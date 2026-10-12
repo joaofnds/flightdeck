@@ -47,11 +47,10 @@ impl Interfaces {
         while let Some(header) = self.buffer.get(offset..offset + 4) {
             let length = usize::from(u16::from_ne_bytes([header[0], header[1]]));
             let kind = libc::c_int::from(header[3]);
-            let Some(message) = self
-                .buffer
-                .get(offset..offset + length)
-                .filter(|_| length > 0)
-            else {
+            if length == 0 {
+                break;
+            }
+            let Some(message) = self.buffer.get(offset..offset + length) else {
                 break;
             };
 
