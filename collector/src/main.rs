@@ -1,4 +1,5 @@
 use std::io;
+use std::num::NonZeroU64;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -36,7 +37,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn seconds_from(args: &[String]) -> Result<Option<u64>, String> {
+fn seconds_from(args: &[String]) -> Result<Option<NonZeroU64>, String> {
     let usage = "usage: collector [--seconds N]".to_owned();
     match args {
         [] => Ok(None),
@@ -45,7 +46,7 @@ fn seconds_from(args: &[String]) -> Result<Option<u64>, String> {
     }
 }
 
-fn run(seconds: Option<u64>) -> io::Result<()> {
+fn run(seconds: Option<NonZeroU64>) -> io::Result<()> {
     let error = unsafe { pthread_set_qos_class_self_np(QOS_CLASS_DEFAULT, 0) };
     if error != 0 {
         return Err(io::Error::from_raw_os_error(error));
@@ -95,7 +96,7 @@ fn run(seconds: Option<u64>) -> io::Result<()> {
             window_tally = Tally::default();
         }
 
-        if seconds.is_some_and(|seconds| following > seconds) {
+        if seconds.is_some_and(|seconds| following > seconds.get()) {
             let now = Mark::take(&meter, timebase, &collector);
             report(
                 &format!("whole run, ticks 1-{tick}"),
@@ -248,4 +249,31 @@ fn report(label: &str, earlier: &Mark, later: &Mark, tally: &Tally) {
 
 fn milliseconds(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1_000.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn arguments(words: &[&str]) -> Vec<String> {
+        words.iter().map(|&word| word.to_owned()).collect()
+    }
+
+    #[test]
+    fn runs_until_stopped_without_arguments() {
+        assert_eq!(Ok(None), seconds_from(&arguments(&[])));
+    }
+
+    #[test]
+    fn runs_for_the_seconds_given() {
+        assert_eq!(
+            Ok(NonZeroU64::new(5)),
+            seconds_from(&arguments(&["--seconds", "5"]))
+        );
+    }
+
+    #[test]
+    fn rejects_a_run_of_zero_seconds() {
+        assert!(seconds_from(&arguments(&["--seconds", "0"])).is_err());
+    }
 }
