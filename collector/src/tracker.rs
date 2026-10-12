@@ -396,6 +396,27 @@ mod tests {
     }
 
     #[test]
+    fn reports_a_watched_process_replacing_its_program() {
+        let mut tracker = Tracker::new(Timebase::read()).unwrap();
+
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "sleep 0.1; exec /usr/bin/true"])
+            .spawn()
+            .unwrap();
+        follow_for(&mut tracker, &mut Meter::default(), 500);
+        child.wait().unwrap();
+
+        let pid = child.id().cast_signed();
+        let events: Vec<Event> = tracker.drain_events().collect();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::Exec { pid: p } if *p == pid)),
+            "child {pid}: {events:?}"
+        );
+    }
+
+    #[test]
     fn reports_a_child_with_the_coalition_it_started_in() {
         let mut tracker = Tracker::new(Timebase::read()).unwrap();
 
