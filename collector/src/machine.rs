@@ -29,7 +29,29 @@ pub struct Memory {
     pub pageouts: u64,
     pub compressions: u64,
     pub decompressions: u64,
-    pub pressure_level: u32,
+    pub pressure: Pressure,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Pressure {
+    #[default]
+    Normal,
+    Warning,
+    Critical,
+}
+
+impl Pressure {
+    fn from_level(level: u32) -> io::Result<Self> {
+        match level {
+            1 => Ok(Self::Normal),
+            2 => Ok(Self::Warning),
+            4 => Ok(Self::Critical),
+            other => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("macOS reported memory pressure level {other}"),
+            )),
+        }
+    }
 }
 
 unsafe extern "C" {
@@ -147,7 +169,7 @@ impl Machine {
             pageouts: vm.pageouts,
             compressions: vm.compressions,
             decompressions: vm.decompressions,
-            pressure_level: self.pressure_level.read()?,
+            pressure: Pressure::from_level(self.pressure_level.read()?)?,
         };
         Ok(())
     }
@@ -242,6 +264,25 @@ mod tests {
             memory.swap_used_bytes <= memory.swap_total_bytes,
             "{memory:?}"
         );
-        assert!([1, 2, 4].contains(&memory.pressure_level), "{memory:?}");
+    }
+
+    #[test]
+    fn reads_level_one_as_normal_pressure() {
+        assert_eq!(Pressure::Normal, Pressure::from_level(1).unwrap());
+    }
+
+    #[test]
+    fn reads_level_two_as_warning_pressure() {
+        assert_eq!(Pressure::Warning, Pressure::from_level(2).unwrap());
+    }
+
+    #[test]
+    fn reads_level_four_as_critical_pressure() {
+        assert_eq!(Pressure::Critical, Pressure::from_level(4).unwrap());
+    }
+
+    #[test]
+    fn refuses_a_pressure_level_macos_does_not_report() {
+        assert!(Pressure::from_level(3).is_err());
     }
 }
