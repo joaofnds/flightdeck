@@ -2,6 +2,7 @@ use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 use crate::clock::Timebase;
+use crate::cost::{Meter, Source};
 use crate::processes::{self, Unreadable, Usage};
 
 #[derive(Debug)]
@@ -33,8 +34,15 @@ pub struct Tracker {
     scans: u64,
     changes: Vec<libc::kevent>,
     received: Vec<libc::kevent>,
+    exiting: Vec<(i32, Noticed)>,
     events: Vec<Event>,
     pub counts: Counts,
+}
+
+#[derive(Default)]
+struct Wake {
+    due: bool,
+    forked: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -71,14 +79,16 @@ impl Tracker {
             scans: 0,
             changes: Vec::new(),
             received: Vec::new(),
+            exiting: Vec::new(),
             events: Vec::new(),
             counts: Counts::default(),
         };
-        tracker.rescan()?;
+        tracker.rescan(&mut Meter::default())?;
+
         Ok(tracker)
     }
 
-    pub fn follow_until(&mut self, deadline: u64) -> io::Result<()> {
+    pub fn follow_until(&mut self, deadline: u64, meter: &mut Meter) -> io::Result<()> {
         let timer = kevent(
             TIMER,
             libc::EVFILT_TIMER,
@@ -89,35 +99,42 @@ impl Tracker {
         let mut pending: &[libc::kevent] = std::slice::from_ref(&timer);
 
         loop {
-            let count = self.wait(pending)?;
+            let woke = meter.measure(Source::Events, || self.wait_and_handle(pending))?;
             pending = &[];
 
-            let mut due = false;
-            let mut forked = false;
-            for index in 0..count {
-                let event = self.received[index];
-                if event.flags & libc::EV_ERROR != 0 {
-                    return Err(io::Error::from_raw_os_error(
-                        i32::try_from(event.data).unwrap_or(libc::EINVAL),
-                    ));
-                }
-                if event.filter == libc::EVFILT_TIMER {
-                    due = true;
-                } else {
-                    forked |= self.handle(event);
-                }
+            self.read_exits(meter);
+            if woke.forked {
+                self.rescan(meter)?;
             }
-
-            if forked {
-                self.rescan()?;
-            }
-            if due {
+            if woke.due {
                 return Ok(());
             }
         }
     }
 
-    pub fn observe(&mut self, listing: &[i32]) -> io::Result<()> {
+    pub fn observe(&mut self, listing: &[i32], meter: &mut Meter) -> io::Result<()> {
+        meter.measure(Source::Scans, || self.compare(listing));
+        self.submit_watches(meter)
+    }
+
+    pub fn drain_events(&mut self) -> std::vec::Drain<'_, Event> {
+        self.events.drain(..)
+    }
+
+    fn rescan(&mut self, meter: &mut Meter) -> io::Result<()> {
+        let mut listing = std::mem::take(&mut self.listing);
+        let scanned = meter.measure(Source::Scans, || {
+            processes::list_pids(&mut listing)?;
+            self.compare(&listing);
+            io::Result::Ok(())
+        });
+        self.listing = listing;
+        scanned?;
+
+        self.submit_watches(meter)
+    }
+
+    fn compare(&mut self, listing: &[i32]) {
         let previous = self.scans;
         self.scans += 1;
         let reporting = previous > 0;
@@ -139,20 +156,27 @@ impl Tracker {
             }
             self.last_seen[index] = self.scans;
         }
-
-        self.submit_watches()
     }
 
-    pub fn drain_events(&mut self) -> std::vec::Drain<'_, Event> {
-        self.events.drain(..)
-    }
+    fn wait_and_handle(&mut self, pending: &[libc::kevent]) -> io::Result<Wake> {
+        let count = self.wait(pending)?;
+        let mut woke = Wake::default();
+        for index in 0..count {
+            let event = self.received[index];
+            if event.flags & libc::EV_ERROR != 0 {
+                return Err(io::Error::from_raw_os_error(
+                    i32::try_from(event.data).unwrap_or(libc::EINVAL),
+                ));
+            }
 
-    fn rescan(&mut self) -> io::Result<()> {
-        let mut listing = std::mem::take(&mut self.listing);
-        let observed = processes::list_pids(&mut listing).and_then(|()| self.observe(&listing));
-        self.listing = listing;
+            if event.filter == libc::EVFILT_TIMER {
+                woke.due = true;
+            } else {
+                woke.forked |= self.handle(event);
+            }
+        }
 
-        observed
+        Ok(woke)
     }
 
     fn handle(&mut self, event: libc::kevent) -> bool {
@@ -161,7 +185,7 @@ impl Tracker {
             self.events.push(Event::Exec { pid });
         }
         if event.fflags & libc::NOTE_EXIT != 0 {
-            self.record_exit(pid, Noticed::OnExit);
+            self.exiting.push((pid, Noticed::OnExit));
         }
 
         let forked = event.fflags & libc::NOTE_FORK != 0;
@@ -171,19 +195,34 @@ impl Tracker {
         forked
     }
 
-    fn record_exit(&mut self, pid: i32, noticed: Noticed) {
-        self.events.push(Event::Exit {
-            pid,
-            last: processes::read_usage(pid, self.timebase),
-            noticed,
+    fn read_exits(&mut self, meter: &mut Meter) {
+        if self.exiting.is_empty() {
+            return;
+        }
+
+        meter.measure(Source::ExitReads, || {
+            for (pid, noticed) in self.exiting.drain(..) {
+                self.events.push(Event::Exit {
+                    pid,
+                    last: processes::read_usage(pid, self.timebase),
+                    noticed,
+                });
+            }
         });
     }
 
-    fn submit_watches(&mut self) -> io::Result<()> {
+    fn submit_watches(&mut self, meter: &mut Meter) -> io::Result<()> {
         if self.changes.is_empty() {
             return Ok(());
         }
 
+        meter.measure(Source::Watches, || self.register_watches())?;
+        self.read_exits(meter);
+
+        Ok(())
+    }
+
+    fn register_watches(&mut self) -> io::Result<()> {
         let count = libc::c_int::try_from(self.changes.len()).unwrap_or(libc::c_int::MAX);
         self.received
             .resize(self.changes.len(), kevent(0, 0, 0, 0, 0));
@@ -212,7 +251,7 @@ impl Tracker {
             match i32::try_from(receipt.data).unwrap_or(libc::EINVAL) {
                 0 => {}
                 libc::EPERM => self.counts.refused_watches += 1,
-                libc::ESRCH => self.record_exit(pid, Noticed::AlreadyExited),
+                libc::ESRCH => self.exiting.push((pid, Noticed::AlreadyExited)),
                 error => return Err(io::Error::from_raw_os_error(error)),
             }
         }
@@ -271,11 +310,12 @@ fn kevent(ident: usize, filter: i16, flags: u16, filter_flags: u32, data: isize)
 mod tests {
     use super::*;
     use crate::clock;
+    use crate::cost::Snapshot;
 
-    fn follow_for(tracker: &mut Tracker, millis: u64) {
+    fn follow_for(tracker: &mut Tracker, meter: &mut Meter, millis: u64) {
         let timebase = Timebase::read();
         tracker
-            .follow_until(clock::now() + timebase.ticks(millis * 1_000_000))
+            .follow_until(clock::now() + timebase.ticks(millis * 1_000_000), meter)
             .unwrap();
     }
 
@@ -287,7 +327,7 @@ mod tests {
             .arg("0.2")
             .spawn()
             .unwrap();
-        follow_for(&mut tracker, 500);
+        follow_for(&mut tracker, &mut Meter::default(), 500);
         child.wait().unwrap();
 
         let pid = child.id().cast_signed();
@@ -302,12 +342,33 @@ mod tests {
     }
 
     #[test]
+    fn charges_following_a_child_to_scans_watches_and_exit_reads() {
+        let timebase = Timebase::read();
+        let mut tracker = Tracker::new(timebase).unwrap();
+        let mut meter = Meter::default();
+
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("0.2")
+            .spawn()
+            .unwrap();
+        follow_for(&mut tracker, &mut meter, 500);
+        child.wait().unwrap();
+
+        let spent = Snapshot::take(&meter, timebase).spent_ns;
+        let charged =
+            [Source::Scans, Source::Watches, Source::ExitReads].map(|s| spent[s as usize]);
+        assert!(charged.iter().all(|&ns| ns > 0), "{charged:?}");
+    }
+
+    #[test]
     fn returns_once_the_deadline_has_passed() {
         let timebase = Timebase::read();
         let mut tracker = Tracker::new(timebase).unwrap();
         let deadline = clock::now() + timebase.ticks(100_000_000);
 
-        tracker.follow_until(deadline).unwrap();
+        tracker
+            .follow_until(deadline, &mut Meter::default())
+            .unwrap();
 
         let late_ns = timebase.nanos(clock::now() - deadline);
         assert!(
@@ -324,7 +385,7 @@ mod tests {
         let mut listing = Vec::new();
         processes::list_pids(&mut listing).unwrap();
 
-        tracker.observe(&listing).unwrap();
+        tracker.observe(&listing, &mut Meter::default()).unwrap();
         child.wait().unwrap();
 
         let pid = child.id().cast_signed();
@@ -344,7 +405,7 @@ mod tests {
         processes::list_pids(&mut listing).unwrap();
         listing.push(99_999);
 
-        tracker.observe(&listing).unwrap();
+        tracker.observe(&listing, &mut Meter::default()).unwrap();
 
         let events: Vec<Event> = tracker.drain_events().collect();
         assert!(
@@ -360,10 +421,10 @@ mod tests {
         let mut tracker = Tracker::new(Timebase::read()).unwrap();
         let mut listing = Vec::new();
         processes::list_pids(&mut listing).unwrap();
-        tracker.observe(&listing).unwrap();
+        tracker.observe(&listing, &mut Meter::default()).unwrap();
         tracker.drain_events();
 
-        tracker.observe(&listing).unwrap();
+        tracker.observe(&listing, &mut Meter::default()).unwrap();
 
         assert_eq!(0, tracker.drain_events().count());
     }

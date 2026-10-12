@@ -46,7 +46,7 @@ impl Collector {
     }
 
     pub fn wait_until(&mut self, deadline: u64, meter: &mut Meter) -> io::Result<()> {
-        meter.measure(Source::Tracking, || self.tracker.follow_until(deadline))
+        self.tracker.follow_until(deadline, meter)
     }
 
     pub fn read(&mut self, meter: &mut Meter) -> io::Result<()> {
@@ -59,12 +59,11 @@ impl Collector {
             self.processes.run(&self.listing, self.timebase);
             io::Result::Ok(())
         })?;
-        meter.measure(Source::Tracking, || {
-            self.tracker.observe(&self.listing)?;
+        self.tracker.observe(&self.listing, meter)?;
+        meter.measure(Source::Events, || {
             self.events.clear();
             self.events.extend(self.tracker.drain_events());
-            io::Result::Ok(())
-        })?;
+        });
         meter.measure(Source::Coalitions, || {
             for event in &self.events {
                 if let Event::Start { pid } = event {

@@ -9,16 +9,22 @@ pub enum Source {
     Interfaces,
     Processes,
     Coalitions,
-    Tracking,
+    Events,
+    Scans,
+    Watches,
+    ExitReads,
     IoReport,
     Smc,
 }
 
 impl Source {
-    pub const ALL: [Source; 7] = [
+    pub const ALL: [Source; 10] = [
         Source::Processes,
         Source::Coalitions,
-        Source::Tracking,
+        Source::Events,
+        Source::Scans,
+        Source::Watches,
+        Source::ExitReads,
         Source::IoReport,
         Source::Smc,
         Source::Machine,
@@ -32,7 +38,10 @@ impl Source {
             Source::Interfaces => "interfaces",
             Source::Processes => "processes",
             Source::Coalitions => "coalitions",
-            Source::Tracking => "tracking",
+            Source::Events => "events",
+            Source::Scans => "scans",
+            Source::Watches => "watches",
+            Source::ExitReads => "exit reads",
             Source::IoReport => "ioreport",
             Source::Smc => "smc",
         }
@@ -225,7 +234,8 @@ mod tests {
             spin_on_this_thread_for(Duration::from_millis(20));
         });
 
-        assert!(meter.spent_ns[Source::Coalitions as usize] >= 20_000_000);
-        assert_eq!(0, meter.spent_ns[Source::Processes as usize]);
+        let spent = Snapshot::take(&meter, Timebase::read()).spent_ns;
+        assert!(spent[Source::Coalitions as usize] >= 20_000_000);
+        assert_eq!(0, spent[Source::Processes as usize]);
     }
 }
