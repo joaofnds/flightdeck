@@ -472,7 +472,11 @@ mod tests {
             .follow_until(deadline, &mut Meter::default())
             .unwrap();
 
-        let late_ns = timebase.nanos(clock::now() - deadline);
+        let late_ns = timebase.nanos(
+            clock::now()
+                .checked_sub(deadline)
+                .expect("returned before the deadline"),
+        );
         assert!(
             late_ns < 50_000_000,
             "returned {late_ns} ns after the deadline"
