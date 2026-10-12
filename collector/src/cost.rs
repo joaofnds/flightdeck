@@ -56,6 +56,14 @@ fn thread_cpu_ns() -> u64 {
     u64::try_from(now.tv_sec).unwrap_or(0) * 1_000_000_000 + u64::try_from(now.tv_nsec).unwrap_or(0)
 }
 
+#[cfg(test)]
+pub(crate) fn spin_on_this_thread_for(cpu_time: Duration) {
+    let start = thread_cpu_ns();
+    while Duration::from_nanos(thread_cpu_ns() - start) < cpu_time {
+        std::hint::black_box(0);
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Snapshot {
     pub at_ns: u64,
@@ -208,13 +216,10 @@ mod tests {
         let mut meter = Meter::default();
 
         meter.measure(Source::Coalitions, || {
-            let start = std::time::Instant::now();
-            while start.elapsed().as_millis() < 20 {
-                std::hint::black_box(0);
-            }
+            spin_on_this_thread_for(Duration::from_millis(20));
         });
 
-        assert!(meter.spent_ns[Source::Coalitions as usize] >= 15_000_000);
+        assert!(meter.spent_ns[Source::Coalitions as usize] >= 20_000_000);
         assert_eq!(0, meter.spent_ns[Source::Processes as usize]);
     }
 }
