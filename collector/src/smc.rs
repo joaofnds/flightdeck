@@ -1,6 +1,8 @@
 use std::ffi::{c_char, c_void};
 use std::io;
 
+use crate::mach;
+
 #[link(name = "IOKit", kind = "framework")]
 unsafe extern "C" {
     fn IOServiceMatching(name: *const c_char) -> *mut c_void;
@@ -24,10 +26,6 @@ unsafe extern "C" {
         output: *mut c_void,
         output_size: *mut usize,
     ) -> libc::kern_return_t;
-}
-
-unsafe extern "C" {
-    static mach_task_self_: libc::mach_port_t;
 }
 
 const CALL_STRUCT: u32 = 2;
@@ -170,7 +168,7 @@ impl Connection {
         }
 
         let mut connection = 0;
-        let opened = unsafe { IOServiceOpen(service, mach_task_self_, 0, &raw mut connection) };
+        let opened = unsafe { IOServiceOpen(service, mach::task_self(), 0, &raw mut connection) };
         unsafe { IOObjectRelease(service) };
         if opened != 0 {
             return Err(io::Error::other(format!(

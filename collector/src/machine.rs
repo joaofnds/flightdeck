@@ -1,6 +1,8 @@
 use std::ffi::CStr;
 use std::io;
 
+use crate::mach;
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CpuTicks {
     pub user: u32,
@@ -56,7 +58,6 @@ impl Pressure {
 
 unsafe extern "C" {
     fn mach_host_self() -> libc::mach_port_t;
-    static mach_task_self_: libc::mach_port_t;
 }
 
 pub struct Machine {
@@ -122,7 +123,7 @@ impl Machine {
 
         unsafe {
             libc::vm_deallocate(
-                mach_task_self_,
+                mach::task_self(),
                 info as libc::vm_address_t,
                 size as usize * size_of::<libc::integer_t>(),
             )
