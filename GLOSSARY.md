@@ -33,6 +33,9 @@ on their own, as swap-ins and swap-outs.
 critical. Only critical means heat is cutting the system's performance. Fair and serious
 ask apps to cut back their work before that happens.
 
+**SMC**: the System Management Controller, the part of the Mac that measures its
+temperatures, fan speeds and power draw. It names each reading with a four-character key.
+
 **Load average**: the work running or waiting for a CPU, averaged over 1, 5 and 15
 minutes. Above the core count, work waits for a core.
 
