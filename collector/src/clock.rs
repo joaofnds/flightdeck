@@ -47,7 +47,25 @@ impl Timebase {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use super::*;
+
+    #[test]
+    fn measures_an_interval_within_what_the_standard_clock_measures() {
+        let timebase = Timebase::read();
+        let outer = Instant::now();
+        let start = now();
+
+        std::thread::sleep(Duration::from_millis(20));
+
+        let elapsed = Duration::from_nanos(timebase.nanos(now() - start));
+        let outer_elapsed = outer.elapsed();
+        assert!(
+            Duration::from_millis(20) <= elapsed && elapsed <= outer_elapsed,
+            "{elapsed:?} inside {outer_elapsed:?}"
+        );
+    }
 
     #[test]
     fn turns_a_second_of_ticks_into_a_second_of_nanoseconds() {
