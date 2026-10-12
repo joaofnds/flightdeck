@@ -120,17 +120,13 @@ impl Coalitions {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
+    use crate::cost::spin_on_this_thread_for;
 
     fn own_coalition() -> u64 {
         coalition_of(std::process::id().cast_signed()).unwrap()
-    }
-
-    fn burn_cpu(for_ns: u64) {
-        let start = std::time::Instant::now();
-        while start.elapsed().as_nanos() < u128::from(for_ns) {
-            std::hint::black_box(0);
-        }
     }
 
     #[test]
@@ -140,7 +136,7 @@ mod tests {
         coalitions.read_all();
         let before = coalitions.read[0];
 
-        burn_cpu(50_000_000);
+        spin_on_this_thread_for(Duration::from_millis(50));
         coalitions.read_all();
 
         let after = coalitions.read[0];
