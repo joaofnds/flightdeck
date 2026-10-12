@@ -11,6 +11,7 @@ pub enum Source {
     Coalitions,
     Events,
     Scans,
+    StartReads,
     Watches,
     ExitReads,
     IoReport,
@@ -18,11 +19,12 @@ pub enum Source {
 }
 
 impl Source {
-    pub const ALL: [Source; 10] = [
+    pub const ALL: [Source; 11] = [
         Source::Processes,
         Source::Coalitions,
         Source::Events,
         Source::Scans,
+        Source::StartReads,
         Source::Watches,
         Source::ExitReads,
         Source::IoReport,
@@ -40,6 +42,7 @@ impl Source {
             Source::Coalitions => "coalitions",
             Source::Events => "events",
             Source::Scans => "scans",
+            Source::StartReads => "start reads",
             Source::Watches => "watches",
             Source::ExitReads => "exit reads",
             Source::IoReport => "ioreport",

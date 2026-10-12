@@ -68,10 +68,12 @@ impl Collector {
         });
         meter.measure(Source::Coalitions, || {
             for event in &self.events {
-                if let Event::Start { pid } = event
-                    && let Some(id) = coalitions::coalition_of(*pid)
+                if let Event::Start {
+                    coalition: Some(id),
+                    ..
+                } = event
                 {
-                    self.coalitions.add(id);
+                    self.coalitions.add(*id);
                 }
             }
             self.coalitions.read_all();

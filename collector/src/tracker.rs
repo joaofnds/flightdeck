@@ -2,6 +2,7 @@ use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 use crate::clock::Timebase;
+use crate::coalitions;
 use crate::cost::{Meter, Source};
 use crate::processes::{self, Unreadable, Usage};
 
@@ -9,6 +10,7 @@ use crate::processes::{self, Unreadable, Usage};
 pub enum Event {
     Start {
         pid: i32,
+        coalition: Option<u64>,
     },
     Exec {
         pid: i32,
@@ -35,6 +37,7 @@ pub struct Tracker {
     scans: u64,
     changes: Vec<libc::kevent>,
     received: Vec<libc::kevent>,
+    starting: Vec<i32>,
     exiting: Vec<(i32, Noticed)>,
     events: Vec<Event>,
     pub counts: Counts,
@@ -87,6 +90,7 @@ impl Tracker {
             scans: 0,
             changes: Vec::new(),
             received: Vec::new(),
+            starting: Vec::new(),
             exiting: Vec::new(),
             events: Vec::new(),
             counts: Counts::default(),
@@ -125,6 +129,7 @@ impl Tracker {
             self.compare(listing);
             self.start_reused_pids();
         });
+        self.read_starts(meter);
         self.submit_watches(meter)
     }
 
@@ -142,6 +147,7 @@ impl Tracker {
         self.listing = listing;
         scanned?;
 
+        self.read_starts(meter);
         self.submit_watches(meter)
     }
 
@@ -167,7 +173,7 @@ impl Tracker {
                 known.exited = false;
                 self.changes.push(watch(pid));
                 if reporting {
-                    self.events.push(Event::Start { pid });
+                    self.starting.push(pid);
                 }
             } else if known.exited {
                 self.lingering.push((pid, index));
@@ -180,7 +186,7 @@ impl Tracker {
             if processes::is_alive(pid) {
                 self.known[index].exited = false;
                 self.changes.push(watch(pid));
-                self.events.push(Event::Start { pid });
+                self.starting.push(pid);
             }
         }
     }
@@ -220,6 +226,21 @@ impl Tracker {
             self.counts.forks += 1;
         }
         forked
+    }
+
+    fn read_starts(&mut self, meter: &mut Meter) {
+        if self.starting.is_empty() {
+            return;
+        }
+
+        meter.measure(Source::StartReads, || {
+            for pid in self.starting.drain(..) {
+                self.events.push(Event::Start {
+                    pid,
+                    coalition: coalitions::coalition_of(pid),
+                });
+            }
+        });
     }
 
     fn read_exits(&mut self, meter: &mut Meter) {
@@ -368,14 +389,36 @@ mod tests {
         assert!(
             events
                 .iter()
-                .any(|e| matches!(e, Event::Start { pid: p } if *p == pid)),
+                .any(|e| matches!(e, Event::Start { pid: p, .. } if *p == pid)),
             "child {pid}: {events:?}"
         );
         assert!(events.iter().any(|e| matches!(e, Event::Exit { pid: p, last: Ok(last), noticed: Noticed::OnExit } if *p == pid && last.user_ns + last.system_ns > 0)), "child {pid}: {events:?}");
     }
 
     #[test]
-    fn charges_following_a_child_to_scans_watches_and_exit_reads() {
+    fn reports_a_child_with_the_coalition_it_started_in() {
+        let mut tracker = Tracker::new(Timebase::read()).unwrap();
+
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("0.2")
+            .spawn()
+            .unwrap();
+        follow_for(&mut tracker, &mut Meter::default(), 500);
+        child.wait().unwrap();
+
+        let pid = child.id().cast_signed();
+        let own = coalitions::coalition_of(std::process::id().cast_signed());
+        let events: Vec<Event> = tracker.drain_events().collect();
+        assert!(
+            events.iter().any(
+                |e| matches!(e, Event::Start { pid: p, coalition } if *p == pid && *coalition == own)
+            ),
+            "child {pid} in {own:?}: {events:?}"
+        );
+    }
+
+    #[test]
+    fn charges_each_step_of_following_a_child_to_its_own_source() {
         let timebase = Timebase::read();
         let mut tracker = Tracker::new(timebase).unwrap();
         let mut meter = Meter::default();
@@ -388,8 +431,13 @@ mod tests {
         child.wait().unwrap();
 
         let spent = Snapshot::take(&meter, timebase).spent_ns;
-        let charged =
-            [Source::Scans, Source::Watches, Source::ExitReads].map(|s| spent[s as usize]);
+        let charged = [
+            Source::Scans,
+            Source::StartReads,
+            Source::Watches,
+            Source::ExitReads,
+        ]
+        .map(|s| spent[s as usize]);
         assert!(charged.iter().all(|&ns| ns > 0), "{charged:?}");
     }
 
@@ -445,7 +493,7 @@ mod tests {
         let pid = child.id().cast_signed();
         let events: Vec<Event> = tracker.drain_events().collect();
         assert!(
-            !events.iter().any(|e| matches!(e, Event::Start { pid: p } | Event::Exec { pid: p } | Event::Exit { pid: p, .. } if *p == pid)),
+            !events.iter().any(|e| matches!(e, Event::Start { pid: p, .. } | Event::Exec { pid: p } | Event::Exit { pid: p, .. } if *p == pid)),
             "child {pid}: {events:?}"
         );
     }
@@ -463,7 +511,7 @@ mod tests {
         assert!(
             events
                 .iter()
-                .any(|e| matches!(e, Event::Start { pid: 99_999 })),
+                .any(|e| matches!(e, Event::Start { pid: 99_999, .. })),
             "{events:?}"
         );
     }
