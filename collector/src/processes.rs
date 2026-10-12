@@ -72,7 +72,7 @@ pub struct Process {
 
 #[derive(Debug, Clone, Copy)]
 pub struct Usage {
-    pub started: u64,
+    pub awake_ns_at_start: u64,
     pub user_ns: u64,
     pub system_ns: u64,
     pub energy_nj: u64,
@@ -136,7 +136,7 @@ pub fn read_usage(pid: i32, timebase: Timebase) -> Result<Usage, Unreadable> {
     let usage = rusage(pid)?;
 
     Ok(Usage {
-        started: usage.proc_start_abstime,
+        awake_ns_at_start: timebase.nanos(usage.proc_start_abstime),
         user_ns: timebase.nanos(usage.user_time),
         system_ns: timebase.nanos(usage.system_time),
         energy_nj: usage.energy_nj,
@@ -253,6 +253,10 @@ mod tests {
     use super::*;
     use crate::cost::spin_on_this_thread_for;
 
+    unsafe extern "C" {
+        fn mach_absolute_time() -> u64;
+    }
+
     fn own_cpu_ns() -> u64 {
         let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
         unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
@@ -303,6 +307,23 @@ mod tests {
             before.energy_nj,
             after.energy_nj
         );
+    }
+
+    #[test]
+    fn reads_when_a_process_started_in_awake_time() {
+        let timebase = Timebase::read();
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("1")
+            .spawn()
+            .unwrap();
+
+        let usage = read_usage(child.id().cast_signed(), timebase).unwrap();
+        let awake_ns = timebase.nanos(unsafe { mach_absolute_time() });
+        child.kill().unwrap();
+        child.wait().unwrap();
+
+        let age = Duration::from_nanos(awake_ns - usage.awake_ns_at_start);
+        assert!(age < Duration::from_secs(1), "started {age:?} ago");
     }
 
     #[test]
