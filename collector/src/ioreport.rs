@@ -275,6 +275,7 @@ mod tests {
 
     use super::*;
     use crate::cost::spin_on_this_thread_for;
+    use crate::machine::Machine;
 
     fn logical_cpus() -> u32 {
         let mut value = 0u32;
@@ -293,6 +294,20 @@ mod tests {
 
     fn active_time_of_every_core(ioreport: &IoReport) -> Duration {
         Duration::from_nanos(ioreport.cores.iter().flat_map(|core| &core.active_ns).sum())
+    }
+
+    fn scheduler_tick() -> Duration {
+        let per_second = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+        Duration::from_secs(1) / u32::try_from(per_second).unwrap()
+    }
+
+    fn busy_time_of_every_cpu(machine: &Machine) -> Duration {
+        let ticks: u64 = machine
+            .cpus
+            .iter()
+            .map(|cpu| u64::from(cpu.user) + u64::from(cpu.system) + u64::from(cpu.nice))
+            .sum();
+        Duration::from_nanos(ticks * u64::try_from(scheduler_tick().as_nanos()).unwrap())
     }
 
     #[test]
@@ -322,6 +337,32 @@ mod tests {
         assert!(
             active >= busy && active <= elapsed * logical_cpus(),
             "{active:?} active across the cores in {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn leaves_the_time_cores_spend_idle_out_of_their_active_time() {
+        let mut ioreport = IoReport::open(Timebase::read()).unwrap();
+        let mut machine = Machine::new().unwrap();
+        ioreport.read().unwrap();
+        machine.read().unwrap();
+        let active_before = active_time_of_every_core(&ioreport);
+        let busy_before = busy_time_of_every_cpu(&machine);
+
+        std::thread::sleep(Duration::from_millis(200));
+
+        ioreport.read().unwrap();
+        machine.read().unwrap();
+        let active = active_time_of_every_core(&ioreport)
+            .checked_sub(active_before)
+            .expect("the cores' active time only grows");
+        let busy = busy_time_of_every_cpu(&machine)
+            .checked_sub(busy_before)
+            .expect("the scheduler's busy time only grows");
+        let tick_rounding = scheduler_tick() * logical_cpus();
+        assert!(
+            active <= busy + tick_rounding,
+            "{active:?} active across the cores, {busy:?} busy by the scheduler's count"
         );
     }
 
