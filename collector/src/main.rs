@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use collector::clock::{self, Timebase};
 use collector::collector::Collector;
-use collector::cost::{Cost, Meter, Snapshot, Source};
+use collector::cost::{Meter, Snapshot, Source};
 use collector::processes::{Unreadable, Usage};
 use collector::schedule::Schedule;
 use collector::tracker::{Counts, Event, Noticed};
@@ -225,7 +225,7 @@ impl std::fmt::Display for Exits {
 }
 
 fn report(label: &str, earlier: &Mark, later: &Mark, tally: &Tally) {
-    let cost = Cost::between(&earlier.snapshot, &later.snapshot);
+    let cost = later.snapshot.cost_since(&earlier.snapshot);
     let counts = later.counts.since(earlier.counts);
     let share = cost.share_of_a_core();
     println!(

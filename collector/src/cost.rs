@@ -82,7 +82,7 @@ pub(crate) fn spin_on_this_thread_for(cpu_time: Duration) {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct Snapshot {
     pub at_ns: u64,
     pub cpu_ns: u64,
@@ -107,6 +107,20 @@ impl Snapshot {
             spent_ns: meter.spent_ns,
         }
     }
+
+    #[must_use]
+    pub fn cost_since(&self, earlier: &Snapshot) -> Cost {
+        Cost {
+            elapsed: Duration::from_nanos(self.at_ns - earlier.at_ns),
+            cpu: Duration::from_nanos(self.cpu_ns - earlier.cpu_ns),
+            energy_nj: self.energy_nj - earlier.energy_nj,
+            instructions: self.instructions - earlier.instructions,
+            super_instructions: self.super_instructions - earlier.super_instructions,
+            spent: std::array::from_fn(|source| {
+                Duration::from_nanos(self.spent_ns[source] - earlier.spent_ns[source])
+            }),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -120,20 +134,6 @@ pub struct Cost {
 }
 
 impl Cost {
-    #[must_use]
-    pub fn between(earlier: &Snapshot, later: &Snapshot) -> Self {
-        Self {
-            elapsed: Duration::from_nanos(later.at_ns - earlier.at_ns),
-            cpu: Duration::from_nanos(later.cpu_ns - earlier.cpu_ns),
-            energy_nj: later.energy_nj - earlier.energy_nj,
-            instructions: later.instructions - earlier.instructions,
-            super_instructions: later.super_instructions - earlier.super_instructions,
-            spent: std::array::from_fn(|source| {
-                Duration::from_nanos(later.spent_ns[source] - earlier.spent_ns[source])
-            }),
-        }
-    }
-
     #[must_use]
     pub fn share_of_a_core(&self) -> f64 {
         self.cpu.div_duration_f64(self.elapsed)
@@ -196,7 +196,7 @@ mod tests {
             super_instructions: 100 + 3_000,
         };
 
-        Cost::between(&earlier, &later)
+        later.cost_since(&earlier)
     }
 
     #[test]
