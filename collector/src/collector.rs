@@ -44,6 +44,7 @@ impl Collector {
                 collector.coalitions.add(id);
             }
         }
+
         Ok(collector)
     }
 
@@ -56,6 +57,7 @@ impl Collector {
         meter.measure(Source::Interfaces, || self.interfaces.read_all())?;
         meter.measure(Source::IoReport, || self.ioreport.read())?;
         meter.measure(Source::Smc, || self.smc.read())?;
+
         meter.measure(Source::Processes, || {
             processes::list_pids(&mut self.listing)?;
             self.processes.run(&self.listing, self.timebase);
@@ -78,6 +80,7 @@ impl Collector {
             }
             self.coalitions.read_all();
         });
+
         Ok(())
     }
 }

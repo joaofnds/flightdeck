@@ -143,6 +143,7 @@ impl Smc {
             self.fan_rpm.push(self.connection.read_float(fan)?);
         }
         self.soc_celsius = self.connection.read_float(self.soc_sensor)?;
+
         Ok(())
     }
 }
@@ -175,6 +176,7 @@ impl Connection {
                 "connecting to the SMC returned {opened:#x}"
             )));
         }
+
         Ok(Self(connection))
     }
 
@@ -190,6 +192,7 @@ impl Connection {
             let Some(bytes) = self.value(key, FLOAT)? else {
                 continue;
             };
+
             readings.push((key, float_from(bytes)));
         }
 
@@ -265,6 +268,7 @@ impl Connection {
                 "calling the SMC returned {returned:#x}"
             )));
         }
+
         Ok((answer.result == 0).then_some(answer))
     }
 }

@@ -59,6 +59,7 @@ impl Interfaces {
             }
             offset += length;
         }
+
         Ok(())
     }
 

@@ -113,6 +113,7 @@ impl Machine {
         let loads = unsafe {
             std::slice::from_raw_parts(info.cast::<libc::processor_cpu_load_info>(), count as usize)
         };
+
         self.cpus.clear();
         self.cpus.extend(loads.iter().map(|load| CpuTicks {
             user: load.cpu_ticks[libc::CPU_STATE_USER as usize],
@@ -128,6 +129,7 @@ impl Machine {
                 size as usize * size_of::<libc::integer_t>(),
             )
         };
+
         Ok(())
     }
 
@@ -151,6 +153,7 @@ impl Machine {
         let vm = unsafe { vm.assume_init() };
         let swap: libc::xsw_usage = self.swap_usage.read()?;
         let pages = |count: u32| u64::from(count) * self.page_size;
+
         self.memory = Memory {
             total_bytes: self.memory.total_bytes,
             free_bytes: pages(vm.free_count),
@@ -172,6 +175,7 @@ impl Machine {
             decompressions: vm.decompressions,
             pressure: Pressure::from_level(self.pressure_level.read()?)?,
         };
+
         Ok(())
     }
 }

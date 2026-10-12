@@ -115,6 +115,7 @@ impl IoReport {
         if samples.is_null() {
             return Err(io::Error::other("sampling IOReport"));
         }
+
         let samples = Owned(samples);
         let channels = channels_of(&samples, &self.channels_key)?;
 
@@ -134,6 +135,7 @@ impl IoReport {
             }
         }
         self.cores.truncate(cores);
+
         Ok(())
     }
 }
@@ -199,6 +201,7 @@ fn energy_nj(channel: CfRef) -> io::Result<u64> {
     };
 
     let value = unsafe { IOReportSimpleGetIntegerValue(channel, 0) };
+
     Ok(u64::try_from(value).unwrap_or(0) * nj_per_unit)
 }
 
@@ -220,12 +223,14 @@ fn channels_in_group(group: &CStr, subgroup: Option<&CStr>) -> io::Result<Owned>
             "IOReport has no such channel group",
         ));
     }
+
     Ok(Owned(channels))
 }
 
 fn merge_group(into: &Owned, group: &CStr, subgroup: &CStr) -> io::Result<()> {
     let more = channels_in_group(group, Some(subgroup))?;
     unsafe { IOReportMergeChannels(into.0, more.0, ptr::null()) };
+
     Ok(())
 }
 
@@ -233,12 +238,14 @@ fn keep_read_channels(channels: &Owned, key: &Owned) -> io::Result<()> {
     let all = channels_of(channels, key)?;
     let kept =
         Owned(unsafe { CFArrayCreateMutable(ptr::null(), 0, &raw const kCFTypeArrayCallBacks) });
+
     for channel in each(all) {
         if Kind::of(channel).is_some() {
             unsafe { CFArrayAppendValue(kept.0, channel) };
         }
     }
     unsafe { CFDictionarySetValue(channels.0, key.0, kept.0) };
+
     Ok(())
 }
 
@@ -250,6 +257,7 @@ fn channels_of(dictionary: &Owned, key: &Owned) -> io::Result<CfRef> {
             "IOReport gave no list of channels",
         ));
     }
+
     Ok(channels)
 }
 

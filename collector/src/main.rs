@@ -56,6 +56,7 @@ fn run(seconds: Option<NonZeroU64>) -> io::Result<()> {
     let mut meter = Meter::default();
     let mut collector = Collector::new(timebase)?;
     let schedule = Schedule::new(clock::now(), timebase.ticks(1_000_000_000));
+
     println!(
         "started in {:.1} ms of CPU",
         milliseconds(Duration::from_nanos(
@@ -95,6 +96,7 @@ fn run(seconds: Option<NonZeroU64>) -> io::Result<()> {
             );
             return Ok(());
         }
+
         tick = following;
     }
 }

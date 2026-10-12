@@ -166,8 +166,10 @@ impl Tracker {
             if index >= self.known.len() {
                 self.known.resize(index + 1, Known::default());
             }
+
             let known = &mut self.known[index];
             let listed_before = reporting && known.listed_in == previous;
+
             known.listed_in = self.scans;
             if !listed_before {
                 known.exited = false;
@@ -225,6 +227,7 @@ impl Tracker {
         if forked {
             self.counts.forks += 1;
         }
+
         forked
     }
 
