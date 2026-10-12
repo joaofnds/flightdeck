@@ -84,7 +84,7 @@ fn run(seconds: Option<NonZeroU64>) -> io::Result<()> {
             window_tally.add(late, slips, &collector);
         }
 
-        if tick > 0 && tick % TICKS_PER_WINDOW == 0 {
+        if closes_window(tick, following) {
             let now = Mark::take(&meter, timebase, &collector);
             report(
                 &format!("ticks {}-{tick}", tick + 1 - window_tally.ticks),
@@ -108,6 +108,10 @@ fn run(seconds: Option<NonZeroU64>) -> io::Result<()> {
         }
         tick = following;
     }
+}
+
+fn closes_window(tick: u64, following: u64) -> bool {
+    tick > 0 && (following - 1) / TICKS_PER_WINDOW > (tick - 1) / TICKS_PER_WINDOW
 }
 
 #[derive(Clone, Copy, Default)]
@@ -275,5 +279,25 @@ mod tests {
     #[test]
     fn rejects_a_run_of_zero_seconds() {
         assert!(seconds_from(&arguments(&["--seconds", "0"])).is_err());
+    }
+
+    #[test]
+    fn closes_a_window_after_its_tenth_tick() {
+        assert!(closes_window(10, 11));
+    }
+
+    #[test]
+    fn keeps_a_window_open_before_its_tenth_tick() {
+        assert!(!closes_window(9, 10));
+    }
+
+    #[test]
+    fn closes_a_window_whose_tenth_tick_slipped() {
+        assert!(closes_window(9, 11));
+    }
+
+    #[test]
+    fn opens_no_window_on_the_warm_up_tick() {
+        assert!(!closes_window(0, 1));
     }
 }
