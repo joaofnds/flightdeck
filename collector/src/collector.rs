@@ -38,7 +38,7 @@ impl Collector {
             events: Vec::new(),
         };
 
-        processes::list_pids(&mut collector.listing);
+        processes::list_pids(&mut collector.listing)?;
         for &pid in &collector.listing {
             collector.coalitions.join(pid);
         }
@@ -55,14 +55,16 @@ impl Collector {
         meter.measure(Source::IoReport, || self.ioreport.read())?;
         meter.measure(Source::Smc, || self.smc.read())?;
         meter.measure(Source::Processes, || {
-            processes::list_pids(&mut self.listing);
+            processes::list_pids(&mut self.listing)?;
             self.processes.run(&self.listing, self.timebase);
-        });
+            io::Result::Ok(())
+        })?;
         meter.measure(Source::Tracking, || {
-            self.tracker.observe(&self.listing);
+            self.tracker.observe(&self.listing)?;
             self.events.clear();
             self.events.extend(self.tracker.drain_events());
-        });
+            io::Result::Ok(())
+        })?;
         meter.measure(Source::Coalitions, || {
             for event in &self.events {
                 if let Event::Start { pid } = event {

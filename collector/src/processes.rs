@@ -1,3 +1,5 @@
+use std::io;
+
 use crate::clock::Timebase;
 
 #[repr(C)]
@@ -95,15 +97,18 @@ pub struct Task {
     pub unix_syscalls: i32,
 }
 
-pub fn list_pids(into: &mut Vec<i32>) {
+pub fn list_pids(into: &mut Vec<i32>) -> io::Result<()> {
     loop {
         into.resize(into.capacity().max(4096), 0);
         let room = libc::c_int::try_from(into.len() * size_of::<i32>()).unwrap_or(libc::c_int::MAX);
         let count = unsafe { libc::proc_listallpids(into.as_mut_ptr().cast(), room) };
-        let count = usize::try_from(count).unwrap_or(0);
+        let Ok(count) = usize::try_from(count) else {
+            return Err(io::Error::last_os_error());
+        };
+
         if count < into.len() {
             into.truncate(count);
-            return;
+            return Ok(());
         }
 
         into.reserve(into.len());
@@ -177,7 +182,7 @@ fn task_info(pid: i32) -> Result<libc::proc_taskinfo, Unreadable> {
 }
 
 fn unreadable_from_errno() -> Unreadable {
-    if std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+    if io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
         Unreadable::Gone
     } else {
         Unreadable::Refused
@@ -233,7 +238,7 @@ mod tests {
     fn lists_this_process_among_every_pid() {
         let mut pids = Vec::new();
 
-        list_pids(&mut pids);
+        list_pids(&mut pids).unwrap();
 
         assert!(pids.contains(&std::process::id().cast_signed()));
     }
@@ -257,7 +262,7 @@ mod tests {
     #[test]
     fn reads_or_counts_every_listed_pid() {
         let mut pids = Vec::new();
-        list_pids(&mut pids);
+        list_pids(&mut pids).unwrap();
         let mut sweep = Sweep::default();
 
         sweep.run(&pids, Timebase::read());

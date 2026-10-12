@@ -74,7 +74,7 @@ impl Tracker {
             events: Vec::new(),
             counts: Counts::default(),
         };
-        tracker.rescan();
+        tracker.rescan()?;
         Ok(tracker)
     }
 
@@ -109,7 +109,7 @@ impl Tracker {
             }
 
             if forked {
-                self.rescan();
+                self.rescan()?;
             }
             if due {
                 return Ok(());
@@ -117,7 +117,7 @@ impl Tracker {
         }
     }
 
-    pub fn observe(&mut self, listing: &[i32]) {
+    pub fn observe(&mut self, listing: &[i32]) -> io::Result<()> {
         let previous = self.scans;
         self.scans += 1;
         let reporting = previous > 0;
@@ -140,18 +140,19 @@ impl Tracker {
             self.last_seen[index] = self.scans;
         }
 
-        self.submit_watches();
+        self.submit_watches()
     }
 
     pub fn drain_events(&mut self) -> std::vec::Drain<'_, Event> {
         self.events.drain(..)
     }
 
-    fn rescan(&mut self) {
+    fn rescan(&mut self) -> io::Result<()> {
         let mut listing = std::mem::take(&mut self.listing);
-        processes::list_pids(&mut listing);
-        self.observe(&listing);
+        let observed = processes::list_pids(&mut listing).and_then(|()| self.observe(&listing));
         self.listing = listing;
+
+        observed
     }
 
     fn handle(&mut self, event: libc::kevent) -> bool {
@@ -178,9 +179,9 @@ impl Tracker {
         });
     }
 
-    fn submit_watches(&mut self) {
+    fn submit_watches(&mut self) -> io::Result<()> {
         if self.changes.is_empty() {
-            return;
+            return Ok(());
         }
 
         let count = libc::c_int::try_from(self.changes.len()).unwrap_or(libc::c_int::MAX);
@@ -201,16 +202,22 @@ impl Tracker {
             )
         };
 
-        let receipts = usize::try_from(receipts).unwrap_or(0);
+        let Ok(receipts) = usize::try_from(receipts) else {
+            return Err(io::Error::last_os_error());
+        };
+
         for index in 0..receipts {
             let receipt = self.received[index];
-            if receipt.data == libc::EPERM as isize {
-                self.counts.refused_watches += 1;
-            } else if receipt.data == libc::ESRCH as isize {
-                let pid = i32::try_from(receipt.ident).unwrap_or(-1);
-                self.record_exit(pid, Noticed::AlreadyExited);
+            let pid = i32::try_from(receipt.ident).unwrap_or(-1);
+            match i32::try_from(receipt.data).unwrap_or(libc::EINVAL) {
+                0 => {}
+                libc::EPERM => self.counts.refused_watches += 1,
+                libc::ESRCH => self.record_exit(pid, Noticed::AlreadyExited),
+                error => return Err(io::Error::from_raw_os_error(error)),
             }
         }
+
+        Ok(())
     }
 
     fn wait(&mut self, pending: &[libc::kevent]) -> io::Result<usize> {
@@ -315,9 +322,9 @@ mod tests {
         let mut child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(100));
         let mut listing = Vec::new();
-        processes::list_pids(&mut listing);
+        processes::list_pids(&mut listing).unwrap();
 
-        tracker.observe(&listing);
+        tracker.observe(&listing).unwrap();
         child.wait().unwrap();
 
         let pid = child.id().cast_signed();
@@ -334,10 +341,10 @@ mod tests {
     fn reports_a_pid_first_seen_in_a_listing_as_a_start() {
         let mut tracker = Tracker::new(Timebase::read()).unwrap();
         let mut listing = Vec::new();
-        processes::list_pids(&mut listing);
+        processes::list_pids(&mut listing).unwrap();
         listing.push(99_999);
 
-        tracker.observe(&listing);
+        tracker.observe(&listing).unwrap();
 
         let events: Vec<Event> = tracker.drain_events().collect();
         assert!(
@@ -352,11 +359,11 @@ mod tests {
     fn reports_nothing_for_pids_the_previous_listing_held() {
         let mut tracker = Tracker::new(Timebase::read()).unwrap();
         let mut listing = Vec::new();
-        processes::list_pids(&mut listing);
-        tracker.observe(&listing);
+        processes::list_pids(&mut listing).unwrap();
+        tracker.observe(&listing).unwrap();
         tracker.drain_events();
 
-        tracker.observe(&listing);
+        tracker.observe(&listing).unwrap();
 
         assert_eq!(0, tracker.drain_events().count());
     }
