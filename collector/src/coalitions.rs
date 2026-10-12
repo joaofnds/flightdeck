@@ -63,8 +63,8 @@ pub struct Coalition {
     pub idle_wakeups: u64,
     pub disk_read_bytes: u64,
     pub disk_written_bytes: u64,
-    pub gpu_time: u64,
-    pub energy: u64,
+    pub gpu_ns: u64,
+    pub energy_nj: u64,
 }
 
 pub struct Coalitions {
@@ -110,8 +110,8 @@ impl Coalitions {
                 idle_wakeups: usage.platform_idle_wakeups,
                 disk_read_bytes: usage.bytesread,
                 disk_written_bytes: usage.byteswritten,
-                gpu_time: usage.gpu_time,
-                energy: usage.energy,
+                gpu_ns: usage.gpu_time,
+                energy_nj: usage.energy,
             });
             true
         });
@@ -124,6 +124,7 @@ mod tests {
 
     use super::*;
     use crate::cost::spin_on_this_thread_for;
+    use crate::processes;
 
     fn own_coalition() -> u64 {
         coalition_of(std::process::id().cast_signed()).unwrap()
@@ -144,6 +145,29 @@ mod tests {
             after.cpu_ns - before.cpu_ns >= 50_000_000,
             "grew {} ns",
             after.cpu_ns - before.cpu_ns
+        );
+    }
+
+    #[test]
+    fn counts_the_energy_this_process_spends_in_its_coalition() {
+        let timebase = Timebase::read();
+        let pid = std::process::id().cast_signed();
+        let mut coalitions = Coalitions::new(timebase);
+        coalitions.add(own_coalition());
+        coalitions.read_all();
+        let before = coalitions.read[0];
+        let own_before = processes::read_usage(pid, timebase).unwrap();
+
+        spin_on_this_thread_for(Duration::from_millis(50));
+
+        let own_after = processes::read_usage(pid, timebase).unwrap();
+        coalitions.read_all();
+        let after = coalitions.read[0];
+        let own_nj = own_after.energy_nj - own_before.energy_nj;
+        assert!(
+            after.energy_nj - before.energy_nj >= own_nj,
+            "coalition grew {} nJ, this process {own_nj} nJ",
+            after.energy_nj - before.energy_nj
         );
     }
 
