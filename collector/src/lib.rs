@@ -3,6 +3,7 @@ pub mod coalitions;
 pub mod collector;
 pub mod cost;
 pub mod interfaces;
+pub mod ioreport;
 pub mod machine;
 pub mod processes;
 pub mod schedule;

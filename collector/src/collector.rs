@@ -4,6 +4,7 @@ use crate::clock::Timebase;
 use crate::coalitions::Coalitions;
 use crate::cost::{Meter, Source};
 use crate::interfaces::Interfaces;
+use crate::ioreport::IoReport;
 use crate::machine::Machine;
 use crate::processes::{self, Sweep};
 use crate::tracker::{Event, Tracker};
@@ -14,6 +15,7 @@ pub struct Collector {
     pub tracker: Tracker,
     pub machine: Machine,
     pub interfaces: Interfaces,
+    pub ioreport: IoReport,
     pub processes: Sweep,
     pub coalitions: Coalitions,
     pub events: Vec<Event>,
@@ -27,6 +29,7 @@ impl Collector {
             tracker: Tracker::new(timebase)?,
             machine: Machine::new()?,
             interfaces: Interfaces::default(),
+            ioreport: IoReport::open(timebase)?,
             processes: Sweep::default(),
             coalitions: Coalitions::new(timebase),
             events: Vec::new(),
@@ -46,6 +49,7 @@ impl Collector {
     pub fn read(&mut self, meter: &mut Meter) -> io::Result<()> {
         meter.measure(Source::Machine, || self.machine.read())?;
         meter.measure(Source::Interfaces, || self.interfaces.read_all())?;
+        meter.measure(Source::IoReport, || self.ioreport.read())?;
         meter.measure(Source::Processes, || {
             processes::list_pids(&mut self.listing);
             self.processes.run(&self.listing, self.timebase);

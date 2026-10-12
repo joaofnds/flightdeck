@@ -10,13 +10,15 @@ pub enum Source {
     Processes,
     Coalitions,
     Tracking,
+    IoReport,
 }
 
 impl Source {
-    pub const ALL: [Source; 5] = [
+    pub const ALL: [Source; 6] = [
         Source::Processes,
         Source::Coalitions,
         Source::Tracking,
+        Source::IoReport,
         Source::Machine,
         Source::Interfaces,
     ];
@@ -29,6 +31,7 @@ impl Source {
             Source::Processes => "processes",
             Source::Coalitions => "coalitions",
             Source::Tracking => "tracking",
+            Source::IoReport => "ioreport",
         }
     }
 }
@@ -163,11 +166,11 @@ mod tests {
             at_ns: 5_000_000_000,
             cpu_ns: 1_000,
             energy_nj: 2_000,
-            spent_ns: [7; 5],
+            spent_ns: [7; Source::ALL.len()],
             instructions: 500,
             super_instructions: 100,
         };
-        let mut spent_ns = [7; 5];
+        let mut spent_ns = [7; Source::ALL.len()];
         spent_ns[Source::Processes as usize] += processes_ns;
         let later = Snapshot {
             at_ns: 15_000_000_000,
