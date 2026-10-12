@@ -309,12 +309,26 @@ mod tests {
     #[test]
     fn reads_a_speed_for_every_fan() {
         let mut smc = Smc::open().unwrap();
+        let fans = Connection::open()
+            .unwrap()
+            .read(FAN_COUNT, UNSIGNED_8)
+            .unwrap()[0];
 
         smc.read().unwrap();
 
-        assert!(!smc.fan_rpm.is_empty());
+        assert_eq!(usize::from(fans), smc.fan_rpm.len());
+    }
+
+    #[test]
+    fn reads_each_fan_speed_in_rpm() {
+        let mut smc = Smc::open().unwrap();
+
+        smc.read().unwrap();
+
         assert!(
-            smc.fan_rpm.iter().all(|&rpm| rpm > 0.0 && rpm < 10_000.0),
+            smc.fan_rpm
+                .iter()
+                .all(|&rpm| (0.0..10_000.0).contains(&rpm)),
             "{:?}",
             smc.fan_rpm
         );
