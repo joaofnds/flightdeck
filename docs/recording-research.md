@@ -9,26 +9,27 @@ and socket was doing. Every number below was measured on this M5 Pro on 2026-10-
 
 - The whole machine is read at most once a second. The measurements go down to
   100 ms to show the headroom, and a later mode may read one process tree at 100 ms.
-- The collector gets 3% of one core.
+- The collector gets 3% of one core, averaged over each minute.
 - The collector runs without root. Root may come later as an option the user turns on
   in the app.
 - A kernel panic or a power loss may lose the minute not yet sealed.
 
 Without root and once a second, the collector in Rust measured 2.29% and 1.75% of a core
-and 37.5 and 21.7 mW over two five-minute runs of this Mac's use, inside the budget. It
-does not yet read the GPU, open files, disk, per-process network, battery or most of the
-SMC, and adding the ones measured apart puts it at about 2.7% and 2.2%, against the 2.0
-to 2.2% estimated. IOReport costs the most of the rows read every second, then the sweep
-of every process and the coalitions, and process tracking cost more than those three
-together in the busier run. Over 10-second windows the collector stayed at 1.0 to 2.6%
-while processes forked up to 161 times a second, as they did in 53 of 60 windows here,
-and went over the budget in bursts of 316 to 1,745, at 3.3 to 8.7%. Under one process
-forking at a steady rate it sat at the budget at 100 forks a second and went over it
-from 300, and at 1,600 it cost 9.9% over a minute and 19.8% in the 10 seconds the Mac
-forked 2,932 times a second, mostly from rescanning the pid list after forks. A kqueue
-watch on every process sees nearly every process start and exit without root, which
-polling cannot. Root would add the usage and open files of the third of processes owned
-by other users, and file and socket events as they happen.
+and 37.5 and 21.7 mW over two five-minute runs of this Mac's use. Seven of their ten
+minutes cost 1.2 to 2.2%, inside the budget, and the three that held a burst of forks
+cost 3.1 to 3.2%, over it. It does not yet read the GPU, open files, disk, per-process
+network, battery or most of the SMC, and adding the ones measured apart puts it at about
+2.7% and 2.2%, against the 2.0 to 2.2% estimated. IOReport costs the most of the rows
+read every second, then the sweep of every process and the coalitions, and process
+tracking cost more than those three together in the busier run. Over 10-second windows
+the collector stayed at 1.0 to 2.6% while processes forked up to 161 times a second, as
+they did in 53 of 60 windows here, and rose to 3.3 to 8.7% in bursts of 316 to 1,745.
+Under one process forking at a steady rate it sat at the budget at 100 forks a second
+and went over it from 300, and at 1,600 it cost 9.9% over a minute and 19.8% in the 10
+seconds the Mac forked 2,932 times a second, mostly from rescanning the pid list after
+forks. A kqueue watch on every process sees nearly every process start and exit without
+root, which polling cannot. Root would add the usage and open files of the third of
+processes owned by other users, and file and socket events as they happen.
 
 ## Reading the kernel is what costs CPU, not moving the data
 
@@ -127,21 +128,21 @@ and the coalitions at about 2.4 ms in both against 1.0 in a tight loop.
 
 At their costs measured apart, the rows not read yet add 4.4 to 4.8 ms a second for the
 GPU, the open-file list, the rest of the SMC every 10 seconds and the keyframe every 60.
-That puts the busier run at about 2.7% of a core, half a point over the estimate, and
-the quieter at about 2.2%, the top of the estimate, both under the budget before disk,
+That puts the busier run at about 2.7% of a core over its five minutes, half a point
+over the estimate, and the quieter at about 2.2%, the top of the estimate. Minute by
+minute, the same three minutes go over the budget and no others, before disk,
 per-process network, battery and the persister, which are not measured.
 
-Over 10-second windows, the 53 of 60 windows at 3 to 161 forks a second cost 1.0 to
-2.6% of a core, 1.39% and 16.5 mW on average in the quieter run and 1.57% and 28.6 mW
-in the busier. The seven windows at 316 to 1,745 forks a second cost 3.3 to 8.7% and up
-to 117 mW, over the budget, and tracking took 22 to 74 ms of each of their seconds. In
-the two bursts of the quieter run, rescanning the pid list took 78% of tracking, the
-kevent calls and their events 11 to 13%, and reading and watching the new and exited
-processes 9 to 11%. A run without IOReport and the SMC split the same way, 0.95% on
-average at up to 147 forks a second and 6.5 to 8.0% in bursts of 870 to 1,650. Ticks
-started 2.9 and 3.0 ms late on average and 8 ms at most, with no slips. The budget does
-not say over what period it holds: over five minutes both runs are inside it, and over
-10 seconds 7 of their 60 windows are not.
+Over 10-second windows, the 53 of 60 windows at 3 to 161 forks a second cost 1.0 to 2.6%
+of a core, 1.39% and 16.5 mW on average in the quieter run and 1.57% and 28.6 mW in the
+busier. The seven windows at 316 to 1,745 forks a second cost 3.3 to 8.7% and up to 117
+mW, and tracking took 22 to 74 ms of each of their seconds. In the two bursts of the
+quieter run, rescanning the pid list took 78% of tracking, the kevent calls and their
+events 11 to 13%, and reading and watching the new and exited processes 9 to 11%. A run
+without IOReport and the SMC split the same way, 0.95% on average at up to 147 forks a
+second and 6.5 to 8.0% in bursts of 870 to 1,650. Ticks started 2.9 and 3.0 ms late on
+average and 8 ms at most, with no slips. Every one of the seven burst windows fell in
+one of the three minutes that went over the budget.
 
 The collector rescans once per wake that carries a fork, and a wake returns up to 64
 events, so forks that arrive together share a rescan and forks spread evenly each pay
@@ -532,7 +533,8 @@ did not record the power source. Their output is in `/tmp/fd-probe` as `run1.txt
 `windows2.py`. The steady fork rates came from `forkrate/forkrate.c`, run by
 `forkrate/rates.sh` against the same c7bb9ba build, on AC power at load averages of 2.7
 to 6.3, into `forkrate/rate-*.txt`, which `windows2.py` also splits. `supercorr.py`
-correlates each window's Super-core share with the sweep's CPU and energy.
+correlates each window's Super-core share with the sweep's CPU and energy. `minutes.py`
+averages each run over every minute.
 `/tmp/fd-probe` also holds the probes for IOReport's units and groups (`unit/unit.c`,
 `unit/groups.c`), an SMC key's cost and the SoC sensors (`smc/smccost.c`, `smc/keys.c`),
 `posix_spawn` against the fork watch (`spawnfork.c`), a coalition outliving its process
