@@ -14,37 +14,43 @@ unless it cites a source. The evidence programs are listed at the end.
   in the app.
 - A kernel panic or a power loss may lose the minute not yet sealed.
 
-Without root and once a second, the collector fits that budget at about 2% of a core
-by the estimate below. A kqueue watch on every process sees nearly every process start
-and exit without root, which polling cannot. Root would add the usage and open files of
-the third of processes owned by other users, and file and socket events as they
-happen.
+Without root and once a second, the collector in Rust measured 2.3% of a core over five
+minutes of this Mac's use, inside the budget. It stays at 1.0 to 2.6% while processes
+fork under 200 times a second and goes over the budget, up to 8.6%, in bursts of 300 to
+1,600 forks a second, because it rescans the pid list on every fork. A kqueue watch on
+every process sees nearly every process start and exit without root, which polling
+cannot. Root would add the usage and open files of the third of processes owned by
+other users, and file and socket events as they happen.
 
 ## Reading the kernel is what costs CPU, not moving the data
 
 | Step | CPU |
 |---|---|
-| `proc_pid_rusage` and task info for the 665 to 672 processes readable without root, paced every 100 ms at the default quality of service | 6.0 to 8.3 ms and 2.3 mJ a pass, 9 to 12 µs a process |
+| `proc_pid_rusage` and task info for the 665 to 710 processes readable without root, paced every 100 ms or once a second at the default quality of service | 6.0 to 8.3 ms and 2.3 mJ a pass, 9 to 12 µs a process. At either pace, 4.8 to 5.2 ms and 4.3 mJ with half its instructions on Super cores, and 2.8 to 3.2 ms and 8.1 to 9.3 mJ with 78 to 95% on them |
 | The same calls in a tight loop, for comparison | 1.7 µs a process, which a loop that sleeps between passes does not reach |
 | CPU ticks of every core, memory, network interfaces, the pid list, in C, tight loop | 3.2 µs, 0.4 µs, 25 µs, 8.8 µs |
 | Usage of all 679 coalitions, in C, tight loop | 1.0 ms |
 | Listing each process's open files | 1.4 ms a pass |
 | Resolving the 7,462 open files to a path or socket | 8 to 20 ms a pass |
 | The SMC: 268 temperature keys and 2 fans, in the Go collector | 6.0 ms CPU, 52 ms wall |
-| IOReport: CPU and GPU frequency states and GPU energy, in Go | 5.9 ms |
+| One SMC key, paced every 100 ms | 33 µs CPU, 272 µs wall |
+| IOReport: CPU and GPU frequency states and GPU energy | 5.9 ms in Go. In Rust, paced, 4.5 ms for the 18 cores' states, 0.5 ms for the GPU's, 0.65 ms for its energy |
 | GPU from the I/O Registry, in Go | 2.2 ms |
-| Watching every process's fork, exec and exit with kqueue, rescanning the pid list on each fork | 0.13% of a core at 7 process starts a second, 0.32% at 34 |
+| Watching every process's fork, exec and exit with kqueue, rescanning the pid list on each fork | 0.13% of a core at 7 process starts a second, 0.32% at 34. In the collector, 44 µs a fork at 1,600 forks a second, 60 to 64 µs over a whole run |
 | Running `nettop` once for per-process network bytes | about 30 ms CPU, 5 s wall |
 | Handing a tick of 610 records (9.8 KB) to another process through a shared-memory ring, paced at 10 ticks a second, the reader woken once a tick | 33 µs writer, 20 µs reader, 10 µJ together, per tick |
 | The same through a Unix socket | 50 µs writer, 30 µs reader, 12 µJ together |
 | The ring with a reader that looks at each 60 Hz screen frame instead of being woken | 14 µs writer, 52 µs reader, 13 µJ together, 7.3 reader wakeups a tick |
 
-Reading every process once a second costs 0.7% of one core and 2.3 mW. The same at
-100 ms costs 6 to 8%, and reading every source above at 100 ms, open files and the SMC
-included, adds up to 31 to 45% of a core from parts measured apart, so a 100 ms mode has to narrow to a process tree. At 9
-to 12 µs a process, a tree of 50 processes read every 100 ms costs 4.5 to 6 ms a
-second, 0.5% of a core. The Go rows include Go's runtime: the CPU ticks cost 186 µs a read
-through the Go collector and 3.2 µs in C, so those rows are upper bounds.
+Reading every process once a second costs 0.3 to 0.8% of one core and 2.3 to 9.3 mW.
+The more of a pass runs on Super cores, the less CPU time and the more energy it takes.
+The same at 100 ms costs 3 to 8%, and reading every source above at 100 ms, open files
+and the SMC included, adds up to 31 to 45% of a core from parts measured apart, so a
+100 ms mode has to narrow to a process tree. At 9 to 12 µs a process, a tree of 50
+processes read every 100 ms costs 4.5 to 6 ms a second, 0.5% of a core. The Go rows
+include Go's runtime: the CPU ticks cost 186 µs a read through the Go collector and
+3.2 µs in C, so those rows are upper bounds. IOReport is the exception, at about the
+same cost in Rust.
 
 Handing a tick over costs 53 to 80 µs of CPU for writer and reader together, so at
 one tick a second the transport is under 0.01% of a core. The ring with a reader woken
@@ -70,20 +76,20 @@ library but has no header in the SDK, so a peak per second rests on a private ca
 
 ### What is read, and how often
 
-| Every | What | Cost per read, measured apart |
-|---|---|---|
-| 1 s | CPU ticks of every core, memory and swap, network interfaces, the pid list | under 0.1 ms in a tight loop |
-| 1 s | Every process readable without root | 7.3 ms CPU and 2.3 mJ, paced |
-| 1 s | Every coalition | 1.0 ms in a tight loop |
-| 1 s | IOReport, GPU | 5.9 ms and 2.2 ms in Go |
-| 1 s | The open-file list of every process readable without root, resolving only descriptors that are new | 1.4 ms to list, the few changes to resolve |
-| 1 s | A few SMC keys: hottest SoC sensor, fans, system power | not measured |
-| 1 s | Bytes and operations per disk | not measured |
-| 1 s | Network bytes per process, through the framework under `nettop` | not measured |
-| 10 s | The rest of the 268 SMC temperatures, on their own thread | 6 ms CPU, 52 ms wall |
-| 60 s | Battery charge and health | not measured |
-| 60 s | Every open file and socket, resolved in full, as a keyframe | 10 to 20 ms |
-| As they happen | Process fork, exec and exit, from kqueue | 0.13 to 0.32% of a core |
+| Every | What | Cost per read, measured apart | In the collector, ms of CPU a second |
+|---|---|---|---|
+| 1 s | CPU ticks of every core, memory and swap, network interfaces, the pid list | under 0.1 ms in a tight loop | 0.03 to 0.07 for the CPUs and memory, 0.17 to 0.33 for the interfaces, the pid list counted with the processes |
+| 1 s | Every process readable without root | 2.8 to 8.3 ms CPU and 2.3 to 9.3 mJ, paced, by the cores it runs on | 2.5 to 4.1 |
+| 1 s | Every coalition | 1.0 ms in a tight loop | 1.7 to 3.2 |
+| 1 s | IOReport, GPU | 5.9 ms and 2.2 ms in Go | 4.8 to 6.1 for IOReport, the I/O Registry's GPU not read yet |
+| 1 s | The open-file list of every process readable without root, resolving only descriptors that are new | 1.4 ms to list, the few changes to resolve | not read yet |
+| 1 s | A few SMC keys: hottest SoC sensor, fans, system power | 33 µs CPU a key, paced | 0.09 to 0.15 for 4 keys |
+| 1 s | Bytes and operations per disk | not measured | not read yet |
+| 1 s | Network bytes per process, through the framework under `nettop` | not measured | not read yet |
+| 10 s | The rest of the 268 SMC temperatures, on their own thread | 6 ms CPU, 52 ms wall | not read yet |
+| 60 s | Battery charge and health | not measured | not read yet |
+| 60 s | Every open file and socket, resolved in full, as a keyframe | 10 to 20 ms | not read yet |
+| As they happen | Process fork, exec and exit, from kqueue | 0.13 to 0.32% of a core | 0.1 to 15 at 1 to 170 forks a second, 22 to 74 at 300 to 1,700 |
 
 Network interfaces have to be read with `sysctl` and `NET_RT_IFLIST2`, whose `if_data64`
 counts bytes in 64 bits. The `if_data` that `getifaddrs` hands back counts them in 32
@@ -94,11 +100,26 @@ costs about 30 ms of CPU and 5 seconds a sample, so the collector has to call th
 framework directly. Per-process GPU time has not been located beyond the coalition
 totals.
 
-By those numbers the collector spends about 20 to 22 ms a second, 2.0 to 2.2% of one
-core, most of it on the sweep of every process and on IOReport. That leaves under 1%
-of the budget for the rows not measured and for the persister. The sum is an estimate
-from parts measured apart, and its energy is measured only for the sweep. The next
-measurement is the whole collector in Rust against the 3% budget.
+Summed from parts measured apart, the collector was estimated at 20 to 22 ms a second,
+2.0 to 2.2% of one core. The collector in Rust reads every row above with a cost in its
+last column, and over five minutes it spent 22.9 ms a second, 2.29% of a core, and
+37.5 mW. `time` agreed at 2.33%. The rows it reads were estimated at 16 to 18 ms, so it
+came in 5 to 7 ms over, and process tracking accounts for more than that. Tracking cost
+11.7 ms a second against 1.3 to 3.2 ms estimated, because processes forked 182 times a
+second on average during the run, against 7 to 34 process starts a second when
+tracking was measured apart. The other rows together came in under their estimate,
+11.1 ms against 14.4. The sweep of every process cost 3.2 ms against 7.3, mostly on Super
+cores, and IOReport 5.1 against 5.9. Coalitions cost 2.3 ms against 1.0 in a tight
+loop.
+
+Over 10-second windows, the 25 of 30 windows under 200 forks a second cost 1.0 to 2.6%
+of a core, 1.57% and 28.6 mW on average, which leaves 0.4 to 2.0% of a core for the
+rows not read yet and for the persister. The five windows at 316 to 1,585 forks a
+second cost 3.3 to 8.6% and up to 114 mW, over the budget, and tracking took 22 to 73 ms
+of each of their seconds. A run without IOReport and the SMC split the same way, 0.95%
+on average under 200 forks a second and 6.5 to 8.0% in bursts of 870 to 1,650. Ticks
+started 2.9 ms late on average and 8 ms at most, with no slips. The budget holds for
+the reads, and the rescan on every fork breaks it during bursts.
 
 Ticks have to be scheduled on absolute deadlines from the monotonic clock. The
 sampler used here slept one second after each pass and drifted 9 seconds over 300,
@@ -142,11 +163,16 @@ none refused. The kernel no longer names the child on a fork (`sys/event.h` says
 `NOTE_TRACK` has been unsupported since 10.5), so on each fork the collector rescans
 the pid list and watches whatever is new. In two runs that found 835 of 845 and 2,024
 of 2,025 new pids, each in the rescan right after its parent's fork, and a poll once a
-second found none the rescans had missed.
+second found none the rescans had missed. `posix_spawn` reports a fork to the watch on
+its parent the same as `fork` does, so the rescan catches processes started either way.
 
 An exited process's final usage stays readable until its parent reaps it. Reading it
 on the exit event succeeded for 87% and 65% of exits in the two runs (730 of 835, 1,316
-of 2,017). The rest still count in their coalition's totals.
+of 2,017). In the collector's two five-minute runs, at 166 and 182 forks a second, it
+succeeded for 83% and 82% (41,920 of 50,346, 44,926 of 54,990). The rescan found 61%
+and 55% of new processes already exited, too late to watch, and the collector read
+their usage when it found them instead of on an exit event. The rest still count in
+their coalition's totals.
 
 kqueue does not report file opens, file closes or socket connections. Those come from
 Endpoint Security, which needs root and an entitlement Apple grants, or from
@@ -409,17 +435,20 @@ The storage choice in step 3 waits on the query benchmark below.
 
 ## Next measurements
 
-1. The whole collector in Rust once a second, with the reads above, against the 3%
-   budget, energy included.
-2. Query speed on a week of synthetic data in each storage option: one process over
+1. Rescanning the pid list at most once per interval while processes fork hundreds of
+   times a second: the CPU it saves, and the processes it misses that a rescan on every
+   fork finds.
+2. The rows the collector does not read yet, against the room left in the budget: GPU
+   from the I/O Registry, open files, disk, battery, and the 10 s and 60 s rows.
+3. Query speed on a week of synthetic data in each storage option: one process over
    the week at screen resolution, top apps over a day, everything at one second.
-3. Bytes a day at peak load.
-4. Per-process network bytes through NetworkStatistics directly, and what it costs.
-5. Whether coalitions group processes the way the app's notion of an app does.
-6. iceoryx2 on this Mac against the ring measured here.
-7. Parquet against Vortex, which claims much faster random access and cannot yet read
+4. Bytes a day at peak load.
+5. Per-process network bytes through NetworkStatistics directly, and what it costs.
+6. Whether coalitions group processes the way the app's notion of an app does.
+7. iceoryx2 on this Mac against the ring measured here.
+8. Parquet against Vortex, which claims much faster random access and cannot yet read
    files written by a newer version of itself.
-8. For the root option: `eslogger`'s events a second and its CPU, file opens most of
+9. For the root option: `eslogger`'s events a second and its CPU, file opens most of
    all.
 
 ## Evidence
@@ -435,6 +464,14 @@ time, and an exited child's CPU),
 `lab/track2.c` (kqueue process tracking against the coalitions' count). The sealing
 windows were compared with `clickhouse-local` over `procs.csv`. The machine readings
 were timed with a test added to a copy of the Go collector in `/tmp/sysmon-bench`.
+
+The collector is in `collector/`, and `cargo run --release -- --seconds 300` prints its
+cost for each 10-second window and for the run. Its two five-minute runs were release
+builds of d8788c8, before IOReport and the SMC, and 737719d, on AC power at load
+averages of 7 to 14. `/tmp/fd-probe` holds the probes for IOReport's units and groups
+(`unit/unit.c`, `unit/groups.c`), an SMC key's cost and the SoC sensors
+(`smc/smccost.c`, `smc/keys.c`), `posix_spawn` against the fork watch (`spawnfork.c`),
+and `tick1s.c`, which is `lab/tick.c` paced once a second.
 
 ## Sources
 
