@@ -248,7 +248,10 @@ impl Sweep {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
+    use crate::cost::spin_on_this_thread_for;
 
     fn own_cpu_ns() -> u64 {
         let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
@@ -259,13 +262,6 @@ mod tests {
         };
 
         (micros(usage.ru_utime) + micros(usage.ru_stime)) * 1_000
-    }
-
-    fn burn_cpu(for_ns: u64) {
-        let start = std::time::Instant::now();
-        while start.elapsed().as_nanos() < u128::from(for_ns) {
-            std::hint::black_box(0);
-        }
     }
 
     #[test]
@@ -279,7 +275,7 @@ mod tests {
 
     #[test]
     fn reads_this_process_with_the_cpu_time_getrusage_reports() {
-        burn_cpu(50_000_000);
+        spin_on_this_thread_for(Duration::from_millis(50));
         let pid = std::process::id().cast_signed();
 
         let before = own_cpu_ns();
@@ -291,6 +287,33 @@ mod tests {
             before - 2_000_000 <= cpu_ns && cpu_ns <= after + 2_000_000,
             "read {cpu_ns} ns, getrusage {before} to {after}"
         );
+    }
+
+    #[test]
+    fn reads_this_process_spending_energy_while_it_runs() {
+        let pid = std::process::id().cast_signed();
+        let before = read_usage(pid, Timebase::read()).unwrap();
+
+        spin_on_this_thread_for(Duration::from_millis(50));
+
+        let after = read_usage(pid, Timebase::read()).unwrap();
+        assert!(
+            after.energy_nj > before.energy_nj,
+            "{} nJ then {} nJ",
+            before.energy_nj,
+            after.energy_nj
+        );
+    }
+
+    #[test]
+    fn reads_this_process_in_a_sweep() {
+        let pid = std::process::id().cast_signed();
+        let mut sweep = Sweep::default();
+
+        sweep.run(&[pid], Timebase::read());
+
+        let read: Vec<i32> = sweep.read.iter().map(|process| process.pid).collect();
+        assert_eq!(vec![pid], read);
     }
 
     #[test]
