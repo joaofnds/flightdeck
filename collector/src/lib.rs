@@ -7,4 +7,5 @@ pub mod ioreport;
 pub mod machine;
 pub mod processes;
 pub mod schedule;
+pub mod smc;
 pub mod tracker;

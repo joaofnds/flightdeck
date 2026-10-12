@@ -11,14 +11,16 @@ pub enum Source {
     Coalitions,
     Tracking,
     IoReport,
+    Smc,
 }
 
 impl Source {
-    pub const ALL: [Source; 6] = [
+    pub const ALL: [Source; 7] = [
         Source::Processes,
         Source::Coalitions,
         Source::Tracking,
         Source::IoReport,
+        Source::Smc,
         Source::Machine,
         Source::Interfaces,
     ];
@@ -32,6 +34,7 @@ impl Source {
             Source::Coalitions => "coalitions",
             Source::Tracking => "tracking",
             Source::IoReport => "ioreport",
+            Source::Smc => "smc",
         }
     }
 }
