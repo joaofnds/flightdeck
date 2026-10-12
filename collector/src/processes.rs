@@ -181,6 +181,40 @@ fn task_info(pid: i32) -> Result<libc::proc_taskinfo, Unreadable> {
     Ok(unsafe { task.assume_init() })
 }
 
+#[must_use]
+pub fn is_alive(pid: i32) -> bool {
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdshortinfo>::uninit();
+    let size = libc::c_int::try_from(size_of::<libc::proc_bsdshortinfo>()).unwrap_or(0);
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDT_SHORTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+
+    written == size
+}
+
+#[cfg(test)]
+pub(crate) fn child_that_has_exited() -> std::process::Child {
+    let child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+    let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+    let waited = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            child.id(),
+            info.as_mut_ptr(),
+            libc::WEXITED | libc::WNOWAIT,
+        )
+    };
+    assert_eq!(0, waited, "{}", io::Error::last_os_error());
+
+    child
+}
+
 fn unreadable_from_errno() -> Unreadable {
     if io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
         Unreadable::Gone
@@ -276,5 +310,35 @@ mod tests {
     #[test]
     fn refuses_launchd_to_a_user_without_root() {
         assert_eq!(Unreadable::Refused, read(1, Timebase::read()).unwrap_err());
+    }
+
+    #[test]
+    fn reads_a_reaped_child_as_gone() {
+        let mut child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+        child.wait().unwrap();
+
+        let read = read(child.id().cast_signed(), Timebase::read());
+
+        assert_eq!(Unreadable::Gone, read.unwrap_err());
+    }
+
+    #[test]
+    fn finds_this_process_alive() {
+        assert!(is_alive(std::process::id().cast_signed()));
+    }
+
+    #[test]
+    fn finds_a_process_it_cannot_read_alive() {
+        assert!(is_alive(1));
+    }
+
+    #[test]
+    fn finds_an_exited_child_not_yet_reaped_not_alive() {
+        let mut child = child_that_has_exited();
+
+        let alive = is_alive(child.id().cast_signed());
+        child.wait().unwrap();
+
+        assert!(!alive);
     }
 }

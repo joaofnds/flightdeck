@@ -30,13 +30,20 @@ pub struct Tracker {
     queue: OwnedFd,
     timebase: Timebase,
     listing: Vec<i32>,
-    last_seen: Vec<u64>,
+    known: Vec<Known>,
+    lingering: Vec<(i32, usize)>,
     scans: u64,
     changes: Vec<libc::kevent>,
     received: Vec<libc::kevent>,
     exiting: Vec<(i32, Noticed)>,
     events: Vec<Event>,
     pub counts: Counts,
+}
+
+#[derive(Clone, Copy, Default)]
+struct Known {
+    listed_in: u64,
+    exited: bool,
 }
 
 #[derive(Default)]
@@ -75,7 +82,8 @@ impl Tracker {
             queue: unsafe { OwnedFd::from_raw_fd(queue) },
             timebase,
             listing: Vec::new(),
-            last_seen: Vec::new(),
+            known: Vec::new(),
+            lingering: Vec::new(),
             scans: 0,
             changes: Vec::new(),
             received: Vec::new(),
@@ -113,7 +121,10 @@ impl Tracker {
     }
 
     pub fn observe(&mut self, listing: &[i32], meter: &mut Meter) -> io::Result<()> {
-        meter.measure(Source::Scans, || self.compare(listing));
+        meter.measure(Source::Scans, || {
+            self.compare(listing);
+            self.start_reused_pids();
+        });
         self.submit_watches(meter)
     }
 
@@ -139,22 +150,38 @@ impl Tracker {
         self.scans += 1;
         let reporting = previous > 0;
         self.changes.clear();
+        self.lingering.clear();
 
         for &pid in listing {
             let Ok(index) = usize::try_from(pid) else {
                 continue;
             };
-            if index >= self.last_seen.len() {
-                self.last_seen.resize(index + 1, 0);
+
+            if index >= self.known.len() {
+                self.known.resize(index + 1, Known::default());
             }
-            let seen_in_previous_scan = reporting && self.last_seen[index] == previous;
-            if !seen_in_previous_scan {
+            let known = &mut self.known[index];
+            let listed_before = reporting && known.listed_in == previous;
+            known.listed_in = self.scans;
+            if !listed_before {
+                known.exited = false;
                 self.changes.push(watch(pid));
                 if reporting {
                     self.events.push(Event::Start { pid });
                 }
+            } else if known.exited {
+                self.lingering.push((pid, index));
             }
-            self.last_seen[index] = self.scans;
+        }
+    }
+
+    fn start_reused_pids(&mut self) {
+        for &(pid, index) in &self.lingering {
+            if processes::is_alive(pid) {
+                self.known[index].exited = false;
+                self.changes.push(watch(pid));
+                self.events.push(Event::Start { pid });
+            }
         }
     }
 
@@ -202,6 +229,12 @@ impl Tracker {
 
         meter.measure(Source::ExitReads, || {
             for (pid, noticed) in self.exiting.drain(..) {
+                if let Some(known) = usize::try_from(pid)
+                    .ok()
+                    .and_then(|i| self.known.get_mut(i))
+                {
+                    known.exited = true;
+                }
                 self.events.push(Event::Exit {
                     pid,
                     last: processes::read_usage(pid, self.timebase),
@@ -380,8 +413,7 @@ mod tests {
     #[test]
     fn reports_a_process_found_already_exited_with_its_final_usage() {
         let mut tracker = Tracker::new(Timebase::read()).unwrap();
-        let mut child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        let mut child = processes::child_that_has_exited();
         let mut listing = Vec::new();
         processes::list_pids(&mut listing).unwrap();
 
@@ -394,6 +426,26 @@ mod tests {
             events
                 .iter()
                 .any(|e| matches!(e, Event::Exit { pid: p, last: Ok(_), noticed: Noticed::AlreadyExited } if *p == pid)),
+            "child {pid}: {events:?}"
+        );
+    }
+
+    #[test]
+    fn reports_nothing_more_for_an_exited_process_while_it_stays_listed() {
+        let mut tracker = Tracker::new(Timebase::read()).unwrap();
+        let mut child = processes::child_that_has_exited();
+        let mut listing = Vec::new();
+        processes::list_pids(&mut listing).unwrap();
+        tracker.observe(&listing, &mut Meter::default()).unwrap();
+        tracker.drain_events();
+
+        tracker.observe(&listing, &mut Meter::default()).unwrap();
+        child.wait().unwrap();
+
+        let pid = child.id().cast_signed();
+        let events: Vec<Event> = tracker.drain_events().collect();
+        assert!(
+            !events.iter().any(|e| matches!(e, Event::Start { pid: p } | Event::Exec { pid: p } | Event::Exit { pid: p, .. } if *p == pid)),
             "child {pid}: {events:?}"
         );
     }
