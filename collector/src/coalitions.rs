@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
 use crate::clock::Timebase;
+use crate::processes;
 
 #[repr(C)]
 #[derive(Default)]
@@ -34,22 +35,8 @@ unsafe extern "C" {
 
 #[must_use]
 pub fn coalition_of(pid: i32) -> Option<u64> {
-    let mut info = std::mem::MaybeUninit::<PidCoalitionInfo>::uninit();
-    let size = libc::c_int::try_from(size_of::<PidCoalitionInfo>()).unwrap_or(0);
-    if unsafe {
-        libc::proc_pidinfo(
-            pid,
-            PROC_PIDCOALITIONINFO,
-            0,
-            info.as_mut_ptr().cast(),
-            size,
-        )
-    } != size
-    {
-        return None;
-    }
+    let info: PidCoalitionInfo = unsafe { processes::pid_info(pid, PROC_PIDCOALITIONINFO) }.ok()?;
 
-    let info = unsafe { info.assume_init() };
     Some(info.coalition_id[COALITION_TYPE_RESOURCE])
 }
 
@@ -124,7 +111,6 @@ mod tests {
 
     use super::*;
     use crate::cost::spin_on_this_thread_for;
-    use crate::processes;
 
     fn own_coalition() -> u64 {
         coalition_of(std::process::id().cast_signed()).unwrap()

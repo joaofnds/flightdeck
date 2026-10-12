@@ -117,7 +117,7 @@ pub fn list_pids(into: &mut Vec<i32>) -> io::Result<()> {
 
 pub fn read(pid: i32, timebase: Timebase) -> Result<Process, Unreadable> {
     let usage = read_usage(pid, timebase)?;
-    let task = task_info(pid)?;
+    let task: libc::proc_taskinfo = unsafe { pid_info(pid, libc::PROC_PIDTASKINFO)? };
 
     Ok(Process {
         pid,
@@ -162,40 +162,24 @@ fn rusage(pid: i32) -> Result<RusageInfoV6, Unreadable> {
     Ok(unsafe { usage.assume_init() })
 }
 
-fn task_info(pid: i32) -> Result<libc::proc_taskinfo, Unreadable> {
-    let mut task = std::mem::MaybeUninit::<libc::proc_taskinfo>::uninit();
-    let size = libc::c_int::try_from(size_of::<libc::proc_taskinfo>()).unwrap_or(0);
-    let written = unsafe {
-        libc::proc_pidinfo(
-            pid,
-            libc::PROC_PIDTASKINFO,
-            0,
-            task.as_mut_ptr().cast(),
-            size,
-        )
-    };
+#[must_use]
+pub fn is_alive(pid: i32) -> bool {
+    unsafe { pid_info::<libc::proc_bsdshortinfo>(pid, libc::PROC_PIDT_SHORTBSDINFO) }.is_ok()
+}
+
+/// # Safety
+///
+/// Every bit pattern must be a valid `T`, as it is for a C struct of integers, since
+/// `T` holds whatever bytes the kernel wrote.
+pub(crate) unsafe fn pid_info<T>(pid: i32, flavor: libc::c_int) -> Result<T, Unreadable> {
+    let mut info = std::mem::MaybeUninit::<T>::uninit();
+    let size = libc::c_int::try_from(size_of::<T>()).unwrap_or(0);
+    let written = unsafe { libc::proc_pidinfo(pid, flavor, 0, info.as_mut_ptr().cast(), size) };
     if written != size {
         return Err(unreadable_from_errno());
     }
 
-    Ok(unsafe { task.assume_init() })
-}
-
-#[must_use]
-pub fn is_alive(pid: i32) -> bool {
-    let mut info = std::mem::MaybeUninit::<libc::proc_bsdshortinfo>::uninit();
-    let size = libc::c_int::try_from(size_of::<libc::proc_bsdshortinfo>()).unwrap_or(0);
-    let written = unsafe {
-        libc::proc_pidinfo(
-            pid,
-            libc::PROC_PIDT_SHORTBSDINFO,
-            0,
-            info.as_mut_ptr().cast(),
-            size,
-        )
-    };
-
-    written == size
+    Ok(unsafe { info.assume_init() })
 }
 
 #[cfg(test)]
