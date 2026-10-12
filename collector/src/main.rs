@@ -63,11 +63,13 @@ fn run(seconds: Option<NonZeroU64>) -> io::Result<()> {
         ))
     );
 
-    let mut tick = 0;
-    let mut run_start = Mark::default();
-    let mut window_start = Mark::default();
-    let mut run_tally = Tally::default();
-    let mut window_tally = Tally::default();
+    collector.wait_until(schedule.deadline(0), &mut meter)?;
+    collector.read(&mut meter)?;
+
+    let mut tick = schedule.first_ahead_of(clock::now()).max(1);
+    let start = Mark::take(&meter, timebase, &collector);
+    let mut whole = Span::begin(start, tick);
+    let mut window = Span::begin(start, tick);
     loop {
         let deadline = schedule.deadline(tick);
         collector.wait_until(deadline, &mut meter)?;
@@ -76,33 +78,20 @@ fn run(seconds: Option<NonZeroU64>) -> io::Result<()> {
 
         let following = schedule.first_ahead_of(clock::now()).max(tick + 1);
         let slips = following - tick - 1;
-        if tick == 0 {
-            run_start = Mark::take(&meter, timebase, &collector);
-            window_start = run_start;
-        } else {
-            run_tally.add(late, slips, &collector);
-            window_tally.add(late, slips, &collector);
-        }
+        whole.tally.add(late, slips, &collector);
+        window.tally.add(late, slips, &collector);
 
         if closes_window(tick, following) {
             let now = Mark::take(&meter, timebase, &collector);
-            report(
-                &format!("ticks {}-{tick}", tick + 1 - window_tally.ticks),
-                &window_start,
-                &now,
-                &window_tally,
-            );
-            window_start = now;
-            window_tally = Tally::default();
+            window.report("ticks", tick, &now);
+            window = Span::begin(now, following);
         }
 
         if seconds.is_some_and(|seconds| following > seconds.get()) {
-            let now = Mark::take(&meter, timebase, &collector);
-            report(
-                &format!("whole run, ticks 1-{tick}"),
-                &run_start,
-                &now,
-                &run_tally,
+            whole.report(
+                "whole run, ticks",
+                tick,
+                &Mark::take(&meter, timebase, &collector),
             );
             return Ok(());
         }
@@ -110,11 +99,36 @@ fn run(seconds: Option<NonZeroU64>) -> io::Result<()> {
     }
 }
 
+struct Span {
+    start: Mark,
+    first_tick: u64,
+    tally: Tally,
+}
+
+impl Span {
+    fn begin(start: Mark, first_tick: u64) -> Self {
+        Self {
+            start,
+            first_tick,
+            tally: Tally::default(),
+        }
+    }
+
+    fn report(&self, label: &str, last_tick: u64, end: &Mark) {
+        report(
+            &format!("{label} {}-{last_tick}", self.first_tick),
+            &self.start,
+            end,
+            &self.tally,
+        );
+    }
+}
+
 fn closes_window(tick: u64, following: u64) -> bool {
     tick > 0 && (following - 1) / TICKS_PER_WINDOW > (tick - 1) / TICKS_PER_WINDOW
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 struct Mark {
     snapshot: Snapshot,
     counts: Counts,
