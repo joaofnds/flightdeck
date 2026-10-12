@@ -15,7 +15,14 @@ pub enum Event {
     Exit {
         pid: i32,
         last: Result<Usage, Unreadable>,
+        noticed: Noticed,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Noticed {
+    OnExit,
+    AlreadyExited,
 }
 
 pub struct Tracker {
@@ -34,7 +41,6 @@ pub struct Tracker {
 pub struct Counts {
     pub forks: u64,
     pub refused_watches: u64,
-    pub missed_watches: u64,
 }
 
 impl Counts {
@@ -43,7 +49,6 @@ impl Counts {
         Counts {
             forks: self.forks - earlier.forks,
             refused_watches: self.refused_watches - earlier.refused_watches,
-            missed_watches: self.missed_watches - earlier.missed_watches,
         }
     }
 }
@@ -155,10 +160,7 @@ impl Tracker {
             self.events.push(Event::Exec { pid });
         }
         if event.fflags & libc::NOTE_EXIT != 0 {
-            self.events.push(Event::Exit {
-                pid,
-                last: processes::read_usage(pid, self.timebase),
-            });
+            self.record_exit(pid, Noticed::OnExit);
         }
 
         let forked = event.fflags & libc::NOTE_FORK != 0;
@@ -166,6 +168,14 @@ impl Tracker {
             self.counts.forks += 1;
         }
         forked
+    }
+
+    fn record_exit(&mut self, pid: i32, noticed: Noticed) {
+        self.events.push(Event::Exit {
+            pid,
+            last: processes::read_usage(pid, self.timebase),
+            noticed,
+        });
     }
 
     fn submit_watches(&mut self) {
@@ -197,12 +207,8 @@ impl Tracker {
             if receipt.data == libc::EPERM as isize {
                 self.counts.refused_watches += 1;
             } else if receipt.data == libc::ESRCH as isize {
-                self.counts.missed_watches += 1;
                 let pid = i32::try_from(receipt.ident).unwrap_or(-1);
-                self.events.push(Event::Exit {
-                    pid,
-                    last: processes::read_usage(pid, self.timebase),
-                });
+                self.record_exit(pid, Noticed::AlreadyExited);
             }
         }
     }
@@ -285,7 +291,7 @@ mod tests {
                 .any(|e| matches!(e, Event::Start { pid: p } if *p == pid)),
             "child {pid}: {events:?}"
         );
-        assert!(events.iter().any(|e| matches!(e, Event::Exit { pid: p, last: Ok(last) } if *p == pid && last.user_ns + last.system_ns > 0)), "child {pid}: {events:?}");
+        assert!(events.iter().any(|e| matches!(e, Event::Exit { pid: p, last: Ok(last), noticed: Noticed::OnExit } if *p == pid && last.user_ns + last.system_ns > 0)), "child {pid}: {events:?}");
     }
 
     #[test]
@@ -319,7 +325,7 @@ mod tests {
         assert!(
             events
                 .iter()
-                .any(|e| matches!(e, Event::Exit { pid: p, last: Ok(_) } if *p == pid)),
+                .any(|e| matches!(e, Event::Exit { pid: p, last: Ok(_), noticed: Noticed::AlreadyExited } if *p == pid)),
             "child {pid}: {events:?}"
         );
     }

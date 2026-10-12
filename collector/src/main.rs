@@ -5,8 +5,9 @@ use std::time::Duration;
 use collector::clock::{self, Timebase};
 use collector::collector::Collector;
 use collector::cost::{Cost, Meter, Snapshot, Source};
+use collector::processes::{Unreadable, Usage};
 use collector::schedule::Schedule;
-use collector::tracker::{Counts, Event};
+use collector::tracker::{Counts, Event, Noticed};
 
 const QOS_CLASS_DEFAULT: u32 = 0x15;
 const TICKS_PER_WINDOW: u64 = 10;
@@ -131,8 +132,8 @@ struct Tally {
     late_max: Duration,
     starts: u64,
     execs: u64,
-    exits: u64,
-    exits_with_usage: u64,
+    seen_exiting: Exits,
+    found_exited: Exits,
     processes_read: usize,
     processes_refused: u32,
     processes_gone: u32,
@@ -152,10 +153,16 @@ impl Tally {
             match event {
                 Event::Start { .. } => self.starts += 1,
                 Event::Exec { .. } => self.execs += 1,
-                Event::Exit { last, .. } => {
-                    self.exits += 1;
-                    self.exits_with_usage += u64::from(last.is_ok());
-                }
+                Event::Exit {
+                    last,
+                    noticed: Noticed::OnExit,
+                    ..
+                } => self.seen_exiting.add(last),
+                Event::Exit {
+                    last,
+                    noticed: Noticed::AlreadyExited,
+                    ..
+                } => self.found_exited.add(last),
             }
         }
 
@@ -165,6 +172,36 @@ impl Tally {
         self.coalitions = collector.coalitions.read.len();
         self.interfaces = collector.interfaces.read.len();
         self.cpus = collector.machine.cpus.len();
+    }
+}
+
+#[derive(Default)]
+struct Exits {
+    read: u64,
+    refused: u64,
+    gone: u64,
+}
+
+impl Exits {
+    fn add(&mut self, last: &Result<Usage, Unreadable>) {
+        match last {
+            Ok(_) => self.read += 1,
+            Err(Unreadable::Refused) => self.refused += 1,
+            Err(Unreadable::Gone) => self.gone += 1,
+        }
+    }
+}
+
+impl std::fmt::Display for Exits {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} ({} read, {} refused, {} gone)",
+            self.read + self.refused + self.gone,
+            self.read,
+            self.refused,
+            self.gone
+        )
     }
 }
 
@@ -193,7 +230,7 @@ fn report(label: &str, earlier: &Mark, later: &Mark, tally: &Tally) {
         cost.unattributed_ms_per_second()
     );
     println!(
-        "  last tick read {} processes ({} refused, {} gone), {} coalitions, {} CPUs, {} interfaces; over the window {} forks, {} starts ({} already exited when found, {} watches refused), {} execs, {} exits ({} with final usage)",
+        "  last tick read {} processes ({} refused, {} gone), {} coalitions, {} CPUs, {} interfaces; over the window {} forks, {} starts ({} watches refused), {} execs, exits seen {}, found already exited {}",
         tally.processes_read,
         tally.processes_refused,
         tally.processes_gone,
@@ -202,11 +239,10 @@ fn report(label: &str, earlier: &Mark, later: &Mark, tally: &Tally) {
         tally.interfaces,
         counts.forks,
         tally.starts,
-        counts.missed_watches,
         counts.refused_watches,
         tally.execs,
-        tally.exits,
-        tally.exits_with_usage,
+        tally.seen_exiting,
+        tally.found_exited,
     );
 }
 
