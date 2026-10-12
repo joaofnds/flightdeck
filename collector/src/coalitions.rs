@@ -32,6 +32,27 @@ unsafe extern "C" {
     fn coalition_info_resource_usage(cid: u64, cru: *mut ResourceUsage, sz: usize) -> libc::c_int;
 }
 
+#[must_use]
+pub fn coalition_of(pid: i32) -> Option<u64> {
+    let mut info = std::mem::MaybeUninit::<PidCoalitionInfo>::uninit();
+    let size = libc::c_int::try_from(size_of::<PidCoalitionInfo>()).unwrap_or(0);
+    if unsafe {
+        libc::proc_pidinfo(
+            pid,
+            PROC_PIDCOALITIONINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    } != size
+    {
+        return None;
+    }
+
+    let info = unsafe { info.assume_init() };
+    Some(info.coalition_id[COALITION_TYPE_RESOURCE])
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Coalition {
     pub id: u64,
@@ -62,24 +83,8 @@ impl Coalitions {
         }
     }
 
-    pub fn join(&mut self, pid: i32) {
-        let mut info = std::mem::MaybeUninit::<PidCoalitionInfo>::uninit();
-        let size = libc::c_int::try_from(size_of::<PidCoalitionInfo>()).unwrap_or(0);
-        if unsafe {
-            libc::proc_pidinfo(
-                pid,
-                PROC_PIDCOALITIONINFO,
-                0,
-                info.as_mut_ptr().cast(),
-                size,
-            )
-        } != size
-        {
-            return;
-        }
-
-        let info = unsafe { info.assume_init() };
-        self.ids.insert(info.coalition_id[COALITION_TYPE_RESOURCE]);
+    pub fn add(&mut self, id: u64) {
+        self.ids.insert(id);
     }
 
     pub fn read_all(&mut self) {
@@ -117,6 +122,10 @@ impl Coalitions {
 mod tests {
     use super::*;
 
+    fn own_coalition() -> u64 {
+        coalition_of(std::process::id().cast_signed()).unwrap()
+    }
+
     fn burn_cpu(for_ns: u64) {
         let start = std::time::Instant::now();
         while start.elapsed().as_nanos() < u128::from(for_ns) {
@@ -127,7 +136,7 @@ mod tests {
     #[test]
     fn counts_the_cpu_time_this_process_spends_in_its_coalition() {
         let mut coalitions = Coalitions::new(Timebase::read());
-        coalitions.join(std::process::id().cast_signed());
+        coalitions.add(own_coalition());
         coalitions.read_all();
         let before = coalitions.read[0];
 
@@ -145,12 +154,33 @@ mod tests {
     #[test]
     fn reads_each_coalition_once_however_many_processes_it_holds() {
         let mut coalitions = Coalitions::new(Timebase::read());
-        let own = std::process::id().cast_signed();
-        coalitions.join(own);
-        coalitions.join(own);
+        coalitions.add(own_coalition());
+        coalitions.add(own_coalition());
 
         coalitions.read_all();
 
         assert_eq!(1, coalitions.read.len());
+    }
+
+    #[test]
+    fn finds_a_child_in_its_parents_coalition() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("1")
+            .spawn()
+            .unwrap();
+
+        let found = coalition_of(child.id().cast_signed());
+        child.kill().unwrap();
+        child.wait().unwrap();
+
+        assert_eq!(Some(own_coalition()), found);
+    }
+
+    #[test]
+    fn finds_no_coalition_for_a_reaped_pid() {
+        let mut child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+        child.wait().unwrap();
+
+        assert_eq!(None, coalition_of(child.id().cast_signed()));
     }
 }

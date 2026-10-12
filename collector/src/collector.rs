@@ -1,7 +1,7 @@
 use std::io;
 
 use crate::clock::Timebase;
-use crate::coalitions::Coalitions;
+use crate::coalitions::{self, Coalitions};
 use crate::cost::{Meter, Source};
 use crate::interfaces::Interfaces;
 use crate::ioreport::IoReport;
@@ -40,7 +40,9 @@ impl Collector {
 
         processes::list_pids(&mut collector.listing)?;
         for &pid in &collector.listing {
-            collector.coalitions.join(pid);
+            if let Some(id) = coalitions::coalition_of(pid) {
+                collector.coalitions.add(id);
+            }
         }
         Ok(collector)
     }
@@ -66,8 +68,10 @@ impl Collector {
         });
         meter.measure(Source::Coalitions, || {
             for event in &self.events {
-                if let Event::Start { pid } = event {
-                    self.coalitions.join(*pid);
+                if let Event::Start { pid } = event
+                    && let Some(id) = coalitions::coalition_of(*pid)
+                {
+                    self.coalitions.add(id);
                 }
             }
             self.coalitions.read_all();
