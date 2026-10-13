@@ -537,7 +537,18 @@ mod tests {
                 .any(|e| matches!(e, Event::Start { pid: p, .. } if *p == pid)),
             "child {pid}: {events:?}"
         );
-        assert!(events.iter().any(|e| matches!(e, Event::Exit { pid: p, last: Ok(last), noticed: Noticed::OnExit } if *p == pid && last.user_ns + last.system_ns > 0)), "child {pid}: {events:?}");
+        let exited_with_usage = |event: &Event| match event {
+            Event::Exit {
+                pid: p,
+                last: Ok(last),
+                noticed: Noticed::OnExit,
+            } => *p == pid && last.user_ns + last.system_ns > 0,
+            _ => false,
+        };
+        assert!(
+            events.iter().any(exited_with_usage),
+            "child {pid}: {events:?}"
+        );
     }
 
     #[test]
@@ -572,10 +583,12 @@ mod tests {
         let pid = child.id().cast_signed();
         let own = coalitions::coalition_of(std::process::id().cast_signed());
         let events: Vec<Event> = tracker.drain_events().collect();
+        let started_in_own = |event: &Event| match event {
+            Event::Start { pid: p, coalition } => *p == pid && *coalition == own,
+            _ => false,
+        };
         assert!(
-            events.iter().any(
-                |e| matches!(e, Event::Start { pid: p, coalition } if *p == pid && *coalition == own)
-            ),
+            events.iter().any(started_in_own),
             "child {pid} in {own:?}: {events:?}"
         );
     }
@@ -634,12 +647,15 @@ mod tests {
 
         let pid = child.id().cast_signed();
         let events: Vec<Event> = tracker.drain_events().collect();
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, Event::Exit { pid: p, last: Ok(_), noticed: Noticed::AlreadyExited } if *p == pid)),
-            "child {pid}: {events:?}"
-        );
+        let found_exited = |event: &Event| match event {
+            Event::Exit {
+                pid: p,
+                last: Ok(_),
+                noticed: Noticed::AlreadyExited,
+            } => *p == pid,
+            _ => false,
+        };
+        assert!(events.iter().any(found_exited), "child {pid}: {events:?}");
     }
 
     #[test]
@@ -656,10 +672,12 @@ mod tests {
 
         let pid = child.id().cast_signed();
         let events: Vec<Event> = tracker.drain_events().collect();
-        assert!(
-            !events.iter().any(|e| matches!(e, Event::Start { pid: p, .. } | Event::Exec { pid: p } | Event::Exit { pid: p, .. } if *p == pid)),
-            "child {pid}: {events:?}"
-        );
+        let about_child = |event: &Event| match event {
+            Event::Start { pid: p, .. } | Event::Exec { pid: p } | Event::Exit { pid: p, .. } => {
+                *p == pid
+            }
+        };
+        assert!(!events.iter().any(about_child), "child {pid}: {events:?}");
     }
 
     #[test]

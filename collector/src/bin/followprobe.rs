@@ -90,7 +90,8 @@ fn run(probe: &Probe) -> io::Result<()> {
     let tracking_total: f64 = TRACKING.iter().map(|&s| cost.ms_per_second(s)).sum();
 
     println!(
-        "rescan interval {} ms: children {}, found {found}, missed {}, final usage read for {read} ({:.1}% of children)",
+        "rescan interval {} ms: children {}, found {found}, missed {}, \
+         final usage read for {read} ({:.1}% of children)",
         probe.rescan_interval.as_millis(),
         children.len(),
         children.len() - found,

@@ -320,7 +320,9 @@ fn report(label: &str, earlier: &Mark, later: &Mark, tally: &Tally) {
     let counts = later.counts.since(earlier.counts);
     let share = cost.share_of_a_core();
     println!(
-        "{label}: CPU {:.2}% of a core, {:.0}% of the budget, {:.2} mW, {:.0}% of instructions on Super cores; ticks late {:.1} ms on average, {:.1} ms at most, {} slips",
+        "{label}: CPU {:.2}% of a core, {:.0}% of the budget, {:.2} mW, \
+         {:.0}% of instructions on Super cores; \
+         ticks late {:.1} ms on average, {:.1} ms at most, {} slips",
         share * 100.0,
         share / BUDGET_SHARE_OF_A_CORE * 100.0,
         cost.milliwatts(),
@@ -340,7 +342,10 @@ fn report(label: &str, earlier: &Mark, later: &Mark, tally: &Tally) {
         cost.unattributed_ms_per_second()
     );
     println!(
-        "  last tick read {} processes ({} refused, {} gone), {} coalitions, {} CPUs, {} interfaces; over the window {} forks, {} rescans ({} leading, {} trailing, {} listing), {} starts ({} watches refused), {} execs, exits seen {}, found already exited {}",
+        "  last tick read {} processes ({} refused, {} gone), {} coalitions, {} CPUs, \
+         {} interfaces; over the window {} forks, \
+         {} rescans ({} leading, {} trailing, {} listing), \
+         {} starts ({} watches refused), {} execs, exits seen {}, found already exited {}",
         tally.processes_read,
         tally.processes_refused,
         tally.processes_gone,

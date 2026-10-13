@@ -1,5 +1,5 @@
 [workspace]
-members = ["collector"]
+members = ["collector", "tidy"]
 resolver = "3"
 
 [workspace.lints.rust]
