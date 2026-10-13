@@ -370,21 +370,46 @@ fn script_passes_rust_configuration_and_documents() {
     assert!(!script("README.md", b"# Flightdeck\n\n#!/bin/sh\n"));
 }
 
-/// The number of each line, counted from 1, that discards a value with `let _ =` or `_ =`.
-/// Rustfmt puts one space on each side of `=`, which a match arm on `_` follows with `>`.
+/// Lists the number of each line, counted from 1, that assigns a value to `_`.
 fn discards(text: &str) -> Vec<usize> {
     let mut numbers = Vec::new();
     for (index, line) in text.lines().enumerate() {
-        let statement = line.trim_start();
-        if statement.starts_with("let _ = ") {
+        if discards_holds(line) {
             numbers.push(index + 1);
-        } else {
-            if statement.starts_with("_ = ") {
-                numbers.push(index + 1);
-            }
         }
     }
     numbers
+}
+
+/// Tells whether `line` assigns a value to `_`, in a statement, in a binding with or without
+/// a type, or after a match arm's arrow or a closure's parameters.
+fn discards_holds(line: &str) -> bool {
+    let statement = line.trim_start();
+    let binding = statement.strip_prefix("let ").unwrap_or(statement);
+    if binding.starts_with("_:") {
+        return true;
+    }
+    if discards_assigns(binding) {
+        return true;
+    }
+
+    for separator in ["=> ", "| "] {
+        for (position, _) in line.match_indices(separator) {
+            if discards_assigns(&line[position + separator.len()..]) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Tells whether `text` starts by assigning to `_`. Rustfmt writes `_ =` with nothing after
+/// it where it wraps the value onto the next line, and a match arm on `_` writes `_ =>`.
+fn discards_assigns(text: &str) -> bool {
+    match text.strip_prefix("_ =") {
+        Some(rest) => !rest.starts_with(['=', '>']),
+        None => false,
+    }
 }
 
 #[test]
@@ -399,12 +424,37 @@ fn discards_reports_a_value_discarded_by_assignment() {
 }
 
 #[test]
-fn discards_passes_a_match_arm_and_a_named_binding() {
-    // Goal: a match arm on `_` and a binding with a name are not discards.
-    // Method: a function holding one of each.
-    let text = "fn step() {\n    match read() {\n        _ => {}\n    }\n    let total = 1;\n}\n";
+fn discards_reports_a_discard_in_an_arm_a_closure_a_type_or_a_wrapped_line() {
+    // Goal: a value assigned to `_` is reported wherever rustfmt can put the assignment.
+    // Method: a match arm, a closure, a typed binding, and two discards rustfmt wrapped after
+    // their `=`. The escaped spaces keep this test's own source free of a discard.
+    let text = "fn step() {\n".to_owned()
+        + "    match read() {\n"
+        + "        Some(count) => _\x20= write(count),\n"
+        + "        None => {}\n"
+        + "    }\n"
+        + "    each(|count| _\x20= write(count));\n"
+        + "    let _: u64 = read();\n"
+        + "    let _ =\n"
+        + "        read_every_source_of_the_machine();\n"
+        + "    _ =\n"
+        + "        write_every_source_of_the_machine();\n"
+        + "}\n";
 
-    let numbers = discards(text);
+    let numbers = discards(&text);
+
+    assert_eq!(numbers, [3, 6, 7, 8, 10]);
+}
+
+#[test]
+fn discards_passes_a_match_arm_a_closure_and_a_named_binding() {
+    // Goal: a match arm on `_`, a closure that ignores its parameter and a binding with a
+    // name are not discards.
+    // Method: a function holding one of each, the arm after an or-pattern.
+    let text = "fn step() {\n    match read() {\n        Some(_) | _ => {}\n    }\n".to_owned()
+        + "    each(|_| write());\n    let total: u64 = 1;\n}\n";
+
+    let numbers = discards(&text);
 
     assert!(numbers.is_empty());
 }
