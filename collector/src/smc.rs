@@ -80,13 +80,22 @@ impl std::fmt::Debug for Key {
     }
 }
 
+/// What the SMC says of a key, as the SMC lays it out. The padding is a field of its own, so a
+/// question written out carries zeroes there.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 struct KeyInfo {
     size: u32,
     kind: u32,
     _attributes: u8,
+    _padding: [u8; 3],
 }
+
+const _: () = assert!(size_of::<KeyInfo>() == 12);
+const _: () = assert!(std::mem::offset_of!(KeyInfo, size) == 0);
+const _: () = assert!(std::mem::offset_of!(KeyInfo, kind) == 4);
+const _: () = assert!(std::mem::offset_of!(KeyInfo, _attributes) == 8);
+const _: () = assert!(std::mem::offset_of!(KeyInfo, _padding) == 9);
 
 impl KeyInfo {
     const fn of(kind: [u8; 4], size: u32) -> Self {
@@ -94,6 +103,7 @@ impl KeyInfo {
             size,
             kind: u32::from_be_bytes(kind),
             _attributes: 0,
+            _padding: [0; 3],
         }
     }
 
@@ -102,6 +112,8 @@ impl KeyInfo {
     }
 }
 
+/// A question to the SMC and its answer, as the SMC lays them out. The padding is a field of
+/// its own, so a question written out carries zeroes there.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 struct Message {
@@ -111,13 +123,17 @@ struct Message {
     result: u8,
     _status: u8,
     command: u8,
+    _padding: u8,
     index: u32,
     bytes: [u8; 32],
 }
 
 const _: () = assert!(size_of::<Message>() == 80);
+const _: () = assert!(std::mem::offset_of!(Message, key) == 0);
 const _: () = assert!(std::mem::offset_of!(Message, info) == 28);
 const _: () = assert!(std::mem::offset_of!(Message, result) == 40);
+const _: () = assert!(std::mem::offset_of!(Message, command) == 42);
+const _: () = assert!(std::mem::offset_of!(Message, _padding) == 43);
 const _: () = assert!(std::mem::offset_of!(Message, index) == 44);
 const _: () = assert!(std::mem::offset_of!(Message, bytes) == 48);
 
