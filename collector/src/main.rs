@@ -250,7 +250,7 @@ impl Span {
         end: &Mark,
     ) -> io::Result<()> {
         let cost = end.snapshot.cost_since(&self.start.snapshot);
-        let counts = end.counts.since(self.start.counts);
+        let counts = end.counts.since(&self.start.counts);
 
         write!(out, "{label} {}-{last_tick}: ", self.first_tick)?;
         report_cost(out, &cost, &self.tally)?;

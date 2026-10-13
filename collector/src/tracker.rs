@@ -81,7 +81,7 @@ pub struct Counts {
 
 impl Counts {
     #[must_use]
-    pub fn since(self, earlier: Counts) -> Counts {
+    pub fn since(&self, earlier: &Counts) -> Counts {
         assert!(earlier.forks <= self.forks);
         assert!(earlier.refused_watches <= self.refused_watches);
         assert!(earlier.leading_rescans <= self.leading_rescans);
@@ -105,8 +105,8 @@ impl Counts {
 }
 
 struct Throttle {
-    interval: u64,
-    last_rescan: u64,
+    interval_ticks: u64,
+    rescan_ticks_last: u64,
     pending: bool,
     deferred: bool,
     armed: bool,
@@ -126,10 +126,10 @@ enum Cause {
 }
 
 impl Throttle {
-    fn new(interval: u64) -> Self {
+    fn new(interval_ticks: u64) -> Self {
         Self {
-            interval,
-            last_rescan: 0,
+            interval_ticks,
+            rescan_ticks_last: 0,
             pending: false,
             deferred: false,
             armed: false,
@@ -145,13 +145,13 @@ impl Throttle {
         }
     }
 
-    fn rescanned(&mut self, now: u64) {
-        self.last_rescan = now;
+    fn rescanned(&mut self, now_ticks: u64) {
+        self.rescan_ticks_last = now_ticks;
         self.pending = false;
         self.deferred = false;
     }
 
-    fn step(&mut self, now: u64) -> Step {
+    fn step(&mut self, now_ticks: u64) -> Step {
         if self.deferred {
             assert!(self.pending);
         }
@@ -160,7 +160,7 @@ impl Throttle {
             return Step::Wait;
         }
 
-        if now.saturating_sub(self.last_rescan) >= self.interval {
+        if now_ticks.saturating_sub(self.rescan_ticks_last) >= self.interval_ticks {
             return Step::Rescan(if self.deferred {
                 Cause::Trailing
             } else {
@@ -173,9 +173,9 @@ impl Throttle {
             Step::Wait
         } else {
             self.armed = true;
-            let at = self.last_rescan.saturating_add(self.interval);
-            assert!(now <= at);
-            Step::ArmAt(at)
+            let at_ticks = self.rescan_ticks_last.saturating_add(self.interval_ticks);
+            assert!(now_ticks <= at_ticks);
+            Step::ArmAt(at_ticks)
         }
     }
 }
@@ -256,13 +256,13 @@ impl Tracker {
         Ok(tracker)
     }
 
-    pub fn follow_until(&mut self, deadline: u64, meter: &mut Meter) -> io::Result<()> {
+    pub fn follow_until(&mut self, deadline_ticks: u64, meter: &mut Meter) -> io::Result<()> {
         assert!(!self.failed, "a call to the tracker failed before");
         assert!(self.timers.len() < TIMER_COUNT_MAX);
         self.failed = true;
         push_without_growing(
             &mut self.timers,
-            follow_until_timer(DEADLINE_TIMER, deadline)?,
+            follow_until_timer(DEADLINE_TIMER, deadline_ticks)?,
         );
 
         loop {
@@ -288,8 +288,11 @@ impl Tracker {
                         Cause::Trailing => self.counts.trailing_rescans += 1,
                     }
                 }
-                Step::ArmAt(at) => {
-                    push_without_growing(&mut self.timers, follow_until_timer(RESCAN_TIMER, at)?);
+                Step::ArmAt(at_ticks) => {
+                    push_without_growing(
+                        &mut self.timers,
+                        follow_until_timer(RESCAN_TIMER, at_ticks)?,
+                    );
                 }
                 Step::Wait => {}
             }
@@ -663,19 +666,19 @@ fn watch(index: usize) -> Kevent {
     )
 }
 
-fn follow_until_timer(ident: usize, deadline: u64) -> io::Result<Kevent> {
+fn follow_until_timer(ident: usize, deadline_ticks: u64) -> io::Result<Kevent> {
     if ident != DEADLINE_TIMER {
         assert_eq!(RESCAN_TIMER, ident);
     }
 
-    let Ok(data) = isize::try_from(deadline) else {
+    let Ok(data) = isize::try_from(deadline_ticks) else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("a deadline of {deadline} ticks passes what a kevent timer holds"),
+            format!("a deadline of {deadline_ticks} ticks passes what a kevent timer holds"),
         ));
     };
 
-    assert_eq!(Ok(deadline), u64::try_from(data));
+    assert_eq!(Ok(deadline_ticks), u64::try_from(data));
     Ok(Kevent::new(
         ident,
         EVFILT_TIMER,
@@ -780,7 +783,7 @@ mod tests {
             .expect("a pid the listing does not hold")
     }
 
-    fn rescans_from_forks(counts: Counts) -> u64 {
+    fn rescans_from_forks(counts: &Counts) -> u64 {
         counts.leading_rescans + counts.trailing_rescans
     }
 
@@ -913,7 +916,7 @@ mod tests {
             ..Counts::default()
         };
 
-        let since = later.since(earlier);
+        let since = later.since(&earlier);
 
         let dropped = Counts {
             dropped_starts: 4,
@@ -1263,15 +1266,15 @@ mod tests {
         // Method: follow until 100 ms from now, and require a return within 50 ms of the deadline.
         let timebase = Timebase::read();
         let mut tracker = tracker(INTERVAL);
-        let deadline = clock::now() + timebase.ticks(100_000_000);
+        let deadline_ticks = clock::now() + timebase.ticks(100_000_000);
 
         tracker
-            .follow_until(deadline, &mut Meter::default())
+            .follow_until(deadline_ticks, &mut Meter::default())
             .unwrap();
 
         let late_ns = timebase.nanos(
             clock::now()
-                .checked_sub(deadline)
+                .checked_sub(deadline_ticks)
                 .expect("returned before the deadline"),
         );
         assert!(
@@ -1463,7 +1466,7 @@ mod tests {
         follow_for(&mut tracker, &mut Meter::default(), 100);
         child.wait().unwrap();
 
-        let since = tracker.counts.since(before);
+        let since = tracker.counts.since(&before);
         assert_eq!(0, since.leading_rescans, "{since:?}");
         assert_eq!(1, tracker.counts.listing_rescans);
     }
@@ -1496,7 +1499,7 @@ mod tests {
 
         let cap = follow_ms / u64::try_from(INTERVAL.as_millis()).unwrap() + 2;
         assert!(
-            rescans_from_forks(tracker.counts) <= cap,
+            rescans_from_forks(&tracker.counts) <= cap,
             "{:?} over {cap}",
             tracker.counts
         );
@@ -1509,18 +1512,22 @@ mod tests {
         // Method: follow for 100 ms with a 5 ms interval while a thread forks every 2 ms.
         let timebase = Timebase::read();
         let mut tracker = tracker(Duration::from_millis(5));
-        let deadline = clock::now() + timebase.ticks(100_000_000);
+        let deadline_ticks = clock::now() + timebase.ticks(100_000_000);
 
-        while_forking_every_2_ms(|| tracker.follow_until(deadline, &mut Meter::default())).unwrap();
+        while_forking_every_2_ms(|| tracker.follow_until(deadline_ticks, &mut Meter::default()))
+            .unwrap();
 
-        assert!(clock::now() >= deadline, "returned before the deadline");
+        assert!(
+            clock::now() >= deadline_ticks,
+            "returned before the deadline"
+        );
     }
 
     mod throttle {
         use super::super::{Cause, Step, Throttle, Wake};
 
-        const INTERVAL: u64 = 50;
-        const LAST_RESCAN: u64 = 1_000;
+        const INTERVAL_TICKS: u64 = 50;
+        const RESCAN_TICKS_LAST: u64 = 1_000;
         const FORK: Wake = Wake {
             due: false,
             rescan_timer_fired: false,
@@ -1533,8 +1540,8 @@ mod tests {
         };
 
         fn throttle() -> Throttle {
-            let mut throttle = Throttle::new(INTERVAL);
-            throttle.rescanned(LAST_RESCAN);
+            let mut throttle = Throttle::new(INTERVAL_TICKS);
+            throttle.rescanned(RESCAN_TICKS_LAST);
             throttle
         }
 
@@ -1548,7 +1555,7 @@ mod tests {
 
             assert_eq!(
                 Step::Rescan(Cause::Leading),
-                throttle.step(LAST_RESCAN + INTERVAL)
+                throttle.step(RESCAN_TICKS_LAST + INTERVAL_TICKS)
             );
         }
 
@@ -1562,8 +1569,8 @@ mod tests {
             throttle.woke(FORK);
 
             assert_eq!(
-                Step::ArmAt(LAST_RESCAN + INTERVAL),
-                throttle.step(LAST_RESCAN + 1)
+                Step::ArmAt(RESCAN_TICKS_LAST + INTERVAL_TICKS),
+                throttle.step(RESCAN_TICKS_LAST + 1)
             );
         }
 
@@ -1573,11 +1580,11 @@ mod tests {
             // Method: step after one early fork, which arms the timer, and again after a second.
             let mut throttle = throttle();
             throttle.woke(FORK);
-            throttle.step(LAST_RESCAN + 1);
+            throttle.step(RESCAN_TICKS_LAST + 1);
 
             throttle.woke(FORK);
 
-            assert_eq!(Step::Wait, throttle.step(LAST_RESCAN + 2));
+            assert_eq!(Step::Wait, throttle.step(RESCAN_TICKS_LAST + 2));
         }
 
         #[test]
@@ -1587,13 +1594,13 @@ mod tests {
             // rescan.
             let mut throttle = throttle();
             throttle.woke(FORK);
-            throttle.step(LAST_RESCAN + 1);
+            throttle.step(RESCAN_TICKS_LAST + 1);
 
             throttle.woke(TIMER);
 
             assert_eq!(
                 Step::Rescan(Cause::Trailing),
-                throttle.step(LAST_RESCAN + INTERVAL)
+                throttle.step(RESCAN_TICKS_LAST + INTERVAL_TICKS)
             );
         }
 
@@ -1604,12 +1611,15 @@ mod tests {
             // deadline.
             let mut throttle = throttle();
             throttle.woke(FORK);
-            throttle.step(LAST_RESCAN + 1);
-            throttle.rescanned(LAST_RESCAN + 2);
+            throttle.step(RESCAN_TICKS_LAST + 1);
+            throttle.rescanned(RESCAN_TICKS_LAST + 2);
 
             throttle.woke(TIMER);
 
-            assert_eq!(Step::Wait, throttle.step(LAST_RESCAN + INTERVAL));
+            assert_eq!(
+                Step::Wait,
+                throttle.step(RESCAN_TICKS_LAST + INTERVAL_TICKS)
+            );
         }
 
         #[test]
@@ -1620,15 +1630,15 @@ mod tests {
             // step at the deadline it was armed for.
             let mut throttle = throttle();
             throttle.woke(FORK);
-            throttle.step(LAST_RESCAN + 1);
-            throttle.rescanned(LAST_RESCAN + 2);
+            throttle.step(RESCAN_TICKS_LAST + 1);
+            throttle.rescanned(RESCAN_TICKS_LAST + 2);
             throttle.woke(FORK);
 
             throttle.woke(TIMER);
 
             assert_eq!(
-                Step::ArmAt(LAST_RESCAN + 2 + INTERVAL),
-                throttle.step(LAST_RESCAN + INTERVAL)
+                Step::ArmAt(RESCAN_TICKS_LAST + 2 + INTERVAL_TICKS),
+                throttle.step(RESCAN_TICKS_LAST + INTERVAL_TICKS)
             );
         }
 
@@ -1639,11 +1649,11 @@ mod tests {
             // Method: arm the timer on an early fork, and step at its deadline without firing it.
             let mut throttle = throttle();
             throttle.woke(FORK);
-            throttle.step(LAST_RESCAN + 1);
+            throttle.step(RESCAN_TICKS_LAST + 1);
 
             assert_eq!(
                 Step::Rescan(Cause::Trailing),
-                throttle.step(LAST_RESCAN + INTERVAL)
+                throttle.step(RESCAN_TICKS_LAST + INTERVAL_TICKS)
             );
         }
 
@@ -1653,11 +1663,11 @@ mod tests {
             // tick rather than wrapping.
             // Method: step just after the last rescan with the longest interval and a fork pending.
             let mut throttle = Throttle::new(u64::MAX);
-            throttle.rescanned(LAST_RESCAN);
+            throttle.rescanned(RESCAN_TICKS_LAST);
 
             throttle.woke(FORK);
 
-            assert_eq!(Step::ArmAt(u64::MAX), throttle.step(LAST_RESCAN + 1));
+            assert_eq!(Step::ArmAt(u64::MAX), throttle.step(RESCAN_TICKS_LAST + 1));
         }
 
         #[test]
@@ -1667,18 +1677,24 @@ mod tests {
             // Method: step at the instant of the last rescan with an interval of 0 and a fork
             // pending.
             let mut throttle = Throttle::new(0);
-            throttle.rescanned(LAST_RESCAN);
+            throttle.rescanned(RESCAN_TICKS_LAST);
 
             throttle.woke(FORK);
 
-            assert_eq!(Step::Rescan(Cause::Leading), throttle.step(LAST_RESCAN));
+            assert_eq!(
+                Step::Rescan(Cause::Leading),
+                throttle.step(RESCAN_TICKS_LAST)
+            );
         }
 
         #[test]
         fn waits_with_nothing_pending() {
             // Goal: a step with no fork pending rescans nothing and arms no timer.
             // Method: step an interval after the last rescan with no fork.
-            assert_eq!(Step::Wait, throttle().step(LAST_RESCAN + INTERVAL));
+            assert_eq!(
+                Step::Wait,
+                throttle().step(RESCAN_TICKS_LAST + INTERVAL_TICKS)
+            );
         }
     }
 
