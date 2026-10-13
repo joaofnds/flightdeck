@@ -405,7 +405,7 @@ fn read_usage_returned(returned: c_int, error: io::Error) -> io::Result<Result<(
         } else {
             Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("proc_pid_rusage returned {returned}, neither success nor failure"),
+                format!("proc_pid_rusage returned {returned}, neither 0 nor -1"),
             ))
         }
     }
