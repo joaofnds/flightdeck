@@ -6,7 +6,7 @@ use std::time::Duration;
 use collector::clock::{self, Timebase};
 use collector::collector::Collector;
 use collector::cost::{Meter, Snapshot, Source};
-use collector::processes::{self, Unreadable, Usage};
+use collector::processes::{Unreadable, Usage};
 use collector::schedule::Schedule;
 use collector::tracker::{Counts, Event, Noticed};
 
@@ -79,8 +79,7 @@ fn run(options: &Options) -> io::Result<()> {
     let mut meter = Meter::default();
     let first_mark = throwaway_child()?;
     let mut collector = Collector::new(timebase, options.rescan_interval)?;
-    let mut live_at_first_scan = Vec::new();
-    processes::list_pids(&mut live_at_first_scan)?;
+    let live_at_first_scan = collector.tracker.last_listing().to_vec();
     let schedule = Schedule::new(clock::now(), timebase.ticks(1_000_000_000));
 
     println!(
@@ -209,7 +208,9 @@ fn report_missed(started: Option<u64>, found: u64) {
         (Some(started), Some(missed)) => {
             println!("  processes started over the run {started}, found {found}, missed {missed}");
         }
-        _ => println!("  pids wrapped over the run, so the processes missed are not counted"),
+        _ => println!(
+            "  pids may have wrapped over the run, so the processes missed are not counted"
+        ),
     }
 }
 

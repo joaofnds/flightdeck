@@ -216,6 +216,11 @@ impl Tracker {
         self.events.drain(..)
     }
 
+    #[must_use]
+    pub fn last_listing(&self) -> &[i32] {
+        &self.listing
+    }
+
     fn rescan(&mut self, meter: &mut Meter) -> io::Result<()> {
         let mut listing = std::mem::take(&mut self.listing);
         let scanned = meter.measure(Source::Scans, || {
@@ -667,6 +672,16 @@ mod tests {
                 .any(|e| matches!(e, Event::Start { pid: 99_999, .. })),
             "{events:?}"
         );
+    }
+
+    #[test]
+    fn lists_the_processes_its_first_scan_found() {
+        let mut child = spawn_sleeper();
+
+        let tracker = Tracker::new(Timebase::read(), INTERVAL).unwrap();
+        child.wait().unwrap();
+
+        assert!(tracker.last_listing().contains(&child.id().cast_signed()));
     }
 
     #[test]
