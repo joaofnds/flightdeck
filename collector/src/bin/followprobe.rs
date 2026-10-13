@@ -64,7 +64,8 @@ fn probe_from(args: &[String]) -> Result<Probe, String> {
 
 fn run(probe: &Probe) -> io::Result<()> {
     let timebase = Timebase::read();
-    let mut tracker = Tracker::new(timebase, probe.rescan_interval)?;
+    let process_limit = processes::process_limit()?;
+    let mut tracker = Tracker::new(timebase, probe.rescan_interval, process_limit)?;
     let mut meter = Meter::default();
     let start = Snapshot::take(&meter, timebase)?;
 
@@ -126,7 +127,7 @@ fn follow(
 
         let mut started = HashSet::new();
         let mut read_at_exit = HashSet::new();
-        let mut listing = Vec::new();
+        let mut listing = processes::pid_list(processes::process_limit()?);
         let second = timebase.ticks(1_000_000_000);
         let mut deadline = clock::now() + second;
         loop {

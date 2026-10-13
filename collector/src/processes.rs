@@ -3,7 +3,7 @@ use std::io;
 use std::mem::offset_of;
 
 use crate::clock::Timebase;
-use crate::kernel::ESRCH;
+use crate::kernel::{ESRCH, Sysctl};
 
 #[repr(C)]
 struct RusageInfoV6 {
@@ -165,22 +165,45 @@ pub struct Task {
     pub unix_syscalls: i32,
 }
 
+/// Reads the most processes the system runs at once, `kern.maxproc`, which sizes every list
+/// that holds an entry for each process.
+pub fn process_limit() -> io::Result<usize> {
+    let limit: c_int = Sysctl::named(c"kern.maxproc")?.read()?;
+    usize::try_from(limit).map_err(io::Error::other)
+}
+
+/// Returns an empty pid list with room for every process `process_limit` allows and one more,
+/// so a listing that fills it holds more processes than the limit allows.
+#[must_use]
+pub fn pid_list(process_limit: usize) -> Vec<i32> {
+    Vec::with_capacity(process_limit + 1)
+}
+
+/// Lists the pid of every process into `into`, up to the capacity it has, which it never
+/// grows. A listing that fills `into` may have been cut short, so it is an error.
 pub fn list_pids(into: &mut Vec<i32>) -> io::Result<()> {
-    loop {
-        into.resize(into.capacity().max(4096), 0);
-        let room = c_int::try_from(into.len() * size_of::<i32>()).unwrap_or(c_int::MAX);
-        let count = unsafe { proc_listallpids(into.as_mut_ptr().cast(), room) };
-        let Ok(count) = usize::try_from(count) else {
-            return Err(io::Error::last_os_error());
-        };
+    let capacity = into.capacity();
+    let room = c_int::try_from(capacity * size_of::<i32>()).map_err(io::Error::other)?;
 
-        if count < into.len() {
+    into.resize(capacity, 0);
+    let count = unsafe { proc_listallpids(into.as_mut_ptr().cast(), room) };
+    let listed = match usize::try_from(count) {
+        Ok(count) if count < capacity => {
             into.truncate(count);
-            return Ok(());
+            Ok(())
         }
-
-        into.reserve(into.len());
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::QuotaExceeded,
+            format!("the pids listed filled the room for {capacity}"),
+        )),
+        Err(_) => Err(io::Error::last_os_error()),
+    };
+    if listed.is_err() {
+        into.clear();
     }
+
+    assert_eq!(capacity, into.capacity());
+    listed
 }
 
 pub fn read(pid: i32, timebase: Timebase) -> Result<Process, Unreadable> {
@@ -373,8 +396,21 @@ mod tests {
     }
 
     #[test]
+    fn reports_a_listing_that_fills_its_buffer_without_growing_it() {
+        // Goal: a pid listing longer than its buffer is an error, and the buffer keeps the
+        // capacity it was given, as Tiger Style's limit on everything asks.
+        // Method: list into a buffer with room for one pid, fewer than any Mac runs.
+        let mut pids = Vec::with_capacity(1);
+
+        let listed = list_pids(&mut pids);
+
+        assert_eq!(io::ErrorKind::QuotaExceeded, listed.unwrap_err().kind());
+        assert_eq!(1, pids.capacity());
+    }
+
+    #[test]
     fn lists_this_process_among_every_pid() {
-        let mut pids = Vec::new();
+        let mut pids = pid_list(process_limit().unwrap());
 
         list_pids(&mut pids).unwrap();
 
@@ -443,7 +479,7 @@ mod tests {
 
     #[test]
     fn reads_or_counts_every_listed_pid() {
-        let mut pids = Vec::new();
+        let mut pids = pid_list(process_limit().unwrap());
         list_pids(&mut pids).unwrap();
         let mut sweep = Sweep::default();
 

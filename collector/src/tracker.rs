@@ -158,7 +158,11 @@ const RESCAN_TIMER: usize = 2;
 const RECEIVED_PER_WAIT: usize = 64;
 
 impl Tracker {
-    pub fn new(timebase: Timebase, rescan_interval: Duration) -> io::Result<Self> {
+    pub fn new(
+        timebase: Timebase,
+        rescan_interval: Duration,
+        process_limit: usize,
+    ) -> io::Result<Self> {
         let queue = unsafe { kqueue() };
         if queue < 0 {
             return Err(io::Error::last_os_error());
@@ -167,7 +171,7 @@ impl Tracker {
         let mut tracker = Self {
             queue: unsafe { OwnedFd::from_raw_fd(queue) },
             timebase,
-            listing: Vec::new(),
+            listing: processes::pid_list(process_limit),
             known: Vec::new(),
             lingering: Vec::new(),
             scans: 0,
@@ -538,6 +542,10 @@ mod tests {
 
     const INTERVAL: Duration = Duration::from_millis(50);
 
+    fn process_limit() -> usize {
+        processes::process_limit().unwrap()
+    }
+
     fn rescans_from_forks(counts: Counts) -> u64 {
         counts.leading_rescans + counts.trailing_rescans
     }
@@ -575,7 +583,7 @@ mod tests {
 
     #[test]
     fn reports_a_child_starting_and_exiting_with_its_final_usage() {
-        let mut tracker = Tracker::new(Timebase::read(), INTERVAL).unwrap();
+        let mut tracker = Tracker::new(Timebase::read(), INTERVAL, process_limit()).unwrap();
 
         let mut child = spawn_sleeper();
         follow_for(&mut tracker, &mut Meter::default(), 500);
@@ -605,7 +613,7 @@ mod tests {
 
     #[test]
     fn reports_a_watched_process_replacing_its_program() {
-        let mut tracker = Tracker::new(Timebase::read(), INTERVAL).unwrap();
+        let mut tracker = Tracker::new(Timebase::read(), INTERVAL, process_limit()).unwrap();
 
         let mut child = std::process::Command::new("/bin/sh")
             .args(["-c", "sleep 0.1; exec /usr/bin/true"])
@@ -626,7 +634,7 @@ mod tests {
 
     #[test]
     fn reports_a_child_with_the_coalition_it_started_in() {
-        let mut tracker = Tracker::new(Timebase::read(), INTERVAL).unwrap();
+        let mut tracker = Tracker::new(Timebase::read(), INTERVAL, process_limit()).unwrap();
 
         let mut child = spawn_sleeper();
         follow_for(&mut tracker, &mut Meter::default(), 500);
@@ -648,7 +656,7 @@ mod tests {
     #[test]
     fn charges_each_step_of_following_a_child_to_its_own_source() {
         let timebase = Timebase::read();
-        let mut tracker = Tracker::new(timebase, INTERVAL).unwrap();
+        let mut tracker = Tracker::new(timebase, INTERVAL, process_limit()).unwrap();
         let mut meter = Meter::default();
 
         let mut child = spawn_sleeper();
@@ -669,7 +677,7 @@ mod tests {
     #[test]
     fn returns_once_the_deadline_has_passed() {
         let timebase = Timebase::read();
-        let mut tracker = Tracker::new(timebase, INTERVAL).unwrap();
+        let mut tracker = Tracker::new(timebase, INTERVAL, process_limit()).unwrap();
         let deadline = clock::now() + timebase.ticks(100_000_000);
 
         tracker
@@ -689,9 +697,9 @@ mod tests {
 
     #[test]
     fn reports_a_process_found_already_exited_with_its_final_usage() {
-        let mut tracker = Tracker::new(Timebase::read(), INTERVAL).unwrap();
+        let mut tracker = Tracker::new(Timebase::read(), INTERVAL, process_limit()).unwrap();
         let mut child = processes::child_that_has_exited();
-        let mut listing = Vec::new();
+        let mut listing = processes::pid_list(process_limit());
         processes::list_pids(&mut listing).unwrap();
 
         tracker.observe(&listing, &mut Meter::default()).unwrap();
@@ -712,9 +720,9 @@ mod tests {
 
     #[test]
     fn reports_nothing_more_for_an_exited_process_while_it_stays_listed() {
-        let mut tracker = Tracker::new(Timebase::read(), INTERVAL).unwrap();
+        let mut tracker = Tracker::new(Timebase::read(), INTERVAL, process_limit()).unwrap();
         let mut child = processes::child_that_has_exited();
-        let mut listing = Vec::new();
+        let mut listing = processes::pid_list(process_limit());
         processes::list_pids(&mut listing).unwrap();
         tracker.observe(&listing, &mut Meter::default()).unwrap();
         tracker.drain_events();
@@ -734,8 +742,8 @@ mod tests {
 
     #[test]
     fn reports_a_pid_first_seen_in_a_listing_as_a_start() {
-        let mut tracker = Tracker::new(Timebase::read(), INTERVAL).unwrap();
-        let mut listing = Vec::new();
+        let mut tracker = Tracker::new(Timebase::read(), INTERVAL, process_limit()).unwrap();
+        let mut listing = processes::pid_list(process_limit());
         processes::list_pids(&mut listing).unwrap();
         listing.push(99_999);
 
@@ -754,7 +762,7 @@ mod tests {
     fn lists_the_processes_its_first_scan_found() {
         let mut child = spawn_sleeper();
 
-        let tracker = Tracker::new(Timebase::read(), INTERVAL).unwrap();
+        let tracker = Tracker::new(Timebase::read(), INTERVAL, process_limit()).unwrap();
         child.wait().unwrap();
 
         assert!(tracker.last_listing().contains(&child.id().cast_signed()));
@@ -762,7 +770,12 @@ mod tests {
 
     #[test]
     fn rescans_an_interval_after_forks_that_came_too_soon() {
-        let mut tracker = Tracker::new(Timebase::read(), Duration::from_millis(300)).unwrap();
+        let mut tracker = Tracker::new(
+            Timebase::read(),
+            Duration::from_millis(300),
+            process_limit(),
+        )
+        .unwrap();
 
         let mut first = spawn_sleeper();
         std::thread::sleep(Duration::from_millis(1));
@@ -776,9 +789,14 @@ mod tests {
 
     #[test]
     fn waits_an_interval_after_a_listing_before_rescanning_on_a_fork() {
-        let mut tracker = Tracker::new(Timebase::read(), Duration::from_millis(200)).unwrap();
+        let mut tracker = Tracker::new(
+            Timebase::read(),
+            Duration::from_millis(200),
+            process_limit(),
+        )
+        .unwrap();
         std::thread::sleep(Duration::from_millis(250));
-        let mut listing = Vec::new();
+        let mut listing = processes::pid_list(process_limit());
         processes::list_pids(&mut listing).unwrap();
         tracker.observe(&listing, &mut Meter::default()).unwrap();
         let before = tracker.counts;
@@ -794,7 +812,12 @@ mod tests {
 
     #[test]
     fn rescans_at_once_on_a_fork_after_a_quiet_interval() {
-        let mut tracker = Tracker::new(Timebase::read(), Duration::from_millis(200)).unwrap();
+        let mut tracker = Tracker::new(
+            Timebase::read(),
+            Duration::from_millis(200),
+            process_limit(),
+        )
+        .unwrap();
         std::thread::sleep(Duration::from_millis(250));
 
         let mut child = spawn_sleeper();
@@ -806,7 +829,7 @@ mod tests {
 
     #[test]
     fn rescans_at_most_once_an_interval_however_often_processes_fork() {
-        let mut tracker = Tracker::new(Timebase::read(), INTERVAL).unwrap();
+        let mut tracker = Tracker::new(Timebase::read(), INTERVAL, process_limit()).unwrap();
         let follow_ms = 300;
 
         while_forking_every_2_ms(|| follow_for(&mut tracker, &mut Meter::default(), follow_ms));
@@ -822,7 +845,8 @@ mod tests {
     #[test]
     fn returns_no_sooner_than_the_deadline_while_rescans_wait_on_their_timer() {
         let timebase = Timebase::read();
-        let mut tracker = Tracker::new(timebase, Duration::from_millis(5)).unwrap();
+        let mut tracker =
+            Tracker::new(timebase, Duration::from_millis(5), process_limit()).unwrap();
         let deadline = clock::now() + timebase.ticks(100_000_000);
 
         while_forking_every_2_ms(|| tracker.follow_until(deadline, &mut Meter::default())).unwrap();
@@ -959,8 +983,8 @@ mod tests {
 
     #[test]
     fn reports_nothing_for_pids_the_previous_listing_held() {
-        let mut tracker = Tracker::new(Timebase::read(), INTERVAL).unwrap();
-        let mut listing = Vec::new();
+        let mut tracker = Tracker::new(Timebase::read(), INTERVAL, process_limit()).unwrap();
+        let mut listing = processes::pid_list(process_limit());
         processes::list_pids(&mut listing).unwrap();
         tracker.observe(&listing, &mut Meter::default()).unwrap();
         tracker.drain_events();

@@ -26,10 +26,11 @@ pub struct Collector {
 
 impl Collector {
     pub fn new(timebase: Timebase, rescan_interval: Duration) -> io::Result<Self> {
+        let process_limit = processes::process_limit()?;
         let mut collector = Self {
             timebase,
-            listing: Vec::new(),
-            tracker: Tracker::new(timebase, rescan_interval)?,
+            listing: processes::pid_list(process_limit),
+            tracker: Tracker::new(timebase, rescan_interval, process_limit)?,
             machine: Machine::new()?,
             interfaces: Interfaces::default(),
             ioreport: IoReport::open(timebase)?,
