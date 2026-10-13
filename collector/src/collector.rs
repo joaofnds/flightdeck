@@ -1,4 +1,5 @@
 use std::io;
+use std::time::Duration;
 
 use crate::clock::Timebase;
 use crate::coalitions::{self, Coalitions};
@@ -24,11 +25,11 @@ pub struct Collector {
 }
 
 impl Collector {
-    pub fn new(timebase: Timebase) -> io::Result<Self> {
+    pub fn new(timebase: Timebase, rescan_interval: Duration) -> io::Result<Self> {
         let mut collector = Self {
             timebase,
             listing: Vec::new(),
-            tracker: Tracker::new(timebase)?,
+            tracker: Tracker::new(timebase, rescan_interval)?,
             machine: Machine::new()?,
             interfaces: Interfaces::default(),
             ioreport: IoReport::open(timebase)?,

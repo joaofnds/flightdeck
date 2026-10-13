@@ -54,7 +54,7 @@ fn run(seconds: Option<NonZeroU64>) -> io::Result<()> {
 
     let timebase = Timebase::read();
     let mut meter = Meter::default();
-    let mut collector = Collector::new(timebase)?;
+    let mut collector = Collector::new(timebase, Duration::from_millis(10))?;
     let schedule = Schedule::new(clock::now(), timebase.ticks(1_000_000_000));
 
     println!(

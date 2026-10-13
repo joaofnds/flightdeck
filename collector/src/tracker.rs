@@ -1,7 +1,8 @@
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::time::Duration;
 
-use crate::clock::Timebase;
+use crate::clock::{self, Timebase};
 use crate::coalitions;
 use crate::cost::{Meter, Source};
 use crate::processes::{self, Unreadable, Usage};
@@ -35,6 +36,8 @@ pub struct Tracker {
     known: Vec<Known>,
     lingering: Vec<(i32, usize)>,
     scans: u64,
+    throttle: Throttle,
+    arming: Vec<libc::kevent>,
     changes: Vec<libc::kevent>,
     received: Vec<libc::kevent>,
     starting: Vec<i32>,
@@ -52,6 +55,7 @@ struct Known {
 #[derive(Default)]
 struct Wake {
     due: bool,
+    fired: bool,
     forked: bool,
 }
 
@@ -59,6 +63,9 @@ struct Wake {
 pub struct Counts {
     pub forks: u64,
     pub refused_watches: u64,
+    pub leading_rescans: u64,
+    pub trailing_rescans: u64,
+    pub listing_rescans: u64,
 }
 
 impl Counts {
@@ -67,15 +74,72 @@ impl Counts {
         Counts {
             forks: self.forks - earlier.forks,
             refused_watches: self.refused_watches - earlier.refused_watches,
+            leading_rescans: self.leading_rescans - earlier.leading_rescans,
+            trailing_rescans: self.trailing_rescans - earlier.trailing_rescans,
+            listing_rescans: self.listing_rescans - earlier.listing_rescans,
+        }
+    }
+}
+
+struct Throttle {
+    interval: u64,
+    last_rescan: u64,
+    pending: bool,
+    armed: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Step {
+    RescanNow,
+    ArmAt(u64),
+    Wait,
+}
+
+impl Throttle {
+    fn new(interval: u64, last_rescan: u64) -> Self {
+        Self {
+            interval,
+            last_rescan,
+            pending: false,
+            armed: false,
+        }
+    }
+
+    fn forked(&mut self) {
+        self.pending = true;
+    }
+
+    fn fired(&mut self) {
+        self.armed = false;
+    }
+
+    fn rescanned(&mut self, now: u64) {
+        self.last_rescan = now;
+        self.pending = false;
+    }
+
+    fn step(&mut self, now: u64) -> Step {
+        if !self.pending {
+            return Step::Wait;
+        }
+
+        if now.saturating_sub(self.last_rescan) >= self.interval {
+            Step::RescanNow
+        } else if self.armed {
+            Step::Wait
+        } else {
+            self.armed = true;
+            Step::ArmAt(self.last_rescan + self.interval)
         }
     }
 }
 
 const TIMER: usize = 1;
+const RESCAN_TIMER: usize = 2;
 const RECEIVED_PER_WAIT: usize = 64;
 
 impl Tracker {
-    pub fn new(timebase: Timebase) -> io::Result<Self> {
+    pub fn new(timebase: Timebase, rescan_interval: Duration) -> io::Result<Self> {
         let queue = unsafe { libc::kqueue() };
         if queue < 0 {
             return Err(io::Error::last_os_error());
@@ -88,6 +152,11 @@ impl Tracker {
             known: Vec::new(),
             lingering: Vec::new(),
             scans: 0,
+            throttle: Throttle::new(
+                timebase.ticks(u64::try_from(rescan_interval.as_nanos()).unwrap_or(u64::MAX)),
+                clock::now(),
+            ),
+            arming: Vec::new(),
             changes: Vec::new(),
             received: Vec::new(),
             starting: Vec::new(),
@@ -101,23 +170,34 @@ impl Tracker {
     }
 
     pub fn follow_until(&mut self, deadline: u64, meter: &mut Meter) -> io::Result<()> {
-        let timer = kevent(
-            TIMER,
-            libc::EVFILT_TIMER,
-            libc::EV_ADD | libc::EV_ONESHOT,
-            libc::NOTE_ABSOLUTE | libc::NOTE_MACHTIME | libc::NOTE_MACH_CONTINUOUS_TIME,
-            isize::try_from(deadline).unwrap_or(isize::MAX),
-        );
-        let mut pending: &[libc::kevent] = std::slice::from_ref(&timer);
+        self.arming.push(timer_at(TIMER, deadline));
 
         loop {
-            let woke = meter.measure(Source::Events, || self.wait_and_handle(pending))?;
-            pending = &[];
+            let woke = meter.measure(Source::Events, || self.wait_and_handle())?;
 
             self.read_exits(meter);
-            if woke.forked {
-                self.rescan(meter)?;
+            if woke.fired {
+                self.throttle.fired();
             }
+            if woke.forked {
+                self.throttle.forked();
+            }
+
+            let now = clock::now();
+            match self.throttle.step(now) {
+                Step::RescanNow => {
+                    self.rescan(meter)?;
+                    self.throttle.rescanned(now);
+                    if woke.fired {
+                        self.counts.trailing_rescans += 1;
+                    } else {
+                        self.counts.leading_rescans += 1;
+                    }
+                }
+                Step::ArmAt(at) => self.arming.push(timer_at(RESCAN_TIMER, at)),
+                Step::Wait => {}
+            }
+
             if woke.due {
                 return Ok(());
             }
@@ -129,6 +209,8 @@ impl Tracker {
             self.compare(listing);
             self.start_reused_pids();
         });
+        self.throttle.rescanned(clock::now());
+        self.counts.listing_rescans += 1;
         self.read_starts(meter);
         self.submit_watches(meter)
     }
@@ -193,8 +275,8 @@ impl Tracker {
         }
     }
 
-    fn wait_and_handle(&mut self, pending: &[libc::kevent]) -> io::Result<Wake> {
-        let count = self.wait(pending)?;
+    fn wait_and_handle(&mut self) -> io::Result<Wake> {
+        let count = self.wait()?;
         let mut woke = Wake::default();
         for index in 0..count {
             let event = self.received[index];
@@ -204,8 +286,10 @@ impl Tracker {
                 ));
             }
 
-            if event.filter == libc::EVFILT_TIMER {
+            if event.filter == libc::EVFILT_TIMER && event.ident == TIMER {
                 woke.due = true;
+            } else if event.filter == libc::EVFILT_TIMER {
+                woke.fired = true;
             } else {
                 woke.forked |= self.handle(event);
             }
@@ -316,21 +400,22 @@ impl Tracker {
         Ok(())
     }
 
-    fn wait(&mut self, pending: &[libc::kevent]) -> io::Result<usize> {
+    fn wait(&mut self) -> io::Result<usize> {
         self.received
             .resize(RECEIVED_PER_WAIT, kevent(0, 0, 0, 0, 0));
         loop {
             let count = unsafe {
                 libc::kevent(
                     self.queue.as_raw_fd(),
-                    pending.as_ptr(),
-                    libc::c_int::try_from(pending.len()).unwrap_or(0),
+                    self.arming.as_ptr(),
+                    libc::c_int::try_from(self.arming.len()).unwrap_or(0),
                     self.received.as_mut_ptr(),
                     libc::c_int::try_from(RECEIVED_PER_WAIT).unwrap_or(1),
                     std::ptr::null(),
                 )
             };
             if let Ok(count) = usize::try_from(count) {
+                self.arming.clear();
                 return Ok(count);
             }
 
@@ -352,6 +437,16 @@ fn watch(pid: i32) -> libc::kevent {
     )
 }
 
+fn timer_at(ident: usize, deadline: u64) -> libc::kevent {
+    kevent(
+        ident,
+        libc::EVFILT_TIMER,
+        libc::EV_ADD | libc::EV_ONESHOT,
+        libc::NOTE_ABSOLUTE | libc::NOTE_MACHTIME | libc::NOTE_MACH_CONTINUOUS_TIME,
+        isize::try_from(deadline).unwrap_or(isize::MAX),
+    )
+}
+
 fn kevent(ident: usize, filter: i16, flags: u16, filter_flags: u32, data: isize) -> libc::kevent {
     libc::kevent {
         ident,
@@ -368,6 +463,38 @@ mod tests {
     use super::*;
     use crate::clock;
     use crate::cost::Snapshot;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    const INTERVAL: Duration = Duration::from_millis(50);
+
+    fn rescans_from_forks(counts: Counts) -> u64 {
+        counts.leading_rescans + counts.trailing_rescans
+    }
+
+    fn spawn_sleeper() -> std::process::Child {
+        std::process::Command::new("/bin/sleep")
+            .arg("0.2")
+            .spawn()
+            .unwrap()
+    }
+
+    fn while_forking_every_2_ms<T>(follow: impl FnOnce() -> T) -> T {
+        let stop = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while !stop.load(Ordering::Relaxed) {
+                    std::process::Command::new("/usr/bin/true")
+                        .status()
+                        .unwrap();
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            });
+            let result = follow();
+            stop.store(true, Ordering::Relaxed);
+            result
+        })
+    }
 
     fn follow_for(tracker: &mut Tracker, meter: &mut Meter, millis: u64) {
         let timebase = Timebase::read();
@@ -378,7 +505,7 @@ mod tests {
 
     #[test]
     fn reports_a_child_starting_and_exiting_with_its_final_usage() {
-        let mut tracker = Tracker::new(Timebase::read()).unwrap();
+        let mut tracker = Tracker::new(Timebase::read(), INTERVAL).unwrap();
 
         let mut child = std::process::Command::new("/bin/sleep")
             .arg("0.2")
@@ -400,7 +527,7 @@ mod tests {
 
     #[test]
     fn reports_a_watched_process_replacing_its_program() {
-        let mut tracker = Tracker::new(Timebase::read()).unwrap();
+        let mut tracker = Tracker::new(Timebase::read(), INTERVAL).unwrap();
 
         let mut child = std::process::Command::new("/bin/sh")
             .args(["-c", "sleep 0.1; exec /usr/bin/true"])
@@ -421,7 +548,7 @@ mod tests {
 
     #[test]
     fn reports_a_child_with_the_coalition_it_started_in() {
-        let mut tracker = Tracker::new(Timebase::read()).unwrap();
+        let mut tracker = Tracker::new(Timebase::read(), INTERVAL).unwrap();
 
         let mut child = std::process::Command::new("/bin/sleep")
             .arg("0.2")
@@ -444,7 +571,7 @@ mod tests {
     #[test]
     fn charges_each_step_of_following_a_child_to_its_own_source() {
         let timebase = Timebase::read();
-        let mut tracker = Tracker::new(timebase).unwrap();
+        let mut tracker = Tracker::new(timebase, INTERVAL).unwrap();
         let mut meter = Meter::default();
 
         let mut child = std::process::Command::new("/bin/sleep")
@@ -468,7 +595,7 @@ mod tests {
     #[test]
     fn returns_once_the_deadline_has_passed() {
         let timebase = Timebase::read();
-        let mut tracker = Tracker::new(timebase).unwrap();
+        let mut tracker = Tracker::new(timebase, INTERVAL).unwrap();
         let deadline = clock::now() + timebase.ticks(100_000_000);
 
         tracker
@@ -488,7 +615,7 @@ mod tests {
 
     #[test]
     fn reports_a_process_found_already_exited_with_its_final_usage() {
-        let mut tracker = Tracker::new(Timebase::read()).unwrap();
+        let mut tracker = Tracker::new(Timebase::read(), INTERVAL).unwrap();
         let mut child = processes::child_that_has_exited();
         let mut listing = Vec::new();
         processes::list_pids(&mut listing).unwrap();
@@ -508,7 +635,7 @@ mod tests {
 
     #[test]
     fn reports_nothing_more_for_an_exited_process_while_it_stays_listed() {
-        let mut tracker = Tracker::new(Timebase::read()).unwrap();
+        let mut tracker = Tracker::new(Timebase::read(), INTERVAL).unwrap();
         let mut child = processes::child_that_has_exited();
         let mut listing = Vec::new();
         processes::list_pids(&mut listing).unwrap();
@@ -528,7 +655,7 @@ mod tests {
 
     #[test]
     fn reports_a_pid_first_seen_in_a_listing_as_a_start() {
-        let mut tracker = Tracker::new(Timebase::read()).unwrap();
+        let mut tracker = Tracker::new(Timebase::read(), INTERVAL).unwrap();
         let mut listing = Vec::new();
         processes::list_pids(&mut listing).unwrap();
         listing.push(99_999);
@@ -545,8 +672,168 @@ mod tests {
     }
 
     #[test]
+    fn rescans_an_interval_after_forks_that_came_too_soon() {
+        let mut tracker = Tracker::new(Timebase::read(), INTERVAL).unwrap();
+
+        let mut first = spawn_sleeper();
+        std::thread::sleep(Duration::from_millis(1));
+        let mut second = spawn_sleeper();
+        follow_for(&mut tracker, &mut Meter::default(), 200);
+        first.wait().unwrap();
+        second.wait().unwrap();
+
+        assert!(tracker.counts.trailing_rescans >= 1, "{:?}", tracker.counts);
+    }
+
+    #[test]
+    fn rescans_at_once_on_a_fork_after_a_quiet_interval() {
+        let mut tracker = Tracker::new(Timebase::read(), Duration::from_millis(20)).unwrap();
+        follow_for(&mut tracker, &mut Meter::default(), 40);
+        let before = tracker.counts;
+
+        let mut child = spawn_sleeper();
+        follow_for(&mut tracker, &mut Meter::default(), 100);
+        child.wait().unwrap();
+
+        let leading = tracker.counts.since(before).leading_rescans;
+        assert!(leading >= 1, "{:?}", tracker.counts.since(before));
+    }
+
+    #[test]
+    fn rescans_at_most_once_an_interval_however_often_processes_fork() {
+        let mut tracker = Tracker::new(Timebase::read(), INTERVAL).unwrap();
+        let follow_ms = 300;
+
+        while_forking_every_2_ms(|| follow_for(&mut tracker, &mut Meter::default(), follow_ms));
+
+        let cap = follow_ms / 50 + 2;
+        assert!(
+            rescans_from_forks(tracker.counts) <= cap,
+            "{:?} over {cap}",
+            tracker.counts
+        );
+    }
+
+    #[test]
+    fn returns_no_sooner_than_the_deadline_while_rescans_wait_on_their_timer() {
+        let timebase = Timebase::read();
+        let mut tracker = Tracker::new(timebase, Duration::from_millis(5)).unwrap();
+        let deadline = clock::now() + timebase.ticks(100_000_000);
+
+        while_forking_every_2_ms(|| tracker.follow_until(deadline, &mut Meter::default()))
+            .unwrap();
+
+        assert!(clock::now() >= deadline, "returned before the deadline");
+    }
+
+    #[test]
+    fn reports_a_child_that_started_right_after_a_rescan() {
+        let mut tracker = Tracker::new(Timebase::read(), INTERVAL).unwrap();
+
+        let mut child = spawn_sleeper();
+        follow_for(&mut tracker, &mut Meter::default(), 150);
+        child.wait().unwrap();
+
+        let pid = child.id().cast_signed();
+        let events: Vec<Event> = tracker.drain_events().collect();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::Start { pid: p, .. } if *p == pid)),
+            "child {pid}: {events:?}"
+        );
+    }
+
+    mod throttle {
+        use super::super::{Step, Throttle};
+
+        const INTERVAL: u64 = 50;
+        const LAST_RESCAN: u64 = 1_000;
+
+        fn throttle() -> Throttle {
+            Throttle::new(INTERVAL, LAST_RESCAN)
+        }
+
+        #[test]
+        fn rescans_on_a_fork_an_interval_after_the_last_rescan() {
+            let mut throttle = throttle();
+
+            throttle.forked();
+
+            assert_eq!(Step::RescanNow, throttle.step(LAST_RESCAN + INTERVAL));
+        }
+
+        #[test]
+        fn arms_the_timer_for_an_interval_after_the_last_rescan_on_an_early_fork() {
+            let mut throttle = throttle();
+
+            throttle.forked();
+
+            assert_eq!(
+                Step::ArmAt(LAST_RESCAN + INTERVAL),
+                throttle.step(LAST_RESCAN + 1)
+            );
+        }
+
+        #[test]
+        fn waits_on_an_early_fork_while_the_timer_is_armed() {
+            let mut throttle = throttle();
+            throttle.forked();
+            throttle.step(LAST_RESCAN + 1);
+
+            throttle.forked();
+
+            assert_eq!(Step::Wait, throttle.step(LAST_RESCAN + 2));
+        }
+
+        #[test]
+        fn rescans_when_the_timer_fires_with_a_fork_pending() {
+            let mut throttle = throttle();
+            throttle.forked();
+            throttle.step(LAST_RESCAN + 1);
+
+            throttle.fired();
+
+            assert_eq!(Step::RescanNow, throttle.step(LAST_RESCAN + INTERVAL));
+        }
+
+        #[test]
+        fn waits_when_the_timer_fires_with_nothing_pending() {
+            let mut throttle = throttle();
+            throttle.forked();
+            throttle.step(LAST_RESCAN + 1);
+            throttle.rescanned(LAST_RESCAN + 2);
+
+            throttle.fired();
+
+            assert_eq!(Step::Wait, throttle.step(LAST_RESCAN + INTERVAL));
+        }
+
+        #[test]
+        fn rearms_when_the_timer_fires_early_with_a_fork_pending() {
+            let mut throttle = throttle();
+            throttle.forked();
+            throttle.step(LAST_RESCAN + 1);
+            throttle.rescanned(LAST_RESCAN + 2);
+            throttle.forked();
+
+            throttle.fired();
+
+            assert_eq!(
+                Step::ArmAt(LAST_RESCAN + 2 + INTERVAL),
+                throttle.step(LAST_RESCAN + INTERVAL)
+            );
+        }
+
+        #[test]
+        fn waits_with_nothing_pending() {
+            assert_eq!(Step::Wait, throttle().step(LAST_RESCAN + INTERVAL));
+        }
+    }
+
+    #[test]
     fn reports_nothing_for_pids_the_previous_listing_held() {
-        let mut tracker = Tracker::new(Timebase::read()).unwrap();
+        let mut tracker = Tracker::new(Timebase::read(), INTERVAL).unwrap();
         let mut listing = Vec::new();
         processes::list_pids(&mut listing).unwrap();
         tracker.observe(&listing, &mut Meter::default()).unwrap();
