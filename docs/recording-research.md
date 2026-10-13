@@ -18,12 +18,15 @@ and socket was doing. Every number below was measured on this M5 Pro on 2026-10-
 - The collector stays in Rust ("agree, stay in rust", 2026-10-13). Measured against
   Zig, performance did not decide between the two, as Rust against Zig below shows.
 - The core is everything a UI client uses, shared by the macOS client and any Windows
-  or Linux client that follows. It takes no dependencies except an existing database or
-  storage technology for persistence, which is preferred to writing one. A UI client
-  may also use a UI toolkit such as GPUI or Skia, and any other crate it adds needs a
-  recorded case ("by the core, I mean everything that the UI client will use ... we
-  should try to use an existing database or technology for persistence, and not just
-  like add dependencies for whatever", 2026-10-13).
+  or Linux client that follows. Flightdeck's own work is collecting, storing and
+  retrieving metrics so a rich dashboard can be built on them. The core takes a
+  dependency only for infrastructure that would be a large build of its own, such as
+  persistence or communication between processes, and only a battle-tested, fast one,
+  such as iceoryx2 for the ring. A UI client may also use a UI toolkit such as GPUI or
+  Skia. Any other crate needs a recorded case ("not just persistence, but like inter
+  process communication ... we can just use a package for that is battle tested and
+  really, really, really performant. So we can focus on our core", "I would totally
+  allow iceoryx2", 2026-10-13).
 
 Without root and once a second, the collector in Rust measured 2.29% and 1.75% of a core
 and 37.5 and 21.7 mW over two five-minute runs of this Mac's use. Seven of their ten
@@ -617,9 +620,7 @@ rather than block when full.
 4. The GPUI viewer draws live data from the ring, asks DuckDB for history over the
    sealed files, and joins the two through the ring's unsealed tail as Arrow batches.
 
-The storage choice in step 3 waits on the query benchmark below. The dependency decision
-above keeps that choice among existing technologies, Parquet, DuckLake, DuckDB, Arrow
-and zstd, and rules out iceoryx2, so the ring in step 2 is written in the workspace.
+The storage choice in step 3 waits on the query benchmark below.
 
 ## Next measurements
 
