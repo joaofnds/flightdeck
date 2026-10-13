@@ -6,6 +6,7 @@ use crate::clock::Timebase;
 
 type CfRef = *const c_void;
 
+/// The callbacks an array runs on its values, as `CFArrayCallBacks` declares them.
 #[repr(C)]
 struct ArrayCallBacks {
     version: isize,
@@ -14,6 +15,9 @@ struct ArrayCallBacks {
     copy_description: *const c_void,
     equal: *const c_void,
 }
+
+const _: () = assert!(size_of::<ArrayCallBacks>() == 40);
+const _: () = assert!(align_of::<ArrayCallBacks>() == 8);
 
 const UTF8: u32 = 0x0800_0100;
 
