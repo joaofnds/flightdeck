@@ -841,9 +841,14 @@ mod tests {
                     std::thread::sleep(Duration::from_millis(2));
                 }
             });
-            let result = follow();
+            // A panic in the follow stops the forks too, or the scope would wait on them forever
+            // and a failing test would hang.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(follow));
             stop.store(true, Ordering::Relaxed);
-            result
+            match result {
+                Ok(result) => result,
+                Err(panic) => std::panic::resume_unwind(panic),
+            }
         })
     }
 
