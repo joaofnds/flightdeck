@@ -76,7 +76,14 @@ fn run(probe: &Probe) -> io::Result<()> {
     let pid_files: Vec<PathBuf> = (0..probe.generators)
         .map(|n| std::env::temp_dir().join(format!("followprobe-{}-{n}.pids", std::process::id())))
         .collect();
-    let followed = follow(probe, timebase, &mut tracker, &mut meter, &pid_files);
+    let followed = follow(
+        probe,
+        timebase,
+        &mut tracker,
+        &mut meter,
+        &pid_files,
+        process_limit,
+    );
     let removed = remove_pid_files(&pid_files);
     let (started, read_at_exit, children) = followed?;
     removed?;
@@ -111,6 +118,10 @@ fn run(probe: &Probe) -> io::Result<()> {
         "  {} forks, rescans {} leading, {} trailing, {} listing",
         counts.forks, counts.leading_rescans, counts.trailing_rescans, counts.listing_rescans,
     );
+    println!(
+        "  dropped from a full event list {} starts, {} execs, {} exits",
+        counts.dropped_starts, counts.dropped_execs, counts.dropped_exits,
+    );
     Ok(())
 }
 
@@ -122,6 +133,7 @@ fn follow(
     tracker: &mut Tracker,
     meter: &mut Meter,
     pid_files: &[PathBuf],
+    process_limit: usize,
 ) -> io::Result<Followed> {
     let mut generators = Vec::new();
     let followed = (|| {
@@ -131,7 +143,7 @@ fn follow(
 
         let mut started = HashSet::new();
         let mut read_at_exit = HashSet::new();
-        let mut listing = processes::pid_list(processes::process_limit()?);
+        let mut listing = processes::pid_list(process_limit);
         let second = timebase.ticks(1_000_000_000);
         let mut deadline = clock::now() + second;
         loop {
