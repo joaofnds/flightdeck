@@ -71,8 +71,7 @@ impl Collector {
 
         meter.measure(Source::Processes, || {
             processes::list_pids(&mut self.listing)?;
-            self.processes.run(&self.listing, self.timebase);
-            io::Result::Ok(())
+            self.processes.run(&self.listing, self.timebase)
         })?;
         self.tracker.observe(&self.listing, meter)?;
         meter.measure(Source::Events, || {
@@ -108,7 +107,7 @@ impl Collector {
 /// Adds the coalition of every process in `listing`.
 fn add_listed_coalitions(listing: &[i32], coalitions: &mut Coalitions) -> io::Result<()> {
     for &pid in listing {
-        if let Some(id) = coalitions::coalition_of(pid) {
+        if let Some(id) = coalitions::coalition_of(pid)? {
             coalitions.add(id)?;
         }
     }
@@ -132,7 +131,7 @@ mod tests {
 
         collector.read(&mut Meter::default()).unwrap();
 
-        let launchd = coalitions::coalition_of(1).unwrap();
+        let launchd = coalitions::coalition_of(1).unwrap().unwrap();
         let read = &collector.coalitions.read;
         assert!(read.iter().any(|coalition| coalition.id == launchd));
     }

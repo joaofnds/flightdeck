@@ -3,7 +3,7 @@ use std::io;
 use std::mem::offset_of;
 
 use crate::clock::Timebase;
-use crate::kernel::{ESRCH, Sysctl};
+use crate::kernel::{EPERM, ESRCH, Sysctl};
 use crate::push_without_growing;
 
 #[repr(C)]
@@ -231,11 +231,17 @@ pub fn list_pids(into: &mut Vec<i32>) -> io::Result<()> {
     listed
 }
 
-pub fn read(pid: i32, timebase: Timebase) -> Result<Process, Unreadable> {
-    let usage = read_usage(pid, timebase)?;
-    let task: ProcTaskinfo = unsafe { pid_info(pid, PROC_PIDTASKINFO)? };
+pub fn read(pid: i32, timebase: Timebase) -> io::Result<Result<Process, Unreadable>> {
+    let usage = match read_usage(pid, timebase)? {
+        Ok(usage) => usage,
+        Err(unreadable) => return Ok(Err(unreadable)),
+    };
+    let task = match unsafe { pid_info::<ProcTaskinfo>(pid, PROC_PIDTASKINFO) }? {
+        Ok(task) => task,
+        Err(unreadable) => return Ok(Err(unreadable)),
+    };
 
-    Ok(Process {
+    Ok(Ok(Process {
         pid,
         usage,
         task: Task {
@@ -245,13 +251,16 @@ pub fn read(pid: i32, timebase: Timebase) -> Result<Process, Unreadable> {
             mach_syscalls: task.syscalls_mach,
             unix_syscalls: task.syscalls_unix,
         },
-    })
+    }))
 }
 
-pub fn read_usage(pid: i32, timebase: Timebase) -> Result<Usage, Unreadable> {
-    let usage = rusage(pid)?;
+pub fn read_usage(pid: i32, timebase: Timebase) -> io::Result<Result<Usage, Unreadable>> {
+    let usage = match rusage(pid)? {
+        Ok(usage) => usage,
+        Err(unreadable) => return Ok(Err(unreadable)),
+    };
 
-    Ok(Usage {
+    Ok(Ok(Usage {
         awake_ns_at_start: timebase.nanos(usage.proc_start_abstime),
         user_ns: timebase.nanos(usage.user_time),
         system_ns: timebase.nanos(usage.system_time),
@@ -266,36 +275,36 @@ pub fn read_usage(pid: i32, timebase: Timebase) -> Result<Usage, Unreadable> {
         footprint_bytes: usage.phys_footprint,
         disk_read_bytes: usage.diskio_bytesread,
         disk_written_bytes: usage.diskio_byteswritten,
-    })
+    }))
 }
 
-fn rusage(pid: i32) -> Result<RusageInfoV6, Unreadable> {
+fn rusage(pid: i32) -> io::Result<Result<RusageInfoV6, Unreadable>> {
     let mut usage = std::mem::MaybeUninit::<RusageInfoV6>::uninit();
     if unsafe { proc_pid_rusage(pid, RUSAGE_INFO_V6, usage.as_mut_ptr().cast()) } != 0 {
-        return Err(unreadable_from_errno());
+        return unreadable_of(io::Error::last_os_error()).map(Err);
     }
 
-    Ok(unsafe { usage.assume_init() })
+    Ok(Ok(unsafe { usage.assume_init() }))
 }
 
-#[must_use]
-pub fn is_alive(pid: i32) -> bool {
-    unsafe { pid_info::<ProcBsdshortinfo>(pid, PROC_PIDT_SHORTBSDINFO) }.is_ok()
+pub fn is_alive(pid: i32) -> io::Result<bool> {
+    let info = unsafe { pid_info::<ProcBsdshortinfo>(pid, PROC_PIDT_SHORTBSDINFO) }?;
+    Ok(info.is_ok())
 }
 
 /// # Safety
 ///
 /// Every bit pattern must be a valid `T`, as it is for a C struct of integers, since
 /// `T` holds whatever bytes the kernel wrote.
-pub(crate) unsafe fn pid_info<T>(pid: i32, flavor: c_int) -> Result<T, Unreadable> {
+pub(crate) unsafe fn pid_info<T>(pid: i32, flavor: c_int) -> io::Result<Result<T, Unreadable>> {
     let mut info = std::mem::MaybeUninit::<T>::uninit();
     let size = c_int::try_from(size_of::<T>()).unwrap_or(0);
     let written = unsafe { proc_pidinfo(pid, flavor, 0, info.as_mut_ptr().cast(), size) };
     if written != size {
-        return Err(unreadable_from_errno());
+        return unreadable_of(io::Error::last_os_error()).map(Err);
     }
 
-    Ok(unsafe { info.assume_init() })
+    Ok(Ok(unsafe { info.assume_init() }))
 }
 
 #[cfg(test)]
@@ -325,11 +334,13 @@ pub(crate) fn child_that_has_exited() -> std::process::Child {
     child
 }
 
-fn unreadable_from_errno() -> Unreadable {
-    if io::Error::last_os_error().raw_os_error() == Some(ESRCH) {
-        Unreadable::Gone
-    } else {
-        Unreadable::Refused
+/// Reads the `error` a call about one process failed with: EPERM as refused, ESRCH as gone,
+/// and any other errno as the error it is.
+fn unreadable_of(error: io::Error) -> io::Result<Unreadable> {
+    match error.raw_os_error() {
+        Some(EPERM) => Ok(Unreadable::Refused),
+        Some(ESRCH) => Ok(Unreadable::Gone),
+        _ => Err(error),
     }
 }
 
@@ -351,19 +362,20 @@ impl Sweep {
         }
     }
 
-    pub fn run(&mut self, pids: &[i32], timebase: Timebase) {
+    pub fn run(&mut self, pids: &[i32], timebase: Timebase) -> io::Result<()> {
         assert!(pids.len() <= self.read.capacity());
         self.read.clear();
         self.refused = 0;
         self.gone = 0;
 
         for &pid in pids {
-            match read(pid, timebase) {
+            match read(pid, timebase)? {
                 Ok(process) => push_without_growing(&mut self.read, process),
                 Err(Unreadable::Refused) => self.refused += 1,
                 Err(Unreadable::Gone) => self.gone += 1,
             }
         }
+        Ok(())
     }
 }
 
@@ -460,7 +472,7 @@ mod tests {
         let pid = std::process::id().cast_signed();
 
         let before = own_cpu_ns();
-        let process = read(pid, Timebase::read()).unwrap();
+        let process = read(pid, Timebase::read()).unwrap().unwrap();
         let after = own_cpu_ns();
 
         let cpu_ns = process.usage.user_ns + process.usage.system_ns;
@@ -473,11 +485,11 @@ mod tests {
     #[test]
     fn reads_this_process_spending_energy_while_it_runs() {
         let pid = std::process::id().cast_signed();
-        let before = read_usage(pid, Timebase::read()).unwrap();
+        let before = read_usage(pid, Timebase::read()).unwrap().unwrap();
 
         spin_on_this_thread_for(Duration::from_millis(50));
 
-        let after = read_usage(pid, Timebase::read()).unwrap();
+        let after = read_usage(pid, Timebase::read()).unwrap().unwrap();
         assert!(
             after.energy_nj > before.energy_nj,
             "{} nJ then {} nJ",
@@ -494,7 +506,9 @@ mod tests {
             .spawn()
             .unwrap();
 
-        let usage = read_usage(child.id().cast_signed(), timebase).unwrap();
+        let usage = read_usage(child.id().cast_signed(), timebase)
+            .unwrap()
+            .unwrap();
         let awake_ns = timebase.nanos(unsafe { mach_absolute_time() });
         child.kill().unwrap();
         child.wait().unwrap();
@@ -508,7 +522,7 @@ mod tests {
         let pid = std::process::id().cast_signed();
         let mut sweep = Sweep::new(1);
 
-        sweep.run(&[pid], Timebase::read());
+        sweep.run(&[pid], Timebase::read()).unwrap();
 
         let read: Vec<i32> = sweep.read.iter().map(|process| process.pid).collect();
         assert_eq!(vec![pid], read);
@@ -520,7 +534,7 @@ mod tests {
         list_pids(&mut pids).unwrap();
         let mut sweep = Sweep::new(process_limit().unwrap());
 
-        sweep.run(&pids, Timebase::read());
+        sweep.run(&pids, Timebase::read()).unwrap();
 
         assert_eq!(
             pids.len(),
@@ -569,7 +583,10 @@ mod tests {
 
     #[test]
     fn refuses_launchd_to_a_user_without_root() {
-        assert_eq!(Unreadable::Refused, read(1, Timebase::read()).unwrap_err());
+        assert_eq!(
+            Unreadable::Refused,
+            read(1, Timebase::read()).unwrap().unwrap_err()
+        );
     }
 
     #[test]
@@ -579,24 +596,40 @@ mod tests {
 
         let read = read(child.id().cast_signed(), Timebase::read());
 
-        assert_eq!(Unreadable::Gone, read.unwrap_err());
+        assert_eq!(Unreadable::Gone, read.unwrap().unwrap_err());
+    }
+
+    #[test]
+    fn reports_an_errno_besides_refused_and_gone_as_an_error() {
+        // Goal: an errno other than EPERM and ESRCH is an error rather than a refusal, so a change
+        // in macOS shows as one instead of as every process refusing.
+        // Method: ask for an info flavor macOS does not have, which it refuses with EINVAL.
+        const EINVAL: i32 = 22;
+        let pid = std::process::id().cast_signed();
+
+        let info = unsafe { pid_info::<ProcTaskinfo>(pid, 9_999) };
+
+        assert_eq!(
+            Some(EINVAL),
+            info.err().and_then(|error| error.raw_os_error())
+        );
     }
 
     #[test]
     fn finds_this_process_alive() {
-        assert!(is_alive(std::process::id().cast_signed()));
+        assert!(is_alive(std::process::id().cast_signed()).unwrap());
     }
 
     #[test]
     fn finds_a_process_it_cannot_read_alive() {
-        assert!(is_alive(1));
+        assert!(is_alive(1).unwrap());
     }
 
     #[test]
     fn finds_an_exited_child_not_yet_reaped_not_alive() {
         let mut child = child_that_has_exited();
 
-        let alive = is_alive(child.id().cast_signed());
+        let alive = is_alive(child.id().cast_signed()).unwrap();
         child.wait().unwrap();
 
         assert!(!alive);

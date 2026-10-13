@@ -14,6 +14,9 @@ pub(crate) type KernReturn = c_int;
 /// Says a Mach call succeeded.
 pub(crate) const KERN_SUCCESS: KernReturn = 0;
 
+/// Says the caller may not act on the process a call named.
+pub(crate) const EPERM: c_int = 1;
+
 /// Says no process has the pid a call named.
 pub(crate) const ESRCH: c_int = 3;
 

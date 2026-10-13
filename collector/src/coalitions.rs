@@ -2,7 +2,7 @@ use std::ffi::c_int;
 use std::io;
 
 use crate::clock::Timebase;
-use crate::processes;
+use crate::processes::{self, Unreadable};
 use crate::push_without_growing;
 
 #[repr(C)]
@@ -35,11 +35,13 @@ unsafe extern "C" {
     fn coalition_info_resource_usage(cid: u64, cru: *mut ResourceUsage, sz: usize) -> c_int;
 }
 
-#[must_use]
-pub fn coalition_of(pid: i32) -> Option<u64> {
-    let info: PidCoalitionInfo = unsafe { processes::pid_info(pid, PROC_PIDCOALITIONINFO) }.ok()?;
+pub fn coalition_of(pid: i32) -> io::Result<Option<u64>> {
+    let info = unsafe { processes::pid_info::<PidCoalitionInfo>(pid, PROC_PIDCOALITIONINFO) }?;
 
-    Some(info.coalition_id[COALITION_TYPE_RESOURCE])
+    match info {
+        Ok(info) => Ok(Some(info.coalition_id[COALITION_TYPE_RESOURCE])),
+        Err(Unreadable::Refused | Unreadable::Gone) => Ok(None),
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -164,7 +166,9 @@ mod tests {
     };
 
     fn own_coalition() -> u64 {
-        coalition_of(std::process::id().cast_signed()).unwrap()
+        coalition_of(std::process::id().cast_signed())
+            .unwrap()
+            .unwrap()
     }
 
     #[test]
@@ -193,11 +197,11 @@ mod tests {
         coalitions.add(own_coalition()).unwrap();
         coalitions.read_all();
         let before = coalitions.read[0];
-        let own_before = processes::read_usage(pid, timebase).unwrap();
+        let own_before = processes::read_usage(pid, timebase).unwrap().unwrap();
 
         spin_on_this_thread_for(Duration::from_millis(50));
 
-        let own_after = processes::read_usage(pid, timebase).unwrap();
+        let own_after = processes::read_usage(pid, timebase).unwrap().unwrap();
         coalitions.read_all();
         let after = coalitions.read[0];
         let own_nj = own_after.energy_nj - own_before.energy_nj;
@@ -285,7 +289,7 @@ mod tests {
             .spawn()
             .unwrap();
 
-        let found = coalition_of(child.id().cast_signed());
+        let found = coalition_of(child.id().cast_signed()).unwrap();
         child.kill().unwrap();
         child.wait().unwrap();
 
@@ -297,6 +301,6 @@ mod tests {
         let mut child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
         child.wait().unwrap();
 
-        assert_eq!(None, coalition_of(child.id().cast_signed()));
+        assert_eq!(None, coalition_of(child.id().cast_signed()).unwrap());
     }
 }

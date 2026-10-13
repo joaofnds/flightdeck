@@ -7,7 +7,7 @@ use std::time::Duration;
 use crate::clock::{self, Timebase};
 use crate::coalitions;
 use crate::cost::{Meter, Source};
-use crate::kernel::{ESRCH, Timespec};
+use crate::kernel::{EPERM, ESRCH, Timespec};
 use crate::processes::{self, Unreadable, Usage};
 use crate::push_without_growing;
 
@@ -250,7 +250,6 @@ const NOTE_EXEC: u32 = 0x2000_0000;
 const NOTE_ABSOLUTE: u32 = 0x8;
 const NOTE_MACHTIME: u32 = 0x100;
 const NOTE_MACH_CONTINUOUS_TIME: u32 = 0x80;
-const EPERM: c_int = 1;
 
 unsafe extern "C" {
     fn kqueue() -> c_int;
@@ -372,12 +371,11 @@ impl Tracker {
 
         meter.measure(Source::Scans, || {
             self.compare(listing)?;
-            self.observe_reused_pids();
-            io::Result::Ok(())
+            self.observe_reused_pids()
         })?;
         self.throttle.rescanned(clock::now());
         self.counts.listing_rescans += 1;
-        self.read_starts(meter);
+        self.read_starts(meter)?;
         self.submit_watches(meter)?;
 
         assert!(self.starts.is_empty());
@@ -414,7 +412,7 @@ impl Tracker {
         assert_eq!(scans + 1, self.scans);
         self.throttle.rescanned(clock::now());
 
-        self.read_starts(meter);
+        self.read_starts(meter)?;
         self.submit_watches(meter)
     }
 
@@ -461,21 +459,22 @@ impl Tracker {
         Ok(())
     }
 
-    fn observe_reused_pids(&mut self) {
+    fn observe_reused_pids(&mut self) -> io::Result<()> {
         for &(pid, index) in &self.reuse_candidates {
             assert!(self.known[index].exited);
             assert_eq!(self.scans, self.known[index].listed_in);
-            if processes::is_alive(pid) {
+            if processes::is_alive(pid)? {
                 self.known[index].exited = false;
                 push_without_growing(&mut self.changes, watch(index));
                 push_without_growing(&mut self.starts, pid);
             }
         }
+        Ok(())
     }
 
-    fn read_starts(&mut self, meter: &mut Meter) {
+    fn read_starts(&mut self, meter: &mut Meter) -> io::Result<()> {
         if self.starts.is_empty() {
-            return;
+            return Ok(());
         }
 
         meter.measure(Source::StartReads, || {
@@ -483,13 +482,16 @@ impl Tracker {
                 assert!(pid >= 0);
                 let start = Event::Start {
                     pid,
-                    coalition: coalitions::coalition_of(pid),
+                    coalition: coalitions::coalition_of(pid)?,
                 };
                 record(&mut self.events, &mut self.counts, start);
             }
-        });
+
+            io::Result::Ok(())
+        })?;
 
         assert!(self.starts.is_empty());
+        Ok(())
     }
 
     fn read_exits(&mut self, meter: &mut Meter) -> io::Result<()> {
@@ -503,7 +505,7 @@ impl Tracker {
                 self.known[index].exited = true;
                 let exit = Event::Exit {
                     pid,
-                    last: processes::read_usage(pid, self.timebase),
+                    last: processes::read_usage(pid, self.timebase)?,
                     noticed,
                 };
                 record(&mut self.events, &mut self.counts, exit);
@@ -1394,6 +1396,7 @@ mod tests {
 
         let pid = child.id().cast_signed();
         let own = coalitions::coalition_of(std::process::id().cast_signed())
+            .unwrap()
             .expect("this test process's coalition");
         let events: Vec<Event> = tracker.drain_events().collect();
         let started_in_own = |event: &Event| match event {
