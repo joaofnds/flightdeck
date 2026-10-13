@@ -1155,9 +1155,9 @@ mod tests {
     }
 
     #[test]
-    fn reports_a_child_starting_and_exiting_with_its_final_usage() {
-        // Goal: a child the tracker sees start is reported as a start, and as an exit that carries
-        // the CPU time it used, noticed as it exited.
+    fn reports_a_child_exiting_with_its_final_usage() {
+        // Goal: a child the tracker follows is reported as an exit that carries the CPU time it
+        // used, noticed as it exited.
         // Method: follow for 500 ms while a child sleeps 200 ms and exits.
         let mut tracker = tracker(INTERVAL);
 
@@ -1167,12 +1167,6 @@ mod tests {
 
         let pid = child.id().cast_signed();
         let events: Vec<Event> = tracker.drain_events().collect();
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, Event::Start { pid: p, .. } if *p == pid)),
-            "child {pid}: {events:?}"
-        );
         let exited_with_usage = |event: &Event| match event {
             Event::Exit {
                 pid: p,
@@ -1222,10 +1216,11 @@ mod tests {
         child.wait().unwrap();
 
         let pid = child.id().cast_signed();
-        let own = coalitions::coalition_of(std::process::id().cast_signed());
+        let own = coalitions::coalition_of(std::process::id().cast_signed())
+            .expect("this test process's coalition");
         let events: Vec<Event> = tracker.drain_events().collect();
         let started_in_own = |event: &Event| match event {
-            Event::Start { pid: p, coalition } => *p == pid && *coalition == own,
+            Event::Start { pid: p, coalition } => *p == pid && *coalition == Some(own),
             _ => false,
         };
         assert!(
@@ -1332,6 +1327,29 @@ mod tests {
     }
 
     #[test]
+    fn reports_a_live_process_at_a_pid_whose_process_exited_as_a_start() {
+        // Goal: a pid a listing holds again after its process exited, and which names a live
+        // process, is reported as a start, since macOS gave the pid to a new process.
+        // Method: mark this test process's pid exited, as an exit the tracker read would, and
+        // observe this Mac's listing, which holds it. No test can make macOS reuse a pid.
+        let mut tracker = tracker(INTERVAL);
+        let listing = current_listing();
+        let pid = std::process::id().cast_signed();
+        let index = known_index(pid, tracker.known.len()).unwrap();
+        tracker.known[index].exited = true;
+
+        tracker.observe(&listing, &mut Meter::default()).unwrap();
+
+        let events: Vec<Event> = tracker.drain_events().collect();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::Start { pid: p, .. } if *p == pid)),
+            "{pid}: {events:?}"
+        );
+    }
+
+    #[test]
     fn reports_a_pid_a_listing_holds_twice_as_one_start() {
         // Goal: a pid a listing holds twice names one process, reported with one start.
         // Method: observe this Mac's listing with an unlisted pid added twice, and count the
@@ -1380,23 +1398,20 @@ mod tests {
     fn reports_a_pid_first_seen_in_a_listing_as_a_start() {
         // Goal: a pid first seen in a listing, with no fork the tracker caught, is reported as a
         // start.
-        // Method: observe this Mac's listing with PID_MAX added to it.
+        // Method: observe this Mac's listing with an unlisted pid added to it.
         let mut tracker = tracker(INTERVAL);
         let mut listing = current_listing();
-        listing.push(processes::PID_MAX);
+        let pid = unlisted_pid(&listing);
+        listing.push(pid);
 
         tracker.observe(&listing, &mut Meter::default()).unwrap();
 
         let events: Vec<Event> = tracker.drain_events().collect();
         assert!(
-            events.iter().any(|e| matches!(
-                e,
-                Event::Start {
-                    pid: processes::PID_MAX,
-                    ..
-                }
-            )),
-            "{events:?}"
+            events
+                .iter()
+                .any(|e| matches!(e, Event::Start { pid: p, .. } if *p == pid)),
+            "{pid}: {events:?}"
         );
     }
 
@@ -1433,8 +1448,8 @@ mod tests {
     fn waits_an_interval_after_a_listing_before_rescanning_on_a_fork() {
         // Goal: a listing the tracker observes counts as a rescan, so a fork within an interval of
         // it waits for the interval rather than rescanning at once.
-        // Method: after a quiet 250 ms, observe a listing, start a child, and follow for 100 ms
-        // with a 200 ms interval.
+        // Method: 250 ms after the tracker's first scan, observe a listing, start a child, and
+        // follow for 100 ms with a 200 ms interval.
         let mut tracker = tracker(Duration::from_millis(200));
         std::thread::sleep(Duration::from_millis(250));
         let listing = current_listing();
@@ -1451,10 +1466,11 @@ mod tests {
     }
 
     #[test]
-    fn rescans_at_once_on_a_fork_after_a_quiet_interval() {
+    fn rescans_at_once_on_a_fork_an_interval_after_the_last_rescan() {
         // Goal: a fork an interval or more after the last rescan is rescanned for at once, as a
         // leading rescan.
-        // Method: after a quiet 250 ms, start a child and follow for 100 ms with a 200 ms interval.
+        // Method: 250 ms after the tracker's first scan, start a child and follow for 100 ms with
+        // a 200 ms interval.
         let mut tracker = tracker(Duration::from_millis(200));
         std::thread::sleep(Duration::from_millis(250));
 
