@@ -185,6 +185,13 @@ impl Tracker {
     pub fn new(timebase: Timebase, rescan_interval: Duration, limits: Limits) -> io::Result<Self> {
         assert!(limits.events_per_tick_max > 0);
 
+        let Ok(interval_ns) = u64::try_from(rescan_interval.as_nanos()) else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("a rescan interval of {rescan_interval:?} passes u64 nanoseconds"),
+            ));
+        };
+
         let queue = unsafe { kqueue() };
         if queue < 0 {
             return Err(io::Error::last_os_error());
@@ -204,9 +211,7 @@ impl Tracker {
             known: vec![Known::default(); known_count],
             lingering: Vec::with_capacity(room),
             scans: 0,
-            throttle: Throttle::new(
-                timebase.ticks(u64::try_from(rescan_interval.as_nanos()).unwrap_or(u64::MAX)),
-            ),
+            throttle: Throttle::new(timebase.ticks(interval_ns)),
             arming: Vec::with_capacity(TIMER_COUNT),
             changes: Vec::with_capacity(room),
             received: vec![Kevent::new(0, 0, 0, 0, 0); room.max(RECEIVED_PER_WAIT)],
@@ -795,6 +800,17 @@ mod tests {
 
         let refused = started.err().map(|error| error.kind());
         assert_eq!(Some(io::ErrorKind::QuotaExceeded), refused);
+    }
+
+    #[test]
+    fn refuses_a_rescan_interval_whose_nanoseconds_pass_u64() {
+        // Goal: a rescan interval longer than u64 holds in nanoseconds is an error, rather than
+        // an interval cut short to fit.
+        // Method: start a tracker with the longest interval a Duration holds.
+        let started = Tracker::new(Timebase::read(), Duration::MAX, limits());
+
+        let refused = started.err().map(|error| error.kind());
+        assert_eq!(Some(io::ErrorKind::InvalidInput), refused);
     }
 
     #[test]
