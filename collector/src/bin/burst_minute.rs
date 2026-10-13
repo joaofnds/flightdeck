@@ -16,13 +16,13 @@ const BURST_START_SECONDS: u64 = 15;
 const BURST_SECONDS: u64 = 30;
 const BURST_CHILD_MS: u64 = 6;
 const BURST_GENERATORS: u64 = 2;
-/// How long past its own run a program may take to end before the run stops it.
+/// Sets how long past its own run a program may take to end before the run stops it.
 const GRACE_SECONDS: u64 = 30;
-/// How long date, sysctl or pmset may take, though each ends at once.
+/// Sets how long date, sysctl or pmset may take, though each ends at once.
 const CONDITION_MS_MAX: u64 = 10_000;
 const POLL_MS: u64 = 100;
-/// Counts the report files this process has created, so that no two share a path.
-static REPORT_FILES_CREATED: AtomicU64 = AtomicU64::new(0);
+/// Counts the output files this process has created, so that no two share a path.
+static OUTPUT_FILES_CREATED: AtomicU64 = AtomicU64::new(0);
 const USAGE: &str = "usage: burst_minute --rescan-ms N --per-second N -- COLLECTOR [ARGUMENT...]";
 
 fn main() -> ExitCode {
@@ -51,7 +51,7 @@ struct Options {
     collector: CollectorCommand,
 }
 
-/// The program that runs as the collector and its own arguments, to which the run adds
+/// Holds the program that runs as the collector and its own arguments, to which the run adds
 /// `--seconds` with `COLLECTOR_SECONDS`.
 #[derive(Debug, PartialEq)]
 struct CollectorCommand {
@@ -81,26 +81,31 @@ fn options_from(words: &[String]) -> Result<Options, String> {
             "--per-second" => &mut per_second,
             _ => return Err(USAGE.to_owned()),
         };
+        if target.is_some() {
+            return Err(format!("{flag} is given twice"));
+        }
         match number.parse() {
             Ok(parsed) => *target = Some(parsed),
             Err(error) => return Err(format!("{flag} {number}: {error}")),
         }
     }
 
-    match (rescan_ms, per_second) {
-        (Some(rescan_ms), Some(per_second)) => {
-            assert!(!program.is_empty());
-            Ok(Options {
-                rescan_ms,
-                per_second,
-                collector: CollectorCommand {
-                    program: program.clone(),
-                    arguments: arguments.to_vec(),
-                },
-            })
-        }
-        _ => Err(USAGE.to_owned()),
-    }
+    let Some(rescan_ms) = rescan_ms else {
+        return Err(USAGE.to_owned());
+    };
+    let Some(per_second) = per_second else {
+        return Err(USAGE.to_owned());
+    };
+
+    assert!(!program.is_empty());
+    Ok(Options {
+        rescan_ms,
+        per_second,
+        collector: CollectorCommand {
+            program: program.clone(),
+            arguments: arguments.to_vec(),
+        },
+    })
 }
 
 fn run(options: &Options) -> io::Result<()> {
@@ -114,8 +119,8 @@ fn run(options: &Options) -> io::Result<()> {
     run_write_conditions(&mut stdout)?;
 
     let reports = Reports {
-        collector: ReportFile::create("collector")?,
-        followprobe: ReportFile::create("followprobe")?,
+        collector: OutputFile::create("collector")?,
+        followprobe: OutputFile::create("followprobe")?,
     };
     assert!(reports.collector.path != reports.followprobe.path);
     let minute = run_minute(options, &followprobe, &reports);
@@ -134,7 +139,7 @@ fn run_minute(options: &Options, followprobe: &Path, reports: &Reports) -> io::R
     let mut collector = StartedProcess::start(
         "collector",
         Command::new(&options.collector.program)
-            .args(run_collector_arguments(&options.collector))
+            .args(run_minute_collector_arguments(&options.collector))
             .stdin(Stdio::null())
             .stdout(reports.collector.stdio()?)
             .stderr(reports.collector.stdio()?),
@@ -154,11 +159,11 @@ fn run_minute(options: &Options, followprobe: &Path, reports: &Reports) -> io::R
 }
 
 /// Runs followprobe for the burst and waits for it to end.
-fn run_burst(options: &Options, followprobe: &Path, report: &ReportFile) -> io::Result<()> {
+fn run_burst(options: &Options, followprobe: &Path, report: &OutputFile) -> io::Result<()> {
     let mut probe = StartedProcess::start(
         "followprobe",
         Command::new(followprobe)
-            .args(run_followprobe_arguments(options))
+            .args(run_burst_arguments(options))
             .stdin(Stdio::null())
             .stdout(report.stdio()?)
             .stderr(report.stdio()?),
@@ -168,7 +173,7 @@ fn run_burst(options: &Options, followprobe: &Path, report: &ReportFile) -> io::
 }
 
 /// Lists the collector's arguments, its own and then the minute it runs for.
-fn run_collector_arguments(collector: &CollectorCommand) -> Vec<String> {
+fn run_minute_collector_arguments(collector: &CollectorCommand) -> Vec<String> {
     let mut arguments = collector.arguments.clone();
     arguments.push("--seconds".to_owned());
     arguments.push(COLLECTOR_SECONDS.to_string());
@@ -179,7 +184,7 @@ fn run_collector_arguments(collector: &CollectorCommand) -> Vec<String> {
 
 /// Lists followprobe's arguments in the order it reads them, `RESCAN_MS PER_SECOND SECONDS
 /// CHILD_MS GENERATORS`.
-fn run_followprobe_arguments(options: &Options) -> [String; 5] {
+fn run_burst_arguments(options: &Options) -> [String; 5] {
     [
         options.rescan_ms,
         options.per_second,
@@ -209,13 +214,13 @@ fn run_followprobe_path() -> io::Result<PathBuf> {
 /// Writes the date, the load average and the power source, which say what else the machine
 /// was doing during the minute.
 fn run_write_conditions(stdout: &mut impl Write) -> io::Result<()> {
-    stdout.write_all(&run_command_stdout("/bin/date", &[])?)?;
-    stdout.write_all(&run_command_stdout(
+    stdout.write_all(&run_write_conditions_stdout("/bin/date", &[])?)?;
+    stdout.write_all(&run_write_conditions_stdout(
         "/usr/sbin/sysctl",
         &["-n", "vm.loadavg"],
     )?)?;
-    let power = run_command_stdout("/usr/bin/pmset", &["-g", "batt"])?;
-    match run_first_line(&power) {
+    let power = run_write_conditions_stdout("/usr/bin/pmset", &["-g", "batt"])?;
+    match run_write_conditions_first_line(&power) {
         Some(line) => stdout.write_all(line)?,
         None => return Err(io::Error::other("pmset -g batt printed nothing")),
     }
@@ -224,11 +229,11 @@ fn run_write_conditions(stdout: &mut impl Write) -> io::Result<()> {
 
 /// Runs a program to its end, within `CONDITION_MS_MAX`, and returns what it wrote to
 /// standard output, or fails with its status and what it wrote to standard error.
-fn run_command_stdout(program: &'static str, arguments: &[&str]) -> io::Result<Vec<u8>> {
+fn run_write_conditions_stdout(program: &'static str, arguments: &[&str]) -> io::Result<Vec<u8>> {
     assert!(program.starts_with('/'));
 
-    let output = ReportFile::create("output")?;
-    let errors = ReportFile::create("errors")?;
+    let output = OutputFile::create("output")?;
+    let errors = OutputFile::create("errors")?;
     let mut process = StartedProcess::start(
         program,
         Command::new(program)
@@ -248,7 +253,7 @@ fn run_command_stdout(program: &'static str, arguments: &[&str]) -> io::Result<V
 }
 
 /// Returns the first line of `text` with its newline, or `None` when `text` is empty.
-fn run_first_line(text: &[u8]) -> Option<&[u8]> {
+fn run_write_conditions_first_line(text: &[u8]) -> Option<&[u8]> {
     let line = text.split_inclusive(|&byte| byte == b'\n').next();
     if let Some(line) = line {
         assert!(!line.is_empty());
@@ -257,13 +262,13 @@ fn run_first_line(text: &[u8]) -> Option<&[u8]> {
     line
 }
 
-/// The two report files of one run, named so they cannot be swapped.
+/// Holds the two report files of one run, by name so they cannot be swapped.
 struct Reports {
-    collector: ReportFile,
-    followprobe: ReportFile,
+    collector: OutputFile,
+    followprobe: OutputFile,
 }
 
-/// A process the run started. Dropping it stops the process and waits for it, so no way out
+/// Owns a process the run started, and stops it and waits for it when dropped, so no way out
 /// of the run leaves it running.
 struct StartedProcess {
     name: &'static str,
@@ -338,19 +343,19 @@ impl Drop for StartedProcess {
     }
 }
 
-/// A file in the temporary directory that a program writes its output to, removed when
-/// dropped.
-struct ReportFile {
+/// Owns a file in the temporary directory that a program writes its output to, and removes
+/// it when dropped.
+struct OutputFile {
     path: PathBuf,
     file: File,
 }
 
-impl ReportFile {
-    fn create(name: &str) -> io::Result<ReportFile> {
+impl OutputFile {
+    fn create(name: &str) -> io::Result<OutputFile> {
         assert!(!name.is_empty());
         assert!(!name.contains('/'));
 
-        let sequence = REPORT_FILES_CREATED.fetch_add(1, Ordering::Relaxed);
+        let sequence = OUTPUT_FILES_CREATED.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
             "burst_minute-{}-{sequence}-{name}.txt",
             std::process::id()
@@ -364,7 +369,7 @@ impl ReportFile {
             .create_new(true)
             .open(&path)?;
 
-        Ok(ReportFile { path, file })
+        Ok(OutputFile { path, file })
     }
 
     /// Returns a handle on the file for a program's standard output or standard error. The
@@ -379,7 +384,7 @@ impl ReportFile {
     }
 }
 
-impl Drop for ReportFile {
+impl Drop for OutputFile {
     fn drop(&mut self) {
         if let Err(error) = fs::remove_file(&self.path) {
             eprintln!(
@@ -491,6 +496,26 @@ mod tests {
     }
 
     #[test]
+    fn refuses_a_flag_given_twice() {
+        // Goal: a flag given twice is refused, rather than the last one silently winning.
+        // Method: the interval given twice, each time a number.
+        let words = arguments(&[
+            "--rescan-ms",
+            "5",
+            "--rescan-ms",
+            "50",
+            "--per-second",
+            "1000",
+            "--",
+            "c",
+        ]);
+
+        let parsed = options_from(&words);
+
+        assert_eq!(parsed, Err("--rescan-ms is given twice".to_owned()));
+    }
+
+    #[test]
     fn gives_the_collector_its_own_arguments_and_then_the_minute() {
         // Goal: the collector runs for the minute, after whatever flags it was given.
         // Method: a collector command with a flag of its own.
@@ -499,7 +524,7 @@ mod tests {
             arguments: arguments(&["--rescan-ms", "5"]),
         };
 
-        let collector_arguments = run_collector_arguments(&collector);
+        let collector_arguments = run_minute_collector_arguments(&collector);
 
         assert_eq!(
             collector_arguments,
@@ -517,7 +542,7 @@ mod tests {
             arguments: Vec::new(),
         });
 
-        let followprobe_arguments = run_followprobe_arguments(&options);
+        let followprobe_arguments = run_burst_arguments(&options);
 
         assert_eq!(followprobe_arguments, ["5", "1000", "30", "6", "2"]);
     }
@@ -530,10 +555,10 @@ mod tests {
         let power = b"Now drawing from 'AC Power'\n -InternalBattery-0\n";
 
         assert_eq!(
-            run_first_line(power),
+            run_write_conditions_first_line(power),
             Some(&b"Now drawing from 'AC Power'\n"[..])
         );
-        assert_eq!(run_first_line(b""), None);
+        assert_eq!(run_write_conditions_first_line(b""), None);
     }
 
     #[test]
@@ -541,7 +566,7 @@ mod tests {
         // Goal: a program that succeeds gives what it wrote to standard output, and nothing it
         // wrote to standard error.
         // Method: a shell that writes a line to each.
-        let output = run_command_stdout("/bin/sh", &["-c", "echo out; echo noise >&2"]);
+        let output = run_write_conditions_stdout("/bin/sh", &["-c", "echo out; echo noise >&2"]);
 
         assert_eq!(output.unwrap(), b"out\n");
     }
@@ -551,7 +576,8 @@ mod tests {
         // Goal: a program that fails is reported by its status and by what it wrote to
         // standard error, which says why.
         // Method: a shell that writes a line to standard error and exits 3.
-        let output = run_command_stdout("/bin/sh", &["-c", "echo out; echo why >&2; exit 3"]);
+        let output =
+            run_write_conditions_stdout("/bin/sh", &["-c", "echo out; echo why >&2; exit 3"]);
 
         assert_eq!(
             output.unwrap_err().to_string(),
