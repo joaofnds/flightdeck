@@ -15,8 +15,9 @@ the CPU of each source.
 cargo run --release -p collector -- --seconds 300
 ```
 
-It reports every 10 seconds, every minute and over the run, and ends with the processes
-it missed. `--rescan-ms N` sets how often a fork may make it rescan the pid list, 5 ms
+It reports every 10 seconds, every minute and over the run. With `--seconds` it ends with
+the processes it missed, counted against the pid sequence, unless the pids may have
+wrapped over the run. `--rescan-ms N` sets how often a fork may make it rescan the pid list, 5 ms
 by default.
 
 To measure process tracking under a load you choose, `forkrate` forks children at a
