@@ -108,7 +108,7 @@ fn repository_paths(root: &Path) -> Vec<String> {
     paths
 }
 
-/// Every rule's findings for one file, each starting with the file's path.
+/// Applies every rule to one file and returns its findings, each led by the file's path.
 fn file_findings(path: &str, bytes: &[u8]) -> Vec<String> {
     let mut findings = Vec::new();
     if script(path, bytes) {
@@ -235,7 +235,7 @@ fn file_findings_text() -> String {
         + "let _ = read();\n"
 }
 
-/// The number of each line, counted from 1, that runs past `COLUMNS_MAX` columns.
+/// Lists the number of each line, counted from 1, that runs past `COLUMNS_MAX` columns.
 fn long_lines(text: &str) -> Vec<usize> {
     let mut numbers = Vec::new();
     for (index, line) in text.lines().enumerate() {
@@ -272,7 +272,7 @@ fn long_lines_counts_columns_and_not_bytes() {
     assert!(numbers.is_empty());
 }
 
-/// The number of the `fn` line, counted from 1, of each function that runs past
+/// Lists the number of the `fn` line, counted from 1, of each function that runs past
 /// `FUNCTION_LINES_MAX` lines, counted from its `fn` line to its closing brace.
 fn long_functions(text: &str) -> Vec<usize> {
     let lines: Vec<&str> = text.lines().collect();
@@ -310,10 +310,10 @@ fn long_functions_opens(line: &str) -> bool {
     false
 }
 
-/// The lines of the function whose `fn` line is at `start`, up to its closing brace. Rustfmt
-/// ends a signature with `{` before a body, and closes the body with a brace alone on a line
-/// at the `fn` line's indentation. A declaration ends its signature with `;` and an empty
-/// body with `{}`, so neither has lines past its signature.
+/// Counts the lines of the function whose `fn` line is at `start`, up to its closing brace.
+/// Rustfmt ends a signature with `{` before a body, and closes the body with a brace alone on
+/// a line at the `fn` line's indentation. A declaration ends its signature with `;` and an
+/// empty body with `{}`, so neither has lines past its signature.
 fn long_functions_count(lines: &[&str], start: usize) -> usize {
     assert!(start < lines.len());
 
@@ -328,8 +328,8 @@ fn long_functions_count(lines: &[&str], start: usize) -> usize {
     }
 }
 
-/// The lines up to and including the one that ends the signature at the start of `lines`,
-/// or all of them when none does.
+/// Counts the lines up to and including the one that ends the signature at the start of
+/// `lines`, or all of them when none does.
 fn long_functions_count_signature(lines: &[&str]) -> usize {
     assert!(!lines.is_empty());
 
@@ -341,7 +341,7 @@ fn long_functions_count_signature(lines: &[&str]) -> usize {
     lines.len()
 }
 
-/// The lines up to and including the first that holds only a closing brace at
+/// Counts the lines up to and including the first that holds only a closing brace at
 /// `indentation`, or all of them when none does, since the function then runs to the end.
 fn long_functions_count_body(lines: &[&str], indentation: &str) -> usize {
     assert!(!lines.is_empty());
@@ -439,8 +439,8 @@ fn long_functions_counts_a_function_behind_its_visibility_and_qualifiers() {
     }
 }
 
-/// A function of `line_count` lines at `indentation`, counted from its `fn` line to its
-/// closing brace, whose body opens with a block that closes at a deeper indentation.
+/// Builds a function of `line_count` lines at `indentation`, counted from its `fn` line to
+/// its closing brace, whose body opens with a block that closes at a deeper indentation.
 fn function_text(indentation: &str, line_count: usize) -> String {
     assert!(line_count >= 5);
 
