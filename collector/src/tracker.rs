@@ -191,10 +191,10 @@ impl Tracker {
         }
 
         // A scan, a registration and a wait each hold at most one entry for every pid a
-        // listing holds, so each list gets the listing's room once and never grows.
+        // listing holds, so each list gets the listing's room once and never grows. A wait
+        // takes up to RECEIVED_PER_WAIT events too, so the received list holds at least that.
         let listing = processes::pid_list(limits.process_limit);
         let room = listing.capacity();
-        assert!(RECEIVED_PER_WAIT <= room);
         let known_count = usize::try_from(processes::PID_MAX).map_err(io::Error::other)? + 1;
 
         let mut tracker = Self {
@@ -209,7 +209,7 @@ impl Tracker {
             ),
             arming: Vec::with_capacity(TIMER_COUNT),
             changes: Vec::with_capacity(room),
-            received: vec![Kevent::new(0, 0, 0, 0, 0); room],
+            received: vec![Kevent::new(0, 0, 0, 0, 0); room.max(RECEIVED_PER_WAIT)],
             starting: Vec::with_capacity(room),
             exiting: Vec::with_capacity(room),
             events: Vec::with_capacity(limits.events_per_tick_max),
@@ -779,6 +779,22 @@ mod tests {
         assert_eq!(1, tracker.drain_events().count());
         let dropped = tracker.counts.dropped_starts + tracker.counts.dropped_exits;
         assert!(dropped > 0, "{:?}", tracker.counts);
+    }
+
+    #[test]
+    fn reports_a_process_limit_below_what_this_mac_runs_as_an_error() {
+        // Goal: a process limit too small for the listing is an error and trips no assertion,
+        // even below the events one wait takes.
+        // Method: start a tracker with room for one process on this Mac, which runs hundreds.
+        let limits = Limits {
+            process_limit: 1,
+            ..limits()
+        };
+
+        let started = Tracker::new(Timebase::read(), INTERVAL, limits);
+
+        let refused = started.err().map(|error| error.kind());
+        assert_eq!(Some(io::ErrorKind::QuotaExceeded), refused);
     }
 
     #[test]
