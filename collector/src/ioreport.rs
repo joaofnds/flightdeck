@@ -46,14 +46,16 @@ unsafe extern "C" {
     fn CFStringGetCString(text: CFTypeRef, buffer: *mut c_char, size: isize, encoding: u32) -> u8;
 }
 
+// Apple documents none of IOReport, so the meaning of the last three arguments of
+// IOReportCopyChannelsInGroup is unknown, and the collector passes 0 for each.
 #[link(name = "IOReport")]
 unsafe extern "C" {
     fn IOReportCopyChannelsInGroup(
         group: CFTypeRef,
         subgroup: CFTypeRef,
-        a: u64,
-        b: u64,
-        c: u64,
+        unknown_1: u64,
+        unknown_2: u64,
+        unknown_3: u64,
     ) -> CFTypeRef;
     fn IOReportMergeChannels(into: CFTypeRef, from: CFTypeRef, unused: CFTypeRef);
     fn IOReportCreateSubscription(
@@ -312,18 +314,25 @@ impl Kind {
         let subgroup = unsafe { IOReportChannelGetSubGroup(channel) };
         let name = unsafe { IOReportChannelGetChannelName(channel) };
 
-        if is(group, c"Energy Model") && is(name, c"GPU Energy") {
-            Some(Kind::GpuEnergy)
-        } else if is(group, c"GPU Stats")
-            && is(subgroup, c"GPU Performance States")
-            && is(name, c"GPUPH")
-        {
-            Some(Kind::GpuStates)
-        } else if is(group, c"CPU Stats") && is(subgroup, c"CPU Core Performance States") {
-            Some(Kind::CoreStates)
-        } else {
-            None
+        if is(group, c"Energy Model") {
+            if is(name, c"GPU Energy") {
+                return Some(Kind::GpuEnergy);
+            }
         }
+        if is(group, c"GPU Stats") {
+            if is(subgroup, c"GPU Performance States") {
+                if is(name, c"GPUPH") {
+                    return Some(Kind::GpuStates);
+                }
+            }
+        }
+        if is(group, c"CPU Stats") {
+            if is(subgroup, c"CPU Core Performance States") {
+                return Some(Kind::CoreStates);
+            }
+        }
+
+        None
     }
 }
 
@@ -500,7 +509,7 @@ fn channels_in_group(group: &CStr, subgroup: Option<&CStr>) -> io::Result<Owned>
     let channels = unsafe {
         IOReportCopyChannelsInGroup(
             group.0,
-            subgroup.as_ref().map_or(ptr::null(), |s| s.0),
+            subgroup.as_ref().map_or(ptr::null(), |subgroup| subgroup.0),
             0,
             0,
             0,
@@ -533,10 +542,16 @@ fn keep_read_channels(channels: &Owned, key: &Owned) -> io::Result<()> {
 
 fn channels_of(dictionary: &Owned, key: &Owned) -> io::Result<CFTypeRef> {
     let channels = unsafe { CFDictionaryGetValue(dictionary.0, key.0) };
-    if channels.is_null() || unsafe { CFGetTypeID(channels) != CFArrayGetTypeID() } {
+    if channels.is_null() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "IOReport gave no list of channels",
+        ));
+    }
+    if unsafe { CFGetTypeID(channels) } != unsafe { CFArrayGetTypeID() } {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "IOReport gave a list of channels that is not an array",
         ));
     }
 
@@ -578,11 +593,22 @@ fn string(text: &CStr) -> io::Result<Owned> {
     Owned::new(created, "creating a string")
 }
 
+/// Whether `text` is a string that holds `want`. A string the buffer cannot hold is longer than
+/// `want`, which fits it, so it is not `want`.
 fn is(text: CFTypeRef, want: &CStr) -> bool {
-    let mut buffer = [0; 64];
-    !text.is_null()
-        && unsafe { CFStringGetCString(text, buffer.as_mut_ptr(), 64, UTF8) } != 0
-        && unsafe { CStr::from_ptr(buffer.as_ptr()) } == want
+    let mut buffer = [0_u8; 64];
+    assert!(want.count_bytes() < buffer.len());
+
+    if text.is_null() {
+        return false;
+    }
+    let size = buffer.len().cast_signed();
+    let converted = unsafe { CFStringGetCString(text, buffer.as_mut_ptr().cast(), size, UTF8) };
+    if converted == 0 {
+        return false;
+    }
+
+    CStr::from_bytes_until_nul(&buffer).is_ok_and(|copied| copied == want)
 }
 
 #[cfg(test)]
