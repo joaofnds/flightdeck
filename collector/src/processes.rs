@@ -229,7 +229,7 @@ pub fn process_limit() -> io::Result<usize> {
 
 /// The process limit a `kern.maxproc` of `maxproc` gives, which allows at least this process.
 fn process_limit_of(maxproc: c_int) -> io::Result<usize> {
-    let refused = || {
+    let allows_no_process = || {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("kern.maxproc of {maxproc} allows no process"),
@@ -237,13 +237,13 @@ fn process_limit_of(maxproc: c_int) -> io::Result<usize> {
     };
 
     let Ok(limit) = usize::try_from(maxproc) else {
-        return Err(refused());
+        return Err(allows_no_process());
     };
     if limit > 0 {
         assert_eq!(Ok(maxproc), c_int::try_from(limit));
         Ok(limit)
     } else {
-        Err(refused())
+        Err(allows_no_process())
     }
 }
 
