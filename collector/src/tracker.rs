@@ -1142,6 +1142,40 @@ mod tests {
     }
 
     #[test]
+    fn refuses_an_exit_whose_pid_is_outside_the_known_table() {
+        // Goal: an exit queued for a pid the known table cannot hold is an error, rather than
+        // an exit skipped.
+        // Method: queue an exit for PID_MAX + 1 and read the exits. Every exit the kernel
+        // reports names a pid the tracker watched, so only a test queues one.
+        let mut tracker = tracker(INTERVAL);
+        tracker
+            .exits
+            .push((processes::PID_MAX + 1, Noticed::OnExit));
+
+        let read = tracker.read_exits(&mut Meter::default());
+
+        assert_eq!(io::ErrorKind::InvalidData, read.unwrap_err().kind());
+    }
+
+    #[test]
+    fn reports_an_error_a_watch_receipt_carries_besides_refused_and_gone() {
+        // Goal: a receipt that carries an error other than a refused watch or a gone process is
+        // that error.
+        // Method: register a change whose filter kqueue does not know, which draws EINVAL. Every
+        // watch the tracker builds is one kqueue takes, so only a test registers one.
+        const EINVAL: i32 = 22;
+        let mut tracker = tracker(INTERVAL);
+        tracker.changes.clear();
+        tracker
+            .changes
+            .push(Kevent::new(1, -99, EV_ADD | EV_RECEIPT, 0, 0));
+
+        let registered = tracker.submit_watches_register();
+
+        assert_eq!(Some(EINVAL), registered.unwrap_err().raw_os_error());
+    }
+
+    #[test]
     fn refuses_a_deadline_a_kevent_timer_cannot_take() {
         // Goal: a deadline past what a kevent timer's isize holds is an error, rather than a
         // timer armed at isize::MAX, which never fires.
