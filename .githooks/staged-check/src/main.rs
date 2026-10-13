@@ -1,5 +1,5 @@
 use std::env;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
 use std::os::unix::process::CommandExt;
@@ -27,7 +27,14 @@ fn main() -> ExitCode {
         }
     };
 
-    let mut outcome = check(&export);
+    let index = env::var_os("GIT_INDEX_FILE");
+    let mut outcome = check(&Check {
+        repository: Path::new("."),
+        index: index.as_deref(),
+        export: &export,
+        steps: &STEPS,
+        interrupted: &INTERRUPTED,
+    });
     let removal = fs::remove_dir_all(&export);
     // A signal after the last step's final poll would otherwise let the commit through.
     if INTERRUPTED.load(Ordering::Relaxed) {
@@ -75,29 +82,46 @@ fn create_export(temp: &Path, pid: u32) -> io::Result<PathBuf> {
     Ok(export)
 }
 
-fn check(export: &Path) -> Result<(), Refusal> {
-    assert!(export.is_absolute());
+fn check(check: &Check) -> Result<(), Refusal> {
+    assert!(check.export.is_absolute());
+    assert!(!check.steps.is_empty());
 
-    eprintln!("check: exporting the staged tree to {}", export.display());
+    eprintln!(
+        "check: exporting the staged tree to {}",
+        check.export.display()
+    );
     run(
-        &mut check_export_command(Path::new("."), export),
+        &mut check_export_command(check),
         EXPORT_LIMIT_MS,
-        &INTERRUPTED,
+        check.interrupted,
     )?;
-    for step in &STEPS {
-        eprintln!("check: cargo {}", step.arguments.join(" "));
+    for step in check.steps {
+        eprintln!("check: {} {}", step.program, step.arguments.join(" "));
         run(
-            &mut check_step_command(step, export, env::vars_os()),
+            &mut check_step_command(step, check.export, env::vars_os()),
             step.limit_ms,
-            &INTERRUPTED,
+            check.interrupted,
         )?;
     }
     Ok(())
 }
 
-// One cargo command the commit must pass, and how long it may take. A cold check of the
+// What one run of the check reads and runs.
+struct Check<'a> {
+    // Where git runs, the repository being committed.
+    repository: &'a Path,
+    // The index git names in GIT_INDEX_FILE, which `git commit -a` and `git commit <path>`
+    // point at a temporary one. None leaves git to read the repository's own.
+    index: Option<&'a OsStr>,
+    export: &'a Path,
+    steps: &'a [Step],
+    interrupted: &'a AtomicBool,
+}
+
+// One command the commit must pass, and how long it may take. A cold check of the
 // collector took 2 s on 2026-10-13, so each limit leaves wide room for a busy machine.
 struct Step {
+    program: &'static str,
     arguments: &'static [&'static str],
     limit_ms: u32,
 }
@@ -110,14 +134,17 @@ const HOOK_MANIFEST: &str = ".githooks/staged-check/Cargo.toml";
 // whole diff in fmt, so the fmt steps go without it.
 const STEPS: [Step; 6] = [
     Step {
+        program: "cargo",
         arguments: &["fmt", "--all", "--check"],
         limit_ms: 60_000,
     },
     Step {
+        program: "cargo",
         arguments: &["fmt", "--check", "--manifest-path", HOOK_MANIFEST],
         limit_ms: 60_000,
     },
     Step {
+        program: "cargo",
         arguments: &[
             "clippy",
             "--quiet",
@@ -130,6 +157,7 @@ const STEPS: [Step; 6] = [
         limit_ms: 120_000,
     },
     Step {
+        program: "cargo",
         arguments: &[
             "clippy",
             "--quiet",
@@ -144,10 +172,12 @@ const STEPS: [Step; 6] = [
         limit_ms: 120_000,
     },
     Step {
+        program: "cargo",
         arguments: &["test", "--quiet", "--locked"],
         limit_ms: 120_000,
     },
     Step {
+        program: "cargo",
         arguments: &[
             "test",
             "--quiet",
@@ -160,13 +190,13 @@ const STEPS: [Step; 6] = [
 ];
 
 // Exports the index, the tree the commit would hold, into an empty directory.
-fn check_export_command(repository: &Path, export: &Path) -> Command {
-    assert!(export.is_absolute());
+fn check_export_command(check: &Check) -> Command {
+    assert!(check.export.is_absolute());
 
     // git checkout-index puts the prefix before each path as it is, so without the closing
     // slash it would write files beside the export rather than into it.
     let mut prefix = OsString::from("--prefix=");
-    prefix.push(export);
+    prefix.push(check.export);
     prefix.push("/");
     assert!(prefix.as_encoded_bytes().starts_with(b"--prefix=/"));
     assert!(prefix.as_encoded_bytes().ends_with(b"/"));
@@ -174,35 +204,38 @@ fn check_export_command(repository: &Path, export: &Path) -> Command {
     command
         .args(["checkout-index", "--all"])
         .arg(prefix)
-        .current_dir(repository)
+        .current_dir(check.repository)
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
+    match check.index {
+        Some(index) => command.env("GIT_INDEX_FILE", index),
+        None => command.env_remove("GIT_INDEX_FILE"),
+    };
     command
 }
 
-// A step reads no input, so a test that waits on stdin fails rather than hangs.
+// A step gets the hook's environment without git's variables, so a test that runs git
+// cannot reach the repository being committed. It reads no input, so a test that waits on
+// stdin fails rather than hangs.
 fn check_step_command(
     step: &Step,
     export: &Path,
     environment: impl Iterator<Item = (OsString, OsString)>,
 ) -> Command {
-    assert!(!step.arguments.is_empty());
+    assert!(!step.program.is_empty());
     assert!(export.is_absolute());
 
-    let mut command = Command::new("cargo");
+    let mut command = Command::new(step.program);
     command
         .args(step.arguments)
         .current_dir(export)
+        .env_clear()
+        .envs(environment.filter(|(name, _)| !name.as_encoded_bytes().starts_with(b"GIT_")))
         .env("CARGO_TARGET_DIR", export.join("target"))
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
-    for (name, _) in environment {
-        if name.as_encoded_bytes().starts_with(b"GIT_") {
-            command.env_remove(name);
-        }
-    }
     assert_eq!(command.get_current_dir(), Some(export));
     command
 }
@@ -355,7 +388,6 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::OsStr;
     use std::sync::atomic::AtomicBool;
     use std::time::Instant;
 
@@ -501,26 +533,85 @@ mod tests {
         assert_eq!(fs::read_dir(&export).unwrap().count(), 0);
     }
 
+    // Goal: the first step that fails refuses the commit, and no step after it runs.
+    // Method: run a check whose steps are `false` and then a `touch` of a file in the
+    // export, and look for the file.
+    #[test]
+    fn refuses_a_commit_at_the_first_step_that_fails() {
+        let scratch = Scratch::new("refuses_a_commit");
+        let repository = scratch.repository("staged\n");
+        let export = scratch.export();
+        let touching = Step {
+            program: "touch",
+            arguments: &["touched"],
+            limit_ms: 1_000,
+        };
+
+        let outcome = check(&Check {
+            repository: &repository,
+            index: None,
+            export: &export,
+            steps: &[FAILING, touching],
+            interrupted: &NEVER_INTERRUPTED,
+        });
+
+        assert!(
+            matches!(outcome, Err(Refusal::Failed(status)) if status.code() == Some(1)),
+            "{outcome:?}"
+        );
+        assert!(!export.join("touched").exists());
+    }
+
+    // Goal: the check exports the index git names in GIT_INDEX_FILE, which `git commit -a`
+    // and `git commit <path>` point at a temporary one, rather than the repository's own.
+    // Method: stage one version of a file in the repository's index and another in a
+    // second index, run the check naming the second, and read the exported copy.
+    #[test]
+    fn exports_the_index_git_names() {
+        let scratch = Scratch::new("exports_the_index");
+        let repository = scratch.repository("own index\n");
+        let other = repository.join(".git/other-index");
+        fs::write(repository.join("file"), "other index\n").unwrap();
+        let status = git_command(&repository)
+            .env("GIT_INDEX_FILE", &other)
+            .args(["add", "file"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let export = scratch.export();
+
+        let outcome = check(&Check {
+            repository: &repository,
+            index: Some(other.as_os_str()),
+            export: &export,
+            steps: &[PASSING],
+            interrupted: &NEVER_INTERRUPTED,
+        });
+
+        assert!(outcome.is_ok(), "{outcome:?}");
+        assert_eq!(
+            fs::read_to_string(export.join("file")).unwrap(),
+            "other index\n"
+        );
+    }
+
     // Goal: the check reads what the commit would hold, never the working tree.
     // Method: in a scratch repository, stage one version of a file, change it again
-    // without staging, export, and read the exported copy.
+    // without staging, run the check, and read the exported copy.
     #[test]
     fn exports_the_staged_content_and_not_the_working_tree() {
         let scratch = Scratch::new("exports");
-        let repository = scratch.path.join("repository");
-        fs::create_dir(&repository).unwrap();
-        git(&repository, &["init", "--quiet"]);
-        fs::write(repository.join("file"), "staged\n").unwrap();
-        git(&repository, &["add", "file"]);
+        let repository = scratch.repository("staged\n");
         fs::write(repository.join("file"), "unstaged\n").unwrap();
-        let export = scratch.path.join("export");
-        fs::create_dir(&export).unwrap();
+        let export = scratch.export();
 
-        let outcome = run(
-            &mut check_export_command(&repository, &export),
-            EXPORT_LIMIT_MS,
-            &NEVER_INTERRUPTED,
-        );
+        let outcome = check(&Check {
+            repository: &repository,
+            index: None,
+            export: &export,
+            steps: &[PASSING],
+            interrupted: &NEVER_INTERRUPTED,
+        });
 
         assert!(outcome.is_ok(), "{outcome:?}");
         assert_eq!(fs::read_to_string(export.join("file")).unwrap(), "staged\n");
@@ -528,25 +619,37 @@ mod tests {
 
     // Goal: no step can reach the repository being committed through the variables git
     // hands the hook, such as a test that runs git writing to the real index.
-    // Method: build a step's command from an environment holding git's and other
-    // variables, and read which ones the command removes.
+    // Method: run `env` as a step, given an environment holding git's variables and others,
+    // and read the names of the variables it printed.
     #[test]
     fn runs_steps_without_the_variables_git_hands_the_hook() {
+        let scratch = Scratch::new("runs_steps_without");
         let environment = [
-            (
-                OsString::from("GIT_INDEX_FILE"),
-                OsString::from(".git/index.lock"),
-            ),
-            (OsString::from("PATH"), OsString::from("/usr/bin")),
-        ];
+            ("GIT_CONFIG_PARAMETERS", "'core.hooksPath'='elsewhere'"),
+            ("GIT_DIR", "/repository/.git"),
+            ("GIT_INDEX_FILE", "/repository/.git/index.lock"),
+            ("PATH", "/usr/bin:/bin"),
+            ("STEP_PROBE", "kept"),
+        ]
+        .map(|(name, value)| (OsString::from(name), OsString::from(value)));
+        let printing = Step {
+            program: "env",
+            arguments: &[],
+            limit_ms: 1_000,
+        };
 
-        let command = check_step_command(&STEPS[0], Path::new("/export"), environment.into_iter());
+        let output = check_step_command(&printing, &scratch.path, environment.into_iter())
+            .stdout(Stdio::piped())
+            .output()
+            .unwrap();
 
-        let removed: Vec<_> = command
-            .get_envs()
-            .filter(|(_, value)| value.is_none())
+        let printed = String::from_utf8(output.stdout).unwrap();
+        let mut names: Vec<_> = printed
+            .lines()
+            .map(|line| line.split_once('=').unwrap().0)
             .collect();
-        assert_eq!(removed, [(OsStr::new("GIT_INDEX_FILE"), None)]);
+        names.sort_unstable();
+        assert_eq!(names, ["CARGO_TARGET_DIR", "PATH", "STEP_PROBE"]);
     }
 
     // Goal: a refused rustfmt step shows the diff it wants, so the refusal says what to fix.
@@ -585,7 +688,36 @@ mod tests {
         }
     }
 
+    // Goal: a commit whose every step passes is let through.
+    // Method: in a scratch repository with a file staged, run a check whose one step is `true`.
+    #[test]
+    fn passes_a_commit_whose_every_step_passes() {
+        let scratch = Scratch::new("passes_a_commit");
+        let repository = scratch.repository("staged\n");
+        let export = scratch.export();
+
+        let outcome = check(&Check {
+            repository: &repository,
+            index: None,
+            export: &export,
+            steps: &[PASSING],
+            interrupted: &NEVER_INTERRUPTED,
+        });
+
+        assert!(outcome.is_ok(), "{outcome:?}");
+    }
+
     static NEVER_INTERRUPTED: AtomicBool = AtomicBool::new(false);
+    const PASSING: Step = Step {
+        program: "true",
+        arguments: &[],
+        limit_ms: 1_000,
+    };
+    const FAILING: Step = Step {
+        program: "false",
+        arguments: &[],
+        limit_ms: 1_000,
+    };
 
     // A directory of its own for one test, removed when the test ends, pass or fail.
     struct Scratch {
@@ -597,6 +729,22 @@ mod tests {
             let path = env::temp_dir().join(format!("staged-check-{}-{test}", process::id()));
             fs::create_dir(&path).unwrap();
             Scratch { path }
+        }
+
+        // A repository whose index holds one file, `file`, with the content given.
+        fn repository(&self, staged: &str) -> PathBuf {
+            let repository = self.path.join("repository");
+            fs::create_dir(&repository).unwrap();
+            git(&repository, &["init", "--quiet"]);
+            fs::write(repository.join("file"), staged).unwrap();
+            git(&repository, &["add", "file"]);
+            repository
+        }
+
+        fn export(&self) -> PathBuf {
+            let export = self.path.join("export");
+            fs::create_dir(&export).unwrap();
+            export
         }
     }
 
@@ -633,14 +781,17 @@ mod tests {
     // The test's git must not see the variables git hands a hook, or it would write to the
     // index of the repository being committed instead of the scratch one.
     fn git(repository: &Path, arguments: &[&str]) {
-        let status = Command::new("git")
-            .args(arguments)
+        let status = git_command(repository).args(arguments).status().unwrap();
+        assert!(status.success());
+    }
+
+    fn git_command(repository: &Path) -> Command {
+        let mut command = Command::new("git");
+        command
             .current_dir(repository)
             .env_remove("GIT_DIR")
             .env_remove("GIT_INDEX_FILE")
-            .env_remove("GIT_WORK_TREE")
-            .status()
-            .unwrap();
-        assert!(status.success());
+            .env_remove("GIT_WORK_TREE");
+        command
     }
 }
