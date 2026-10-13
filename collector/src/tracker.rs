@@ -788,6 +788,7 @@ mod tests {
     use super::*;
     use crate::clock;
     use crate::cost::Snapshot;
+    use crate::kernel::EINVAL;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
@@ -1307,7 +1308,6 @@ mod tests {
         // that error.
         // Method: register a change whose filter kqueue does not know, which draws EINVAL. Every
         // watch the tracker builds is one kqueue takes, so only a test registers one.
-        const EINVAL: i32 = 22;
         let mut tracker = tracker(INTERVAL);
         tracker.changes.clear();
         tracker

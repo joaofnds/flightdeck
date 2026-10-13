@@ -224,6 +224,7 @@ mod tests {
 
     use super::*;
     use crate::cost::spin_on_this_thread_for;
+    use crate::kernel::EINVAL;
 
     const COALITION_LIMIT: usize = 16;
 
@@ -415,7 +416,6 @@ mod tests {
         // Method: add this process's jetsam coalition, which is no resource coalition, so macOS
         // refuses to read its resource usage with EINVAL.
         const COALITION_TYPE_JETSAM: usize = 1;
-        const EINVAL: i32 = 22;
         let pid = std::process::id().cast_signed();
         let info = unsafe { processes::pid_info::<PidCoalitionInfo>(pid, PROC_PIDCOALITIONINFO) };
         let jetsam = info.unwrap().ok().unwrap().coalition_id[COALITION_TYPE_JETSAM];

@@ -478,6 +478,7 @@ mod tests {
 
     use super::*;
     use crate::cost::spin_on_this_thread_for;
+    use crate::kernel::EINVAL;
 
     /// A time in seconds and microseconds, as `struct timeval` declares it.
     #[repr(C)]
@@ -749,7 +750,6 @@ mod tests {
         // Goal: an errno other than EPERM and ESRCH is an error rather than a refusal, so a change
         // in macOS shows as one instead of as every process refusing.
         // Method: ask for an info flavor macOS does not have, which it refuses with EINVAL.
-        const EINVAL: i32 = 22;
         let pid = std::process::id().cast_signed();
 
         let info = unsafe { pid_info::<ProcTaskinfo>(pid, 9_999) };

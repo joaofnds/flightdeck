@@ -20,6 +20,10 @@ pub(crate) const EPERM: c_int = 1;
 /// Says no process has the pid a call named.
 pub(crate) const ESRCH: c_int = 3;
 
+/// Says a call was given an argument it does not take.
+#[cfg(test)]
+pub(crate) const EINVAL: c_int = 22;
+
 /// A time in seconds and nanoseconds, as `struct timespec` declares it.
 #[repr(C)]
 pub(crate) struct Timespec {
