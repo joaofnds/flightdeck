@@ -776,8 +776,8 @@ never to allocate after startup and names no departure for these calls. The same
 of a release build of 719b976, which read IOReport's state names and energy unit on
 every read, found 432 calls a tick, 251 of them under the names and the unit. The output
 is in `~/code/backlog/boards/flightdeck/evidence/TASK-13.4/final-guarded` on this Mac,
-outside the repository, with the counter's source and a probe that calls `malloc`,
-`calloc`, `malloc_type_malloc` and `malloc_type_calloc` 100 times each.
+outside the repository, with the counter's source and a probe that calls each of the 30
+functions 100 times, for which the counter prints 100 calls each.
 
 ## Sources
 
