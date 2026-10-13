@@ -7,6 +7,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -17,7 +18,11 @@ const BURST_CHILD_MS: u64 = 6;
 const BURST_GENERATORS: u64 = 2;
 /// How long past its own run a program may take to end before the run stops it.
 const GRACE_SECONDS: u64 = 30;
+/// How long date, sysctl or pmset may take, though each ends at once.
+const CONDITION_MS_MAX: u64 = 10_000;
 const POLL_MS: u64 = 100;
+/// Counts the report files this process has created, so that no two share a path.
+static REPORT_FILES_CREATED: AtomicU64 = AtomicU64::new(0);
 const USAGE: &str = "usage: burst_minute --rescan-ms N --per-second N -- COLLECTOR [ARGUMENT...]";
 
 fn main() -> ExitCode {
@@ -101,6 +106,7 @@ fn options_from(words: &[String]) -> Result<Options, String> {
 fn run(options: &Options) -> io::Result<()> {
     const { assert!(BURST_START_SECONDS + BURST_SECONDS < COLLECTOR_SECONDS) };
     const { assert!(BURST_GENERATORS > 0) };
+    const { assert!(CONDITION_MS_MAX >= POLL_MS) };
     assert!(!options.collector.program.is_empty());
 
     let followprobe = run_followprobe_path()?;
@@ -111,6 +117,7 @@ fn run(options: &Options) -> io::Result<()> {
         collector: ReportFile::create("collector")?,
         followprobe: ReportFile::create("followprobe")?,
     };
+    assert!(reports.collector.path != reports.followprobe.path);
     let minute = run_minute(options, &followprobe, &reports);
 
     // Both reports are written whatever the minute's outcome, since a program that failed
@@ -124,30 +131,23 @@ fn run(options: &Options) -> io::Result<()> {
 /// Runs the collector for its minute with followprobe's burst inside it. Once both have
 /// ended, fails with the collector's failure, else with followprobe's.
 fn run_minute(options: &Options, followprobe: &Path, reports: &Reports) -> io::Result<()> {
-    let program = &options.collector.program;
-    let mut collector = match Command::new(program)
-        .args(run_collector_arguments(&options.collector))
-        .stdin(Stdio::null())
-        .stdout(reports.collector.stdio()?)
-        .stderr(reports.collector.stdio()?)
-        .spawn()
-    {
-        Ok(collector) => collector,
-        Err(error) => return Err(run_start_error(program, &error)),
-    };
+    let mut collector = StartedProcess::start(
+        "collector",
+        Command::new(&options.collector.program)
+            .args(run_collector_arguments(&options.collector))
+            .stdin(Stdio::null())
+            .stdout(reports.collector.stdio()?)
+            .stderr(reports.collector.stdio()?),
+    )?;
 
     thread::sleep(Duration::from_secs(BURST_START_SECONDS));
-    let burst = match collector.try_wait()? {
+    let burst = match collector.child.try_wait()? {
         Some(status) => Err(io::Error::other(format!(
             "the collector ended before the burst, {status}"
         ))),
         None => run_burst(options, followprobe, &reports.followprobe),
     };
-    let minute = run_wait(
-        &mut collector,
-        "collector",
-        (COLLECTOR_SECONDS + GRACE_SECONDS) * 1000,
-    );
+    let minute = collector.wait((COLLECTOR_SECONDS + GRACE_SECONDS) * 1000);
 
     minute?;
     burst
@@ -155,27 +155,16 @@ fn run_minute(options: &Options, followprobe: &Path, reports: &Reports) -> io::R
 
 /// Runs followprobe for the burst and waits for it to end.
 fn run_burst(options: &Options, followprobe: &Path, report: &ReportFile) -> io::Result<()> {
-    let mut child = match Command::new(followprobe)
-        .args(run_followprobe_arguments(options))
-        .stdin(Stdio::null())
-        .stdout(report.stdio()?)
-        .stderr(report.stdio()?)
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(error) => return Err(run_start_error(&followprobe.display().to_string(), &error)),
-    };
-
-    run_wait(
-        &mut child,
+    let mut probe = StartedProcess::start(
         "followprobe",
-        (BURST_SECONDS + GRACE_SECONDS) * 1000,
-    )
-}
+        Command::new(followprobe)
+            .args(run_followprobe_arguments(options))
+            .stdin(Stdio::null())
+            .stdout(report.stdio()?)
+            .stderr(report.stdio()?),
+    )?;
 
-/// Names the program that could not start, which the operating system's error leaves out.
-fn run_start_error(program: &str, error: &io::Error) -> io::Error {
-    io::Error::new(error.kind(), format!("cannot start {program}: {error}"))
+    probe.wait((BURST_SECONDS + GRACE_SECONDS) * 1000)
 }
 
 /// Lists the collector's arguments, its own and then the minute it runs for.
@@ -199,35 +188,6 @@ fn run_followprobe_arguments(options: &Options) -> [String; 5] {
         BURST_GENERATORS,
     ]
     .map(|number| number.to_string())
-}
-
-/// Waits up to `limit_ms` for `child` to end, then stops it. Fails unless the child ended
-/// within the limit and succeeded.
-fn run_wait(child: &mut Child, name: &str, limit_ms: u64) -> io::Result<()> {
-    const { assert!(POLL_MS > 0) };
-    assert!(limit_ms >= POLL_MS);
-
-    for _ in 0..limit_ms.div_ceil(POLL_MS) {
-        match child.try_wait()? {
-            Some(status) => return run_status(name, status),
-            None => thread::sleep(Duration::from_millis(POLL_MS)),
-        }
-    }
-
-    child.kill()?;
-    let status = child.wait()?;
-    Err(io::Error::new(
-        io::ErrorKind::TimedOut,
-        format!("{name} ran past {limit_ms} ms and was stopped, {status}"),
-    ))
-}
-
-fn run_status(name: &str, status: ExitStatus) -> io::Result<()> {
-    if status.success() {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!("{name}: {status}")))
-    }
 }
 
 /// Finds the `followprobe` built beside this program, in the same target directory.
@@ -262,21 +222,28 @@ fn run_write_conditions(stdout: &mut impl Write) -> io::Result<()> {
     stdout.flush()
 }
 
-/// Runs a program to its end and returns what it wrote to standard output, or fails with
-/// its status and what it wrote to standard error.
-fn run_command_stdout(program: &str, arguments: &[&str]) -> io::Result<Vec<u8>> {
-    let output = Command::new(program)
-        .args(arguments)
-        .stdin(Stdio::null())
-        .output()?;
-    if output.status.success() {
-        Ok(output.stdout)
-    } else {
-        Err(io::Error::other(format!(
-            "{program}: {}\n{}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr)
-        )))
+/// Runs a program to its end, within `CONDITION_MS_MAX`, and returns what it wrote to
+/// standard output, or fails with its status and what it wrote to standard error.
+fn run_command_stdout(program: &'static str, arguments: &[&str]) -> io::Result<Vec<u8>> {
+    assert!(program.starts_with('/'));
+
+    let output = ReportFile::create("output")?;
+    let errors = ReportFile::create("errors")?;
+    let mut process = StartedProcess::start(
+        program,
+        Command::new(program)
+            .args(arguments)
+            .stdin(Stdio::null())
+            .stdout(output.stdio()?)
+            .stderr(errors.stdio()?),
+    )?;
+
+    match process.wait(CONDITION_MS_MAX) {
+        Ok(()) => output.read(),
+        Err(error) => Err(io::Error::new(
+            error.kind(),
+            format!("{error}\n{}", String::from_utf8_lossy(&errors.read()?)),
+        )),
     }
 }
 
@@ -296,7 +263,82 @@ struct Reports {
     followprobe: ReportFile,
 }
 
-/// A file in the temporary directory that one program writes its report to, removed when
+/// A process the run started. Dropping it stops the process and waits for it, so no way out
+/// of the run leaves it running.
+struct StartedProcess {
+    name: &'static str,
+    child: Child,
+}
+
+impl StartedProcess {
+    /// Starts `command`, or fails naming its program, which the operating system's error
+    /// leaves out.
+    fn start(name: &'static str, command: &mut Command) -> io::Result<StartedProcess> {
+        assert!(!name.is_empty());
+
+        match command.spawn() {
+            Ok(child) => Ok(StartedProcess { name, child }),
+            Err(error) => Err(io::Error::new(
+                error.kind(),
+                format!("cannot start {}: {error}", command.get_program().display()),
+            )),
+        }
+    }
+
+    /// Waits up to `limit_ms` for the process to end, then stops it. Fails unless the process
+    /// ended within the limit and succeeded.
+    fn wait(&mut self, limit_ms: u64) -> io::Result<()> {
+        const { assert!(POLL_MS > 0) };
+        assert!(limit_ms >= POLL_MS);
+
+        for _ in 0..limit_ms.div_ceil(POLL_MS) {
+            match self.child.try_wait()? {
+                Some(status) => return self.wait_status(status),
+                None => thread::sleep(Duration::from_millis(POLL_MS)),
+            }
+        }
+
+        self.child.kill()?;
+        let status = self.child.wait()?;
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!(
+                "{} ran past {limit_ms} ms and was stopped, {status}",
+                self.name
+            ),
+        ))
+    }
+
+    fn wait_status(&self, status: ExitStatus) -> io::Result<()> {
+        if status.success() {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!("{}: {status}", self.name)))
+        }
+    }
+}
+
+impl Drop for StartedProcess {
+    fn drop(&mut self) {
+        match self.child.try_wait() {
+            Ok(Some(_)) => {}
+            Ok(None) => match self.child.kill() {
+                Ok(()) => {
+                    if let Err(error) = self.child.wait() {
+                        eprintln!("burst_minute: cannot wait for {}: {error}", self.name);
+                    }
+                }
+                Err(error) => eprintln!("burst_minute: cannot stop {}: {error}", self.name),
+            },
+            Err(error) => eprintln!(
+                "burst_minute: cannot tell whether {} ended: {error}",
+                self.name
+            ),
+        }
+    }
+}
+
+/// A file in the temporary directory that a program writes its output to, removed when
 /// dropped.
 struct ReportFile {
     path: PathBuf,
@@ -305,15 +347,21 @@ struct ReportFile {
 
 impl ReportFile {
     fn create(name: &str) -> io::Result<ReportFile> {
-        let path =
-            std::env::temp_dir().join(format!("burst_minute-{}-{name}.txt", std::process::id()));
+        assert!(!name.is_empty());
+        assert!(!name.contains('/'));
+
+        let sequence = REPORT_FILES_CREATED.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "burst_minute-{}-{sequence}-{name}.txt",
+            std::process::id()
+        ));
         let file = OpenOptions::new()
             .read(false)
             .write(true)
             .append(false)
-            .truncate(true)
-            .create(true)
-            .create_new(false)
+            .truncate(false)
+            .create(false)
+            .create_new(true)
             .open(&path)?;
 
         Ok(ReportFile { path, file })
@@ -345,6 +393,7 @@ impl Drop for ReportFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
     fn arguments(words: &[&str]) -> Vec<String> {
         words.iter().map(|&word| word.to_owned()).collect()
@@ -488,15 +537,40 @@ mod tests {
     }
 
     #[test]
+    fn returns_what_a_program_wrote_to_standard_output() {
+        // Goal: a program that succeeds gives what it wrote to standard output, and nothing it
+        // wrote to standard error.
+        // Method: a shell that writes a line to each.
+        let output = run_command_stdout("/bin/sh", &["-c", "echo out; echo noise >&2"]);
+
+        assert_eq!(output.unwrap(), b"out\n");
+    }
+
+    #[test]
+    fn reports_what_a_failed_program_wrote_to_standard_error() {
+        // Goal: a program that fails is reported by its status and by what it wrote to
+        // standard error, which says why.
+        // Method: a shell that writes a line to standard error and exits 3.
+        let output = run_command_stdout("/bin/sh", &["-c", "echo out; echo why >&2; exit 3"]);
+
+        assert_eq!(
+            output.unwrap_err().to_string(),
+            "/bin/sh: exit status: 3\nwhy\n"
+        );
+    }
+
+    #[test]
     fn waits_for_a_program_that_ends_within_its_limit() {
         // Goal: a program that succeeds within its limit passes, and one that fails is
         // reported by its status.
         // Method: `true` and `false`, each with a second to end.
-        let mut success = Command::new("/usr/bin/true").spawn().unwrap();
-        let mut failure = Command::new("/usr/bin/false").spawn().unwrap();
+        let mut success =
+            StartedProcess::start("true", &mut Command::new("/usr/bin/true")).unwrap();
+        let mut failure =
+            StartedProcess::start("false", &mut Command::new("/usr/bin/false")).unwrap();
 
-        let succeeded = run_wait(&mut success, "true", 1000);
-        let failed = run_wait(&mut failure, "false", 1000);
+        let succeeded = success.wait(1000);
+        let failed = failure.wait(1000);
 
         assert!(succeeded.is_ok(), "{succeeded:?}");
         assert_eq!(failed.unwrap_err().to_string(), "false: exit status: 1");
@@ -506,11 +580,46 @@ mod tests {
     fn stops_a_program_past_its_limit() {
         // Goal: a program that runs past its limit is stopped, and the run fails as timed out.
         // Method: a sleep of ten seconds given a fifth of a second.
-        let mut sleep = Command::new("/bin/sleep").arg("10").spawn().unwrap();
+        let mut sleep = Command::new("/bin/sleep");
+        let mut process = StartedProcess::start("sleep", sleep.arg("10")).unwrap();
 
-        let waited = run_wait(&mut sleep, "sleep", 200);
+        let waited = process.wait(200);
 
         assert_eq!(waited.unwrap_err().kind(), io::ErrorKind::TimedOut);
-        assert!(sleep.try_wait().unwrap().is_some());
+        assert!(process.child.try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    fn stops_a_running_program_when_dropped() {
+        // Goal: no way out of the run, an error returned early included, leaves a program it
+        // started running, or waits for it to end on its own.
+        // Method: drop a sleep of ten seconds, time the drop, then ask ps for its pid, which
+        // ps finds only while the process exists.
+        let mut sleep = Command::new("/bin/sleep");
+        let process = StartedProcess::start("sleep", sleep.arg("10")).unwrap();
+        let pid = process.child.id().to_string();
+        let started = Instant::now();
+
+        drop(process);
+
+        let elapsed = started.elapsed();
+        let listed = Command::new("/bin/ps").args(["-p", &pid]).output().unwrap();
+        assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
+        assert!(!listed.status.success(), "{listed:?}");
+    }
+
+    #[test]
+    fn names_a_program_that_cannot_start() {
+        // Goal: a program that cannot start is named, which the operating system's error
+        // leaves out.
+        // Method: a program at a path that does not exist.
+        let mut missing = Command::new("/nonexistent/collector");
+
+        let started = StartedProcess::start("collector", &mut missing);
+
+        assert_eq!(
+            started.err().unwrap().to_string(),
+            "cannot start /nonexistent/collector: No such file or directory (os error 2)"
+        );
     }
 }
