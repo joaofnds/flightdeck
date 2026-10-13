@@ -1,17 +1,18 @@
 use std::ffi::c_int;
-use std::io;
+use std::io::{self, Write};
 use std::num::NonZeroU64;
 use std::process::ExitCode;
 use std::time::Duration;
 
 use collector::clock::{self, Timebase};
 use collector::collector::Collector;
-use collector::cost::{Meter, Snapshot, Source};
+use collector::cost::{Cost, Meter, Snapshot, Source};
 use collector::processes::{Unreadable, Usage};
 use collector::schedule::Schedule;
 use collector::tracker::{Counts, Event, Noticed};
 
 const QOS_CLASS_DEFAULT: u32 = 0x15;
+const TICK_PERIOD_NS: u64 = 1_000_000_000;
 const TICKS_PER_WINDOW: u64 = 10;
 const TICKS_PER_MINUTE: u64 = 60;
 const PID_LAP: u64 = 99_999;
@@ -73,63 +74,22 @@ fn run(options: &Options) -> io::Result<()> {
     set_qos_class_default()?;
 
     let timebase = Timebase::read();
-    let mut meter = Meter::default();
     let first_marker_pid = throwaway_child();
-    let mut collector = Collector::new(timebase, options.rescan_interval)?;
-    let live_at_first_scan = collector.tracker.last_listing().to_vec();
-    let schedule = Schedule::new(clock::now(), timebase.ticks(1_000_000_000));
-
-    report_start(&meter, timebase)?;
-
-    collector.wait_until(schedule.deadline(0), &mut meter)?;
-    collector.read(&mut meter)?;
-    let warm_up_starts = starts_in(&collector.events);
-
-    let mut tick = schedule.first_ahead_of(clock::now()).max(1);
-    let start = Mark::take(&meter, timebase, &collector)?;
-    let mut whole = Span::begin(start, tick);
-    let mut minute = Span::begin(start, tick);
-    let mut window = Span::begin(start, tick);
+    let mut out = io::stdout().lock();
+    let mut run = Run::start(timebase, TICK_PERIOD_NS, options.rescan_interval, &mut out)?;
+    let mut tick = run.first_tick;
     loop {
-        let deadline = schedule.deadline(tick);
-        collector.wait_until(deadline, &mut meter)?;
-        let late = Duration::from_nanos(timebase.nanos(clock::now().saturating_sub(deadline)));
-        collector.read(&mut meter)?;
-
-        let following = schedule.first_ahead_of(clock::now()).max(tick + 1);
-        let slips = following - tick - 1;
-        whole.tally.add(late, slips, &collector);
-        minute.tally.add(late, slips, &collector);
-        window.tally.add(late, slips, &collector);
-
-        if closes_span(tick, following, TICKS_PER_WINDOW) {
-            let now = Mark::take(&meter, timebase, &collector)?;
-            window.report("ticks", tick, &now);
-            window = Span::begin(now, following);
-        }
-        if closes_span(tick, following, TICKS_PER_MINUTE) {
-            let now = Mark::take(&meter, timebase, &collector)?;
-            minute.report("minute, ticks", tick, &now);
-            minute = Span::begin(now, following);
-        }
-
+        let following = run.tick(tick, &mut out)?;
         if options
             .seconds
             .is_some_and(|seconds| following > seconds.get())
         {
             let last_marker_pid = throwaway_child();
-            let end = Mark::take(&meter, timebase, &collector)?;
-            whole.report("whole run, ticks", tick, &end);
-            match (&first_marker_pid, &last_marker_pid) {
-                (Ok(first), Ok(last)) => report_missed(
-                    processes_started(*first, *last, &live_at_first_scan, end.counts.forks),
-                    warm_up_starts + whole.tally.starts,
-                ),
-                (Err(error), _) | (_, Err(error)) => {
-                    println!("  processes missed are not counted, a marker child failed: {error}");
-                }
-            }
-            return Ok(());
+            let markers = Markers {
+                first: first_marker_pid,
+                last: last_marker_pid,
+            };
+            return run.finish(tick, &markers, &mut out);
         }
 
         tick = following;
@@ -144,13 +104,118 @@ fn set_qos_class_default() -> io::Result<()> {
     Ok(())
 }
 
-fn report_start(meter: &Meter, timebase: Timebase) -> io::Result<()> {
+/// The collector and what a run keeps from one tick to the next.
+struct Run {
+    timebase: Timebase,
+    schedule: Schedule,
+    meter: Meter,
+    collector: Collector,
+    live_at_first_scan: Vec<i32>,
+    warm_up_starts: u64,
+    first_tick: u64,
+    whole: Span,
+    minute: Span,
+    window: Span,
+}
+
+/// The pids of the children spawned before the first scan and after the last tick, which
+/// bound the pids of the processes that started over the run.
+struct Markers {
+    first: io::Result<i32>,
+    last: io::Result<i32>,
+}
+
+impl Run {
+    /// Starts the collector, reports what starting cost, and runs the warm-up tick, which
+    /// no report counts.
+    fn start(
+        timebase: Timebase,
+        tick_period_ns: u64,
+        rescan_interval: Duration,
+        out: &mut impl Write,
+    ) -> io::Result<Self> {
+        let mut meter = Meter::default();
+        let mut collector = Collector::new(timebase, rescan_interval)?;
+        let live_at_first_scan = collector.tracker.last_listing().to_vec();
+        let schedule = Schedule::new(clock::now(), timebase.ticks(tick_period_ns));
+
+        report_start(out, &meter, timebase)?;
+
+        collector.wait_until(schedule.deadline(0), &mut meter)?;
+        collector.read(&mut meter)?;
+        let warm_up_starts = starts_in(&collector.events);
+
+        let first_tick = schedule.first_ahead_of(clock::now()).max(1);
+        let start = Mark::take(&meter, timebase, &collector)?;
+        Ok(Self {
+            timebase,
+            schedule,
+            meter,
+            collector,
+            live_at_first_scan,
+            warm_up_starts,
+            first_tick,
+            whole: Span::begin(start, first_tick),
+            minute: Span::begin(start, first_tick),
+            window: Span::begin(start, first_tick),
+        })
+    }
+
+    /// Runs `tick`, writes the reports of the spans it closes, and returns the tick that
+    /// follows it, past any tick the run slipped.
+    fn tick(&mut self, tick: u64, out: &mut impl Write) -> io::Result<u64> {
+        let deadline = self.schedule.deadline(tick);
+        self.collector.wait_until(deadline, &mut self.meter)?;
+        let late_ticks = clock::now().saturating_sub(deadline);
+        let late = Duration::from_nanos(self.timebase.nanos(late_ticks));
+        self.collector.read(&mut self.meter)?;
+
+        let following = self.schedule.first_ahead_of(clock::now()).max(tick + 1);
+        let slips = following - tick - 1;
+        self.whole.tally.add(late, slips, &self.collector);
+        self.minute.tally.add(late, slips, &self.collector);
+        self.window.tally.add(late, slips, &self.collector);
+
+        if closes_span(tick, following, TICKS_PER_WINDOW) {
+            let now = Mark::take(&self.meter, self.timebase, &self.collector)?;
+            self.window.report(out, "ticks", tick, &now)?;
+            self.window = Span::begin(now, following);
+        }
+        if closes_span(tick, following, TICKS_PER_MINUTE) {
+            let now = Mark::take(&self.meter, self.timebase, &self.collector)?;
+            self.minute.report(out, "minute, ticks", tick, &now)?;
+            self.minute = Span::begin(now, following);
+        }
+
+        Ok(following)
+    }
+
+    /// Writes the whole run's report, which ends at `last_tick`, and the processes it missed.
+    fn finish(&self, last_tick: u64, markers: &Markers, out: &mut impl Write) -> io::Result<()> {
+        let end = Mark::take(&self.meter, self.timebase, &self.collector)?;
+        self.whole
+            .report(out, "whole run, ticks", last_tick, &end)?;
+        match (&markers.first, &markers.last) {
+            (Ok(first), Ok(last)) => report_missed(
+                out,
+                processes_started(*first, *last, &self.live_at_first_scan, end.counts.forks),
+                self.warm_up_starts + self.whole.tally.starts,
+            ),
+            (Err(error), _) | (_, Err(error)) => writeln!(
+                out,
+                "  processes missed are not counted, a marker child failed: {error}"
+            ),
+        }
+    }
+}
+
+fn report_start(out: &mut impl Write, meter: &Meter, timebase: Timebase) -> io::Result<()> {
     let snapshot = Snapshot::take(meter, timebase)?;
-    println!(
+    writeln!(
+        out,
         "started in {:.1} ms of CPU",
         milliseconds(Duration::from_nanos(snapshot.cpu_ns))
-    );
-    Ok(())
+    )
 }
 
 struct Span {
@@ -168,13 +233,22 @@ impl Span {
         }
     }
 
-    fn report(&self, label: &str, last_tick: u64, end: &Mark) {
-        report(
-            &format!("{label} {}-{last_tick}", self.first_tick),
-            &self.start,
-            end,
-            &self.tally,
-        );
+    /// Writes what the span's ticks, `first_tick` to `last_tick`, cost and counted, with
+    /// `end` taken after its last tick.
+    fn report(
+        &self,
+        out: &mut impl Write,
+        label: &str,
+        last_tick: u64,
+        end: &Mark,
+    ) -> io::Result<()> {
+        let cost = end.snapshot.cost_since(&self.start.snapshot);
+        let counts = end.counts.since(self.start.counts);
+
+        write!(out, "{label} {}-{last_tick}: ", self.first_tick)?;
+        report_cost(out, &cost, &self.tally)?;
+        report_sources(out, &cost)?;
+        report_counts(out, &self.tally, &counts)
     }
 }
 
@@ -222,12 +296,14 @@ fn missed(started: Option<u64>, found: u64) -> Option<u64> {
     started.and_then(|started| started.checked_sub(found))
 }
 
-fn report_missed(started: Option<u64>, found: u64) {
+fn report_missed(out: &mut impl Write, started: Option<u64>, found: u64) -> io::Result<()> {
     match (started, missed(started, found)) {
-        (Some(started), Some(missed)) => {
-            println!("  processes started over the run {started}, found {found}, missed {missed}");
-        }
-        _ => println!(
+        (Some(started), Some(missed)) => writeln!(
+            out,
+            "  processes started over the run {started}, found {found}, missed {missed}"
+        ),
+        _ => writeln!(
+            out,
             "  pids may have wrapped over the run, so the processes missed are not counted"
         ),
     }
@@ -329,12 +405,11 @@ impl std::fmt::Display for Exits {
     }
 }
 
-fn report(label: &str, earlier: &Mark, later: &Mark, tally: &Tally) {
-    let cost = later.snapshot.cost_since(&earlier.snapshot);
-    let counts = later.counts.since(earlier.counts);
+fn report_cost(out: &mut impl Write, cost: &Cost, tally: &Tally) -> io::Result<()> {
     let share = cost.share_of_a_core();
-    println!(
-        "{label}: CPU {:.2}% of a core, {:.0}% of the budget, {:.2} mW, \
+    writeln!(
+        out,
+        "CPU {:.2}% of a core, {:.0}% of the budget, {:.2} mW, \
          {:.0}% of instructions on Super cores; \
          ticks late {:.1} ms on average, {:.1} ms at most, {} slips",
         share * 100.0,
@@ -344,18 +419,20 @@ fn report(label: &str, earlier: &Mark, later: &Mark, tally: &Tally) {
         milliseconds(tally.late_total / u32::try_from(tally.ticks.max(1)).unwrap_or(u32::MAX)),
         milliseconds(tally.late_max),
         tally.slips,
-    );
+    )
+}
 
-    let sources: Vec<String> = Source::ALL
-        .iter()
-        .map(|&source| format!("{} {:.2}", source.name(), cost.ms_per_second(source)))
-        .collect();
-    println!(
-        "  ms of CPU a second: {}, unattributed {:.2}",
-        sources.join(", "),
-        cost.unattributed_ms_per_second()
-    );
-    println!(
+fn report_sources(out: &mut impl Write, cost: &Cost) -> io::Result<()> {
+    write!(out, "  ms of CPU a second: ")?;
+    for source in Source::ALL {
+        write!(out, "{} {:.2}, ", source.name(), cost.ms_per_second(source))?;
+    }
+    writeln!(out, "unattributed {:.2}", cost.unattributed_ms_per_second())
+}
+
+fn report_counts(out: &mut impl Write, tally: &Tally, counts: &Counts) -> io::Result<()> {
+    writeln!(
+        out,
         "  last tick read {} processes ({} refused, {} gone), {} coalitions, {} CPUs, \
          {} interfaces; over the window {} forks, \
          {} rescans ({} leading, {} trailing, {} listing), \
@@ -376,7 +453,7 @@ fn report(label: &str, earlier: &Mark, later: &Mark, tally: &Tally) {
         tally.execs,
         tally.seen_exiting,
         tally.found_exited,
-    );
+    )
 }
 
 fn milliseconds(duration: Duration) -> f64 {
