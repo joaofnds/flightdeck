@@ -15,6 +15,8 @@ and socket was doing. Every number below was measured on this M5 Pro on 2026-10-
 - The collector runs without root. Root may come later as an option the user turns on
   in the app.
 - A kernel panic or a power loss may lose the minute not yet sealed.
+- The collector stays in Rust ("agree, stay in rust", 2026-10-13). Measured against
+  Zig, performance did not decide between the two, as Rust against Zig below shows.
 
 Without root and once a second, the collector in Rust measured 2.29% and 1.75% of a core
 and 37.5 and 21.7 mW over two five-minute runs of this Mac's use. Seven of their ten
@@ -121,8 +123,7 @@ the same wake, which may explain the gap but was not tested. These figures compa
 two languages and do not give the sweep's cost. Only CPU time was compared, not energy,
 memory or startup.
 
-On this evidence performance does not decide between the two languages, and whether to
-move to Zig is open.
+On this evidence performance does not decide between the two languages.
 
 ## Collecting once a second
 
