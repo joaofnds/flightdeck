@@ -5,7 +5,12 @@ its helper processes. Processes outside any bundle group by executable name, so 
 `claude` processes are one app.
 
 **Process**: one running program, identified by its pid. macOS reuses pids, so a pid can
-name a new process once the old one exits.
+name a new process once the old one exits. A process that replaces its own program
+(`exec`) keeps its pid and stays the same process.
+
+**Fork**: one process starting another, whether by copying itself (`fork`) or by starting
+another program in one step (`posix_spawn`). An `exec` starts no new process, so it is not
+a fork.
 
 **Super cores and performance cores**: the two CPU core clusters of the M5 Pro. Super
 cores are the faster cluster. macOS names them in `sysctl hw.perflevel0.name` and
