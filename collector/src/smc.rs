@@ -301,11 +301,15 @@ mod tests {
 
     #[test]
     fn reads_the_power_the_mac_draws() {
+        // Goal: the SMC's system power reads as a draw a running Mac can have.
+        // Method: one read, held above zero and below 500 W. An idle M5 Pro on AC power has
+        // read 0.73 W, so the floor is zero.
         let mut smc = Smc::open().unwrap();
 
         smc.read().unwrap();
 
-        assert!(smc.watts > 1.0 && smc.watts < 500.0, "{} W", smc.watts);
+        assert!(smc.watts > 0.0, "{} W", smc.watts);
+        assert!(smc.watts < 500.0, "{} W", smc.watts);
     }
 
     #[test]
