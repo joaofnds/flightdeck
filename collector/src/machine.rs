@@ -361,6 +361,8 @@ mod tests {
 
     #[test]
     fn refuses_more_cpus_than_its_limit_without_growing() {
+        // Goal: macOS reporting more CPUs than the limit is an error, and the list keeps its room.
+        // Method: read this Mac, which has more than one CPU, into room for one.
         let mut machine = Machine::new(1).unwrap();
 
         let read = machine.read();

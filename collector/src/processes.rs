@@ -509,6 +509,8 @@ mod tests {
 
     #[test]
     fn reads_a_listing_into_room_taken_at_startup() {
+        // Goal: a sweep reads a whole listing into the room it took at startup.
+        // Method: sweep this Mac's listing and compare the readings' room with the process limit.
         let limit = process_limit().unwrap();
         let mut pids = pid_list(limit);
         list_pids(&mut pids).unwrap();

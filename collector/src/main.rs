@@ -673,6 +673,8 @@ mod tests {
 
     #[test]
     fn reports_the_events_dropped_from_a_full_event_list_by_kind() {
+        // Goal: a window's report names the starts, execs and exits a full event list dropped.
+        // Method: write the counts line for a window with a drop of each kind.
         let counts = Counts {
             dropped_starts: 2,
             dropped_execs: 1,
@@ -690,6 +692,8 @@ mod tests {
 
     #[test]
     fn reports_the_dropped_starts_among_the_processes_missed() {
+        // Goal: the run's report counts a dropped start once, among the processes missed.
+        // Method: write the missed line for a run that found 7 of 10 starts and dropped 2.
         let mut written = Vec::new();
 
         report_missed(&mut written, Some(10), 7, 2).unwrap();

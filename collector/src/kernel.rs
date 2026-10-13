@@ -137,6 +137,8 @@ mod tests {
 
     #[test]
     fn reads_kernel_state_of_the_size_asked_for() {
+        // Goal: kernel state read as a type of its size gives the value the kernel holds.
+        // Method: read hw.logicalcpu as a u32 and compare it with its raw bytes.
         let cpus: u32 = Sysctl::named(c"hw.logicalcpu").unwrap().read().unwrap();
 
         assert_eq!(u32::from_ne_bytes(sysctl_bytes(c"hw.logicalcpu")), cpus);
@@ -144,6 +146,8 @@ mod tests {
 
     #[test]
     fn refuses_kernel_state_of_another_size() {
+        // Goal: kernel state read as a type of another size is an error, never a reading.
+        // Method: read hw.logicalcpu, which is 4 bytes, as a u64.
         let read = Sysctl::named(c"hw.logicalcpu").unwrap().read::<u64>();
 
         assert_eq!(io::ErrorKind::InvalidData, read.unwrap_err().kind());

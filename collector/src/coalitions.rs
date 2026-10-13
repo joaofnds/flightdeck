@@ -194,6 +194,8 @@ mod tests {
 
     #[test]
     fn refuses_a_coalition_past_its_limit_without_growing() {
+        // Goal: a coalition past the limit is an error, and the list keeps the room it was given.
+        // Method: fill a set with room for one coalition, then add a second.
         let mut coalitions = Coalitions::new(Timebase::read(), 1);
         coalitions.add(1).unwrap();
 
@@ -205,6 +207,8 @@ mod tests {
 
     #[test]
     fn adds_a_coalition_it_holds_already_at_its_limit() {
+        // Goal: a full set still takes a coalition it holds, since holding it again takes no room.
+        // Method: fill a set with room for one coalition, then add that one again.
         let mut coalitions = Coalitions::new(Timebase::read(), 1);
         coalitions.add(1).unwrap();
 

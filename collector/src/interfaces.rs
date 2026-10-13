@@ -304,6 +304,9 @@ mod tests {
 
     #[test]
     fn refuses_a_dump_larger_than_its_buffer_without_growing_it() {
+        // Goal: an interface dump larger than the buffer is an error, and the buffer keeps the
+        // size it was given.
+        // Method: read into a buffer that holds one message's prefix, smaller than any dump.
         let mut interfaces = Interfaces::with_dump_size(MESSAGE_PREFIX_SIZE);
 
         let read = interfaces.read_all();

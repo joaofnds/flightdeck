@@ -362,6 +362,8 @@ mod tests {
 
     #[test]
     fn refuses_more_cores_than_its_cpu_limit() {
+        // Goal: IOReport reporting more cores than the CPU limit is an error.
+        // Method: open with a limit of one CPU and read this Mac, which has more.
         let mut ioreport = IoReport::open(Timebase::read(), 1).unwrap();
 
         let read = ioreport.read();
@@ -371,6 +373,9 @@ mod tests {
 
     #[test]
     fn refuses_a_channel_with_more_active_states_than_its_room() {
+        // Goal: a channel with more active states than the room taken for them is an error, and
+        // the list keeps that room.
+        // Method: read a core's channel on this Mac, which has many states, into room for one.
         let ioreport = open();
         let samples = Owned(unsafe {
             IOReportCreateSamples(ioreport.subscription.0, ioreport.subscribed.0, ptr::null())

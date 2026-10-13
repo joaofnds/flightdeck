@@ -632,6 +632,8 @@ mod tests {
 
     #[test]
     fn keeps_an_event_while_the_tick_has_room_for_it() {
+        // Goal: an event is kept while the tick's list has room for it, and nothing is dropped.
+        // Method: record one event into a list with room for one.
         let mut events = Vec::with_capacity(1);
         let mut counts = Counts::default();
 
@@ -643,6 +645,9 @@ mod tests {
 
     #[test]
     fn drops_a_start_past_the_bound_and_counts_it() {
+        // Goal: a start past the tick's bound is dropped and counted as a start, and the list
+        // keeps its room.
+        // Method: record a start into a full list with room for one.
         let mut events = full_event_list();
         let mut counts = Counts::default();
 
@@ -662,6 +667,9 @@ mod tests {
 
     #[test]
     fn drops_an_exec_past_the_bound_and_counts_it() {
+        // Goal: an exec past the tick's bound is dropped and counted as an exec, and the list
+        // keeps its room.
+        // Method: record an exec into a full list with room for one.
         let mut events = full_event_list();
         let mut counts = Counts::default();
 
@@ -677,6 +685,9 @@ mod tests {
 
     #[test]
     fn drops_an_exit_past_the_bound_and_counts_it() {
+        // Goal: an exit past the tick's bound is dropped and counted as an exit, and the list
+        // keeps its room.
+        // Method: record an exit into a full list with room for one.
         let mut events = full_event_list();
         let mut counts = Counts::default();
 
@@ -697,6 +708,9 @@ mod tests {
 
     #[test]
     fn refuses_a_listed_pid_past_the_pid_ceiling() {
+        // Goal: a listed pid past the pid ceiling is an error, since the known table cannot
+        // hold it.
+        // Method: observe a listing that holds PID_MAX + 1.
         let mut tracker = Tracker::new(Timebase::read(), INTERVAL, process_limit()).unwrap();
 
         let observed = tracker.observe(&[processes::PID_MAX + 1], &mut Meter::default());
@@ -706,6 +720,8 @@ mod tests {
 
     #[test]
     fn refuses_a_negative_listed_pid() {
+        // Goal: a negative listed pid is an error, since the known table cannot hold it.
+        // Method: observe a listing that holds -1.
         let mut tracker = Tracker::new(Timebase::read(), INTERVAL, process_limit()).unwrap();
 
         let observed = tracker.observe(&[-1], &mut Meter::default());
@@ -881,6 +897,9 @@ mod tests {
 
     #[test]
     fn reports_a_pid_first_seen_in_a_listing_as_a_start() {
+        // Goal: a pid first seen in a listing, with no fork the tracker caught, is reported as a
+        // start.
+        // Method: observe this Mac's listing with PID_MAX added to it.
         let mut tracker = Tracker::new(Timebase::read(), INTERVAL, process_limit()).unwrap();
         let mut listing = processes::pid_list(process_limit());
         processes::list_pids(&mut listing).unwrap();
