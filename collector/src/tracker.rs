@@ -78,6 +78,15 @@ pub struct Counts {
 impl Counts {
     #[must_use]
     pub fn since(self, earlier: Counts) -> Counts {
+        assert!(earlier.forks <= self.forks);
+        assert!(earlier.refused_watches <= self.refused_watches);
+        assert!(earlier.leading_rescans <= self.leading_rescans);
+        assert!(earlier.trailing_rescans <= self.trailing_rescans);
+        assert!(earlier.listing_rescans <= self.listing_rescans);
+        assert!(earlier.dropped_starts <= self.dropped_starts);
+        assert!(earlier.dropped_execs <= self.dropped_execs);
+        assert!(earlier.dropped_exits <= self.dropped_exits);
+
         Counts {
             forks: self.forks - earlier.forks,
             refused_watches: self.refused_watches - earlier.refused_watches,
@@ -138,6 +147,10 @@ impl Throttle {
     }
 
     fn step(&mut self, now: u64) -> Step {
+        if self.deferred {
+            assert!(self.pending);
+        }
+
         if !self.pending {
             return Step::Wait;
         }
@@ -155,7 +168,9 @@ impl Throttle {
             Step::Wait
         } else {
             self.armed = true;
-            Step::ArmAt(self.last_rescan.saturating_add(self.interval))
+            let at = self.last_rescan.saturating_add(self.interval);
+            assert!(now <= at);
+            Step::ArmAt(at)
         }
     }
 }
@@ -165,6 +180,9 @@ const RESCAN_TIMER: usize = 2;
 /// The timers a wait arms at most, the deadline and the rescan, each once.
 const TIMER_COUNT: usize = 2;
 const RECEIVED_PER_WAIT: usize = 64;
+
+const _: () = assert!(DEADLINE_TIMER != RESCAN_TIMER);
+const _: () = assert!(RECEIVED_PER_WAIT > 0);
 
 /// The most process events a tick holds. A burst past it drops the rest and counts them by
 /// kind, since a burst is a condition the collector runs under and no fault. The busiest
@@ -183,6 +201,7 @@ pub struct Limits {
 
 impl Tracker {
     pub fn new(timebase: Timebase, rescan_interval: Duration, limits: Limits) -> io::Result<Self> {
+        assert!(limits.process_limit > 0);
         assert!(limits.events_per_tick_max > 0);
 
         let Ok(interval_ns) = u64::try_from(rescan_interval.as_nanos()) else {
@@ -222,10 +241,16 @@ impl Tracker {
         };
         tracker.rescan(&mut Meter::default())?;
 
+        assert_eq!(1, tracker.scans);
+        assert!(tracker.arming.is_empty());
+        assert!(tracker.starting.is_empty());
+        assert!(tracker.exiting.is_empty());
+        assert!(RECEIVED_PER_WAIT <= tracker.received.len());
         Ok(tracker)
     }
 
     pub fn follow_until(&mut self, deadline: u64, meter: &mut Meter) -> io::Result<()> {
+        assert!(self.arming.len() < TIMER_COUNT);
         push_without_growing(&mut self.arming, timer_at(DEADLINE_TIMER, deadline)?);
 
         loop {
@@ -254,6 +279,8 @@ impl Tracker {
             }
 
             if woke.due {
+                assert!(self.starting.is_empty());
+                assert!(self.exiting.is_empty());
                 return Ok(());
             }
         }
@@ -268,26 +295,37 @@ impl Tracker {
         self.throttle.rescanned(clock::now());
         self.counts.listing_rescans += 1;
         self.read_starts(meter);
-        self.submit_watches(meter)
+        self.submit_watches(meter)?;
+
+        assert!(self.starting.is_empty());
+        assert!(self.exiting.is_empty());
+        Ok(())
     }
 
     pub fn drain_events(&mut self) -> std::vec::Drain<'_, Event> {
+        assert!(self.starting.is_empty());
+        assert!(self.exiting.is_empty());
         self.events.drain(..)
     }
 
     #[must_use]
     pub fn last_listing(&self) -> &[i32] {
+        assert!(self.listing.capacity() > 0);
         &self.listing
     }
 
     fn rescan(&mut self, meter: &mut Meter) -> io::Result<()> {
+        let scans = self.scans;
+        let capacity = self.listing.capacity();
         let mut listing = std::mem::take(&mut self.listing);
         let scanned = meter.measure(Source::Scans, || {
             processes::list_pids(&mut listing)?;
             self.compare(&listing)
         });
         self.listing = listing;
+        assert_eq!(capacity, self.listing.capacity());
         scanned?;
+        assert_eq!(scans + 1, self.scans);
         self.throttle.rescanned(clock::now());
 
         self.read_starts(meter);
@@ -296,6 +334,7 @@ impl Tracker {
 
     fn compare(&mut self, listing: &[i32]) -> io::Result<()> {
         assert!(listing.len() < self.changes.capacity());
+        assert!(self.starting.is_empty());
         let previous = self.scans;
         self.scans += 1;
         let reporting = previous > 0;
@@ -325,11 +364,15 @@ impl Tracker {
             }
         }
 
+        assert!(self.changes.len() <= listing.len());
+        assert!(self.lingering.len() <= listing.len());
         Ok(())
     }
 
     fn start_reused_pids(&mut self) {
         for &(pid, index) in &self.lingering {
+            assert!(self.known[index].exited);
+            assert_eq!(self.scans, self.known[index].listed_in);
             if processes::is_alive(pid) {
                 self.known[index].exited = false;
                 push_without_growing(&mut self.changes, watch(index));
@@ -340,6 +383,9 @@ impl Tracker {
 
     fn wait_and_handle(&mut self) -> io::Result<Wake> {
         let count = self.wait()?;
+        assert!(count <= RECEIVED_PER_WAIT);
+        assert!(self.arming.is_empty());
+
         let mut woke = Wake::default();
         for index in 0..count {
             let event = self.received[index];
@@ -362,6 +408,9 @@ impl Tracker {
     }
 
     fn handle(&mut self, event: Kevent) -> io::Result<bool> {
+        assert_ne!(EVFILT_TIMER, event.filter);
+        assert_eq!(0, event.flags & EV_ERROR);
+
         let pid = pid_of(event.ident)?;
         if event.fflags & NOTE_EXEC != 0 {
             record(&mut self.events, &mut self.counts, Event::Exec { pid });
@@ -385,6 +434,7 @@ impl Tracker {
 
         meter.measure(Source::StartReads, || {
             for pid in self.starting.drain(..) {
+                assert!(pid >= 0);
                 let start = Event::Start {
                     pid,
                     coalition: coalitions::coalition_of(pid),
@@ -392,6 +442,8 @@ impl Tracker {
                 record(&mut self.events, &mut self.counts, start);
             }
         });
+
+        assert!(self.starting.is_empty());
     }
 
     fn read_exits(&mut self, meter: &mut Meter) -> io::Result<()> {
@@ -411,8 +463,11 @@ impl Tracker {
                 record(&mut self.events, &mut self.counts, exit);
             }
 
-            Ok(())
-        })
+            io::Result::Ok(())
+        })?;
+
+        assert!(self.exiting.is_empty());
+        Ok(())
     }
 
     fn submit_watches(&mut self, meter: &mut Meter) -> io::Result<()> {
@@ -420,11 +475,13 @@ impl Tracker {
             return Ok(());
         }
 
+        assert!(self.exiting.is_empty());
         meter.measure(Source::Watches, || self.register_watches())?;
         self.read_exits(meter)
     }
 
     fn register_watches(&mut self) -> io::Result<()> {
+        assert!(!self.changes.is_empty());
         assert!(self.changes.len() <= self.received.len());
         let count = c_int::try_from(self.changes.len()).map_err(io::Error::other)?;
         let none_pending = Timespec {
@@ -445,6 +502,14 @@ impl Tracker {
         let Ok(receipts) = usize::try_from(receipts) else {
             return Err(io::Error::last_os_error());
         };
+        if receipts > self.changes.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("kevent returned {receipts} receipts for {count} changes"),
+            ));
+        }
+
+        assert!(receipts <= self.received.len());
 
         for index in 0..receipts {
             let receipt = self.received[index];
@@ -461,6 +526,7 @@ impl Tracker {
     }
 
     fn wait(&mut self) -> io::Result<usize> {
+        assert!(self.arming.len() <= TIMER_COUNT);
         assert!(RECEIVED_PER_WAIT <= self.received.len());
         let arming_count = c_int::try_from(self.arming.len()).map_err(io::Error::other)?;
         let received_count_max = c_int::try_from(RECEIVED_PER_WAIT).map_err(io::Error::other)?;
@@ -478,6 +544,12 @@ impl Tracker {
             };
             if let Ok(count) = usize::try_from(count) {
                 self.arming.clear();
+                if count > RECEIVED_PER_WAIT {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("kevent returned {count} events for room of {RECEIVED_PER_WAIT}"),
+                    ));
+                }
                 return Ok(count);
             }
 
@@ -493,6 +565,8 @@ impl Tracker {
 /// counts it among the dropped events of its kind, so the list never grows.
 fn record(events: &mut Vec<Event>, counts: &mut Counts, event: Event) {
     let capacity = events.capacity();
+    assert!(capacity > 0);
+
     if events.len() < capacity {
         events.push(event);
     } else {
@@ -504,13 +578,19 @@ fn record(events: &mut Vec<Event>, counts: &mut Counts, event: Event) {
     }
 
     assert_eq!(capacity, events.capacity());
+    assert!(events.len() <= capacity);
 }
 
 /// The index of `pid` in a table of `known_count` pids. A pid the table cannot hold is an
 /// error, since the kernel gives no pid below 0 or past `PID_MAX`.
 fn known_index(pid: i32, known_count: usize) -> io::Result<usize> {
+    assert!(known_count > 0);
+
     match usize::try_from(pid) {
-        Ok(index) if index < known_count => Ok(index),
+        Ok(index) if index < known_count => {
+            assert_eq!(Ok(pid), i32::try_from(index));
+            Ok(index)
+        }
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("pid {pid} is outside the known table, which holds pids below {known_count}"),
@@ -527,6 +607,8 @@ fn pid_of(ident: usize) -> io::Result<i32> {
         ));
     };
 
+    assert!(pid >= 0);
+    assert_eq!(Ok(ident), usize::try_from(pid));
     Ok(pid)
 }
 
@@ -539,6 +621,7 @@ fn errno_of(data: isize) -> io::Result<i32> {
         ));
     };
 
+    assert_eq!(Ok(data), isize::try_from(errno));
     Ok(errno)
 }
 
@@ -554,6 +637,10 @@ fn watch(index: usize) -> Kevent {
 }
 
 fn timer_at(ident: usize, deadline: u64) -> io::Result<Kevent> {
+    if ident != DEADLINE_TIMER {
+        assert_eq!(RESCAN_TIMER, ident);
+    }
+
     let Ok(data) = isize::try_from(deadline) else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -561,6 +648,7 @@ fn timer_at(ident: usize, deadline: u64) -> io::Result<Kevent> {
         ));
     };
 
+    assert_eq!(Ok(deadline), u64::try_from(data));
     Ok(Kevent::new(
         ident,
         EVFILT_TIMER,
