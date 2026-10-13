@@ -14,6 +14,13 @@ missing_panics_doc = "allow"
 # `else { if }`, which these two lints would collapse again.
 collapsible_if = "allow"
 collapsible_else_if = "allow"
+# Tiger Style handles every error and converts no integer with `as`, tests included.
+as_conversions = "warn"
+unwrap_used = "warn"
+expect_used = "warn"
+let_underscore_untyped = "warn"
+let_underscore_must_use = "warn"
+unused_result_ok = "warn"
 
 # Tiger Style keeps assertions on in production, so overflow traps and a panic aborts.
 [profile.release]

@@ -79,14 +79,14 @@ fn run(options: &Options) -> io::Result<()> {
     let live_at_first_scan = collector.tracker.last_listing().to_vec();
     let schedule = Schedule::new(clock::now(), timebase.ticks(1_000_000_000));
 
-    report_start(&meter, timebase);
+    report_start(&meter, timebase)?;
 
     collector.wait_until(schedule.deadline(0), &mut meter)?;
     collector.read(&mut meter)?;
     let warm_up_starts = starts_in(&collector.events);
 
     let mut tick = schedule.first_ahead_of(clock::now()).max(1);
-    let start = Mark::take(&meter, timebase, &collector);
+    let start = Mark::take(&meter, timebase, &collector)?;
     let mut whole = Span::begin(start, tick);
     let mut minute = Span::begin(start, tick);
     let mut window = Span::begin(start, tick);
@@ -103,12 +103,12 @@ fn run(options: &Options) -> io::Result<()> {
         window.tally.add(late, slips, &collector);
 
         if closes_span(tick, following, TICKS_PER_WINDOW) {
-            let now = Mark::take(&meter, timebase, &collector);
+            let now = Mark::take(&meter, timebase, &collector)?;
             window.report("ticks", tick, &now);
             window = Span::begin(now, following);
         }
         if closes_span(tick, following, TICKS_PER_MINUTE) {
-            let now = Mark::take(&meter, timebase, &collector);
+            let now = Mark::take(&meter, timebase, &collector)?;
             minute.report("minute, ticks", tick, &now);
             minute = Span::begin(now, following);
         }
@@ -118,7 +118,7 @@ fn run(options: &Options) -> io::Result<()> {
             .is_some_and(|seconds| following > seconds.get())
         {
             let last_marker_pid = throwaway_child();
-            let end = Mark::take(&meter, timebase, &collector);
+            let end = Mark::take(&meter, timebase, &collector)?;
             whole.report("whole run, ticks", tick, &end);
             match (&first_marker_pid, &last_marker_pid) {
                 (Ok(first), Ok(last)) => report_missed(
@@ -144,11 +144,13 @@ fn set_qos_class_default() -> io::Result<()> {
     Ok(())
 }
 
-fn report_start(meter: &Meter, timebase: Timebase) {
+fn report_start(meter: &Meter, timebase: Timebase) -> io::Result<()> {
+    let snapshot = Snapshot::take(meter, timebase)?;
     println!(
         "started in {:.1} ms of CPU",
-        milliseconds(Duration::from_nanos(Snapshot::take(meter, timebase).cpu_ns))
+        milliseconds(Duration::from_nanos(snapshot.cpu_ns))
     );
+    Ok(())
 }
 
 struct Span {
@@ -187,10 +189,13 @@ fn throwaway_child() -> io::Result<i32> {
 }
 
 fn starts_in(events: &[Event]) -> u64 {
-    events
-        .iter()
-        .filter(|event| matches!(event, Event::Start { .. }))
-        .count() as u64
+    let mut starts = 0;
+    for event in events {
+        if matches!(event, Event::Start { .. }) {
+            starts += 1;
+        }
+    }
+    starts
 }
 
 fn processes_started(
@@ -204,10 +209,12 @@ fn processes_started(
     }
 
     let between = u64::from((last_marker_pid - first_marker_pid - 1).cast_unsigned());
-    let live_between = live_at_first_scan
-        .iter()
-        .filter(|&&pid| first_marker_pid < pid && pid < last_marker_pid)
-        .count() as u64;
+    let mut live_between = 0;
+    for pid in live_at_first_scan {
+        if (first_marker_pid + 1..last_marker_pid).contains(pid) {
+            live_between += 1;
+        }
+    }
     Some(between - live_between)
 }
 
@@ -233,11 +240,11 @@ struct Mark {
 }
 
 impl Mark {
-    fn take(meter: &Meter, timebase: Timebase, collector: &Collector) -> Self {
-        Self {
-            snapshot: Snapshot::take(meter, timebase),
+    fn take(meter: &Meter, timebase: Timebase, collector: &Collector) -> io::Result<Self> {
+        Ok(Self {
+            snapshot: Snapshot::take(meter, timebase)?,
             counts: collector.tracker.counts,
-        }
+        })
     }
 }
 

@@ -603,14 +603,14 @@ mod tests {
         follow_for(&mut tracker, &mut meter, 500);
         child.wait().unwrap();
 
-        let spent = Snapshot::take(&meter, timebase).spent_ns;
+        let spent = Snapshot::take(&meter, timebase).unwrap().spent_ns;
         let charged = [
             Source::Scans,
             Source::StartReads,
             Source::Watches,
             Source::ExitReads,
         ]
-        .map(|s| spent[s as usize]);
+        .map(|s| spent[s.index()]);
         assert!(charged.iter().all(|&ns| ns > 0), "{charged:?}");
     }
 

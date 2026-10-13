@@ -1,0 +1,8 @@
+# Tiger Style keeps assertions on in production, and lets a test unwrap.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+disallowed-macros = [
+    { path = "std::debug_assert", reason = "assertions stay on in production" },
+    { path = "std::debug_assert_eq", reason = "assertions stay on in production" },
+    { path = "std::debug_assert_ne", reason = "assertions stay on in production" },
+]

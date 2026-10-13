@@ -3,6 +3,12 @@ use std::io;
 
 use crate::mach;
 
+// `processor_cpu_load_info.cpu_ticks` holds a core's ticks in the order of these constants.
+const _: () = assert!(libc::CPU_STATE_USER == 0);
+const _: () = assert!(libc::CPU_STATE_SYSTEM == 1);
+const _: () = assert!(libc::CPU_STATE_IDLE == 2);
+const _: () = assert!(libc::CPU_STATE_NICE == 3);
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CpuTicks {
     pub user: u32,
@@ -72,10 +78,11 @@ pub struct Machine {
 impl Machine {
     pub fn new() -> io::Result<Self> {
         let total_bytes: u64 = Sysctl::named(c"hw.memsize")?.read()?;
+        let page_size = u64::try_from(unsafe { libc::vm_page_size }).map_err(io::Error::other)?;
 
         Ok(Self {
             host: unsafe { mach_host_self() },
-            page_size: unsafe { libc::vm_page_size } as u64,
+            page_size,
             swap_usage: Sysctl::named(c"vm.swapusage")?,
             pressure_level: Sysctl::named(c"kern.memorystatus_vm_pressure_level")?,
             cpus: Vec::new(),
@@ -111,22 +118,28 @@ impl Machine {
         }
 
         let loads = unsafe {
-            std::slice::from_raw_parts(info.cast::<libc::processor_cpu_load_info>(), count as usize)
+            std::slice::from_raw_parts(
+                info.cast::<libc::processor_cpu_load_info>(),
+                usize_from_u32(count),
+            )
         };
 
         self.cpus.clear();
-        self.cpus.extend(loads.iter().map(|load| CpuTicks {
-            user: load.cpu_ticks[libc::CPU_STATE_USER as usize],
-            system: load.cpu_ticks[libc::CPU_STATE_SYSTEM as usize],
-            nice: load.cpu_ticks[libc::CPU_STATE_NICE as usize],
-            idle: load.cpu_ticks[libc::CPU_STATE_IDLE as usize],
+        self.cpus.extend(loads.iter().map(|load| {
+            let [user, system, idle, nice] = load.cpu_ticks;
+            CpuTicks {
+                user,
+                system,
+                nice,
+                idle,
+            }
         }));
 
         unsafe {
             libc::vm_deallocate(
                 mach::task_self(),
-                info as libc::vm_address_t,
-                size as usize * size_of::<libc::integer_t>(),
+                info.addr(),
+                usize_from_u32(size) * size_of::<libc::integer_t>(),
             )
         };
 
@@ -220,6 +233,16 @@ impl Sysctl {
     }
 }
 
+/// Widens a count the kernel returns as a `u32`, which a `usize` holds on every 64-bit Mac.
+fn usize_from_u32(value: u32) -> usize {
+    const { assert!(size_of::<u32>() <= size_of::<usize>()) };
+
+    match usize::try_from(value) {
+        Ok(value) => value,
+        Err(error) => unreachable!("{error}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,7 +268,10 @@ mod tests {
 
         machine.read().unwrap();
 
-        assert_eq!(sysctl_u64(c"hw.logicalcpu"), machine.cpus.len() as u64);
+        assert_eq!(
+            sysctl_u64(c"hw.logicalcpu"),
+            u64::try_from(machine.cpus.len()).unwrap()
+        );
     }
 
     #[test]

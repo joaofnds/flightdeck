@@ -1,3 +1,4 @@
+use std::io;
 use std::time::Duration;
 
 use crate::clock::{self, Timebase};
@@ -49,6 +50,24 @@ impl Source {
             Source::Smc => "smc",
         }
     }
+
+    /// The source's slot in an array that holds a value for each source.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        match self {
+            Source::Machine => 0,
+            Source::Interfaces => 1,
+            Source::Processes => 2,
+            Source::Coalitions => 3,
+            Source::Events => 4,
+            Source::Scans => 5,
+            Source::StartReads => 6,
+            Source::Watches => 7,
+            Source::ExitReads => 8,
+            Source::IoReport => 9,
+            Source::Smc => 10,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -60,7 +79,7 @@ impl Meter {
     pub fn measure<T>(&mut self, source: Source, read: impl FnOnce() -> T) -> T {
         let before = thread_cpu_ns();
         let result = read();
-        self.spent_ns[source as usize] += thread_cpu_ns() - before;
+        self.spent_ns[source.index()] += thread_cpu_ns() - before;
         result
     }
 }
@@ -93,19 +112,24 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
-    #[must_use]
-    pub fn take(meter: &Meter, timebase: Timebase) -> Self {
-        let own = processes::read_usage(std::process::id().cast_signed(), timebase)
-            .expect("a process can read its own usage");
+    pub fn take(meter: &Meter, timebase: Timebase) -> io::Result<Self> {
+        let own = match processes::read_usage(std::process::id().cast_signed(), timebase) {
+            Ok(own) => own,
+            Err(unreadable) => {
+                return Err(io::Error::other(format!(
+                    "cannot read the collector's own usage: {unreadable:?}"
+                )));
+            }
+        };
 
-        Self {
+        Ok(Self {
             at_ns: timebase.nanos(clock::now()),
             cpu_ns: own.user_ns + own.system_ns,
             energy_nj: own.energy_nj,
             instructions: own.instructions,
             super_instructions: own.super_instructions,
             spent_ns: meter.spent_ns,
-        }
+        })
     }
 
     #[must_use]
@@ -154,7 +178,7 @@ impl Cost {
 
     #[must_use]
     pub fn ms_per_second(&self, source: Source) -> f64 {
-        self.spent[source as usize].div_duration_f64(self.elapsed) * 1_000.0
+        self.spent[source.index()].div_duration_f64(self.elapsed) * 1_000.0
     }
 
     #[must_use]
@@ -186,7 +210,7 @@ mod tests {
             super_instructions: 100,
         };
         let mut spent_ns = [7; Source::ALL.len()];
-        spent_ns[Source::Processes as usize] += processes_ns;
+        spent_ns[Source::Processes.index()] += processes_ns;
         let later = Snapshot {
             at_ns: 15_000_000_000,
             cpu_ns: 1_000 + cpu_ns,
@@ -230,6 +254,20 @@ mod tests {
     }
 
     #[test]
+    fn index_gives_each_source_its_own_slot() {
+        // Goal: every source indexes a slot of a per-source array, and no two share one.
+        // Method: mark the slot of each source in turn, failing on a slot marked twice.
+        let mut taken = [false; Source::ALL.len()];
+
+        for source in Source::ALL {
+            let index = source.index();
+            assert!(index < taken.len(), "{source:?}");
+            assert!(!taken[index], "{source:?}");
+            taken[index] = true;
+        }
+    }
+
+    #[test]
     fn charges_a_measured_read_to_its_source() {
         let mut meter = Meter::default();
 
@@ -237,8 +275,8 @@ mod tests {
             spin_on_this_thread_for(Duration::from_millis(20));
         });
 
-        let spent = Snapshot::take(&meter, Timebase::read()).spent_ns;
-        assert!(spent[Source::Coalitions as usize] >= 20_000_000);
-        assert_eq!(0, spent[Source::Processes as usize]);
+        let spent = Snapshot::take(&meter, Timebase::read()).unwrap().spent_ns;
+        assert!(spent[Source::Coalitions.index()] >= 20_000_000);
+        assert_eq!(0, spent[Source::Processes.index()]);
     }
 }

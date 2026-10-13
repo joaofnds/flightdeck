@@ -312,7 +312,10 @@ mod tests {
 
         ioreport.read().unwrap();
 
-        assert_eq!(logical_cpus() as usize, ioreport.cores.len());
+        assert_eq!(
+            usize::try_from(logical_cpus()).unwrap(),
+            ioreport.cores.len()
+        );
     }
 
     #[test]
@@ -383,7 +386,7 @@ mod tests {
             })
             .count();
 
-        assert_eq!(logical_cpus() as usize + 1, states.len());
+        assert_eq!(usize::try_from(logical_cpus()).unwrap() + 1, states.len());
         assert_eq!(0, without_idle);
     }
 

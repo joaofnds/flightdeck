@@ -66,7 +66,7 @@ fn run(probe: &Probe) -> io::Result<()> {
     let timebase = Timebase::read();
     let mut tracker = Tracker::new(timebase, probe.rescan_interval)?;
     let mut meter = Meter::default();
-    let start = Snapshot::take(&meter, timebase);
+    let start = Snapshot::take(&meter, timebase)?;
 
     let pid_files: Vec<PathBuf> = (0..probe.generators)
         .map(|n| std::env::temp_dir().join(format!("followprobe-{}-{n}.pids", std::process::id())))
@@ -76,7 +76,7 @@ fn run(probe: &Probe) -> io::Result<()> {
     let (started, read_at_exit, children) = followed?;
     removed?;
 
-    let cost = Snapshot::take(&meter, timebase).cost_since(&start);
+    let cost = Snapshot::take(&meter, timebase)?.cost_since(&start);
     let found = children.iter().filter(|pid| started.contains(pid)).count();
     let read = children
         .iter()
