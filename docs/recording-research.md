@@ -3,7 +3,7 @@
 Research for a Rust and GPUI app that records the whole machine once a second, keeps
 the recording, and lets you go back to any second and join what every process, file
 and socket was doing. Every number below was measured on this M5 Pro on 2026-10-12 or
-2026-10-13 unless it cites a source. The evidence programs are listed at the end.
+2026-10-13 unless it cites a source. The evidence programs are described at the end.
 
 ## Decisions
 
@@ -76,10 +76,10 @@ parts measured apart, so a 100 ms mode has to narrow to a process tree. At 4 to 
 process, a tree of 50 processes read every 100 ms costs 2 to 6 ms a second, 0.2 to 0.6%
 of a core. The Go rows include Go's runtime: the CPU ticks cost 186 µs a read through
 the Go collector and 3.2 µs in C, so those rows are upper bounds. IOReport and the SMC
-are the exceptions. IOReport costs about the same in Rust. An SMC key costs 27 to 33 µs
-in the collector in Rust, against about 22 µs a key in the Go collector, so the rest of
-the SMC may cost 7 to 9 ms a read in Rust rather than 6, which the 100 ms sum above
-uses.
+are the exceptions. IOReport cost 4.8 to 9.0 ms a second in the collector in Rust,
+against 5.9 ms in Go. An SMC key costs 27 to 33 µs in the collector in Rust, against
+about 22 µs a key in the Go collector, so the rest of the SMC may cost 7 to 9 ms a read
+in Rust rather than 6, which the 100 ms sum above uses.
 
 Handing a tick over costs 53 to 80 µs of CPU for writer and reader together, so at
 one tick a second the transport is under 0.01% of a core. The ring with a reader woken
@@ -87,6 +87,42 @@ once a tick is the cheapest. A reader paced to the screen costs more, because it
 seven times for each tick it finds. NATS, ZeroMQ, Kafka and Iggy are built for millions
 of messages a second between machines. This workload is one tick a second on one
 machine.
+
+### Rust against Zig
+
+A rewrite keeps the same system calls, so what a language can change is mostly user
+time, the time spent in the collector's own code and the libraries it calls. Over a
+minute on AC power that held 14 forks, the collector in Rust spent 0.08 s in user time
+and 0.99 s in system time, 124 ms of it starting up, and 1.58% of a core after that.
+User time also counts the code of IOReport and the system library, so rewriting the
+collector as it reads today could save at most 1.3 ms a second, 0.13% of a core, and
+only by taking its own code to zero. That bound leaves out what is not built yet: the
+open-file list, the GPU, and the persister, which sorts, encodes and compresses each
+window in user space, where a language and its compiler matter most. It leaves out
+tracking in a burst of forks too, which was not measured this way.
+
+The sweep of every process and every coalition was also written in Zig and run against
+the same sweep through the collector's own Rust code, alternating, three runs of each
+back to back and seven once a second. Both made the same calls, reading 469 processes
+and 572 coalitions a round back to back, and 464 to 481 processes and 572 to 579
+coalitions once a second. Zig's user time was lower on average at both paces, 139
+against 144 µs a round back to back and 357 against 375 µs once a second, which once a
+second is 18 µs, 0.002% of a core. That difference belongs to the two builds as much as
+to the two languages. Zig was built as one unit with `-OReleaseFast`, which turns its
+assertions off, while the Rust program called the collector crate under the default
+release profile and keeps the coalitions in a `BTreeSet` where the Zig code scans an
+array. System time was 91% of a round back to back and 96% once a second, and it varied
+more between runs of one language than between the two. Once a second, single runs took
+7,700 to 9,405 µs of CPU a round in Rust and 7,809 to 9,236 µs in Zig, and on average
+Zig took 211 µs more. Those rounds averaged 8.6 to 8.8 ms, against 6.2 ms a second for
+the same reads inside the collector over the minute above. The comparison sweeps
+straight after a one-second sleep, where the collector sweeps after its other reads in
+the same wake, which may explain the gap but was not tested. These figures compare the
+two languages and do not give the sweep's cost. Only CPU time was compared, not energy,
+memory or startup.
+
+On this evidence performance does not decide between the two languages, and whether to
+move to Zig is open.
 
 ## Collecting once a second
 
@@ -110,7 +146,7 @@ library but has no header in the SDK, so a peak per second rests on a private ca
 | 1 s | CPU ticks of every core, memory and swap, network interfaces, the pid list | under 0.1 ms in a tight loop | 0.03 to 0.11 for the CPUs and memory, 0.17 to 0.62 for the interfaces, the pid list counted with the processes |
 | 1 s | Every process readable without root | 2.8 to 8.3 ms CPU and 2.3 to 9.3 mJ, paced, varying from run to run | 2.5 to 5.3 |
 | 1 s | Every coalition | 1.0 ms in a tight loop | 1.7 to 3.5 |
-| 1 s | IOReport, GPU | 5.9 ms and 2.2 ms in Go | 4.8 to 8.3 for IOReport, the I/O Registry's GPU not read yet |
+| 1 s | IOReport, GPU | 5.9 ms and 2.2 ms in Go | 4.8 to 9.0 for IOReport, the I/O Registry's GPU not read yet |
 | 1 s | The open-file list of every process readable without root, resolving only descriptors that are new | 1.4 ms to list, the few changes to resolve | not read yet |
 | 1 s | A few SMC keys: the SoC sensor that was hottest at startup, fans, system power | 33 µs CPU a key, paced, in C | 0.09 to 0.19 for 4 keys |
 | 1 s | Bytes and operations per disk | not measured | not read yet |
@@ -598,7 +634,8 @@ The storage choice in step 3 waits on the query benchmark below.
 
 ## Evidence
 
-The programs are in `/tmp/sysmon-xray` on this Mac and will not survive a reboot:
+A reboot on 2026-10-13 cleared `/tmp`, so the programs and output kept there are gone
+and only their descriptions remain. The programs were in `/tmp/sysmon-xray`:
 `xray.c` (one full pass), `sample.c` (300 seconds of processes and open files),
 `lab/codecs.sh` (encodings), `lab/churn.py` (what changes per tick),
 `lab/cheap.c` and `lab/tick.c` (the paced loop, its CPU, lateness and energy),
@@ -614,7 +651,7 @@ The collector is in `collector/`, and `cargo run --release -- --seconds 300` pri
 cost for each 10-second window and for the run, with each source apart. Its three
 five-minute runs were release builds of d8788c8, before IOReport and the SMC, 737719d
 and c7bb9ba, at load averages of 5 to 14. The third ran on AC power, and the first two
-did not record the power source. Their output is in `/tmp/fd-probe` as `run1.txt`,
+did not record the power source. Their output was in `/tmp/fd-probe` as `run1.txt`,
 `run2.txt` and `run3.txt`, split into windows by `windows.py` and, for the third,
 `windows2.py`. The steady fork rates came from `forkrate/forkrate.c`, run by
 `forkrate/rates.sh` against the same c7bb9ba build, on AC power at load averages of 2.7
@@ -637,13 +674,26 @@ five-minute runs (`paired-0.txt`, `paired-5.txt`, `natural-2.txt`) used a releas
 of 657fe1d, the first with the miss count fixed. The runs at the default interval of zero
 (`default-<n>.txt`) used a release build of 336d278, run back to back for five minutes
 each by `default-runs.sh` in `~/.cache/flightdeck-task10/scripts`.
-`/tmp/fd-probe` also holds the probes for IOReport's units and groups (`unit/unit.c`,
+`/tmp/fd-probe` also held the probes for IOReport's units and groups (`unit/unit.c`,
 `unit/groups.c`), an SMC key's cost and the SoC sensors (`smc/smccost.c`, `smc/keys.c`),
 `posix_spawn` against the fork watch (`spawnfork.c`), a coalition outliving its process
 (`coallife/coallife.c`, output in `coallife-120s.txt`), the units of a coalition's
 energy and GPU time (`idleprobe/src/bin/units.rs`, output of its later run in
 `units.txt`), and `tick1s.c`, which is `lab/tick.c` paced once a second, with output of
-its later runs in `tick1s-default.txt`. It will not survive a reboot either.
+its later runs in `tick1s-default.txt`.
+
+The language comparison is in `~/.cache/flightdeck-lang` on this Mac, outside the
+repository. `ab.zig` is the sweep in Zig with static buffers sized at compile time, and
+`abrust-main.rs`, built with `abrust-Cargo.toml`, runs the same rounds through the
+collector's own `list_pids`, `Sweep` and `Coalitions` at 3e39e0e. Both read `ROUNDS`
+and `PACE_MS` from the environment and print the median and percentiles of each
+round's CPU time with the process's user and system time a round. `results.txt` holds
+every run: three of 300 rounds back to back and seven of 15 rounds at once a second for
+each language, taking turns, built with `zig build-exe -OReleaseFast` on Zig 0.17.0 and
+`cargo build --release` with the default release profile on Rust 1.95.0, while the Mac
+listed 757 to 778 pids and refused 293 to 297 of them. `whole/run-60s.txt` is the
+collector at 209b539 run for a minute under `/usr/bin/time -p`, at one-minute load
+averages of 1.64 to 1.91.
 
 ## Sources
 
