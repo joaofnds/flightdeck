@@ -867,6 +867,17 @@ mod tests {
     }
 
     #[test]
+    fn reports_a_usage_read_failing_with_another_errno() {
+        // Goal: a usage read that fails with an errno other than EPERM and ESRCH is that error,
+        // rather than a refusal.
+        // Method: read a call that returned -1 with EINVAL in errno, which proc_pid_rusage sets
+        // for a flavor it does not have.
+        let returned = read_usage_returned(-1, io::Error::from_raw_os_error(EINVAL));
+
+        assert_eq!(Some(EINVAL), returned.unwrap_err().raw_os_error());
+    }
+
+    #[test]
     fn finds_this_process_alive() {
         // Goal: a running process is alive.
         // Method: ask about this process.
