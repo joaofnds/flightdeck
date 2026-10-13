@@ -112,10 +112,16 @@ const _: () = assert!(std::mem::offset_of!(Message, result) == 40);
 const _: () = assert!(std::mem::offset_of!(Message, index) == 44);
 const _: () = assert!(std::mem::offset_of!(Message, bytes) == 48);
 
+/// A key the SMC holds as a float, as its info showed when the key was checked, so a read of
+/// it each tick need not ask again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FloatKey(Key);
+
 pub struct Smc {
     connection: Connection,
-    fans: Vec<Key>,
-    soc_sensor: Key,
+    power: FloatKey,
+    fans: Vec<FloatKey>,
+    soc_sensor: FloatKey,
     pub watts: f32,
     pub fan_rpm: Vec<f32>,
     pub soc_celsius: f32,
@@ -124,14 +130,16 @@ pub struct Smc {
 impl Smc {
     pub fn open() -> io::Result<Self> {
         let connection = Connection::open()?;
-        let fans: Vec<Key> = (0..connection.read(FAN_COUNT, UNSIGNED_8)?[0])
-            .map(Key::fan_speed)
-            .collect();
+        let power = connection.float_key(SYSTEM_POWER)?;
+        let fans = (0..connection.read(FAN_COUNT, UNSIGNED_8)?[0])
+            .map(|fan| connection.float_key(Key::fan_speed(fan)))
+            .collect::<io::Result<Vec<FloatKey>>>()?;
         let soc_sensor = connection.hottest_soc_sensor()?;
         let fan_rpm = Vec::with_capacity(fans.len());
 
         Ok(Self {
             connection,
+            power,
             fans,
             soc_sensor,
             watts: 0.0,
@@ -141,7 +149,7 @@ impl Smc {
     }
 
     pub fn read(&mut self) -> io::Result<()> {
-        self.watts = self.connection.read_float(SYSTEM_POWER)?;
+        self.watts = self.connection.read_float(self.power)?;
         self.fan_rpm.clear();
         for &fan in &self.fans {
             push_without_growing(&mut self.fan_rpm, self.connection.read_float(fan)?);
@@ -184,20 +192,21 @@ impl Connection {
         Ok(Self(connection))
     }
 
-    fn hottest_soc_sensor(&self) -> io::Result<Key> {
+    fn hottest_soc_sensor(&self) -> io::Result<FloatKey> {
         let mut readings = Vec::new();
         for index in 0..self.key_count()? {
             let Some(key) = self.key_at(index)? else {
                 continue;
             };
-            if !key.is_soc_temperature() || !self.info(key)?.is_some_and(|info| info.is(FLOAT)) {
+            if !key.is_soc_temperature() {
                 continue;
             }
-            let Some(bytes) = self.value(key, FLOAT)? else {
+            if !self.info(key)?.is(FLOAT) {
                 continue;
-            };
+            }
 
-            readings.push((key, float_from(bytes)));
+            let sensor = FloatKey(key);
+            readings.push((sensor, self.read_float(sensor)?));
         }
 
         hottest(readings).ok_or_else(|| {
@@ -222,36 +231,51 @@ impl Connection {
         Ok(listed.map(|listed| Key(listed.key)))
     }
 
-    fn info(&self, key: Key) -> io::Result<Option<KeyInfo>> {
+    /// Checks that the SMC holds `key` as a float.
+    fn float_key(&self, key: Key) -> io::Result<FloatKey> {
+        info_check(key, self.info(key)?, FLOAT)?;
+        Ok(FloatKey(key))
+    }
+
+    fn read_float(&self, key: FloatKey) -> io::Result<f32> {
+        self.bytes(key.0, FLOAT).map(float_from)
+    }
+
+    /// Reads `key` as a value of `info` once the SMC shows it holds one, since the SMC answers
+    /// a read of a key with its bytes whatever type the read names.
+    fn read(&self, key: Key, info: KeyInfo) -> io::Result<[u8; 32]> {
+        info_check(key, self.info(key)?, info)?;
+        self.bytes(key, info)
+    }
+
+    fn info(&self, key: Key) -> io::Result<KeyInfo> {
         let described = self.ask(Message {
             key: key.0,
             command: READ_KEY_INFO,
             ..Message::default()
         })?;
-        Ok(described.map(|described| described.info))
-    }
-
-    fn read_float(&self, key: Key) -> io::Result<f32> {
-        self.read(key, FLOAT).map(float_from)
-    }
-
-    fn read(&self, key: Key, info: KeyInfo) -> io::Result<[u8; 32]> {
-        self.value(key, info)?.ok_or_else(|| {
+        described.map(|described| described.info).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("the SMC has no value for {key:?}"),
+                format!("the SMC has no key {key:?}"),
             )
         })
     }
 
-    fn value(&self, key: Key, info: KeyInfo) -> io::Result<Option<[u8; 32]>> {
+    /// The bytes of `key` read as a value of `info`, which the caller checked the SMC holds.
+    fn bytes(&self, key: Key, info: KeyInfo) -> io::Result<[u8; 32]> {
         let answer = self.ask(Message {
             key: key.0,
             info,
             command: READ_BYTES,
             ..Message::default()
         })?;
-        Ok(answer.map(|answer| answer.bytes))
+        answer.map(|answer| answer.bytes).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("the SMC has no value for {key:?}"),
+            )
+        })
     }
 
     fn ask(&self, question: Message) -> io::Result<Option<Message>> {
@@ -307,7 +331,19 @@ fn ask_answered(
     Ok(Some(answer))
 }
 
-fn hottest(readings: impl IntoIterator<Item = (Key, f32)>) -> Option<Key> {
+/// Checks that the SMC holds `key`, whose info is `held`, as a value of `wanted`.
+fn info_check(key: Key, held: KeyInfo, wanted: KeyInfo) -> io::Result<()> {
+    if !held.is(wanted) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("the SMC holds {key:?} as {held:?}, which is not {wanted:?}"),
+        ));
+    }
+
+    Ok(())
+}
+
+fn hottest(readings: impl IntoIterator<Item = (FloatKey, f32)>) -> Option<FloatKey> {
     readings
         .into_iter()
         .max_by(|(_, one), (_, other)| one.total_cmp(other))
@@ -325,12 +361,12 @@ mod tests {
     #[test]
     fn picks_the_hottest_of_the_sensors_read() {
         let readings = [
-            (Key::named(*b"Tp01"), 41.0),
-            (Key::named(*b"Tg05"), 63.5),
-            (Key::named(*b"TP0a"), 52.0),
+            (FloatKey(Key::named(*b"Tp01")), 41.0),
+            (FloatKey(Key::named(*b"Tg05")), 63.5),
+            (FloatKey(Key::named(*b"TP0a")), 52.0),
         ];
 
-        assert_eq!(Some(Key::named(*b"Tg05")), hottest(readings));
+        assert_eq!(Some(FloatKey(Key::named(*b"Tg05"))), hottest(readings));
     }
 
     #[test]
@@ -353,7 +389,8 @@ mod tests {
     #[test]
     fn reads_the_result_for_a_missing_key_as_no_answer() {
         // Goal: result 132, which the SMC gives for a key it does not hold, reads as no key.
-        // Method: interpret a whole answer holding 132, as answers.out shows for the key ZZZZ.
+        // Method: interpret a whole answer holding 132, which the SMC of an M5 Pro gave for the
+        // key ZZZZ.
         let answer = Message {
             result: KEY_NOT_FOUND,
             ..Message::default()
@@ -367,8 +404,8 @@ mod tests {
     #[test]
     fn refuses_an_answer_holding_another_result() {
         // Goal: a result besides success and a missing key is an error, never a missing key.
-        // Method: interpret a whole answer holding 135, the result the SMC gave a read whose
-        // size was not its key's (answers.out).
+        // Method: interpret a whole answer holding 135, the result the SMC of an M5 Pro gave a
+        // read whose size was not its key's.
         let answer = Message {
             result: 135,
             ..Message::default()
@@ -396,11 +433,40 @@ mod tests {
     #[test]
     fn refuses_a_call_the_kernel_failed() {
         // Goal: a call to the SMC that the kernel failed is an error.
-        // Method: interpret 0xe00002c2, which the kernel returned for a command the SMC does not
-        // take (answers.out).
+        // Method: interpret 0xe00002c2, which the kernel of an M5 Pro returned for a command the
+        // SMC does not take.
         let answered = ask_answered(0xe000_02c2_u32.cast_signed(), 0, Message::default());
 
         assert_eq!(io::ErrorKind::Other, answered.unwrap_err().kind());
+    }
+
+    #[test]
+    fn takes_a_key_held_as_the_type_read() {
+        // Goal: a key the SMC holds as the type it is read as passes the check.
+        // Method: check the info of a float key against the float it is read as.
+        assert!(info_check(SYSTEM_POWER, FLOAT, FLOAT).is_ok());
+    }
+
+    #[test]
+    fn refuses_a_key_held_as_another_type() {
+        // Goal: a key the SMC holds as another type than the one read is an error.
+        // Method: check the info of the fan count, a ui8, against a float.
+        let checked = info_check(FAN_COUNT, UNSIGNED_8, FLOAT);
+
+        assert_eq!(io::ErrorKind::InvalidData, checked.unwrap_err().kind());
+    }
+
+    #[test]
+    fn refuses_a_key_read_as_a_type_it_does_not_hold() {
+        // Goal: a key read as another type than the one the SMC holds it as is an error, since
+        // the SMC answers such a read with the key's bytes.
+        // Method: read the fan count, a ui8, as a float, which the SMC of an M5 Pro answers
+        // with result 0.
+        let connection = Connection::open().unwrap();
+
+        let read = connection.read(FAN_COUNT, FLOAT);
+
+        assert_eq!(io::ErrorKind::InvalidData, read.unwrap_err().kind());
     }
 
     #[test]

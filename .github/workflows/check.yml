@@ -48,4 +48,5 @@ jobs:
           --skip smc::tests::reads_each_fan_speed_in_rpm
           --skip smc::tests::reads_the_power_the_mac_draws
           --skip smc::tests::reads_the_temperature_of_a_soc_sensor
+          --skip smc::tests::refuses_a_key_read_as_a_type_it_does_not_hold
           --skip tests::allocates_nothing_in_a_warm_tick_or_the_reports_it_closes
