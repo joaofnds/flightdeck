@@ -14,7 +14,7 @@ const FUNCTION_LINES_MAX: usize = 70;
 
 #[test]
 fn repository_is_tidy() {
-    // Goal: every file git tracks or would track meets the rules below.
+    // Goal: every file git tracks meets the rules below.
     // Method: list the files with git, apply each rule to each, and report every finding at
     // once, so one run shows all that a change has to fix.
     let root = repository_root();
@@ -43,23 +43,23 @@ fn repository_root() -> PathBuf {
     }
 }
 
-/// The files git tracks and the untracked files it does not ignore, relative to `root`.
+/// Lists the files git tracks, relative to `root`. It leaves out untracked files, since what
+/// each clone ignores depends on its own global ignore file, and CI checks a clean clone.
 fn repository_paths(root: &Path) -> Vec<String> {
     let output = Command::new("git")
-        .args([
-            "ls-files",
-            "-z",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-        ])
+        .args(["ls-files", "-z", "--cached"])
         .current_dir(root)
         .output();
     let output = match output {
         Ok(output) => output,
         Err(error) => panic!("cannot run git ls-files: {error}"),
     };
-    assert!(output.status.success(), "git ls-files: {}", output.status);
+    assert!(
+        output.status.success(),
+        "git ls-files: {}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let mut paths = Vec::new();
     for name in output.stdout.split(|&byte| byte == 0) {
