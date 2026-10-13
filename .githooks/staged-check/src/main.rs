@@ -4,14 +4,27 @@ use std::fs;
 use std::io;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{self, Child, Command, ExitCode, ExitStatus};
+use std::process::{self, Child, Command, ExitCode, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
 // Checks the tree the commit would hold, exported from the index, so that unstaged work
 // in the shared working tree neither breaks a sound commit nor hides a broken one.
 fn main() -> ExitCode {
+    if let Err(error) = catch_interrupts() {
+        eprintln!("check: cannot catch interrupts: {error}");
+        return ExitCode::FAILURE;
+    }
     let export = env::temp_dir().join(format!("flightdeck-staged-{}", process::id()));
+    // Cargo resolves a relative target directory from the export, git from the repository.
+    if export.is_relative() {
+        eprintln!(
+            "check: the temporary directory {} is relative",
+            export.display()
+        );
+        return ExitCode::FAILURE;
+    }
     if let Err(error) = fs::create_dir(&export) {
         eprintln!("check: cannot create {}: {error}", export.display());
         return ExitCode::FAILURE;
@@ -35,15 +48,21 @@ fn main() -> ExitCode {
 }
 
 fn check(export: &Path) -> Result<(), Refusal> {
+    assert!(export.is_absolute());
     assert!(export.is_dir());
 
     eprintln!("check: exporting the staged tree to {}", export.display());
-    export_index(Path::new("."), export)?;
+    run(
+        &mut check_export_command(Path::new("."), export),
+        EXPORT_LIMIT_MS,
+        &INTERRUPTED,
+    )?;
     for step in &STEPS {
         eprintln!("check: cargo {}", step.arguments.join(" "));
         run(
-            &mut step_command(step, export, env::vars_os()),
+            &mut check_step_command(step, export, env::vars_os()),
             step.limit_ms,
+            &INTERRUPTED,
         )?;
     }
     Ok(())
@@ -60,6 +79,8 @@ struct Step {
 // cannot break it, and so the steps check it by its own manifest.
 const HOOK_MANIFEST: &str = ".githooks/staged-check/Cargo.toml";
 
+// Cargo's --quiet silences only its progress lines in clippy and test, but rustfmt's
+// whole diff in fmt, so the fmt steps go without it.
 const STEPS: [Step; 6] = [
     Step {
         arguments: &["fmt", "--all", "--check"],
@@ -111,18 +132,42 @@ const STEPS: [Step; 6] = [
     },
 ];
 
-fn step_command(
+// Exports the index, the tree the commit would hold, into an empty directory.
+fn check_export_command(repository: &Path, export: &Path) -> Command {
+    assert!(repository.is_dir());
+    assert!(export.is_absolute());
+
+    let mut prefix = OsString::from("--prefix=");
+    prefix.push(export);
+    prefix.push("/");
+    let mut command = Command::new("git");
+    command
+        .args(["checkout-index", "--all"])
+        .arg(prefix)
+        .current_dir(repository)
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    command
+}
+
+// A step reads no input, so a test that waits on stdin fails rather than hangs.
+fn check_step_command(
     step: &Step,
     export: &Path,
     environment: impl Iterator<Item = (OsString, OsString)>,
 ) -> Command {
     assert!(!step.arguments.is_empty());
+    assert!(export.is_absolute());
 
     let mut command = Command::new("cargo");
     command
         .args(step.arguments)
         .current_dir(export)
-        .env("CARGO_TARGET_DIR", export.join("target"));
+        .env("CARGO_TARGET_DIR", export.join("target"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
     for (name, _) in environment {
         if name.as_encoded_bytes().starts_with(b"GIT_") {
             command.env_remove(name);
@@ -132,23 +177,7 @@ fn step_command(
     command
 }
 
-// Exports the index, the tree the commit would hold, into an empty directory.
-fn export_index(repository: &Path, export: &Path) -> Result<(), Refusal> {
-    assert!(export.is_dir());
-    assert!(repository.is_dir());
-
-    let mut prefix = OsString::from("--prefix=");
-    prefix.push(export);
-    prefix.push("/");
-    let mut command = Command::new("git");
-    command
-        .args(["checkout-index", "--all"])
-        .arg(prefix)
-        .current_dir(repository);
-    run(&mut command, EXPORT_LIMIT_MS)
-}
-
-fn run(command: &mut Command, limit_ms: u32) -> Result<(), Refusal> {
+fn run(command: &mut Command, limit_ms: u32, interrupted: &AtomicBool) -> Result<(), Refusal> {
     assert!(limit_ms > 0);
     assert!(limit_ms.is_multiple_of(POLL_MS));
 
@@ -158,6 +187,7 @@ fn run(command: &mut Command, limit_ms: u32) -> Result<(), Refusal> {
         .spawn()
         .map_err(Refusal::Unstartable)?;
 
+    // The standard library has no wait with a time limit, so the loop polls.
     for _ in 0..limit_ms / POLL_MS {
         let exited = child.try_wait().map_err(Refusal::Unwaitable)?;
         if let Some(status) = exited {
@@ -167,14 +197,18 @@ fn run(command: &mut Command, limit_ms: u32) -> Result<(), Refusal> {
                 Err(Refusal::Failed(status))
             };
         }
+        if interrupted.load(Ordering::Relaxed) {
+            run_stop(&mut child)?;
+            return Err(Refusal::Interrupted);
+        }
         thread::sleep(Duration::from_millis(u64::from(POLL_MS)));
     }
 
-    stop(&mut child)?;
+    run_stop(&mut child)?;
     Err(Refusal::Stopped { limit_ms })
 }
 
-fn stop(child: &mut Child) -> Result<(), Refusal> {
+fn run_stop(child: &mut Child) -> Result<(), Refusal> {
     let group =
         i32::try_from(child.id()).map_err(|error| Refusal::Unstoppable(io::Error::other(error)))?;
     assert!(group > 0);
@@ -198,6 +232,7 @@ enum Refusal {
     Failed(ExitStatus),
     Stopped { limit_ms: u32 },
     Unstoppable(io::Error),
+    Interrupted,
 }
 
 impl std::fmt::Display for Refusal {
@@ -218,17 +253,46 @@ impl std::fmt::Display for Refusal {
                     "it ran past its limit and could not be stopped: {error}"
                 )
             }
+            Refusal::Interrupted => write!(formatter, "it was interrupted and stopped"),
         }
     }
+}
+
+// Set by a signal that would end the hook, Ctrl-C above all, so that the hook stops the
+// step running, whose process group the terminal's signal does not reach, and removes
+// its export before it exits.
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn interrupt(_signal: i32) {
+    INTERRUPTED.store(true, Ordering::Relaxed);
+}
+
+fn catch_interrupts() -> io::Result<()> {
+    assert!(!INTERRUPTED.load(Ordering::Relaxed));
+
+    for number in [SIGNAL_HANGUP, SIGNAL_INTERRUPT, SIGNAL_TERMINATE] {
+        // SAFETY: `interrupt` only stores to an atomic, which a signal handler may do.
+        let previous = unsafe { signal(number, interrupt) };
+        if previous == SIGNAL_ERROR {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
 }
 
 unsafe extern "C" {
     // kill(2). A negative pid names a process group.
     safe fn kill(pid: i32, signal: i32) -> i32;
+    // signal(3), which returns the previous handler as a pointer, or SIG_ERR.
+    fn signal(signal: i32, handler: extern "C" fn(i32)) -> isize;
 }
 
-// SIGKILL in <sys/signal.h> and ESRCH in <sys/errno.h>.
+// From <sys/signal.h> and <sys/errno.h>.
+const SIGNAL_HANGUP: i32 = 1;
+const SIGNAL_INTERRUPT: i32 = 2;
 const SIGNAL_KILL: i32 = 9;
+const SIGNAL_TERMINATE: i32 = 15;
+const SIGNAL_ERROR: isize = -1;
 const NO_SUCH_PROCESS: i32 = 3;
 const POLL_MS: u32 = 10;
 const EXPORT_LIMIT_MS: u32 = 30_000;
@@ -237,6 +301,7 @@ const EXPORT_LIMIT_MS: u32 = 30_000;
 const _: () = {
     assert!(EXPORT_LIMIT_MS > 0);
     assert!(EXPORT_LIMIT_MS.is_multiple_of(POLL_MS));
+    assert!(!STEPS.is_empty());
     let mut index = 0;
     while index < STEPS.len() {
         assert!(STEPS[index].limit_ms > 0);
@@ -249,13 +314,14 @@ const _: () = {
 mod tests {
     use super::*;
     use std::ffi::OsStr;
+    use std::sync::atomic::AtomicBool;
     use std::time::Instant;
 
     // Goal: a step whose command succeeds lets the commit through.
     // Method: run `true` as a step in the current directory.
     #[test]
     fn passes_a_step_that_exits_zero() {
-        let outcome = run(&mut Command::new("true"), 1_000);
+        let outcome = run(&mut Command::new("true"), 1_000, &NEVER_INTERRUPTED);
 
         assert!(outcome.is_ok(), "{outcome:?}");
     }
@@ -264,7 +330,7 @@ mod tests {
     // Method: run `false`, which exits 1.
     #[test]
     fn refuses_a_step_that_exits_non_zero() {
-        let outcome = run(&mut Command::new("false"), 1_000);
+        let outcome = run(&mut Command::new("false"), 1_000, &NEVER_INTERRUPTED);
 
         assert!(
             matches!(outcome, Err(Refusal::Failed(status)) if status.code() == Some(1)),
@@ -276,12 +342,55 @@ mod tests {
     // Method: run a program path that does not exist.
     #[test]
     fn refuses_a_step_it_cannot_start() {
-        let outcome = run(&mut Command::new("/nonexistent/program"), 1_000);
+        let outcome = run(
+            &mut Command::new("/nonexistent/program"),
+            1_000,
+            &NEVER_INTERRUPTED,
+        );
 
         assert!(
             matches!(outcome, Err(Refusal::Unstartable(_))),
             "{outcome:?}"
         );
+    }
+
+    // Goal: an interrupt, such as Ctrl-C in the terminal running `git commit`, stops the
+    // step running, since the step leads a process group the terminal's signal misses.
+    // Method: run a 30 s `sleep` and set the interrupt flag from another thread at 100 ms.
+    #[test]
+    fn stops_a_step_when_interrupted() {
+        let interrupted = AtomicBool::new(false);
+        let started = Instant::now();
+
+        let outcome = thread::scope(|scope| {
+            scope.spawn(|| {
+                thread::sleep(Duration::from_millis(100));
+                interrupted.store(true, Ordering::Relaxed);
+            });
+            run(Command::new("sleep").arg("30"), 60_000, &interrupted)
+        });
+
+        assert!(matches!(outcome, Err(Refusal::Interrupted)), "{outcome:?}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    // Goal: a signal that would end the hook sets the interrupt flag instead, so the hook
+    // can stop its step and remove its export before it exits.
+    // Method: catch the signals, send this process a hangup, and wait for the flag.
+    #[test]
+    fn turns_a_hangup_into_an_interrupt() {
+        catch_interrupts().unwrap();
+
+        assert_eq!(
+            kill(i32::try_from(process::id()).unwrap(), SIGNAL_HANGUP),
+            0
+        );
+
+        let started = Instant::now();
+        while !INTERRUPTED.load(Ordering::Relaxed) {
+            assert!(started.elapsed() < Duration::from_secs(2), "no interrupt");
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 
     // Goal: a step that runs past its limit refuses the commit, and nothing it started
@@ -297,7 +406,7 @@ mod tests {
             .current_dir(&scratch.path);
         let started = Instant::now();
 
-        let outcome = run(&mut command, 200);
+        let outcome = run(&mut command, 200, &NEVER_INTERRUPTED);
 
         assert!(
             matches!(outcome, Err(Refusal::Stopped { limit_ms: 200 })),
@@ -328,7 +437,11 @@ mod tests {
         let export = scratch.path.join("export");
         fs::create_dir(&export).unwrap();
 
-        let outcome = export_index(&repository, &export);
+        let outcome = run(
+            &mut check_export_command(&repository, &export),
+            EXPORT_LIMIT_MS,
+            &NEVER_INTERRUPTED,
+        );
 
         assert!(outcome.is_ok(), "{outcome:?}");
         assert_eq!(fs::read_to_string(export.join("file")).unwrap(), "staged\n");
@@ -348,7 +461,7 @@ mod tests {
             (OsString::from("PATH"), OsString::from("/usr/bin")),
         ];
 
-        let command = step_command(&STEPS[0], Path::new("/export"), environment.into_iter());
+        let command = check_step_command(&STEPS[0], Path::new("/export"), environment.into_iter());
 
         let removed: Vec<_> = command
             .get_envs()
@@ -378,7 +491,8 @@ mod tests {
         assert_eq!(rustfmt_steps.len(), 2);
 
         for step in rustfmt_steps {
-            let output = step_command(step, &scratch.path, env::vars_os())
+            let output = check_step_command(step, &scratch.path, env::vars_os())
+                .stdout(Stdio::piped())
                 .output()
                 .unwrap();
 
@@ -391,6 +505,8 @@ mod tests {
             );
         }
     }
+
+    static NEVER_INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
     // A directory of its own for one test, removed when the test ends, pass or fail.
     struct Scratch {
