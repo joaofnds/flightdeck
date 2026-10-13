@@ -426,9 +426,9 @@ pub(crate) unsafe fn pid_info<T>(pid: i32, flavor: c_int) -> io::Result<Result<T
     assert!(flavor > 0);
 
     let mut info = std::mem::MaybeUninit::<T>::uninit();
-    let size = c_int::try_from(size_of::<T>()).map_err(io::Error::other)?;
+    let size = pid_info_size::<T>();
     let written = unsafe { proc_pidinfo(pid, flavor, 0, info.as_mut_ptr().cast(), size) };
-    if let Err(unreadable) = pid_info_written(written, size, io::Error::last_os_error())? {
+    if let Err(unreadable) = pid_info_written::<T>(written, io::Error::last_os_error())? {
         return Ok(Err(unreadable));
     }
 
@@ -436,14 +436,22 @@ pub(crate) unsafe fn pid_info<T>(pid: i32, flavor: c_int) -> io::Result<Result<T
     Ok(Ok(unsafe { info.assume_init() }))
 }
 
-/// Reads what a `proc_pidinfo` asked for `size` bytes returned: the count of bytes it `written`,
-/// and the `error` it set where it failed, which it does by writing none. Any other count is
-/// info of another size than its type.
-fn pid_info_written(
-    written: c_int,
-    size: c_int,
-    error: io::Error,
-) -> io::Result<Result<(), Unreadable>> {
+/// The size of `T` as `proc_pidinfo` takes it. A type too large for that fails the build.
+fn pid_info_size<T>() -> c_int {
+    const { assert!(size_of::<T>() > 0) };
+    const { assert!(size_of::<T>() < 1 << 31) };
+
+    match c_int::try_from(size_of::<T>()) {
+        Ok(size) => size,
+        Err(error) => unreachable!("{error}"),
+    }
+}
+
+/// Reads what a `proc_pidinfo` asked for a `T` returned: the count of bytes it `written`, and
+/// the `error` it set where it failed, which it does by writing none. Any other count is info
+/// of another size than `T`.
+fn pid_info_written<T>(written: c_int, error: io::Error) -> io::Result<Result<(), Unreadable>> {
+    let size = pid_info_size::<T>();
     assert!(size > 0);
     assert!(error.raw_os_error().is_some());
 
@@ -820,8 +828,8 @@ mod tests {
     fn refuses_info_shorter_than_asked_for() {
         // Goal: info shorter than its type is an error rather than a reading, since the rest of
         // the type would hold no bytes the kernel wrote, and no errno says why.
-        // Method: read a call that wrote 40 of 96 bytes and set no errno.
-        let written = pid_info_written(40, 96, io::Error::from_raw_os_error(0));
+        // Method: read a call that wrote 40 of the 96 bytes of a task info and set no errno.
+        let written = pid_info_written::<ProcTaskinfo>(40, io::Error::from_raw_os_error(0));
 
         assert_eq!(io::ErrorKind::InvalidData, written.unwrap_err().kind());
     }
