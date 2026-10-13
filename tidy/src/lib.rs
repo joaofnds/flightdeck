@@ -156,14 +156,22 @@ fn long_functions(text: &str) -> Vec<usize> {
     numbers
 }
 
-/// Whether `line` opens a function, with nothing before `fn` but its visibility and its
-/// qualifiers.
+/// Tells whether `line` opens a function, with nothing before `fn` but its visibility and
+/// its qualifiers. A restricted visibility can hold a space, as `pub(in crate::tracker)`
+/// does, so it is dropped whole before the line is split into words.
 fn long_functions_opens(line: &str) -> bool {
-    for word in line.split_whitespace() {
+    let mut rest = line.trim_start();
+    if rest.starts_with("pub(") {
+        match rest.find(')') {
+            Some(index) => rest = &rest[index + 1..],
+            None => return false,
+        }
+    }
+
+    for word in rest.split_whitespace() {
         match word {
             "fn" => return true,
-            "pub" | "pub(crate)" | "pub(super)" | "pub(self)" | "const" | "async" | "unsafe"
-            | "safe" | "extern" => {}
+            "pub" | "const" | "async" | "unsafe" | "safe" | "extern" => {}
             abi if abi.starts_with('"') => {}
             _ => return false,
         }
@@ -267,6 +275,37 @@ fn long_functions_ends_an_indented_function_at_its_own_closing_brace() {
     let numbers = long_functions(&text);
 
     assert_eq!(numbers, [FUNCTION_LINES_MAX + 2]);
+}
+
+#[test]
+fn long_functions_counts_a_function_behind_its_visibility_and_qualifiers() {
+    // Goal: a function is measured whatever visibility and qualifiers stand before its `fn`.
+    // Method: a function one line past the limit behind each prefix rustfmt can write.
+    let prefixes = [
+        "pub ",
+        "pub(crate) ",
+        "pub(super) ",
+        "pub(self) ",
+        "pub(in crate::tracker) ",
+        "const ",
+        "async ",
+        "unsafe ",
+        "safe ",
+        "extern \"C\" ",
+        "pub(crate) const unsafe extern \"C\" ",
+    ];
+
+    for prefix in prefixes {
+        let text = function_text("", FUNCTION_LINES_MAX + 1).replacen(
+            "fn ",
+            &(prefix.to_owned() + "fn "),
+            1,
+        );
+
+        let numbers = long_functions(&text);
+
+        assert_eq!(numbers, [1], "{prefix}");
+    }
 }
 
 /// A function of `line_count` lines at `indentation`, counted from its `fn` line to its
