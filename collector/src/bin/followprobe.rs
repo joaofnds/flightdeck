@@ -158,8 +158,18 @@ fn follow(
 
     if followed.is_err() {
         for generator in &mut generators {
-            let _ = generator.kill();
-            let _ = generator.wait();
+            if let Err(error) = generator.kill() {
+                eprintln!(
+                    "followprobe: cannot stop generator {}: {error}",
+                    generator.id()
+                );
+            }
+            if let Err(error) = generator.wait() {
+                eprintln!(
+                    "followprobe: cannot reap generator {}: {error}",
+                    generator.id()
+                );
+            }
         }
     }
     followed

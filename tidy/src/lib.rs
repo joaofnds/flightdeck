@@ -88,6 +88,9 @@ fn file_findings(path: &str, bytes: &[u8]) -> Vec<String> {
                     findings.push(format!("{path}:{number}: over {COLUMNS_MAX} columns"));
                 }
                 if extension == Some("rs") {
+                    for number in discards(text) {
+                        findings.push(format!("{path}:{number}: discards a value"));
+                    }
                     for number in long_functions(text) {
                         findings.push(format!(
                             "{path}:{number}: function over {FUNCTION_LINES_MAX} lines"
@@ -326,4 +329,43 @@ fn script_passes_rust_configuration_and_documents() {
     assert!(!script("Cargo.toml", b"[workspace]\n"));
     assert!(!script(".github/workflows/check.yml", b"name: check\n"));
     assert!(!script("README.md", b"# Flightdeck\n\n#!/bin/sh\n"));
+}
+
+/// The number of each line, counted from 1, that discards a value with `let _ =` or `_ =`.
+/// Rustfmt puts one space on each side of `=`, which a match arm on `_` follows with `>`.
+fn discards(text: &str) -> Vec<usize> {
+    let mut numbers = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        let statement = line.trim_start();
+        if statement.starts_with("let _ = ") {
+            numbers.push(index + 1);
+        } else {
+            if statement.starts_with("_ = ") {
+                numbers.push(index + 1);
+            }
+        }
+    }
+    numbers
+}
+
+#[test]
+fn discards_reports_a_value_discarded_by_assignment() {
+    // Goal: both statements that discard a value are reported by their line numbers.
+    // Method: one of each in a function.
+    let text = "fn step() {\n    let _ = read();\n    _ = write();\n}\n";
+
+    let numbers = discards(text);
+
+    assert_eq!(numbers, [2, 3]);
+}
+
+#[test]
+fn discards_passes_a_match_arm_and_a_named_binding() {
+    // Goal: a match arm on `_` and a binding with a name are not discards.
+    // Method: a function holding one of each.
+    let text = "fn step() {\n    match read() {\n        _ => {}\n    }\n    let total = 1;\n}\n";
+
+    let numbers = discards(text);
+
+    assert!(numbers.is_empty());
 }
