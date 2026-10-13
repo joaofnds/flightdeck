@@ -32,6 +32,10 @@ and socket was doing. Every number below was measured on this M5 Pro on 2026-10-
   achieve the same performance, and if it wouldn't be too much of a burden to
   maintain", 2026-10-13).
 
+Every cost here comes from release builds made before 1a4b016, which turned on overflow
+checks and abort on a panic. Measure that change on its own before comparing a new run
+with these rows.
+
 Without root and once a second, the collector in Rust measured 2.29% and 1.75% of a core
 and 37.5 and 21.7 mW over two five-minute runs of this Mac's use. Seven of their ten
 minutes cost 1.2 to 2.2%, and the three that held a burst of forks cost 3.1 to 3.2%,
