@@ -1,1 +1,0 @@
-#!/usr/bin/env -S CARGO_TARGET_DIR=target/hook cargo run --locked --manifest-path .githooks/staged-check/Cargo.toml --

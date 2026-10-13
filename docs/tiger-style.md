@@ -8,15 +8,16 @@ here how the rule applies to Rust and where Flightdeck departs from it.
 
 Hold the code you write or change to every rule here. Bring other code into line only on
 a card for that work, never as a side effect of another task. Add a rule's check in the
-commit that brings the code into line with it, so the check never refuses a commit over
-code nobody has fixed yet.
+commit that brings the code into line with it, so the check never fails over code nobody
+has fixed yet.
 
 ## What the check holds
 
-The pre-commit hook in `.githooks` runs rustfmt, clippy and the tests over the tree a
-commit holds, as `.githooks/staged-check/src/main.rs` lists them, and refuses the commit
-on any failure or warning. A reviewer reads each change against every rule below, since a
-tool holds only some of them.
+GitHub Actions runs rustfmt, clippy and the tests on every push to `main` and every pull
+request, as `.github/workflows/check.yml` lists them, and fails the run on an error or a
+warning from any of them. Put a new check in that workflow or in a test it runs, and add no
+git hook, since what runs on a contributor's machine is theirs to choose. A reviewer reads
+each change against every rule below, since a tool holds only some of them.
 
 Rust holds Tiger's snake_case for functions, variables and modules and its braces on every
 `if`, and rustfmt holds its layout and four-space indentation. Name every file in
@@ -149,7 +150,5 @@ snake_case too, which nothing checks.
 - Take a crate from outside the workspace only under the dependency decision in
   [recording-research.md](recording-research.md#decisions), with its case recorded there,
   where Tiger takes no dependency beyond its toolchain.
-- `.githooks/pre-commit` is a script of one shebang line, since git runs a hook as a
-  file that must exist before anything can be built.
 
 [tiger]: https://github.com/tigerbeetle/tigerbeetle/blob/6e39a21fc9d1d912dfbaa1bc7fd8ac108fe379ea/docs/TIGER_STYLE.md
