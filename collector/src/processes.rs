@@ -509,6 +509,15 @@ mod tests {
     }
 
     #[test]
+    fn reads_the_process_limit_from_kern_maxproc() {
+        // Goal: the process limit is kern.maxproc, the most processes macOS runs at once.
+        // Method: compare the limit with kern.maxproc read as raw bytes.
+        let maxproc = i32::from_ne_bytes(crate::kernel::sysctl_bytes(c"kern.maxproc"));
+
+        assert_eq!(usize::try_from(maxproc).unwrap(), process_limit().unwrap());
+    }
+
+    #[test]
     fn takes_room_for_every_process_the_limit_allows() {
         // Goal: a sweep takes room at startup for every process the limit allows, so no listing
         // makes a tick grow its readings.

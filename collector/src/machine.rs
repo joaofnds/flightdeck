@@ -360,6 +360,15 @@ mod tests {
     }
 
     #[test]
+    fn reads_the_cpu_limit_from_hw_logicalcpu_max() {
+        // Goal: the CPU limit is hw.logicalcpu_max, the most logical CPUs the machine runs.
+        // Method: compare the limit with hw.logicalcpu_max read as raw bytes.
+        let cpus = u32::from_ne_bytes(kernel::sysctl_bytes(c"hw.logicalcpu_max"));
+
+        assert_eq!(usize::try_from(cpus).unwrap(), cpu_limit().unwrap());
+    }
+
+    #[test]
     fn refuses_more_cpus_than_its_limit_without_growing() {
         // Goal: macOS reporting more CPUs than the limit is an error, and the list keeps its room.
         // Method: read this Mac, which has more than one CPU, into room for one.
