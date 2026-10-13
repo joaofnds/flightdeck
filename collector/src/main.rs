@@ -197,9 +197,16 @@ impl Run {
         match (&markers.first, &markers.last) {
             (Ok(first), Ok(last)) => report_missed(
                 out,
-                processes_started(*first, *last, &self.live_at_first_scan, end.counts.forks),
-                self.warm_up_starts + self.whole.tally.starts,
-                end.counts.dropped_starts,
+                &Starts {
+                    started: processes_started(
+                        *first,
+                        *last,
+                        &self.live_at_first_scan,
+                        end.counts.forks,
+                    ),
+                    found: self.warm_up_starts + self.whole.tally.starts,
+                    dropped: end.counts.dropped_starts,
+                },
             ),
             (Err(error), _) | (_, Err(error)) => writeln!(
                 out,
@@ -301,19 +308,30 @@ fn missed(started: Option<u64>, found: u64) -> Option<u64> {
     started.and_then(|started| started.checked_sub(found))
 }
 
-/// Writes how many processes started over the run and how many of them no event reported,
-/// which holds the starts dropped from a full event list, `dropped_starts`.
-fn report_missed(
-    out: &mut impl Write,
+/// The processes that started over a run, as the run's report counts them.
+struct Starts {
+    /// The processes started over the run, or `None` where pids may have wrapped.
     started: Option<u64>,
+    /// The starts an event reported.
     found: u64,
-    dropped_starts: u64,
-) -> io::Result<()> {
+    /// The starts dropped from a full event list, which no event reported.
+    dropped: u64,
+}
+
+/// Writes how many processes started over the run and how many of them no event reported,
+/// which holds the starts dropped from a full event list.
+fn report_missed(out: &mut impl Write, starts: &Starts) -> io::Result<()> {
+    let &Starts {
+        started,
+        found,
+        dropped,
+    } = starts;
+
     match (started, missed(started, found)) {
         (Some(started), Some(missed)) => writeln!(
             out,
             "  processes started over the run {started}, found {found}, missed {missed}, \
-             {dropped_starts} of them dropped from a full event list"
+             {dropped} of them dropped from a full event list"
         ),
         _ => writeln!(
             out,
@@ -696,7 +714,12 @@ mod tests {
         // Method: write the missed line for a run that found 7 of 10 starts and dropped 2.
         let mut written = Vec::new();
 
-        report_missed(&mut written, Some(10), 7, 2).unwrap();
+        let starts = Starts {
+            started: Some(10),
+            found: 7,
+            dropped: 2,
+        };
+        report_missed(&mut written, &starts).unwrap();
 
         assert_eq!(
             "  processes started over the run 10, found 7, missed 3, \
