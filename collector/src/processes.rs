@@ -1,8 +1,9 @@
-use std::ffi::c_int;
+use std::ffi::{c_int, c_void};
 use std::io;
 use std::mem::offset_of;
 
 use crate::clock::Timebase;
+use crate::kernel::ESRCH;
 
 #[repr(C)]
 struct RusageInfoV6 {
@@ -72,6 +73,58 @@ const _: () = assert!(offset_of!(RusageInfoV6, energy_nj) == 336);
 
 const RUSAGE_INFO_V6: c_int = 6;
 
+/// A process's task, as `struct proc_taskinfo` declares it.
+#[repr(C)]
+struct ProcTaskinfo {
+    virtual_size: u64,
+    resident_size: u64,
+    total_user: u64,
+    total_system: u64,
+    threads_user: u64,
+    threads_system: u64,
+    policy: i32,
+    faults: i32,
+    pageins: i32,
+    cow_faults: i32,
+    messages_sent: i32,
+    messages_received: i32,
+    syscalls_mach: i32,
+    syscalls_unix: i32,
+    csw: i32,
+    threadnum: i32,
+    numrunning: i32,
+    priority: i32,
+}
+
+const _: () = assert!(size_of::<ProcTaskinfo>() == 96);
+const _: () = assert!(offset_of!(ProcTaskinfo, faults) == 52);
+const _: () = assert!(offset_of!(ProcTaskinfo, syscalls_mach) == 72);
+const _: () = assert!(offset_of!(ProcTaskinfo, syscalls_unix) == 76);
+const _: () = assert!(offset_of!(ProcTaskinfo, csw) == 80);
+const _: () = assert!(offset_of!(ProcTaskinfo, threadnum) == 84);
+
+/// Room for `struct proc_bsdshortinfo`, which `is_running` asks for and never reads.
+#[repr(C)]
+struct ProcBsdshortinfo([u32; 16]);
+
+const _: () = assert!(size_of::<ProcBsdshortinfo>() == 64);
+const _: () = assert!(align_of::<ProcBsdshortinfo>() == 4);
+
+const PROC_PIDTASKINFO: c_int = 4;
+const PROC_PIDT_SHORTBSDINFO: c_int = 13;
+
+unsafe extern "C" {
+    fn proc_listallpids(buffer: *mut c_void, buffer_size: c_int) -> c_int;
+    fn proc_pidinfo(
+        pid: c_int,
+        flavor: c_int,
+        argument: u64,
+        buffer: *mut c_void,
+        buffer_size: c_int,
+    ) -> c_int;
+    fn proc_pid_rusage(pid: c_int, flavor: c_int, buffer: *mut c_void) -> c_int;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unreadable {
     Refused,
@@ -116,7 +169,7 @@ pub fn list_pids(into: &mut Vec<i32>) -> io::Result<()> {
     loop {
         into.resize(into.capacity().max(4096), 0);
         let room = c_int::try_from(into.len() * size_of::<i32>()).unwrap_or(c_int::MAX);
-        let count = unsafe { libc::proc_listallpids(into.as_mut_ptr().cast(), room) };
+        let count = unsafe { proc_listallpids(into.as_mut_ptr().cast(), room) };
         let Ok(count) = usize::try_from(count) else {
             return Err(io::Error::last_os_error());
         };
@@ -132,17 +185,17 @@ pub fn list_pids(into: &mut Vec<i32>) -> io::Result<()> {
 
 pub fn read(pid: i32, timebase: Timebase) -> Result<Process, Unreadable> {
     let usage = read_usage(pid, timebase)?;
-    let task: libc::proc_taskinfo = unsafe { pid_info(pid, libc::PROC_PIDTASKINFO)? };
+    let task: ProcTaskinfo = unsafe { pid_info(pid, PROC_PIDTASKINFO)? };
 
     Ok(Process {
         pid,
         usage,
         task: Task {
-            threads: task.pti_threadnum,
-            faults: task.pti_faults,
-            context_switches: task.pti_csw,
-            mach_syscalls: task.pti_syscalls_mach,
-            unix_syscalls: task.pti_syscalls_unix,
+            threads: task.threadnum,
+            faults: task.faults,
+            context_switches: task.csw,
+            mach_syscalls: task.syscalls_mach,
+            unix_syscalls: task.syscalls_unix,
         },
     })
 }
@@ -170,7 +223,7 @@ pub fn read_usage(pid: i32, timebase: Timebase) -> Result<Usage, Unreadable> {
 
 fn rusage(pid: i32) -> Result<RusageInfoV6, Unreadable> {
     let mut usage = std::mem::MaybeUninit::<RusageInfoV6>::uninit();
-    if unsafe { libc::proc_pid_rusage(pid, RUSAGE_INFO_V6, usage.as_mut_ptr().cast()) } != 0 {
+    if unsafe { proc_pid_rusage(pid, RUSAGE_INFO_V6, usage.as_mut_ptr().cast()) } != 0 {
         return Err(unreadable_from_errno());
     }
 
@@ -179,7 +232,7 @@ fn rusage(pid: i32) -> Result<RusageInfoV6, Unreadable> {
 
 #[must_use]
 pub fn is_alive(pid: i32) -> bool {
-    unsafe { pid_info::<libc::proc_bsdshortinfo>(pid, libc::PROC_PIDT_SHORTBSDINFO) }.is_ok()
+    unsafe { pid_info::<ProcBsdshortinfo>(pid, PROC_PIDT_SHORTBSDINFO) }.is_ok()
 }
 
 /// # Safety
@@ -189,7 +242,7 @@ pub fn is_alive(pid: i32) -> bool {
 pub(crate) unsafe fn pid_info<T>(pid: i32, flavor: c_int) -> Result<T, Unreadable> {
     let mut info = std::mem::MaybeUninit::<T>::uninit();
     let size = c_int::try_from(size_of::<T>()).unwrap_or(0);
-    let written = unsafe { libc::proc_pidinfo(pid, flavor, 0, info.as_mut_ptr().cast(), size) };
+    let written = unsafe { proc_pidinfo(pid, flavor, 0, info.as_mut_ptr().cast(), size) };
     if written != size {
         return Err(unreadable_from_errno());
     }
@@ -199,23 +252,33 @@ pub(crate) unsafe fn pid_info<T>(pid: i32, flavor: c_int) -> Result<T, Unreadabl
 
 #[cfg(test)]
 pub(crate) fn child_that_has_exited() -> std::process::Child {
+    use std::ffi::c_uint;
+
+    /// Room for `siginfo_t`, which `waitid` fills and the tests never read.
+    #[repr(C)]
+    struct SigInfo([u64; 13]);
+
+    const _: () = assert!(size_of::<SigInfo>() == 104);
+    const _: () = assert!(align_of::<SigInfo>() == 8);
+
+    const P_PID: c_uint = 1;
+    const WEXITED: c_int = 4;
+    const WNOWAIT: c_int = 32;
+
+    unsafe extern "C" {
+        fn waitid(kind: c_uint, id: u32, info: *mut SigInfo, options: c_int) -> c_int;
+    }
+
     let child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
-    let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
-    let waited = unsafe {
-        libc::waitid(
-            libc::P_PID,
-            child.id(),
-            info.as_mut_ptr(),
-            libc::WEXITED | libc::WNOWAIT,
-        )
-    };
+    let mut info = std::mem::MaybeUninit::<SigInfo>::zeroed();
+    let waited = unsafe { waitid(P_PID, child.id(), info.as_mut_ptr(), WEXITED | WNOWAIT) };
     assert_eq!(0, waited, "{}", io::Error::last_os_error());
 
     child
 }
 
 fn unreadable_from_errno() -> Unreadable {
-    if io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+    if io::Error::last_os_error().raw_os_error() == Some(ESRCH) {
         Unreadable::Gone
     } else {
         Unreadable::Refused
@@ -252,19 +315,61 @@ mod tests {
     use super::*;
     use crate::cost::spin_on_this_thread_for;
 
+    /// A time in seconds and microseconds, as `struct timeval` declares it.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct Timeval {
+        tv_sec: i64,
+        tv_usec: i32,
+    }
+
+    const _: () = assert!(size_of::<Timeval>() == 16);
+    const _: () = assert!(offset_of!(Timeval, tv_sec) == 0);
+    const _: () = assert!(offset_of!(Timeval, tv_usec) == 8);
+
+    /// What a process has used, as `struct rusage` declares it.
+    #[repr(C)]
+    struct Rusage {
+        utime: Timeval,
+        stime: Timeval,
+        maxrss: i64,
+        ixrss: i64,
+        idrss: i64,
+        isrss: i64,
+        minflt: i64,
+        majflt: i64,
+        nswap: i64,
+        inblock: i64,
+        oublock: i64,
+        msgsnd: i64,
+        msgrcv: i64,
+        nsignals: i64,
+        nvcsw: i64,
+        nivcsw: i64,
+    }
+
+    const _: () = assert!(size_of::<Rusage>() == 144);
+    const _: () = assert!(offset_of!(Rusage, utime) == 0);
+    const _: () = assert!(offset_of!(Rusage, stime) == 16);
+
+    const RUSAGE_SELF: c_int = 0;
+
     unsafe extern "C" {
         fn mach_absolute_time() -> u64;
+        fn getrusage(who: c_int, usage: *mut Rusage) -> c_int;
     }
 
     fn own_cpu_ns() -> u64 {
-        let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
-        unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+        let mut usage = std::mem::MaybeUninit::<Rusage>::uninit();
+        let measured = unsafe { getrusage(RUSAGE_SELF, usage.as_mut_ptr()) };
+        assert_eq!(0, measured, "{}", io::Error::last_os_error());
+
         let usage = unsafe { usage.assume_init() };
-        let micros = |t: libc::timeval| {
+        let micros = |t: Timeval| {
             u64::try_from(t.tv_sec).unwrap() * 1_000_000 + u64::try_from(t.tv_usec).unwrap()
         };
 
-        (micros(usage.ru_utime) + micros(usage.ru_stime)) * 1_000
+        (micros(usage.utime) + micros(usage.stime)) * 1_000
     }
 
     #[test]
