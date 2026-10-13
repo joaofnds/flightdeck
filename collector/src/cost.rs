@@ -1,7 +1,9 @@
+use std::ffi::{c_int, c_uint};
 use std::io;
 use std::time::Duration;
 
 use crate::clock::{self, Timebase};
+use crate::kernel::Timespec;
 use crate::processes;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,12 +86,18 @@ impl Meter {
     }
 }
 
+const CLOCK_THREAD_CPUTIME_ID: c_uint = 16;
+
+unsafe extern "C" {
+    fn clock_gettime(clock: c_uint, time: *mut Timespec) -> c_int;
+}
+
 fn thread_cpu_ns() -> u64 {
-    let mut now = libc::timespec {
+    let mut now = Timespec {
         tv_sec: 0,
         tv_nsec: 0,
     };
-    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &raw mut now) };
+    unsafe { clock_gettime(CLOCK_THREAD_CPUTIME_ID, &raw mut now) };
     u64::try_from(now.tv_sec).unwrap_or(0) * 1_000_000_000 + u64::try_from(now.tv_nsec).unwrap_or(0)
 }
 

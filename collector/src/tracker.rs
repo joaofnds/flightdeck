@@ -1,11 +1,13 @@
-use std::ffi::c_int;
+use std::ffi::{c_int, c_void};
 use std::io;
+use std::mem::offset_of;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::time::Duration;
 
 use crate::clock::{self, Timebase};
 use crate::coalitions;
 use crate::cost::{Meter, Source};
+use crate::kernel::{ESRCH, Timespec};
 use crate::processes::{self, Unreadable, Usage};
 
 #[derive(Debug)]
@@ -38,9 +40,9 @@ pub struct Tracker {
     lingering: Vec<(i32, usize)>,
     scans: u64,
     throttle: Throttle,
-    arming: Vec<libc::kevent>,
-    changes: Vec<libc::kevent>,
-    received: Vec<libc::kevent>,
+    arming: Vec<Kevent>,
+    changes: Vec<Kevent>,
+    received: Vec<Kevent>,
     starting: Vec<i32>,
     exiting: Vec<(i32, Noticed)>,
     events: Vec<Event>,
@@ -157,7 +159,7 @@ const RECEIVED_PER_WAIT: usize = 64;
 
 impl Tracker {
     pub fn new(timebase: Timebase, rescan_interval: Duration) -> io::Result<Self> {
-        let queue = unsafe { libc::kqueue() };
+        let queue = unsafe { kqueue() };
         if queue < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -299,15 +301,15 @@ impl Tracker {
         let mut woke = Wake::default();
         for index in 0..count {
             let event = self.received[index];
-            if event.flags & libc::EV_ERROR != 0 {
+            if event.flags & EV_ERROR != 0 {
                 return Err(io::Error::from_raw_os_error(
-                    i32::try_from(event.data).unwrap_or(libc::EINVAL),
+                    i32::try_from(event.data).unwrap_or(EINVAL),
                 ));
             }
 
-            if event.filter == libc::EVFILT_TIMER && event.ident == DEADLINE_TIMER {
+            if event.filter == EVFILT_TIMER && event.ident == DEADLINE_TIMER {
                 woke.due = true;
-            } else if event.filter == libc::EVFILT_TIMER {
+            } else if event.filter == EVFILT_TIMER {
                 woke.rescan_timer_fired = true;
             } else {
                 woke.forked |= self.handle(event);
@@ -317,16 +319,16 @@ impl Tracker {
         Ok(woke)
     }
 
-    fn handle(&mut self, event: libc::kevent) -> bool {
+    fn handle(&mut self, event: Kevent) -> bool {
         let pid = i32::try_from(event.ident).unwrap_or(-1);
-        if event.fflags & libc::NOTE_EXEC != 0 {
+        if event.fflags & NOTE_EXEC != 0 {
             self.events.push(Event::Exec { pid });
         }
-        if event.fflags & libc::NOTE_EXIT != 0 {
+        if event.fflags & NOTE_EXIT != 0 {
             self.exiting.push((pid, Noticed::OnExit));
         }
 
-        let forked = event.fflags & libc::NOTE_FORK != 0;
+        let forked = event.fflags & NOTE_FORK != 0;
         if forked {
             self.counts.forks += 1;
         }
@@ -385,13 +387,13 @@ impl Tracker {
     fn register_watches(&mut self) -> io::Result<()> {
         let count = c_int::try_from(self.changes.len()).unwrap_or(c_int::MAX);
         self.received
-            .resize(self.changes.len(), kevent(0, 0, 0, 0, 0));
-        let none_pending = libc::timespec {
+            .resize(self.changes.len(), Kevent::new(0, 0, 0, 0, 0));
+        let none_pending = Timespec {
             tv_sec: 0,
             tv_nsec: 0,
         };
         let receipts = unsafe {
-            libc::kevent(
+            kevent(
                 self.queue.as_raw_fd(),
                 self.changes.as_ptr(),
                 count,
@@ -408,10 +410,10 @@ impl Tracker {
         for index in 0..receipts {
             let receipt = self.received[index];
             let pid = i32::try_from(receipt.ident).unwrap_or(-1);
-            match i32::try_from(receipt.data).unwrap_or(libc::EINVAL) {
+            match i32::try_from(receipt.data).unwrap_or(EINVAL) {
                 0 => {}
-                libc::EPERM => self.counts.refused_watches += 1,
-                libc::ESRCH => self.exiting.push((pid, Noticed::AlreadyExited)),
+                EPERM => self.counts.refused_watches += 1,
+                ESRCH => self.exiting.push((pid, Noticed::AlreadyExited)),
                 error => return Err(io::Error::from_raw_os_error(error)),
             }
         }
@@ -421,10 +423,10 @@ impl Tracker {
 
     fn wait(&mut self) -> io::Result<usize> {
         self.received
-            .resize(RECEIVED_PER_WAIT, kevent(0, 0, 0, 0, 0));
+            .resize(RECEIVED_PER_WAIT, Kevent::new(0, 0, 0, 0, 0));
         loop {
             let count = unsafe {
-                libc::kevent(
+                kevent(
                     self.queue.as_raw_fd(),
                     self.arming.as_ptr(),
                     c_int::try_from(self.arming.len()).unwrap_or(0),
@@ -446,35 +448,84 @@ impl Tracker {
     }
 }
 
-fn watch(pid: i32) -> libc::kevent {
-    kevent(
+fn watch(pid: i32) -> Kevent {
+    Kevent::new(
         usize::try_from(pid).unwrap_or(0),
-        libc::EVFILT_PROC,
-        libc::EV_ADD | libc::EV_RECEIPT,
-        libc::NOTE_FORK | libc::NOTE_EXEC | libc::NOTE_EXIT,
+        EVFILT_PROC,
+        EV_ADD | EV_RECEIPT,
+        NOTE_FORK | NOTE_EXEC | NOTE_EXIT,
         0,
     )
 }
 
-fn timer_at(ident: usize, deadline: u64) -> libc::kevent {
-    kevent(
+fn timer_at(ident: usize, deadline: u64) -> Kevent {
+    Kevent::new(
         ident,
-        libc::EVFILT_TIMER,
-        libc::EV_ADD | libc::EV_ONESHOT,
-        libc::NOTE_ABSOLUTE | libc::NOTE_MACHTIME | libc::NOTE_MACH_CONTINUOUS_TIME,
+        EVFILT_TIMER,
+        EV_ADD | EV_ONESHOT,
+        NOTE_ABSOLUTE | NOTE_MACHTIME | NOTE_MACH_CONTINUOUS_TIME,
         isize::try_from(deadline).unwrap_or(isize::MAX),
     )
 }
 
-fn kevent(ident: usize, filter: i16, flags: u16, filter_flags: u32, data: isize) -> libc::kevent {
-    libc::kevent {
-        ident,
-        filter,
-        flags,
-        fflags: filter_flags,
-        data,
-        udata: std::ptr::null_mut(),
+/// One change to a kqueue, or one event it reports, as `struct kevent` declares it.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Kevent {
+    ident: usize,
+    filter: i16,
+    flags: u16,
+    fflags: u32,
+    data: isize,
+    udata: *mut c_void,
+}
+
+const _: () = assert!(size_of::<Kevent>() == 32);
+const _: () = assert!(offset_of!(Kevent, ident) == 0);
+const _: () = assert!(offset_of!(Kevent, filter) == 8);
+const _: () = assert!(offset_of!(Kevent, flags) == 10);
+const _: () = assert!(offset_of!(Kevent, fflags) == 12);
+const _: () = assert!(offset_of!(Kevent, data) == 16);
+const _: () = assert!(offset_of!(Kevent, udata) == 24);
+
+impl Kevent {
+    fn new(ident: usize, filter: i16, flags: u16, filter_flags: u32, data: isize) -> Self {
+        Self {
+            ident,
+            filter,
+            flags,
+            fflags: filter_flags,
+            data,
+            udata: std::ptr::null_mut(),
+        }
     }
+}
+
+const EVFILT_PROC: i16 = -5;
+const EVFILT_TIMER: i16 = -7;
+const EV_ADD: u16 = 0x1;
+const EV_ONESHOT: u16 = 0x10;
+const EV_RECEIPT: u16 = 0x40;
+const EV_ERROR: u16 = 0x4000;
+const NOTE_EXIT: u32 = 0x8000_0000;
+const NOTE_FORK: u32 = 0x4000_0000;
+const NOTE_EXEC: u32 = 0x2000_0000;
+const NOTE_ABSOLUTE: u32 = 0x8;
+const NOTE_MACHTIME: u32 = 0x100;
+const NOTE_MACH_CONTINUOUS_TIME: u32 = 0x80;
+const EPERM: c_int = 1;
+const EINVAL: c_int = 22;
+
+unsafe extern "C" {
+    fn kqueue() -> c_int;
+    fn kevent(
+        queue: c_int,
+        changes: *const Kevent,
+        change_count: c_int,
+        events: *mut Kevent,
+        event_capacity: c_int,
+        timeout: *const Timespec,
+    ) -> c_int;
 }
 
 #[cfg(test)]
