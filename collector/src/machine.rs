@@ -192,8 +192,15 @@ pub struct Machine {
     pub memory: Memory,
 }
 
+/// Reads the most logical CPUs the machine runs, `hw.logicalcpu_max`, which sizes every list
+/// that holds an entry for each CPU.
+pub fn cpu_limit() -> io::Result<usize> {
+    let limit: c_int = Sysctl::named(c"hw.logicalcpu_max")?.read()?;
+    usize::try_from(limit).map_err(io::Error::other)
+}
+
 impl Machine {
-    pub fn new() -> io::Result<Self> {
+    pub fn new(cpu_limit: usize) -> io::Result<Self> {
         let total_bytes: u64 = Sysctl::named(c"hw.memsize")?.read()?;
         let page_size = u64::try_from(unsafe { vm_page_size }).map_err(io::Error::other)?;
 
@@ -202,7 +209,7 @@ impl Machine {
             page_size,
             swap_usage: Sysctl::named(c"vm.swapusage")?,
             pressure_level: Sysctl::named(c"kern.memorystatus_vm_pressure_level")?,
-            cpus: Vec::new(),
+            cpus: Vec::with_capacity(cpu_limit),
             memory: Memory {
                 total_bytes,
                 ..Memory::default()
@@ -217,14 +224,14 @@ impl Machine {
 
     fn read_cpus(&mut self) -> io::Result<()> {
         let mut count: u32 = 0;
-        let mut info: *mut c_int = std::ptr::null_mut();
+        let mut address: *mut c_int = std::ptr::null_mut();
         let mut size: u32 = 0;
         let result = unsafe {
             host_processor_info(
                 self.host,
                 PROCESSOR_CPU_LOAD_INFO,
                 &raw mut count,
-                &raw mut info,
+                &raw mut address,
                 &raw mut size,
             )
         };
@@ -234,10 +241,23 @@ impl Machine {
             )));
         }
 
-        let loads = unsafe {
-            std::slice::from_raw_parts(info.cast::<ProcessorCpuLoadInfo>(), usize_from_u32(count))
+        let info = MachMemory {
+            address,
+            size: usize_from_u32(size) * size_of::<c_int>(),
         };
 
+        let count = usize_from_u32(count);
+        let capacity = self.cpus.capacity();
+        if count > capacity {
+            return Err(io::Error::new(
+                io::ErrorKind::QuotaExceeded,
+                format!("macOS reported {count} CPUs past the limit of {capacity}"),
+            ));
+        }
+
+        let loads = unsafe {
+            std::slice::from_raw_parts(info.address.cast::<ProcessorCpuLoadInfo>(), count)
+        };
         self.cpus.clear();
         self.cpus.extend(loads.iter().map(|load| CpuTicks {
             user: load.cpu_ticks[USER_INDEX],
@@ -245,14 +265,7 @@ impl Machine {
             nice: load.cpu_ticks[NICE_INDEX],
             idle: load.cpu_ticks[IDLE_INDEX],
         }));
-
-        unsafe {
-            vm_deallocate(
-                kernel::task_self(),
-                info.addr(),
-                usize_from_u32(size) * size_of::<c_int>(),
-            )
-        };
+        assert_eq!(capacity, self.cpus.capacity());
 
         Ok(())
     }
@@ -307,6 +320,19 @@ impl Machine {
     }
 }
 
+/// Memory the kernel gave this task in a reply, `size` bytes at `address`, which it frees
+/// when it drops.
+struct MachMemory {
+    address: *mut c_int,
+    size: usize,
+}
+
+impl Drop for MachMemory {
+    fn drop(&mut self) {
+        unsafe { vm_deallocate(kernel::task_self(), self.address.addr(), self.size) };
+    }
+}
+
 /// Widens a count the kernel returns as a `u32`, which a `usize` holds on every 64-bit Mac.
 fn usize_from_u32(value: u32) -> usize {
     const { assert!(size_of::<u32>() <= size_of::<usize>()) };
@@ -323,7 +349,7 @@ mod tests {
 
     #[test]
     fn reads_the_ticks_of_every_logical_cpu() {
-        let mut machine = Machine::new().unwrap();
+        let mut machine = Machine::new(cpu_limit().unwrap()).unwrap();
 
         machine.read().unwrap();
 
@@ -334,8 +360,18 @@ mod tests {
     }
 
     #[test]
+    fn refuses_more_cpus_than_its_limit_without_growing() {
+        let mut machine = Machine::new(1).unwrap();
+
+        let read = machine.read();
+
+        assert_eq!(io::ErrorKind::QuotaExceeded, read.unwrap_err().kind());
+        assert_eq!(1, machine.cpus.capacity());
+    }
+
+    #[test]
     fn reads_memory_that_fits_in_the_installed_ram() {
-        let mut machine = Machine::new().unwrap();
+        let mut machine = Machine::new(cpu_limit().unwrap()).unwrap();
 
         machine.read().unwrap();
 

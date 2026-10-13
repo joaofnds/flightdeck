@@ -6,7 +6,7 @@ use crate::coalitions::{self, Coalitions};
 use crate::cost::{Meter, Source};
 use crate::interfaces::Interfaces;
 use crate::ioreport::IoReport;
-use crate::machine::Machine;
+use crate::machine::{self, Machine};
 use crate::processes::{self, Sweep};
 use crate::smc::Smc;
 use crate::tracker::{EVENTS_PER_TICK_MAX, Event, Tracker};
@@ -27,6 +27,7 @@ pub struct Collector {
 impl Collector {
     pub fn new(timebase: Timebase, rescan_interval: Duration) -> io::Result<Self> {
         let process_limit = processes::process_limit()?;
+        let cpu_limit = machine::cpu_limit()?;
         // Room for a coalition for every process macOS runs and one for every start a tick
         // holds, with a coalition past it reported as an error.
         let coalition_limit = process_limit + EVENTS_PER_TICK_MAX;
@@ -35,7 +36,7 @@ impl Collector {
             timebase,
             listing: processes::pid_list(process_limit),
             tracker: Tracker::new(timebase, rescan_interval, process_limit)?,
-            machine: Machine::new()?,
+            machine: Machine::new(cpu_limit)?,
             interfaces: Interfaces::default(),
             ioreport: IoReport::open(timebase)?,
             smc: Smc::open()?,
