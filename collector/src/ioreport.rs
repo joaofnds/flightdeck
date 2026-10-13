@@ -78,10 +78,26 @@ unsafe extern "C" {
     fn IOReportStateGetResidency(channel: CFTypeRef, index: i32) -> i64;
 }
 
+/// A CoreFoundation object a create or copy call returned, which is never null and which only
+/// this owner releases.
 struct Owned(CFTypeRef);
+
+impl Owned {
+    /// Owns `object`, which the call `call` names returned, or reports the call where it
+    /// returned null.
+    fn new(object: CFTypeRef, call: &str) -> io::Result<Self> {
+        if object.is_null() {
+            return Err(io::Error::other(format!("{call} returned null")));
+        }
+
+        Ok(Self(object))
+    }
+}
 
 impl Drop for Owned {
     fn drop(&mut self) {
+        assert!(!self.0.is_null());
+
         unsafe { CFRelease(self.0) };
     }
 }
@@ -127,7 +143,7 @@ pub struct IOReport {
 
 impl IOReport {
     pub fn open(timebase: Timebase, cpu_limit: usize) -> io::Result<Self> {
-        let channels_key = string(c"IOReportChannels");
+        let channels_key = string(c"IOReportChannels")?;
         let wanted = channels_in_group(c"Energy Model", None)?;
         merge_group(&wanted, c"GPU Stats", c"GPU Performance States")?;
         merge_group(&wanted, c"CPU Stats", c"CPU Core Performance States")?;
@@ -137,15 +153,14 @@ impl IOReport {
         let subscription = unsafe {
             IOReportCreateSubscription(ptr::null(), wanted.0, &raw mut subscribed, 0, ptr::null())
         };
-        if subscription.is_null() || subscribed.is_null() {
-            return Err(io::Error::other("subscribing to IOReport's channels"));
-        }
+        let subscription = Owned::new(subscription, "subscribing to IOReport's channels")?;
+        let subscribed = Owned::new(subscribed, "listing the channels IOReport subscribed to")?;
 
         let mut ioreport = Self {
             timebase,
             channels_key,
-            subscription: Owned(subscription),
-            subscribed: Owned(subscribed),
+            subscription,
+            subscribed,
             gpu_energy_nj: 0,
             gpu_nj_per_unit: None,
             gpu: States::new(ACTIVE_STATES_MAX),
@@ -246,11 +261,7 @@ impl Kind {
 /// Takes a sample of every channel `subscribed` holds.
 fn sample(subscription: &Owned, subscribed: &Owned) -> io::Result<Owned> {
     let samples = unsafe { IOReportCreateSamples(subscription.0, subscribed.0, ptr::null()) };
-    if samples.is_null() {
-        return Err(io::Error::other("sampling IOReport"));
-    }
-
-    Ok(Owned(samples))
+    Owned::new(samples, "sampling IOReport")
 }
 
 /// The core at `index` among `cores`, which hold one for each CPU the machine runs, so a core
@@ -365,8 +376,8 @@ fn energy_nj(channel: CFTypeRef, nj_per_unit: Option<u64>) -> io::Result<u64> {
 }
 
 fn channels_in_group(group: &CStr, subgroup: Option<&CStr>) -> io::Result<Owned> {
-    let group = string(group);
-    let subgroup = subgroup.map(string);
+    let group = string(group)?;
+    let subgroup = subgroup.map(string).transpose()?;
     let channels = unsafe {
         IOReportCopyChannelsInGroup(
             group.0,
@@ -376,14 +387,7 @@ fn channels_in_group(group: &CStr, subgroup: Option<&CStr>) -> io::Result<Owned>
             0,
         )
     };
-    if channels.is_null() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "IOReport has no such channel group",
-        ));
-    }
-
-    Ok(Owned(channels))
+    Owned::new(channels, "copying IOReport's channels in a group")
 }
 
 fn merge_group(into: &Owned, group: &CStr, subgroup: &CStr) -> io::Result<()> {
@@ -395,8 +399,8 @@ fn merge_group(into: &Owned, group: &CStr, subgroup: &CStr) -> io::Result<()> {
 
 fn keep_read_channels(channels: &Owned, key: &Owned) -> io::Result<()> {
     let all = channels_of(channels, key)?;
-    let kept =
-        Owned(unsafe { CFArrayCreateMutable(ptr::null(), 0, &raw const kCFTypeArrayCallBacks) });
+    let kept = unsafe { CFArrayCreateMutable(ptr::null(), 0, &raw const kCFTypeArrayCallBacks) };
+    let kept = Owned::new(kept, "creating an array")?;
 
     for channel in each(all) {
         if Kind::of(channel).is_some() {
@@ -425,8 +429,9 @@ fn each(array: CFTypeRef) -> impl Iterator<Item = CFTypeRef> {
         .map(move |index| unsafe { CFArrayGetValueAtIndex(array, index) })
 }
 
-fn string(text: &CStr) -> Owned {
-    Owned(unsafe { CFStringCreateWithCString(ptr::null(), text.as_ptr(), UTF8) })
+fn string(text: &CStr) -> io::Result<Owned> {
+    let created = unsafe { CFStringCreateWithCString(ptr::null(), text.as_ptr(), UTF8) };
+    Owned::new(created, "creating a string")
 }
 
 fn is(text: CFTypeRef, want: &CStr) -> bool {
@@ -468,6 +473,19 @@ mod tests {
                 .flat_map(|core| &core.active_ns)
                 .sum(),
         )
+    }
+
+    #[test]
+    fn refuses_to_own_null() {
+        // Goal: a CoreFoundation call that returned null is an error, never an object a drop
+        // would release.
+        // Method: own a null pointer, as a create or copy call that failed returns.
+        let owned = Owned::new(ptr::null(), "creating an object");
+
+        assert_eq!(
+            Some(io::ErrorKind::Other),
+            owned.err().map(|error| error.kind())
+        );
     }
 
     #[test]
@@ -553,9 +571,9 @@ mod tests {
         // Goal: counting IDLE, DOWN or OFF as active would read every core and the GPU as
         // busy for the whole of each second.
         // Method: ask the filter about each name these states carry on this Mac.
-        assert!(!read_active_states_counts(string(c"IDLE").0));
-        assert!(!read_active_states_counts(string(c"DOWN").0));
-        assert!(!read_active_states_counts(string(c"OFF").0));
+        assert!(!read_active_states_counts(string(c"IDLE").unwrap().0));
+        assert!(!read_active_states_counts(string(c"DOWN").unwrap().0));
+        assert!(!read_active_states_counts(string(c"OFF").unwrap().0));
     }
 
     #[test]
@@ -563,8 +581,8 @@ mod tests {
         // Goal: a performance state left out would hide the time spent in it.
         // Method: ask the filter about a core's state name and the GPU's, as this Mac
         // names them.
-        assert!(read_active_states_counts(string(c"V0P14").0));
-        assert!(read_active_states_counts(string(c"P1").0));
+        assert!(read_active_states_counts(string(c"V0P14").unwrap().0));
+        assert!(read_active_states_counts(string(c"P1").unwrap().0));
     }
 
     #[test]
