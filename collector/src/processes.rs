@@ -205,9 +205,11 @@ pub fn pid_list(process_limit: usize) -> Vec<i32> {
 }
 
 /// Lists the pid of every process into `into`, up to the capacity it has, which it never
-/// grows. A listing that fills `into` may have been cut short, so it is an error.
+/// grows. A listing that fills `into` may have been cut short, so it is an error, and so is a
+/// pid macOS gives no process.
 pub fn list_pids(into: &mut Vec<i32>) -> io::Result<()> {
     let capacity = into.capacity();
+    assert!(capacity > 0);
     let buffer_size = c_int::try_from(capacity * size_of::<i32>()).map_err(io::Error::other)?;
 
     into.resize(capacity, 0);
@@ -215,7 +217,7 @@ pub fn list_pids(into: &mut Vec<i32>) -> io::Result<()> {
     let listed = match usize::try_from(count) {
         Ok(count) if count < capacity => {
             into.truncate(count);
-            Ok(())
+            list_pids_check(into)
         }
         Ok(_) => Err(io::Error::new(
             io::ErrorKind::QuotaExceeded,
@@ -228,7 +230,19 @@ pub fn list_pids(into: &mut Vec<i32>) -> io::Result<()> {
     }
 
     assert_eq!(capacity, into.capacity());
+    assert!(into.len() < capacity);
     listed
+}
+
+/// Checks that each of `pids` is one macOS gives a process, from 0 to `PID_MAX`.
+fn list_pids_check(pids: &[i32]) -> io::Result<()> {
+    match pids.iter().find(|&&pid| !(0..=PID_MAX).contains(&pid)) {
+        None => Ok(()),
+        Some(pid) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("the listing holds pid {pid}, outside 0 to {PID_MAX}"),
+        )),
+    }
 }
 
 pub fn read(pid: i32, timebase: Timebase) -> io::Result<Result<Process, Unreadable>> {
@@ -497,6 +511,34 @@ mod tests {
 
         assert_eq!(io::ErrorKind::QuotaExceeded, listed.unwrap_err().kind());
         assert_eq!(capacity, pids.capacity());
+    }
+
+    #[test]
+    fn refuses_a_listed_pid_past_pid_max() {
+        // Goal: a listing holding a pid past the highest macOS gives is an error, since every
+        // function given a listed pid asserts it is one macOS gives.
+        // Method: check a listing of 1 and PID_MAX + 1.
+        let checked = list_pids_check(&[1, PID_MAX + 1]);
+
+        assert_eq!(io::ErrorKind::InvalidData, checked.unwrap_err().kind());
+    }
+
+    #[test]
+    fn refuses_a_negative_listed_pid() {
+        // Goal: a listing holding a negative pid is an error, since macOS gives no process one.
+        // Method: check a listing of 1 and -1.
+        let checked = list_pids_check(&[1, -1]);
+
+        assert_eq!(io::ErrorKind::InvalidData, checked.unwrap_err().kind());
+    }
+
+    #[test]
+    fn takes_a_listing_of_the_lowest_and_highest_pids() {
+        // Goal: 0, the kernel's pid, and PID_MAX are pids macOS gives, so a listing holds them.
+        // Method: check a listing of 0 and PID_MAX.
+        let checked = list_pids_check(&[0, PID_MAX]);
+
+        assert!(checked.is_ok(), "{checked:?}");
     }
 
     #[test]
