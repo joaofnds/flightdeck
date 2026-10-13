@@ -750,6 +750,18 @@ listed 757 to 778 pids and refused 293 to 297 of them. `whole/run-60s.txt` is th
 collector at 209b539 run for a minute under `/usr/bin/time -p`, at one-minute load
 averages of 1.64 to 1.91.
 
+The collector's memory use after startup was counted with `malloc-count.c`, a library
+that counts every malloc-family call in a process and groups the calls by the collector's
+frames they came through. `git log -1 --format=%B -S malloc-count.c --
+docs/recording-research.md` prints its source and how to build and run it. A release
+build of ae1843a ran for 65 seconds twice, once on a quiet Mac and once beside
+`forkrate 400 64 6`, and the count covered the 63 ticks from 1.5 to 64.5 seconds of each.
+Every tick made 214 calls in both runs, 150 inside `IOReportCreateSamples` and 64
+releasing the samples it returns, and no call came from the collector's own code. At
+719b976, before the collector read IOReport's state names and energy unit once at open,
+a count that missed the typed entry points such as `malloc_type_malloc` found 432 calls
+a tick, 251 of them under the names and the unit.
+
 ## Sources
 
 - [Tmog](https://tmog.org/), [TigerBeetle](https://docs.tigerbeetle.com/)
