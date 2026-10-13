@@ -440,6 +440,7 @@ pub(crate) unsafe fn pid_info<T>(pid: i32, flavor: c_int) -> io::Result<Result<T
 
     let mut info = std::mem::MaybeUninit::<T>::uninit();
     let size = pid_info_size::<T>();
+    assert!(size > 0);
     let written = unsafe { proc_pidinfo(pid, flavor, 0, info.as_mut_ptr().cast(), size) };
     if let Err(unreadable) = pid_info_written::<T>(written, io::Error::last_os_error())? {
         return Ok(Err(unreadable));
