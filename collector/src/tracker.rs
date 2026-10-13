@@ -38,14 +38,14 @@ pub struct Tracker {
     timebase: Timebase,
     listing: Vec<i32>,
     known: Vec<Known>,
-    lingering: Vec<(i32, usize)>,
+    reuse_candidates: Vec<(i32, usize)>,
     scans: u64,
     throttle: Throttle,
-    arming: Vec<Kevent>,
+    timers: Vec<Kevent>,
     changes: Vec<Kevent>,
-    received: Vec<Kevent>,
-    starting: Vec<i32>,
-    exiting: Vec<(i32, Noticed)>,
+    eventlist: Vec<Kevent>,
+    starts: Vec<i32>,
+    exits: Vec<(i32, Noticed)>,
     events: Vec<Event>,
     pub counts: Counts,
     /// Set for the length of every call that can fail and cleared as it succeeds, so it holds
@@ -183,11 +183,11 @@ impl Throttle {
 const DEADLINE_TIMER: usize = 1;
 const RESCAN_TIMER: usize = 2;
 /// The timers a wait arms at most, the deadline and the rescan, each once.
-const TIMER_COUNT: usize = 2;
-const RECEIVED_PER_WAIT: usize = 64;
+const TIMER_COUNT_MAX: usize = 2;
+const EVENTS_PER_WAIT_MAX: usize = 64;
 
 const _: () = assert!(DEADLINE_TIMER != RESCAN_TIMER);
-const _: () = assert!(RECEIVED_PER_WAIT > 0);
+const _: () = assert!(EVENTS_PER_WAIT_MAX > 0);
 
 /// The most process events a tick holds. A burst past it drops the rest and counts them by
 /// kind, since a burst is a condition the collector runs under and no fault. The busiest
@@ -218,7 +218,7 @@ impl Tracker {
 
         // A scan, a registration and a wait each hold at most one entry for every pid a
         // listing holds, so each list gets the listing's room once and never grows. A wait
-        // takes up to RECEIVED_PER_WAIT events too, so the received list holds at least that.
+        // takes up to EVENTS_PER_WAIT_MAX events too, so the eventlist holds at least that.
         let listing = processes::pid_list(limits.process_limit);
         let room = listing.capacity();
         let known_count = usize::try_from(processes::PID_MAX).map_err(io::Error::other)? + 1;
@@ -234,14 +234,14 @@ impl Tracker {
             timebase,
             listing,
             known: vec![Known::default(); known_count],
-            lingering: Vec::with_capacity(room),
+            reuse_candidates: Vec::with_capacity(room),
             scans: 0,
             throttle: Throttle::new(timebase.ticks(interval_ns)),
-            arming: Vec::with_capacity(TIMER_COUNT),
+            timers: Vec::with_capacity(TIMER_COUNT_MAX),
             changes: Vec::with_capacity(room),
-            received: vec![Kevent::new(0, 0, 0, 0, 0); room.max(RECEIVED_PER_WAIT)],
-            starting: Vec::with_capacity(room),
-            exiting: Vec::with_capacity(room),
+            eventlist: vec![Kevent::new(0, 0, 0, 0, 0); room.max(EVENTS_PER_WAIT_MAX)],
+            starts: Vec::with_capacity(room),
+            exits: Vec::with_capacity(room),
             events: Vec::with_capacity(limits.events_per_tick_max),
             counts: Counts::default(),
             failed: false,
@@ -249,30 +249,33 @@ impl Tracker {
         tracker.rescan(&mut Meter::default())?;
 
         assert_eq!(1, tracker.scans);
-        assert!(tracker.arming.is_empty());
-        assert!(tracker.starting.is_empty());
-        assert!(tracker.exiting.is_empty());
-        assert!(RECEIVED_PER_WAIT <= tracker.received.len());
+        assert!(tracker.timers.is_empty());
+        assert!(tracker.starts.is_empty());
+        assert!(tracker.exits.is_empty());
+        assert!(EVENTS_PER_WAIT_MAX <= tracker.eventlist.len());
         Ok(tracker)
     }
 
     pub fn follow_until(&mut self, deadline: u64, meter: &mut Meter) -> io::Result<()> {
         assert!(!self.failed, "a call to the tracker failed before");
-        assert!(self.arming.len() < TIMER_COUNT);
+        assert!(self.timers.len() < TIMER_COUNT_MAX);
         self.failed = true;
-        push_without_growing(&mut self.arming, timer_at(DEADLINE_TIMER, deadline)?);
+        push_without_growing(
+            &mut self.timers,
+            follow_until_timer(DEADLINE_TIMER, deadline)?,
+        );
 
         loop {
             let woke = meter.measure(Source::Events, || {
                 let count = self.follow_until_wait()?;
                 follow_until_handle(
-                    &self.received[..count],
+                    &self.eventlist[..count],
                     &mut self.events,
                     &mut self.counts,
-                    &mut self.exiting,
+                    &mut self.exits,
                 )
             })?;
-            assert!(self.arming.is_empty());
+            assert!(self.timers.is_empty());
 
             self.read_exits(meter)?;
             self.throttle.woke(woke);
@@ -286,14 +289,14 @@ impl Tracker {
                     }
                 }
                 Step::ArmAt(at) => {
-                    push_without_growing(&mut self.arming, timer_at(RESCAN_TIMER, at)?);
+                    push_without_growing(&mut self.timers, follow_until_timer(RESCAN_TIMER, at)?);
                 }
                 Step::Wait => {}
             }
 
             if woke.due {
-                assert!(self.starting.is_empty());
-                assert!(self.exiting.is_empty());
+                assert!(self.starts.is_empty());
+                assert!(self.exits.is_empty());
                 self.failed = false;
                 return Ok(());
             }
@@ -306,7 +309,7 @@ impl Tracker {
 
         meter.measure(Source::Scans, || {
             self.compare(listing)?;
-            self.start_reused_pids();
+            self.observe_reused_pids();
             io::Result::Ok(())
         })?;
         self.throttle.rescanned(clock::now());
@@ -314,16 +317,16 @@ impl Tracker {
         self.read_starts(meter);
         self.submit_watches(meter)?;
 
-        assert!(self.starting.is_empty());
-        assert!(self.exiting.is_empty());
+        assert!(self.starts.is_empty());
+        assert!(self.exits.is_empty());
         self.failed = false;
         Ok(())
     }
 
     pub fn drain_events(&mut self) -> std::vec::Drain<'_, Event> {
         assert!(!self.failed, "a call to the tracker failed before");
-        assert!(self.starting.is_empty());
-        assert!(self.exiting.is_empty());
+        assert!(self.starts.is_empty());
+        assert!(self.exits.is_empty());
         self.events.drain(..)
     }
 
@@ -354,12 +357,12 @@ impl Tracker {
 
     fn compare(&mut self, listing: &[i32]) -> io::Result<()> {
         assert!(listing.len() < self.changes.capacity());
-        assert!(self.starting.is_empty());
+        assert!(self.starts.is_empty());
         let previous = self.scans;
         self.scans += 1;
         let reporting = previous > 0;
         self.changes.clear();
-        self.lingering.clear();
+        self.reuse_candidates.clear();
 
         for &pid in listing {
             let index = known_index(pid, self.known.len())?;
@@ -379,41 +382,41 @@ impl Tracker {
             known.listed_in = self.scans;
             if listed_before {
                 if known.exited {
-                    push_without_growing(&mut self.lingering, (pid, index));
+                    push_without_growing(&mut self.reuse_candidates, (pid, index));
                 }
             } else {
                 known.exited = false;
                 push_without_growing(&mut self.changes, watch(index));
                 if reporting {
-                    push_without_growing(&mut self.starting, pid);
+                    push_without_growing(&mut self.starts, pid);
                 }
             }
         }
 
         assert!(self.changes.len() <= listing.len());
-        assert!(self.lingering.len() <= listing.len());
+        assert!(self.reuse_candidates.len() <= listing.len());
         Ok(())
     }
 
-    fn start_reused_pids(&mut self) {
-        for &(pid, index) in &self.lingering {
+    fn observe_reused_pids(&mut self) {
+        for &(pid, index) in &self.reuse_candidates {
             assert!(self.known[index].exited);
             assert_eq!(self.scans, self.known[index].listed_in);
             if processes::is_alive(pid) {
                 self.known[index].exited = false;
                 push_without_growing(&mut self.changes, watch(index));
-                push_without_growing(&mut self.starting, pid);
+                push_without_growing(&mut self.starts, pid);
             }
         }
     }
 
     fn read_starts(&mut self, meter: &mut Meter) {
-        if self.starting.is_empty() {
+        if self.starts.is_empty() {
             return;
         }
 
         meter.measure(Source::StartReads, || {
-            for pid in self.starting.drain(..) {
+            for pid in self.starts.drain(..) {
                 assert!(pid >= 0);
                 let start = Event::Start {
                     pid,
@@ -423,16 +426,16 @@ impl Tracker {
             }
         });
 
-        assert!(self.starting.is_empty());
+        assert!(self.starts.is_empty());
     }
 
     fn read_exits(&mut self, meter: &mut Meter) -> io::Result<()> {
-        if self.exiting.is_empty() {
+        if self.exits.is_empty() {
             return Ok(());
         }
 
         meter.measure(Source::ExitReads, || {
-            for (pid, noticed) in self.exiting.drain(..) {
+            for (pid, noticed) in self.exits.drain(..) {
                 let index = known_index(pid, self.known.len())?;
                 self.known[index].exited = true;
                 let exit = Event::Exit {
@@ -446,7 +449,7 @@ impl Tracker {
             io::Result::Ok(())
         })?;
 
-        assert!(self.exiting.is_empty());
+        assert!(self.exits.is_empty());
         Ok(())
     }
 
@@ -455,14 +458,14 @@ impl Tracker {
             return Ok(());
         }
 
-        assert!(self.exiting.is_empty());
-        meter.measure(Source::Watches, || self.register_watches())?;
+        assert!(self.exits.is_empty());
+        meter.measure(Source::Watches, || self.submit_watches_register())?;
         self.read_exits(meter)
     }
 
-    fn register_watches(&mut self) -> io::Result<()> {
+    fn submit_watches_register(&mut self) -> io::Result<()> {
         assert!(!self.changes.is_empty());
-        assert!(self.changes.len() <= self.received.len());
+        assert!(self.changes.len() <= self.eventlist.len());
         let count = c_int::try_from(self.changes.len()).map_err(io::Error::other)?;
         let none_pending = Timespec {
             tv_sec: 0,
@@ -473,7 +476,7 @@ impl Tracker {
                 self.queue.as_raw_fd(),
                 self.changes.as_ptr(),
                 count,
-                self.received.as_mut_ptr(),
+                self.eventlist.as_mut_ptr(),
                 count,
                 &raw const none_pending,
             )
@@ -483,7 +486,7 @@ impl Tracker {
             return Err(io::Error::last_os_error());
         };
         if receipts <= self.changes.len() {
-            assert!(receipts <= self.received.len());
+            assert!(receipts <= self.eventlist.len());
         } else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -492,12 +495,12 @@ impl Tracker {
         }
 
         for index in 0..receipts {
-            let receipt = self.received[index];
+            let receipt = self.eventlist[index];
             let pid = pid_of(receipt.ident)?;
             match errno_of(receipt.data)? {
                 0 => {}
                 EPERM => self.counts.refused_watches += 1,
-                ESRCH => push_without_growing(&mut self.exiting, (pid, Noticed::AlreadyExited)),
+                ESRCH => push_without_growing(&mut self.exits, (pid, Noticed::AlreadyExited)),
                 error => return Err(io::Error::from_raw_os_error(error)),
             }
         }
@@ -506,18 +509,18 @@ impl Tracker {
     }
 
     fn follow_until_wait(&mut self) -> io::Result<usize> {
-        assert!(self.arming.len() <= TIMER_COUNT);
-        assert!(RECEIVED_PER_WAIT <= self.received.len());
-        let arming_count = c_int::try_from(self.arming.len()).map_err(io::Error::other)?;
-        let received_count_max = c_int::try_from(RECEIVED_PER_WAIT).map_err(io::Error::other)?;
+        assert!(self.timers.len() <= TIMER_COUNT_MAX);
+        assert!(EVENTS_PER_WAIT_MAX <= self.eventlist.len());
+        let timer_count = c_int::try_from(self.timers.len()).map_err(io::Error::other)?;
+        let event_count_max = c_int::try_from(EVENTS_PER_WAIT_MAX).map_err(io::Error::other)?;
 
         let count = unsafe {
             kevent(
                 self.queue.as_raw_fd(),
-                self.arming.as_ptr(),
-                arming_count,
-                self.received.as_mut_ptr(),
-                received_count_max,
+                self.timers.as_ptr(),
+                timer_count,
+                self.eventlist.as_mut_ptr(),
+                event_count_max,
                 std::ptr::null(),
             )
         };
@@ -525,32 +528,32 @@ impl Tracker {
             return Err(io::Error::last_os_error());
         };
 
-        self.arming.clear();
-        if count <= RECEIVED_PER_WAIT {
+        self.timers.clear();
+        if count <= EVENTS_PER_WAIT_MAX {
             Ok(count)
         } else {
             Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("kevent returned {count} events for room of {RECEIVED_PER_WAIT}"),
+                format!("kevent returned {count} events for room of {EVENTS_PER_WAIT_MAX}"),
             ))
         }
     }
 }
 
-/// Handles the events one wait `received`: records each exec among the tick's `events`,
-/// queues each exit among the `exiting` to read, counts each fork, and returns what the wait
-/// woke for. An event that reports an error is that error.
+/// Handles the events one wait returned in its `eventlist`: records each exec among the tick's
+/// `events`, queues each exit among the `exits` to read, counts each fork, and returns what the
+/// wait woke for. An event that reports an error is that error.
 fn follow_until_handle(
-    received: &[Kevent],
+    eventlist: &[Kevent],
     events: &mut Vec<Event>,
     counts: &mut Counts,
-    exiting: &mut Vec<(i32, Noticed)>,
+    exits: &mut Vec<(i32, Noticed)>,
 ) -> io::Result<Wake> {
-    assert!(received.len() <= RECEIVED_PER_WAIT);
-    assert!(exiting.is_empty());
+    assert!(eventlist.len() <= EVENTS_PER_WAIT_MAX);
+    assert!(exits.is_empty());
 
     let mut wake = Wake::default();
-    for event in received {
+    for event in eventlist {
         if event.flags & EV_ERROR != 0 {
             return Err(io::Error::from_raw_os_error(errno_of(event.data)?));
         }
@@ -567,7 +570,7 @@ fn follow_until_handle(
                 record(events, counts, Event::Exec { pid });
             }
             if event.fflags & NOTE_EXIT != 0 {
-                push_without_growing(exiting, (pid, Noticed::OnExit));
+                push_without_growing(exits, (pid, Noticed::OnExit));
             }
             if event.fflags & NOTE_FORK != 0 {
                 counts.forks += 1;
@@ -576,7 +579,7 @@ fn follow_until_handle(
         }
     }
 
-    assert!(exiting.len() <= received.len());
+    assert!(exits.len() <= eventlist.len());
     Ok(wake)
 }
 
@@ -660,7 +663,7 @@ fn watch(index: usize) -> Kevent {
     )
 }
 
-fn timer_at(ident: usize, deadline: u64) -> io::Result<Kevent> {
+fn follow_until_timer(ident: usize, deadline: u64) -> io::Result<Kevent> {
     if ident != DEADLINE_TIMER {
         assert_eq!(RESCAN_TIMER, ident);
     }
@@ -1008,22 +1011,22 @@ mod tests {
         wake: io::Result<Wake>,
         events: Vec<Event>,
         counts: Counts,
-        exiting: Vec<(i32, Noticed)>,
+        exits: Vec<(i32, Noticed)>,
     }
 
-    /// Handles `received` as one wait's events, into lists with room for all of them.
-    fn handle(received: &[Kevent]) -> Handled {
-        let mut events = Vec::with_capacity(RECEIVED_PER_WAIT);
+    /// Handles `eventlist` as the events one wait returned, into lists with room for all of them.
+    fn handle(eventlist: &[Kevent]) -> Handled {
+        let mut events = Vec::with_capacity(EVENTS_PER_WAIT_MAX);
         let mut counts = Counts::default();
-        let mut exiting = Vec::with_capacity(RECEIVED_PER_WAIT);
+        let mut exits = Vec::with_capacity(EVENTS_PER_WAIT_MAX);
 
-        let wake = follow_until_handle(received, &mut events, &mut counts, &mut exiting);
+        let wake = follow_until_handle(eventlist, &mut events, &mut counts, &mut exits);
 
         Handled {
             wake,
             events,
             counts,
-            exiting,
+            exits,
         }
     }
 
@@ -1054,7 +1057,7 @@ mod tests {
         // Method: handle one exit event.
         let handled = handle(&[process_event(7, NOTE_EXIT)]);
 
-        assert_eq!(vec![(7, Noticed::OnExit)], handled.exiting);
+        assert_eq!(vec![(7, Noticed::OnExit)], handled.exits);
     }
 
     #[test]
