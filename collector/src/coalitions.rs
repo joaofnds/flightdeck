@@ -2,6 +2,7 @@ use std::ffi::c_int;
 use std::io;
 
 use crate::clock::Timebase;
+use crate::kernel::ESRCH;
 use crate::processes::{self, Unreadable};
 use crate::push_without_growing;
 
@@ -107,38 +108,75 @@ impl Coalitions {
         Ok(())
     }
 
-    pub fn read_all(&mut self) {
+    pub fn read_all(&mut self) -> io::Result<()> {
         self.read.clear();
-        let timebase = self.timebase;
-        let read = &mut self.read;
 
-        self.ids.retain(|&id| {
+        for &id in &self.ids {
             let mut usage = ResourceUsage::default();
-            if unsafe {
+            let returned = unsafe {
                 coalition_info_resource_usage(id, &raw mut usage, size_of::<ResourceUsage>())
-            } != 0
-            {
-                return false;
-            }
-
-            let coalition = Coalition {
-                id,
-                tasks_started: usage.tasks_started,
-                tasks_exited: usage.tasks_exited,
-                cpu_ns: timebase.nanos(usage.cpu_time),
-                interrupt_wakeups: usage.interrupt_wakeups,
-                idle_wakeups: usage.platform_idle_wakeups,
-                disk_read_bytes: usage.bytesread,
-                disk_written_bytes: usage.byteswritten,
-                gpu_ns: usage.gpu_time,
-                energy_nj: usage.energy,
             };
-            push_without_growing(read, coalition);
-            // A coalition with no process left stays readable for minutes at least, so holding it
-            // would fill the list over a long run. Its last reading is taken here, and a start
-            // that names it again adds it back.
-            coalition.holds_a_process()
-        });
+            if read_all_returned(returned, io::Error::last_os_error())? {
+                let coalition = Coalition {
+                    id,
+                    tasks_started: usage.tasks_started,
+                    tasks_exited: usage.tasks_exited,
+                    cpu_ns: self.timebase.nanos(usage.cpu_time),
+                    interrupt_wakeups: usage.interrupt_wakeups,
+                    idle_wakeups: usage.platform_idle_wakeups,
+                    disk_read_bytes: usage.bytesread,
+                    disk_written_bytes: usage.byteswritten,
+                    gpu_ns: usage.gpu_time,
+                    energy_nj: usage.energy,
+                };
+                push_without_growing(&mut self.read, coalition);
+            }
+        }
+
+        read_all_retain(&mut self.ids, &self.read);
+        Ok(())
+    }
+}
+
+/// Keeps among `ids` each coalition whose reading in `read` holds a process. `read` holds a
+/// reading for each coalition macOS still has, in the order of `ids`.
+///
+/// A coalition with no process left stays readable for minutes at least, so holding it would
+/// fill the list over a long run. Its last reading is in `read`, and a start that names it
+/// again adds it back.
+fn read_all_retain(ids: &mut Vec<u64>, read: &[Coalition]) {
+    assert!(read.len() <= ids.len());
+
+    let mut readings = read.iter().peekable();
+    ids.retain(|&id| {
+        readings
+            .next_if(|coalition| coalition.id == id)
+            .is_some_and(Coalition::holds_a_process)
+    });
+
+    assert!(readings.next().is_none());
+    assert!(ids.len() <= read.len());
+}
+
+/// Reads what a `coalition_info_resource_usage` `returned`, and the `error` it set where it
+/// failed, which it does by returning -1: true where it read the coalition, false where macOS
+/// no longer has it, and any other failure as the error it is.
+fn read_all_returned(returned: c_int, error: io::Error) -> io::Result<bool> {
+    if returned == 0 {
+        Ok(true)
+    } else {
+        if returned == -1 {
+            if error.raw_os_error() == Some(ESRCH) {
+                Ok(false)
+            } else {
+                Err(error)
+            }
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("coalition_info_resource_usage returned {returned}, neither 0 nor -1"),
+            ))
+        }
     }
 }
 
@@ -175,11 +213,11 @@ mod tests {
     fn counts_the_cpu_time_this_process_spends_in_its_coalition() {
         let mut coalitions = Coalitions::new(Timebase::read(), COALITION_LIMIT);
         coalitions.add(own_coalition()).unwrap();
-        coalitions.read_all();
+        coalitions.read_all().unwrap();
         let before = coalitions.read[0];
 
         spin_on_this_thread_for(Duration::from_millis(50));
-        coalitions.read_all();
+        coalitions.read_all().unwrap();
 
         let after = coalitions.read[0];
         assert!(
@@ -195,14 +233,14 @@ mod tests {
         let pid = std::process::id().cast_signed();
         let mut coalitions = Coalitions::new(timebase, COALITION_LIMIT);
         coalitions.add(own_coalition()).unwrap();
-        coalitions.read_all();
+        coalitions.read_all().unwrap();
         let before = coalitions.read[0];
         let own_before = processes::read_usage(pid, timebase).unwrap().unwrap();
 
         spin_on_this_thread_for(Duration::from_millis(50));
 
         let own_after = processes::read_usage(pid, timebase).unwrap().unwrap();
-        coalitions.read_all();
+        coalitions.read_all().unwrap();
         let after = coalitions.read[0];
         let own_nj = own_after.energy_nj - own_before.energy_nj;
         assert!(
@@ -218,7 +256,7 @@ mod tests {
         coalitions.add(own_coalition()).unwrap();
         coalitions.add(own_coalition()).unwrap();
 
-        coalitions.read_all();
+        coalitions.read_all().unwrap();
 
         assert_eq!(1, coalitions.read.len());
     }
@@ -280,6 +318,77 @@ mod tests {
 
         assert!(running.holds_a_process());
         assert!(!ended.holds_a_process());
+    }
+
+    #[test]
+    fn keeps_only_the_coalitions_read_holding_a_process() {
+        // Goal: after a read, the list keeps a coalition only while its reading holds a process,
+        // so neither one macOS no longer has nor one whose processes all exited stays.
+        // Method: keep from coalitions 1 to 4 with readings for 2 and 4, holding a process, and
+        // 3, holding none, as a read that found 1 gone would give.
+        let running = Coalition {
+            tasks_started: 1,
+            ..READING
+        };
+        let ended = Coalition {
+            id: 3,
+            tasks_started: 1,
+            tasks_exited: 1,
+            ..READING
+        };
+        let read = [
+            Coalition { id: 2, ..running },
+            ended,
+            Coalition { id: 4, ..running },
+        ];
+        let mut ids = vec![1, 2, 3, 4];
+
+        read_all_retain(&mut ids, &read);
+
+        assert_eq!(vec![2, 4], ids);
+    }
+
+    #[test]
+    fn drops_a_coalition_macos_does_not_have() {
+        // Goal: a coalition macOS no longer has leaves the list without a reading, since its last
+        // reading was taken while it had one.
+        // Method: add coalition 0, which macOS reports with ESRCH, and read every coalition.
+        let mut coalitions = Coalitions::new(Timebase::read(), COALITION_LIMIT);
+        coalitions.add(0).unwrap();
+
+        coalitions.read_all().unwrap();
+
+        assert!(coalitions.read.is_empty());
+        assert!(coalitions.ids.is_empty());
+    }
+
+    #[test]
+    fn reports_a_coalition_read_failing_with_another_errno() {
+        // Goal: a coalition read that fails with an errno other than ESRCH is that error, rather
+        // than the coalition leaving the list as if macOS no longer had it.
+        // Method: add this process's jetsam coalition, which is no resource coalition, so macOS
+        // refuses to read its resource usage with EINVAL.
+        const COALITION_TYPE_JETSAM: usize = 1;
+        const EINVAL: i32 = 22;
+        let pid = std::process::id().cast_signed();
+        let info = unsafe { processes::pid_info::<PidCoalitionInfo>(pid, PROC_PIDCOALITIONINFO) };
+        let jetsam = info.unwrap().ok().unwrap().coalition_id[COALITION_TYPE_JETSAM];
+        let mut coalitions = Coalitions::new(Timebase::read(), COALITION_LIMIT);
+        coalitions.add(jetsam).unwrap();
+
+        let read = coalitions.read_all();
+
+        assert_eq!(Some(EINVAL), read.unwrap_err().raw_os_error());
+    }
+
+    #[test]
+    fn refuses_a_coalition_read_that_returned_neither_success_nor_failure() {
+        // Goal: coalition_info_resource_usage returns 0 or -1, so any other value is an error
+        // rather than a reading taken from whatever errno an earlier call left.
+        // Method: read a call that returned 1 with ESRCH left in errno.
+        let returned = read_all_returned(1, io::Error::from_raw_os_error(ESRCH));
+
+        assert_eq!(io::ErrorKind::InvalidData, returned.unwrap_err().kind());
     }
 
     #[test]

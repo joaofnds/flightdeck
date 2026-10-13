@@ -96,8 +96,7 @@ impl Collector {
                 add_listed_coalitions(&self.listing, &mut self.coalitions)?;
             }
             self.dropped_starts_previous = self.tracker.counts.dropped_starts;
-            self.coalitions.read_all();
-            io::Result::Ok(())
+            self.coalitions.read_all()
         })?;
 
         Ok(())
