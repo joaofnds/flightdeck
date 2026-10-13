@@ -66,19 +66,6 @@ watch on every process sees nearly every process start and exit without root, wh
 polling cannot. Root would add the usage and open files of the third of processes owned
 by other users, and file and socket events as they happen.
 
-## Crates from outside the workspace
-
-Each crate from outside the workspace that a package in it depends on directly has its
-case here, under a heading that names the crate, as the dependency decision above asks.
-A case holds three entries, each on a line of its own: `- Used:` says how much of the
-crate Flightdeck uses, `- Performance:` whether code written here would match its
-performance, and `- Maintenance:` what that code would cost to maintain. The tidy test
-fails on a dependency with no case and on a case missing an entry.
-
-No crate has a case, since the workspace depends on none. The collector declares the
-kernel calls it makes, with each struct's size and offsets and each constant's value
-pinned to the macOS SDK headers, so it needs no crate for them.
-
 ## Reading the kernel is what costs CPU, not moving the data
 
 | Step | CPU |
@@ -643,6 +630,34 @@ rather than block when full.
    sealed files, and joins the two through the ring's unsealed tail as Arrow batches.
 
 The storage choice in step 3 waits on the query benchmark below.
+
+## Crates from outside the workspace
+
+Each crate from outside the workspace that a workspace member depends on directly has its
+case here, as the dependency decision above asks. A crate is from outside unless it is one
+of the members the workspace manifest lists, so a crate read from a path, which Cargo.lock
+gives no `source`, needs a case as a crate from a registry does. A case weighs what its
+crate pulls in with it, so a crate reached only through another has no case of its own.
+
+Each case sits under a `###` heading whose text is the crate's name as Cargo.lock writes
+it, in backticks or not. It holds three entries, each a line that starts with its label and
+says its part on that line: `- Used:` how much of the crate Flightdeck uses,
+`- Performance:` whether code written here would match its performance, and
+`- Maintenance:` what that code would cost to maintain. The tidy test finds this section by
+its heading, and fails when the heading is gone, on a dependency with no case, on a case
+missing an entry, and on a case whose crate no member depends on.
+
+No crate has a case, since the workspace depends on none. The collector declares the kernel
+calls it makes instead of taking them from libc, which added 631 lines to `collector/src`
+and removed 172 (72a35a7..de6cc13). Each struct and constant it declares that the macOS SDK
+headers also declare matches what a C program built against the macOS 27.0 SDK printed. A
+compile-time assertion holds each struct's size, and the offset of each field the collector
+reads, to that output, and each constant holds the printed value. The program is in the
+message of the latest commit that changes a pin, which `git log --grep 'xcrun clang'` lists
+first. Nothing runs it again, so a later SDK that changed one of them would go unnoticed
+until someone does, and nothing checks the argument types of the functions declared against
+the headers. The structs `coalitions.rs` and `smc.rs` declare have no SDK header to check
+them against.
 
 ## Next measurements
 
