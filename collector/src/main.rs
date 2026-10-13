@@ -6,12 +6,14 @@ use std::time::Duration;
 use collector::clock::{self, Timebase};
 use collector::collector::Collector;
 use collector::cost::{Meter, Snapshot, Source};
-use collector::processes::{Unreadable, Usage};
+use collector::processes::{self, Unreadable, Usage};
 use collector::schedule::Schedule;
 use collector::tracker::{Counts, Event, Noticed};
 
 const QOS_CLASS_DEFAULT: u32 = 0x15;
 const TICKS_PER_WINDOW: u64 = 10;
+const TICKS_PER_MINUTE: u64 = 60;
+const PID_LAP: u64 = 99_999;
 const BUDGET_SHARE_OF_A_CORE: f64 = 0.03;
 const DEFAULT_RESCAN_INTERVAL: Duration = Duration::from_millis(10);
 
@@ -75,7 +77,10 @@ fn run(options: &Options) -> io::Result<()> {
 
     let timebase = Timebase::read();
     let mut meter = Meter::default();
+    let first_mark = throwaway_child()?;
     let mut collector = Collector::new(timebase, options.rescan_interval)?;
+    let mut live_at_first_scan = Vec::new();
+    processes::list_pids(&mut live_at_first_scan)?;
     let schedule = Schedule::new(clock::now(), timebase.ticks(1_000_000_000));
 
     println!(
@@ -87,10 +92,12 @@ fn run(options: &Options) -> io::Result<()> {
 
     collector.wait_until(schedule.deadline(0), &mut meter)?;
     collector.read(&mut meter)?;
+    let warm_up_starts = starts_in(&collector.events);
 
     let mut tick = schedule.first_ahead_of(clock::now()).max(1);
     let start = Mark::take(&meter, timebase, &collector);
     let mut whole = Span::begin(start, tick);
+    let mut minute = Span::begin(start, tick);
     let mut window = Span::begin(start, tick);
     loop {
         let deadline = schedule.deadline(tick);
@@ -101,22 +108,30 @@ fn run(options: &Options) -> io::Result<()> {
         let following = schedule.first_ahead_of(clock::now()).max(tick + 1);
         let slips = following - tick - 1;
         whole.tally.add(late, slips, &collector);
+        minute.tally.add(late, slips, &collector);
         window.tally.add(late, slips, &collector);
 
-        if closes_window(tick, following) {
+        if closes_span(tick, following, TICKS_PER_WINDOW) {
             let now = Mark::take(&meter, timebase, &collector);
             window.report("ticks", tick, &now);
             window = Span::begin(now, following);
+        }
+        if closes_span(tick, following, TICKS_PER_MINUTE) {
+            let now = Mark::take(&meter, timebase, &collector);
+            minute.report("minute, ticks", tick, &now);
+            minute = Span::begin(now, following);
         }
 
         if options
             .seconds
             .is_some_and(|seconds| following > seconds.get())
         {
-            whole.report(
-                "whole run, ticks",
-                tick,
-                &Mark::take(&meter, timebase, &collector),
+            let last_mark = throwaway_child()?;
+            let end = Mark::take(&meter, timebase, &collector);
+            whole.report("whole run, ticks", tick, &end);
+            report_missed(
+                processes_started(first_mark, last_mark, &live_at_first_scan, end.counts.forks),
+                warm_up_starts + whole.tally.starts,
             );
             return Ok(());
         }
@@ -150,8 +165,49 @@ impl Span {
     }
 }
 
-fn closes_window(tick: u64, following: u64) -> bool {
-    tick > 0 && (following - 1) / TICKS_PER_WINDOW > (tick - 1) / TICKS_PER_WINDOW
+fn closes_span(tick: u64, following: u64, ticks_per_span: u64) -> bool {
+    tick > 0 && (following - 1) / ticks_per_span > (tick - 1) / ticks_per_span
+}
+
+fn throwaway_child() -> io::Result<i32> {
+    let mut child = std::process::Command::new("/usr/bin/true").spawn()?;
+    child.wait()?;
+    Ok(child.id().cast_signed())
+}
+
+fn starts_in(events: &[Event]) -> u64 {
+    events
+        .iter()
+        .filter(|event| matches!(event, Event::Start { .. }))
+        .count() as u64
+}
+
+fn processes_started(
+    first_mark: i32,
+    last_mark: i32,
+    live_at_first_scan: &[i32],
+    forks_counted: u64,
+) -> Option<u64> {
+    if last_mark <= first_mark || forks_counted >= PID_LAP {
+        return None;
+    }
+
+    let between = u64::from((last_mark - first_mark - 1).cast_unsigned());
+    let live_between = live_at_first_scan
+        .iter()
+        .filter(|&&pid| first_mark < pid && pid < last_mark)
+        .count() as u64;
+    Some(between - live_between)
+}
+
+fn report_missed(started: Option<u64>, found: u64) {
+    match started {
+        Some(started) => println!(
+            "  processes started over the run {started}, found {found}, missed {}",
+            started.saturating_sub(found)
+        ),
+        None => println!("  pids wrapped over the run, so the processes missed are not counted"),
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -275,7 +331,7 @@ fn report(label: &str, earlier: &Mark, later: &Mark, tally: &Tally) {
         cost.unattributed_ms_per_second()
     );
     println!(
-        "  last tick read {} processes ({} refused, {} gone), {} coalitions, {} CPUs, {} interfaces; over the window {} forks, {} starts ({} watches refused), {} execs, exits seen {}, found already exited {}",
+        "  last tick read {} processes ({} refused, {} gone), {} coalitions, {} CPUs, {} interfaces; over the window {} forks, {} rescans ({} leading, {} trailing, {} listing), {} starts ({} watches refused), {} execs, exits seen {}, found already exited {}",
         tally.processes_read,
         tally.processes_refused,
         tally.processes_gone,
@@ -283,6 +339,10 @@ fn report(label: &str, earlier: &Mark, later: &Mark, tally: &Tally) {
         tally.cpus,
         tally.interfaces,
         counts.forks,
+        counts.leading_rescans + counts.trailing_rescans + counts.listing_rescans,
+        counts.leading_rescans,
+        counts.trailing_rescans,
+        counts.listing_rescans,
         tally.starts,
         counts.refused_watches,
         tally.execs,
@@ -358,22 +418,45 @@ mod tests {
     }
 
     #[test]
+    fn counts_the_pids_between_the_marks_less_those_live_at_the_first_scan() {
+        assert_eq!(
+            Some(7),
+            processes_started(100, 110, &[50, 103, 105, 110, 200], 1_000)
+        );
+    }
+
+    #[test]
+    fn gives_no_count_once_the_pids_wrapped() {
+        assert_eq!(None, processes_started(99_000, 300, &[], 1_000));
+    }
+
+    #[test]
+    fn gives_no_count_once_the_forks_counted_could_fill_a_lap_of_pids() {
+        assert_eq!(None, processes_started(100, 110, &[], PID_LAP));
+    }
+
+    #[test]
     fn closes_a_window_after_its_tenth_tick() {
-        assert!(closes_window(10, 11));
+        assert!(closes_span(10, 11, TICKS_PER_WINDOW));
     }
 
     #[test]
     fn keeps_a_window_open_before_its_tenth_tick() {
-        assert!(!closes_window(9, 10));
+        assert!(!closes_span(9, 10, TICKS_PER_WINDOW));
     }
 
     #[test]
     fn closes_a_window_whose_tenth_tick_slipped() {
-        assert!(closes_window(9, 11));
+        assert!(closes_span(9, 11, TICKS_PER_WINDOW));
+    }
+
+    #[test]
+    fn closes_a_minute_after_its_sixtieth_tick() {
+        assert!(closes_span(60, 61, TICKS_PER_MINUTE));
     }
 
     #[test]
     fn opens_no_window_on_the_warm_up_tick() {
-        assert!(!closes_window(0, 1));
+        assert!(!closes_span(0, 1, TICKS_PER_WINDOW));
     }
 }
