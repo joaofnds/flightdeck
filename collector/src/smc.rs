@@ -2,6 +2,7 @@ use std::ffi::{c_char, c_void};
 use std::io;
 
 use crate::kernel::{self, KernReturn, MachPort};
+use crate::push_without_growing;
 
 #[link(name = "IOKit", kind = "framework")]
 unsafe extern "C" {
@@ -138,8 +139,7 @@ impl Smc {
         self.watts = self.connection.read_float(SYSTEM_POWER)?;
         self.fan_rpm.clear();
         for &fan in &self.fans {
-            assert!(self.fan_rpm.len() < self.fan_rpm.capacity());
-            self.fan_rpm.push(self.connection.read_float(fan)?);
+            push_without_growing(&mut self.fan_rpm, self.connection.read_float(fan)?);
         }
         self.soc_celsius = self.connection.read_float(self.soc_sensor)?;
 

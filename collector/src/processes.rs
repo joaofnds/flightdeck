@@ -4,6 +4,7 @@ use std::mem::offset_of;
 
 use crate::clock::Timebase;
 use crate::kernel::{ESRCH, Sysctl};
+use crate::push_without_growing;
 
 #[repr(C)]
 struct RusageInfoV6 {
@@ -338,10 +339,7 @@ impl Sweep {
 
         for &pid in pids {
             match read(pid, timebase) {
-                Ok(process) => {
-                    assert!(self.read.len() < self.read.capacity());
-                    self.read.push(process);
-                }
+                Ok(process) => push_without_growing(&mut self.read, process),
                 Err(Unreadable::Refused) => self.refused += 1,
                 Err(Unreadable::Gone) => self.gone += 1,
             }

@@ -3,6 +3,7 @@ use std::io;
 use std::mem::offset_of;
 
 use crate::kernel::sysctl;
+use crate::push_without_growing;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Interface {
@@ -89,8 +90,7 @@ impl Interfaces {
 
             if kind == RTM_IFINFO2 {
                 if let Some(interface) = interface_from(message) {
-                    assert!(self.read.len() < self.read.capacity());
-                    self.read.push(interface);
+                    push_without_growing(&mut self.read, interface);
                 }
             }
             offset += length;

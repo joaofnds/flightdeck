@@ -9,6 +9,7 @@ use crate::coalitions;
 use crate::cost::{Meter, Source};
 use crate::kernel::{ESRCH, Timespec};
 use crate::processes::{self, Unreadable, Usage};
+use crate::push_without_growing;
 
 #[derive(Debug)]
 pub enum Event {
@@ -500,16 +501,6 @@ fn compare_index(pid: i32, known_count: usize) -> io::Result<usize> {
             ),
         )),
     }
-}
-
-/// Pushes `item` onto `list`, which the tracker sized at startup to hold every item a scan
-/// or a wait gives it, so the list never grows.
-fn push_without_growing<T>(list: &mut Vec<T>, item: T) {
-    let capacity = list.capacity();
-    assert!(list.len() < capacity);
-
-    list.push(item);
-    assert_eq!(capacity, list.capacity());
 }
 
 fn watch(pid: i32) -> Kevent {

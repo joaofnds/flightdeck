@@ -3,6 +3,7 @@ use std::io;
 
 use crate::clock::Timebase;
 use crate::processes;
+use crate::push_without_growing;
 
 #[repr(C)]
 #[derive(Default)]
@@ -108,8 +109,7 @@ impl Coalitions {
                 return false;
             }
 
-            assert!(read.len() < read.capacity());
-            read.push(Coalition {
+            let coalition = Coalition {
                 id,
                 tasks_started: usage.tasks_started,
                 tasks_exited: usage.tasks_exited,
@@ -120,7 +120,8 @@ impl Coalitions {
                 disk_written_bytes: usage.byteswritten,
                 gpu_ns: usage.gpu_time,
                 energy_nj: usage.energy,
-            });
+            };
+            push_without_growing(read, coalition);
             true
         });
     }
