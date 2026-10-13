@@ -200,13 +200,16 @@ fn processes_started(
     Some(between - live_between)
 }
 
+fn missed(started: Option<u64>, found: u64) -> Option<u64> {
+    started.and_then(|started| started.checked_sub(found))
+}
+
 fn report_missed(started: Option<u64>, found: u64) {
-    match started {
-        Some(started) => println!(
-            "  processes started over the run {started}, found {found}, missed {}",
-            started.saturating_sub(found)
-        ),
-        None => println!("  pids wrapped over the run, so the processes missed are not counted"),
+    match (started, missed(started, found)) {
+        (Some(started), Some(missed)) => {
+            println!("  processes started over the run {started}, found {found}, missed {missed}");
+        }
+        _ => println!("  pids wrapped over the run, so the processes missed are not counted"),
     }
 }
 
@@ -433,6 +436,16 @@ mod tests {
     #[test]
     fn gives_no_count_once_the_forks_counted_could_fill_a_lap_of_pids() {
         assert_eq!(None, processes_started(100, 110, &[], PID_LAP));
+    }
+
+    #[test]
+    fn counts_as_missed_the_processes_started_but_never_found() {
+        assert_eq!(Some(3), missed(Some(10), 7));
+    }
+
+    #[test]
+    fn gives_no_miss_count_when_more_were_found_than_the_pids_say_started() {
+        assert_eq!(None, missed(Some(10), 11));
     }
 
     #[test]
