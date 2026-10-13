@@ -279,7 +279,9 @@ pub fn list_pids(into: &mut Vec<i32>) -> io::Result<()> {
         )),
         Err(_) => Err(io::Error::last_os_error()),
     };
-    if listed.is_err() {
+    if listed.is_ok() {
+        assert!(!into.is_empty());
+    } else {
         into.clear();
     }
 
@@ -288,15 +290,26 @@ pub fn list_pids(into: &mut Vec<i32>) -> io::Result<()> {
     listed
 }
 
-/// Checks that each of `pids` is one macOS gives a process, from 0 to `PID_MAX`.
+/// Checks that `pids` holds a pid, as a listing holds this process's at least, and that each
+/// is one macOS gives a process, from 0 to `PID_MAX`.
 fn list_pids_check(pids: &[i32]) -> io::Result<()> {
-    match pids.iter().find(|&&pid| !(0..=PID_MAX).contains(&pid)) {
-        None => Ok(()),
-        Some(pid) => Err(io::Error::new(
+    if pids.is_empty() {
+        return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("the listing holds pid {pid}, outside 0 to {PID_MAX}"),
-        )),
+            "the listing holds no pid, not even this process's",
+        ));
     }
+
+    pids.iter().try_for_each(|&pid| {
+        if (0..=PID_MAX).contains(&pid) {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("the listing holds pid {pid}, outside 0 to {PID_MAX}"),
+            ))
+        }
+    })
 }
 
 /// Returns the pid of this process.
@@ -602,6 +615,15 @@ mod tests {
         // Goal: a listing holding a negative pid is an error, since macOS gives no process one.
         // Method: check a listing of 1 and -1.
         let checked = list_pids_check(&[1, -1]);
+
+        assert_eq!(io::ErrorKind::InvalidData, checked.unwrap_err().kind());
+    }
+
+    #[test]
+    fn refuses_an_empty_listing() {
+        // Goal: a listing that holds no pid is an error, since it holds this process's at least.
+        // Method: check a listing of no pid.
+        let checked = list_pids_check(&[]);
 
         assert_eq!(io::ErrorKind::InvalidData, checked.unwrap_err().kind());
     }
