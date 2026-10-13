@@ -27,6 +27,10 @@ pub struct Collector {
 impl Collector {
     pub fn new(timebase: Timebase, rescan_interval: Duration) -> io::Result<Self> {
         let process_limit = processes::process_limit()?;
+        // Room for a coalition for every process macOS runs and one for every start a tick
+        // holds, with a coalition past it reported as an error.
+        let coalition_limit = process_limit + EVENTS_PER_TICK_MAX;
+
         let mut collector = Self {
             timebase,
             listing: processes::pid_list(process_limit),
@@ -36,14 +40,14 @@ impl Collector {
             ioreport: IoReport::open(timebase)?,
             smc: Smc::open()?,
             processes: Sweep::default(),
-            coalitions: Coalitions::new(timebase),
+            coalitions: Coalitions::new(timebase, coalition_limit),
             events: Vec::with_capacity(EVENTS_PER_TICK_MAX),
         };
 
         processes::list_pids(&mut collector.listing)?;
         for &pid in &collector.listing {
             if let Some(id) = coalitions::coalition_of(pid) {
-                collector.coalitions.add(id);
+                collector.coalitions.add(id)?;
             }
         }
 
@@ -77,11 +81,12 @@ impl Collector {
                     ..
                 } = event
                 {
-                    self.coalitions.add(*id);
+                    self.coalitions.add(*id)?;
                 }
             }
             self.coalitions.read_all();
-        });
+            io::Result::Ok(())
+        })?;
 
         Ok(())
     }

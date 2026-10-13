@@ -1,5 +1,5 @@
-use std::collections::BTreeSet;
 use std::ffi::c_int;
+use std::io;
 
 use crate::clock::Timebase;
 use crate::processes;
@@ -57,22 +57,41 @@ pub struct Coalition {
 
 pub struct Coalitions {
     timebase: Timebase,
-    ids: BTreeSet<u64>,
+    /// Sorted, each id once.
+    ids: Vec<u64>,
     pub read: Vec<Coalition>,
 }
 
 impl Coalitions {
+    /// Holds at most `coalition_limit` coalitions, with room for them taken once here.
     #[must_use]
-    pub fn new(timebase: Timebase) -> Self {
+    pub fn new(timebase: Timebase, coalition_limit: usize) -> Self {
+        assert!(coalition_limit > 0);
+
         Self {
             timebase,
-            ids: BTreeSet::new(),
-            read: Vec::new(),
+            ids: Vec::with_capacity(coalition_limit),
+            read: Vec::with_capacity(coalition_limit),
         }
     }
 
-    pub fn add(&mut self, id: u64) {
-        self.ids.insert(id);
+    /// Adds the coalition `id` unless it holds it already. A coalition past the limit is an
+    /// error, and the list does not grow.
+    pub fn add(&mut self, id: u64) -> io::Result<()> {
+        let capacity = self.ids.capacity();
+        let Err(position) = self.ids.binary_search(&id) else {
+            return Ok(());
+        };
+        if self.ids.len() == capacity {
+            return Err(io::Error::new(
+                io::ErrorKind::QuotaExceeded,
+                format!("the coalitions filled the room for {capacity}"),
+            ));
+        }
+
+        self.ids.insert(position, id);
+        assert_eq!(capacity, self.ids.capacity());
+        Ok(())
     }
 
     pub fn read_all(&mut self) {
@@ -89,6 +108,7 @@ impl Coalitions {
                 return false;
             }
 
+            assert!(read.len() < read.capacity());
             read.push(Coalition {
                 id,
                 tasks_started: usage.tasks_started,
@@ -113,14 +133,16 @@ mod tests {
     use super::*;
     use crate::cost::spin_on_this_thread_for;
 
+    const COALITION_LIMIT: usize = 16;
+
     fn own_coalition() -> u64 {
         coalition_of(std::process::id().cast_signed()).unwrap()
     }
 
     #[test]
     fn counts_the_cpu_time_this_process_spends_in_its_coalition() {
-        let mut coalitions = Coalitions::new(Timebase::read());
-        coalitions.add(own_coalition());
+        let mut coalitions = Coalitions::new(Timebase::read(), COALITION_LIMIT);
+        coalitions.add(own_coalition()).unwrap();
         coalitions.read_all();
         let before = coalitions.read[0];
 
@@ -139,8 +161,8 @@ mod tests {
     fn counts_the_energy_this_process_spends_in_its_coalition() {
         let timebase = Timebase::read();
         let pid = std::process::id().cast_signed();
-        let mut coalitions = Coalitions::new(timebase);
-        coalitions.add(own_coalition());
+        let mut coalitions = Coalitions::new(timebase, COALITION_LIMIT);
+        coalitions.add(own_coalition()).unwrap();
         coalitions.read_all();
         let before = coalitions.read[0];
         let own_before = processes::read_usage(pid, timebase).unwrap();
@@ -160,13 +182,34 @@ mod tests {
 
     #[test]
     fn reads_each_coalition_once_however_many_processes_it_holds() {
-        let mut coalitions = Coalitions::new(Timebase::read());
-        coalitions.add(own_coalition());
-        coalitions.add(own_coalition());
+        let mut coalitions = Coalitions::new(Timebase::read(), COALITION_LIMIT);
+        coalitions.add(own_coalition()).unwrap();
+        coalitions.add(own_coalition()).unwrap();
 
         coalitions.read_all();
 
         assert_eq!(1, coalitions.read.len());
+    }
+
+    #[test]
+    fn refuses_a_coalition_past_its_limit_without_growing() {
+        let mut coalitions = Coalitions::new(Timebase::read(), 1);
+        coalitions.add(1).unwrap();
+
+        let added = coalitions.add(2);
+
+        assert_eq!(io::ErrorKind::QuotaExceeded, added.unwrap_err().kind());
+        assert_eq!(1, coalitions.ids.capacity());
+    }
+
+    #[test]
+    fn adds_a_coalition_it_holds_already_at_its_limit() {
+        let mut coalitions = Coalitions::new(Timebase::read(), 1);
+        coalitions.add(1).unwrap();
+
+        let added = coalitions.add(1);
+
+        assert!(added.is_ok());
     }
 
     #[test]
