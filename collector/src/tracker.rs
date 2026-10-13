@@ -720,8 +720,7 @@ mod tests {
         let mut tracker = Tracker::new(timebase, Duration::from_millis(5)).unwrap();
         let deadline = clock::now() + timebase.ticks(100_000_000);
 
-        while_forking_every_2_ms(|| tracker.follow_until(deadline, &mut Meter::default()))
-            .unwrap();
+        while_forking_every_2_ms(|| tracker.follow_until(deadline, &mut Meter::default())).unwrap();
 
         assert!(clock::now() >= deadline, "returned before the deadline");
     }
