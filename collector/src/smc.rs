@@ -4,166 +4,6 @@ use std::io;
 use crate::kernel::{self, KernReturn, MachPort};
 use crate::push_without_growing;
 
-#[link(name = "IOKit", kind = "framework")]
-unsafe extern "C" {
-    static kIOMainPortDefault: MachPort;
-    fn IOServiceMatching(name: *const c_char) -> *mut c_void;
-    fn IOServiceGetMatchingService(main_port: MachPort, matching: *mut c_void) -> MachPort;
-    fn IOServiceOpen(
-        service: MachPort,
-        owning_task: MachPort,
-        kind: u32,
-        connection: *mut MachPort,
-    ) -> KernReturn;
-    fn IOServiceClose(connection: MachPort) -> KernReturn;
-    fn IOObjectRelease(object: MachPort) -> KernReturn;
-    fn IOConnectCallStructMethod(
-        connection: MachPort,
-        selector: u32,
-        input: *const c_void,
-        input_size: usize,
-        output: *mut c_void,
-        output_size: *mut usize,
-    ) -> KernReturn;
-}
-
-/// The selector of the SMC's method that takes a question and writes back its answer. Apple
-/// documents no part of the SMC's interface, so this selector, the commands below and the
-/// message's layout hold only as far as the SMC of an M5 Pro answers them.
-const CALL_STRUCT: u32 = 2;
-const READ_BYTES: u8 = 5;
-const READ_INDEX: u8 = 8;
-const READ_KEY_INFO: u8 = 9;
-const COMMANDS: [u8; 3] = [READ_BYTES, READ_INDEX, READ_KEY_INFO];
-
-/// The result an answer holds where the SMC did what it was asked.
-const SUCCESS: u8 = 0;
-/// The result an answer holds where the SMC has no key of the name asked for.
-const KEY_NOT_FOUND: u8 = 132;
-
-const KEY_COUNT: Key = Key::named(*b"#KEY");
-const FAN_COUNT: Key = Key::named(*b"FNum");
-const SYSTEM_POWER: Key = Key::named(*b"PSTR");
-/// The prefixes of the keys of the chip's CPU, GPU and fabric temperature sensors, as
-/// sysmon-exporter's `sensors.go` groups them on Apple silicon, since Apple documents no SMC key.
-const SOC_TEMPERATURE_PREFIXES: [[u8; 2]; 8] = [
-    *b"TC", *b"Tp", *b"Tf", *b"Ts", *b"Te", *b"TR", *b"Tg", *b"TP",
-];
-
-/// The most fans the SMC's keys can name, since a fan's speed key names it with one digit.
-const FANS_MAX: u8 = 10;
-/// The most keys open lists, past four times the 3,626 the SMC of an M5 Pro lists.
-const KEYS_MAX: u32 = 16_384;
-/// The most bytes a key's value has, the 32 a message's `bytes` hold.
-const VALUE_SIZE_MAX: u32 = 32;
-
-const FLOAT: KeyInfo = KeyInfo::of(*b"flt ", 4);
-const UNSIGNED_8: KeyInfo = KeyInfo::of(*b"ui8 ", 1);
-const UNSIGNED_32: KeyInfo = KeyInfo::of(*b"ui32", 4);
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct Key(u32);
-
-impl Key {
-    const fn named(name: [u8; 4]) -> Self {
-        let mut index = 0;
-        while index < name.len() {
-            assert!(name[index].is_ascii_graphic());
-            index += 1;
-        }
-
-        Key(u32::from_be_bytes(name))
-    }
-
-    /// The key of the speed of `fan`, counted from 0.
-    fn fan_speed(fan: u8) -> Self {
-        assert!(fan < FANS_MAX);
-
-        Key::named([b'F', b'0' + fan, b'A', b'c'])
-    }
-
-    fn is_soc_temperature(self) -> bool {
-        let [first, second, _, _] = self.0.to_be_bytes();
-        SOC_TEMPERATURE_PREFIXES.contains(&[first, second])
-    }
-}
-
-impl std::fmt::Debug for Key {
-    /// Writes the key's four characters, escaping any that is not printable.
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for byte in self.0.to_be_bytes() {
-            write!(f, "{}", char::from(byte).escape_default())?;
-        }
-
-        Ok(())
-    }
-}
-
-/// What the SMC says of a key, as the SMC lays it out. The padding is a field of its own, so a
-/// question written out carries zeroes there.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
-struct KeyInfo {
-    size: u32,
-    kind: u32,
-    _attributes: u8,
-    padding: [u8; 3],
-}
-
-const _: () = assert!(size_of::<KeyInfo>() == 12);
-const _: () = assert!(std::mem::offset_of!(KeyInfo, size) == 0);
-const _: () = assert!(std::mem::offset_of!(KeyInfo, kind) == 4);
-const _: () = assert!(std::mem::offset_of!(KeyInfo, _attributes) == 8);
-const _: () = assert!(std::mem::offset_of!(KeyInfo, padding) == 9);
-
-impl KeyInfo {
-    const fn of(kind: [u8; 4], size: u32) -> Self {
-        assert!(size > 0);
-        assert!(size <= VALUE_SIZE_MAX);
-
-        Self {
-            size,
-            kind: u32::from_be_bytes(kind),
-            _attributes: 0,
-            padding: [0; 3],
-        }
-    }
-
-    fn is(self, other: KeyInfo) -> bool {
-        self.size == other.size && self.kind == other.kind
-    }
-}
-
-/// A question to the SMC and its answer, as the SMC lays them out. The padding is a field of
-/// its own, so a question written out carries zeroes there.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
-struct Message {
-    key: u32,
-    _version_and_limits: [u8; 24],
-    info: KeyInfo,
-    result: u8,
-    _status: u8,
-    command: u8,
-    padding: u8,
-    index: u32,
-    bytes: [u8; 32],
-}
-
-const _: () = assert!(size_of::<Message>() == 80);
-const _: () = assert!(std::mem::offset_of!(Message, key) == 0);
-const _: () = assert!(std::mem::offset_of!(Message, info) == 28);
-const _: () = assert!(std::mem::offset_of!(Message, result) == 40);
-const _: () = assert!(std::mem::offset_of!(Message, command) == 42);
-const _: () = assert!(std::mem::offset_of!(Message, padding) == 43);
-const _: () = assert!(std::mem::offset_of!(Message, index) == 44);
-const _: () = assert!(std::mem::offset_of!(Message, bytes) == 48);
-
-/// A key the SMC holds as a float, as its info showed when the key was checked, so a read of
-/// it each tick need not ask again.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct FloatKey(Key);
-
 pub struct Smc {
     connection: Connection,
     power: FloatKey,
@@ -213,9 +53,37 @@ impl Smc {
     }
 }
 
+/// A key the SMC holds as a float, as its info showed when the key was checked, so a read of
+/// it each tick need not ask again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FloatKey(Key);
+
 /// A connection to the SMC, through a port that is never 0 and that only this connection
 /// closes.
 struct Connection(MachPort);
+
+#[link(name = "IOKit", kind = "framework")]
+unsafe extern "C" {
+    static kIOMainPortDefault: MachPort;
+    fn IOServiceMatching(name: *const c_char) -> *mut c_void;
+    fn IOServiceGetMatchingService(main_port: MachPort, matching: *mut c_void) -> MachPort;
+    fn IOServiceOpen(
+        service: MachPort,
+        owning_task: MachPort,
+        kind: u32,
+        connection: *mut MachPort,
+    ) -> KernReturn;
+    fn IOServiceClose(connection: MachPort) -> KernReturn;
+    fn IOObjectRelease(object: MachPort) -> KernReturn;
+    fn IOConnectCallStructMethod(
+        connection: MachPort,
+        selector: u32,
+        input: *const c_void,
+        input_size: usize,
+        output: *mut c_void,
+        output_size: *mut usize,
+    ) -> KernReturn;
+}
 
 impl Drop for Connection {
     /// Closes the connection, and reports on stderr a close that failed, since a drop has no
@@ -494,6 +362,139 @@ fn hottest_soc_sensor_of(
 
     Some(reading)
 }
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Key(u32);
+
+const KEY_COUNT: Key = Key::named(*b"#KEY");
+const FAN_COUNT: Key = Key::named(*b"FNum");
+const SYSTEM_POWER: Key = Key::named(*b"PSTR");
+/// The prefixes of the keys of the chip's CPU, GPU and fabric temperature sensors, as
+/// sysmon-exporter's `sensors.go` groups them on Apple silicon, since Apple documents no SMC key.
+const SOC_TEMPERATURE_PREFIXES: [[u8; 2]; 8] = [
+    *b"TC", *b"Tp", *b"Tf", *b"Ts", *b"Te", *b"TR", *b"Tg", *b"TP",
+];
+
+/// The most fans the SMC's keys can name, since a fan's speed key names it with one digit.
+const FANS_MAX: u8 = 10;
+/// The most keys open lists, past four times the 3,626 the SMC of an M5 Pro lists.
+const KEYS_MAX: u32 = 16_384;
+
+impl Key {
+    const fn named(name: [u8; 4]) -> Self {
+        let mut index = 0;
+        while index < name.len() {
+            assert!(name[index].is_ascii_graphic());
+            index += 1;
+        }
+
+        Key(u32::from_be_bytes(name))
+    }
+
+    /// The key of the speed of `fan`, counted from 0.
+    fn fan_speed(fan: u8) -> Self {
+        assert!(fan < FANS_MAX);
+
+        Key::named([b'F', b'0' + fan, b'A', b'c'])
+    }
+
+    fn is_soc_temperature(self) -> bool {
+        let [first, second, _, _] = self.0.to_be_bytes();
+        SOC_TEMPERATURE_PREFIXES.contains(&[first, second])
+    }
+}
+
+impl std::fmt::Debug for Key {
+    /// Writes the key's four characters, escaping any that is not printable.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for byte in self.0.to_be_bytes() {
+            write!(f, "{}", char::from(byte).escape_default())?;
+        }
+
+        Ok(())
+    }
+}
+
+/// What the SMC says of a key, as the SMC lays it out. The padding is a field of its own, so a
+/// question written out carries zeroes there.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+struct KeyInfo {
+    size: u32,
+    kind: u32,
+    _attributes: u8,
+    padding: [u8; 3],
+}
+
+const _: () = assert!(size_of::<KeyInfo>() == 12);
+const _: () = assert!(std::mem::offset_of!(KeyInfo, size) == 0);
+const _: () = assert!(std::mem::offset_of!(KeyInfo, kind) == 4);
+const _: () = assert!(std::mem::offset_of!(KeyInfo, _attributes) == 8);
+const _: () = assert!(std::mem::offset_of!(KeyInfo, padding) == 9);
+
+/// The most bytes a key's value has, the 32 a message's `bytes` hold.
+const VALUE_SIZE_MAX: u32 = 32;
+
+const FLOAT: KeyInfo = KeyInfo::of(*b"flt ", 4);
+const UNSIGNED_8: KeyInfo = KeyInfo::of(*b"ui8 ", 1);
+const UNSIGNED_32: KeyInfo = KeyInfo::of(*b"ui32", 4);
+
+impl KeyInfo {
+    const fn of(kind: [u8; 4], size: u32) -> Self {
+        assert!(size > 0);
+        assert!(size <= VALUE_SIZE_MAX);
+
+        Self {
+            size,
+            kind: u32::from_be_bytes(kind),
+            _attributes: 0,
+            padding: [0; 3],
+        }
+    }
+
+    fn is(self, other: KeyInfo) -> bool {
+        self.size == other.size && self.kind == other.kind
+    }
+}
+
+/// A question to the SMC and its answer, as the SMC lays them out. The padding is a field of
+/// its own, so a question written out carries zeroes there.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+struct Message {
+    key: u32,
+    _version_and_limits: [u8; 24],
+    info: KeyInfo,
+    result: u8,
+    _status: u8,
+    command: u8,
+    padding: u8,
+    index: u32,
+    bytes: [u8; 32],
+}
+
+const _: () = assert!(size_of::<Message>() == 80);
+const _: () = assert!(std::mem::offset_of!(Message, key) == 0);
+const _: () = assert!(std::mem::offset_of!(Message, info) == 28);
+const _: () = assert!(std::mem::offset_of!(Message, result) == 40);
+const _: () = assert!(std::mem::offset_of!(Message, command) == 42);
+const _: () = assert!(std::mem::offset_of!(Message, padding) == 43);
+const _: () = assert!(std::mem::offset_of!(Message, index) == 44);
+const _: () = assert!(std::mem::offset_of!(Message, bytes) == 48);
+
+/// The selector of the SMC's method that takes a question and writes back its answer. Apple
+/// documents no part of the SMC's interface, so this selector, the commands below and the
+/// message's layout hold only as far as the SMC of an M5 Pro answers them.
+const CALL_STRUCT: u32 = 2;
+const READ_BYTES: u8 = 5;
+const READ_INDEX: u8 = 8;
+const READ_KEY_INFO: u8 = 9;
+const COMMANDS: [u8; 3] = [READ_BYTES, READ_INDEX, READ_KEY_INFO];
+
+/// The result an answer holds where the SMC did what it was asked.
+const SUCCESS: u8 = 0;
+/// The result an answer holds where the SMC has no key of the name asked for.
+const KEY_NOT_FOUND: u8 = 132;
 
 #[cfg(test)]
 mod tests {
