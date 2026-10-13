@@ -728,6 +728,25 @@ mod tests {
     }
 
     #[test]
+    fn keeps_a_tick_to_its_event_bound_and_counts_the_rest_as_dropped() {
+        // Goal: a tick that sees more process events than the tracker's bound keeps to the
+        // bound and counts the rest as dropped.
+        // Method: follow one tick of 300 ms with room for one event while a thread forks every
+        // 2 ms, each fork a start and an exit.
+        let limits = Limits {
+            events_per_tick_max: 1,
+            ..limits()
+        };
+        let mut tracker = Tracker::new(Timebase::read(), INTERVAL, limits).unwrap();
+
+        while_forking_every_2_ms(|| follow_for(&mut tracker, &mut Meter::default(), 300));
+
+        assert_eq!(1, tracker.drain_events().count());
+        let dropped = tracker.counts.dropped_starts + tracker.counts.dropped_exits;
+        assert!(dropped > 0, "{:?}", tracker.counts);
+    }
+
+    #[test]
     fn refuses_a_listed_pid_past_the_pid_ceiling() {
         // Goal: a listed pid past the pid ceiling is an error, since the known table cannot
         // hold it.
