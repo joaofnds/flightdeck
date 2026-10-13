@@ -269,7 +269,7 @@ fn long_lines_counts_columns_and_not_bytes() {
 
     let numbers = long_lines(&text);
 
-    assert!(numbers.is_empty());
+    assert!(numbers.is_empty(), "{numbers:?}");
 }
 
 /// Lists the number of the `fn` line, counted from 1, of each function that runs past
@@ -390,7 +390,7 @@ fn long_functions_skips_a_declaration_and_an_empty_body() {
 
     let numbers = long_functions(&text);
 
-    assert!(numbers.is_empty());
+    assert!(numbers.is_empty(), "{numbers:?}");
 }
 
 #[test]
@@ -607,5 +607,5 @@ fn discards_passes_a_match_arm_a_closure_and_a_named_binding() {
 
     let numbers = discards(&text);
 
-    assert!(numbers.is_empty());
+    assert!(numbers.is_empty(), "{numbers:?}");
 }
