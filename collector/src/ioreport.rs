@@ -5,7 +5,7 @@ use std::ptr;
 use crate::clock::Timebase;
 use crate::push_without_growing;
 
-type CfRef = *const c_void;
+type CFTypeRef = *const c_void;
 
 /// The callbacks an array runs on its values, as `CFArrayCallBacks` declares them.
 #[repr(C)]
@@ -25,46 +25,60 @@ const UTF8: u32 = 0x0800_0100;
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
     static kCFTypeArrayCallBacks: ArrayCallBacks;
-    fn CFRelease(object: CfRef);
-    fn CFGetTypeID(object: CfRef) -> usize;
+    fn CFRelease(object: CFTypeRef);
+    fn CFGetTypeID(object: CFTypeRef) -> usize;
     fn CFArrayGetTypeID() -> usize;
-    fn CFArrayGetCount(array: CfRef) -> isize;
-    fn CFArrayGetValueAtIndex(array: CfRef, index: isize) -> CfRef;
+    fn CFArrayGetCount(array: CFTypeRef) -> isize;
+    fn CFArrayGetValueAtIndex(array: CFTypeRef, index: isize) -> CFTypeRef;
     fn CFArrayCreateMutable(
-        allocator: CfRef,
+        allocator: CFTypeRef,
         capacity: isize,
         callbacks: *const ArrayCallBacks,
-    ) -> CfRef;
-    fn CFArrayAppendValue(array: CfRef, value: CfRef);
-    fn CFDictionaryGetValue(dictionary: CfRef, key: CfRef) -> CfRef;
-    fn CFDictionarySetValue(dictionary: CfRef, key: CfRef, value: CfRef);
-    fn CFStringCreateWithCString(allocator: CfRef, text: *const c_char, encoding: u32) -> CfRef;
-    fn CFStringGetCString(text: CfRef, buffer: *mut c_char, size: isize, encoding: u32) -> u8;
+    ) -> CFTypeRef;
+    fn CFArrayAppendValue(array: CFTypeRef, value: CFTypeRef);
+    fn CFDictionaryGetValue(dictionary: CFTypeRef, key: CFTypeRef) -> CFTypeRef;
+    fn CFDictionarySetValue(dictionary: CFTypeRef, key: CFTypeRef, value: CFTypeRef);
+    fn CFStringCreateWithCString(
+        allocator: CFTypeRef,
+        text: *const c_char,
+        encoding: u32,
+    ) -> CFTypeRef;
+    fn CFStringGetCString(text: CFTypeRef, buffer: *mut c_char, size: isize, encoding: u32) -> u8;
 }
 
 #[link(name = "IOReport")]
 unsafe extern "C" {
-    fn IOReportCopyChannelsInGroup(group: CfRef, subgroup: CfRef, a: u64, b: u64, c: u64) -> CfRef;
-    fn IOReportMergeChannels(into: CfRef, from: CfRef, unused: CfRef);
+    fn IOReportCopyChannelsInGroup(
+        group: CFTypeRef,
+        subgroup: CFTypeRef,
+        a: u64,
+        b: u64,
+        c: u64,
+    ) -> CFTypeRef;
+    fn IOReportMergeChannels(into: CFTypeRef, from: CFTypeRef, unused: CFTypeRef);
     fn IOReportCreateSubscription(
-        unused: CfRef,
-        desired: CfRef,
-        subscribed: *mut CfRef,
+        unused: CFTypeRef,
+        desired: CFTypeRef,
+        subscribed: *mut CFTypeRef,
         channel_id: u64,
-        options: CfRef,
-    ) -> CfRef;
-    fn IOReportCreateSamples(subscription: CfRef, subscribed: CfRef, options: CfRef) -> CfRef;
-    fn IOReportChannelGetGroup(channel: CfRef) -> CfRef;
-    fn IOReportChannelGetSubGroup(channel: CfRef) -> CfRef;
-    fn IOReportChannelGetChannelName(channel: CfRef) -> CfRef;
-    fn IOReportChannelGetUnitLabel(channel: CfRef) -> CfRef;
-    fn IOReportSimpleGetIntegerValue(channel: CfRef, index: i32) -> i64;
-    fn IOReportStateGetCount(channel: CfRef) -> i32;
-    fn IOReportStateGetNameForIndex(channel: CfRef, index: i32) -> CfRef;
-    fn IOReportStateGetResidency(channel: CfRef, index: i32) -> i64;
+        options: CFTypeRef,
+    ) -> CFTypeRef;
+    fn IOReportCreateSamples(
+        subscription: CFTypeRef,
+        subscribed: CFTypeRef,
+        options: CFTypeRef,
+    ) -> CFTypeRef;
+    fn IOReportChannelGetGroup(channel: CFTypeRef) -> CFTypeRef;
+    fn IOReportChannelGetSubGroup(channel: CFTypeRef) -> CFTypeRef;
+    fn IOReportChannelGetChannelName(channel: CFTypeRef) -> CFTypeRef;
+    fn IOReportChannelGetUnitLabel(channel: CFTypeRef) -> CFTypeRef;
+    fn IOReportSimpleGetIntegerValue(channel: CFTypeRef, index: i32) -> i64;
+    fn IOReportStateGetCount(channel: CFTypeRef) -> i32;
+    fn IOReportStateGetNameForIndex(channel: CFTypeRef, index: i32) -> CFTypeRef;
+    fn IOReportStateGetResidency(channel: CFTypeRef, index: i32) -> i64;
 }
 
-struct Owned(CfRef);
+struct Owned(CFTypeRef);
 
 impl Drop for Owned {
     fn drop(&mut self) {
@@ -96,7 +110,7 @@ impl States {
     }
 }
 
-pub struct IoReport {
+pub struct IOReport {
     timebase: Timebase,
     channels_key: Owned,
     subscription: Owned,
@@ -111,7 +125,7 @@ pub struct IoReport {
     core_count: usize,
 }
 
-impl IoReport {
+impl IOReport {
     pub fn open(timebase: Timebase, cpu_limit: usize) -> io::Result<Self> {
         let channels_key = string(c"IOReportChannels");
         let wanted = channels_in_group(c"Energy Model", None)?;
@@ -209,7 +223,7 @@ enum Kind {
 }
 
 impl Kind {
-    fn of(channel: CfRef) -> Option<Kind> {
+    fn of(channel: CFTypeRef) -> Option<Kind> {
         let group = unsafe { IOReportChannelGetGroup(channel) };
         let subgroup = unsafe { IOReportChannelGetSubGroup(channel) };
         let name = unsafe { IOReportChannelGetChannelName(channel) };
@@ -253,7 +267,7 @@ fn core_at(cores: &mut [States], index: usize) -> io::Result<&mut States> {
 
 /// Learns which of `channel`'s states count as active into `into`, whose room it does not
 /// grow, so a channel with more active states than that is an error.
-fn learn_active_states(channel: CfRef, into: &mut States) -> io::Result<()> {
+fn learn_active_states(channel: CFTypeRef, into: &mut States) -> io::Result<()> {
     let capacity = into.active_indices.capacity();
     let state_count = unsafe { IOReportStateGetCount(channel) };
     into.active_indices.clear();
@@ -279,7 +293,7 @@ fn learn_active_states(channel: CfRef, into: &mut States) -> io::Result<()> {
 
 /// Reads the time `channel` spent in each state `into` learned as active. A channel whose
 /// states changed since then is an error, since the learned indices name other states.
-fn read_active_states(channel: CfRef, into: &mut States, timebase: Timebase) -> io::Result<()> {
+fn read_active_states(channel: CFTypeRef, into: &mut States, timebase: Timebase) -> io::Result<()> {
     let state_count = unsafe { IOReportStateGetCount(channel) };
     if state_count != into.state_count {
         return Err(io::Error::new(
@@ -306,14 +320,14 @@ fn read_active_states(channel: CfRef, into: &mut States, timebase: Timebase) -> 
     Ok(())
 }
 
-fn read_active_states_counts(state: CfRef) -> bool {
+fn read_active_states_counts(state: CFTypeRef) -> bool {
     ![c"OFF", c"IDLE", c"DOWN"]
         .iter()
         .any(|inactive| is(state, inactive))
 }
 
 /// The nanojoules in one unit of the energy `channel` gives.
-fn nj_per_unit(channel: CfRef) -> io::Result<u64> {
+fn nj_per_unit(channel: CFTypeRef) -> io::Result<u64> {
     let unit = unsafe { IOReportChannelGetUnitLabel(channel) };
     if is(unit, c"nJ") {
         Ok(1)
@@ -330,7 +344,7 @@ fn nj_per_unit(channel: CfRef) -> io::Result<u64> {
 }
 
 /// Reads the energy `channel` gives in units of `nj_per_unit` nanojoules, which open learned.
-fn energy_nj(channel: CfRef, nj_per_unit: Option<u64>) -> io::Result<u64> {
+fn energy_nj(channel: CFTypeRef, nj_per_unit: Option<u64>) -> io::Result<u64> {
     let Some(nj_per_unit) = nj_per_unit else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -394,7 +408,7 @@ fn keep_read_channels(channels: &Owned, key: &Owned) -> io::Result<()> {
     Ok(())
 }
 
-fn channels_of(dictionary: &Owned, key: &Owned) -> io::Result<CfRef> {
+fn channels_of(dictionary: &Owned, key: &Owned) -> io::Result<CFTypeRef> {
     let channels = unsafe { CFDictionaryGetValue(dictionary.0, key.0) };
     if channels.is_null() || unsafe { CFGetTypeID(channels) != CFArrayGetTypeID() } {
         return Err(io::Error::new(
@@ -406,7 +420,7 @@ fn channels_of(dictionary: &Owned, key: &Owned) -> io::Result<CfRef> {
     Ok(channels)
 }
 
-fn each(array: CfRef) -> impl Iterator<Item = CfRef> {
+fn each(array: CFTypeRef) -> impl Iterator<Item = CFTypeRef> {
     (0..unsafe { CFArrayGetCount(array) })
         .map(move |index| unsafe { CFArrayGetValueAtIndex(array, index) })
 }
@@ -415,7 +429,7 @@ fn string(text: &CStr) -> Owned {
     Owned(unsafe { CFStringCreateWithCString(ptr::null(), text.as_ptr(), UTF8) })
 }
 
-fn is(text: CfRef, want: &CStr) -> bool {
+fn is(text: CFTypeRef, want: &CStr) -> bool {
     let mut buffer = [0; 64];
     !text.is_null()
         && unsafe { CFStringGetCString(text, buffer.as_mut_ptr(), 64, UTF8) } != 0
@@ -434,19 +448,19 @@ mod tests {
         u32::from_ne_bytes(crate::kernel::sysctl_bytes(c"hw.logicalcpu"))
     }
 
-    fn open() -> IoReport {
-        IoReport::open(Timebase::read(), machine::cpu_limit().unwrap()).unwrap()
+    fn open() -> IOReport {
+        IOReport::open(Timebase::read(), machine::cpu_limit().unwrap()).unwrap()
     }
 
     /// The first channel of `kind` among the channels `samples` holds, a sample of
     /// `ioreport`'s.
-    fn first_channel(ioreport: &IoReport, samples: &Owned, kind: Kind) -> CfRef {
+    fn first_channel(ioreport: &IOReport, samples: &Owned, kind: Kind) -> CFTypeRef {
         each(channels_of(samples, &ioreport.channels_key).unwrap())
             .find(|&channel| Kind::of(channel) == Some(kind))
             .unwrap()
     }
 
-    fn active_time_of_every_core(ioreport: &IoReport) -> Duration {
+    fn active_time_of_every_core(ioreport: &IOReport) -> Duration {
         Duration::from_nanos(
             ioreport
                 .cores()
@@ -472,7 +486,7 @@ mod tests {
     fn refuses_more_cores_than_its_cpu_limit() {
         // Goal: IOReport reporting more cores than the CPU limit is an error.
         // Method: open with a limit of one CPU on this Mac, which has more.
-        let opened = IoReport::open(Timebase::read(), 1);
+        let opened = IOReport::open(Timebase::read(), 1);
 
         let refused = opened.err().map(|error| error.kind());
         assert_eq!(Some(io::ErrorKind::QuotaExceeded), refused);
@@ -563,7 +577,7 @@ mod tests {
         let samples = sample(&ioreport.subscription, &ioreport.subscribed).unwrap();
         let channels = channels_of(&samples, &ioreport.channels_key).unwrap();
 
-        let states: Vec<CfRef> = each(channels)
+        let states: Vec<CFTypeRef> = each(channels)
             .filter(|&channel| {
                 matches!(Kind::of(channel), Some(Kind::CoreStates | Kind::GpuStates))
             })

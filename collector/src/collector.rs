@@ -5,7 +5,7 @@ use crate::clock::Timebase;
 use crate::coalitions::{self, Coalitions};
 use crate::cost::{Meter, Source};
 use crate::interfaces::Interfaces;
-use crate::ioreport::IoReport;
+use crate::ioreport::IOReport;
 use crate::machine::{self, Machine};
 use crate::processes::{self, Sweep};
 use crate::push_without_growing;
@@ -18,7 +18,7 @@ pub struct Collector {
     pub tracker: Tracker,
     pub machine: Machine,
     pub interfaces: Interfaces,
-    pub ioreport: IoReport,
+    pub ioreport: IOReport,
     pub smc: Smc,
     pub processes: Sweep,
     pub coalitions: Coalitions,
@@ -44,7 +44,7 @@ impl Collector {
             tracker: Tracker::new(timebase, rescan_interval, limits)?,
             machine: Machine::new(cpu_limit)?,
             interfaces: Interfaces::default(),
-            ioreport: IoReport::open(timebase, cpu_limit)?,
+            ioreport: IOReport::open(timebase, cpu_limit)?,
             smc: Smc::open()?,
             processes: Sweep::new(limits.process_limit),
             coalitions: Coalitions::new(timebase, coalition_limit),
@@ -66,7 +66,7 @@ impl Collector {
     pub fn read(&mut self, meter: &mut Meter) -> io::Result<()> {
         meter.measure(Source::Machine, || self.machine.read())?;
         meter.measure(Source::Interfaces, || self.interfaces.read_all())?;
-        meter.measure(Source::IoReport, || self.ioreport.read())?;
+        meter.measure(Source::IOReport, || self.ioreport.read())?;
         meter.measure(Source::Smc, || self.smc.read())?;
 
         meter.measure(Source::Processes, || {

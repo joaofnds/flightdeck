@@ -17,7 +17,7 @@ pub enum Source {
     StartReads,
     Watches,
     ExitReads,
-    IoReport,
+    IOReport,
     Smc,
 }
 
@@ -30,7 +30,7 @@ impl Source {
         Source::StartReads,
         Source::Watches,
         Source::ExitReads,
-        Source::IoReport,
+        Source::IOReport,
         Source::Smc,
         Source::Machine,
         Source::Interfaces,
@@ -48,7 +48,7 @@ impl Source {
             Source::StartReads => "start reads",
             Source::Watches => "watches",
             Source::ExitReads => "exit reads",
-            Source::IoReport => "ioreport",
+            Source::IOReport => "ioreport",
             Source::Smc => "smc",
         }
     }
@@ -66,7 +66,7 @@ impl Source {
             Source::StartReads => 6,
             Source::Watches => 7,
             Source::ExitReads => 8,
-            Source::IoReport => 9,
+            Source::IOReport => 9,
             Source::Smc => 10,
         }
     }
