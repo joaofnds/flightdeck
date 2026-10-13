@@ -1004,6 +1004,9 @@ mod tests {
 
     #[test]
     fn reports_a_child_starting_and_exiting_with_its_final_usage() {
+        // Goal: a child the tracker sees start is reported as a start, and as an exit that carries
+        // the CPU time it used, noticed as it exited.
+        // Method: follow for 500 ms while a child sleeps 200 ms and exits.
         let mut tracker = tracker(INTERVAL);
 
         let mut child = spawn_sleeper();
@@ -1034,6 +1037,8 @@ mod tests {
 
     #[test]
     fn reports_a_watched_process_replacing_its_program() {
+        // Goal: a watched process that replaces its program is reported as an exec under its pid.
+        // Method: follow for 500 ms while a shell child waits 100 ms and then execs true.
         let mut tracker = tracker(INTERVAL);
 
         let mut child = std::process::Command::new("/bin/sh")
@@ -1055,6 +1060,9 @@ mod tests {
 
     #[test]
     fn reports_a_child_with_the_coalition_it_started_in() {
+        // Goal: a child's start carries the coalition it started in, which is its parent's.
+        // Method: follow for 500 ms while a child of this test sleeps, and compare the coalition
+        // its start carries with this test process's own.
         let mut tracker = tracker(INTERVAL);
 
         let mut child = spawn_sleeper();
@@ -1076,6 +1084,10 @@ mod tests {
 
     #[test]
     fn charges_each_step_of_following_a_child_to_its_own_source() {
+        // Goal: scanning, reading a start, watching and reading an exit each charge their time to
+        // their own source.
+        // Method: follow a child through its start and exit for 500 ms, and read each source's time
+        // from the meter.
         let timebase = Timebase::read();
         let mut tracker = tracker(INTERVAL);
         let mut meter = Meter::default();
@@ -1097,6 +1109,8 @@ mod tests {
 
     #[test]
     fn returns_once_the_deadline_has_passed() {
+        // Goal: following returns no sooner than its deadline, and soon after it.
+        // Method: follow until 100 ms from now, and require a return within 50 ms of the deadline.
         let timebase = Timebase::read();
         let mut tracker = tracker(INTERVAL);
         let deadline = clock::now() + timebase.ticks(100_000_000);
@@ -1118,6 +1132,9 @@ mod tests {
 
     #[test]
     fn reports_a_process_found_already_exited_with_its_final_usage() {
+        // Goal: a listed process the tracker finds already exited is reported as an exit with its
+        // final usage, noticed as already exited.
+        // Method: observe a listing that holds a child which has exited and is not yet reaped.
         let mut tracker = tracker(INTERVAL);
         let mut child = processes::child_that_has_exited();
         let listing = current_listing();
@@ -1140,6 +1157,9 @@ mod tests {
 
     #[test]
     fn reports_nothing_more_for_an_exited_process_while_it_stays_listed() {
+        // Goal: an exited process reported once is not reported again while listings still hold it.
+        // Method: observe the same listing twice with an exited child not yet reaped in it, and
+        // read the events of the second observation.
         let mut tracker = tracker(INTERVAL);
         let mut child = processes::child_that_has_exited();
         let listing = current_listing();
@@ -1185,6 +1205,8 @@ mod tests {
 
     #[test]
     fn lists_the_processes_its_first_scan_found() {
+        // Goal: a new tracker's last listing holds the processes its first scan found.
+        // Method: start a child, then a tracker, and look for the child in the tracker's listing.
         let mut child = spawn_sleeper();
 
         let tracker = tracker(INTERVAL);
@@ -1195,6 +1217,9 @@ mod tests {
 
     #[test]
     fn rescans_an_interval_after_forks_that_came_too_soon() {
+        // Goal: forks within an interval of the last rescan are rescanned for once the interval
+        // passes, as a trailing rescan.
+        // Method: start two children 1 ms apart and follow for 600 ms with a 300 ms interval.
         let mut tracker = tracker(Duration::from_millis(300));
 
         let mut first = spawn_sleeper();
@@ -1209,6 +1234,10 @@ mod tests {
 
     #[test]
     fn waits_an_interval_after_a_listing_before_rescanning_on_a_fork() {
+        // Goal: a listing the tracker observes counts as a rescan, so a fork within an interval of
+        // it waits for the interval rather than rescanning at once.
+        // Method: after a quiet 250 ms, observe a listing, start a child, and follow for 100 ms
+        // with a 200 ms interval.
         let mut tracker = tracker(Duration::from_millis(200));
         std::thread::sleep(Duration::from_millis(250));
         let listing = current_listing();
@@ -1226,6 +1255,9 @@ mod tests {
 
     #[test]
     fn rescans_at_once_on_a_fork_after_a_quiet_interval() {
+        // Goal: a fork an interval or more after the last rescan is rescanned for at once, as a
+        // leading rescan.
+        // Method: after a quiet 250 ms, start a child and follow for 100 ms with a 200 ms interval.
         let mut tracker = tracker(Duration::from_millis(200));
         std::thread::sleep(Duration::from_millis(250));
 
@@ -1238,6 +1270,9 @@ mod tests {
 
     #[test]
     fn rescans_at_most_once_an_interval_however_often_processes_fork() {
+        // Goal: forks however frequent cause at most about one rescan an interval.
+        // Method: follow for 300 ms with a 50 ms interval while a thread forks every 2 ms, and hold
+        // the rescans from forks to one an interval plus two.
         let mut tracker = tracker(INTERVAL);
         let follow_ms = 300;
 
@@ -1253,6 +1288,9 @@ mod tests {
 
     #[test]
     fn returns_no_sooner_than_the_deadline_while_rescans_wait_on_their_timer() {
+        // Goal: following returns no sooner than its deadline while forks keep the rescan timer
+        // armed.
+        // Method: follow for 100 ms with a 5 ms interval while a thread forks every 2 ms.
         let timebase = Timebase::read();
         let mut tracker = tracker(Duration::from_millis(5));
         let deadline = clock::now() + timebase.ticks(100_000_000);
@@ -1276,6 +1314,8 @@ mod tests {
 
         #[test]
         fn rescans_on_a_fork_an_interval_after_the_last_rescan() {
+            // Goal: a fork an interval after the last rescan is rescanned for at once, as leading.
+            // Method: step an interval after the last rescan with a fork pending.
             let mut throttle = throttle();
 
             throttle.forked();
@@ -1288,6 +1328,9 @@ mod tests {
 
         #[test]
         fn arms_the_timer_for_an_interval_after_the_last_rescan_on_an_early_fork() {
+            // Goal: a fork within an interval of the last rescan arms the timer for an interval
+            // after that rescan.
+            // Method: step just after the last rescan with a fork pending.
             let mut throttle = throttle();
 
             throttle.forked();
@@ -1300,6 +1343,8 @@ mod tests {
 
         #[test]
         fn waits_on_an_early_fork_while_the_timer_is_armed() {
+            // Goal: a second early fork waits on the timer the first armed and arms no other.
+            // Method: step after one early fork, which arms the timer, and again after a second.
             let mut throttle = throttle();
             throttle.forked();
             throttle.step(LAST_RESCAN + 1);
@@ -1311,6 +1356,9 @@ mod tests {
 
         #[test]
         fn rescans_when_the_timer_fires_with_a_fork_pending() {
+            // Goal: the timer firing with an early fork still pending rescans, as trailing.
+            // Method: arm the timer on an early fork, fire it, and step an interval after the last
+            // rescan.
             let mut throttle = throttle();
             throttle.forked();
             throttle.step(LAST_RESCAN + 1);
@@ -1325,6 +1373,9 @@ mod tests {
 
         #[test]
         fn waits_when_the_timer_fires_with_nothing_pending() {
+            // Goal: the timer firing after a rescan has covered the early fork rescans nothing.
+            // Method: arm the timer on an early fork, rescan, fire the timer, and step at its
+            // deadline.
             let mut throttle = throttle();
             throttle.forked();
             throttle.step(LAST_RESCAN + 1);
@@ -1337,6 +1388,10 @@ mod tests {
 
         #[test]
         fn rearms_when_the_timer_fires_early_with_a_fork_pending() {
+            // Goal: the timer firing less than an interval after the last rescan, with a fork
+            // pending, arms it again for an interval after that rescan.
+            // Method: arm the timer on an early fork, rescan just after, fork, fire the timer, and
+            // step at the deadline it was armed for.
             let mut throttle = throttle();
             throttle.forked();
             throttle.step(LAST_RESCAN + 1);
@@ -1353,6 +1408,9 @@ mod tests {
 
         #[test]
         fn rescans_as_trailing_when_an_early_fork_comes_due_before_its_timer_fires() {
+            // Goal: an early fork that comes due before its timer fires is rescanned for as
+            // trailing.
+            // Method: arm the timer on an early fork, and step at its deadline without firing it.
             let mut throttle = throttle();
             throttle.forked();
             throttle.step(LAST_RESCAN + 1);
@@ -1365,6 +1423,9 @@ mod tests {
 
         #[test]
         fn arms_the_timer_for_the_last_tick_when_the_interval_runs_past_it() {
+            // Goal: an interval that runs past the last tick a u64 holds arms the timer for that
+            // tick rather than wrapping.
+            // Method: step just after the last rescan with the longest interval and a fork pending.
             let mut throttle = Throttle::new(u64::MAX);
             throttle.rescanned(LAST_RESCAN);
 
@@ -1375,6 +1436,10 @@ mod tests {
 
         #[test]
         fn rescans_on_a_fork_at_the_instant_of_the_last_rescan_with_no_interval() {
+            // Goal: with no interval, a fork is rescanned for at once, even at the instant of the
+            // last rescan.
+            // Method: step at the instant of the last rescan with an interval of 0 and a fork
+            // pending.
             let mut throttle = Throttle::new(0);
             throttle.rescanned(LAST_RESCAN);
 
@@ -1385,12 +1450,16 @@ mod tests {
 
         #[test]
         fn waits_with_nothing_pending() {
+            // Goal: a step with no fork pending rescans nothing and arms no timer.
+            // Method: step an interval after the last rescan with no fork.
             assert_eq!(Step::Wait, throttle().step(LAST_RESCAN + INTERVAL));
         }
     }
 
     #[test]
     fn reports_nothing_for_pids_the_previous_listing_held() {
+        // Goal: a pid the previous listing held is not reported again in the next.
+        // Method: observe the same listing twice and count the events of the second observation.
         let mut tracker = tracker(INTERVAL);
         let listing = current_listing();
         tracker.observe(&listing, &mut Meter::default()).unwrap();
