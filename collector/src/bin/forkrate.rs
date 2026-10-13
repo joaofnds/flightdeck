@@ -1,3 +1,4 @@
+use std::ffi::c_int;
 use std::io::Write;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -6,7 +7,7 @@ use collector::clock::Timebase;
 
 unsafe extern "C" {
     fn mach_absolute_time() -> u64;
-    fn mach_wait_until(deadline: u64) -> libc::c_int;
+    fn mach_wait_until(deadline: u64) -> c_int;
 }
 
 struct Burst {

@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::ffi::c_int;
 
 use crate::clock::Timebase;
 use crate::processes;
@@ -26,11 +27,11 @@ struct PidCoalitionInfo {
     reserved: [u64; 3],
 }
 
-const PROC_PIDCOALITIONINFO: libc::c_int = 20;
+const PROC_PIDCOALITIONINFO: c_int = 20;
 const COALITION_TYPE_RESOURCE: usize = 0;
 
 unsafe extern "C" {
-    fn coalition_info_resource_usage(cid: u64, cru: *mut ResourceUsage, sz: usize) -> libc::c_int;
+    fn coalition_info_resource_usage(cid: u64, cru: *mut ResourceUsage, sz: usize) -> c_int;
 }
 
 #[must_use]

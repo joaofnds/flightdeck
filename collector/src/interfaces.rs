@@ -1,3 +1,4 @@
+use std::ffi::c_int;
 use std::io;
 
 #[derive(Debug, Clone, Copy)]
@@ -46,7 +47,7 @@ impl Interfaces {
         let mut offset = 0;
         while let Some(header) = self.buffer.get(offset..offset + 4) {
             let length = usize::from(u16::from_ne_bytes([header[0], header[1]]));
-            let kind = libc::c_int::from(header[3]);
+            let kind = c_int::from(header[3]);
             if length == 0 {
                 break;
             }

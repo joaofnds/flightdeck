@@ -1,4 +1,4 @@
-use std::ffi::CStr;
+use std::ffi::{CStr, c_int, c_uint};
 use std::io;
 
 use crate::mach;
@@ -12,7 +12,7 @@ const NICE_INDEX: usize = cpu_ticks_index(libc::CPU_STATE_NICE);
 
 /// Converts a `CPU_STATE` constant to the index it names in `cpu_ticks`, at compile time,
 /// where `as` would do it with no check.
-const fn cpu_ticks_index(state: libc::c_int) -> usize {
+const fn cpu_ticks_index(state: c_int) -> usize {
     match state {
         0 => 0,
         1 => 1,
@@ -204,8 +204,8 @@ impl Machine {
 }
 
 struct Sysctl {
-    mib: [libc::c_int; 12],
-    len: libc::c_uint,
+    mib: [c_int; 12],
+    len: c_uint,
 }
 
 impl Sysctl {
@@ -218,7 +218,7 @@ impl Sysctl {
 
         Ok(Self {
             mib,
-            len: libc::c_uint::try_from(len).unwrap_or(0),
+            len: c_uint::try_from(len).unwrap_or(0),
         })
     }
 

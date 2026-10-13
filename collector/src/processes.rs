@@ -1,3 +1,4 @@
+use std::ffi::c_int;
 use std::io;
 use std::mem::offset_of;
 
@@ -69,7 +70,7 @@ const _: () = assert!(offset_of!(RusageInfoV6, cycles) == 256);
 const _: () = assert!(offset_of!(RusageInfoV6, pinstructions) == 320);
 const _: () = assert!(offset_of!(RusageInfoV6, energy_nj) == 336);
 
-const RUSAGE_INFO_V6: libc::c_int = 6;
+const RUSAGE_INFO_V6: c_int = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unreadable {
@@ -114,7 +115,7 @@ pub struct Task {
 pub fn list_pids(into: &mut Vec<i32>) -> io::Result<()> {
     loop {
         into.resize(into.capacity().max(4096), 0);
-        let room = libc::c_int::try_from(into.len() * size_of::<i32>()).unwrap_or(libc::c_int::MAX);
+        let room = c_int::try_from(into.len() * size_of::<i32>()).unwrap_or(c_int::MAX);
         let count = unsafe { libc::proc_listallpids(into.as_mut_ptr().cast(), room) };
         let Ok(count) = usize::try_from(count) else {
             return Err(io::Error::last_os_error());
@@ -185,9 +186,9 @@ pub fn is_alive(pid: i32) -> bool {
 ///
 /// Every bit pattern must be a valid `T`, as it is for a C struct of integers, since
 /// `T` holds whatever bytes the kernel wrote.
-pub(crate) unsafe fn pid_info<T>(pid: i32, flavor: libc::c_int) -> Result<T, Unreadable> {
+pub(crate) unsafe fn pid_info<T>(pid: i32, flavor: c_int) -> Result<T, Unreadable> {
     let mut info = std::mem::MaybeUninit::<T>::uninit();
-    let size = libc::c_int::try_from(size_of::<T>()).unwrap_or(0);
+    let size = c_int::try_from(size_of::<T>()).unwrap_or(0);
     let written = unsafe { libc::proc_pidinfo(pid, flavor, 0, info.as_mut_ptr().cast(), size) };
     if written != size {
         return Err(unreadable_from_errno());

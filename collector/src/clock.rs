@@ -1,3 +1,4 @@
+use std::ffi::c_int;
 use std::mem::offset_of;
 
 #[repr(C)]
@@ -12,7 +13,7 @@ const _: () = assert!(offset_of!(MachTimebaseInfo, denom) == 4);
 
 unsafe extern "C" {
     fn mach_continuous_time() -> u64;
-    fn mach_timebase_info(info: *mut MachTimebaseInfo) -> libc::c_int;
+    fn mach_timebase_info(info: *mut MachTimebaseInfo) -> c_int;
 }
 
 #[must_use]

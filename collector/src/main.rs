@@ -1,3 +1,4 @@
+use std::ffi::c_int;
 use std::io;
 use std::num::NonZeroU64;
 use std::process::ExitCode;
@@ -18,8 +19,7 @@ const BUDGET_SHARE_OF_A_CORE: f64 = 0.05;
 const DEFAULT_RESCAN_INTERVAL: Duration = Duration::ZERO;
 
 unsafe extern "C" {
-    fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: libc::c_int)
-    -> libc::c_int;
+    fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: c_int) -> c_int;
 }
 
 fn main() -> ExitCode {

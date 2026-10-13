@@ -1,3 +1,4 @@
+use std::ffi::c_int;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::time::Duration;
@@ -382,7 +383,7 @@ impl Tracker {
     }
 
     fn register_watches(&mut self) -> io::Result<()> {
-        let count = libc::c_int::try_from(self.changes.len()).unwrap_or(libc::c_int::MAX);
+        let count = c_int::try_from(self.changes.len()).unwrap_or(c_int::MAX);
         self.received
             .resize(self.changes.len(), kevent(0, 0, 0, 0, 0));
         let none_pending = libc::timespec {
@@ -426,9 +427,9 @@ impl Tracker {
                 libc::kevent(
                     self.queue.as_raw_fd(),
                     self.arming.as_ptr(),
-                    libc::c_int::try_from(self.arming.len()).unwrap_or(0),
+                    c_int::try_from(self.arming.len()).unwrap_or(0),
                     self.received.as_mut_ptr(),
-                    libc::c_int::try_from(RECEIVED_PER_WAIT).unwrap_or(1),
+                    c_int::try_from(RECEIVED_PER_WAIT).unwrap_or(1),
                     std::ptr::null(),
                 )
             };
