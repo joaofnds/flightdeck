@@ -461,9 +461,9 @@ fn pid_info_size<T>() -> c_int {
     }
 }
 
-/// Reads what a `proc_pidinfo` asked for a `T` returned: the count of bytes it `written`, and
-/// the `error` it set where it failed, which it does by writing none. Any other count is info
-/// of another size than `T`.
+/// Reads what a `proc_pidinfo` asked for a `T` returned: `written`, the count of bytes it
+/// wrote, and the `error` it set where it failed, which it does by writing none. A count
+/// besides none and the size of `T` is info of another size than `T`.
 fn pid_info_written<T>(written: c_int, error: io::Error) -> io::Result<Result<(), Unreadable>> {
     let size = pid_info_size::<T>();
     assert!(size > 0);
