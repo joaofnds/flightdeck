@@ -1,7 +1,7 @@
 // The parts of the kernel's interface that more than one module calls. A module declares
 // the rest of what it calls itself.
 
-use std::ffi::c_int;
+use std::ffi::{c_int, c_uint, c_void};
 use std::mem::offset_of;
 
 /// Names a Mach port, as `mach_port_t` does.
@@ -12,6 +12,16 @@ pub(crate) type KernReturn = c_int;
 
 unsafe extern "C" {
     static mach_task_self_: MachPort;
+
+    /// Reads the kernel state that `name`, a path of integers, names.
+    pub(crate) fn sysctl(
+        name: *mut c_int,
+        name_count: c_uint,
+        old: *mut c_void,
+        old_size: *mut usize,
+        new: *mut c_void,
+        new_size: usize,
+    ) -> c_int;
 }
 
 pub(crate) fn task_self() -> MachPort {
