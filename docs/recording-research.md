@@ -31,10 +31,12 @@ forks. Rescanning at most once every 5 ms brings a minute that holds a 30-second
 1,744 forks a second from 4.9 to 5.0% of a core to 2.7 to 2.8%, inside the budget, though
 the rows not read yet would take its worst minute to about 3.3%. A probe tracking at the
 same interval missed none of 52,320 children that lived 6 ms and were reaped within
-10 ms of exiting, but in five minutes of this Mac's use the collector at 5 ms missed
-1,910 of 3,077 processes against 36 for one rescanning after every wake. A kqueue watch on every process sees nearly every process start and
-exit without root, which polling cannot. Root would add the usage and open files of the third of
-processes owned by other users, and file and socket events as they happen.
+10 ms of exiting. In five minutes of this Mac's use while a test suite ran, at up to 76
+forks a second over 10 seconds, the collector cost the same 2% a minute at 5 ms as when
+it rescanned after every wake, and missed 1,910 of 3,077 processes against 36. A kqueue
+watch on every process sees nearly every process start and exit without root, which
+polling cannot. Root would add the usage and open files of the third of processes owned
+by other users, and file and socket events as they happen.
 
 ## Reading the kernel is what costs CPU, not moving the data
 
@@ -108,7 +110,7 @@ library but has no header in the SDK, so a peak per second rests on a private ca
 | 10 s | The rest of the 268 SMC temperatures, on their own thread | 6 ms CPU and 52 ms wall in Go | not read yet |
 | 60 s | Battery charge and health | not measured | not read yet |
 | 60 s | Every open file and socket, resolved in full, as a keyframe | 10 to 20 ms | not read yet |
-| As they happen | Process fork, exec and exit, from kqueue, rescanning the pid list at most every 5 ms | 0.13 to 0.32% of a core, rescanning after every fork | 0.1 to 15 at 1 to 161 forks a second as this Mac forked, 22 to 74 in its bursts of 316 to 1,745 and 14 to 184 under one process forking at a steady 100 to 1,600 when it rescanned after every wake that carried a fork; at 5 ms, 13.6 to 14.7 over a minute holding a 30-second burst of 1,744. A probe's tracker alone, under a steady 100 to 1,600, took 13.1 to 44.1 rescanning after every wake and 12.9 to 23.3 at 5 ms |
+| As they happen | Process fork, exec and exit, from kqueue, rescanning the pid list at most every 5 ms | 0.13 to 0.32% of a core, rescanning after every fork | 0.1 to 15 at 1 to 161 forks a second as this Mac forked, 22 to 74 in its bursts of 316 to 1,745 and 14 to 184 under one process forking at a steady 100 to 1,600 when it rescanned after every wake that carried a fork; at 5 ms, 13.6 to 14.7 over a minute holding a 30-second burst of 1,744. A probe's tracker alone, under a steady 100 to 1,600, took 13.1 to 44.1 rescanning after every wake and 12.9 to 24.8 at 5 ms |
 
 Network interfaces have to be read with `sysctl` and `NET_RT_IFLIST2`, whose `if_data64`
 counts bytes in 64 bits. The `if_data` that `getifaddrs` hands back counts them in 32
@@ -169,14 +171,14 @@ budget. Rescanning after every wake put the collector at the budget while proces
 forked steadily 100 times a second and over it from 300, steady or in bursts.
 
 The collector now rescans at most once every 5 ms. A fork rescans at once when the last
-rescan ended at least 5 ms ago, and otherwise arms a timer for 5 ms after it, which
+rescan's listing ended at least 5 ms ago, and otherwise arms a timer for 5 ms after it, which
 rescans if a fork is still pending. The once-a-second listing counts as a rescan, though
 it is not itself held back, so it can land within 5 ms of a rescan once a second. In a
 minute of the collector holding a 30-second burst of 1,744 forks a second from two
 generators, each child living 6 ms and reaped by its generator within 10 ms of exiting,
 the collector cost:
 
-| Rescan | Collector over the minute, three runs | Tracking, ms a second | Children the probe missed at the same interval, of 52,320 | Final usage read |
+| Rescan | Collector over the minute, three runs | Tracking, ms a second | Children the probe missed at the same interval, of 52,320 | Children whose final usage the probe read |
 |---|---|---|---|---|
 | After every wake carrying a fork | 4.87 to 5.04%, and 8.08% in a run that also held a burst of this Mac's own, 73,302 forks in the minute against 51,896 to 53,290 | 35.3 to 35.6, and 68.9 | 0 | 99.5 to 99.8% |
 | At most every 5 ms | 2.74 to 2.78% | 13.6 to 14.7 | 0 | 99.7 to 99.8% |
@@ -185,12 +187,13 @@ the collector cost:
 | At most every 50 ms | 1.69 to 2.06% | 5.4 to 5.9 | 39,180 to 39,554 | 24.2 to 25.0% |
 
 The probe ran at the interval of its row, 0 for the first, which rescans whenever a fork
-is pending. A child stays listed from its fork until its generator reaps it, 6 to 16 ms,
+is pending, and it ran beside the collector, costing 5.2 to 9.2% of a core in the first
+row and 2.7 to 2.9% at 5 ms, so contention may have raised the first row's cost. A child stays listed from its fork until its generator reaps it, 6 to 16 ms,
 so the misses rise sharply once the interval passes that span, since a child that exits
 and is reaped between two rescans is never listed. A process that lives under 5 ms and
 is reaped at once, as many of this Mac's own are, can still be missed at 5 ms, and these
 runs cannot show how often. 5 ms is the shortest of the intervals tried, and all four
-kept the minute inside the budget. With the 4.4 to 4.8 ms a second of the rows not read
+kept the minute inside the budget. No interval between 0 and 5 ms was tried. With the 4.4 to 4.8 ms a second of the rows not read
 yet, its worst minute would come to about 3.3%. Only the 20 and 50 ms intervals would
 still fit, at about 2.8 and 2.5%, while missing two in five and three in four of those
 children.
@@ -212,24 +215,24 @@ tracking, the kevent calls, the reads and the watches, grows with the forks and 
 throttled: at 1,600 it came to 17.2 ms a second. No collector ran at a steady rate since
 the change. With the other rows at the 13.1 to 13.8 ms a second they took in the 5 ms
 burst minutes, the probe's tracking would put the collector at about 3.8% at a steady 300
-and 3.7% at 1,600, which is inference, so a minute of steady forking from 300 a second is likely
-still over the budget.
+and 3.7% at 1,600, which is inference, so a minute of steady forking from 300 a second
+is likely still over the budget.
 
-This Mac's own short processes are missed far more often than the generator's children.
+This Mac's own processes can be missed far more often than the generator's children.
 Two collectors ran side by side for five minutes, one rescanning after every wake that
-carried a fork and one at most every 5 ms, while a test suite ran and the Mac forked in
-bursts of up to about 300 a second. Both cost 1.95 to 2.05% a minute, and against the pid sequence the
-first missed 36 of 3,078 processes started and the one at 5 ms missed 1,910 of 3,077.
-In five minutes of quieter use, at up to 69 forks a second, the collector at 5 ms cost
-1.81 to 1.91% a minute and missed 144 of 708. The likely reason, not yet measured, is
-that most of these processes exit and are reaped within a few milliseconds, so they are
+carried a fork and one at most every 5 ms, while a test suite ran and the Mac forked at
+up to 76 a second over 10 seconds. Both cost 1.95 to 2.05% a minute, 2.00 and 2.01% over
+the run, so the interval saved no CPU there. Against the pid sequence the first missed
+36 of 3,078 processes started and the one at 5 ms missed 1,910 of 3,077. In two runs of
+five minutes of quieter use at 5 ms, at up to 7 and 6 forks a second over 10 seconds,
+the collector cost 1.81 to 1.93% a minute and missed 144 of 708 and 1 of 257, so the
+share missed varies with how the forks come. The likely reason, not yet measured, is
+that many of these processes exit and are reaped within a few milliseconds, so they are
 gone before a rescan held back for 5 ms lists them, while the generator's stayed listed
-for 6 to 16 ms. With two of the 30-second
-bursts of 1,744 forks a second added to five minutes of use, the collector cost 1.92 to
-2.82% a minute. No five minutes with a burst of 300 or more forks a second of this
-Mac's own use have been measured since the change. Counts made before the miss count
-was fixed to use the tracker's own first scan understated misses, so they are not
-quoted here.
+for 6 to 16 ms. With two of the 30-second bursts of 1,744 forks a second added to five
+minutes of use, the collector cost 1.92 to 2.82% a minute. No five minutes with a burst
+of 300 or more forks a second of this Mac's own use have been measured since the
+change.
 
 Ticks have to be scheduled on absolute deadlines from the monotonic clock. The
 sampler used here slept one second after each pass and drifted 9 seconds over 300,
@@ -543,9 +546,9 @@ rather than block when full.
    recording goes on while the app is closed. It runs one clock that ticks each second,
    with groups at 10 and 60 seconds, on absolute deadlines at the default quality of
    service, and records its own slips. It reads coalitions for per-app totals and
-   watches every process with kqueue, rescanning the pid list after forks at most once
-   every 5 ms, and reading each exiting process's final usage, into an event queue that
-   counts what it drops. Everything carries one tick number.
+   watches every process with kqueue, rescanning the pid list after forks, at most once
+   every 5 ms for now, a default still open under next measurement 1, and reading each
+   exiting process's final usage, into an event queue that counts what it drops. Everything carries one tick number.
 2. It writes each tick into a shared-memory ring that only the user can read, holding
    two sealing windows. The writer never waits for a reader and wakes readers once a
    tick. iceoryx2 is the library to try for this before writing it by hand.
@@ -560,11 +563,11 @@ The storage choice in step 3 waits on the query benchmark below.
 
 ## Next measurements
 
-1. Answered for bursts from a generator under "Process starts and exits without root":
-   the collector rescans at most every 5 ms. Still open: what five minutes of this
-   Mac's own use with a burst of 300 or more forks a second cost at 5 ms, and which
-   interval keeps both the budget and this Mac's short processes, which 5 ms misses
-   most of.
+1. Answered for bursts from a generator under "What is read, and how often": the
+   collector rescans at most every 5 ms. Still open: what five minutes of this Mac's own
+   use with a burst of 300 or more forks a second cost at 5 ms, and which interval, 5 ms
+   or one under it, keeps both the budget and this Mac's own processes, of which 5 ms
+   missed 1,910 of 3,077 in one run.
 2. The rows the collector does not read yet, against the room left in the budget: GPU
    from the I/O Registry, open files, disk, battery, and the 10 s and 60 s rows.
 3. Query speed on a week of synthetic data in each storage option: one process over
