@@ -40,16 +40,27 @@ fn repository_is_tidy() {
 fn release_profile_traps_overflow_and_aborts_on_a_panic() {
     // Goal: the release build keeps the checks Tiger Style keeps in production.
     // Method: read the `[profile.release]` table of the workspace manifest.
-    let manifest = repository_root().join("Cargo.toml");
-    let text = match fs::read_to_string(&manifest) {
-        Ok(text) => text,
-        Err(error) => panic!("cannot read {}: {error}", manifest.display()),
-    };
+    let text = read_text(&repository_root().join("Cargo.toml"));
 
     let settings = release_profile_settings(&text);
 
     assert!(settings.contains(&"overflow-checks = true"), "{settings:?}");
     assert!(settings.contains(&"panic = \"abort\""), "{settings:?}");
+}
+
+#[test]
+fn dependencies_from_outside_the_workspace_have_a_recorded_case() {
+    // Goal: the workspace depends on a crate from outside it only with a case recorded under
+    // the dependency decision in docs/recording-research.md.
+    // Method: read the direct dependencies from Cargo.lock and the cases from the research
+    // doc's section of them.
+    let root = repository_root();
+    let lockfile = read_text(&root.join("Cargo.lock"));
+    let research = read_text(&root.join("docs/recording-research.md"));
+
+    let findings = dependency_findings(&lockfile, &research);
+
+    assert!(findings.is_empty(), "\n{}\n", findings.join("\n"));
 }
 
 /// Lists the lines of the `[profile.release]` table in a manifest, trimmed, up to the next
@@ -68,6 +79,13 @@ fn release_profile_settings(text: &str) -> Vec<&str> {
         }
     }
     settings
+}
+
+fn read_text(path: &Path) -> String {
+    match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) => panic!("cannot read {}: {error}", path.display()),
+    }
 }
 
 fn repository_root() -> PathBuf {
@@ -611,4 +629,270 @@ fn discards_passes_a_match_arm_a_closure_and_a_named_binding() {
     let numbers = discards(&text);
 
     assert!(numbers.is_empty(), "{numbers:?}");
+}
+
+/// Opens the research doc's section of recorded cases, one for each crate from outside the
+/// workspace that a workspace package depends on.
+const CASES_HEADING: &str = "## Crates from outside the workspace";
+
+/// Checks a lockfile's direct dependencies from outside the workspace against the cases the
+/// research doc records, and returns its findings.
+fn dependency_findings(lockfile: &str, research: &str) -> Vec<String> {
+    let cases = recorded_cases(research);
+
+    let mut findings = Vec::new();
+    if !research.lines().any(|line| line == CASES_HEADING) {
+        findings.push(format!(
+            "docs/recording-research.md: no `{CASES_HEADING}` section"
+        ));
+    }
+    for case in &cases {
+        for label in CASE_ENTRIES {
+            if !case.said.contains(&label) {
+                findings.push(format!(
+                    "docs/recording-research.md: the case for {} says nothing under `{label}`",
+                    case.name
+                ));
+            }
+        }
+    }
+    for name in external_dependencies(lockfile) {
+        if !cases.iter().any(|case| case.name == name) {
+            findings.push(format!(
+                "Cargo.lock: {name} comes from outside the workspace with no case in the \
+                 research doc"
+            ));
+        }
+    }
+    findings
+}
+
+/// The entries a case needs, each a line that starts with its label and goes on to say
+/// something: how much of the crate Flightdeck uses, whether code written here would match
+/// its performance, and what that code would cost to maintain.
+const CASE_ENTRIES: [&str; 3] = ["- Used:", "- Performance:", "- Maintenance:"];
+
+/// A crate's case in the research doc, with the labels of the entries it fills.
+struct Case<'a> {
+    name: &'a str,
+    said: Vec<&'static str>,
+}
+
+/// Reads the cases in the research doc's section of them, one under each `###` heading.
+fn recorded_cases(research: &str) -> Vec<Case<'_>> {
+    let mut cases: Vec<Case<'_>> = Vec::new();
+    let mut inside = false;
+    for line in research.lines() {
+        if line.starts_with("## ") {
+            inside = line == CASES_HEADING;
+        } else {
+            if inside {
+                if let Some(name) = line.strip_prefix("### ") {
+                    cases.push(Case {
+                        name: name.trim_matches('`'),
+                        said: Vec::new(),
+                    });
+                } else {
+                    if let Some(case) = cases.last_mut() {
+                        case.said.extend(recorded_cases_entries(line));
+                    }
+                }
+            }
+        }
+    }
+    cases
+}
+
+/// Returns the label of the entry a line fills, if it starts with one and says something
+/// after it.
+fn recorded_cases_entries(line: &str) -> Option<&'static str> {
+    CASE_ENTRIES.into_iter().find(|label| {
+        line.strip_prefix(label)
+            .is_some_and(|said| !said.trim().is_empty())
+    })
+}
+
+/// A package in a lockfile. Cargo writes a `source` only for a package from outside the
+/// workspace.
+struct Package<'a> {
+    name: &'a str,
+    external: bool,
+    dependencies: Vec<&'a str>,
+}
+
+/// Lists the crates from outside the workspace that a package in it names as a dependency,
+/// each once, in the order the lockfile first names them.
+fn external_dependencies(lockfile: &str) -> Vec<&str> {
+    let packages = external_dependencies_packages(lockfile);
+    let mut names = Vec::new();
+    for package in packages.iter().filter(|package| !package.external) {
+        for &name in &package.dependencies {
+            let external = packages
+                .iter()
+                .any(|other| other.external && other.name == name);
+            if external && !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    names
+}
+
+/// Reads the packages of a lockfile in the form Cargo writes, where each `[[package]]`
+/// table holds one key a line and its `dependencies` one name a line, with a version after
+/// the name where two packages share it.
+fn external_dependencies_packages(lockfile: &str) -> Vec<Package<'_>> {
+    let mut packages: Vec<Package<'_>> = Vec::new();
+    let mut inside_package = false;
+    let mut inside_dependencies = false;
+    for line in lockfile.lines() {
+        if line.starts_with('[') {
+            inside_package = line == "[[package]]";
+            inside_dependencies = false;
+            if inside_package {
+                packages.push(Package {
+                    name: "",
+                    external: false,
+                    dependencies: Vec::new(),
+                });
+            }
+        } else {
+            if inside_package {
+                let Some(package) = packages.last_mut() else {
+                    unreachable!("inside a package before reading one");
+                };
+                if inside_dependencies {
+                    if line == "]" {
+                        inside_dependencies = false;
+                    } else {
+                        let entry = line.trim().trim_end_matches(',').trim_matches('"');
+                        let name = entry.split_once(' ').map_or(entry, |(name, _)| name);
+                        package.dependencies.push(name);
+                    }
+                } else {
+                    if let Some(name) = line.strip_prefix("name = ") {
+                        package.name = name.trim_matches('"');
+                    }
+                    if line.starts_with("source = ") {
+                        package.external = true;
+                    }
+                    inside_dependencies = line == "dependencies = [";
+                }
+            }
+        }
+    }
+    packages
+}
+
+#[test]
+fn dependency_findings_reports_each_direct_dependency_from_outside_with_no_case() {
+    // Goal: a crate from outside the workspace that a workspace package depends on needs a
+    // recorded case, and a crate only another outside crate depends on does not.
+    // Method: a lockfile where a workspace package depends on a registry crate and on another
+    // workspace package, and the registry crate on a third crate, against no cases.
+    let research = research_text("");
+
+    let findings = dependency_findings(LOCKFILE, &research);
+
+    assert_eq!(
+        findings,
+        ["Cargo.lock: libc comes from outside the workspace with no case in the research doc"]
+    );
+}
+
+#[test]
+fn dependency_findings_passes_a_dependency_with_a_full_case() {
+    // Goal: a case that names how much of the crate Flightdeck uses, whether code written here
+    // would match its performance, and what that code would cost to maintain admits it.
+    // Method: the lockfile above against a case for `libc` with all three entries.
+    let research = research_text(LIBC_CASE);
+
+    let findings = dependency_findings(LOCKFILE, &research);
+
+    assert!(findings.is_empty(), "{findings:?}");
+}
+
+#[test]
+fn dependency_findings_reports_a_case_missing_an_entry() {
+    // Goal: a case admits its crate only when it says all three things a case weighs.
+    // Method: the case above with its first entry left empty and its second removed.
+    let case = LIBC_CASE
+        .replace(
+            "- Used: the kernel calls and the structs they fill.",
+            "- Used:",
+        )
+        .replace("- Performance: the same calls, made the same way.\n", "");
+    let research = research_text(&case);
+
+    let findings = dependency_findings(LOCKFILE, &research);
+
+    assert_eq!(
+        findings,
+        [
+            "docs/recording-research.md: the case for libc says nothing under `- Used:`",
+            "docs/recording-research.md: the case for libc says nothing under `- Performance:`",
+        ]
+    );
+}
+
+#[test]
+fn dependency_findings_reports_a_research_doc_with_no_section_of_cases() {
+    // Goal: the rule reports a research doc that has lost its section of cases, which would
+    // otherwise read as recording none.
+    // Method: a full case for `libc` under a section of another name.
+    let research = research_text(LIBC_CASE).replace(CASES_HEADING, "## Crates");
+
+    let findings = dependency_findings(LOCKFILE, &research);
+
+    assert_eq!(
+        findings,
+        [
+            "docs/recording-research.md: no `## Crates from outside the workspace` section",
+            "Cargo.lock: libc comes from outside the workspace with no case in the research doc",
+        ]
+    );
+}
+
+/// A case for `libc` with every entry a case needs.
+const LIBC_CASE: &str = "### libc
+
+- Used: the kernel calls and the structs they fill.
+- Performance: the same calls, made the same way.
+- Maintenance: a struct to pin each time the SDK changes one.
+";
+
+/// A lockfile as Cargo writes one, where the workspace package `collector` depends on
+/// `libc`, named with its version, and on `tidy`, and `libc` depends on `cfg-if`.
+const LOCKFILE: &str = r#"version = 4
+
+[[package]]
+name = "cfg-if"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "collector"
+version = "0.1.0"
+dependencies = [
+ "libc 0.2.190",
+ "tidy",
+]
+
+[[package]]
+name = "libc"
+version = "0.2.190"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+dependencies = [
+ "cfg-if",
+]
+
+[[package]]
+name = "tidy"
+version = "0.1.0"
+"#;
+
+/// Builds a research doc whose section of cases holds `cases`, followed by a section that
+/// names `libc` under a heading of its own.
+fn research_text(cases: &str) -> String {
+    format!("# Research\n\n{CASES_HEADING}\n\nWhy.\n\n{cases}\n## Sources\n\n### libc\n")
 }

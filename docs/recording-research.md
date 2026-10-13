@@ -66,6 +66,19 @@ watch on every process sees nearly every process start and exit without root, wh
 polling cannot. Root would add the usage and open files of the third of processes owned
 by other users, and file and socket events as they happen.
 
+## Crates from outside the workspace
+
+Each crate from outside the workspace that a package in it depends on directly has its
+case here, under a heading that names the crate, as the dependency decision above asks.
+A case holds three entries, each on a line of its own: `- Used:` says how much of the
+crate Flightdeck uses, `- Performance:` whether code written here would match its
+performance, and `- Maintenance:` what that code would cost to maintain. The tidy test
+fails on a dependency with no case and on a case missing an entry.
+
+No crate has a case, since the workspace depends on none. The collector declares the
+kernel calls it makes, with each struct's size and offsets and each constant's value
+pinned to the macOS SDK headers, so it needs no crate for them.
+
 ## Reading the kernel is what costs CPU, not moving the data
 
 | Step | CPU |
