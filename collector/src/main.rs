@@ -13,6 +13,7 @@ use collector::tracker::{Counts, Event, Noticed};
 const QOS_CLASS_DEFAULT: u32 = 0x15;
 const TICKS_PER_WINDOW: u64 = 10;
 const BUDGET_SHARE_OF_A_CORE: f64 = 0.03;
+const DEFAULT_RESCAN_INTERVAL: Duration = Duration::from_millis(10);
 
 unsafe extern "C" {
     fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: libc::c_int)
@@ -20,15 +21,15 @@ unsafe extern "C" {
 }
 
 fn main() -> ExitCode {
-    let seconds = match seconds_from(&std::env::args().skip(1).collect::<Vec<_>>()) {
-        Ok(seconds) => seconds,
+    let options = match options_from(&std::env::args().skip(1).collect::<Vec<_>>()) {
+        Ok(options) => options,
         Err(usage) => {
             eprintln!("{usage}");
             return ExitCode::from(2);
         }
     };
 
-    match run(seconds) {
+    match run(&options) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("collector: {error}");
@@ -37,16 +38,36 @@ fn main() -> ExitCode {
     }
 }
 
-fn seconds_from(args: &[String]) -> Result<Option<NonZeroU64>, String> {
-    let usage = "usage: collector [--seconds N]".to_owned();
-    match args {
-        [] => Ok(None),
-        [flag, seconds] if flag == "--seconds" => seconds.parse().map(Some).map_err(|_| usage),
-        _ => Err(usage),
-    }
+#[derive(Debug, PartialEq)]
+struct Options {
+    seconds: Option<NonZeroU64>,
+    rescan_interval: Duration,
 }
 
-fn run(seconds: Option<NonZeroU64>) -> io::Result<()> {
+fn options_from(args: &[String]) -> Result<Options, String> {
+    let usage = || "usage: collector [--seconds N] [--rescan-ms N]".to_owned();
+    let mut options = Options {
+        seconds: None,
+        rescan_interval: DEFAULT_RESCAN_INTERVAL,
+    };
+
+    for pair in args.chunks(2) {
+        match pair {
+            [flag, seconds] if flag == "--seconds" => {
+                options.seconds = Some(seconds.parse().map_err(|_| usage())?);
+            }
+            [flag, millis] if flag == "--rescan-ms" => {
+                options.rescan_interval =
+                    Duration::from_millis(millis.parse().map_err(|_| usage())?);
+            }
+            _ => return Err(usage()),
+        }
+    }
+
+    Ok(options)
+}
+
+fn run(options: &Options) -> io::Result<()> {
     let error = unsafe { pthread_set_qos_class_self_np(QOS_CLASS_DEFAULT, 0) };
     if error != 0 {
         return Err(io::Error::from_raw_os_error(error));
@@ -54,7 +75,7 @@ fn run(seconds: Option<NonZeroU64>) -> io::Result<()> {
 
     let timebase = Timebase::read();
     let mut meter = Meter::default();
-    let mut collector = Collector::new(timebase, Duration::from_millis(10))?;
+    let mut collector = Collector::new(timebase, options.rescan_interval)?;
     let schedule = Schedule::new(clock::now(), timebase.ticks(1_000_000_000));
 
     println!(
@@ -88,7 +109,10 @@ fn run(seconds: Option<NonZeroU64>) -> io::Result<()> {
             window = Span::begin(now, following);
         }
 
-        if seconds.is_some_and(|seconds| following > seconds.get()) {
+        if options
+            .seconds
+            .is_some_and(|seconds| following > seconds.get())
+        {
             whole.report(
                 "whole run, ticks",
                 tick,
@@ -281,20 +305,56 @@ mod tests {
 
     #[test]
     fn runs_until_stopped_without_arguments() {
-        assert_eq!(Ok(None), seconds_from(&arguments(&[])));
+        assert_eq!(None, options_from(&arguments(&[])).unwrap().seconds);
     }
 
     #[test]
     fn runs_for_the_seconds_given() {
         assert_eq!(
-            Ok(NonZeroU64::new(5)),
-            seconds_from(&arguments(&["--seconds", "5"]))
+            NonZeroU64::new(5),
+            options_from(&arguments(&["--seconds", "5"]))
+                .unwrap()
+                .seconds
         );
     }
 
     #[test]
     fn rejects_a_run_of_zero_seconds() {
-        assert!(seconds_from(&arguments(&["--seconds", "0"])).is_err());
+        assert!(options_from(&arguments(&["--seconds", "0"])).is_err());
+    }
+
+    #[test]
+    fn rescans_at_the_default_interval_without_arguments() {
+        assert_eq!(
+            DEFAULT_RESCAN_INTERVAL,
+            options_from(&arguments(&[])).unwrap().rescan_interval
+        );
+    }
+
+    #[test]
+    fn rescans_at_the_interval_given_in_milliseconds() {
+        assert_eq!(
+            Duration::from_millis(20),
+            options_from(&arguments(&["--rescan-ms", "20"]))
+                .unwrap()
+                .rescan_interval
+        );
+    }
+
+    #[test]
+    fn takes_both_options_in_either_order() {
+        assert_eq!(
+            Ok(Options {
+                seconds: NonZeroU64::new(5),
+                rescan_interval: Duration::from_millis(20),
+            }),
+            options_from(&arguments(&["--rescan-ms", "20", "--seconds", "5"]))
+        );
+    }
+
+    #[test]
+    fn rejects_an_unknown_option() {
+        assert!(options_from(&arguments(&["--minutes", "5"])).is_err());
     }
 
     #[test]
