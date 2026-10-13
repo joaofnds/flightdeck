@@ -14,3 +14,8 @@ missing_panics_doc = "allow"
 # `else { if }`, which these two lints would collapse again.
 collapsible_if = "allow"
 collapsible_else_if = "allow"
+
+# Tiger Style keeps assertions on in production, so overflow traps and a panic aborts.
+[profile.release]
+overflow-checks = true
+panic = "abort"
