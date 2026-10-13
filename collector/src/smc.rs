@@ -234,9 +234,7 @@ impl Connection {
     fn hottest_soc_sensor(&self) -> io::Result<FloatKey> {
         let mut readings = Vec::new();
         for index in 0..self.key_count()? {
-            let Some(key) = self.key_at(index)? else {
-                continue;
-            };
+            let key = self.key_at(index)?;
             if !key.is_soc_temperature() {
                 continue;
             }
@@ -261,13 +259,13 @@ impl Connection {
         key_count_check(u32::from_be_bytes([a, b, c, d]))
     }
 
-    fn key_at(&self, index: u32) -> io::Result<Option<Key>> {
-        let listed = self.ask(Message {
+    fn key_at(&self, index: u32) -> io::Result<Key> {
+        let listed = self.ask(&Message {
             command: READ_INDEX,
             index,
             ..Message::default()
         })?;
-        Ok(listed.map(|listed| Key(listed.key)))
+        Ok(Key(listed.key))
     }
 
     /// Checks that the SMC holds `key` as a float.
@@ -288,61 +286,52 @@ impl Connection {
     }
 
     fn info(&self, key: Key) -> io::Result<KeyInfo> {
-        let described = self.ask(Message {
+        let described = self.ask(&Message {
             key: key.0,
             command: READ_KEY_INFO,
             ..Message::default()
         })?;
-        described.map(|described| described.info).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("the SMC has no key {key:?}"),
-            )
-        })
+        Ok(described.info)
     }
 
     /// The bytes of `key` read as a value of `info`, which the caller checked the SMC holds.
     fn bytes(&self, key: Key, info: KeyInfo) -> io::Result<[u8; 32]> {
-        let answer = self.ask(Message {
+        let answer = self.ask(&Message {
             key: key.0,
             info,
             command: READ_BYTES,
             ..Message::default()
         })?;
-        answer.map(|answer| answer.bytes).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("the SMC has no value for {key:?}"),
-            )
-        })
+        Ok(answer.bytes)
     }
 
-    fn ask(&self, question: Message) -> io::Result<Option<Message>> {
+    fn ask(&self, question: &Message) -> io::Result<Message> {
         let mut answer = Message::default();
         let mut answer_size = size_of::<Message>();
         let returned = unsafe {
             IOConnectCallStructMethod(
                 self.0,
                 CALL_STRUCT,
-                (&raw const question).cast(),
+                std::ptr::from_ref(question).cast(),
                 size_of::<Message>(),
                 (&raw mut answer).cast(),
                 &raw mut answer_size,
             )
         };
 
-        ask_answered(returned, answer_size, answer)
+        ask_answered(question, returned, answer_size, answer)
     }
 }
 
-/// What the SMC answered a question with, from what the call returned, the size of the answer
-/// it wrote, and the answer: the answer, `None` where the SMC has no such key, or an error
-/// where the call failed, the answer is short or the SMC refused the question.
+/// What the SMC answered `question` with, from what the call returned, the size of the answer
+/// it wrote, and the answer: the answer, or an error where the call failed, the answer is
+/// short, the SMC has no key the question names, or the SMC refused the question.
 fn ask_answered(
+    question: &Message,
     returned: KernReturn,
     answer_size: usize,
     answer: Message,
-) -> io::Result<Option<Message>> {
+) -> io::Result<Message> {
     kern_return_check(returned, "calling the SMC")?;
     if answer_size != size_of::<Message>() {
         return Err(io::Error::new(
@@ -354,7 +343,15 @@ fn ask_answered(
         ));
     }
     if answer.result == KEY_NOT_FOUND {
-        return Ok(None);
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "the SMC has no key {:?} for command {} at index {}",
+                Key(question.key),
+                question.command,
+                question.index
+            ),
+        ));
     }
     if answer.result != SUCCESS {
         return Err(io::Error::other(format!(
@@ -363,7 +360,7 @@ fn ask_answered(
         )));
     }
 
-    Ok(Some(answer))
+    Ok(answer)
 }
 
 /// Checks that a Mach call, which `call` names, returned success.
@@ -512,36 +509,56 @@ mod tests {
         assert_eq!(io::ErrorKind::QuotaExceeded, checked.unwrap_err().kind());
     }
 
-    #[test]
-    fn takes_a_whole_answer_holding_success() {
-        // Goal: an answer the SMC wrote in full with result 0 is its answer.
-        // Method: interpret a call that succeeded and wrote a whole message holding PSTR.
-        let answer = Message {
+    /// A question for the info of PSTR, as `info` asks it.
+    fn power_info_question() -> Message {
+        Message {
             key: SYSTEM_POWER.0,
+            command: READ_KEY_INFO,
             ..Message::default()
-        };
-
-        let answered = ask_answered(kernel::KERN_SUCCESS, size_of::<Message>(), answer);
-
-        assert_eq!(
-            Some(SYSTEM_POWER.0),
-            answered.unwrap().map(|answer| answer.key)
-        );
+        }
     }
 
     #[test]
-    fn reads_the_result_for_a_missing_key_as_no_answer() {
-        // Goal: result 132, which the SMC gives for a key it does not hold, reads as no key.
-        // Method: interpret a whole answer holding 132, which the SMC of an M5 Pro gave for the
-        // key ZZZZ.
+    fn takes_a_whole_answer_holding_success() {
+        // Goal: an answer the SMC wrote in full with result 0 is its answer.
+        // Method: interpret a call that succeeded and wrote a whole message holding PSTR's
+        // info.
+        let question = power_info_question();
         let answer = Message {
-            result: KEY_NOT_FOUND,
-            ..Message::default()
+            info: FLOAT,
+            ..question
         };
 
-        let answered = ask_answered(kernel::KERN_SUCCESS, size_of::<Message>(), answer);
+        let answered = ask_answered(
+            &question,
+            kernel::KERN_SUCCESS,
+            size_of::<Message>(),
+            answer,
+        );
 
-        assert!(answered.unwrap().is_none());
+        assert!(answered.unwrap().info.is(FLOAT));
+    }
+
+    #[test]
+    fn refuses_an_answer_for_a_missing_key_as_not_found() {
+        // Goal: result 132, which the SMC gives for a key it does not hold, is a key not found,
+        // since every question names a key or an index the SMC should have.
+        // Method: interpret a whole answer holding 132, which the SMC of an M5 Pro gave for the
+        // key ZZZZ.
+        let question = power_info_question();
+        let answer = Message {
+            result: KEY_NOT_FOUND,
+            ..question
+        };
+
+        let answered = ask_answered(
+            &question,
+            kernel::KERN_SUCCESS,
+            size_of::<Message>(),
+            answer,
+        );
+
+        assert_eq!(io::ErrorKind::NotFound, answered.unwrap_err().kind());
     }
 
     #[test]
@@ -549,12 +566,18 @@ mod tests {
         // Goal: a result besides success and a missing key is an error, never a missing key.
         // Method: interpret a whole answer holding 135, the result the SMC of an M5 Pro gave a
         // read whose size was not its key's.
+        let question = power_info_question();
         let answer = Message {
             result: 135,
-            ..Message::default()
+            ..question
         };
 
-        let answered = ask_answered(kernel::KERN_SUCCESS, size_of::<Message>(), answer);
+        let answered = ask_answered(
+            &question,
+            kernel::KERN_SUCCESS,
+            size_of::<Message>(),
+            answer,
+        );
 
         assert_eq!(io::ErrorKind::Other, answered.unwrap_err().kind());
     }
@@ -564,10 +587,13 @@ mod tests {
         // Goal: an answer the SMC wrote only in part is an error, since the rest of the
         // message holds no answer.
         // Method: interpret a call that succeeded and wrote half a message.
+        let question = power_info_question();
+
         let answered = ask_answered(
+            &question,
             kernel::KERN_SUCCESS,
             size_of::<Message>() / 2,
-            Message::default(),
+            question,
         );
 
         assert_eq!(io::ErrorKind::InvalidData, answered.unwrap_err().kind());
@@ -578,7 +604,9 @@ mod tests {
         // Goal: a call to the SMC that the kernel failed is an error.
         // Method: interpret 0xe00002c2, which the kernel of an M5 Pro returned for a command the
         // SMC does not take.
-        let answered = ask_answered(0xe000_02c2_u32.cast_signed(), 0, Message::default());
+        let question = power_info_question();
+
+        let answered = ask_answered(&question, 0xe000_02c2_u32.cast_signed(), 0, question);
 
         assert_eq!(io::ErrorKind::Other, answered.unwrap_err().kind());
     }
