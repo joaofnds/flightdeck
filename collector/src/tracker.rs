@@ -643,7 +643,7 @@ fn follow_until_handle(
 
 /// Reads the `receipts` one registration of watches returned: counts each watch the kernel
 /// refused, and queues each process already gone among the `exits` to read. A receipt that
-/// reports any other error is that error.
+/// reports any other error is that error, and one without `EV_ERROR` holds no errno to read.
 fn submit_watches_receipts(
     receipts: &[Kevent],
     counts: &mut Counts,
@@ -653,11 +653,18 @@ fn submit_watches_receipts(
 
     for receipt in receipts {
         let pid = pid_of(receipt.ident)?;
-        match errno_of(receipt.data)? {
-            0 => {}
-            EPERM => counts.refused_watches += 1,
-            ESRCH => push_without_growing(exits, (pid, Noticed::AlreadyExited)),
-            error => return Err(io::Error::from_raw_os_error(error)),
+        if receipt.flags & EV_ERROR != 0 {
+            match errno_of(receipt.data)? {
+                0 => {}
+                EPERM => counts.refused_watches += 1,
+                ESRCH => push_without_growing(exits, (pid, Noticed::AlreadyExited)),
+                error => return Err(io::Error::from_raw_os_error(error)),
+            }
+        } else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("the kevent receipt for pid {pid} carries no error code"),
+            ));
         }
     }
 
@@ -1120,6 +1127,19 @@ mod tests {
 
         read.result.unwrap();
         assert_eq!(vec![(7, Noticed::AlreadyExited)], read.exits);
+    }
+
+    #[test]
+    fn refuses_a_receipt_without_an_error_code() {
+        // Goal: a receipt without EV_ERROR, whose data then holds no errno, is an error of
+        // invalid data, rather than its data read as an errno.
+        // Method: read one receipt with EV_ERROR cleared and data 0, which reads as a watch taken.
+        let mut taken = receipt(7, 0);
+        taken.flags &= !EV_ERROR;
+
+        let read = read_receipts(&[taken]);
+
+        assert_eq!(io::ErrorKind::InvalidData, read.result.unwrap_err().kind());
     }
 
     #[test]
