@@ -1,3 +1,6 @@
+# Tiger Style keeps a function to 70 lines. Clippy counts only its code lines, and parses
+# the function, so a string holding a line like its closing brace cannot cut its count short.
+too-many-lines-threshold = 70
 # Tiger Style keeps assertions on in production, and lets a test unwrap.
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true
