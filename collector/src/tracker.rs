@@ -305,17 +305,23 @@ impl Tracker {
         for &pid in listing {
             let index = known_index(pid, self.known.len())?;
             let known = &mut self.known[index];
-            let listed_before = reporting && known.listed_in == previous;
+            let listed_before = if reporting {
+                known.listed_in == previous
+            } else {
+                false
+            };
 
             known.listed_in = self.scans;
-            if !listed_before {
+            if listed_before {
+                if known.exited {
+                    push_without_growing(&mut self.lingering, (pid, index));
+                }
+            } else {
                 known.exited = false;
                 push_without_growing(&mut self.changes, watch(index));
                 if reporting {
                     push_without_growing(&mut self.starting, pid);
                 }
-            } else if known.exited {
-                push_without_growing(&mut self.lingering, (pid, index));
             }
         }
 
@@ -341,10 +347,12 @@ impl Tracker {
                 return Err(io::Error::from_raw_os_error(errno_of(event.data)?));
             }
 
-            if event.filter == EVFILT_TIMER && event.ident == DEADLINE_TIMER {
-                woke.due = true;
-            } else if event.filter == EVFILT_TIMER {
-                woke.rescan_timer_fired = true;
+            if event.filter == EVFILT_TIMER {
+                if event.ident == DEADLINE_TIMER {
+                    woke.due = true;
+                } else {
+                    woke.rescan_timer_fired = true;
+                }
             } else {
                 woke.forked |= self.handle(event)?;
             }
