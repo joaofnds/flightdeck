@@ -345,6 +345,12 @@ impl Tracker {
         for &pid in listing {
             let index = known_index(pid, self.known.len())?;
             let known = &mut self.known[index];
+            if known.listed_in == self.scans {
+                // A pid the listing already held names the process compared there.
+                continue;
+            }
+
+            assert!(known.listed_in <= previous);
             let listed_before = if reporting {
                 known.listed_in == previous
             } else {
@@ -750,6 +756,14 @@ mod tests {
         let mut listing = processes::pid_list(limits().process_limit);
         processes::list_pids(&mut listing).unwrap();
         listing
+    }
+
+    /// The highest pid `listing` does not hold, so no process this Mac ran when it listed.
+    fn unlisted_pid(listing: &[i32]) -> i32 {
+        (0..=processes::PID_MAX)
+            .rev()
+            .find(|pid| !listing.contains(pid))
+            .expect("a pid the listing does not hold")
     }
 
     fn rescans_from_forks(counts: Counts) -> u64 {
@@ -1177,6 +1191,51 @@ mod tests {
         child.wait().unwrap();
 
         let pid = child.id().cast_signed();
+        let events: Vec<Event> = tracker.drain_events().collect();
+        let about_child = |event: &Event| match event {
+            Event::Start { pid: p, .. } | Event::Exec { pid: p } | Event::Exit { pid: p, .. } => {
+                *p == pid
+            }
+        };
+        assert!(!events.iter().any(about_child), "child {pid}: {events:?}");
+    }
+
+    #[test]
+    fn reports_a_pid_a_listing_holds_twice_as_one_start() {
+        // Goal: a pid a listing holds twice names one process, reported with one start.
+        // Method: observe this Mac's listing with an unlisted pid added twice, and count the
+        // starts reported for that pid.
+        let mut tracker = tracker(INTERVAL);
+        let mut listing = current_listing();
+        let pid = unlisted_pid(&listing);
+        listing.extend([pid, pid]);
+
+        tracker.observe(&listing, &mut Meter::default()).unwrap();
+
+        let starts = tracker
+            .drain_events()
+            .filter(|e| matches!(e, Event::Start { pid: p, .. } if *p == pid))
+            .count();
+        assert_eq!(1, starts);
+    }
+
+    #[test]
+    fn reports_nothing_more_for_an_exited_process_a_listing_holds_twice() {
+        // Goal: an exited process a later listing holds twice is reported nothing more, and
+        // trips no assertion.
+        // Method: observe a listing with an exited child not yet reaped in it, then the same
+        // listing with the child's pid added again, and read the events of the second.
+        let mut tracker = tracker(INTERVAL);
+        let mut child = processes::child_that_has_exited();
+        let mut listing = current_listing();
+        tracker.observe(&listing, &mut Meter::default()).unwrap();
+        tracker.drain_events();
+        let pid = child.id().cast_signed();
+        listing.push(pid);
+
+        tracker.observe(&listing, &mut Meter::default()).unwrap();
+        child.wait().unwrap();
+
         let events: Vec<Event> = tracker.drain_events().collect();
         let about_child = |event: &Event| match event {
             Event::Start { pid: p, .. } | Event::Exec { pid: p } | Event::Exit { pid: p, .. } => {
