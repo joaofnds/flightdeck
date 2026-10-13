@@ -84,8 +84,13 @@ impl Key {
 }
 
 impl std::fmt::Debug for Key {
+    /// Writes the key's four characters, escaping any that is not printable.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&String::from_utf8_lossy(&self.0.to_be_bytes()))
+        for byte in self.0.to_be_bytes() {
+            write!(f, "{}", char::from(byte).escape_default())?;
+        }
+
+        Ok(())
     }
 }
 
@@ -541,6 +546,18 @@ mod tests {
         // Method: name the first and the tenth fan's keys.
         assert_eq!(Key::named(*b"F0Ac"), Key::fan_speed(0));
         assert_eq!(Key::named(*b"F9Ac"), Key::fan_speed(9));
+    }
+
+    #[test]
+    fn names_a_key_by_its_characters_escaping_any_unprintable() {
+        // Goal: a key reads as its four characters in an error, and a byte that is not
+        // printable reads as its escape, so a key the SMC lists with a zero byte shows it.
+        // Method: format PSTR, and a key of T followed by three zero bytes.
+        let named = format!("{SYSTEM_POWER:?}");
+        let unprintable = format!("{:?}", Key(0x5400_0000));
+
+        assert_eq!("PSTR", named);
+        assert_eq!(r"T\u{0}\u{0}\u{0}", unprintable);
     }
 
     #[test]
