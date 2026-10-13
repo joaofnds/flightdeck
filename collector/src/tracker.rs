@@ -704,15 +704,22 @@ fn pid_of(ident: usize) -> io::Result<i32> {
 
 /// The errno a kevent reports in the data of an error or a watch's receipt.
 fn errno_of(data: isize) -> io::Result<i32> {
-    let Ok(errno) = i32::try_from(data) else {
-        return Err(io::Error::new(
+    let refused = || {
+        io::Error::new(
             io::ErrorKind::InvalidData,
             format!("a kevent error code of {data} holds no errno"),
-        ));
+        )
     };
 
-    assert_eq!(Ok(data), isize::try_from(errno));
-    Ok(errno)
+    let Ok(errno) = i32::try_from(data) else {
+        return Err(refused());
+    };
+    if errno >= 0 {
+        assert_eq!(Ok(data), isize::try_from(errno));
+        Ok(errno)
+    } else {
+        Err(refused())
+    }
 }
 
 /// A watch on the process at `index` in the known table, whose index is its pid.
@@ -1124,6 +1131,18 @@ mod tests {
         // Method: handle an error event whose code is the first past i32::MAX.
         let data = isize::try_from(i32::MAX).unwrap() + 1;
         let failed = Kevent::new(7, EVFILT_PROC, EV_ERROR, 0, data);
+
+        let handled = handle(&[failed]);
+
+        assert_eq!(io::ErrorKind::InvalidData, handled.wake.unwrap_err().kind());
+    }
+
+    #[test]
+    fn refuses_a_received_error_code_below_zero() {
+        // Goal: an error code below zero, which no errno is, is an error of invalid data,
+        // rather than an OS error with a negative code.
+        // Method: handle an error event whose code is -1.
+        let failed = Kevent::new(7, EVFILT_PROC, EV_ERROR, 0, -1);
 
         let handled = handle(&[failed]);
 
