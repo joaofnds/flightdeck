@@ -31,6 +31,7 @@ const CALL_STRUCT: u32 = 2;
 const READ_BYTES: u8 = 5;
 const READ_INDEX: u8 = 8;
 const READ_KEY_INFO: u8 = 9;
+const COMMANDS: [u8; 3] = [READ_BYTES, READ_INDEX, READ_KEY_INFO];
 
 /// The result an answer holds where the SMC did what it was asked.
 const SUCCESS: u8 = 0;
@@ -48,6 +49,8 @@ const SOC_TEMPERATURE_PREFIXES: [[u8; 2]; 8] = [
 const FANS_MAX: u8 = 10;
 /// The most keys open lists, past four times the 3,626 the SMC of an M5 Pro lists.
 const KEYS_MAX: u32 = 16_384;
+/// The most bytes a key's value has, the 32 a message's `bytes` hold.
+const VALUE_SIZE_MAX: u32 = 32;
 
 const FLOAT: KeyInfo = KeyInfo::of(*b"flt ", 4);
 const UNSIGNED_8: KeyInfo = KeyInfo::of(*b"ui8 ", 1);
@@ -58,6 +61,12 @@ struct Key(u32);
 
 impl Key {
     const fn named(name: [u8; 4]) -> Self {
+        let mut index = 0;
+        while index < name.len() {
+            assert!(name[index].is_ascii_graphic());
+            index += 1;
+        }
+
         Key(u32::from_be_bytes(name))
     }
 
@@ -88,22 +97,25 @@ struct KeyInfo {
     size: u32,
     kind: u32,
     _attributes: u8,
-    _padding: [u8; 3],
+    padding: [u8; 3],
 }
 
 const _: () = assert!(size_of::<KeyInfo>() == 12);
 const _: () = assert!(std::mem::offset_of!(KeyInfo, size) == 0);
 const _: () = assert!(std::mem::offset_of!(KeyInfo, kind) == 4);
 const _: () = assert!(std::mem::offset_of!(KeyInfo, _attributes) == 8);
-const _: () = assert!(std::mem::offset_of!(KeyInfo, _padding) == 9);
+const _: () = assert!(std::mem::offset_of!(KeyInfo, padding) == 9);
 
 impl KeyInfo {
     const fn of(kind: [u8; 4], size: u32) -> Self {
+        assert!(size > 0);
+        assert!(size <= VALUE_SIZE_MAX);
+
         Self {
             size,
             kind: u32::from_be_bytes(kind),
             _attributes: 0,
-            _padding: [0; 3],
+            padding: [0; 3],
         }
     }
 
@@ -123,7 +135,7 @@ struct Message {
     result: u8,
     _status: u8,
     command: u8,
-    _padding: u8,
+    padding: u8,
     index: u32,
     bytes: [u8; 32],
 }
@@ -133,7 +145,7 @@ const _: () = assert!(std::mem::offset_of!(Message, key) == 0);
 const _: () = assert!(std::mem::offset_of!(Message, info) == 28);
 const _: () = assert!(std::mem::offset_of!(Message, result) == 40);
 const _: () = assert!(std::mem::offset_of!(Message, command) == 42);
-const _: () = assert!(std::mem::offset_of!(Message, _padding) == 43);
+const _: () = assert!(std::mem::offset_of!(Message, padding) == 43);
 const _: () = assert!(std::mem::offset_of!(Message, index) == 44);
 const _: () = assert!(std::mem::offset_of!(Message, bytes) == 48);
 
@@ -156,12 +168,14 @@ impl Smc {
     pub fn open() -> io::Result<Self> {
         let connection = Connection::open()?;
         let power = connection.float_key(SYSTEM_POWER)?;
-        let fan_count = fan_count_check(connection.read(FAN_COUNT, UNSIGNED_8)?[0])?;
+        let fan_count = connection.fan_count()?;
         let fans = (0..fan_count)
             .map(|fan| connection.float_key(Key::fan_speed(fan)))
             .collect::<io::Result<Vec<FloatKey>>>()?;
         let soc_sensor = connection.hottest_soc_sensor()?;
         let fan_rpm = Vec::with_capacity(fans.len());
+        assert_eq!(usize::from(fan_count), fans.len());
+        assert!(fans.len() <= fan_rpm.capacity());
 
         Ok(Self {
             connection,
@@ -175,11 +189,14 @@ impl Smc {
     }
 
     pub fn read(&mut self) -> io::Result<()> {
+        assert!(self.fans.len() <= self.fan_rpm.capacity());
+
         self.watts = self.connection.read_float(self.power)?;
         self.fan_rpm.clear();
         for &fan in &self.fans {
             push_without_growing(&mut self.fan_rpm, self.connection.read_float(fan)?);
         }
+        assert_eq!(self.fans.len(), self.fan_rpm.len());
         self.soc_celsius = self.connection.read_float(self.soc_sensor)?;
 
         Ok(())
@@ -232,8 +249,11 @@ impl Connection {
     }
 
     fn hottest_soc_sensor(&self) -> io::Result<FloatKey> {
-        let mut readings = Vec::new();
-        for index in 0..self.key_count()? {
+        let key_count = self.key_count()?;
+        assert!(key_count <= KEYS_MAX);
+
+        let mut hottest = None;
+        for index in 0..key_count {
             let key = self.key_at(index)?;
             if !key.is_soc_temperature() {
                 continue;
@@ -243,23 +263,41 @@ impl Connection {
             }
 
             let sensor = FloatKey(key);
-            readings.push((sensor, self.read_float(sensor)?));
+            hottest = hottest_soc_sensor_of(hottest, (sensor, self.read_float(sensor)?));
         }
 
-        hottest(readings).ok_or_else(|| {
-            io::Error::new(
+        let Some((sensor, celsius)) = hottest else {
+            return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 "the SMC has no SoC temperature sensor",
-            )
-        })
+            ));
+        };
+        assert!(sensor.0.is_soc_temperature());
+        assert!(celsius.is_finite());
+        Ok(sensor)
+    }
+
+    fn fan_count(&self) -> io::Result<u8> {
+        const { assert!(UNSIGNED_8.size == 1) };
+        let [fan_count, ..] = self.read(FAN_COUNT, UNSIGNED_8)?;
+
+        let fan_count = fan_count_check(fan_count)?;
+        assert!(fan_count <= FANS_MAX);
+        Ok(fan_count)
     }
 
     fn key_count(&self) -> io::Result<u32> {
+        const { assert!(UNSIGNED_32.size == 4) };
         let [a, b, c, d, ..] = self.read(KEY_COUNT, UNSIGNED_32)?;
-        key_count_check(u32::from_be_bytes([a, b, c, d]))
+
+        let key_count = key_count_check(u32::from_be_bytes([a, b, c, d]))?;
+        assert!(key_count <= KEYS_MAX);
+        Ok(key_count)
     }
 
     fn key_at(&self, index: u32) -> io::Result<Key> {
+        assert!(index < KEYS_MAX);
+
         let listed = self.ask(&Message {
             command: READ_INDEX,
             index,
@@ -270,18 +308,27 @@ impl Connection {
 
     /// Checks that the SMC holds `key` as a float.
     fn float_key(&self, key: Key) -> io::Result<FloatKey> {
-        info_check(key, self.info(key)?, FLOAT)?;
+        let info = self.info(key)?;
+
+        info_check(key, info, FLOAT)?;
+        assert!(info.is(FLOAT));
         Ok(FloatKey(key))
     }
 
     fn read_float(&self, key: FloatKey) -> io::Result<f32> {
-        self.bytes(key.0, FLOAT).map(float_from)
+        const { assert!(FLOAT.size == 4) };
+        let [a, b, c, d, ..] = self.bytes(key.0, FLOAT)?;
+
+        Ok(f32::from_ne_bytes([a, b, c, d]))
     }
 
     /// Reads `key` as a value of `info` once the SMC shows it holds one, since the SMC answers
     /// a read of a key with its bytes whatever type the read names.
     fn read(&self, key: Key, info: KeyInfo) -> io::Result<[u8; 32]> {
-        info_check(key, self.info(key)?, info)?;
+        let held = self.info(key)?;
+
+        info_check(key, held, info)?;
+        assert!(held.is(info));
         self.bytes(key, info)
     }
 
@@ -296,6 +343,9 @@ impl Connection {
 
     /// The bytes of `key` read as a value of `info`, which the caller checked the SMC holds.
     fn bytes(&self, key: Key, info: KeyInfo) -> io::Result<[u8; 32]> {
+        assert!(info.size > 0);
+        assert!(info.size <= VALUE_SIZE_MAX);
+
         let answer = self.ask(&Message {
             key: key.0,
             info,
@@ -306,6 +356,10 @@ impl Connection {
     }
 
     fn ask(&self, question: &Message) -> io::Result<Message> {
+        assert!(COMMANDS.contains(&question.command));
+        assert_eq!(0, question.padding);
+        assert_eq!([0; 3], question.info.padding);
+
         let mut answer = Message::default();
         let mut answer_size = size_of::<Message>();
         let returned = unsafe {
@@ -319,7 +373,10 @@ impl Connection {
             )
         };
 
-        ask_answered(question, returned, answer_size, answer)
+        let answer = ask_answered(question, returned, answer_size, answer)?;
+        assert_eq!(size_of::<Message>(), answer_size);
+        assert_eq!(SUCCESS, answer.result);
+        Ok(answer)
     }
 }
 
@@ -408,18 +465,24 @@ fn key_count_check(key_count: u32) -> io::Result<u32> {
     Ok(key_count)
 }
 
-/// The sensor of the highest temperature among `readings`, leaving out a reading that is not
-/// a finite number.
-fn hottest(readings: impl IntoIterator<Item = (FloatKey, f32)>) -> Option<FloatKey> {
-    readings
-        .into_iter()
-        .filter(|(_, celsius)| celsius.is_finite())
-        .max_by(|(_, one), (_, other)| one.total_cmp(other))
-        .map(|(sensor, _)| sensor)
-}
+/// The hotter of `hottest`, the hottest reading so far, and `reading`, leaving out a reading
+/// that is not a finite number.
+fn hottest_soc_sensor_of(
+    hottest: Option<(FloatKey, f32)>,
+    reading: (FloatKey, f32),
+) -> Option<(FloatKey, f32)> {
+    let (_, celsius) = reading;
+    if !celsius.is_finite() {
+        return hottest;
+    }
+    if let Some((_, hottest_celsius)) = hottest {
+        assert!(hottest_celsius.is_finite());
+        if hottest_celsius >= celsius {
+            return hottest;
+        }
+    }
 
-fn float_from([a, b, c, d, ..]: [u8; 32]) -> f32 {
-    f32::from_ne_bytes([a, b, c, d])
+    Some(reading)
 }
 
 #[cfg(test)]
@@ -434,7 +497,9 @@ mod tests {
             (FloatKey(Key::named(*b"TP0a")), 52.0),
         ];
 
-        assert_eq!(Some(FloatKey(Key::named(*b"Tg05"))), hottest(readings));
+        let hottest = readings.into_iter().fold(None, hottest_soc_sensor_of);
+
+        assert_eq!(Some((FloatKey(Key::named(*b"Tg05")), 63.5)), hottest);
     }
 
     #[test]
@@ -447,7 +512,9 @@ mod tests {
             (FloatKey(Key::named(*b"Tg05")), f32::NAN),
         ];
 
-        assert_eq!(Some(FloatKey(Key::named(*b"Tp01"))), hottest(readings));
+        let hottest = readings.into_iter().fold(None, hottest_soc_sensor_of);
+
+        assert_eq!(Some((FloatKey(Key::named(*b"Tp01")), 41.0)), hottest);
     }
 
     #[test]
