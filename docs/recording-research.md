@@ -97,9 +97,11 @@ process, a tree of 50 processes read every 100 ms costs 2 to 6 ms a second, 0.2 
 of a core. The Go rows include Go's runtime: the CPU ticks cost 186 µs a read through
 the Go collector and 3.2 µs in C, so those rows are upper bounds. IOReport and the SMC
 are the exceptions. IOReport cost 4.8 to 9.0 ms a second in the collector in Rust,
-against 5.9 ms in Go. An SMC key costs 27 to 33 µs in the collector in Rust, against
-about 22 µs a key in the Go collector, so the rest of the SMC may cost 7 to 9 ms a read
-in Rust rather than 6, which the 100 ms sum above uses.
+against 5.9 ms in Go, and it is the only part of a tick that still calls the malloc
+family, 143 times a tick inside `IOReportCreateSamples` and the release of the samples
+it returns, as Evidence describes. An SMC key costs 27 to 33 µs in the collector in
+Rust, against about 22 µs a key in the Go collector, so the rest of the SMC may cost 7
+to 9 ms a read in Rust rather than 6, which the 100 ms sum above uses.
 
 Handing a tick over costs 53 to 80 µs of CPU for writer and reader together, so at
 one tick a second the transport is under 0.01% of a core. The ring with a reader woken
@@ -750,17 +752,26 @@ listed 757 to 778 pids and refused 293 to 297 of them. `whole/run-60s.txt` is th
 collector at 209b539 run for a minute under `/usr/bin/time -p`, at one-minute load
 averages of 1.64 to 1.91.
 
-The collector's memory use after startup was counted with `malloc-count.c`, a library
-that counts every malloc-family call in a process and groups the calls by the collector's
-frames they came through. `git log -1 --format=%B -S malloc-count.c --
-docs/recording-research.md` prints its source and how to build and run it. A release
-build of ae1843a ran for 65 seconds twice, once on a quiet Mac and once beside
-`forkrate 400 64 6`, and the count covered the 63 ticks from 1.5 to 64.5 seconds of each.
-Every tick made 214 calls in both runs, 150 inside `IOReportCreateSamples` and 64
-releasing the samples it returns, and no call came from the collector's own code. At
-719b976, before the collector read IOReport's state names and energy unit once at open,
-a count that missed the typed entry points such as `malloc_type_malloc` found 432 calls
-a tick, 251 of them under the names and the unit.
+The collector's malloc-family calls after startup were counted with `malloc-count.c`, a
+library loaded through `DYLD_INSERT_LIBRARIES` that counts every call into the malloc
+family's exported functions, frees included, and groups the calls by the collector's
+frames they came through. A typed entry point such as `malloc_type_calloc` calls an
+untyped one such as `calloc`, so the library counts only the outermost call on each
+thread. A call made straight through a zone's function pointers skips those functions and
+is not counted. `git log -1 --format=%B -F --grep='BEGIN malloc-count.c'` prints its
+source between the lines `BEGIN malloc-count.c` and `END malloc-count.c`, with how to
+build and run it. A release build of 155ddc6 ran for 65 seconds twice, once on a quiet Mac
+and once beside `forkrate 400 64 6`, which forks 400 children a second for 64 seconds,
+each sleeping 6 ms before it exits, and the collector saw about 396 forks a second. The
+count covered the 63 ticks from 1.5 to 64.5 seconds of each run. Both runs made 9,009
+calls, 143 a tick, 79 inside `IOReportCreateSamples` and 64 releasing the samples it
+returns, all under the collector's IOReport read. docs/tiger-style.md says never to
+allocate after startup and names no departure for these calls. The same count of a
+release build of 719b976, which read IOReport's state names and energy unit on every
+read, found 432 calls a tick, 251 of them under the names and the unit. The output is in
+`~/code/backlog/boards/flightdeck/evidence/TASK-13.4/final-guarded` on this Mac, outside
+the repository, with the counter's source and a probe that calls each entry point 100
+times.
 
 ## Sources
 
