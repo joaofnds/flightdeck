@@ -118,17 +118,18 @@ pub struct Smc {
 impl Smc {
     pub fn open() -> io::Result<Self> {
         let connection = Connection::open()?;
-        let fans = (0..connection.read(FAN_COUNT, UNSIGNED_8)?[0])
+        let fans: Vec<Key> = (0..connection.read(FAN_COUNT, UNSIGNED_8)?[0])
             .map(Key::fan_speed)
             .collect();
         let soc_sensor = connection.hottest_soc_sensor()?;
+        let fan_rpm = Vec::with_capacity(fans.len());
 
         Ok(Self {
             connection,
             fans,
             soc_sensor,
             watts: 0.0,
-            fan_rpm: Vec::new(),
+            fan_rpm,
             soc_celsius: 0.0,
         })
     }
@@ -137,6 +138,7 @@ impl Smc {
         self.watts = self.connection.read_float(SYSTEM_POWER)?;
         self.fan_rpm.clear();
         for &fan in &self.fans {
+            assert!(self.fan_rpm.len() < self.fan_rpm.capacity());
             self.fan_rpm.push(self.connection.read_float(fan)?);
         }
         self.soc_celsius = self.connection.read_float(self.soc_sensor)?;
@@ -320,6 +322,17 @@ mod tests {
         smc.read().unwrap();
 
         assert_eq!(usize::from(fans), smc.fan_rpm.len());
+    }
+
+    #[test]
+    fn reads_the_fan_speeds_into_room_taken_at_open() {
+        let mut smc = Smc::open().unwrap();
+        let capacity = smc.fan_rpm.capacity();
+
+        smc.read().unwrap();
+
+        assert_eq!(smc.fans.len(), capacity);
+        assert_eq!(capacity, smc.fan_rpm.capacity());
     }
 
     #[test]
