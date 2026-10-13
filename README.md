@@ -18,8 +18,8 @@ cargo run --release -p collector -- --seconds 300
 It reports every 10 seconds and every minute, and with `--seconds` over the whole run,
 ending with the processes it missed, counted against the pid sequence. It gives no count
 when the pids may have wrapped, when it found more processes than the pids say started,
-or when a marker child it starts for the count fails. `--rescan-ms N` sets how often a fork may make it rescan the pid list, 5 ms
-by default.
+or when a marker child it starts for the count fails. `--rescan-ms N` sets how often a
+fork may make it rescan the pid list, 5 ms by default.
 
 To measure process tracking under a load you choose, `forkrate` forks children at a
 fixed rate, `followprobe` counts the children the tracker finds and misses at a given

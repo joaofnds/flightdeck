@@ -224,7 +224,7 @@ carried a fork and one at most every 5 ms, while a test suite ran and the Mac fo
 up to 76 a second over 10 seconds. Both cost 1.95 to 2.05% a minute, 2.00 and 2.01% over
 the run, so the interval saved no CPU there. Against the pid sequence the first missed
 36 of 3,078 processes started and the one at 5 ms missed 1,910 of 3,077. In two runs of
-five minutes of quieter use at 5 ms, at up to 7 and 6 forks a second over 10 seconds,
+five minutes of quieter use at 5 ms, at up to 7 and 1.4 forks a second over 10 seconds,
 the collector cost 1.81 to 1.93% a minute and missed 144 of 708 and 1 of 257, so the
 share missed varies with how the forks come. The likely reason, not yet measured, is
 that many of these processes exit and are reaped within a few milliseconds, so they are
