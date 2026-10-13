@@ -710,7 +710,8 @@ mod tests {
 
     #[test]
     fn reports_the_dropped_starts_among_the_processes_missed() {
-        // Goal: the run's report counts a dropped start once, among the processes missed.
+        // Goal: the missed line says how many of the processes missed were dropped from a full
+        // event list.
         // Method: write the missed line for a run that found 7 of 10 starts and dropped 2.
         let mut written = Vec::new();
 
