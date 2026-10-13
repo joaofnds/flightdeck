@@ -6,6 +6,97 @@ use crate::clock::Timebase;
 use crate::kernel::{EPERM, ESRCH, Sysctl};
 use crate::push_without_growing;
 
+#[derive(Debug, Clone, Copy)]
+pub struct Process {
+    pub pid: i32,
+    pub usage: Usage,
+    pub task: Task,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Usage {
+    pub awake_ns_at_start: u64,
+    pub user_ns: u64,
+    pub system_ns: u64,
+    pub energy_nj: u64,
+    pub instructions: u64,
+    pub super_instructions: u64,
+    pub cycles: u64,
+    pub idle_wakeups: u64,
+    pub interrupt_wakeups: u64,
+    pub pageins: u64,
+    pub resident_bytes: u64,
+    pub footprint_bytes: u64,
+    pub disk_read_bytes: u64,
+    pub disk_written_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Task {
+    pub threads: i32,
+    pub faults: i32,
+    pub context_switches: i32,
+    pub mach_syscalls: i32,
+    pub unix_syscalls: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unreadable {
+    Refused,
+    Gone,
+}
+
+pub struct Sweep {
+    pub read: Vec<Process>,
+    pub refused: u32,
+    pub gone: u32,
+}
+
+impl Sweep {
+    /// A sweep with room taken once for every process a listing holds, at most
+    /// `process_limit`.
+    #[must_use]
+    pub fn new(process_limit: usize) -> Self {
+        assert!(process_limit > 0);
+
+        let sweep = Self {
+            read: Vec::with_capacity(process_limit),
+            refused: 0,
+            gone: 0,
+        };
+        assert!(sweep.read.capacity() >= process_limit);
+        sweep
+    }
+
+    pub fn run(&mut self, timebase: Timebase, pids: &[i32]) -> io::Result<()> {
+        assert!(pids.len() <= self.read.capacity());
+        self.read.clear();
+        self.refused = 0;
+        self.gone = 0;
+
+        for &pid in pids {
+            match read(timebase, pid)? {
+                Ok(process) => {
+                    assert_eq!(pid, process.pid);
+                    push_without_growing(&mut self.read, process);
+                }
+                Err(Unreadable::Refused) => self.refused += 1,
+                Err(Unreadable::Gone) => self.gone += 1,
+            }
+        }
+
+        // Each pid is read or counted once.
+        assert!(self.read.len() <= pids.len());
+        let unread = pids.len() - self.read.len();
+        assert_eq!(Ok(unread), usize::try_from(self.refused + self.gone));
+        Ok(())
+    }
+}
+
+/// The highest pid macOS gives a process, `PID_MAX` in XNU's `bsd/sys/proc_internal.h`, which
+/// the SDK does not declare. Pids count up to it and then wrap to low pids again.
+pub const PID_MAX: i32 = 99_999;
+
 #[repr(C)]
 struct RusageInfoV6 {
     uuid: [u8; 16],
@@ -125,50 +216,6 @@ unsafe extern "C" {
     ) -> c_int;
     fn proc_pid_rusage(pid: c_int, flavor: c_int, buffer: *mut c_void) -> c_int;
 }
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Unreadable {
-    Refused,
-    Gone,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct Process {
-    pub pid: i32,
-    pub usage: Usage,
-    pub task: Task,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct Usage {
-    pub awake_ns_at_start: u64,
-    pub user_ns: u64,
-    pub system_ns: u64,
-    pub energy_nj: u64,
-    pub instructions: u64,
-    pub super_instructions: u64,
-    pub cycles: u64,
-    pub idle_wakeups: u64,
-    pub interrupt_wakeups: u64,
-    pub pageins: u64,
-    pub resident_bytes: u64,
-    pub footprint_bytes: u64,
-    pub disk_read_bytes: u64,
-    pub disk_written_bytes: u64,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct Task {
-    pub threads: i32,
-    pub faults: i32,
-    pub context_switches: i32,
-    pub mach_syscalls: i32,
-    pub unix_syscalls: i32,
-}
-
-/// The highest pid macOS gives a process, `PID_MAX` in XNU's `bsd/sys/proc_internal.h`, which
-/// the SDK does not declare. Pids count up to it and then wrap to low pids again.
-pub const PID_MAX: i32 = 99_999;
 
 /// Returns how many entries a list takes to hold one for every process macOS runs at once,
 /// which `kern.maxproc` gives.
@@ -386,6 +433,18 @@ fn pid_info_written(
     }
 }
 
+/// Reads the `error` a call about one process failed with: EPERM as refused, ESRCH as gone,
+/// and any other errno as the error it is.
+fn unreadable_of(error: io::Error) -> io::Result<Unreadable> {
+    assert!(error.raw_os_error().is_some());
+
+    match error.raw_os_error() {
+        Some(EPERM) => Ok(Unreadable::Refused),
+        Some(ESRCH) => Ok(Unreadable::Gone),
+        _ => Err(error),
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn child_that_has_exited() -> std::process::Child {
     use std::ffi::c_uint;
@@ -411,65 +470,6 @@ pub(crate) fn child_that_has_exited() -> std::process::Child {
     assert_eq!(0, waited, "{}", io::Error::last_os_error());
 
     child
-}
-
-/// Reads the `error` a call about one process failed with: EPERM as refused, ESRCH as gone,
-/// and any other errno as the error it is.
-fn unreadable_of(error: io::Error) -> io::Result<Unreadable> {
-    assert!(error.raw_os_error().is_some());
-
-    match error.raw_os_error() {
-        Some(EPERM) => Ok(Unreadable::Refused),
-        Some(ESRCH) => Ok(Unreadable::Gone),
-        _ => Err(error),
-    }
-}
-
-pub struct Sweep {
-    pub read: Vec<Process>,
-    pub refused: u32,
-    pub gone: u32,
-}
-
-impl Sweep {
-    /// A sweep with room taken once for every process a listing holds, at most
-    /// `process_limit`.
-    #[must_use]
-    pub fn new(process_limit: usize) -> Self {
-        assert!(process_limit > 0);
-
-        let sweep = Self {
-            read: Vec::with_capacity(process_limit),
-            refused: 0,
-            gone: 0,
-        };
-        assert!(sweep.read.capacity() >= process_limit);
-        sweep
-    }
-
-    pub fn run(&mut self, timebase: Timebase, pids: &[i32]) -> io::Result<()> {
-        assert!(pids.len() <= self.read.capacity());
-        self.read.clear();
-        self.refused = 0;
-        self.gone = 0;
-
-        for &pid in pids {
-            match read(timebase, pid)? {
-                Ok(process) => {
-                    assert_eq!(pid, process.pid);
-                    push_without_growing(&mut self.read, process);
-                }
-                Err(Unreadable::Refused) => self.refused += 1,
-                Err(Unreadable::Gone) => self.gone += 1,
-            }
-        }
-
-        // Each pid is read or counted once.
-        assert!(self.read.len() <= pids.len());
-        let unread = pids.len() - self.read.len();
-        assert_eq!(Ok(unread), usize::try_from(self.refused + self.gone));
-        Ok(())
-    }
 }
 
 #[cfg(test)]
