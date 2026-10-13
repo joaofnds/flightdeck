@@ -211,12 +211,18 @@ fn run(command: &mut Command, limit_ms: u32, interrupted: &AtomicBool) -> Result
 fn run_stop(child: &mut Child) -> Result<(), Refusal> {
     let group =
         i32::try_from(child.id()).map_err(|error| Refusal::Unstoppable(io::Error::other(error)))?;
-    assert!(group > 0);
+    // Zero or a negative number would make kill(2) signal the hook's own group, git's too.
+    if group <= 0 {
+        return Err(Refusal::Unstoppable(io::Error::other(format!(
+            "the step's pid is {group}"
+        ))));
+    }
 
     if kill(-group, SIGNAL_KILL) != 0 {
         let error = io::Error::last_os_error();
-        // The group is already gone when every process in it has exited on its own.
-        if error.raw_os_error() != Some(NO_SUCH_PROCESS) {
+        // macOS refuses to signal a group whose every process has exited, with EPERM when
+        // the leader is not yet reaped, so a step that has exited needs no stopping.
+        if child.try_wait().map_err(Refusal::Unwaitable)?.is_none() {
             return Err(Refusal::Unstoppable(error));
         }
     }
@@ -247,12 +253,7 @@ impl std::fmt::Display for Refusal {
                     "it ran past its limit of {limit_ms} ms and was stopped"
                 )
             }
-            Refusal::Unstoppable(error) => {
-                write!(
-                    formatter,
-                    "it ran past its limit and could not be stopped: {error}"
-                )
-            }
+            Refusal::Unstoppable(error) => write!(formatter, "it could not be stopped: {error}"),
             Refusal::Interrupted => write!(formatter, "it was interrupted and stopped"),
         }
     }
@@ -287,13 +288,12 @@ unsafe extern "C" {
     fn signal(signal: i32, handler: extern "C" fn(i32)) -> isize;
 }
 
-// From <sys/signal.h> and <sys/errno.h>.
+// From <sys/signal.h>.
 const SIGNAL_HANGUP: i32 = 1;
 const SIGNAL_INTERRUPT: i32 = 2;
 const SIGNAL_KILL: i32 = 9;
 const SIGNAL_TERMINATE: i32 = 15;
 const SIGNAL_ERROR: isize = -1;
-const NO_SUCH_PROCESS: i32 = 3;
 const POLL_MS: u32 = 10;
 const EXPORT_LIMIT_MS: u32 = 30_000;
 
@@ -420,6 +420,19 @@ mod tests {
             gone_within(grandchild, Duration::from_secs(2)),
             "pid {grandchild} survived"
         );
+    }
+
+    // Goal: a step that exits on its own just as its limit or an interrupt stops it is
+    // stopped, not reported as a step that could not be stopped.
+    // Method: start `true` in a process group of its own, let it exit unreaped, and stop it.
+    #[test]
+    fn stops_a_step_that_has_already_exited() {
+        let mut child = Command::new("true").process_group(0).spawn().unwrap();
+        thread::sleep(Duration::from_millis(200));
+
+        let outcome = run_stop(&mut child);
+
+        assert!(outcome.is_ok(), "{outcome:?}");
     }
 
     // Goal: the check reads what the commit would hold, never the working tree.
