@@ -30,8 +30,12 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let outcome = check(&export);
+    let mut outcome = check(&export);
     let removal = fs::remove_dir_all(&export);
+    // A signal after the last step's final poll would otherwise let the commit through.
+    if INTERRUPTED.load(Ordering::Relaxed) {
+        outcome = Err(Refusal::Interrupted);
+    }
 
     if let Err(error) = removal {
         eprintln!("check: cannot remove {}: {error}", export.display());
@@ -259,21 +263,26 @@ impl std::fmt::Display for Refusal {
     }
 }
 
-// Set by a signal that would end the hook, Ctrl-C above all, so that the hook stops the
-// step running, whose process group the terminal's signal does not reach, and removes
-// its export before it exits.
+// Set by a signal that would end the hook, Ctrl-C and Ctrl-\ above all, so that the hook
+// stops the step running, whose process group the terminal's signal does not reach, and
+// removes its export before it exits.
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
-extern "C" fn interrupt(_signal: i32) {
+extern "C" fn catch_interrupts_callback(_signal: i32) {
     INTERRUPTED.store(true, Ordering::Relaxed);
 }
 
 fn catch_interrupts() -> io::Result<()> {
     assert!(!INTERRUPTED.load(Ordering::Relaxed));
 
-    for number in [SIGNAL_HANGUP, SIGNAL_INTERRUPT, SIGNAL_TERMINATE] {
-        // SAFETY: `interrupt` only stores to an atomic, which a signal handler may do.
-        let previous = unsafe { signal(number, interrupt) };
+    for number in [
+        SIGNAL_HANGUP,
+        SIGNAL_INTERRUPT,
+        SIGNAL_QUIT,
+        SIGNAL_TERMINATE,
+    ] {
+        // SAFETY: the callback only stores to an atomic, which a signal handler may do.
+        let previous = unsafe { signal(number, catch_interrupts_callback) };
         if previous == SIGNAL_ERROR {
             return Err(io::Error::last_os_error());
         }
@@ -291,6 +300,7 @@ unsafe extern "C" {
 // From <sys/signal.h>.
 const SIGNAL_HANGUP: i32 = 1;
 const SIGNAL_INTERRUPT: i32 = 2;
+const SIGNAL_QUIT: i32 = 3;
 const SIGNAL_KILL: i32 = 9;
 const SIGNAL_TERMINATE: i32 = 15;
 const SIGNAL_ERROR: isize = -1;
@@ -374,22 +384,30 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(5));
     }
 
-    // Goal: a signal that would end the hook sets the interrupt flag instead, so the hook
-    // can stop its step and remove its export before it exits.
-    // Method: catch the signals, send this process a hangup, and wait for the flag.
+    // Goal: each signal that would end the hook, Ctrl-C and Ctrl-\ among them, sets the
+    // interrupt flag instead, so the hook can stop its step and remove its export.
+    // Method: catch the signals, send this process each one in turn, and wait for the
+    // flag, clearing it after each. One test sends them all, since the handlers and the
+    // flag belong to the whole process.
     #[test]
-    fn turns_a_hangup_into_an_interrupt() {
+    fn turns_each_signal_that_would_end_the_hook_into_an_interrupt() {
         catch_interrupts().unwrap();
+        let hook = i32::try_from(process::id()).unwrap();
 
-        assert_eq!(
-            kill(i32::try_from(process::id()).unwrap(), SIGNAL_HANGUP),
-            0
-        );
+        for number in [
+            SIGNAL_HANGUP,
+            SIGNAL_INTERRUPT,
+            SIGNAL_QUIT,
+            SIGNAL_TERMINATE,
+        ] {
+            let sent = kill(hook, number);
 
-        let started = Instant::now();
-        while !INTERRUPTED.load(Ordering::Relaxed) {
-            assert!(started.elapsed() < Duration::from_secs(2), "no interrupt");
-            thread::sleep(Duration::from_millis(10));
+            assert_eq!(sent, 0, "signal {number}");
+            assert!(
+                interrupted_within(Duration::from_secs(2)),
+                "signal {number}"
+            );
+            INTERRUPTED.store(false, Ordering::Relaxed);
         }
     }
 
@@ -538,6 +556,18 @@ mod tests {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.path).unwrap();
         }
+    }
+
+    // A signal arrives asynchronously, so the test polls for the flag it sets.
+    fn interrupted_within(wait: Duration) -> bool {
+        let started = Instant::now();
+        while started.elapsed() < wait {
+            if INTERRUPTED.load(Ordering::Relaxed) {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        false
     }
 
     // A killed process can stay a zombie until launchd reaps it, so the probe polls.
