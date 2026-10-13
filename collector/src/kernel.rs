@@ -1,5 +1,5 @@
-// The parts of the kernel's interface that more than one module calls. A module declares
-// the rest of what it calls itself.
+//! The parts of the kernel's interface that more than one module calls. A module declares
+//! the rest of what it calls itself.
 
 use std::ffi::{c_int, c_uint, c_void};
 use std::mem::offset_of;
@@ -12,6 +12,20 @@ pub(crate) type KernReturn = c_int;
 
 /// Says a Mach call succeeded.
 pub(crate) const KERN_SUCCESS: KernReturn = 0;
+
+/// Says no process has the pid a call named.
+pub(crate) const ESRCH: c_int = 3;
+
+/// A time in seconds and nanoseconds, as `struct timespec` declares it.
+#[repr(C)]
+pub(crate) struct Timespec {
+    pub(crate) tv_sec: i64,
+    pub(crate) tv_nsec: i64,
+}
+
+const _: () = assert!(size_of::<Timespec>() == 16);
+const _: () = assert!(offset_of!(Timespec, tv_sec) == 0);
+const _: () = assert!(offset_of!(Timespec, tv_nsec) == 8);
 
 unsafe extern "C" {
     static mach_task_self_: MachPort;
@@ -27,32 +41,38 @@ unsafe extern "C" {
     ) -> c_int;
 }
 
-#[cfg(test)]
-unsafe extern "C" {
-    /// Reads the kernel state that `name`, a dotted string, names.
-    pub(crate) fn sysctlbyname(
-        name: *const std::ffi::c_char,
-        old: *mut c_void,
-        old_size: *mut usize,
-        new: *mut c_void,
-        new_size: usize,
-    ) -> c_int;
-}
-
 pub(crate) fn task_self() -> MachPort {
     unsafe { mach_task_self_ }
 }
 
-/// Says no process has the pid a call named.
-pub(crate) const ESRCH: c_int = 3;
+/// Reads the kernel state that `name`, a dotted string, names, as the bytes of a number of
+/// `SIZE` bytes, so a test can compare a reading with what the kernel reports.
+#[cfg(test)]
+pub(crate) fn sysctl_bytes<const SIZE: usize>(name: &std::ffi::CStr) -> [u8; SIZE] {
+    use std::ffi::c_char;
 
-/// A time in seconds and nanoseconds, as `struct timespec` declares it.
-#[repr(C)]
-pub(crate) struct Timespec {
-    pub(crate) tv_sec: i64,
-    pub(crate) tv_nsec: i64,
+    unsafe extern "C" {
+        fn sysctlbyname(
+            name: *const c_char,
+            old: *mut c_void,
+            old_size: *mut usize,
+            new: *mut c_void,
+            new_size: usize,
+        ) -> c_int;
+    }
+
+    let mut bytes = [0; SIZE];
+    let mut size = SIZE;
+    let result = unsafe {
+        sysctlbyname(
+            name.as_ptr(),
+            bytes.as_mut_ptr().cast(),
+            &raw mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    assert_eq!(0, result, "{name:?}");
+    assert_eq!(SIZE, size, "{name:?}");
+    bytes
 }
-
-const _: () = assert!(size_of::<Timespec>() == 16);
-const _: () = assert!(offset_of!(Timespec, tv_sec) == 0);
-const _: () = assert!(offset_of!(Timespec, tv_nsec) == 8);

@@ -292,18 +292,7 @@ mod tests {
     use crate::cost::spin_on_this_thread_for;
 
     fn logical_cpus() -> u32 {
-        let mut value = 0u32;
-        let mut size = size_of::<u32>();
-        unsafe {
-            crate::kernel::sysctlbyname(
-                c"hw.logicalcpu".as_ptr(),
-                (&raw mut value).cast(),
-                &raw mut size,
-                ptr::null_mut(),
-                0,
-            )
-        };
-        value
+        u32::from_ne_bytes(crate::kernel::sysctl_bytes(c"hw.logicalcpu"))
     }
 
     fn active_time_of_every_core(ioreport: &IoReport) -> Duration {

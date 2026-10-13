@@ -362,21 +362,6 @@ fn usize_from_u32(value: u32) -> usize {
 mod tests {
     use super::*;
 
-    fn sysctl_u64(name: &CStr) -> u64 {
-        let mut value = 0u64;
-        let mut size = size_of::<u64>();
-        unsafe {
-            kernel::sysctlbyname(
-                name.as_ptr(),
-                (&raw mut value).cast(),
-                &raw mut size,
-                std::ptr::null_mut(),
-                0,
-            )
-        };
-        value
-    }
-
     #[test]
     fn reads_the_ticks_of_every_logical_cpu() {
         let mut machine = Machine::new().unwrap();
@@ -384,8 +369,8 @@ mod tests {
         machine.read().unwrap();
 
         assert_eq!(
-            sysctl_u64(c"hw.logicalcpu"),
-            u64::try_from(machine.cpus.len()).unwrap()
+            u32::from_ne_bytes(kernel::sysctl_bytes(c"hw.logicalcpu")),
+            u32::try_from(machine.cpus.len()).unwrap()
         );
     }
 
@@ -401,7 +386,10 @@ mod tests {
             + memory.inactive_bytes
             + memory.wired_bytes
             + memory.compressed_bytes;
-        assert_eq!(sysctl_u64(c"hw.memsize"), memory.total_bytes);
+        assert_eq!(
+            u64::from_ne_bytes(kernel::sysctl_bytes(c"hw.memsize")),
+            memory.total_bytes
+        );
         assert!(
             in_ram <= memory.total_bytes && in_ram > memory.total_bytes / 2,
             "{memory:?}"

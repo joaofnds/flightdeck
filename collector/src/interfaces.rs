@@ -272,6 +272,8 @@ mod tests {
     fn listed_by_the_system() -> Vec<String> {
         let mut names = Vec::new();
         let first = unsafe { if_nameindex() };
+        assert!(!first.is_null());
+
         let mut entry = first;
         while unsafe { (*entry).if_index } != 0 {
             let name = unsafe { std::ffi::CStr::from_ptr((*entry).if_name) };
