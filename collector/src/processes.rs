@@ -580,6 +580,9 @@ mod tests {
 
     #[test]
     fn lists_this_process_among_every_pid() {
+        // Goal: a listing holds every process, this one included.
+        // Method: list every pid into a list sized from the process limit, and look for this
+        // process's pid.
         let mut pids = pid_list(process_limit().unwrap());
 
         list_pids(&mut pids).unwrap();
@@ -589,6 +592,10 @@ mod tests {
 
     #[test]
     fn reads_this_process_with_the_cpu_time_getrusage_reports() {
+        // Goal: the CPU time read for a process is the time it spent, in nanoseconds, as getrusage
+        // reports it for this process.
+        // Method: spin 50 ms, then read this process between two getrusage readings, and take
+        // the read within 2 ms of them.
         spin_on_this_thread_for(Duration::from_millis(50));
         let pid = std::process::id().cast_signed();
 
@@ -598,13 +605,19 @@ mod tests {
 
         let cpu_ns = process.usage.user_ns + process.usage.system_ns;
         assert!(
-            before - 2_000_000 <= cpu_ns && cpu_ns <= after + 2_000_000,
+            before - 2_000_000 <= cpu_ns,
+            "read {cpu_ns} ns, getrusage {before} to {after}"
+        );
+        assert!(
+            cpu_ns <= after + 2_000_000,
             "read {cpu_ns} ns, getrusage {before} to {after}"
         );
     }
 
     #[test]
     fn reads_this_process_spending_energy_while_it_runs() {
+        // Goal: a process's energy grows while it runs.
+        // Method: read this process's usage before and after spinning 50 ms.
         let pid = std::process::id().cast_signed();
         let before = read_usage(pid, Timebase::read()).unwrap().unwrap();
 
@@ -621,6 +634,9 @@ mod tests {
 
     #[test]
     fn reads_when_a_process_started_in_awake_time() {
+        // Goal: a process's start reads in awake time, the clock the collector keeps.
+        // Method: spawn a child, read its start, and take it within a second of the awake time
+        // mach_absolute_time reads just after.
         let timebase = Timebase::read();
         let mut child = std::process::Command::new("/bin/sleep")
             .arg("1")
@@ -640,6 +656,8 @@ mod tests {
 
     #[test]
     fn reads_this_process_in_a_sweep() {
+        // Goal: a sweep reads each process it is given.
+        // Method: sweep this process's pid alone.
         let pid = std::process::id().cast_signed();
         let mut sweep = Sweep::new(1);
 
@@ -651,6 +669,8 @@ mod tests {
 
     #[test]
     fn reads_or_counts_every_listed_pid() {
+        // Goal: a sweep of every listed pid reads each one or counts it as refused or gone.
+        // Method: sweep a listing of every pid, and compare the readings and counts with it.
         let mut pids = pid_list(process_limit().unwrap());
         list_pids(&mut pids).unwrap();
         let mut sweep = Sweep::new(process_limit().unwrap());
@@ -704,6 +724,8 @@ mod tests {
 
     #[test]
     fn refuses_launchd_to_a_user_without_root() {
+        // Goal: a process this user may not read, such as one another user owns, reads as refused.
+        // Method: read launchd, pid 1, which runs as root, as a user without root.
         assert_eq!(
             Unreadable::Refused,
             read(1, Timebase::read()).unwrap().unwrap_err()
@@ -712,6 +734,8 @@ mod tests {
 
     #[test]
     fn reads_a_reaped_child_as_gone() {
+        // Goal: a pid whose process exited and was reaped reads as gone.
+        // Method: spawn a child, wait for it, and read its pid.
         let mut child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
         child.wait().unwrap();
 
@@ -758,16 +782,22 @@ mod tests {
 
     #[test]
     fn finds_this_process_alive() {
+        // Goal: a running process is alive.
+        // Method: ask about this process.
         assert!(is_alive(std::process::id().cast_signed()).unwrap());
     }
 
     #[test]
     fn finds_a_process_it_cannot_read_alive() {
+        // Goal: a process whose task this user may not read is still found alive.
+        // Method: ask about launchd, whose task info a user without root is refused.
         assert!(is_alive(1).unwrap());
     }
 
     #[test]
     fn finds_an_exited_child_not_yet_reaped_not_alive() {
+        // Goal: a process that has exited is not alive, even while its parent has yet to reap it.
+        // Method: ask about a child that has exited, which waitid with WNOWAIT leaves unreaped.
         let mut child = child_that_has_exited();
 
         let alive = is_alive(child.id().cast_signed()).unwrap();

@@ -230,6 +230,8 @@ mod tests {
 
     #[test]
     fn counts_the_cpu_time_this_process_spends_in_its_coalition() {
+        // Goal: a coalition's CPU time grows by at least the time one of its processes spends.
+        // Method: read this process's coalition before and after spinning 50 ms on one thread.
         let mut coalitions = Coalitions::new(Timebase::read(), COALITION_LIMIT);
         coalitions.add(own_coalition()).unwrap();
         coalitions.read_all().unwrap();
@@ -248,6 +250,8 @@ mod tests {
 
     #[test]
     fn counts_the_energy_this_process_spends_in_its_coalition() {
+        // Goal: a coalition's energy grows by at least what one of its processes spends.
+        // Method: read this process's coalition and usage before and after spinning 50 ms.
         let timebase = Timebase::read();
         let pid = std::process::id().cast_signed();
         let mut coalitions = Coalitions::new(timebase, COALITION_LIMIT);
@@ -271,6 +275,8 @@ mod tests {
 
     #[test]
     fn reads_each_coalition_once_however_many_processes_it_holds() {
+        // Goal: a coalition added twice, as two of its processes would add it, is read once.
+        // Method: add this process's coalition twice, and read every coalition.
         let mut coalitions = Coalitions::new(Timebase::read(), COALITION_LIMIT);
         coalitions.add(own_coalition()).unwrap();
         coalitions.add(own_coalition()).unwrap();
@@ -303,7 +309,8 @@ mod tests {
 
         let added = coalitions.add(1);
 
-        assert!(added.is_ok());
+        assert!(added.is_ok(), "{added:?}");
+        assert_eq!(vec![1], coalitions.ids);
     }
 
     #[test]
@@ -317,7 +324,8 @@ mod tests {
 
         let added = coalitions.add(3);
 
-        assert!(added.is_ok());
+        assert!(added.is_ok(), "{added:?}");
+        assert_eq!(vec![1, 3], coalitions.ids);
     }
 
     #[test]
@@ -412,6 +420,8 @@ mod tests {
 
     #[test]
     fn finds_a_child_in_its_parents_coalition() {
+        // Goal: a child starts in its parent's coalition.
+        // Method: spawn a child that sleeps, and find its coalition.
         let mut child = std::process::Command::new("/bin/sleep")
             .arg("1")
             .spawn()
@@ -426,6 +436,8 @@ mod tests {
 
     #[test]
     fn finds_no_coalition_for_a_reaped_pid() {
+        // Goal: a pid whose process exited and was reaped has no coalition.
+        // Method: spawn a child, wait for it, and ask for its pid's coalition.
         let mut child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
         child.wait().unwrap();
 
