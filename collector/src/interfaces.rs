@@ -1,4 +1,4 @@
-use std::ffi::{c_char, c_int};
+use std::ffi::{c_char, c_int, c_uint};
 use std::io;
 use std::mem::offset_of;
 
@@ -36,19 +36,45 @@ impl std::fmt::Debug for Name {
     }
 }
 
-#[derive(Default)]
 pub struct Interfaces {
     buffer: Vec<u8>,
     pub read: Vec<Interface>,
 }
 
+impl Default for Interfaces {
+    fn default() -> Self {
+        Self::with_dump_size(DUMP_SIZE)
+    }
+}
+
+/// The most bytes of the routing dump of every interface the collector reads, sixteen times
+/// the 15,920 bytes the dump of 30 interfaces took on the Mac this was measured on.
+const DUMP_SIZE: usize = 256 * 1024;
+
 impl Interfaces {
+    fn with_dump_size(dump_size: usize) -> Self {
+        assert!(dump_size > 0);
+
+        Self {
+            buffer: vec![0; dump_size],
+            // Each interface read takes a whole header of the dump, so the dump holds no
+            // more of them than this, which floors.
+            read: Vec::with_capacity(dump_size / size_of::<IfMsghdr2>()),
+        }
+    }
+
     pub fn read_all(&mut self) -> io::Result<()> {
-        self.fill_buffer()?;
+        let filled = self.fill_buffer()?;
+        let Some(dump) = self.buffer.get(..filled) else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("sysctl wrote {filled} bytes into {}", self.buffer.len()),
+            ));
+        };
         self.read.clear();
 
         let mut offset = 0;
-        while let Some(header) = self.buffer.get(offset..offset + MESSAGE_PREFIX_SIZE) {
+        while let Some(header) = dump.get(offset..offset + MESSAGE_PREFIX_SIZE) {
             let length = usize::from(u16::from_ne_bytes([
                 header[MESSAGE_LENGTH_OFFSET],
                 header[MESSAGE_LENGTH_OFFSET + 1],
@@ -57,12 +83,15 @@ impl Interfaces {
             if length == 0 {
                 break;
             }
-            let Some(message) = self.buffer.get(offset..offset + length) else {
+            let Some(message) = dump.get(offset..offset + length) else {
                 break;
             };
 
             if kind == RTM_IFINFO2 {
-                self.read.extend(interface_from(message));
+                if let Some(interface) = interface_from(message) {
+                    assert!(self.read.len() < self.read.capacity());
+                    self.read.push(interface);
+                }
             }
             offset += length;
         }
@@ -70,45 +99,34 @@ impl Interfaces {
         Ok(())
     }
 
-    fn fill_buffer(&mut self) -> io::Result<()> {
-        let mut mib = [CTL_NET, PF_ROUTE, 0, 0, NET_RT_IFLIST2, 0];
-        loop {
-            let mut size = 0;
-            if unsafe {
-                sysctl(
-                    mib.as_mut_ptr(),
-                    6,
-                    std::ptr::null_mut(),
-                    &raw mut size,
-                    std::ptr::null_mut(),
-                    0,
-                )
-            } != 0
-            {
-                return Err(io::Error::last_os_error());
-            }
-
-            self.buffer.resize(size, 0);
-            if unsafe {
-                sysctl(
-                    mib.as_mut_ptr(),
-                    6,
-                    self.buffer.as_mut_ptr().cast(),
-                    &raw mut size,
-                    std::ptr::null_mut(),
-                    0,
-                )
-            } == 0
-            {
-                self.buffer.truncate(size);
-                return Ok(());
-            }
-
-            let error = io::Error::last_os_error();
-            if error.raw_os_error() != Some(ENOMEM) {
-                return Err(error);
-            }
+    /// Fills the buffer with the routing dump of every interface and returns the bytes the
+    /// kernel wrote. A dump past the buffer is an error, since the buffer does not grow.
+    fn fill_buffer(&mut self) -> io::Result<usize> {
+        let mut path = [CTL_NET, PF_ROUTE, 0, 0, NET_RT_IFLIST2, 0];
+        let path_count = c_uint::try_from(path.len()).map_err(io::Error::other)?;
+        let mut size = self.buffer.len();
+        let result = unsafe {
+            sysctl(
+                path.as_mut_ptr(),
+                path_count,
+                self.buffer.as_mut_ptr().cast(),
+                &raw mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if result == 0 {
+            return Ok(size);
         }
+
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(ENOMEM) {
+            return Err(io::Error::new(
+                io::ErrorKind::QuotaExceeded,
+                format!("the interface dump outgrew its {} bytes", self.buffer.len()),
+            ));
+        }
+        Err(error)
     }
 }
 
@@ -282,6 +300,16 @@ mod tests {
         }
         unsafe { if_freenameindex(first) };
         names
+    }
+
+    #[test]
+    fn refuses_a_dump_larger_than_its_buffer_without_growing_it() {
+        let mut interfaces = Interfaces::with_dump_size(MESSAGE_PREFIX_SIZE);
+
+        let read = interfaces.read_all();
+
+        assert_eq!(io::ErrorKind::QuotaExceeded, read.unwrap_err().kind());
+        assert_eq!(MESSAGE_PREFIX_SIZE, interfaces.buffer.capacity());
     }
 
     #[test]
