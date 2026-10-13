@@ -226,7 +226,7 @@ impl Tracker {
     }
 
     pub fn follow_until(&mut self, deadline: u64, meter: &mut Meter) -> io::Result<()> {
-        push_without_growing(&mut self.arming, timer_at(DEADLINE_TIMER, deadline));
+        push_without_growing(&mut self.arming, timer_at(DEADLINE_TIMER, deadline)?);
 
         loop {
             let woke = meter.measure(Source::Events, || self.wait_and_handle())?;
@@ -248,7 +248,7 @@ impl Tracker {
                     }
                 }
                 Step::ArmAt(at) => {
-                    push_without_growing(&mut self.arming, timer_at(RESCAN_TIMER, at));
+                    push_without_growing(&mut self.arming, timer_at(RESCAN_TIMER, at)?);
                 }
                 Step::Wait => {}
             }
@@ -525,14 +525,21 @@ fn watch(pid: i32) -> Kevent {
     )
 }
 
-fn timer_at(ident: usize, deadline: u64) -> Kevent {
-    Kevent::new(
+fn timer_at(ident: usize, deadline: u64) -> io::Result<Kevent> {
+    let Ok(data) = isize::try_from(deadline) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("a deadline of {deadline} ticks passes what a kevent timer holds"),
+        ));
+    };
+
+    Ok(Kevent::new(
         ident,
         EVFILT_TIMER,
         EV_ADD | EV_ONESHOT,
         NOTE_ABSOLUTE | NOTE_MACHTIME | NOTE_MACH_CONTINUOUS_TIME,
-        isize::try_from(deadline).unwrap_or(isize::MAX),
-    )
+        data,
+    ))
 }
 
 /// One change to a kqueue, or one event it reports, as `struct kevent` declares it.
@@ -834,6 +841,18 @@ mod tests {
         let observed = tracker.observe(&[-1], &mut Meter::default());
 
         assert_eq!(io::ErrorKind::InvalidData, observed.unwrap_err().kind());
+    }
+
+    #[test]
+    fn refuses_a_deadline_a_kevent_timer_cannot_take() {
+        // Goal: a deadline past what a kevent timer's isize holds is an error, rather than a
+        // timer armed at isize::MAX, which never fires.
+        // Method: follow until the latest deadline a u64 holds.
+        let mut tracker = tracker(INTERVAL);
+
+        let followed = tracker.follow_until(u64::MAX, &mut Meter::default());
+
+        assert_eq!(io::ErrorKind::InvalidInput, followed.unwrap_err().kind());
     }
 
     fn follow_for(tracker: &mut Tracker, meter: &mut Meter, millis: u64) {
