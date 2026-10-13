@@ -1,4 +1,5 @@
 use std::io;
+use std::mem::offset_of;
 
 use crate::clock::Timebase;
 
@@ -53,7 +54,20 @@ struct RusageInfoV6 {
 }
 
 const _: () = assert!(size_of::<RusageInfoV6>() == 464);
-const _: () = assert!(std::mem::offset_of!(RusageInfoV6, energy_nj) == 336);
+const _: () = assert!(offset_of!(RusageInfoV6, user_time) == 16);
+const _: () = assert!(offset_of!(RusageInfoV6, system_time) == 24);
+const _: () = assert!(offset_of!(RusageInfoV6, pkg_idle_wkups) == 32);
+const _: () = assert!(offset_of!(RusageInfoV6, interrupt_wkups) == 40);
+const _: () = assert!(offset_of!(RusageInfoV6, pageins) == 48);
+const _: () = assert!(offset_of!(RusageInfoV6, resident_size) == 64);
+const _: () = assert!(offset_of!(RusageInfoV6, phys_footprint) == 72);
+const _: () = assert!(offset_of!(RusageInfoV6, proc_start_abstime) == 80);
+const _: () = assert!(offset_of!(RusageInfoV6, diskio_bytesread) == 144);
+const _: () = assert!(offset_of!(RusageInfoV6, diskio_byteswritten) == 152);
+const _: () = assert!(offset_of!(RusageInfoV6, instructions) == 248);
+const _: () = assert!(offset_of!(RusageInfoV6, cycles) == 256);
+const _: () = assert!(offset_of!(RusageInfoV6, pinstructions) == 320);
+const _: () = assert!(offset_of!(RusageInfoV6, energy_nj) == 336);
 
 const RUSAGE_INFO_V6: libc::c_int = 6;
 

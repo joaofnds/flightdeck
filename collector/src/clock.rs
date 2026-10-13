@@ -1,8 +1,14 @@
+use std::mem::offset_of;
+
 #[repr(C)]
 struct MachTimebaseInfo {
     numer: u32,
     denom: u32,
 }
+
+const _: () = assert!(size_of::<MachTimebaseInfo>() == 8);
+const _: () = assert!(offset_of!(MachTimebaseInfo, numer) == 0);
+const _: () = assert!(offset_of!(MachTimebaseInfo, denom) == 4);
 
 unsafe extern "C" {
     fn mach_continuous_time() -> u64;
