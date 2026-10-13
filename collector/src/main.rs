@@ -70,10 +70,7 @@ fn options_from(args: &[String]) -> Result<Options, String> {
 }
 
 fn run(options: &Options) -> io::Result<()> {
-    let error = unsafe { pthread_set_qos_class_self_np(QOS_CLASS_DEFAULT, 0) };
-    if error != 0 {
-        return Err(io::Error::from_raw_os_error(error));
-    }
+    set_qos_class_default()?;
 
     let timebase = Timebase::read();
     let mut meter = Meter::default();
@@ -82,12 +79,7 @@ fn run(options: &Options) -> io::Result<()> {
     let live_at_first_scan = collector.tracker.last_listing().to_vec();
     let schedule = Schedule::new(clock::now(), timebase.ticks(1_000_000_000));
 
-    println!(
-        "started in {:.1} ms of CPU",
-        milliseconds(Duration::from_nanos(
-            Snapshot::take(&meter, timebase).cpu_ns
-        ))
-    );
+    report_start(&meter, timebase);
 
     collector.wait_until(schedule.deadline(0), &mut meter)?;
     collector.read(&mut meter)?;
@@ -142,6 +134,21 @@ fn run(options: &Options) -> io::Result<()> {
 
         tick = following;
     }
+}
+
+fn set_qos_class_default() -> io::Result<()> {
+    let error = unsafe { pthread_set_qos_class_self_np(QOS_CLASS_DEFAULT, 0) };
+    if error != 0 {
+        return Err(io::Error::from_raw_os_error(error));
+    }
+    Ok(())
+}
+
+fn report_start(meter: &Meter, timebase: Timebase) {
+    println!(
+        "started in {:.1} ms of CPU",
+        milliseconds(Duration::from_nanos(Snapshot::take(meter, timebase).cpu_ns))
+    );
 }
 
 struct Span {

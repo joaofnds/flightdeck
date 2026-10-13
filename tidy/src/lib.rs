@@ -10,6 +10,7 @@ use std::process::Command;
 use std::str;
 
 const COLUMNS_MAX: usize = 100;
+const FUNCTION_LINES_MAX: usize = 70;
 
 #[test]
 fn repository_is_tidy() {
@@ -82,6 +83,13 @@ fn file_findings(path: &str, bytes: &[u8]) -> Vec<String> {
                 for number in long_lines(text) {
                     findings.push(format!("{path}:{number}: over {COLUMNS_MAX} columns"));
                 }
+                if extension == Some("rs") {
+                    for number in long_functions(text) {
+                        findings.push(format!(
+                            "{path}:{number}: function over {FUNCTION_LINES_MAX} lines"
+                        ));
+                    }
+                }
             }
             Err(error) => findings.push(format!("{path}: not UTF-8, {error}")),
         }
@@ -124,4 +132,144 @@ fn long_lines_counts_columns_and_not_bytes() {
     let numbers = long_lines(&text);
 
     assert!(numbers.is_empty());
+}
+
+/// The number of the `fn` line, counted from 1, of each function that runs past
+/// `FUNCTION_LINES_MAX` lines, counted from its `fn` line to its closing brace.
+fn long_functions(text: &str) -> Vec<usize> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut numbers = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        if long_functions_opens(line) {
+            if long_functions_count(&lines, index) > FUNCTION_LINES_MAX {
+                numbers.push(index + 1);
+            }
+        }
+    }
+    numbers
+}
+
+/// Whether `line` opens a function, with nothing before `fn` but its visibility and its
+/// qualifiers.
+fn long_functions_opens(line: &str) -> bool {
+    for word in line.split_whitespace() {
+        match word {
+            "fn" => return true,
+            "pub" | "pub(crate)" | "pub(super)" | "pub(self)" | "const" | "async" | "unsafe"
+            | "safe" | "extern" => {}
+            abi if abi.starts_with('"') => {}
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// The lines of the function whose `fn` line is at `start`, up to its closing brace. Rustfmt
+/// ends a signature with `{` before a body, and closes the body with a brace alone on a line
+/// at the `fn` line's indentation. A declaration ends its signature with `;` and an empty
+/// body with `{}`, so neither has lines past its signature.
+fn long_functions_count(lines: &[&str], start: usize) -> usize {
+    assert!(start < lines.len());
+
+    let rest = &lines[start..];
+    let signature_count = long_functions_count_signature(rest);
+    if rest[signature_count - 1].ends_with('{') {
+        let line = rest[0];
+        let indentation = &line[..line.len() - line.trim_start().len()];
+        long_functions_count_body(rest, indentation)
+    } else {
+        signature_count
+    }
+}
+
+/// The lines up to and including the one that ends the signature at the start of `lines`,
+/// or all of them when none does.
+fn long_functions_count_signature(lines: &[&str]) -> usize {
+    assert!(!lines.is_empty());
+
+    for (index, line) in lines.iter().enumerate() {
+        if matches!(line.chars().last(), Some('{' | '}' | ';')) {
+            return index + 1;
+        }
+    }
+    lines.len()
+}
+
+/// The lines up to and including the first that holds only a closing brace at
+/// `indentation`, or all of them when none does, since the function then runs to the end.
+fn long_functions_count_body(lines: &[&str], indentation: &str) -> usize {
+    assert!(!lines.is_empty());
+
+    for (index, line) in lines.iter().enumerate() {
+        if line.strip_prefix(indentation) == Some("}") {
+            return index + 1;
+        }
+    }
+    lines.len()
+}
+
+#[test]
+fn long_functions_reports_a_function_past_the_limit() {
+    // Goal: a function of 71 lines is reported by its `fn` line, and one of 70 is not.
+    // Method: two functions one after the other, the second one line past the limit.
+    let text = function_text("", FUNCTION_LINES_MAX) + &function_text("", FUNCTION_LINES_MAX + 1);
+
+    let numbers = long_functions(&text);
+
+    assert_eq!(numbers, [FUNCTION_LINES_MAX + 1]);
+}
+
+#[test]
+fn long_functions_counts_a_signature_over_several_lines() {
+    // Goal: the count starts at the `fn` line, so a signature that rustfmt wraps counts too.
+    // Method: a function of 71 lines whose signature and where clause take its first six.
+    let text = "fn step(\n    count: u64,\n) -> u64\nwhere\n    u64: Copy,\n{\n".to_owned()
+        + &"    step_once();\n".repeat(FUNCTION_LINES_MAX - 6)
+        + "}\n";
+
+    let numbers = long_functions(&text);
+
+    assert_eq!(numbers, [1]);
+}
+
+#[test]
+fn long_functions_skips_a_declaration_and_an_empty_body() {
+    // Goal: a declaration with no body and an empty body on its `fn` line end there, and do
+    // not run on into the function after them.
+    // Method: a declaration and an empty function, each followed by a function at the limit.
+    let text = "trait Clock {\n    fn now(&self) -> u64;\n".to_owned()
+        + &function_text("    ", FUNCTION_LINES_MAX)
+        + "}\n\nfn idle() {}\n"
+        + &function_text("", FUNCTION_LINES_MAX);
+
+    let numbers = long_functions(&text);
+
+    assert!(numbers.is_empty());
+}
+
+#[test]
+fn long_functions_ends_an_indented_function_at_its_own_closing_brace() {
+    // Goal: a function inside a module ends at the brace at its own indentation, and not at
+    // the module's.
+    // Method: two indented functions in a module, at the limit and one line past it.
+    let text = "mod tests {\n".to_owned()
+        + &function_text("    ", FUNCTION_LINES_MAX)
+        + &function_text("    ", FUNCTION_LINES_MAX + 1)
+        + "}\n";
+
+    let numbers = long_functions(&text);
+
+    assert_eq!(numbers, [FUNCTION_LINES_MAX + 2]);
+}
+
+/// A function of `line_count` lines at `indentation`, counted from its `fn` line to its
+/// closing brace, whose body opens with a block that closes at a deeper indentation.
+fn function_text(indentation: &str, line_count: usize) -> String {
+    assert!(line_count >= 5);
+
+    let block = format!(
+        "{indentation}    if ready {{\n{indentation}        step_once();\n{indentation}    }}\n"
+    );
+    let steps = format!("{indentation}    step_once();\n").repeat(line_count - 5);
+    format!("{indentation}fn step() {{\n{block}{steps}{indentation}}}\n")
 }
