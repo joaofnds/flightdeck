@@ -96,10 +96,10 @@ enum Step {
 }
 
 impl Throttle {
-    fn new(interval: u64, last_rescan: u64) -> Self {
+    fn new(interval: u64) -> Self {
         Self {
             interval,
-            last_rescan,
+            last_rescan: 0,
             pending: false,
             armed: false,
         }
@@ -154,7 +154,6 @@ impl Tracker {
             scans: 0,
             throttle: Throttle::new(
                 timebase.ticks(u64::try_from(rescan_interval.as_nanos()).unwrap_or(u64::MAX)),
-                clock::now(),
             ),
             arming: Vec::new(),
             changes: Vec::new(),
@@ -183,11 +182,9 @@ impl Tracker {
                 self.throttle.forked();
             }
 
-            let now = clock::now();
-            match self.throttle.step(now) {
+            match self.throttle.step(clock::now()) {
                 Step::RescanNow => {
                     self.rescan(meter)?;
-                    self.throttle.rescanned(now);
                     if woke.fired {
                         self.counts.trailing_rescans += 1;
                     } else {
@@ -228,6 +225,7 @@ impl Tracker {
         });
         self.listing = listing;
         scanned?;
+        self.throttle.rescanned(clock::now());
 
         self.read_starts(meter);
         self.submit_watches(meter)
@@ -673,12 +671,12 @@ mod tests {
 
     #[test]
     fn rescans_an_interval_after_forks_that_came_too_soon() {
-        let mut tracker = Tracker::new(Timebase::read(), INTERVAL).unwrap();
+        let mut tracker = Tracker::new(Timebase::read(), Duration::from_millis(300)).unwrap();
 
         let mut first = spawn_sleeper();
         std::thread::sleep(Duration::from_millis(1));
         let mut second = spawn_sleeper();
-        follow_for(&mut tracker, &mut Meter::default(), 200);
+        follow_for(&mut tracker, &mut Meter::default(), 600);
         first.wait().unwrap();
         second.wait().unwrap();
 
@@ -750,7 +748,9 @@ mod tests {
         const LAST_RESCAN: u64 = 1_000;
 
         fn throttle() -> Throttle {
-            Throttle::new(INTERVAL, LAST_RESCAN)
+            let mut throttle = Throttle::new(INTERVAL);
+            throttle.rescanned(LAST_RESCAN);
+            throttle
         }
 
         #[test]
