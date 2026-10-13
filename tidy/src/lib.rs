@@ -7,7 +7,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::str;
 
 const COLUMNS_MAX: usize = 100;
@@ -84,6 +84,9 @@ fn repository_paths(root: &Path) -> Vec<String> {
     let output = Command::new("git")
         .args(["ls-files", "-z", "--cached"])
         .current_dir(root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .output();
     let output = match output {
         Ok(output) => output,
