@@ -77,7 +77,7 @@ fn run(options: &Options) -> io::Result<()> {
 
     let timebase = Timebase::read();
     let mut meter = Meter::default();
-    let first_mark = throwaway_child()?;
+    let first_marker_pid = throwaway_child();
     let mut collector = Collector::new(timebase, options.rescan_interval)?;
     let live_at_first_scan = collector.tracker.last_listing().to_vec();
     let schedule = Schedule::new(clock::now(), timebase.ticks(1_000_000_000));
@@ -125,13 +125,18 @@ fn run(options: &Options) -> io::Result<()> {
             .seconds
             .is_some_and(|seconds| following > seconds.get())
         {
-            let last_mark = throwaway_child()?;
+            let last_marker_pid = throwaway_child();
             let end = Mark::take(&meter, timebase, &collector);
             whole.report("whole run, ticks", tick, &end);
-            report_missed(
-                processes_started(first_mark, last_mark, &live_at_first_scan, end.counts.forks),
-                warm_up_starts + whole.tally.starts,
-            );
+            match (&first_marker_pid, &last_marker_pid) {
+                (Ok(first), Ok(last)) => report_missed(
+                    processes_started(*first, *last, &live_at_first_scan, end.counts.forks),
+                    warm_up_starts + whole.tally.starts,
+                ),
+                (Err(error), _) | (_, Err(error)) => {
+                    println!("  processes missed are not counted, a marker child failed: {error}");
+                }
+            }
             return Ok(());
         }
 
@@ -182,19 +187,19 @@ fn starts_in(events: &[Event]) -> u64 {
 }
 
 fn processes_started(
-    first_mark: i32,
-    last_mark: i32,
+    first_marker_pid: i32,
+    last_marker_pid: i32,
     live_at_first_scan: &[i32],
     forks_counted: u64,
 ) -> Option<u64> {
-    if last_mark <= first_mark || forks_counted >= PID_LAP {
+    if last_marker_pid <= first_marker_pid || forks_counted >= PID_LAP {
         return None;
     }
 
-    let between = u64::from((last_mark - first_mark - 1).cast_unsigned());
+    let between = u64::from((last_marker_pid - first_marker_pid - 1).cast_unsigned());
     let live_between = live_at_first_scan
         .iter()
-        .filter(|&&pid| first_mark < pid && pid < last_mark)
+        .filter(|&&pid| first_marker_pid < pid && pid < last_marker_pid)
         .count() as u64;
     Some(between - live_between)
 }
