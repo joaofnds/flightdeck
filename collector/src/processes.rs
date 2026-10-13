@@ -366,7 +366,7 @@ pub fn read_usage(timebase: Timebase, pid: i32) -> io::Result<Result<Usage, Unre
     assert!(pid >= 0);
     assert!(pid <= PID_MAX);
 
-    let mut usage = std::mem::MaybeUninit::<RusageInfoV6>::uninit();
+    let mut usage = std::mem::MaybeUninit::<RusageInfoV6>::zeroed();
     let returned = unsafe { proc_pid_rusage(pid, RUSAGE_INFO_V6, usage.as_mut_ptr().cast()) };
     if let Err(unreadable) = read_usage_returned(returned, io::Error::last_os_error())? {
         return Ok(Err(unreadable));
