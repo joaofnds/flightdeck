@@ -4,7 +4,14 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+# Its own workspace, so a root manifest broken in the working tree does not stop the hook's
+# own build.
 [workspace]
+
+# Tiger Style keeps assertions on in production and aborts on a panic. The hook runs this
+# profile, and Cargo ignores the setting for the tests, which need to unwind.
+[profile.dev]
+panic = "abort"
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

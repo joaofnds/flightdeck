@@ -3,7 +3,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{self, Child, Command, ExitCode, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -16,19 +16,16 @@ fn main() -> ExitCode {
         eprintln!("check: cannot catch interrupts: {error}");
         return ExitCode::FAILURE;
     }
-    let export = env::temp_dir().join(format!("flightdeck-staged-{}", process::id()));
-    // Cargo resolves a relative target directory from the export, git from the repository.
-    if export.is_relative() {
-        eprintln!(
-            "check: the temporary directory {} is relative",
-            export.display()
-        );
-        return ExitCode::FAILURE;
-    }
-    if let Err(error) = fs::create_dir(&export) {
-        eprintln!("check: cannot create {}: {error}", export.display());
-        return ExitCode::FAILURE;
-    }
+    let export = match create_export(&env::temp_dir(), process::id()) {
+        Ok(export) => export,
+        Err(error) => {
+            eprintln!(
+                "check: cannot create the export in {}: {error}",
+                env::temp_dir().display()
+            );
+            return ExitCode::FAILURE;
+        }
+    };
 
     let mut outcome = check(&export);
     let removal = fs::remove_dir_all(&export);
@@ -37,23 +34,49 @@ fn main() -> ExitCode {
         outcome = Err(Refusal::Interrupted);
     }
 
+    // Both are reported, since a step that could not be stopped may be what keeps the
+    // export from being removed.
+    if let Err(refusal) = &outcome {
+        eprintln!("check: refused, since {refusal}");
+    }
     if let Err(error) = removal {
         eprintln!("check: cannot remove {}: {error}", export.display());
         return ExitCode::FAILURE;
     }
-    assert!(!export.exists());
-    match outcome {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(refusal) => {
-            eprintln!("check: refused, since {refusal}");
-            ExitCode::FAILURE
-        }
+    if outcome.is_ok() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
     }
+}
+
+// Creates an empty directory for the export, named for this process. Only an earlier hook
+// that had this pid and was killed can have left a directory of that name, since no live
+// process shares the pid, so it is removed first.
+fn create_export(temp: &Path, pid: u32) -> io::Result<PathBuf> {
+    // Cargo resolves a relative target directory from the export, git from the repository.
+    if temp.is_relative() {
+        return Err(io::Error::other(format!(
+            "the temporary directory {} is relative",
+            temp.display()
+        )));
+    }
+
+    let export = temp.join(format!("flightdeck-staged-{pid}"));
+    if let Err(error) = fs::create_dir(&export) {
+        if error.kind() != io::ErrorKind::AlreadyExists {
+            return Err(error);
+        }
+        fs::remove_dir_all(&export)?;
+        fs::create_dir(&export)?;
+    }
+    assert!(export.is_absolute());
+    assert!(export.starts_with(temp));
+    Ok(export)
 }
 
 fn check(export: &Path) -> Result<(), Refusal> {
     assert!(export.is_absolute());
-    assert!(export.is_dir());
 
     eprintln!("check: exporting the staged tree to {}", export.display());
     run(
@@ -138,12 +161,15 @@ const STEPS: [Step; 6] = [
 
 // Exports the index, the tree the commit would hold, into an empty directory.
 fn check_export_command(repository: &Path, export: &Path) -> Command {
-    assert!(repository.is_dir());
     assert!(export.is_absolute());
 
+    // git checkout-index puts the prefix before each path as it is, so without the closing
+    // slash it would write files beside the export rather than into it.
     let mut prefix = OsString::from("--prefix=");
     prefix.push(export);
     prefix.push("/");
+    assert!(prefix.as_encoded_bytes().starts_with(b"--prefix=/"));
+    assert!(prefix.as_encoded_bytes().ends_with(b"/"));
     let mut command = Command::new("git");
     command
         .args(["checkout-index", "--all"])
@@ -193,7 +219,13 @@ fn run(command: &mut Command, limit_ms: u32, interrupted: &AtomicBool) -> Result
 
     // The standard library has no wait with a time limit, so the loop polls.
     for _ in 0..limit_ms / POLL_MS {
-        let exited = child.try_wait().map_err(Refusal::Unwaitable)?;
+        let exited = match child.try_wait() {
+            Ok(exited) => exited,
+            Err(error) => {
+                run_stop(&mut child)?;
+                return Err(Refusal::Unwaitable(error));
+            }
+        };
         if let Some(status) = exited {
             return if status.success() {
                 Ok(())
@@ -453,6 +485,22 @@ mod tests {
         assert!(outcome.is_ok(), "{outcome:?}");
     }
 
+    // Goal: a hook killed before it removed its export does not refuse the commits of a
+    // later hook that gets the same pid.
+    // Method: leave a directory holding a file where the export goes, then create it.
+    #[test]
+    fn creates_an_empty_export_over_one_a_killed_hook_left() {
+        let scratch = Scratch::new("creates_an_empty_export");
+        let leftover = scratch.path.join("flightdeck-staged-7");
+        fs::create_dir(&leftover).unwrap();
+        fs::write(leftover.join("file"), "left\n").unwrap();
+
+        let export = create_export(&scratch.path, 7).unwrap();
+
+        assert_eq!(export, leftover);
+        assert_eq!(fs::read_dir(&export).unwrap().count(), 0);
+    }
+
     // Goal: the check reads what the commit would hold, never the working tree.
     // Method: in a scratch repository, stage one version of a file, change it again
     // without staging, export, and read the exported copy.
@@ -541,7 +589,7 @@ mod tests {
 
     // A directory of its own for one test, removed when the test ends, pass or fail.
     struct Scratch {
-        path: std::path::PathBuf,
+        path: PathBuf,
     }
 
     impl Scratch {
