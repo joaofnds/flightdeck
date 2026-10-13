@@ -348,15 +348,15 @@ impl Tracker {
             } else if event.filter == EVFILT_TIMER {
                 woke.rescan_timer_fired = true;
             } else {
-                woke.forked |= self.handle(event);
+                woke.forked |= self.handle(event)?;
             }
         }
 
         Ok(woke)
     }
 
-    fn handle(&mut self, event: Kevent) -> bool {
-        let pid = i32::try_from(event.ident).unwrap_or(-1);
+    fn handle(&mut self, event: Kevent) -> io::Result<bool> {
+        let pid = pid_of(event.ident)?;
         if event.fflags & NOTE_EXEC != 0 {
             record(&mut self.events, &mut self.counts, Event::Exec { pid });
         }
@@ -369,7 +369,7 @@ impl Tracker {
             self.counts.forks += 1;
         }
 
-        forked
+        Ok(forked)
     }
 
     fn read_starts(&mut self, meter: &mut Meter) {
@@ -446,7 +446,7 @@ impl Tracker {
 
         for index in 0..receipts {
             let receipt = self.received[index];
-            let pid = i32::try_from(receipt.ident).unwrap_or(-1);
+            let pid = pid_of(receipt.ident)?;
             match i32::try_from(receipt.data).unwrap_or(EINVAL) {
                 0 => {}
                 EPERM => self.counts.refused_watches += 1,
@@ -513,6 +513,18 @@ fn compare_index(pid: i32, known_count: usize) -> io::Result<usize> {
             ),
         )),
     }
+}
+
+/// The pid a process event or a watch's receipt names in its ident.
+fn pid_of(ident: usize) -> io::Result<i32> {
+    let Ok(pid) = i32::try_from(ident) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("a kevent ident of {ident} names no pid"),
+        ));
+    };
+
+    Ok(pid)
 }
 
 fn watch(pid: i32) -> Kevent {
@@ -841,6 +853,18 @@ mod tests {
         let observed = tracker.observe(&[-1], &mut Meter::default());
 
         assert_eq!(io::ErrorKind::InvalidData, observed.unwrap_err().kind());
+    }
+
+    #[test]
+    fn refuses_a_kevent_ident_that_names_no_pid() {
+        // Goal: an ident past what a pid's i32 holds is an error, rather than pid -1.
+        // Method: read the pid of the first ident past i32::MAX. The kernel reports only the
+        // pids the tracker registered, so no real event carries one.
+        let ident = usize::try_from(i32::MAX).unwrap() + 1;
+
+        let read = pid_of(ident);
+
+        assert_eq!(io::ErrorKind::InvalidData, read.unwrap_err().kind());
     }
 
     #[test]
