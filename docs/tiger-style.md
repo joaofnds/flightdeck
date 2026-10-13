@@ -13,11 +13,7 @@ has fixed yet.
 
 ## What the check holds
 
-GitHub Actions runs rustfmt, clippy and the tests on every push to `main` and every pull
-request, as `.github/workflows/check.yml` lists them, and fails the run on an error or a
-warning from any of them. Put a new check in that workflow or in a test it runs, and add no
-git hook, since what runs on a contributor's machine is theirs to choose. A reviewer reads
-each change against every rule below, since a tool holds only some of them.
+A reviewer reads each change against every rule below, since a tool holds only some of them.
 
 Rust holds Tiger's snake_case for functions, variables and modules and its braces on every
 `if`, and rustfmt holds its layout and four-space indentation. Name every file in
