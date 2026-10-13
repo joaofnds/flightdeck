@@ -56,7 +56,7 @@ struct Known {
     exited: bool,
 }
 
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Wake {
     due: bool,
     rescan_timer_fired: bool,
@@ -132,12 +132,13 @@ impl Throttle {
         }
     }
 
-    fn forked(&mut self) {
-        self.pending = true;
-    }
-
-    fn fired(&mut self) {
-        self.armed = false;
+    fn woke(&mut self, wake: Wake) {
+        if wake.rescan_timer_fired {
+            self.armed = false;
+        }
+        if wake.forked {
+            self.pending = true;
+        }
     }
 
     fn rescanned(&mut self, now: u64) {
@@ -255,15 +256,19 @@ impl Tracker {
         push_without_growing(&mut self.arming, timer_at(DEADLINE_TIMER, deadline)?);
 
         loop {
-            let woke = meter.measure(Source::Events, || self.wait_and_handle())?;
+            let woke = meter.measure(Source::Events, || {
+                let count = self.follow_until_wait()?;
+                follow_until_handle(
+                    &self.received[..count],
+                    &mut self.events,
+                    &mut self.counts,
+                    &mut self.exiting,
+                )
+            })?;
+            assert!(self.arming.is_empty());
 
             self.read_exits(meter)?;
-            if woke.rescan_timer_fired {
-                self.throttle.fired();
-            }
-            if woke.forked {
-                self.throttle.forked();
-            }
+            self.throttle.woke(woke);
 
             match self.throttle.step(clock::now()) {
                 Step::Rescan(cause) => {
@@ -388,52 +393,6 @@ impl Tracker {
         }
     }
 
-    fn wait_and_handle(&mut self) -> io::Result<Wake> {
-        let count = self.wait()?;
-        assert!(count <= RECEIVED_PER_WAIT);
-        assert!(self.arming.is_empty());
-
-        let mut woke = Wake::default();
-        for index in 0..count {
-            let event = self.received[index];
-            if event.flags & EV_ERROR != 0 {
-                return Err(io::Error::from_raw_os_error(errno_of(event.data)?));
-            }
-
-            if event.filter == EVFILT_TIMER {
-                if event.ident == DEADLINE_TIMER {
-                    woke.due = true;
-                } else {
-                    woke.rescan_timer_fired = true;
-                }
-            } else {
-                woke.forked |= self.handle(event)?;
-            }
-        }
-
-        Ok(woke)
-    }
-
-    fn handle(&mut self, event: Kevent) -> io::Result<bool> {
-        assert_ne!(EVFILT_TIMER, event.filter);
-        assert_eq!(0, event.flags & EV_ERROR);
-
-        let pid = pid_of(event.ident)?;
-        if event.fflags & NOTE_EXEC != 0 {
-            record(&mut self.events, &mut self.counts, Event::Exec { pid });
-        }
-        if event.fflags & NOTE_EXIT != 0 {
-            push_without_growing(&mut self.exiting, (pid, Noticed::OnExit));
-        }
-
-        let forked = event.fflags & NOTE_FORK != 0;
-        if forked {
-            self.counts.forks += 1;
-        }
-
-        Ok(forked)
-    }
-
     fn read_starts(&mut self, meter: &mut Meter) {
         if self.starting.is_empty() {
             return;
@@ -532,7 +491,7 @@ impl Tracker {
         Ok(())
     }
 
-    fn wait(&mut self) -> io::Result<usize> {
+    fn follow_until_wait(&mut self) -> io::Result<usize> {
         assert!(self.arming.len() <= TIMER_COUNT);
         assert!(RECEIVED_PER_WAIT <= self.received.len());
         let arming_count = c_int::try_from(self.arming.len()).map_err(io::Error::other)?;
@@ -567,6 +526,49 @@ impl Tracker {
             }
         }
     }
+}
+
+/// Handles the events one wait `received`: records each exec among the tick's `events`,
+/// queues each exit among the `exiting` to read, counts each fork, and returns what the wait
+/// woke for. An event that reports an error is that error.
+fn follow_until_handle(
+    received: &[Kevent],
+    events: &mut Vec<Event>,
+    counts: &mut Counts,
+    exiting: &mut Vec<(i32, Noticed)>,
+) -> io::Result<Wake> {
+    assert!(received.len() <= RECEIVED_PER_WAIT);
+    assert!(exiting.is_empty());
+
+    let mut wake = Wake::default();
+    for event in received {
+        if event.flags & EV_ERROR != 0 {
+            return Err(io::Error::from_raw_os_error(errno_of(event.data)?));
+        }
+
+        if event.filter == EVFILT_TIMER {
+            if event.ident == DEADLINE_TIMER {
+                wake.due = true;
+            } else {
+                wake.rescan_timer_fired = true;
+            }
+        } else {
+            let pid = pid_of(event.ident)?;
+            if event.fflags & NOTE_EXEC != 0 {
+                record(events, counts, Event::Exec { pid });
+            }
+            if event.fflags & NOTE_EXIT != 0 {
+                push_without_growing(exiting, (pid, Noticed::OnExit));
+            }
+            if event.fflags & NOTE_FORK != 0 {
+                counts.forks += 1;
+                wake.forked = true;
+            }
+        }
+    }
+
+    assert!(exiting.len() <= received.len());
+    Ok(wake)
 }
 
 /// Keeps `event` among the tick's `events` while they have room for it, and otherwise
@@ -979,29 +981,136 @@ mod tests {
         assert_eq!(io::ErrorKind::InvalidData, observed.unwrap_err().kind());
     }
 
-    #[test]
-    fn refuses_a_kevent_ident_that_names_no_pid() {
-        // Goal: an ident past what a pid's i32 holds is an error, rather than pid -1.
-        // Method: read the pid of the first ident past i32::MAX. The kernel reports only the
-        // pids the tracker registered, so no real event carries one.
-        let ident = usize::try_from(i32::MAX).unwrap() + 1;
+    /// What handling one wait's events left behind.
+    struct Handled {
+        wake: io::Result<Wake>,
+        events: Vec<Event>,
+        counts: Counts,
+        exiting: Vec<(i32, Noticed)>,
+    }
 
-        let read = pid_of(ident);
+    /// Handles `received` as one wait's events, into lists with room for all of them.
+    fn handle(received: &[Kevent]) -> Handled {
+        let mut events = Vec::with_capacity(RECEIVED_PER_WAIT);
+        let mut counts = Counts::default();
+        let mut exiting = Vec::with_capacity(RECEIVED_PER_WAIT);
 
-        assert_eq!(io::ErrorKind::InvalidData, read.unwrap_err().kind());
+        let wake = follow_until_handle(received, &mut events, &mut counts, &mut exiting);
+
+        Handled {
+            wake,
+            events,
+            counts,
+            exiting,
+        }
+    }
+
+    fn process_event(ident: usize, filter_flags: u32) -> Kevent {
+        Kevent::new(ident, EVFILT_PROC, 0, filter_flags, 0)
+    }
+
+    fn timer_event(ident: usize) -> Kevent {
+        Kevent::new(ident, EVFILT_TIMER, 0, 0, 1)
     }
 
     #[test]
-    fn refuses_a_kevent_error_code_no_errno_holds() {
-        // Goal: an error code past what an errno's i32 holds is an error naming it, rather
-        // than EINVAL.
-        // Method: read the errno of the first error code past i32::MAX. The kernel reports
-        // errnos, so no real event carries one.
+    fn records_an_exec_under_its_pid() {
+        // Goal: an exec a wait receives is recorded among the tick's events under its pid.
+        // Method: handle one exec event.
+        let handled = handle(&[process_event(7, NOTE_EXEC)]);
+
+        assert!(
+            matches!(handled.events[..], [Event::Exec { pid: 7 }]),
+            "{:?}",
+            handled.events
+        );
+    }
+
+    #[test]
+    fn queues_an_exit_to_read_as_noticed_on_exit() {
+        // Goal: an exit a wait receives is queued to read, noticed as it exited.
+        // Method: handle one exit event.
+        let handled = handle(&[process_event(7, NOTE_EXIT)]);
+
+        assert_eq!(vec![(7, Noticed::OnExit)], handled.exiting);
+    }
+
+    #[test]
+    fn counts_each_fork_and_wakes_for_them() {
+        // Goal: each fork a wait receives is counted, and the wake carries them to the throttle.
+        // Method: handle two fork events.
+        let fork = process_event(7, NOTE_FORK);
+
+        let handled = handle(&[fork, fork]);
+
+        let forked = Wake {
+            forked: true,
+            ..Wake::default()
+        };
+        assert_eq!(forked, handled.wake.unwrap());
+        assert_eq!(2, handled.counts.forks);
+    }
+
+    #[test]
+    fn wakes_due_when_the_deadline_timer_fires() {
+        // Goal: the deadline timer firing makes the wake due, and nothing else.
+        // Method: handle the deadline timer's event.
+        let handled = handle(&[timer_event(DEADLINE_TIMER)]);
+
+        let due = Wake {
+            due: true,
+            ..Wake::default()
+        };
+        assert_eq!(due, handled.wake.unwrap());
+    }
+
+    #[test]
+    fn wakes_for_the_rescan_timer_when_it_fires() {
+        // Goal: the rescan timer firing is carried to the throttle, and nothing else.
+        // Method: handle the rescan timer's event.
+        let handled = handle(&[timer_event(RESCAN_TIMER)]);
+
+        let fired = Wake {
+            rescan_timer_fired: true,
+            ..Wake::default()
+        };
+        assert_eq!(fired, handled.wake.unwrap());
+    }
+
+    #[test]
+    fn reports_the_error_a_received_event_carries() {
+        // Goal: an event a wait receives flagged as an error is that error.
+        // Method: handle an error event that carries ESRCH.
+        let failed = Kevent::new(7, EVFILT_PROC, EV_ERROR, 0, isize::try_from(ESRCH).unwrap());
+
+        let handled = handle(&[failed]);
+
+        assert_eq!(Some(ESRCH), handled.wake.unwrap_err().raw_os_error());
+    }
+
+    #[test]
+    fn refuses_a_received_error_code_no_errno_holds() {
+        // Goal: an error code past what an errno's i32 holds is an error of invalid data,
+        // rather than EINVAL.
+        // Method: handle an error event whose code is the first past i32::MAX.
         let data = isize::try_from(i32::MAX).unwrap() + 1;
+        let failed = Kevent::new(7, EVFILT_PROC, EV_ERROR, 0, data);
 
-        let read = errno_of(data);
+        let handled = handle(&[failed]);
 
-        assert_eq!(io::ErrorKind::InvalidData, read.unwrap_err().kind());
+        assert_eq!(io::ErrorKind::InvalidData, handled.wake.unwrap_err().kind());
+    }
+
+    #[test]
+    fn refuses_a_received_process_event_whose_ident_names_no_pid() {
+        // Goal: a process event whose ident is past what a pid's i32 holds is an error, rather
+        // than pid -1.
+        // Method: handle an exec event whose ident is the first past i32::MAX.
+        let ident = usize::try_from(i32::MAX).unwrap() + 1;
+
+        let handled = handle(&[process_event(ident, NOTE_EXEC)]);
+
+        assert_eq!(io::ErrorKind::InvalidData, handled.wake.unwrap_err().kind());
     }
 
     #[test]
@@ -1367,10 +1476,20 @@ mod tests {
     }
 
     mod throttle {
-        use super::super::{Cause, Step, Throttle};
+        use super::super::{Cause, Step, Throttle, Wake};
 
         const INTERVAL: u64 = 50;
         const LAST_RESCAN: u64 = 1_000;
+        const FORK: Wake = Wake {
+            due: false,
+            rescan_timer_fired: false,
+            forked: true,
+        };
+        const TIMER: Wake = Wake {
+            due: false,
+            rescan_timer_fired: true,
+            forked: false,
+        };
 
         fn throttle() -> Throttle {
             let mut throttle = Throttle::new(INTERVAL);
@@ -1384,7 +1503,7 @@ mod tests {
             // Method: step an interval after the last rescan with a fork pending.
             let mut throttle = throttle();
 
-            throttle.forked();
+            throttle.woke(FORK);
 
             assert_eq!(
                 Step::Rescan(Cause::Leading),
@@ -1399,7 +1518,7 @@ mod tests {
             // Method: step just after the last rescan with a fork pending.
             let mut throttle = throttle();
 
-            throttle.forked();
+            throttle.woke(FORK);
 
             assert_eq!(
                 Step::ArmAt(LAST_RESCAN + INTERVAL),
@@ -1412,10 +1531,10 @@ mod tests {
             // Goal: a second early fork waits on the timer the first armed and arms no other.
             // Method: step after one early fork, which arms the timer, and again after a second.
             let mut throttle = throttle();
-            throttle.forked();
+            throttle.woke(FORK);
             throttle.step(LAST_RESCAN + 1);
 
-            throttle.forked();
+            throttle.woke(FORK);
 
             assert_eq!(Step::Wait, throttle.step(LAST_RESCAN + 2));
         }
@@ -1426,10 +1545,10 @@ mod tests {
             // Method: arm the timer on an early fork, fire it, and step an interval after the last
             // rescan.
             let mut throttle = throttle();
-            throttle.forked();
+            throttle.woke(FORK);
             throttle.step(LAST_RESCAN + 1);
 
-            throttle.fired();
+            throttle.woke(TIMER);
 
             assert_eq!(
                 Step::Rescan(Cause::Trailing),
@@ -1443,11 +1562,11 @@ mod tests {
             // Method: arm the timer on an early fork, rescan, fire the timer, and step at its
             // deadline.
             let mut throttle = throttle();
-            throttle.forked();
+            throttle.woke(FORK);
             throttle.step(LAST_RESCAN + 1);
             throttle.rescanned(LAST_RESCAN + 2);
 
-            throttle.fired();
+            throttle.woke(TIMER);
 
             assert_eq!(Step::Wait, throttle.step(LAST_RESCAN + INTERVAL));
         }
@@ -1459,12 +1578,12 @@ mod tests {
             // Method: arm the timer on an early fork, rescan just after, fork, fire the timer, and
             // step at the deadline it was armed for.
             let mut throttle = throttle();
-            throttle.forked();
+            throttle.woke(FORK);
             throttle.step(LAST_RESCAN + 1);
             throttle.rescanned(LAST_RESCAN + 2);
-            throttle.forked();
+            throttle.woke(FORK);
 
-            throttle.fired();
+            throttle.woke(TIMER);
 
             assert_eq!(
                 Step::ArmAt(LAST_RESCAN + 2 + INTERVAL),
@@ -1478,7 +1597,7 @@ mod tests {
             // trailing.
             // Method: arm the timer on an early fork, and step at its deadline without firing it.
             let mut throttle = throttle();
-            throttle.forked();
+            throttle.woke(FORK);
             throttle.step(LAST_RESCAN + 1);
 
             assert_eq!(
@@ -1495,7 +1614,7 @@ mod tests {
             let mut throttle = Throttle::new(u64::MAX);
             throttle.rescanned(LAST_RESCAN);
 
-            throttle.forked();
+            throttle.woke(FORK);
 
             assert_eq!(Step::ArmAt(u64::MAX), throttle.step(LAST_RESCAN + 1));
         }
@@ -1509,7 +1628,7 @@ mod tests {
             let mut throttle = Throttle::new(0);
             throttle.rescanned(LAST_RESCAN);
 
-            throttle.forked();
+            throttle.woke(FORK);
 
             assert_eq!(Step::Rescan(Cause::Leading), throttle.step(LAST_RESCAN));
         }
