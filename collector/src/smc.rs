@@ -43,6 +43,11 @@ const SOC_TEMPERATURE_PREFIXES: [[u8; 2]; 8] = [
     *b"TC", *b"Tp", *b"Tf", *b"Ts", *b"Te", *b"TR", *b"Tg", *b"TP",
 ];
 
+/// The most fans the SMC's keys can name, since a fan's speed key names it with one digit.
+const FANS_MAX: u8 = 10;
+/// The most keys open lists, past four times the 3,626 the SMC of an M5 Pro lists.
+const KEYS_MAX: u32 = 16_384;
+
 const FLOAT: KeyInfo = KeyInfo::of(*b"flt ", 4);
 const UNSIGNED_8: KeyInfo = KeyInfo::of(*b"ui8 ", 1);
 const UNSIGNED_32: KeyInfo = KeyInfo::of(*b"ui32", 4);
@@ -55,7 +60,10 @@ impl Key {
         Key(u32::from_be_bytes(name))
     }
 
+    /// The key of the speed of `fan`, counted from 0.
     fn fan_speed(fan: u8) -> Self {
+        assert!(fan < FANS_MAX);
+
         Key::named([b'F', b'0' + fan, b'A', b'c'])
     }
 
@@ -131,7 +139,8 @@ impl Smc {
     pub fn open() -> io::Result<Self> {
         let connection = Connection::open()?;
         let power = connection.float_key(SYSTEM_POWER)?;
-        let fans = (0..connection.read(FAN_COUNT, UNSIGNED_8)?[0])
+        let fan_count = fan_count_check(connection.read(FAN_COUNT, UNSIGNED_8)?[0])?;
+        let fans = (0..fan_count)
             .map(|fan| connection.float_key(Key::fan_speed(fan)))
             .collect::<io::Result<Vec<FloatKey>>>()?;
         let soc_sensor = connection.hottest_soc_sensor()?;
@@ -219,7 +228,7 @@ impl Connection {
 
     fn key_count(&self) -> io::Result<u32> {
         let [a, b, c, d, ..] = self.read(KEY_COUNT, UNSIGNED_32)?;
-        Ok(u32::from_be_bytes([a, b, c, d]))
+        key_count_check(u32::from_be_bytes([a, b, c, d]))
     }
 
     fn key_at(&self, index: u32) -> io::Result<Option<Key>> {
@@ -343,6 +352,30 @@ fn info_check(key: Key, held: KeyInfo, wanted: KeyInfo) -> io::Result<()> {
     Ok(())
 }
 
+/// Checks that the SMC counts no more fans than its keys can name.
+fn fan_count_check(fan_count: u8) -> io::Result<u8> {
+    if fan_count > FANS_MAX {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("the SMC counts {fan_count} fans, past the {FANS_MAX} its keys can name"),
+        ));
+    }
+
+    Ok(fan_count)
+}
+
+/// Checks that the SMC lists no more keys than open lists.
+fn key_count_check(key_count: u32) -> io::Result<u32> {
+    if key_count > KEYS_MAX {
+        return Err(io::Error::new(
+            io::ErrorKind::QuotaExceeded,
+            format!("the SMC lists {key_count} keys, past the {KEYS_MAX} open lists"),
+        ));
+    }
+
+    Ok(key_count)
+}
+
 fn hottest(readings: impl IntoIterator<Item = (FloatKey, f32)>) -> Option<FloatKey> {
     readings
         .into_iter()
@@ -367,6 +400,48 @@ mod tests {
         ];
 
         assert_eq!(Some(FloatKey(Key::named(*b"Tg05"))), hottest(readings));
+    }
+
+    #[test]
+    fn names_the_speed_key_of_each_fan_by_its_digit() {
+        // Goal: each fan's speed key names the fan by its digit, from the first fan to the
+        // tenth.
+        // Method: name the first and the tenth fan's keys.
+        assert_eq!(Key::named(*b"F0Ac"), Key::fan_speed(0));
+        assert_eq!(Key::named(*b"F9Ac"), Key::fan_speed(9));
+    }
+
+    #[test]
+    fn takes_as_many_fans_as_its_keys_can_name() {
+        // Goal: a fan count up to the ten fans the keys can name passes the check.
+        // Method: check a count of ten.
+        assert_eq!(FANS_MAX, fan_count_check(FANS_MAX).unwrap());
+    }
+
+    #[test]
+    fn refuses_more_fans_than_its_keys_can_name() {
+        // Goal: an eleventh fan is an error, since its key would need a second digit.
+        // Method: check a count of eleven.
+        let checked = fan_count_check(FANS_MAX + 1);
+
+        assert_eq!(io::ErrorKind::InvalidData, checked.unwrap_err().kind());
+    }
+
+    #[test]
+    fn takes_as_many_keys_as_its_bound() {
+        // Goal: a key count up to the bound passes the check.
+        // Method: check a count equal to the bound.
+        assert_eq!(KEYS_MAX, key_count_check(KEYS_MAX).unwrap());
+    }
+
+    #[test]
+    fn refuses_more_keys_than_its_bound() {
+        // Goal: a key count past the bound is an error, so listing the keys at open has a
+        // bound.
+        // Method: check a count one past the bound.
+        let checked = key_count_check(KEYS_MAX + 1);
+
+        assert_eq!(io::ErrorKind::QuotaExceeded, checked.unwrap_err().kind());
     }
 
     #[test]
