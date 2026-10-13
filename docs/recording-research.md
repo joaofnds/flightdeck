@@ -19,14 +19,18 @@ and socket was doing. Every number below was measured on this M5 Pro on 2026-10-
   Zig, performance did not decide between the two, as Rust against Zig below shows.
 - The core is everything a UI client uses, shared by the macOS client and any Windows
   or Linux client that follows. Flightdeck's own work is collecting, storing and
-  retrieving metrics so a rich dashboard can be built on them. The core takes a
-  dependency only for infrastructure that would be a large build of its own, such as
-  persistence or communication between processes, and only a battle-tested, fast one,
-  such as iceoryx2 for the ring. A UI client may also use a UI toolkit such as GPUI or
-  Skia. Any other crate needs a recorded case ("not just persistence, but like inter
-  process communication ... we can just use a package for that is battle tested and
-  really, really, really performant. So we can focus on our core", "I would totally
-  allow iceoryx2", 2026-10-13).
+  retrieving metrics so a rich dashboard can be built on them. A UI client may use a UI
+  toolkit such as GPUI or Skia. The core takes a dependency only for infrastructure
+  that would be a large build of its own, such as persistence or communication between
+  processes, and only a battle-tested, fast one. Each crate outside the workspace needs
+  a recorded case that weighs how much of it Flightdeck would use, whether code written
+  here matches its performance, and what that code would cost to maintain, so iceoryx2
+  is weighed against a ring written here ("not just persistence, but like inter process
+  communication ... we can just use a package for that is battle tested and really,
+  really, really performant", "I would totally allow iceoryx2", "we need to see how much
+  of it we would actually use, and if just writing a ring buffer ourselves ... we can
+  achieve the same performance, and if it wouldn't be too much of a burden to
+  maintain", 2026-10-13).
 
 Without root and once a second, the collector in Rust measured 2.29% and 1.75% of a core
 and 37.5 and 21.7 mW over two five-minute runs of this Mac's use. Seven of their ten
@@ -427,8 +431,8 @@ kernel refused the attempt. The writer wakes readers once a tick with
 `os_sync_wake_by_address_any` and the `SHARED` flag, which macOS has had since 14.4.
 [iceoryx2](https://github.com/eclipse-iceoryx/iceoryx2) offers the same in Rust,
 publish-subscribe with events over shared memory, and lists macOS at its tier 2, "a
-restricted security and safety feature set". It is the library to try before writing
-the ring by hand, and it is not measured here.
+restricted security and safety feature set". It is weighed against a ring written here,
+in the comparison under Next measurements, and it is not measured yet.
 
 Because the ring outlives the collector, a crash of the collector loses nothing the
 ring holds. On restart it seals whatever the ring holds past the last sealed tick
@@ -612,7 +616,8 @@ rather than block when full.
    carries a fork, or at most once per interval as an option, and reading each exiting process's final usage, into an event queue that counts what it drops. Everything carries one tick number.
 2. It writes each tick into a shared-memory ring that only the user can read, holding
    two sealing windows. The writer never waits for a reader and wakes readers once a
-   tick. iceoryx2 is the library to try for this before writing it by hand.
+   tick. Whether the ring is iceoryx2 or written here waits on the comparison under
+   Next measurements.
 3. A persister in the same agent seals each 60-second window into Parquet or DuckLake,
    sorted by series, delta encoded, zstd, no bloom filter, and compacts sealed windows
    into the per-minute and per-hour tiers. On start it first seals what the ring holds
@@ -640,7 +645,9 @@ The storage choice in step 3 waits on the query benchmark below.
 6. Whether coalitions group processes the way the app's notion of an app does, and how
    many coalitions the collector never learns because their processes are gone before a
    rescan.
-7. iceoryx2 on this Mac against the ring measured here.
+7. iceoryx2 on this Mac against a ring written here, comparing the latency and CPU of a
+   tick through each, how much of iceoryx2 the ring would use, and how much code a ring
+   written here would take to maintain.
 8. Parquet against Vortex, which claims much faster random access and cannot yet read
    files written by a newer version of itself.
 9. For the root option: `eslogger`'s events a second and its CPU, file opens most of
