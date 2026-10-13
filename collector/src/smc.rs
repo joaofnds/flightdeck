@@ -27,6 +27,9 @@ unsafe extern "C" {
     ) -> KernReturn;
 }
 
+/// The selector of the SMC's method that takes a question and writes back its answer. Apple
+/// documents no part of the SMC's interface, so this selector, the commands below and the
+/// message's layout hold only as far as the SMC of an M5 Pro answers them.
 const CALL_STRUCT: u32 = 2;
 const READ_BYTES: u8 = 5;
 const READ_INDEX: u8 = 8;
@@ -41,6 +44,8 @@ const KEY_NOT_FOUND: u8 = 132;
 const KEY_COUNT: Key = Key::named(*b"#KEY");
 const FAN_COUNT: Key = Key::named(*b"FNum");
 const SYSTEM_POWER: Key = Key::named(*b"PSTR");
+/// The prefixes of the keys of the chip's CPU, GPU and fabric temperature sensors, as
+/// sysmon-exporter's `sensors.go` groups them on Apple silicon, since Apple documents no SMC key.
 const SOC_TEMPERATURE_PREFIXES: [[u8; 2]; 8] = [
     *b"TC", *b"Tp", *b"Tf", *b"Ts", *b"Te", *b"TR", *b"Tg", *b"TP",
 ];
@@ -164,7 +169,7 @@ pub struct Smc {
     power: FloatKey,
     fans: Vec<FloatKey>,
     soc_sensor: FloatKey,
-    pub watts: f32,
+    pub power_watts: f32,
     pub fan_rpm: Vec<f32>,
     pub soc_celsius: f32,
 }
@@ -187,7 +192,7 @@ impl Smc {
             power,
             fans,
             soc_sensor,
-            watts: 0.0,
+            power_watts: 0.0,
             fan_rpm,
             soc_celsius: 0.0,
         })
@@ -196,7 +201,7 @@ impl Smc {
     pub fn read(&mut self) -> io::Result<()> {
         assert!(self.fans.len() <= self.fan_rpm.capacity());
 
-        self.watts = self.connection.read_float(self.power)?;
+        self.power_watts = self.connection.read_float(self.power)?;
         self.fan_rpm.clear();
         for &fan in &self.fans {
             push_without_growing(&mut self.fan_rpm, self.connection.read_float(fan)?);
@@ -733,8 +738,8 @@ mod tests {
 
         smc.read().unwrap();
 
-        assert!(smc.watts > 0.0, "{} W", smc.watts);
-        assert!(smc.watts < 500.0, "{} W", smc.watts);
+        assert!(smc.power_watts > 0.0, "{} W", smc.power_watts);
+        assert!(smc.power_watts < 500.0, "{} W", smc.power_watts);
     }
 
     #[test]
