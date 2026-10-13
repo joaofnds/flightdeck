@@ -218,6 +218,20 @@ mod tests {
     }
 
     #[test]
+    fn finds_a_coalition_it_holds_whatever_order_the_coalitions_came_in() {
+        // Goal: a full set finds a coalition it holds after a lower one was added, since it
+        // keeps its ids sorted.
+        // Method: fill a set with room for two with 3 and then 1, and add 3 again.
+        let mut coalitions = Coalitions::new(Timebase::read(), 2);
+        coalitions.add(3).unwrap();
+        coalitions.add(1).unwrap();
+
+        let added = coalitions.add(3);
+
+        assert!(added.is_ok());
+    }
+
+    #[test]
     fn finds_a_child_in_its_parents_coalition() {
         let mut child = std::process::Command::new("/bin/sleep")
             .arg("1")
