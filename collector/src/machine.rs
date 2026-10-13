@@ -141,8 +141,12 @@ const _: () = assert!(offset_of!(VmStatistics64, external_page_count) == 136);
 const _: () = assert!(offset_of!(VmStatistics64, internal_page_count) == 140);
 
 const HOST_VM_INFO64: c_int = 4;
-/// The size of `VmStatistics64` in integers, as the header computes it.
-const HOST_VM_INFO64_REV1_COUNT: u32 = 38;
+/// The size of `VmStatistics64` in integers, the count `host_statistics64` fills, as the
+/// header computes it.
+const HOST_VM_INFO64_REV1_COUNT: usize = size_of::<VmStatistics64>() / size_of::<c_int>();
+
+const _: () = assert!(size_of::<VmStatistics64>().is_multiple_of(size_of::<c_int>()));
+const _: () = assert!(HOST_VM_INFO64_REV1_COUNT == 38);
 
 /// The machine's swap, as `struct xsw_usage` declares it without the `xsu_` prefix.
 #[repr(C)]
@@ -256,7 +260,10 @@ impl Machine {
 
     fn read_memory(&mut self) -> io::Result<()> {
         let mut vm = std::mem::MaybeUninit::<VmStatistics64>::zeroed();
-        let mut count = HOST_VM_INFO64_REV1_COUNT;
+        let mut count = match u32::try_from(HOST_VM_INFO64_REV1_COUNT) {
+            Ok(count) => count,
+            Err(error) => unreachable!("{error}"),
+        };
         let result = unsafe {
             host_statistics64(
                 self.host,

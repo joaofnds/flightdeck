@@ -48,9 +48,12 @@ impl Interfaces {
         self.read.clear();
 
         let mut offset = 0;
-        while let Some(header) = self.buffer.get(offset..offset + 4) {
-            let length = usize::from(u16::from_ne_bytes([header[0], header[1]]));
-            let kind = c_int::from(header[3]);
+        while let Some(header) = self.buffer.get(offset..offset + MESSAGE_PREFIX_SIZE) {
+            let length = usize::from(u16::from_ne_bytes([
+                header[MESSAGE_LENGTH_OFFSET],
+                header[MESSAGE_LENGTH_OFFSET + 1],
+            ]));
+            let kind = c_int::from(header[MESSAGE_TYPE_OFFSET]);
             if length == 0 {
                 break;
             }
@@ -128,10 +131,21 @@ struct IfMsghdr2 {
 
 const _: () = assert!(size_of::<IfMsghdr2>() == 160);
 const _: () = assert!(align_of::<IfMsghdr2>() == 4);
+const _: () = assert!(offset_of!(IfMsghdr2, msglen) == 0);
 const _: () = assert!(offset_of!(IfMsghdr2, r#type) == 3);
+const _: () = assert!(offset_of!(IfMsghdr2, addrs) == 4);
 const _: () = assert!(offset_of!(IfMsghdr2, flags) == 8);
 const _: () = assert!(offset_of!(IfMsghdr2, index) == 12);
 const _: () = assert!(offset_of!(IfMsghdr2, data) == 32);
+
+/// Where every routing message keeps its length, two bytes, and its type, one byte, in the
+/// fields it starts with, which end where `addrs` starts.
+const MESSAGE_LENGTH_OFFSET: usize = offset_of!(IfMsghdr2, msglen);
+const MESSAGE_TYPE_OFFSET: usize = offset_of!(IfMsghdr2, r#type);
+const MESSAGE_PREFIX_SIZE: usize = offset_of!(IfMsghdr2, addrs);
+
+const _: () = assert!(MESSAGE_LENGTH_OFFSET + size_of::<u16>() <= MESSAGE_PREFIX_SIZE);
+const _: () = assert!(MESSAGE_TYPE_OFFSET < MESSAGE_PREFIX_SIZE);
 
 /// An interface's counters, as `struct if_data64` declares it without the `ifi_` prefix,
 /// packed to four bytes as the header packs it.
