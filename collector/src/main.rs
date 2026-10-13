@@ -14,8 +14,8 @@ const QOS_CLASS_DEFAULT: u32 = 0x15;
 const TICKS_PER_WINDOW: u64 = 10;
 const TICKS_PER_MINUTE: u64 = 60;
 const PID_LAP: u64 = 99_999;
-const BUDGET_SHARE_OF_A_CORE: f64 = 0.03;
-const DEFAULT_RESCAN_INTERVAL: Duration = Duration::from_millis(5);
+const BUDGET_SHARE_OF_A_CORE: f64 = 0.05;
+const DEFAULT_RESCAN_INTERVAL: Duration = Duration::ZERO;
 
 unsafe extern "C" {
     fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: libc::c_int)
@@ -393,9 +393,9 @@ mod tests {
     }
 
     #[test]
-    fn rescans_at_the_default_interval_without_arguments() {
+    fn rescans_after_every_wake_that_carries_a_fork_without_arguments() {
         assert_eq!(
-            DEFAULT_RESCAN_INTERVAL,
+            Duration::ZERO,
             options_from(&arguments(&[])).unwrap().rescan_interval
         );
     }
