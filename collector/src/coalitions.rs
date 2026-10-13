@@ -211,10 +211,23 @@ pub fn coalition_of(pid: i32) -> io::Result<Option<u64>> {
     assert!(pid <= processes::PID_MAX);
 
     let info = unsafe { processes::pid_info::<PidCoalitionInfo>(pid, PROC_PIDCOALITIONINFO) }?;
+    coalition_of_info(pid, info)
+}
 
+/// Returns the resource coalition that `info`, a read of the coalitions of `pid`, gives. A
+/// process that is gone has none. One that refused is in one all the same, so the refusal is
+/// an error.
+fn coalition_of_info(
+    pid: i32,
+    info: Result<PidCoalitionInfo, Unreadable>,
+) -> io::Result<Option<u64>> {
     match info {
         Ok(info) => Ok(Some(info.coalition_id[COALITION_TYPE_RESOURCE])),
-        Err(Unreadable::Refused | Unreadable::Gone) => Ok(None),
+        Err(Unreadable::Gone) => Ok(None),
+        Err(Unreadable::Refused) => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("pid {pid} refused to say its coalition"),
+        )),
     }
 }
 
@@ -461,5 +474,18 @@ mod tests {
         child.wait().unwrap();
 
         assert_eq!(None, coalition_of(child.id().cast_signed()).unwrap());
+    }
+
+    #[test]
+    fn reports_a_process_refusing_its_coalition_as_an_error() {
+        // Goal: a process that refuses to say its coalition is an error, rather than a process in
+        // no coalition, since every process is in one.
+        // Method: take a refused read, since no process this user can name refuses it.
+        let coalition = coalition_of_info(1, Err(Unreadable::Refused));
+
+        assert_eq!(
+            io::ErrorKind::PermissionDenied,
+            coalition.unwrap_err().kind()
+        );
     }
 }
