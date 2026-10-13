@@ -17,6 +17,10 @@ and socket was doing. Every number below was measured on this M5 Pro on 2026-10-
 - A kernel panic or a power loss may lose the minute not yet sealed.
 - The collector stays in Rust ("agree, stay in rust", 2026-10-13). Measured against
   Zig, performance did not decide between the two, as Rust against Zig below shows.
+- Only the viewer takes dependencies, a UI toolkit such as GPUI or Skia, and anything
+  else it adds needs a recorded case. The rest of Flightdeck uses the workspace's own
+  crates and the Rust toolchain ("the core should remain with zero dependencies ... we
+  should try as much as we can to avoid adding any dependencies", 2026-10-13).
 
 Without root and once a second, the collector in Rust measured 2.29% and 1.75% of a core
 and 37.5 and 21.7 mW over two five-minute runs of this Mac's use. Seven of their ten
@@ -610,14 +614,19 @@ rather than block when full.
 4. The GPUI viewer draws live data from the ring, asks DuckDB for history over the
    sealed files, and joins the two through the ring's unsealed tail as Arrow batches.
 
-The storage choice in step 3 waits on the query benchmark below.
+The storage choice in step 3 waits on the query benchmark below. The dependency decision
+above rules out iceoryx2, Parquet or DuckLake, and zstd unless the workspace writes its
+own, and DuckDB and Arrow in the viewer each need a recorded case.
 
 ## Next measurements
 
 1. Answered under "What is read, and how often": the collector rescans after every wake
    that carries a fork, and `--rescan-ms` trades missed processes for CPU in bursts.
-   Still open: whether a cap that rescans after every fork until rescans
-   pass a rate keeps both, which waits for benchmarks that run on CI.
+   Still open is which pace keeps both, rescanning after every fork wake, a cap that
+   does so until rescans pass a rate, or Tiger Style's own pace of at most once an
+   interval. A benchmark that runs on CI decides it by weighing the CPU each costs
+   against the processes each misses ("I think we should benchmark this and weigh the
+   pros and cons and see what the tradeoffs are", 2026-10-13).
 2. The rows the collector does not read yet, against the room left in the budget: GPU
    from the I/O Registry, open files, disk, battery, and the 10 s and 60 s rows.
 3. Query speed on a week of synthetic data in each storage option: one process over
