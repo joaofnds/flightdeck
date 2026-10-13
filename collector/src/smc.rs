@@ -6,6 +6,7 @@ use crate::push_without_growing;
 
 #[link(name = "IOKit", kind = "framework")]
 unsafe extern "C" {
+    static kIOMainPortDefault: MachPort;
     fn IOServiceMatching(name: *const c_char) -> *mut c_void;
     fn IOServiceGetMatchingService(main_port: MachPort, matching: *mut c_void) -> MachPort;
     fn IOServiceOpen(
@@ -169,18 +170,30 @@ impl Smc {
     }
 }
 
+/// A connection to the SMC, through a port that is never 0 and that only this connection
+/// closes.
 struct Connection(MachPort);
 
 impl Drop for Connection {
+    /// Closes the connection, and reports on stderr a close that failed, since a drop has no
+    /// caller to return the error to.
     fn drop(&mut self) {
-        unsafe { IOServiceClose(self.0) };
+        assert_ne!(0, self.0);
+
+        let closed = unsafe { IOServiceClose(self.0) };
+        if let Err(error) = kern_return_check(closed, "closing the SMC connection") {
+            eprintln!("collector: {error}");
+        }
     }
 }
 
 impl Connection {
     fn open() -> io::Result<Self> {
         let service = unsafe {
-            IOServiceGetMatchingService(0, IOServiceMatching(c"AppleSMCKeysEndpoint".as_ptr()))
+            IOServiceGetMatchingService(
+                kIOMainPortDefault,
+                IOServiceMatching(c"AppleSMCKeysEndpoint".as_ptr()),
+            )
         };
         if service == 0 {
             return Err(io::Error::new(
@@ -189,16 +202,17 @@ impl Connection {
             ));
         }
 
-        let mut connection = 0;
-        let opened = unsafe { IOServiceOpen(service, kernel::task_self(), 0, &raw mut connection) };
-        unsafe { IOObjectRelease(service) };
-        if opened != kernel::KERN_SUCCESS {
-            return Err(io::Error::other(format!(
-                "connecting to the SMC returned {opened:#x}"
-            )));
+        let mut port = 0;
+        let opened = unsafe { IOServiceOpen(service, kernel::task_self(), 0, &raw mut port) };
+        let released = unsafe { IOObjectRelease(service) };
+        kern_return_check(opened, "connecting to the SMC")?;
+        if port == 0 {
+            return Err(io::Error::other("connecting to the SMC gave no connection"));
         }
+        let connection = Self(port);
 
-        Ok(Self(connection))
+        kern_return_check(released, "releasing the SMC's service")?;
+        Ok(connection)
     }
 
     fn hottest_soc_sensor(&self) -> io::Result<FloatKey> {
@@ -313,11 +327,7 @@ fn ask_answered(
     answer_size: usize,
     answer: Message,
 ) -> io::Result<Option<Message>> {
-    if returned != kernel::KERN_SUCCESS {
-        return Err(io::Error::other(format!(
-            "calling the SMC returned {returned:#x}"
-        )));
-    }
+    kern_return_check(returned, "calling the SMC")?;
     if answer_size != size_of::<Message>() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -338,6 +348,15 @@ fn ask_answered(
     }
 
     Ok(Some(answer))
+}
+
+/// Checks that a Mach call, which `call` names, returned success.
+fn kern_return_check(returned: KernReturn, call: &str) -> io::Result<()> {
+    if returned != kernel::KERN_SUCCESS {
+        return Err(io::Error::other(format!("{call} returned {returned:#x}")));
+    }
+
+    Ok(())
 }
 
 /// Checks that the SMC holds `key`, whose info is `held`, as a value of `wanted`.
@@ -400,6 +419,23 @@ mod tests {
         ];
 
         assert_eq!(Some(FloatKey(Key::named(*b"Tg05"))), hottest(readings));
+    }
+
+    #[test]
+    fn takes_a_mach_call_that_succeeded() {
+        // Goal: a Mach call that returned success passes the check.
+        // Method: check KERN_SUCCESS.
+        assert!(kern_return_check(kernel::KERN_SUCCESS, "a call").is_ok());
+    }
+
+    #[test]
+    fn refuses_a_mach_call_that_failed() {
+        // Goal: a Mach call that returned anything but success is an error.
+        // Method: check 0x10000003, which closing an SMC connection a second time returned on
+        // an M5 Pro.
+        let checked = kern_return_check(0x1000_0003, "closing a connection");
+
+        assert_eq!(io::ErrorKind::Other, checked.unwrap_err().kind());
     }
 
     #[test]
