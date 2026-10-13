@@ -174,7 +174,10 @@ pub const PID_MAX: i32 = 99_999;
 /// which `kern.maxproc` gives.
 pub fn process_limit() -> io::Result<usize> {
     let maxproc: c_int = Sysctl::named(c"kern.maxproc")?.read()?;
-    process_limit_of(maxproc)
+    let limit = process_limit_of(maxproc)?;
+
+    assert!(limit > 0);
+    Ok(limit)
 }
 
 /// The process limit a `kern.maxproc` of `maxproc` gives, which allows at least this process.
@@ -201,7 +204,11 @@ fn process_limit_of(maxproc: c_int) -> io::Result<usize> {
 /// so a listing that fills it holds more processes than the limit allows.
 #[must_use]
 pub fn pid_list(process_limit: usize) -> Vec<i32> {
-    Vec::with_capacity(process_limit + 1)
+    assert!(process_limit > 0);
+
+    let pids = Vec::with_capacity(process_limit + 1);
+    assert!(pids.capacity() > process_limit);
+    pids
 }
 
 /// Lists the pid of every process into `into`, up to the capacity it has, which it never
@@ -246,6 +253,9 @@ fn list_pids_check(pids: &[i32]) -> io::Result<()> {
 }
 
 pub fn read(pid: i32, timebase: Timebase) -> io::Result<Result<Process, Unreadable>> {
+    assert!(pid >= 0);
+    assert!(pid <= PID_MAX);
+
     let usage = match read_usage(pid, timebase)? {
         Ok(usage) => usage,
         Err(unreadable) => return Ok(Err(unreadable)),
@@ -269,6 +279,9 @@ pub fn read(pid: i32, timebase: Timebase) -> io::Result<Result<Process, Unreadab
 }
 
 pub fn read_usage(pid: i32, timebase: Timebase) -> io::Result<Result<Usage, Unreadable>> {
+    assert!(pid >= 0);
+    assert!(pid <= PID_MAX);
+
     let mut usage = std::mem::MaybeUninit::<RusageInfoV6>::uninit();
     let returned = unsafe { proc_pid_rusage(pid, RUSAGE_INFO_V6, usage.as_mut_ptr().cast()) };
     if let Err(unreadable) = read_usage_returned(returned, io::Error::last_os_error())? {
@@ -298,6 +311,8 @@ pub fn read_usage(pid: i32, timebase: Timebase) -> io::Result<Result<Usage, Unre
 /// Reads what a `proc_pid_rusage` `returned`, and the `error` it set where it failed, which it
 /// does by returning -1.
 fn read_usage_returned(returned: c_int, error: io::Error) -> io::Result<Result<(), Unreadable>> {
+    assert!(error.raw_os_error().is_some());
+
     if returned == 0 {
         Ok(Ok(()))
     } else {
@@ -315,6 +330,9 @@ fn read_usage_returned(returned: c_int, error: io::Error) -> io::Result<Result<(
 /// Returns whether a process has `pid`. One that refuses to be read has it, since macOS
 /// reports a pid no process has as gone, never as refused.
 pub fn is_alive(pid: i32) -> io::Result<bool> {
+    assert!(pid >= 0);
+    assert!(pid <= PID_MAX);
+
     let info = unsafe { pid_info::<ProcBsdshortinfo>(pid, PROC_PIDT_SHORTBSDINFO) }?;
 
     match info {
@@ -328,6 +346,10 @@ pub fn is_alive(pid: i32) -> io::Result<bool> {
 /// Every bit pattern must be a valid `T`, as it is for a C struct of integers, since
 /// `T` holds whatever bytes the kernel wrote.
 pub(crate) unsafe fn pid_info<T>(pid: i32, flavor: c_int) -> io::Result<Result<T, Unreadable>> {
+    assert!(pid >= 0);
+    assert!(pid <= PID_MAX);
+    assert!(flavor > 0);
+
     let mut info = std::mem::MaybeUninit::<T>::uninit();
     let size = c_int::try_from(size_of::<T>()).map_err(io::Error::other)?;
     let written = unsafe { proc_pidinfo(pid, flavor, 0, info.as_mut_ptr().cast(), size) };
@@ -348,6 +370,7 @@ fn pid_info_written(
     error: io::Error,
 ) -> io::Result<Result<(), Unreadable>> {
     assert!(size > 0);
+    assert!(error.raw_os_error().is_some());
 
     if written == size {
         Ok(Ok(()))
@@ -393,6 +416,8 @@ pub(crate) fn child_that_has_exited() -> std::process::Child {
 /// Reads the `error` a call about one process failed with: EPERM as refused, ESRCH as gone,
 /// and any other errno as the error it is.
 fn unreadable_of(error: io::Error) -> io::Result<Unreadable> {
+    assert!(error.raw_os_error().is_some());
+
     match error.raw_os_error() {
         Some(EPERM) => Ok(Unreadable::Refused),
         Some(ESRCH) => Ok(Unreadable::Gone),
@@ -411,11 +436,15 @@ impl Sweep {
     /// `process_limit`.
     #[must_use]
     pub fn new(process_limit: usize) -> Self {
-        Self {
+        assert!(process_limit > 0);
+
+        let sweep = Self {
             read: Vec::with_capacity(process_limit),
             refused: 0,
             gone: 0,
-        }
+        };
+        assert!(sweep.read.capacity() >= process_limit);
+        sweep
     }
 
     pub fn run(&mut self, pids: &[i32], timebase: Timebase) -> io::Result<()> {
@@ -426,11 +455,19 @@ impl Sweep {
 
         for &pid in pids {
             match read(pid, timebase)? {
-                Ok(process) => push_without_growing(&mut self.read, process),
+                Ok(process) => {
+                    assert_eq!(pid, process.pid);
+                    push_without_growing(&mut self.read, process);
+                }
                 Err(Unreadable::Refused) => self.refused += 1,
                 Err(Unreadable::Gone) => self.gone += 1,
             }
         }
+
+        // Each pid is read or counted once.
+        assert!(self.read.len() <= pids.len());
+        let unread = pids.len() - self.read.len();
+        assert_eq!(Ok(unread), usize::try_from(self.refused + self.gone));
         Ok(())
     }
 }
