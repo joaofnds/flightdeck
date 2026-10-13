@@ -56,9 +56,19 @@ pub struct Coalition {
     pub energy_nj: u64,
 }
 
+impl Coalition {
+    /// Returns whether a process still belongs to the coalition, which holds while fewer of its
+    /// tasks exited than started.
+    #[must_use]
+    pub fn holds_a_process(&self) -> bool {
+        self.tasks_exited < self.tasks_started
+    }
+}
+
 pub struct Coalitions {
     timebase: Timebase,
-    /// The coalitions to read, sorted, with each id once.
+    /// The coalitions to read, sorted, with each id once. A coalition leaves once a read finds
+    /// no process in it.
     ids: Vec<u64>,
     pub read: Vec<Coalition>,
 }
@@ -122,7 +132,10 @@ impl Coalitions {
                 energy_nj: usage.energy,
             };
             push_without_growing(read, coalition);
-            true
+            // A coalition with no process left stays readable for minutes at least, so holding it
+            // would fill the list over a long run. Its last reading is taken here, and a start
+            // that names it again adds it back.
+            coalition.holds_a_process()
         });
     }
 }
@@ -135,6 +148,20 @@ mod tests {
     use crate::cost::spin_on_this_thread_for;
 
     const COALITION_LIMIT: usize = 16;
+
+    /// A reading with every count at zero, for a test to fill the counts it needs.
+    const READING: Coalition = Coalition {
+        id: 1,
+        tasks_started: 0,
+        tasks_exited: 0,
+        cpu_ns: 0,
+        interrupt_wakeups: 0,
+        idle_wakeups: 0,
+        disk_read_bytes: 0,
+        disk_written_bytes: 0,
+        gpu_ns: 0,
+        energy_nj: 0,
+    };
 
     fn own_coalition() -> u64 {
         coalition_of(std::process::id().cast_signed()).unwrap()
@@ -230,6 +257,25 @@ mod tests {
         let added = coalitions.add(3);
 
         assert!(added.is_ok());
+    }
+
+    #[test]
+    fn holds_a_process_until_every_task_it_started_exited() {
+        // Goal: a coalition holds a process while fewer of its tasks exited than started, and
+        // none once as many exited as started, which is how an ended app's coalition reads.
+        // Method: a reading with one task left, and the same reading once that task exited.
+        let running = Coalition {
+            tasks_started: 4,
+            tasks_exited: 3,
+            ..READING
+        };
+        let ended = Coalition {
+            tasks_exited: 4,
+            ..running
+        };
+
+        assert!(running.holds_a_process());
+        assert!(!ended.holds_a_process());
     }
 
     #[test]
