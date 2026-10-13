@@ -135,13 +135,14 @@ pub struct IOReport {
     subscription: Owned,
     subscribed: Owned,
     pub gpu_energy_nj: u64,
-    /// The nanojoules in one unit of the GPU's energy, learned at open, or `None` where `IOReport`
-    /// gave no GPU energy then.
-    gpu_nj_per_unit: Option<u64>,
+    /// The nanojoules in one unit of the GPU's energy, learned at open.
+    gpu_nj_per_unit: u64,
     pub gpu: States,
-    /// One for each CPU the machine runs, of which the first `core_count` hold the last read.
+    /// One for each CPU the machine runs, of which the first `counts.cores` hold the cores open
+    /// found.
     cores: Vec<States>,
-    core_count: usize,
+    /// The channels of each kind open found, which every read finds again.
+    counts: ChannelCounts,
 }
 
 impl IOReport {
@@ -165,12 +166,12 @@ impl IOReport {
             subscription,
             subscribed,
             gpu_energy_nj: 0,
-            gpu_nj_per_unit: None,
+            gpu_nj_per_unit: 0,
             gpu: States::new(ACTIVE_STATES_MAX),
             cores: (0..cpu_limit)
                 .map(|_| States::new(ACTIVE_STATES_MAX))
                 .collect(),
-            core_count: 0,
+            counts: ChannelCounts::default(),
         };
         ioreport.learn()?;
 
@@ -184,19 +185,28 @@ impl IOReport {
         let samples = sample(&self.subscription, &self.subscribed)?;
         let channels = channels_of(&samples, &self.channels_key)?;
 
-        let mut core_count = 0;
+        let mut counts = ChannelCounts::default();
         for channel in each(channels)? {
             match Kind::of(channel) {
-                Some(Kind::GpuEnergy) => self.gpu_nj_per_unit = Some(nj_per_unit(channel)?),
-                Some(Kind::GpuStates) => learn_active_states(channel, &mut self.gpu)?,
+                Some(Kind::GpuEnergy) => {
+                    self.gpu_nj_per_unit = nj_per_unit(channel)?;
+                    counts.gpu_energy += 1;
+                }
+                Some(Kind::GpuStates) => {
+                    learn_active_states(channel, &mut self.gpu)?;
+                    counts.gpu_states += 1;
+                }
                 Some(Kind::CoreStates) => {
-                    learn_active_states(channel, core_at(&mut self.cores, core_count)?)?;
-                    core_count += 1;
+                    learn_active_states(channel, core_at(&mut self.cores, counts.cores)?)?;
+                    counts.cores += 1;
                 }
                 None => {}
             }
         }
+        counts.learn_check()?;
+        self.counts = counts;
 
+        assert!(self.gpu_nj_per_unit > 0);
         Ok(())
     }
 
@@ -204,32 +214,88 @@ impl IOReport {
         let samples = sample(&self.subscription, &self.subscribed)?;
         let channels = channels_of(&samples, &self.channels_key)?;
 
-        let mut core_count = 0;
+        let mut counts = ChannelCounts::default();
+        let cores = &mut self.cores[..self.counts.cores];
         for channel in each(channels)? {
             match Kind::of(channel) {
                 Some(Kind::GpuEnergy) => {
                     self.gpu_energy_nj = energy_nj(channel, self.gpu_nj_per_unit)?;
+                    counts.gpu_energy += 1;
                 }
                 Some(Kind::GpuStates) => {
                     read_active_states(channel, &mut self.gpu, self.timebase)?;
+                    counts.gpu_states += 1;
                 }
                 Some(Kind::CoreStates) => {
-                    let core = core_at(&mut self.cores, core_count)?;
+                    let core = core_at(cores, counts.cores)?;
                     read_active_states(channel, core, self.timebase)?;
-                    core_count += 1;
+                    counts.cores += 1;
                 }
                 None => {}
             }
         }
-        self.core_count = core_count;
+
+        counts.read_check(&self.counts)
+    }
+
+    /// The performance states of each core open found.
+    #[must_use]
+    pub fn cores(&self) -> &[States] {
+        &self.cores[..self.counts.cores]
+    }
+}
+
+/// The count of channels of each kind one sample held.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct ChannelCounts {
+    gpu_energy: usize,
+    gpu_states: usize,
+    cores: usize,
+}
+
+impl ChannelCounts {
+    /// Checks that open found what a read takes, one channel of the GPU's energy, one of its
+    /// states, and at least one core.
+    fn learn_check(&self) -> io::Result<()> {
+        if self.gpu_energy != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "IOReport gave {} channels of the GPU's energy",
+                    self.gpu_energy
+                ),
+            ));
+        }
+        if self.gpu_states != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "IOReport gave {} channels of the GPU's states",
+                    self.gpu_states
+                ),
+            ));
+        }
+        if self.cores == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "IOReport gave no core's states",
+            ));
+        }
 
         Ok(())
     }
 
-    /// The performance states of each core the last read found.
-    #[must_use]
-    pub fn cores(&self) -> &[States] {
-        &self.cores[..self.core_count]
+    /// Checks that a read found the channels open found, since a channel it missed would keep
+    /// the value of the read before.
+    fn read_check(&self, at_open: &ChannelCounts) -> io::Result<()> {
+        if self != at_open {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("IOReport gave the channels {self:?}, and {at_open:?} at open"),
+            ));
+        }
+
+        Ok(())
     }
 }
 
@@ -397,14 +463,7 @@ fn nj_per_unit(channel: CFTypeRef) -> io::Result<u64> {
 }
 
 /// Reads the energy `channel` gives in units of `nj_per_unit` nanojoules, which open learned.
-fn energy_nj(channel: CFTypeRef, nj_per_unit: Option<u64>) -> io::Result<u64> {
-    let Some(nj_per_unit) = nj_per_unit else {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "IOReport gave the GPU's energy, which it did not give at open",
-        ));
-    };
-
+fn energy_nj(channel: CFTypeRef, nj_per_unit: u64) -> io::Result<u64> {
     let value = unsafe { IOReportSimpleGetIntegerValue(channel, 0) };
     energy_nj_of(value, nj_per_unit)
 }
@@ -695,6 +754,134 @@ mod tests {
             io::ErrorKind::InvalidData,
             channel_count.unwrap_err().kind()
         );
+    }
+
+    /// What a sample of an M5 Pro holds, one channel of the GPU's energy, one of its states,
+    /// and 18 cores.
+    fn counts_on_an_m5_pro() -> ChannelCounts {
+        ChannelCounts {
+            gpu_energy: 1,
+            gpu_states: 1,
+            cores: 18,
+        }
+    }
+
+    #[test]
+    fn learns_from_a_sample_with_the_gpus_energy_its_states_and_a_core() {
+        // Goal: a sample with one channel of the GPU's energy, one of its states, and at least
+        // one core gives open what a read needs.
+        // Method: check what a sample of an M5 Pro holds.
+        let checked = counts_on_an_m5_pro().learn_check();
+
+        assert!(checked.is_ok());
+    }
+
+    #[test]
+    fn refuses_to_learn_from_a_sample_without_the_gpus_energy() {
+        // Goal: open without the GPU's energy is an error, never a reading of no energy.
+        // Method: check a sample with no channel of the GPU's energy.
+        let counts = ChannelCounts {
+            gpu_energy: 0,
+            ..counts_on_an_m5_pro()
+        };
+
+        let checked = counts.learn_check();
+
+        assert_eq!(io::ErrorKind::InvalidData, checked.unwrap_err().kind());
+    }
+
+    #[test]
+    fn refuses_to_learn_from_a_sample_with_two_channels_of_the_gpus_energy() {
+        // Goal: two channels of the GPU's energy are an error, never one read over the other.
+        // Method: check a sample with two.
+        let counts = ChannelCounts {
+            gpu_energy: 2,
+            ..counts_on_an_m5_pro()
+        };
+
+        let checked = counts.learn_check();
+
+        assert_eq!(io::ErrorKind::InvalidData, checked.unwrap_err().kind());
+    }
+
+    #[test]
+    fn refuses_to_learn_from_a_sample_without_the_gpus_states() {
+        // Goal: open without the GPU's states is an error, never a GPU that is never active.
+        // Method: check a sample with no channel of the GPU's states.
+        let counts = ChannelCounts {
+            gpu_states: 0,
+            ..counts_on_an_m5_pro()
+        };
+
+        let checked = counts.learn_check();
+
+        assert_eq!(io::ErrorKind::InvalidData, checked.unwrap_err().kind());
+    }
+
+    #[test]
+    fn refuses_to_learn_from_a_sample_with_two_channels_of_the_gpus_states() {
+        // Goal: two channels of the GPU's states are an error, never one read over the other.
+        // Method: check a sample with two.
+        let counts = ChannelCounts {
+            gpu_states: 2,
+            ..counts_on_an_m5_pro()
+        };
+
+        let checked = counts.learn_check();
+
+        assert_eq!(io::ErrorKind::InvalidData, checked.unwrap_err().kind());
+    }
+
+    #[test]
+    fn refuses_to_learn_from_a_sample_without_a_core() {
+        // Goal: open without a core is an error, never a machine whose cores are never active.
+        // Method: check a sample with no channel of a core's states.
+        let counts = ChannelCounts {
+            cores: 0,
+            ..counts_on_an_m5_pro()
+        };
+
+        let checked = counts.learn_check();
+
+        assert_eq!(io::ErrorKind::InvalidData, checked.unwrap_err().kind());
+    }
+
+    #[test]
+    fn reads_a_sample_with_the_channels_open_found() {
+        // Goal: a read that finds the channels open found passes the check.
+        // Method: check a sample of an M5 Pro against the same at open.
+        let checked = counts_on_an_m5_pro().read_check(&counts_on_an_m5_pro());
+
+        assert!(checked.is_ok());
+    }
+
+    #[test]
+    fn refuses_to_read_a_sample_with_fewer_cores_than_open_found() {
+        // Goal: a read missing a core open found is an error, never a core that read no time.
+        // Method: check a sample with one core fewer than at open.
+        let counts = ChannelCounts {
+            cores: 17,
+            ..counts_on_an_m5_pro()
+        };
+
+        let checked = counts.read_check(&counts_on_an_m5_pro());
+
+        assert_eq!(io::ErrorKind::InvalidData, checked.unwrap_err().kind());
+    }
+
+    #[test]
+    fn refuses_to_read_a_sample_without_the_gpus_energy_open_found() {
+        // Goal: a read missing the GPU's energy is an error, never the energy of the read
+        // before.
+        // Method: check a sample with no channel of the GPU's energy against one at open.
+        let counts = ChannelCounts {
+            gpu_energy: 0,
+            ..counts_on_an_m5_pro()
+        };
+
+        let checked = counts.read_check(&counts_on_an_m5_pro());
+
+        assert_eq!(io::ErrorKind::InvalidData, checked.unwrap_err().kind());
     }
 
     #[test]
