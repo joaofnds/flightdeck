@@ -5,9 +5,15 @@ use std::time::Duration;
 
 use collector::clock::Timebase;
 
+const WNOHANG: c_int = 1;
+
 unsafe extern "C" {
     fn mach_absolute_time() -> u64;
     fn mach_wait_until(deadline: u64) -> c_int;
+    fn fork() -> c_int;
+    fn _exit(status: c_int) -> !;
+    fn usleep(microseconds: u32) -> c_int;
+    fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int;
 }
 
 struct Burst {
@@ -93,7 +99,7 @@ fn run(burst: &Burst) -> std::io::Result<()> {
         unsafe { mach_wait_until(next) };
     }
     per_second_reached.push(this_second);
-    while reaped < total && unsafe { libc::waitpid(-1, std::ptr::null_mut(), 0) } > 0 {
+    while reaped < total && unsafe { waitpid(-1, std::ptr::null_mut(), 0) } > 0 {
         reaped += 1;
     }
 
@@ -118,13 +124,13 @@ fn run(burst: &Burst) -> std::io::Result<()> {
 }
 
 fn fork_child(child_ms: u32) -> std::io::Result<i32> {
-    let pid = unsafe { libc::fork() };
+    let pid = unsafe { fork() };
     if pid == 0 {
         unsafe {
             if child_ms > 0 {
-                libc::usleep(child_ms.saturating_mul(1_000));
+                usleep(child_ms.saturating_mul(1_000));
             }
-            libc::_exit(0);
+            _exit(0);
         }
     }
     if pid < 0 {
@@ -136,7 +142,7 @@ fn fork_child(child_ms: u32) -> std::io::Result<i32> {
 
 fn reap() -> u64 {
     let mut reaped = 0;
-    while unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG) } > 0 {
+    while unsafe { waitpid(-1, std::ptr::null_mut(), WNOHANG) } > 0 {
         reaped += 1;
     }
     reaped
