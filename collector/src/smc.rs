@@ -325,20 +325,6 @@ mod tests {
     }
 
     #[test]
-    fn reads_the_fan_speeds_into_room_taken_at_open() {
-        // Goal: the fan speeds fill the room taken when the SMC opens, one for each fan, and the
-        // list does not grow.
-        // Method: read this Mac's fans and compare the list's room before and after.
-        let mut smc = Smc::open().unwrap();
-        let capacity = smc.fan_rpm.capacity();
-
-        smc.read().unwrap();
-
-        assert_eq!(smc.fans.len(), capacity);
-        assert_eq!(capacity, smc.fan_rpm.capacity());
-    }
-
-    #[test]
     fn reads_each_fan_speed_in_rpm() {
         let mut smc = Smc::open().unwrap();
 

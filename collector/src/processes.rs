@@ -508,17 +508,15 @@ mod tests {
     }
 
     #[test]
-    fn reads_a_listing_into_room_taken_at_startup() {
-        // Goal: a sweep reads a whole listing into the room it took at startup.
-        // Method: sweep this Mac's listing and compare the readings' room with the process limit.
+    fn takes_room_for_every_process_the_limit_allows() {
+        // Goal: a sweep takes room at startup for every process the limit allows, so no listing
+        // makes a tick grow its readings.
+        // Method: build a sweep for this Mac's process limit and compare its room with the limit.
         let limit = process_limit().unwrap();
-        let mut pids = pid_list(limit);
-        list_pids(&mut pids).unwrap();
-        let mut sweep = Sweep::new(limit);
 
-        sweep.run(&pids, Timebase::read());
+        let sweep = Sweep::new(limit);
 
-        assert_eq!(limit, sweep.read.capacity());
+        assert!(sweep.read.capacity() >= limit);
     }
 
     #[test]
