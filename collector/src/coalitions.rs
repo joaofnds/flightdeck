@@ -258,11 +258,11 @@ mod tests {
         coalitions.add(own_coalition()).unwrap();
         coalitions.read_all().unwrap();
         let before = coalitions.read[0];
-        let own_before = processes::read_usage(pid, timebase).unwrap().unwrap();
+        let own_before = processes::read_usage(timebase, pid).unwrap().unwrap();
 
         spin_on_this_thread_for(Duration::from_millis(50));
 
-        let own_after = processes::read_usage(pid, timebase).unwrap().unwrap();
+        let own_after = processes::read_usage(timebase, pid).unwrap().unwrap();
         coalitions.read_all().unwrap();
         let after = coalitions.read[0];
         let own_nj = own_after.energy_nj - own_before.energy_nj;

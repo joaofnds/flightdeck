@@ -505,7 +505,7 @@ impl Tracker {
                 self.known[index].exited = true;
                 let exit = Event::Exit {
                     pid,
-                    last: processes::read_usage(pid, self.timebase)?,
+                    last: processes::read_usage(self.timebase, pid)?,
                     noticed,
                 };
                 record(&mut self.events, &mut self.counts, exit);

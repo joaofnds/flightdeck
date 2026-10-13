@@ -252,11 +252,11 @@ fn list_pids_check(pids: &[i32]) -> io::Result<()> {
     }
 }
 
-pub fn read(pid: i32, timebase: Timebase) -> io::Result<Result<Process, Unreadable>> {
+pub fn read(timebase: Timebase, pid: i32) -> io::Result<Result<Process, Unreadable>> {
     assert!(pid >= 0);
     assert!(pid <= PID_MAX);
 
-    let usage = match read_usage(pid, timebase)? {
+    let usage = match read_usage(timebase, pid)? {
         Ok(usage) => usage,
         Err(unreadable) => return Ok(Err(unreadable)),
     };
@@ -278,7 +278,7 @@ pub fn read(pid: i32, timebase: Timebase) -> io::Result<Result<Process, Unreadab
     }))
 }
 
-pub fn read_usage(pid: i32, timebase: Timebase) -> io::Result<Result<Usage, Unreadable>> {
+pub fn read_usage(timebase: Timebase, pid: i32) -> io::Result<Result<Usage, Unreadable>> {
     assert!(pid >= 0);
     assert!(pid <= PID_MAX);
 
@@ -447,14 +447,14 @@ impl Sweep {
         sweep
     }
 
-    pub fn run(&mut self, pids: &[i32], timebase: Timebase) -> io::Result<()> {
+    pub fn run(&mut self, timebase: Timebase, pids: &[i32]) -> io::Result<()> {
         assert!(pids.len() <= self.read.capacity());
         self.read.clear();
         self.refused = 0;
         self.gone = 0;
 
         for &pid in pids {
-            match read(pid, timebase)? {
+            match read(timebase, pid)? {
                 Ok(process) => {
                     assert_eq!(pid, process.pid);
                     push_without_growing(&mut self.read, process);
@@ -600,7 +600,7 @@ mod tests {
         let pid = std::process::id().cast_signed();
 
         let before = own_cpu_ns();
-        let process = read(pid, Timebase::read()).unwrap().unwrap();
+        let process = read(Timebase::read(), pid).unwrap().unwrap();
         let after = own_cpu_ns();
 
         let cpu_ns = process.usage.user_ns + process.usage.system_ns;
@@ -619,11 +619,11 @@ mod tests {
         // Goal: a process's energy grows while it runs.
         // Method: read this process's usage before and after spinning 50 ms.
         let pid = std::process::id().cast_signed();
-        let before = read_usage(pid, Timebase::read()).unwrap().unwrap();
+        let before = read_usage(Timebase::read(), pid).unwrap().unwrap();
 
         spin_on_this_thread_for(Duration::from_millis(50));
 
-        let after = read_usage(pid, Timebase::read()).unwrap().unwrap();
+        let after = read_usage(Timebase::read(), pid).unwrap().unwrap();
         assert!(
             after.energy_nj > before.energy_nj,
             "{} nJ then {} nJ",
@@ -643,7 +643,7 @@ mod tests {
             .spawn()
             .unwrap();
 
-        let usage = read_usage(child.id().cast_signed(), timebase)
+        let usage = read_usage(timebase, child.id().cast_signed())
             .unwrap()
             .unwrap();
         let awake_ns = timebase.nanos(unsafe { mach_absolute_time() });
@@ -661,7 +661,7 @@ mod tests {
         let pid = std::process::id().cast_signed();
         let mut sweep = Sweep::new(1);
 
-        sweep.run(&[pid], Timebase::read()).unwrap();
+        sweep.run(Timebase::read(), &[pid]).unwrap();
 
         let read: Vec<i32> = sweep.read.iter().map(|process| process.pid).collect();
         assert_eq!(vec![pid], read);
@@ -675,7 +675,7 @@ mod tests {
         list_pids(&mut pids).unwrap();
         let mut sweep = Sweep::new(process_limit().unwrap());
 
-        sweep.run(&pids, Timebase::read()).unwrap();
+        sweep.run(Timebase::read(), &pids).unwrap();
 
         assert_eq!(
             pids.len(),
@@ -728,7 +728,7 @@ mod tests {
         // Method: read launchd, pid 1, which runs as root, as a user without root.
         assert_eq!(
             Unreadable::Refused,
-            read(1, Timebase::read()).unwrap().unwrap_err()
+            read(Timebase::read(), 1).unwrap().unwrap_err()
         );
     }
 
@@ -739,7 +739,7 @@ mod tests {
         let mut child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
         child.wait().unwrap();
 
-        let read = read(child.id().cast_signed(), Timebase::read());
+        let read = read(Timebase::read(), child.id().cast_signed());
 
         assert_eq!(Unreadable::Gone, read.unwrap().unwrap_err());
     }

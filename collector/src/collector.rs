@@ -71,7 +71,7 @@ impl Collector {
 
         meter.measure(Source::Processes, || {
             processes::list_pids(&mut self.listing)?;
-            self.processes.run(&self.listing, self.timebase)
+            self.processes.run(self.timebase, &self.listing)
         })?;
         self.tracker.observe(&self.listing, meter)?;
         meter.measure(Source::Events, || {
