@@ -298,9 +298,15 @@ fn read_usage_returned(returned: c_int, error: io::Error) -> io::Result<Result<(
     }
 }
 
+/// Returns whether a process has `pid`. One that refuses to be read has it, since macOS
+/// reports a pid no process has as gone, never as refused.
 pub fn is_alive(pid: i32) -> io::Result<bool> {
     let info = unsafe { pid_info::<ProcBsdshortinfo>(pid, PROC_PIDT_SHORTBSDINFO) }?;
-    Ok(info.is_ok())
+
+    match info {
+        Ok(_) | Err(Unreadable::Refused) => Ok(true),
+        Err(Unreadable::Gone) => Ok(false),
+    }
 }
 
 /// # Safety
