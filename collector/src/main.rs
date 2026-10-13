@@ -15,7 +15,7 @@ const TICKS_PER_WINDOW: u64 = 10;
 const TICKS_PER_MINUTE: u64 = 60;
 const PID_LAP: u64 = 99_999;
 const BUDGET_SHARE_OF_A_CORE: f64 = 0.03;
-const DEFAULT_RESCAN_INTERVAL: Duration = Duration::from_millis(10);
+const DEFAULT_RESCAN_INTERVAL: Duration = Duration::from_millis(5);
 
 unsafe extern "C" {
     fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: libc::c_int)
