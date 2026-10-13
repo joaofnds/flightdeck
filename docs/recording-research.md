@@ -17,10 +17,13 @@ and socket was doing. Every number below was measured on this M5 Pro on 2026-10-
 - A kernel panic or a power loss may lose the minute not yet sealed.
 - The collector stays in Rust ("agree, stay in rust", 2026-10-13). Measured against
   Zig, performance did not decide between the two, as Rust against Zig below shows.
-- Only the viewer takes dependencies, a UI toolkit such as GPUI or Skia, and anything
-  else it adds needs a recorded case. The rest of Flightdeck uses the workspace's own
-  crates and the Rust toolchain ("the core should remain with zero dependencies ... we
-  should try as much as we can to avoid adding any dependencies", 2026-10-13).
+- The core is everything a UI client uses, shared by the macOS client and any Windows
+  or Linux client that follows. It takes no dependencies except an existing database or
+  storage technology for persistence, which is preferred to writing one. A UI client
+  may also use a UI toolkit such as GPUI or Skia, and any other crate it adds needs a
+  recorded case ("by the core, I mean everything that the UI client will use ... we
+  should try to use an existing database or technology for persistence, and not just
+  like add dependencies for whatever", 2026-10-13).
 
 Without root and once a second, the collector in Rust measured 2.29% and 1.75% of a core
 and 37.5 and 21.7 mW over two five-minute runs of this Mac's use. Seven of their ten
@@ -615,8 +618,8 @@ rather than block when full.
    sealed files, and joins the two through the ring's unsealed tail as Arrow batches.
 
 The storage choice in step 3 waits on the query benchmark below. The dependency decision
-above rules out iceoryx2, Parquet or DuckLake, and zstd unless the workspace writes its
-own, and DuckDB and Arrow in the viewer each need a recorded case.
+above keeps that choice among existing technologies, Parquet, DuckLake, DuckDB, Arrow
+and zstd, and rules out iceoryx2, so the ring in step 2 is written in the workspace.
 
 ## Next measurements
 
