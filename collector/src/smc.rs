@@ -168,7 +168,7 @@ impl Connection {
         let mut connection = 0;
         let opened = unsafe { IOServiceOpen(service, kernel::task_self(), 0, &raw mut connection) };
         unsafe { IOObjectRelease(service) };
-        if opened != 0 {
+        if opened != kernel::KERN_SUCCESS {
             return Err(io::Error::other(format!(
                 "connecting to the SMC returned {opened:#x}"
             )));
@@ -260,7 +260,7 @@ impl Connection {
                 &raw mut size,
             )
         };
-        if returned != 0 {
+        if returned != kernel::KERN_SUCCESS {
             return Err(io::Error::other(format!(
                 "calling the SMC returned {returned:#x}"
             )));

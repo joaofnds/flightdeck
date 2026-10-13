@@ -1,14 +1,15 @@
-use std::ffi::{CStr, c_int, c_uint};
+use std::ffi::{CStr, c_char, c_int, c_uint};
 use std::io;
+use std::mem::offset_of;
 
-use crate::kernel::{self, MachPort};
+use crate::kernel::{self, KERN_SUCCESS, KernReturn, MachPort};
 
-// `processor_cpu_load_info.cpu_ticks` holds a core's ticks at the indices libc's CPU_STATE
+// `processor_cpu_load_info.cpu_ticks` holds a core's ticks at the indices the CPU_STATE
 // constants name.
-const USER_INDEX: usize = cpu_ticks_index(libc::CPU_STATE_USER);
-const SYSTEM_INDEX: usize = cpu_ticks_index(libc::CPU_STATE_SYSTEM);
-const IDLE_INDEX: usize = cpu_ticks_index(libc::CPU_STATE_IDLE);
-const NICE_INDEX: usize = cpu_ticks_index(libc::CPU_STATE_NICE);
+const USER_INDEX: usize = cpu_ticks_index(CPU_STATE_USER);
+const SYSTEM_INDEX: usize = cpu_ticks_index(CPU_STATE_SYSTEM);
+const IDLE_INDEX: usize = cpu_ticks_index(CPU_STATE_IDLE);
+const NICE_INDEX: usize = cpu_ticks_index(CPU_STATE_NICE);
 
 /// Converts a `CPU_STATE` constant to the index it names in `cpu_ticks`, at compile time,
 /// where `as` would do it with no check.
@@ -75,8 +76,108 @@ impl Pressure {
     }
 }
 
+const CPU_STATE_MAX: usize = 4;
+const CPU_STATE_USER: c_int = 0;
+const CPU_STATE_SYSTEM: c_int = 1;
+const CPU_STATE_IDLE: c_int = 2;
+const CPU_STATE_NICE: c_int = 3;
+const PROCESSOR_CPU_LOAD_INFO: c_int = 2;
+
+/// A core's ticks in each state, as `struct processor_cpu_load_info` declares it.
+#[repr(C)]
+struct ProcessorCpuLoadInfo {
+    cpu_ticks: [u32; CPU_STATE_MAX],
+}
+
+const _: () = assert!(size_of::<ProcessorCpuLoadInfo>() == 16);
+const _: () = assert!(offset_of!(ProcessorCpuLoadInfo, cpu_ticks) == 0);
+
+/// The machine's page counts, as `struct vm_statistics64` declares them through its first
+/// revision. The kernel fills only the integers the call's count asks for, and the struct
+/// has grown past this since.
+#[repr(C)]
+struct VmStatistics64 {
+    free_count: u32,
+    active_count: u32,
+    inactive_count: u32,
+    wire_count: u32,
+    zero_fill_count: u64,
+    reactivations: u64,
+    pageins: u64,
+    pageouts: u64,
+    faults: u64,
+    cow_faults: u64,
+    lookups: u64,
+    hits: u64,
+    purges: u64,
+    purgeable_count: u32,
+    speculative_count: u32,
+    decompressions: u64,
+    compressions: u64,
+    swapins: u64,
+    swapouts: u64,
+    compressor_page_count: u32,
+    throttled_count: u32,
+    external_page_count: u32,
+    internal_page_count: u32,
+    total_uncompressed_pages_in_compressor: u64,
+}
+
+const _: () = assert!(size_of::<VmStatistics64>() == 152);
+const _: () = assert!(offset_of!(VmStatistics64, free_count) == 0);
+const _: () = assert!(offset_of!(VmStatistics64, active_count) == 4);
+const _: () = assert!(offset_of!(VmStatistics64, inactive_count) == 8);
+const _: () = assert!(offset_of!(VmStatistics64, wire_count) == 12);
+const _: () = assert!(offset_of!(VmStatistics64, pageins) == 32);
+const _: () = assert!(offset_of!(VmStatistics64, pageouts) == 40);
+const _: () = assert!(offset_of!(VmStatistics64, purgeable_count) == 88);
+const _: () = assert!(offset_of!(VmStatistics64, speculative_count) == 92);
+const _: () = assert!(offset_of!(VmStatistics64, decompressions) == 96);
+const _: () = assert!(offset_of!(VmStatistics64, compressions) == 104);
+const _: () = assert!(offset_of!(VmStatistics64, swapins) == 112);
+const _: () = assert!(offset_of!(VmStatistics64, swapouts) == 120);
+const _: () = assert!(offset_of!(VmStatistics64, compressor_page_count) == 128);
+const _: () = assert!(offset_of!(VmStatistics64, external_page_count) == 136);
+const _: () = assert!(offset_of!(VmStatistics64, internal_page_count) == 140);
+
+const HOST_VM_INFO64: c_int = 4;
+/// The size of `VmStatistics64` in integers, as the header computes it.
+const HOST_VM_INFO64_REV1_COUNT: u32 = 38;
+
+/// The machine's swap, as `struct xsw_usage` declares it without the `xsu_` prefix.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct XswUsage {
+    total: u64,
+    avail: u64,
+    used: u64,
+    pagesize: u32,
+    encrypted: c_int,
+}
+
+const _: () = assert!(size_of::<XswUsage>() == 32);
+const _: () = assert!(offset_of!(XswUsage, total) == 0);
+const _: () = assert!(offset_of!(XswUsage, used) == 16);
+
 unsafe extern "C" {
+    static vm_page_size: usize;
+
     fn mach_host_self() -> MachPort;
+    fn host_processor_info(
+        host: MachPort,
+        flavor: c_int,
+        processor_count: *mut u32,
+        info: *mut *mut c_int,
+        info_count: *mut u32,
+    ) -> KernReturn;
+    fn host_statistics64(
+        host: MachPort,
+        flavor: c_int,
+        info: *mut c_int,
+        info_count: *mut u32,
+    ) -> KernReturn;
+    fn vm_deallocate(task: MachPort, address: usize, size: usize) -> KernReturn;
+    fn sysctlnametomib(name: *const c_char, mib: *mut c_int, mib_count: *mut usize) -> c_int;
 }
 
 pub struct Machine {
@@ -91,7 +192,7 @@ pub struct Machine {
 impl Machine {
     pub fn new() -> io::Result<Self> {
         let total_bytes: u64 = Sysctl::named(c"hw.memsize")?.read()?;
-        let page_size = u64::try_from(unsafe { libc::vm_page_size }).map_err(io::Error::other)?;
+        let page_size = u64::try_from(unsafe { vm_page_size }).map_err(io::Error::other)?;
 
         Ok(Self {
             host: unsafe { mach_host_self() },
@@ -112,29 +213,26 @@ impl Machine {
     }
 
     fn read_cpus(&mut self) -> io::Result<()> {
-        let mut count: libc::natural_t = 0;
-        let mut info: libc::processor_info_array_t = std::ptr::null_mut();
-        let mut size: libc::mach_msg_type_number_t = 0;
+        let mut count: u32 = 0;
+        let mut info: *mut c_int = std::ptr::null_mut();
+        let mut size: u32 = 0;
         let result = unsafe {
-            libc::host_processor_info(
+            host_processor_info(
                 self.host,
-                libc::PROCESSOR_CPU_LOAD_INFO,
+                PROCESSOR_CPU_LOAD_INFO,
                 &raw mut count,
                 &raw mut info,
                 &raw mut size,
             )
         };
-        if result != libc::KERN_SUCCESS {
+        if result != KERN_SUCCESS {
             return Err(io::Error::other(format!(
                 "host_processor_info returned {result}"
             )));
         }
 
         let loads = unsafe {
-            std::slice::from_raw_parts(
-                info.cast::<libc::processor_cpu_load_info>(),
-                usize_from_u32(count),
-            )
+            std::slice::from_raw_parts(info.cast::<ProcessorCpuLoadInfo>(), usize_from_u32(count))
         };
 
         self.cpus.clear();
@@ -146,10 +244,10 @@ impl Machine {
         }));
 
         unsafe {
-            libc::vm_deallocate(
+            vm_deallocate(
                 kernel::task_self(),
                 info.addr(),
-                usize_from_u32(size) * size_of::<libc::integer_t>(),
+                usize_from_u32(size) * size_of::<c_int>(),
             )
         };
 
@@ -157,24 +255,24 @@ impl Machine {
     }
 
     fn read_memory(&mut self) -> io::Result<()> {
-        let mut vm = std::mem::MaybeUninit::<libc::vm_statistics64>::zeroed();
-        let mut count = libc::HOST_VM_INFO64_COUNT;
+        let mut vm = std::mem::MaybeUninit::<VmStatistics64>::zeroed();
+        let mut count = HOST_VM_INFO64_REV1_COUNT;
         let result = unsafe {
-            libc::host_statistics64(
+            host_statistics64(
                 self.host,
-                libc::HOST_VM_INFO64,
+                HOST_VM_INFO64,
                 vm.as_mut_ptr().cast(),
                 &raw mut count,
             )
         };
-        if result != libc::KERN_SUCCESS {
+        if result != KERN_SUCCESS {
             return Err(io::Error::other(format!(
                 "host_statistics64 returned {result}"
             )));
         }
 
         let vm = unsafe { vm.assume_init() };
-        let swap: libc::xsw_usage = self.swap_usage.read()?;
+        let swap: XswUsage = self.swap_usage.read()?;
         let pages = |count: u32| u64::from(count) * self.page_size;
 
         self.memory = Memory {
@@ -188,8 +286,8 @@ impl Machine {
             anonymous_bytes: pages(vm.internal_page_count),
             file_backed_bytes: pages(vm.external_page_count),
             purgeable_bytes: pages(vm.purgeable_count),
-            swap_total_bytes: swap.xsu_total,
-            swap_used_bytes: swap.xsu_used,
+            swap_total_bytes: swap.total,
+            swap_used_bytes: swap.used,
             swapped_in_bytes: vm.swapins * self.page_size,
             swapped_out_bytes: vm.swapouts * self.page_size,
             pageins: vm.pageins,
@@ -212,7 +310,7 @@ impl Sysctl {
     fn named(name: &CStr) -> io::Result<Self> {
         let mut mib = [0; 12];
         let mut len = mib.len();
-        if unsafe { libc::sysctlnametomib(name.as_ptr(), mib.as_mut_ptr(), &raw mut len) } != 0 {
+        if unsafe { sysctlnametomib(name.as_ptr(), mib.as_mut_ptr(), &raw mut len) } != 0 {
             return Err(io::Error::last_os_error());
         }
 
@@ -226,7 +324,7 @@ impl Sysctl {
         let mut value = T::default();
         let mut size = size_of::<T>();
         let result = unsafe {
-            libc::sysctl(
+            kernel::sysctl(
                 self.mib.as_ptr().cast_mut(),
                 self.len,
                 (&raw mut value).cast(),
@@ -261,7 +359,7 @@ mod tests {
         let mut value = 0u64;
         let mut size = size_of::<u64>();
         unsafe {
-            libc::sysctlbyname(
+            kernel::sysctlbyname(
                 name.as_ptr(),
                 (&raw mut value).cast(),
                 &raw mut size,

@@ -10,6 +10,9 @@ pub(crate) type MachPort = u32;
 /// Holds what a Mach call returns, as `kern_return_t` does.
 pub(crate) type KernReturn = c_int;
 
+/// Says a Mach call succeeded.
+pub(crate) const KERN_SUCCESS: KernReturn = 0;
+
 unsafe extern "C" {
     static mach_task_self_: MachPort;
 
@@ -17,6 +20,18 @@ unsafe extern "C" {
     pub(crate) fn sysctl(
         name: *mut c_int,
         name_count: c_uint,
+        old: *mut c_void,
+        old_size: *mut usize,
+        new: *mut c_void,
+        new_size: usize,
+    ) -> c_int;
+}
+
+#[cfg(test)]
+unsafe extern "C" {
+    /// Reads the kernel state that `name`, a dotted string, names.
+    pub(crate) fn sysctlbyname(
+        name: *const std::ffi::c_char,
         old: *mut c_void,
         old_size: *mut usize,
         new: *mut c_void,

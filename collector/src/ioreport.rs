@@ -291,7 +291,7 @@ mod tests {
         let mut value = 0u32;
         let mut size = size_of::<u32>();
         unsafe {
-            libc::sysctlbyname(
+            crate::kernel::sysctlbyname(
                 c"hw.logicalcpu".as_ptr(),
                 (&raw mut value).cast(),
                 &raw mut size,
