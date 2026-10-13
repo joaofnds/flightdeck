@@ -23,6 +23,8 @@ pub struct Collector {
     pub processes: Sweep,
     pub coalitions: Coalitions,
     pub events: Vec<Event>,
+    /// The starts the tracker had dropped when the previous tick was read.
+    dropped_starts_previous: u64,
 }
 
 impl Collector {
@@ -48,14 +50,11 @@ impl Collector {
             coalitions: Coalitions::new(timebase, coalition_limit),
             // The tracker holds at most this many events a tick, so a tick's events fit.
             events: Vec::with_capacity(limits.events_per_tick_max),
+            dropped_starts_previous: 0,
         };
 
         processes::list_pids(&mut collector.listing)?;
-        for &pid in &collector.listing {
-            if let Some(id) = coalitions::coalition_of(pid) {
-                collector.coalitions.add(id)?;
-            }
-        }
+        add_listed_coalitions(&collector.listing, &mut collector.coalitions)?;
 
         Ok(collector)
     }
@@ -92,10 +91,49 @@ impl Collector {
                     self.coalitions.add(*id)?;
                 }
             }
+            // A dropped start takes its coalition with it, so a tick that dropped one adds the
+            // coalition of every process listed, as startup does.
+            if self.tracker.counts.dropped_starts > self.dropped_starts_previous {
+                add_listed_coalitions(&self.listing, &mut self.coalitions)?;
+            }
+            self.dropped_starts_previous = self.tracker.counts.dropped_starts;
             self.coalitions.read_all();
             io::Result::Ok(())
         })?;
 
         Ok(())
+    }
+}
+
+/// Adds the coalition of every process in `listing`.
+fn add_listed_coalitions(listing: &[i32], coalitions: &mut Coalitions) -> io::Result<()> {
+    for &pid in listing {
+        if let Some(id) = coalitions::coalition_of(pid) {
+            coalitions.add(id)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_every_listed_coalition_after_a_tick_that_dropped_a_start() {
+        // Goal: a start dropped from a full event list takes its coalition with it, so the tick
+        // that dropped it adds the coalition of every process listed.
+        // Method: empty a collector's coalitions, count one start as dropped, and read a tick.
+        // launchd's coalition holds only launchd and the kernel, so no start names it.
+        let timebase = Timebase::read();
+        let mut collector = Collector::new(timebase, Duration::ZERO).unwrap();
+        collector.coalitions = Coalitions::new(timebase, collector.listing.capacity());
+        collector.tracker.counts.dropped_starts += 1;
+
+        collector.read(&mut Meter::default()).unwrap();
+
+        let launchd = coalitions::coalition_of(1).unwrap();
+        let read = &collector.coalitions.read;
+        assert!(read.iter().any(|coalition| coalition.id == launchd));
     }
 }
