@@ -231,7 +231,7 @@ impl Tracker {
         loop {
             let woke = meter.measure(Source::Events, || self.wait_and_handle())?;
 
-            self.read_exits(meter);
+            self.read_exits(meter)?;
             if woke.rescan_timer_fired {
                 self.throttle.fired();
             }
@@ -303,7 +303,7 @@ impl Tracker {
         self.lingering.clear();
 
         for &pid in listing {
-            let index = compare_index(pid, self.known.len())?;
+            let index = known_index(pid, self.known.len())?;
             let known = &mut self.known[index];
             let listed_before = reporting && known.listed_in == previous;
 
@@ -386,19 +386,15 @@ impl Tracker {
         });
     }
 
-    fn read_exits(&mut self, meter: &mut Meter) {
+    fn read_exits(&mut self, meter: &mut Meter) -> io::Result<()> {
         if self.exiting.is_empty() {
-            return;
+            return Ok(());
         }
 
         meter.measure(Source::ExitReads, || {
             for (pid, noticed) in self.exiting.drain(..) {
-                if let Some(known) = usize::try_from(pid)
-                    .ok()
-                    .and_then(|i| self.known.get_mut(i))
-                {
-                    known.exited = true;
-                }
+                let index = known_index(pid, self.known.len())?;
+                self.known[index].exited = true;
                 let exit = Event::Exit {
                     pid,
                     last: processes::read_usage(pid, self.timebase),
@@ -406,7 +402,9 @@ impl Tracker {
                 };
                 record(&mut self.events, &mut self.counts, exit);
             }
-        });
+
+            Ok(())
+        })
     }
 
     fn submit_watches(&mut self, meter: &mut Meter) -> io::Result<()> {
@@ -415,9 +413,7 @@ impl Tracker {
         }
 
         meter.measure(Source::Watches, || self.register_watches())?;
-        self.read_exits(meter);
-
-        Ok(())
+        self.read_exits(meter)
     }
 
     fn register_watches(&mut self) -> io::Result<()> {
@@ -500,15 +496,13 @@ fn record(events: &mut Vec<Event>, counts: &mut Counts, event: Event) {
 }
 
 /// The index of `pid` in a table of `known_count` pids. A pid the table cannot hold is an
-/// error, since the kernel lists no pid below 0 or past `PID_MAX`.
-fn compare_index(pid: i32, known_count: usize) -> io::Result<usize> {
+/// error, since the kernel gives no pid below 0 or past `PID_MAX`.
+fn known_index(pid: i32, known_count: usize) -> io::Result<usize> {
     match usize::try_from(pid) {
         Ok(index) if index < known_count => Ok(index),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!(
-                "the listing holds pid {pid}, and the known table holds pids below {known_count}"
-            ),
+            format!("pid {pid} is outside the known table, which holds pids below {known_count}"),
         )),
     }
 }
