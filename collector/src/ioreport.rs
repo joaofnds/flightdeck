@@ -172,10 +172,7 @@ fn read_active_states(channel: CfRef, into: &mut States, timebase: Timebase) {
     into.active_ns.clear();
     for index in 0..unsafe { IOReportStateGetCount(channel) } {
         let name = unsafe { IOReportStateGetNameForIndex(channel, index) };
-        if [c"OFF", c"IDLE", c"DOWN"]
-            .iter()
-            .any(|inactive| is(name, inactive))
-        {
+        if !read_active_states_counts(name) {
             continue;
         }
 
@@ -183,6 +180,12 @@ fn read_active_states(channel: CfRef, into: &mut States, timebase: Timebase) {
         into.active_ns
             .push(timebase.nanos(u64::try_from(residency).unwrap_or(0)));
     }
+}
+
+fn read_active_states_counts(state: CfRef) -> bool {
+    ![c"OFF", c"IDLE", c"DOWN"]
+        .iter()
+        .any(|inactive| is(state, inactive))
 }
 
 fn energy_nj(channel: CfRef) -> io::Result<u64> {
@@ -283,7 +286,6 @@ mod tests {
 
     use super::*;
     use crate::cost::spin_on_this_thread_for;
-    use crate::machine::Machine;
 
     fn logical_cpus() -> u32 {
         let mut value = 0u32;
@@ -302,20 +304,6 @@ mod tests {
 
     fn active_time_of_every_core(ioreport: &IoReport) -> Duration {
         Duration::from_nanos(ioreport.cores.iter().flat_map(|core| &core.active_ns).sum())
-    }
-
-    fn scheduler_tick() -> Duration {
-        let per_second = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
-        Duration::from_secs(1) / u32::try_from(per_second).unwrap()
-    }
-
-    fn busy_time_of_every_cpu(machine: &Machine) -> Duration {
-        let ticks: u64 = machine
-            .cpus
-            .iter()
-            .map(|cpu| u64::from(cpu.user) + u64::from(cpu.system) + u64::from(cpu.nice))
-            .sum();
-        Duration::from_nanos(ticks * u64::try_from(scheduler_tick().as_nanos()).unwrap())
     }
 
     #[test]
@@ -349,29 +337,54 @@ mod tests {
     }
 
     #[test]
-    fn leaves_the_time_cores_spend_idle_out_of_their_active_time() {
-        let mut ioreport = IoReport::open(Timebase::read()).unwrap();
-        let mut machine = Machine::new().unwrap();
-        ioreport.read().unwrap();
-        machine.read().unwrap();
-        let active_before = active_time_of_every_core(&ioreport);
-        let busy_before = busy_time_of_every_cpu(&machine);
+    fn leaves_the_states_a_core_or_the_gpu_spends_idle_out_of_its_active_time() {
+        // Goal: counting IDLE, DOWN or OFF as active would read every core and the GPU as
+        // busy for the whole of each second.
+        // Method: ask the filter about each name these states carry on this Mac.
+        assert!(!read_active_states_counts(string(c"IDLE").0));
+        assert!(!read_active_states_counts(string(c"DOWN").0));
+        assert!(!read_active_states_counts(string(c"OFF").0));
+    }
 
-        std::thread::sleep(Duration::from_millis(200));
+    #[test]
+    fn counts_the_performance_states_of_a_core_and_the_gpu_as_active() {
+        // Goal: a performance state left out would hide the time spent in it.
+        // Method: ask the filter about a core's state name and the GPU's, as this Mac
+        // names them.
+        assert!(read_active_states_counts(string(c"V0P14").0));
+        assert!(read_active_states_counts(string(c"P1").0));
+    }
 
-        ioreport.read().unwrap();
-        machine.read().unwrap();
-        let active = active_time_of_every_core(&ioreport)
-            .checked_sub(active_before)
-            .expect("the cores' active time only grows");
-        let busy = busy_time_of_every_cpu(&machine)
-            .checked_sub(busy_before)
-            .expect("the scheduler's busy time only grows");
-        let tick_rounding = scheduler_tick() * logical_cpus();
-        assert!(
-            active <= busy + tick_rounding,
-            "{active:?} active across the cores, {busy:?} busy by the scheduler's count"
-        );
+    #[test]
+    fn finds_a_state_left_out_of_active_time_in_every_core_and_the_gpu() {
+        // Goal: a macOS that renamed the idle states would read every core as busy all the
+        // time, while the two tests above still passed.
+        // Method: sample IOReport and look for a state the filter leaves out in each
+        // channel of core or GPU states.
+        let ioreport = IoReport::open(Timebase::read()).unwrap();
+        let samples = Owned(unsafe {
+            IOReportCreateSamples(ioreport.subscription.0, ioreport.subscribed.0, ptr::null())
+        });
+        let channels = channels_of(&samples, &ioreport.channels_key).unwrap();
+
+        let states: Vec<CfRef> = each(channels)
+            .filter(|&channel| {
+                matches!(Kind::of(channel), Some(Kind::CoreStates | Kind::GpuStates))
+            })
+            .collect();
+        let without_idle = states
+            .iter()
+            .filter(|&&channel| {
+                (0..unsafe { IOReportStateGetCount(channel) }).all(|index| {
+                    read_active_states_counts(unsafe {
+                        IOReportStateGetNameForIndex(channel, index)
+                    })
+                })
+            })
+            .count();
+
+        assert_eq!(logical_cpus() as usize + 1, states.len());
+        assert_eq!(0, without_idle);
     }
 
     #[test]
