@@ -217,10 +217,10 @@ impl Tracker {
         };
 
         // A scan, a registration and a wait each hold at most one entry for every pid a
-        // listing holds, so each list gets the listing's room once and never grows. A wait
+        // listing holds, so each list gets the listing's capacity once and never grows. A wait
         // takes up to EVENTS_PER_WAIT_MAX events too, so the eventlist holds at least that.
         let listing = processes::pid_list(limits.process_limit);
-        let room = listing.capacity();
+        let capacity = listing.capacity();
         let known_count = usize::try_from(processes::PID_MAX).map_err(io::Error::other)? + 1;
 
         let queue = unsafe { kqueue() };
@@ -234,14 +234,14 @@ impl Tracker {
             timebase,
             listing,
             known: vec![Known::default(); known_count],
-            reuse_candidates: Vec::with_capacity(room),
+            reuse_candidates: Vec::with_capacity(capacity),
             scans: 0,
             throttle: Throttle::new(timebase.ticks(interval_ns)),
             timers: Vec::with_capacity(TIMER_COUNT_MAX),
-            changes: Vec::with_capacity(room),
-            eventlist: vec![Kevent::new(0, 0, 0, 0, 0); room.max(EVENTS_PER_WAIT_MAX)],
-            starts: Vec::with_capacity(room),
-            exits: Vec::with_capacity(room),
+            changes: Vec::with_capacity(capacity),
+            eventlist: vec![Kevent::new(0, 0, 0, 0, 0); capacity.max(EVENTS_PER_WAIT_MAX)],
+            starts: Vec::with_capacity(capacity),
+            exits: Vec::with_capacity(capacity),
             events: Vec::with_capacity(limits.events_per_tick_max),
             counts: Counts::default(),
             failed: false,
@@ -569,13 +569,13 @@ fn follow_until_handle(
             }
         } else {
             let pid = pid_of(event.ident)?;
-            if event.fflags & NOTE_EXEC != 0 {
+            if event.filter_flags & NOTE_EXEC != 0 {
                 record(events, counts, Event::Exec { pid });
             }
-            if event.fflags & NOTE_EXIT != 0 {
+            if event.filter_flags & NOTE_EXIT != 0 {
                 push_without_growing(exits, (pid, Noticed::OnExit));
             }
-            if event.fflags & NOTE_FORK != 0 {
+            if event.filter_flags & NOTE_FORK != 0 {
                 counts.forks += 1;
                 wake.forked = true;
             }
@@ -688,14 +688,15 @@ fn follow_until_timer(ident: usize, deadline_ticks: u64) -> io::Result<Kevent> {
     ))
 }
 
-/// One change to a kqueue, or one event it reports, as `struct kevent` declares it.
+/// One change to a kqueue, or one event it reports, as `struct kevent` declares it. Its
+/// `fflags` is named `filter_flags` here, since clippy refuses `fflags` beside `flags`.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Kevent {
     ident: usize,
     filter: i16,
     flags: u16,
-    fflags: u32,
+    filter_flags: u32,
     data: isize,
     udata: *mut c_void,
 }
@@ -704,7 +705,7 @@ const _: () = assert!(size_of::<Kevent>() == 32);
 const _: () = assert!(offset_of!(Kevent, ident) == 0);
 const _: () = assert!(offset_of!(Kevent, filter) == 8);
 const _: () = assert!(offset_of!(Kevent, flags) == 10);
-const _: () = assert!(offset_of!(Kevent, fflags) == 12);
+const _: () = assert!(offset_of!(Kevent, filter_flags) == 12);
 const _: () = assert!(offset_of!(Kevent, data) == 16);
 const _: () = assert!(offset_of!(Kevent, udata) == 24);
 
@@ -714,7 +715,7 @@ impl Kevent {
             ident,
             filter,
             flags,
-            fflags: filter_flags,
+            filter_flags,
             data,
             udata: std::ptr::null_mut(),
         }
