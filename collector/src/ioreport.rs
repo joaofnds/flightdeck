@@ -319,16 +319,24 @@ fn read_active_states(channel: CFTypeRef, into: &mut States, timebase: Timebase)
     into.active_ns.clear();
     for &index in &into.active_indices {
         let residency = unsafe { IOReportStateGetResidency(channel, index) };
-        let Ok(residency) = u64::try_from(residency) else {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "IOReport reported a negative time in a state",
-            ));
-        };
-        push_without_growing(&mut into.active_ns, timebase.nanos(residency));
+        let ticks = read_active_states_residency(residency)?;
+        push_without_growing(&mut into.active_ns, timebase.nanos(ticks));
     }
 
     Ok(())
+}
+
+/// The ticks of the time in a state `IOReport` gave as `residency`, or an error where it is
+/// negative.
+fn read_active_states_residency(residency: i64) -> io::Result<u64> {
+    let Ok(ticks) = u64::try_from(residency) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("IOReport reported a time of {residency} in a state"),
+        ));
+    };
+
+    Ok(ticks)
 }
 
 fn read_active_states_counts(state: CFTypeRef) -> bool {
@@ -337,21 +345,22 @@ fn read_active_states_counts(state: CFTypeRef) -> bool {
         .any(|inactive| is(state, inactive))
 }
 
+/// The units `IOReport` can give an energy in, each with the nanojoules in one of it.
+const ENERGY_UNITS: [(&CStr, u64); 3] = [(c"nJ", 1), (c"uJ", 1_000), (c"mJ", 1_000_000)];
+
 /// The nanojoules in one unit of the energy `channel` gives.
 fn nj_per_unit(channel: CFTypeRef) -> io::Result<u64> {
     let unit = unsafe { IOReportChannelGetUnitLabel(channel) };
-    if is(unit, c"nJ") {
-        Ok(1)
-    } else if is(unit, c"uJ") {
-        Ok(1_000)
-    } else if is(unit, c"mJ") {
-        Ok(1_000_000)
-    } else {
-        Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "IOReport gave the GPU's energy in an unknown unit",
-        ))
+    for (label, nj_per_unit) in ENERGY_UNITS {
+        if is(unit, label) {
+            return Ok(nj_per_unit);
+        }
     }
+
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "IOReport gave the GPU's energy in an unknown unit",
+    ))
 }
 
 /// Reads the energy `channel` gives in units of `nj_per_unit` nanojoules, which open learned.
@@ -364,15 +373,33 @@ fn energy_nj(channel: CFTypeRef, nj_per_unit: Option<u64>) -> io::Result<u64> {
     };
 
     let value = unsafe { IOReportSimpleGetIntegerValue(channel, 0) };
-    u64::try_from(value)
-        .ok()
-        .and_then(|units| units.checked_mul(nj_per_unit))
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("IOReport gave the GPU's energy as {value} units"),
-            )
-        })
+    energy_nj_of(value, nj_per_unit)
+}
+
+/// The nanojoules in `value` units of `nj_per_unit` nanojoules each, or an error where the value
+/// is negative or its nanojoules pass what a u64 counts.
+fn energy_nj_of(value: i64, nj_per_unit: u64) -> io::Result<u64> {
+    assert!(
+        ENERGY_UNITS
+            .iter()
+            .any(|&(_, unit_nj)| unit_nj == nj_per_unit)
+    );
+
+    let Ok(units) = u64::try_from(value) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("IOReport gave the GPU's energy as {value} units"),
+        ));
+    };
+    let Some(energy_nj) = units.checked_mul(nj_per_unit) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("the GPU's energy of {units} units of {nj_per_unit} nJ passes a u64"),
+        ));
+    };
+
+    assert!(energy_nj >= units);
+    Ok(energy_nj)
 }
 
 fn channels_in_group(group: &CStr, subgroup: Option<&CStr>) -> io::Result<Owned> {
@@ -486,6 +513,54 @@ mod tests {
             Some(io::ErrorKind::Other),
             owned.err().map(|error| error.kind())
         );
+    }
+
+    #[test]
+    fn converts_the_gpus_energy_into_nanojoules() {
+        // Goal: an energy IOReport gives in some unit reads as that many of the unit's
+        // nanojoules.
+        // Method: convert 2,500 units of a microjoule.
+        let energy_nj = energy_nj_of(2_500, 1_000);
+
+        assert_eq!(2_500_000, energy_nj.unwrap());
+    }
+
+    #[test]
+    fn refuses_a_negative_gpu_energy() {
+        // Goal: a negative energy is an error, never a reading of 0.
+        // Method: convert i64::MIN, which IOReport of an M5 Pro gave for the value of a channel
+        // of states.
+        let energy_nj = energy_nj_of(i64::MIN, 1);
+
+        assert_eq!(io::ErrorKind::InvalidData, energy_nj.unwrap_err().kind());
+    }
+
+    #[test]
+    fn refuses_a_gpu_energy_past_what_its_nanojoules_can_count() {
+        // Goal: an energy whose nanojoules pass a u64 is an error, never a wrapped reading.
+        // Method: convert i64::MAX units of a millijoule.
+        let energy_nj = energy_nj_of(i64::MAX, 1_000_000);
+
+        assert_eq!(io::ErrorKind::InvalidData, energy_nj.unwrap_err().kind());
+    }
+
+    #[test]
+    fn takes_a_residency_of_no_time() {
+        // Goal: a state the channel never entered reads as no time in it.
+        // Method: convert a residency of 0.
+        let residency = read_active_states_residency(0);
+
+        assert_eq!(0, residency.unwrap());
+    }
+
+    #[test]
+    fn refuses_a_negative_residency() {
+        // Goal: a negative time in a state is an error, never a reading of 0.
+        // Method: convert i64::MIN, which IOReport of an M5 Pro gave for the residency of the
+        // GPU's energy channel.
+        let residency = read_active_states_residency(i64::MIN);
+
+        assert_eq!(io::ErrorKind::InvalidData, residency.unwrap_err().kind());
     }
 
     #[test]
