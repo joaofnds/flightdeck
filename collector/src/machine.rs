@@ -3,11 +3,24 @@ use std::io;
 
 use crate::mach;
 
-// `processor_cpu_load_info.cpu_ticks` holds a core's ticks in the order of these constants.
-const _: () = assert!(libc::CPU_STATE_USER == 0);
-const _: () = assert!(libc::CPU_STATE_SYSTEM == 1);
-const _: () = assert!(libc::CPU_STATE_IDLE == 2);
-const _: () = assert!(libc::CPU_STATE_NICE == 3);
+// `processor_cpu_load_info.cpu_ticks` holds a core's ticks at the indices libc's CPU_STATE
+// constants name.
+const USER_INDEX: usize = cpu_ticks_index(libc::CPU_STATE_USER);
+const SYSTEM_INDEX: usize = cpu_ticks_index(libc::CPU_STATE_SYSTEM);
+const IDLE_INDEX: usize = cpu_ticks_index(libc::CPU_STATE_IDLE);
+const NICE_INDEX: usize = cpu_ticks_index(libc::CPU_STATE_NICE);
+
+/// Converts a `CPU_STATE` constant to the index it names in `cpu_ticks`, at compile time,
+/// where `as` would do it with no check.
+const fn cpu_ticks_index(state: libc::c_int) -> usize {
+    match state {
+        0 => 0,
+        1 => 1,
+        2 => 2,
+        3 => 3,
+        _ => panic!("a CPU_STATE constant past the end of cpu_ticks"),
+    }
+}
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CpuTicks {
@@ -125,14 +138,11 @@ impl Machine {
         };
 
         self.cpus.clear();
-        self.cpus.extend(loads.iter().map(|load| {
-            let [user, system, idle, nice] = load.cpu_ticks;
-            CpuTicks {
-                user,
-                system,
-                nice,
-                idle,
-            }
+        self.cpus.extend(loads.iter().map(|load| CpuTicks {
+            user: load.cpu_ticks[USER_INDEX],
+            system: load.cpu_ticks[SYSTEM_INDEX],
+            nice: load.cpu_ticks[NICE_INDEX],
+            idle: load.cpu_ticks[IDLE_INDEX],
         }));
 
         unsafe {
