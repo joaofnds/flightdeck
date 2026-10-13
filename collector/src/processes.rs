@@ -197,10 +197,10 @@ const _: () = assert!(offset_of!(ProcTaskinfo, threadnum) == 84);
 
 /// Room for `struct proc_bsdshortinfo`, which `is_alive` asks for and never reads.
 #[repr(C)]
-struct ProcBsdshortinfo([u32; 16]);
+struct ProcBSDShortInfo([u32; 16]);
 
-const _: () = assert!(size_of::<ProcBsdshortinfo>() == 64);
-const _: () = assert!(align_of::<ProcBsdshortinfo>() == 4);
+const _: () = assert!(size_of::<ProcBSDShortInfo>() == 64);
+const _: () = assert!(align_of::<ProcBSDShortInfo>() == 4);
 
 const PROC_PIDTASKINFO: c_int = 4;
 const PROC_PIDT_SHORTBSDINFO: c_int = 13;
@@ -416,7 +416,7 @@ pub fn is_alive(pid: i32) -> io::Result<bool> {
     assert!(pid >= 0);
     assert!(pid <= PID_MAX);
 
-    let info = unsafe { pid_info::<ProcBsdshortinfo>(pid, PROC_PIDT_SHORTBSDINFO) }?;
+    let info = unsafe { pid_info::<ProcBSDShortInfo>(pid, PROC_PIDT_SHORTBSDINFO) }?;
     Ok(is_alive_of(&info))
 }
 
