@@ -1,8 +1,8 @@
-use std::ffi::{CStr, c_char, c_int, c_uint};
+use std::ffi::c_int;
 use std::io;
 use std::mem::offset_of;
 
-use crate::kernel::{self, KERN_SUCCESS, KernReturn, MachPort};
+use crate::kernel::{self, KERN_SUCCESS, KernReturn, MachPort, Sysctl};
 
 // `processor_cpu_load_info.cpu_ticks` holds a core's ticks at the indices the CPU_STATE
 // constants name.
@@ -181,7 +181,6 @@ unsafe extern "C" {
         info_count: *mut u32,
     ) -> KernReturn;
     fn vm_deallocate(task: MachPort, address: usize, size: usize) -> KernReturn;
-    fn sysctlnametomib(name: *const c_char, mib: *mut c_int, mib_count: *mut usize) -> c_int;
 }
 
 pub struct Machine {
@@ -305,46 +304,6 @@ impl Machine {
         };
 
         Ok(())
-    }
-}
-
-struct Sysctl {
-    mib: [c_int; 12],
-    len: c_uint,
-}
-
-impl Sysctl {
-    fn named(name: &CStr) -> io::Result<Self> {
-        let mut mib = [0; 12];
-        let mut len = mib.len();
-        if unsafe { sysctlnametomib(name.as_ptr(), mib.as_mut_ptr(), &raw mut len) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-
-        Ok(Self {
-            mib,
-            len: c_uint::try_from(len).unwrap_or(0),
-        })
-    }
-
-    fn read<T: Copy + Default>(&self) -> io::Result<T> {
-        let mut value = T::default();
-        let mut size = size_of::<T>();
-        let result = unsafe {
-            kernel::sysctl(
-                self.mib.as_ptr().cast_mut(),
-                self.len,
-                (&raw mut value).cast(),
-                &raw mut size,
-                std::ptr::null_mut(),
-                0,
-            )
-        };
-        if result != 0 {
-            return Err(io::Error::last_os_error());
-        }
-
-        Ok(value)
     }
 }
 
