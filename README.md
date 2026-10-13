@@ -33,9 +33,11 @@ cargo build --release
 ./target/release/followprobe 5 1000 30 6 1   # RESCAN_MS PER_SECOND SECONDS CHILD_MS GENERATORS
 ```
 
-Every commit runs the check: rustfmt, clippy with every warning an error, and the tests.
-It checks the tree the commit holds, exported from the index, so unstaged edits in the
-working tree neither refuse a sound commit nor pass a broken one. A clone turns it on
+Code here follows Tiger Style, as [docs/tiger-style.md](docs/tiger-style.md) reads it
+into Rust, and every commit runs the check that page describes. The check reads the tree
+the commit holds, exported from the index, so unstaged edits in the working tree neither
+refuse a sound commit nor pass a broken one. The check's own code is the exception, since
+the hook builds it from `.githooks/staged-check` in the working tree. A clone turns it on
 with:
 
 ```sh
