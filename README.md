@@ -33,15 +33,24 @@ cargo build --release
 ./target/release/followprobe 5 1000 30 6 1   # RESCAN_MS PER_SECOND SECONDS CHILD_MS GENERATORS
 ```
 
-Code here follows Tiger Style, as [docs/tiger-style.md](docs/tiger-style.md) reads it
-into Rust, and every commit runs the check that page describes. The check reads the tree
-the commit holds, exported from the index, so unstaged edits in the working tree neither
-refuse a sound commit nor pass a broken one. The check's own code is the exception, since
-the hook builds it from `.githooks/staged-check` in the working tree. A clone turns it on
+## Commit check
+
+New and changed code here follows Tiger Style, as [docs/tiger-style.md](docs/tiger-style.md)
+reads it into Rust. The collector's older code does not follow it yet. The hook in
+`.githooks` holds each commit to the check that page describes, once a clone turns it on
 with:
 
 ```sh
 git config core.hooksPath .githooks
 ```
 
-`.githooks/pre-commit` runs the same check on what is staged without committing.
+From then on each `git commit` builds `.githooks/staged-check` and runs it, and the check
+builds and tests the workspace, so committing runs code from the repository. The check
+reads the tree the commit holds, exported from the index, so unstaged edits to the
+workspace neither refuse a sound commit nor pass a broken one. The hook itself is built
+from the working tree, so unstaged edits under `.githooks`, and a `rust-toolchain.toml` or
+`.cargo/config.toml` at the root, still change what it does. `git commit --no-verify`,
+`git merge`, `git cherry-pick` and `git revert` make commits without the check.
+
+Run `.githooks/pre-commit` from the repository's root to check what is staged without
+committing.
