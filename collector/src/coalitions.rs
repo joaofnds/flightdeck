@@ -9,6 +9,8 @@ use crate::push_without_growing;
 
 pub struct Coalitions {
     timebase: Timebase,
+    /// The most coalitions the list holds.
+    coalition_limit: usize,
     /// The coalitions to read, sorted, with each id once. A coalition leaves once a read finds
     /// no process in it.
     ids: Vec<u64>,
@@ -80,11 +82,12 @@ impl Coalitions {
 
         let coalitions = Self {
             timebase,
+            coalition_limit,
             ids: Vec::with_capacity(coalition_limit),
             read: Vec::with_capacity(coalition_limit),
         };
         assert!(coalitions.ids.capacity() >= coalition_limit);
-        assert!(coalitions.read.capacity() >= coalitions.ids.capacity());
+        assert!(coalitions.read.capacity() >= coalition_limit);
         coalitions
     }
 
@@ -92,12 +95,13 @@ impl Coalitions {
     /// error, and the list does not grow.
     pub fn add(&mut self, id: u64) -> io::Result<()> {
         let capacity = self.ids.capacity();
-        assert!(self.ids.len() <= capacity);
+        assert!(self.ids.len() <= self.coalition_limit);
+        assert!(self.coalition_limit <= capacity);
         let Err(position) = self.ids.binary_search(&id) else {
             return Ok(());
         };
 
-        if self.ids.len() < capacity {
+        if self.ids.len() < self.coalition_limit {
             self.ids.insert(position, id);
             // The ids stay sorted, with each id once.
             if position > 0 {
@@ -111,13 +115,17 @@ impl Coalitions {
         } else {
             Err(io::Error::new(
                 io::ErrorKind::QuotaExceeded,
-                format!("the coalitions filled the room for {capacity}"),
+                format!(
+                    "the coalitions reached the limit of {}",
+                    self.coalition_limit
+                ),
             ))
         }
     }
 
     pub fn read_all(&mut self) -> io::Result<()> {
-        assert!(self.ids.len() <= self.read.capacity());
+        assert!(self.ids.len() <= self.coalition_limit);
+        assert!(self.coalition_limit <= self.read.capacity());
         assert!(self.ids.windows(2).all(|pair| pair[0] < pair[1]));
         self.read.clear();
 
