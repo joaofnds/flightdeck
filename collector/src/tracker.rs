@@ -48,6 +48,10 @@ pub struct Tracker {
     exiting: Vec<(i32, Noticed)>,
     events: Vec<Event>,
     pub counts: Counts,
+    /// Set for the length of every call that can fail and cleared as it succeeds, so it holds
+    /// after a call that returned an error. That call left the lists and the kqueue part-way
+    /// through a change, so no call follows it.
+    failed: bool,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -240,6 +244,7 @@ impl Tracker {
             exiting: Vec::with_capacity(room),
             events: Vec::with_capacity(limits.events_per_tick_max),
             counts: Counts::default(),
+            failed: false,
         };
         tracker.rescan(&mut Meter::default())?;
 
@@ -252,7 +257,9 @@ impl Tracker {
     }
 
     pub fn follow_until(&mut self, deadline: u64, meter: &mut Meter) -> io::Result<()> {
+        assert!(!self.failed, "a call to the tracker failed before");
         assert!(self.arming.len() < TIMER_COUNT);
+        self.failed = true;
         push_without_growing(&mut self.arming, timer_at(DEADLINE_TIMER, deadline)?);
 
         loop {
@@ -287,12 +294,16 @@ impl Tracker {
             if woke.due {
                 assert!(self.starting.is_empty());
                 assert!(self.exiting.is_empty());
+                self.failed = false;
                 return Ok(());
             }
         }
     }
 
     pub fn observe(&mut self, listing: &[i32], meter: &mut Meter) -> io::Result<()> {
+        assert!(!self.failed, "a call to the tracker failed before");
+        self.failed = true;
+
         meter.measure(Source::Scans, || {
             self.compare(listing)?;
             self.start_reused_pids();
@@ -305,10 +316,12 @@ impl Tracker {
 
         assert!(self.starting.is_empty());
         assert!(self.exiting.is_empty());
+        self.failed = false;
         Ok(())
     }
 
     pub fn drain_events(&mut self) -> std::vec::Drain<'_, Event> {
+        assert!(!self.failed, "a call to the tracker failed before");
         assert!(self.starting.is_empty());
         assert!(self.exiting.is_empty());
         self.events.drain(..)
@@ -316,6 +329,7 @@ impl Tracker {
 
     #[must_use]
     pub fn last_listing(&self) -> &[i32] {
+        assert!(!self.failed, "a call to the tracker failed before");
         assert!(self.listing.capacity() > 0);
         &self.listing
     }
@@ -968,6 +982,19 @@ mod tests {
         let observed = tracker.observe(&[processes::PID_MAX + 1], &mut Meter::default());
 
         assert_eq!(io::ErrorKind::InvalidData, observed.unwrap_err().kind());
+    }
+
+    #[test]
+    #[should_panic(expected = "a call to the tracker failed before")]
+    fn refuses_a_call_after_one_failed() {
+        // Goal: a tracker is not used after a call to it failed, since what it holds then is
+        // part-way through a change.
+        // Method: observe a listing that holds a negative pid, which fails, then this Mac's.
+        let mut tracker = tracker(INTERVAL);
+        let listing = current_listing();
+        assert!(tracker.observe(&[-1], &mut Meter::default()).is_err());
+
+        tracker.observe(&listing, &mut Meter::default()).unwrap();
     }
 
     #[test]
