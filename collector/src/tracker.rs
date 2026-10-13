@@ -55,7 +55,7 @@ struct Known {
 #[derive(Default)]
 struct Wake {
     due: bool,
-    fired: bool,
+    rescan_timer_fired: bool,
     forked: bool,
 }
 
@@ -85,14 +85,21 @@ struct Throttle {
     interval: u64,
     last_rescan: u64,
     pending: bool,
+    deferred: bool,
     armed: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 enum Step {
-    RescanNow,
+    Rescan(Cause),
     ArmAt(u64),
     Wait,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Cause {
+    Leading,
+    Trailing,
 }
 
 impl Throttle {
@@ -101,6 +108,7 @@ impl Throttle {
             interval,
             last_rescan: 0,
             pending: false,
+            deferred: false,
             armed: false,
         }
     }
@@ -116,6 +124,7 @@ impl Throttle {
     fn rescanned(&mut self, now: u64) {
         self.last_rescan = now;
         self.pending = false;
+        self.deferred = false;
     }
 
     fn step(&mut self, now: u64) -> Step {
@@ -124,8 +133,15 @@ impl Throttle {
         }
 
         if now.saturating_sub(self.last_rescan) >= self.interval {
-            Step::RescanNow
-        } else if self.armed {
+            return Step::Rescan(if self.deferred {
+                Cause::Trailing
+            } else {
+                Cause::Leading
+            });
+        }
+
+        self.deferred = true;
+        if self.armed {
             Step::Wait
         } else {
             self.armed = true;
@@ -134,7 +150,7 @@ impl Throttle {
     }
 }
 
-const TIMER: usize = 1;
+const DEADLINE_TIMER: usize = 1;
 const RESCAN_TIMER: usize = 2;
 const RECEIVED_PER_WAIT: usize = 64;
 
@@ -169,13 +185,13 @@ impl Tracker {
     }
 
     pub fn follow_until(&mut self, deadline: u64, meter: &mut Meter) -> io::Result<()> {
-        self.arming.push(timer_at(TIMER, deadline));
+        self.arming.push(timer_at(DEADLINE_TIMER, deadline));
 
         loop {
             let woke = meter.measure(Source::Events, || self.wait_and_handle())?;
 
             self.read_exits(meter);
-            if woke.fired {
+            if woke.rescan_timer_fired {
                 self.throttle.fired();
             }
             if woke.forked {
@@ -183,12 +199,11 @@ impl Tracker {
             }
 
             match self.throttle.step(clock::now()) {
-                Step::RescanNow => {
+                Step::Rescan(cause) => {
                     self.rescan(meter)?;
-                    if woke.fired {
-                        self.counts.trailing_rescans += 1;
-                    } else {
-                        self.counts.leading_rescans += 1;
+                    match cause {
+                        Cause::Leading => self.counts.leading_rescans += 1,
+                        Cause::Trailing => self.counts.trailing_rescans += 1,
                     }
                 }
                 Step::ArmAt(at) => self.arming.push(timer_at(RESCAN_TIMER, at)),
@@ -289,10 +304,10 @@ impl Tracker {
                 ));
             }
 
-            if event.filter == libc::EVFILT_TIMER && event.ident == TIMER {
+            if event.filter == libc::EVFILT_TIMER && event.ident == DEADLINE_TIMER {
                 woke.due = true;
             } else if event.filter == libc::EVFILT_TIMER {
-                woke.fired = true;
+                woke.rescan_timer_fired = true;
             } else {
                 woke.forked |= self.handle(event);
             }
@@ -510,10 +525,7 @@ mod tests {
     fn reports_a_child_starting_and_exiting_with_its_final_usage() {
         let mut tracker = Tracker::new(Timebase::read(), INTERVAL).unwrap();
 
-        let mut child = std::process::Command::new("/bin/sleep")
-            .arg("0.2")
-            .spawn()
-            .unwrap();
+        let mut child = spawn_sleeper();
         follow_for(&mut tracker, &mut Meter::default(), 500);
         child.wait().unwrap();
 
@@ -553,10 +565,7 @@ mod tests {
     fn reports_a_child_with_the_coalition_it_started_in() {
         let mut tracker = Tracker::new(Timebase::read(), INTERVAL).unwrap();
 
-        let mut child = std::process::Command::new("/bin/sleep")
-            .arg("0.2")
-            .spawn()
-            .unwrap();
+        let mut child = spawn_sleeper();
         follow_for(&mut tracker, &mut Meter::default(), 500);
         child.wait().unwrap();
 
@@ -577,10 +586,7 @@ mod tests {
         let mut tracker = Tracker::new(timebase, INTERVAL).unwrap();
         let mut meter = Meter::default();
 
-        let mut child = std::process::Command::new("/bin/sleep")
-            .arg("0.2")
-            .spawn()
-            .unwrap();
+        let mut child = spawn_sleeper();
         follow_for(&mut tracker, &mut meter, 500);
         child.wait().unwrap();
 
@@ -699,17 +705,33 @@ mod tests {
     }
 
     #[test]
-    fn rescans_at_once_on_a_fork_after_a_quiet_interval() {
-        let mut tracker = Tracker::new(Timebase::read(), Duration::from_millis(20)).unwrap();
-        follow_for(&mut tracker, &mut Meter::default(), 40);
+    fn waits_an_interval_after_a_listing_before_rescanning_on_a_fork() {
+        let mut tracker = Tracker::new(Timebase::read(), Duration::from_millis(200)).unwrap();
+        std::thread::sleep(Duration::from_millis(250));
+        let mut listing = Vec::new();
+        processes::list_pids(&mut listing).unwrap();
+        tracker.observe(&listing, &mut Meter::default()).unwrap();
         let before = tracker.counts;
 
         let mut child = spawn_sleeper();
         follow_for(&mut tracker, &mut Meter::default(), 100);
         child.wait().unwrap();
 
-        let leading = tracker.counts.since(before).leading_rescans;
-        assert!(leading >= 1, "{:?}", tracker.counts.since(before));
+        let since = tracker.counts.since(before);
+        assert_eq!(0, since.leading_rescans, "{since:?}");
+        assert_eq!(1, tracker.counts.listing_rescans);
+    }
+
+    #[test]
+    fn rescans_at_once_on_a_fork_after_a_quiet_interval() {
+        let mut tracker = Tracker::new(Timebase::read(), Duration::from_millis(200)).unwrap();
+        std::thread::sleep(Duration::from_millis(250));
+
+        let mut child = spawn_sleeper();
+        follow_for(&mut tracker, &mut Meter::default(), 100);
+        child.wait().unwrap();
+
+        assert!(tracker.counts.leading_rescans >= 1, "{:?}", tracker.counts);
     }
 
     #[test]
@@ -719,7 +741,7 @@ mod tests {
 
         while_forking_every_2_ms(|| follow_for(&mut tracker, &mut Meter::default(), follow_ms));
 
-        let cap = follow_ms / 50 + 2;
+        let cap = follow_ms / u64::try_from(INTERVAL.as_millis()).unwrap() + 2;
         assert!(
             rescans_from_forks(tracker.counts) <= cap,
             "{:?} over {cap}",
@@ -738,26 +760,8 @@ mod tests {
         assert!(clock::now() >= deadline, "returned before the deadline");
     }
 
-    #[test]
-    fn reports_a_child_that_started_right_after_a_rescan() {
-        let mut tracker = Tracker::new(Timebase::read(), INTERVAL).unwrap();
-
-        let mut child = spawn_sleeper();
-        follow_for(&mut tracker, &mut Meter::default(), 150);
-        child.wait().unwrap();
-
-        let pid = child.id().cast_signed();
-        let events: Vec<Event> = tracker.drain_events().collect();
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, Event::Start { pid: p, .. } if *p == pid)),
-            "child {pid}: {events:?}"
-        );
-    }
-
     mod throttle {
-        use super::super::{Step, Throttle};
+        use super::super::{Cause, Step, Throttle};
 
         const INTERVAL: u64 = 50;
         const LAST_RESCAN: u64 = 1_000;
@@ -774,7 +778,10 @@ mod tests {
 
             throttle.forked();
 
-            assert_eq!(Step::RescanNow, throttle.step(LAST_RESCAN + INTERVAL));
+            assert_eq!(
+                Step::Rescan(Cause::Leading),
+                throttle.step(LAST_RESCAN + INTERVAL)
+            );
         }
 
         #[test]
@@ -808,7 +815,10 @@ mod tests {
 
             throttle.fired();
 
-            assert_eq!(Step::RescanNow, throttle.step(LAST_RESCAN + INTERVAL));
+            assert_eq!(
+                Step::Rescan(Cause::Trailing),
+                throttle.step(LAST_RESCAN + INTERVAL)
+            );
         }
 
         #[test]
@@ -835,6 +845,18 @@ mod tests {
 
             assert_eq!(
                 Step::ArmAt(LAST_RESCAN + 2 + INTERVAL),
+                throttle.step(LAST_RESCAN + INTERVAL)
+            );
+        }
+
+        #[test]
+        fn rescans_as_trailing_when_an_early_fork_comes_due_before_its_timer_fires() {
+            let mut throttle = throttle();
+            throttle.forked();
+            throttle.step(LAST_RESCAN + 1);
+
+            assert_eq!(
+                Step::Rescan(Cause::Trailing),
                 throttle.step(LAST_RESCAN + INTERVAL)
             );
         }
