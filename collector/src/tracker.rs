@@ -872,6 +872,16 @@ mod tests {
         }
 
         #[test]
+        fn rescans_on_a_fork_at_the_instant_of_the_last_rescan_with_no_interval() {
+            let mut throttle = Throttle::new(0);
+            throttle.rescanned(LAST_RESCAN);
+
+            throttle.forked();
+
+            assert_eq!(Step::Rescan(Cause::Leading), throttle.step(LAST_RESCAN));
+        }
+
+        #[test]
         fn waits_with_nothing_pending() {
             assert_eq!(Step::Wait, throttle().step(LAST_RESCAN + INTERVAL));
         }

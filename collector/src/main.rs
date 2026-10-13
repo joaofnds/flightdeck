@@ -393,7 +393,7 @@ mod tests {
     }
 
     #[test]
-    fn rescans_after_every_wake_that_carries_a_fork_without_arguments() {
+    fn takes_no_rescan_interval_without_arguments() {
         assert_eq!(
             Duration::ZERO,
             options_from(&arguments(&[])).unwrap().rescan_interval
