@@ -185,7 +185,7 @@ impl IOReport {
         let channels = channels_of(&samples, &self.channels_key)?;
 
         let mut core_count = 0;
-        for channel in each(channels) {
+        for channel in each(channels)? {
             match Kind::of(channel) {
                 Some(Kind::GpuEnergy) => self.gpu_nj_per_unit = Some(nj_per_unit(channel)?),
                 Some(Kind::GpuStates) => learn_active_states(channel, &mut self.gpu)?,
@@ -205,7 +205,7 @@ impl IOReport {
         let channels = channels_of(&samples, &self.channels_key)?;
 
         let mut core_count = 0;
-        for channel in each(channels) {
+        for channel in each(channels)? {
             match Kind::of(channel) {
                 Some(Kind::GpuEnergy) => {
                     self.gpu_energy_nj = energy_nj(channel, self.gpu_nj_per_unit)?;
@@ -462,7 +462,7 @@ fn keep_read_channels(channels: &Owned, key: &Owned) -> io::Result<()> {
     let kept = unsafe { CFArrayCreateMutable(ptr::null(), 0, &raw const kCFTypeArrayCallBacks) };
     let kept = Owned::new(kept, "creating an array")?;
 
-    for channel in each(all) {
+    for channel in each(all)? {
         if Kind::of(channel).is_some() {
             unsafe { CFArrayAppendValue(kept.0, channel) };
         }
@@ -484,9 +484,34 @@ fn channels_of(dictionary: &Owned, key: &Owned) -> io::Result<CFTypeRef> {
     Ok(channels)
 }
 
-fn each(array: CFTypeRef) -> impl Iterator<Item = CFTypeRef> {
-    (0..unsafe { CFArrayGetCount(array) })
-        .map(move |index| unsafe { CFArrayGetValueAtIndex(array, index) })
+/// The most channels walked in one list, past ten times the 383 the groups the collector reads
+/// hold on an M5 Pro.
+const CHANNELS_MAX: isize = 4096;
+
+/// Each channel in `array`, or an error where its count is not a count within the bound on
+/// walking one.
+fn each(array: CFTypeRef) -> io::Result<impl Iterator<Item = CFTypeRef>> {
+    let channel_count = channel_count_check(unsafe { CFArrayGetCount(array) })?;
+
+    Ok((0..channel_count).map(move |index| unsafe { CFArrayGetValueAtIndex(array, index) }))
+}
+
+/// Checks that a list's count of channels is a count, and within the bound on walking one.
+fn channel_count_check(channel_count: isize) -> io::Result<isize> {
+    if channel_count < 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("IOReport gave a list of {channel_count} channels"),
+        ));
+    }
+    if channel_count > CHANNELS_MAX {
+        return Err(io::Error::new(
+            io::ErrorKind::QuotaExceeded,
+            format!("IOReport gave a list of {channel_count} channels, past {CHANNELS_MAX}"),
+        ));
+    }
+
+    Ok(channel_count)
 }
 
 fn string(text: &CStr) -> io::Result<Owned> {
@@ -521,6 +546,7 @@ mod tests {
     /// `ioreport`'s.
     fn first_channel(ioreport: &IOReport, samples: &Owned, kind: Kind) -> CFTypeRef {
         each(channels_of(samples, &ioreport.channels_key).unwrap())
+            .unwrap()
             .find(|&channel| Kind::of(channel) == Some(kind))
             .unwrap()
     }
@@ -635,6 +661,40 @@ mod tests {
         let state_count = state_count_check(-1);
 
         assert_eq!(io::ErrorKind::InvalidData, state_count.unwrap_err().kind());
+    }
+
+    #[test]
+    fn takes_as_many_channels_as_its_bound() {
+        // Goal: a list with as many channels as the bound passes the check.
+        // Method: check a count equal to the bound.
+        let channel_count = channel_count_check(CHANNELS_MAX);
+
+        assert_eq!(CHANNELS_MAX, channel_count.unwrap());
+    }
+
+    #[test]
+    fn refuses_more_channels_than_its_bound() {
+        // Goal: a list with more channels than the bound is an error, so walking a list of
+        // channels has a bound.
+        // Method: check a count one past the bound.
+        let channel_count = channel_count_check(CHANNELS_MAX + 1);
+
+        assert_eq!(
+            io::ErrorKind::QuotaExceeded,
+            channel_count.unwrap_err().kind()
+        );
+    }
+
+    #[test]
+    fn refuses_a_negative_channel_count() {
+        // Goal: a negative count of channels is an error, never a list with no channels.
+        // Method: check a count of -1.
+        let channel_count = channel_count_check(-1);
+
+        assert_eq!(
+            io::ErrorKind::InvalidData,
+            channel_count.unwrap_err().kind()
+        );
     }
 
     #[test]
@@ -760,6 +820,7 @@ mod tests {
         let channels = channels_of(&samples, &ioreport.channels_key).unwrap();
 
         let states: Vec<CFTypeRef> = each(channels)
+            .unwrap()
             .filter(|&channel| {
                 matches!(Kind::of(channel), Some(Kind::CoreStates | Kind::GpuStates))
             })
