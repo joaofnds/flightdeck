@@ -309,7 +309,7 @@ pub fn is_alive(pid: i32) -> io::Result<bool> {
 /// `T` holds whatever bytes the kernel wrote.
 pub(crate) unsafe fn pid_info<T>(pid: i32, flavor: c_int) -> io::Result<Result<T, Unreadable>> {
     let mut info = std::mem::MaybeUninit::<T>::uninit();
-    let size = c_int::try_from(size_of::<T>()).unwrap_or(0);
+    let size = c_int::try_from(size_of::<T>()).map_err(io::Error::other)?;
     let written = unsafe { proc_pidinfo(pid, flavor, 0, info.as_mut_ptr().cast(), size) };
     if let Err(unreadable) = pid_info_written(written, size, io::Error::last_os_error())? {
         return Ok(Err(unreadable));
