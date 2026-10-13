@@ -33,40 +33,6 @@ pub enum Noticed {
     AlreadyExited,
 }
 
-pub struct Tracker {
-    queue: OwnedFd,
-    timebase: Timebase,
-    listing: Vec<i32>,
-    known: Vec<Known>,
-    reuse_candidates: Vec<(i32, usize)>,
-    scans: u64,
-    throttle: Throttle,
-    timers: Vec<Kevent>,
-    changes: Vec<Kevent>,
-    eventlist: Vec<Kevent>,
-    starts: Vec<i32>,
-    exits: Vec<(i32, Noticed)>,
-    events: Vec<Event>,
-    pub counts: Counts,
-    /// Set for the length of every call that can fail and cleared as it succeeds, so it holds
-    /// after a call that returned an error. That call left the lists and the kqueue part-way
-    /// through a change, so no call follows it.
-    failed: bool,
-}
-
-#[derive(Clone, Copy, Default)]
-struct Known {
-    listed_in: u64,
-    exited: bool,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct Wake {
-    due: bool,
-    rescan_timer_fired: bool,
-    forked: bool,
-}
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Counts {
     pub forks: u64,
@@ -102,6 +68,55 @@ impl Counts {
             dropped_exits: self.dropped_exits - earlier.dropped_exits,
         }
     }
+}
+
+/// The most process events a tick holds. A burst past it drops the rest and counts them by
+/// kind, since a burst is a condition the collector runs under and no fault. The busiest
+/// bursts docs/recording-research.md measured forked 1,745 times a second, each fork a start
+/// and an exit and most an exec, so 16,384 holds about three seconds of them.
+pub const EVENTS_PER_TICK_MAX: usize = 16_384;
+
+/// The room a tracker takes once, when it starts.
+#[derive(Debug, Clone, Copy)]
+pub struct Limits {
+    /// The most pids a listing holds.
+    pub process_limit: usize,
+    /// The most process events a tick holds.
+    pub events_per_tick_max: usize,
+}
+
+pub struct Tracker {
+    queue: OwnedFd,
+    timebase: Timebase,
+    listing: Vec<i32>,
+    known: Vec<Known>,
+    reuse_candidates: Vec<(i32, usize)>,
+    scans: u64,
+    throttle: Throttle,
+    timers: Vec<Kevent>,
+    changes: Vec<Kevent>,
+    eventlist: Vec<Kevent>,
+    starts: Vec<i32>,
+    exits: Vec<(i32, Noticed)>,
+    events: Vec<Event>,
+    pub counts: Counts,
+    /// Set for the length of every call that can fail and cleared as it succeeds, so it holds
+    /// after a call that returned an error. That call left the lists and the kqueue part-way
+    /// through a change, so no call follows it.
+    failed: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+struct Known {
+    listed_in: u64,
+    exited: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Wake {
+    due: bool,
+    rescan_timer_fired: bool,
+    forked: bool,
 }
 
 struct Throttle {
@@ -189,19 +204,64 @@ const EVENTS_PER_WAIT_MAX: usize = 64;
 const _: () = assert!(DEADLINE_TIMER != RESCAN_TIMER);
 const _: () = assert!(EVENTS_PER_WAIT_MAX > 0);
 
-/// The most process events a tick holds. A burst past it drops the rest and counts them by
-/// kind, since a burst is a condition the collector runs under and no fault. The busiest
-/// bursts docs/recording-research.md measured forked 1,745 times a second, each fork a start
-/// and an exit and most an exec, so 16,384 holds about three seconds of them.
-pub const EVENTS_PER_TICK_MAX: usize = 16_384;
+/// One change to a kqueue, or one event it reports, as `struct kevent` declares it. Its
+/// `fflags` is named `filter_flags` here, since clippy refuses `fflags` beside `flags`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Kevent {
+    ident: usize,
+    filter: i16,
+    flags: u16,
+    filter_flags: u32,
+    data: isize,
+    udata: *mut c_void,
+}
 
-/// The room a tracker takes once, when it starts.
-#[derive(Debug, Clone, Copy)]
-pub struct Limits {
-    /// The most pids a listing holds.
-    pub process_limit: usize,
-    /// The most process events a tick holds.
-    pub events_per_tick_max: usize,
+const _: () = assert!(size_of::<Kevent>() == 32);
+const _: () = assert!(offset_of!(Kevent, ident) == 0);
+const _: () = assert!(offset_of!(Kevent, filter) == 8);
+const _: () = assert!(offset_of!(Kevent, flags) == 10);
+const _: () = assert!(offset_of!(Kevent, filter_flags) == 12);
+const _: () = assert!(offset_of!(Kevent, data) == 16);
+const _: () = assert!(offset_of!(Kevent, udata) == 24);
+
+impl Kevent {
+    fn new(ident: usize, filter: i16, flags: u16, filter_flags: u32, data: isize) -> Self {
+        Self {
+            ident,
+            filter,
+            flags,
+            filter_flags,
+            data,
+            udata: std::ptr::null_mut(),
+        }
+    }
+}
+
+const EVFILT_PROC: i16 = -5;
+const EVFILT_TIMER: i16 = -7;
+const EV_ADD: u16 = 0x1;
+const EV_ONESHOT: u16 = 0x10;
+const EV_RECEIPT: u16 = 0x40;
+const EV_ERROR: u16 = 0x4000;
+const NOTE_EXIT: u32 = 0x8000_0000;
+const NOTE_FORK: u32 = 0x4000_0000;
+const NOTE_EXEC: u32 = 0x2000_0000;
+const NOTE_ABSOLUTE: u32 = 0x8;
+const NOTE_MACHTIME: u32 = 0x100;
+const NOTE_MACH_CONTINUOUS_TIME: u32 = 0x80;
+const EPERM: c_int = 1;
+
+unsafe extern "C" {
+    fn kqueue() -> c_int;
+    fn kevent(
+        queue: c_int,
+        changes: *const Kevent,
+        change_count: c_int,
+        events: *mut Kevent,
+        event_capacity: c_int,
+        timeout: *const Timespec,
+    ) -> c_int;
 }
 
 impl Tracker {
@@ -686,66 +746,6 @@ fn follow_until_timer(ident: usize, deadline_ticks: u64) -> io::Result<Kevent> {
         NOTE_ABSOLUTE | NOTE_MACHTIME | NOTE_MACH_CONTINUOUS_TIME,
         data,
     ))
-}
-
-/// One change to a kqueue, or one event it reports, as `struct kevent` declares it. Its
-/// `fflags` is named `filter_flags` here, since clippy refuses `fflags` beside `flags`.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Kevent {
-    ident: usize,
-    filter: i16,
-    flags: u16,
-    filter_flags: u32,
-    data: isize,
-    udata: *mut c_void,
-}
-
-const _: () = assert!(size_of::<Kevent>() == 32);
-const _: () = assert!(offset_of!(Kevent, ident) == 0);
-const _: () = assert!(offset_of!(Kevent, filter) == 8);
-const _: () = assert!(offset_of!(Kevent, flags) == 10);
-const _: () = assert!(offset_of!(Kevent, filter_flags) == 12);
-const _: () = assert!(offset_of!(Kevent, data) == 16);
-const _: () = assert!(offset_of!(Kevent, udata) == 24);
-
-impl Kevent {
-    fn new(ident: usize, filter: i16, flags: u16, filter_flags: u32, data: isize) -> Self {
-        Self {
-            ident,
-            filter,
-            flags,
-            filter_flags,
-            data,
-            udata: std::ptr::null_mut(),
-        }
-    }
-}
-
-const EVFILT_PROC: i16 = -5;
-const EVFILT_TIMER: i16 = -7;
-const EV_ADD: u16 = 0x1;
-const EV_ONESHOT: u16 = 0x10;
-const EV_RECEIPT: u16 = 0x40;
-const EV_ERROR: u16 = 0x4000;
-const NOTE_EXIT: u32 = 0x8000_0000;
-const NOTE_FORK: u32 = 0x4000_0000;
-const NOTE_EXEC: u32 = 0x2000_0000;
-const NOTE_ABSOLUTE: u32 = 0x8;
-const NOTE_MACHTIME: u32 = 0x100;
-const NOTE_MACH_CONTINUOUS_TIME: u32 = 0x80;
-const EPERM: c_int = 1;
-
-unsafe extern "C" {
-    fn kqueue() -> c_int;
-    fn kevent(
-        queue: c_int,
-        changes: *const Kevent,
-        change_count: c_int,
-        events: *mut Kevent,
-        event_capacity: c_int,
-        timeout: *const Timespec,
-    ) -> c_int;
 }
 
 #[cfg(test)]
