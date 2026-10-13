@@ -683,8 +683,9 @@ averages each run over every minute.
 The rescan interval was measured with programs in the repository. `forkrate` forks at a
 fixed rate and writes its children's pids, `followprobe` runs the tracker at a given
 interval and counts those children found and missed, and
-`collector/scripts/burst-minute.sh` runs both inside one minute of the collector. The
-runs used release builds of 3c61963 to ee7fd68, whose tracking is the same, at intervals
+`collector/scripts/burst-minute.sh`, which the `burst_minute` binary has since replaced, ran
+both inside one minute of the collector.
+The runs used release builds of 3c61963 to ee7fd68, whose tracking is the same, at intervals
 of 5 to 50 ms, and a build of 52e24f0, whose collector is c7bb9ba's, before the
 throttle. The probe in the rows before the throttle ran at an interval of 0. The runs
 were on AC power, which the steady runs did not record, at one-minute load averages of

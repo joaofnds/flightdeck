@@ -25,12 +25,14 @@ and exit between two rescans.
 
 To measure process tracking under a load you choose, `forkrate` forks children at a
 fixed rate, `followprobe` counts the children the tracker finds and misses at a given
-rescan interval, and `collector/scripts/burst-minute.sh` runs both inside one collector
-minute.
+rescan interval, and `burst_minute` runs a 30-second burst of `followprobe` inside one
+minute of the collector and prints the date, the load average and the power source
+before both reports.
 
 ```sh
 cargo build --release
 ./target/release/followprobe 5 1000 30 6 1   # RESCAN_MS PER_SECOND SECONDS CHILD_MS GENERATORS
+./target/release/burst_minute --rescan-ms 5 --per-second 1000 -- ./target/release/collector
 ```
 
 ## Check

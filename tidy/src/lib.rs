@@ -76,6 +76,10 @@ fn repository_paths(root: &Path) -> Vec<String> {
 /// Every rule's findings for one file, each starting with the file's path.
 fn file_findings(path: &str, bytes: &[u8]) -> Vec<String> {
     let mut findings = Vec::new();
+    if script(path, bytes) {
+        findings.push(format!("{path}: a script, which belongs in a Rust binary"));
+    }
+
     let extension = Path::new(path).extension().and_then(OsStr::to_str);
     if matches!(extension, Some("rs" | "toml")) {
         match str::from_utf8(bytes) {
@@ -272,4 +276,54 @@ fn function_text(indentation: &str, line_count: usize) -> String {
     );
     let steps = format!("{indentation}    step_once();\n").repeat(line_count - 5);
     format!("{indentation}fn step() {{\n{block}{steps}{indentation}}}\n")
+}
+
+/// Whether the file is a script, by its name or by a shebang on its first line.
+fn script(path: &str, bytes: &[u8]) -> bool {
+    assert!(!path.is_empty());
+
+    let extension = Path::new(path).extension().and_then(OsStr::to_str);
+    if matches!(
+        extension,
+        Some("sh" | "bash" | "zsh" | "py" | "pl" | "rb" | "js" | "ts" | "c" | "m")
+    ) {
+        true
+    } else {
+        // Rust opens an inner attribute with `#![`, which is not a shebang.
+        if bytes.starts_with(b"#!") {
+            !bytes.starts_with(b"#![")
+        } else {
+            false
+        }
+    }
+}
+
+#[test]
+fn script_reports_a_shebang_and_each_script_extension() {
+    // Goal: a file is a script by its first line or by its name, whatever else it holds.
+    // Method: a shebang in a file with no extension, then each extension on an empty file.
+    let extensions = ["sh", "bash", "zsh", "py", "pl", "rb", "js", "ts", "c", "m"];
+
+    assert!(script(
+        "tools/measure",
+        b"#!/usr/bin/env python3\nprint(1)\n"
+    ));
+    for extension in extensions {
+        assert!(
+            script(&format!("tools/measure.{extension}"), b"x"),
+            "{extension}"
+        );
+    }
+}
+
+#[test]
+fn script_passes_rust_configuration_and_documents() {
+    // Goal: Rust, its configuration and the documents are not scripts, and neither is a file
+    // that opens with an inner attribute, which starts with `#!` as a shebang does.
+    // Method: a file of each kind, with a shebang later in a document.
+    assert!(!script("tidy/src/lib.rs", b"#![cfg(test)]\n"));
+    assert!(!script("collector/src/main.rs", b"fn main() {}\n"));
+    assert!(!script("Cargo.toml", b"[workspace]\n"));
+    assert!(!script(".github/workflows/check.yml", b"name: check\n"));
+    assert!(!script("README.md", b"# Flightdeck\n\n#!/bin/sh\n"));
 }
