@@ -200,6 +200,7 @@ impl Run {
                 out,
                 processes_started(*first, *last, &self.live_at_first_scan, end.counts.forks),
                 self.warm_up_starts + self.whole.tally.starts,
+                end.counts.dropped_starts,
             ),
             (Err(error), _) | (_, Err(error)) => writeln!(
                 out,
@@ -296,11 +297,19 @@ fn missed(started: Option<u64>, found: u64) -> Option<u64> {
     started.and_then(|started| started.checked_sub(found))
 }
 
-fn report_missed(out: &mut impl Write, started: Option<u64>, found: u64) -> io::Result<()> {
+/// Writes how many processes started over the run and how many of them no event reported,
+/// which holds the starts dropped from a full event list, `dropped_starts`.
+fn report_missed(
+    out: &mut impl Write,
+    started: Option<u64>,
+    found: u64,
+    dropped_starts: u64,
+) -> io::Result<()> {
     match (started, missed(started, found)) {
         (Some(started), Some(missed)) => writeln!(
             out,
-            "  processes started over the run {started}, found {found}, missed {missed}"
+            "  processes started over the run {started}, found {found}, missed {missed}, \
+             {dropped_starts} of them dropped from a full event list"
         ),
         _ => writeln!(
             out,
@@ -436,7 +445,8 @@ fn report_counts(out: &mut impl Write, tally: &Tally, counts: &Counts) -> io::Re
         "  last tick read {} processes ({} refused, {} gone), {} coalitions, {} CPUs, \
          {} interfaces; over the window {} forks, \
          {} rescans ({} leading, {} trailing, {} listing), \
-         {} starts ({} watches refused), {} execs, exits seen {}, found already exited {}",
+         {} starts ({} watches refused), {} execs, exits seen {}, found already exited {}; \
+         {} starts, {} execs and {} exits dropped from a full event list",
         tally.processes_read,
         tally.processes_refused,
         tally.processes_gone,
@@ -453,6 +463,9 @@ fn report_counts(out: &mut impl Write, tally: &Tally, counts: &Counts) -> io::Re
         tally.execs,
         tally.seen_exiting,
         tally.found_exited,
+        counts.dropped_starts,
+        counts.dropped_execs,
+        counts.dropped_exits,
     )
 }
 
@@ -548,6 +561,36 @@ mod tests {
     #[test]
     fn gives_no_miss_count_when_more_were_found_than_the_pids_say_started() {
         assert_eq!(None, missed(Some(10), 11));
+    }
+
+    #[test]
+    fn reports_the_events_dropped_from_a_full_event_list_by_kind() {
+        let counts = Counts {
+            dropped_starts: 2,
+            dropped_execs: 1,
+            dropped_exits: 3,
+            ..Counts::default()
+        };
+        let mut written = Vec::new();
+
+        report_counts(&mut written, &Tally::default(), &counts).unwrap();
+
+        let line = String::from_utf8(written).unwrap();
+        let dropped = "; 2 starts, 1 execs and 3 exits dropped from a full event list\n";
+        assert!(line.ends_with(dropped), "{line}");
+    }
+
+    #[test]
+    fn reports_the_dropped_starts_among_the_processes_missed() {
+        let mut written = Vec::new();
+
+        report_missed(&mut written, Some(10), 7, 2).unwrap();
+
+        assert_eq!(
+            "  processes started over the run 10, found 7, missed 3, \
+             2 of them dropped from a full event list\n",
+            String::from_utf8(written).unwrap()
+        );
     }
 
     #[test]

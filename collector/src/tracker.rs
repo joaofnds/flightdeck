@@ -62,13 +62,16 @@ struct Wake {
     forked: bool,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Counts {
     pub forks: u64,
     pub refused_watches: u64,
     pub leading_rescans: u64,
     pub trailing_rescans: u64,
     pub listing_rescans: u64,
+    pub dropped_starts: u64,
+    pub dropped_execs: u64,
+    pub dropped_exits: u64,
 }
 
 impl Counts {
@@ -80,6 +83,9 @@ impl Counts {
             leading_rescans: self.leading_rescans - earlier.leading_rescans,
             trailing_rescans: self.trailing_rescans - earlier.trailing_rescans,
             listing_rescans: self.listing_rescans - earlier.listing_rescans,
+            dropped_starts: self.dropped_starts - earlier.dropped_starts,
+            dropped_execs: self.dropped_execs - earlier.dropped_execs,
+            dropped_exits: self.dropped_exits - earlier.dropped_exits,
         }
     }
 }
@@ -157,6 +163,12 @@ const DEADLINE_TIMER: usize = 1;
 const RESCAN_TIMER: usize = 2;
 const RECEIVED_PER_WAIT: usize = 64;
 
+/// The most process events a tick holds. A burst past it drops the rest and counts them by
+/// kind, since a burst is a condition the collector runs under and no fault. The busiest
+/// bursts docs/recording-research.md measured forked 1,745 times a second, each fork a start
+/// and an exit and most an exec, so 16,384 holds about three seconds of them.
+pub const EVENTS_PER_TICK_MAX: usize = 16_384;
+
 impl Tracker {
     pub fn new(
         timebase: Timebase,
@@ -183,7 +195,7 @@ impl Tracker {
             received: Vec::new(),
             starting: Vec::new(),
             exiting: Vec::new(),
-            events: Vec::new(),
+            events: Vec::with_capacity(EVENTS_PER_TICK_MAX),
             counts: Counts::default(),
         };
         tracker.rescan(&mut Meter::default())?;
@@ -326,7 +338,7 @@ impl Tracker {
     fn handle(&mut self, event: Kevent) -> bool {
         let pid = i32::try_from(event.ident).unwrap_or(-1);
         if event.fflags & NOTE_EXEC != 0 {
-            self.events.push(Event::Exec { pid });
+            record(&mut self.events, &mut self.counts, Event::Exec { pid });
         }
         if event.fflags & NOTE_EXIT != 0 {
             self.exiting.push((pid, Noticed::OnExit));
@@ -347,10 +359,11 @@ impl Tracker {
 
         meter.measure(Source::StartReads, || {
             for pid in self.starting.drain(..) {
-                self.events.push(Event::Start {
+                let start = Event::Start {
                     pid,
                     coalition: coalitions::coalition_of(pid),
-                });
+                };
+                record(&mut self.events, &mut self.counts, start);
             }
         });
     }
@@ -368,11 +381,12 @@ impl Tracker {
                 {
                     known.exited = true;
                 }
-                self.events.push(Event::Exit {
+                let exit = Event::Exit {
                     pid,
                     last: processes::read_usage(pid, self.timebase),
                     noticed,
-                });
+                };
+                record(&mut self.events, &mut self.counts, exit);
             }
         });
     }
@@ -450,6 +464,23 @@ impl Tracker {
             }
         }
     }
+}
+
+/// Keeps `event` among the tick's `events` while they have room for it, and otherwise
+/// counts it among the dropped events of its kind, so the list never grows.
+fn record(events: &mut Vec<Event>, counts: &mut Counts, event: Event) {
+    let capacity = events.capacity();
+    if events.len() < capacity {
+        events.push(event);
+    } else {
+        match event {
+            Event::Start { .. } => counts.dropped_starts += 1,
+            Event::Exec { .. } => counts.dropped_execs += 1,
+            Event::Exit { .. } => counts.dropped_exits += 1,
+        }
+    }
+
+    assert_eq!(capacity, events.capacity());
 }
 
 fn watch(pid: i32) -> Kevent {
@@ -572,6 +603,76 @@ mod tests {
             stop.store(true, Ordering::Relaxed);
             result
         })
+    }
+
+    /// A tick's event list with room for one event, which it already holds.
+    fn full_event_list() -> Vec<Event> {
+        vec![Event::Exec { pid: 1 }]
+    }
+
+    #[test]
+    fn keeps_an_event_while_the_tick_has_room_for_it() {
+        let mut events = Vec::with_capacity(1);
+        let mut counts = Counts::default();
+
+        record(&mut events, &mut counts, Event::Exec { pid: 1 });
+
+        assert_eq!(1, events.len());
+        assert_eq!(Counts::default(), counts);
+    }
+
+    #[test]
+    fn drops_a_start_past_the_bound_and_counts_it() {
+        let mut events = full_event_list();
+        let mut counts = Counts::default();
+
+        let start = Event::Start {
+            pid: 2,
+            coalition: None,
+        };
+        record(&mut events, &mut counts, start);
+
+        assert_eq!((1, 1), (events.len(), events.capacity()));
+        let dropped = Counts {
+            dropped_starts: 1,
+            ..Counts::default()
+        };
+        assert_eq!(dropped, counts);
+    }
+
+    #[test]
+    fn drops_an_exec_past_the_bound_and_counts_it() {
+        let mut events = full_event_list();
+        let mut counts = Counts::default();
+
+        record(&mut events, &mut counts, Event::Exec { pid: 2 });
+
+        assert_eq!((1, 1), (events.len(), events.capacity()));
+        let dropped = Counts {
+            dropped_execs: 1,
+            ..Counts::default()
+        };
+        assert_eq!(dropped, counts);
+    }
+
+    #[test]
+    fn drops_an_exit_past_the_bound_and_counts_it() {
+        let mut events = full_event_list();
+        let mut counts = Counts::default();
+
+        let exit = Event::Exit {
+            pid: 2,
+            last: Err(Unreadable::Gone),
+            noticed: Noticed::OnExit,
+        };
+        record(&mut events, &mut counts, exit);
+
+        assert_eq!((1, 1), (events.len(), events.capacity()));
+        let dropped = Counts {
+            dropped_exits: 1,
+            ..Counts::default()
+        };
+        assert_eq!(dropped, counts);
     }
 
     fn follow_for(tracker: &mut Tracker, meter: &mut Meter, millis: u64) {

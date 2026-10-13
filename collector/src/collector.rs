@@ -9,7 +9,7 @@ use crate::ioreport::IoReport;
 use crate::machine::Machine;
 use crate::processes::{self, Sweep};
 use crate::smc::Smc;
-use crate::tracker::{Event, Tracker};
+use crate::tracker::{EVENTS_PER_TICK_MAX, Event, Tracker};
 
 pub struct Collector {
     timebase: Timebase,
@@ -37,7 +37,7 @@ impl Collector {
             smc: Smc::open()?,
             processes: Sweep::default(),
             coalitions: Coalitions::new(timebase),
-            events: Vec::new(),
+            events: Vec::with_capacity(EVENTS_PER_TICK_MAX),
         };
 
         processes::list_pids(&mut collector.listing)?;
