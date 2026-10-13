@@ -243,9 +243,11 @@ minutes of use, the collector cost 1.92 to 2.82% a minute. Rescanning after ever
 in five minutes of quiet use at up to 13 forks a second over 10 seconds, the collector
 cost 1.31 to 1.72% a minute and missed none of 888 processes, and in the next five
 minutes, while a test suite built and ran, at up to 54 forks a second, 1.60 to 1.77% a
-minute and 46 of 2,616, or 1.8%. No five minutes of this
-Mac's own use with a burst of 300 or more forks a second have been measured with the
-collector as it is now.
+minute and 46 of 2,616, or 1.8%. In the five minutes after that, 10 seconds of this
+Mac's own use held 4,904 forks, 490 a second with 190 execs, from no generator and from a
+source not identified. That window cost 3.68% of a core and tracking 20.2 ms a second,
+its minute 1.98%, and the run's minutes 1.77 to 1.98%. It missed 175 of 5,887
+processes, or 3.0%.
 
 Ticks have to be scheduled on absolute deadlines from the monotonic clock. The
 sampler used here slept one second after each pass and drifted 9 seconds over 300,
@@ -577,8 +579,7 @@ The storage choice in step 3 waits on the query benchmark below.
 
 1. Answered under "What is read, and how often": the collector rescans after every wake
    that carries a fork, and `--rescan-ms` trades missed processes for CPU in bursts.
-   Still open: what five minutes of this Mac's own use with a burst of 300 or more forks
-   a second cost now, and whether a cap that rescans after every fork until rescans
+   Still open: whether a cap that rescans after every fork until rescans
    pass a rate keeps both, which waits for benchmarks that run on CI.
 2. The rows the collector does not read yet, against the room left in the budget: GPU
    from the I/O Registry, open files, disk, battery, and the 10 s and 60 s rows.
