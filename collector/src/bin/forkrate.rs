@@ -121,7 +121,7 @@ fn fork_child(child_ms: u32) -> std::io::Result<i32> {
     if pid == 0 {
         unsafe {
             if child_ms > 0 {
-                libc::usleep(child_ms * 1_000);
+                libc::usleep(child_ms.saturating_mul(1_000));
             }
             libc::_exit(0);
         }

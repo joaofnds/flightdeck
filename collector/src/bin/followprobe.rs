@@ -71,42 +71,12 @@ fn run(probe: &Probe) -> io::Result<()> {
     let pid_files: Vec<PathBuf> = (0..probe.generators)
         .map(|n| std::env::temp_dir().join(format!("followprobe-{}-{n}.pids", std::process::id())))
         .collect();
-    let mut generators = pid_files
-        .iter()
-        .map(|file| start_generator(probe, file))
-        .collect::<io::Result<Vec<Child>>>()?;
-
-    let mut started = HashSet::new();
-    let mut read_at_exit = HashSet::new();
-    let mut listing = Vec::new();
-    let second = timebase.ticks(1_000_000_000);
-    let mut deadline = clock::now() + second;
-    loop {
-        tracker.follow_until(deadline, &mut meter)?;
-        processes::list_pids(&mut listing)?;
-        tracker.observe(&listing, &mut meter)?;
-        for event in tracker.drain_events() {
-            match event {
-                Event::Start { pid, .. } => {
-                    started.insert(pid);
-                }
-                Event::Exit {
-                    pid, last: Ok(_), ..
-                } => {
-                    read_at_exit.insert(pid);
-                }
-                Event::Exit { .. } | Event::Exec { .. } => {}
-            }
-        }
-
-        if all_exited(&mut generators)? {
-            break;
-        }
-        deadline += second;
-    }
+    let followed = follow(probe, timebase, &mut tracker, &mut meter, &pid_files);
+    let removed = remove_pid_files(&pid_files);
+    let (started, read_at_exit, children) = followed?;
+    removed?;
 
     let cost = Snapshot::take(&meter, timebase).cost_since(&start);
-    let children = read_children(&pid_files)?;
     let found = children.iter().filter(|pid| started.contains(pid)).count();
     let read = children
         .iter()
@@ -135,9 +105,71 @@ fn run(probe: &Probe) -> io::Result<()> {
         "  {} forks, rescans {} leading, {} trailing, {} listing",
         counts.forks, counts.leading_rescans, counts.trailing_rescans, counts.listing_rescans,
     );
+    Ok(())
+}
 
-    for file in &pid_files {
-        std::fs::remove_file(file)?;
+type Followed = (HashSet<i32>, HashSet<i32>, HashSet<i32>);
+
+fn follow(
+    probe: &Probe,
+    timebase: Timebase,
+    tracker: &mut Tracker,
+    meter: &mut Meter,
+    pid_files: &[PathBuf],
+) -> io::Result<Followed> {
+    let mut generators = Vec::new();
+    let followed = (|| {
+        for file in pid_files {
+            generators.push(start_generator(probe, file)?);
+        }
+
+        let mut started = HashSet::new();
+        let mut read_at_exit = HashSet::new();
+        let mut listing = Vec::new();
+        let second = timebase.ticks(1_000_000_000);
+        let mut deadline = clock::now() + second;
+        loop {
+            tracker.follow_until(deadline, meter)?;
+            processes::list_pids(&mut listing)?;
+            tracker.observe(&listing, meter)?;
+            for event in tracker.drain_events() {
+                match event {
+                    Event::Start { pid, .. } => {
+                        started.insert(pid);
+                    }
+                    Event::Exit {
+                        pid, last: Ok(_), ..
+                    } => {
+                        read_at_exit.insert(pid);
+                    }
+                    Event::Exit { .. } | Event::Exec { .. } => {}
+                }
+            }
+
+            if all_exited(&mut generators)? {
+                break;
+            }
+            deadline += second;
+        }
+
+        Ok((started, read_at_exit, read_children(pid_files)?))
+    })();
+
+    if followed.is_err() {
+        for generator in &mut generators {
+            let _ = generator.kill();
+            let _ = generator.wait();
+        }
+    }
+    followed
+}
+
+fn remove_pid_files(pid_files: &[PathBuf]) -> io::Result<()> {
+    for file in pid_files {
+        match std::fs::remove_file(file) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+            _ => {}
+        }
     }
     Ok(())
 }

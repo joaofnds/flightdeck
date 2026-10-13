@@ -7,6 +7,7 @@ set -eu
 out=$1 rescan_ms=$2 per_second=$3
 shift 3
 bin=$(dirname "$0")/../../target/release
+burst_seconds=30 child_ms=6 generators=2
 
 {
   date
@@ -15,8 +16,9 @@ bin=$(dirname "$0")/../../target/release
 } > "$out"
 "$@" --seconds 60 > "$out.collector" 2>&1 &
 collector=$!
+trap 'kill "$collector" 2>/dev/null; rm -f "$out.collector" "$out.probe"' EXIT
 sleep 15
-"$bin/followprobe" "$rescan_ms" "$per_second" 30 6 2 > "$out.probe" 2>&1
+"$bin/followprobe" "$rescan_ms" "$per_second" "$burst_seconds" "$child_ms" "$generators" \
+  > "$out.probe" 2>&1
 wait "$collector"
 cat "$out.collector" "$out.probe" >> "$out"
-rm "$out.collector" "$out.probe"
