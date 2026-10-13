@@ -670,6 +670,7 @@ mod tests {
         // keeps its room.
         // Method: record a start into a full list with room for one.
         let mut events = full_event_list();
+        let capacity = events.capacity();
         let mut counts = Counts::default();
 
         let start = Event::Start {
@@ -678,7 +679,8 @@ mod tests {
         };
         record(&mut events, &mut counts, start);
 
-        assert_eq!((1, 1), (events.len(), events.capacity()));
+        assert_eq!(1, events.len());
+        assert_eq!(capacity, events.capacity());
         let dropped = Counts {
             dropped_starts: 1,
             ..Counts::default()
@@ -692,11 +694,13 @@ mod tests {
         // keeps its room.
         // Method: record an exec into a full list with room for one.
         let mut events = full_event_list();
+        let capacity = events.capacity();
         let mut counts = Counts::default();
 
         record(&mut events, &mut counts, Event::Exec { pid: 2 });
 
-        assert_eq!((1, 1), (events.len(), events.capacity()));
+        assert_eq!(1, events.len());
+        assert_eq!(capacity, events.capacity());
         let dropped = Counts {
             dropped_execs: 1,
             ..Counts::default()
@@ -710,6 +714,7 @@ mod tests {
         // keeps its room.
         // Method: record an exit into a full list with room for one.
         let mut events = full_event_list();
+        let capacity = events.capacity();
         let mut counts = Counts::default();
 
         let exit = Event::Exit {
@@ -719,7 +724,8 @@ mod tests {
         };
         record(&mut events, &mut counts, exit);
 
-        assert_eq!((1, 1), (events.len(), events.capacity()));
+        assert_eq!(1, events.len());
+        assert_eq!(capacity, events.capacity());
         let dropped = Counts {
             dropped_exits: 1,
             ..Counts::default()

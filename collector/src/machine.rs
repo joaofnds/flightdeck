@@ -364,11 +364,12 @@ mod tests {
         // Goal: macOS reporting more CPUs than the limit is an error, and the list keeps its room.
         // Method: read this Mac, which has more than one CPU, into room for one.
         let mut machine = Machine::new(1).unwrap();
+        let capacity = machine.cpus.capacity();
 
         let read = machine.read();
 
         assert_eq!(io::ErrorKind::QuotaExceeded, read.unwrap_err().kind());
-        assert_eq!(1, machine.cpus.capacity());
+        assert_eq!(capacity, machine.cpus.capacity());
     }
 
     #[test]

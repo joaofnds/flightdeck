@@ -417,11 +417,12 @@ mod tests {
         // capacity it was given, as Tiger Style's limit on everything asks.
         // Method: list into a buffer with room for one pid, fewer than any Mac runs.
         let mut pids = Vec::with_capacity(1);
+        let capacity = pids.capacity();
 
         let listed = list_pids(&mut pids);
 
         assert_eq!(io::ErrorKind::QuotaExceeded, listed.unwrap_err().kind());
-        assert_eq!(1, pids.capacity());
+        assert_eq!(capacity, pids.capacity());
     }
 
     #[test]

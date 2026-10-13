@@ -387,11 +387,12 @@ mod tests {
         let mut states = States {
             active_ns: Vec::with_capacity(1),
         };
+        let capacity = states.active_ns.capacity();
 
         let read = read_active_states(core, &mut states, ioreport.timebase);
 
         assert_eq!(io::ErrorKind::QuotaExceeded, read.unwrap_err().kind());
-        assert_eq!(1, states.active_ns.capacity());
+        assert_eq!(capacity, states.active_ns.capacity());
     }
 
     #[test]

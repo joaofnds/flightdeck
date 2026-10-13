@@ -198,11 +198,12 @@ mod tests {
         // Method: fill a set with room for one coalition, then add a second.
         let mut coalitions = Coalitions::new(Timebase::read(), 1);
         coalitions.add(1).unwrap();
+        let capacity = coalitions.ids.capacity();
 
         let added = coalitions.add(2);
 
         assert_eq!(io::ErrorKind::QuotaExceeded, added.unwrap_err().kind());
-        assert_eq!(1, coalitions.ids.capacity());
+        assert_eq!(capacity, coalitions.ids.capacity());
     }
 
     #[test]

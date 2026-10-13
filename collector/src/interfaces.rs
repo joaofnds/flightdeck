@@ -308,11 +308,12 @@ mod tests {
         // size it was given.
         // Method: read into a buffer that holds one message's prefix, smaller than any dump.
         let mut interfaces = Interfaces::with_dump_size(MESSAGE_PREFIX_SIZE);
+        let capacity = interfaces.buffer.capacity();
 
         let read = interfaces.read_all();
 
         assert_eq!(io::ErrorKind::QuotaExceeded, read.unwrap_err().kind());
-        assert_eq!(MESSAGE_PREFIX_SIZE, interfaces.buffer.capacity());
+        assert_eq!(capacity, interfaces.buffer.capacity());
     }
 
     #[test]
