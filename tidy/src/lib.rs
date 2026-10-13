@@ -1,5 +1,6 @@
-//! Holds the repository to the rules of `docs/tiger-style.md` that rustfmt and clippy cannot
-//! check, as `TigerBeetle`'s `test "tidy"` does. It is only a test, run by `cargo test`.
+//! Holds the repository to the rules of `docs/tiger-style.md` and `AGENTS.md` that rustfmt
+//! and clippy cannot check, as `TigerBeetle`'s `test "tidy"` does. It is only a test, run by
+//! `cargo test`.
 #![cfg(test)]
 
 use std::ffi::OsStr;
@@ -79,6 +80,11 @@ fn file_findings(path: &str, bytes: &[u8]) -> Vec<String> {
     if script(path, bytes) {
         findings.push(format!("{path}: a script, which belongs in a Rust binary"));
     }
+    if toolchain_file(path) {
+        findings.push(format!(
+            "{path}: a toolchain file, which makes rustup install a toolchain on every clone"
+        ));
+    }
 
     let extension = Path::new(path).extension().and_then(OsStr::to_str);
     if matches!(extension, Some("rs" | "toml")) {
@@ -102,6 +108,97 @@ fn file_findings(path: &str, bytes: &[u8]) -> Vec<String> {
         }
     }
     findings
+}
+
+#[test]
+fn file_findings_applies_every_rule_to_rust_source() {
+    // Goal: Rust source is held to the column, discard and function rules, each finding led
+    // by the path and the line.
+    // Method: a function one line past the limit, then a long comment and a discard.
+    let text = file_findings_text();
+
+    let findings = file_findings("collector/src/main.rs", text.as_bytes());
+
+    assert_eq!(
+        findings,
+        [
+            "collector/src/main.rs:72: over 100 columns",
+            "collector/src/main.rs:73: discards a value",
+            "collector/src/main.rs:1: function over 70 lines",
+        ]
+    );
+}
+
+#[test]
+fn file_findings_applies_only_the_column_rule_to_toml() {
+    // Goal: a TOML file is held to the column rule and to no rule about Rust code.
+    // Method: the Rust source of the test above under a TOML name.
+    let text = file_findings_text();
+
+    let findings = file_findings("Cargo.toml", text.as_bytes());
+
+    assert_eq!(findings, ["Cargo.toml:72: over 100 columns"]);
+}
+
+#[test]
+fn file_findings_applies_no_text_rule_to_a_document() {
+    // Goal: Markdown may run past the limits, as the Tiger page's departures allow.
+    // Method: the Rust source of the test above under a Markdown name.
+    let text = file_findings_text();
+
+    let findings = file_findings("README.md", text.as_bytes());
+
+    assert!(findings.is_empty(), "{findings:?}");
+}
+
+#[test]
+fn file_findings_reports_a_script() {
+    // Goal: a script is reported by its path alone.
+    // Method: a shell script by its extension.
+    let findings = file_findings("tools/measure.sh", b"echo\n");
+
+    assert_eq!(
+        findings,
+        ["tools/measure.sh: a script, which belongs in a Rust binary"]
+    );
+}
+
+#[test]
+fn file_findings_reports_rust_source_that_is_not_utf8() {
+    // Goal: Rust source that is not UTF-8 is reported, since no text rule can read it.
+    // Method: a byte that never starts a UTF-8 character.
+    let findings = file_findings("collector/src/main.rs", b"\xff\n");
+
+    assert_eq!(findings.len(), 1);
+    assert!(
+        findings[0].starts_with("collector/src/main.rs: not UTF-8"),
+        "{}",
+        findings[0]
+    );
+}
+
+#[test]
+fn file_findings_reports_a_toolchain_file() {
+    // Goal: a file that pins the toolchain is reported wherever it sits, since rustup
+    // installs that toolchain on the machine of anyone who runs cargo beside it.
+    // Method: both names rustup reads, at the root and in a package.
+    let reason = "a toolchain file, which makes rustup install a toolchain on every clone";
+
+    let root = file_findings("rust-toolchain.toml", b"[toolchain]\n");
+    let package = file_findings("collector/rust-toolchain", b"1.95.0\n");
+
+    assert_eq!(root, [format!("rust-toolchain.toml: {reason}")]);
+    assert_eq!(package, [format!("collector/rust-toolchain: {reason}")]);
+}
+
+/// Builds a function one line past `FUNCTION_LINES_MAX`, then a comment past `COLUMNS_MAX`
+/// on line 72 and a discard on line 73.
+fn file_findings_text() -> String {
+    function_text("", FUNCTION_LINES_MAX + 1)
+        + "// "
+        + &"x".repeat(COLUMNS_MAX)
+        + "\n"
+        + "let _ = read();\n"
 }
 
 /// The number of each line, counted from 1, that runs past `COLUMNS_MAX` columns.
@@ -318,6 +415,15 @@ fn function_text(indentation: &str, line_count: usize) -> String {
     );
     let steps = format!("{indentation}    step_once();\n").repeat(line_count - 5);
     format!("{indentation}fn step() {{\n{block}{steps}{indentation}}}\n")
+}
+
+/// Tells whether the file pins the toolchain, which rustup by default installs for anyone
+/// who runs cargo beside it.
+fn toolchain_file(path: &str) -> bool {
+    assert!(!path.is_empty());
+
+    let name = Path::new(path).file_name().and_then(OsStr::to_str);
+    matches!(name, Some("rust-toolchain" | "rust-toolchain.toml"))
 }
 
 /// Tells whether the file is a script, by its name or by a shebang on its first line.
