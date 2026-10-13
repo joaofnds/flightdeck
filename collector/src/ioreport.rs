@@ -927,6 +927,10 @@ mod tests {
 
     #[test]
     fn reads_the_performance_states_of_every_logical_cpu() {
+        // Goal: every logical CPU has its performance states read, so no CPU's active time is
+        // missing.
+        // Method: read IOReport once on this Mac, and count the cores read against its
+        // logical CPUs.
         let mut ioreport = open();
 
         ioreport.read().unwrap();
@@ -984,6 +988,10 @@ mod tests {
 
     #[test]
     fn counts_a_busy_cpu_in_its_cores_active_time() {
+        // Goal: time a CPU spends running shows in the cores' active time, and never more of it
+        // than every CPU could spend in that time.
+        // Method: spin this thread for 200 ms between two reads, and bound the active time the
+        // cores gained below by the spin and above by the time passed on every logical CPU.
         let mut ioreport = open();
         let busy = Duration::from_millis(200);
         let start = Instant::now();
@@ -998,7 +1006,11 @@ mod tests {
             .checked_sub(before)
             .expect("the cores' active time only grows");
         assert!(
-            active >= busy && active <= elapsed * logical_cpus(),
+            active >= busy,
+            "{active:?} active across the cores in {elapsed:?}"
+        );
+        assert!(
+            active <= elapsed * logical_cpus(),
             "{active:?} active across the cores in {elapsed:?}"
         );
     }
@@ -1056,6 +1068,8 @@ mod tests {
 
     #[test]
     fn counts_time_the_gpu_spends_in_active_states() {
+        // Goal: the GPU's time in its active states reads as more than none.
+        // Method: read IOReport once on this Mac, whose GPU has run since it started.
         let mut ioreport = open();
 
         ioreport.read().unwrap();
@@ -1065,6 +1079,8 @@ mod tests {
 
     #[test]
     fn counts_the_energy_the_gpu_spends() {
+        // Goal: the GPU's energy reads as more than none.
+        // Method: read IOReport once on this Mac, whose GPU has run since it started.
         let mut ioreport = open();
 
         ioreport.read().unwrap();
