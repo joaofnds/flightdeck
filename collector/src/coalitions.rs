@@ -37,6 +37,9 @@ unsafe extern "C" {
 }
 
 pub fn coalition_of(pid: i32) -> io::Result<Option<u64>> {
+    assert!(pid >= 0);
+    assert!(pid <= processes::PID_MAX);
+
     let info = unsafe { processes::pid_info::<PidCoalitionInfo>(pid, PROC_PIDCOALITIONINFO) }?;
 
     match info {
@@ -82,33 +85,47 @@ impl Coalitions {
     pub fn new(timebase: Timebase, coalition_limit: usize) -> Self {
         assert!(coalition_limit > 0);
 
-        Self {
+        let coalitions = Self {
             timebase,
             ids: Vec::with_capacity(coalition_limit),
             read: Vec::with_capacity(coalition_limit),
-        }
+        };
+        assert!(coalitions.ids.capacity() >= coalition_limit);
+        assert!(coalitions.read.capacity() >= coalitions.ids.capacity());
+        coalitions
     }
 
     /// Adds the coalition `id` unless it holds it already. A coalition past the limit is an
     /// error, and the list does not grow.
     pub fn add(&mut self, id: u64) -> io::Result<()> {
         let capacity = self.ids.capacity();
+        assert!(self.ids.len() <= capacity);
         let Err(position) = self.ids.binary_search(&id) else {
             return Ok(());
         };
-        if self.ids.len() == capacity {
-            return Err(io::Error::new(
+
+        if self.ids.len() < capacity {
+            self.ids.insert(position, id);
+            // The ids stay sorted, with each id once.
+            if position > 0 {
+                assert!(self.ids[position - 1] < id);
+            }
+            if position + 1 < self.ids.len() {
+                assert!(id < self.ids[position + 1]);
+            }
+            assert_eq!(capacity, self.ids.capacity());
+            Ok(())
+        } else {
+            Err(io::Error::new(
                 io::ErrorKind::QuotaExceeded,
                 format!("the coalitions filled the room for {capacity}"),
-            ));
+            ))
         }
-
-        self.ids.insert(position, id);
-        assert_eq!(capacity, self.ids.capacity());
-        Ok(())
     }
 
     pub fn read_all(&mut self) -> io::Result<()> {
+        assert!(self.ids.len() <= self.read.capacity());
+        assert!(self.ids.windows(2).all(|pair| pair[0] < pair[1]));
         self.read.clear();
 
         for &id in &self.ids {
@@ -162,6 +179,8 @@ fn read_all_retain(ids: &mut Vec<u64>, read: &[Coalition]) {
 /// failed, which it does by returning -1: true where it read the coalition, false where macOS
 /// no longer has it, and any other failure as the error it is.
 fn read_all_returned(returned: c_int, error: io::Error) -> io::Result<bool> {
+    assert!(error.raw_os_error().is_some());
+
     if returned == 0 {
         Ok(true)
     } else {
