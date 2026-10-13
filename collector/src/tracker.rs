@@ -129,7 +129,7 @@ impl Throttle {
             Step::Wait
         } else {
             self.armed = true;
-            Step::ArmAt(self.last_rescan + self.interval)
+            Step::ArmAt(self.last_rescan.saturating_add(self.interval))
         }
     }
 }
@@ -822,6 +822,16 @@ mod tests {
                 Step::ArmAt(LAST_RESCAN + 2 + INTERVAL),
                 throttle.step(LAST_RESCAN + INTERVAL)
             );
+        }
+
+        #[test]
+        fn arms_the_timer_for_the_last_tick_when_the_interval_runs_past_it() {
+            let mut throttle = Throttle::new(u64::MAX);
+            throttle.rescanned(LAST_RESCAN);
+
+            throttle.forked();
+
+            assert_eq!(Step::ArmAt(u64::MAX), throttle.step(LAST_RESCAN + 1));
         }
 
         #[test]
