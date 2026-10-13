@@ -211,11 +211,6 @@ impl Tracker {
             ));
         };
 
-        let queue = unsafe { kqueue() };
-        if queue < 0 {
-            return Err(io::Error::last_os_error());
-        }
-
         // A scan, a registration and a wait each hold at most one entry for every pid a
         // listing holds, so each list gets the listing's room once and never grows. A wait
         // takes up to RECEIVED_PER_WAIT events too, so the received list holds at least that.
@@ -223,8 +218,14 @@ impl Tracker {
         let room = listing.capacity();
         let known_count = usize::try_from(processes::PID_MAX).map_err(io::Error::other)? + 1;
 
+        let queue = unsafe { kqueue() };
+        if queue < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let queue = unsafe { OwnedFd::from_raw_fd(queue) };
+
         let mut tracker = Self {
-            queue: unsafe { OwnedFd::from_raw_fd(queue) },
+            queue,
             timebase,
             listing,
             known: vec![Known::default(); known_count],
