@@ -502,6 +502,8 @@ mod tests {
 
     #[test]
     fn picks_the_hottest_of_the_sensors_read() {
+        // Goal: the SoC sensor picked at open is the one reading the highest temperature.
+        // Method: pick among three sensors reading 41, 63.5 and 52 degrees, the hottest second.
         let readings = [
             (FloatKey(Key::named(*b"Tp01")), 41.0),
             (FloatKey(Key::named(*b"Tg05")), 63.5),
@@ -745,42 +747,40 @@ mod tests {
 
     #[test]
     fn reads_a_speed_for_every_fan() {
+        // Goal: each read takes one speed for every fan the SMC counts.
+        // Method: one read, against the fan count read on a connection of the test's own.
         let mut smc = Smc::open().unwrap();
-        let fans = Connection::open()
-            .unwrap()
-            .read(FAN_COUNT, UNSIGNED_8)
-            .unwrap()[0];
+        let fan_count = Connection::open().unwrap().fan_count().unwrap();
 
         smc.read().unwrap();
 
-        assert_eq!(usize::from(fans), smc.fan_rpm.len());
+        assert_eq!(usize::from(fan_count), smc.fan_rpm.len());
     }
 
     #[test]
     fn reads_each_fan_speed_in_rpm() {
+        // Goal: each fan's speed reads as revolutions a minute a fan can turn at.
+        // Method: one read, each speed held at or above 0, a fan standing still, and below
+        // 10,000 rpm.
         let mut smc = Smc::open().unwrap();
 
         smc.read().unwrap();
 
-        assert!(
-            smc.fan_rpm
-                .iter()
-                .all(|&rpm| (0.0..10_000.0).contains(&rpm)),
-            "{:?}",
-            smc.fan_rpm
-        );
+        for &rpm in &smc.fan_rpm {
+            assert!(rpm >= 0.0, "{rpm} rpm");
+            assert!(rpm < 10_000.0, "{rpm} rpm");
+        }
     }
 
     #[test]
     fn reads_the_temperature_of_a_soc_sensor() {
+        // Goal: the SoC sensor reads as a temperature a running chip can have.
+        // Method: one read, held above 15 and below 115 degrees.
         let mut smc = Smc::open().unwrap();
 
         smc.read().unwrap();
 
-        assert!(
-            smc.soc_celsius > 15.0 && smc.soc_celsius < 115.0,
-            "{} °C",
-            smc.soc_celsius
-        );
+        assert!(smc.soc_celsius > 15.0, "{} °C", smc.soc_celsius);
+        assert!(smc.soc_celsius < 115.0, "{} °C", smc.soc_celsius);
     }
 }
