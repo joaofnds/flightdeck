@@ -6,46 +6,12 @@ use crate::kernel::ESRCH;
 use crate::processes::{self, Unreadable};
 use crate::push_without_growing;
 
-#[repr(C)]
-#[derive(Default)]
-struct ResourceUsage {
-    tasks_started: u64,
-    tasks_exited: u64,
-    time_nonempty: u64,
-    cpu_time: u64,
-    interrupt_wakeups: u64,
-    platform_idle_wakeups: u64,
-    bytesread: u64,
-    byteswritten: u64,
-    gpu_time: u64,
-    cpu_time_billed_to_me: u64,
-    cpu_time_billed_to_others: u64,
-    energy: u64,
-}
-
-#[repr(C)]
-struct PidCoalitionInfo {
-    coalition_id: [u64; 2],
-    reserved: [u64; 3],
-}
-
-const PROC_PIDCOALITIONINFO: c_int = 20;
-const COALITION_TYPE_RESOURCE: usize = 0;
-
-unsafe extern "C" {
-    fn coalition_info_resource_usage(cid: u64, cru: *mut ResourceUsage, sz: usize) -> c_int;
-}
-
-pub fn coalition_of(pid: i32) -> io::Result<Option<u64>> {
-    assert!(pid >= 0);
-    assert!(pid <= processes::PID_MAX);
-
-    let info = unsafe { processes::pid_info::<PidCoalitionInfo>(pid, PROC_PIDCOALITIONINFO) }?;
-
-    match info {
-        Ok(info) => Ok(Some(info.coalition_id[COALITION_TYPE_RESOURCE])),
-        Err(Unreadable::Refused | Unreadable::Gone) => Ok(None),
-    }
+pub struct Coalitions {
+    timebase: Timebase,
+    /// The coalitions to read, sorted, with each id once. A coalition leaves once a read finds
+    /// no process in it.
+    ids: Vec<u64>,
+    pub read: Vec<Coalition>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -71,12 +37,25 @@ impl Coalition {
     }
 }
 
-pub struct Coalitions {
-    timebase: Timebase,
-    /// The coalitions to read, sorted, with each id once. A coalition leaves once a read finds
-    /// no process in it.
-    ids: Vec<u64>,
-    pub read: Vec<Coalition>,
+#[repr(C)]
+#[derive(Default)]
+struct ResourceUsage {
+    tasks_started: u64,
+    tasks_exited: u64,
+    time_nonempty: u64,
+    cpu_time: u64,
+    interrupt_wakeups: u64,
+    platform_idle_wakeups: u64,
+    bytesread: u64,
+    byteswritten: u64,
+    gpu_time: u64,
+    cpu_time_billed_to_me: u64,
+    cpu_time_billed_to_others: u64,
+    energy: u64,
+}
+
+unsafe extern "C" {
+    fn coalition_info_resource_usage(cid: u64, cru: *mut ResourceUsage, sz: usize) -> c_int;
 }
 
 impl Coalitions {
@@ -196,6 +175,27 @@ fn read_all_returned(returned: c_int, error: io::Error) -> io::Result<bool> {
                 format!("coalition_info_resource_usage returned {returned}, neither 0 nor -1"),
             ))
         }
+    }
+}
+
+#[repr(C)]
+struct PidCoalitionInfo {
+    coalition_id: [u64; 2],
+    reserved: [u64; 3],
+}
+
+const PROC_PIDCOALITIONINFO: c_int = 20;
+const COALITION_TYPE_RESOURCE: usize = 0;
+
+pub fn coalition_of(pid: i32) -> io::Result<Option<u64>> {
+    assert!(pid >= 0);
+    assert!(pid <= processes::PID_MAX);
+
+    let info = unsafe { processes::pid_info::<PidCoalitionInfo>(pid, PROC_PIDCOALITIONINFO) }?;
+
+    match info {
+        Ok(info) => Ok(Some(info.coalition_id[COALITION_TYPE_RESOURCE])),
+        Err(Unreadable::Refused | Unreadable::Gone) => Ok(None),
     }
 }
 
