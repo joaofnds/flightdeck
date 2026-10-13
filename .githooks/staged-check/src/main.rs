@@ -86,13 +86,14 @@ fn check(check: &Check) -> Result<(), Refusal> {
     assert!(check.export.is_absolute());
     assert!(!check.steps.is_empty());
 
+    let tree = check_tree(check)?;
     eprintln!(
-        "check: exporting the staged tree to {}",
+        "check: exporting the staged tree {tree} to {}",
         check.export.display()
     );
     run(
         &mut check_export_command(check),
-        EXPORT_LIMIT_MS,
+        GIT_LIMIT_MS,
         check.interrupted,
     )?;
     for step in check.steps {
@@ -102,6 +103,12 @@ fn check(check: &Check) -> Result<(), Refusal> {
             step.limit_ms,
             check.interrupted,
         )?;
+    }
+
+    // Git reads the index again once the hook exits, so a file staged while the steps ran
+    // would be committed unchecked. One staged after this comparison still gets through.
+    if check_tree(check)? != tree {
+        return Err(Refusal::IndexChanged);
     }
     Ok(())
 }
@@ -189,6 +196,35 @@ const STEPS: [Step; 6] = [
     },
 ];
 
+// The id of the tree the index holds, which names the content the commit would hold.
+fn check_tree(check: &Check) -> Result<String, Refusal> {
+    let mut command = check_git_command(check);
+    command.arg("write-tree").stdout(Stdio::piped());
+    let mut child = run_spawn(&mut command)?;
+    // The id fits in the pipe's buffer, so git exits without waiting for it to be read.
+    run_wait(&mut child, GIT_LIMIT_MS, check.interrupted)?;
+
+    let Some(stdout) = child.stdout.take() else {
+        unreachable!("the command's output is piped");
+    };
+    let printed = io::read_to_string(stdout).map_err(Refusal::Unreadable)?;
+    let unreadable = || {
+        Refusal::Unreadable(io::Error::other(format!(
+            "git write-tree printed {printed:?}"
+        )))
+    };
+    let tree = printed.trim_end();
+    // A SHA-1 id has 40 hexadecimal digits and a SHA-256 id has 64. Two empty outputs
+    // would compare equal and let any change through.
+    if !matches!(tree.len(), 40 | 64) {
+        return Err(unreadable());
+    }
+    if !tree.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(unreadable());
+    }
+    Ok(tree.to_owned())
+}
+
 // Exports the index, the tree the commit would hold, into an empty directory.
 fn check_export_command(check: &Check) -> Command {
     assert!(check.export.is_absolute());
@@ -200,13 +236,20 @@ fn check_export_command(check: &Check) -> Command {
     prefix.push("/");
     assert!(prefix.as_encoded_bytes().starts_with(b"--prefix=/"));
     assert!(prefix.as_encoded_bytes().ends_with(b"/"));
-    let mut command = Command::new("git");
+    let mut command = check_git_command(check);
     command
         .args(["checkout-index", "--all"])
         .arg(prefix)
+        .stdout(Stdio::inherit());
+    command
+}
+
+// Git in the repository being committed, reading the index git names.
+fn check_git_command(check: &Check) -> Command {
+    let mut command = Command::new("git");
+    command
         .current_dir(check.repository)
         .stdin(Stdio::null())
-        .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
     match check.index {
         Some(index) => command.env("GIT_INDEX_FILE", index),
@@ -241,21 +284,28 @@ fn check_step_command(
 }
 
 fn run(command: &mut Command, limit_ms: u32, interrupted: &AtomicBool) -> Result<(), Refusal> {
-    assert!(limit_ms > 0);
-    assert!(limit_ms.is_multiple_of(POLL_MS));
+    let mut child = run_spawn(command)?;
+    run_wait(&mut child, limit_ms, interrupted)
+}
 
-    // The command leads a process group of its own, so stopping it reaches what it started.
-    let mut child = command
+// The command leads a process group of its own, so stopping it reaches what it started.
+fn run_spawn(command: &mut Command) -> Result<Child, Refusal> {
+    command
         .process_group(0)
         .spawn()
-        .map_err(Refusal::Unstartable)?;
+        .map_err(Refusal::Unstartable)
+}
+
+fn run_wait(child: &mut Child, limit_ms: u32, interrupted: &AtomicBool) -> Result<(), Refusal> {
+    assert!(limit_ms > 0);
+    assert!(limit_ms.is_multiple_of(POLL_MS));
 
     // The standard library has no wait with a time limit, so the loop polls.
     for _ in 0..limit_ms / POLL_MS {
         let exited = match child.try_wait() {
             Ok(exited) => exited,
             Err(error) => {
-                run_stop(&mut child)?;
+                run_stop(child)?;
                 return Err(Refusal::Unwaitable(error));
             }
         };
@@ -267,13 +317,13 @@ fn run(command: &mut Command, limit_ms: u32, interrupted: &AtomicBool) -> Result
             };
         }
         if interrupted.load(Ordering::Relaxed) {
-            run_stop(&mut child)?;
+            run_stop(child)?;
             return Err(Refusal::Interrupted);
         }
         thread::sleep(Duration::from_millis(u64::from(POLL_MS)));
     }
 
-    run_stop(&mut child)?;
+    run_stop(child)?;
     Err(Refusal::Stopped { limit_ms })
 }
 
@@ -307,7 +357,9 @@ enum Refusal {
     Failed(ExitStatus),
     Stopped { limit_ms: u32 },
     Unstoppable(io::Error),
+    Unreadable(io::Error),
     Interrupted,
+    IndexChanged,
 }
 
 impl std::fmt::Display for Refusal {
@@ -323,7 +375,12 @@ impl std::fmt::Display for Refusal {
                 )
             }
             Refusal::Unstoppable(error) => write!(formatter, "it could not be stopped: {error}"),
+            Refusal::Unreadable(error) => write!(formatter, "its output was unreadable: {error}"),
             Refusal::Interrupted => write!(formatter, "it was interrupted and stopped"),
+            Refusal::IndexChanged => write!(
+                formatter,
+                "files were staged while it ran, so it did not check what git would commit"
+            ),
         }
     }
 }
@@ -370,12 +427,13 @@ const SIGNAL_KILL: i32 = 9;
 const SIGNAL_TERMINATE: i32 = 15;
 const SIGNAL_ERROR: isize = -1;
 const POLL_MS: u32 = 10;
-const EXPORT_LIMIT_MS: u32 = 30_000;
+// Exporting this repository's index took 10 ms on 2026-10-13, and writing its tree 7 ms.
+const GIT_LIMIT_MS: u32 = 30_000;
 
 // `run` polls a limit in whole intervals, so each limit is a positive multiple of one.
 const _: () = {
-    assert!(EXPORT_LIMIT_MS > 0);
-    assert!(EXPORT_LIMIT_MS.is_multiple_of(POLL_MS));
+    assert!(GIT_LIMIT_MS > 0);
+    assert!(GIT_LIMIT_MS.is_multiple_of(POLL_MS));
     assert!(!STEPS.is_empty());
     let mut index = 0;
     while index < STEPS.len() {
@@ -560,6 +618,32 @@ mod tests {
             "{outcome:?}"
         );
         assert!(!export.join("touched").exists());
+    }
+
+    // Goal: a file staged while the check runs, which git would commit unchecked since it
+    // reads the index again after the hook, refuses the commit.
+    // Method: run a check whose one step stages a second file in the scratch repository.
+    #[test]
+    fn refuses_a_commit_whose_index_changed_while_it_ran() {
+        let scratch = Scratch::new("refuses_a_commit_whose_index");
+        let repository = scratch.repository("staged\n");
+        fs::write(repository.join("late"), "late\n").unwrap();
+        let export = scratch.export();
+        let staging = Step {
+            program: "git",
+            arguments: &["-C", "../repository", "add", "late"],
+            limit_ms: 10_000,
+        };
+
+        let outcome = check(&Check {
+            repository: &repository,
+            index: None,
+            export: &export,
+            steps: &[staging],
+            interrupted: &NEVER_INTERRUPTED,
+        });
+
+        assert!(matches!(outcome, Err(Refusal::IndexChanged)), "{outcome:?}");
     }
 
     // Goal: the check exports the index git names in GIT_INDEX_FILE, which `git commit -a`
