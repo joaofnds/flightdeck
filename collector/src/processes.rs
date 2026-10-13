@@ -165,6 +165,10 @@ pub struct Task {
     pub unix_syscalls: i32,
 }
 
+/// The highest pid macOS gives a process, `PID_MAX` in XNU's `bsd/sys/proc_internal.h`, which
+/// the SDK does not declare. Pids count up to it and then wrap to low pids again.
+pub const PID_MAX: i32 = 99_999;
+
 /// Reads the most processes the system runs at once, `kern.maxproc`, which sizes every list
 /// that holds an entry for each process.
 pub fn process_limit() -> io::Result<usize> {

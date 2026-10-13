@@ -161,6 +161,8 @@ impl Throttle {
 
 const DEADLINE_TIMER: usize = 1;
 const RESCAN_TIMER: usize = 2;
+/// The timers a wait arms at most, the deadline and the rescan, each once.
+const TIMER_COUNT: usize = 2;
 const RECEIVED_PER_WAIT: usize = 64;
 
 /// The most process events a tick holds. A burst past it drops the rest and counts them by
@@ -180,21 +182,28 @@ impl Tracker {
             return Err(io::Error::last_os_error());
         }
 
+        // A scan, a registration and a wait each hold at most one entry for every pid a
+        // listing holds, so each list gets the listing's room once and never grows.
+        let listing = processes::pid_list(process_limit);
+        let room = listing.capacity();
+        assert!(RECEIVED_PER_WAIT <= room);
+        let known_count = usize::try_from(processes::PID_MAX).map_err(io::Error::other)? + 1;
+
         let mut tracker = Self {
             queue: unsafe { OwnedFd::from_raw_fd(queue) },
             timebase,
-            listing: processes::pid_list(process_limit),
-            known: Vec::new(),
-            lingering: Vec::new(),
+            listing,
+            known: vec![Known::default(); known_count],
+            lingering: Vec::with_capacity(room),
             scans: 0,
             throttle: Throttle::new(
                 timebase.ticks(u64::try_from(rescan_interval.as_nanos()).unwrap_or(u64::MAX)),
             ),
-            arming: Vec::new(),
-            changes: Vec::new(),
-            received: Vec::new(),
-            starting: Vec::new(),
-            exiting: Vec::new(),
+            arming: Vec::with_capacity(TIMER_COUNT),
+            changes: Vec::with_capacity(room),
+            received: vec![Kevent::new(0, 0, 0, 0, 0); room],
+            starting: Vec::with_capacity(room),
+            exiting: Vec::with_capacity(room),
             events: Vec::with_capacity(EVENTS_PER_TICK_MAX),
             counts: Counts::default(),
         };
@@ -204,7 +213,7 @@ impl Tracker {
     }
 
     pub fn follow_until(&mut self, deadline: u64, meter: &mut Meter) -> io::Result<()> {
-        self.arming.push(timer_at(DEADLINE_TIMER, deadline));
+        push_without_growing(&mut self.arming, timer_at(DEADLINE_TIMER, deadline));
 
         loop {
             let woke = meter.measure(Source::Events, || self.wait_and_handle())?;
@@ -225,7 +234,9 @@ impl Tracker {
                         Cause::Trailing => self.counts.trailing_rescans += 1,
                     }
                 }
-                Step::ArmAt(at) => self.arming.push(timer_at(RESCAN_TIMER, at)),
+                Step::ArmAt(at) => {
+                    push_without_growing(&mut self.arming, timer_at(RESCAN_TIMER, at));
+                }
                 Step::Wait => {}
             }
 
@@ -237,9 +248,10 @@ impl Tracker {
 
     pub fn observe(&mut self, listing: &[i32], meter: &mut Meter) -> io::Result<()> {
         meter.measure(Source::Scans, || {
-            self.compare(listing);
+            self.compare(listing)?;
             self.start_reused_pids();
-        });
+            io::Result::Ok(())
+        })?;
         self.throttle.rescanned(clock::now());
         self.counts.listing_rescans += 1;
         self.read_starts(meter);
@@ -259,8 +271,7 @@ impl Tracker {
         let mut listing = std::mem::take(&mut self.listing);
         let scanned = meter.measure(Source::Scans, || {
             processes::list_pids(&mut listing)?;
-            self.compare(&listing);
-            io::Result::Ok(())
+            self.compare(&listing)
         });
         self.listing = listing;
         scanned?;
@@ -270,7 +281,8 @@ impl Tracker {
         self.submit_watches(meter)
     }
 
-    fn compare(&mut self, listing: &[i32]) {
+    fn compare(&mut self, listing: &[i32]) -> io::Result<()> {
+        assert!(listing.len() < self.changes.capacity());
         let previous = self.scans;
         self.scans += 1;
         let reporting = previous > 0;
@@ -278,36 +290,31 @@ impl Tracker {
         self.lingering.clear();
 
         for &pid in listing {
-            let Ok(index) = usize::try_from(pid) else {
-                continue;
-            };
-
-            if index >= self.known.len() {
-                self.known.resize(index + 1, Known::default());
-            }
-
+            let index = compare_index(pid, self.known.len())?;
             let known = &mut self.known[index];
             let listed_before = reporting && known.listed_in == previous;
 
             known.listed_in = self.scans;
             if !listed_before {
                 known.exited = false;
-                self.changes.push(watch(pid));
+                push_without_growing(&mut self.changes, watch(pid));
                 if reporting {
-                    self.starting.push(pid);
+                    push_without_growing(&mut self.starting, pid);
                 }
             } else if known.exited {
-                self.lingering.push((pid, index));
+                push_without_growing(&mut self.lingering, (pid, index));
             }
         }
+
+        Ok(())
     }
 
     fn start_reused_pids(&mut self) {
         for &(pid, index) in &self.lingering {
             if processes::is_alive(pid) {
                 self.known[index].exited = false;
-                self.changes.push(watch(pid));
-                self.starting.push(pid);
+                push_without_growing(&mut self.changes, watch(pid));
+                push_without_growing(&mut self.starting, pid);
             }
         }
     }
@@ -341,7 +348,7 @@ impl Tracker {
             record(&mut self.events, &mut self.counts, Event::Exec { pid });
         }
         if event.fflags & NOTE_EXIT != 0 {
-            self.exiting.push((pid, Noticed::OnExit));
+            push_without_growing(&mut self.exiting, (pid, Noticed::OnExit));
         }
 
         let forked = event.fflags & NOTE_FORK != 0;
@@ -403,9 +410,8 @@ impl Tracker {
     }
 
     fn register_watches(&mut self) -> io::Result<()> {
+        assert!(self.changes.len() <= self.received.len());
         let count = c_int::try_from(self.changes.len()).unwrap_or(c_int::MAX);
-        self.received
-            .resize(self.changes.len(), Kevent::new(0, 0, 0, 0, 0));
         let none_pending = Timespec {
             tv_sec: 0,
             tv_nsec: 0,
@@ -431,7 +437,7 @@ impl Tracker {
             match i32::try_from(receipt.data).unwrap_or(EINVAL) {
                 0 => {}
                 EPERM => self.counts.refused_watches += 1,
-                ESRCH => self.exiting.push((pid, Noticed::AlreadyExited)),
+                ESRCH => push_without_growing(&mut self.exiting, (pid, Noticed::AlreadyExited)),
                 error => return Err(io::Error::from_raw_os_error(error)),
             }
         }
@@ -440,8 +446,7 @@ impl Tracker {
     }
 
     fn wait(&mut self) -> io::Result<usize> {
-        self.received
-            .resize(RECEIVED_PER_WAIT, Kevent::new(0, 0, 0, 0, 0));
+        assert!(RECEIVED_PER_WAIT <= self.received.len());
         loop {
             let count = unsafe {
                 kevent(
@@ -481,6 +486,30 @@ fn record(events: &mut Vec<Event>, counts: &mut Counts, event: Event) {
     }
 
     assert_eq!(capacity, events.capacity());
+}
+
+/// The index of `pid` in a table of `known_count` pids. A pid the table cannot hold is an
+/// error, since the kernel lists no pid below 0 or past `PID_MAX`.
+fn compare_index(pid: i32, known_count: usize) -> io::Result<usize> {
+    match usize::try_from(pid) {
+        Ok(index) if index < known_count => Ok(index),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "the listing holds pid {pid}, and the known table holds pids below {known_count}"
+            ),
+        )),
+    }
+}
+
+/// Pushes `item` onto `list`, which the tracker sized at startup to hold every item a scan
+/// or a wait gives it, so the list never grows.
+fn push_without_growing<T>(list: &mut Vec<T>, item: T) {
+    let capacity = list.capacity();
+    assert!(list.len() < capacity);
+
+    list.push(item);
+    assert_eq!(capacity, list.capacity());
 }
 
 fn watch(pid: i32) -> Kevent {
@@ -675,6 +704,24 @@ mod tests {
         assert_eq!(dropped, counts);
     }
 
+    #[test]
+    fn refuses_a_listed_pid_past_the_pid_ceiling() {
+        let mut tracker = Tracker::new(Timebase::read(), INTERVAL, process_limit()).unwrap();
+
+        let observed = tracker.observe(&[processes::PID_MAX + 1], &mut Meter::default());
+
+        assert_eq!(io::ErrorKind::InvalidData, observed.unwrap_err().kind());
+    }
+
+    #[test]
+    fn refuses_a_negative_listed_pid() {
+        let mut tracker = Tracker::new(Timebase::read(), INTERVAL, process_limit()).unwrap();
+
+        let observed = tracker.observe(&[-1], &mut Meter::default());
+
+        assert_eq!(io::ErrorKind::InvalidData, observed.unwrap_err().kind());
+    }
+
     fn follow_for(tracker: &mut Tracker, meter: &mut Meter, millis: u64) {
         let timebase = Timebase::read();
         tracker
@@ -846,15 +893,19 @@ mod tests {
         let mut tracker = Tracker::new(Timebase::read(), INTERVAL, process_limit()).unwrap();
         let mut listing = processes::pid_list(process_limit());
         processes::list_pids(&mut listing).unwrap();
-        listing.push(99_999);
+        listing.push(processes::PID_MAX);
 
         tracker.observe(&listing, &mut Meter::default()).unwrap();
 
         let events: Vec<Event> = tracker.drain_events().collect();
         assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, Event::Start { pid: 99_999, .. })),
+            events.iter().any(|e| matches!(
+                e,
+                Event::Start {
+                    pid: processes::PID_MAX,
+                    ..
+                }
+            )),
             "{events:?}"
         );
     }

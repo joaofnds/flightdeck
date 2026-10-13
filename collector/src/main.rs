@@ -7,7 +7,7 @@ use std::time::Duration;
 use collector::clock::{self, Timebase};
 use collector::collector::Collector;
 use collector::cost::{Cost, Meter, Snapshot, Source};
-use collector::processes::{Unreadable, Usage};
+use collector::processes::{self, Unreadable, Usage};
 use collector::schedule::Schedule;
 use collector::tracker::{Counts, Event, Noticed};
 
@@ -15,7 +15,6 @@ const QOS_CLASS_DEFAULT: u32 = 0x15;
 const TICK_PERIOD_NS: u64 = 1_000_000_000;
 const TICKS_PER_WINDOW: u64 = 10;
 const TICKS_PER_MINUTE: u64 = 60;
-const PID_LAP: u64 = 99_999;
 const BUDGET_SHARE_OF_A_CORE: f64 = 0.05;
 const DEFAULT_RESCAN_INTERVAL: Duration = Duration::ZERO;
 
@@ -279,7 +278,7 @@ fn processes_started(
     live_at_first_scan: &[i32],
     forks_counted: u64,
 ) -> Option<u64> {
-    if last_marker_pid <= first_marker_pid || forks_counted >= PID_LAP {
+    if last_marker_pid <= first_marker_pid || forks_counted >= pid_lap() {
         return None;
     }
 
@@ -291,6 +290,11 @@ fn processes_started(
         }
     }
     Some(between - live_between)
+}
+
+/// The pids macOS gives out before it wraps to low pids again.
+fn pid_lap() -> u64 {
+    u64::from(processes::PID_MAX.cast_unsigned())
 }
 
 fn missed(started: Option<u64>, found: u64) -> Option<u64> {
@@ -475,7 +479,111 @@ fn milliseconds(duration: Duration) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use super::*;
+
+    const TEST_TICK_PERIOD_NS: u64 = 20_000_000;
+
+    /// The system's allocator, counting the calls made to it on a thread while that thread
+    /// asks it to, so a test can see whether its own thread allocates.
+    struct Counting;
+
+    #[global_allocator]
+    static COUNTING: Counting = Counting;
+
+    thread_local! {
+        static COUNTING_THIS_THREAD: Cell<bool> = const { Cell::new(false) };
+        static CALLS_THIS_THREAD: Cell<u64> = const { Cell::new(0) };
+    }
+
+    fn count_call() {
+        if COUNTING_THIS_THREAD.get() {
+            CALLS_THIS_THREAD.set(CALLS_THIS_THREAD.get() + 1);
+        }
+    }
+
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            count_call();
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            count_call();
+            unsafe { System.alloc_zeroed(layout) }
+        }
+
+        unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+            count_call();
+            unsafe { System.dealloc(pointer, layout) }
+        }
+
+        unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+            count_call();
+            unsafe { System.realloc(pointer, layout, size) }
+        }
+    }
+
+    /// Returns how many times `work` called the allocator on this thread.
+    fn allocator_calls_in(work: impl FnOnce()) -> u64 {
+        CALLS_THIS_THREAD.set(0);
+        COUNTING_THIS_THREAD.set(true);
+        work();
+        COUNTING_THIS_THREAD.set(false);
+        CALLS_THIS_THREAD.get()
+    }
+
+    /// Runs `work` while another thread starts a process every 2 ms, so the collector's
+    /// ticks carry starts and exits.
+    fn while_forking<T>(work: impl FnOnce() -> T) -> T {
+        let stop = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while !stop.load(Ordering::Relaxed) {
+                    std::process::Command::new("/usr/bin/true")
+                        .status()
+                        .unwrap();
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            });
+            let result = work();
+            stop.store(true, Ordering::Relaxed);
+            result
+        })
+    }
+
+    #[test]
+    fn allocates_nothing_in_a_warm_tick_or_the_reports_it_closes() {
+        // Goal: a tick after the warm-up allocates nothing, with the window and minute
+        // reports it writes, as Tiger Style's allocation at startup only asks.
+        // Method: run ticks 20 ms apart until the minute closes, so they write six window
+        // reports and a minute report, while another thread starts processes, and count the
+        // allocator calls made on this thread.
+        let timebase = Timebase::read();
+        let mut sink = io::sink();
+        let mut run = Run::start(
+            timebase,
+            TEST_TICK_PERIOD_NS,
+            DEFAULT_RESCAN_INTERVAL,
+            &mut sink,
+        )
+        .unwrap();
+
+        let calls = while_forking(|| {
+            allocator_calls_in(|| {
+                let mut tick = run.first_tick;
+                while tick <= TICKS_PER_MINUTE {
+                    tick = run.tick(tick, &mut sink).unwrap();
+                }
+            })
+        });
+
+        assert!(run.whole.tally.starts > 0);
+        assert_eq!(0, calls);
+    }
 
     fn arguments(words: &[&str]) -> Vec<String> {
         words.iter().map(|&word| word.to_owned()).collect()
@@ -550,7 +658,7 @@ mod tests {
 
     #[test]
     fn gives_no_count_once_the_forks_counted_could_fill_a_lap_of_pids() {
-        assert_eq!(None, processes_started(100, 110, &[], PID_LAP));
+        assert_eq!(None, processes_started(100, 110, &[], pid_lap()));
     }
 
     #[test]
