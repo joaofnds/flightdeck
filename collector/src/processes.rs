@@ -103,7 +103,7 @@ const _: () = assert!(offset_of!(ProcTaskinfo, syscalls_unix) == 76);
 const _: () = assert!(offset_of!(ProcTaskinfo, csw) == 80);
 const _: () = assert!(offset_of!(ProcTaskinfo, threadnum) == 84);
 
-/// Room for `struct proc_bsdshortinfo`, which `is_running` asks for and never reads.
+/// Room for `struct proc_bsdshortinfo`, which `is_alive` asks for and never reads.
 #[repr(C)]
 struct ProcBsdshortinfo([u32; 16]);
 
