@@ -398,17 +398,21 @@ fn read_usage_returned(returned: c_int, error: io::Error) -> io::Result<Result<(
     }
 }
 
-/// Returns whether a process has `pid`. One that refuses to be read has it, since macOS
-/// reports a pid no process has as gone, never as refused.
+/// Returns whether a process has `pid`.
 pub fn is_alive(pid: i32) -> io::Result<bool> {
     assert!(pid >= 0);
     assert!(pid <= PID_MAX);
 
     let info = unsafe { pid_info::<ProcBsdshortinfo>(pid, PROC_PIDT_SHORTBSDINFO) }?;
+    Ok(is_alive_of(&info))
+}
 
+/// Returns whether the process a read of `info` was about is alive. One that refuses to be
+/// read is, since macOS reports a pid no process has as gone, never as refused.
+fn is_alive_of<T>(info: &Result<T, Unreadable>) -> bool {
     match info {
-        Ok(_) | Err(Unreadable::Refused) => Ok(true),
-        Err(Unreadable::Gone) => Ok(false),
+        Ok(_) | Err(Unreadable::Refused) => true,
+        Err(Unreadable::Gone) => false,
     }
 }
 
@@ -842,8 +846,18 @@ mod tests {
     #[test]
     fn finds_a_process_it_cannot_read_alive() {
         // Goal: a process whose task this user may not read is still found alive.
-        // Method: ask about launchd, whose task info a user without root is refused.
+        // Method: ask about launchd, whose task info a user without root is refused, though not
+        // the short BSD info that is_alive reads.
         assert!(is_alive(1).unwrap());
+    }
+
+    #[test]
+    fn finds_a_process_that_refuses_to_be_read_alive() {
+        // Goal: a process that refuses to be read is alive, since macOS reports a pid no process
+        // has as gone, never as refused.
+        // Method: take a refused read, since no process this user can name refuses the short BSD
+        // info that is_alive reads.
+        assert!(is_alive_of(&Err::<(), _>(Unreadable::Refused)));
     }
 
     #[test]
