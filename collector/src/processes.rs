@@ -255,11 +255,14 @@ pub fn read(pid: i32, timebase: Timebase) -> io::Result<Result<Process, Unreadab
 }
 
 pub fn read_usage(pid: i32, timebase: Timebase) -> io::Result<Result<Usage, Unreadable>> {
-    let usage = match rusage(pid)? {
-        Ok(usage) => usage,
-        Err(unreadable) => return Ok(Err(unreadable)),
-    };
+    let mut usage = std::mem::MaybeUninit::<RusageInfoV6>::uninit();
+    let returned = unsafe { proc_pid_rusage(pid, RUSAGE_INFO_V6, usage.as_mut_ptr().cast()) };
+    if let Err(unreadable) = read_usage_returned(returned, io::Error::last_os_error())? {
+        return Ok(Err(unreadable));
+    }
 
+    assert_eq!(0, returned);
+    let usage = unsafe { usage.assume_init_ref() };
     Ok(Ok(Usage {
         awake_ns_at_start: timebase.nanos(usage.proc_start_abstime),
         user_ns: timebase.nanos(usage.user_time),
@@ -278,13 +281,13 @@ pub fn read_usage(pid: i32, timebase: Timebase) -> io::Result<Result<Usage, Unre
     }))
 }
 
-fn rusage(pid: i32) -> io::Result<Result<RusageInfoV6, Unreadable>> {
-    let mut usage = std::mem::MaybeUninit::<RusageInfoV6>::uninit();
-    if unsafe { proc_pid_rusage(pid, RUSAGE_INFO_V6, usage.as_mut_ptr().cast()) } != 0 {
-        return unreadable_of(io::Error::last_os_error()).map(Err);
+/// Reads what a `proc_pid_rusage` `returned`, and the `error` it set where it failed.
+fn read_usage_returned(returned: c_int, error: io::Error) -> io::Result<Result<(), Unreadable>> {
+    if returned == 0 {
+        Ok(Ok(()))
+    } else {
+        unreadable_of(error).map(Err)
     }
-
-    Ok(Ok(unsafe { usage.assume_init() }))
 }
 
 pub fn is_alive(pid: i32) -> io::Result<bool> {
