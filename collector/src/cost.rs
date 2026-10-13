@@ -117,7 +117,7 @@ impl Snapshot {
             Ok(own) => own,
             Err(unreadable) => {
                 return Err(io::Error::other(format!(
-                    "cannot read the collector's own usage: {unreadable:?}"
+                    "cannot read this process's own usage: {unreadable:?}"
                 )));
             }
         };
