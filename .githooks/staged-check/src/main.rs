@@ -2,6 +2,7 @@ use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{self, Child, Command, ExitCode, ExitStatus, Stdio};
@@ -69,6 +70,8 @@ fn create_export(temp: &Path, pid: u32) -> io::Result<PathBuf> {
         )));
     }
 
+    create_export_private(temp)?;
+
     let export = temp.join(format!("flightdeck-staged-{pid}"));
     if let Err(error) = fs::create_dir(&export) {
         if error.kind() != io::ErrorKind::AlreadyExists {
@@ -80,6 +83,32 @@ fn create_export(temp: &Path, pid: u32) -> io::Result<PathBuf> {
     assert!(export.is_absolute());
     assert!(export.starts_with(temp));
     Ok(export)
+}
+
+// Cargo reads a configuration from every directory above the one it runs in, and the
+// configuration can name a program for cargo to run. So a directory above the export that
+// another user can write, as /tmp is, would let them run code as the committer.
+fn create_export_private(temp: &Path) -> io::Result<()> {
+    let user = getuid();
+    for directory in fs::canonicalize(temp)?.ancestors() {
+        let metadata = fs::metadata(directory)?;
+        let refusal = |reason: &str| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "{} {reason}, who could have cargo run a program as you",
+                    directory.display()
+                ),
+            )
+        };
+        if metadata.mode() & WRITABLE_BY_OTHERS != 0 {
+            return Err(refusal("is writable by other users"));
+        }
+        if ![ROOT, user].contains(&metadata.uid()) {
+            return Err(refusal("belongs to another user"));
+        }
+    }
+    Ok(())
 }
 
 fn check(check: &Check) -> Result<(), Refusal> {
@@ -439,6 +468,8 @@ fn catch_interrupts() -> io::Result<()> {
 }
 
 unsafe extern "C" {
+    // getuid(2), which cannot fail.
+    safe fn getuid() -> u32;
     // kill(2). A negative pid names a process group.
     safe fn kill(pid: i32, signal: i32) -> i32;
     // signal(3), which returns the previous handler as a pointer, or SIG_ERR.
@@ -452,6 +483,9 @@ const SIGNAL_QUIT: i32 = 3;
 const SIGNAL_KILL: i32 = 9;
 const SIGNAL_TERMINATE: i32 = 15;
 const SIGNAL_ERROR: isize = -1;
+// From <sys/stat.h>, S_IWGRP and S_IWOTH.
+const WRITABLE_BY_OTHERS: u32 = 0o022;
+const ROOT: u32 = 0;
 const POLL_MS: u32 = 10;
 // Exporting this repository's index took 10 ms on 2026-10-13, and writing its tree 7 ms.
 const GIT_LIMIT_MS: u32 = 30_000;
@@ -472,6 +506,7 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::AtomicBool;
     use std::time::Instant;
 
@@ -703,6 +738,26 @@ mod tests {
             fs::read_to_string(export.join("file")).unwrap(),
             "other index\n"
         );
+    }
+
+    // Goal: no other user can run code as the committer through a cargo configuration
+    // above the export, which cargo reads from every directory above the one it runs in.
+    // Method: make a scratch directory that every user can write, as /tmp is, and create
+    // the export in it.
+    #[test]
+    fn refuses_an_export_under_a_directory_other_users_can_write() {
+        let scratch = Scratch::new("refuses_an_export_under");
+        let shared = scratch.path.join("shared");
+        fs::create_dir(&shared).unwrap();
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o1777)).unwrap();
+
+        let outcome = create_export(&shared, 7);
+
+        assert_eq!(
+            outcome.map_err(|error| error.kind()),
+            Err(io::ErrorKind::PermissionDenied)
+        );
+        assert!(!shared.join("flightdeck-staged-7").exists());
     }
 
     // Goal: the check reads what the commit would hold, never the working tree.
