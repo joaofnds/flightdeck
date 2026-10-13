@@ -40,7 +40,7 @@ impl Collector {
             interfaces: Interfaces::default(),
             ioreport: IoReport::open(timebase, cpu_limit)?,
             smc: Smc::open()?,
-            processes: Sweep::default(),
+            processes: Sweep::new(process_limit),
             coalitions: Coalitions::new(timebase, coalition_limit),
             events: Vec::with_capacity(EVENTS_PER_TICK_MAX),
         };

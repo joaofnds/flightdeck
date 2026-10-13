@@ -312,7 +312,6 @@ fn unreadable_from_errno() -> Unreadable {
     }
 }
 
-#[derive(Default)]
 pub struct Sweep {
     pub read: Vec<Process>,
     pub refused: u32,
@@ -320,14 +319,29 @@ pub struct Sweep {
 }
 
 impl Sweep {
+    /// A sweep with room taken once for every process a listing holds, at most
+    /// `process_limit`.
+    #[must_use]
+    pub fn new(process_limit: usize) -> Self {
+        Self {
+            read: Vec::with_capacity(process_limit),
+            refused: 0,
+            gone: 0,
+        }
+    }
+
     pub fn run(&mut self, pids: &[i32], timebase: Timebase) {
+        assert!(pids.len() <= self.read.capacity());
         self.read.clear();
         self.refused = 0;
         self.gone = 0;
 
         for &pid in pids {
             match read(pid, timebase) {
-                Ok(process) => self.read.push(process),
+                Ok(process) => {
+                    assert!(self.read.len() < self.read.capacity());
+                    self.read.push(process);
+                }
                 Err(Unreadable::Refused) => self.refused += 1,
                 Err(Unreadable::Gone) => self.gone += 1,
             }
@@ -473,7 +487,7 @@ mod tests {
     #[test]
     fn reads_this_process_in_a_sweep() {
         let pid = std::process::id().cast_signed();
-        let mut sweep = Sweep::default();
+        let mut sweep = Sweep::new(1);
 
         sweep.run(&[pid], Timebase::read());
 
@@ -485,7 +499,7 @@ mod tests {
     fn reads_or_counts_every_listed_pid() {
         let mut pids = pid_list(process_limit().unwrap());
         list_pids(&mut pids).unwrap();
-        let mut sweep = Sweep::default();
+        let mut sweep = Sweep::new(process_limit().unwrap());
 
         sweep.run(&pids, Timebase::read());
 
@@ -493,6 +507,18 @@ mod tests {
             pids.len(),
             sweep.read.len() + usize::try_from(sweep.refused + sweep.gone).unwrap()
         );
+    }
+
+    #[test]
+    fn reads_a_listing_into_room_taken_at_startup() {
+        let limit = process_limit().unwrap();
+        let mut pids = pid_list(limit);
+        list_pids(&mut pids).unwrap();
+        let mut sweep = Sweep::new(limit);
+
+        sweep.run(&pids, Timebase::read());
+
+        assert_eq!(limit, sweep.read.capacity());
     }
 
     #[test]
