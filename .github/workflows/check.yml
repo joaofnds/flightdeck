@@ -1,0 +1,27 @@
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    # The collector reads macOS kernel interfaces and frameworks, so it builds only on macOS.
+    runs-on: macos-26
+    timeout-minutes: 15
+    env:
+      # Pinned, so that a newer clippy never refuses code that passed before. Move it forward
+      # in a commit of its own, together with the fixes the newer lints ask for.
+      RUSTUP_TOOLCHAIN: 1.95.0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install --profile minimal --component rustfmt,clippy --no-self-update
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --workspace --all-targets -- --deny warnings
+      - run: cargo test --locked --workspace
