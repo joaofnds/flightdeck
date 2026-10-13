@@ -310,7 +310,7 @@ impl Tracker {
             known.listed_in = self.scans;
             if !listed_before {
                 known.exited = false;
-                push_without_growing(&mut self.changes, watch(pid));
+                push_without_growing(&mut self.changes, watch(index));
                 if reporting {
                     push_without_growing(&mut self.starting, pid);
                 }
@@ -326,7 +326,7 @@ impl Tracker {
         for &(pid, index) in &self.lingering {
             if processes::is_alive(pid) {
                 self.known[index].exited = false;
-                push_without_growing(&mut self.changes, watch(pid));
+                push_without_growing(&mut self.changes, watch(index));
                 push_without_growing(&mut self.starting, pid);
             }
         }
@@ -531,9 +531,10 @@ fn errno_of(data: isize) -> io::Result<i32> {
     Ok(errno)
 }
 
-fn watch(pid: i32) -> Kevent {
+/// A watch on the process at `index` in the known table, whose index is its pid.
+fn watch(index: usize) -> Kevent {
     Kevent::new(
-        usize::try_from(pid).unwrap_or(0),
+        index,
         EVFILT_PROC,
         EV_ADD | EV_RECEIPT,
         NOTE_FORK | NOTE_EXEC | NOTE_EXIT,
