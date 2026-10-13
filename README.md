@@ -33,4 +33,13 @@ cargo build --release
 ./target/release/followprobe 5 1000 30 6 1   # RESCAN_MS PER_SECOND SECONDS CHILD_MS GENERATORS
 ```
 
-The check is `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`.
+Every commit runs the check: rustfmt, clippy with every warning an error, and the tests.
+It checks the tree the commit holds, exported from the index, so unstaged edits in the
+working tree neither refuse a sound commit nor pass a broken one. A clone turns it on
+with:
+
+```sh
+git config core.hooksPath .githooks
+```
+
+`.githooks/pre-commit` runs the same check on what is staged without committing.
