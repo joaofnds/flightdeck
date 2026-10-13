@@ -418,7 +418,7 @@ impl Tracker {
 
     fn register_watches(&mut self) -> io::Result<()> {
         assert!(self.changes.len() <= self.received.len());
-        let count = c_int::try_from(self.changes.len()).unwrap_or(c_int::MAX);
+        let count = c_int::try_from(self.changes.len()).map_err(io::Error::other)?;
         let none_pending = Timespec {
             tv_sec: 0,
             tv_nsec: 0,
@@ -454,14 +454,17 @@ impl Tracker {
 
     fn wait(&mut self) -> io::Result<usize> {
         assert!(RECEIVED_PER_WAIT <= self.received.len());
+        let arming_count = c_int::try_from(self.arming.len()).map_err(io::Error::other)?;
+        let received_count_max = c_int::try_from(RECEIVED_PER_WAIT).map_err(io::Error::other)?;
+
         loop {
             let count = unsafe {
                 kevent(
                     self.queue.as_raw_fd(),
                     self.arming.as_ptr(),
-                    c_int::try_from(self.arming.len()).unwrap_or(0),
+                    arming_count,
                     self.received.as_mut_ptr(),
-                    c_int::try_from(RECEIVED_PER_WAIT).unwrap_or(1),
+                    received_count_max,
                     std::ptr::null(),
                 )
             };
