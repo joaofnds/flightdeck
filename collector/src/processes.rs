@@ -300,11 +300,36 @@ pub(crate) unsafe fn pid_info<T>(pid: i32, flavor: c_int) -> io::Result<Result<T
     let mut info = std::mem::MaybeUninit::<T>::uninit();
     let size = c_int::try_from(size_of::<T>()).unwrap_or(0);
     let written = unsafe { proc_pidinfo(pid, flavor, 0, info.as_mut_ptr().cast(), size) };
-    if written != size {
-        return unreadable_of(io::Error::last_os_error()).map(Err);
+    if let Err(unreadable) = pid_info_written(written, size, io::Error::last_os_error())? {
+        return Ok(Err(unreadable));
     }
 
+    assert_eq!(size, written);
     Ok(Ok(unsafe { info.assume_init() }))
+}
+
+/// Reads what a `proc_pidinfo` asked for `size` bytes returned: the count of bytes it `written`,
+/// and the `error` it set where it failed, which it does by writing none. Any other count is
+/// info of another size than its type.
+fn pid_info_written(
+    written: c_int,
+    size: c_int,
+    error: io::Error,
+) -> io::Result<Result<(), Unreadable>> {
+    assert!(size > 0);
+
+    if written == size {
+        Ok(Ok(()))
+    } else {
+        if written == 0 {
+            unreadable_of(error).map(Err)
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("proc_pidinfo wrote {written} bytes of the {size} asked for"),
+            ))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -613,6 +638,16 @@ mod tests {
             Some(EINVAL),
             info.err().and_then(|error| error.raw_os_error())
         );
+    }
+
+    #[test]
+    fn refuses_info_shorter_than_asked_for() {
+        // Goal: info shorter than its type is an error rather than a reading, since the rest of
+        // the type would hold no bytes the kernel wrote, and no errno says why.
+        // Method: read a call that wrote 40 of 96 bytes and set no errno.
+        let written = pid_info_written(40, 96, io::Error::from_raw_os_error(0));
+
+        assert_eq!(io::ErrorKind::InvalidData, written.unwrap_err().kind());
     }
 
     #[test]
