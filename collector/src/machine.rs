@@ -1,7 +1,7 @@
 use std::ffi::{CStr, c_int, c_uint};
 use std::io;
 
-use crate::mach;
+use crate::kernel::{self, MachPort};
 
 // `processor_cpu_load_info.cpu_ticks` holds a core's ticks at the indices libc's CPU_STATE
 // constants name.
@@ -76,11 +76,11 @@ impl Pressure {
 }
 
 unsafe extern "C" {
-    fn mach_host_self() -> libc::mach_port_t;
+    fn mach_host_self() -> MachPort;
 }
 
 pub struct Machine {
-    host: libc::mach_port_t,
+    host: MachPort,
     page_size: u64,
     swap_usage: Sysctl,
     pressure_level: Sysctl,
@@ -147,7 +147,7 @@ impl Machine {
 
         unsafe {
             libc::vm_deallocate(
-                mach::task_self(),
+                kernel::task_self(),
                 info.addr(),
                 usize_from_u32(size) * size_of::<libc::integer_t>(),
             )

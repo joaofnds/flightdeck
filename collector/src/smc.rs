@@ -1,31 +1,28 @@
 use std::ffi::{c_char, c_void};
 use std::io;
 
-use crate::mach;
+use crate::kernel::{self, KernReturn, MachPort};
 
 #[link(name = "IOKit", kind = "framework")]
 unsafe extern "C" {
     fn IOServiceMatching(name: *const c_char) -> *mut c_void;
-    fn IOServiceGetMatchingService(
-        main_port: libc::mach_port_t,
-        matching: *mut c_void,
-    ) -> libc::mach_port_t;
+    fn IOServiceGetMatchingService(main_port: MachPort, matching: *mut c_void) -> MachPort;
     fn IOServiceOpen(
-        service: libc::mach_port_t,
-        owning_task: libc::mach_port_t,
+        service: MachPort,
+        owning_task: MachPort,
         kind: u32,
-        connection: *mut libc::mach_port_t,
-    ) -> libc::kern_return_t;
-    fn IOServiceClose(connection: libc::mach_port_t) -> libc::kern_return_t;
-    fn IOObjectRelease(object: libc::mach_port_t) -> libc::kern_return_t;
+        connection: *mut MachPort,
+    ) -> KernReturn;
+    fn IOServiceClose(connection: MachPort) -> KernReturn;
+    fn IOObjectRelease(object: MachPort) -> KernReturn;
     fn IOConnectCallStructMethod(
-        connection: libc::mach_port_t,
+        connection: MachPort,
         selector: u32,
         input: *const c_void,
         input_size: usize,
         output: *mut c_void,
         output_size: *mut usize,
-    ) -> libc::kern_return_t;
+    ) -> KernReturn;
 }
 
 const CALL_STRUCT: u32 = 2;
@@ -148,7 +145,7 @@ impl Smc {
     }
 }
 
-struct Connection(libc::mach_port_t);
+struct Connection(MachPort);
 
 impl Drop for Connection {
     fn drop(&mut self) {
@@ -169,7 +166,7 @@ impl Connection {
         }
 
         let mut connection = 0;
-        let opened = unsafe { IOServiceOpen(service, mach::task_self(), 0, &raw mut connection) };
+        let opened = unsafe { IOServiceOpen(service, kernel::task_self(), 0, &raw mut connection) };
         unsafe { IOObjectRelease(service) };
         if opened != 0 {
             return Err(io::Error::other(format!(

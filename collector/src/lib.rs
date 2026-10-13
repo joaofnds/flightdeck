@@ -4,7 +4,7 @@ pub mod collector;
 pub mod cost;
 pub mod interfaces;
 pub mod ioreport;
-mod mach;
+mod kernel;
 pub mod machine;
 pub mod processes;
 pub mod schedule;
