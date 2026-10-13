@@ -17,6 +17,7 @@ fn main() -> ExitCode {
         eprintln!("check: cannot catch interrupts: {error}");
         return ExitCode::FAILURE;
     }
+
     let export = match create_export(&env::temp_dir(), process::id()) {
         Ok(export) => export,
         Err(error) => {
@@ -27,6 +28,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    assert!(export.is_absolute());
 
     let index = env::var_os("GIT_INDEX_FILE");
     let mut outcome = check(&Check {
@@ -89,6 +91,8 @@ fn create_export(temp: &Path, pid: u32) -> io::Result<PathBuf> {
 // configuration can name a program for cargo to run. So a directory above the export that
 // another user can write, as /tmp is, would let them run code as the committer.
 fn create_export_private(temp: &Path) -> io::Result<()> {
+    assert!(temp.is_absolute());
+
     let user = getuid();
     for directory in fs::canonicalize(temp)?.ancestors() {
         let metadata = fs::metadata(directory)?;
@@ -310,6 +314,7 @@ fn check_git_command(check: &Check) -> Command {
         Some(index) => command.env("GIT_INDEX_FILE", index),
         None => command.env_remove("GIT_INDEX_FILE"),
     };
+    assert_eq!(command.get_current_dir(), Some(check.repository));
     command
 }
 
@@ -345,6 +350,8 @@ fn run(command: &mut Command, limit_ms: u32, interrupted: &AtomicBool) -> Result
 
 // The command leads a process group of its own, so stopping it reaches what it started.
 fn run_spawn(command: &mut Command) -> Result<Child, Refusal> {
+    assert!(!command.get_program().is_empty());
+
     command
         .process_group(0)
         .spawn()
@@ -468,11 +475,11 @@ fn catch_interrupts() -> io::Result<()> {
 }
 
 unsafe extern "C" {
-    // getuid(2), which cannot fail.
+    // The getuid(2) call, which cannot fail.
     safe fn getuid() -> u32;
-    // kill(2). A negative pid names a process group.
+    // The kill(2) call. A negative pid names a process group.
     safe fn kill(pid: i32, signal: i32) -> i32;
-    // signal(3), which returns the previous handler as a pointer, or SIG_ERR.
+    // The signal(3) call, which returns the previous handler as a pointer, or SIG_ERR.
     fn signal(signal: i32, handler: extern "C" fn(i32)) -> isize;
 }
 
@@ -485,9 +492,13 @@ const SIGNAL_TERMINATE: i32 = 15;
 const SIGNAL_ERROR: isize = -1;
 // From <sys/stat.h>, S_IWGRP and S_IWOTH.
 const WRITABLE_BY_OTHERS: u32 = 0o022;
+// The user id of root, who owns the directories above every user's own.
 const ROOT: u32 = 0;
+// A step's exit or an interrupt is seen within this, which a person at the terminal cannot
+// tell from at once, while the hook's own polling costs nothing that shows.
 const POLL_MS: u32 = 10;
-// Exporting this repository's index took 10 ms on 2026-10-13, and writing its tree 7 ms.
+// Exporting this repository's index took 10 ms on 2026-10-13, and writing its tree 7 ms,
+// so the limit leaves room for a far larger index on a busy machine.
 const GIT_LIMIT_MS: u32 = 30_000;
 
 // `run` polls a limit in whole intervals, so each limit is a positive multiple of one.
@@ -507,7 +518,6 @@ const _: () = {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::atomic::AtomicBool;
     use std::time::Instant;
 
     // Goal: a step whose command succeeds lets the commit through.
@@ -597,7 +607,8 @@ mod tests {
     // Goal: a step that runs past its limit refuses the commit, and nothing it started
     // outlives it, since a test binary that hangs is a grandchild of the cargo we start.
     // Method: run a shell that starts a background `sleep` and waits on it, give the step
-    // a 200 ms limit, then look for the background process by the pid it wrote down.
+    // a 1 s limit, which leaves the shell time to write down the background process's pid
+    // on a busy machine, then look for that process by its pid.
     #[test]
     fn stops_a_step_and_its_children_past_its_limit() {
         let scratch = Scratch::new("stops_a_step");
@@ -607,13 +618,15 @@ mod tests {
             .current_dir(&scratch.path);
         let started = Instant::now();
 
-        let outcome = run(&mut command, 200, &NEVER_INTERRUPTED);
+        let outcome = run(&mut command, 1_000, &NEVER_INTERRUPTED);
 
+        let elapsed = started.elapsed();
         assert!(
-            matches!(outcome, Err(Refusal::Stopped { limit_ms: 200 })),
+            matches!(outcome, Err(Refusal::Stopped { limit_ms: 1_000 })),
             "{outcome:?}"
         );
-        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(elapsed >= Duration::from_secs(1), "{elapsed:?}");
+        assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
         let grandchild: i32 = fs::read_to_string(scratch.path.join("grandchild"))
             .map(|text| text.trim().parse().unwrap())
             .unwrap();
@@ -782,6 +795,57 @@ mod tests {
         assert_eq!(fs::read_to_string(export.join("file")).unwrap(), "staged\n");
     }
 
+    // Goal: the check reads only what the index holds, so a file never staged stays out.
+    // Method: in a scratch repository with a file staged, leave a second file untracked,
+    // run the check, and look for the second file in the export.
+    #[test]
+    fn leaves_a_file_the_index_does_not_hold_out_of_the_export() {
+        let scratch = Scratch::new("leaves_a_file");
+        let repository = scratch.repository("staged\n");
+        fs::write(repository.join("untracked"), "untracked\n").unwrap();
+        let export = scratch.export();
+
+        let outcome = check(&Check {
+            repository: &repository,
+            index: None,
+            export: &export,
+            steps: &[PASSING],
+            interrupted: &NEVER_INTERRUPTED,
+        });
+
+        assert!(outcome.is_ok(), "{outcome:?}");
+        assert!(export.join("file").exists());
+        assert!(!export.join("untracked").exists());
+    }
+
+    // Goal: each step builds into a target directory inside the export, so it neither
+    // reuses nor overwrites a build of the working tree's.
+    // Method: run `env` as a step, given an environment naming another target directory,
+    // and read the one it printed.
+    #[test]
+    fn builds_each_step_inside_the_export() {
+        let scratch = Scratch::new("builds_each_step");
+        let environment = [
+            ("CARGO_TARGET_DIR", "target/hook"),
+            ("PATH", "/usr/bin:/bin"),
+        ]
+        .map(|(name, value)| (OsString::from(name), OsString::from(value)));
+        let printing = Step {
+            program: "env",
+            arguments: &[],
+            limit_ms: 1_000,
+        };
+
+        let output = check_step_command(&printing, &scratch.path, environment.into_iter())
+            .stdout(Stdio::piped())
+            .output()
+            .unwrap();
+
+        let printed = String::from_utf8(output.stdout).unwrap();
+        let expected = format!("CARGO_TARGET_DIR={}", scratch.path.join("target").display());
+        assert!(printed.lines().any(|line| line == expected), "{printed:?}");
+    }
+
     // Goal: no step can reach the repository being committed through the variables git
     // hands the hook, such as a test that runs git writing to the real index.
     // Method: run `env` as a step, given an environment holding git's variables and others,
@@ -936,7 +1000,13 @@ mod tests {
 
     impl Drop for Scratch {
         fn drop(&mut self) {
-            fs::remove_dir_all(&self.path).unwrap();
+            let removal = fs::remove_dir_all(&self.path);
+            // A second panic while a failed test unwinds would abort the test binary and
+            // lose every other test's report.
+            if thread::panicking() {
+                return;
+            }
+            removal.unwrap();
         }
     }
 
@@ -1000,7 +1070,8 @@ mod tests {
     }
 
     // The test's git must not see the variables git hands a hook, or it would write to the
-    // index of the repository being committed instead of the scratch one.
+    // index of the repository being committed instead of the scratch one. It reads no
+    // configuration of the user's, such as core.autocrlf, which would change what it stages.
     fn git(repository: &Path, arguments: &[&str]) {
         let status = git_command(repository).args(arguments).status().unwrap();
         assert!(status.success());
@@ -1012,7 +1083,9 @@ mod tests {
             .current_dir(repository)
             .env_remove("GIT_DIR")
             .env_remove("GIT_INDEX_FILE")
-            .env_remove("GIT_WORK_TREE");
+            .env_remove("GIT_WORK_TREE")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1");
         command
     }
 }
