@@ -121,7 +121,7 @@ pub struct Snapshot {
 
 impl Snapshot {
     pub fn take(meter: &Meter, timebase: Timebase) -> io::Result<Self> {
-        let own = match processes::read_usage(timebase, std::process::id().cast_signed())? {
+        let own = match processes::read_usage(timebase, processes::own_pid()?)? {
             Ok(own) => own,
             Err(unreadable) => {
                 return Err(io::Error::other(format!(

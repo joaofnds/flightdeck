@@ -299,6 +299,30 @@ fn list_pids_check(pids: &[i32]) -> io::Result<()> {
     }
 }
 
+/// Returns the pid of this process.
+pub fn own_pid() -> io::Result<i32> {
+    let pid = own_pid_check(std::process::id())?;
+
+    assert!(pid >= 0);
+    assert!(pid <= PID_MAX);
+    Ok(pid)
+}
+
+/// Checks that `pid`, which macOS reports as this process's, is one macOS gives a process.
+fn own_pid_check(pid: u32) -> io::Result<i32> {
+    if pid <= PID_MAX.cast_unsigned() {
+        let checked = pid.cast_signed();
+        assert!(checked >= 0);
+        assert!(checked <= PID_MAX);
+        Ok(checked)
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("this process has pid {pid}, past {PID_MAX}"),
+        ))
+    }
+}
+
 pub fn read(timebase: Timebase, pid: i32) -> io::Result<Result<Process, Unreadable>> {
     assert!(pid >= 0);
     assert!(pid <= PID_MAX);
@@ -577,6 +601,34 @@ mod tests {
         let checked = list_pids_check(&[0, PID_MAX]);
 
         assert!(checked.is_ok(), "{checked:?}");
+    }
+
+    #[test]
+    fn takes_an_own_pid_of_pid_max() {
+        // Goal: PID_MAX is a pid macOS gives, so this process may have it.
+        // Method: check an own pid of PID_MAX.
+        let checked = own_pid_check(PID_MAX.cast_unsigned());
+
+        assert_eq!(PID_MAX, checked.unwrap());
+    }
+
+    #[test]
+    fn refuses_an_own_pid_past_pid_max() {
+        // Goal: an own pid past the highest macOS gives is an error, since every function given
+        // a pid asserts it is one macOS gives.
+        // Method: check an own pid of PID_MAX + 1.
+        let checked = own_pid_check(100_000);
+
+        assert_eq!(io::ErrorKind::InvalidData, checked.unwrap_err().kind());
+    }
+
+    #[test]
+    fn refuses_an_own_pid_past_the_range_of_an_i32() {
+        // Goal: an own pid too large for an i32 is an error, rather than a negative pid.
+        // Method: check an own pid of u32::MAX, which cast_signed reads as -1.
+        let checked = own_pid_check(u32::MAX);
+
+        assert_eq!(io::ErrorKind::InvalidData, checked.unwrap_err().kind());
     }
 
     #[test]
