@@ -38,10 +38,12 @@ cargo build --release
 New and changed code here follows Tiger Style, as [docs/tiger-style.md](docs/tiger-style.md)
 reads it into Rust. The collector's older code does not follow it yet.
 
-GitHub Actions holds every push to `main` and every pull request to the check that page
-describes, with the steps and the toolchain `.github/workflows/check.yml` names. The
-repository installs no git hook, so nothing runs on your machine unless you run it. To run
-its steps before you push:
+GitHub Actions runs the check that page describes on every push to `main` and every pull
+request, with the steps and the toolchain `.github/workflows/check.yml` names. The
+repository installs no git hook, so nothing runs on your machine unless you run it. A clone
+that set `core.hooksPath` for the hook this repository once carried can drop it with
+`git config --unset core.hooksPath`. To get the check's verdict before you push, run its
+steps under that toolchain:
 
 ```sh
 cargo fmt --all --check
