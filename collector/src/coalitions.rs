@@ -58,7 +58,7 @@ pub struct Coalition {
 
 pub struct Coalitions {
     timebase: Timebase,
-    /// Sorted, each id once.
+    /// The coalitions to read, sorted, with each id once.
     ids: Vec<u64>,
     pub read: Vec<Coalition>,
 }

@@ -170,8 +170,8 @@ pub struct Task {
 /// the SDK does not declare. Pids count up to it and then wrap to low pids again.
 pub const PID_MAX: i32 = 99_999;
 
-/// Reads the most processes the system runs at once, `kern.maxproc`, which sizes every list
-/// that holds an entry for each process.
+/// Returns how many entries a list takes to hold one for every process macOS runs at once,
+/// which `kern.maxproc` gives.
 pub fn process_limit() -> io::Result<usize> {
     let limit: c_int = Sysctl::named(c"kern.maxproc")?.read()?;
     usize::try_from(limit).map_err(io::Error::other)
@@ -188,10 +188,10 @@ pub fn pid_list(process_limit: usize) -> Vec<i32> {
 /// grows. A listing that fills `into` may have been cut short, so it is an error.
 pub fn list_pids(into: &mut Vec<i32>) -> io::Result<()> {
     let capacity = into.capacity();
-    let room = c_int::try_from(capacity * size_of::<i32>()).map_err(io::Error::other)?;
+    let buffer_size = c_int::try_from(capacity * size_of::<i32>()).map_err(io::Error::other)?;
 
     into.resize(capacity, 0);
-    let count = unsafe { proc_listallpids(into.as_mut_ptr().cast(), room) };
+    let count = unsafe { proc_listallpids(into.as_mut_ptr().cast(), buffer_size) };
     let listed = match usize::try_from(count) {
         Ok(count) if count < capacity => {
             into.truncate(count);

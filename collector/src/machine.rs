@@ -183,6 +183,13 @@ unsafe extern "C" {
     fn vm_deallocate(task: MachPort, address: usize, size: usize) -> KernReturn;
 }
 
+/// Returns how many entries a list takes to hold one for every logical CPU the machine runs,
+/// which `hw.logicalcpu_max` gives.
+pub fn cpu_limit() -> io::Result<usize> {
+    let limit: c_int = Sysctl::named(c"hw.logicalcpu_max")?.read()?;
+    usize::try_from(limit).map_err(io::Error::other)
+}
+
 pub struct Machine {
     host: MachPort,
     page_size: u64,
@@ -190,13 +197,6 @@ pub struct Machine {
     pressure_level: Sysctl,
     pub cpus: Vec<CpuTicks>,
     pub memory: Memory,
-}
-
-/// Reads the most logical CPUs the machine runs, `hw.logicalcpu_max`, which sizes every list
-/// that holds an entry for each CPU.
-pub fn cpu_limit() -> io::Result<usize> {
-    let limit: c_int = Sysctl::named(c"hw.logicalcpu_max")?.read()?;
-    usize::try_from(limit).map_err(io::Error::other)
 }
 
 impl Machine {
@@ -223,16 +223,16 @@ impl Machine {
     }
 
     fn read_cpus(&mut self) -> io::Result<()> {
-        let mut count: u32 = 0;
+        let mut cpu_count: u32 = 0;
         let mut address: *mut c_int = std::ptr::null_mut();
-        let mut size: u32 = 0;
+        let mut info_count: u32 = 0;
         let result = unsafe {
             host_processor_info(
                 self.host,
                 PROCESSOR_CPU_LOAD_INFO,
-                &raw mut count,
+                &raw mut cpu_count,
                 &raw mut address,
-                &raw mut size,
+                &raw mut info_count,
             )
         };
         if result != KERN_SUCCESS {
@@ -243,20 +243,20 @@ impl Machine {
 
         let info = MachMemory {
             address,
-            size: usize_from_u32(size) * size_of::<c_int>(),
+            size: usize_from_u32(info_count) * size_of::<c_int>(),
         };
 
-        let count = usize_from_u32(count);
+        let cpu_count = usize_from_u32(cpu_count);
         let capacity = self.cpus.capacity();
-        if count > capacity {
+        if cpu_count > capacity {
             return Err(io::Error::new(
                 io::ErrorKind::QuotaExceeded,
-                format!("macOS reported {count} CPUs past the limit of {capacity}"),
+                format!("macOS reported {cpu_count} CPUs past the limit of {capacity}"),
             ));
         }
 
         let loads = unsafe {
-            std::slice::from_raw_parts(info.address.cast::<ProcessorCpuLoadInfo>(), count)
+            std::slice::from_raw_parts(info.address.cast::<ProcessorCpuLoadInfo>(), cpu_count)
         };
         self.cpus.clear();
         self.cpus.extend(loads.iter().map(|load| CpuTicks {
