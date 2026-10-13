@@ -503,14 +503,14 @@ impl Tracker {
         let Ok(receipts) = usize::try_from(receipts) else {
             return Err(io::Error::last_os_error());
         };
-        if receipts > self.changes.len() {
+        if receipts <= self.changes.len() {
+            assert!(receipts <= self.received.len());
+        } else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("kevent returned {receipts} receipts for {count} changes"),
             ));
         }
-
-        assert!(receipts <= self.received.len());
 
         for index in 0..receipts {
             let receipt = self.received[index];
@@ -545,13 +545,14 @@ impl Tracker {
             };
             if let Ok(count) = usize::try_from(count) {
                 self.arming.clear();
-                if count > RECEIVED_PER_WAIT {
-                    return Err(io::Error::new(
+                return if count <= RECEIVED_PER_WAIT {
+                    Ok(count)
+                } else {
+                    Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         format!("kevent returned {count} events for room of {RECEIVED_PER_WAIT}"),
-                    ));
-                }
-                return Ok(count);
+                    ))
+                };
             }
 
             let error = io::Error::last_os_error();
@@ -586,16 +587,21 @@ fn record(events: &mut Vec<Event>, counts: &mut Counts, event: Event) {
 /// error, since the kernel gives no pid below 0 or past `PID_MAX`.
 fn known_index(pid: i32, known_count: usize) -> io::Result<usize> {
     assert!(known_count > 0);
-
-    match usize::try_from(pid) {
-        Ok(index) if index < known_count => {
-            assert_eq!(Ok(pid), i32::try_from(index));
-            Ok(index)
-        }
-        _ => Err(io::Error::new(
+    let outside = || {
+        io::Error::new(
             io::ErrorKind::InvalidData,
             format!("pid {pid} is outside the known table, which holds pids below {known_count}"),
-        )),
+        )
+    };
+
+    let Ok(index) = usize::try_from(pid) else {
+        return Err(outside());
+    };
+    if index < known_count {
+        assert_eq!(Ok(pid), i32::try_from(index));
+        Ok(index)
+    } else {
+        Err(outside())
     }
 }
 
