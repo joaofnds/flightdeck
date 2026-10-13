@@ -411,11 +411,14 @@ fn key_count_check(key_count: u32) -> io::Result<u32> {
     Ok(key_count)
 }
 
+/// The sensor of the highest temperature among `readings`, leaving out a reading that is not
+/// a finite number.
 fn hottest(readings: impl IntoIterator<Item = (FloatKey, f32)>) -> Option<FloatKey> {
     readings
         .into_iter()
+        .filter(|(_, celsius)| celsius.is_finite())
         .max_by(|(_, one), (_, other)| one.total_cmp(other))
-        .map(|(key, _)| key)
+        .map(|(sensor, _)| sensor)
 }
 
 fn float_from([a, b, c, d, ..]: [u8; 32]) -> f32 {
@@ -435,6 +438,19 @@ mod tests {
         ];
 
         assert_eq!(Some(FloatKey(Key::named(*b"Tg05"))), hottest(readings));
+    }
+
+    #[test]
+    fn leaves_a_sensor_reading_no_number_out_of_the_hottest() {
+        // Goal: a sensor whose reading is not a number is never the hottest, though NaN orders
+        // above every temperature.
+        // Method: pick from a sensor reading 41 degrees and one reading NaN.
+        let readings = [
+            (FloatKey(Key::named(*b"Tp01")), 41.0),
+            (FloatKey(Key::named(*b"Tg05")), f32::NAN),
+        ];
+
+        assert_eq!(Some(FloatKey(Key::named(*b"Tp01"))), hottest(readings));
     }
 
     #[test]
