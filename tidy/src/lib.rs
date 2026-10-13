@@ -36,6 +36,40 @@ fn repository_is_tidy() {
     assert!(findings.is_empty(), "\n{}\n", findings.join("\n"));
 }
 
+#[test]
+fn release_profile_traps_overflow_and_aborts_on_a_panic() {
+    // Goal: the release build keeps the checks Tiger Style keeps in production.
+    // Method: read the `[profile.release]` table of the workspace manifest.
+    let manifest = repository_root().join("Cargo.toml");
+    let text = match fs::read_to_string(&manifest) {
+        Ok(text) => text,
+        Err(error) => panic!("cannot read {}: {error}", manifest.display()),
+    };
+
+    let settings = release_profile_settings(&text);
+
+    assert!(settings.contains(&"overflow-checks = true"), "{settings:?}");
+    assert!(settings.contains(&"panic = \"abort\""), "{settings:?}");
+}
+
+/// Lists the lines of the `[profile.release]` table in a manifest, trimmed, up to the next
+/// table.
+fn release_profile_settings(text: &str) -> Vec<&str> {
+    let mut settings = Vec::new();
+    let mut inside = false;
+    for line in text.lines() {
+        let setting = line.trim();
+        if setting.starts_with('[') {
+            inside = setting == "[profile.release]";
+        } else {
+            if inside {
+                settings.push(setting);
+            }
+        }
+    }
+    settings
+}
+
 fn repository_root() -> PathBuf {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     match manifest.parent() {
