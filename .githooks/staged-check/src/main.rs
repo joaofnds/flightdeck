@@ -62,17 +62,11 @@ const HOOK_MANIFEST: &str = ".githooks/staged-check/Cargo.toml";
 
 const STEPS: [Step; 6] = [
     Step {
-        arguments: &["fmt", "--quiet", "--all", "--check"],
+        arguments: &["fmt", "--all", "--check"],
         limit_ms: 60_000,
     },
     Step {
-        arguments: &[
-            "fmt",
-            "--quiet",
-            "--check",
-            "--manifest-path",
-            HOOK_MANIFEST,
-        ],
+        arguments: &["fmt", "--check", "--manifest-path", HOOK_MANIFEST],
         limit_ms: 60_000,
     },
     Step {
@@ -361,6 +355,41 @@ mod tests {
             .filter(|(_, value)| value.is_none())
             .collect();
         assert_eq!(removed, [(OsStr::new("GIT_INDEX_FILE"), None)]);
+    }
+
+    // Goal: a refused rustfmt step shows the diff it wants, so the refusal says what to fix.
+    // Method: lay out an export holding a misformatted workspace and a misformatted package
+    // at this package's path, run each rustfmt step there, and read what it printed.
+    #[test]
+    fn shows_the_diff_of_a_rustfmt_step_that_refuses() {
+        let scratch = Scratch::new("shows_the_diff");
+        let workspace = scratch.path.clone();
+        let hook_package = scratch.path.join(".githooks/staged-check");
+        for package in [&workspace, &hook_package] {
+            fs::create_dir_all(package.join("src")).unwrap();
+            let manifest = "[package]\nname = \"probe\"\nedition = \"2024\"\n\n[workspace]\n";
+            fs::write(package.join("Cargo.toml"), manifest).unwrap();
+            fs::write(package.join("src/main.rs"), "fn   main( ) {}\n").unwrap();
+        }
+        let rustfmt_steps: Vec<_> = STEPS
+            .iter()
+            .filter(|step| step.arguments[0] == "fmt")
+            .collect();
+        assert_eq!(rustfmt_steps.len(), 2);
+
+        for step in rustfmt_steps {
+            let output = step_command(step, &scratch.path, env::vars_os())
+                .output()
+                .unwrap();
+
+            assert!(!output.status.success(), "{:?}", step.arguments);
+            let printed = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                printed.contains("Diff in"),
+                "{:?} printed {printed:?}",
+                step.arguments
+            );
+        }
     }
 
     // A directory of its own for one test, removed when the test ends, pass or fail.
