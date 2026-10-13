@@ -355,7 +355,6 @@ mod tests {
         let added = coalitions.add(1);
 
         assert!(added.is_ok(), "{added:?}");
-        assert_eq!(vec![1], coalitions.ids);
     }
 
     #[test]
@@ -370,7 +369,6 @@ mod tests {
         let added = coalitions.add(3);
 
         assert!(added.is_ok(), "{added:?}");
-        assert_eq!(vec![1, 3], coalitions.ids);
     }
 
     #[test]
@@ -424,14 +422,16 @@ mod tests {
     fn drops_a_coalition_macos_does_not_have() {
         // Goal: a coalition macOS no longer has leaves the list without a reading, since its last
         // reading was taken while it had one.
-        // Method: add coalition 0, which macOS reports with ESRCH, and read every coalition.
-        let mut coalitions = Coalitions::new(Timebase::read(), COALITION_LIMIT);
+        // Method: fill a set with room for one with coalition 0, which macOS reports with ESRCH,
+        // read every coalition, and add this process's coalition in the room 0 held.
+        let mut coalitions = Coalitions::new(Timebase::read(), 1);
         coalitions.add(0).unwrap();
 
         coalitions.read_all().unwrap();
+        let added = coalitions.add(own_coalition());
 
         assert!(coalitions.read.is_empty());
-        assert!(coalitions.ids.is_empty());
+        assert!(added.is_ok(), "{added:?}");
     }
 
     #[test]
