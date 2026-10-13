@@ -338,9 +338,7 @@ impl Tracker {
         for index in 0..count {
             let event = self.received[index];
             if event.flags & EV_ERROR != 0 {
-                return Err(io::Error::from_raw_os_error(
-                    i32::try_from(event.data).unwrap_or(EINVAL),
-                ));
+                return Err(io::Error::from_raw_os_error(errno_of(event.data)?));
             }
 
             if event.filter == EVFILT_TIMER && event.ident == DEADLINE_TIMER {
@@ -447,7 +445,7 @@ impl Tracker {
         for index in 0..receipts {
             let receipt = self.received[index];
             let pid = pid_of(receipt.ident)?;
-            match i32::try_from(receipt.data).unwrap_or(EINVAL) {
+            match errno_of(receipt.data)? {
                 0 => {}
                 EPERM => self.counts.refused_watches += 1,
                 ESRCH => push_without_growing(&mut self.exiting, (pid, Noticed::AlreadyExited)),
@@ -527,6 +525,18 @@ fn pid_of(ident: usize) -> io::Result<i32> {
     Ok(pid)
 }
 
+/// The errno a kevent reports in the data of an error or a watch's receipt.
+fn errno_of(data: isize) -> io::Result<i32> {
+    let Ok(errno) = i32::try_from(data) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("a kevent error code of {data} holds no errno"),
+        ));
+    };
+
+    Ok(errno)
+}
+
 fn watch(pid: i32) -> Kevent {
     Kevent::new(
         usize::try_from(pid).unwrap_or(0),
@@ -600,7 +610,6 @@ const NOTE_ABSOLUTE: u32 = 0x8;
 const NOTE_MACHTIME: u32 = 0x100;
 const NOTE_MACH_CONTINUOUS_TIME: u32 = 0x80;
 const EPERM: c_int = 1;
-const EINVAL: c_int = 22;
 
 unsafe extern "C" {
     fn kqueue() -> c_int;
@@ -863,6 +872,19 @@ mod tests {
         let ident = usize::try_from(i32::MAX).unwrap() + 1;
 
         let read = pid_of(ident);
+
+        assert_eq!(io::ErrorKind::InvalidData, read.unwrap_err().kind());
+    }
+
+    #[test]
+    fn refuses_a_kevent_error_code_no_errno_holds() {
+        // Goal: an error code past what an errno's i32 holds is an error naming it, rather
+        // than EINVAL.
+        // Method: read the errno of the first error code past i32::MAX. The kernel reports
+        // errnos, so no real event carries one.
+        let data = isize::try_from(i32::MAX).unwrap() + 1;
+
+        let read = errno_of(data);
 
         assert_eq!(io::ErrorKind::InvalidData, read.unwrap_err().kind());
     }
