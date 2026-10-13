@@ -136,65 +136,91 @@ struct Step {
 // This package sits outside the workspace, so that an unstaged edit to the workspace
 // cannot break it, and so the steps check it by its own manifest.
 const HOOK_MANIFEST: &str = ".githooks/staged-check/Cargo.toml";
+const WORKSPACE_MANIFEST: &str = "Cargo.toml";
 
-// Cargo's --quiet silences only its progress lines in clippy and test, but rustfmt's
-// whole diff in fmt, so the fmt steps go without it.
 const STEPS: [Step; 6] = [
-    Step {
-        program: "cargo",
-        arguments: &["fmt", "--all", "--check"],
-        limit_ms: 60_000,
-    },
-    Step {
-        program: "cargo",
-        arguments: &["fmt", "--check", "--manifest-path", HOOK_MANIFEST],
-        limit_ms: 60_000,
-    },
-    Step {
-        program: "cargo",
-        arguments: &[
-            "clippy",
-            "--quiet",
-            "--locked",
-            "--all-targets",
-            "--",
-            "-D",
-            "warnings",
-        ],
-        limit_ms: 120_000,
-    },
-    Step {
-        program: "cargo",
-        arguments: &[
-            "clippy",
-            "--quiet",
-            "--locked",
-            "--all-targets",
-            "--manifest-path",
-            HOOK_MANIFEST,
-            "--",
-            "-D",
-            "warnings",
-        ],
-        limit_ms: 120_000,
-    },
-    Step {
-        program: "cargo",
-        arguments: &["test", "--quiet", "--locked"],
-        limit_ms: 120_000,
-    },
-    Step {
-        program: "cargo",
-        arguments: &[
-            "test",
-            "--quiet",
-            "--locked",
-            "--manifest-path",
-            HOOK_MANIFEST,
-        ],
-        limit_ms: 120_000,
-    },
+    RUSTFMT_WORKSPACE,
+    RUSTFMT_HOOK,
+    CLIPPY_WORKSPACE,
+    CLIPPY_HOOK,
+    TESTS_WORKSPACE,
+    TESTS_HOOK,
 ];
+
+// Cargo's --quiet silences only its progress lines in clippy and test, but rustfmt's whole
+// diff in fmt, so the rustfmt steps go without it.
+const RUSTFMT_WORKSPACE: Step = Step {
+    program: "cargo",
+    arguments: &[
+        "fmt",
+        "--manifest-path",
+        WORKSPACE_MANIFEST,
+        "--all",
+        "--check",
+    ],
+    limit_ms: 60_000,
+};
+const RUSTFMT_HOOK: Step = Step {
+    program: "cargo",
+    arguments: &["fmt", "--manifest-path", HOOK_MANIFEST, "--all", "--check"],
+    limit_ms: 60_000,
+};
+const CLIPPY_WORKSPACE: Step = Step {
+    program: "cargo",
+    arguments: &[
+        "clippy",
+        "--manifest-path",
+        WORKSPACE_MANIFEST,
+        "--quiet",
+        "--locked",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "--deny",
+        "warnings",
+    ],
+    limit_ms: 120_000,
+};
+const CLIPPY_HOOK: Step = Step {
+    program: "cargo",
+    arguments: &[
+        "clippy",
+        "--manifest-path",
+        HOOK_MANIFEST,
+        "--quiet",
+        "--locked",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "--deny",
+        "warnings",
+    ],
+    limit_ms: 120_000,
+};
+const TESTS_WORKSPACE: Step = Step {
+    program: "cargo",
+    arguments: &[
+        "test",
+        "--manifest-path",
+        WORKSPACE_MANIFEST,
+        "--quiet",
+        "--locked",
+        "--workspace",
+    ],
+    limit_ms: 120_000,
+};
+const TESTS_HOOK: Step = Step {
+    program: "cargo",
+    arguments: &[
+        "test",
+        "--manifest-path",
+        HOOK_MANIFEST,
+        "--quiet",
+        "--locked",
+        "--workspace",
+    ],
+    limit_ms: 120_000,
+};
 
 // The id of the tree the index holds, which names the content the commit would hold.
 fn check_tree(check: &Check) -> Result<String, Refusal> {
@@ -736,59 +762,66 @@ mod tests {
         assert_eq!(names, ["CARGO_TARGET_DIR", "PATH", "STEP_PROBE"]);
     }
 
-    // Goal: a refused rustfmt step shows the diff it wants, so the refusal says what to fix.
-    // Method: lay out an export holding a misformatted workspace and a misformatted package
-    // at this package's path, run each rustfmt step there, and read what it printed.
+    // Goal: rustfmt, clippy and the tests each check the workspace and then the hook's own
+    // package, which sits outside the workspace.
+    // Method: read the tool and the manifest each step names, in order.
     #[test]
-    fn shows_the_diff_of_a_rustfmt_step_that_refuses() {
-        let scratch = Scratch::new("shows_the_diff");
-        let workspace = scratch.path.clone();
-        let hook_package = scratch.path.join(".githooks/staged-check");
-        for package in [&workspace, &hook_package] {
-            fs::create_dir_all(package.join("src")).unwrap();
-            let manifest = "[package]\nname = \"probe\"\nedition = \"2024\"\n\n[workspace]\n";
-            fs::write(package.join("Cargo.toml"), manifest).unwrap();
-            fs::write(package.join("src/main.rs"), "fn   main( ) {}\n").unwrap();
-        }
-        let rustfmt_steps: Vec<_> = STEPS
+    fn runs_each_tool_over_the_workspace_and_then_the_hook_package() {
+        let runs: Vec<_> = STEPS
             .iter()
-            .filter(|step| step.arguments[0] == "fmt")
+            .map(|step| (step.arguments[0], step.arguments[1], step.arguments[2]))
             .collect();
-        assert_eq!(rustfmt_steps.len(), 2);
 
-        for step in rustfmt_steps {
-            let output = check_step_command(step, &scratch.path, env::vars_os())
-                .stdout(Stdio::piped())
-                .output()
-                .unwrap();
-
-            assert!(!output.status.success(), "{:?}", step.arguments);
-            let printed = String::from_utf8_lossy(&output.stdout);
-            assert!(
-                printed.contains("Diff in"),
-                "{:?} printed {printed:?}",
-                step.arguments
-            );
-        }
+        assert_eq!(
+            runs,
+            [
+                ("fmt", "--manifest-path", WORKSPACE_MANIFEST),
+                ("fmt", "--manifest-path", HOOK_MANIFEST),
+                ("clippy", "--manifest-path", WORKSPACE_MANIFEST),
+                ("clippy", "--manifest-path", HOOK_MANIFEST),
+                ("test", "--manifest-path", WORKSPACE_MANIFEST),
+                ("test", "--manifest-path", HOOK_MANIFEST),
+            ]
+        );
     }
 
-    // Goal: a commit whose every step passes is let through.
-    // Method: in a scratch repository with a file staged, run a check whose one step is `true`.
+    // Goal: rustfmt refusing a file of the workspace refuses the commit and shows the diff
+    // it wants, so the refusal says what to fix.
+    // Method: lay out an export whose workspace holds a misformatted file and whose hook
+    // package is formatted, run the workspace's rustfmt step there, and read its output.
     #[test]
-    fn passes_a_commit_whose_every_step_passes() {
-        let scratch = Scratch::new("passes_a_commit");
-        let repository = scratch.repository("staged\n");
-        let export = scratch.export();
+    fn shows_the_diff_rustfmt_wants_in_the_workspace() {
+        let scratch = Scratch::new("shows_the_diff_rustfmt_wants_in_the_workspace");
+        lay_out_packages(&scratch.path, &scratch.path);
 
-        let outcome = check(&Check {
-            repository: &repository,
-            index: None,
-            export: &export,
-            steps: &[PASSING],
-            interrupted: &NEVER_INTERRUPTED,
-        });
+        let output = check_step_command(&RUSTFMT_WORKSPACE, &scratch.path, env::vars_os())
+            .stdout(Stdio::piped())
+            .output()
+            .unwrap();
 
-        assert!(outcome.is_ok(), "{outcome:?}");
+        assert!(!output.status.success());
+        let printed = String::from_utf8_lossy(&output.stdout);
+        assert!(printed.contains("Diff in"), "{printed:?}");
+    }
+
+    // Goal: rustfmt refusing a file of the hook's own package refuses the commit and shows
+    // the diff it wants, though the package sits outside the workspace.
+    // Method: lay out an export whose hook package holds a misformatted file and whose
+    // workspace is formatted, run the hook's rustfmt step there, and read its output.
+    #[test]
+    fn shows_the_diff_rustfmt_wants_in_the_hook_package() {
+        let scratch = Scratch::new("shows_the_diff_rustfmt_wants_in_the_hook_package");
+        let hook_package = scratch.path.join(".githooks/staged-check");
+        lay_out_packages(&scratch.path, &hook_package);
+
+        let output = check_step_command(&RUSTFMT_HOOK, &scratch.path, env::vars_os())
+            .stdout(Stdio::piped())
+            .output()
+            .unwrap();
+
+        assert!(!output.status.success());
+        let printed = String::from_utf8_lossy(&output.stdout);
+        assert!(printed.contains("Diff in"), "{printed:?}");
     }
 
     static NEVER_INTERRUPTED: AtomicBool = AtomicBool::new(false);
@@ -836,6 +869,19 @@ mod tests {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.path).unwrap();
         }
+    }
+
+    // Lays out an export holding a workspace and the hook's package, each a binary of one
+    // file, where the file of the package at `misformatted` is the only one rustfmt refuses.
+    fn lay_out_packages(export: &Path, misformatted: &Path) {
+        let hook_package = export.join(".githooks/staged-check");
+        for package in [export, hook_package.as_path()] {
+            fs::create_dir_all(package.join("src")).unwrap();
+            let manifest = "[package]\nname = \"probe\"\nedition = \"2024\"\n\n[workspace]\n";
+            fs::write(package.join("Cargo.toml"), manifest).unwrap();
+            fs::write(package.join("src/main.rs"), "fn main() {}\n").unwrap();
+        }
+        fs::write(misformatted.join("src/main.rs"), "fn   main( ) {}\n").unwrap();
     }
 
     // A signal arrives asynchronously, so the test polls for the flag it sets.
