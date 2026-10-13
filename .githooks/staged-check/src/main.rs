@@ -824,6 +824,20 @@ mod tests {
         assert!(printed.contains("Diff in"), "{printed:?}");
     }
 
+    // Goal: the hook's package holds itself to the workspace's lints, which it cannot
+    // inherit, since it is a workspace of its own.
+    // Method: read the lint tables of both manifests, each line under its table's name.
+    #[test]
+    fn lints_itself_as_the_workspace_does() {
+        let workspace = include_str!("../../../Cargo.toml");
+        let hook = include_str!("../Cargo.toml");
+
+        assert_eq!(
+            lint_lines(hook, "[lints."),
+            lint_lines(workspace, "[workspace.lints.")
+        );
+    }
+
     static NEVER_INTERRUPTED: AtomicBool = AtomicBool::new(false);
     const PASSING: Step = Step {
         program: "true",
@@ -882,6 +896,28 @@ mod tests {
             fs::write(package.join("src/main.rs"), "fn main() {}\n").unwrap();
         }
         fs::write(misformatted.join("src/main.rs"), "fn   main( ) {}\n").unwrap();
+    }
+
+    // Each line of the tables whose header starts with `prefix`, after the table's name
+    // with the prefix taken off, so `[lints.clippy]` and `[workspace.lints.clippy]` match.
+    fn lint_lines(manifest: &str, prefix: &str) -> Vec<String> {
+        let mut lines = Vec::new();
+        let mut table = None;
+        for line in manifest.lines() {
+            if line.starts_with('[') {
+                table = line
+                    .strip_prefix(prefix)
+                    .and_then(|name| name.strip_suffix(']'));
+                continue;
+            }
+            let Some(name) = table else {
+                continue;
+            };
+            if !line.is_empty() {
+                lines.push(format!("{name}: {line}"));
+            }
+        }
+        lines
     }
 
     // A signal arrives asynchronously, so the test polls for the flag it sets.

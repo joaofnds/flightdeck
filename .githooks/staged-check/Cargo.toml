@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 # Its own workspace, so a root manifest broken in the working tree does not stop the hook's
-# own build.
+# own build. It cannot inherit the workspace's lints, so a test keeps the tables below equal.
 [workspace]
 
 # Tiger Style keeps assertions on in production and aborts on a panic. The hook runs this
@@ -19,3 +19,5 @@ unused_qualifications = "warn"
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
