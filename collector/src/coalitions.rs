@@ -215,14 +215,16 @@ struct PidCoalitionInfo {
 const _: () = assert!(size_of::<PidCoalitionInfo>() == 40);
 const _: () = assert!(offset_of!(PidCoalitionInfo, coalition_id) == 0);
 
-const PROC_PIDCOALITIONINFO: c_int = 20;
+impl processes::PidInfo for PidCoalitionInfo {
+    const FLAVOR: c_int = 20; // PROC_PIDCOALITIONINFO
+}
 const COALITION_TYPE_RESOURCE: usize = 0;
 
 pub fn coalition_of(pid: i32) -> io::Result<Option<u64>> {
     assert!(pid >= 0);
     assert!(pid <= processes::PID_MAX);
 
-    let info = unsafe { processes::pid_info::<PidCoalitionInfo>(pid, PROC_PIDCOALITIONINFO) }?;
+    let info = unsafe { processes::pid_info::<PidCoalitionInfo>(pid) }?;
     coalition_of_info(pid, info)
 }
 
@@ -442,7 +444,7 @@ mod tests {
         // refuses to read its resource usage with EINVAL.
         const COALITION_TYPE_JETSAM: usize = 1;
         let pid = std::process::id().cast_signed();
-        let info = unsafe { processes::pid_info::<PidCoalitionInfo>(pid, PROC_PIDCOALITIONINFO) };
+        let info = unsafe { processes::pid_info::<PidCoalitionInfo>(pid) };
         let jetsam = info.unwrap().ok().unwrap().coalition_id[COALITION_TYPE_JETSAM];
         let mut coalitions = Coalitions::new(Timebase::read(), COALITION_LIMIT);
         coalitions.add(jetsam).unwrap();

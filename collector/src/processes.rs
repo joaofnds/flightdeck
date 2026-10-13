@@ -165,6 +165,11 @@ const _: () = assert!(offset_of!(RusageInfoV6, energy_nj) == 336);
 
 const RUSAGE_INFO_V6: c_int = 6;
 
+/// Info `proc_pidinfo` gives about a process, which it gives under one flavor.
+pub(crate) trait PidInfo {
+    const FLAVOR: c_int;
+}
+
 /// A process's task, as `struct proc_taskinfo` declares it.
 #[repr(C)]
 struct ProcTaskinfo {
@@ -195,6 +200,10 @@ const _: () = assert!(offset_of!(ProcTaskinfo, syscalls_unix) == 76);
 const _: () = assert!(offset_of!(ProcTaskinfo, csw) == 80);
 const _: () = assert!(offset_of!(ProcTaskinfo, threadnum) == 84);
 
+impl PidInfo for ProcTaskinfo {
+    const FLAVOR: c_int = 4; // PROC_PIDTASKINFO
+}
+
 /// Room for `struct proc_bsdshortinfo`, which `is_alive` asks for and never reads.
 #[repr(C)]
 struct ProcBSDShortInfo([u32; 16]);
@@ -202,8 +211,9 @@ struct ProcBSDShortInfo([u32; 16]);
 const _: () = assert!(size_of::<ProcBSDShortInfo>() == 64);
 const _: () = assert!(align_of::<ProcBSDShortInfo>() == 4);
 
-const PROC_PIDTASKINFO: c_int = 4;
-const PROC_PIDT_SHORTBSDINFO: c_int = 13;
+impl PidInfo for ProcBSDShortInfo {
+    const FLAVOR: c_int = 13; // PROC_PIDT_SHORTBSDINFO
+}
 
 unsafe extern "C" {
     fn proc_listallpids(buffer: *mut c_void, buffer_size: c_int) -> c_int;
@@ -344,7 +354,7 @@ pub fn read(timebase: Timebase, pid: i32) -> io::Result<Result<Process, Unreadab
         Ok(usage) => usage,
         Err(unreadable) => return Ok(Err(unreadable)),
     };
-    let task = match unsafe { pid_info::<ProcTaskinfo>(pid, PROC_PIDTASKINFO) }? {
+    let task = match unsafe { pid_info::<ProcTaskinfo>(pid) }? {
         Ok(task) => task,
         Err(unreadable) => return Ok(Err(unreadable)),
     };
@@ -416,7 +426,7 @@ pub fn is_alive(pid: i32) -> io::Result<bool> {
     assert!(pid >= 0);
     assert!(pid <= PID_MAX);
 
-    let info = unsafe { pid_info::<ProcBSDShortInfo>(pid, PROC_PIDT_SHORTBSDINFO) }?;
+    let info = unsafe { pid_info::<ProcBSDShortInfo>(pid) }?;
     Ok(is_alive_of(&info))
 }
 
@@ -433,15 +443,15 @@ fn is_alive_of<T>(info: &Result<T, Unreadable>) -> bool {
 ///
 /// Every bit pattern must be a valid `T`, as it is for a C struct of integers, since
 /// `T` holds whatever bytes the kernel wrote.
-pub(crate) unsafe fn pid_info<T>(pid: i32, flavor: c_int) -> io::Result<Result<T, Unreadable>> {
+pub(crate) unsafe fn pid_info<T: PidInfo>(pid: i32) -> io::Result<Result<T, Unreadable>> {
+    const { assert!(T::FLAVOR > 0) };
     assert!(pid >= 0);
     assert!(pid <= PID_MAX);
-    assert!(flavor > 0);
 
     let mut info = std::mem::MaybeUninit::<T>::uninit();
     let size = pid_info_size::<T>();
     assert!(size > 0);
-    let written = unsafe { proc_pidinfo(pid, flavor, 0, info.as_mut_ptr().cast(), size) };
+    let written = unsafe { proc_pidinfo(pid, T::FLAVOR, 0, info.as_mut_ptr().cast(), size) };
     if let Err(unreadable) = pid_info_written::<T>(written, io::Error::last_os_error())? {
         return Ok(Err(unreadable));
     }
@@ -837,9 +847,14 @@ mod tests {
         // Goal: an errno other than EPERM and ESRCH is an error rather than a refusal, so a change
         // in macOS shows as one instead of as every process refusing.
         // Method: ask for an info flavor macOS does not have, which it refuses with EINVAL.
+        #[repr(C)]
+        struct UnknownInfo([u32; 24]);
+        impl PidInfo for UnknownInfo {
+            const FLAVOR: c_int = 9_999;
+        }
         let pid = std::process::id().cast_signed();
 
-        let info = unsafe { pid_info::<ProcTaskinfo>(pid, 9_999) };
+        let info = unsafe { pid_info::<UnknownInfo>(pid) };
 
         assert_eq!(
             Some(EINVAL),
