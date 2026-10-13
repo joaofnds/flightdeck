@@ -115,6 +115,9 @@ pub struct States {
 /// The most active performance states read from one channel, three times the 20 a core of
 /// the M5 Pro reports.
 const ACTIVE_STATES_MAX: usize = 64;
+/// The most states learned from one channel, past ten times the 22 a core of the M5 Pro
+/// reports.
+const STATES_MAX: i32 = 256;
 
 impl States {
     fn new(active_states_max: usize) -> Self {
@@ -280,11 +283,11 @@ fn core_at(cores: &mut [States], index: usize) -> io::Result<&mut States> {
 /// grow, so a channel with more active states than that is an error.
 fn learn_active_states(channel: CFTypeRef, into: &mut States) -> io::Result<()> {
     let capacity = into.active_indices.capacity();
-    let state_count = unsafe { IOReportStateGetCount(channel) };
+    let state_count = state_count_check(unsafe { IOReportStateGetCount(channel) })?;
     into.active_indices.clear();
     for index in 0..state_count {
         let name = unsafe { IOReportStateGetNameForIndex(channel, index) };
-        if !read_active_states_counts(name) {
+        if !learn_active_states_counts(name)? {
             continue;
         }
 
@@ -339,10 +342,40 @@ fn read_active_states_residency(residency: i64) -> io::Result<u64> {
     Ok(ticks)
 }
 
-fn read_active_states_counts(state: CFTypeRef) -> bool {
-    ![c"OFF", c"IDLE", c"DOWN"]
-        .iter()
-        .any(|inactive| is(state, inactive))
+/// Whether the state `name` names counts as active, or an error where `IOReport` gave the state
+/// no name.
+fn learn_active_states_counts(name: CFTypeRef) -> io::Result<bool> {
+    if name.is_null() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "IOReport gave a state no name",
+        ));
+    }
+
+    for inactive in [c"OFF", c"IDLE", c"DOWN"] {
+        if is(name, inactive) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Checks that a channel's count of states is a count, and within the bound on learning them.
+fn state_count_check(state_count: i32) -> io::Result<i32> {
+    if state_count < 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("an IOReport channel reported {state_count} states"),
+        ));
+    }
+    if state_count > STATES_MAX {
+        return Err(io::Error::new(
+            io::ErrorKind::QuotaExceeded,
+            format!("an IOReport channel reported {state_count} states, past {STATES_MAX}"),
+        ));
+    }
+
+    Ok(state_count)
 }
 
 /// The units `IOReport` can give an energy in, each with the nanojoules in one of it.
@@ -564,6 +597,62 @@ mod tests {
     }
 
     #[test]
+    fn refuses_a_state_with_no_name() {
+        // Goal: a state IOReport gives no name is an error, never a state counted as active.
+        // Method: ask the filter about null, the name IOReport of an M5 Pro gave for the index
+        // one past a channel's last state.
+        let counts = learn_active_states_counts(ptr::null());
+
+        assert_eq!(io::ErrorKind::InvalidData, counts.unwrap_err().kind());
+    }
+
+    #[test]
+    fn takes_as_many_states_as_its_bound() {
+        // Goal: a channel with as many states as the bound passes the check.
+        // Method: check a count equal to the bound.
+        let state_count = state_count_check(STATES_MAX);
+
+        assert_eq!(STATES_MAX, state_count.unwrap());
+    }
+
+    #[test]
+    fn refuses_more_states_than_its_bound() {
+        // Goal: a channel with more states than the bound is an error, so learning a channel's
+        // states has a bound.
+        // Method: check a count one past the bound.
+        let state_count = state_count_check(STATES_MAX + 1);
+
+        assert_eq!(
+            io::ErrorKind::QuotaExceeded,
+            state_count.unwrap_err().kind()
+        );
+    }
+
+    #[test]
+    fn refuses_a_negative_state_count() {
+        // Goal: a negative count of states is an error, never a channel with no states.
+        // Method: check -1, the count IOReport of an M5 Pro gave for the GPU's energy channel.
+        let state_count = state_count_check(-1);
+
+        assert_eq!(io::ErrorKind::InvalidData, state_count.unwrap_err().kind());
+    }
+
+    #[test]
+    fn refuses_to_learn_the_states_of_a_channel_without_states() {
+        // Goal: learning the states of a channel that has none is an error, never a channel
+        // with no active state.
+        // Method: learn the GPU's energy channel, whose state count IOReport gives as -1.
+        let ioreport = open();
+        let samples = sample(&ioreport.subscription, &ioreport.subscribed).unwrap();
+        let energy = first_channel(&ioreport, &samples, Kind::GpuEnergy);
+        let mut states = States::new(ACTIVE_STATES_MAX);
+
+        let learned = learn_active_states(energy, &mut states);
+
+        assert_eq!(io::ErrorKind::InvalidData, learned.unwrap_err().kind());
+    }
+
+    #[test]
     fn reads_the_performance_states_of_every_logical_cpu() {
         let mut ioreport = open();
 
@@ -646,9 +735,9 @@ mod tests {
         // Goal: counting IDLE, DOWN or OFF as active would read every core and the GPU as
         // busy for the whole of each second.
         // Method: ask the filter about each name these states carry on this Mac.
-        assert!(!read_active_states_counts(string(c"IDLE").unwrap().0));
-        assert!(!read_active_states_counts(string(c"DOWN").unwrap().0));
-        assert!(!read_active_states_counts(string(c"OFF").unwrap().0));
+        assert!(!learn_active_states_counts(string(c"IDLE").unwrap().0).unwrap());
+        assert!(!learn_active_states_counts(string(c"DOWN").unwrap().0).unwrap());
+        assert!(!learn_active_states_counts(string(c"OFF").unwrap().0).unwrap());
     }
 
     #[test]
@@ -656,8 +745,8 @@ mod tests {
         // Goal: a performance state left out would hide the time spent in it.
         // Method: ask the filter about a core's state name and the GPU's, as this Mac
         // names them.
-        assert!(read_active_states_counts(string(c"V0P14").unwrap().0));
-        assert!(read_active_states_counts(string(c"P1").unwrap().0));
+        assert!(learn_active_states_counts(string(c"V0P14").unwrap().0).unwrap());
+        assert!(learn_active_states_counts(string(c"P1").unwrap().0).unwrap());
     }
 
     #[test]
@@ -679,9 +768,10 @@ mod tests {
             .iter()
             .filter(|&&channel| {
                 (0..unsafe { IOReportStateGetCount(channel) }).all(|index| {
-                    read_active_states_counts(unsafe {
+                    learn_active_states_counts(unsafe {
                         IOReportStateGetNameForIndex(channel, index)
                     })
+                    .unwrap()
                 })
             })
             .count();
