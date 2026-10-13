@@ -511,33 +511,28 @@ impl Tracker {
         let arming_count = c_int::try_from(self.arming.len()).map_err(io::Error::other)?;
         let received_count_max = c_int::try_from(RECEIVED_PER_WAIT).map_err(io::Error::other)?;
 
-        loop {
-            let count = unsafe {
-                kevent(
-                    self.queue.as_raw_fd(),
-                    self.arming.as_ptr(),
-                    arming_count,
-                    self.received.as_mut_ptr(),
-                    received_count_max,
-                    std::ptr::null(),
-                )
-            };
-            if let Ok(count) = usize::try_from(count) {
-                self.arming.clear();
-                return if count <= RECEIVED_PER_WAIT {
-                    Ok(count)
-                } else {
-                    Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("kevent returned {count} events for room of {RECEIVED_PER_WAIT}"),
-                    ))
-                };
-            }
+        let count = unsafe {
+            kevent(
+                self.queue.as_raw_fd(),
+                self.arming.as_ptr(),
+                arming_count,
+                self.received.as_mut_ptr(),
+                received_count_max,
+                std::ptr::null(),
+            )
+        };
+        let Ok(count) = usize::try_from(count) else {
+            return Err(io::Error::last_os_error());
+        };
 
-            let error = io::Error::last_os_error();
-            if error.kind() != io::ErrorKind::Interrupted {
-                return Err(error);
-            }
+        self.arming.clear();
+        if count <= RECEIVED_PER_WAIT {
+            Ok(count)
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("kevent returned {count} events for room of {RECEIVED_PER_WAIT}"),
+            ))
         }
     }
 }
