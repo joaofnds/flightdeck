@@ -734,6 +734,35 @@ mod tests {
     }
 
     #[test]
+    fn counts_the_events_dropped_since_an_earlier_count() {
+        // Goal: the counts since an earlier count hold the starts, execs and exits dropped in
+        // between, so each window reports its own drops.
+        // Method: take a count from a later one that dropped a different number of each kind.
+        let earlier = Counts {
+            dropped_starts: 1,
+            dropped_execs: 2,
+            dropped_exits: 3,
+            ..Counts::default()
+        };
+        let later = Counts {
+            dropped_starts: 5,
+            dropped_execs: 7,
+            dropped_exits: 9,
+            ..Counts::default()
+        };
+
+        let since = later.since(earlier);
+
+        let dropped = Counts {
+            dropped_starts: 4,
+            dropped_execs: 5,
+            dropped_exits: 6,
+            ..Counts::default()
+        };
+        assert_eq!(dropped, since);
+    }
+
+    #[test]
     fn keeps_a_tick_to_its_event_bound_and_counts_the_rest_as_dropped() {
         // Goal: a tick that sees more process events than the tracker's bound keeps to the
         // bound and counts the rest as dropped.
