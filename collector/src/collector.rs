@@ -38,7 +38,7 @@ impl Collector {
             tracker: Tracker::new(timebase, rescan_interval, process_limit)?,
             machine: Machine::new(cpu_limit)?,
             interfaces: Interfaces::default(),
-            ioreport: IoReport::open(timebase)?,
+            ioreport: IoReport::open(timebase, cpu_limit)?,
             smc: Smc::open()?,
             processes: Sweep::default(),
             coalitions: Coalitions::new(timebase, coalition_limit),

@@ -71,9 +71,21 @@ impl Drop for Owned {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct States {
     pub active_ns: Vec<u64>,
+}
+
+/// The most active performance states read from one channel, three times the 20 a core of
+/// the M5 Pro reports.
+const ACTIVE_STATES_MAX: usize = 64;
+
+impl States {
+    fn new() -> Self {
+        Self {
+            active_ns: Vec::with_capacity(ACTIVE_STATES_MAX),
+        }
+    }
 }
 
 pub struct IoReport {
@@ -83,11 +95,13 @@ pub struct IoReport {
     subscribed: Owned,
     pub gpu_energy_nj: u64,
     pub gpu: States,
-    pub cores: Vec<States>,
+    /// One for each CPU the machine runs, of which the first `core_count` hold the last read.
+    cores: Vec<States>,
+    core_count: usize,
 }
 
 impl IoReport {
-    pub fn open(timebase: Timebase) -> io::Result<Self> {
+    pub fn open(timebase: Timebase, cpu_limit: usize) -> io::Result<Self> {
         let channels_key = string(c"IOReportChannels");
         let wanted = channels_in_group(c"Energy Model", None)?;
         merge_group(&wanted, c"GPU Stats", c"GPU Performance States")?;
@@ -108,8 +122,9 @@ impl IoReport {
             subscription: Owned(subscription),
             subscribed: Owned(subscribed),
             gpu_energy_nj: 0,
-            gpu: States::default(),
-            cores: Vec::new(),
+            gpu: States::new(),
+            cores: (0..cpu_limit).map(|_| States::new()).collect(),
+            core_count: 0,
         })
     }
 
@@ -123,24 +138,35 @@ impl IoReport {
         let samples = Owned(samples);
         let channels = channels_of(&samples, &self.channels_key)?;
 
-        let mut cores = 0;
+        let mut core_count = 0;
         for channel in each(channels) {
             match Kind::of(channel) {
                 Some(Kind::GpuEnergy) => self.gpu_energy_nj = energy_nj(channel)?,
-                Some(Kind::GpuStates) => read_active_states(channel, &mut self.gpu, self.timebase),
+                Some(Kind::GpuStates) => {
+                    read_active_states(channel, &mut self.gpu, self.timebase)?;
+                }
                 Some(Kind::CoreStates) => {
-                    if cores == self.cores.len() {
-                        self.cores.push(States::default());
-                    }
-                    read_active_states(channel, &mut self.cores[cores], self.timebase);
-                    cores += 1;
+                    let Some(core) = self.cores.get_mut(core_count) else {
+                        return Err(io::Error::new(
+                            io::ErrorKind::QuotaExceeded,
+                            format!("IOReport reported cores past {}", self.cores.len()),
+                        ));
+                    };
+                    read_active_states(channel, core, self.timebase)?;
+                    core_count += 1;
                 }
                 None => {}
             }
         }
-        self.cores.truncate(cores);
+        self.core_count = core_count;
 
         Ok(())
+    }
+
+    /// The performance states of each core the last read found.
+    #[must_use]
+    pub fn cores(&self) -> &[States] {
+        &self.cores[..self.core_count]
     }
 }
 
@@ -172,7 +198,10 @@ impl Kind {
     }
 }
 
-fn read_active_states(channel: CfRef, into: &mut States, timebase: Timebase) {
+/// Reads the time `channel` spent in each active state into `into`, whose room it does not
+/// grow, so a channel with more active states than that is an error.
+fn read_active_states(channel: CfRef, into: &mut States, timebase: Timebase) -> io::Result<()> {
+    let capacity = into.active_ns.capacity();
     into.active_ns.clear();
     for index in 0..unsafe { IOReportStateGetCount(channel) } {
         let name = unsafe { IOReportStateGetNameForIndex(channel, index) };
@@ -180,10 +209,19 @@ fn read_active_states(channel: CfRef, into: &mut States, timebase: Timebase) {
             continue;
         }
 
+        if into.active_ns.len() == capacity {
+            return Err(io::Error::new(
+                io::ErrorKind::QuotaExceeded,
+                format!("an IOReport channel reported active states past {capacity}"),
+            ));
+        }
         let residency = unsafe { IOReportStateGetResidency(channel, index) };
         into.active_ns
             .push(timebase.nanos(u64::try_from(residency).unwrap_or(0)));
     }
+
+    assert_eq!(capacity, into.active_ns.capacity());
+    Ok(())
 }
 
 fn read_active_states_counts(state: CfRef) -> bool {
@@ -290,30 +328,70 @@ mod tests {
 
     use super::*;
     use crate::cost::spin_on_this_thread_for;
+    use crate::machine;
 
     fn logical_cpus() -> u32 {
         u32::from_ne_bytes(crate::kernel::sysctl_bytes(c"hw.logicalcpu"))
     }
 
+    fn open() -> IoReport {
+        IoReport::open(Timebase::read(), machine::cpu_limit().unwrap()).unwrap()
+    }
+
     fn active_time_of_every_core(ioreport: &IoReport) -> Duration {
-        Duration::from_nanos(ioreport.cores.iter().flat_map(|core| &core.active_ns).sum())
+        Duration::from_nanos(
+            ioreport
+                .cores()
+                .iter()
+                .flat_map(|core| &core.active_ns)
+                .sum(),
+        )
     }
 
     #[test]
     fn reads_the_performance_states_of_every_logical_cpu() {
-        let mut ioreport = IoReport::open(Timebase::read()).unwrap();
+        let mut ioreport = open();
 
         ioreport.read().unwrap();
 
         assert_eq!(
             usize::try_from(logical_cpus()).unwrap(),
-            ioreport.cores.len()
+            ioreport.cores().len()
         );
     }
 
     #[test]
+    fn refuses_more_cores_than_its_cpu_limit() {
+        let mut ioreport = IoReport::open(Timebase::read(), 1).unwrap();
+
+        let read = ioreport.read();
+
+        assert_eq!(io::ErrorKind::QuotaExceeded, read.unwrap_err().kind());
+    }
+
+    #[test]
+    fn refuses_a_channel_with_more_active_states_than_its_room() {
+        let ioreport = open();
+        let samples = Owned(unsafe {
+            IOReportCreateSamples(ioreport.subscription.0, ioreport.subscribed.0, ptr::null())
+        });
+        let channels = channels_of(&samples, &ioreport.channels_key).unwrap();
+        let core = each(channels)
+            .find(|&channel| matches!(Kind::of(channel), Some(Kind::CoreStates)))
+            .unwrap();
+        let mut states = States {
+            active_ns: Vec::with_capacity(1),
+        };
+
+        let read = read_active_states(core, &mut states, ioreport.timebase);
+
+        assert_eq!(io::ErrorKind::QuotaExceeded, read.unwrap_err().kind());
+        assert_eq!(1, states.active_ns.capacity());
+    }
+
+    #[test]
     fn counts_a_busy_cpu_in_its_cores_active_time() {
-        let mut ioreport = IoReport::open(Timebase::read()).unwrap();
+        let mut ioreport = open();
         let busy = Duration::from_millis(200);
         let start = Instant::now();
         ioreport.read().unwrap();
@@ -357,7 +435,7 @@ mod tests {
         // time, while the two tests above still passed.
         // Method: sample IOReport and look for a state the filter leaves out in each
         // channel of core or GPU states.
-        let ioreport = IoReport::open(Timebase::read()).unwrap();
+        let ioreport = open();
         let samples = Owned(unsafe {
             IOReportCreateSamples(ioreport.subscription.0, ioreport.subscribed.0, ptr::null())
         });
@@ -385,7 +463,7 @@ mod tests {
 
     #[test]
     fn counts_time_the_gpu_spends_in_active_states() {
-        let mut ioreport = IoReport::open(Timebase::read()).unwrap();
+        let mut ioreport = open();
 
         ioreport.read().unwrap();
 
@@ -394,7 +472,7 @@ mod tests {
 
     #[test]
     fn counts_the_energy_the_gpu_spends() {
-        let mut ioreport = IoReport::open(Timebase::read()).unwrap();
+        let mut ioreport = open();
 
         ioreport.read().unwrap();
 
