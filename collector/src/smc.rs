@@ -31,6 +31,11 @@ const READ_BYTES: u8 = 5;
 const READ_INDEX: u8 = 8;
 const READ_KEY_INFO: u8 = 9;
 
+/// The result an answer holds where the SMC did what it was asked.
+const SUCCESS: u8 = 0;
+/// The result an answer holds where the SMC has no key of the name asked for.
+const KEY_NOT_FOUND: u8 = 132;
+
 const KEY_COUNT: Key = Key::named(*b"#KEY");
 const FAN_COUNT: Key = Key::named(*b"FNum");
 const SYSTEM_POWER: Key = Key::named(*b"PSTR");
@@ -67,7 +72,7 @@ impl std::fmt::Debug for Key {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 struct KeyInfo {
     size: u32,
     kind: u32,
@@ -89,7 +94,7 @@ impl KeyInfo {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 struct Message {
     key: u32,
     _version_and_limits: [u8; 24],
@@ -251,7 +256,7 @@ impl Connection {
 
     fn ask(&self, question: Message) -> io::Result<Option<Message>> {
         let mut answer = Message::default();
-        let mut size = size_of::<Message>();
+        let mut answer_size = size_of::<Message>();
         let returned = unsafe {
             IOConnectCallStructMethod(
                 self.0,
@@ -259,17 +264,47 @@ impl Connection {
                 (&raw const question).cast(),
                 size_of::<Message>(),
                 (&raw mut answer).cast(),
-                &raw mut size,
+                &raw mut answer_size,
             )
         };
-        if returned != kernel::KERN_SUCCESS {
-            return Err(io::Error::other(format!(
-                "calling the SMC returned {returned:#x}"
-            )));
-        }
 
-        Ok((answer.result == 0).then_some(answer))
+        ask_answered(returned, answer_size, answer)
     }
+}
+
+/// What the SMC answered a question with, from what the call returned, the size of the answer
+/// it wrote, and the answer: the answer, `None` where the SMC has no such key, or an error
+/// where the call failed, the answer is short or the SMC refused the question.
+fn ask_answered(
+    returned: KernReturn,
+    answer_size: usize,
+    answer: Message,
+) -> io::Result<Option<Message>> {
+    if returned != kernel::KERN_SUCCESS {
+        return Err(io::Error::other(format!(
+            "calling the SMC returned {returned:#x}"
+        )));
+    }
+    if answer_size != size_of::<Message>() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "the SMC answered with {answer_size} bytes, where a message holds {}",
+                size_of::<Message>()
+            ),
+        ));
+    }
+    if answer.result == KEY_NOT_FOUND {
+        return Ok(None);
+    }
+    if answer.result != SUCCESS {
+        return Err(io::Error::other(format!(
+            "the SMC refused a question with result {}",
+            answer.result
+        )));
+    }
+
+    Ok(Some(answer))
 }
 
 fn hottest(readings: impl IntoIterator<Item = (Key, f32)>) -> Option<Key> {
@@ -296,6 +331,76 @@ mod tests {
         ];
 
         assert_eq!(Some(Key::named(*b"Tg05")), hottest(readings));
+    }
+
+    #[test]
+    fn takes_a_whole_answer_holding_success() {
+        // Goal: an answer the SMC wrote in full with result 0 is its answer.
+        // Method: interpret a call that succeeded and wrote a whole message holding PSTR.
+        let answer = Message {
+            key: SYSTEM_POWER.0,
+            ..Message::default()
+        };
+
+        let answered = ask_answered(kernel::KERN_SUCCESS, size_of::<Message>(), answer);
+
+        assert_eq!(
+            Some(SYSTEM_POWER.0),
+            answered.unwrap().map(|answer| answer.key)
+        );
+    }
+
+    #[test]
+    fn reads_the_result_for_a_missing_key_as_no_answer() {
+        // Goal: result 132, which the SMC gives for a key it does not hold, reads as no key.
+        // Method: interpret a whole answer holding 132, as answers.out shows for the key ZZZZ.
+        let answer = Message {
+            result: KEY_NOT_FOUND,
+            ..Message::default()
+        };
+
+        let answered = ask_answered(kernel::KERN_SUCCESS, size_of::<Message>(), answer);
+
+        assert!(answered.unwrap().is_none());
+    }
+
+    #[test]
+    fn refuses_an_answer_holding_another_result() {
+        // Goal: a result besides success and a missing key is an error, never a missing key.
+        // Method: interpret a whole answer holding 135, the result the SMC gave a read whose
+        // size was not its key's (answers.out).
+        let answer = Message {
+            result: 135,
+            ..Message::default()
+        };
+
+        let answered = ask_answered(kernel::KERN_SUCCESS, size_of::<Message>(), answer);
+
+        assert_eq!(io::ErrorKind::Other, answered.unwrap_err().kind());
+    }
+
+    #[test]
+    fn refuses_an_answer_shorter_than_a_message() {
+        // Goal: an answer the SMC wrote only in part is an error, since the rest of the
+        // message holds no answer.
+        // Method: interpret a call that succeeded and wrote half a message.
+        let answered = ask_answered(
+            kernel::KERN_SUCCESS,
+            size_of::<Message>() / 2,
+            Message::default(),
+        );
+
+        assert_eq!(io::ErrorKind::InvalidData, answered.unwrap_err().kind());
+    }
+
+    #[test]
+    fn refuses_a_call_the_kernel_failed() {
+        // Goal: a call to the SMC that the kernel failed is an error.
+        // Method: interpret 0xe00002c2, which the kernel returned for a command the SMC does not
+        // take (answers.out).
+        let answered = ask_answered(0xe000_02c2_u32.cast_signed(), 0, Message::default());
+
+        assert_eq!(io::ErrorKind::Other, answered.unwrap_err().kind());
     }
 
     #[test]
