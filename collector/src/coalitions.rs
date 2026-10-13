@@ -71,7 +71,11 @@ const _: () = assert!(offset_of!(ResourceUsage, gpu_time) == 64);
 const _: () = assert!(offset_of!(ResourceUsage, energy) == 88);
 
 unsafe extern "C" {
-    fn coalition_info_resource_usage(cid: u64, cru: *mut ResourceUsage, sz: usize) -> c_int;
+    fn coalition_info_resource_usage(
+        coalition_id: u64,
+        usage: *mut ResourceUsage,
+        size: usize,
+    ) -> c_int;
 }
 
 impl Coalitions {
