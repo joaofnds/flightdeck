@@ -20,7 +20,7 @@ impl Smc {
         let power = connection.float_key(SYSTEM_POWER)?;
         let fan_count = connection.fan_count()?;
         let fans = (0..fan_count)
-            .map(|fan| connection.float_key(Key::fan_speed(fan)))
+            .map(|fan_index| connection.float_key(Key::fan_speed(fan_index)))
             .collect::<io::Result<Vec<FloatKey>>>()?;
         let soc_sensor = connection.hottest_soc_sensor()?;
         let fan_rpm = Vec::with_capacity(fans.len());
@@ -391,11 +391,11 @@ impl Key {
         Key(u32::from_be_bytes(name))
     }
 
-    /// The key of the speed of `fan`, counted from 0.
-    fn fan_speed(fan: u8) -> Self {
-        assert!(fan < FANS_MAX);
+    /// The key of the speed of the fan at `fan_index`.
+    fn fan_speed(fan_index: u8) -> Self {
+        assert!(fan_index < FANS_MAX);
 
-        Key::named([b'F', b'0' + fan, b'A', b'c'])
+        Key::named([b'F', b'0' + fan_index, b'A', b'c'])
     }
 
     fn is_soc_temperature(self) -> bool {
@@ -453,7 +453,11 @@ impl KeyInfo {
     }
 
     fn is(self, other: KeyInfo) -> bool {
-        self.size == other.size && self.kind == other.kind
+        if self.kind != other.kind {
+            return false;
+        }
+
+        self.size == other.size
     }
 }
 
