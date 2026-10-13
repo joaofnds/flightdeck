@@ -320,13 +320,16 @@ fn function_text(indentation: &str, line_count: usize) -> String {
     format!("{indentation}fn step() {{\n{block}{steps}{indentation}}}\n")
 }
 
-/// Whether the file is a script, by its name or by a shebang on its first line.
+/// Tells whether the file is a script, by its name or by a shebang on its first line.
 fn script(path: &str, bytes: &[u8]) -> bool {
     assert!(!path.is_empty());
 
-    let extension = Path::new(path).extension().and_then(OsStr::to_str);
+    let extension = Path::new(path)
+        .extension()
+        .and_then(OsStr::to_str)
+        .map(str::to_ascii_lowercase);
     if matches!(
-        extension,
+        extension.as_deref(),
         Some("sh" | "bash" | "zsh" | "py" | "pl" | "rb" | "js" | "ts" | "c" | "m")
     ) {
         true
@@ -356,6 +359,14 @@ fn script_reports_a_shebang_and_each_script_extension() {
             "{extension}"
         );
     }
+}
+
+#[test]
+fn script_reports_an_extension_in_capitals() {
+    // Goal: a script's extension counts whatever its case.
+    // Method: one extension in capitals and one in mixed case.
+    assert!(script("tools/measure.SH", b"x"));
+    assert!(script("tools/measure.Py", b"x"));
 }
 
 #[test]
