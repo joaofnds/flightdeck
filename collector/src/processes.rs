@@ -281,12 +281,20 @@ pub fn read_usage(pid: i32, timebase: Timebase) -> io::Result<Result<Usage, Unre
     }))
 }
 
-/// Reads what a `proc_pid_rusage` `returned`, and the `error` it set where it failed.
+/// Reads what a `proc_pid_rusage` `returned`, and the `error` it set where it failed, which it
+/// does by returning -1.
 fn read_usage_returned(returned: c_int, error: io::Error) -> io::Result<Result<(), Unreadable>> {
     if returned == 0 {
         Ok(Ok(()))
     } else {
-        unreadable_of(error).map(Err)
+        if returned == -1 {
+            unreadable_of(error).map(Err)
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("proc_pid_rusage returned {returned}, neither success nor failure"),
+            ))
+        }
     }
 }
 
@@ -651,6 +659,16 @@ mod tests {
         let written = pid_info_written(40, 96, io::Error::from_raw_os_error(0));
 
         assert_eq!(io::ErrorKind::InvalidData, written.unwrap_err().kind());
+    }
+
+    #[test]
+    fn refuses_a_usage_read_that_returned_neither_success_nor_failure() {
+        // Goal: proc_pid_rusage returns 0 or -1, so any other value is an error rather than a
+        // reading taken from whatever errno an earlier call left, such as ESRCH read as gone.
+        // Method: read a call that returned 1 with ESRCH left in errno.
+        let returned = read_usage_returned(1, io::Error::from_raw_os_error(ESRCH));
+
+        assert_eq!(io::ErrorKind::InvalidData, returned.unwrap_err().kind());
     }
 
     #[test]
