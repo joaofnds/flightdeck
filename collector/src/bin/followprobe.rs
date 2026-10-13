@@ -7,7 +7,7 @@ use std::time::Duration;
 use collector::clock::{self, Timebase};
 use collector::cost::{Meter, Snapshot, Source};
 use collector::processes;
-use collector::tracker::{Event, Tracker};
+use collector::tracker::{EVENTS_PER_TICK_MAX, Event, Limits, Tracker};
 
 const TRACKING: [Source; 5] = [
     Source::Events,
@@ -65,7 +65,11 @@ fn probe_from(args: &[String]) -> Result<Probe, String> {
 fn run(probe: &Probe) -> io::Result<()> {
     let timebase = Timebase::read();
     let process_limit = processes::process_limit()?;
-    let mut tracker = Tracker::new(timebase, probe.rescan_interval, process_limit)?;
+    let limits = Limits {
+        process_limit,
+        events_per_tick_max: EVENTS_PER_TICK_MAX,
+    };
+    let mut tracker = Tracker::new(timebase, probe.rescan_interval, limits)?;
     let mut meter = Meter::default();
     let start = Snapshot::take(&meter, timebase)?;
 

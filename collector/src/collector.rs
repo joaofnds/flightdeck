@@ -9,7 +9,7 @@ use crate::ioreport::IoReport;
 use crate::machine::{self, Machine};
 use crate::processes::{self, Sweep};
 use crate::smc::Smc;
-use crate::tracker::{EVENTS_PER_TICK_MAX, Event, Tracker};
+use crate::tracker::{EVENTS_PER_TICK_MAX, Event, Limits, Tracker};
 
 pub struct Collector {
     timebase: Timebase,
@@ -35,7 +35,14 @@ impl Collector {
         let mut collector = Self {
             timebase,
             listing: processes::pid_list(process_limit),
-            tracker: Tracker::new(timebase, rescan_interval, process_limit)?,
+            tracker: Tracker::new(
+                timebase,
+                rescan_interval,
+                Limits {
+                    process_limit,
+                    events_per_tick_max: EVENTS_PER_TICK_MAX,
+                },
+            )?,
             machine: Machine::new(cpu_limit)?,
             interfaces: Interfaces::default(),
             ioreport: IoReport::open(timebase, cpu_limit)?,
