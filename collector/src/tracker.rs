@@ -522,11 +522,18 @@ impl Tracker {
         }
 
         assert!(self.exits.is_empty());
-        meter.measure(Source::Watches, || self.submit_watches_register())?;
+        meter.measure(Source::Watches, || {
+            let receipts = self.submit_watches_register()?;
+            submit_watches_receipts(
+                &self.eventlist[..receipts],
+                &mut self.counts,
+                &mut self.exits,
+            )
+        })?;
         self.read_exits(meter)
     }
 
-    fn submit_watches_register(&mut self) -> io::Result<()> {
+    fn submit_watches_register(&mut self) -> io::Result<usize> {
         assert!(!self.changes.is_empty());
         assert!(self.changes.len() <= self.eventlist.len());
         let count = c_int::try_from(self.changes.len()).map_err(io::Error::other)?;
@@ -550,25 +557,13 @@ impl Tracker {
         };
         if receipts <= self.changes.len() {
             assert!(receipts <= self.eventlist.len());
+            Ok(receipts)
         } else {
-            return Err(io::Error::new(
+            Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("kevent returned {receipts} receipts for {count} changes"),
-            ));
+            ))
         }
-
-        for index in 0..receipts {
-            let receipt = self.eventlist[index];
-            let pid = pid_of(receipt.ident)?;
-            match errno_of(receipt.data)? {
-                0 => {}
-                EPERM => self.counts.refused_watches += 1,
-                ESRCH => push_without_growing(&mut self.exits, (pid, Noticed::AlreadyExited)),
-                error => return Err(io::Error::from_raw_os_error(error)),
-            }
-        }
-
-        Ok(())
     }
 
     fn follow_until_wait(&mut self) -> io::Result<usize> {
@@ -644,6 +639,30 @@ fn follow_until_handle(
 
     assert!(exits.len() <= eventlist.len());
     Ok(wake)
+}
+
+/// Reads the `receipts` one registration of watches returned: counts each watch the kernel
+/// refused, and queues each process already gone among the `exits` to read. A receipt that
+/// reports any other error is that error.
+fn submit_watches_receipts(
+    receipts: &[Kevent],
+    counts: &mut Counts,
+    exits: &mut Vec<(i32, Noticed)>,
+) -> io::Result<()> {
+    assert!(exits.is_empty());
+
+    for receipt in receipts {
+        let pid = pid_of(receipt.ident)?;
+        match errno_of(receipt.data)? {
+            0 => {}
+            EPERM => counts.refused_watches += 1,
+            ESRCH => push_without_growing(exits, (pid, Noticed::AlreadyExited)),
+            error => return Err(io::Error::from_raw_os_error(error)),
+        }
+    }
+
+    assert!(exits.len() <= receipts.len());
+    Ok(())
 }
 
 /// Keeps `event` among the tick's `events` while they have room for it, and otherwise
@@ -1049,6 +1068,84 @@ mod tests {
         Kevent::new(ident, EVFILT_TIMER, 0, 0, 1)
     }
 
+    /// What reading one registration's receipts left behind.
+    struct ReceiptsRead {
+        result: io::Result<()>,
+        counts: Counts,
+        exits: Vec<(i32, Noticed)>,
+    }
+
+    /// Reads `receipts` as the receipts one registration returned, into a list with room for all
+    /// of them.
+    fn read_receipts(receipts: &[Kevent]) -> ReceiptsRead {
+        let mut counts = Counts::default();
+        let mut exits = Vec::with_capacity(receipts.len());
+
+        let result = submit_watches_receipts(receipts, &mut counts, &mut exits);
+
+        ReceiptsRead {
+            result,
+            counts,
+            exits,
+        }
+    }
+
+    /// The receipt the kernel returns for `watch(ident)`, reporting `errno`, with `EV_ERROR` set as
+    /// macOS 27.0.1 sets it on every receipt.
+    fn receipt(ident: usize, errno: isize) -> Kevent {
+        let mut receipt = watch(ident);
+        receipt.flags |= EV_ERROR;
+        receipt.data = errno;
+        receipt
+    }
+
+    #[test]
+    fn counts_a_watch_the_kernel_refused() {
+        // Goal: a watch the kernel refused is counted as refused, and its process is not queued
+        // as gone.
+        // Method: read one receipt that reports EPERM, which no watch a test makes draws.
+        let read = read_receipts(&[receipt(7, isize::try_from(EPERM).unwrap())]);
+
+        read.result.unwrap();
+        assert_eq!(1, read.counts.refused_watches);
+        assert!(read.exits.is_empty());
+    }
+
+    #[test]
+    fn queues_a_watch_on_a_process_already_gone_as_already_exited() {
+        // Goal: a watch on a process that exited before the watch took is queued as an exit to
+        // read, noticed as already exited.
+        // Method: read one receipt that reports ESRCH.
+        let read = read_receipts(&[receipt(7, isize::try_from(ESRCH).unwrap())]);
+
+        read.result.unwrap();
+        assert_eq!(vec![(7, Noticed::AlreadyExited)], read.exits);
+    }
+
+    #[test]
+    fn refuses_a_receipt_whose_ident_names_no_pid() {
+        // Goal: a receipt whose ident is past what a pid's i32 holds is an error, rather than
+        // pid -1.
+        // Method: read one receipt whose ident is the first past i32::MAX.
+        let ident = usize::try_from(i32::MAX).unwrap() + 1;
+
+        let read = read_receipts(&[receipt(ident, 0)]);
+
+        assert_eq!(io::ErrorKind::InvalidData, read.result.unwrap_err().kind());
+    }
+
+    #[test]
+    fn refuses_a_receipt_error_code_no_errno_holds() {
+        // Goal: a receipt's error code past what an errno's i32 holds is an error of invalid
+        // data, rather than EINVAL.
+        // Method: read one receipt whose code is the first past i32::MAX.
+        let data = isize::try_from(i32::MAX).unwrap() + 1;
+
+        let read = read_receipts(&[receipt(7, data)]);
+
+        assert_eq!(io::ErrorKind::InvalidData, read.result.unwrap_err().kind());
+    }
+
     #[test]
     fn records_an_exec_under_its_pid() {
         // Goal: an exec a wait receives is recorded among the tick's events under its pid.
@@ -1190,9 +1287,9 @@ mod tests {
             .changes
             .push(Kevent::new(1, -99, EV_ADD | EV_RECEIPT, 0, 0));
 
-        let registered = tracker.submit_watches_register();
+        let submitted = tracker.submit_watches(&mut Meter::default());
 
-        assert_eq!(Some(EINVAL), registered.unwrap_err().raw_os_error());
+        assert_eq!(Some(EINVAL), submitted.unwrap_err().raw_os_error());
     }
 
     #[test]
