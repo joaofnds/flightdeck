@@ -1,5 +1,6 @@
 use std::ffi::c_int;
 use std::io;
+use std::mem::offset_of;
 
 use crate::clock::Timebase;
 use crate::kernel::ESRCH;
@@ -37,6 +38,8 @@ impl Coalition {
     }
 }
 
+/// The first 96 bytes of `struct coalition_resource_usage`, which the call fills only up to
+/// the size it is given.
 #[repr(C)]
 #[derive(Default)]
 struct ResourceUsage {
@@ -53,6 +56,17 @@ struct ResourceUsage {
     cpu_time_billed_to_others: u64,
     energy: u64,
 }
+
+const _: () = assert!(size_of::<ResourceUsage>() == 96);
+const _: () = assert!(offset_of!(ResourceUsage, tasks_started) == 0);
+const _: () = assert!(offset_of!(ResourceUsage, tasks_exited) == 8);
+const _: () = assert!(offset_of!(ResourceUsage, cpu_time) == 24);
+const _: () = assert!(offset_of!(ResourceUsage, interrupt_wakeups) == 32);
+const _: () = assert!(offset_of!(ResourceUsage, platform_idle_wakeups) == 40);
+const _: () = assert!(offset_of!(ResourceUsage, bytesread) == 48);
+const _: () = assert!(offset_of!(ResourceUsage, byteswritten) == 56);
+const _: () = assert!(offset_of!(ResourceUsage, gpu_time) == 64);
+const _: () = assert!(offset_of!(ResourceUsage, energy) == 88);
 
 unsafe extern "C" {
     fn coalition_info_resource_usage(cid: u64, cru: *mut ResourceUsage, sz: usize) -> c_int;
@@ -178,11 +192,16 @@ fn read_all_returned(returned: c_int, error: io::Error) -> io::Result<bool> {
     }
 }
 
+/// A process's coalitions, as `struct proc_pidcoalitioninfo` declares it, one id for each
+/// coalition type.
 #[repr(C)]
 struct PidCoalitionInfo {
     coalition_id: [u64; 2],
     reserved: [u64; 3],
 }
+
+const _: () = assert!(size_of::<PidCoalitionInfo>() == 40);
+const _: () = assert!(offset_of!(PidCoalitionInfo, coalition_id) == 0);
 
 const PROC_PIDCOALITIONINFO: c_int = 20;
 const COALITION_TYPE_RESOURCE: usize = 0;
