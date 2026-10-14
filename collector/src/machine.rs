@@ -203,11 +203,54 @@ fn cpu_limit_check(limit: c_int) -> io::Result<usize> {
 
 pub struct Machine {
     host: MachPort,
-    page_size: u64,
+    page_size: PageSize,
     swap_usage: Sysctl,
     pressure_level: Sysctl,
     pub cpus: Vec<CPUTicks>,
     pub memory: Memory,
+}
+
+/// The bytes a page of memory holds, above 0.
+#[derive(Debug, Clone, Copy)]
+struct PageSize {
+    bytes: u64,
+}
+
+impl PageSize {
+    /// Takes `size`, the bytes `vm_page_size` gives, or an error where it is 0.
+    fn new(size: usize) -> io::Result<Self> {
+        const { assert!(size_of::<usize>() <= size_of::<u64>()) };
+
+        let bytes = match u64::try_from(size) {
+            Ok(bytes) => bytes,
+            Err(error) => unreachable!("{error}"),
+        };
+        if bytes == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "vm_page_size gave a page of 0 bytes",
+            ));
+        }
+
+        let page_size = Self { bytes };
+        assert!(page_size.bytes > 0);
+        Ok(page_size)
+    }
+
+    /// Returns the bytes `pages` pages hold, or an error where a u64 cannot hold them.
+    fn bytes_of(self, pages: u64) -> io::Result<u64> {
+        assert!(self.bytes > 0);
+
+        pages.checked_mul(self.bytes).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{pages} pages of {} bytes pass what a u64 holds",
+                    self.bytes
+                ),
+            )
+        })
+    }
 }
 
 impl Machine {
@@ -215,10 +258,7 @@ impl Machine {
         assert!(cpu_limit > 0);
 
         let total_bytes: u64 = Sysctl::named(c"hw.memsize")?.read()?;
-        let page_size = match u64::try_from(unsafe { vm_page_size }) {
-            Ok(size) => size,
-            Err(error) => unreachable!("{error}"),
-        };
+        let page_size = PageSize::new(unsafe { vm_page_size })?;
 
         let machine = Self {
             host: unsafe { mach_host_self() },
@@ -304,23 +344,30 @@ impl Machine {
 
         let statistics = unsafe { statistics.assume_init() };
         let swap: XswUsage = self.swap_usage.read()?;
-        let pages = |count: u32| u64::from(count) * self.page_size;
 
         self.memory = Memory {
             total_bytes: self.memory.total_bytes,
-            free_bytes: pages(statistics.free_count),
-            active_bytes: pages(statistics.active_count),
-            inactive_bytes: pages(statistics.inactive_count),
-            speculative_bytes: pages(statistics.speculative_count),
-            wired_bytes: pages(statistics.wire_count),
-            compressed_bytes: pages(statistics.compressor_page_count),
-            anonymous_bytes: pages(statistics.internal_page_count),
-            file_backed_bytes: pages(statistics.external_page_count),
-            purgeable_bytes: pages(statistics.purgeable_count),
+            free_bytes: self.page_size.bytes_of(statistics.free_count.into())?,
+            active_bytes: self.page_size.bytes_of(statistics.active_count.into())?,
+            inactive_bytes: self.page_size.bytes_of(statistics.inactive_count.into())?,
+            speculative_bytes: self
+                .page_size
+                .bytes_of(statistics.speculative_count.into())?,
+            wired_bytes: self.page_size.bytes_of(statistics.wire_count.into())?,
+            compressed_bytes: self
+                .page_size
+                .bytes_of(statistics.compressor_page_count.into())?,
+            anonymous_bytes: self
+                .page_size
+                .bytes_of(statistics.internal_page_count.into())?,
+            file_backed_bytes: self
+                .page_size
+                .bytes_of(statistics.external_page_count.into())?,
+            purgeable_bytes: self.page_size.bytes_of(statistics.purgeable_count.into())?,
             swap_total_bytes: swap.total,
             swap_used_bytes: swap.used,
-            swapped_in_bytes: self.read_memory_bytes(statistics.swapins)?,
-            swapped_out_bytes: self.read_memory_bytes(statistics.swapouts)?,
+            swapped_in_bytes: self.page_size.bytes_of(statistics.swapins)?,
+            swapped_out_bytes: self.page_size.bytes_of(statistics.swapouts)?,
             pageins: statistics.pageins,
             pageouts: statistics.pageouts,
             compressions: statistics.compressions,
@@ -329,19 +376,6 @@ impl Machine {
         };
 
         Ok(())
-    }
-
-    /// Returns the bytes of `pages` pages, or an error where a u64 cannot hold them.
-    fn read_memory_bytes(&self, pages: u64) -> io::Result<u64> {
-        pages.checked_mul(self.page_size).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "{pages} pages of {} bytes pass what a u64 holds",
-                    self.page_size
-                ),
-            )
-        })
     }
 }
 
@@ -486,13 +520,31 @@ mod tests {
     }
 
     #[test]
-    fn refuses_swapped_pages_past_the_bytes_a_u64_holds() {
-        // Goal: a count of swapped pages whose bytes pass what a u64 holds is an error, never a
+    fn takes_the_bytes_of_pages_at_their_size() {
+        // Goal: a count of pages takes as many bytes as the pages hold together.
+        // Method: take the bytes of 3 pages at the 16,384 bytes this Mac's vm_page_size gave.
+        let page_size = PageSize::new(16_384).unwrap();
+
+        assert_eq!(49_152, page_size.bytes_of(3).unwrap());
+    }
+
+    #[test]
+    fn refuses_a_page_size_of_0() {
+        // Goal: a page size of 0 is an error, since every count of pages would read as no bytes.
+        // Method: take a page size of 0.
+        let page_size = PageSize::new(0);
+
+        assert_eq!(io::ErrorKind::InvalidData, page_size.unwrap_err().kind());
+    }
+
+    #[test]
+    fn refuses_pages_past_the_bytes_a_u64_holds() {
+        // Goal: a count of pages whose bytes pass what a u64 holds is an error, never a
         // multiplication that traps.
         // Method: take the bytes of u64::MAX pages.
-        let machine = Machine::new(1).unwrap();
+        let page_size = PageSize::new(16_384).unwrap();
 
-        let bytes = machine.read_memory_bytes(u64::MAX);
+        let bytes = page_size.bytes_of(u64::MAX);
 
         assert_eq!(io::ErrorKind::InvalidData, bytes.unwrap_err().kind());
     }
