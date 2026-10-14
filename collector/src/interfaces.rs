@@ -5,6 +5,11 @@ use std::mem::offset_of;
 use crate::kernel::sysctl;
 use crate::push_without_growing;
 
+pub struct Interfaces {
+    buffer: Vec<u8>,
+    pub read: Vec<Interface>,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Interface {
     pub index: u16,
@@ -66,11 +71,6 @@ impl std::fmt::Debug for Name {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(self.as_str())
     }
-}
-
-pub struct Interfaces {
-    buffer: Vec<u8>,
-    pub read: Vec<Interface>,
 }
 
 impl Default for Interfaces {
@@ -151,6 +151,106 @@ impl Interfaces {
         }
         Err(error)
     }
+}
+
+/// Reads into `read` the interface each message of `dump` names, skipping loopback and the
+/// messages of other kinds. A message the dump cannot hold, or that names no interface, is
+/// an error.
+fn read_all_messages(dump: &[u8], read: &mut Vec<Interface>) -> io::Result<()> {
+    let mut offset = 0;
+    while offset < dump.len() {
+        let Some(header) = dump.get(offset..offset + MESSAGE_PREFIX_SIZE) else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "the interface dump ends {} bytes into a message",
+                    dump.len() - offset
+                ),
+            ));
+        };
+        let length = usize::from(u16::from_ne_bytes([
+            header[MESSAGE_LENGTH_OFFSET],
+            header[MESSAGE_LENGTH_OFFSET + 1],
+        ]));
+        if length < MESSAGE_PREFIX_SIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("a routing message gave its length as {length} bytes"),
+            ));
+        }
+        let Some(message) = dump.get(offset..offset + length) else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "a routing message of {length} bytes runs past the {} left of the dump",
+                    dump.len() - offset
+                ),
+            ));
+        };
+
+        if c_int::from(header[MESSAGE_TYPE_OFFSET]) == RTM_IFINFO2 {
+            if let Some(interface) = read_all_interface(message)? {
+                push_without_growing(read, interface);
+            }
+        }
+        offset += length;
+        assert!(offset <= dump.len());
+    }
+
+    assert_eq!(dump.len(), offset);
+    Ok(())
+}
+
+/// Reads the interface `message` names, or `None` for loopback, whose traffic is not
+/// external.
+fn read_all_interface(message: &[u8]) -> io::Result<Option<Interface>> {
+    assert!(message.len() >= MESSAGE_PREFIX_SIZE);
+    assert_eq!(RTM_IFINFO2, c_int::from(message[MESSAGE_TYPE_OFFSET]));
+
+    let Some(link) = message.get(size_of::<IfMsghdr2>()..) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "an interface's message of {} bytes is shorter than its header",
+                message.len()
+            ),
+        ));
+    };
+    assert!(message.len() >= size_of::<IfMsghdr2>());
+    let info = unsafe { message.as_ptr().cast::<IfMsghdr2>().read_unaligned() };
+    if info.flags & IFF_LOOPBACK != 0 {
+        return Ok(None);
+    }
+
+    let Some(&name_length) = link.get(offset_of!(SockaddrDl, nlen)) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("interface {} has no link address", info.index),
+        ));
+    };
+    let name_offset = offset_of!(SockaddrDl, data);
+    let Some(name) = link.get(name_offset..name_offset + usize::from(name_length)) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "interface {}'s name of {name_length} bytes runs past its message",
+                info.index
+            ),
+        ));
+    };
+
+    let data = info.data;
+    Ok(Some(Interface {
+        index: info.index,
+        name: Name::new(name)?,
+        received_bytes: data.ibytes,
+        sent_bytes: data.obytes,
+        received_packets: data.ipackets,
+        sent_packets: data.opackets,
+        receive_errors: data.ierrors,
+        send_errors: data.oerrors,
+        receive_drops: data.iqdrops,
+    }))
 }
 
 /// The header of an interface's message in a routing dump, as `struct if_msghdr2` declares
@@ -261,106 +361,6 @@ const RTM_IFINFO2: c_int = 18;
 const IFF_LOOPBACK: c_int = 0x8;
 const IFNAMSIZ: usize = 16;
 const ENOMEM: c_int = 12;
-
-/// Reads into `read` the interface each message of `dump` names, skipping loopback and the
-/// messages of other kinds. A message the dump cannot hold, or that names no interface, is
-/// an error.
-fn read_all_messages(dump: &[u8], read: &mut Vec<Interface>) -> io::Result<()> {
-    let mut offset = 0;
-    while offset < dump.len() {
-        let Some(header) = dump.get(offset..offset + MESSAGE_PREFIX_SIZE) else {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "the interface dump ends {} bytes into a message",
-                    dump.len() - offset
-                ),
-            ));
-        };
-        let length = usize::from(u16::from_ne_bytes([
-            header[MESSAGE_LENGTH_OFFSET],
-            header[MESSAGE_LENGTH_OFFSET + 1],
-        ]));
-        if length < MESSAGE_PREFIX_SIZE {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("a routing message gave its length as {length} bytes"),
-            ));
-        }
-        let Some(message) = dump.get(offset..offset + length) else {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "a routing message of {length} bytes runs past the {} left of the dump",
-                    dump.len() - offset
-                ),
-            ));
-        };
-
-        if c_int::from(header[MESSAGE_TYPE_OFFSET]) == RTM_IFINFO2 {
-            if let Some(interface) = read_all_interface(message)? {
-                push_without_growing(read, interface);
-            }
-        }
-        offset += length;
-        assert!(offset <= dump.len());
-    }
-
-    assert_eq!(dump.len(), offset);
-    Ok(())
-}
-
-/// Reads the interface `message` names, or `None` for loopback, whose traffic is not
-/// external.
-fn read_all_interface(message: &[u8]) -> io::Result<Option<Interface>> {
-    assert!(message.len() >= MESSAGE_PREFIX_SIZE);
-    assert_eq!(RTM_IFINFO2, c_int::from(message[MESSAGE_TYPE_OFFSET]));
-
-    let Some(link) = message.get(size_of::<IfMsghdr2>()..) else {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "an interface's message of {} bytes is shorter than its header",
-                message.len()
-            ),
-        ));
-    };
-    assert!(message.len() >= size_of::<IfMsghdr2>());
-    let info = unsafe { message.as_ptr().cast::<IfMsghdr2>().read_unaligned() };
-    if info.flags & IFF_LOOPBACK != 0 {
-        return Ok(None);
-    }
-
-    let Some(&name_length) = link.get(offset_of!(SockaddrDl, nlen)) else {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("interface {} has no link address", info.index),
-        ));
-    };
-    let name_offset = offset_of!(SockaddrDl, data);
-    let Some(name) = link.get(name_offset..name_offset + usize::from(name_length)) else {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "interface {}'s name of {name_length} bytes runs past its message",
-                info.index
-            ),
-        ));
-    };
-
-    let data = info.data;
-    Ok(Some(Interface {
-        index: info.index,
-        name: Name::new(name)?,
-        received_bytes: data.ibytes,
-        sent_bytes: data.obytes,
-        received_packets: data.ipackets,
-        sent_packets: data.opackets,
-        receive_errors: data.ierrors,
-        send_errors: data.oerrors,
-        receive_drops: data.iqdrops,
-    }))
-}
 
 #[cfg(test)]
 mod tests {

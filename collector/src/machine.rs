@@ -4,23 +4,13 @@ use std::mem::offset_of;
 
 use crate::kernel::{self, KernReturn, MachPort, Sysctl, kern_return_check};
 
-// `processor_cpu_load_info.cpu_ticks` holds a core's ticks at the indices the CPU_STATE
-// constants name.
-const USER_INDEX: usize = cpu_ticks_index(CPU_STATE_USER);
-const SYSTEM_INDEX: usize = cpu_ticks_index(CPU_STATE_SYSTEM);
-const IDLE_INDEX: usize = cpu_ticks_index(CPU_STATE_IDLE);
-const NICE_INDEX: usize = cpu_ticks_index(CPU_STATE_NICE);
-
-/// Converts a `CPU_STATE` constant to the index it names in `cpu_ticks`, at compile time,
-/// where `as` would do it with no check.
-const fn cpu_ticks_index(state: c_int) -> usize {
-    match state {
-        0 => 0,
-        1 => 1,
-        2 => 2,
-        3 => 3,
-        _ => panic!("a CPU_STATE constant past the end of cpu_ticks"),
-    }
+pub struct Machine {
+    host: MachPort,
+    page_size: PageSize,
+    swap_usage: Sysctl,
+    pressure_level: Sysctl,
+    pub cpus: Vec<CPUTicks>,
+    pub memory: Memory,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -74,128 +64,6 @@ impl Pressure {
             )),
         }
     }
-}
-
-const CPU_STATE_MAX: usize = 4;
-const CPU_STATE_USER: c_int = 0;
-const CPU_STATE_SYSTEM: c_int = 1;
-const CPU_STATE_IDLE: c_int = 2;
-const CPU_STATE_NICE: c_int = 3;
-const PROCESSOR_CPU_LOAD_INFO: c_int = 2;
-
-/// A core's ticks in each state, as `struct processor_cpu_load_info` declares it.
-#[repr(C)]
-struct ProcessorCPULoadInfo {
-    cpu_ticks: [u32; CPU_STATE_MAX],
-}
-
-const _: () = assert!(size_of::<ProcessorCPULoadInfo>() == 16);
-const _: () = assert!(offset_of!(ProcessorCPULoadInfo, cpu_ticks) == 0);
-
-/// The machine's page counts, as `struct vm_statistics64` declares them through its first
-/// revision. The kernel fills only the integers the call's count asks for, and the struct
-/// has grown past this since.
-#[repr(C)]
-struct VMStatistics64 {
-    free_count: u32,
-    active_count: u32,
-    inactive_count: u32,
-    wire_count: u32,
-    zero_fill_count: u64,
-    reactivations: u64,
-    pageins: u64,
-    pageouts: u64,
-    faults: u64,
-    cow_faults: u64,
-    lookups: u64,
-    hits: u64,
-    purges: u64,
-    purgeable_count: u32,
-    speculative_count: u32,
-    decompressions: u64,
-    compressions: u64,
-    swapins: u64,
-    swapouts: u64,
-    compressor_page_count: u32,
-    throttled_count: u32,
-    external_page_count: u32,
-    internal_page_count: u32,
-    total_uncompressed_pages_in_compressor: u64,
-}
-
-const _: () = assert!(size_of::<VMStatistics64>() == 152);
-const _: () = assert!(offset_of!(VMStatistics64, free_count) == 0);
-const _: () = assert!(offset_of!(VMStatistics64, active_count) == 4);
-const _: () = assert!(offset_of!(VMStatistics64, inactive_count) == 8);
-const _: () = assert!(offset_of!(VMStatistics64, wire_count) == 12);
-const _: () = assert!(offset_of!(VMStatistics64, pageins) == 32);
-const _: () = assert!(offset_of!(VMStatistics64, pageouts) == 40);
-const _: () = assert!(offset_of!(VMStatistics64, purgeable_count) == 88);
-const _: () = assert!(offset_of!(VMStatistics64, speculative_count) == 92);
-const _: () = assert!(offset_of!(VMStatistics64, decompressions) == 96);
-const _: () = assert!(offset_of!(VMStatistics64, compressions) == 104);
-const _: () = assert!(offset_of!(VMStatistics64, swapins) == 112);
-const _: () = assert!(offset_of!(VMStatistics64, swapouts) == 120);
-const _: () = assert!(offset_of!(VMStatistics64, compressor_page_count) == 128);
-const _: () = assert!(offset_of!(VMStatistics64, external_page_count) == 136);
-const _: () = assert!(offset_of!(VMStatistics64, internal_page_count) == 140);
-
-const HOST_VM_INFO64: c_int = 4;
-/// The size of `VMStatistics64` in integers, the count `host_statistics64` fills, as the
-/// header computes it.
-const HOST_VM_INFO64_REV1_COUNT: usize = size_of::<VMStatistics64>() / size_of::<c_int>();
-
-const _: () = assert!(size_of::<VMStatistics64>().is_multiple_of(size_of::<c_int>()));
-const _: () = assert!(HOST_VM_INFO64_REV1_COUNT == 38);
-
-/// The machine's swap, as `struct xsw_usage` declares it without the `xsu_` prefix.
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct XswUsage {
-    total: u64,
-    avail: u64,
-    used: u64,
-    pagesize: u32,
-    encrypted: c_int,
-}
-
-const _: () = assert!(size_of::<XswUsage>() == 32);
-const _: () = assert!(offset_of!(XswUsage, total) == 0);
-const _: () = assert!(offset_of!(XswUsage, used) == 16);
-
-unsafe extern "C" {
-    static vm_page_size: usize;
-
-    fn mach_host_self() -> MachPort;
-    fn host_processor_info(
-        host: MachPort,
-        flavor: c_int,
-        processor_count: *mut u32,
-        info: *mut *mut c_int,
-        info_count: *mut u32,
-    ) -> KernReturn;
-    fn host_statistics64(
-        host: MachPort,
-        flavor: c_int,
-        info: *mut c_int,
-        info_count: *mut u32,
-    ) -> KernReturn;
-    fn vm_deallocate(task: MachPort, address: usize, size: usize) -> KernReturn;
-}
-
-/// Returns how many entries a list takes to hold one for every logical CPU the machine runs,
-/// which `hw.logicalcpu_max` gives.
-pub fn cpu_limit() -> io::Result<usize> {
-    kernel::read_limit(c"hw.logicalcpu_max")
-}
-
-pub struct Machine {
-    host: MachPort,
-    page_size: PageSize,
-    swap_usage: Sysctl,
-    pressure_level: Sysctl,
-    pub cpus: Vec<CPUTicks>,
-    pub memory: Memory,
 }
 
 /// The bytes a page of memory holds, above 0.
@@ -453,6 +321,138 @@ fn usize_from_u32(value: u32) -> usize {
         Ok(value) => value,
         Err(error) => unreachable!("{error}"),
     }
+}
+
+/// Returns how many entries a list takes to hold one for every logical CPU the machine runs,
+/// which `hw.logicalcpu_max` gives.
+pub fn cpu_limit() -> io::Result<usize> {
+    kernel::read_limit(c"hw.logicalcpu_max")
+}
+
+// `processor_cpu_load_info.cpu_ticks` holds a core's ticks at the indices the CPU_STATE
+// constants name.
+const USER_INDEX: usize = cpu_ticks_index(CPU_STATE_USER);
+const SYSTEM_INDEX: usize = cpu_ticks_index(CPU_STATE_SYSTEM);
+const IDLE_INDEX: usize = cpu_ticks_index(CPU_STATE_IDLE);
+const NICE_INDEX: usize = cpu_ticks_index(CPU_STATE_NICE);
+
+/// Converts a `CPU_STATE` constant to the index it names in `cpu_ticks`, at compile time,
+/// where `as` would do it with no check.
+const fn cpu_ticks_index(state: c_int) -> usize {
+    match state {
+        0 => 0,
+        1 => 1,
+        2 => 2,
+        3 => 3,
+        _ => panic!("a CPU_STATE constant past the end of cpu_ticks"),
+    }
+}
+
+const CPU_STATE_MAX: usize = 4;
+const CPU_STATE_USER: c_int = 0;
+const CPU_STATE_SYSTEM: c_int = 1;
+const CPU_STATE_IDLE: c_int = 2;
+const CPU_STATE_NICE: c_int = 3;
+const PROCESSOR_CPU_LOAD_INFO: c_int = 2;
+
+/// A core's ticks in each state, as `struct processor_cpu_load_info` declares it.
+#[repr(C)]
+struct ProcessorCPULoadInfo {
+    cpu_ticks: [u32; CPU_STATE_MAX],
+}
+
+const _: () = assert!(size_of::<ProcessorCPULoadInfo>() == 16);
+const _: () = assert!(offset_of!(ProcessorCPULoadInfo, cpu_ticks) == 0);
+
+/// The machine's page counts, as `struct vm_statistics64` declares them through its first
+/// revision. The kernel fills only the integers the call's count asks for, and the struct
+/// has grown past this since.
+#[repr(C)]
+struct VMStatistics64 {
+    free_count: u32,
+    active_count: u32,
+    inactive_count: u32,
+    wire_count: u32,
+    zero_fill_count: u64,
+    reactivations: u64,
+    pageins: u64,
+    pageouts: u64,
+    faults: u64,
+    cow_faults: u64,
+    lookups: u64,
+    hits: u64,
+    purges: u64,
+    purgeable_count: u32,
+    speculative_count: u32,
+    decompressions: u64,
+    compressions: u64,
+    swapins: u64,
+    swapouts: u64,
+    compressor_page_count: u32,
+    throttled_count: u32,
+    external_page_count: u32,
+    internal_page_count: u32,
+    total_uncompressed_pages_in_compressor: u64,
+}
+
+const _: () = assert!(size_of::<VMStatistics64>() == 152);
+const _: () = assert!(offset_of!(VMStatistics64, free_count) == 0);
+const _: () = assert!(offset_of!(VMStatistics64, active_count) == 4);
+const _: () = assert!(offset_of!(VMStatistics64, inactive_count) == 8);
+const _: () = assert!(offset_of!(VMStatistics64, wire_count) == 12);
+const _: () = assert!(offset_of!(VMStatistics64, pageins) == 32);
+const _: () = assert!(offset_of!(VMStatistics64, pageouts) == 40);
+const _: () = assert!(offset_of!(VMStatistics64, purgeable_count) == 88);
+const _: () = assert!(offset_of!(VMStatistics64, speculative_count) == 92);
+const _: () = assert!(offset_of!(VMStatistics64, decompressions) == 96);
+const _: () = assert!(offset_of!(VMStatistics64, compressions) == 104);
+const _: () = assert!(offset_of!(VMStatistics64, swapins) == 112);
+const _: () = assert!(offset_of!(VMStatistics64, swapouts) == 120);
+const _: () = assert!(offset_of!(VMStatistics64, compressor_page_count) == 128);
+const _: () = assert!(offset_of!(VMStatistics64, external_page_count) == 136);
+const _: () = assert!(offset_of!(VMStatistics64, internal_page_count) == 140);
+
+const HOST_VM_INFO64: c_int = 4;
+/// The size of `VMStatistics64` in integers, the count `host_statistics64` fills, as the
+/// header computes it.
+const HOST_VM_INFO64_REV1_COUNT: usize = size_of::<VMStatistics64>() / size_of::<c_int>();
+
+const _: () = assert!(size_of::<VMStatistics64>().is_multiple_of(size_of::<c_int>()));
+const _: () = assert!(HOST_VM_INFO64_REV1_COUNT == 38);
+
+/// The machine's swap, as `struct xsw_usage` declares it without the `xsu_` prefix.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct XswUsage {
+    total: u64,
+    avail: u64,
+    used: u64,
+    pagesize: u32,
+    encrypted: c_int,
+}
+
+const _: () = assert!(size_of::<XswUsage>() == 32);
+const _: () = assert!(offset_of!(XswUsage, total) == 0);
+const _: () = assert!(offset_of!(XswUsage, used) == 16);
+
+unsafe extern "C" {
+    static vm_page_size: usize;
+
+    fn mach_host_self() -> MachPort;
+    fn host_processor_info(
+        host: MachPort,
+        flavor: c_int,
+        processor_count: *mut u32,
+        info: *mut *mut c_int,
+        info_count: *mut u32,
+    ) -> KernReturn;
+    fn host_statistics64(
+        host: MachPort,
+        flavor: c_int,
+        info: *mut c_int,
+        info_count: *mut u32,
+    ) -> KernReturn;
+    fn vm_deallocate(task: MachPort, address: usize, size: usize) -> KernReturn;
 }
 
 #[cfg(test)]

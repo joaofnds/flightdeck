@@ -3,23 +3,6 @@ use std::mem::offset_of;
 
 use crate::kernel::{KernReturn, kern_return_check};
 
-/// The ratio of nanoseconds to ticks, as `struct mach_timebase_info` declares it.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct MachTimebaseInfo {
-    numer: u32,
-    denom: u32,
-}
-
-const _: () = assert!(size_of::<MachTimebaseInfo>() == 8);
-const _: () = assert!(offset_of!(MachTimebaseInfo, numer) == 0);
-const _: () = assert!(offset_of!(MachTimebaseInfo, denom) == 4);
-
-unsafe extern "C" {
-    fn mach_continuous_time() -> u64;
-    fn mach_timebase_info(info: *mut MachTimebaseInfo) -> KernReturn;
-}
-
 #[must_use]
 pub fn now() -> u64 {
     unsafe { mach_continuous_time() }
@@ -91,6 +74,23 @@ fn read_check(info: MachTimebaseInfo) -> io::Result<Timebase> {
         numerator: info.numer.into(),
         denominator: info.denom.into(),
     })
+}
+
+/// The ratio of nanoseconds to ticks, as `struct mach_timebase_info` declares it.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct MachTimebaseInfo {
+    numer: u32,
+    denom: u32,
+}
+
+const _: () = assert!(size_of::<MachTimebaseInfo>() == 8);
+const _: () = assert!(offset_of!(MachTimebaseInfo, numer) == 0);
+const _: () = assert!(offset_of!(MachTimebaseInfo, denom) == 4);
+
+unsafe extern "C" {
+    fn mach_continuous_time() -> u64;
+    fn mach_timebase_info(info: *mut MachTimebaseInfo) -> KernReturn;
 }
 
 #[cfg(test)]
