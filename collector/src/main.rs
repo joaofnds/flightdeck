@@ -426,6 +426,7 @@ fn finish_report_missed(out: &mut impl Write, starts: &Starts) -> io::Result<()>
     match (started, starts.missed()) {
         (Some(started), Some(missed)) => {
             assert!(missed <= started);
+            assert!(found <= started);
             writeln!(
                 out,
                 "  processes started over the run {started}, found {found}, missed {missed}, \
@@ -557,6 +558,8 @@ impl Exits {
         let count = self.read + self.refused + self.gone;
 
         assert!(count >= self.read);
+        assert!(count >= self.refused);
+        assert!(count >= self.gone);
         count
     }
 

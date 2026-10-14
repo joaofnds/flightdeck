@@ -390,23 +390,38 @@ impl OutputFile {
             .create_new(true)
             .open(&path)?;
 
-        Ok(OutputFile { path, file })
+        let output = OutputFile { path, file };
+        assert!(output.is_named());
+        Ok(output)
     }
 
     /// Returns a handle on the file for a program's standard output or standard error. The
     /// handles share one offset, so the file holds both streams in the order they were
     /// written.
     fn stdio(&self) -> io::Result<Stdio> {
+        assert!(self.is_named());
+
         Ok(Stdio::from(self.file.try_clone()?))
     }
 
     fn read(&self) -> io::Result<Vec<u8>> {
+        assert!(self.is_named());
+
         fs::read(&self.path)
+    }
+
+    /// Whether the file has the name `create` gave it, so a drop removes no other file.
+    fn is_named(&self) -> bool {
+        self.path
+            .file_name()
+            .is_some_and(|name| name.as_encoded_bytes().starts_with(b"burst_minute-"))
     }
 }
 
 impl Drop for OutputFile {
     fn drop(&mut self) {
+        assert!(self.is_named());
+
         if let Err(error) = fs::remove_file(&self.path) {
             eprintln!(
                 "burst_minute: cannot remove {}: {error}",
