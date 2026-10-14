@@ -44,8 +44,6 @@ jobs:
           --skip ioreport::tests::reads_the_performance_states_of_every_logical_cpu
           --skip ioreport::tests::refuses_a_channel_whose_states_changed_since_open
           --skip ioreport::tests::refuses_a_channel_with_more_active_states_than_its_room
-          --skip ioreport::tests::refuses_a_dictionary_with_no_list_of_channels
-          --skip ioreport::tests::refuses_a_list_of_channels_that_is_not_an_array
           --skip ioreport::tests::refuses_a_negative_energy_read_from_a_channel
           --skip ioreport::tests::refuses_a_read_that_finds_other_channels_than_open
           --skip ioreport::tests::refuses_more_cores_than_its_cpu_limit

@@ -708,6 +708,12 @@ mod tests {
     unsafe extern "C" {
         fn CFRetain(object: CFTypeRef) -> CFTypeRef;
         fn CFGetRetainCount(object: CFTypeRef) -> isize;
+        fn CFDictionaryCreateMutable(
+            allocator: CFTypeRef,
+            capacity: isize,
+            key_callbacks: *const c_void,
+            value_callbacks: *const c_void,
+        ) -> CFTypeRef;
     }
 
     fn logical_cpus() -> u32 {
@@ -725,6 +731,14 @@ mod tests {
             .unwrap()
             .find(|&channel| Kind::of(channel) == Some(kind))
             .unwrap()
+    }
+
+    /// A new, empty dictionary, which with no callbacks compares its keys as pointers and
+    /// holds its values without retaining them.
+    fn empty_dictionary() -> Owned {
+        let dictionary =
+            unsafe { CFDictionaryCreateMutable(ptr::null(), 0, ptr::null(), ptr::null()) };
+        Owned::new(dictionary, "creating a dictionary").unwrap()
     }
 
     fn active_time_of_every_core(ioreport: &IOReport) -> Duration {
@@ -897,16 +911,11 @@ mod tests {
     fn refuses_a_dictionary_with_no_list_of_channels() {
         // Goal: a dictionary IOReport gives without a list of channels is an error, never an
         // empty list.
-        // Method: look for the list in what IOReport gives for a group it does not have, which
-        // on an M5 Pro holds only its query options.
+        // Method: look for the list in an empty dictionary.
         let key = ChannelsKey::new().unwrap();
-        let missing = channels_in_group(&Group {
-            name: c"No Such Group",
-            subgroup: None,
-        })
-        .unwrap();
+        let dictionary = empty_dictionary();
 
-        let channels = key.channels_of(&missing);
+        let channels = key.channels_of(&dictionary);
 
         assert_eq!(io::ErrorKind::InvalidData, channels.unwrap_err().kind());
     }
@@ -915,18 +924,13 @@ mod tests {
     fn refuses_a_list_of_channels_that_is_not_an_array() {
         // Goal: a list of channels of another type than an array is an error, never walked as
         // an array.
-        // Method: put a string where the list goes, in what IOReport gives for a group it does
-        // not have.
+        // Method: put a string where the list goes in a dictionary.
         let key = ChannelsKey::new().unwrap();
-        let missing = channels_in_group(&Group {
-            name: c"No Such Group",
-            subgroup: None,
-        })
-        .unwrap();
+        let dictionary = empty_dictionary();
         let text = string(c"not an array").unwrap();
-        unsafe { CFDictionarySetValue(missing.0, key.0.0, text.0) };
+        unsafe { CFDictionarySetValue(dictionary.0, key.0.0, text.0) };
 
-        let channels = key.channels_of(&missing);
+        let channels = key.channels_of(&dictionary);
 
         assert_eq!(io::ErrorKind::InvalidData, channels.unwrap_err().kind());
     }
