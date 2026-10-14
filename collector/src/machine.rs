@@ -97,15 +97,18 @@ impl PageSize {
     fn bytes_of(self, pages: u64) -> io::Result<u64> {
         assert!(self.bytes > 0);
 
-        pages.checked_mul(self.bytes).ok_or_else(|| {
-            io::Error::new(
+        let Some(bytes) = pages.checked_mul(self.bytes) else {
+            return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
                     "{pages} pages of {} bytes pass what a u64 holds",
                     self.bytes
                 ),
-            )
-        })
+            ));
+        };
+
+        assert_eq!(pages, bytes / self.bytes);
+        Ok(bytes)
     }
 }
 
@@ -133,6 +136,8 @@ impl Machine {
 
     pub fn read(&mut self) -> io::Result<()> {
         self.read_cpus()?;
+        assert!(!self.cpus.is_empty());
+
         self.read_memory()
     }
 
@@ -164,7 +169,10 @@ impl Machine {
         };
 
         let capacity = self.cpus.capacity();
+        assert!(capacity > 0);
         let cpu_count = read_cpus_count_check(counts, capacity)?;
+        assert!(cpu_count > 0);
+        assert!(cpu_count <= capacity);
         let loads = unsafe {
             std::slice::from_raw_parts(info.address.cast::<ProcessorCPULoadInfo>(), cpu_count)
         };
@@ -197,6 +205,7 @@ impl Machine {
         };
         kern_return_check(result, "host_statistics64")?;
         read_memory_count_check(count)?;
+        assert_eq!(HOST_VM_INFO64_REV1_COUNT, usize_from_u32(count));
 
         let statistics = unsafe { statistics.assume_init() };
         let swap: XswUsage = self.swap_usage.read()?;
@@ -339,13 +348,16 @@ const NICE_INDEX: usize = cpu_ticks_index(CPU_STATE_NICE);
 /// Converts a `CPU_STATE` constant to the index it names in `cpu_ticks`, at compile time,
 /// where `as` would do it with no check.
 const fn cpu_ticks_index(state: c_int) -> usize {
-    match state {
+    let index = match state {
         0 => 0,
         1 => 1,
         2 => 2,
         3 => 3,
         _ => panic!("a CPU_STATE constant past the end of cpu_ticks"),
-    }
+    };
+
+    assert!(index < CPU_STATE_MAX);
+    index
 }
 
 const CPU_STATE_MAX: usize = 4;
