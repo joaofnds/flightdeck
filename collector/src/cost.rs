@@ -117,11 +117,11 @@ unsafe extern "C" {
 }
 
 fn thread_cpu_ns() -> io::Result<u64> {
-    clock_ns(CLOCK_THREAD_CPUTIME_ID)
+    thread_cpu_ns_of(CLOCK_THREAD_CPUTIME_ID)
 }
 
 /// Reads `clock` in nanoseconds.
-fn clock_ns(clock: c_uint) -> io::Result<u64> {
+fn thread_cpu_ns_of(clock: c_uint) -> io::Result<u64> {
     let mut now = Timespec {
         tv_sec: 0,
         tv_nsec: 0,
@@ -131,11 +131,11 @@ fn clock_ns(clock: c_uint) -> io::Result<u64> {
         return Err(io::Error::last_os_error());
     }
 
-    clock_ns_from(now)
+    thread_cpu_ns_from(now)
 }
 
 /// Returns `time` in nanoseconds, or an error where it is negative or a u64 cannot hold it.
-fn clock_ns_from(time: Timespec) -> io::Result<u64> {
+fn thread_cpu_ns_from(time: Timespec) -> io::Result<u64> {
     let invalid = || {
         io::Error::new(
             io::ErrorKind::InvalidData,
@@ -499,7 +499,7 @@ mod tests {
     fn refuses_a_clock_macos_does_not_have() {
         // Goal: a clock that clock_gettime refuses is an error, never a time of 0.
         // Method: read clock 99, which clock_gettime refused with -1 on macOS 27.0.1.
-        let read = clock_ns(99);
+        let read = thread_cpu_ns_of(99);
 
         assert_eq!(io::ErrorKind::InvalidInput, read.unwrap_err().kind());
     }
@@ -513,7 +513,7 @@ mod tests {
             tv_nsec: 5,
         };
 
-        assert_eq!(2_000_000_005, clock_ns_from(time).unwrap());
+        assert_eq!(2_000_000_005, thread_cpu_ns_from(time).unwrap());
     }
 
     #[test]
@@ -526,7 +526,7 @@ mod tests {
             tv_nsec: 0,
         };
 
-        let read = clock_ns_from(time);
+        let read = thread_cpu_ns_from(time);
 
         assert_eq!(io::ErrorKind::InvalidData, read.unwrap_err().kind());
     }
@@ -540,7 +540,7 @@ mod tests {
             tv_nsec: 0,
         };
 
-        let read = clock_ns_from(time);
+        let read = thread_cpu_ns_from(time);
 
         assert_eq!(io::ErrorKind::InvalidData, read.unwrap_err().kind());
     }

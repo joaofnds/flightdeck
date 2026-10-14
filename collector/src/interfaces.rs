@@ -298,7 +298,7 @@ fn read_all_messages(dump: &[u8], read: &mut Vec<Interface>) -> io::Result<()> {
         };
 
         if c_int::from(header[MESSAGE_TYPE_OFFSET]) == RTM_IFINFO2 {
-            if let Some(interface) = interface_from(message)? {
+            if let Some(interface) = read_all_interface(message)? {
                 push_without_growing(read, interface);
             }
         }
@@ -312,7 +312,7 @@ fn read_all_messages(dump: &[u8], read: &mut Vec<Interface>) -> io::Result<()> {
 
 /// Reads the interface `message` names, or `None` for loopback, whose traffic is not
 /// external.
-fn interface_from(message: &[u8]) -> io::Result<Option<Interface>> {
+fn read_all_interface(message: &[u8]) -> io::Result<Option<Interface>> {
     assert!(message.len() >= MESSAGE_PREFIX_SIZE);
     assert_eq!(RTM_IFINFO2, c_int::from(message[MESSAGE_TYPE_OFFSET]));
 
