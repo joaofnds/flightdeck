@@ -223,34 +223,34 @@ impl Machine {
     }
 
     fn read_cpus(&mut self) -> io::Result<()> {
-        let mut cpu_count: u32 = 0;
+        let mut counts = ReplyCounts {
+            cpu_count: 0,
+            integer_count: 0,
+        };
         let mut address: *mut c_int = std::ptr::null_mut();
-        let mut info_count: u32 = 0;
         let result = unsafe {
             host_processor_info(
                 self.host,
                 PROCESSOR_CPU_LOAD_INFO,
-                &raw mut cpu_count,
+                &raw mut counts.cpu_count,
                 &raw mut address,
-                &raw mut info_count,
+                &raw mut counts.integer_count,
             )
         };
         kern_return_check(result, "host_processor_info")?;
-
-        let info = MachMemory {
-            address,
-            size: usize_from_u32(info_count) * size_of::<c_int>(),
-        };
-
-        let cpu_count = usize_from_u32(cpu_count);
-        let capacity = self.cpus.capacity();
-        if cpu_count > capacity {
-            return Err(io::Error::new(
-                io::ErrorKind::QuotaExceeded,
-                format!("macOS reported {cpu_count} CPUs past the limit of {capacity}"),
+        if address.is_null() {
+            return Err(io::Error::other(
+                "host_processor_info replied with no loads",
             ));
         }
 
+        let info = MachMemory {
+            address,
+            size: usize_from_u32(counts.integer_count) * size_of::<c_int>(),
+        };
+
+        let capacity = self.cpus.capacity();
+        let cpu_count = read_cpus_count_check(counts, capacity)?;
         let loads = unsafe {
             std::slice::from_raw_parts(info.address.cast::<ProcessorCpuLoadInfo>(), cpu_count)
         };
@@ -310,6 +310,43 @@ impl Machine {
 
         Ok(())
     }
+}
+
+/// The counts `host_processor_info` replies with: the CPUs whose loads it gives, and the
+/// integers those loads take.
+#[derive(Clone, Copy)]
+struct ReplyCounts {
+    cpu_count: u32,
+    integer_count: u32,
+}
+
+/// Checks that `counts` give at least one CPU, and no more than `capacity`, in the
+/// `CPU_STATE_MAX` integers of each CPU's load, and returns the CPU count.
+fn read_cpus_count_check(counts: ReplyCounts, capacity: usize) -> io::Result<usize> {
+    let cpu_count = usize_from_u32(counts.cpu_count);
+    let integer_count = usize_from_u32(counts.integer_count);
+    if cpu_count == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "host_processor_info replied with no CPUs",
+        ));
+    }
+    if integer_count != cpu_count * CPU_STATE_MAX {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "host_processor_info replied with {integer_count} integers for {cpu_count} CPUs"
+            ),
+        ));
+    }
+    if cpu_count > capacity {
+        return Err(io::Error::new(
+            io::ErrorKind::QuotaExceeded,
+            format!("macOS reported {cpu_count} CPUs past the limit of {capacity}"),
+        ));
+    }
+
+    Ok(cpu_count)
 }
 
 /// Memory the kernel gave this task in a reply, `size` bytes at `address`, which it frees
@@ -381,6 +418,61 @@ mod tests {
 
         assert_eq!(io::ErrorKind::QuotaExceeded, read.unwrap_err().kind());
         assert_eq!(capacity, machine.cpus.capacity());
+    }
+
+    #[test]
+    fn takes_a_reply_of_four_integers_a_cpu() {
+        // Goal: a reply holding the four ticks of each CPU it counts gives that many CPUs.
+        // Method: check the counts this Mac's 18 CPUs replied with, in room for 18.
+        let counts = ReplyCounts {
+            cpu_count: 18,
+            integer_count: 72,
+        };
+
+        assert_eq!(18, read_cpus_count_check(counts, 18).unwrap());
+    }
+
+    #[test]
+    fn refuses_a_reply_of_fewer_integers_than_four_a_cpu() {
+        // Goal: a reply too short for the CPUs it counts is an error, so no read passes its end.
+        // Method: check 18 CPUs in 71 integers, one short.
+        let counts = ReplyCounts {
+            cpu_count: 18,
+            integer_count: 71,
+        };
+
+        let checked = read_cpus_count_check(counts, 18);
+
+        assert_eq!(io::ErrorKind::InvalidData, checked.unwrap_err().kind());
+    }
+
+    #[test]
+    fn refuses_a_reply_of_more_integers_than_four_a_cpu() {
+        // Goal: a reply whose integers are not the four ticks of each CPU is an error, since
+        // the CPUs' ticks would then not start where a read looks for them.
+        // Method: check 18 CPUs in 90 integers, five a CPU.
+        let counts = ReplyCounts {
+            cpu_count: 18,
+            integer_count: 90,
+        };
+
+        let checked = read_cpus_count_check(counts, 18);
+
+        assert_eq!(io::ErrorKind::InvalidData, checked.unwrap_err().kind());
+    }
+
+    #[test]
+    fn refuses_a_reply_of_no_cpus() {
+        // Goal: a reply that counts no CPUs is an error, never a machine with no CPUs.
+        // Method: check a reply of no CPUs in no integers.
+        let counts = ReplyCounts {
+            cpu_count: 0,
+            integer_count: 0,
+        };
+
+        let checked = read_cpus_count_check(counts, 18);
+
+        assert_eq!(io::ErrorKind::InvalidData, checked.unwrap_err().kind());
     }
 
     #[test]
