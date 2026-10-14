@@ -161,19 +161,19 @@ fn thread_cpu_ns_from(time: Timespec) -> io::Result<u64> {
         )
     };
     let seconds = u64::try_from(time.tv_sec).map_err(|_| invalid())?;
-    let nanos = u64::try_from(time.tv_nsec).map_err(|_| invalid())?;
-    if nanos >= NANOSECONDS_PER_SECOND {
+    let nanoseconds = u64::try_from(time.tv_nsec).map_err(|_| invalid())?;
+    if nanoseconds >= NANOSECONDS_PER_SECOND {
         return Err(invalid());
     }
     let Some(time_ns) = seconds
         .checked_mul(NANOSECONDS_PER_SECOND)
-        .and_then(|seconds_ns| seconds_ns.checked_add(nanos))
+        .and_then(|seconds_ns| seconds_ns.checked_add(nanoseconds))
     else {
         return Err(invalid());
     };
 
     assert_eq!(seconds, time_ns / NANOSECONDS_PER_SECOND);
-    assert_eq!(nanos, time_ns % NANOSECONDS_PER_SECOND);
+    assert_eq!(nanoseconds, time_ns % NANOSECONDS_PER_SECOND);
     Ok(time_ns)
 }
 
