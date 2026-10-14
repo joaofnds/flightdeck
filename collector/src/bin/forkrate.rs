@@ -228,18 +228,19 @@ fn run_forks(burst: &Burst, timebase: Timebase, start: u64) -> io::Result<Forked
                 .add(&run_forks_reap(fork + 1 - forked.reaped.count)?);
             next_reap += reap_every;
         }
-        if now >= second_ends {
-            forked.per_second_reached.push(this_second);
-            this_second = 0;
-            second_ends += second;
-        }
         if now > next {
             forked.late += 1;
         }
         if now >= run_ends {
             // Forking fell behind the rate. Ending on time keeps the run inside its seconds,
-            // which bound how long followprobe waits for it.
+            // which bound how long followprobe waits for it. The last second's forks are
+            // counted after the loop, so the run lists no second it did not run.
             break;
+        }
+        if now >= second_ends {
+            forked.per_second_reached.push(this_second);
+            this_second = 0;
+            second_ends += second;
         }
 
         run_forks_wait_until(next)?;
