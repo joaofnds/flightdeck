@@ -154,11 +154,20 @@ impl Throttle {
     }
 
     fn woke(&mut self, wake: Wake) {
+        // A rescan is deferred only while one is pending.
+        if self.deferred {
+            assert!(self.pending);
+        }
+
         if wake.rescan_timer_fired {
             self.armed = false;
         }
         if wake.forked {
             self.pending = true;
+        }
+
+        if wake.forked {
+            assert!(self.pending);
         }
     }
 
