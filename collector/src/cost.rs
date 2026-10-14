@@ -594,6 +594,19 @@ mod tests {
     }
 
     #[test]
+    fn reads_the_last_nanosecond_of_a_second() {
+        // Goal: the most nanoseconds a time holds past its seconds read as a time, never as
+        // a whole second refused.
+        // Method: read 1 s and 999,999,999 ns.
+        let time = Timespec {
+            tv_sec: 1,
+            tv_nsec: 999_999_999,
+        };
+
+        assert_eq!(1_999_999_999, thread_cpu_ns_from(time).unwrap());
+    }
+
+    #[test]
     fn refuses_a_negative_time() {
         // Goal: a clock that gives a negative time is an error, since no time a thread spent
         // is negative.
