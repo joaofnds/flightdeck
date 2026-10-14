@@ -9,7 +9,7 @@ use collector::collector::Collector;
 use collector::cost::{Cost, Meter, Snapshot, Source};
 use collector::processes::{self, Unreadable, Usage};
 use collector::schedule::Schedule;
-use collector::tracker::{Counts, Event, Noticed};
+use collector::tracker::{Counts, EVENTS_PER_TICK_MAX, Event, Noticed};
 use collector::u64_from_usize;
 
 const QOS_CLASS_DEFAULT: u32 = 0x15;
@@ -81,6 +81,8 @@ fn run(options: &Options) -> io::Result<()> {
     let mut out = io::stdout().lock();
     let mut run = Run::start(timebase, TICK_PERIOD_NS, options.rescan_interval, &mut out)?;
     let mut tick = run.first_tick;
+    // Tick 0 is the warm-up tick, which `Run::start` ran.
+    assert!(tick > 0);
     loop {
         let following = run.tick(tick, &mut out)?;
         assert!(following > tick);
@@ -318,6 +320,7 @@ impl Span {
         last_tick: u64,
         end: &Mark,
     ) -> io::Result<()> {
+        assert!(!label.is_empty());
         assert!(last_tick >= self.first_tick);
         // A slipped tick is in the span but never ran.
         assert!(self.tally.ticks <= last_tick - self.first_tick + 1);
@@ -360,6 +363,8 @@ fn run_throwaway_child() -> io::Result<i32> {
 }
 
 fn start_warm_up_starts(events: &[Event]) -> u64 {
+    assert!(events.len() <= EVENTS_PER_TICK_MAX);
+
     let mut starts = 0;
     for event in events {
         if matches!(event, Event::Start { .. }) {
@@ -375,7 +380,9 @@ fn start_warm_up_starts(events: &[Event]) -> u64 {
 fn processes_started_pid_lap() -> u64 {
     const { assert!(processes::PID_MAX > 0) };
 
-    u64::from(processes::PID_MAX.cast_unsigned())
+    let lap = u64::from(processes::PID_MAX.cast_unsigned());
+    assert!(lap > 0);
+    lap
 }
 
 /// The processes that started over a run, as the run's report counts them.
@@ -413,11 +420,14 @@ fn finish_report_missed(out: &mut impl Write, starts: &Starts) -> io::Result<()>
     } = starts;
 
     match (started, starts.missed()) {
-        (Some(started), Some(missed)) => writeln!(
-            out,
-            "  processes started over the run {started}, found {found}, missed {missed}, \
+        (Some(started), Some(missed)) => {
+            assert!(missed <= started);
+            writeln!(
+                out,
+                "  processes started over the run {started}, found {found}, missed {missed}, \
              {dropped} of them dropped from a full event list"
-        ),
+            )
+        }
         _ => writeln!(
             out,
             "  pids may have wrapped over the run, so the processes missed are not counted"
@@ -466,6 +476,7 @@ impl Tally {
         self.late_max = self.late_max.max(late);
         assert!(self.late_max <= self.late_total);
 
+        let events_counted = self.events_counted();
         for event in collector.events() {
             match event {
                 Event::Start { .. } => self.starts += 1,
@@ -482,6 +493,11 @@ impl Tally {
                 } => self.found_exited.add(last),
             }
         }
+        // Each event counts in exactly one of the counts.
+        assert_eq!(
+            events_counted + u64_from_usize(collector.events().len()),
+            self.events_counted()
+        );
 
         self.processes_read = u64_from_usize(collector.processes.read.len());
         self.processes_refused = collector.processes.refused;
@@ -489,6 +505,15 @@ impl Tally {
         self.coalitions = u64_from_usize(collector.coalitions.read.len());
         self.interfaces = u64_from_usize(collector.interfaces.read().len());
         self.cpus = u64_from_usize(collector.machine.cpus().len());
+    }
+
+    /// The events the tally has counted, in all of its counts of them.
+    fn events_counted(&self) -> u64 {
+        let exits = self.seen_exiting.count() + self.found_exited.count();
+        let events = self.starts + self.execs + exits;
+
+        assert!(events >= exits);
+        events
     }
 
     /// The lateness of the average tick the tally counts, floored to the nanosecond, or an
@@ -522,8 +547,16 @@ struct Exits {
 }
 
 impl Exits {
+    /// The exits counted, each in exactly one of the three.
+    fn count(&self) -> u64 {
+        let count = self.read + self.refused + self.gone;
+
+        assert!(count >= self.read);
+        count
+    }
+
     fn add(&mut self, last: &Result<Usage, Unreadable>) {
-        let total = self.read + self.refused + self.gone;
+        let total = self.count();
 
         match last {
             Ok(_) => self.read += 1,
@@ -532,7 +565,7 @@ impl Exits {
         }
 
         // Each exit counts in exactly one of the three.
-        assert_eq!(total + 1, self.read + self.refused + self.gone);
+        assert_eq!(total + 1, self.count());
     }
 }
 
@@ -541,7 +574,7 @@ impl std::fmt::Display for Exits {
         write!(
             formatter,
             "{} ({} read, {} refused, {} gone)",
-            self.read + self.refused + self.gone,
+            self.count(),
             self.read,
             self.refused,
             self.gone
@@ -555,8 +588,9 @@ fn report_cost(
     tally: &Tally,
     late_average: Duration,
 ) -> io::Result<()> {
-    // The average tick is no later than the latest, and the latest no later than all of the
-    // span's ticks together.
+    // A span reports after its first tick. The average tick is no later than the latest, and
+    // the latest no later than all of the span's ticks together.
+    assert!(tally.ticks > 0);
     assert!(late_average <= tally.late_max);
     assert!(tally.late_max <= tally.late_total);
 
@@ -594,6 +628,9 @@ fn report_sources(out: &mut impl Write, cost: &Cost) -> io::Result<()> {
 }
 
 fn report_counts(out: &mut impl Write, tally: &Tally, counts: &Counts) -> io::Result<()> {
+    // A span reports after its first tick, whose read these counts hold.
+    assert!(tally.ticks > 0);
+
     writeln!(
         out,
         "  last tick read {} processes ({} refused, {} gone), {} coalitions, {} CPUs, \
@@ -624,7 +661,10 @@ fn report_counts(out: &mut impl Write, tally: &Tally, counts: &Counts) -> io::Re
 }
 
 fn milliseconds(duration: Duration) -> f64 {
-    duration.as_secs_f64() * 1_000.0
+    let milliseconds = duration.as_secs_f64() * 1_000.0;
+
+    assert!(milliseconds >= 0.0);
+    milliseconds
 }
 
 #[cfg(test)]
@@ -926,9 +966,13 @@ mod tests {
             dropped_exits: 3,
             ..Counts::default()
         };
+        let tally = Tally {
+            ticks: 1,
+            ..Tally::default()
+        };
         let mut written = Vec::new();
 
-        report_counts(&mut written, &Tally::default(), &counts).unwrap();
+        report_counts(&mut written, &tally, &counts).unwrap();
 
         let line = String::from_utf8(written).unwrap();
         let dropped = "; 2 starts, 1 execs and 3 exits dropped from a full event list\n";
