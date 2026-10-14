@@ -1321,28 +1321,47 @@ mod tests {
     }
 
     #[test]
-    fn leaves_the_states_a_core_or_the_gpu_spends_idle_out_of_its_active_time() {
-        // Goal: counting IDLE, DOWN or OFF as active would read every core and the GPU as
-        // busy for the whole of each second.
-        // Method: ask the filter about each name these states carry on this Mac.
+    fn leaves_the_idle_state_out_of_active_time() {
+        // Goal: counting IDLE as active would read every core and the GPU as busy for the
+        // whole of each second.
+        // Method: ask the filter about the name IDLE, as this Mac names the state.
         assert!(!learn_active_states_is_active(string(c"IDLE").unwrap().0).unwrap());
+    }
+
+    #[test]
+    fn leaves_the_down_state_out_of_active_time() {
+        // Goal: counting DOWN as active would read every core and the GPU as busy for the
+        // whole of each second.
+        // Method: ask the filter about the name DOWN, as this Mac names the state.
         assert!(!learn_active_states_is_active(string(c"DOWN").unwrap().0).unwrap());
+    }
+
+    #[test]
+    fn leaves_the_off_state_out_of_active_time() {
+        // Goal: counting OFF as active would read every core and the GPU as busy for the
+        // whole of each second.
+        // Method: ask the filter about the name OFF, as this Mac names the state.
         assert!(!learn_active_states_is_active(string(c"OFF").unwrap().0).unwrap());
     }
 
     #[test]
-    fn counts_the_performance_states_of_a_core_and_the_gpu_as_active() {
-        // Goal: a performance state left out would hide the time spent in it.
-        // Method: ask the filter about a core's state name and the GPU's, as this Mac
-        // names them.
+    fn counts_a_performance_state_of_a_core_as_active() {
+        // Goal: a core's performance state left out would hide the time spent in it.
+        // Method: ask the filter about V0P14, as this Mac names a core's state.
         assert!(learn_active_states_is_active(string(c"V0P14").unwrap().0).unwrap());
+    }
+
+    #[test]
+    fn counts_a_performance_state_of_the_gpu_as_active() {
+        // Goal: a GPU performance state left out would hide the time spent in it.
+        // Method: ask the filter about P1, as this Mac names a GPU state.
         assert!(learn_active_states_is_active(string(c"P1").unwrap().0).unwrap());
     }
 
     #[test]
     fn finds_a_state_left_out_of_active_time_in_every_core_and_the_gpu() {
         // Goal: a macOS that renamed the idle states would read every core as busy all the
-        // time, while the two tests above still passed.
+        // time, while the tests above on the state names still passed.
         // Method: sample IOReport and look for a state the filter leaves out in each
         // channel of core or GPU states.
         let ioreport = open();

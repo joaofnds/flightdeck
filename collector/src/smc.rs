@@ -664,23 +664,36 @@ mod tests {
     }
 
     #[test]
-    fn names_the_speed_key_of_each_fan_by_its_digit() {
-        // Goal: each fan's speed key names the fan by its digit, from the first fan to the
-        // tenth.
-        // Method: name the first and the tenth fan's keys.
+    fn names_the_speed_key_of_the_first_fan_by_its_digit() {
+        // Goal: the first fan's speed key names the fan by the digit 0.
+        // Method: name the first fan's key.
         assert_eq!(Key::named(*b"F0Ac"), Key::fan_speed(0));
+    }
+
+    #[test]
+    fn names_the_speed_key_of_the_tenth_fan_by_its_digit() {
+        // Goal: the tenth fan's speed key names the fan by the digit 9, the last a key can
+        // name.
+        // Method: name the tenth fan's key.
         assert_eq!(Key::named(*b"F9Ac"), Key::fan_speed(9));
     }
 
     #[test]
-    fn names_a_key_by_its_characters_escaping_any_unprintable() {
-        // Goal: a key reads as its four characters in an error, and a byte that is not
-        // printable reads as its escape, so a key the SMC lists with a zero byte shows it.
-        // Method: format PSTR, and a key of T followed by three zero bytes.
+    fn names_a_key_by_its_characters() {
+        // Goal: a key reads as its four characters in an error.
+        // Method: format PSTR.
         let named = format!("{SYSTEM_POWER:?}");
-        let unprintable = format!("{:?}", Key(0x5400_0000));
 
         assert_eq!("PSTR", named);
+    }
+
+    #[test]
+    fn names_a_key_by_the_escape_of_a_character_that_is_not_printable() {
+        // Goal: a byte that is not printable reads as its escape, so a key the SMC lists with
+        // a zero byte shows it.
+        // Method: format a key of T followed by three zero bytes.
+        let unprintable = format!("{:?}", Key(0x5400_0000));
+
         assert_eq!(r"T\u{0}\u{0}\u{0}", unprintable);
     }
 
