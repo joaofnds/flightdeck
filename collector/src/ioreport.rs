@@ -413,12 +413,12 @@ impl IOReport {
                     counts.gpu_energy += 1;
                 }
                 Some(Kind::GPUStates) => {
-                    read_active_states(channel, &mut self.gpu, self.timebase)?;
+                    read_active_states(self.timebase, channel, &mut self.gpu)?;
                     counts.gpu_states += 1;
                 }
                 Some(Kind::CoreStates) => {
                     let core = core_at(cores, counts.core_states)?;
-                    read_active_states(channel, core, self.timebase)?;
+                    read_active_states(self.timebase, channel, core)?;
                     counts.core_states += 1;
                 }
                 None => {}
@@ -608,7 +608,7 @@ fn learn_active_states_count_check(state_count: i32) -> io::Result<()> {
 
 /// Reads the time `channel` spent in each state `into` learned as active. A channel whose
 /// states changed since then is an error, since the learned indices name other states.
-fn read_active_states(channel: CFTypeRef, into: &mut States, timebase: Timebase) -> io::Result<()> {
+fn read_active_states(timebase: Timebase, channel: CFTypeRef, into: &mut States) -> io::Result<()> {
     let state_count = unsafe { IOReportStateGetCount(channel) };
     if state_count != into.state_count {
         return Err(io::Error::new(
@@ -1242,7 +1242,7 @@ mod tests {
         let mut states = States::new(ACTIVE_STATES_MAX);
         learn_active_states(gpu, &mut states).unwrap();
 
-        let read = read_active_states(core, &mut states, ioreport.timebase);
+        let read = read_active_states(ioreport.timebase, core, &mut states);
 
         assert_eq!(io::ErrorKind::InvalidData, read.unwrap_err().kind());
     }
