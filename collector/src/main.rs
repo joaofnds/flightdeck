@@ -287,9 +287,10 @@ impl Span {
 
         let cost = end.snapshot.cost_since(&self.start.snapshot)?;
         let counts = end.counts.since(&self.start.counts);
+        let late_average = self.tally.late_average()?;
 
         write!(out, "{label} {}-{last_tick}: ", self.first_tick)?;
-        report_cost(out, &cost, &self.tally)?;
+        report_cost(out, &cost, &self.tally, late_average)?;
         report_sources(out, &cost)?;
         report_counts(out, &self.tally, &counts)
     }
@@ -472,6 +473,27 @@ impl Tally {
         self.interfaces = u64_from_usize(collector.interfaces.read().len());
         self.cpus = u64_from_usize(collector.machine.cpus().len());
     }
+
+    /// The lateness of the average tick the tally counts, floored to the nanosecond, or an
+    /// error where the ticks are more than a u32 holds, which `Duration` divides by.
+    fn late_average(&self) -> io::Result<Duration> {
+        // A span reports only after a tick has added to its tally.
+        assert!(self.ticks > 0);
+
+        let Ok(divisor) = u32::try_from(self.ticks) else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "a span of {} ticks, past the {} a lateness averages over",
+                    self.ticks,
+                    u32::MAX
+                ),
+            ));
+        };
+        let late_average = self.late_total / divisor;
+        assert!(late_average <= self.late_total);
+        Ok(late_average)
+    }
 }
 
 #[derive(Default)]
@@ -504,7 +526,12 @@ impl std::fmt::Display for Exits {
     }
 }
 
-fn report_cost(out: &mut impl Write, cost: &Cost, tally: &Tally) -> io::Result<()> {
+fn report_cost(
+    out: &mut impl Write,
+    cost: &Cost,
+    tally: &Tally,
+    late_average: Duration,
+) -> io::Result<()> {
     let share = cost.share_of_a_core();
     write!(
         out,
@@ -521,7 +548,6 @@ fn report_cost(out: &mut impl Write, cost: &Cost, tally: &Tally) -> io::Result<(
         )?,
         None => write!(out, "no instructions run")?,
     }
-    let late_average = report_cost_late_average(tally.late_total, tally.ticks)?;
     writeln!(
         out,
         "; ticks late {:.1} ms on average, {:.1} ms at most, {} slips",
@@ -529,26 +555,6 @@ fn report_cost(out: &mut impl Write, cost: &Cost, tally: &Tally) -> io::Result<(
         milliseconds(tally.late_max),
         tally.slips,
     )
-}
-
-/// The lateness of the average tick in a span of `ticks`, floored to the nanosecond, or an
-/// error where the ticks are more than a u32 holds, which `Duration` divides by.
-fn report_cost_late_average(late_total: Duration, ticks: u64) -> io::Result<Duration> {
-    // A span reports only after a tick has added to its tally.
-    assert!(ticks > 0);
-
-    let Ok(divisor) = u32::try_from(ticks) else {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "a span of {ticks} ticks, past the {} a lateness averages over",
-                u32::MAX
-            ),
-        ));
-    };
-    let late_average = late_total / divisor;
-    assert!(late_average <= late_total);
-    Ok(late_average)
 }
 
 fn report_sources(out: &mut impl Write, cost: &Cost) -> io::Result<()> {
@@ -908,10 +914,13 @@ mod tests {
     fn averages_the_lateness_over_the_ticks() {
         // Goal: a span's average lateness is its total lateness over its ticks.
         // Method: average 30 ms over 3 ticks.
-        assert_eq!(
-            Duration::from_millis(10),
-            report_cost_late_average(Duration::from_millis(30), 3).unwrap()
-        );
+        let tally = Tally {
+            ticks: 3,
+            late_total: Duration::from_millis(30),
+            ..Tally::default()
+        };
+
+        assert_eq!(Duration::from_millis(10), tally.late_average().unwrap());
     }
 
     #[test]
@@ -919,11 +928,42 @@ mod tests {
         // Goal: a span of more ticks than a u32 holds is an error, not an average over
         // u32::MAX ticks.
         // Method: average over one tick past u32::MAX.
-        let ticks = u64::from(u32::MAX) + 1;
+        let tally = Tally {
+            ticks: u64::from(u32::MAX) + 1,
+            late_total: Duration::from_secs(1),
+            ..Tally::default()
+        };
 
-        let average = report_cost_late_average(Duration::from_secs(1), ticks);
+        let average = tally.late_average();
 
         assert_eq!(io::ErrorKind::InvalidData, average.unwrap_err().kind());
+    }
+
+    #[test]
+    fn writes_none_of_a_span_whose_lateness_cannot_be_averaged() {
+        // Goal: a span whose lateness cannot be averaged is an error that writes none of its
+        // line, so no partial reading reaches the report.
+        // Method: report a span counting one tick past u32::MAX into a buffer, between two
+        // snapshots a cost can be taken over.
+        let timebase = Timebase::read().unwrap();
+        let meter = Meter::default();
+        let start = Mark {
+            snapshot: Snapshot::take(&meter, timebase).unwrap(),
+            counts: Counts::default(),
+        };
+        let end = Mark {
+            snapshot: Snapshot::take(&meter, timebase).unwrap(),
+            counts: Counts::default(),
+        };
+        assert!(end.snapshot.cost_since(&start.snapshot).is_ok());
+        let mut span = Span::begin(start, 1);
+        span.tally.ticks = u64::from(u32::MAX) + 1;
+        let mut written = Vec::new();
+
+        let report = span.report(&mut written, "ticks", span.tally.ticks, &end);
+
+        assert_eq!(io::ErrorKind::InvalidData, report.unwrap_err().kind());
+        assert_eq!("", String::from_utf8(written).unwrap());
     }
 
     #[test]
