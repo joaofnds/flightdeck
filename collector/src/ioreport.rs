@@ -58,11 +58,11 @@ impl IOReport {
         let mut counts = ChannelCounts::default();
         for channel in each(channels)? {
             match Kind::of(channel) {
-                Some(Kind::GpuEnergy) => {
+                Some(Kind::GPUEnergy) => {
                     self.gpu_nj_per_unit = nj_per_unit(channel)?;
                     counts.gpu_energy += 1;
                 }
-                Some(Kind::GpuStates) => {
+                Some(Kind::GPUStates) => {
                     learn_active_states(channel, &mut self.gpu)?;
                     counts.gpu_states += 1;
                 }
@@ -92,11 +92,11 @@ impl IOReport {
         let cores = &mut self.cores[..self.counts.cores];
         for channel in each(channels)? {
             match Kind::of(channel) {
-                Some(Kind::GpuEnergy) => {
+                Some(Kind::GPUEnergy) => {
                     self.gpu_energy_nj = energy_nj(channel, self.gpu_nj_per_unit)?;
                     counts.gpu_energy += 1;
                 }
-                Some(Kind::GpuStates) => {
+                Some(Kind::GPUStates) => {
                     read_active_states(channel, &mut self.gpu, self.timebase)?;
                     counts.gpu_states += 1;
                 }
@@ -227,8 +227,8 @@ impl ChannelCounts {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
-    GpuEnergy,
-    GpuStates,
+    GPUEnergy,
+    GPUStates,
     CoreStates,
 }
 
@@ -238,12 +238,12 @@ impl Kind {
 
         if ENERGY_MODEL.holds(channel) {
             if is(name, c"GPU Energy") {
-                return Some(Kind::GpuEnergy);
+                return Some(Kind::GPUEnergy);
             }
         }
         if GPU_PERFORMANCE_STATES.holds(channel) {
             if is(name, c"GPUPH") {
-                return Some(Kind::GpuStates);
+                return Some(Kind::GPUStates);
             }
         }
         if CPU_CORE_PERFORMANCE_STATES.holds(channel) {
@@ -1126,7 +1126,7 @@ mod tests {
         // Method: learn the GPU's energy channel, whose state count IOReport gives as -1.
         let ioreport = open();
         let samples = ioreport.subscription.sample().unwrap();
-        let energy = first_channel(&ioreport, &samples, Kind::GpuEnergy);
+        let energy = first_channel(&ioreport, &samples, Kind::GPUEnergy);
         let mut states = States::new(ACTIVE_STATES_MAX);
 
         let learned = learn_active_states(energy, &mut states);
@@ -1231,7 +1231,7 @@ mod tests {
         // or 22 states, with what was learned.
         let ioreport = open();
         let samples = ioreport.subscription.sample().unwrap();
-        let gpu = first_channel(&ioreport, &samples, Kind::GpuStates);
+        let gpu = first_channel(&ioreport, &samples, Kind::GPUStates);
         let core = first_channel(&ioreport, &samples, Kind::CoreStates);
         let mut states = States::new(ACTIVE_STATES_MAX);
         learn_active_states(gpu, &mut states).unwrap();
@@ -1263,7 +1263,7 @@ mod tests {
         // Method: learn the unit of the GPU's states channel, 24Mticks on this Mac.
         let ioreport = open();
         let samples = ioreport.subscription.sample().unwrap();
-        let gpu = first_channel(&ioreport, &samples, Kind::GpuStates);
+        let gpu = first_channel(&ioreport, &samples, Kind::GPUStates);
 
         let nj_per_unit = nj_per_unit(gpu);
 
@@ -1278,7 +1278,7 @@ mod tests {
         // Mac is the least an i64 holds.
         let ioreport = open();
         let samples = ioreport.subscription.sample().unwrap();
-        let gpu = first_channel(&ioreport, &samples, Kind::GpuStates);
+        let gpu = first_channel(&ioreport, &samples, Kind::GPUStates);
 
         let energy = energy_nj(gpu, 1);
 
@@ -1346,7 +1346,7 @@ mod tests {
         let states: Vec<CFTypeRef> = each(channels)
             .unwrap()
             .filter(|&channel| {
-                matches!(Kind::of(channel), Some(Kind::CoreStates | Kind::GpuStates))
+                matches!(Kind::of(channel), Some(Kind::CoreStates | Kind::GPUStates))
             })
             .collect();
         let without_idle = states
@@ -1386,7 +1386,7 @@ mod tests {
         ioreport.read().unwrap();
         let before = ioreport.gpu_energy_nj();
         let samples = ioreport.subscription.sample().unwrap();
-        let energy = first_channel(&ioreport, &samples, Kind::GpuEnergy);
+        let energy = first_channel(&ioreport, &samples, Kind::GPUEnergy);
         let units = u64::try_from(unsafe { IOReportSimpleGetIntegerValue(energy, 0) }).unwrap();
         ioreport.read().unwrap();
         let after = ioreport.gpu_energy_nj();
