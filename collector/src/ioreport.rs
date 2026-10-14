@@ -57,6 +57,8 @@ impl States {
     #[must_use]
     pub fn active_ns(&self) -> &[u64] {
         assert!(self.active_ns.len() <= self.active_states_max);
+        // A read pushes one time for each active state open learned, and none before it.
+        assert!(self.active_ns.len() <= self.active_indices.len());
 
         &self.active_ns
     }
@@ -108,6 +110,9 @@ impl ChannelCounts {
     /// Checks that a read found the channels open found, since a channel it missed would keep
     /// the value of the read before.
     fn read_check(&self, at_open: &ChannelCounts) -> io::Result<()> {
+        assert_eq!(1, at_open.gpu_energy);
+        assert!(at_open.core_states > 0);
+
         if self != at_open {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -115,6 +120,7 @@ impl ChannelCounts {
             ));
         }
 
+        assert_eq!(at_open.core_states, self.core_states);
         Ok(())
     }
 }
@@ -170,12 +176,15 @@ const CPU_CORE_PERFORMANCE_STATES: Group = Group {
 impl Group {
     /// Whether `channel` is in this group, and in its subgroup where it has one.
     fn holds(&self, channel: CFTypeRef) -> bool {
+        assert!(!self.name.is_empty());
+
         if !is(unsafe { IOReportChannelGetGroup(channel) }, self.name) {
             return false;
         }
         let Some(subgroup) = self.subgroup else {
             return true;
         };
+        assert!(!subgroup.is_empty());
 
         is(unsafe { IOReportChannelGetSubGroup(channel) }, subgroup)
     }
@@ -189,6 +198,8 @@ struct Subscription {
 
 impl Subscription {
     fn new(wanted: &Owned) -> io::Result<Self> {
+        assert!(!wanted.0.is_null());
+
         let mut channels = ptr::null();
         let handle = unsafe {
             IOReportCreateSubscription(ptr::null(), wanted.0, &raw mut channels, 0, ptr::null())
@@ -196,14 +207,20 @@ impl Subscription {
         let handle = Owned::new(handle, "subscribing to IOReport's channels");
         let channels = Owned::new(channels, "listing the channels IOReport subscribed to");
 
-        Ok(Self {
+        let subscription = Self {
             handle: handle?,
             channels: channels?,
-        })
+        };
+        assert!(!subscription.handle.0.is_null());
+        assert!(!subscription.channels.0.is_null());
+        Ok(subscription)
     }
 
     /// Takes a sample of every channel the subscription holds.
     fn sample(&self) -> io::Result<Owned> {
+        assert!(!self.handle.0.is_null());
+        assert!(!self.channels.0.is_null());
+
         let samples = unsafe { IOReportCreateSamples(self.handle.0, self.channels.0, ptr::null()) };
         Owned::new(samples, "sampling IOReport")
     }
@@ -218,6 +235,9 @@ impl ChannelsKey {
     }
 
     fn channels_of(&self, dictionary: &Owned) -> io::Result<CFTypeRef> {
+        assert!(!self.0.0.is_null());
+        assert!(!dictionary.0.is_null());
+
         let channels = unsafe { CFDictionaryGetValue(dictionary.0, self.0.0) };
         if channels.is_null() {
             return Err(io::Error::new(
@@ -245,6 +265,8 @@ impl Owned {
     /// Owns `object`, which the call `call` names returned, or reports the call where it
     /// returned null.
     fn new(object: CFTypeRef, call: &str) -> io::Result<Self> {
+        assert!(!call.is_empty());
+
         if object.is_null() {
             return Err(io::Error::other(format!("{call} returned null")));
         }
@@ -446,23 +468,38 @@ impl IOReport {
     /// The energy the GPU had spent at the last read, in nanojoules.
     #[must_use]
     pub fn gpu_energy_nj(&self) -> u64 {
+        assert!(self.gpu_nj_per_unit > 0);
+        // A read counts whole units of the energy, and none before it.
+        assert!(self.gpu_energy_nj.is_multiple_of(self.gpu_nj_per_unit));
+
         self.gpu_energy_nj
     }
 
     /// The GPU's performance states.
     #[must_use]
     pub fn gpu(&self) -> &States {
+        assert_eq!(1, self.counts.gpu_states);
+        assert!(self.gpu.active_ns.len() <= self.gpu.active_indices.len());
+
         &self.gpu
     }
 
     /// The performance states of each core open found.
     #[must_use]
     pub fn cores(&self) -> &[States] {
+        assert!(self.counts.core_states > 0);
+        assert!(self.counts.core_states <= self.cores.len());
+
         &self.cores[..self.counts.core_states]
     }
 }
 
 fn channels_in_group(group: &Group) -> io::Result<Owned> {
+    assert!(!group.name.is_empty());
+    if let Some(subgroup) = group.subgroup {
+        assert!(!subgroup.is_empty());
+    }
+
     let name = string(group.name)?;
     let subgroup = group.subgroup.map(string).transpose()?;
 
@@ -479,7 +516,10 @@ fn channels_in_group(group: &Group) -> io::Result<Owned> {
 }
 
 fn open_merge_group(into: &Owned, group: &Group) -> io::Result<()> {
+    assert!(!into.0.is_null());
+
     let more = channels_in_group(group)?;
+    assert!(!more.0.is_null());
 
     unsafe { IOReportMergeChannels(into.0, more.0, ptr::null()) };
 
@@ -494,11 +534,15 @@ fn open_keep_read_channels(channels: &Owned, key: &ChannelsKey) -> io::Result<()
     let kept = unsafe { CFArrayCreateMutable(ptr::null(), 0, &raw const kCFTypeArrayCallBacks) };
     let kept = Owned::new(kept, "creating an array")?;
 
+    let mut kept_count: isize = 0;
     for channel in each(all)? {
         if Kind::of(channel).is_some() {
             unsafe { CFArrayAppendValue(kept.0, channel) };
+            kept_count += 1;
         }
     }
+    assert!(kept_count <= CHANNELS_MAX);
+    assert!(!kept.0.is_null());
     unsafe { CFDictionarySetValue(channels.0, key.0.0, kept.0) };
 
     Ok(())
@@ -511,8 +555,11 @@ const CHANNELS_MAX: isize = 4096;
 /// Each channel in `array`, or an error where its count is not a count within the bound on
 /// walking one.
 fn each(array: CFTypeRef) -> io::Result<impl Iterator<Item = CFTypeRef>> {
+    assert!(!array.is_null());
+
     let channel_count = unsafe { CFArrayGetCount(array) };
     each_channel_count_check(channel_count)?;
+    assert!(channel_count <= CHANNELS_MAX);
 
     Ok((0..channel_count).map(move |index| unsafe { CFArrayGetValueAtIndex(array, index) }))
 }
@@ -542,6 +589,8 @@ fn each_channel_count_check(channel_count: isize) -> io::Result<()> {
 /// at a read.
 fn core_at(cores: &mut [States], index: usize) -> io::Result<&mut States> {
     let count = cores.len();
+    // Open holds a core for each CPU, and a read the cores open found, one at least.
+    assert!(count > 0);
     assert!(index <= count);
 
     cores.get_mut(index).ok_or_else(|| {
@@ -595,6 +644,7 @@ fn learn_active_states_is_active(name: CFTypeRef) -> io::Result<bool> {
         ));
     }
 
+    assert!(!name.is_null());
     for inactive in [c"OFF", c"IDLE", c"DOWN"] {
         if is(name, inactive) {
             return Ok(false);
@@ -666,6 +716,8 @@ fn read_active_states_residency(residency: i64) -> io::Result<u64> {
         ));
     };
 
+    assert!(residency >= 0);
+    assert_eq!(residency, ticks.cast_signed());
     Ok(ticks)
 }
 
@@ -678,7 +730,11 @@ const _: () = assert!(ENERGY_UNITS[2].1 == ENERGY_UNITS[1].1 * 1_000);
 
 /// The nanojoules in one unit of the energy `channel` gives.
 fn learn_nj_per_unit(channel: CFTypeRef) -> io::Result<u64> {
-    learn_nj_per_unit_of(unsafe { IOReportChannelGetUnitLabel(channel) })
+    let nj_per_unit = learn_nj_per_unit_of(unsafe { IOReportChannelGetUnitLabel(channel) })?;
+
+    assert!(nj_per_unit >= ENERGY_UNITS[0].1);
+    assert!(nj_per_unit <= ENERGY_UNITS[2].1);
+    Ok(nj_per_unit)
 }
 
 /// The nanojoules in one of the unit `unit` labels, or an error where it labels no unit of
@@ -686,6 +742,7 @@ fn learn_nj_per_unit(channel: CFTypeRef) -> io::Result<u64> {
 fn learn_nj_per_unit_of(unit: CFTypeRef) -> io::Result<u64> {
     for (label, nj_per_unit) in ENERGY_UNITS {
         if is(unit, label) {
+            assert!(nj_per_unit > 0);
             return Ok(nj_per_unit);
         }
     }
@@ -698,8 +755,13 @@ fn learn_nj_per_unit_of(unit: CFTypeRef) -> io::Result<u64> {
 
 /// Reads the energy `channel` gives in units of `nj_per_unit` nanojoules, which open learned.
 fn read_energy_nj(channel: CFTypeRef, nj_per_unit: u64) -> io::Result<u64> {
+    assert!(nj_per_unit > 0);
+
     let value = unsafe { IOReportSimpleGetIntegerValue(channel, 0) };
-    read_energy_nj_of(value, nj_per_unit)
+    let energy_nj = read_energy_nj_of(value, nj_per_unit)?;
+
+    assert!(energy_nj.is_multiple_of(nj_per_unit));
+    Ok(energy_nj)
 }
 
 /// The nanojoules in `value` units of `nj_per_unit` nanojoules each, or an error where the value
@@ -729,6 +791,8 @@ fn read_energy_nj_of(value: i64, nj_per_unit: u64) -> io::Result<u64> {
 }
 
 fn string(text: &CStr) -> io::Result<Owned> {
+    assert!(!text.is_empty());
+
     let created = unsafe { CFStringCreateWithCString(ptr::null(), text.as_ptr(), UTF8) };
     Owned::new(created, "creating a string")
 }
@@ -737,6 +801,7 @@ fn string(text: &CStr) -> io::Result<Owned> {
 /// `want`, which fits it, so it is not `want`.
 fn is(text: CFTypeRef, want: &CStr) -> bool {
     let mut buffer = [0_u8; 64];
+    assert!(!want.is_empty());
     assert!(want.count_bytes() < buffer.len());
 
     if text.is_null() {
