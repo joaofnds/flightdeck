@@ -13,8 +13,8 @@ pub struct IOReport {
     /// The nanojoules in one unit of the GPU's energy, learned at open.
     gpu_nj_per_unit: u64,
     gpu: States,
-    /// One for each CPU the machine runs, of which the first `counts.cores` hold the cores open
-    /// found.
+    /// One for each CPU the machine runs, of which the first `counts.core_states` hold the
+    /// cores open found.
     cores: Vec<States>,
     /// The channels of each kind open found, which every read finds again.
     counts: ChannelCounts,
@@ -67,8 +67,8 @@ impl IOReport {
                     counts.gpu_states += 1;
                 }
                 Some(Kind::CoreStates) => {
-                    learn_active_states(channel, core_at(&mut self.cores, counts.cores)?)?;
-                    counts.cores += 1;
+                    learn_active_states(channel, core_at(&mut self.cores, counts.core_states)?)?;
+                    counts.core_states += 1;
                 }
                 None => {}
             }
@@ -77,19 +77,19 @@ impl IOReport {
         self.counts = counts;
 
         assert!(self.gpu_nj_per_unit > 0);
-        assert!(self.counts.cores <= self.cores.len());
+        assert!(self.counts.core_states <= self.cores.len());
         Ok(())
     }
 
     pub fn read(&mut self) -> io::Result<()> {
         assert!(self.gpu_nj_per_unit > 0);
-        assert!(self.counts.cores <= self.cores.len());
+        assert!(self.counts.core_states <= self.cores.len());
 
         let samples = self.subscription.sample()?;
         let channels = self.channels_key.channels_of(&samples)?;
 
         let mut counts = ChannelCounts::default();
-        let cores = &mut self.cores[..self.counts.cores];
+        let cores = &mut self.cores[..self.counts.core_states];
         for channel in each(channels)? {
             match Kind::of(channel) {
                 Some(Kind::GPUEnergy) => {
@@ -101,9 +101,9 @@ impl IOReport {
                     counts.gpu_states += 1;
                 }
                 Some(Kind::CoreStates) => {
-                    let core = core_at(cores, counts.cores)?;
+                    let core = core_at(cores, counts.core_states)?;
                     read_active_states(channel, core, self.timebase)?;
-                    counts.cores += 1;
+                    counts.core_states += 1;
                 }
                 None => {}
             }
@@ -127,7 +127,7 @@ impl IOReport {
     /// The performance states of each core open found.
     #[must_use]
     pub fn cores(&self) -> &[States] {
-        &self.cores[..self.counts.cores]
+        &self.cores[..self.counts.core_states]
     }
 }
 
@@ -172,7 +172,7 @@ impl States {
 struct ChannelCounts {
     gpu_energy: usize,
     gpu_states: usize,
-    cores: usize,
+    core_states: usize,
 }
 
 impl ChannelCounts {
@@ -197,7 +197,7 @@ impl ChannelCounts {
                 ),
             ));
         }
-        if self.cores == 0 {
+        if self.core_states == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "IOReport gave no core's states",
@@ -212,7 +212,7 @@ impl ChannelCounts {
     fn read_check(&self, at_open: &ChannelCounts) -> io::Result<()> {
         assert_eq!(1, at_open.gpu_energy);
         assert_eq!(1, at_open.gpu_states);
-        assert!(at_open.cores > 0);
+        assert!(at_open.core_states > 0);
 
         if self != at_open {
             return Err(io::Error::new(
@@ -997,7 +997,7 @@ mod tests {
         ChannelCounts {
             gpu_energy: 1,
             gpu_states: 1,
-            cores: 18,
+            core_states: 18,
         }
     }
 
@@ -1072,7 +1072,7 @@ mod tests {
         // Goal: open without a core is an error, never a machine whose cores are never active.
         // Method: check a sample with no channel of a core's states.
         let counts = ChannelCounts {
-            cores: 0,
+            core_states: 0,
             ..counts_on_an_m5_pro()
         };
 
@@ -1095,7 +1095,7 @@ mod tests {
         // Goal: a read missing a core open found is an error, never a core that read no time.
         // Method: check a sample with one core fewer than at open.
         let counts = ChannelCounts {
-            cores: 17,
+            core_states: 17,
             ..counts_on_an_m5_pro()
         };
 
@@ -1169,7 +1169,7 @@ mod tests {
 
         let counts = ioreport.counts;
         assert_eq!(
-            counts.gpu_energy + counts.gpu_states + counts.cores,
+            counts.gpu_energy + counts.gpu_states + counts.core_states,
             subscribed
         );
     }
@@ -1249,7 +1249,7 @@ mod tests {
         // that core too, and read.
         let cpu_limit = machine::cpu_limit().unwrap();
         let mut ioreport = IOReport::open(Timebase::read(), cpu_limit + 1).unwrap();
-        ioreport.counts.cores += 1;
+        ioreport.counts.core_states += 1;
 
         let read = ioreport.read();
 
