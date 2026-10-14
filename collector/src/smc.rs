@@ -229,10 +229,7 @@ impl Connection {
 
     /// Checks that the SMC holds `key` as a float.
     fn float_key(&self, key: Key) -> io::Result<FloatKey> {
-        let info = self.info(key)?;
-
-        info_check(key, info, FLOAT)?;
-        assert!(info.is(FLOAT));
+        self.held_check(key, FLOAT)?;
         Ok(FloatKey(key))
     }
 
@@ -246,11 +243,20 @@ impl Connection {
     /// Reads `key` as a value of `info` once the SMC shows it holds one, since the SMC answers
     /// a read of a key with its bytes whatever type the read names.
     fn read(&self, key: Key, info: KeyInfo) -> io::Result<[u8; 32]> {
-        let held = self.info(key)?;
-
-        info_check(key, held, info)?;
-        assert!(held.is(info));
+        self.held_check(key, info)?;
         self.bytes(key, info)
+    }
+
+    /// Checks that the SMC holds `key` as a value of `wanted`.
+    fn held_check(&self, key: Key, wanted: KeyInfo) -> io::Result<()> {
+        let held = Held {
+            key,
+            info: self.info(key)?,
+        };
+
+        held_check_of(held, wanted)?;
+        assert!(held.info.is(wanted));
+        Ok(())
     }
 
     fn info(&self, key: Key) -> io::Result<KeyInfo> {
@@ -352,12 +358,22 @@ fn kern_return_check(returned: KernReturn, call: &str) -> io::Result<()> {
     Ok(())
 }
 
-/// Checks that the SMC holds `key`, whose info is `held`, as a value of `wanted`.
-fn info_check(key: Key, held: KeyInfo, wanted: KeyInfo) -> io::Result<()> {
-    if !held.is(wanted) {
+/// A key, and the info the SMC holds it with.
+#[derive(Clone, Copy)]
+struct Held {
+    key: Key,
+    info: KeyInfo,
+}
+
+/// Checks that the SMC holds a key as a value of `wanted`, from the info `held` gives.
+fn held_check_of(held: Held, wanted: KeyInfo) -> io::Result<()> {
+    if !held.info.is(wanted) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("the SMC holds {key:?} as {held:?}, which is not {wanted:?}"),
+            format!(
+                "the SMC holds {:?} as {:?}, which is not {wanted:?}",
+                held.key, held.info
+            ),
         ));
     }
 
@@ -803,14 +819,24 @@ mod tests {
     fn takes_a_key_held_as_the_type_read() {
         // Goal: a key the SMC holds as the type it is read as passes the check.
         // Method: check the info of a float key against the float it is read as.
-        assert!(info_check(SYSTEM_POWER, FLOAT, FLOAT).is_ok());
+        let held = Held {
+            key: SYSTEM_POWER,
+            info: FLOAT,
+        };
+
+        assert!(held_check_of(held, FLOAT).is_ok());
     }
 
     #[test]
     fn refuses_a_key_held_as_another_type() {
         // Goal: a key the SMC holds as another type than the one read is an error.
         // Method: check the info of the fan count, a ui8, against a float.
-        let checked = info_check(FAN_COUNT, UNSIGNED_8, FLOAT);
+        let held = Held {
+            key: FAN_COUNT,
+            info: UNSIGNED_8,
+        };
+
+        let checked = held_check_of(held, FLOAT);
 
         assert_eq!(io::ErrorKind::InvalidData, checked.unwrap_err().kind());
     }
