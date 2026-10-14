@@ -72,6 +72,9 @@ fn burst_from(arguments: &[String]) -> Result<Burst, String> {
     if per_second == 0 {
         return Err("forkrate: a rate of 0 forks a second forks nothing".to_owned());
     }
+    if seconds == 0 {
+        return Err("forkrate: a run of 0 seconds forks nothing".to_owned());
+    }
     if per_second > PER_SECOND_MAX {
         return Err(format!(
             "forkrate: a rate of {per_second} forks a second passes one a nanosecond"
@@ -95,6 +98,8 @@ fn burst_from(arguments: &[String]) -> Result<Burst, String> {
     };
 
     assert!(per_second > 0);
+    assert!(seconds > 0);
+    assert!(forks > 0);
     assert_eq!(u64::from(forks), per_second * seconds);
     Ok(Burst {
         per_second,
@@ -409,6 +414,13 @@ mod tests {
         // Goal: a rate of no forks a second is a usage error, not a rate of one.
         // Method: parse a rate of 0.
         assert!(burst_from(&arguments(&["0", "15", "6"])).is_err());
+    }
+
+    #[test]
+    fn refuses_a_run_of_no_seconds() {
+        // Goal: a run of no seconds is a usage error, not a run that forks nothing.
+        // Method: parse a run of 0 seconds.
+        assert!(burst_from(&arguments(&["300", "0", "6"])).is_err());
     }
 
     #[test]
