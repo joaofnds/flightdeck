@@ -88,7 +88,10 @@ const DUMP_SIZE: usize = 256 * 1024;
 /// header of the dump, so the division floors, since a header cut off by the end of the dump
 /// is no interface.
 fn interface_count_max(dump_size: usize) -> usize {
-    dump_size / size_of::<IfMsghdr2>()
+    let interface_count_max = dump_size / size_of::<IfMsghdr2>();
+
+    assert!(interface_count_max * size_of::<IfMsghdr2>() <= dump_size);
+    interface_count_max
 }
 
 impl Interfaces {
@@ -108,6 +111,8 @@ impl Interfaces {
     /// the room `with_dump_size` gave it and never grows it.
     #[must_use]
     pub fn read(&self) -> &[Interface] {
+        assert!(self.read.len() <= interface_count_max(self.buffer.len()));
+
         &self.read
     }
 
@@ -129,6 +134,9 @@ impl Interfaces {
     /// Fills the buffer with the routing dump of every interface and returns the bytes the
     /// kernel wrote. A dump past the buffer is an error, since the buffer does not grow.
     fn read_all_fill_buffer(&mut self) -> io::Result<usize> {
+        // A buffer of no bytes would have the kernel report the dump's size and write none.
+        assert!(!self.buffer.is_empty());
+
         let mut path = [
             CTL_NET,
             PF_ROUTE,
