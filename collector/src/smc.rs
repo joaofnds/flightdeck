@@ -811,6 +811,30 @@ mod tests {
     }
 
     #[test]
+    fn refuses_a_float_key_the_smc_holds_as_another_type() {
+        // Goal: a key open would read each tick as a float, but the SMC holds as another type,
+        // is an error at open, never a float made of the key's bytes.
+        // Method: take the fan count, a ui8 on an M5 Pro, as a float key.
+        let connection = Connection::open().unwrap();
+
+        let taken = connection.float_key(FAN_COUNT);
+
+        assert_eq!(io::ErrorKind::InvalidData, taken.unwrap_err().kind());
+    }
+
+    #[test]
+    fn finds_no_info_for_a_key_the_smc_does_not_hold() {
+        // Goal: asking the SMC about a key it does not hold is a key not found, never a panic
+        // over the result the SMC answers with.
+        // Method: ask for the info of ZZZZ, which the SMC of an M5 Pro answers with result 132.
+        let connection = Connection::open().unwrap();
+
+        let info = connection.info(Key::named(*b"ZZZZ"));
+
+        assert_eq!(io::ErrorKind::NotFound, info.unwrap_err().kind());
+    }
+
+    #[test]
     fn reads_the_power_the_mac_draws() {
         // Goal: the SMC's system power reads as a draw a running Mac can have.
         // Method: one read, held above zero and below 500 W. An idle M5 Pro on AC power has

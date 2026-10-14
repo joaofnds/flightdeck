@@ -1226,6 +1226,50 @@ mod tests {
     }
 
     #[test]
+    fn refuses_a_read_that_finds_other_channels_than_open() {
+        // Goal: a read that finds another count of channels than open found is an error, so a
+        // channel missing from a sample never leaves the read before standing.
+        // Method: open with room for one core more than this Mac has, record that open found
+        // that core too, and read.
+        let cpu_limit = machine::cpu_limit().unwrap();
+        let mut ioreport = IOReport::open(Timebase::read(), cpu_limit + 1).unwrap();
+        ioreport.counts.cores += 1;
+
+        let read = ioreport.read();
+
+        assert_eq!(io::ErrorKind::InvalidData, read.unwrap_err().kind());
+    }
+
+    #[test]
+    fn refuses_the_energy_unit_of_a_channel_that_gives_no_energy() {
+        // Goal: a channel whose unit is not one of energy is an error where open learns the
+        // GPU's energy unit, never a unit of nanojoules.
+        // Method: learn the unit of the GPU's states channel, 24Mticks on this Mac.
+        let ioreport = open();
+        let samples = ioreport.subscription.sample().unwrap();
+        let gpu = first_channel(&ioreport, &samples, Kind::GpuStates);
+
+        let nj_per_unit = nj_per_unit(gpu);
+
+        assert_eq!(io::ErrorKind::InvalidData, nj_per_unit.unwrap_err().kind());
+    }
+
+    #[test]
+    fn refuses_a_negative_energy_read_from_a_channel() {
+        // Goal: a channel's value below zero is an error where a read takes it as energy, never
+        // 0 nJ.
+        // Method: read the GPU's states channel as energy in nanojoules, whose value on this
+        // Mac is the least an i64 holds.
+        let ioreport = open();
+        let samples = ioreport.subscription.sample().unwrap();
+        let gpu = first_channel(&ioreport, &samples, Kind::GpuStates);
+
+        let energy = energy_nj(gpu, 1);
+
+        assert_eq!(io::ErrorKind::InvalidData, energy.unwrap_err().kind());
+    }
+
+    #[test]
     fn counts_a_busy_cpu_in_its_cores_active_time() {
         // Goal: time a CPU spends running shows in the cores' active time, and never more of it
         // than every CPU could spend in that time.

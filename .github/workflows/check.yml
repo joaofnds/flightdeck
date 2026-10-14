@@ -46,13 +46,18 @@ jobs:
           --skip ioreport::tests::refuses_a_channel_with_more_active_states_than_its_room
           --skip ioreport::tests::refuses_a_dictionary_with_no_list_of_channels
           --skip ioreport::tests::refuses_a_list_of_channels_that_is_not_an_array
+          --skip ioreport::tests::refuses_a_negative_energy_read_from_a_channel
+          --skip ioreport::tests::refuses_a_read_that_finds_other_channels_than_open
           --skip ioreport::tests::refuses_more_cores_than_its_cpu_limit
+          --skip ioreport::tests::refuses_the_energy_unit_of_a_channel_that_gives_no_energy
           --skip ioreport::tests::refuses_to_learn_the_states_of_a_channel_without_states
           --skip ioreport::tests::subscribes_only_to_the_channels_a_read_takes
           --skip processes::tests::reads_this_process_spending_energy_while_it_runs
+          --skip smc::tests::finds_no_info_for_a_key_the_smc_does_not_hold
           --skip smc::tests::reads_a_speed_for_every_fan
           --skip smc::tests::reads_each_fan_speed_in_rpm
           --skip smc::tests::reads_the_power_the_mac_draws
           --skip smc::tests::reads_the_temperature_of_a_soc_sensor
+          --skip smc::tests::refuses_a_float_key_the_smc_holds_as_another_type
           --skip smc::tests::refuses_a_key_read_as_a_type_it_does_not_hold
           --skip tests::allocates_nothing_in_a_warm_tick_or_the_reports_it_closes
