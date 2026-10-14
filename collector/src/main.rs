@@ -402,7 +402,7 @@ impl Tally {
         self.processes_gone = collector.processes.gone;
         self.coalitions = collector.coalitions.read.len();
         self.interfaces = collector.interfaces.read.len();
-        self.cpus = collector.machine.cpus.len();
+        self.cpus = collector.machine.cpus().len();
     }
 }
 

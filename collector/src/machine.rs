@@ -9,7 +9,7 @@ pub struct Machine {
     page_size: PageSize,
     swap_usage: Sysctl,
     pressure_level: Sysctl,
-    pub cpus: Vec<CPUTicks>,
+    cpus: Vec<CPUTicks>,
     pub memory: Memory,
 }
 
@@ -139,6 +139,13 @@ impl Machine {
         assert!(!self.cpus.is_empty());
 
         self.read_memory()
+    }
+
+    /// The ticks of each logical CPU the last read found. The list is private, since a read
+    /// fills it within the room `new` gave it and never grows it.
+    #[must_use]
+    pub fn cpus(&self) -> &[CPUTicks] {
+        &self.cpus
     }
 
     fn read_cpus(&mut self) -> io::Result<()> {
