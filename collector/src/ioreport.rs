@@ -1,4 +1,4 @@
-use std::ffi::{CStr, c_char, c_void};
+use std::ffi::{CStr, c_char, c_ulong, c_void};
 use std::io;
 use std::ptr;
 
@@ -670,8 +670,8 @@ const UTF8: u32 = 0x0800_0100;
 unsafe extern "C" {
     static kCFTypeArrayCallBacks: ArrayCallBacks;
     fn CFRelease(object: CFTypeRef);
-    fn CFGetTypeID(object: CFTypeRef) -> usize;
-    fn CFArrayGetTypeID() -> usize;
+    fn CFGetTypeID(object: CFTypeRef) -> c_ulong;
+    fn CFArrayGetTypeID() -> c_ulong;
     fn CFArrayGetCount(array: CFTypeRef) -> isize;
     fn CFArrayGetValueAtIndex(array: CFTypeRef, index: isize) -> CFTypeRef;
     fn CFArrayCreateMutable(
