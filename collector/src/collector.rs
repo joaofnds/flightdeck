@@ -53,6 +53,8 @@ impl Collector {
             counts_previous: Counts::default(),
         };
 
+        assert!(collector.events.capacity() >= limits.events_per_tick_max);
+
         processes::list_pids(&mut collector.listing)?;
         add_listed_coalitions(&collector.listing, &mut collector.coalitions)?;
 
@@ -106,6 +108,8 @@ fn read_coalitions(
     listing: &[i32],
     coalitions: &mut Coalitions,
 ) -> io::Result<()> {
+    assert!(events.len() <= EVENTS_PER_TICK_MAX);
+
     for event in events {
         if let Event::Start {
             coalition: Some(id),
