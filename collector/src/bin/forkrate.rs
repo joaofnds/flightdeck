@@ -128,6 +128,7 @@ fn run(burst: &Burst) -> io::Result<()> {
             "mach_absolute_time went back from {start} to {end}"
         )));
     };
+
     let elapsed = Duration::from_nanos(timebase.nanoseconds(elapsed_ticks)?);
 
     let reached: Vec<String> = forked

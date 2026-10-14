@@ -490,6 +490,7 @@ impl Tally {
                 ),
             ));
         };
+
         let late_average = self.late_total / divisor;
         assert!(late_average <= self.late_total);
         Ok(late_average)

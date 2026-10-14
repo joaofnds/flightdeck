@@ -210,6 +210,7 @@ fn run_report_children(followed: &Followed) -> io::Result<Children> {
             ),
         ));
     };
+
     if forked == 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -248,6 +249,7 @@ fn follow(
     process_limit: usize,
 ) -> io::Result<Followed> {
     let mut generators = Generators::start(probe, pid_files)?;
+
     let mut started = HashSet::new();
     let mut read_at_exit = HashSet::new();
     let mut listing = processes::pid_list(process_limit);
@@ -283,6 +285,7 @@ fn follow(
                 children: read_children(pid_files)?,
             });
         }
+
         deadline += second;
     }
 
