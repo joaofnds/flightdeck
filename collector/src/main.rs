@@ -631,6 +631,7 @@ fn milliseconds(duration: Duration) -> f64 {
 mod tests {
     use std::alloc::{GlobalAlloc, Layout, System};
     use std::cell::Cell;
+    use std::panic::AssertUnwindSafe;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::*;
@@ -699,9 +700,13 @@ mod tests {
                     std::thread::sleep(Duration::from_millis(2));
                 }
             });
-            let result = work();
+            // The scope waits for the forking thread, so it is stopped on a panic too.
+            let result = std::panic::catch_unwind(AssertUnwindSafe(work));
             stop.store(true, Ordering::Relaxed);
-            result
+            match result {
+                Ok(result) => result,
+                Err(panic) => std::panic::resume_unwind(panic),
+            }
         })
     }
 
