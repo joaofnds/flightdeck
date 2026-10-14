@@ -31,7 +31,12 @@ snake_case too, which nothing checks.
 - Keep assertions on in production. Write `assert!`, never `debug_assert!`, and make
   the release profile trap integer overflow and abort on a panic.
 - Treat every compiler and clippy warning as an error, clippy's pedantic group included.
-- Assert arguments, return values, preconditions, postconditions and invariants.
+- Assert arguments, return values, preconditions, postconditions and invariants wherever a
+  bug in this function or a change elsewhere could break them. Never write an assertion that
+  restates the statement just above it, such as a guard repeated after it or a field
+  compared with the literal it was just set to, unless the condition is critical and
+  surprising. An assertion in a `const` block fails the build when a constant or a type
+  changes, so it is never one of these.
 - Assert only what the code itself guarantees. Handle what a kernel call or another
   program returns as an operating error and never assert it, because under
   `panic = "abort"` an assertion on it turns a change in macOS into a crash.
