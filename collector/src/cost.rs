@@ -181,9 +181,15 @@ impl Snapshot {
     }
 
     /// Returns what this process spent from `earlier` to this snapshot, or an error where a
-    /// counter macOS gives went back.
+    /// counter macOS gives went back or no time passed, since a cost is a rate over the time.
     pub fn cost_since(&self, earlier: &Snapshot) -> io::Result<Cost> {
         let elapsed_ns = self.cost_since_counter(earlier, "time", |snapshot| snapshot.at_ns)?;
+        if elapsed_ns == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("no time passed between two snapshots at {} ns", self.at_ns),
+            ));
+        }
         let cpu_ns = self.cost_since_counter(earlier, "CPU time", |snapshot| snapshot.cpu_ns)?;
         let energy_nj =
             self.cost_since_counter(earlier, "energy", |snapshot| snapshot.energy_nj)?;
@@ -229,6 +235,7 @@ impl Snapshot {
 
 #[derive(Debug, Clone, Copy)]
 pub struct Cost {
+    /// More than zero, which `Snapshot::cost_since` checks, since every rate divides by it.
     elapsed: Duration,
     cpu: Duration,
     energy_nj: u64,
@@ -240,12 +247,14 @@ pub struct Cost {
 impl Cost {
     #[must_use]
     pub fn share_of_a_core(&self) -> f64 {
+        assert!(self.elapsed > Duration::ZERO);
         self.cpu.div_duration_f64(self.elapsed)
     }
 
     /// The power spent, as nanojoules a second divided by the million of them in a milliwatt.
     #[must_use]
     pub fn milliwatts(&self) -> f64 {
+        assert!(self.elapsed > Duration::ZERO);
         f64_from_u64(self.energy_nj) / self.elapsed.as_secs_f64() / 1_000_000.0
     }
 
@@ -256,6 +265,7 @@ impl Cost {
 
     #[must_use]
     pub fn ms_per_second(&self, source: Source) -> f64 {
+        assert!(self.elapsed > Duration::ZERO);
         self.spent[source.index()].div_duration_f64(self.elapsed) * 1_000.0
     }
 
@@ -264,6 +274,7 @@ impl Cost {
     /// process's usage times the process.
     #[must_use]
     pub fn unattributed_ms_per_second(&self) -> f64 {
+        assert!(self.elapsed > Duration::ZERO);
         let attributed: Duration = self.spent.iter().sum();
         (self.cpu.as_secs_f64() - attributed.as_secs_f64()) / self.elapsed.as_secs_f64() * 1_000.0
     }
@@ -325,6 +336,16 @@ mod tests {
         };
 
         let cost = later.cost_since(&EARLIER);
+
+        assert_eq!(io::ErrorKind::InvalidData, cost.unwrap_err().kind());
+    }
+
+    #[test]
+    fn refuses_a_cost_over_no_time() {
+        // Goal: a cost over two snapshots no time apart is an error, never a division by zero
+        // time.
+        // Method: take the cost from a snapshot to itself.
+        let cost = EARLIER.cost_since(&EARLIER);
 
         assert_eq!(io::ErrorKind::InvalidData, cost.unwrap_err().kind());
     }
