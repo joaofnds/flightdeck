@@ -74,13 +74,11 @@ mod tests {
     fn puts_each_tick_a_whole_number_of_periods_after_the_start() {
         // Goal: tick n falls due n periods after the start.
         // Method: read the deadlines of ticks 0, 1 and 10 of a schedule of 24-tick periods.
-        let schedule = Schedule {
-            start: 1_000,
-            period: 24,
-        };
+        let schedule = Schedule::starting_now(24).unwrap();
+        let start = schedule.deadline(0);
 
         assert_eq!(
-            [1_000, 1_024, 1_240],
+            [start, start + 24, start + 240],
             [0, 1, 10].map(|tick| schedule.deadline(tick))
         );
     }
@@ -90,14 +88,12 @@ mod tests {
         // Goal: the tick ahead of a time is the first whose deadline is past it, so a time on
         // a deadline belongs to the tick before.
         // Method: ask at the start, inside the first period, on its end, and three periods on.
-        let schedule = Schedule {
-            start: 1_000,
-            period: 24,
-        };
+        let schedule = Schedule::starting_now(24).unwrap();
+        let start = schedule.deadline(0);
 
         assert_eq!(
             [1, 1, 2, 4],
-            [1_000, 1_023, 1_024, 1_090].map(|now| schedule.first_ahead_of(now))
+            [start, start + 23, start + 24, start + 90].map(|now| schedule.first_ahead_of(now))
         );
     }
 
@@ -105,12 +101,9 @@ mod tests {
     fn gives_tick_0_before_the_start() {
         // Goal: before the start, tick 0 is the first tick still ahead, never a later one.
         // Method: ask one clock tick before the start.
-        let schedule = Schedule {
-            start: 1_000,
-            period: 24,
-        };
+        let schedule = Schedule::starting_now(24).unwrap();
 
-        assert_eq!(0, schedule.first_ahead_of(999));
+        assert_eq!(0, schedule.first_ahead_of(schedule.deadline(0) - 1));
     }
 
     #[test]
