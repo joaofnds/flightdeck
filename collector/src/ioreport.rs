@@ -103,10 +103,6 @@ impl ChannelCounts {
     /// Checks that a read found the channels open found, since a channel it missed would keep
     /// the value of the read before.
     fn read_check(&self, at_open: &ChannelCounts) -> io::Result<()> {
-        assert_eq!(1, at_open.gpu_energy);
-        assert_eq!(1, at_open.gpu_states);
-        assert!(at_open.core_states > 0);
-
         if self != at_open {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -399,6 +395,9 @@ impl IOReport {
 
     pub fn read(&mut self) -> io::Result<()> {
         assert!(self.gpu_nj_per_unit > 0);
+        assert_eq!(1, self.counts.gpu_energy);
+        assert_eq!(1, self.counts.gpu_states);
+        assert!(self.counts.core_states > 0);
         assert!(self.counts.core_states <= self.cores.len());
 
         let samples = self.subscription.sample()?;
