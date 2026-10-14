@@ -277,13 +277,16 @@ mod tests {
     #[test]
     fn counts_the_cpu_time_this_process_spends_in_its_coalition() {
         // Goal: a coalition's CPU time grows by at least the time one of its processes spends.
-        // Method: read this process's coalition before and after spinning 50 ms on one thread.
+        // Method: read this process's coalition before and after spinning 50 ms on one thread,
+        // and sleep before the second read, since the coalition takes in a running thread's time
+        // only when the thread blocks or its 10 ms time slice ends.
         let mut coalitions = Coalitions::new(Timebase::read().unwrap(), COALITION_LIMIT);
         coalitions.add(own_coalition()).unwrap();
         coalitions.read_all().unwrap();
         let before = coalitions.read[0];
 
         spin_on_this_thread_for(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(1));
         coalitions.read_all().unwrap();
 
         let after = coalitions.read[0];
