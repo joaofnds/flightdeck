@@ -24,9 +24,9 @@ impl IOReport {
     pub fn open(timebase: Timebase, cpu_limit: usize) -> io::Result<Self> {
         let channels_key = ChannelsKey::new()?;
         let wanted = channels_in_group(&ENERGY_MODEL)?;
-        merge_group(&wanted, &GPU_PERFORMANCE_STATES)?;
-        merge_group(&wanted, &CPU_CORE_PERFORMANCE_STATES)?;
-        keep_read_channels(&wanted, &channels_key)?;
+        open_merge_group(&wanted, &GPU_PERFORMANCE_STATES)?;
+        open_merge_group(&wanted, &CPU_CORE_PERFORMANCE_STATES)?;
+        open_keep_read_channels(&wanted, &channels_key)?;
         let subscription = Subscription::new(&wanted)?;
 
         let mut ioreport = Self {
@@ -59,7 +59,7 @@ impl IOReport {
         for channel in each(channels)? {
             match Kind::of(channel) {
                 Some(Kind::GPUEnergy) => {
-                    self.gpu_nj_per_unit = nj_per_unit(channel)?;
+                    self.gpu_nj_per_unit = learn_nj_per_unit(channel)?;
                     counts.gpu_energy += 1;
                 }
                 Some(Kind::GPUStates) => {
@@ -93,7 +93,7 @@ impl IOReport {
         for channel in each(channels)? {
             match Kind::of(channel) {
                 Some(Kind::GPUEnergy) => {
-                    self.gpu_energy_nj = energy_nj(channel, self.gpu_nj_per_unit)?;
+                    self.gpu_energy_nj = read_energy_nj(channel, self.gpu_nj_per_unit)?;
                     counts.gpu_energy += 1;
                 }
                 Some(Kind::GPUStates) => {
@@ -357,7 +357,7 @@ fn channels_in_group(group: &Group) -> io::Result<Owned> {
     Owned::new(channels, "copying IOReport's channels in a group")
 }
 
-fn merge_group(into: &Owned, group: &Group) -> io::Result<()> {
+fn open_merge_group(into: &Owned, group: &Group) -> io::Result<()> {
     let more = channels_in_group(group)?;
     unsafe { IOReportMergeChannels(into.0, more.0, ptr::null()) };
 
@@ -366,7 +366,7 @@ fn merge_group(into: &Owned, group: &Group) -> io::Result<()> {
 
 /// Keeps in `channels` only those a read takes, so each sample copies the 20 channels an M5 Pro
 /// reads rather than the 383 the groups hold.
-fn keep_read_channels(channels: &Owned, key: &ChannelsKey) -> io::Result<()> {
+fn open_keep_read_channels(channels: &Owned, key: &ChannelsKey) -> io::Result<()> {
     let all = key.channels_of(channels)?;
     let kept = unsafe { CFArrayCreateMutable(ptr::null(), 0, &raw const kCFTypeArrayCallBacks) };
     let kept = Owned::new(kept, "creating an array")?;
@@ -388,13 +388,13 @@ const CHANNELS_MAX: isize = 4096;
 /// Each channel in `array`, or an error where its count is not a count within the bound on
 /// walking one.
 fn each(array: CFTypeRef) -> io::Result<impl Iterator<Item = CFTypeRef>> {
-    let channel_count = channel_count_check(unsafe { CFArrayGetCount(array) })?;
+    let channel_count = each_channel_count_check(unsafe { CFArrayGetCount(array) })?;
 
     Ok((0..channel_count).map(move |index| unsafe { CFArrayGetValueAtIndex(array, index) }))
 }
 
 /// Checks that a list's count of channels is a count, and within the bound on walking one.
-fn channel_count_check(channel_count: isize) -> io::Result<isize> {
+fn each_channel_count_check(channel_count: isize) -> io::Result<isize> {
     if channel_count < 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -431,11 +431,11 @@ fn learn_active_states(channel: CFTypeRef, into: &mut States) -> io::Result<()> 
     let capacity = into.active_indices.capacity();
     assert!(capacity <= into.active_ns.capacity());
 
-    let state_count = state_count_check(unsafe { IOReportStateGetCount(channel) })?;
+    let state_count = learn_active_states_count_check(unsafe { IOReportStateGetCount(channel) })?;
     into.active_indices.clear();
     for index in 0..state_count {
         let name = unsafe { IOReportStateGetNameForIndex(channel, index) };
-        if !learn_active_states_counts(name)? {
+        if !learn_active_states_is_active(name)? {
             continue;
         }
 
@@ -455,7 +455,7 @@ fn learn_active_states(channel: CFTypeRef, into: &mut States) -> io::Result<()> 
 
 /// Whether the state `name` names counts as active, or an error where `IOReport` gave the state
 /// no name.
-fn learn_active_states_counts(name: CFTypeRef) -> io::Result<bool> {
+fn learn_active_states_is_active(name: CFTypeRef) -> io::Result<bool> {
     if name.is_null() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -476,7 +476,7 @@ fn learn_active_states_counts(name: CFTypeRef) -> io::Result<bool> {
 const STATES_MAX: i32 = 256;
 
 /// Checks that a channel's count of states is a count, and within the bound on learning them.
-fn state_count_check(state_count: i32) -> io::Result<i32> {
+fn learn_active_states_count_check(state_count: i32) -> io::Result<i32> {
     if state_count < 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -541,13 +541,13 @@ const _: () = assert!(ENERGY_UNITS[1].1 == ENERGY_UNITS[0].1 * 1_000);
 const _: () = assert!(ENERGY_UNITS[2].1 == ENERGY_UNITS[1].1 * 1_000);
 
 /// The nanojoules in one unit of the energy `channel` gives.
-fn nj_per_unit(channel: CFTypeRef) -> io::Result<u64> {
-    nj_per_unit_of(unsafe { IOReportChannelGetUnitLabel(channel) })
+fn learn_nj_per_unit(channel: CFTypeRef) -> io::Result<u64> {
+    learn_nj_per_unit_of(unsafe { IOReportChannelGetUnitLabel(channel) })
 }
 
 /// The nanojoules in one of the unit `unit` labels, or an error where it labels no unit of
 /// `ENERGY_UNITS`.
-fn nj_per_unit_of(unit: CFTypeRef) -> io::Result<u64> {
+fn learn_nj_per_unit_of(unit: CFTypeRef) -> io::Result<u64> {
     for (label, nj_per_unit) in ENERGY_UNITS {
         if is(unit, label) {
             return Ok(nj_per_unit);
@@ -561,18 +561,18 @@ fn nj_per_unit_of(unit: CFTypeRef) -> io::Result<u64> {
 }
 
 /// Reads the energy `channel` gives in units of `nj_per_unit` nanojoules, which open learned.
-fn energy_nj(channel: CFTypeRef, nj_per_unit: u64) -> io::Result<u64> {
+fn read_energy_nj(channel: CFTypeRef, nj_per_unit: u64) -> io::Result<u64> {
     let value = unsafe { IOReportSimpleGetIntegerValue(channel, 0) };
-    energy_nj_of(value, nj_per_unit)
+    read_energy_nj_of(value, nj_per_unit)
 }
 
 /// The nanojoules in `value` units of `nj_per_unit` nanojoules each, or an error where the value
 /// is negative or its nanojoules pass what a u64 counts.
-fn energy_nj_of(value: i64, nj_per_unit: u64) -> io::Result<u64> {
+fn read_energy_nj_of(value: i64, nj_per_unit: u64) -> io::Result<u64> {
     assert!(
         ENERGY_UNITS
             .iter()
-            .any(|&(_, unit_nj)| unit_nj == nj_per_unit)
+            .any(|&(_, nj_per_unit_listed)| nj_per_unit_listed == nj_per_unit)
     );
 
     let Ok(units) = u64::try_from(value) else {
@@ -797,7 +797,7 @@ mod tests {
     fn takes_an_energy_in_millijoules() {
         // Goal: an energy IOReport gives in millijoules reads as a million nanojoules a unit.
         // Method: ask for the nanojoules in the unit IOReport labels "mJ".
-        let nj_per_unit = nj_per_unit_of(string(c"mJ").unwrap().0);
+        let nj_per_unit = learn_nj_per_unit_of(string(c"mJ").unwrap().0);
 
         assert_eq!(1_000_000, nj_per_unit.unwrap());
     }
@@ -807,7 +807,7 @@ mod tests {
         // Goal: an energy in a unit the collector does not know is an error, never a reading
         // in another unit.
         // Method: ask for the nanojoules in a unit labelled "kJ".
-        let nj_per_unit = nj_per_unit_of(string(c"kJ").unwrap().0);
+        let nj_per_unit = learn_nj_per_unit_of(string(c"kJ").unwrap().0);
 
         assert_eq!(io::ErrorKind::InvalidData, nj_per_unit.unwrap_err().kind());
     }
@@ -816,7 +816,7 @@ mod tests {
     fn refuses_an_energy_with_no_unit() {
         // Goal: an energy IOReport gives no unit for is an error.
         // Method: ask for the nanojoules in a null unit.
-        let nj_per_unit = nj_per_unit_of(ptr::null());
+        let nj_per_unit = learn_nj_per_unit_of(ptr::null());
 
         assert_eq!(io::ErrorKind::InvalidData, nj_per_unit.unwrap_err().kind());
     }
@@ -826,7 +826,7 @@ mod tests {
         // Goal: an energy IOReport gives in some unit reads as that many of the unit's
         // nanojoules.
         // Method: convert 2,500 units of a microjoule.
-        let energy_nj = energy_nj_of(2_500, 1_000);
+        let energy_nj = read_energy_nj_of(2_500, 1_000);
 
         assert_eq!(2_500_000, energy_nj.unwrap());
     }
@@ -836,7 +836,7 @@ mod tests {
         // Goal: a negative energy is an error, never a reading of 0.
         // Method: convert i64::MIN, which IOReport of an M5 Pro gave for the value of a channel
         // of states.
-        let energy_nj = energy_nj_of(i64::MIN, 1);
+        let energy_nj = read_energy_nj_of(i64::MIN, 1);
 
         assert_eq!(io::ErrorKind::InvalidData, energy_nj.unwrap_err().kind());
     }
@@ -845,7 +845,7 @@ mod tests {
     fn refuses_a_gpu_energy_past_what_its_nanojoules_can_count() {
         // Goal: an energy whose nanojoules pass a u64 is an error, never a wrapped reading.
         // Method: convert i64::MAX units of a millijoule.
-        let energy_nj = energy_nj_of(i64::MAX, 1_000_000);
+        let energy_nj = read_energy_nj_of(i64::MAX, 1_000_000);
 
         assert_eq!(io::ErrorKind::InvalidData, energy_nj.unwrap_err().kind());
     }
@@ -874,16 +874,16 @@ mod tests {
         // Goal: a state IOReport gives no name is an error, never a state counted as active.
         // Method: ask the filter about null, the name IOReport of an M5 Pro gave for the index
         // one past a channel's last state.
-        let counts = learn_active_states_counts(ptr::null());
+        let is_active = learn_active_states_is_active(ptr::null());
 
-        assert_eq!(io::ErrorKind::InvalidData, counts.unwrap_err().kind());
+        assert_eq!(io::ErrorKind::InvalidData, is_active.unwrap_err().kind());
     }
 
     #[test]
     fn takes_as_many_states_as_its_bound() {
         // Goal: a channel with as many states as the bound passes the check.
         // Method: check a count equal to the bound.
-        let state_count = state_count_check(STATES_MAX);
+        let state_count = learn_active_states_count_check(STATES_MAX);
 
         assert_eq!(STATES_MAX, state_count.unwrap());
     }
@@ -892,7 +892,7 @@ mod tests {
     fn takes_a_channel_with_no_states() {
         // Goal: a channel with no states passes the check, and has no active state to learn.
         // Method: check a count of 0.
-        let state_count = state_count_check(0);
+        let state_count = learn_active_states_count_check(0);
 
         assert_eq!(0, state_count.unwrap());
     }
@@ -902,7 +902,7 @@ mod tests {
         // Goal: a channel with more states than the bound is an error, so learning a channel's
         // states has a bound.
         // Method: check a count one past the bound.
-        let state_count = state_count_check(STATES_MAX + 1);
+        let state_count = learn_active_states_count_check(STATES_MAX + 1);
 
         assert_eq!(
             io::ErrorKind::QuotaExceeded,
@@ -914,7 +914,7 @@ mod tests {
     fn refuses_a_negative_state_count() {
         // Goal: a negative count of states is an error, never a channel with no states.
         // Method: check -1, the count IOReport of an M5 Pro gave for the GPU's energy channel.
-        let state_count = state_count_check(-1);
+        let state_count = learn_active_states_count_check(-1);
 
         assert_eq!(io::ErrorKind::InvalidData, state_count.unwrap_err().kind());
     }
@@ -951,7 +951,7 @@ mod tests {
     fn takes_as_many_channels_as_its_bound() {
         // Goal: a list with as many channels as the bound passes the check.
         // Method: check a count equal to the bound.
-        let channel_count = channel_count_check(CHANNELS_MAX);
+        let channel_count = each_channel_count_check(CHANNELS_MAX);
 
         assert_eq!(CHANNELS_MAX, channel_count.unwrap());
     }
@@ -961,7 +961,7 @@ mod tests {
         // Goal: an empty list of channels passes the check, which leaves to open whether the
         // channels it found are enough.
         // Method: check a count of 0.
-        let channel_count = channel_count_check(0);
+        let channel_count = each_channel_count_check(0);
 
         assert_eq!(0, channel_count.unwrap());
     }
@@ -971,7 +971,7 @@ mod tests {
         // Goal: a list with more channels than the bound is an error, so walking a list of
         // channels has a bound.
         // Method: check a count one past the bound.
-        let channel_count = channel_count_check(CHANNELS_MAX + 1);
+        let channel_count = each_channel_count_check(CHANNELS_MAX + 1);
 
         assert_eq!(
             io::ErrorKind::QuotaExceeded,
@@ -983,7 +983,7 @@ mod tests {
     fn refuses_a_negative_channel_count() {
         // Goal: a negative count of channels is an error, never a list with no channels.
         // Method: check a count of -1.
-        let channel_count = channel_count_check(-1);
+        let channel_count = each_channel_count_check(-1);
 
         assert_eq!(
             io::ErrorKind::InvalidData,
@@ -1216,7 +1216,7 @@ mod tests {
 
         let active: Vec<i32> = (0..states.state_count)
             .filter(|&index| {
-                learn_active_states_counts(unsafe { IOReportStateGetNameForIndex(core, index) })
+                learn_active_states_is_active(unsafe { IOReportStateGetNameForIndex(core, index) })
                     .unwrap()
             })
             .collect();
@@ -1265,7 +1265,7 @@ mod tests {
         let samples = ioreport.subscription.sample().unwrap();
         let gpu = first_channel(&ioreport, &samples, Kind::GPUStates);
 
-        let nj_per_unit = nj_per_unit(gpu);
+        let nj_per_unit = learn_nj_per_unit(gpu);
 
         assert_eq!(io::ErrorKind::InvalidData, nj_per_unit.unwrap_err().kind());
     }
@@ -1280,7 +1280,7 @@ mod tests {
         let samples = ioreport.subscription.sample().unwrap();
         let gpu = first_channel(&ioreport, &samples, Kind::GPUStates);
 
-        let energy = energy_nj(gpu, 1);
+        let energy = read_energy_nj(gpu, 1);
 
         assert_eq!(io::ErrorKind::InvalidData, energy.unwrap_err().kind());
     }
@@ -1319,9 +1319,9 @@ mod tests {
         // Goal: counting IDLE, DOWN or OFF as active would read every core and the GPU as
         // busy for the whole of each second.
         // Method: ask the filter about each name these states carry on this Mac.
-        assert!(!learn_active_states_counts(string(c"IDLE").unwrap().0).unwrap());
-        assert!(!learn_active_states_counts(string(c"DOWN").unwrap().0).unwrap());
-        assert!(!learn_active_states_counts(string(c"OFF").unwrap().0).unwrap());
+        assert!(!learn_active_states_is_active(string(c"IDLE").unwrap().0).unwrap());
+        assert!(!learn_active_states_is_active(string(c"DOWN").unwrap().0).unwrap());
+        assert!(!learn_active_states_is_active(string(c"OFF").unwrap().0).unwrap());
     }
 
     #[test]
@@ -1329,8 +1329,8 @@ mod tests {
         // Goal: a performance state left out would hide the time spent in it.
         // Method: ask the filter about a core's state name and the GPU's, as this Mac
         // names them.
-        assert!(learn_active_states_counts(string(c"V0P14").unwrap().0).unwrap());
-        assert!(learn_active_states_counts(string(c"P1").unwrap().0).unwrap());
+        assert!(learn_active_states_is_active(string(c"V0P14").unwrap().0).unwrap());
+        assert!(learn_active_states_is_active(string(c"P1").unwrap().0).unwrap());
     }
 
     #[test]
@@ -1353,7 +1353,7 @@ mod tests {
             .iter()
             .filter(|&&channel| {
                 (0..unsafe { IOReportStateGetCount(channel) }).all(|index| {
-                    learn_active_states_counts(unsafe {
+                    learn_active_states_is_active(unsafe {
                         IOReportStateGetNameForIndex(channel, index)
                     })
                     .unwrap()
