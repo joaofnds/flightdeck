@@ -166,9 +166,9 @@ impl Connection {
 
     fn key_count(&self) -> io::Result<u32> {
         const { assert!(UNSIGNED_32.size == 4) };
-        let [a, b, c, d, ..] = self.read(KEY_COUNT, UNSIGNED_32)?;
+        let [first, second, third, fourth, ..] = self.read(KEY_COUNT, UNSIGNED_32)?;
 
-        let key_count = key_count_check(u32::from_be_bytes([a, b, c, d]))?;
+        let key_count = key_count_check(u32::from_be_bytes([first, second, third, fourth]))?;
         assert!(key_count <= KEYS_MAX);
         Ok(key_count)
     }
@@ -195,9 +195,9 @@ impl Connection {
 
     fn read_float(&self, key: FloatKey) -> io::Result<f32> {
         const { assert!(FLOAT.size == 4) };
-        let [a, b, c, d, ..] = self.bytes(key.0, FLOAT)?;
+        let [first, second, third, fourth, ..] = self.bytes(key.0, FLOAT)?;
 
-        Ok(f32::from_ne_bytes([a, b, c, d]))
+        Ok(f32::from_ne_bytes([first, second, third, fourth]))
     }
 
     /// Reads `key` as a value of `info` once the SMC shows it holds one, since the SMC answers
@@ -406,9 +406,9 @@ impl Key {
 
 impl std::fmt::Debug for Key {
     /// Writes the key's four characters, escaping any that is not printable.
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for byte in self.0.to_be_bytes() {
-            write!(f, "{}", char::from(byte).escape_default())?;
+            write!(formatter, "{}", char::from(byte).escape_default())?;
         }
 
         Ok(())
