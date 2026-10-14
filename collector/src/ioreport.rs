@@ -281,10 +281,13 @@ impl Subscription {
         let handle = unsafe {
             IOReportCreateSubscription(ptr::null(), wanted.0, &raw mut channels, 0, ptr::null())
         };
-        let handle = Owned::new(handle, "subscribing to IOReport's channels")?;
-        let channels = Owned::new(channels, "listing the channels IOReport subscribed to")?;
+        let handle = Owned::new(handle, "subscribing to IOReport's channels");
+        let channels = Owned::new(channels, "listing the channels IOReport subscribed to");
 
-        Ok(Self { handle, channels })
+        Ok(Self {
+            handle: handle?,
+            channels: channels?,
+        })
     }
 
     /// Takes a sample of every channel the subscription holds.
