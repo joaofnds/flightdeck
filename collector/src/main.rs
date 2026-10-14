@@ -139,8 +139,7 @@ impl Run {
 
         let mut meter = Meter::default();
         let mut collector = Collector::new(timebase, rescan_interval)?;
-        let mut live_at_first_scan = collector.tracker.last_listing().to_vec();
-        live_at_first_scan.sort_unstable();
+        let live_at_first_scan = Self::start_live_at_first_scan(collector.tracker.last_listing());
         let schedule = Schedule::starting_now(timebase.ticks(tick_period_ns)?)?;
 
         report_start(out, &meter, timebase)?;
@@ -165,6 +164,20 @@ impl Run {
             minute: Span::begin(start, first_tick),
             window: Span::begin(start, first_tick),
         })
+    }
+
+    /// The pids of `listing` in increasing order, each once, where a listing comes in no set
+    /// order and may hold a pid twice.
+    fn start_live_at_first_scan(listing: &[i32]) -> Vec<i32> {
+        let mut live_at_first_scan = listing.to_vec();
+        live_at_first_scan.sort_unstable();
+        live_at_first_scan.dedup();
+
+        for listed in live_at_first_scan.windows(2) {
+            assert!(listed[0] < listed[1]);
+        }
+        assert!(live_at_first_scan.len() <= listing.len());
+        live_at_first_scan
     }
 
     /// Runs `tick`, writes the reports of the spans it closes, and returns the tick that
@@ -309,8 +322,8 @@ fn starts_in(events: &[Event]) -> u64 {
 }
 
 /// The processes that started between the marker children, less those live at the first
-/// scan, or `None` where the pids may have wrapped. `live_at_first_scan` is sorted, and may
-/// hold a pid twice, as a listing may.
+/// scan, or `None` where the pids may have wrapped. `live_at_first_scan` holds each pid once,
+/// in increasing order.
 fn processes_started(
     first_marker_pid: i32,
     last_marker_pid: i32,
@@ -318,7 +331,7 @@ fn processes_started(
     forks_counted: u64,
 ) -> Option<u64> {
     for listed in live_at_first_scan.windows(2) {
-        assert!(listed[0] <= listed[1]);
+        assert!(listed[0] < listed[1]);
     }
 
     if last_marker_pid <= first_marker_pid {
@@ -332,8 +345,8 @@ fn processes_started(
 
     let between = u64::from((last_marker_pid - first_marker_pid - 1).cast_unsigned());
     let mut live_between = 0;
-    for same_pid in live_at_first_scan.chunk_by(|pid, next| pid == next) {
-        if (first_marker_pid + 1..last_marker_pid).contains(&same_pid[0]) {
+    for pid in live_at_first_scan {
+        if (first_marker_pid + 1..last_marker_pid).contains(pid) {
             live_between += 1;
         }
     }
@@ -764,20 +777,32 @@ mod tests {
     }
 
     #[test]
-    fn counts_a_pid_listed_twice_at_the_first_scan_once() {
-        // Goal: a pid the first scan's listing holds twice, which the tracker allows, takes
-        // one pid off the processes started, not two.
-        // Method: count between marks one pid apart with that pid listed twice.
-        assert_eq!(Some(0), processes_started(100, 102, &[101, 101], 1_000));
+    fn keeps_each_pid_live_at_the_first_scan_once_in_order() {
+        // Goal: the first scan's listing, which comes in no set order and may hold a pid
+        // twice as the tracker allows, reaches the count sorted and with each pid once.
+        // Method: take a listing in decreasing order that holds one pid twice.
+        let listing = [103, 101, 103];
+
+        let live_at_first_scan = Run::start_live_at_first_scan(&listing);
+
+        assert_eq!(vec![101, 103], live_at_first_scan);
     }
 
     #[test]
-    #[should_panic(expected = "listed[0] <= listed[1]")]
+    #[should_panic(expected = "listed[0] < listed[1]")]
     fn refuses_a_first_scan_out_of_order() {
-        // Goal: the first scan's listing reaches the count sorted, which a pid listed twice
-        // needs to be counted once.
+        // Goal: the count takes the first scan's pids in increasing order.
         // Method: count with a listing in decreasing order.
         processes_started(100, 104, &[103, 101], 1_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "listed[0] < listed[1]")]
+    fn refuses_a_first_scan_that_lists_a_pid_twice() {
+        // Goal: the count takes each of the first scan's pids once, since a pid listed
+        // twice would take two pids off the processes started.
+        // Method: count between marks one pid apart with that pid listed twice.
+        processes_started(100, 102, &[101, 101], 1_000);
     }
 
     #[test]
