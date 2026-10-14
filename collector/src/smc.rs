@@ -573,6 +573,15 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "is_ascii_graphic")]
+    fn refuses_to_name_a_key_with_a_character_that_is_not_printable() {
+        // Goal: naming a key with a byte that is not a printable character fails, so every key
+        // the collector names prints as its four characters.
+        // Method: name a key whose last byte is a nul.
+        Key::named(*b"TC0\0");
+    }
+
+    #[test]
     fn takes_as_many_fans_as_its_keys_can_name() {
         // Goal: a fan count up to the ten fans the keys can name passes the check.
         // Method: check a count of ten.
@@ -752,9 +761,13 @@ mod tests {
     #[test]
     fn reads_a_speed_for_every_fan() {
         // Goal: each read takes one speed for every fan the SMC counts.
-        // Method: one read, against the fan count read on a connection of the test's own.
+        // Method: one read, against the fan count's byte read on a connection of the test's
+        // own.
         let mut smc = Smc::open().unwrap();
-        let fan_count = Connection::open().unwrap().fan_count().unwrap();
+        let [fan_count, ..] = Connection::open()
+            .unwrap()
+            .bytes(FAN_COUNT, UNSIGNED_8)
+            .unwrap();
 
         smc.read().unwrap();
 
