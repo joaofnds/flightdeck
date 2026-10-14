@@ -215,9 +215,12 @@ impl Machine {
         assert!(cpu_limit > 0);
 
         let total_bytes: u64 = Sysctl::named(c"hw.memsize")?.read()?;
-        let page_size = u64::try_from(unsafe { vm_page_size }).map_err(io::Error::other)?;
+        let page_size = match u64::try_from(unsafe { vm_page_size }) {
+            Ok(size) => size,
+            Err(error) => unreachable!("{error}"),
+        };
 
-        Ok(Self {
+        let machine = Self {
             host: unsafe { mach_host_self() },
             page_size,
             swap_usage: Sysctl::named(c"vm.swapusage")?,
@@ -227,7 +230,9 @@ impl Machine {
                 total_bytes,
                 ..Memory::default()
             },
-        })
+        };
+        assert!(machine.cpus.capacity() >= cpu_limit);
+        Ok(machine)
     }
 
     pub fn read(&mut self) -> io::Result<()> {
@@ -274,6 +279,7 @@ impl Machine {
             nice: load.cpu_ticks[NICE_INDEX],
             idle: load.cpu_ticks[IDLE_INDEX],
         }));
+        assert_eq!(cpu_count, self.cpus.len());
         assert_eq!(capacity, self.cpus.capacity());
 
         Ok(())
@@ -387,6 +393,8 @@ impl Drop for MachMemory {
     /// Frees the memory, and reports on stderr a free that failed, since a drop has no caller
     /// to return the error to.
     fn drop(&mut self) {
+        assert!(!self.address.is_null());
+
         if let Err(error) = deallocate(self.address.addr(), self.size) {
             eprintln!("collector: {error}");
         }
