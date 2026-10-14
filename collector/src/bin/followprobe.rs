@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode};
 use std::time::Duration;
@@ -167,26 +167,31 @@ fn run_report(probe: &Probe, followed: &Followed, cost: &Cost, counts: &Counts) 
         .map(|&source| cost.ms_per_second(source))
         .sum();
 
-    println!(
+    let mut out = io::stdout().lock();
+    writeln!(
+        out,
         "rescan interval {} ms: children {children}, found {found}, missed {}, \
          final usage read for {read} ({:.1}% of children)",
         probe.rescan_interval.as_millis(),
         children - found,
         percent(read, children),
-    );
-    println!(
+    )?;
+    writeln!(
+        out,
         "  tracking ms of CPU a second {tracking_total:.2}: {}; process CPU {:.2}% of a core",
         tracking.join(", "),
         cost.share_of_a_core() * 100.0,
-    );
-    println!(
+    )?;
+    writeln!(
+        out,
         "  {} forks, rescans {} leading, {} trailing, {} listing",
         counts.forks, counts.leading_rescans, counts.trailing_rescans, counts.listing_rescans,
-    );
-    println!(
+    )?;
+    writeln!(
+        out,
         "  dropped from a full event list {} starts, {} execs, {} exits",
         counts.dropped_starts, counts.dropped_execs, counts.dropped_exits,
-    );
+    )?;
     Ok(())
 }
 

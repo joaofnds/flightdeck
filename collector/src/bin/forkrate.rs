@@ -134,8 +134,10 @@ fn run(burst: &Burst) -> io::Result<()> {
         .iter()
         .map(u64::to_string)
         .collect();
-    println!("forks each second: {}", reached.join(" "));
-    println!(
+    let mut out = io::stdout().lock();
+    writeln!(out, "forks each second: {}", reached.join(" "))?;
+    writeln!(
+        out,
         "{forks} of {} forks in {:.1} s, {:.0} a second, {} late, {} reaped, {} of them failed",
         burst.forks,
         elapsed.as_secs_f64(),
@@ -143,7 +145,7 @@ fn run(burst: &Burst) -> io::Result<()> {
         forked.late,
         reaped.count,
         reaped.failed,
-    );
+    )?;
 
     if let Some(file) = &burst.pids {
         run_write_pids(file, &forked.children)?;
