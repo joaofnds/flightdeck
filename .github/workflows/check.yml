@@ -44,6 +44,7 @@ jobs:
           --skip ioreport::tests::refuses_a_channel_with_more_active_states_than_its_room
           --skip ioreport::tests::refuses_more_cores_than_its_cpu_limit
           --skip ioreport::tests::refuses_to_learn_the_states_of_a_channel_without_states
+          --skip ioreport::tests::subscribes_only_to_the_channels_a_read_takes
           --skip processes::tests::reads_this_process_spending_energy_while_it_runs
           --skip smc::tests::reads_a_speed_for_every_fan
           --skip smc::tests::reads_each_fan_speed_in_rpm

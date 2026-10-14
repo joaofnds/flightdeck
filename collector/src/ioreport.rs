@@ -964,6 +964,25 @@ mod tests {
     }
 
     #[test]
+    fn subscribes_only_to_the_channels_a_read_takes() {
+        // Goal: the subscription holds only the channels a read takes, so a sample copies no
+        // channel the read throws away.
+        // Method: open IOReport on this Mac, and count the channels it subscribed to against
+        // those open found.
+        let ioreport = open();
+
+        let subscribed = each(channels_of(&ioreport.subscribed, &ioreport.channels_key).unwrap())
+            .unwrap()
+            .count();
+
+        let counts = ioreport.counts;
+        assert_eq!(
+            counts.gpu_energy + counts.gpu_states + counts.cores,
+            subscribed
+        );
+    }
+
+    #[test]
     fn refuses_more_cores_than_its_cpu_limit() {
         // Goal: IOReport reporting more cores than the CPU limit is an error.
         // Method: open with a limit of one CPU on this Mac, which has more.
