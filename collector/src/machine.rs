@@ -320,9 +320,19 @@ struct MachMemory {
 }
 
 impl Drop for MachMemory {
+    /// Frees the memory, and reports on stderr a free that failed, since a drop has no caller
+    /// to return the error to.
     fn drop(&mut self) {
-        unsafe { vm_deallocate(kernel::task_self(), self.address.addr(), self.size) };
+        if let Err(error) = deallocate(self.address.addr(), self.size) {
+            eprintln!("collector: {error}");
+        }
     }
+}
+
+/// Frees `size` bytes at `address` that the kernel gave this task.
+fn deallocate(address: usize, size: usize) -> io::Result<()> {
+    let returned = unsafe { vm_deallocate(kernel::task_self(), address, size) };
+    kern_return_check(returned, "vm_deallocate")
 }
 
 /// Widens a count the kernel returns as a `u32`, which a `usize` holds on every 64-bit Mac.
@@ -371,6 +381,16 @@ mod tests {
 
         assert_eq!(io::ErrorKind::QuotaExceeded, read.unwrap_err().kind());
         assert_eq!(capacity, machine.cpus.capacity());
+    }
+
+    #[test]
+    fn refuses_to_free_memory_the_kernel_did_not_give() {
+        // Goal: a free the kernel refuses is an error, never ignored.
+        // Method: free two pages that wrap past the top of the address space, which
+        // vm_deallocate refused with KERN_INVALID_ARGUMENT on macOS 27.0.1.
+        let freed = deallocate(0xffff_ffff_ffff_f000, 0x2000);
+
+        assert_eq!(io::ErrorKind::Other, freed.unwrap_err().kind());
     }
 
     #[test]
