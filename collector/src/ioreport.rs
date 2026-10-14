@@ -46,9 +46,9 @@ impl IOReport {
         Ok(ioreport)
     }
 
-    /// Learns from one sample what each read takes from the channels by index, the GPU's
-    /// energy unit and the active states of the GPU and of every core, so a read asks `IOReport`
-    /// for no name.
+    /// Learns from one sample the GPU's energy unit and which states of the GPU and of every
+    /// core are active, so a read finds each active state by its index and asks `IOReport` for
+    /// no state's name.
     fn learn(&mut self) -> io::Result<()> {
         assert_eq!(ChannelCounts::default(), self.counts);
 
@@ -411,8 +411,9 @@ fn each_channel_count_check(channel_count: isize) -> io::Result<isize> {
     Ok(channel_count)
 }
 
-/// The core at `index` among `cores`, which hold one for each CPU the machine runs, so a core
-/// past them is an error.
+/// The core at `index` among `cores`, or an error where `IOReport` reports more cores than
+/// `cores` holds, which is one for each CPU the machine runs at open and the cores open found
+/// at a read.
 fn core_at(cores: &mut [States], index: usize) -> io::Result<&mut States> {
     let count = cores.len();
     assert!(index <= count);
@@ -420,7 +421,7 @@ fn core_at(cores: &mut [States], index: usize) -> io::Result<&mut States> {
     cores.get_mut(index).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::QuotaExceeded,
-            format!("IOReport reported cores past {count}"),
+            format!("IOReport reported more cores than {count}"),
         )
     })
 }
