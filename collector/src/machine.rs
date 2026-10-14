@@ -281,6 +281,7 @@ impl Machine {
             )
         };
         kern_return_check(result, "host_statistics64")?;
+        read_memory_count_check(count)?;
 
         let vm = unsafe { vm.assume_init() };
         let swap: XswUsage = self.swap_usage.read()?;
@@ -347,6 +348,19 @@ fn read_cpus_count_check(counts: ReplyCounts, capacity: usize) -> io::Result<usi
     }
 
     Ok(cpu_count)
+}
+
+/// Checks that `host_statistics64` wrote back `count` integers, all of `VmStatistics64`,
+/// since one it left unwritten would read as a count of 0.
+fn read_memory_count_check(count: u32) -> io::Result<()> {
+    if usize_from_u32(count) != HOST_VM_INFO64_REV1_COUNT {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("host_statistics64 wrote {count} integers of {HOST_VM_INFO64_REV1_COUNT}"),
+        ));
+    }
+
+    Ok(())
 }
 
 /// Memory the kernel gave this task in a reply, `size` bytes at `address`, which it frees
@@ -483,6 +497,23 @@ mod tests {
         let freed = deallocate(0xffff_ffff_ffff_f000, 0x2000);
 
         assert_eq!(io::ErrorKind::Other, freed.unwrap_err().kind());
+    }
+
+    #[test]
+    fn takes_statistics_of_the_first_revision_whole() {
+        // Goal: a reply that fills every integer of the first revision is read.
+        // Method: check the 38 integers host_statistics64 wrote back on macOS 27.0.1.
+        assert!(read_memory_count_check(38).is_ok());
+    }
+
+    #[test]
+    fn refuses_statistics_shorter_than_the_first_revision() {
+        // Goal: a reply that leaves some page counts unwritten is an error, never zeros
+        // read as counts.
+        // Method: check a reply of 37 integers, one short.
+        let checked = read_memory_count_check(37);
+
+        assert_eq!(io::ErrorKind::InvalidData, checked.unwrap_err().kind());
     }
 
     #[test]
