@@ -427,6 +427,15 @@ mod tests {
     }
 
     #[test]
+    fn takes_a_rate_of_a_fork_a_nanosecond() {
+        // Goal: the fastest rate, whose period floors to a nanosecond, is taken.
+        // Method: parse a rate of a billion a second for a second.
+        let burst = burst_from(&arguments(&["1000000000", "1", "0"]));
+
+        assert_eq!(PER_SECOND_MAX, burst.unwrap().per_second);
+    }
+
+    #[test]
     fn refuses_a_rate_past_a_fork_a_nanosecond() {
         // Goal: a rate whose period floors to no nanoseconds is a usage error.
         // Method: parse a rate one past a billion a second.
@@ -441,11 +450,21 @@ mod tests {
     }
 
     #[test]
+    fn takes_a_run_of_as_many_forks_as_a_u32_holds() {
+        // Goal: a run of exactly u32::MAX forks is taken.
+        // Method: parse 15 seconds at 286,331,153 forks a second, which make 4,294,967,295.
+        let burst = burst_from(&arguments(&["286331153", "15", "0"]));
+
+        assert_eq!(u32::MAX, burst.unwrap().forks);
+    }
+
+    #[test]
     fn refuses_a_run_of_more_forks_than_a_u32_holds() {
         // Goal: a run of more forks than a u32 holds is a usage error, since the report's
         // rate takes the forks as a u32.
-        // Method: parse 5 seconds at a billion forks a second.
-        assert!(burst_from(&arguments(&["1000000000", "5", "0"])).is_err());
+        // Method: parse 1,024 seconds at 4,194,304 forks a second, which make 2^32, one past
+        // u32::MAX, at a rate well under a fork a nanosecond.
+        assert!(burst_from(&arguments(&["4194304", "1024", "0"])).is_err());
     }
 
     #[test]

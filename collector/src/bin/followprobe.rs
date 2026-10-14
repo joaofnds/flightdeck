@@ -455,6 +455,18 @@ mod tests {
     }
 
     #[test]
+    fn takes_as_many_generators_as_a_probe_runs() {
+        // Goal: a probe of GENERATORS_MAX generators is taken.
+        // Method: parse GENERATORS_MAX generators at a rate that gives each one a fork a
+        // second.
+        let generators = GENERATORS_MAX.to_string();
+
+        let probe = probe_from(&arguments(&["0", "1000", "15", "6", &generators]));
+
+        assert_eq!(GENERATORS_MAX, probe.unwrap().generators);
+    }
+
+    #[test]
     fn refuses_more_generators_than_a_probe_runs() {
         // Goal: a probe of more generators than GENERATORS_MAX is a usage error, not a list
         // of pid files sized to whatever was asked.
@@ -468,6 +480,15 @@ mod tests {
     }
 
     #[test]
+    fn takes_a_rate_of_one_fork_a_second_for_each_generator() {
+        // Goal: a rate that leaves each generator exactly one fork a second is taken.
+        // Method: parse a rate of 4 a second over 4 generators.
+        let probe = probe_from(&arguments(&["0", "4", "15", "6", "4"]));
+
+        assert_eq!(4, probe.unwrap().per_second);
+    }
+
+    #[test]
     fn refuses_a_rate_under_one_fork_a_second_for_each_generator() {
         // Goal: a rate that leaves a generator no forks a second, once it floors, is a usage
         // error.
@@ -476,7 +497,7 @@ mod tests {
     }
 
     #[test]
-    fn the_generators_exited_once_each_exited_successfully() {
+    fn generators_that_each_succeeded_have_all_exited() {
         // Goal: generators that each exited successfully have all exited.
         // Method: wait on a child that runs true, then ask whether the generators exited.
         let mut succeeded = Command::new("/usr/bin/true").spawn().unwrap();
