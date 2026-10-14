@@ -350,7 +350,7 @@ impl Mark {
     fn take(meter: &Meter, timebase: Timebase, collector: &Collector) -> io::Result<Self> {
         Ok(Self {
             snapshot: Snapshot::take(meter, timebase)?,
-            counts: collector.tracker.counts,
+            counts: collector.tracker.counts(),
         })
     }
 }

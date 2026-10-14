@@ -10,7 +10,7 @@ use crate::machine::{self, Machine};
 use crate::processes::{self, Sweep};
 use crate::push_without_growing;
 use crate::smc::Smc;
-use crate::tracker::{EVENTS_PER_TICK_MAX, Event, Limits, Tracker};
+use crate::tracker::{Counts, EVENTS_PER_TICK_MAX, Event, Limits, Tracker};
 
 pub struct Collector {
     timebase: Timebase,
@@ -23,8 +23,8 @@ pub struct Collector {
     pub processes: Sweep,
     pub coalitions: Coalitions,
     pub events: Vec<Event>,
-    /// The starts the tracker had dropped when the previous tick was read.
-    dropped_starts_previous: u64,
+    /// What the tracker had counted when the previous tick was read.
+    counts_previous: Counts,
 }
 
 impl Collector {
@@ -50,7 +50,7 @@ impl Collector {
             coalitions: Coalitions::new(timebase, coalition_limit),
             // The tracker holds at most this many events a tick, so a tick's events fit.
             events: Vec::with_capacity(limits.events_per_tick_max),
-            dropped_starts_previous: 0,
+            counts_previous: Counts::default(),
         };
 
         processes::list_pids(&mut collector.listing)?;
@@ -82,26 +82,46 @@ impl Collector {
             Ok(())
         })?;
         meter.measure(Source::Coalitions, || {
-            for event in &self.events {
-                if let Event::Start {
-                    coalition: Some(id),
-                    ..
-                } = event
-                {
-                    self.coalitions.add(*id)?;
-                }
-            }
-            // A dropped start takes its coalition with it, so a tick that dropped one adds the
-            // coalition of every process listed, as startup does.
-            if self.tracker.counts.dropped_starts > self.dropped_starts_previous {
-                add_listed_coalitions(&self.listing, &mut self.coalitions)?;
-            }
-            self.dropped_starts_previous = self.tracker.counts.dropped_starts;
-            self.coalitions.read_all()
+            let counts = self.tracker.counts();
+            let added = counts.since(&self.counts_previous);
+            self.counts_previous = counts;
+
+            read_coalitions(
+                &self.events,
+                added.dropped_starts,
+                &self.listing,
+                &mut self.coalitions,
+            )
         })?;
 
         Ok(())
     }
+}
+
+/// Adds the coalition of each process `events` saw start, and of every process in `listing`
+/// when the tick dropped a start, then reads every coalition held.
+fn read_coalitions(
+    events: &[Event],
+    dropped_starts: u64,
+    listing: &[i32],
+    coalitions: &mut Coalitions,
+) -> io::Result<()> {
+    for event in events {
+        if let Event::Start {
+            coalition: Some(id),
+            ..
+        } = event
+        {
+            coalitions.add(*id)?;
+        }
+    }
+    // A dropped start takes its coalition with it, so a tick that dropped one adds the
+    // coalition of every process listed, as startup does.
+    if dropped_starts > 0 {
+        add_listed_coalitions(listing, coalitions)?;
+    }
+
+    coalitions.read_all()
 }
 
 /// Adds the coalition of every process in `listing`.
@@ -118,21 +138,68 @@ fn add_listed_coalitions(listing: &[i32], coalitions: &mut Coalitions) -> io::Re
 mod tests {
     use super::*;
 
+    /// The pids of the processes running now, in a list with room for every process macOS
+    /// runs.
+    fn listing_now() -> Vec<i32> {
+        let mut listing = processes::pid_list(processes::process_limit().unwrap());
+        processes::list_pids(&mut listing).unwrap();
+        listing
+    }
+
+    #[test]
+    fn reads_the_coalition_a_start_names() {
+        // Goal: a tick reads the coalition of each process it saw start.
+        // Method: read the coalitions of a tick whose one event is a start in launchd's
+        // coalition, with nothing listed and no start dropped.
+        let timebase = Timebase::read().unwrap();
+        let launchd = coalitions::coalition_of(1).unwrap().unwrap();
+        let start = Event::Start {
+            pid: 1,
+            coalition: Some(launchd),
+        };
+        let mut coalitions = Coalitions::new(timebase, 1);
+
+        read_coalitions(&[start], 0, &[], &mut coalitions).unwrap();
+
+        let read = &coalitions.read;
+        assert_eq!(
+            vec![launchd],
+            read.iter()
+                .map(|coalition| coalition.id)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn reads_no_listed_coalition_after_a_tick_that_dropped_no_start() {
+        // Goal: a tick that dropped no start reads only the coalitions its starts name, never
+        // those of every process listed.
+        // Method: read the coalitions of a tick with every process listed, no event, and no
+        // start dropped.
+        let timebase = Timebase::read().unwrap();
+        let listing = listing_now();
+        let mut coalitions = Coalitions::new(timebase, listing.capacity());
+
+        read_coalitions(&[], 0, &listing, &mut coalitions).unwrap();
+
+        assert!(coalitions.read.is_empty());
+    }
+
     #[test]
     fn reads_every_listed_coalition_after_a_tick_that_dropped_a_start() {
         // Goal: a start dropped from a full event list takes its coalition with it, so the tick
         // that dropped it adds the coalition of every process listed.
-        // Method: empty a collector's coalitions, count one start as dropped, and read a tick.
-        // launchd's coalition holds only launchd and the kernel, so no start names it.
+        // Method: read the coalitions of a tick with every process listed, no event, and one
+        // start dropped. launchd's coalition holds only launchd and the kernel, so no start
+        // names it.
         let timebase = Timebase::read().unwrap();
-        let mut collector = Collector::new(timebase, Duration::ZERO).unwrap();
-        collector.coalitions = Coalitions::new(timebase, collector.listing.capacity());
-        collector.tracker.counts.dropped_starts += 1;
+        let listing = listing_now();
+        let mut coalitions = Coalitions::new(timebase, listing.capacity());
 
-        collector.read(&mut Meter::default()).unwrap();
+        read_coalitions(&[], 1, &listing, &mut coalitions).unwrap();
 
         let launchd = coalitions::coalition_of(1).unwrap().unwrap();
-        let read = &collector.coalitions.read;
+        let read = &coalitions.read;
         assert!(read.iter().any(|coalition| coalition.id == launchd));
     }
 }

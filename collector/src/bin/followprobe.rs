@@ -94,7 +94,7 @@ fn run(probe: &Probe) -> io::Result<()> {
         .iter()
         .filter(|pid| read_at_exit.contains(pid))
         .count();
-    let counts = tracker.counts;
+    let counts = tracker.counts();
     let tracking: Vec<String> = TRACKING
         .iter()
         .map(|&source| format!("{} {:.2}", source.name(), cost.ms_per_second(source)))

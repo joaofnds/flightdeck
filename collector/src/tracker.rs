@@ -99,7 +99,7 @@ pub struct Tracker {
     starts: Vec<i32>,
     exits: Vec<(i32, Noticed)>,
     events: Vec<Event>,
-    pub counts: Counts,
+    counts: Counts,
     /// Set for the length of every call that can fail and cleared as it succeeds, so it holds
     /// after a call that returned an error. That call left the lists and the kqueue part-way
     /// through a change, so no call follows it.
@@ -389,6 +389,13 @@ impl Tracker {
         assert!(self.starts.is_empty());
         assert!(self.exits.is_empty());
         self.events.drain(..)
+    }
+
+    /// What the tracker has counted since it started.
+    #[must_use]
+    pub fn counts(&self) -> Counts {
+        assert!(!self.failed, "a call to the tracker failed before");
+        self.counts
     }
 
     #[must_use]
