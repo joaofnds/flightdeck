@@ -113,6 +113,9 @@ fn burst_from(arguments: &[String]) -> Result<Burst, String> {
 }
 
 fn run(burst: &Burst) -> io::Result<()> {
+    // `burst_from` refuses a burst of no forks.
+    assert!(burst.forks > 0);
+
     let timebase = Timebase::read()?;
     let start = unsafe { mach_absolute_time() };
     let forked = run_forks(burst, timebase, start)?;
@@ -124,6 +127,9 @@ fn run(burst: &Burst) -> io::Result<()> {
     let mut reaped = forked.reaped;
     reaped.add(&rest);
     assert_eq!(forks, reaped.count);
+    assert!(reaped.failed <= forks);
+    // Forking counts the second it ends in, so a run lists one second at least.
+    assert!(!forked.per_second_reached.is_empty());
     let Some(elapsed_ticks) = end.checked_sub(start) else {
         return Err(io::Error::other(format!(
             "mach_absolute_time went back from {start} to {end}"

@@ -95,6 +95,10 @@ fn probe_from(arguments: &[String]) -> Result<Probe, String> {
 }
 
 fn run(probe: &Probe) -> io::Result<()> {
+    // `probe_from` refuses a probe of no generators or more than a probe runs.
+    assert!(probe.generators > 0);
+    assert!(probe.generators <= GENERATORS_MAX);
+
     let timebase = Timebase::read()?;
     let process_limit = processes::process_limit()?;
     assert!(process_limit > 0);
@@ -227,6 +231,7 @@ fn run_report_children(followed: &Followed) -> io::Result<Children> {
         ));
     }
 
+    assert!(forked > 0);
     let mut children = Children {
         forked,
         found: 0,
