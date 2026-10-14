@@ -72,7 +72,7 @@ fn options_from(args: &[String]) -> Result<Options, String> {
 fn run(options: &Options) -> io::Result<()> {
     set_qos_class_default()?;
 
-    let timebase = Timebase::read();
+    let timebase = Timebase::read()?;
     let first_marker_pid = throwaway_child();
     let mut out = io::stdout().lock();
     let mut run = Run::start(timebase, TICK_PERIOD_NS, options.rescan_interval, &mut out)?;
@@ -136,7 +136,7 @@ impl Run {
         let mut meter = Meter::default();
         let mut collector = Collector::new(timebase, rescan_interval)?;
         let live_at_first_scan = collector.tracker.last_listing().to_vec();
-        let schedule = Schedule::new(clock::now(), timebase.ticks(tick_period_ns));
+        let schedule = Schedule::new(clock::now(), timebase.ticks(tick_period_ns)?);
 
         report_start(out, &meter, timebase)?;
 
@@ -166,7 +166,7 @@ impl Run {
         let deadline = self.schedule.deadline(tick);
         self.collector.wait_until(deadline, &mut self.meter)?;
         let late_ticks = clock::now().saturating_sub(deadline);
-        let late = Duration::from_nanos(self.timebase.nanos(late_ticks));
+        let late = Duration::from_nanos(self.timebase.nanos(late_ticks)?);
         self.collector.read(&mut self.meter)?;
 
         let following = self.schedule.first_ahead_of(clock::now()).max(tick + 1);
@@ -580,7 +580,7 @@ mod tests {
         // Method: run ticks 20 ms apart until the minute closes, so they write six window
         // reports and a minute report, while another thread starts processes, and count the
         // allocator calls made on this thread.
-        let timebase = Timebase::read();
+        let timebase = Timebase::read().unwrap();
         let mut sink = io::sink();
         let mut run = Run::start(
             timebase,

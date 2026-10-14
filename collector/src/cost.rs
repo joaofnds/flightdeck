@@ -131,7 +131,7 @@ impl Snapshot {
         };
 
         Ok(Self {
-            at_ns: timebase.nanos(clock::now()),
+            at_ns: timebase.nanos(clock::now())?,
             cpu_ns: own.user_ns + own.system_ns,
             energy_nj: own.energy_nj,
             instructions: own.instructions,
@@ -283,7 +283,9 @@ mod tests {
             spin_on_this_thread_for(Duration::from_millis(20));
         });
 
-        let spent = Snapshot::take(&meter, Timebase::read()).unwrap().spent_ns;
+        let spent = Snapshot::take(&meter, Timebase::read().unwrap())
+            .unwrap()
+            .spent_ns;
         assert!(spent[Source::Coalitions.index()] >= 20_000_000);
         assert_eq!(0, spent[Source::Processes.index()]);
     }

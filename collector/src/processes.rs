@@ -385,9 +385,9 @@ pub fn read_usage(timebase: Timebase, pid: i32) -> io::Result<Result<Usage, Unre
     assert_eq!(0, returned);
     let usage = unsafe { usage.assume_init_ref() };
     Ok(Ok(Usage {
-        awake_ns_at_start: timebase.nanos(usage.proc_start_abstime),
-        user_ns: timebase.nanos(usage.user_time),
-        system_ns: timebase.nanos(usage.system_time),
+        awake_ns_at_start: timebase.nanos(usage.proc_start_abstime)?,
+        user_ns: timebase.nanos(usage.user_time)?,
+        system_ns: timebase.nanos(usage.system_time)?,
         energy_nj: usage.energy_nj,
         instructions: usage.instructions,
         super_instructions: usage.pinstructions,
@@ -698,7 +698,7 @@ mod tests {
         let pid = std::process::id().cast_signed();
 
         let before = own_cpu_ns();
-        let process = read(Timebase::read(), pid).unwrap().unwrap();
+        let process = read(Timebase::read().unwrap(), pid).unwrap().unwrap();
         let after = own_cpu_ns();
 
         let cpu_ns = process.usage.user_ns + process.usage.system_ns;
@@ -717,11 +717,11 @@ mod tests {
         // Goal: a process's energy grows while it runs.
         // Method: read this process's usage before and after spinning 50 ms.
         let pid = std::process::id().cast_signed();
-        let before = read_usage(Timebase::read(), pid).unwrap().unwrap();
+        let before = read_usage(Timebase::read().unwrap(), pid).unwrap().unwrap();
 
         spin_on_this_thread_for(Duration::from_millis(50));
 
-        let after = read_usage(Timebase::read(), pid).unwrap().unwrap();
+        let after = read_usage(Timebase::read().unwrap(), pid).unwrap().unwrap();
         assert!(
             after.energy_nj > before.energy_nj,
             "{} nJ then {} nJ",
@@ -735,7 +735,7 @@ mod tests {
         // Goal: a process's start reads in awake time, the clock the collector keeps.
         // Method: spawn a child, read its start, and take it within a second of the awake time
         // mach_absolute_time reads just after.
-        let timebase = Timebase::read();
+        let timebase = Timebase::read().unwrap();
         let mut child = std::process::Command::new("/bin/sleep")
             .arg("1")
             .spawn()
@@ -744,7 +744,7 @@ mod tests {
         let usage = read_usage(timebase, child.id().cast_signed())
             .unwrap()
             .unwrap();
-        let awake_ns = timebase.nanos(unsafe { mach_absolute_time() });
+        let awake_ns = timebase.nanos(unsafe { mach_absolute_time() }).unwrap();
         child.kill().unwrap();
         child.wait().unwrap();
 
@@ -759,7 +759,7 @@ mod tests {
         let pid = std::process::id().cast_signed();
         let mut sweep = Sweep::new(1);
 
-        sweep.run(Timebase::read(), &[pid]).unwrap();
+        sweep.run(Timebase::read().unwrap(), &[pid]).unwrap();
 
         let read: Vec<i32> = sweep.read.iter().map(|process| process.pid).collect();
         assert_eq!(vec![pid], read);
@@ -773,7 +773,7 @@ mod tests {
         list_pids(&mut pids).unwrap();
         let mut sweep = Sweep::new(process_limit().unwrap());
 
-        sweep.run(Timebase::read(), &pids).unwrap();
+        sweep.run(Timebase::read().unwrap(), &pids).unwrap();
 
         assert_eq!(
             pids.len(),
@@ -826,7 +826,7 @@ mod tests {
         // Method: read launchd, pid 1, which runs as root, as a user without root.
         assert_eq!(
             Unreadable::Refused,
-            read(Timebase::read(), 1).unwrap().unwrap_err()
+            read(Timebase::read().unwrap(), 1).unwrap().unwrap_err()
         );
     }
 
@@ -837,7 +837,7 @@ mod tests {
         let mut child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
         child.wait().unwrap();
 
-        let read = read(Timebase::read(), child.id().cast_signed());
+        let read = read(Timebase::read().unwrap(), child.id().cast_signed());
 
         assert_eq!(Unreadable::Gone, read.unwrap().unwrap_err());
     }

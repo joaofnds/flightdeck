@@ -629,7 +629,7 @@ fn read_active_states(timebase: Timebase, channel: CFTypeRef, into: &mut States)
         assert!(index < into.state_count);
         let residency = unsafe { IOReportStateGetResidency(channel, index) };
         let ticks = read_active_states_residency(residency)?;
-        push_without_growing(&mut into.active_ns, timebase.nanos(ticks));
+        push_without_growing(&mut into.active_ns, timebase.nanos(ticks)?);
     }
 
     assert_eq!(into.active_indices.len(), into.active_ns.len());
@@ -757,7 +757,7 @@ mod tests {
     }
 
     fn open() -> IOReport {
-        IOReport::open(Timebase::read(), machine::cpu_limit().unwrap()).unwrap()
+        IOReport::open(Timebase::read().unwrap(), machine::cpu_limit().unwrap()).unwrap()
     }
 
     /// The first channel of `kind` among the channels `samples` holds, a sample of
@@ -1187,7 +1187,7 @@ mod tests {
     fn refuses_more_cores_than_its_cpu_limit() {
         // Goal: IOReport reporting more cores than the CPU limit is an error.
         // Method: open with a limit of one CPU on this Mac, which has more.
-        let opened = IOReport::open(Timebase::read(), 1);
+        let opened = IOReport::open(Timebase::read().unwrap(), 1);
 
         let refused = opened.err().map(|error| error.kind());
         assert_eq!(Some(io::ErrorKind::QuotaExceeded), refused);
@@ -1257,7 +1257,7 @@ mod tests {
         // Method: open with room for one core more than this Mac has, record that open found
         // that core too, and read.
         let cpu_limit = machine::cpu_limit().unwrap();
-        let mut ioreport = IOReport::open(Timebase::read(), cpu_limit + 1).unwrap();
+        let mut ioreport = IOReport::open(Timebase::read().unwrap(), cpu_limit + 1).unwrap();
         ioreport.counts.core_states += 1;
 
         let read = ioreport.read();

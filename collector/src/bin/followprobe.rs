@@ -63,7 +63,7 @@ fn probe_from(args: &[String]) -> Result<Probe, String> {
 }
 
 fn run(probe: &Probe) -> io::Result<()> {
-    let timebase = Timebase::read();
+    let timebase = Timebase::read()?;
     let process_limit = processes::process_limit()?;
     let limits = Limits {
         process_limit,
@@ -144,7 +144,7 @@ fn follow(
         let mut started = HashSet::new();
         let mut read_at_exit = HashSet::new();
         let mut listing = processes::pid_list(process_limit);
-        let second = timebase.ticks(1_000_000_000);
+        let second = timebase.ticks(1_000_000_000)?;
         let mut deadline = clock::now() + second;
         loop {
             tracker.follow_until(deadline, meter)?;

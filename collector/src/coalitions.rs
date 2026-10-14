@@ -143,7 +143,7 @@ impl Coalitions {
                     id,
                     tasks_started: usage.tasks_started,
                     tasks_exited: usage.tasks_exited,
-                    cpu_ns: self.timebase.nanos(usage.cpu_time),
+                    cpu_ns: self.timebase.nanos(usage.cpu_time)?,
                     interrupt_wakeups: usage.interrupt_wakeups,
                     idle_wakeups: usage.platform_idle_wakeups,
                     disk_read_bytes: usage.bytesread,
@@ -279,7 +279,7 @@ mod tests {
     fn counts_the_cpu_time_this_process_spends_in_its_coalition() {
         // Goal: a coalition's CPU time grows by at least the time one of its processes spends.
         // Method: read this process's coalition before and after spinning 50 ms on one thread.
-        let mut coalitions = Coalitions::new(Timebase::read(), COALITION_LIMIT);
+        let mut coalitions = Coalitions::new(Timebase::read().unwrap(), COALITION_LIMIT);
         coalitions.add(own_coalition()).unwrap();
         coalitions.read_all().unwrap();
         let before = coalitions.read[0];
@@ -299,7 +299,7 @@ mod tests {
     fn counts_the_energy_this_process_spends_in_its_coalition() {
         // Goal: a coalition's energy grows by at least what one of its processes spends.
         // Method: read this process's coalition and usage before and after spinning 50 ms.
-        let timebase = Timebase::read();
+        let timebase = Timebase::read().unwrap();
         let pid = std::process::id().cast_signed();
         let mut coalitions = Coalitions::new(timebase, COALITION_LIMIT);
         coalitions.add(own_coalition()).unwrap();
@@ -324,7 +324,7 @@ mod tests {
     fn reads_each_coalition_once_however_many_processes_it_holds() {
         // Goal: a coalition added twice, as two of its processes would add it, is read once.
         // Method: add this process's coalition twice, and read every coalition.
-        let mut coalitions = Coalitions::new(Timebase::read(), COALITION_LIMIT);
+        let mut coalitions = Coalitions::new(Timebase::read().unwrap(), COALITION_LIMIT);
         coalitions.add(own_coalition()).unwrap();
         coalitions.add(own_coalition()).unwrap();
 
@@ -337,7 +337,7 @@ mod tests {
     fn refuses_a_coalition_past_its_limit_without_growing() {
         // Goal: a coalition past the limit is an error, and the list keeps the room it was given.
         // Method: fill a set with room for one coalition, then add a second.
-        let mut coalitions = Coalitions::new(Timebase::read(), 1);
+        let mut coalitions = Coalitions::new(Timebase::read().unwrap(), 1);
         coalitions.add(1).unwrap();
         let capacity = coalitions.ids.capacity();
 
@@ -351,7 +351,7 @@ mod tests {
     fn adds_a_coalition_it_holds_already_at_its_limit() {
         // Goal: a full set still takes a coalition it holds, since holding it again takes no room.
         // Method: fill a set with room for one coalition, then add that one again.
-        let mut coalitions = Coalitions::new(Timebase::read(), 1);
+        let mut coalitions = Coalitions::new(Timebase::read().unwrap(), 1);
         coalitions.add(1).unwrap();
 
         let added = coalitions.add(1);
@@ -364,7 +364,7 @@ mod tests {
         // Goal: a full set finds a coalition it holds after a lower one was added, since it
         // keeps its ids sorted.
         // Method: fill a set with room for two with 3 and then 1, and add 3 again.
-        let mut coalitions = Coalitions::new(Timebase::read(), 2);
+        let mut coalitions = Coalitions::new(Timebase::read().unwrap(), 2);
         coalitions.add(3).unwrap();
         coalitions.add(1).unwrap();
 
@@ -426,7 +426,7 @@ mod tests {
         // reading was taken while it had one.
         // Method: fill a set with room for one with coalition 0, which macOS reports with ESRCH,
         // read every coalition, and add this process's coalition in the room 0 held.
-        let mut coalitions = Coalitions::new(Timebase::read(), 1);
+        let mut coalitions = Coalitions::new(Timebase::read().unwrap(), 1);
         coalitions.add(0).unwrap();
 
         coalitions.read_all().unwrap();
@@ -446,7 +446,7 @@ mod tests {
         let pid = std::process::id().cast_signed();
         let info = unsafe { processes::pid_info::<PidCoalitionInfo>(pid) };
         let jetsam = info.unwrap().ok().unwrap().coalition_id[COALITION_TYPE_JETSAM];
-        let mut coalitions = Coalitions::new(Timebase::read(), COALITION_LIMIT);
+        let mut coalitions = Coalitions::new(Timebase::read().unwrap(), COALITION_LIMIT);
         coalitions.add(jetsam).unwrap();
 
         let read = coalitions.read_all();

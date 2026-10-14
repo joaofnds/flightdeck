@@ -295,7 +295,7 @@ impl Tracker {
             known: vec![Known::default(); known_count],
             reuse_candidates: Vec::with_capacity(capacity),
             scans: 0,
-            throttle: Throttle::new(timebase.ticks(interval_ns)),
+            throttle: Throttle::new(timebase.ticks(interval_ns)?),
             timers: Vec::with_capacity(TIMER_COUNT_MAX),
             changes: Vec::with_capacity(capacity),
             eventlist: vec![Kevent::new(0, 0, 0, 0, 0); capacity.max(EVENTS_PER_WAIT_MAX)],
@@ -802,7 +802,7 @@ mod tests {
     }
 
     fn tracker(rescan_interval: Duration) -> Tracker {
-        Tracker::new(Timebase::read(), rescan_interval, limits()).unwrap()
+        Tracker::new(Timebase::read().unwrap(), rescan_interval, limits()).unwrap()
     }
 
     /// The pids this Mac runs now, in a list with the room a tracker gives its own.
@@ -979,7 +979,7 @@ mod tests {
             events_per_tick_max: 1,
             ..limits()
         };
-        let mut tracker = Tracker::new(Timebase::read(), INTERVAL, limits).unwrap();
+        let mut tracker = Tracker::new(Timebase::read().unwrap(), INTERVAL, limits).unwrap();
 
         while_forking_every_2_ms(|| follow_for(&mut tracker, &mut Meter::default(), 300));
 
@@ -998,7 +998,7 @@ mod tests {
             ..limits()
         };
 
-        let started = Tracker::new(Timebase::read(), INTERVAL, limits);
+        let started = Tracker::new(Timebase::read().unwrap(), INTERVAL, limits);
 
         let refused = started.err().map(|error| error.kind());
         assert_eq!(Some(io::ErrorKind::QuotaExceeded), refused);
@@ -1009,7 +1009,7 @@ mod tests {
         // Goal: a rescan interval longer than u64 holds in nanoseconds is an error, rather than
         // an interval cut short to fit.
         // Method: start a tracker with the longest interval a Duration holds.
-        let started = Tracker::new(Timebase::read(), Duration::MAX, limits());
+        let started = Tracker::new(Timebase::read().unwrap(), Duration::MAX, limits());
 
         let refused = started.err().map(|error| error.kind());
         assert_eq!(Some(io::ErrorKind::InvalidInput), refused);
@@ -1332,9 +1332,12 @@ mod tests {
     }
 
     fn follow_for(tracker: &mut Tracker, meter: &mut Meter, millis: u64) {
-        let timebase = Timebase::read();
+        let timebase = Timebase::read().unwrap();
         tracker
-            .follow_until(clock::now() + timebase.ticks(millis * 1_000_000), meter)
+            .follow_until(
+                clock::now() + timebase.ticks(millis * 1_000_000).unwrap(),
+                meter,
+            )
             .unwrap();
     }
 
@@ -1420,7 +1423,7 @@ mod tests {
         // their own source.
         // Method: follow a child through its start and exit for 500 ms, and read each source's time
         // from the meter.
-        let timebase = Timebase::read();
+        let timebase = Timebase::read().unwrap();
         let mut tracker = tracker(INTERVAL);
         let mut meter = Meter::default();
 
@@ -1443,19 +1446,21 @@ mod tests {
     fn returns_once_the_deadline_has_passed() {
         // Goal: following returns no sooner than its deadline, and soon after it.
         // Method: follow until 100 ms from now, and require a return within 50 ms of the deadline.
-        let timebase = Timebase::read();
+        let timebase = Timebase::read().unwrap();
         let mut tracker = tracker(INTERVAL);
-        let deadline_ticks = clock::now() + timebase.ticks(100_000_000);
+        let deadline_ticks = clock::now() + timebase.ticks(100_000_000).unwrap();
 
         tracker
             .follow_until(deadline_ticks, &mut Meter::default())
             .unwrap();
 
-        let late_ns = timebase.nanos(
-            clock::now()
-                .checked_sub(deadline_ticks)
-                .expect("returned before the deadline"),
-        );
+        let late_ns = timebase
+            .nanos(
+                clock::now()
+                    .checked_sub(deadline_ticks)
+                    .expect("returned before the deadline"),
+            )
+            .unwrap();
         assert!(
             late_ns < 50_000_000,
             "returned {late_ns} ns after the deadline"
@@ -1689,9 +1694,9 @@ mod tests {
         // Goal: following returns no sooner than its deadline while forks keep the rescan timer
         // armed.
         // Method: follow for 100 ms with a 5 ms interval while a thread forks every 2 ms.
-        let timebase = Timebase::read();
+        let timebase = Timebase::read().unwrap();
         let mut tracker = tracker(Duration::from_millis(5));
-        let deadline_ticks = clock::now() + timebase.ticks(100_000_000);
+        let deadline_ticks = clock::now() + timebase.ticks(100_000_000).unwrap();
 
         while_forking_every_2_ms(|| tracker.follow_until(deadline_ticks, &mut Meter::default()))
             .unwrap();

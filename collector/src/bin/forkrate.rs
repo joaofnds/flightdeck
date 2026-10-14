@@ -61,10 +61,10 @@ fn burst_from(args: &[String]) -> Result<Burst, String> {
 }
 
 fn run(burst: &Burst) -> std::io::Result<()> {
-    let timebase = Timebase::read();
-    let period = timebase.ticks(1_000_000_000 / burst.per_second.max(1));
-    let second = timebase.ticks(1_000_000_000);
-    let reap_every = timebase.ticks(10_000_000);
+    let timebase = Timebase::read()?;
+    let period = timebase.ticks(1_000_000_000 / burst.per_second.max(1))?;
+    let second = timebase.ticks(1_000_000_000)?;
+    let reap_every = timebase.ticks(10_000_000)?;
     let total = burst.per_second * burst.seconds;
 
     let start = unsafe { mach_absolute_time() };
@@ -103,7 +103,7 @@ fn run(burst: &Burst) -> std::io::Result<()> {
         reaped += 1;
     }
 
-    let elapsed = Duration::from_nanos(timebase.nanos(unsafe { mach_absolute_time() } - start));
+    let elapsed = Duration::from_nanos(timebase.nanos(unsafe { mach_absolute_time() } - start)?);
     let reached: Vec<String> = per_second_reached.iter().map(u64::to_string).collect();
     println!("forks each second: {}", reached.join(" "));
     println!(

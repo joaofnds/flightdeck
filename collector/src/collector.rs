@@ -123,7 +123,7 @@ mod tests {
         // that dropped it adds the coalition of every process listed.
         // Method: empty a collector's coalitions, count one start as dropped, and read a tick.
         // launchd's coalition holds only launchd and the kernel, so no start names it.
-        let timebase = Timebase::read();
+        let timebase = Timebase::read().unwrap();
         let mut collector = Collector::new(timebase, Duration::ZERO).unwrap();
         collector.coalitions = Coalitions::new(timebase, collector.listing.capacity());
         collector.tracker.counts.dropped_starts += 1;
