@@ -149,7 +149,7 @@ fn run_report(probe: &Probe, followed: &Followed, cost: &Cost, counts: &Counts) 
         children.found,
         children.forked - children.found,
         children.read,
-        percent(children.read, children.forked),
+        children.read_percent(),
     )?;
     writeln!(
         out,
@@ -185,6 +185,16 @@ struct Children {
     forked: u32,
     found: u32,
     read: u32,
+}
+
+impl Children {
+    /// The share of the children forked whose final usage the tracker read, as a percentage.
+    fn read_percent(&self) -> f64 {
+        assert!(self.forked > 0);
+        assert!(self.read <= self.forked);
+
+        f64::from(self.read) / f64::from(self.forked) * 100.0
+    }
 }
 
 /// Counts the children `followed` holds, or an error where the generators wrote none, since a
@@ -397,14 +407,6 @@ fn read_children(pid_files: &[PathBuf]) -> io::Result<HashSet<i32>> {
         }
     }
     Ok(children)
-}
-
-/// The share of `whole` that `part` is, as a percentage.
-fn percent(part: u32, whole: u32) -> f64 {
-    assert!(whole > 0);
-    assert!(part <= whole);
-
-    f64::from(part) / f64::from(whole) * 100.0
 }
 
 #[cfg(test)]
@@ -656,18 +658,31 @@ mod tests {
     }
 
     #[test]
-    fn gives_the_share_of_the_children_as_a_percentage() {
-        // Goal: a part of a whole reads as its percentage.
-        // Method: take 3 of 12.
-        assert!((percent(3, 12) - 25.0).abs() < f64::EPSILON);
+    fn gives_the_share_of_the_children_read_as_a_percentage() {
+        // Goal: the children whose final usage the tracker read read as a percentage of the
+        // children forked.
+        // Method: take 3 children read of 12 forked.
+        let children = Children {
+            forked: 12,
+            found: 12,
+            read: 3,
+        };
+
+        assert!((children.read_percent() - 25.0).abs() < f64::EPSILON);
     }
 
     #[test]
-    #[should_panic(expected = "whole > 0")]
-    fn refuses_a_share_of_nothing() {
+    #[should_panic(expected = "self.forked > 0")]
+    fn refuses_a_share_of_no_children() {
         // Goal: a percentage of no children is never asked for, since run_report_children
         // refuses a probe with none before the report asks for one.
-        // Method: take 0 of 0.
-        percent(0, 0);
+        // Method: take the share read of no children.
+        let children = Children {
+            forked: 0,
+            found: 0,
+            read: 0,
+        };
+
+        children.read_percent();
     }
 }
