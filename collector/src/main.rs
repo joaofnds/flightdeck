@@ -133,6 +133,8 @@ impl Run {
         rescan_interval: Duration,
         out: &mut impl Write,
     ) -> io::Result<Self> {
+        assert!(tick_period_ns > 0);
+
         let mut meter = Meter::default();
         let mut collector = Collector::new(timebase, rescan_interval)?;
         let mut live_at_first_scan = collector.tracker.last_listing().to_vec();
@@ -146,6 +148,8 @@ impl Run {
         let warm_up_starts = starts_in(collector.events());
 
         let first_tick = schedule.first_ahead_of(clock::now()).max(1);
+        // Tick 0 is the warm-up tick, so the spans start past it.
+        assert!(first_tick > 0);
         let start = Mark::take(&meter, timebase, &collector)?;
         Ok(Self {
             timebase,
@@ -164,6 +168,8 @@ impl Run {
     /// Runs `tick`, writes the reports of the spans it closes, and returns the tick that
     /// follows it, past any tick the run slipped.
     fn tick(&mut self, tick: u64, out: &mut impl Write) -> io::Result<u64> {
+        assert!(tick >= self.first_tick);
+
         let deadline = self.schedule.deadline(tick);
         self.collector.wait_until(deadline, &mut self.meter)?;
         let late_ticks = clock::now().saturating_sub(deadline);
@@ -171,6 +177,7 @@ impl Run {
         self.collector.read(&mut self.meter)?;
 
         let following = self.schedule.first_ahead_of(clock::now()).max(tick + 1);
+        assert!(following > tick);
         let slips = following - tick - 1;
         self.whole.tally.add(late, slips, &self.collector);
         self.minute.tally.add(late, slips, &self.collector);
@@ -192,6 +199,8 @@ impl Run {
 
     /// Writes the whole run's report, which ends at `last_tick`, and the processes it missed.
     fn finish(&self, last_tick: u64, markers: &Markers, out: &mut impl Write) -> io::Result<()> {
+        assert!(last_tick >= self.first_tick);
+
         let end = Mark::take(&self.meter, self.timebase, &self.collector)?;
         self.whole
             .report(out, "whole run, ticks", last_tick, &end)?;
@@ -234,6 +243,8 @@ struct Span {
 
 impl Span {
     fn begin(start: Mark, first_tick: u64) -> Self {
+        assert!(first_tick > 0);
+
         Self {
             start,
             first_tick,
@@ -250,6 +261,10 @@ impl Span {
         last_tick: u64,
         end: &Mark,
     ) -> io::Result<()> {
+        assert!(last_tick >= self.first_tick);
+        // A slipped tick is in the span but never ran.
+        assert!(self.tally.ticks <= last_tick - self.first_tick + 1);
+
         let cost = end.snapshot.cost_since(&self.start.snapshot)?;
         let counts = end.counts.since(&self.start.counts);
 
@@ -324,6 +339,8 @@ fn processes_started(
 
 /// The pids macOS gives out before it wraps to low pids again.
 fn pid_lap() -> u64 {
+    const { assert!(processes::PID_MAX > 0) };
+
     u64::from(processes::PID_MAX.cast_unsigned())
 }
 
@@ -402,6 +419,7 @@ impl Tally {
         self.slips += slips;
         self.late_total += late;
         self.late_max = self.late_max.max(late);
+        assert!(self.late_max <= self.late_total);
 
         for event in collector.events() {
             match event {
