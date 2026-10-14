@@ -7,7 +7,7 @@ use crate::push_without_growing;
 
 pub struct Interfaces {
     buffer: Vec<u8>,
-    pub read: Vec<Interface>,
+    read: Vec<Interface>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -102,6 +102,13 @@ impl Interfaces {
         assert_eq!(dump_size, interfaces.buffer.len());
         assert!(interfaces.read.capacity() >= interface_count_max(dump_size));
         interfaces
+    }
+
+    /// The interfaces the last read found. The list is private, since a read fills it within
+    /// the room `with_dump_size` gave it and never grows it.
+    #[must_use]
+    pub fn read(&self) -> &[Interface] {
+        &self.read
     }
 
     pub fn read_all(&mut self) -> io::Result<()> {
