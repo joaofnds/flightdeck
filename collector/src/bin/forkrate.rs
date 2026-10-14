@@ -45,11 +45,12 @@ fn main() -> ExitCode {
     }
 }
 
-/// A run of `forks` children, `per_second` of them a second, each sleeping `child_ms`
-/// before it exits, with their pids written to the file `pids` names.
+/// A run of `forks` children over `seconds`, `per_second` of them a second, each sleeping
+/// `child_ms` before it exits, with their pids written to the file `pids` names.
 #[derive(Debug, PartialEq)]
 struct Burst {
     per_second: u64,
+    seconds: u64,
     forks: u32,
     child_ms: u32,
     pids: Option<String>,
@@ -97,6 +98,7 @@ fn burst_from(arguments: &[String]) -> Result<Burst, String> {
     assert_eq!(u64::from(forks), per_second * seconds);
     Ok(Burst {
         per_second,
+        seconds,
         forks,
         child_ms,
         pids,
@@ -107,12 +109,13 @@ fn run(burst: &Burst) -> io::Result<()> {
     let timebase = Timebase::read()?;
     let start = unsafe { mach_absolute_time() };
     let forked = run_forks(burst, timebase, start)?;
-    let rest = reap_rest(burst.forks - forked.reaped.count)?;
+    let forks = forked.forks();
+    let rest = reap_rest(forks - forked.reaped.count)?;
     let end = unsafe { mach_absolute_time() };
 
     let mut reaped = forked.reaped;
     reaped.add(&rest);
-    assert_eq!(burst.forks, reaped.count);
+    assert_eq!(forks, reaped.count);
     let Some(elapsed_ticks) = end.checked_sub(start) else {
         return Err(io::Error::other(format!(
             "mach_absolute_time went back from {start} to {end}"
@@ -127,10 +130,10 @@ fn run(burst: &Burst) -> io::Result<()> {
         .collect();
     println!("forks each second: {}", reached.join(" "));
     println!(
-        "{} forks in {:.1} s, {:.0} a second, {} late, {} reaped, {} of them failed",
+        "{forks} of {} forks in {:.1} s, {:.0} a second, {} late, {} reaped, {} of them failed",
         burst.forks,
         elapsed.as_secs_f64(),
-        f64::from(burst.forks) / elapsed.as_secs_f64(),
+        f64::from(forks) / elapsed.as_secs_f64(),
         forked.late,
         reaped.count,
         reaped.failed,
@@ -145,6 +148,13 @@ fn run(burst: &Burst) -> io::Result<()> {
             reaped.failed
         )));
     }
+    if forks < burst.forks {
+        return Err(io::Error::other(format!(
+            "forked {forks} of {} children in the run's {} seconds, since forking fell behind \
+             the rate",
+            burst.forks, burst.seconds
+        )));
+    }
     Ok(())
 }
 
@@ -156,8 +166,20 @@ struct Forked {
     reaped: Reaped,
 }
 
-/// Forks the run's children at its rate from `start`, reaping those that have exited every
-/// 10 ms, and counts the forks each second reached and those that came late.
+impl Forked {
+    /// The children the run forked, short of those it asked for where forking fell behind.
+    fn forks(&self) -> u32 {
+        // A run forks at most the u32 of children its burst asks for.
+        match u32::try_from(self.children.len()) {
+            Ok(forks) => forks,
+            Err(error) => unreachable!("{error}"),
+        }
+    }
+}
+
+/// Forks the run's children at its rate from `start` until it has forked them all or its
+/// seconds have passed, reaping those that have exited every 10 ms, and counts the forks each
+/// second reached and those that came late.
 fn run_forks(burst: &Burst, timebase: Timebase, start: u64) -> io::Result<Forked> {
     // The period floors to the nanosecond, which a rate of a fork a nanosecond at most keeps
     // at 1 or more.
@@ -166,6 +188,10 @@ fn run_forks(burst: &Burst, timebase: Timebase, start: u64) -> io::Result<Forked
     let period = timebase.ticks(period_ns)?;
     let second = timebase.ticks(NANOSECONDS_PER_SECOND)?;
     let reap_every = timebase.ticks(REAP_EVERY_NS)?;
+    // A run forks at least once a second, so it runs no more seconds than a u32 of forks,
+    // whose nanoseconds fit a u64.
+    assert!(burst.seconds <= u64::from(burst.forks));
+    let run = timebase.ticks(burst.seconds * NANOSECONDS_PER_SECOND)?;
 
     const { assert!(size_of::<u32>() <= size_of::<usize>()) };
     let capacity = match usize::try_from(burst.forks) {
@@ -181,6 +207,7 @@ fn run_forks(burst: &Burst, timebase: Timebase, start: u64) -> io::Result<Forked
     let mut next = start;
     let mut next_reap = start + reap_every;
     let mut second_ends = start + second;
+    let run_ends = start + run;
     let mut this_second = 0_u64;
     for fork in 0..burst.forks {
         forked.children.push(fork_child(burst.child_ms)?);
@@ -200,13 +227,18 @@ fn run_forks(burst: &Burst, timebase: Timebase, start: u64) -> io::Result<Forked
         if now > next {
             forked.late += 1;
         }
+        if now >= run_ends {
+            // Forking fell behind the rate. Ending on time keeps the run inside its seconds,
+            // which bound how long followprobe waits for it.
+            break;
+        }
 
         wait_until(next)?;
     }
     forked.per_second_reached.push(this_second);
 
-    assert_eq!(capacity, forked.children.len());
-    assert!(forked.reaped.count <= burst.forks);
+    assert!(forked.children.len() <= capacity);
+    assert!(forked.reaped.count <= forked.forks());
     Ok(forked)
 }
 
@@ -336,6 +368,7 @@ mod tests {
         assert_eq!(
             Ok(Burst {
                 per_second: 300,
+                seconds: 15,
                 forks: 4_500,
                 child_ms: 6,
                 pids: None,
