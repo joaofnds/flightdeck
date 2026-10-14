@@ -68,8 +68,6 @@ impl Collector {
     }
 
     pub fn read(&mut self, meter: &mut Meter) -> io::Result<()> {
-        assert!(self.events.capacity() >= EVENTS_PER_TICK_MAX);
-
         meter.measure(Source::Machine, || self.machine.read())?;
         meter.measure(Source::Interfaces, || self.interfaces.read_all())?;
         meter.measure(Source::IOReport, || self.ioreport.read())?;
@@ -82,7 +80,10 @@ impl Collector {
         self.tracker.observe(&self.listing, meter)?;
         meter.measure(Source::Events, || {
             self.events.clear();
-            for event in self.tracker.drain_events() {
+            let drained = self.tracker.drain_events();
+            // `new` gave the tracker and these events one limit, so a tick's events fit.
+            assert!(drained.len() <= self.events.capacity());
+            for event in drained {
                 push_without_growing(&mut self.events, event);
             }
             Ok(())
