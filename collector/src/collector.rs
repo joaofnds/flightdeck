@@ -67,6 +67,7 @@ impl Collector {
     #[must_use]
     pub fn events(&self) -> &[Event] {
         assert!(self.events.len() <= EVENTS_PER_TICK_MAX);
+        assert!(self.events.capacity() >= EVENTS_PER_TICK_MAX);
 
         &self.events
     }
@@ -132,6 +133,9 @@ fn read_coalitions(
     coalitions: &mut Coalitions,
 ) -> io::Result<()> {
     assert!(events.len() <= EVENTS_PER_TICK_MAX);
+    if dropped_starts > 0 {
+        assert!(!listing.is_empty());
+    }
 
     for event in events {
         if let Event::Start {

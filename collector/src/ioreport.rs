@@ -231,7 +231,9 @@ struct ChannelsKey(Owned);
 
 impl ChannelsKey {
     fn new() -> io::Result<Self> {
-        Ok(Self(string(c"IOReportChannels")?))
+        let key = Self(string(c"IOReportChannels")?);
+        assert!(!key.0.0.is_null());
+        Ok(key)
     }
 
     fn channels_of(&self, dictionary: &Owned) -> io::Result<CFTypeRef> {
@@ -794,7 +796,9 @@ fn string(text: &CStr) -> io::Result<Owned> {
     assert!(!text.is_empty());
 
     let created = unsafe { CFStringCreateWithCString(ptr::null(), text.as_ptr(), UTF8) };
-    Owned::new(created, "creating a string")
+    let string = Owned::new(created, "creating a string")?;
+    assert!(!string.0.is_null());
+    Ok(string)
 }
 
 /// Whether `text` is a string that holds `want`. A string the buffer cannot hold is longer than

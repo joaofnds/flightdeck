@@ -33,7 +33,9 @@ impl Schedule {
     pub fn deadline(&self, tick: u64) -> u64 {
         assert!(self.period > 0);
 
-        self.start + tick * self.period
+        let deadline = self.start + tick * self.period;
+        assert!(deadline >= self.start);
+        deadline
     }
 
     /// Gives the first tick whose deadline is past `now`.

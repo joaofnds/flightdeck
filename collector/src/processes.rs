@@ -445,10 +445,13 @@ fn pid_info_size<T>() -> c_int {
     const { assert!(size_of::<T>() > 0) };
     const { assert!(size_of::<T>() < 1 << 31) };
 
-    match c_int::try_from(size_of::<T>()) {
+    let size = match c_int::try_from(size_of::<T>()) {
         Ok(size) => size,
         Err(error) => unreachable!("{error}"),
-    }
+    };
+    assert!(size > 0);
+    assert_eq!(usize::try_from(size), Ok(size_of::<T>()));
+    size
 }
 
 /// Reads what a `proc_pidinfo` asked for a `T` returned: `written`, the count of bytes it

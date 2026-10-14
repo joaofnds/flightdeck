@@ -143,6 +143,8 @@ impl Machine {
     /// fills it within the room `new` gave it and never grows it.
     #[must_use]
     pub fn cpus(&self) -> &[CPUTicks] {
+        assert!(self.cpus.capacity() > 0);
+
         &self.cpus
     }
 

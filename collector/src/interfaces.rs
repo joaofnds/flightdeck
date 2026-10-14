@@ -134,6 +134,9 @@ impl Interfaces {
                 format!("sysctl wrote {filled} bytes into {}", self.buffer.len()),
             ));
         };
+        assert_eq!(filled, dump.len());
+        assert!(filled <= self.buffer.len());
+
         self.read.clear();
         read_all_messages(dump, &mut self.read)?;
 
