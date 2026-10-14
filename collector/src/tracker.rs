@@ -1429,24 +1429,28 @@ mod tests {
         // Goal: scanning, reading a start, watching and reading an exit each charge their time to
         // their own source.
         // Method: follow a child through its start and exit for 500 ms, and read each source's time
-        // from the meter.
+        // from the cost of those 500 ms.
         let timebase = Timebase::read().unwrap();
         let mut tracker = tracker(INTERVAL);
         let mut meter = Meter::default();
+        let start = Snapshot::take(&meter, timebase).unwrap();
 
         let mut child = spawn_sleeper();
         follow_for(&mut tracker, &mut meter, 500);
         child.wait().unwrap();
 
-        let spent = Snapshot::take(&meter, timebase).unwrap().spent_ns;
+        let cost = Snapshot::take(&meter, timebase)
+            .unwrap()
+            .cost_since(&start)
+            .unwrap();
         let charged = [
             Source::Scans,
             Source::StartReads,
             Source::Watches,
             Source::ExitReads,
         ]
-        .map(|s| spent[s.index()]);
-        assert!(charged.iter().all(|&ns| ns > 0), "{charged:?}");
+        .map(|s| cost.ms_per_second(s));
+        assert!(charged.iter().all(|&ms| ms > 0.0), "{charged:?}");
     }
 
     #[test]

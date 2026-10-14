@@ -221,7 +221,7 @@ fn report_start(out: &mut impl Write, meter: &Meter, timebase: Timebase) -> io::
     writeln!(
         out,
         "started in {:.1} ms of CPU",
-        milliseconds(Duration::from_nanos(snapshot.cpu_ns))
+        milliseconds(Duration::from_nanos(snapshot.cpu_ns()))
     )
 }
 

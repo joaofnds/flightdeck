@@ -161,12 +161,12 @@ pub(crate) fn spin_on_this_thread_for(cpu_time: Duration) {
 
 #[derive(Debug, Clone, Copy)]
 pub struct Snapshot {
-    pub at_ns: u64,
-    pub cpu_ns: u64,
-    pub energy_nj: u64,
-    pub instructions: u64,
-    pub super_instructions: u64,
-    pub spent_ns: [u64; Source::ALL.len()],
+    at_ns: u64,
+    cpu_ns: u64,
+    energy_nj: u64,
+    instructions: u64,
+    super_instructions: u64,
+    spent_ns: [u64; Source::ALL.len()],
 }
 
 impl Snapshot {
@@ -190,8 +190,15 @@ impl Snapshot {
         })
     }
 
+    /// The CPU time this process had spent when the snapshot was taken.
+    #[must_use]
+    pub fn cpu_ns(&self) -> u64 {
+        self.cpu_ns
+    }
+
     /// Returns what this process spent from `earlier` to this snapshot, or an error where a
     /// counter macOS gives went back or no time passed, since a cost is a rate over the time.
+    /// Both snapshots come from one meter, whose charges only grow.
     pub fn cost_since(&self, earlier: &Snapshot) -> io::Result<Cost> {
         let elapsed_ns = self.cost_since_counter(earlier, "time", |snapshot| snapshot.at_ns)?;
         if elapsed_ns == 0 {
