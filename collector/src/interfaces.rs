@@ -84,24 +84,28 @@ impl Default for Interfaces {
 /// the 15,920 bytes the dump of 30 interfaces took on the Mac this was measured on.
 const DUMP_SIZE: usize = 256 * 1024;
 
+/// The most interfaces a dump of `dump_size` bytes holds. Each interface read takes a whole
+/// header of the dump, so the division floors, since a header cut off by the end of the dump
+/// is no interface.
+fn interface_count_max(dump_size: usize) -> usize {
+    dump_size / size_of::<IfMsghdr2>()
+}
+
 impl Interfaces {
     fn with_dump_size(dump_size: usize) -> Self {
         assert!(dump_size > 0);
 
-        // Each interface read takes a whole header of the dump, so the dump holds no more of
-        // them than this, which floors.
-        let interface_count_max = dump_size / size_of::<IfMsghdr2>();
         let interfaces = Self {
             buffer: vec![0; dump_size],
-            read: Vec::with_capacity(interface_count_max),
+            read: Vec::with_capacity(interface_count_max(dump_size)),
         };
         assert_eq!(dump_size, interfaces.buffer.len());
-        assert!(interfaces.read.capacity() >= interface_count_max);
+        assert!(interfaces.read.capacity() >= interface_count_max(dump_size));
         interfaces
     }
 
     pub fn read_all(&mut self) -> io::Result<()> {
-        assert!(self.read.capacity() >= self.buffer.len() / size_of::<IfMsghdr2>());
+        assert!(self.read.capacity() >= interface_count_max(self.buffer.len()));
 
         let filled = self.read_all_fill_buffer()?;
         let Some(dump) = self.buffer.get(..filled) else {
@@ -203,8 +207,7 @@ fn read_all_messages(dump: &[u8], read: &mut Vec<Interface>) -> io::Result<()> {
     }
 
     assert_eq!(dump.len(), offset);
-    // Each interface read took a whole header of its own message, which floors.
-    assert!(read.len() <= dump.len() / size_of::<IfMsghdr2>());
+    assert!(read.len() <= interface_count_max(dump.len()));
     Ok(())
 }
 
@@ -429,7 +432,7 @@ mod tests {
 
     /// Reads `dump` into room for every interface it could hold.
     fn read_dump(dump: &[u8]) -> io::Result<Vec<Interface>> {
-        let mut read = Vec::with_capacity(dump.len() / size_of::<IfMsghdr2>());
+        let mut read = Vec::with_capacity(interface_count_max(dump.len()));
         read_all_messages(dump, &mut read)?;
         Ok(read)
     }
