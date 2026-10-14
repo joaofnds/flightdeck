@@ -12,6 +12,7 @@ use std::str;
 
 const COLUMNS_MAX: usize = 100;
 const FUNCTION_LINES_MAX: usize = 70;
+const ASSERTIONS_PER_FUNCTION_MIN: usize = 2;
 
 #[test]
 fn repository_is_tidy() {
@@ -76,6 +77,35 @@ fn dependencies_from_outside_the_workspace_have_a_recorded_case() {
     });
 
     assert!(findings.is_empty(), "\n{}\n", findings.join("\n"));
+}
+
+#[test]
+fn functions_average_two_assertions() {
+    // Goal: the functions outside tests make two runtime assertions each on average, as
+    // docs/tiger-style.md asks.
+    // Method: count the functions with a body and the assertions in them over every Rust file
+    // git tracks, and compare the assertions with twice the functions.
+    let root = repository_root();
+    let mut total = AssertionCounts::default();
+    for path in repository_paths(&root) {
+        if Path::new(&path).extension() == Some(OsStr::new("rs")) {
+            match fs::read_to_string(root.join(&path)) {
+                Ok(text) => total.add(assertion_counts(&text)),
+                // A file deleted in the working tree stays in the index until the deletion
+                // is staged.
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => panic!("cannot read {path}: {error}"),
+            }
+        }
+    }
+
+    assert!(total.functions > 0);
+    assert!(
+        total.assertions >= ASSERTIONS_PER_FUNCTION_MIN * total.functions,
+        "{} runtime assertions in {} functions, under {ASSERTIONS_PER_FUNCTION_MIN} a function",
+        total.assertions,
+        total.functions
+    );
 }
 
 /// Lists the lines of the `[profile.release]` table in a manifest, trimmed, up to the next
@@ -644,6 +674,266 @@ fn discards_passes_a_match_arm_a_closure_and_a_named_binding() {
     let numbers = discards(&text);
 
     assert!(numbers.is_empty(), "{numbers:?}");
+}
+
+/// The functions with a body that the assertion rule counts, and the runtime assertions they
+/// make.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct AssertionCounts {
+    functions: usize,
+    assertions: usize,
+}
+
+impl AssertionCounts {
+    fn add(&mut self, other: AssertionCounts) {
+        self.functions += other.functions;
+        self.assertions += other.assertions;
+    }
+}
+
+/// Counts the functions with a body in `text`, the source of one Rust file, and the runtime
+/// assertions they make. It leaves out a file compiled only for tests, every item under
+/// `#[cfg(test)]`, a function declared with no body, and the assertions of a `const` block,
+/// which the compiler runs. An assertion outside a function, as in a `const` item, counts
+/// for none.
+fn assertion_counts(text: &str) -> AssertionCounts {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut counts = AssertionCounts::default();
+    if lines.iter().any(|line| line.trim() == "#![cfg(test)]") {
+        return counts;
+    }
+
+    // The indentation of the outermost function open at the line, whose body closes with a
+    // brace alone on a line at that indentation.
+    let mut open: Option<&str> = None;
+    let mut index = 0;
+    while index < lines.len() {
+        let left_out = assertion_counts_left_out(&lines[index..]);
+        if left_out > 0 {
+            index += left_out;
+        } else {
+            let line = lines[index];
+            if long_functions_opens(line) {
+                let signature_count = long_functions_count_signature(&lines[index..]);
+                let signature_end = lines[index + signature_count - 1];
+                if !signature_end.ends_with(';') {
+                    counts.functions += 1;
+                    if signature_end.ends_with('{') {
+                        if open.is_none() {
+                            open = Some(&line[..line.len() - line.trim_start().len()]);
+                        }
+                    }
+                }
+            }
+            if let Some(indentation) = open {
+                counts.assertions += assertion_counts_line(line);
+                if line.strip_prefix(indentation) == Some("}") {
+                    open = None;
+                }
+            }
+            index += 1;
+        }
+    }
+    counts
+}
+
+/// Counts the lines of the item at the start of `lines` that the assertion rule leaves out:
+/// an item under `#[cfg(test)]`, with the attributes before it, and a `const` block over
+/// several lines. Returns 0 where the first line starts no such item.
+fn assertion_counts_left_out(lines: &[&str]) -> usize {
+    assert!(!lines.is_empty());
+
+    let first = lines[0].trim_start();
+    if first == "#[cfg(test)]" {
+        let attribute_count = lines
+            .iter()
+            .take_while(|line| line.trim_start().starts_with("#["))
+            .count();
+        assert!(attribute_count > 0);
+        if attribute_count == lines.len() {
+            return attribute_count;
+        }
+        return attribute_count + assertion_counts_item(&lines[attribute_count..]);
+    }
+    if first.ends_with("const {") {
+        return assertion_counts_item(lines);
+    }
+    0
+}
+
+/// Counts the lines of the item at the start of `lines`: its first line where that ends it,
+/// with `;` or a body on the same line, and otherwise through the brace that closes its body,
+/// alone on a line at the item's indentation or followed by `;`.
+fn assertion_counts_item(lines: &[&str]) -> usize {
+    assert!(!lines.is_empty());
+
+    let signature_count = long_functions_count_signature(lines);
+    if !lines[signature_count - 1].ends_with('{') {
+        return signature_count;
+    }
+
+    let first = lines[0];
+    let indentation = &first[..first.len() - first.trim_start().len()];
+    for (index, line) in lines.iter().enumerate() {
+        if matches!(line.strip_prefix(indentation), Some("}" | "};")) {
+            return index + 1;
+        }
+    }
+    lines.len()
+}
+
+/// Counts the runtime assertions `line` makes: each `assert!`, `assert_eq!` and `assert_ne!`
+/// before any comment, outside a `const` block, and never `debug_assert!`, which a release
+/// build leaves out.
+fn assertion_counts_line(line: &str) -> usize {
+    let code = match line.find("//") {
+        Some(position) => &line[..position],
+        None => line,
+    };
+    if code.contains("const {") {
+        return 0;
+    }
+
+    let mut count = 0;
+    for macro_call in ["assert!(", "assert_eq!(", "assert_ne!("] {
+        for (position, _) in code.match_indices(macro_call) {
+            let before = code[..position].chars().next_back();
+            if !before.is_some_and(
+                |character| matches!(character, '_' | 'a'..='z' | 'A'..='Z' | '0'..='9'),
+            ) {
+                count += 1;
+            }
+        }
+    }
+    assert!(count <= code.len());
+    count
+}
+
+#[test]
+fn assertion_counts_counts_each_function_with_a_body_and_its_assertions() {
+    // Goal: each function with a body counts once, with each runtime assertion it makes.
+    // Method: a function and a method in an impl, making three assertions between them.
+    let text = "fn step(count: u64) -> u64 {\n    assert!(count > 0);\n    count\n}\n\n".to_owned()
+        + "impl Tally {\n    fn add(&mut self) {\n        assert_eq!(0, self.ticks);\n"
+        + "        assert_ne!(1, self.slips);\n    }\n}\n";
+
+    let counts = assertion_counts(&text);
+
+    assert_eq!(
+        AssertionCounts {
+            functions: 2,
+            assertions: 3
+        },
+        counts
+    );
+}
+
+#[test]
+fn assertion_counts_leaves_out_every_item_under_cfg_test() {
+    // Goal: an item under `#[cfg(test)]` counts no function and no assertion.
+    // Method: a function, then a helper whose `#[cfg(test)]` comes before a second attribute,
+    // then a test module.
+    let text = "fn step() {\n    assert!(ready());\n}\n\n#[cfg(test)]\n#[must_use]\n".to_owned()
+        + "fn helper() -> u64 {\n    assert!(ready());\n    7\n}\n\n#[cfg(test)]\n"
+        + "mod tests {\n    #[test]\n    fn steps() {\n        assert!(ready());\n    }\n}\n";
+
+    let counts = assertion_counts(&text);
+
+    assert_eq!(
+        AssertionCounts {
+            functions: 1,
+            assertions: 1
+        },
+        counts
+    );
+}
+
+#[test]
+fn assertion_counts_leaves_out_a_file_compiled_only_for_tests() {
+    // Goal: a file that `#![cfg(test)]` compiles only for tests counts nothing.
+    // Method: such a file holding a function that makes an assertion.
+    let text = "#![cfg(test)]\n\nfn helper() {\n    assert!(ready());\n}\n";
+
+    let counts = assertion_counts(text);
+
+    assert_eq!(AssertionCounts::default(), counts);
+}
+
+#[test]
+fn assertion_counts_leaves_out_a_function_declared_with_no_body() {
+    // Goal: a function declared in an extern block or a trait, with no body, is not counted.
+    // Method: an extern block behind a link attribute, one declaration over several lines,
+    // and a trait method with no default body.
+    let text = "#[link(name = \"IOKit\", kind = \"framework\")]\nunsafe extern \"C\" {\n"
+        .to_owned()
+        + "    fn IOObjectRelease(object: u32) -> i32;\n    fn sysctl(\n        name: *mut i32,\n"
+        + "    ) -> i32;\n}\n\ntrait Read {\n    fn read(&self) -> u64;\n}\n";
+
+    let counts = assertion_counts(&text);
+
+    assert_eq!(AssertionCounts::default(), counts);
+}
+
+#[test]
+fn assertion_counts_leaves_out_assertions_the_compiler_runs() {
+    // Goal: an assertion in a `const` item or block runs at compile time, so it is not one of
+    // a function's runtime assertions.
+    // Method: a one-line and a multi-line const item, then a function making one runtime
+    // assertion beside a one-line and a multi-line const block.
+    let text = "const _: () = assert!(SIZE > 0);\n\nconst _: () = {\n    assert!(SIZE < 9);\n};\n\n"
+        .to_owned()
+        + "fn step() {\n    const { assert!(SIZE > 1) };\n    const {\n        assert!(SIZE > 2);\n"
+        + "    };\n    assert!(ready());\n}\n";
+
+    let counts = assertion_counts(&text);
+
+    assert_eq!(
+        AssertionCounts {
+            functions: 1,
+            assertions: 1
+        },
+        counts
+    );
+}
+
+#[test]
+fn assertion_counts_leaves_out_comments_and_debug_assertions() {
+    // Goal: an assertion in a comment makes none, and `debug_assert!` makes no runtime
+    // assertion, since a release build leaves it out.
+    // Method: a function making one assertion, after a commented one and a debug assertion,
+    // with another commented at the end of its line.
+    let text = "fn step() {\n    // assert!(ready());\n    debug_assert!(ready());\n".to_owned()
+        + "    assert!(ready()); // assert!(done())\n}\n";
+
+    let counts = assertion_counts(&text);
+
+    assert_eq!(
+        AssertionCounts {
+            functions: 1,
+            assertions: 1
+        },
+        counts
+    );
+}
+
+#[test]
+fn assertion_counts_ends_an_empty_body_on_its_own_line() {
+    // Goal: a function with an empty body counts with no assertion, and ends on its own line,
+    // so the lines after it are not taken for its body.
+    // Method: a function whose body is `{}`, a const item's assertion outside any function,
+    // then a function making an assertion.
+    let text = "fn idle() {}\n\nconst _: () = assert!(SIZE > 0);\n\n".to_owned()
+        + "fn step() {\n    assert!(ready());\n}\n";
+
+    let counts = assertion_counts(&text);
+
+    assert_eq!(
+        AssertionCounts {
+            functions: 2,
+            assertions: 1
+        },
+        counts
+    );
 }
 
 /// Opens the research doc's section of recorded cases, one for each crate from outside the
