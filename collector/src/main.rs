@@ -597,7 +597,7 @@ fn report_counts(out: &mut impl Write, tally: &Tally, counts: &Counts) -> io::Re
     writeln!(
         out,
         "  last tick read {} processes ({} refused, {} gone), {} coalitions, {} CPUs, \
-         {} interfaces; over the window {} forks, \
+         {} interfaces; over these ticks {} forks, \
          {} rescans ({} leading, {} trailing, {} listing), \
          {} starts ({} watches refused), {} execs, exits seen {}, found already exited {}; \
          {} starts, {} execs and {} exits dropped from a full event list",
