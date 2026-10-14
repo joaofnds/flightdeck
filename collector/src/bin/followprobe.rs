@@ -129,35 +129,7 @@ fn run(probe: &Probe) -> io::Result<()> {
 }
 
 fn run_report(probe: &Probe, followed: &Followed, cost: &Cost, counts: &Counts) -> io::Result<()> {
-    let Ok(children) = u32::try_from(followed.children.len()) else {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "{} children pass the {} a probe counts",
-                followed.children.len(),
-                u32::MAX
-            ),
-        ));
-    };
-    if children == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "the generators wrote no children's pids",
-        ));
-    }
-    let mut found = 0_u32;
-    let mut read = 0_u32;
-    for pid in &followed.children {
-        if followed.started.contains(pid) {
-            found += 1;
-        }
-        if followed.read_at_exit.contains(pid) {
-            read += 1;
-        }
-    }
-    assert!(found <= children);
-    assert!(read <= children);
-
+    let children = run_report_children(followed)?;
     let tracking: Vec<String> = TRACKING
         .iter()
         .map(|&source| format!("{} {:.2}", source.name(), cost.ms_per_second(source)))
@@ -170,11 +142,14 @@ fn run_report(probe: &Probe, followed: &Followed, cost: &Cost, counts: &Counts) 
     let mut out = io::stdout().lock();
     writeln!(
         out,
-        "rescan interval {} ms: children {children}, found {found}, missed {}, \
-         final usage read for {read} ({:.1}% of children)",
+        "rescan interval {} ms: children {}, found {}, missed {}, \
+         final usage read for {} ({:.1}% of children)",
         probe.rescan_interval.as_millis(),
-        children - found,
-        percent(read, children),
+        children.forked,
+        children.found,
+        children.forked - children.found,
+        children.read,
+        percent(children.read, children.forked),
     )?;
     writeln!(
         out,
@@ -201,6 +176,54 @@ struct Followed {
     started: HashSet<i32>,
     read_at_exit: HashSet<i32>,
     children: HashSet<i32>,
+}
+
+/// The children the generators forked, how many of them the tracker reported started, and
+/// how many of them it read the final usage of at exit.
+#[derive(Debug, PartialEq)]
+struct Children {
+    forked: u32,
+    found: u32,
+    read: u32,
+}
+
+/// Counts the children `followed` holds, or an error where the generators wrote none, since a
+/// share of no children is no measurement.
+fn run_report_children(followed: &Followed) -> io::Result<Children> {
+    let Ok(forked) = u32::try_from(followed.children.len()) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{} children pass the {} a probe counts",
+                followed.children.len(),
+                u32::MAX
+            ),
+        ));
+    };
+    if forked == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "the generators wrote no children's pids",
+        ));
+    }
+
+    let mut children = Children {
+        forked,
+        found: 0,
+        read: 0,
+    };
+    for pid in &followed.children {
+        if followed.started.contains(pid) {
+            children.found += 1;
+        }
+        if followed.read_at_exit.contains(pid) {
+            children.read += 1;
+        }
+    }
+
+    assert!(children.found <= children.forked);
+    assert!(children.read <= children.forked);
+    Ok(children)
 }
 
 /// Starts a generator for each of `pid_files` and follows their children once a second
@@ -520,6 +543,46 @@ mod tests {
     }
 
     #[test]
+    fn counts_the_children_the_tracker_found_and_read() {
+        // Goal: a probe counts each child the generators forked, those the tracker reported
+        // started and those whose final usage it read, and no pid outside the children.
+        // Method: follow four children, two found, one of them read, and a started pid that
+        // is not a child.
+        let followed = Followed {
+            started: HashSet::from([101, 102, 900]),
+            read_at_exit: HashSet::from([102]),
+            children: HashSet::from([101, 102, 103, 104]),
+        };
+
+        let children = run_report_children(&followed);
+
+        assert_eq!(
+            Children {
+                forked: 4,
+                found: 2,
+                read: 1,
+            },
+            children.unwrap()
+        );
+    }
+
+    #[test]
+    fn refuses_a_probe_whose_generators_wrote_no_children() {
+        // Goal: a probe whose generators wrote no pids is an error before its report, not a
+        // report of no children.
+        // Method: count a probe that followed no children.
+        let followed = Followed {
+            started: HashSet::from([900]),
+            read_at_exit: HashSet::new(),
+            children: HashSet::new(),
+        };
+
+        let children = run_report_children(&followed);
+
+        assert_eq!(io::ErrorKind::InvalidData, children.unwrap_err().kind());
+    }
+
+    #[test]
     fn gives_the_share_of_the_children_as_a_percentage() {
         // Goal: a part of a whole reads as its percentage.
         // Method: take 3 of 12.
@@ -529,8 +592,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "whole > 0")]
     fn refuses_a_share_of_nothing() {
-        // Goal: a percentage of no children is never asked for, since a probe with none is an
-        // error before its report.
+        // Goal: a percentage of no children is never asked for, since run_report_children
+        // refuses a probe with none before the report asks for one.
         // Method: take 0 of 0.
         percent(0, 0);
     }
