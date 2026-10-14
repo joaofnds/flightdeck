@@ -629,7 +629,7 @@ fn read_active_states(timebase: Timebase, channel: CFTypeRef, into: &mut States)
         assert!(index < into.state_count);
         let residency = unsafe { IOReportStateGetResidency(channel, index) };
         let ticks = read_active_states_residency(residency)?;
-        push_without_growing(&mut into.active_ns, timebase.nanos(ticks)?);
+        push_without_growing(&mut into.active_ns, timebase.nanoseconds(ticks)?);
     }
 
     assert_eq!(into.active_indices.len(), into.active_ns.len());

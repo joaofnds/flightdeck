@@ -166,7 +166,7 @@ impl Run {
         let deadline = self.schedule.deadline(tick);
         self.collector.wait_until(deadline, &mut self.meter)?;
         let late_ticks = clock::now().saturating_sub(deadline);
-        let late = Duration::from_nanos(self.timebase.nanos(late_ticks)?);
+        let late = Duration::from_nanos(self.timebase.nanoseconds(late_ticks)?);
         self.collector.read(&mut self.meter)?;
 
         let following = self.schedule.first_ahead_of(clock::now()).max(tick + 1);

@@ -1468,7 +1468,7 @@ mod tests {
             .unwrap();
 
         let late_ns = timebase
-            .nanos(
+            .nanoseconds(
                 clock::now()
                     .checked_sub(deadline_ticks)
                     .expect("returned before the deadline"),

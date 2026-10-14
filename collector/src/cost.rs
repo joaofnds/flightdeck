@@ -209,7 +209,7 @@ impl Snapshot {
         };
 
         Ok(Self {
-            at_ns: timebase.nanos(clock::now())?,
+            at_ns: timebase.nanoseconds(clock::now())?,
             cpu_ns: take_cpu_ns(&own)?,
             energy_nj: own.energy_nj,
             instructions: own.instructions,

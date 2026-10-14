@@ -361,9 +361,9 @@ pub fn read_usage(timebase: Timebase, pid: i32) -> io::Result<Result<Usage, Unre
     assert_eq!(0, returned);
     let usage = unsafe { usage.assume_init_ref() };
     Ok(Ok(Usage {
-        awake_ns_at_start: timebase.nanos(usage.proc_start_abstime)?,
-        user_ns: timebase.nanos(usage.user_time)?,
-        system_ns: timebase.nanos(usage.system_time)?,
+        awake_ns_at_start: timebase.nanoseconds(usage.proc_start_abstime)?,
+        user_ns: timebase.nanoseconds(usage.user_time)?,
+        system_ns: timebase.nanoseconds(usage.system_time)?,
         energy_nj: usage.energy_nj,
         instructions: usage.instructions,
         super_instructions: usage.pinstructions,
@@ -720,7 +720,9 @@ mod tests {
         let usage = read_usage(timebase, child.id().cast_signed())
             .unwrap()
             .unwrap();
-        let awake_ns = timebase.nanos(unsafe { mach_absolute_time() }).unwrap();
+        let awake_ns = timebase
+            .nanoseconds(unsafe { mach_absolute_time() })
+            .unwrap();
         child.kill().unwrap();
         child.wait().unwrap();
 

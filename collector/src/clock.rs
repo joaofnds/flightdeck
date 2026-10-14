@@ -29,12 +29,13 @@ impl Timebase {
     }
 
     /// Converts `ticks` to nanoseconds, rounded down.
-    pub fn nanos(self, ticks: u64) -> io::Result<u64> {
+    pub fn nanoseconds(self, ticks: u64) -> io::Result<u64> {
         assert!(self.numerator > 0);
         assert!(self.denominator > 0);
 
-        let nanos = u128::from(ticks) * u128::from(self.numerator) / u128::from(self.denominator);
-        u64::try_from(nanos).map_err(|_| {
+        let nanoseconds =
+            u128::from(ticks) * u128::from(self.numerator) / u128::from(self.denominator);
+        u64::try_from(nanoseconds).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("{ticks} ticks run past the nanoseconds a u64 holds"),
@@ -42,16 +43,17 @@ impl Timebase {
         })
     }
 
-    /// Converts `nanos` to ticks, rounded down.
-    pub fn ticks(self, nanos: u64) -> io::Result<u64> {
+    /// Converts `nanoseconds` to ticks, rounded down.
+    pub fn ticks(self, nanoseconds: u64) -> io::Result<u64> {
         assert!(self.numerator > 0);
         assert!(self.denominator > 0);
 
-        let ticks = u128::from(nanos) * u128::from(self.denominator) / u128::from(self.numerator);
+        let ticks =
+            u128::from(nanoseconds) * u128::from(self.denominator) / u128::from(self.numerator);
         u64::try_from(ticks).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("{nanos} nanoseconds run past the ticks a u64 holds"),
+                format!("{nanoseconds} nanoseconds run past the ticks a u64 holds"),
             )
         })
     }
@@ -111,7 +113,7 @@ mod tests {
 
         std::thread::sleep(Duration::from_millis(20));
 
-        let elapsed = Duration::from_nanos(timebase.nanos(now() - start).unwrap());
+        let elapsed = Duration::from_nanos(timebase.nanoseconds(now() - start).unwrap());
         assert!(Duration::from_millis(20) <= elapsed, "{elapsed:?}");
     }
 
@@ -126,7 +128,7 @@ mod tests {
 
         std::thread::sleep(Duration::from_millis(20));
 
-        let elapsed = Duration::from_nanos(timebase.nanos(now() - start).unwrap());
+        let elapsed = Duration::from_nanos(timebase.nanoseconds(now() - start).unwrap());
         let outer_elapsed = outer.elapsed();
         assert!(
             elapsed <= outer_elapsed,
@@ -143,7 +145,7 @@ mod tests {
 
         let ticks = timebase.ticks(1_000_000_000).unwrap();
 
-        assert_eq!(1_000_000_000, timebase.nanos(ticks).unwrap());
+        assert_eq!(1_000_000_000, timebase.nanoseconds(ticks).unwrap());
     }
 
     #[test]
@@ -157,7 +159,7 @@ mod tests {
 
         let timebase = read_check(info).unwrap();
 
-        assert_eq!(125, timebase.nanos(3).unwrap());
+        assert_eq!(125, timebase.nanoseconds(3).unwrap());
     }
 
     #[test]
@@ -195,9 +197,9 @@ mod tests {
         })
         .unwrap();
 
-        let nanos = timebase.nanos(u64::MAX);
+        let nanoseconds = timebase.nanoseconds(u64::MAX);
 
-        assert_eq!(io::ErrorKind::InvalidData, nanos.unwrap_err().kind());
+        assert_eq!(io::ErrorKind::InvalidData, nanoseconds.unwrap_err().kind());
     }
 
     #[test]

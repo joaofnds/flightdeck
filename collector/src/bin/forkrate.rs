@@ -103,7 +103,8 @@ fn run(burst: &Burst) -> std::io::Result<()> {
         reaped += 1;
     }
 
-    let elapsed = Duration::from_nanos(timebase.nanos(unsafe { mach_absolute_time() } - start)?);
+    let elapsed =
+        Duration::from_nanos(timebase.nanoseconds(unsafe { mach_absolute_time() } - start)?);
     let reached: Vec<String> = per_second_reached.iter().map(u64::to_string).collect();
     println!("forks each second: {}", reached.join(" "));
     println!(

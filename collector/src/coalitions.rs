@@ -143,7 +143,7 @@ impl Coalitions {
                     id,
                     tasks_started: usage.tasks_started,
                     tasks_exited: usage.tasks_exited,
-                    cpu_ns: self.timebase.nanos(usage.cpu_time)?,
+                    cpu_ns: self.timebase.nanoseconds(usage.cpu_time)?,
                     interrupt_wakeups: usage.interrupt_wakeups,
                     idle_wakeups: usage.platform_idle_wakeups,
                     disk_read_bytes: usage.bytesread,
