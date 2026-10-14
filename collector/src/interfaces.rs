@@ -61,10 +61,12 @@ impl Name {
     pub fn as_str(&self) -> &str {
         assert!(self.length <= IFNAMSIZ);
 
-        match std::str::from_utf8(&self.bytes[..self.length]) {
+        let name = match std::str::from_utf8(&self.bytes[..self.length]) {
             Ok(name) => name,
             Err(error) => unreachable!("{error}"),
-        }
+        };
+        assert_eq!(self.length, name.len());
+        name
     }
 }
 
@@ -76,7 +78,10 @@ impl std::fmt::Debug for Name {
 
 impl Default for Interfaces {
     fn default() -> Self {
-        Self::with_dump_size(DUMP_SIZE)
+        let interfaces = Self::with_dump_size(DUMP_SIZE);
+
+        assert_eq!(DUMP_SIZE, interfaces.buffer.len());
+        interfaces
     }
 }
 
@@ -91,6 +96,8 @@ fn interface_count_max(dump_size: usize) -> usize {
     let interface_count_max = dump_size / size_of::<IfMsghdr2>();
 
     assert!(interface_count_max * size_of::<IfMsghdr2>() <= dump_size);
+    // The bytes left over are short of a header.
+    assert!(dump_size - interface_count_max * size_of::<IfMsghdr2>() < size_of::<IfMsghdr2>());
     interface_count_max
 }
 
@@ -111,6 +118,7 @@ impl Interfaces {
     /// the room `with_dump_size` gave it and never grows it.
     #[must_use]
     pub fn read(&self) -> &[Interface] {
+        assert!(!self.buffer.is_empty());
         assert!(self.read.len() <= interface_count_max(self.buffer.len()));
 
         &self.read
@@ -127,8 +135,10 @@ impl Interfaces {
             ));
         };
         self.read.clear();
+        read_all_messages(dump, &mut self.read)?;
 
-        read_all_messages(dump, &mut self.read)
+        assert!(self.read.len() <= interface_count_max(self.buffer.len()));
+        Ok(())
     }
 
     /// Fills the buffer with the routing dump of every interface and returns the bytes the
