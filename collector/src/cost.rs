@@ -56,7 +56,7 @@ impl Source {
     /// The source's slot in an array that holds a value for each source.
     #[must_use]
     pub const fn index(self) -> usize {
-        match self {
+        let index = match self {
             Source::Machine => 0,
             Source::Interfaces => 1,
             Source::Processes => 2,
@@ -68,9 +68,24 @@ impl Source {
             Source::ExitReads => 8,
             Source::IOReport => 9,
             Source::Smc => 10,
-        }
+        };
+
+        assert!(index < Source::ALL.len());
+        index
     }
 }
+
+// Each source takes a slot of its own, so no read is charged to another source's slot.
+const _: () = {
+    let mut taken = [false; Source::ALL.len()];
+    let mut position = 0;
+    while position < Source::ALL.len() {
+        let index = Source::ALL[position].index();
+        assert!(!taken[index]);
+        taken[index] = true;
+        position += 1;
+    }
+};
 
 #[derive(Default)]
 pub struct Meter {
@@ -105,6 +120,8 @@ impl Meter {
                 ),
             ));
         };
+        // A source's charge only grows, which `Snapshot::cost_since` relies on.
+        assert!(charged >= self.spent_ns[index]);
         self.spent_ns[index] = charged;
         Ok(result)
     }
@@ -241,14 +258,17 @@ impl Snapshot {
             Duration::from_nanos(self.spent_ns[source] - earlier.spent_ns[source])
         });
 
-        Ok(Cost {
+        let cost = Cost {
             elapsed: Duration::from_nanos(elapsed_ns),
             cpu: Duration::from_nanos(cpu_ns),
             energy_nj,
             instructions,
             super_instructions,
             spent,
-        })
+        };
+        assert!(cost.elapsed > Duration::ZERO);
+        assert!(cost.super_instructions <= cost.instructions);
+        Ok(cost)
     }
 
     /// Returns how far the counter that `read` reads, which `name` names, grew from `earlier`
@@ -317,7 +337,11 @@ impl Cost {
         if self.instructions == 0 {
             return None;
         }
-        Some(f64_from_u64(self.super_instructions) / f64_from_u64(self.instructions))
+        // Rounding to the nearest f64 keeps the order of two counts, so the share stays at
+        // or under 1.
+        let share = f64_from_u64(self.super_instructions) / f64_from_u64(self.instructions);
+        assert!(share <= 1.0);
+        Some(share)
     }
 
     #[must_use]
