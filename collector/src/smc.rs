@@ -1,4 +1,4 @@
-use std::ffi::{c_char, c_void};
+use std::ffi::{CStr, c_char, c_void};
 use std::io;
 
 use crate::kernel::{self, KernReturn, MachPort};
@@ -62,6 +62,45 @@ struct FloatKey(Key);
 /// closes.
 struct Connection(MachPort);
 
+/// An `IOKit` service this holds a reference to, which it releases when it drops.
+#[derive(Debug)]
+struct Service(MachPort);
+
+impl Service {
+    /// Finds the first service `IOKit` has of the class `class`.
+    fn matching(class: &CStr) -> io::Result<Self> {
+        let matching = unsafe { IOServiceMatching(class.as_ptr()) };
+        if matching.is_null() {
+            return Err(io::Error::other(format!(
+                "IOKit made no dictionary to match {class:?}"
+            )));
+        }
+
+        let service = unsafe { IOServiceGetMatchingService(kIOMainPortDefault, matching) };
+        if service == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("IOKit has no service of the class {class:?}"),
+            ));
+        }
+
+        Ok(Self(service))
+    }
+}
+
+impl Drop for Service {
+    /// Releases the service, and reports on stderr a release that failed, since a drop has no
+    /// caller to return the error to.
+    fn drop(&mut self) {
+        assert_ne!(0, self.0);
+
+        let released = unsafe { IOObjectRelease(self.0) };
+        if let Err(error) = kern_return_check(released, "releasing an IOKit service") {
+            eprintln!("collector: {error}");
+        }
+    }
+}
+
 #[link(name = "IOKit", kind = "framework")]
 unsafe extern "C" {
     static kIOMainPortDefault: MachPort;
@@ -100,30 +139,16 @@ impl Drop for Connection {
 
 impl Connection {
     fn open() -> io::Result<Self> {
-        let service = unsafe {
-            IOServiceGetMatchingService(
-                kIOMainPortDefault,
-                IOServiceMatching(c"AppleSMCKeysEndpoint".as_ptr()),
-            )
-        };
-        if service == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "found no SMC to connect to",
-            ));
-        }
+        let service = Service::matching(c"AppleSMCKeysEndpoint")?;
 
         let mut port = 0;
-        let opened = unsafe { IOServiceOpen(service, kernel::task_self(), 0, &raw mut port) };
-        let released = unsafe { IOObjectRelease(service) };
+        let opened = unsafe { IOServiceOpen(service.0, kernel::task_self(), 0, &raw mut port) };
         kern_return_check(opened, "connecting to the SMC")?;
         if port == 0 {
             return Err(io::Error::other("connecting to the SMC gave no connection"));
         }
-        let connection = Self(port);
 
-        kern_return_check(released, "releasing the SMC's service")?;
-        Ok(connection)
+        Ok(Self(port))
     }
 
     fn hottest_soc_sensor(&self) -> io::Result<FloatKey> {
@@ -509,6 +534,12 @@ const KEY_NOT_FOUND: u8 = 132;
 mod tests {
     use super::*;
 
+    #[link(name = "IOKit", kind = "framework")]
+    unsafe extern "C" {
+        fn IOObjectRetain(object: MachPort) -> KernReturn;
+        fn IOObjectGetUserRetainCount(object: MachPort) -> u32;
+    }
+
     #[test]
     fn picks_the_hottest_of_the_sensors_read() {
         // Goal: the SoC sensor picked at open is the one reading the highest temperature.
@@ -537,6 +568,35 @@ mod tests {
         let hottest = readings.into_iter().fold(None, hottest_soc_sensor_of);
 
         assert_eq!(Some((FloatKey(Key::named(*b"Tp01")), 41.0)), hottest);
+    }
+
+    #[test]
+    fn refuses_a_service_iokit_does_not_have() {
+        // Goal: looking up a class of service IOKit does not have is a service not found, as
+        // on a Mac with no SMC.
+        // Method: look up a class no driver registers.
+        let found = Service::matching(c"NoSuchService");
+
+        assert_eq!(io::ErrorKind::NotFound, found.unwrap_err().kind());
+    }
+
+    #[test]
+    fn releases_the_service_it_holds() {
+        // Goal: dropping a service releases IOKit's object once, so no service leaks.
+        // Method: find the platform expert, which every Mac has and nothing else in the
+        // collector looks up, take a second reference to it, drop the service, and count the
+        // references this process holds.
+        let service = Service::matching(c"IOPlatformExpertDevice").unwrap();
+        let object = service.0;
+        let retained = unsafe { IOObjectRetain(object) };
+
+        drop(service);
+
+        let references = unsafe { IOObjectGetUserRetainCount(object) };
+        let released = unsafe { IOObjectRelease(object) };
+        assert_eq!(kernel::KERN_SUCCESS, retained);
+        assert_eq!(kernel::KERN_SUCCESS, released);
+        assert_eq!(1, references);
     }
 
     #[test]
