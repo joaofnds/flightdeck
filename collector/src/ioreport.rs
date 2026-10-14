@@ -269,9 +269,9 @@ impl Drop for Owned {
 
 type CFTypeRef = *const c_void;
 
-/// The callbacks an array runs on its values, as `CFArrayCallBacks` declares them.
+/// The callbacks an array runs on its values, as CoreFoundation declares them.
 #[repr(C)]
-struct ArrayCallBacks {
+struct CFArrayCallBacks {
     version: isize,
     retain: *const c_void,
     release: *const c_void,
@@ -279,14 +279,14 @@ struct ArrayCallBacks {
     equal: *const c_void,
 }
 
-const _: () = assert!(size_of::<ArrayCallBacks>() == 40);
-const _: () = assert!(align_of::<ArrayCallBacks>() == 8);
+const _: () = assert!(size_of::<CFArrayCallBacks>() == 40);
+const _: () = assert!(align_of::<CFArrayCallBacks>() == 8);
 
 const UTF8: u32 = 0x0800_0100;
 
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
-    static kCFTypeArrayCallBacks: ArrayCallBacks;
+    static kCFTypeArrayCallBacks: CFArrayCallBacks;
     fn CFRelease(object: CFTypeRef);
     fn CFGetTypeID(object: CFTypeRef) -> c_ulong;
     fn CFArrayGetTypeID() -> c_ulong;
@@ -295,7 +295,7 @@ unsafe extern "C" {
     fn CFArrayCreateMutable(
         allocator: CFTypeRef,
         capacity: isize,
-        callbacks: *const ArrayCallBacks,
+        callbacks: *const CFArrayCallBacks,
     ) -> CFTypeRef;
     fn CFArrayAppendValue(array: CFTypeRef, value: CFTypeRef);
     fn CFDictionaryGetValue(dictionary: CFTypeRef, key: CFTypeRef) -> CFTypeRef;
