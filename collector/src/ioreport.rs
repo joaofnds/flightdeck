@@ -1123,9 +1123,9 @@ mod tests {
     }
 
     #[test]
-    fn refuses_to_learn_the_states_of_a_channel_without_states() {
-        // Goal: learning the states of a channel that has none is an error, never a channel
-        // with no active state.
+    fn refuses_to_learn_a_channel_with_a_negative_state_count() {
+        // Goal: a channel whose count of states is negative, as IOReport gives for a channel
+        // that is not one of states, is an error, never a channel with no active state.
         // Method: learn the GPU's energy channel, whose state count IOReport gives as -1.
         let ioreport = open();
         let samples = ioreport.subscription.sample().unwrap();

@@ -48,7 +48,7 @@ jobs:
           --skip ioreport::tests::refuses_a_read_that_finds_other_channels_than_open
           --skip ioreport::tests::refuses_more_cores_than_its_cpu_limit
           --skip ioreport::tests::refuses_the_energy_unit_of_a_channel_that_gives_no_energy
-          --skip ioreport::tests::refuses_to_learn_the_states_of_a_channel_without_states
+          --skip ioreport::tests::refuses_to_learn_a_channel_with_a_negative_state_count
           --skip ioreport::tests::subscribes_only_to_the_channels_a_read_takes
           --skip processes::tests::reads_this_process_spending_energy_while_it_runs
           --skip smc::tests::finds_no_info_for_a_key_the_smc_does_not_hold
