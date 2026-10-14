@@ -415,6 +415,8 @@ mod tests {
 
     #[test]
     fn reads_the_ticks_of_every_logical_cpu() {
+        // Goal: a read gives the ticks of every logical CPU the machine runs now.
+        // Method: compare the CPUs read with hw.logicalcpu read as raw bytes.
         let mut machine = Machine::new(cpu_limit().unwrap()).unwrap();
 
         machine.read().unwrap();
@@ -563,7 +565,23 @@ mod tests {
     }
 
     #[test]
-    fn reads_memory_that_fits_in_the_installed_ram() {
+    fn reads_the_installed_ram_from_hw_memsize() {
+        // Goal: the machine's RAM is what hw.memsize gives.
+        // Method: compare it with hw.memsize read as raw bytes.
+        let machine = Machine::new(cpu_limit().unwrap()).unwrap();
+
+        assert_eq!(
+            u64::from_ne_bytes(kernel::sysctl_bytes(c"hw.memsize")),
+            machine.memory.total_bytes
+        );
+    }
+
+    #[test]
+    fn reads_pages_in_ram_that_fit_in_the_installed_ram() {
+        // Goal: the pages read as in RAM fit in the RAM installed, and fill most of it, so each
+        // page count reads in the unit the others do.
+        // Method: read this Mac, and add up its free, active, inactive, wired and compressed
+        // pages.
         let mut machine = Machine::new(cpu_limit().unwrap()).unwrap();
 
         machine.read().unwrap();
@@ -574,14 +592,19 @@ mod tests {
             + memory.inactive_bytes
             + memory.wired_bytes
             + memory.compressed_bytes;
-        assert_eq!(
-            u64::from_ne_bytes(kernel::sysctl_bytes(c"hw.memsize")),
-            memory.total_bytes
-        );
-        assert!(
-            in_ram <= memory.total_bytes && in_ram > memory.total_bytes / 2,
-            "{memory:?}"
-        );
+        assert!(in_ram <= memory.total_bytes, "{memory:?}");
+        assert!(in_ram > memory.total_bytes / 2, "{memory:?}");
+    }
+
+    #[test]
+    fn reads_no_more_swap_used_than_there_is() {
+        // Goal: the swap read as used fits in the swap there is.
+        // Method: read this Mac's swap.
+        let mut machine = Machine::new(cpu_limit().unwrap()).unwrap();
+
+        machine.read().unwrap();
+
+        let memory = machine.memory;
         assert!(
             memory.swap_used_bytes <= memory.swap_total_bytes,
             "{memory:?}"
@@ -590,21 +613,31 @@ mod tests {
 
     #[test]
     fn reads_level_one_as_normal_pressure() {
+        // Goal: macOS's pressure level 1 reads as normal pressure.
+        // Method: read level 1.
         assert_eq!(Pressure::Normal, Pressure::from_level(1).unwrap());
     }
 
     #[test]
     fn reads_level_two_as_warning_pressure() {
+        // Goal: macOS's pressure level 2 reads as warning pressure.
+        // Method: read level 2.
         assert_eq!(Pressure::Warning, Pressure::from_level(2).unwrap());
     }
 
     #[test]
     fn reads_level_four_as_critical_pressure() {
+        // Goal: macOS's pressure level 4 reads as critical pressure.
+        // Method: read level 4.
         assert_eq!(Pressure::Critical, Pressure::from_level(4).unwrap());
     }
 
     #[test]
     fn refuses_a_pressure_level_macos_does_not_report() {
-        assert!(Pressure::from_level(3).is_err());
+        // Goal: a pressure level macOS does not report is an error, never a guessed pressure.
+        // Method: read level 3, between warning and critical.
+        let read = Pressure::from_level(3);
+
+        assert_eq!(io::ErrorKind::InvalidData, read.unwrap_err().kind());
     }
 }
