@@ -187,9 +187,8 @@ impl Run {
         collector.read(&mut meter)?;
         let warm_up_starts = start_warm_up_starts(collector.events());
 
-        let first_tick = schedule.first_ahead_of(clock::now()).max(1);
         // Tick 0 is the warm-up tick, so the spans start past it.
-        assert!(first_tick > 0);
+        let first_tick = schedule.first_ahead_of(clock::now()).max(1);
         let start = Mark::take(&meter, timebase, &collector)?;
         Ok(Self {
             timebase,
@@ -211,11 +210,6 @@ impl Run {
         let mut live_at_first_scan = listing.to_vec();
         live_at_first_scan.sort_unstable();
         live_at_first_scan.dedup();
-
-        for listed in live_at_first_scan.windows(2) {
-            assert!(listed[0] < listed[1]);
-        }
-        assert!(live_at_first_scan.len() <= listing.len());
         live_at_first_scan
     }
 
@@ -231,7 +225,6 @@ impl Run {
         self.collector.read(&mut self.meter)?;
 
         let following = self.schedule.first_ahead_of(clock::now()).max(tick + 1);
-        assert!(following > tick);
         let slips = following - tick - 1;
         self.whole.tally.add(late, slips, &self.collector);
         self.minute.tally.add(late, slips, &self.collector);
@@ -239,19 +232,9 @@ impl Run {
         // A span closes on its last tick, so it never runs more ticks than it spans.
         assert!(self.window.tally.ticks <= TICKS_PER_WINDOW);
         assert!(self.minute.tally.ticks <= TICKS_PER_MINUTE);
-        // A span runs or slips each of its ticks, from its first to the one before `following`.
-        assert_eq!(
-            following,
-            self.whole.first_tick + self.whole.tally.ticks + self.whole.tally.slips
-        );
-        assert_eq!(
-            following,
-            self.minute.first_tick + self.minute.tally.ticks + self.minute.tally.slips
-        );
-        assert_eq!(
-            following,
-            self.window.first_tick + self.window.tally.ticks + self.window.tally.slips
-        );
+        assert_eq!(following, self.whole.following());
+        assert_eq!(following, self.minute.following());
+        assert_eq!(following, self.window.following());
 
         let step = Step { tick, following };
         if step.closes_span(TICKS_PER_WINDOW) {
@@ -323,6 +306,11 @@ impl Span {
             first_tick,
             tally: Tally::default(),
         }
+    }
+
+    /// The tick after the span's last, since a span runs or slips each of its ticks.
+    fn following(&self) -> u64 {
+        self.first_tick + self.tally.ticks + self.tally.slips
     }
 
     /// Writes what the span's ticks, `first_tick` to `last_tick`, cost and counted, with
@@ -409,14 +397,8 @@ impl Starts {
     /// The processes started that no event reported, or `None` where the run gives no count
     /// of the processes started or found more than it counted.
     fn missed(&self) -> Option<u64> {
-        let missed = self
-            .started
-            .and_then(|started| started.checked_sub(self.found));
-
-        if let Some(missed) = missed {
-            assert_eq!(self.started, Some(missed + self.found));
-        }
-        missed
+        self.started
+            .and_then(|started| started.checked_sub(self.found))
     }
 }
 
@@ -652,7 +634,7 @@ fn report_counts(out: &mut impl Write, tally: &Tally, counts: &Counts) -> io::Re
         tally.cpus,
         tally.interfaces,
         counts.forks,
-        counts.leading_rescans + counts.trailing_rescans + counts.listing_rescans,
+        counts.rescans(),
         counts.leading_rescans,
         counts.trailing_rescans,
         counts.listing_rescans,
@@ -668,11 +650,7 @@ fn report_counts(out: &mut impl Write, tally: &Tally, counts: &Counts) -> io::Re
 }
 
 fn milliseconds(duration: Duration) -> f64 {
-    let milliseconds = duration.as_secs_f64() * 1_000.0;
-
-    assert!(milliseconds >= 0.0);
-    assert!(milliseconds.is_finite());
-    milliseconds
+    duration.as_secs_f64() * 1_000.0
 }
 
 #[cfg(test)]

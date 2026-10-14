@@ -54,8 +54,6 @@ impl Collector {
             counts_previous: Counts::default(),
         };
 
-        assert!(collector.events.capacity() >= limits.events_per_tick_max);
-
         processes::list_pids(&mut collector.listing)?;
         add_listed_coalitions(&collector.listing, &mut collector.coalitions)?;
 
@@ -77,7 +75,7 @@ impl Collector {
     }
 
     pub fn read(&mut self, meter: &mut Meter) -> io::Result<()> {
-        // A tick fills the lists `new` sized and never grows them.
+        // A tick fills the lists that `new` sized and never grows them.
         let listing_capacity = self.listing.capacity();
         let events_capacity = self.events.capacity();
 

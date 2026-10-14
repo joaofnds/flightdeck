@@ -99,10 +99,6 @@ fn burst_from(arguments: &[String]) -> Result<Burst, String> {
         ));
     };
 
-    assert!(per_second > 0);
-    assert!(seconds > 0);
-    assert!(forks > 0);
-    assert_eq!(u64::from(forks), per_second * seconds);
     Ok(Burst {
         per_second,
         seconds,
@@ -303,7 +299,6 @@ fn run_forks_fork_child(child_ms: u32) -> io::Result<i32> {
         return Err(io::Error::last_os_error());
     }
 
-    assert!(pid > 0);
     Ok(pid)
 }
 
@@ -364,7 +359,6 @@ fn run_forks_reap(outstanding: u32) -> io::Result<Reaped> {
         reaped.add_exit(status);
     }
 
-    assert!(reaped.count <= outstanding);
     Ok(reaped)
 }
 
@@ -386,7 +380,6 @@ fn run_reap_rest(outstanding: u32) -> io::Result<Reaped> {
         reaped.add_exit(status);
     }
 
-    assert_eq!(outstanding, reaped.count);
     Ok(reaped)
 }
 

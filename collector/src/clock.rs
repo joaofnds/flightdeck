@@ -22,10 +22,7 @@ impl Timebase {
         let returned = unsafe { mach_timebase_info(&raw mut info) };
         kern_return_check(returned, "mach_timebase_info")?;
 
-        let timebase = read_check(info)?;
-        assert!(timebase.numerator > 0);
-        assert!(timebase.denominator > 0);
-        Ok(timebase)
+        read_check(info)
     }
 
     /// Converts `ticks` to nanoseconds, rounded down.

@@ -99,9 +99,6 @@ fn options_from(words: &[String]) -> Result<Options, String> {
         return Err(USAGE.to_owned());
     };
 
-    // Each flag took the word after it, so the words before the separator came in pairs.
-    assert!(separator.is_multiple_of(2));
-    assert!(!program.is_empty());
     Ok(Options {
         rescan_ms,
         per_second,
@@ -184,27 +181,20 @@ fn run_minute_collector_arguments(collector: &CollectorCommand) -> Vec<String> {
     let mut arguments = collector.arguments.clone();
     arguments.push("--seconds".to_owned());
     arguments.push(COLLECTOR_SECONDS.to_string());
-
-    assert_eq!(arguments.len(), collector.arguments.len() + 2);
-    assert_eq!(Some(&COLLECTOR_SECONDS.to_string()), arguments.last());
     arguments
 }
 
 /// Lists followprobe's arguments in the order it reads them, `RESCAN_MS PER_SECOND SECONDS
 /// CHILD_MS GENERATORS`.
 fn run_burst_arguments(options: &Options) -> [String; 5] {
-    let arguments = [
+    [
         options.rescan_ms,
         options.per_second,
         BURST_SECONDS,
         BURST_CHILD_MS,
         BURST_GENERATORS,
     ]
-    .map(|number| number.to_string());
-
-    assert_eq!(options.rescan_ms.to_string(), arguments[0]);
-    assert_eq!(BURST_GENERATORS.to_string(), arguments[4]);
-    arguments
+    .map(|number| number.to_string())
 }
 
 /// Finds the `followprobe` built beside this program, in the same target directory.
@@ -268,12 +258,7 @@ fn run_write_conditions_stdout(program: &'static str, arguments: &[&str]) -> io:
 
 /// Returns the first line of `text` with its newline, or `None` when `text` is empty.
 fn run_write_conditions_first_line(text: &[u8]) -> Option<&[u8]> {
-    let line = text.split_inclusive(|&byte| byte == b'\n').next();
-    if let Some(line) = line {
-        assert!(!line.is_empty());
-        assert!(text.starts_with(line));
-    }
-    line
+    text.split_inclusive(|&byte| byte == b'\n').next()
 }
 
 /// Holds the two report files of one run, by name so they cannot be swapped.
@@ -388,23 +373,17 @@ impl OutputFile {
             .create_new(true)
             .open(&path)?;
 
-        let output = OutputFile { path, file };
-        assert!(output.is_named());
-        Ok(output)
+        Ok(OutputFile { path, file })
     }
 
     /// Returns a handle on the file for a program's standard output or standard error. The
     /// handles share one offset, so the file holds both streams in the order they were
     /// written.
     fn stdio(&self) -> io::Result<Stdio> {
-        assert!(self.is_named());
-
         Ok(Stdio::from(self.file.try_clone()?))
     }
 
     fn read(&self) -> io::Result<Vec<u8>> {
-        assert!(self.is_named());
-
         fs::read(&self.path)
     }
 

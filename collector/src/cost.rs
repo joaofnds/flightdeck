@@ -56,7 +56,7 @@ impl Source {
     /// The source's slot in an array that holds a value for each source.
     #[must_use]
     pub const fn index(self) -> usize {
-        let index = match self {
+        match self {
             Source::Machine => 0,
             Source::Interfaces => 1,
             Source::Processes => 2,
@@ -68,10 +68,7 @@ impl Source {
             Source::ExitReads => 8,
             Source::IOReport => 9,
             Source::Smc => 10,
-        };
-
-        assert!(index < Source::ALL.len());
-        index
+        }
     }
 }
 
@@ -120,8 +117,6 @@ impl Meter {
                 ),
             ));
         };
-        // A source's charge only grows, which `Snapshot::cost_since` relies on.
-        assert!(charged >= self.spent_ns[index]);
         self.spent_ns[index] = charged;
         Ok(result)
     }
@@ -172,8 +167,6 @@ fn thread_cpu_ns_from(time: Timespec) -> io::Result<u64> {
         return Err(invalid());
     };
 
-    assert_eq!(seconds, time_ns / NANOSECONDS_PER_SECOND);
-    assert_eq!(nanoseconds, time_ns % NANOSECONDS_PER_SECOND);
     Ok(time_ns)
 }
 
@@ -258,17 +251,14 @@ impl Snapshot {
             Duration::from_nanos(self.spent_ns[source] - earlier.spent_ns[source])
         });
 
-        let cost = Cost {
+        Ok(Cost {
             elapsed: Duration::from_nanos(elapsed_ns),
             cpu: Duration::from_nanos(cpu_ns),
             energy_nj,
             instructions,
             super_instructions,
             spent,
-        };
-        assert!(cost.elapsed > Duration::ZERO);
-        assert!(cost.super_instructions <= cost.instructions);
-        Ok(cost)
+        })
     }
 
     /// Returns how far the counter that `read` reads, which `name` names, grew from `earlier`
@@ -326,9 +316,7 @@ impl Cost {
     pub fn share_of_a_core(&self) -> f64 {
         assert!(self.elapsed > Duration::ZERO);
 
-        let share = self.cpu.div_duration_f64(self.elapsed);
-        assert!(share >= 0.0);
-        share
+        self.cpu.div_duration_f64(self.elapsed)
     }
 
     /// The power spent, as nanojoules a second divided by the million of them in a milliwatt.
@@ -336,9 +324,7 @@ impl Cost {
     pub fn milliwatts(&self) -> f64 {
         assert!(self.elapsed > Duration::ZERO);
 
-        let milliwatts = f64_from_u64(self.energy_nj) / self.elapsed.as_secs_f64() / 1_000_000.0;
-        assert!(milliwatts >= 0.0);
-        milliwatts
+        f64_from_u64(self.energy_nj) / self.elapsed.as_secs_f64() / 1_000_000.0
     }
 
     /// The share of the instructions run that ran on super cores, or `None` where none ran.
@@ -351,18 +337,14 @@ impl Cost {
         }
         // Rounding to the nearest f64 keeps the order of two counts, so the share stays at
         // or under 1.
-        let share = f64_from_u64(self.super_instructions) / f64_from_u64(self.instructions);
-        assert!(share <= 1.0);
-        Some(share)
+        Some(f64_from_u64(self.super_instructions) / f64_from_u64(self.instructions))
     }
 
     #[must_use]
     pub fn ms_per_second(&self, source: Source) -> f64 {
         assert!(self.elapsed > Duration::ZERO);
 
-        let ms_per_second = self.spent[source.index()].div_duration_f64(self.elapsed) * 1_000.0;
-        assert!(ms_per_second >= 0.0);
-        ms_per_second
+        self.spent[source.index()].div_duration_f64(self.elapsed) * 1_000.0
     }
 
     /// The CPU time no source took, in milliseconds a second. It is negative where the sources
@@ -373,11 +355,7 @@ impl Cost {
         assert!(self.elapsed > Duration::ZERO);
         let attributed: Duration = self.spent.iter().sum();
 
-        let unattributed_ms_per_second = (self.cpu.as_secs_f64() - attributed.as_secs_f64())
-            / self.elapsed.as_secs_f64()
-            * 1_000.0;
-        assert!(unattributed_ms_per_second.is_finite());
-        unattributed_ms_per_second
+        (self.cpu.as_secs_f64() - attributed.as_secs_f64()) / self.elapsed.as_secs_f64() * 1_000.0
     }
 }
 

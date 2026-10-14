@@ -101,7 +101,6 @@ impl PageSize {
             ));
         };
 
-        assert_eq!(pages, bytes / self.bytes);
         Ok(bytes)
     }
 }
@@ -113,7 +112,7 @@ impl Machine {
         let total_bytes: u64 = Sysctl::named(c"hw.memsize")?.read()?;
         let page_size = PageSize::new(unsafe { vm_page_size })?;
 
-        let machine = Self {
+        Ok(Self {
             host: unsafe { mach_host_self() },
             page_size,
             swap_usage: Sysctl::named(c"vm.swapusage")?,
@@ -123,9 +122,7 @@ impl Machine {
                 total_bytes,
                 ..Memory::default()
             },
-        };
-        assert!(machine.cpus.capacity() >= cpu_limit);
-        Ok(machine)
+        })
     }
 
     pub fn read(&mut self) -> io::Result<()> {
@@ -176,8 +173,6 @@ impl Machine {
         let capacity = self.cpus.capacity();
         assert!(capacity > 0);
         let cpu_count = read_cpus_count_check(counts, capacity)?;
-        assert!(cpu_count > 0);
-        assert!(cpu_count <= capacity);
         let loads = unsafe {
             std::slice::from_raw_parts(info.address.cast::<ProcessorCPULoadInfo>(), cpu_count)
         };
@@ -188,8 +183,6 @@ impl Machine {
             nice: load.cpu_ticks[NICE_INDEX],
             idle: load.cpu_ticks[IDLE_INDEX],
         }));
-        assert_eq!(cpu_count, self.cpus.len());
-        assert_eq!(capacity, self.cpus.capacity());
 
         Ok(())
     }
@@ -212,7 +205,6 @@ impl Machine {
         };
         kern_return_check(result, "host_statistics64")?;
         read_memory_count_check(count)?;
-        assert_eq!(HOST_VM_INFO64_REV1_COUNT, usize_from_u32(count));
 
         let statistics = unsafe { statistics.assume_init() };
         let swap: XswUsage = self.swap_usage.read()?;

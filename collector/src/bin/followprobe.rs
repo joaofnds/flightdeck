@@ -82,9 +82,6 @@ fn probe_from(arguments: &[String]) -> Result<Probe, String> {
         ));
     }
 
-    assert!(generators > 0);
-    assert!(generators <= GENERATORS_MAX);
-    assert!(per_second / generators > 0);
     Ok(Probe {
         rescan_interval: Duration::from_millis(rescan_ms),
         per_second,
@@ -117,7 +114,6 @@ fn run(probe: &Probe) -> io::Result<()> {
             ))
         })
         .collect();
-    assert_eq!(probe.generators, u64_from_usize(pid_files.len()));
     let followed = run_follow(
         probe,
         timebase,
@@ -329,7 +325,6 @@ impl Generators {
             generators.running.push(start_generator(probe, pid_file)?);
         }
 
-        assert_eq!(pid_files.len(), generators.running.len());
         Ok(generators)
     }
 

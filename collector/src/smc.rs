@@ -149,7 +149,6 @@ impl Connection {
         let [fan_count, ..] = self.read(FAN_COUNT, UNSIGNED_8)?;
         fan_count_check(fan_count)?;
 
-        assert!(fan_count <= FANS_MAX);
         Ok(fan_count)
     }
 
@@ -160,7 +159,6 @@ impl Connection {
         let key_count = u32::from_be_bytes([first, second, third, fourth]);
         key_count_check(key_count)?;
 
-        assert!(key_count <= KEYS_MAX);
         Ok(key_count)
     }
 
@@ -205,10 +203,7 @@ impl Connection {
             info: self.info(key)?,
         };
 
-        held_check_of(held, wanted)?;
-        // A read of `wanted` then takes as many bytes as the SMC holds.
-        assert_eq!(held.info.size, wanted.size);
-        Ok(())
+        held_check_of(held, wanted)
     }
 
     fn info(&self, key: Key) -> io::Result<KeyInfo> {
@@ -239,7 +234,7 @@ impl Connection {
         assert!(COMMANDS.contains(&question.command));
         assert_eq!(0, question.padding);
         assert_eq!([0; 3], question.info.padding);
-        // Only a read of bytes names a type, and only a read by index names an index.
+        // Only a read of bytes names a size, and only a read by index names an index.
         if question.command == READ_BYTES {
             assert!(question.info.size > 0);
         } else {
@@ -287,12 +282,14 @@ const SOC_TEMPERATURE_PREFIXES: [[u8; 2]; 8] = [
     *b"TC", *b"Tp", *b"Tf", *b"Ts", *b"Te", *b"TR", *b"Tg", *b"TP",
 ];
 
-// Open looks for the SoC's sensors among every key, so no fan's speed key, which starts with
-// `F`, may look like one.
+/// The first letter of a fan's speed key.
+const FAN_SPEED_KEY_FIRST: u8 = b'F';
+
+// Open looks for the SoC's sensors among every key, so no fan's speed key may look like one.
 const _: () = {
     let mut index = 0;
     while index < SOC_TEMPERATURE_PREFIXES.len() {
-        assert!(SOC_TEMPERATURE_PREFIXES[index][0] != b'F');
+        assert!(SOC_TEMPERATURE_PREFIXES[index][0] != FAN_SPEED_KEY_FIRST);
         index += 1;
     }
 };
@@ -319,7 +316,7 @@ impl Key {
     fn fan_speed(fan_index: u8) -> Self {
         assert!(fan_index < FANS_MAX);
 
-        Key::named([b'F', b'0' + fan_index, b'A', b'c'])
+        Key::named([FAN_SPEED_KEY_FIRST, b'0' + fan_index, b'A', b'c'])
     }
 
     fn is_soc_temperature(self) -> bool {
@@ -447,8 +444,6 @@ impl Smc {
             .collect::<io::Result<Vec<FloatKey>>>()?;
         let soc_sensor = connection.hottest_soc_sensor()?;
         let fan_rpm = Vec::with_capacity(fans.len());
-        assert!(fans.len() <= usize::from(FANS_MAX));
-        assert!(fans.len() <= fan_rpm.capacity());
 
         Ok(Self {
             connection,
@@ -470,7 +465,6 @@ impl Smc {
         for &fan in &self.fans {
             push_without_growing(&mut self.fan_rpm, self.connection.read_float(fan)?);
         }
-        assert_eq!(self.fans.len(), self.fan_rpm.len());
         self.soc_celsius = self.connection.read_float(self.soc_sensor)?;
 
         Ok(())
@@ -545,11 +539,7 @@ fn ask_answered(
 
 /// Checks that the SMC holds a key as a value of `wanted`, from the info `held` gives.
 fn held_check_of(held: Held, wanted: KeyInfo) -> io::Result<()> {
-    assert!(
-        READ_TYPES
-            .iter()
-            .any(|read_type| read_type.kind == wanted.kind)
-    );
+    assert!(READ_TYPES.iter().any(|read_type| read_type.is(wanted)));
 
     if !held.info.is(wanted) {
         return Err(io::Error::new(

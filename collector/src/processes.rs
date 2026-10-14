@@ -59,13 +59,11 @@ impl Sweep {
     pub fn new(process_limit: usize) -> Self {
         assert!(process_limit > 0);
 
-        let sweep = Self {
+        Self {
             read: Vec::with_capacity(process_limit),
             refused: 0,
             gone: 0,
-        };
-        assert!(sweep.read.capacity() >= process_limit);
-        sweep
+        }
     }
 
     pub fn run(&mut self, timebase: Timebase, pids: &[i32]) -> io::Result<()> {
@@ -239,9 +237,7 @@ pub fn process_limit() -> io::Result<usize> {
 pub fn pid_list(process_limit: usize) -> Vec<i32> {
     assert!(process_limit > 0);
 
-    let pids = Vec::with_capacity(process_limit + 1);
-    assert!(pids.capacity() > process_limit);
-    pids
+    Vec::with_capacity(process_limit + 1)
 }
 
 /// Lists the pid of every process into `into`, up to the capacity it has, which it never
@@ -265,14 +261,9 @@ pub fn list_pids(into: &mut Vec<i32>) -> io::Result<()> {
         )),
         Err(_) => Err(io::Error::last_os_error()),
     };
-    if listed.is_ok() {
-        assert!(!into.is_empty());
-    } else {
+    if listed.is_err() {
         into.clear();
     }
-
-    assert_eq!(capacity, into.capacity());
-    assert!(into.len() < capacity);
     listed
 }
 
@@ -300,20 +291,13 @@ fn list_pids_check(pids: &[i32]) -> io::Result<()> {
 
 /// Returns the pid of this process.
 pub fn own_pid() -> io::Result<i32> {
-    let pid = own_pid_check(std::process::id())?;
-
-    assert!(pid >= 0);
-    assert!(pid <= PID_MAX);
-    Ok(pid)
+    own_pid_check(std::process::id())
 }
 
 /// Checks that `pid`, which macOS reports as this process's, is one macOS gives a process.
 fn own_pid_check(pid: u32) -> io::Result<i32> {
     if pid <= PID_MAX.cast_unsigned() {
-        let checked = pid.cast_signed();
-        assert!(checked >= 0);
-        assert!(checked <= PID_MAX);
-        Ok(checked)
+        Ok(pid.cast_signed())
     } else {
         Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -358,7 +342,6 @@ pub fn read_usage(timebase: Timebase, pid: i32) -> io::Result<Result<Usage, Unre
         return Ok(Err(unreadable));
     }
 
-    assert_eq!(0, returned);
     let usage = unsafe { usage.assume_init_ref() };
     Ok(Ok(Usage {
         awake_ns_at_start: timebase.nanoseconds(usage.proc_start_abstime)?,
@@ -426,13 +409,11 @@ pub(crate) unsafe fn pid_info<T: PidInfo>(pid: i32) -> io::Result<Result<T, Unre
 
     let mut info = std::mem::MaybeUninit::<T>::uninit();
     let size = pid_info_size::<T>();
-    assert!(size > 0);
     let written = unsafe { proc_pidinfo(pid, T::FLAVOR, 0, info.as_mut_ptr().cast(), size) };
     if let Err(unreadable) = pid_info_written::<T>(written, io::Error::last_os_error())? {
         return Ok(Err(unreadable));
     }
 
-    assert_eq!(size, written);
     Ok(Ok(unsafe { info.assume_init() }))
 }
 
@@ -452,7 +433,6 @@ fn pid_info_size<T>() -> c_int {
 /// besides none and the size of `T` is info of another size than `T`.
 fn pid_info_written<T>(written: c_int, error: io::Error) -> io::Result<Result<(), Unreadable>> {
     let size = pid_info_size::<T>();
-    assert!(size > 0);
     assert!(error.raw_os_error().is_some());
 
     if written == size {

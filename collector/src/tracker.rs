@@ -46,6 +46,12 @@ pub struct Counts {
 }
 
 impl Counts {
+    /// The rescans counted, whatever their cause.
+    #[must_use]
+    pub fn rescans(&self) -> u64 {
+        self.leading_rescans + self.trailing_rescans + self.listing_rescans
+    }
+
     #[must_use]
     pub fn since(&self, earlier: &Counts) -> Counts {
         assert!(earlier.forks <= self.forks);
@@ -372,12 +378,7 @@ impl Tracker {
                 assert!(self.starts.is_empty());
                 assert!(self.exits.is_empty());
                 // The tracker scans once as it starts, and counts each rescan since by its cause.
-                assert_eq!(
-                    self.scans,
-                    1 + self.counts.leading_rescans
-                        + self.counts.trailing_rescans
-                        + self.counts.listing_rescans
-                );
+                assert_eq!(self.scans, 1 + self.counts.rescans());
                 self.failed = false;
                 return Ok(());
             }
@@ -400,12 +401,7 @@ impl Tracker {
         assert!(self.starts.is_empty());
         assert!(self.exits.is_empty());
         // The tracker scans once as it starts, and counts each rescan since by its cause.
-        assert_eq!(
-            self.scans,
-            1 + self.counts.leading_rescans
-                + self.counts.trailing_rescans
-                + self.counts.listing_rescans
-        );
+        assert_eq!(self.scans, 1 + self.counts.rescans());
         self.failed = false;
         Ok(())
     }
@@ -491,8 +487,6 @@ impl Tracker {
 
         // A pid adds a watch or becomes a candidate, never both, so the candidates' watches fit.
         assert!(self.changes.len() + self.reuse_candidates.len() <= listing.len());
-        // Every start compare reports is watched.
-        assert!(self.starts.len() <= self.changes.len());
         Ok(())
     }
 
@@ -509,8 +503,6 @@ impl Tracker {
             }
         }
 
-        // Every start a reused pid adds is watched.
-        assert!(self.starts.len() <= self.changes.len());
         Ok(())
     }
 
@@ -738,9 +730,6 @@ fn record(events: &mut Vec<Event>, counts: &mut Counts, event: Event) {
             Event::Exit { .. } => counts.dropped_exits += 1,
         }
     }
-
-    assert_eq!(capacity, events.capacity());
-    assert!(events.len() <= capacity);
 }
 
 /// The index of `pid` in a table of `known_count` pids. A pid the table cannot hold is an
@@ -773,7 +762,6 @@ fn pid_of(ident: usize) -> io::Result<i32> {
         ));
     };
 
-    assert!(pid >= 0);
     Ok(pid)
 }
 
@@ -1154,16 +1142,15 @@ mod tests {
     }
 
     /// The receipt the kernel returns for a watch on `ident`, reporting `errno`, with
-    /// `EV_ERROR` set as macOS 27.0.1 sets it on every receipt. It is built field by field,
-    /// since `watch` takes only an ident that names a pid, and a receipt can name any.
+    /// `EV_ERROR` set as macOS 27.0.1 sets it on every receipt. It sets the ident after
+    /// `watch` builds the rest, since `watch` takes only an ident that names a pid, and a
+    /// receipt can name any.
     fn receipt(ident: usize, errno: isize) -> Kevent {
-        Kevent::new(
-            ident,
-            EVFILT_PROC,
-            EV_ADD | EV_RECEIPT | EV_ERROR,
-            NOTE_FORK | NOTE_EXEC | NOTE_EXIT,
-            errno,
-        )
+        let mut receipt = watch(0);
+        receipt.ident = ident;
+        receipt.flags |= EV_ERROR;
+        receipt.data = errno;
+        receipt
     }
 
     #[test]

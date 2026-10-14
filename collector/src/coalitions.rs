@@ -84,15 +84,12 @@ impl Coalitions {
     pub fn new(timebase: Timebase, coalition_limit: usize) -> Self {
         assert!(coalition_limit > 0);
 
-        let coalitions = Self {
+        Self {
             timebase,
             coalition_limit,
             ids: Vec::with_capacity(coalition_limit),
             read: Vec::with_capacity(coalition_limit),
-        };
-        assert!(coalitions.ids.capacity() >= coalition_limit);
-        assert!(coalitions.read.capacity() >= coalition_limit);
-        coalitions
+        }
     }
 
     /// Adds the coalition `id` unless it holds it already. A coalition past the limit is an
@@ -170,8 +167,6 @@ impl Coalitions {
 /// again adds it back.
 fn read_all_retain(ids: &mut Vec<u64>, read: &[Coalition]) {
     assert!(read.len() <= ids.len());
-    // The walk below meets the readings in the order of the ids they were read for.
-    assert!(read.is_sorted_by(|earlier, later| earlier.id < later.id));
 
     let mut readings = read.iter().peekable();
     ids.retain(|&id| {

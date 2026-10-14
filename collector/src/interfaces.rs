@@ -48,13 +48,10 @@ impl Name {
 
         let mut bytes = [0; IFNAMSIZ];
         bytes[..name.len()].copy_from_slice(name);
-        let taken = Self {
+        Ok(Self {
             bytes,
             length: name.len(),
-        };
-        assert_eq!(name, &taken.bytes[..taken.length]);
-        assert!(taken.bytes[taken.length..].iter().all(|&byte| byte == 0));
-        Ok(taken)
+        })
     }
 
     #[must_use]
@@ -88,24 +85,17 @@ const DUMP_SIZE: usize = 256 * 1024;
 /// header of the dump, so the division floors, since a header cut off by the end of the dump
 /// is no interface.
 fn interface_count_max(dump_size: usize) -> usize {
-    let interface_count_max = dump_size / size_of::<IfMsghdr2>();
-
-    assert!(interface_count_max * size_of::<IfMsghdr2>() <= dump_size);
-    // The bytes left over are short of a header.
-    assert!(dump_size - interface_count_max * size_of::<IfMsghdr2>() < size_of::<IfMsghdr2>());
-    interface_count_max
+    dump_size / size_of::<IfMsghdr2>()
 }
 
 impl Interfaces {
     fn with_dump_size(dump_size: usize) -> Self {
         assert!(dump_size > 0);
 
-        let interfaces = Self {
+        Self {
             buffer: vec![0; dump_size],
             read: Vec::with_capacity(interface_count_max(dump_size)),
-        };
-        assert!(interfaces.read.capacity() >= interface_count_max(dump_size));
-        interfaces
+        }
     }
 
     /// The interfaces the last read found. The list is private, since a read fills it within
@@ -223,10 +213,8 @@ fn read_all_messages(dump: &[u8], read: &mut Vec<Interface>) -> io::Result<()> {
             }
         }
         offset += length;
-        assert!(offset <= dump.len());
     }
 
-    assert_eq!(dump.len(), offset);
     assert!(read.len() <= interface_count_max(dump.len()));
     Ok(())
 }
@@ -246,7 +234,6 @@ fn read_all_interface(message: &[u8]) -> io::Result<Option<Interface>> {
             ),
         ));
     };
-    assert!(message.len() >= size_of::<IfMsghdr2>());
     let info = unsafe { message.as_ptr().cast::<IfMsghdr2>().read_unaligned() };
     if info.flags & IFF_LOOPBACK != 0 {
         return Ok(None);

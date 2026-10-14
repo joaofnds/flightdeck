@@ -40,17 +40,12 @@ impl States {
     fn new(active_states_max: usize) -> Self {
         assert!(active_states_max > 0);
 
-        let states = Self {
+        Self {
             active_ns: Vec::with_capacity(active_states_max),
             active_indices: Vec::with_capacity(active_states_max),
             active_states_max,
             state_count: 0,
-        };
-
-        // A read pushes one time for each active state learned, without growing the times.
-        assert!(states.active_states_max <= states.active_indices.capacity());
-        assert!(states.active_states_max <= states.active_ns.capacity());
-        states
+        }
     }
 
     /// The time spent in each active state, in nanoseconds, at the last read.
@@ -107,11 +102,6 @@ impl ChannelCounts {
     /// Checks that a read found the channels open found, since a channel it missed would keep
     /// the value of the read before.
     fn read_check(&self, at_open: &ChannelCounts) -> io::Result<()> {
-        // Open found what a read takes.
-        assert_eq!(1, at_open.gpu_energy);
-        assert_eq!(1, at_open.gpu_states);
-        assert!(at_open.core_states > 0);
-
         if self != at_open {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -379,7 +369,6 @@ impl IOReport {
         };
         ioreport.learn()?;
 
-        assert_eq!(cpu_limit, ioreport.cores.len());
         assert!(ioreport.counts.core_states > 0);
         Ok(ioreport)
     }
@@ -511,6 +500,7 @@ fn open_merge_group(into: &Owned, group: &Group) -> io::Result<()> {
     assert!(!into.0.is_null());
 
     let more = channels_in_group(group)?;
+
     unsafe { IOReportMergeChannels(into.0, more.0, ptr::null()) };
 
     Ok(())
@@ -614,14 +604,6 @@ fn learn_active_states(channel: CFTypeRef, into: &mut States) -> io::Result<()> 
         push_without_growing(&mut into.active_indices, index);
     }
     into.state_count = state_count;
-
-    assert!(into.active_indices.len() <= into.active_states_max);
-    // A read takes each active state's residency at its index, once and in order.
-    assert!(
-        into.active_indices
-            .is_sorted_by(|earlier, later| earlier < later)
-    );
-    assert!(into.active_indices.iter().all(|&index| index < state_count));
     Ok(())
 }
 
@@ -690,7 +672,6 @@ fn read_active_states(timebase: Timebase, channel: CFTypeRef, into: &mut States)
         push_without_growing(&mut into.active_ns, timebase.nanoseconds(ticks)?);
     }
 
-    assert_eq!(into.active_indices.len(), into.active_ns.len());
     Ok(())
 }
 
@@ -771,7 +752,6 @@ fn read_energy_nj_of(value: i64, nj_per_unit: u64) -> io::Result<u64> {
         ));
     };
 
-    assert!(energy_nj >= units);
     Ok(energy_nj)
 }
 
