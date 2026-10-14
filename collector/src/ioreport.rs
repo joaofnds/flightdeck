@@ -83,6 +83,7 @@ impl IOReport {
 
     pub fn read(&mut self) -> io::Result<()> {
         assert!(self.gpu_nj_per_unit > 0);
+        assert!(self.counts.cores <= self.cores.len());
 
         let samples = self.subscription.sample()?;
         let channels = self.channels_key.channels_of(&samples)?;
@@ -191,6 +192,10 @@ impl ChannelCounts {
     /// Checks that a read found the channels open found, since a channel it missed would keep
     /// the value of the read before.
     fn read_check(&self, at_open: &ChannelCounts) -> io::Result<()> {
+        assert_eq!(1, at_open.gpu_energy);
+        assert_eq!(1, at_open.gpu_states);
+        assert!(at_open.cores > 0);
+
         if self != at_open {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -403,6 +408,8 @@ fn core_at(cores: &mut [States], index: usize) -> io::Result<&mut States> {
 /// grow, so a channel with more active states than that is an error.
 fn learn_active_states(channel: CFTypeRef, into: &mut States) -> io::Result<()> {
     let capacity = into.active_indices.capacity();
+    assert!(capacity <= into.active_ns.capacity());
+
     let state_count = state_count_check(unsafe { IOReportStateGetCount(channel) })?;
     into.active_indices.clear();
     for index in 0..state_count {
@@ -479,6 +486,7 @@ fn read_active_states(channel: CFTypeRef, into: &mut States, timebase: Timebase)
         ));
     }
 
+    assert!(into.active_indices.len() <= into.active_ns.capacity());
     into.active_ns.clear();
     for &index in &into.active_indices {
         assert!(index < into.state_count);

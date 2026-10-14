@@ -267,6 +267,8 @@ fn ask_answered(
     answer_size: usize,
     answer: Message,
 ) -> io::Result<Message> {
+    assert!(COMMANDS.contains(&question.command));
+
     kern_return_check(returned, "calling the SMC")?;
     if answer_size != size_of::<Message>() {
         return Err(io::Error::new(
@@ -349,11 +351,14 @@ fn hottest_soc_sensor_of(
     hottest: Option<(FloatKey, f32)>,
     reading: (FloatKey, f32),
 ) -> Option<(FloatKey, f32)> {
-    let (_, celsius) = reading;
+    let (sensor, celsius) = reading;
+    assert!(sensor.0.is_soc_temperature());
+
     if !celsius.is_finite() {
         return hottest;
     }
-    if let Some((_, hottest_celsius)) = hottest {
+    if let Some((hottest_sensor, hottest_celsius)) = hottest {
+        assert!(hottest_sensor.0.is_soc_temperature());
         assert!(hottest_celsius.is_finite());
         if hottest_celsius >= celsius {
             return hottest;
