@@ -134,7 +134,8 @@ fn thread_cpu_ns_of(clock: c_uint) -> io::Result<u64> {
     thread_cpu_ns_from(now)
 }
 
-/// Returns `time` in nanoseconds, or an error where it is negative or a u64 cannot hold it.
+/// Returns `time` in nanoseconds, or an error where it is negative, its nanoseconds hold a
+/// second or more, or a u64 cannot hold it.
 fn thread_cpu_ns_from(time: Timespec) -> io::Result<u64> {
     let invalid = || {
         io::Error::new(
@@ -144,12 +145,22 @@ fn thread_cpu_ns_from(time: Timespec) -> io::Result<u64> {
     };
     let seconds = u64::try_from(time.tv_sec).map_err(|_| invalid())?;
     let nanos = u64::try_from(time.tv_nsec).map_err(|_| invalid())?;
-
-    seconds
-        .checked_mul(1_000_000_000)
+    if nanos >= NANOSECONDS_PER_SECOND {
+        return Err(invalid());
+    }
+    let Some(time_ns) = seconds
+        .checked_mul(NANOSECONDS_PER_SECOND)
         .and_then(|seconds_ns| seconds_ns.checked_add(nanos))
-        .ok_or_else(invalid)
+    else {
+        return Err(invalid());
+    };
+
+    assert_eq!(seconds, time_ns / NANOSECONDS_PER_SECOND);
+    assert_eq!(nanos, time_ns % NANOSECONDS_PER_SECOND);
+    Ok(time_ns)
 }
+
+const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
 
 #[cfg(test)]
 pub(crate) fn spin_on_this_thread_for(cpu_time: Duration) {
@@ -577,6 +588,21 @@ mod tests {
         let time = Timespec {
             tv_sec: 0,
             tv_nsec: -1,
+        };
+
+        let read = thread_cpu_ns_from(time);
+
+        assert_eq!(io::ErrorKind::InvalidData, read.unwrap_err().kind());
+    }
+
+    #[test]
+    fn refuses_nanoseconds_of_a_second_or_more() {
+        // Goal: a clock whose nanoseconds hold a whole second is an error, since a time keeps
+        // its whole seconds apart from the nanoseconds past them.
+        // Method: read 0 s and 1,000,000,000 ns.
+        let time = Timespec {
+            tv_sec: 0,
+            tv_nsec: 1_000_000_000,
         };
 
         let read = thread_cpu_ns_from(time);
