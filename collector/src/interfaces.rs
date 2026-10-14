@@ -106,8 +106,18 @@ impl Interfaces {
     /// Fills the buffer with the routing dump of every interface and returns the bytes the
     /// kernel wrote. A dump past the buffer is an error, since the buffer does not grow.
     fn fill_buffer(&mut self) -> io::Result<usize> {
-        let mut path = [CTL_NET, PF_ROUTE, 0, 0, NET_RT_IFLIST2, 0];
-        let path_count = c_uint::try_from(path.len()).map_err(io::Error::other)?;
+        let mut path = [
+            CTL_NET,
+            PF_ROUTE,
+            ROUTE_PROTOCOL,
+            AF_UNSPEC,
+            NET_RT_IFLIST2,
+            EVERY_INTERFACE,
+        ];
+        let path_count = match c_uint::try_from(path.len()) {
+            Ok(count) => count,
+            Err(error) => unreachable!("{error}"),
+        };
         let mut size = self.buffer.len();
         let result = unsafe {
             sysctl(
@@ -231,7 +241,13 @@ const _: () = assert!(offset_of!(SockaddrDl, data) == 8);
 
 const CTL_NET: c_int = 4;
 const PF_ROUTE: c_int = 17;
+/// The protocol a `PF_ROUTE` path names third, which sysctl(3) gives as always 0.
+const ROUTE_PROTOCOL: c_int = 0;
+/// The address family a `PF_ROUTE` path names fourth, where 0 selects every family.
+const AF_UNSPEC: c_int = 0;
 const NET_RT_IFLIST2: c_int = 6;
+/// The interface index a `NET_RT_IFLIST2` path names sixth, where 0 selects every interface.
+const EVERY_INTERFACE: c_int = 0;
 const RTM_IFINFO2: c_int = 18;
 const IFF_LOOPBACK: c_int = 0x8;
 const IFNAMSIZ: usize = 16;
