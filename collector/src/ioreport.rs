@@ -404,7 +404,6 @@ impl IOReport {
         let channels = self.channels_key.channels_of(&samples)?;
 
         let mut counts = ChannelCounts::default();
-        let cores = &mut self.cores[..self.counts.core_states];
         for channel in each(channels)? {
             match Kind::of(channel) {
                 Some(Kind::GPUEnergy) => {
@@ -416,7 +415,10 @@ impl IOReport {
                     counts.gpu_states += 1;
                 }
                 Some(Kind::CoreStates) => {
-                    let core = core_at(cores, counts.core_states)?;
+                    let core = core_at(
+                        &mut self.cores[..self.counts.core_states],
+                        counts.core_states,
+                    )?;
                     read_active_states(self.timebase, channel, core)?;
                     counts.core_states += 1;
                 }
@@ -537,8 +539,7 @@ fn core_at(cores: &mut [States], index: usize) -> io::Result<&mut States> {
 /// Learns which of `channel`'s states count as active into `into`, whose room it does not
 /// grow, so a channel with more active states than that is an error.
 fn learn_active_states(channel: CFTypeRef, into: &mut States) -> io::Result<()> {
-    let active_states_max = into.active_states_max;
-    assert!(active_states_max <= into.active_indices.capacity());
+    assert!(into.active_states_max <= into.active_indices.capacity());
 
     let state_count = unsafe { IOReportStateGetCount(channel) };
     learn_active_states_count_check(state_count)?;
@@ -550,10 +551,13 @@ fn learn_active_states(channel: CFTypeRef, into: &mut States) -> io::Result<()> 
             continue;
         }
 
-        if into.active_indices.len() == active_states_max {
+        if into.active_indices.len() == into.active_states_max {
             return Err(io::Error::new(
                 io::ErrorKind::QuotaExceeded,
-                format!("an IOReport channel reported active states past {active_states_max}"),
+                format!(
+                    "an IOReport channel reported active states past {}",
+                    into.active_states_max
+                ),
             ));
         }
 
@@ -561,7 +565,7 @@ fn learn_active_states(channel: CFTypeRef, into: &mut States) -> io::Result<()> 
     }
     into.state_count = state_count;
 
-    assert!(into.active_indices.len() <= active_states_max);
+    assert!(into.active_indices.len() <= into.active_states_max);
     Ok(())
 }
 
