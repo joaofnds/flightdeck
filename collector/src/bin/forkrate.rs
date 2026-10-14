@@ -475,6 +475,31 @@ mod tests {
         assert!(burst_from(&arguments(&["300", "15", "4294968"])).is_err());
     }
 
+    /// The errno waitpid fails with where the caller has no children left to wait for.
+    const ECHILD: i32 = 10;
+
+    #[test]
+    fn reaping_without_children_is_an_error() {
+        // Goal: a waitpid that fails while children are still outstanding is an error, not
+        // a reaping that found none.
+        // Method: reap one child from this test process, which forks none, so waitpid fails
+        // with ECHILD.
+        let reaped = reap(1);
+
+        assert_eq!(Some(ECHILD), reaped.unwrap_err().raw_os_error());
+    }
+
+    #[test]
+    fn waiting_without_children_is_an_error() {
+        // Goal: a waitpid that fails while waiting for the children still running is an
+        // error, not a wait that ends early.
+        // Method: wait for one child from this test process, which forks none, so waitpid
+        // fails with ECHILD.
+        let reaped = reap_rest(1);
+
+        assert_eq!(Some(ECHILD), reaped.unwrap_err().raw_os_error());
+    }
+
     #[test]
     fn counts_a_child_that_exited_cleanly() {
         // Goal: a child that exits with status 0 is reaped and not failed.
