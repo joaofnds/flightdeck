@@ -259,13 +259,13 @@ impl Cost {
         self.spent[source.index()].div_duration_f64(self.elapsed) * 1_000.0
     }
 
+    /// The CPU time no source took, in milliseconds a second. It is negative where the sources
+    /// took more than the process, since this thread's clock times each source and the
+    /// process's usage times the process.
     #[must_use]
     pub fn unattributed_ms_per_second(&self) -> f64 {
         let attributed: Duration = self.spent.iter().sum();
-        self.cpu
-            .saturating_sub(attributed)
-            .div_duration_f64(self.elapsed)
-            * 1_000.0
+        (self.cpu.as_secs_f64() - attributed.as_secs_f64()) / self.elapsed.as_secs_f64() * 1_000.0
     }
 }
 
@@ -395,6 +395,16 @@ mod tests {
         assert!((cost.ms_per_second(Source::Processes) - 7.3).abs() < 1e-12);
         assert!((cost.ms_per_second(Source::Coalitions)).abs() < 1e-12);
         assert!((cost.unattributed_ms_per_second() - 2.7).abs() < 1e-12);
+    }
+
+    #[test]
+    fn gives_a_negative_rest_where_the_sources_took_more_than_the_process() {
+        // Goal: sources that took more CPU time than the process read as a negative rest,
+        // never a rest of 0, since the thread's clock and the process's usage then disagree.
+        // Method: spend 0.1 s of CPU in ten seconds, 0.2 s of it on processes.
+        let cost = ten_seconds_later(100_000_000, 0, 200_000_000);
+
+        assert!((cost.unattributed_ms_per_second() + 10.0).abs() < 1e-12);
     }
 
     #[test]
