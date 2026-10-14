@@ -8,6 +8,7 @@ use collector::clock::{self, Timebase};
 use collector::cost::{Cost, Meter, Snapshot, Source};
 use collector::processes;
 use collector::tracker::{Counts, EVENTS_PER_TICK_MAX, Event, Limits, Tracker};
+use collector::u64_from_usize;
 
 const TRACKING: [Source; 5] = [
     Source::Events,
@@ -112,6 +113,7 @@ fn run(probe: &Probe) -> io::Result<()> {
             ))
         })
         .collect();
+    assert_eq!(probe.generators, u64_from_usize(pid_files.len()));
     let followed = run_follow(
         probe,
         timebase,
@@ -130,6 +132,8 @@ fn run(probe: &Probe) -> io::Result<()> {
 
 fn run_report(probe: &Probe, followed: &Followed, cost: &Cost, counts: &Counts) -> io::Result<()> {
     let children = run_report_children(followed)?;
+    // The children missed are those forked less those found.
+    assert!(children.found <= children.forked);
     let tracking: Vec<String> = TRACKING
         .iter()
         .map(|&source| format!("{} {:.2}", source.name(), cost.ms_per_second(source)))
@@ -193,7 +197,9 @@ impl Children {
         assert!(self.forked > 0);
         assert!(self.read <= self.forked);
 
-        f64::from(self.read) / f64::from(self.forked) * 100.0
+        let read_percent = f64::from(self.read) / f64::from(self.forked) * 100.0;
+        assert!(read_percent <= 100.0);
+        read_percent
     }
 }
 
@@ -303,6 +309,9 @@ struct Generators {
 
 impl Generators {
     fn start(probe: &Probe, pid_files: &[PathBuf]) -> io::Result<Self> {
+        // A probe of no generators would follow nothing and count its children as none.
+        assert!(!pid_files.is_empty());
+
         let mut generators = Self {
             running: Vec::with_capacity(pid_files.len()),
         };
