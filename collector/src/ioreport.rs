@@ -5,138 +5,6 @@ use std::ptr;
 use crate::clock::Timebase;
 use crate::push_without_growing;
 
-type CFTypeRef = *const c_void;
-
-/// The callbacks an array runs on its values, as `CFArrayCallBacks` declares them.
-#[repr(C)]
-struct ArrayCallBacks {
-    version: isize,
-    retain: *const c_void,
-    release: *const c_void,
-    copy_description: *const c_void,
-    equal: *const c_void,
-}
-
-const _: () = assert!(size_of::<ArrayCallBacks>() == 40);
-const _: () = assert!(align_of::<ArrayCallBacks>() == 8);
-
-const UTF8: u32 = 0x0800_0100;
-
-#[link(name = "CoreFoundation", kind = "framework")]
-unsafe extern "C" {
-    static kCFTypeArrayCallBacks: ArrayCallBacks;
-    fn CFRelease(object: CFTypeRef);
-    fn CFGetTypeID(object: CFTypeRef) -> usize;
-    fn CFArrayGetTypeID() -> usize;
-    fn CFArrayGetCount(array: CFTypeRef) -> isize;
-    fn CFArrayGetValueAtIndex(array: CFTypeRef, index: isize) -> CFTypeRef;
-    fn CFArrayCreateMutable(
-        allocator: CFTypeRef,
-        capacity: isize,
-        callbacks: *const ArrayCallBacks,
-    ) -> CFTypeRef;
-    fn CFArrayAppendValue(array: CFTypeRef, value: CFTypeRef);
-    fn CFDictionaryGetValue(dictionary: CFTypeRef, key: CFTypeRef) -> CFTypeRef;
-    fn CFDictionarySetValue(dictionary: CFTypeRef, key: CFTypeRef, value: CFTypeRef);
-    fn CFStringCreateWithCString(
-        allocator: CFTypeRef,
-        text: *const c_char,
-        encoding: u32,
-    ) -> CFTypeRef;
-    fn CFStringGetCString(text: CFTypeRef, buffer: *mut c_char, size: isize, encoding: u32) -> u8;
-}
-
-// Apple documents none of IOReport, so the meaning of the last three arguments of
-// IOReportCopyChannelsInGroup is unknown, and the collector passes 0 for each.
-#[link(name = "IOReport")]
-unsafe extern "C" {
-    fn IOReportCopyChannelsInGroup(
-        group: CFTypeRef,
-        subgroup: CFTypeRef,
-        unknown_1: u64,
-        unknown_2: u64,
-        unknown_3: u64,
-    ) -> CFTypeRef;
-    fn IOReportMergeChannels(into: CFTypeRef, from: CFTypeRef, unused: CFTypeRef);
-    fn IOReportCreateSubscription(
-        unused: CFTypeRef,
-        desired: CFTypeRef,
-        subscribed: *mut CFTypeRef,
-        channel_id: u64,
-        options: CFTypeRef,
-    ) -> CFTypeRef;
-    fn IOReportCreateSamples(
-        subscription: CFTypeRef,
-        subscribed: CFTypeRef,
-        options: CFTypeRef,
-    ) -> CFTypeRef;
-    fn IOReportChannelGetGroup(channel: CFTypeRef) -> CFTypeRef;
-    fn IOReportChannelGetSubGroup(channel: CFTypeRef) -> CFTypeRef;
-    fn IOReportChannelGetChannelName(channel: CFTypeRef) -> CFTypeRef;
-    fn IOReportChannelGetUnitLabel(channel: CFTypeRef) -> CFTypeRef;
-    fn IOReportSimpleGetIntegerValue(channel: CFTypeRef, index: i32) -> i64;
-    fn IOReportStateGetCount(channel: CFTypeRef) -> i32;
-    fn IOReportStateGetNameForIndex(channel: CFTypeRef, index: i32) -> CFTypeRef;
-    fn IOReportStateGetResidency(channel: CFTypeRef, index: i32) -> i64;
-}
-
-/// A CoreFoundation object a create or copy call returned, which is never null and which only
-/// this owner releases.
-struct Owned(CFTypeRef);
-
-impl Owned {
-    /// Owns `object`, which the call `call` names returned, or reports the call where it
-    /// returned null.
-    fn new(object: CFTypeRef, call: &str) -> io::Result<Self> {
-        if object.is_null() {
-            return Err(io::Error::other(format!("{call} returned null")));
-        }
-
-        Ok(Self(object))
-    }
-}
-
-impl Drop for Owned {
-    fn drop(&mut self) {
-        assert!(!self.0.is_null());
-
-        unsafe { CFRelease(self.0) };
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct States {
-    pub active_ns: Vec<u64>,
-    /// The index of each state the channel counts as active, learned once at open from the
-    /// state names, since `IOReport` allocates for each name it gives.
-    active_indices: Vec<i32>,
-    /// The states the channel reported at open, which `active_indices` index.
-    state_count: i32,
-}
-
-/// The most active performance states read from one channel, three times the 20 a core of
-/// the M5 Pro reports.
-const ACTIVE_STATES_MAX: usize = 64;
-/// The most states learned from one channel, past ten times the 22 a core of the M5 Pro
-/// reports.
-const STATES_MAX: i32 = 256;
-
-impl States {
-    fn new(active_states_max: usize) -> Self {
-        assert!(active_states_max > 0);
-
-        let states = Self {
-            active_ns: Vec::with_capacity(active_states_max),
-            active_indices: Vec::with_capacity(active_states_max),
-            state_count: 0,
-        };
-
-        // A read pushes one time for each active state learned, without growing the times.
-        assert!(states.active_indices.capacity() <= states.active_ns.capacity());
-        states
-    }
-}
-
 pub struct IOReport {
     timebase: Timebase,
     channels_key: Owned,
@@ -258,6 +126,36 @@ impl IOReport {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct States {
+    pub active_ns: Vec<u64>,
+    /// The index of each state the channel counts as active, learned once at open from the
+    /// state names, since `IOReport` allocates for each name it gives.
+    active_indices: Vec<i32>,
+    /// The states the channel reported at open, which `active_indices` index.
+    state_count: i32,
+}
+
+/// The most active performance states read from one channel, three times the 20 a core of
+/// the M5 Pro reports.
+const ACTIVE_STATES_MAX: usize = 64;
+
+impl States {
+    fn new(active_states_max: usize) -> Self {
+        assert!(active_states_max > 0);
+
+        let states = Self {
+            active_ns: Vec::with_capacity(active_states_max),
+            active_indices: Vec::with_capacity(active_states_max),
+            state_count: 0,
+        };
+
+        // A read pushes one time for each active state learned, without growing the times.
+        assert!(states.active_indices.capacity() <= states.active_ns.capacity());
+        states
+    }
+}
+
 /// The count of channels of each kind one sample held.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct ChannelCounts {
@@ -347,10 +245,95 @@ impl Kind {
     }
 }
 
+fn channels_in_group(group: &CStr, subgroup: Option<&CStr>) -> io::Result<Owned> {
+    let group = string(group)?;
+    let subgroup = subgroup.map(string).transpose()?;
+    let channels = unsafe {
+        IOReportCopyChannelsInGroup(
+            group.0,
+            subgroup.as_ref().map_or(ptr::null(), |subgroup| subgroup.0),
+            0,
+            0,
+            0,
+        )
+    };
+    Owned::new(channels, "copying IOReport's channels in a group")
+}
+
+fn merge_group(into: &Owned, group: &CStr, subgroup: &CStr) -> io::Result<()> {
+    let more = channels_in_group(group, Some(subgroup))?;
+    unsafe { IOReportMergeChannels(into.0, more.0, ptr::null()) };
+
+    Ok(())
+}
+
+fn keep_read_channels(channels: &Owned, key: &Owned) -> io::Result<()> {
+    let all = channels_of(channels, key)?;
+    let kept = unsafe { CFArrayCreateMutable(ptr::null(), 0, &raw const kCFTypeArrayCallBacks) };
+    let kept = Owned::new(kept, "creating an array")?;
+
+    for channel in each(all)? {
+        if Kind::of(channel).is_some() {
+            unsafe { CFArrayAppendValue(kept.0, channel) };
+        }
+    }
+    unsafe { CFDictionarySetValue(channels.0, key.0, kept.0) };
+
+    Ok(())
+}
+
 /// Takes a sample of every channel `subscribed` holds.
 fn sample(subscription: &Owned, subscribed: &Owned) -> io::Result<Owned> {
     let samples = unsafe { IOReportCreateSamples(subscription.0, subscribed.0, ptr::null()) };
     Owned::new(samples, "sampling IOReport")
+}
+
+fn channels_of(dictionary: &Owned, key: &Owned) -> io::Result<CFTypeRef> {
+    let channels = unsafe { CFDictionaryGetValue(dictionary.0, key.0) };
+    if channels.is_null() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "IOReport gave no list of channels",
+        ));
+    }
+    if unsafe { CFGetTypeID(channels) } != unsafe { CFArrayGetTypeID() } {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "IOReport gave a list of channels that is not an array",
+        ));
+    }
+
+    Ok(channels)
+}
+
+/// The most channels walked in one list, past ten times the 383 the groups the collector reads
+/// hold on an M5 Pro.
+const CHANNELS_MAX: isize = 4096;
+
+/// Each channel in `array`, or an error where its count is not a count within the bound on
+/// walking one.
+fn each(array: CFTypeRef) -> io::Result<impl Iterator<Item = CFTypeRef>> {
+    let channel_count = channel_count_check(unsafe { CFArrayGetCount(array) })?;
+
+    Ok((0..channel_count).map(move |index| unsafe { CFArrayGetValueAtIndex(array, index) }))
+}
+
+/// Checks that a list's count of channels is a count, and within the bound on walking one.
+fn channel_count_check(channel_count: isize) -> io::Result<isize> {
+    if channel_count < 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("IOReport gave a list of {channel_count} channels"),
+        ));
+    }
+    if channel_count > CHANNELS_MAX {
+        return Err(io::Error::new(
+            io::ErrorKind::QuotaExceeded,
+            format!("IOReport gave a list of {channel_count} channels, past {CHANNELS_MAX}"),
+        ));
+    }
+
+    Ok(channel_count)
 }
 
 /// The core at `index` among `cores`, which hold one for each CPU the machine runs, so a core
@@ -393,6 +376,46 @@ fn learn_active_states(channel: CFTypeRef, into: &mut States) -> io::Result<()> 
     Ok(())
 }
 
+/// Whether the state `name` names counts as active, or an error where `IOReport` gave the state
+/// no name.
+fn learn_active_states_counts(name: CFTypeRef) -> io::Result<bool> {
+    if name.is_null() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "IOReport gave a state no name",
+        ));
+    }
+
+    for inactive in [c"OFF", c"IDLE", c"DOWN"] {
+        if is(name, inactive) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// The most states learned from one channel, past ten times the 22 a core of the M5 Pro
+/// reports.
+const STATES_MAX: i32 = 256;
+
+/// Checks that a channel's count of states is a count, and within the bound on learning them.
+fn state_count_check(state_count: i32) -> io::Result<i32> {
+    if state_count < 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("an IOReport channel reported {state_count} states"),
+        ));
+    }
+    if state_count > STATES_MAX {
+        return Err(io::Error::new(
+            io::ErrorKind::QuotaExceeded,
+            format!("an IOReport channel reported {state_count} states, past {STATES_MAX}"),
+        ));
+    }
+
+    Ok(state_count)
+}
+
 /// Reads the time `channel` spent in each state `into` learned as active. A channel whose
 /// states changed since then is an error, since the learned indices name other states.
 fn read_active_states(channel: CFTypeRef, into: &mut States, timebase: Timebase) -> io::Result<()> {
@@ -430,42 +453,6 @@ fn read_active_states_residency(residency: i64) -> io::Result<u64> {
     };
 
     Ok(ticks)
-}
-
-/// Whether the state `name` names counts as active, or an error where `IOReport` gave the state
-/// no name.
-fn learn_active_states_counts(name: CFTypeRef) -> io::Result<bool> {
-    if name.is_null() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "IOReport gave a state no name",
-        ));
-    }
-
-    for inactive in [c"OFF", c"IDLE", c"DOWN"] {
-        if is(name, inactive) {
-            return Ok(false);
-        }
-    }
-    Ok(true)
-}
-
-/// Checks that a channel's count of states is a count, and within the bound on learning them.
-fn state_count_check(state_count: i32) -> io::Result<i32> {
-    if state_count < 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("an IOReport channel reported {state_count} states"),
-        ));
-    }
-    if state_count > STATES_MAX {
-        return Err(io::Error::new(
-            io::ErrorKind::QuotaExceeded,
-            format!("an IOReport channel reported {state_count} states, past {STATES_MAX}"),
-        ));
-    }
-
-    Ok(state_count)
 }
 
 /// The units `IOReport` can give an energy in, each with the nanojoules in one of it.
@@ -522,91 +509,6 @@ fn energy_nj_of(value: i64, nj_per_unit: u64) -> io::Result<u64> {
     Ok(energy_nj)
 }
 
-fn channels_in_group(group: &CStr, subgroup: Option<&CStr>) -> io::Result<Owned> {
-    let group = string(group)?;
-    let subgroup = subgroup.map(string).transpose()?;
-    let channels = unsafe {
-        IOReportCopyChannelsInGroup(
-            group.0,
-            subgroup.as_ref().map_or(ptr::null(), |subgroup| subgroup.0),
-            0,
-            0,
-            0,
-        )
-    };
-    Owned::new(channels, "copying IOReport's channels in a group")
-}
-
-fn merge_group(into: &Owned, group: &CStr, subgroup: &CStr) -> io::Result<()> {
-    let more = channels_in_group(group, Some(subgroup))?;
-    unsafe { IOReportMergeChannels(into.0, more.0, ptr::null()) };
-
-    Ok(())
-}
-
-fn keep_read_channels(channels: &Owned, key: &Owned) -> io::Result<()> {
-    let all = channels_of(channels, key)?;
-    let kept = unsafe { CFArrayCreateMutable(ptr::null(), 0, &raw const kCFTypeArrayCallBacks) };
-    let kept = Owned::new(kept, "creating an array")?;
-
-    for channel in each(all)? {
-        if Kind::of(channel).is_some() {
-            unsafe { CFArrayAppendValue(kept.0, channel) };
-        }
-    }
-    unsafe { CFDictionarySetValue(channels.0, key.0, kept.0) };
-
-    Ok(())
-}
-
-fn channels_of(dictionary: &Owned, key: &Owned) -> io::Result<CFTypeRef> {
-    let channels = unsafe { CFDictionaryGetValue(dictionary.0, key.0) };
-    if channels.is_null() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "IOReport gave no list of channels",
-        ));
-    }
-    if unsafe { CFGetTypeID(channels) } != unsafe { CFArrayGetTypeID() } {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "IOReport gave a list of channels that is not an array",
-        ));
-    }
-
-    Ok(channels)
-}
-
-/// The most channels walked in one list, past ten times the 383 the groups the collector reads
-/// hold on an M5 Pro.
-const CHANNELS_MAX: isize = 4096;
-
-/// Each channel in `array`, or an error where its count is not a count within the bound on
-/// walking one.
-fn each(array: CFTypeRef) -> io::Result<impl Iterator<Item = CFTypeRef>> {
-    let channel_count = channel_count_check(unsafe { CFArrayGetCount(array) })?;
-
-    Ok((0..channel_count).map(move |index| unsafe { CFArrayGetValueAtIndex(array, index) }))
-}
-
-/// Checks that a list's count of channels is a count, and within the bound on walking one.
-fn channel_count_check(channel_count: isize) -> io::Result<isize> {
-    if channel_count < 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("IOReport gave a list of {channel_count} channels"),
-        ));
-    }
-    if channel_count > CHANNELS_MAX {
-        return Err(io::Error::new(
-            io::ErrorKind::QuotaExceeded,
-            format!("IOReport gave a list of {channel_count} channels, past {CHANNELS_MAX}"),
-        ));
-    }
-
-    Ok(channel_count)
-}
-
 fn string(text: &CStr) -> io::Result<Owned> {
     let created = unsafe { CFStringCreateWithCString(ptr::null(), text.as_ptr(), UTF8) };
     Owned::new(created, "creating a string")
@@ -628,6 +530,105 @@ fn is(text: CFTypeRef, want: &CStr) -> bool {
     }
 
     CStr::from_bytes_until_nul(&buffer).is_ok_and(|copied| copied == want)
+}
+
+/// A CoreFoundation object a create or copy call returned, which is never null and which only
+/// this owner releases.
+struct Owned(CFTypeRef);
+
+impl Owned {
+    /// Owns `object`, which the call `call` names returned, or reports the call where it
+    /// returned null.
+    fn new(object: CFTypeRef, call: &str) -> io::Result<Self> {
+        if object.is_null() {
+            return Err(io::Error::other(format!("{call} returned null")));
+        }
+
+        Ok(Self(object))
+    }
+}
+
+impl Drop for Owned {
+    fn drop(&mut self) {
+        assert!(!self.0.is_null());
+
+        unsafe { CFRelease(self.0) };
+    }
+}
+
+type CFTypeRef = *const c_void;
+
+/// The callbacks an array runs on its values, as `CFArrayCallBacks` declares them.
+#[repr(C)]
+struct ArrayCallBacks {
+    version: isize,
+    retain: *const c_void,
+    release: *const c_void,
+    copy_description: *const c_void,
+    equal: *const c_void,
+}
+
+const _: () = assert!(size_of::<ArrayCallBacks>() == 40);
+const _: () = assert!(align_of::<ArrayCallBacks>() == 8);
+
+const UTF8: u32 = 0x0800_0100;
+
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
+    static kCFTypeArrayCallBacks: ArrayCallBacks;
+    fn CFRelease(object: CFTypeRef);
+    fn CFGetTypeID(object: CFTypeRef) -> usize;
+    fn CFArrayGetTypeID() -> usize;
+    fn CFArrayGetCount(array: CFTypeRef) -> isize;
+    fn CFArrayGetValueAtIndex(array: CFTypeRef, index: isize) -> CFTypeRef;
+    fn CFArrayCreateMutable(
+        allocator: CFTypeRef,
+        capacity: isize,
+        callbacks: *const ArrayCallBacks,
+    ) -> CFTypeRef;
+    fn CFArrayAppendValue(array: CFTypeRef, value: CFTypeRef);
+    fn CFDictionaryGetValue(dictionary: CFTypeRef, key: CFTypeRef) -> CFTypeRef;
+    fn CFDictionarySetValue(dictionary: CFTypeRef, key: CFTypeRef, value: CFTypeRef);
+    fn CFStringCreateWithCString(
+        allocator: CFTypeRef,
+        text: *const c_char,
+        encoding: u32,
+    ) -> CFTypeRef;
+    fn CFStringGetCString(text: CFTypeRef, buffer: *mut c_char, size: isize, encoding: u32) -> u8;
+}
+
+// Apple documents none of IOReport, so the meaning of the last three arguments of
+// IOReportCopyChannelsInGroup is unknown, and the collector passes 0 for each.
+#[link(name = "IOReport")]
+unsafe extern "C" {
+    fn IOReportCopyChannelsInGroup(
+        group: CFTypeRef,
+        subgroup: CFTypeRef,
+        unknown_1: u64,
+        unknown_2: u64,
+        unknown_3: u64,
+    ) -> CFTypeRef;
+    fn IOReportMergeChannels(into: CFTypeRef, from: CFTypeRef, unused: CFTypeRef);
+    fn IOReportCreateSubscription(
+        unused: CFTypeRef,
+        desired: CFTypeRef,
+        subscribed: *mut CFTypeRef,
+        channel_id: u64,
+        options: CFTypeRef,
+    ) -> CFTypeRef;
+    fn IOReportCreateSamples(
+        subscription: CFTypeRef,
+        subscribed: CFTypeRef,
+        options: CFTypeRef,
+    ) -> CFTypeRef;
+    fn IOReportChannelGetGroup(channel: CFTypeRef) -> CFTypeRef;
+    fn IOReportChannelGetSubGroup(channel: CFTypeRef) -> CFTypeRef;
+    fn IOReportChannelGetChannelName(channel: CFTypeRef) -> CFTypeRef;
+    fn IOReportChannelGetUnitLabel(channel: CFTypeRef) -> CFTypeRef;
+    fn IOReportSimpleGetIntegerValue(channel: CFTypeRef, index: i32) -> i64;
+    fn IOReportStateGetCount(channel: CFTypeRef) -> i32;
+    fn IOReportStateGetNameForIndex(channel: CFTypeRef, index: i32) -> CFTypeRef;
+    fn IOReportStateGetResidency(channel: CFTypeRef, index: i32) -> i64;
 }
 
 #[cfg(test)]
