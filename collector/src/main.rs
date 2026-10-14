@@ -672,11 +672,15 @@ mod tests {
 
     #[test]
     fn runs_until_stopped_without_arguments() {
+        // Goal: a run given no arguments runs until it is stopped.
+        // Method: parse an empty argument list.
         assert_eq!(None, options_from(&arguments(&[])).unwrap().seconds);
     }
 
     #[test]
     fn runs_for_the_seconds_given() {
+        // Goal: --seconds sets how long a run lasts.
+        // Method: parse --seconds 5.
         assert_eq!(
             NonZeroU64::new(5),
             options_from(&arguments(&["--seconds", "5"]))
@@ -687,11 +691,15 @@ mod tests {
 
     #[test]
     fn rejects_a_run_of_zero_seconds() {
+        // Goal: a run of no seconds is a usage error, since it would report nothing.
+        // Method: parse --seconds 0.
         assert!(options_from(&arguments(&["--seconds", "0"])).is_err());
     }
 
     #[test]
     fn takes_no_rescan_interval_without_arguments() {
+        // Goal: a run given no arguments rescans after every wake that carries a fork.
+        // Method: parse an empty argument list.
         assert_eq!(
             Duration::ZERO,
             options_from(&arguments(&[])).unwrap().rescan_interval
@@ -700,6 +708,8 @@ mod tests {
 
     #[test]
     fn rescans_at_the_interval_given_in_milliseconds() {
+        // Goal: --rescan-ms sets the rescan interval in milliseconds.
+        // Method: parse --rescan-ms 20.
         assert_eq!(
             Duration::from_millis(20),
             options_from(&arguments(&["--rescan-ms", "20"]))
@@ -710,6 +720,8 @@ mod tests {
 
     #[test]
     fn takes_both_options_in_either_order() {
+        // Goal: the options parse in any order.
+        // Method: parse --rescan-ms before --seconds.
         assert_eq!(
             Ok(Options {
                 seconds: NonZeroU64::new(5),
@@ -721,11 +733,17 @@ mod tests {
 
     #[test]
     fn rejects_an_unknown_option() {
+        // Goal: a flag the collector does not take is a usage error.
+        // Method: parse --minutes 5.
         assert!(options_from(&arguments(&["--minutes", "5"])).is_err());
     }
 
     #[test]
     fn counts_the_pids_between_the_marks_less_those_live_at_the_first_scan() {
+        // Goal: the processes started are the pids between the marks, less those the first scan
+        // found already live.
+        // Method: count between pids 100 and 110 with two of the nine pids between them live at the
+        // first scan and three outside them.
         assert_eq!(
             Some(7),
             processes_started(100, 110, &[50, 103, 105, 110, 200], 1_000)
@@ -751,21 +769,31 @@ mod tests {
 
     #[test]
     fn gives_no_count_once_the_pids_wrapped() {
+        // Goal: a last mark below the first means the pids wrapped, so no count is given.
+        // Method: count with the last mark's pid below the first's.
         assert_eq!(None, processes_started(99_000, 300, &[], 1_000));
     }
 
     #[test]
     fn gives_no_count_once_the_forks_counted_could_fill_a_lap_of_pids() {
+        // Goal: enough forks to lap the pids could put the last mark past the first again, so
+        // no count is given.
+        // Method: count with as many forks as a lap of pids holds.
         assert_eq!(None, processes_started(100, 110, &[], pid_lap()));
     }
 
     #[test]
     fn counts_as_missed_the_processes_started_but_never_found() {
+        // Goal: the processes missed are those started less those found.
+        // Method: take 7 found from 10 started.
         assert_eq!(Some(3), missed(Some(10), 7));
     }
 
     #[test]
     fn gives_no_miss_count_when_more_were_found_than_the_pids_say_started() {
+        // Goal: more found than started means the count of starts is wrong, so no miss count
+        // is given.
+        // Method: take 11 found from 10 started.
         assert_eq!(None, missed(Some(10), 11));
     }
 
@@ -833,21 +861,29 @@ mod tests {
 
     #[test]
     fn closes_a_window_after_its_tenth_tick() {
+        // Goal: a window closes after its tenth tick.
+        // Method: ask whether tick 10 closes a window, with tick 11 following it.
         assert!(closes_span(10, 11, TICKS_PER_WINDOW));
     }
 
     #[test]
     fn keeps_a_window_open_before_its_tenth_tick() {
+        // Goal: a window stays open through its ninth tick.
+        // Method: ask whether tick 9 closes a window, with tick 10 following it.
         assert!(!closes_span(9, 10, TICKS_PER_WINDOW));
     }
 
     #[test]
     fn closes_a_window_whose_tenth_tick_slipped() {
+        // Goal: a window whose tenth tick slipped still closes, after the tick before it.
+        // Method: ask whether tick 9 closes a window, with tick 11 following it.
         assert!(closes_span(9, 11, TICKS_PER_WINDOW));
     }
 
     #[test]
     fn closes_a_minute_after_its_sixtieth_tick() {
+        // Goal: a minute closes after its sixtieth tick.
+        // Method: ask whether tick 60 closes a minute, with tick 61 following it.
         assert!(closes_span(60, 61, TICKS_PER_MINUTE));
     }
 
