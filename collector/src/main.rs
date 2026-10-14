@@ -259,8 +259,16 @@ impl Span {
     }
 }
 
+/// Whether the span of `ticks_per_span` ticks that holds `tick` ends before `following`,
+/// with spans counted from tick 1.
 fn closes_span(tick: u64, following: u64, ticks_per_span: u64) -> bool {
-    tick > 0 && (following - 1) / ticks_per_span > (tick - 1) / ticks_per_span
+    // `Run::start` runs the warm-up tick, 0, apart from every span.
+    assert!(tick > 0);
+    assert!(following > tick);
+    assert!(ticks_per_span > 0);
+
+    // Each division floors, to the span the tick falls in.
+    (following - 1) / ticks_per_span > (tick - 1) / ticks_per_span
 }
 
 fn throwaway_child() -> io::Result<i32> {
@@ -802,7 +810,10 @@ mod tests {
     }
 
     #[test]
-    fn opens_no_window_on_the_warm_up_tick() {
-        assert!(!closes_span(0, 1, TICKS_PER_WINDOW));
+    #[should_panic(expected = "tick > 0")]
+    fn refuses_the_warm_up_tick() {
+        // Goal: the warm-up tick, which `Run::start` runs apart, never reaches a span.
+        // Method: ask whether tick 0 closes a window.
+        closes_span(0, 1, TICKS_PER_WINDOW);
     }
 }
