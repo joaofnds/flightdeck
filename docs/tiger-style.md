@@ -52,7 +52,9 @@ snake_case too, which nothing checks.
 - Test exhaustively, with valid data, invalid data, and valid data turning invalid.
 - Allocate all memory at startup, and never allocate, or free and allocate again,
   after it. Size every buffer once, to a bound read from the system or chosen above the
-  largest need measured.
+  largest need measured. This binds the `collector` binary and the library code it runs.
+  A test and the code of a binary other than `collector` may allocate, and the library
+  code they call stays bound.
 - Handle every error. Report a failed kernel call, and never replace it with a made-up
   value, so an `unwrap_or` or `.ok()` that hides a failure is a defect. Write no
   `unwrap` and no `expect` outside tests, and no `as` conversion anywhere, tests
@@ -94,7 +96,14 @@ snake_case too, which nothing checks.
 ## Names, shapes and comments
 
 - Find the nouns and verbs that capture what a thing is or does in the domain.
-- Never abbreviate a name, except a plain integer in a sort or a matrix calculation.
+- Never abbreviate a name, except a plain integer in a sort or a matrix calculation, and a
+  name that mirrors a header. Where a header declares a type, its fields, a constant or a
+  function, name the Rust declaration as the header does, so each can be checked against
+  it. Write the type in CamelCase and the fields in snake_case, dropping the prefix they
+  all share or keeping it on every field, as `XswUsage` drops it from `xsu_avail`,
+  `Timespec` keeps `tv_sec`, and `copyDescription` becomes `copy_description`. Give a
+  value its full name where it leaves the declaration, as `received_packets` takes
+  `ipackets`.
 - Keep an acronym's capitals inside a longer name, as `IOReport` does. Write a name that
   is only an acronym as `Smc`, since clippy refuses `SMC` on a private item.
 - Put a name's unit or qualifier last, sorted by significance, as `latency_ms_max`.
@@ -143,7 +152,22 @@ snake_case too, which nothing checks.
   that runs on CI will decide the pace.
 - `usize` indexes, counts and sizes things in memory, where Tiger avoids it everywhere,
   because TigerBeetle's own code uses it that way and a ban would put a conversion
-  beside every slice index.
+  beside every slice index. Keep `usize` or `isize` in a C declaration for a type as wide
+  as a pointer, such as `size_t`, `uintptr_t`, `intptr_t` or `CFIndex`, as `Kevent` does
+  for its `ident` and its `data`, and convert the value to a type of fixed size where it
+  leaves the declaration, as `pid_of` makes the ident an `i32`.
+- A macOS call whose answer changes from tick to tick may allocate inside itself, and the
+  collector may free what it returns, only where no call found gives that reading without
+  root in memory the collector owns, as with `IOReportCreateSamples` and
+  `host_processor_info`. Tiger allocates nothing after startup, and the collector departs
+  from it here because completeness comes first, as
+  [recording-research.md](recording-research.md) records.
+- An error that ends the run, or one met while the run ends, may allocate its message,
+  where Tiger allocates nothing after startup, because the rule's reasons, steady
+  performance and no use after free, no longer apply to a run that is ending. Between
+  startup and the run's end, build no message that allocates for an error the collector
+  goes on from, and report it as `MachMemory` reports a refused free, with its status in
+  `eprintln!` and no `io::Error`.
 - Flightdeck sets no number of assertions a function, where Tiger asks for two on average,
   because code held to a count fills its accessors and thin wrappers with assertions that
   cannot fail.

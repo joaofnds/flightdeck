@@ -222,15 +222,14 @@ const EVENTS_PER_WAIT_MAX: usize = 64;
 const _: () = assert!(DEADLINE_TIMER != RESCAN_TIMER);
 const _: () = assert!(EVENTS_PER_WAIT_MAX > 0);
 
-/// One change to a kqueue, or one event it reports, as `struct kevent` declares it. Its
-/// `fflags` is named `filter_flags` here, since clippy refuses `fflags` beside `flags`.
+/// One change to a kqueue, or one event it reports, as `struct kevent` declares it.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Kevent {
     ident: usize,
     filter: i16,
     flags: u16,
-    filter_flags: u32,
+    fflags: u32,
     data: isize,
     udata: *mut c_void,
 }
@@ -239,7 +238,7 @@ const _: () = assert!(size_of::<Kevent>() == 32);
 const _: () = assert!(offset_of!(Kevent, ident) == 0);
 const _: () = assert!(offset_of!(Kevent, filter) == 8);
 const _: () = assert!(offset_of!(Kevent, flags) == 10);
-const _: () = assert!(offset_of!(Kevent, filter_flags) == 12);
+const _: () = assert!(offset_of!(Kevent, fflags) == 12);
 const _: () = assert!(offset_of!(Kevent, data) == 16);
 const _: () = assert!(offset_of!(Kevent, udata) == 24);
 
@@ -249,7 +248,7 @@ impl Kevent {
             ident,
             filter,
             flags,
-            filter_flags,
+            fflags: filter_flags,
             data,
             udata: std::ptr::null_mut(),
         }
@@ -667,13 +666,13 @@ fn follow_until_handle(
             }
         } else {
             let pid = pid_of(event.ident)?;
-            if event.filter_flags & NOTE_EXEC != 0 {
+            if event.fflags & NOTE_EXEC != 0 {
                 record(events, counts, Event::Exec { pid });
             }
-            if event.filter_flags & NOTE_EXIT != 0 {
+            if event.fflags & NOTE_EXIT != 0 {
                 push_without_growing(exits, (pid, Noticed::OnExit));
             }
-            if event.filter_flags & NOTE_FORK != 0 {
+            if event.fflags & NOTE_FORK != 0 {
                 counts.forks += 1;
                 wake.forked = true;
             }
