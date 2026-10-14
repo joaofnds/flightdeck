@@ -186,8 +186,9 @@ impl Forked {
             Err(error) => unreachable!("{error}"),
         };
 
-        // Forking reaps only the children it has forked.
+        // Forking reaps only the children it has forked, and each fork is late at most once.
         assert!(self.reaped.count <= forks);
+        assert!(self.late <= forks);
         forks
     }
 }
@@ -268,6 +269,8 @@ fn run_write_pids(file: &str, children: &[i32]) -> io::Result<()> {
 
     let mut out = io::BufWriter::new(std::fs::File::create(file)?);
     for pid in children {
+        // Forking returns only the pid of a child it forked.
+        assert!(*pid > 0);
         writeln!(out, "{pid}")?;
     }
     out.flush()
@@ -305,6 +308,8 @@ fn run_forks_wait_until(deadline: u64) -> io::Result<()> {
             "mach_wait_until returned {returned:#x}"
         )));
     }
+
+    assert_eq!(KERN_SUCCESS, returned);
     Ok(())
 }
 
@@ -318,6 +323,8 @@ struct Reaped {
 impl Reaped {
     /// Counts a child that exited with `status`, as a failure where it is not 0.
     fn add_exit(&mut self, status: c_int) {
+        assert!(self.failed <= self.count);
+
         self.count += 1;
         if status != 0 {
             self.failed += 1;
@@ -326,6 +333,8 @@ impl Reaped {
     }
 
     fn add(&mut self, other: &Reaped) {
+        assert!(other.failed <= other.count);
+
         self.count += other.count;
         self.failed += other.failed;
         assert!(self.failed <= self.count);
@@ -369,6 +378,7 @@ fn run_reap_rest(outstanding: u32) -> io::Result<Reaped> {
                 "waitpid returned no child though it was asked to wait for one",
             ));
         }
+        assert!(pid > 0);
         reaped.add_exit(status);
     }
 

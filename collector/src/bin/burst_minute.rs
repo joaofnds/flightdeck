@@ -140,6 +140,7 @@ fn run(options: &Options) -> io::Result<()> {
 fn run_minute(options: &Options, followprobe: &Path, reports: &Reports) -> io::Result<()> {
     // The two programs write to reports of their own, so neither's output lands in the other's.
     assert!(reports.collector.path != reports.followprobe.path);
+    assert!(followprobe.ends_with("followprobe"));
 
     let mut collector = StartedProcess::start(
         "collector",
@@ -186,20 +187,25 @@ fn run_minute_collector_arguments(collector: &CollectorCommand) -> Vec<String> {
     arguments.push(COLLECTOR_SECONDS.to_string());
 
     assert_eq!(arguments.len(), collector.arguments.len() + 2);
+    assert_eq!(Some(&COLLECTOR_SECONDS.to_string()), arguments.last());
     arguments
 }
 
 /// Lists followprobe's arguments in the order it reads them, `RESCAN_MS PER_SECOND SECONDS
 /// CHILD_MS GENERATORS`.
 fn run_burst_arguments(options: &Options) -> [String; 5] {
-    [
+    let arguments = [
         options.rescan_ms,
         options.per_second,
         BURST_SECONDS,
         BURST_CHILD_MS,
         BURST_GENERATORS,
     ]
-    .map(|number| number.to_string())
+    .map(|number| number.to_string());
+
+    assert_eq!(options.rescan_ms.to_string(), arguments[0]);
+    assert_eq!(BURST_GENERATORS.to_string(), arguments[4]);
+    arguments
 }
 
 /// Finds the `followprobe` built beside this program, in the same target directory.
@@ -243,6 +249,7 @@ fn run_write_conditions_stdout(program: &'static str, arguments: &[&str]) -> io:
 
     let output = OutputFile::create("output")?;
     let errors = OutputFile::create("errors")?;
+    assert!(output.path != errors.path);
     let mut process = StartedProcess::start(
         program,
         Command::new(program)

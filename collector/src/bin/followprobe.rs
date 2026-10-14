@@ -335,6 +335,7 @@ impl Generators {
     fn all_exited(&mut self) -> io::Result<bool> {
         // `start` started a generator for each pid file, of which a probe has one or more.
         assert!(!self.running.is_empty());
+        assert!(u64_from_usize(self.running.len()) <= GENERATORS_MAX);
 
         let mut all_exited = true;
         for generator in &mut self.running {
@@ -347,6 +348,7 @@ impl Generators {
                             generator.id()
                         )));
                     }
+                    assert!(status.success());
                 }
             }
         }
@@ -356,6 +358,9 @@ impl Generators {
 
 impl Drop for Generators {
     fn drop(&mut self) {
+        // A probe that failed while starting them may have started none of its generators.
+        assert!(u64_from_usize(self.running.len()) <= GENERATORS_MAX);
+
         for generator in &mut self.running {
             match generator.try_wait() {
                 Ok(Some(_)) => continue,
@@ -400,6 +405,7 @@ fn start_generator(probe: &Probe, pid_file: &Path) -> io::Result<Child> {
 
 fn run_remove_pid_files(pid_files: &[PathBuf]) -> io::Result<()> {
     assert!(!pid_files.is_empty());
+    assert!(u64_from_usize(pid_files.len()) <= GENERATORS_MAX);
 
     for file in pid_files {
         if let Err(error) = std::fs::remove_file(file) {
@@ -415,6 +421,7 @@ fn run_remove_pid_files(pid_files: &[PathBuf]) -> io::Result<()> {
 
 fn run_follow_read_children(pid_files: &[PathBuf]) -> io::Result<HashSet<i32>> {
     assert!(!pid_files.is_empty());
+    assert!(u64_from_usize(pid_files.len()) <= GENERATORS_MAX);
 
     let mut children = HashSet::new();
     for file in pid_files {
