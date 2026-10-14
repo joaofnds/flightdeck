@@ -466,7 +466,12 @@ const _: () = assert!(ENERGY_UNITS[2].1 == ENERGY_UNITS[1].1 * 1_000);
 
 /// The nanojoules in one unit of the energy `channel` gives.
 fn nj_per_unit(channel: CFTypeRef) -> io::Result<u64> {
-    let unit = unsafe { IOReportChannelGetUnitLabel(channel) };
+    nj_per_unit_of(unsafe { IOReportChannelGetUnitLabel(channel) })
+}
+
+/// The nanojoules in one of the unit `unit` labels, or an error where it labels no unit of
+/// `ENERGY_UNITS`.
+fn nj_per_unit_of(unit: CFTypeRef) -> io::Result<u64> {
     for (label, nj_per_unit) in ENERGY_UNITS {
         if is(unit, label) {
             return Ok(nj_per_unit);
@@ -641,6 +646,12 @@ mod tests {
     use crate::cost::spin_on_this_thread_for;
     use crate::machine;
 
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFRetain(object: CFTypeRef) -> CFTypeRef;
+        fn CFGetRetainCount(object: CFTypeRef) -> isize;
+    }
+
     fn logical_cpus() -> u32 {
         u32::from_ne_bytes(crate::kernel::sysctl_bytes(c"hw.logicalcpu"))
     }
@@ -679,6 +690,51 @@ mod tests {
             Some(io::ErrorKind::Other),
             owned.err().map(|error| error.kind())
         );
+    }
+
+    #[test]
+    fn releases_the_object_it_owns() {
+        // Goal: dropping an owner releases its object once, so no object leaks.
+        // Method: take a second reference to a new array, drop its owner, and count the
+        // references left.
+        let array =
+            unsafe { CFArrayCreateMutable(ptr::null(), 0, &raw const kCFTypeArrayCallBacks) };
+        let owned = Owned::new(array, "creating an array").unwrap();
+        unsafe { CFRetain(array) };
+
+        drop(owned);
+
+        let references = unsafe { CFGetRetainCount(array) };
+        unsafe { CFRelease(array) };
+        assert_eq!(1, references);
+    }
+
+    #[test]
+    fn takes_an_energy_in_millijoules() {
+        // Goal: an energy IOReport gives in millijoules reads as a million nanojoules a unit.
+        // Method: ask for the nanojoules in the unit IOReport labels "mJ".
+        let nj_per_unit = nj_per_unit_of(string(c"mJ").unwrap().0);
+
+        assert_eq!(1_000_000, nj_per_unit.unwrap());
+    }
+
+    #[test]
+    fn refuses_an_energy_in_an_unknown_unit() {
+        // Goal: an energy in a unit the collector does not know is an error, never a reading
+        // in another unit.
+        // Method: ask for the nanojoules in a unit labelled "kJ".
+        let nj_per_unit = nj_per_unit_of(string(c"kJ").unwrap().0);
+
+        assert_eq!(io::ErrorKind::InvalidData, nj_per_unit.unwrap_err().kind());
+    }
+
+    #[test]
+    fn refuses_an_energy_with_no_unit() {
+        // Goal: an energy IOReport gives no unit for is an error.
+        // Method: ask for the nanojoules in a null unit.
+        let nj_per_unit = nj_per_unit_of(ptr::null());
+
+        assert_eq!(io::ErrorKind::InvalidData, nj_per_unit.unwrap_err().kind());
     }
 
     #[test]
@@ -749,6 +805,15 @@ mod tests {
     }
 
     #[test]
+    fn takes_a_channel_with_no_states() {
+        // Goal: a channel with no states passes the check, and has no active state to learn.
+        // Method: check a count of 0.
+        let state_count = state_count_check(0);
+
+        assert_eq!(0, state_count.unwrap());
+    }
+
+    #[test]
     fn refuses_more_states_than_its_bound() {
         // Goal: a channel with more states than the bound is an error, so learning a channel's
         // states has a bound.
@@ -777,6 +842,16 @@ mod tests {
         let channel_count = channel_count_check(CHANNELS_MAX);
 
         assert_eq!(CHANNELS_MAX, channel_count.unwrap());
+    }
+
+    #[test]
+    fn takes_a_list_of_no_channels() {
+        // Goal: an empty list of channels passes the check, which leaves to open whether the
+        // channels it found are enough.
+        // Method: check a count of 0.
+        let channel_count = channel_count_check(0);
+
+        assert_eq!(0, channel_count.unwrap());
     }
 
     #[test]
@@ -1010,6 +1085,28 @@ mod tests {
     }
 
     #[test]
+    fn learns_only_the_active_states_of_a_core() {
+        // Goal: the states learned as active are those the filter counts as active, so a read
+        // adds no idle time and leaves out no active time.
+        // Method: learn a core's channel on this Mac, against the filter asked about each of
+        // its states.
+        let ioreport = open();
+        let samples = sample(&ioreport.subscription, &ioreport.subscribed).unwrap();
+        let core = first_channel(&ioreport, &samples, Kind::CoreStates);
+        let mut states = States::new(ACTIVE_STATES_MAX);
+
+        learn_active_states(core, &mut states).unwrap();
+
+        let active: Vec<i32> = (0..states.state_count)
+            .filter(|&index| {
+                learn_active_states_counts(unsafe { IOReportStateGetNameForIndex(core, index) })
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(active, states.active_indices);
+    }
+
+    #[test]
     fn refuses_a_channel_whose_states_changed_since_open() {
         // Goal: a channel that reports another number of states than it did at open is an
         // error, since the active states learned at open no longer name its states.
@@ -1116,6 +1213,26 @@ mod tests {
         ioreport.read().unwrap();
 
         assert!(ioreport.gpu.active_ns.iter().sum::<u64>() > 0);
+    }
+
+    #[test]
+    fn reads_the_gpus_energy_as_its_counter_holds_it() {
+        // Goal: each read takes the GPU's energy from its counter, which only grows.
+        // Method: sample the GPU's energy channel on its own between two reads, and hold what
+        // it gave between what the reads gave.
+        let mut ioreport = open();
+
+        ioreport.read().unwrap();
+        let before = ioreport.gpu_energy_nj;
+        let samples = sample(&ioreport.subscription, &ioreport.subscribed).unwrap();
+        let energy = first_channel(&ioreport, &samples, Kind::GpuEnergy);
+        let units = u64::try_from(unsafe { IOReportSimpleGetIntegerValue(energy, 0) }).unwrap();
+        ioreport.read().unwrap();
+        let after = ioreport.gpu_energy_nj;
+
+        let between = units * ioreport.gpu_nj_per_unit;
+        assert!(before <= between, "{before} nJ, then {between} nJ");
+        assert!(between <= after, "{between} nJ, then {after} nJ");
     }
 
     #[test]

@@ -39,6 +39,8 @@ jobs:
           --skip ioreport::tests::counts_the_energy_the_gpu_spends
           --skip ioreport::tests::counts_time_the_gpu_spends_in_active_states
           --skip ioreport::tests::finds_a_state_left_out_of_active_time_in_every_core_and_the_gpu
+          --skip ioreport::tests::learns_only_the_active_states_of_a_core
+          --skip ioreport::tests::reads_the_gpus_energy_as_its_counter_holds_it
           --skip ioreport::tests::reads_the_performance_states_of_every_logical_cpu
           --skip ioreport::tests::refuses_a_channel_whose_states_changed_since_open
           --skip ioreport::tests::refuses_a_channel_with_more_active_states_than_its_room
