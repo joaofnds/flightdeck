@@ -26,13 +26,14 @@ const FOLLOW_SECONDS_PAST_RUN: u64 = 10;
 const GENERATORS_MAX: u64 = 64;
 
 fn main() -> ExitCode {
-    let probe = match probe_from(&std::env::args().skip(1).collect::<Vec<_>>()) {
-        Ok(probe) => probe,
-        Err(usage) => {
-            eprintln!("{usage}");
-            return ExitCode::from(2);
-        }
-    };
+    let probe =
+        match collector::arguments("followprobe").and_then(|arguments| probe_from(&arguments)) {
+            Ok(probe) => probe,
+            Err(usage) => {
+                eprintln!("{usage}");
+                return ExitCode::from(2);
+            }
+        };
 
     match run(&probe) {
         Ok(()) => ExitCode::SUCCESS,

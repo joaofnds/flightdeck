@@ -23,13 +23,14 @@ unsafe extern "C" {
 }
 
 fn main() -> ExitCode {
-    let options = match options_from(&std::env::args().skip(1).collect::<Vec<_>>()) {
-        Ok(options) => options,
-        Err(usage) => {
-            eprintln!("{usage}");
-            return ExitCode::from(2);
-        }
-    };
+    let options =
+        match collector::arguments("collector").and_then(|arguments| options_from(&arguments)) {
+            Ok(options) => options,
+            Err(usage) => {
+                eprintln!("{usage}");
+                return ExitCode::from(2);
+            }
+        };
 
     match run(&options) {
         Ok(()) => ExitCode::SUCCESS,

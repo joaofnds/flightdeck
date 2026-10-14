@@ -28,7 +28,8 @@ unsafe extern "C" {
 }
 
 fn main() -> ExitCode {
-    let burst = match burst_from(&std::env::args().skip(1).collect::<Vec<_>>()) {
+    let burst = match collector::arguments("forkrate").and_then(|arguments| burst_from(&arguments))
+    {
         Ok(burst) => burst,
         Err(usage) => {
             eprintln!("{usage}");

@@ -26,8 +26,8 @@ static OUTPUT_FILES_CREATED: AtomicU64 = AtomicU64::new(0);
 const USAGE: &str = "usage: burst_minute --rescan-ms N --per-second N -- COLLECTOR [ARGUMENT...]";
 
 fn main() -> ExitCode {
-    let words: Vec<String> = std::env::args().skip(1).collect();
-    let options = match options_from(&words) {
+    let options = match collector::arguments("burst_minute").and_then(|words| options_from(&words))
+    {
         Ok(options) => options,
         Err(usage) => {
             eprintln!("{usage}");
