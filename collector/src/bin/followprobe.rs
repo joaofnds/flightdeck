@@ -301,21 +301,24 @@ impl Generators {
         Ok(generators)
     }
 
-    /// Whether every generator has exited, or an error where one exited with a failure, since
-    /// the children it wrote may then be short of those it forked.
+    /// Whether every generator has exited, or an error where any one exited with a failure,
+    /// since the children it wrote may then be short of those it forked.
     fn all_exited(&mut self) -> io::Result<bool> {
+        let mut all_exited = true;
         for generator in &mut self.running {
-            let Some(status) = generator.try_wait()? else {
-                return Ok(false);
-            };
-            if !status.success() {
-                return Err(io::Error::other(format!(
-                    "generator {} exited with {status}",
-                    generator.id()
-                )));
+            match generator.try_wait()? {
+                None => all_exited = false,
+                Some(status) => {
+                    if !status.success() {
+                        return Err(io::Error::other(format!(
+                            "generator {} exited with {status}",
+                            generator.id()
+                        )));
+                    }
+                }
             }
         }
-        Ok(true)
+        Ok(all_exited)
     }
 }
 
@@ -501,6 +504,55 @@ mod tests {
         let exited = generators.all_exited();
 
         assert_eq!(io::ErrorKind::Other, exited.unwrap_err().kind());
+    }
+
+    #[test]
+    fn a_running_generator_has_not_exited() {
+        // Goal: generators have not all exited while one still runs.
+        // Method: start a child that sleeps a minute, then ask whether the generators exited.
+        let running = Command::new("/bin/sleep").arg("60").spawn().unwrap();
+        let mut generators = Generators {
+            running: vec![running],
+        };
+
+        let exited = generators.all_exited();
+
+        assert!(!exited.unwrap());
+    }
+
+    #[test]
+    fn refuses_a_failed_generator_behind_a_running_one() {
+        // Goal: a generator that failed fails the probe at once, though one before it still
+        // runs, rather than once that one exits.
+        // Method: put a child that sleeps a minute before a child that ran false and exited,
+        // then ask whether the generators exited.
+        let running = Command::new("/bin/sleep").arg("60").spawn().unwrap();
+        let mut failed = Command::new("/usr/bin/false").spawn().unwrap();
+        failed.wait().unwrap();
+        let mut generators = Generators {
+            running: vec![running, failed],
+        };
+
+        let exited = generators.all_exited();
+
+        assert_eq!(io::ErrorKind::Other, exited.unwrap_err().kind());
+    }
+
+    #[test]
+    fn dropping_the_generators_stops_those_still_running() {
+        // Goal: generators dropped while one still runs stop it, rather than waiting for it,
+        // so a probe that fails leaves none running.
+        // Method: drop generators holding a child that sleeps a minute, timing the drop
+        // against half that minute.
+        let running = Command::new("/bin/sleep").arg("60").spawn().unwrap();
+        let generators = Generators {
+            running: vec![running],
+        };
+        let started = std::time::Instant::now();
+
+        drop(generators);
+
+        assert!(started.elapsed() < Duration::from_secs(30));
     }
 
     #[test]
