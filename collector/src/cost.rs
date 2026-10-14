@@ -331,6 +331,8 @@ mod tests {
 
     #[test]
     fn gives_the_cpu_spent_as_a_share_of_one_core() {
+        // Goal: CPU time reads as the share of one core it took over the span.
+        // Method: spend 0.1 s of CPU in ten seconds, a hundredth of a core.
         let cost = ten_seconds_later(100_000_000, 0, 0);
 
         assert!((cost.share_of_a_core() - 0.01).abs() < 1e-12);
@@ -338,6 +340,8 @@ mod tests {
 
     #[test]
     fn gives_the_energy_spent_as_average_power() {
+        // Goal: energy reads as the power it averaged over the span.
+        // Method: spend 25 mJ in ten seconds, 2.5 mW.
         let cost = ten_seconds_later(0, 25_000_000, 0);
 
         assert!((cost.milliwatts() - 2.5).abs() < 1e-12);
@@ -382,6 +386,10 @@ mod tests {
 
     #[test]
     fn gives_each_source_and_the_rest_in_milliseconds_a_second() {
+        // Goal: each source's time reads as milliseconds a second, and so does the CPU time
+        // no source took.
+        // Method: spend 0.1 s of CPU in ten seconds, 73 ms of it on processes and none on
+        // coalitions.
         let cost = ten_seconds_later(100_000_000, 0, 73_000_000);
 
         assert!((cost.ms_per_second(Source::Processes) - 7.3).abs() < 1e-12);
@@ -391,6 +399,8 @@ mod tests {
 
     #[test]
     fn gives_the_share_of_instructions_run_on_super_cores() {
+        // Goal: super core instructions read as their share of every instruction run.
+        // Method: run 3,000 of 4,000 instructions on super cores.
         let cost = ten_seconds_later(0, 0, 0);
 
         assert!((cost.share_on_super_cores() - 0.75).abs() < 1e-12);
@@ -462,6 +472,8 @@ mod tests {
 
     #[test]
     fn charges_a_measured_read_to_its_source() {
+        // Goal: the CPU time a measured read spends is charged to its source and no other.
+        // Method: spin 20 ms of CPU inside a read measured as coalitions.
         let mut meter = Meter::default();
 
         meter
