@@ -112,7 +112,7 @@ fn run(probe: &Probe) -> io::Result<()> {
             ))
         })
         .collect();
-    let followed = follow(
+    let followed = run_follow(
         probe,
         timebase,
         &mut tracker,
@@ -120,7 +120,7 @@ fn run(probe: &Probe) -> io::Result<()> {
         &pid_files,
         process_limit,
     );
-    let removed = remove_pid_files(&pid_files);
+    let removed = run_remove_pid_files(&pid_files);
     let followed = followed?;
     removed?;
 
@@ -240,7 +240,7 @@ fn run_report_children(followed: &Followed) -> io::Result<Children> {
 /// Starts a generator for each of `pid_files` and follows their children once a second
 /// until every generator has exited, or until the generators run past their run and their
 /// children's sleep by `FOLLOW_SECONDS_PAST_RUN`.
-fn follow(
+fn run_follow(
     probe: &Probe,
     timebase: Timebase,
     tracker: &mut Tracker,
@@ -282,7 +282,7 @@ fn follow(
             return Ok(Followed {
                 started,
                 read_at_exit,
-                children: read_children(pid_files)?,
+                children: run_follow_read_children(pid_files)?,
             });
         }
 
@@ -378,7 +378,7 @@ fn start_generator(probe: &Probe, pid_file: &Path) -> io::Result<Child> {
         .spawn()
 }
 
-fn remove_pid_files(pid_files: &[PathBuf]) -> io::Result<()> {
+fn run_remove_pid_files(pid_files: &[PathBuf]) -> io::Result<()> {
     for file in pid_files {
         if let Err(error) = std::fs::remove_file(file) {
             if error.kind() == io::ErrorKind::NotFound {
@@ -391,7 +391,7 @@ fn remove_pid_files(pid_files: &[PathBuf]) -> io::Result<()> {
     Ok(())
 }
 
-fn read_children(pid_files: &[PathBuf]) -> io::Result<HashSet<i32>> {
+fn run_follow_read_children(pid_files: &[PathBuf]) -> io::Result<HashSet<i32>> {
     let mut children = HashSet::new();
     for file in pid_files {
         for line in std::fs::read_to_string(file)?.lines() {
@@ -588,7 +588,7 @@ mod tests {
         let first = pid_file("reads_the_children_first", "101\n102\n");
         let second = pid_file("reads_the_children_second", "201\n202\n");
 
-        let children = read_children(&[first.clone(), second.clone()]);
+        let children = run_follow_read_children(&[first.clone(), second.clone()]);
         std::fs::remove_file(first).unwrap();
         std::fs::remove_file(second).unwrap();
 
@@ -602,7 +602,7 @@ mod tests {
         // Method: read a file that holds pid 101 twice.
         let file = pid_file("refuses_a_pid_forked_twice", "101\n102\n101\n");
 
-        let children = read_children(std::slice::from_ref(&file));
+        let children = run_follow_read_children(std::slice::from_ref(&file));
         std::fs::remove_file(file).unwrap();
 
         assert_eq!(io::ErrorKind::InvalidData, children.unwrap_err().kind());
@@ -614,7 +614,7 @@ mod tests {
         // Method: read a file whose second line is a word.
         let file = pid_file("refuses_a_line_that_is_not_a_pid", "101\nforked\n");
 
-        let children = read_children(std::slice::from_ref(&file));
+        let children = run_follow_read_children(std::slice::from_ref(&file));
         std::fs::remove_file(file).unwrap();
 
         assert_eq!(io::ErrorKind::InvalidData, children.unwrap_err().kind());
