@@ -180,18 +180,50 @@ impl Snapshot {
         })
     }
 
-    #[must_use]
-    pub fn cost_since(&self, earlier: &Snapshot) -> Cost {
-        Cost {
-            elapsed: Duration::from_nanos(self.at_ns - earlier.at_ns),
-            cpu: Duration::from_nanos(self.cpu_ns - earlier.cpu_ns),
-            energy_nj: self.energy_nj - earlier.energy_nj,
-            instructions: self.instructions - earlier.instructions,
-            super_instructions: self.super_instructions - earlier.super_instructions,
-            spent: std::array::from_fn(|source| {
-                Duration::from_nanos(self.spent_ns[source] - earlier.spent_ns[source])
-            }),
-        }
+    /// Returns what this process spent from `earlier` to this snapshot, or an error where a
+    /// counter macOS gives went back.
+    pub fn cost_since(&self, earlier: &Snapshot) -> io::Result<Cost> {
+        let elapsed_ns = self.cost_since_counter(earlier, "time", |snapshot| snapshot.at_ns)?;
+        let cpu_ns = self.cost_since_counter(earlier, "CPU time", |snapshot| snapshot.cpu_ns)?;
+        let energy_nj =
+            self.cost_since_counter(earlier, "energy", |snapshot| snapshot.energy_nj)?;
+        let instructions =
+            self.cost_since_counter(earlier, "instructions", |snapshot| snapshot.instructions)?;
+        let super_instructions =
+            self.cost_since_counter(earlier, "super core instructions", |snapshot| {
+                snapshot.super_instructions
+            })?;
+        let spent = std::array::from_fn(|source| {
+            assert!(self.spent_ns[source] >= earlier.spent_ns[source]);
+            Duration::from_nanos(self.spent_ns[source] - earlier.spent_ns[source])
+        });
+
+        Ok(Cost {
+            elapsed: Duration::from_nanos(elapsed_ns),
+            cpu: Duration::from_nanos(cpu_ns),
+            energy_nj,
+            instructions,
+            super_instructions,
+            spent,
+        })
+    }
+
+    /// Returns how far the counter that `read` reads, which `name` names, grew from `earlier`
+    /// to this snapshot.
+    fn cost_since_counter(
+        &self,
+        earlier: &Snapshot,
+        name: &str,
+        read: fn(&Snapshot) -> u64,
+    ) -> io::Result<u64> {
+        let before = read(earlier);
+        let after = read(self);
+        after.checked_sub(before).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("this process's {name} went back from {before} to {after}"),
+            )
+        })
     }
 }
 
@@ -256,27 +288,45 @@ fn f64_from_u64(value: u64) -> f64 {
 mod tests {
     use super::*;
 
+    const EARLIER: Snapshot = Snapshot {
+        at_ns: 5_000_000_000,
+        cpu_ns: 1_000,
+        energy_nj: 2_000,
+        spent_ns: [7; Source::ALL.len()],
+        instructions: 500,
+        super_instructions: 100,
+    };
+
     fn ten_seconds_later(cpu_ns: u64, energy_nj: u64, processes_ns: u64) -> Cost {
-        let earlier = Snapshot {
-            at_ns: 5_000_000_000,
-            cpu_ns: 1_000,
-            energy_nj: 2_000,
-            spent_ns: [7; Source::ALL.len()],
-            instructions: 500,
-            super_instructions: 100,
-        };
-        let mut spent_ns = [7; Source::ALL.len()];
+        let mut spent_ns = EARLIER.spent_ns;
         spent_ns[Source::Processes.index()] += processes_ns;
         let later = Snapshot {
-            at_ns: 15_000_000_000,
-            cpu_ns: 1_000 + cpu_ns,
-            energy_nj: 2_000 + energy_nj,
+            at_ns: EARLIER.at_ns + 10_000_000_000,
+            cpu_ns: EARLIER.cpu_ns + cpu_ns,
+            energy_nj: EARLIER.energy_nj + energy_nj,
             spent_ns,
-            instructions: 500 + 4_000,
-            super_instructions: 100 + 3_000,
+            instructions: EARLIER.instructions + 4_000,
+            super_instructions: EARLIER.super_instructions + 3_000,
         };
 
-        later.cost_since(&earlier)
+        later.cost_since(&EARLIER).unwrap()
+    }
+
+    #[test]
+    fn refuses_a_cost_over_a_counter_that_went_back() {
+        // Goal: a counter of this process that macOS gives lower than before is an error,
+        // never a subtraction that traps.
+        // Method: take the cost to a snapshot whose energy is a nanojoule below the earlier
+        // one's.
+        let later = Snapshot {
+            at_ns: EARLIER.at_ns + 1,
+            energy_nj: EARLIER.energy_nj - 1,
+            ..EARLIER
+        };
+
+        let cost = later.cost_since(&EARLIER);
+
+        assert_eq!(io::ErrorKind::InvalidData, cost.unwrap_err().kind());
     }
 
     #[test]

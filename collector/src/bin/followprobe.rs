@@ -88,7 +88,7 @@ fn run(probe: &Probe) -> io::Result<()> {
     let (started, read_at_exit, children) = followed?;
     removed?;
 
-    let cost = Snapshot::take(&meter, timebase)?.cost_since(&start);
+    let cost = Snapshot::take(&meter, timebase)?.cost_since(&start)?;
     let found = children.iter().filter(|pid| started.contains(pid)).count();
     let read = children
         .iter()
