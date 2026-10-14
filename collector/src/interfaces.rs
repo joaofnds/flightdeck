@@ -53,6 +53,7 @@ impl Name {
             length: name.len(),
         };
         assert!(taken.length <= IFNAMSIZ);
+        assert_eq!(name, &taken.bytes[..taken.length]);
         Ok(taken)
     }
 
@@ -100,6 +101,8 @@ impl Interfaces {
     }
 
     pub fn read_all(&mut self) -> io::Result<()> {
+        assert!(self.read.capacity() >= self.buffer.len() / size_of::<IfMsghdr2>());
+
         let filled = self.read_all_fill_buffer()?;
         let Some(dump) = self.buffer.get(..filled) else {
             return Err(io::Error::new(
@@ -157,6 +160,8 @@ impl Interfaces {
 /// messages of other kinds. A message the dump cannot hold, or that names no interface, is
 /// an error.
 fn read_all_messages(dump: &[u8], read: &mut Vec<Interface>) -> io::Result<()> {
+    assert!(read.is_empty());
+
     let mut offset = 0;
     while offset < dump.len() {
         let Some(header) = dump.get(offset..offset + MESSAGE_PREFIX_SIZE) else {
@@ -198,6 +203,8 @@ fn read_all_messages(dump: &[u8], read: &mut Vec<Interface>) -> io::Result<()> {
     }
 
     assert_eq!(dump.len(), offset);
+    // Each interface read took a whole header of its own message, which floors.
+    assert!(read.len() <= dump.len() / size_of::<IfMsghdr2>());
     Ok(())
 }
 
