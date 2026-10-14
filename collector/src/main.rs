@@ -85,11 +85,12 @@ fn run(options: &Options) -> io::Result<()> {
             .seconds
             .is_some_and(|seconds| following > seconds.get())
         {
-            let last_marker_pid = throwaway_child();
-            let markers = Markers {
-                first: first_marker_pid,
-                last: last_marker_pid,
-            };
+            let markers = first_marker_pid.and_then(|first| {
+                Ok(Markers {
+                    first,
+                    last: throwaway_child()?,
+                })
+            });
             return run.finish(tick, &markers, &mut out);
         }
 
@@ -122,8 +123,8 @@ struct Run {
 /// The pids of the children spawned before the first scan and after the last tick, which
 /// bound the pids of the processes that started over the run.
 struct Markers {
-    first: io::Result<i32>,
-    last: io::Result<i32>,
+    first: i32,
+    last: i32,
 }
 
 impl Run {
@@ -217,27 +218,27 @@ impl Run {
     }
 
     /// Writes the whole run's report, which ends at `last_tick`, and the processes it missed.
-    fn finish(&self, last_tick: u64, markers: &Markers, out: &mut impl Write) -> io::Result<()> {
+    fn finish(
+        &self,
+        last_tick: u64,
+        markers: &io::Result<Markers>,
+        out: &mut impl Write,
+    ) -> io::Result<()> {
         assert!(last_tick >= self.first_tick);
 
         let end = Mark::take(&self.meter, self.timebase, &self.collector)?;
         self.whole
             .report(out, "whole run, ticks", last_tick, &end)?;
-        match (&markers.first, &markers.last) {
-            (Ok(first), Ok(last)) => report_missed(
+        match markers {
+            Ok(markers) => report_missed(
                 out,
                 &Starts {
-                    started: processes_started(
-                        *first,
-                        *last,
-                        &self.live_at_first_scan,
-                        end.counts.forks,
-                    ),
+                    started: processes_started(markers, &self.live_at_first_scan, end.counts.forks),
                     found: self.warm_up_starts + self.whole.tally.starts,
                     dropped: end.counts.dropped_starts,
                 },
             ),
-            (Err(error), _) | (_, Err(error)) => writeln!(
+            Err(error) => writeln!(
                 out,
                 "  processes missed are not counted, a marker child failed: {error}"
             ),
@@ -334,8 +335,7 @@ fn starts_in(events: &[Event]) -> u64 {
 /// scan, or `None` where the pids may have wrapped. `live_at_first_scan` holds each pid once,
 /// in increasing order.
 fn processes_started(
-    first_marker_pid: i32,
-    last_marker_pid: i32,
+    markers: &Markers,
     live_at_first_scan: &[i32],
     forks_counted: u64,
 ) -> Option<u64> {
@@ -343,7 +343,7 @@ fn processes_started(
         assert!(listed[0] < listed[1]);
     }
 
-    if last_marker_pid <= first_marker_pid {
+    if markers.last <= markers.first {
         // The pids wrapped between the marks.
         return None;
     }
@@ -352,10 +352,10 @@ fn processes_started(
         return None;
     }
 
-    let between = u64::from((last_marker_pid - first_marker_pid - 1).cast_unsigned());
+    let between = u64::from((markers.last - markers.first - 1).cast_unsigned());
     let mut live_between = 0;
     for pid in live_at_first_scan {
-        if (first_marker_pid + 1..last_marker_pid).contains(pid) {
+        if (markers.first + 1..markers.last).contains(pid) {
             live_between += 1;
         }
     }
@@ -779,9 +779,13 @@ mod tests {
         // found already live.
         // Method: count between pids 100 and 110 with two of the nine pids between them live at the
         // first scan and three outside them.
+        let markers = Markers {
+            first: 100,
+            last: 110,
+        };
         assert_eq!(
             Some(7),
-            processes_started(100, 110, &[50, 103, 105, 110, 200], 1_000)
+            processes_started(&markers, &[50, 103, 105, 110, 200], 1_000)
         );
     }
 
@@ -802,7 +806,11 @@ mod tests {
     fn refuses_a_first_scan_out_of_order() {
         // Goal: the count takes the first scan's pids in increasing order.
         // Method: count with a listing in decreasing order.
-        processes_started(100, 104, &[103, 101], 1_000);
+        let markers = Markers {
+            first: 100,
+            last: 104,
+        };
+        processes_started(&markers, &[103, 101], 1_000);
     }
 
     #[test]
@@ -811,14 +819,22 @@ mod tests {
         // Goal: the count takes each of the first scan's pids once, since a pid listed
         // twice would take two pids off the processes started.
         // Method: count between marks one pid apart with that pid listed twice.
-        processes_started(100, 102, &[101, 101], 1_000);
+        let markers = Markers {
+            first: 100,
+            last: 102,
+        };
+        processes_started(&markers, &[101, 101], 1_000);
     }
 
     #[test]
     fn gives_no_count_once_the_pids_wrapped() {
         // Goal: a last mark below the first means the pids wrapped, so no count is given.
         // Method: count with the last mark's pid below the first's.
-        assert_eq!(None, processes_started(99_000, 300, &[], 1_000));
+        let markers = Markers {
+            first: 99_000,
+            last: 300,
+        };
+        assert_eq!(None, processes_started(&markers, &[], 1_000));
     }
 
     #[test]
@@ -826,7 +842,11 @@ mod tests {
         // Goal: enough forks to lap the pids could put the last mark past the first again, so
         // no count is given.
         // Method: count with as many forks as a lap of pids holds.
-        assert_eq!(None, processes_started(100, 110, &[], pid_lap()));
+        let markers = Markers {
+            first: 100,
+            last: 110,
+        };
+        assert_eq!(None, processes_started(&markers, &[], pid_lap()));
     }
 
     #[test]
