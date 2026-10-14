@@ -20,119 +20,6 @@ pub struct IOReport {
     counts: ChannelCounts,
 }
 
-impl IOReport {
-    pub fn open(timebase: Timebase, cpu_limit: usize) -> io::Result<Self> {
-        let channels_key = ChannelsKey::new()?;
-
-        let wanted = channels_in_group(&ENERGY_MODEL)?;
-        open_merge_group(&wanted, &GPU_PERFORMANCE_STATES)?;
-        open_merge_group(&wanted, &CPU_CORE_PERFORMANCE_STATES)?;
-        open_keep_read_channels(&wanted, &channels_key)?;
-
-        let subscription = Subscription::new(&wanted)?;
-
-        let mut ioreport = Self {
-            timebase,
-            channels_key,
-            subscription,
-            gpu_energy_nj: 0,
-            gpu_nj_per_unit: 0,
-            gpu: States::new(ACTIVE_STATES_MAX),
-            cores: (0..cpu_limit)
-                .map(|_| States::new(ACTIVE_STATES_MAX))
-                .collect(),
-            counts: ChannelCounts::default(),
-        };
-        ioreport.learn()?;
-
-        Ok(ioreport)
-    }
-
-    /// Learns from one sample the GPU's energy unit and which states of the GPU and of every
-    /// core are active, so a read finds each active state by its index and asks `IOReport` for
-    /// no state's name.
-    fn learn(&mut self) -> io::Result<()> {
-        assert_eq!(ChannelCounts::default(), self.counts);
-
-        let samples = self.subscription.sample()?;
-        let channels = self.channels_key.channels_of(&samples)?;
-
-        let mut counts = ChannelCounts::default();
-        for channel in each(channels)? {
-            match Kind::of(channel) {
-                Some(Kind::GPUEnergy) => {
-                    self.gpu_nj_per_unit = learn_nj_per_unit(channel)?;
-                    counts.gpu_energy += 1;
-                }
-                Some(Kind::GPUStates) => {
-                    learn_active_states(channel, &mut self.gpu)?;
-                    counts.gpu_states += 1;
-                }
-                Some(Kind::CoreStates) => {
-                    learn_active_states(channel, core_at(&mut self.cores, counts.core_states)?)?;
-                    counts.core_states += 1;
-                }
-                None => {}
-            }
-        }
-        counts.learn_check()?;
-        self.counts = counts;
-
-        assert!(self.gpu_nj_per_unit > 0);
-        assert!(self.counts.core_states <= self.cores.len());
-        Ok(())
-    }
-
-    pub fn read(&mut self) -> io::Result<()> {
-        assert!(self.gpu_nj_per_unit > 0);
-        assert!(self.counts.core_states <= self.cores.len());
-
-        let samples = self.subscription.sample()?;
-        let channels = self.channels_key.channels_of(&samples)?;
-
-        let mut counts = ChannelCounts::default();
-        let cores = &mut self.cores[..self.counts.core_states];
-        for channel in each(channels)? {
-            match Kind::of(channel) {
-                Some(Kind::GPUEnergy) => {
-                    self.gpu_energy_nj = read_energy_nj(channel, self.gpu_nj_per_unit)?;
-                    counts.gpu_energy += 1;
-                }
-                Some(Kind::GPUStates) => {
-                    read_active_states(channel, &mut self.gpu, self.timebase)?;
-                    counts.gpu_states += 1;
-                }
-                Some(Kind::CoreStates) => {
-                    let core = core_at(cores, counts.core_states)?;
-                    read_active_states(channel, core, self.timebase)?;
-                    counts.core_states += 1;
-                }
-                None => {}
-            }
-        }
-
-        counts.read_check(&self.counts)
-    }
-
-    /// The energy the GPU had spent at the last read, in nanojoules.
-    #[must_use]
-    pub fn gpu_energy_nj(&self) -> u64 {
-        self.gpu_energy_nj
-    }
-
-    /// The GPU's performance states.
-    #[must_use]
-    pub fn gpu(&self) -> &States {
-        &self.gpu
-    }
-
-    /// The performance states of each core open found.
-    #[must_use]
-    pub fn cores(&self) -> &[States] {
-        &self.cores[..self.counts.core_states]
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct States {
     active_ns: Vec<u64>,
@@ -345,6 +232,218 @@ impl ChannelsKey {
         }
 
         Ok(channels)
+    }
+}
+
+/// A CoreFoundation object a create or copy call returned, which is never null and which only
+/// this owner releases.
+struct Owned(CFTypeRef);
+
+impl Owned {
+    /// Owns `object`, which the call `call` names returned, or reports the call where it
+    /// returned null.
+    fn new(object: CFTypeRef, call: &str) -> io::Result<Self> {
+        if object.is_null() {
+            return Err(io::Error::other(format!("{call} returned null")));
+        }
+
+        Ok(Self(object))
+    }
+}
+
+impl Drop for Owned {
+    fn drop(&mut self) {
+        assert!(!self.0.is_null());
+
+        unsafe { CFRelease(self.0) };
+    }
+}
+
+type CFTypeRef = *const c_void;
+
+/// The callbacks an array runs on its values, as `CFArrayCallBacks` declares them.
+#[repr(C)]
+struct ArrayCallBacks {
+    version: isize,
+    retain: *const c_void,
+    release: *const c_void,
+    copy_description: *const c_void,
+    equal: *const c_void,
+}
+
+const _: () = assert!(size_of::<ArrayCallBacks>() == 40);
+const _: () = assert!(align_of::<ArrayCallBacks>() == 8);
+
+const UTF8: u32 = 0x0800_0100;
+
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
+    static kCFTypeArrayCallBacks: ArrayCallBacks;
+    fn CFRelease(object: CFTypeRef);
+    fn CFGetTypeID(object: CFTypeRef) -> c_ulong;
+    fn CFArrayGetTypeID() -> c_ulong;
+    fn CFArrayGetCount(array: CFTypeRef) -> isize;
+    fn CFArrayGetValueAtIndex(array: CFTypeRef, index: isize) -> CFTypeRef;
+    fn CFArrayCreateMutable(
+        allocator: CFTypeRef,
+        capacity: isize,
+        callbacks: *const ArrayCallBacks,
+    ) -> CFTypeRef;
+    fn CFArrayAppendValue(array: CFTypeRef, value: CFTypeRef);
+    fn CFDictionaryGetValue(dictionary: CFTypeRef, key: CFTypeRef) -> CFTypeRef;
+    fn CFDictionarySetValue(dictionary: CFTypeRef, key: CFTypeRef, value: CFTypeRef);
+    fn CFStringCreateWithCString(
+        allocator: CFTypeRef,
+        text: *const c_char,
+        encoding: u32,
+    ) -> CFTypeRef;
+    fn CFStringGetCString(text: CFTypeRef, buffer: *mut c_char, size: isize, encoding: u32) -> u8;
+}
+
+// Apple documents none of IOReport, so the meaning of the last three arguments of
+// IOReportCopyChannelsInGroup is unknown, and the collector passes 0 for each.
+#[link(name = "IOReport")]
+unsafe extern "C" {
+    fn IOReportCopyChannelsInGroup(
+        group: CFTypeRef,
+        subgroup: CFTypeRef,
+        unknown_1: u64,
+        unknown_2: u64,
+        unknown_3: u64,
+    ) -> CFTypeRef;
+    fn IOReportMergeChannels(into: CFTypeRef, from: CFTypeRef, unused: CFTypeRef);
+    fn IOReportCreateSubscription(
+        unused: CFTypeRef,
+        desired: CFTypeRef,
+        subscribed: *mut CFTypeRef,
+        channel_id: u64,
+        options: CFTypeRef,
+    ) -> CFTypeRef;
+    fn IOReportCreateSamples(
+        subscription: CFTypeRef,
+        subscribed: CFTypeRef,
+        options: CFTypeRef,
+    ) -> CFTypeRef;
+    fn IOReportChannelGetGroup(channel: CFTypeRef) -> CFTypeRef;
+    fn IOReportChannelGetSubGroup(channel: CFTypeRef) -> CFTypeRef;
+    fn IOReportChannelGetChannelName(channel: CFTypeRef) -> CFTypeRef;
+    fn IOReportChannelGetUnitLabel(channel: CFTypeRef) -> CFTypeRef;
+    fn IOReportSimpleGetIntegerValue(channel: CFTypeRef, index: i32) -> i64;
+    fn IOReportStateGetCount(channel: CFTypeRef) -> i32;
+    fn IOReportStateGetNameForIndex(channel: CFTypeRef, index: i32) -> CFTypeRef;
+    fn IOReportStateGetResidency(channel: CFTypeRef, index: i32) -> i64;
+}
+
+impl IOReport {
+    pub fn open(timebase: Timebase, cpu_limit: usize) -> io::Result<Self> {
+        let channels_key = ChannelsKey::new()?;
+
+        let wanted = channels_in_group(&ENERGY_MODEL)?;
+        open_merge_group(&wanted, &GPU_PERFORMANCE_STATES)?;
+        open_merge_group(&wanted, &CPU_CORE_PERFORMANCE_STATES)?;
+        open_keep_read_channels(&wanted, &channels_key)?;
+
+        let subscription = Subscription::new(&wanted)?;
+
+        let mut ioreport = Self {
+            timebase,
+            channels_key,
+            subscription,
+            gpu_energy_nj: 0,
+            gpu_nj_per_unit: 0,
+            gpu: States::new(ACTIVE_STATES_MAX),
+            cores: (0..cpu_limit)
+                .map(|_| States::new(ACTIVE_STATES_MAX))
+                .collect(),
+            counts: ChannelCounts::default(),
+        };
+        ioreport.learn()?;
+
+        Ok(ioreport)
+    }
+
+    /// Learns from one sample the GPU's energy unit and which states of the GPU and of every
+    /// core are active, so a read finds each active state by its index and asks `IOReport` for
+    /// no state's name.
+    fn learn(&mut self) -> io::Result<()> {
+        assert_eq!(ChannelCounts::default(), self.counts);
+
+        let samples = self.subscription.sample()?;
+        let channels = self.channels_key.channels_of(&samples)?;
+
+        let mut counts = ChannelCounts::default();
+        for channel in each(channels)? {
+            match Kind::of(channel) {
+                Some(Kind::GPUEnergy) => {
+                    self.gpu_nj_per_unit = learn_nj_per_unit(channel)?;
+                    counts.gpu_energy += 1;
+                }
+                Some(Kind::GPUStates) => {
+                    learn_active_states(channel, &mut self.gpu)?;
+                    counts.gpu_states += 1;
+                }
+                Some(Kind::CoreStates) => {
+                    learn_active_states(channel, core_at(&mut self.cores, counts.core_states)?)?;
+                    counts.core_states += 1;
+                }
+                None => {}
+            }
+        }
+        counts.learn_check()?;
+        self.counts = counts;
+
+        assert!(self.gpu_nj_per_unit > 0);
+        assert!(self.counts.core_states <= self.cores.len());
+        Ok(())
+    }
+
+    pub fn read(&mut self) -> io::Result<()> {
+        assert!(self.gpu_nj_per_unit > 0);
+        assert!(self.counts.core_states <= self.cores.len());
+
+        let samples = self.subscription.sample()?;
+        let channels = self.channels_key.channels_of(&samples)?;
+
+        let mut counts = ChannelCounts::default();
+        let cores = &mut self.cores[..self.counts.core_states];
+        for channel in each(channels)? {
+            match Kind::of(channel) {
+                Some(Kind::GPUEnergy) => {
+                    self.gpu_energy_nj = read_energy_nj(channel, self.gpu_nj_per_unit)?;
+                    counts.gpu_energy += 1;
+                }
+                Some(Kind::GPUStates) => {
+                    read_active_states(channel, &mut self.gpu, self.timebase)?;
+                    counts.gpu_states += 1;
+                }
+                Some(Kind::CoreStates) => {
+                    let core = core_at(cores, counts.core_states)?;
+                    read_active_states(channel, core, self.timebase)?;
+                    counts.core_states += 1;
+                }
+                None => {}
+            }
+        }
+
+        counts.read_check(&self.counts)
+    }
+
+    /// The energy the GPU had spent at the last read, in nanojoules.
+    #[must_use]
+    pub fn gpu_energy_nj(&self) -> u64 {
+        self.gpu_energy_nj
+    }
+
+    /// The GPU's performance states.
+    #[must_use]
+    pub fn gpu(&self) -> &States {
+        &self.gpu
+    }
+
+    /// The performance states of each core open found.
+    #[must_use]
+    pub fn cores(&self) -> &[States] {
+        &self.cores[..self.counts.core_states]
     }
 }
 
@@ -628,105 +727,6 @@ fn is(text: CFTypeRef, want: &CStr) -> bool {
     }
 
     CStr::from_bytes_until_nul(&buffer).is_ok_and(|copied| copied == want)
-}
-
-/// A CoreFoundation object a create or copy call returned, which is never null and which only
-/// this owner releases.
-struct Owned(CFTypeRef);
-
-impl Owned {
-    /// Owns `object`, which the call `call` names returned, or reports the call where it
-    /// returned null.
-    fn new(object: CFTypeRef, call: &str) -> io::Result<Self> {
-        if object.is_null() {
-            return Err(io::Error::other(format!("{call} returned null")));
-        }
-
-        Ok(Self(object))
-    }
-}
-
-impl Drop for Owned {
-    fn drop(&mut self) {
-        assert!(!self.0.is_null());
-
-        unsafe { CFRelease(self.0) };
-    }
-}
-
-type CFTypeRef = *const c_void;
-
-/// The callbacks an array runs on its values, as `CFArrayCallBacks` declares them.
-#[repr(C)]
-struct ArrayCallBacks {
-    version: isize,
-    retain: *const c_void,
-    release: *const c_void,
-    copy_description: *const c_void,
-    equal: *const c_void,
-}
-
-const _: () = assert!(size_of::<ArrayCallBacks>() == 40);
-const _: () = assert!(align_of::<ArrayCallBacks>() == 8);
-
-const UTF8: u32 = 0x0800_0100;
-
-#[link(name = "CoreFoundation", kind = "framework")]
-unsafe extern "C" {
-    static kCFTypeArrayCallBacks: ArrayCallBacks;
-    fn CFRelease(object: CFTypeRef);
-    fn CFGetTypeID(object: CFTypeRef) -> c_ulong;
-    fn CFArrayGetTypeID() -> c_ulong;
-    fn CFArrayGetCount(array: CFTypeRef) -> isize;
-    fn CFArrayGetValueAtIndex(array: CFTypeRef, index: isize) -> CFTypeRef;
-    fn CFArrayCreateMutable(
-        allocator: CFTypeRef,
-        capacity: isize,
-        callbacks: *const ArrayCallBacks,
-    ) -> CFTypeRef;
-    fn CFArrayAppendValue(array: CFTypeRef, value: CFTypeRef);
-    fn CFDictionaryGetValue(dictionary: CFTypeRef, key: CFTypeRef) -> CFTypeRef;
-    fn CFDictionarySetValue(dictionary: CFTypeRef, key: CFTypeRef, value: CFTypeRef);
-    fn CFStringCreateWithCString(
-        allocator: CFTypeRef,
-        text: *const c_char,
-        encoding: u32,
-    ) -> CFTypeRef;
-    fn CFStringGetCString(text: CFTypeRef, buffer: *mut c_char, size: isize, encoding: u32) -> u8;
-}
-
-// Apple documents none of IOReport, so the meaning of the last three arguments of
-// IOReportCopyChannelsInGroup is unknown, and the collector passes 0 for each.
-#[link(name = "IOReport")]
-unsafe extern "C" {
-    fn IOReportCopyChannelsInGroup(
-        group: CFTypeRef,
-        subgroup: CFTypeRef,
-        unknown_1: u64,
-        unknown_2: u64,
-        unknown_3: u64,
-    ) -> CFTypeRef;
-    fn IOReportMergeChannels(into: CFTypeRef, from: CFTypeRef, unused: CFTypeRef);
-    fn IOReportCreateSubscription(
-        unused: CFTypeRef,
-        desired: CFTypeRef,
-        subscribed: *mut CFTypeRef,
-        channel_id: u64,
-        options: CFTypeRef,
-    ) -> CFTypeRef;
-    fn IOReportCreateSamples(
-        subscription: CFTypeRef,
-        subscribed: CFTypeRef,
-        options: CFTypeRef,
-    ) -> CFTypeRef;
-    fn IOReportChannelGetGroup(channel: CFTypeRef) -> CFTypeRef;
-    fn IOReportChannelGetSubGroup(channel: CFTypeRef) -> CFTypeRef;
-    fn IOReportChannelGetChannelName(channel: CFTypeRef) -> CFTypeRef;
-    fn IOReportChannelGetUnitLabel(channel: CFTypeRef) -> CFTypeRef;
-    fn IOReportSimpleGetIntegerValue(channel: CFTypeRef, index: i32) -> i64;
-    fn IOReportStateGetCount(channel: CFTypeRef) -> i32;
-    fn IOReportStateGetNameForIndex(channel: CFTypeRef, index: i32) -> CFTypeRef;
-    fn IOReportStateGetResidency(channel: CFTypeRef, index: i32) -> i64;
 }
 
 #[cfg(test)]

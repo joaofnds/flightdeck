@@ -14,63 +14,6 @@ pub struct Smc {
     soc_celsius: f32,
 }
 
-impl Smc {
-    pub fn open() -> io::Result<Self> {
-        let connection = Connection::open()?;
-        let power = connection.float_key(SYSTEM_POWER)?;
-        let fan_count = connection.fan_count()?;
-        let fans = (0..fan_count)
-            .map(|fan_index| connection.float_key(Key::fan_speed(fan_index)))
-            .collect::<io::Result<Vec<FloatKey>>>()?;
-        let soc_sensor = connection.hottest_soc_sensor()?;
-        let fan_rpm = Vec::with_capacity(fans.len());
-        assert_eq!(usize::from(fan_count), fans.len());
-        assert!(fans.len() <= fan_rpm.capacity());
-
-        Ok(Self {
-            connection,
-            power,
-            fans,
-            soc_sensor,
-            power_watts: 0.0,
-            fan_rpm,
-            soc_celsius: 0.0,
-        })
-    }
-
-    pub fn read(&mut self) -> io::Result<()> {
-        assert!(self.fans.len() <= self.fan_rpm.capacity());
-
-        self.power_watts = self.connection.read_float(self.power)?;
-        self.fan_rpm.clear();
-        for &fan in &self.fans {
-            push_without_growing(&mut self.fan_rpm, self.connection.read_float(fan)?);
-        }
-        assert_eq!(self.fans.len(), self.fan_rpm.len());
-        self.soc_celsius = self.connection.read_float(self.soc_sensor)?;
-
-        Ok(())
-    }
-
-    /// The power the Mac drew at the last read, in watts.
-    #[must_use]
-    pub fn power_watts(&self) -> f32 {
-        self.power_watts
-    }
-
-    /// The speed of each fan at the last read, in revolutions a minute.
-    #[must_use]
-    pub fn fan_rpm(&self) -> &[f32] {
-        &self.fan_rpm
-    }
-
-    /// The temperature at the last read of the chip's sensor open picked, in degrees Celsius.
-    #[must_use]
-    pub fn soc_celsius(&self) -> f32 {
-        self.soc_celsius
-    }
-}
-
 /// A key the SMC holds as a float, as its info showed when the key was checked, so a read of
 /// it each tick need not ask again.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -310,125 +253,11 @@ impl Connection {
     }
 }
 
-/// What the SMC answered `question` with, from what the call returned, the size of the answer
-/// it wrote, and the answer: the answer, or an error where the call failed, the answer is
-/// short, the SMC has no key the question names, or the SMC refused the question.
-fn ask_answered(
-    question: &Message,
-    returned: KernReturn,
-    answer_size: usize,
-    answer: Message,
-) -> io::Result<Message> {
-    assert!(COMMANDS.contains(&question.command));
-
-    kern_return_check(returned, "calling the SMC")?;
-    if answer_size != size_of::<Message>() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "the SMC answered with {answer_size} bytes, where a message holds {}",
-                size_of::<Message>()
-            ),
-        ));
-    }
-    if answer.result == KEY_NOT_FOUND {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!(
-                "the SMC has no key {:?} for command {} at index {}",
-                Key(question.key),
-                question.command,
-                question.index
-            ),
-        ));
-    }
-    if answer.result != SUCCESS {
-        return Err(io::Error::other(format!(
-            "the SMC refused a question with result {}",
-            answer.result
-        )));
-    }
-
-    Ok(answer)
-}
-
-/// Checks that a Mach call, which `call` names, returned success.
-fn kern_return_check(returned: KernReturn, call: &str) -> io::Result<()> {
-    if returned != kernel::KERN_SUCCESS {
-        return Err(io::Error::other(format!("{call} returned {returned:#x}")));
-    }
-
-    Ok(())
-}
-
 /// A key, and the info the SMC holds it with.
 #[derive(Clone, Copy)]
 struct Held {
     key: Key,
     info: KeyInfo,
-}
-
-/// Checks that the SMC holds a key as a value of `wanted`, from the info `held` gives.
-fn held_check_of(held: Held, wanted: KeyInfo) -> io::Result<()> {
-    if !held.info.is(wanted) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "the SMC holds {:?} as {:?}, which is not {wanted:?}",
-                held.key, held.info
-            ),
-        ));
-    }
-
-    Ok(())
-}
-
-/// Checks that the SMC counts no more fans than its keys can name.
-fn fan_count_check(fan_count: u8) -> io::Result<()> {
-    if fan_count > FANS_MAX {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("the SMC counts {fan_count} fans, past the {FANS_MAX} its keys can name"),
-        ));
-    }
-
-    Ok(())
-}
-
-/// Checks that the SMC lists no more keys than open lists.
-fn key_count_check(key_count: u32) -> io::Result<()> {
-    if key_count > KEYS_MAX {
-        return Err(io::Error::new(
-            io::ErrorKind::QuotaExceeded,
-            format!("the SMC lists {key_count} keys, past the {KEYS_MAX} open lists"),
-        ));
-    }
-
-    Ok(())
-}
-
-/// The hotter of `hottest`, the hottest reading so far, and `reading`, leaving out a reading
-/// that is not a finite number.
-fn hottest_soc_sensor_of(
-    hottest: Option<(FloatKey, f32)>,
-    reading: (FloatKey, f32),
-) -> Option<(FloatKey, f32)> {
-    let (sensor, celsius) = reading;
-    assert!(sensor.0.is_soc_temperature());
-
-    if !celsius.is_finite() {
-        return hottest;
-    }
-
-    if let Some((hottest_sensor, hottest_celsius)) = hottest {
-        assert!(hottest_sensor.0.is_soc_temperature());
-        assert!(hottest_celsius.is_finite());
-        if hottest_celsius >= celsius {
-            return hottest;
-        }
-    }
-
-    Some(reading)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -576,6 +405,177 @@ const COMMANDS: [u8; 3] = [READ_BYTES, READ_INDEX, READ_KEY_INFO];
 const SUCCESS: u8 = 0;
 /// The result an answer holds where the SMC has no key of the name asked for.
 const KEY_NOT_FOUND: u8 = 132;
+
+impl Smc {
+    pub fn open() -> io::Result<Self> {
+        let connection = Connection::open()?;
+        let power = connection.float_key(SYSTEM_POWER)?;
+        let fan_count = connection.fan_count()?;
+        let fans = (0..fan_count)
+            .map(|fan_index| connection.float_key(Key::fan_speed(fan_index)))
+            .collect::<io::Result<Vec<FloatKey>>>()?;
+        let soc_sensor = connection.hottest_soc_sensor()?;
+        let fan_rpm = Vec::with_capacity(fans.len());
+        assert_eq!(usize::from(fan_count), fans.len());
+        assert!(fans.len() <= fan_rpm.capacity());
+
+        Ok(Self {
+            connection,
+            power,
+            fans,
+            soc_sensor,
+            power_watts: 0.0,
+            fan_rpm,
+            soc_celsius: 0.0,
+        })
+    }
+
+    pub fn read(&mut self) -> io::Result<()> {
+        assert!(self.fans.len() <= self.fan_rpm.capacity());
+
+        self.power_watts = self.connection.read_float(self.power)?;
+        self.fan_rpm.clear();
+        for &fan in &self.fans {
+            push_without_growing(&mut self.fan_rpm, self.connection.read_float(fan)?);
+        }
+        assert_eq!(self.fans.len(), self.fan_rpm.len());
+        self.soc_celsius = self.connection.read_float(self.soc_sensor)?;
+
+        Ok(())
+    }
+
+    /// The power the Mac drew at the last read, in watts.
+    #[must_use]
+    pub fn power_watts(&self) -> f32 {
+        self.power_watts
+    }
+
+    /// The speed of each fan at the last read, in revolutions a minute.
+    #[must_use]
+    pub fn fan_rpm(&self) -> &[f32] {
+        &self.fan_rpm
+    }
+
+    /// The temperature at the last read of the chip's sensor open picked, in degrees Celsius.
+    #[must_use]
+    pub fn soc_celsius(&self) -> f32 {
+        self.soc_celsius
+    }
+}
+
+/// What the SMC answered `question` with, from what the call returned, the size of the answer
+/// it wrote, and the answer: the answer, or an error where the call failed, the answer is
+/// short, the SMC has no key the question names, or the SMC refused the question.
+fn ask_answered(
+    question: &Message,
+    returned: KernReturn,
+    answer_size: usize,
+    answer: Message,
+) -> io::Result<Message> {
+    assert!(COMMANDS.contains(&question.command));
+
+    kern_return_check(returned, "calling the SMC")?;
+    if answer_size != size_of::<Message>() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "the SMC answered with {answer_size} bytes, where a message holds {}",
+                size_of::<Message>()
+            ),
+        ));
+    }
+    if answer.result == KEY_NOT_FOUND {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "the SMC has no key {:?} for command {} at index {}",
+                Key(question.key),
+                question.command,
+                question.index
+            ),
+        ));
+    }
+    if answer.result != SUCCESS {
+        return Err(io::Error::other(format!(
+            "the SMC refused a question with result {}",
+            answer.result
+        )));
+    }
+
+    Ok(answer)
+}
+
+/// Checks that a Mach call, which `call` names, returned success.
+fn kern_return_check(returned: KernReturn, call: &str) -> io::Result<()> {
+    if returned != kernel::KERN_SUCCESS {
+        return Err(io::Error::other(format!("{call} returned {returned:#x}")));
+    }
+
+    Ok(())
+}
+
+/// Checks that the SMC holds a key as a value of `wanted`, from the info `held` gives.
+fn held_check_of(held: Held, wanted: KeyInfo) -> io::Result<()> {
+    if !held.info.is(wanted) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "the SMC holds {:?} as {:?}, which is not {wanted:?}",
+                held.key, held.info
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Checks that the SMC counts no more fans than its keys can name.
+fn fan_count_check(fan_count: u8) -> io::Result<()> {
+    if fan_count > FANS_MAX {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("the SMC counts {fan_count} fans, past the {FANS_MAX} its keys can name"),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Checks that the SMC lists no more keys than open lists.
+fn key_count_check(key_count: u32) -> io::Result<()> {
+    if key_count > KEYS_MAX {
+        return Err(io::Error::new(
+            io::ErrorKind::QuotaExceeded,
+            format!("the SMC lists {key_count} keys, past the {KEYS_MAX} open lists"),
+        ));
+    }
+
+    Ok(())
+}
+
+/// The hotter of `hottest`, the hottest reading so far, and `reading`, leaving out a reading
+/// that is not a finite number.
+fn hottest_soc_sensor_of(
+    hottest: Option<(FloatKey, f32)>,
+    reading: (FloatKey, f32),
+) -> Option<(FloatKey, f32)> {
+    let (sensor, celsius) = reading;
+    assert!(sensor.0.is_soc_temperature());
+
+    if !celsius.is_finite() {
+        return hottest;
+    }
+
+    if let Some((hottest_sensor, hottest_celsius)) = hottest {
+        assert!(hottest_sensor.0.is_soc_temperature());
+        assert!(hottest_celsius.is_finite());
+        if hottest_celsius >= celsius {
+            return hottest;
+        }
+    }
+
+    Some(reading)
+}
 
 #[cfg(test)]
 mod tests {
