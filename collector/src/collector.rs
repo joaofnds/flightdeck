@@ -18,8 +18,10 @@ pub struct Collector {
     pub tracker: Tracker,
     pub machine: Machine,
     pub interfaces: Interfaces,
-    pub ioreport: IOReport,
-    pub smc: Smc,
+    /// `None` where `IOReport` failed to open, as on a Mac with none of its channels.
+    pub ioreport: Option<IOReport>,
+    /// `None` where the SMC failed to open, as on a Mac with no SMC.
+    pub smc: Option<Smc>,
     pub processes: Sweep,
     pub coalitions: Coalitions,
     events: Vec<Event>,
@@ -45,8 +47,8 @@ impl Collector {
             tracker: Tracker::new(timebase, rescan_interval, limits)?,
             machine: Machine::new(cpu_limit)?,
             interfaces: Interfaces::default(),
-            ioreport: IOReport::open(timebase, cpu_limit)?,
-            smc: Smc::open()?,
+            ioreport: new_source("IOReport", IOReport::open(timebase, cpu_limit)),
+            smc: new_source("SMC", Smc::open()),
             processes: Sweep::new(limits.process_limit),
             coalitions: Coalitions::new(timebase, coalition_limit),
             // The tracker holds at most this many events a tick, so a tick's events fit.
@@ -81,8 +83,12 @@ impl Collector {
 
         meter.measure(Source::Machine, || self.machine.read())?;
         meter.measure(Source::Interfaces, || self.interfaces.read())?;
-        meter.measure(Source::IOReport, || self.ioreport.read())?;
-        meter.measure(Source::Smc, || self.smc.read())?;
+        if let Some(ioreport) = &mut self.ioreport {
+            meter.measure(Source::IOReport, || ioreport.read())?;
+        }
+        if let Some(smc) = &mut self.smc {
+            meter.measure(Source::Smc, || smc.read())?;
+        }
 
         meter.measure(Source::Processes, || {
             processes::list_pids(&mut self.listing)?;
@@ -115,6 +121,18 @@ impl Collector {
         assert_eq!(listing_capacity, self.listing.capacity());
         assert_eq!(events_capacity, self.events.capacity());
         Ok(())
+    }
+}
+
+/// Returns the source `opened` holds, or reports why it failed to open and returns `None`, so
+/// a Mac without one source records every other source.
+fn new_source<T>(name: &str, opened: io::Result<T>) -> Option<T> {
+    match opened {
+        Ok(source) => Some(source),
+        Err(error) => {
+            eprintln!("collector: recording no {name} readings, since it failed to open: {error}");
+            None
+        }
     }
 }
 
@@ -179,6 +197,22 @@ mod tests {
         let mut listing = processes::pid_list(processes::process_limit().unwrap());
         processes::list_pids(&mut listing).unwrap();
         listing
+    }
+
+    #[test]
+    fn reads_a_tick_without_an_smc_or_ioreport() {
+        // Goal: a Mac without an SMC or IOReport channels, as CI's virtual machine is, still
+        // records every other source.
+        // Method: start a collector, leave out its SMC and IOReport as `new` does where they
+        // fail to open, and read a tick.
+        let timebase = Timebase::read().unwrap();
+        let mut collector = Collector::new(timebase, Duration::ZERO).unwrap();
+        collector.smc = None;
+        collector.ioreport = None;
+
+        collector.read(&mut Meter::default()).unwrap();
+
+        assert!(!collector.processes.readings.is_empty());
     }
 
     #[test]
