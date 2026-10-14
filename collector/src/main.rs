@@ -453,13 +453,34 @@ fn report_cost(out: &mut impl Write, cost: &Cost, tally: &Tally) -> io::Result<(
         )?,
         None => write!(out, "no instructions run")?,
     }
+    let late_average = report_cost_late_average(tally.late_total, tally.ticks)?;
     writeln!(
         out,
         "; ticks late {:.1} ms on average, {:.1} ms at most, {} slips",
-        milliseconds(tally.late_total / u32::try_from(tally.ticks.max(1)).unwrap_or(u32::MAX)),
+        milliseconds(late_average),
         milliseconds(tally.late_max),
         tally.slips,
     )
+}
+
+/// The lateness of the average tick in a span of `ticks`, floored to the nanosecond, or an
+/// error where the ticks are more than a u32 holds, which `Duration` divides by.
+fn report_cost_late_average(late_total: Duration, ticks: u64) -> io::Result<Duration> {
+    // A span reports only after a tick has added to its tally.
+    assert!(ticks > 0);
+
+    let Ok(divisor) = u32::try_from(ticks) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "a span of {ticks} ticks, past the {} a lateness averages over",
+                u32::MAX
+            ),
+        ));
+    };
+    let late_average = late_total / divisor;
+    assert!(late_average <= late_total);
+    Ok(late_average)
 }
 
 fn report_sources(out: &mut impl Write, cost: &Cost) -> io::Result<()> {
@@ -736,6 +757,28 @@ mod tests {
              2 of them dropped from a full event list\n",
             String::from_utf8(written).unwrap()
         );
+    }
+
+    #[test]
+    fn averages_the_lateness_over_the_ticks() {
+        // Goal: a span's average lateness is its total lateness over its ticks.
+        // Method: average 30 ms over 3 ticks.
+        assert_eq!(
+            Duration::from_millis(10),
+            report_cost_late_average(Duration::from_millis(30), 3).unwrap()
+        );
+    }
+
+    #[test]
+    fn refuses_an_average_over_more_ticks_than_a_u32_holds() {
+        // Goal: a span of more ticks than a u32 holds is an error, not an average over
+        // u32::MAX ticks.
+        // Method: average over one tick past u32::MAX.
+        let ticks = u64::from(u32::MAX) + 1;
+
+        let average = report_cost_late_average(Duration::from_secs(1), ticks);
+
+        assert_eq!(io::ErrorKind::InvalidData, average.unwrap_err().kind());
     }
 
     #[test]
