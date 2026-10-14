@@ -136,7 +136,7 @@ impl Run {
         let mut meter = Meter::default();
         let mut collector = Collector::new(timebase, rescan_interval)?;
         let live_at_first_scan = collector.tracker.last_listing().to_vec();
-        let schedule = Schedule::new(clock::now(), timebase.ticks(tick_period_ns)?);
+        let schedule = Schedule::starting_now(timebase.ticks(tick_period_ns)?)?;
 
         report_start(out, &meter, timebase)?;
 
