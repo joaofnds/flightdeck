@@ -38,7 +38,7 @@ impl Source {
 
     #[must_use]
     pub fn name(self) -> &'static str {
-        match self {
+        let name = match self {
             Source::Machine => "machine",
             Source::Interfaces => "interfaces",
             Source::Processes => "processes",
@@ -50,7 +50,11 @@ impl Source {
             Source::ExitReads => "exit reads",
             Source::IOReport => "ioreport",
             Source::Smc => "smc",
-        }
+        };
+
+        // A report writes the name before the source's time, which reads only with a name.
+        assert!(!name.is_empty());
+        name
     }
 
     /// The source's slot in an array that holds a value for each source.
@@ -110,6 +114,7 @@ impl Meter {
                 format!("this thread's CPU time went back from {before} ns to {after} ns"),
             ));
         };
+        assert!(spent <= after);
         let index = source.index();
         let Some(charged) = self.spent_ns[index].checked_add(spent) else {
             return Err(io::Error::new(
@@ -148,6 +153,7 @@ fn thread_cpu_ns_of(clock: c_uint) -> io::Result<u64> {
         return Err(io::Error::last_os_error());
     }
 
+    assert_eq!(0, returned);
     thread_cpu_ns_from(now)
 }
 
@@ -208,14 +214,17 @@ impl Snapshot {
             }
         };
 
-        Ok(Self {
+        let snapshot = Self {
             at_ns: timebase.nanoseconds(clock::now())?,
             cpu_ns: take_cpu_ns(&own)?,
             energy_nj: own.energy_nj,
             instructions: own.instructions,
             super_instructions: own.super_instructions,
             spent_ns: meter.spent_ns,
-        })
+        };
+        assert!(snapshot.cpu_ns >= own.user_ns);
+        assert!(snapshot.cpu_ns >= own.system_ns);
+        Ok(snapshot)
     }
 
     /// The CPU time this process had spent when the snapshot was taken.
@@ -375,7 +384,12 @@ impl Cost {
     pub fn unattributed_ms_per_second(&self) -> f64 {
         assert!(self.elapsed > Duration::ZERO);
         let attributed: Duration = self.spent.iter().sum();
-        (self.cpu.as_secs_f64() - attributed.as_secs_f64()) / self.elapsed.as_secs_f64() * 1_000.0
+
+        let unattributed_ms_per_second = (self.cpu.as_secs_f64() - attributed.as_secs_f64())
+            / self.elapsed.as_secs_f64()
+            * 1_000.0;
+        assert!(unattributed_ms_per_second.is_finite());
+        unattributed_ms_per_second
     }
 }
 
@@ -392,7 +406,9 @@ fn f64_from_u64(value: u64) -> f64 {
     };
     assert_eq!(value, u64::from(high) << 32 | u64::from(low));
 
-    f64::from(high) * 4_294_967_296.0 + f64::from(low)
+    let converted = f64::from(high) * 4_294_967_296.0 + f64::from(low);
+    assert!(converted >= 0.0);
+    converted
 }
 
 #[cfg(test)]
