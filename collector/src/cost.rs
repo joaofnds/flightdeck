@@ -279,29 +279,38 @@ impl Snapshot {
         name: &str,
         read: fn(&Snapshot) -> u64,
     ) -> io::Result<u64> {
+        assert!(!name.is_empty());
+
         let before = read(earlier);
         let after = read(self);
-        after.checked_sub(before).ok_or_else(|| {
-            io::Error::new(
+        let Some(grown) = after.checked_sub(before) else {
+            return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("this process's {name} went back from {before} to {after}"),
-            )
-        })
+            ));
+        };
+
+        assert!(grown <= after);
+        Ok(grown)
     }
 }
 
 /// Returns the CPU time `own` gives, user and system together, or an error where a u64 cannot
 /// hold it.
 fn take_cpu_ns(own: &Usage) -> io::Result<u64> {
-    own.user_ns.checked_add(own.system_ns).ok_or_else(|| {
-        io::Error::new(
+    let Some(cpu_ns) = own.user_ns.checked_add(own.system_ns) else {
+        return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
                 "a user time of {} ns and a system time of {} ns pass what a u64 holds",
                 own.user_ns, own.system_ns
             ),
-        )
-    })
+        ));
+    };
+
+    assert!(cpu_ns >= own.user_ns);
+    assert!(cpu_ns >= own.system_ns);
+    Ok(cpu_ns)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -319,14 +328,20 @@ impl Cost {
     #[must_use]
     pub fn share_of_a_core(&self) -> f64 {
         assert!(self.elapsed > Duration::ZERO);
-        self.cpu.div_duration_f64(self.elapsed)
+
+        let share = self.cpu.div_duration_f64(self.elapsed);
+        assert!(share >= 0.0);
+        share
     }
 
     /// The power spent, as nanojoules a second divided by the million of them in a milliwatt.
     #[must_use]
     pub fn milliwatts(&self) -> f64 {
         assert!(self.elapsed > Duration::ZERO);
-        f64_from_u64(self.energy_nj) / self.elapsed.as_secs_f64() / 1_000_000.0
+
+        let milliwatts = f64_from_u64(self.energy_nj) / self.elapsed.as_secs_f64() / 1_000_000.0;
+        assert!(milliwatts >= 0.0);
+        milliwatts
     }
 
     /// The share of the instructions run that ran on super cores, or `None` where none ran.
@@ -347,7 +362,10 @@ impl Cost {
     #[must_use]
     pub fn ms_per_second(&self, source: Source) -> f64 {
         assert!(self.elapsed > Duration::ZERO);
-        self.spent[source.index()].div_duration_f64(self.elapsed) * 1_000.0
+
+        let ms_per_second = self.spent[source.index()].div_duration_f64(self.elapsed) * 1_000.0;
+        assert!(ms_per_second >= 0.0);
+        ms_per_second
     }
 
     /// The CPU time no source took, in milliseconds a second. It is negative where the sources
@@ -372,6 +390,7 @@ fn f64_from_u64(value: u64) -> f64 {
         Ok(low) => low,
         Err(error) => unreachable!("{error}"),
     };
+    assert_eq!(value, u64::from(high) << 32 | u64::from(low));
 
     f64::from(high) * 4_294_967_296.0 + f64::from(low)
 }
