@@ -267,6 +267,8 @@ fn merge_group(into: &Owned, group: &CStr, subgroup: &CStr) -> io::Result<()> {
     Ok(())
 }
 
+/// Keeps in `channels` only those a read takes, so each sample copies the 20 channels an M5 Pro
+/// reads rather than the 383 the groups hold.
 fn keep_read_channels(channels: &Owned, key: &Owned) -> io::Result<()> {
     let all = channels_of(channels, key)?;
     let kept = unsafe { CFArrayCreateMutable(ptr::null(), 0, &raw const kCFTypeArrayCallBacks) };
