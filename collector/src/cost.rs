@@ -503,12 +503,13 @@ mod tests {
     fn gives_no_share_where_no_instructions_ran() {
         // Goal: a span that ran no instructions gives no share on super cores, never a made-up
         // share of 0.
-        // Method: share no instructions on super cores among none.
-        let cost = Cost {
-            instructions: 0,
-            super_instructions: 0,
-            ..ten_seconds_later(0, 0, 0)
+        // Method: take the cost to a snapshot a nanosecond later that ran no instructions.
+        let later = Snapshot {
+            at_ns: EARLIER.at_ns + 1,
+            ..EARLIER
         };
+
+        let cost = later.cost_since(&EARLIER).unwrap();
 
         assert_eq!(None, cost.share_on_super_cores());
     }
@@ -552,6 +553,23 @@ mod tests {
         let cost = ten_seconds_later(0, 0, 0);
 
         assert!((cost.share_on_super_cores().unwrap() - 0.75).abs() < 1e-12);
+    }
+
+    #[test]
+    fn gives_a_share_of_1_where_every_instruction_ran_on_super_cores() {
+        // Goal: a span whose every instruction ran on super cores gives a share of 1, never an
+        // error or a share refused as past 1.
+        // Method: take the cost to a snapshot 4,000 instructions later, all on super cores.
+        let later = Snapshot {
+            at_ns: EARLIER.at_ns + 1,
+            instructions: EARLIER.instructions + 4_000,
+            super_instructions: EARLIER.super_instructions + 4_000,
+            ..EARLIER
+        };
+
+        let cost = later.cost_since(&EARLIER).unwrap();
+
+        assert_eq!(Some(1.0), cost.share_on_super_cores());
     }
 
     #[test]
