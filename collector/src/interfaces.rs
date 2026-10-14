@@ -530,10 +530,11 @@ mod tests {
     fn refuses_an_interface_message_shorter_than_its_header() {
         // Goal: an interface's message too short for its header is an error, never a read past
         // the message.
-        // Method: read a dump whose interface message ends 60 bytes into its header.
+        // Method: read a dump whose interface message ends one byte short of its header.
         let mut dump = message(RTM_IFINFO2, 0, b"en0");
-        dump.truncate(60);
-        set_length(&mut dump, 60);
+        let length = size_of::<IfMsghdr2>() - 1;
+        dump.truncate(length);
+        set_length(&mut dump, u16::try_from(length).unwrap());
 
         let read = read_dump(&dump);
 
@@ -558,10 +559,12 @@ mod tests {
     fn refuses_a_name_that_runs_past_its_message() {
         // Goal: a name longer than what is left of its message is an error, never a name read
         // from the next message.
-        // Method: read a message naming en0 whose link address gives the name 13 bytes, one
-        // more than the message holds.
+        // Method: read a message naming en0 whose link address gives the name one byte more
+        // than the message holds after the link address's fixed fields.
         let mut dump = message(RTM_IFINFO2, 0, b"en0");
-        dump[size_of::<IfMsghdr2>() + offset_of!(SockaddrDl, nlen)] = 13;
+        let name_length = size_of::<SockaddrDl>() - offset_of!(SockaddrDl, data) + 1;
+        dump[size_of::<IfMsghdr2>() + offset_of!(SockaddrDl, nlen)] =
+            u8::try_from(name_length).unwrap();
 
         let read = read_dump(&dump);
 
