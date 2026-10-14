@@ -144,13 +144,18 @@ enum Cause {
 
 impl Throttle {
     fn new(interval_ticks: u64) -> Self {
-        Self {
+        let throttle = Self {
             interval_ticks,
             rescan_ticks_last: 0,
             pending: false,
             deferred: false,
             armed: false,
-        }
+        };
+
+        // A throttle starts with no rescan pending and no timer armed for one.
+        assert!(!throttle.pending);
+        assert!(!throttle.armed);
+        throttle
     }
 
     fn woke(&mut self, wake: Wake) {
@@ -172,6 +177,11 @@ impl Throttle {
     }
 
     fn rescanned(&mut self, now_ticks: u64) {
+        // A rescan is deferred only while one is pending.
+        if self.deferred {
+            assert!(self.pending);
+        }
+
         self.rescan_ticks_last = now_ticks;
         self.pending = false;
         self.deferred = false;
@@ -550,7 +560,10 @@ impl Tracker {
                 &mut self.exits,
             )
         })?;
-        self.read_exits(meter)
+        self.read_exits(meter)?;
+
+        assert!(self.exits.is_empty());
+        Ok(())
     }
 
     fn submit_watches_register(&mut self) -> io::Result<usize> {
