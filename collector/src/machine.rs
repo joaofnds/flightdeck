@@ -309,25 +309,25 @@ struct MachMemory {
 
 impl MachMemory {
     /// Frees the memory, which `drop` does, and returns the status `vm_deallocate` gave.
-    fn drop_deallocate(&self) -> io::Result<()> {
+    fn drop_deallocate(&self) -> KernReturn {
         // A reply with no address makes no memory to free.
         assert!(!self.address.is_null());
         assert!(self.size.is_multiple_of(size_of::<c_int>()));
 
-        let returned =
-            unsafe { vm_deallocate(kernel::task_self(), self.address.addr(), self.size) };
-        kern_return_check(returned, "vm_deallocate")
+        unsafe { vm_deallocate(kernel::task_self(), self.address.addr(), self.size) }
     }
 }
 
 impl Drop for MachMemory {
     /// Frees the memory, and reports on stderr a free that failed, since a drop has no caller
-    /// to return the error to.
+    /// to return the error to. The report builds no `io::Error`, whose message allocates,
+    /// since every machine read drops one and the run goes on after it.
     fn drop(&mut self) {
         assert!(!self.address.is_null());
 
-        if let Err(error) = self.drop_deallocate() {
-            eprintln!("collector: {error}");
+        let returned = self.drop_deallocate();
+        if returned != kernel::KERN_SUCCESS {
+            eprintln!("collector: vm_deallocate returned {returned:#x}");
         }
     }
 }
@@ -602,7 +602,7 @@ mod tests {
 
     #[test]
     fn reports_a_free_the_kernel_refuses() {
-        // Goal: a free the kernel refuses is an error, never ignored.
+        // Goal: a free the kernel refuses returns the status the drop reports, never success.
         // Method: free two pages that wrap past the top of the address space, which
         // vm_deallocate refused with KERN_INVALID_ARGUMENT on macOS 27.0.1, from memory held
         // apart from its drop so the free runs once.
@@ -613,7 +613,7 @@ mod tests {
 
         let freed = memory.drop_deallocate();
 
-        assert_eq!(io::ErrorKind::Other, freed.unwrap_err().kind());
+        assert_ne!(kernel::KERN_SUCCESS, freed);
     }
 
     #[test]
