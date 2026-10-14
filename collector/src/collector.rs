@@ -66,6 +66,8 @@ impl Collector {
     /// fills it within the room `new` gave it and never grows it.
     #[must_use]
     pub fn events(&self) -> &[Event] {
+        assert!(self.events.len() <= EVENTS_PER_TICK_MAX);
+
         &self.events
     }
 
@@ -105,6 +107,8 @@ impl Collector {
             )
         })?;
 
+        assert!(!self.listing.is_empty());
+        assert!(self.events.len() <= EVENTS_PER_TICK_MAX);
         Ok(())
     }
 }
@@ -149,6 +153,9 @@ fn read_coalitions(
 
 /// Adds the coalition of every process in `listing`.
 fn add_listed_coalitions(listing: &[i32], coalitions: &mut Coalitions) -> io::Result<()> {
+    // A listing holds this process's pid at least.
+    assert!(!listing.is_empty());
+
     for &pid in listing {
         if let Some(id) = coalitions::coalition_of(pid)? {
             coalitions.add(id)?;

@@ -58,6 +58,8 @@ pub(crate) fn task_self() -> MachPort {
 
 /// Checks that a Mach call, which `call` names, returned success.
 pub(crate) fn kern_return_check(returned: KernReturn, call: &str) -> io::Result<()> {
+    assert!(!call.is_empty());
+
     if returned != KERN_SUCCESS {
         return Err(io::Error::other(format!("{call} returned {returned:#x}")));
     }
@@ -78,6 +80,8 @@ pub(crate) struct Sysctl {
 
 impl Sysctl {
     pub(crate) fn named(name: &CStr) -> io::Result<Self> {
+        assert!(!name.is_empty());
+
         let mut path = [0; CTL_MAXNAME];
         let mut path_count = path.len();
         if unsafe { sysctlnametomib(name.as_ptr(), path.as_mut_ptr(), &raw mut path_count) } != 0 {
@@ -126,6 +130,7 @@ impl Sysctl {
             ));
         }
 
+        assert_eq!(size, size_of::<T>());
         Ok(value)
     }
 }

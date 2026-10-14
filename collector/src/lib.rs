@@ -23,12 +23,18 @@ fn arguments_from(
     program: &str,
     words: impl Iterator<Item = OsString>,
 ) -> Result<Vec<String>, String> {
-    words
+    assert!(!program.is_empty());
+
+    let arguments = words
         .map(|word| {
             word.into_string()
                 .map_err(|word| format!("{program}: argument \"{}\" is not UTF-8", word.display()))
         })
-        .collect()
+        .collect();
+    if let Err(usage) = &arguments {
+        assert!(usage.starts_with(program));
+    }
+    arguments
 }
 
 /// Widens `value`, which a `usize` holds on every 64-bit Mac.
@@ -37,7 +43,10 @@ pub fn usize_from_u32(value: u32) -> usize {
     const { assert!(size_of::<u32>() <= size_of::<usize>()) };
 
     match usize::try_from(value) {
-        Ok(value) => value,
+        Ok(widened) => {
+            assert_eq!(u32::try_from(widened), Ok(value));
+            widened
+        }
         Err(error) => unreachable!("{error}"),
     }
 }
@@ -48,7 +57,10 @@ pub fn u64_from_usize(value: usize) -> u64 {
     const { assert!(size_of::<usize>() <= size_of::<u64>()) };
 
     match u64::try_from(value) {
-        Ok(value) => value,
+        Ok(widened) => {
+            assert_eq!(usize::try_from(widened), Ok(value));
+            widened
+        }
         Err(error) => unreachable!("{error}"),
     }
 }

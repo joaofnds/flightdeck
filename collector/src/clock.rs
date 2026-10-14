@@ -35,12 +35,20 @@ impl Timebase {
 
         let nanoseconds =
             u128::from(ticks) * u128::from(self.numerator) / u128::from(self.denominator);
-        u64::try_from(nanoseconds).map_err(|_| {
-            io::Error::new(
+        let Ok(nanoseconds) = u64::try_from(nanoseconds) else {
+            return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("{ticks} ticks run past the nanoseconds a u64 holds"),
-            )
-        })
+            ));
+        };
+
+        // A tick lasts a nanosecond or more exactly when the numerator is the larger.
+        if self.numerator >= self.denominator {
+            assert!(nanoseconds >= ticks);
+        } else {
+            assert!(nanoseconds <= ticks);
+        }
+        Ok(nanoseconds)
     }
 
     /// Converts `nanoseconds` to ticks, rounded down.
@@ -50,12 +58,20 @@ impl Timebase {
 
         let ticks =
             u128::from(nanoseconds) * u128::from(self.denominator) / u128::from(self.numerator);
-        u64::try_from(ticks).map_err(|_| {
-            io::Error::new(
+        let Ok(ticks) = u64::try_from(ticks) else {
+            return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("{nanoseconds} nanoseconds run past the ticks a u64 holds"),
-            )
-        })
+            ));
+        };
+
+        // A tick lasts a nanosecond or more exactly when the numerator is the larger.
+        if self.numerator >= self.denominator {
+            assert!(ticks <= nanoseconds);
+        } else {
+            assert!(ticks >= nanoseconds);
+        }
+        Ok(ticks)
     }
 }
 
