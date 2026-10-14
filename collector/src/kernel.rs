@@ -85,7 +85,10 @@ impl Sysctl {
         }
         named_check(path_count)?;
 
-        Ok(Self { path, path_count })
+        let named = Self { path, path_count };
+        assert!(named.path_count > 0);
+        assert!(named.path_count <= CTL_MAXNAME);
+        Ok(named)
     }
 
     /// Reads the state as a `T`, and reports an error when the kernel writes a value of
@@ -150,7 +153,10 @@ fn named_check(path_count: usize) -> io::Result<()> {
 /// takes to hold one for each thing the limit allows.
 pub(crate) fn read_limit(name: &CStr) -> io::Result<usize> {
     let limit: c_int = Sysctl::named(name)?.read()?;
-    read_limit_check(name, limit)
+    let count = read_limit_check(name, limit)?;
+
+    assert!(count > 0);
+    Ok(count)
 }
 
 /// Checks that `limit`, which the kernel state `name` gave, allows one thing or more, and
