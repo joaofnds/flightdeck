@@ -20,10 +20,12 @@ impl Schedule {
             ));
         }
 
-        Ok(Self {
+        let schedule = Self {
             start: clock::now(),
             period,
-        })
+        };
+        assert!(schedule.period > 0);
+        Ok(schedule)
     }
 
     /// Gives the clock reading at which `tick` falls due.
