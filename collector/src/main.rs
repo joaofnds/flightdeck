@@ -301,7 +301,12 @@ fn processes_started(
         assert!(listed[0] <= listed[1]);
     }
 
-    if last_marker_pid <= first_marker_pid || forks_counted >= pid_lap() {
+    if last_marker_pid <= first_marker_pid {
+        // The pids wrapped between the marks.
+        return None;
+    }
+    if forks_counted >= pid_lap() {
+        // The pids may have wrapped past the first mark again.
         return None;
     }
 
