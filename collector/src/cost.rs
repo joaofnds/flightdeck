@@ -78,11 +78,25 @@ pub struct Meter {
 }
 
 impl Meter {
-    pub fn measure<T>(&mut self, source: Source, read: impl FnOnce() -> T) -> T {
-        let before = thread_cpu_ns();
-        let result = read();
-        self.spent_ns[source.index()] += thread_cpu_ns() - before;
-        result
+    /// Runs `read`, charges the CPU time this thread spent on it to `source`, and returns
+    /// what it returned.
+    pub fn measure<T>(
+        &mut self,
+        source: Source,
+        read: impl FnOnce() -> io::Result<T>,
+    ) -> io::Result<T> {
+        let before = thread_cpu_ns()?;
+        let result = read()?;
+        let after = thread_cpu_ns()?;
+
+        let Some(spent) = after.checked_sub(before) else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("this thread's CPU time went back from {before} ns to {after} ns"),
+            ));
+        };
+        self.spent_ns[source.index()] += spent;
+        Ok(result)
     }
 }
 
@@ -92,19 +106,45 @@ unsafe extern "C" {
     fn clock_gettime(clock: c_uint, time: *mut Timespec) -> c_int;
 }
 
-fn thread_cpu_ns() -> u64 {
+fn thread_cpu_ns() -> io::Result<u64> {
+    clock_ns(CLOCK_THREAD_CPUTIME_ID)
+}
+
+/// Reads `clock` in nanoseconds.
+fn clock_ns(clock: c_uint) -> io::Result<u64> {
     let mut now = Timespec {
         tv_sec: 0,
         tv_nsec: 0,
     };
-    unsafe { clock_gettime(CLOCK_THREAD_CPUTIME_ID, &raw mut now) };
-    u64::try_from(now.tv_sec).unwrap_or(0) * 1_000_000_000 + u64::try_from(now.tv_nsec).unwrap_or(0)
+    let returned = unsafe { clock_gettime(clock, &raw mut now) };
+    if returned != 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    clock_ns_from(now)
+}
+
+/// Returns `time` in nanoseconds, or an error where it is negative or a u64 cannot hold it.
+fn clock_ns_from(time: Timespec) -> io::Result<u64> {
+    let invalid = || {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("a clock gave {} s and {} ns", time.tv_sec, time.tv_nsec),
+        )
+    };
+    let seconds = u64::try_from(time.tv_sec).map_err(|_| invalid())?;
+    let nanos = u64::try_from(time.tv_nsec).map_err(|_| invalid())?;
+
+    seconds
+        .checked_mul(1_000_000_000)
+        .and_then(|seconds_ns| seconds_ns.checked_add(nanos))
+        .ok_or_else(invalid)
 }
 
 #[cfg(test)]
 pub(crate) fn spin_on_this_thread_for(cpu_time: Duration) {
-    let start = thread_cpu_ns();
-    while Duration::from_nanos(thread_cpu_ns() - start) < cpu_time {
+    let start = thread_cpu_ns().unwrap();
+    while Duration::from_nanos(thread_cpu_ns().unwrap() - start) < cpu_time {
         std::hint::black_box(0);
     }
 }
@@ -276,12 +316,65 @@ mod tests {
     }
 
     #[test]
+    fn refuses_a_clock_macos_does_not_have() {
+        // Goal: a clock that clock_gettime refuses is an error, never a time of 0.
+        // Method: read clock 99, which clock_gettime refused with -1 on macOS 27.0.1.
+        let read = clock_ns(99);
+
+        assert_eq!(io::ErrorKind::InvalidInput, read.unwrap_err().kind());
+    }
+
+    #[test]
+    fn reads_a_time_in_nanoseconds() {
+        // Goal: a time of seconds and nanoseconds reads as nanoseconds.
+        // Method: read 2 s and 5 ns.
+        let time = Timespec {
+            tv_sec: 2,
+            tv_nsec: 5,
+        };
+
+        assert_eq!(2_000_000_005, clock_ns_from(time).unwrap());
+    }
+
+    #[test]
+    fn refuses_a_negative_time() {
+        // Goal: a clock that gives a negative time is an error, since no time a thread spent
+        // is negative.
+        // Method: read -1 s.
+        let time = Timespec {
+            tv_sec: -1,
+            tv_nsec: 0,
+        };
+
+        let read = clock_ns_from(time);
+
+        assert_eq!(io::ErrorKind::InvalidData, read.unwrap_err().kind());
+    }
+
+    #[test]
+    fn refuses_a_time_past_the_nanoseconds_a_u64_holds() {
+        // Goal: a time whose nanoseconds a u64 cannot hold is an error, never a made-up time.
+        // Method: read the most seconds an i64 holds.
+        let time = Timespec {
+            tv_sec: i64::MAX,
+            tv_nsec: 0,
+        };
+
+        let read = clock_ns_from(time);
+
+        assert_eq!(io::ErrorKind::InvalidData, read.unwrap_err().kind());
+    }
+
+    #[test]
     fn charges_a_measured_read_to_its_source() {
         let mut meter = Meter::default();
 
-        meter.measure(Source::Coalitions, || {
-            spin_on_this_thread_for(Duration::from_millis(20));
-        });
+        meter
+            .measure(Source::Coalitions, || {
+                spin_on_this_thread_for(Duration::from_millis(20));
+                Ok(())
+            })
+            .unwrap();
 
         let spent = Snapshot::take(&meter, Timebase::read().unwrap())
             .unwrap()

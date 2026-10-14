@@ -26,6 +26,7 @@ pub(crate) const EINVAL: c_int = 22;
 
 /// A time in seconds and nanoseconds, as `struct timespec` declares it.
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub(crate) struct Timespec {
     pub(crate) tv_sec: i64,
     pub(crate) tv_nsec: i64,

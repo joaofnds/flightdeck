@@ -79,7 +79,8 @@ impl Collector {
             for event in self.tracker.drain_events() {
                 push_without_growing(&mut self.events, event);
             }
-        });
+            Ok(())
+        })?;
         meter.measure(Source::Coalitions, || {
             for event in &self.events {
                 if let Event::Start {
