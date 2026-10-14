@@ -34,7 +34,6 @@ jobs:
       - run: >-
           cargo test --locked --workspace --no-fail-fast -- --exact
           --skip coalitions::tests::counts_the_energy_this_process_spends_in_its_coalition
-          --skip collector::tests::reads_every_listed_coalition_after_a_tick_that_dropped_a_start
           --skip ioreport::tests::counts_a_busy_cpu_in_its_cores_active_time
           --skip ioreport::tests::counts_the_energy_the_gpu_spends
           --skip ioreport::tests::counts_time_the_gpu_spends_in_active_states
