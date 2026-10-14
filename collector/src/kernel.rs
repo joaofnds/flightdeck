@@ -85,10 +85,10 @@ impl Sysctl {
         }
         named_check(path_count)?;
 
-        let named = Self { path, path_count };
-        assert!(named.path_count > 0);
-        assert!(named.path_count <= CTL_MAXNAME);
-        Ok(named)
+        let sysctl = Self { path, path_count };
+        assert!(sysctl.path_count > 0);
+        assert!(sysctl.path_count <= CTL_MAXNAME);
+        Ok(sysctl)
     }
 
     /// Reads the state as a `T`, and reports an error when the kernel writes a value of
