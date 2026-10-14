@@ -137,6 +137,8 @@ pub struct States {
     /// The index of each state the channel counts as active, learned once at open from the
     /// state names, since `IOReport` allocates for each name it gives.
     active_indices: Vec<i32>,
+    /// The most active states learned, which both lists have room for.
+    active_states_max: usize,
     /// The states the channel reported at open, which `active_indices` index.
     state_count: i32,
 }
@@ -152,11 +154,13 @@ impl States {
         let states = Self {
             active_ns: Vec::with_capacity(active_states_max),
             active_indices: Vec::with_capacity(active_states_max),
+            active_states_max,
             state_count: 0,
         };
 
         // A read pushes one time for each active state learned, without growing the times.
-        assert!(states.active_indices.capacity() <= states.active_ns.capacity());
+        assert!(states.active_states_max <= states.active_indices.capacity());
+        assert!(states.active_states_max <= states.active_ns.capacity());
         states
     }
 
@@ -429,8 +433,8 @@ fn core_at(cores: &mut [States], index: usize) -> io::Result<&mut States> {
 /// Learns which of `channel`'s states count as active into `into`, whose room it does not
 /// grow, so a channel with more active states than that is an error.
 fn learn_active_states(channel: CFTypeRef, into: &mut States) -> io::Result<()> {
-    let capacity = into.active_indices.capacity();
-    assert!(capacity <= into.active_ns.capacity());
+    let active_states_max = into.active_states_max;
+    assert!(active_states_max <= into.active_indices.capacity());
 
     let state_count = learn_active_states_count_check(unsafe { IOReportStateGetCount(channel) })?;
     into.active_indices.clear();
@@ -440,18 +444,18 @@ fn learn_active_states(channel: CFTypeRef, into: &mut States) -> io::Result<()> 
             continue;
         }
 
-        if into.active_indices.len() == capacity {
+        if into.active_indices.len() == active_states_max {
             return Err(io::Error::new(
                 io::ErrorKind::QuotaExceeded,
-                format!("an IOReport channel reported active states past {capacity}"),
+                format!("an IOReport channel reported active states past {active_states_max}"),
             ));
         }
 
-        into.active_indices.push(index);
+        push_without_growing(&mut into.active_indices, index);
     }
     into.state_count = state_count;
 
-    assert_eq!(capacity, into.active_indices.capacity());
+    assert!(into.active_indices.len() <= active_states_max);
     Ok(())
 }
 
@@ -509,7 +513,7 @@ fn read_active_states(channel: CFTypeRef, into: &mut States, timebase: Timebase)
         ));
     }
 
-    assert!(into.active_indices.len() <= into.active_ns.capacity());
+    assert!(into.active_indices.len() <= into.active_states_max);
     into.active_ns.clear();
     for &index in &into.active_indices {
         assert!(index < into.state_count);
