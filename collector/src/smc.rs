@@ -193,6 +193,7 @@ impl Connection {
                 "the SMC has no SoC temperature sensor",
             ));
         };
+
         assert!(sensor.0.is_soc_temperature());
         assert!(celsius.is_finite());
         Ok(sensor)
@@ -416,6 +417,7 @@ fn hottest_soc_sensor_of(
     if !celsius.is_finite() {
         return hottest;
     }
+
     if let Some((hottest_sensor, hottest_celsius)) = hottest {
         assert!(hottest_sensor.0.is_soc_temperature());
         assert!(hottest_celsius.is_finite());

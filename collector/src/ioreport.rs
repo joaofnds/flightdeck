@@ -446,6 +446,7 @@ fn learn_active_states(channel: CFTypeRef, into: &mut States) -> io::Result<()> 
                 format!("an IOReport channel reported active states past {capacity}"),
             ));
         }
+
         into.active_indices.push(index);
     }
     into.state_count = state_count;
@@ -607,6 +608,7 @@ fn is(text: CFTypeRef, want: &CStr) -> bool {
     if text.is_null() {
         return false;
     }
+
     let size = buffer.len().cast_signed();
     let converted = unsafe { CFStringGetCString(text, buffer.as_mut_ptr().cast(), size, UTF8) };
     if converted == 0 {
