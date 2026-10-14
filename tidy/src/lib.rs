@@ -24,8 +24,12 @@ fn repository_is_tidy() {
 
     let mut findings = Vec::new();
     for path in &paths {
-        if let Some(bytes) = read_tracked(&root, path) {
-            findings.extend(file_findings(path, &bytes));
+        match fs::read(root.join(path)) {
+            Ok(bytes) => findings.extend(file_findings(path, &bytes)),
+            // A file deleted in the working tree stays in the index until the deletion is
+            // staged.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => panic!("cannot read {path}: {error}"),
         }
     }
 
@@ -90,16 +94,6 @@ fn release_profile_settings(text: &str) -> Vec<&str> {
         }
     }
     settings
-}
-
-/// Reads a file git tracks, or nothing when the working tree has deleted it, since a deleted
-/// file stays in the index until the deletion is staged.
-fn read_tracked(root: &Path, path: &str) -> Option<Vec<u8>> {
-    match fs::read(root.join(path)) {
-        Ok(bytes) => Some(bytes),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-        Err(error) => panic!("cannot read {path}: {error}"),
-    }
 }
 
 fn read_text(path: &Path) -> String {
