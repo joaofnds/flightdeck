@@ -319,8 +319,8 @@ impl Machine {
             purgeable_bytes: pages(statistics.purgeable_count),
             swap_total_bytes: swap.total,
             swap_used_bytes: swap.used,
-            swapped_in_bytes: statistics.swapins * self.page_size,
-            swapped_out_bytes: statistics.swapouts * self.page_size,
+            swapped_in_bytes: self.read_memory_bytes(statistics.swapins)?,
+            swapped_out_bytes: self.read_memory_bytes(statistics.swapouts)?,
             pageins: statistics.pageins,
             pageouts: statistics.pageouts,
             compressions: statistics.compressions,
@@ -329,6 +329,19 @@ impl Machine {
         };
 
         Ok(())
+    }
+
+    /// Returns the bytes of `pages` pages, or an error where a u64 cannot hold them.
+    fn read_memory_bytes(&self, pages: u64) -> io::Result<u64> {
+        pages.checked_mul(self.page_size).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{pages} pages of {} bytes pass what a u64 holds",
+                    self.page_size
+                ),
+            )
+        })
     }
 }
 
@@ -467,6 +480,18 @@ mod tests {
         let checked = cpu_limit_check(-1);
 
         assert_eq!(io::ErrorKind::InvalidData, checked.unwrap_err().kind());
+    }
+
+    #[test]
+    fn refuses_swapped_pages_past_the_bytes_a_u64_holds() {
+        // Goal: a count of swapped pages whose bytes pass what a u64 holds is an error, never a
+        // multiplication that traps.
+        // Method: take the bytes of u64::MAX pages.
+        let machine = Machine::new(1).unwrap();
+
+        let bytes = machine.read_memory_bytes(u64::MAX);
+
+        assert_eq!(io::ErrorKind::InvalidData, bytes.unwrap_err().kind());
     }
 
     #[test]
