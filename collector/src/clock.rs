@@ -144,7 +144,7 @@ mod tests {
     }
 
     #[test]
-    fn takes_a_timebase_of_125_ticks_to_3_nanoseconds() {
+    fn takes_a_timebase_of_125_nanoseconds_to_3_ticks() {
         // Goal: a timebase with a numerator and a denominator above 0 converts ticks.
         // Method: check the 125/3 this Mac's mach_timebase_info gave, and convert 3 ticks.
         let info = MachTimebaseInfo {
