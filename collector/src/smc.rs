@@ -30,6 +30,8 @@ struct Service(MachPort);
 impl Service {
     /// Finds the first service `IOKit` has of the class `class`.
     fn matching(class: &CStr) -> io::Result<Self> {
+        assert!(!class.is_empty());
+
         let matching = unsafe { IOServiceMatching(class.as_ptr()) };
         if matching.is_null() {
             return Err(io::Error::other(format!(
@@ -45,7 +47,9 @@ impl Service {
             ));
         }
 
-        Ok(Self(service))
+        let service = Self(service);
+        assert_ne!(0, service.0);
+        Ok(service)
     }
 }
 
@@ -109,7 +113,9 @@ impl Connection {
             return Err(io::Error::other("connecting to the SMC gave no connection"));
         }
 
-        Ok(Self(port))
+        let connection = Self(port);
+        assert_ne!(0, connection.0);
+        Ok(connection)
     }
 
     fn hottest_soc_sensor(&self) -> io::Result<FloatKey> {
@@ -229,6 +235,7 @@ impl Connection {
     }
 
     fn ask(&self, question: &Message) -> io::Result<Message> {
+        assert_ne!(0, self.0);
         assert!(COMMANDS.contains(&question.command));
         assert_eq!(0, question.padding);
         assert_eq!([0; 3], question.info.padding);
@@ -453,6 +460,9 @@ impl Smc {
     /// The speed of each fan at the last read, in revolutions a minute.
     #[must_use]
     pub fn fan_rpm(&self) -> &[f32] {
+        // Empty until the first read, and one speed for each fan after it.
+        assert!(self.fan_rpm.len() <= self.fans.len());
+
         &self.fan_rpm
     }
 
@@ -502,6 +512,8 @@ fn ask_answered(
         )));
     }
 
+    assert_eq!(size_of::<Message>(), answer_size);
+    assert_eq!(SUCCESS, answer.result);
     Ok(answer)
 }
 
@@ -517,6 +529,7 @@ fn held_check_of(held: Held, wanted: KeyInfo) -> io::Result<()> {
         ));
     }
 
+    assert!(held.info.is(wanted));
     Ok(())
 }
 
@@ -529,6 +542,7 @@ fn fan_count_check(fan_count: u8) -> io::Result<()> {
         ));
     }
 
+    assert!(fan_count <= FANS_MAX);
     Ok(())
 }
 
@@ -541,6 +555,7 @@ fn key_count_check(key_count: u32) -> io::Result<()> {
         ));
     }
 
+    assert!(key_count <= KEYS_MAX);
     Ok(())
 }
 
