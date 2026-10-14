@@ -25,12 +25,8 @@ fn repository_is_tidy() {
 
     let mut findings = Vec::new();
     for path in &paths {
-        match fs::read(root.join(path)) {
-            Ok(bytes) => findings.extend(file_findings(path, &bytes)),
-            // A file deleted in the working tree stays in the index until the deletion is
-            // staged.
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => panic!("cannot read {path}: {error}"),
+        if let Some(bytes) = read_tracked(&root, path) {
+            findings.extend(file_findings(path, &bytes));
         }
     }
 
@@ -89,12 +85,11 @@ fn functions_average_two_assertions() {
     let mut total = AssertionCounts::default();
     for path in repository_paths(&root) {
         if Path::new(&path).extension() == Some(OsStr::new("rs")) {
-            match fs::read_to_string(root.join(&path)) {
-                Ok(text) => total.add(assertion_counts(&text)),
-                // A file deleted in the working tree stays in the index until the deletion
-                // is staged.
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => panic!("cannot read {path}: {error}"),
+            if let Some(bytes) = read_tracked(&root, &path) {
+                match str::from_utf8(&bytes) {
+                    Ok(text) => total.add(assertion_counts(text)),
+                    Err(error) => panic!("cannot read {path}: {error}"),
+                }
             }
         }
     }
@@ -124,6 +119,16 @@ fn release_profile_settings(text: &str) -> Vec<&str> {
         }
     }
     settings
+}
+
+/// Reads a file git tracks, or nothing when the working tree has deleted it, since a deleted
+/// file stays in the index until the deletion is staged.
+fn read_tracked(root: &Path, path: &str) -> Option<Vec<u8>> {
+    match fs::read(root.join(path)) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => panic!("cannot read {path}: {error}"),
+    }
 }
 
 fn read_text(path: &Path) -> String {
@@ -344,8 +349,8 @@ fn long_functions(text: &str) -> Vec<usize> {
     let lines: Vec<&str> = text.lines().collect();
     let mut numbers = Vec::new();
     for (index, line) in lines.iter().enumerate() {
-        if long_functions_opens(line) {
-            if long_functions_count(&lines, index) > FUNCTION_LINES_MAX {
+        if function_opens(line) {
+            if item_count(&lines[index..]) > FUNCTION_LINES_MAX {
                 numbers.push(index + 1);
             }
         }
@@ -356,7 +361,7 @@ fn long_functions(text: &str) -> Vec<usize> {
 /// Tells whether `line` opens a function, with nothing before `fn` but its visibility and
 /// its qualifiers. A restricted visibility can hold a space, as `pub(in crate::tracker)`
 /// does, so it is dropped whole before the line is split into words.
-fn long_functions_opens(line: &str) -> bool {
+fn function_opens(line: &str) -> bool {
     let mut rest = line.trim_start();
     if rest.starts_with("pub(") {
         match rest.find(')') {
@@ -376,44 +381,37 @@ fn long_functions_opens(line: &str) -> bool {
     false
 }
 
-/// Counts the lines of the function whose `fn` line is at `start`, up to its closing brace.
-/// Rustfmt ends a signature with `{` before a body, and closes the body with a brace alone on
-/// a line at the `fn` line's indentation. A declaration ends its signature with `;` and an
-/// empty body with `{}`, so neither has lines past its signature.
-fn long_functions_count(lines: &[&str], start: usize) -> usize {
-    assert!(start < lines.len());
-
-    let rest = &lines[start..];
-    let signature_count = long_functions_count_signature(rest);
-    if rest[signature_count - 1].ends_with('{') {
-        let line = rest[0];
-        let indentation = &line[..line.len() - line.trim_start().len()];
-        long_functions_count_body(rest, indentation)
-    } else {
-        signature_count
-    }
-}
-
-/// Counts the lines up to and including the one that ends the signature at the start of
-/// `lines`, or all of them when none does.
-fn long_functions_count_signature(lines: &[&str]) -> usize {
+/// Counts the lines of the item at the start of `lines`, a function or a `const` item or
+/// block, up to its closing brace. Rustfmt ends a signature with `{` before a body, and
+/// closes the body with a brace alone on a line at the item's indentation, followed by `;`
+/// where the item is an expression. A declaration ends its signature with `;` and an empty
+/// body with `{}`, so neither has lines past its signature. An item whose body no brace
+/// closes runs to the end of `lines`.
+fn item_count(lines: &[&str]) -> usize {
     assert!(!lines.is_empty());
 
+    let signature_count = signature_count(lines);
+    if !lines[signature_count - 1].ends_with('{') {
+        return signature_count;
+    }
+
+    let first = lines[0];
+    let indentation = &first[..first.len() - first.trim_start().len()];
     for (index, line) in lines.iter().enumerate() {
-        if matches!(line.chars().last(), Some('{' | '}' | ';')) {
+        if matches!(line.strip_prefix(indentation), Some("}" | "};")) {
             return index + 1;
         }
     }
     lines.len()
 }
 
-/// Counts the lines up to and including the first that holds only a closing brace at
-/// `indentation`, or all of them when none does, since the function then runs to the end.
-fn long_functions_count_body(lines: &[&str], indentation: &str) -> usize {
+/// Counts the lines up to and including the one that ends the signature at the start of
+/// `lines`, or all of them when none does.
+fn signature_count(lines: &[&str]) -> usize {
     assert!(!lines.is_empty());
 
     for (index, line) in lines.iter().enumerate() {
-        if line.strip_prefix(indentation) == Some("}") {
+        if matches!(line.chars().last(), Some('{' | '}' | ';')) {
             return index + 1;
         }
     }
@@ -713,9 +711,8 @@ fn assertion_counts(text: &str) -> AssertionCounts {
             index += left_out;
         } else {
             let line = lines[index];
-            if long_functions_opens(line) {
-                let signature_count = long_functions_count_signature(&lines[index..]);
-                let signature_end = lines[index + signature_count - 1];
+            if function_opens(line) {
+                let signature_end = lines[index + signature_count(&lines[index..]) - 1];
                 if !signature_end.ends_with(';') {
                     counts.functions += 1;
                     if signature_end.ends_with('{') {
@@ -753,33 +750,12 @@ fn assertion_counts_left_out(lines: &[&str]) -> usize {
         if attribute_count == lines.len() {
             return attribute_count;
         }
-        return attribute_count + assertion_counts_item(&lines[attribute_count..]);
+        return attribute_count + item_count(&lines[attribute_count..]);
     }
     if first.ends_with("const {") {
-        return assertion_counts_item(lines);
+        return item_count(lines);
     }
     0
-}
-
-/// Counts the lines of the item at the start of `lines`: its first line where that ends it,
-/// with `;` or a body on the same line, and otherwise through the brace that closes its body,
-/// alone on a line at the item's indentation or followed by `;`.
-fn assertion_counts_item(lines: &[&str]) -> usize {
-    assert!(!lines.is_empty());
-
-    let signature_count = long_functions_count_signature(lines);
-    if !lines[signature_count - 1].ends_with('{') {
-        return signature_count;
-    }
-
-    let first = lines[0];
-    let indentation = &first[..first.len() - first.trim_start().len()];
-    for (index, line) in lines.iter().enumerate() {
-        if matches!(line.strip_prefix(indentation), Some("}" | "};")) {
-            return index + 1;
-        }
-    }
-    lines.len()
 }
 
 /// Counts the runtime assertions `line` makes: each `assert!`, `assert_eq!` and `assert_ne!`
