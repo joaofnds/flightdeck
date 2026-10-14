@@ -123,11 +123,17 @@ const STATES_MAX: i32 = 256;
 
 impl States {
     fn new(active_states_max: usize) -> Self {
-        Self {
+        assert!(active_states_max > 0);
+
+        let states = Self {
             active_ns: Vec::with_capacity(active_states_max),
             active_indices: Vec::with_capacity(active_states_max),
             state_count: 0,
-        }
+        };
+
+        // A read pushes one time for each active state learned, without growing the times.
+        assert!(states.active_indices.capacity() <= states.active_ns.capacity());
+        states
     }
 }
 
@@ -184,6 +190,8 @@ impl IOReport {
     /// energy unit and the active states of the GPU and of every core, so a read asks `IOReport`
     /// for no name.
     fn learn(&mut self) -> io::Result<()> {
+        assert_eq!(ChannelCounts::default(), self.counts);
+
         let samples = sample(&self.subscription, &self.subscribed)?;
         let channels = channels_of(&samples, &self.channels_key)?;
 
@@ -209,10 +217,13 @@ impl IOReport {
         self.counts = counts;
 
         assert!(self.gpu_nj_per_unit > 0);
+        assert!(self.counts.cores <= self.cores.len());
         Ok(())
     }
 
     pub fn read(&mut self) -> io::Result<()> {
+        assert!(self.gpu_nj_per_unit > 0);
+
         let samples = sample(&self.subscription, &self.subscribed)?;
         let channels = channels_of(&samples, &self.channels_key)?;
 
@@ -346,6 +357,8 @@ fn sample(subscription: &Owned, subscribed: &Owned) -> io::Result<Owned> {
 /// past them is an error.
 fn core_at(cores: &mut [States], index: usize) -> io::Result<&mut States> {
     let count = cores.len();
+    assert!(index <= count);
+
     cores.get_mut(index).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::QuotaExceeded,
@@ -396,11 +409,13 @@ fn read_active_states(channel: CFTypeRef, into: &mut States, timebase: Timebase)
 
     into.active_ns.clear();
     for &index in &into.active_indices {
+        assert!(index < into.state_count);
         let residency = unsafe { IOReportStateGetResidency(channel, index) };
         let ticks = read_active_states_residency(residency)?;
         push_without_growing(&mut into.active_ns, timebase.nanos(ticks));
     }
 
+    assert_eq!(into.active_indices.len(), into.active_ns.len());
     Ok(())
 }
 
@@ -455,6 +470,10 @@ fn state_count_check(state_count: i32) -> io::Result<i32> {
 
 /// The units `IOReport` can give an energy in, each with the nanojoules in one of it.
 const ENERGY_UNITS: [(&CStr, u64); 3] = [(c"nJ", 1), (c"uJ", 1_000), (c"mJ", 1_000_000)];
+
+const _: () = assert!(ENERGY_UNITS[0].1 == 1);
+const _: () = assert!(ENERGY_UNITS[1].1 == ENERGY_UNITS[0].1 * 1_000);
+const _: () = assert!(ENERGY_UNITS[2].1 == ENERGY_UNITS[1].1 * 1_000);
 
 /// The nanojoules in one unit of the energy `channel` gives.
 fn nj_per_unit(channel: CFTypeRef) -> io::Result<u64> {
