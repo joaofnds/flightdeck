@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use crate::clock::{self, Timebase};
 use crate::kernel::Timespec;
-use crate::processes;
+use crate::processes::{self, Usage};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
@@ -95,7 +95,17 @@ impl Meter {
                 format!("this thread's CPU time went back from {before} ns to {after} ns"),
             ));
         };
-        self.spent_ns[source.index()] += spent;
+        let index = source.index();
+        let Some(charged) = self.spent_ns[index].checked_add(spent) else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{spent} ns more charged to {} pass what a u64 holds",
+                    source.name()
+                ),
+            ));
+        };
+        self.spent_ns[index] = charged;
         Ok(result)
     }
 }
@@ -172,7 +182,7 @@ impl Snapshot {
 
         Ok(Self {
             at_ns: timebase.nanos(clock::now())?,
-            cpu_ns: own.user_ns + own.system_ns,
+            cpu_ns: take_cpu_ns(&own)?,
             energy_nj: own.energy_nj,
             instructions: own.instructions,
             super_instructions: own.super_instructions,
@@ -231,6 +241,20 @@ impl Snapshot {
             )
         })
     }
+}
+
+/// Returns the CPU time `own` gives, user and system together, or an error where a u64 cannot
+/// hold it.
+fn take_cpu_ns(own: &Usage) -> io::Result<u64> {
+    own.user_ns.checked_add(own.system_ns).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "a user time of {} ns and a system time of {} ns pass what a u64 holds",
+                own.user_ns, own.system_ns
+            ),
+        )
+    })
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -348,6 +372,26 @@ mod tests {
         let cost = EARLIER.cost_since(&EARLIER);
 
         assert_eq!(io::ErrorKind::InvalidData, cost.unwrap_err().kind());
+    }
+
+    #[test]
+    fn refuses_a_cpu_time_past_the_nanoseconds_a_u64_holds() {
+        // Goal: a user and system time that add up past what a u64 holds is an error, never an
+        // addition that traps.
+        // Method: add a user time of u64::MAX nanoseconds to a system time of 1.
+        let timebase = Timebase::read().unwrap();
+        let own = processes::read_usage(timebase, processes::own_pid().unwrap())
+            .unwrap()
+            .unwrap();
+        let own = Usage {
+            user_ns: u64::MAX,
+            system_ns: 1,
+            ..own
+        };
+
+        let cpu_ns = take_cpu_ns(&own);
+
+        assert_eq!(io::ErrorKind::InvalidData, cpu_ns.unwrap_err().kind());
     }
 
     #[test]
@@ -519,5 +563,23 @@ mod tests {
             .spent_ns;
         assert!(spent[Source::Coalitions.index()] >= 20_000_000);
         assert_eq!(0, spent[Source::Processes.index()]);
+    }
+
+    #[test]
+    fn refuses_to_charge_a_source_past_the_nanoseconds_a_u64_holds() {
+        // Goal: a charge that takes a source's CPU time past what a u64 holds is an error, never
+        // an addition that traps.
+        // Method: measure a read that spins 1 ms against a meter that has charged each source
+        // u64::MAX nanoseconds.
+        let mut meter = Meter {
+            spent_ns: [u64::MAX; Source::ALL.len()],
+        };
+
+        let measured = meter.measure(Source::Machine, || {
+            spin_on_this_thread_for(Duration::from_millis(1));
+            Ok(())
+        });
+
+        assert_eq!(io::ErrorKind::InvalidData, measured.unwrap_err().kind());
     }
 }
