@@ -100,7 +100,7 @@ impl Interfaces {
     }
 
     pub fn read_all(&mut self) -> io::Result<()> {
-        let filled = self.fill_buffer()?;
+        let filled = self.read_all_fill_buffer()?;
         let Some(dump) = self.buffer.get(..filled) else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -114,7 +114,7 @@ impl Interfaces {
 
     /// Fills the buffer with the routing dump of every interface and returns the bytes the
     /// kernel wrote. A dump past the buffer is an error, since the buffer does not grow.
-    fn fill_buffer(&mut self) -> io::Result<usize> {
+    fn read_all_fill_buffer(&mut self) -> io::Result<usize> {
         let mut path = [
             CTL_NET,
             PF_ROUTE,
