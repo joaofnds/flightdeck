@@ -97,6 +97,8 @@ fn options_from(words: &[String]) -> Result<Options, String> {
         return Err(USAGE.to_owned());
     };
 
+    // Each flag took the word after it, so the words before the separator came in pairs.
+    assert!(separator.is_multiple_of(2));
     assert!(!program.is_empty());
     Ok(Options {
         rescan_ms,
@@ -136,6 +138,9 @@ fn run(options: &Options) -> io::Result<()> {
 /// Runs the collector for its minute with followprobe's burst inside it. Once both have
 /// ended, fails with the collector's failure, else with followprobe's.
 fn run_minute(options: &Options, followprobe: &Path, reports: &Reports) -> io::Result<()> {
+    // The two programs write to reports of their own, so neither's output lands in the other's.
+    assert!(reports.collector.path != reports.followprobe.path);
+
     let mut collector = StartedProcess::start(
         "collector",
         Command::new(&options.collector.program)
@@ -160,6 +165,8 @@ fn run_minute(options: &Options, followprobe: &Path, reports: &Reports) -> io::R
 
 /// Runs followprobe for the burst and waits for it to end.
 fn run_burst(options: &Options, followprobe: &Path, report: &OutputFile) -> io::Result<()> {
+    assert!(followprobe.ends_with("followprobe"));
+
     let mut probe = StartedProcess::start(
         "followprobe",
         Command::new(followprobe)
@@ -198,6 +205,8 @@ fn run_burst_arguments(options: &Options) -> [String; 5] {
 /// Finds the `followprobe` built beside this program, in the same target directory.
 fn run_followprobe_path() -> io::Result<PathBuf> {
     let path = std::env::current_exe()?.with_file_name("followprobe");
+    assert!(path.ends_with("followprobe"));
+
     match fs::exists(&path) {
         Ok(true) => Ok(path),
         Ok(false) => Err(io::Error::new(
@@ -294,6 +303,7 @@ impl StartedProcess {
     /// ended within the limit and succeeded.
     fn wait(&mut self, limit_ms: u64) -> io::Result<()> {
         const { assert!(POLL_MS > 0) };
+        assert!(!self.name.is_empty());
         assert!(limit_ms >= POLL_MS);
 
         for _ in 0..limit_ms.div_ceil(POLL_MS) {
@@ -315,6 +325,8 @@ impl StartedProcess {
     }
 
     fn wait_status(&self, status: ExitStatus) -> io::Result<()> {
+        assert!(!self.name.is_empty());
+
         if status.success() {
             Ok(())
         } else {
@@ -325,6 +337,8 @@ impl StartedProcess {
 
 impl Drop for StartedProcess {
     fn drop(&mut self) {
+        assert!(!self.name.is_empty());
+
         match self.child.try_wait() {
             Ok(Some(_)) => {}
             Ok(None) => match self.child.kill() {

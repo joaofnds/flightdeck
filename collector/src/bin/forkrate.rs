@@ -181,10 +181,14 @@ impl Forked {
     /// The children the run forked, short of those it asked for where forking fell behind.
     fn forks(&self) -> u32 {
         // A run forks at most the u32 of children its burst asks for.
-        match u32::try_from(self.children.len()) {
+        let forks = match u32::try_from(self.children.len()) {
             Ok(forks) => forks,
             Err(error) => unreachable!("{error}"),
-        }
+        };
+
+        // Forking reaps only the children it has forked.
+        assert!(self.reaped.count <= forks);
+        forks
     }
 }
 
@@ -259,6 +263,9 @@ fn run_forks(burst: &Burst, timebase: Timebase, start: u64) -> io::Result<Forked
 }
 
 fn run_write_pids(file: &str, children: &[i32]) -> io::Result<()> {
+    // A run forks its first child before it can fall behind.
+    assert!(!children.is_empty());
+
     let mut out = io::BufWriter::new(std::fs::File::create(file)?);
     for pid in children {
         writeln!(out, "{pid}")?;

@@ -97,6 +97,7 @@ fn probe_from(arguments: &[String]) -> Result<Probe, String> {
 fn run(probe: &Probe) -> io::Result<()> {
     let timebase = Timebase::read()?;
     let process_limit = processes::process_limit()?;
+    assert!(process_limit > 0);
     let limits = Limits {
         process_limit,
         events_per_tick_max: EVENTS_PER_TICK_MAX,
@@ -142,6 +143,8 @@ fn run_report(probe: &Probe, followed: &Followed, cost: &Cost, counts: &Counts) 
         .iter()
         .map(|&source| cost.ms_per_second(source))
         .sum();
+    // Each source's rate is a time spent, never negative.
+    assert!(tracking_total >= 0.0);
 
     let mut out = io::stdout().lock();
     writeln!(
@@ -254,6 +257,9 @@ fn run_follow(
     pid_files: &[PathBuf],
     process_limit: usize,
 ) -> io::Result<Followed> {
+    assert!(!pid_files.is_empty());
+    assert!(process_limit > 0);
+
     let mut generators = Generators::start(probe, pid_files)?;
 
     let mut started = HashSet::new();
@@ -265,6 +271,7 @@ fn run_follow(
     let seconds_max = u64::from(probe.seconds)
         + u64::from(probe.child_ms.div_ceil(1_000))
         + FOLLOW_SECONDS_PAST_RUN;
+    assert!(seconds_max >= FOLLOW_SECONDS_PAST_RUN);
 
     for _ in 0..seconds_max {
         tracker.follow_until(deadline, meter)?;
@@ -326,6 +333,9 @@ impl Generators {
     /// Whether every generator has exited, or an error where any one exited with a failure,
     /// since the children it wrote may then be short of those it forked.
     fn all_exited(&mut self) -> io::Result<bool> {
+        // `start` started a generator for each pid file, of which a probe has one or more.
+        assert!(!self.running.is_empty());
+
         let mut all_exited = true;
         for generator in &mut self.running {
             match generator.try_wait()? {
@@ -374,6 +384,7 @@ impl Drop for Generators {
 fn start_generator(probe: &Probe, pid_file: &Path) -> io::Result<Child> {
     // Each generator's rate floors, so the generators fork up to one a second fewer each
     // than the probe's rate.
+    assert!(probe.generators > 0);
     let per_generator = probe.per_second / probe.generators;
     assert!(per_generator > 0);
 
@@ -388,6 +399,8 @@ fn start_generator(probe: &Probe, pid_file: &Path) -> io::Result<Child> {
 }
 
 fn run_remove_pid_files(pid_files: &[PathBuf]) -> io::Result<()> {
+    assert!(!pid_files.is_empty());
+
     for file in pid_files {
         if let Err(error) = std::fs::remove_file(file) {
             if error.kind() == io::ErrorKind::NotFound {
@@ -401,6 +414,8 @@ fn run_remove_pid_files(pid_files: &[PathBuf]) -> io::Result<()> {
 }
 
 fn run_follow_read_children(pid_files: &[PathBuf]) -> io::Result<HashSet<i32>> {
+    assert!(!pid_files.is_empty());
+
     let mut children = HashSet::new();
     for file in pid_files {
         for line in std::fs::read_to_string(file)?.lines() {
