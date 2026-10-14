@@ -54,6 +54,7 @@ impl Name {
         };
         assert!(taken.length <= IFNAMSIZ);
         assert_eq!(name, &taken.bytes[..taken.length]);
+        assert!(taken.bytes[taken.length..].iter().all(|&byte| byte == 0));
         Ok(taken)
     }
 
@@ -215,6 +216,8 @@ fn read_all_messages(dump: &[u8], read: &mut Vec<Interface>) -> io::Result<()> {
                 format!("a routing message gave its length as {length} bytes"),
             ));
         }
+        // Each message moves the offset on by its length, so the walk ends.
+        assert!(length >= MESSAGE_PREFIX_SIZE);
         let Some(message) = dump.get(offset..offset + length) else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -224,6 +227,7 @@ fn read_all_messages(dump: &[u8], read: &mut Vec<Interface>) -> io::Result<()> {
                 ),
             ));
         };
+        assert_eq!(length, message.len());
 
         if c_int::from(header[MESSAGE_TYPE_OFFSET]) == RTM_IFINFO2 {
             if let Some(interface) = read_all_interface(message)? {
@@ -276,6 +280,7 @@ fn read_all_interface(message: &[u8]) -> io::Result<Option<Interface>> {
             ),
         ));
     };
+    assert_eq!(usize::from(name_length), name.len());
 
     let data = info.data;
     Ok(Some(Interface {

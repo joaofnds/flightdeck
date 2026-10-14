@@ -127,6 +127,7 @@ impl Meter {
         };
         // A source's charge only grows, which `Snapshot::cost_since` relies on.
         assert!(charged >= self.spent_ns[index]);
+        assert!(charged >= spent);
         self.spent_ns[index] = charged;
         Ok(result)
     }

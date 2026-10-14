@@ -541,6 +541,8 @@ impl Tally {
 
         let late_average = self.late_total / divisor;
         assert!(late_average <= self.late_total);
+        // The average tick is no later than the latest.
+        assert!(late_average <= self.late_max);
         Ok(late_average)
     }
 }
@@ -1012,10 +1014,11 @@ mod tests {
     #[test]
     fn averages_the_lateness_over_the_ticks() {
         // Goal: a span's average lateness is its total lateness over its ticks.
-        // Method: average 30 ms over 3 ticks.
+        // Method: average 30 ms over 3 ticks, the latest of them 15 ms late.
         let tally = Tally {
             ticks: 3,
             late_total: Duration::from_millis(30),
+            late_max: Duration::from_millis(15),
             ..Tally::default()
         };
 

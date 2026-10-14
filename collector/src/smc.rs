@@ -212,6 +212,8 @@ impl Connection {
 
         held_check_of(held, wanted)?;
         assert!(held.info.is(wanted));
+        // A read of `wanted` then takes as many bytes as the SMC holds.
+        assert_eq!(held.info.size, wanted.size);
         Ok(())
     }
 

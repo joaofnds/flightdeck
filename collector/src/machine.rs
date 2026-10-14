@@ -127,6 +127,7 @@ impl Machine {
             },
         };
         assert!(machine.cpus.capacity() >= cpu_limit);
+        assert!(machine.page_size.bytes > 0);
         Ok(machine)
     }
 

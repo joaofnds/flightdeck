@@ -621,6 +621,8 @@ impl Tracker {
 
         self.timers.clear();
         if count <= EVENTS_PER_WAIT_MAX {
+            // The caller reads the events up to `count`, which the list holds.
+            assert!(count <= self.eventlist.len());
             Ok(count)
         } else {
             Err(io::Error::new(

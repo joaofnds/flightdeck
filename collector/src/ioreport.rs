@@ -633,6 +633,12 @@ fn learn_active_states(channel: CFTypeRef, into: &mut States) -> io::Result<()> 
     into.state_count = state_count;
 
     assert!(into.active_indices.len() <= into.active_states_max);
+    // A read takes each active state's residency at its index, once and in order.
+    assert!(
+        into.active_indices
+            .is_sorted_by(|earlier, later| earlier < later)
+    );
+    assert!(into.active_indices.iter().all(|&index| index < state_count));
     Ok(())
 }
 
