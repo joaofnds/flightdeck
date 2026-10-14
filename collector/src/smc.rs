@@ -202,8 +202,8 @@ impl Connection {
     fn fan_count(&self) -> io::Result<u8> {
         const { assert!(UNSIGNED_8.size == 1) };
         let [fan_count, ..] = self.read(FAN_COUNT, UNSIGNED_8)?;
+        fan_count_check(fan_count)?;
 
-        let fan_count = fan_count_check(fan_count)?;
         assert!(fan_count <= FANS_MAX);
         Ok(fan_count)
     }
@@ -212,7 +212,9 @@ impl Connection {
         const { assert!(UNSIGNED_32.size == 4) };
         let [first, second, third, fourth, ..] = self.read(KEY_COUNT, UNSIGNED_32)?;
 
-        let key_count = key_count_check(u32::from_be_bytes([first, second, third, fourth]))?;
+        let key_count = u32::from_be_bytes([first, second, third, fourth]);
+        key_count_check(key_count)?;
+
         assert!(key_count <= KEYS_MAX);
         Ok(key_count)
     }
@@ -382,7 +384,7 @@ fn held_check_of(held: Held, wanted: KeyInfo) -> io::Result<()> {
 }
 
 /// Checks that the SMC counts no more fans than its keys can name.
-fn fan_count_check(fan_count: u8) -> io::Result<u8> {
+fn fan_count_check(fan_count: u8) -> io::Result<()> {
     if fan_count > FANS_MAX {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -390,11 +392,11 @@ fn fan_count_check(fan_count: u8) -> io::Result<u8> {
         ));
     }
 
-    Ok(fan_count)
+    Ok(())
 }
 
 /// Checks that the SMC lists no more keys than open lists.
-fn key_count_check(key_count: u32) -> io::Result<u32> {
+fn key_count_check(key_count: u32) -> io::Result<()> {
     if key_count > KEYS_MAX {
         return Err(io::Error::new(
             io::ErrorKind::QuotaExceeded,
@@ -402,7 +404,7 @@ fn key_count_check(key_count: u32) -> io::Result<u32> {
         ));
     }
 
-    Ok(key_count)
+    Ok(())
 }
 
 /// The hotter of `hottest`, the hottest reading so far, and `reading`, leaving out a reading
@@ -695,7 +697,7 @@ mod tests {
     fn takes_as_many_fans_as_its_keys_can_name() {
         // Goal: a fan count up to the ten fans the keys can name passes the check.
         // Method: check a count of ten.
-        assert_eq!(FANS_MAX, fan_count_check(FANS_MAX).unwrap());
+        assert!(fan_count_check(FANS_MAX).is_ok());
     }
 
     #[test]
@@ -711,7 +713,7 @@ mod tests {
     fn takes_as_many_keys_as_its_bound() {
         // Goal: a key count up to the bound passes the check.
         // Method: check a count equal to the bound.
-        assert_eq!(KEYS_MAX, key_count_check(KEYS_MAX).unwrap());
+        assert!(key_count_check(KEYS_MAX).is_ok());
     }
 
     #[test]

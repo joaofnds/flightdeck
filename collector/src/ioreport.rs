@@ -392,13 +392,14 @@ const CHANNELS_MAX: isize = 4096;
 /// Each channel in `array`, or an error where its count is not a count within the bound on
 /// walking one.
 fn each(array: CFTypeRef) -> io::Result<impl Iterator<Item = CFTypeRef>> {
-    let channel_count = each_channel_count_check(unsafe { CFArrayGetCount(array) })?;
+    let channel_count = unsafe { CFArrayGetCount(array) };
+    each_channel_count_check(channel_count)?;
 
     Ok((0..channel_count).map(move |index| unsafe { CFArrayGetValueAtIndex(array, index) }))
 }
 
 /// Checks that a list's count of channels is a count, and within the bound on walking one.
-fn each_channel_count_check(channel_count: isize) -> io::Result<isize> {
+fn each_channel_count_check(channel_count: isize) -> io::Result<()> {
     if channel_count < 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -412,7 +413,7 @@ fn each_channel_count_check(channel_count: isize) -> io::Result<isize> {
         ));
     }
 
-    Ok(channel_count)
+    Ok(())
 }
 
 /// The core at `index` among `cores`, or an error where `IOReport` reports more cores than
@@ -436,7 +437,9 @@ fn learn_active_states(channel: CFTypeRef, into: &mut States) -> io::Result<()> 
     let active_states_max = into.active_states_max;
     assert!(active_states_max <= into.active_indices.capacity());
 
-    let state_count = learn_active_states_count_check(unsafe { IOReportStateGetCount(channel) })?;
+    let state_count = unsafe { IOReportStateGetCount(channel) };
+    learn_active_states_count_check(state_count)?;
+
     into.active_indices.clear();
     for index in 0..state_count {
         let name = unsafe { IOReportStateGetNameForIndex(channel, index) };
@@ -482,7 +485,7 @@ fn learn_active_states_is_active(name: CFTypeRef) -> io::Result<bool> {
 const STATES_MAX: i32 = 256;
 
 /// Checks that a channel's count of states is a count, and within the bound on learning them.
-fn learn_active_states_count_check(state_count: i32) -> io::Result<i32> {
+fn learn_active_states_count_check(state_count: i32) -> io::Result<()> {
     if state_count < 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -496,7 +499,7 @@ fn learn_active_states_count_check(state_count: i32) -> io::Result<i32> {
         ));
     }
 
-    Ok(state_count)
+    Ok(())
 }
 
 /// Reads the time `channel` spent in each state `into` learned as active. A channel whose
@@ -890,18 +893,18 @@ mod tests {
     fn takes_as_many_states_as_its_bound() {
         // Goal: a channel with as many states as the bound passes the check.
         // Method: check a count equal to the bound.
-        let state_count = learn_active_states_count_check(STATES_MAX);
+        let checked = learn_active_states_count_check(STATES_MAX);
 
-        assert_eq!(STATES_MAX, state_count.unwrap());
+        assert!(checked.is_ok());
     }
 
     #[test]
     fn takes_a_channel_with_no_states() {
         // Goal: a channel with no states passes the check, and has no active state to learn.
         // Method: check a count of 0.
-        let state_count = learn_active_states_count_check(0);
+        let checked = learn_active_states_count_check(0);
 
-        assert_eq!(0, state_count.unwrap());
+        assert!(checked.is_ok());
     }
 
     #[test]
@@ -909,21 +912,18 @@ mod tests {
         // Goal: a channel with more states than the bound is an error, so learning a channel's
         // states has a bound.
         // Method: check a count one past the bound.
-        let state_count = learn_active_states_count_check(STATES_MAX + 1);
+        let checked = learn_active_states_count_check(STATES_MAX + 1);
 
-        assert_eq!(
-            io::ErrorKind::QuotaExceeded,
-            state_count.unwrap_err().kind()
-        );
+        assert_eq!(io::ErrorKind::QuotaExceeded, checked.unwrap_err().kind());
     }
 
     #[test]
     fn refuses_a_negative_state_count() {
         // Goal: a negative count of states is an error, never a channel with no states.
         // Method: check -1, the count IOReport of an M5 Pro gave for the GPU's energy channel.
-        let state_count = learn_active_states_count_check(-1);
+        let checked = learn_active_states_count_check(-1);
 
-        assert_eq!(io::ErrorKind::InvalidData, state_count.unwrap_err().kind());
+        assert_eq!(io::ErrorKind::InvalidData, checked.unwrap_err().kind());
     }
 
     #[test]
@@ -958,9 +958,9 @@ mod tests {
     fn takes_as_many_channels_as_its_bound() {
         // Goal: a list with as many channels as the bound passes the check.
         // Method: check a count equal to the bound.
-        let channel_count = each_channel_count_check(CHANNELS_MAX);
+        let checked = each_channel_count_check(CHANNELS_MAX);
 
-        assert_eq!(CHANNELS_MAX, channel_count.unwrap());
+        assert!(checked.is_ok());
     }
 
     #[test]
@@ -968,9 +968,9 @@ mod tests {
         // Goal: an empty list of channels passes the check, which leaves to open whether the
         // channels it found are enough.
         // Method: check a count of 0.
-        let channel_count = each_channel_count_check(0);
+        let checked = each_channel_count_check(0);
 
-        assert_eq!(0, channel_count.unwrap());
+        assert!(checked.is_ok());
     }
 
     #[test]
@@ -978,24 +978,18 @@ mod tests {
         // Goal: a list with more channels than the bound is an error, so walking a list of
         // channels has a bound.
         // Method: check a count one past the bound.
-        let channel_count = each_channel_count_check(CHANNELS_MAX + 1);
+        let checked = each_channel_count_check(CHANNELS_MAX + 1);
 
-        assert_eq!(
-            io::ErrorKind::QuotaExceeded,
-            channel_count.unwrap_err().kind()
-        );
+        assert_eq!(io::ErrorKind::QuotaExceeded, checked.unwrap_err().kind());
     }
 
     #[test]
     fn refuses_a_negative_channel_count() {
         // Goal: a negative count of channels is an error, never a list with no channels.
         // Method: check a count of -1.
-        let channel_count = each_channel_count_check(-1);
+        let checked = each_channel_count_check(-1);
 
-        assert_eq!(
-            io::ErrorKind::InvalidData,
-            channel_count.unwrap_err().kind()
-        );
+        assert_eq!(io::ErrorKind::InvalidData, checked.unwrap_err().kind());
     }
 
     /// What a sample of an M5 Pro holds, one channel of the GPU's energy, one of its states,
