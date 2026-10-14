@@ -55,6 +55,15 @@ pub(crate) fn task_self() -> MachPort {
     unsafe { mach_task_self_ }
 }
 
+/// Checks that a Mach call, which `call` names, returned success.
+pub(crate) fn kern_return_check(returned: KernReturn, call: &str) -> io::Result<()> {
+    if returned != KERN_SUCCESS {
+        return Err(io::Error::other(format!("{call} returned {returned:#x}")));
+    }
+
+    Ok(())
+}
+
 /// Kernel state named by a dotted string, looked up once as the path of integers each read
 /// passes.
 pub(crate) struct Sysctl {
@@ -141,6 +150,23 @@ pub(crate) fn sysctl_bytes<const SIZE: usize>(name: &CStr) -> [u8; SIZE] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn takes_a_mach_call_that_succeeded() {
+        // Goal: a Mach call that returned success passes the check.
+        // Method: check KERN_SUCCESS.
+        assert!(kern_return_check(KERN_SUCCESS, "a call").is_ok());
+    }
+
+    #[test]
+    fn refuses_a_mach_call_that_failed() {
+        // Goal: a Mach call that returned anything but success is an error.
+        // Method: check 0x10000003, which closing an SMC connection a second time returned on
+        // an M5 Pro.
+        let checked = kern_return_check(0x1000_0003, "closing a connection");
+
+        assert_eq!(io::ErrorKind::Other, checked.unwrap_err().kind());
+    }
 
     #[test]
     fn reads_kernel_state_of_the_size_asked_for() {

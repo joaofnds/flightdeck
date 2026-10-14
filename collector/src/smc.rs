@@ -1,7 +1,7 @@
 use std::ffi::{CStr, c_char, c_void};
 use std::io;
 
-use crate::kernel::{self, KernReturn, MachPort};
+use crate::kernel::{self, KernReturn, MachPort, kern_return_check};
 use crate::push_without_growing;
 
 pub struct Smc {
@@ -505,15 +505,6 @@ fn ask_answered(
     Ok(answer)
 }
 
-/// Checks that a Mach call, which `call` names, returned success.
-fn kern_return_check(returned: KernReturn, call: &str) -> io::Result<()> {
-    if returned != kernel::KERN_SUCCESS {
-        return Err(io::Error::other(format!("{call} returned {returned:#x}")));
-    }
-
-    Ok(())
-}
-
 /// Checks that the SMC holds a key as a value of `wanted`, from the info `held` gives.
 fn held_check_of(held: Held, wanted: KeyInfo) -> io::Result<()> {
     if !held.info.is(wanted) {
@@ -644,23 +635,6 @@ mod tests {
         assert_eq!(kernel::KERN_SUCCESS, retained);
         assert_eq!(kernel::KERN_SUCCESS, released);
         assert_eq!(1, references);
-    }
-
-    #[test]
-    fn takes_a_mach_call_that_succeeded() {
-        // Goal: a Mach call that returned success passes the check.
-        // Method: check KERN_SUCCESS.
-        assert!(kern_return_check(kernel::KERN_SUCCESS, "a call").is_ok());
-    }
-
-    #[test]
-    fn refuses_a_mach_call_that_failed() {
-        // Goal: a Mach call that returned anything but success is an error.
-        // Method: check 0x10000003, which closing an SMC connection a second time returned on
-        // an M5 Pro.
-        let checked = kern_return_check(0x1000_0003, "closing a connection");
-
-        assert_eq!(io::ErrorKind::Other, checked.unwrap_err().kind());
     }
 
     #[test]

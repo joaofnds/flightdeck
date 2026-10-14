@@ -2,7 +2,7 @@ use std::ffi::c_int;
 use std::io;
 use std::mem::offset_of;
 
-use crate::kernel::{self, KERN_SUCCESS, KernReturn, MachPort, Sysctl};
+use crate::kernel::{self, KernReturn, MachPort, Sysctl, kern_return_check};
 
 // `processor_cpu_load_info.cpu_ticks` holds a core's ticks at the indices the CPU_STATE
 // constants name.
@@ -235,11 +235,7 @@ impl Machine {
                 &raw mut info_count,
             )
         };
-        if result != KERN_SUCCESS {
-            return Err(io::Error::other(format!(
-                "host_processor_info returned {result}"
-            )));
-        }
+        kern_return_check(result, "host_processor_info")?;
 
         let info = MachMemory {
             address,
@@ -284,11 +280,7 @@ impl Machine {
                 &raw mut count,
             )
         };
-        if result != KERN_SUCCESS {
-            return Err(io::Error::other(format!(
-                "host_statistics64 returned {result}"
-            )));
-        }
+        kern_return_check(result, "host_statistics64")?;
 
         let vm = unsafe { vm.assume_init() };
         let swap: XswUsage = self.swap_usage.read()?;
