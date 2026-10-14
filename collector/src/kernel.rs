@@ -65,36 +65,45 @@ pub(crate) fn kern_return_check(returned: KernReturn, call: &str) -> io::Result<
     Ok(())
 }
 
+/// The most levels the path of a kernel state's name has, as `CTL_MAXNAME` in sys/sysctl.h
+/// gives it.
+const CTL_MAXNAME: usize = 12;
+
 /// Kernel state named by a dotted string, looked up once as the path of integers each read
 /// passes.
 pub(crate) struct Sysctl {
-    path: [c_int; 12],
-    path_count: c_uint,
+    path: [c_int; CTL_MAXNAME],
+    path_count: usize,
 }
 
 impl Sysctl {
     pub(crate) fn named(name: &CStr) -> io::Result<Self> {
-        let mut path = [0; 12];
+        let mut path = [0; CTL_MAXNAME];
         let mut path_count = path.len();
         if unsafe { sysctlnametomib(name.as_ptr(), path.as_mut_ptr(), &raw mut path_count) } != 0 {
             return Err(io::Error::last_os_error());
         }
+        named_check(path_count)?;
 
-        Ok(Self {
-            path,
-            path_count: c_uint::try_from(path_count).map_err(io::Error::other)?,
-        })
+        Ok(Self { path, path_count })
     }
 
     /// Reads the state as a `T`, and reports an error when the kernel writes a value of
     /// another size, since a `T` would then hold bytes that are not the value.
     pub(crate) fn read<T: Copy + Default>(&self) -> io::Result<T> {
+        assert!(self.path_count > 0);
+        assert!(self.path_count <= CTL_MAXNAME);
+        let path_count = match c_uint::try_from(self.path_count) {
+            Ok(count) => count,
+            Err(error) => unreachable!("{error}"),
+        };
+
         let mut value = T::default();
         let mut size = size_of::<T>();
         let result = unsafe {
             sysctl(
                 self.path.as_ptr().cast_mut(),
-                self.path_count,
+                path_count,
                 (&raw mut value).cast(),
                 &raw mut size,
                 std::ptr::null_mut(),
@@ -116,6 +125,25 @@ impl Sysctl {
 
         Ok(value)
     }
+}
+
+/// Checks that the path `sysctlnametomib` gave has from 1 to `CTL_MAXNAME` levels, since a
+/// read passes that many levels of the path.
+fn named_check(path_count: usize) -> io::Result<()> {
+    if path_count == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "sysctlnametomib gave a path of 0 levels",
+        ));
+    }
+    if path_count > CTL_MAXNAME {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("sysctlnametomib gave a path of {path_count} levels, past {CTL_MAXNAME}"),
+        ));
+    }
+
+    Ok(())
 }
 
 /// Reads the kernel state that `name`, a dotted string, names, as the bytes of a number of
@@ -167,6 +195,39 @@ mod tests {
         let checked = kern_return_check(0x1000_0003, "closing a connection");
 
         assert_eq!(io::ErrorKind::Other, checked.unwrap_err().kind());
+    }
+
+    #[test]
+    fn takes_a_path_of_one_level() {
+        // Goal: a path the kernel gave as one level is taken, the fewest that name a state.
+        // Method: check a path of 1 level.
+        assert!(named_check(1).is_ok());
+    }
+
+    #[test]
+    fn takes_a_path_of_the_most_levels_a_name_has() {
+        // Goal: a path the kernel gave as CTL_MAXNAME levels is taken, the most the path holds.
+        // Method: check a path of CTL_MAXNAME levels.
+        assert!(named_check(CTL_MAXNAME).is_ok());
+    }
+
+    #[test]
+    fn refuses_a_path_of_no_levels() {
+        // Goal: a path the kernel gave as 0 levels is an error, since it names no state.
+        // Method: check a path of 0 levels.
+        let checked = named_check(0);
+
+        assert_eq!(io::ErrorKind::InvalidData, checked.unwrap_err().kind());
+    }
+
+    #[test]
+    fn refuses_a_path_past_the_most_levels_a_name_has() {
+        // Goal: a path the kernel gave as more levels than the path holds is an error, never a
+        // read past the path.
+        // Method: check a path of CTL_MAXNAME + 1 levels.
+        let checked = named_check(CTL_MAXNAME + 1);
+
+        assert_eq!(io::ErrorKind::InvalidData, checked.unwrap_err().kind());
     }
 
     #[test]
