@@ -40,10 +40,12 @@ impl Name {
 
         let mut bytes = [0; IFNAMSIZ];
         bytes[..name.len()].copy_from_slice(name);
-        Ok(Self {
+        let taken = Self {
             bytes,
             length: name.len(),
-        })
+        };
+        assert!(taken.length <= IFNAMSIZ);
+        Ok(taken)
     }
 
     #[must_use]
@@ -82,12 +84,16 @@ impl Interfaces {
     fn with_dump_size(dump_size: usize) -> Self {
         assert!(dump_size > 0);
 
-        Self {
+        // Each interface read takes a whole header of the dump, so the dump holds no more of
+        // them than this, which floors.
+        let interface_count_max = dump_size / size_of::<IfMsghdr2>();
+        let interfaces = Self {
             buffer: vec![0; dump_size],
-            // Each interface read takes a whole header of the dump, so the dump holds no
-            // more of them than this, which floors.
-            read: Vec::with_capacity(dump_size / size_of::<IfMsghdr2>()),
-        }
+            read: Vec::with_capacity(interface_count_max),
+        };
+        assert_eq!(dump_size, interfaces.buffer.len());
+        assert!(interfaces.read.capacity() >= interface_count_max);
+        interfaces
     }
 
     pub fn read_all(&mut self) -> io::Result<()> {
@@ -304,6 +310,9 @@ fn read_all_messages(dump: &[u8], read: &mut Vec<Interface>) -> io::Result<()> {
 /// Reads the interface `message` names, or `None` for loopback, whose traffic is not
 /// external.
 fn interface_from(message: &[u8]) -> io::Result<Option<Interface>> {
+    assert!(message.len() >= MESSAGE_PREFIX_SIZE);
+    assert_eq!(RTM_IFINFO2, c_int::from(message[MESSAGE_TYPE_OFFSET]));
+
     let Some(link) = message.get(size_of::<IfMsghdr2>()..) else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -313,6 +322,7 @@ fn interface_from(message: &[u8]) -> io::Result<Option<Interface>> {
             ),
         ));
     };
+    assert!(message.len() >= size_of::<IfMsghdr2>());
     let info = unsafe { message.as_ptr().cast::<IfMsghdr2>().read_unaligned() };
     if info.flags & IFF_LOOPBACK != 0 {
         return Ok(None);
