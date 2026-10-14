@@ -33,10 +33,12 @@ impl Collector {
             process_limit: processes::process_limit()?,
             events_per_tick_max: EVENTS_PER_TICK_MAX,
         };
+        assert!(limits.process_limit > 0);
         let cpu_limit = machine::cpu_limit()?;
         // Room for a coalition for every process macOS runs and one for every start a tick
         // holds, with a coalition past it reported as an error.
         let coalition_limit = limits.process_limit + limits.events_per_tick_max;
+        assert!(coalition_limit > limits.process_limit);
 
         let mut collector = Self {
             timebase,
@@ -66,6 +68,8 @@ impl Collector {
     }
 
     pub fn read(&mut self, meter: &mut Meter) -> io::Result<()> {
+        assert!(self.events.capacity() >= EVENTS_PER_TICK_MAX);
+
         meter.measure(Source::Machine, || self.machine.read())?;
         meter.measure(Source::Interfaces, || self.interfaces.read_all())?;
         meter.measure(Source::IOReport, || self.ioreport.read())?;
