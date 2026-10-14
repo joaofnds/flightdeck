@@ -108,6 +108,8 @@ fn run_set_qos_class_default() -> io::Result<()> {
     if error != 0 {
         return Err(io::Error::from_raw_os_error(error));
     }
+
+    assert_eq!(0, error);
     Ok(())
 }
 
@@ -304,11 +306,13 @@ impl Span {
     fn begin(start: Mark, first_tick: u64) -> Self {
         assert!(first_tick > 0);
 
-        Self {
+        let span = Self {
             start,
             first_tick,
             tally: Tally::default(),
-        }
+        };
+        assert_eq!(0, span.tally.ticks);
+        span
     }
 
     /// Writes what the span's ticks, `first_tick` to `last_tick`, cost and counted, with
@@ -513,6 +517,7 @@ impl Tally {
         let events = self.starts + self.execs + exits;
 
         assert!(events >= exits);
+        assert!(events >= self.starts);
         events
     }
 
@@ -664,6 +669,7 @@ fn milliseconds(duration: Duration) -> f64 {
     let milliseconds = duration.as_secs_f64() * 1_000.0;
 
     assert!(milliseconds >= 0.0);
+    assert!(milliseconds.is_finite());
     milliseconds
 }
 
