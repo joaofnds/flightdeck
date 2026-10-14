@@ -388,12 +388,12 @@ struct Tally {
     execs: u64,
     seen_exiting: Exits,
     found_exited: Exits,
-    processes_read: usize,
+    processes_read: u64,
     processes_refused: u32,
     processes_gone: u32,
-    coalitions: usize,
-    interfaces: usize,
-    cpus: usize,
+    coalitions: u64,
+    interfaces: u64,
+    cpus: u64,
 }
 
 impl Tally {
@@ -420,12 +420,22 @@ impl Tally {
             }
         }
 
-        self.processes_read = collector.processes.read.len();
+        self.processes_read = Self::add_count(collector.processes.read.len());
         self.processes_refused = collector.processes.refused;
         self.processes_gone = collector.processes.gone;
-        self.coalitions = collector.coalitions.read.len();
-        self.interfaces = collector.interfaces.read().len();
-        self.cpus = collector.machine.cpus().len();
+        self.coalitions = Self::add_count(collector.coalitions.read.len());
+        self.interfaces = Self::add_count(collector.interfaces.read().len());
+        self.cpus = Self::add_count(collector.machine.cpus().len());
+    }
+
+    /// Takes the length of a list the last tick read as a count the report gives.
+    fn add_count(length: usize) -> u64 {
+        const { assert!(size_of::<usize>() <= size_of::<u64>()) };
+
+        match u64::try_from(length) {
+            Ok(count) => count,
+            Err(error) => unreachable!("{error}"),
+        }
     }
 }
 
