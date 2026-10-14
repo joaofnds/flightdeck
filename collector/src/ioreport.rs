@@ -9,10 +9,10 @@ pub struct IOReport {
     timebase: Timebase,
     channels_key: ChannelsKey,
     subscription: Subscription,
-    pub gpu_energy_nj: u64,
+    gpu_energy_nj: u64,
     /// The nanojoules in one unit of the GPU's energy, learned at open.
     gpu_nj_per_unit: u64,
-    pub gpu: States,
+    gpu: States,
     /// One for each CPU the machine runs, of which the first `counts.cores` hold the cores open
     /// found.
     cores: Vec<States>,
@@ -112,6 +112,18 @@ impl IOReport {
         counts.read_check(&self.counts)
     }
 
+    /// The energy the GPU had spent at the last read, in nanojoules.
+    #[must_use]
+    pub fn gpu_energy_nj(&self) -> u64 {
+        self.gpu_energy_nj
+    }
+
+    /// The GPU's performance states.
+    #[must_use]
+    pub fn gpu(&self) -> &States {
+        &self.gpu
+    }
+
     /// The performance states of each core open found.
     #[must_use]
     pub fn cores(&self) -> &[States] {
@@ -121,7 +133,7 @@ impl IOReport {
 
 #[derive(Debug, Clone)]
 pub struct States {
-    pub active_ns: Vec<u64>,
+    active_ns: Vec<u64>,
     /// The index of each state the channel counts as active, learned once at open from the
     /// state names, since `IOReport` allocates for each name it gives.
     active_indices: Vec<i32>,
@@ -146,6 +158,12 @@ impl States {
         // A read pushes one time for each active state learned, without growing the times.
         assert!(states.active_indices.capacity() <= states.active_ns.capacity());
         states
+    }
+
+    /// The time spent in each active state, in nanoseconds, at the last read.
+    #[must_use]
+    pub fn active_ns(&self) -> &[u64] {
+        &self.active_ns
     }
 }
 
@@ -742,13 +760,7 @@ mod tests {
     }
 
     fn active_time_of_every_core(ioreport: &IOReport) -> Duration {
-        Duration::from_nanos(
-            ioreport
-                .cores()
-                .iter()
-                .flat_map(|core| &core.active_ns)
-                .sum(),
-        )
+        Duration::from_nanos(ioreport.cores().iter().flat_map(States::active_ns).sum())
     }
 
     #[test]
@@ -1361,7 +1373,7 @@ mod tests {
 
         ioreport.read().unwrap();
 
-        assert!(ioreport.gpu.active_ns.iter().sum::<u64>() > 0);
+        assert!(ioreport.gpu().active_ns().iter().sum::<u64>() > 0);
     }
 
     #[test]
@@ -1372,12 +1384,12 @@ mod tests {
         let mut ioreport = open();
 
         ioreport.read().unwrap();
-        let before = ioreport.gpu_energy_nj;
+        let before = ioreport.gpu_energy_nj();
         let samples = ioreport.subscription.sample().unwrap();
         let energy = first_channel(&ioreport, &samples, Kind::GpuEnergy);
         let units = u64::try_from(unsafe { IOReportSimpleGetIntegerValue(energy, 0) }).unwrap();
         ioreport.read().unwrap();
-        let after = ioreport.gpu_energy_nj;
+        let after = ioreport.gpu_energy_nj();
 
         let between = units * ioreport.gpu_nj_per_unit;
         assert!(before <= between, "{before} nJ, then {between} nJ");
@@ -1392,6 +1404,6 @@ mod tests {
 
         ioreport.read().unwrap();
 
-        assert!(ioreport.gpu_energy_nj > 0);
+        assert!(ioreport.gpu_energy_nj() > 0);
     }
 }

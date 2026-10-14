@@ -9,9 +9,9 @@ pub struct Smc {
     power: FloatKey,
     fans: Vec<FloatKey>,
     soc_sensor: FloatKey,
-    pub power_watts: f32,
-    pub fan_rpm: Vec<f32>,
-    pub soc_celsius: f32,
+    power_watts: f32,
+    fan_rpm: Vec<f32>,
+    soc_celsius: f32,
 }
 
 impl Smc {
@@ -50,6 +50,24 @@ impl Smc {
         self.soc_celsius = self.connection.read_float(self.soc_sensor)?;
 
         Ok(())
+    }
+
+    /// The power the Mac drew at the last read, in watts.
+    #[must_use]
+    pub fn power_watts(&self) -> f32 {
+        self.power_watts
+    }
+
+    /// The speed of each fan at the last read, in revolutions a minute.
+    #[must_use]
+    pub fn fan_rpm(&self) -> &[f32] {
+        &self.fan_rpm
+    }
+
+    /// The temperature at the last read of the chip's sensor open picked, in degrees Celsius.
+    #[must_use]
+    pub fn soc_celsius(&self) -> f32 {
+        self.soc_celsius
     }
 }
 
@@ -843,8 +861,8 @@ mod tests {
 
         smc.read().unwrap();
 
-        assert!(smc.power_watts > 0.0, "{} W", smc.power_watts);
-        assert!(smc.power_watts < 500.0, "{} W", smc.power_watts);
+        assert!(smc.power_watts() > 0.0, "{} W", smc.power_watts());
+        assert!(smc.power_watts() < 500.0, "{} W", smc.power_watts());
     }
 
     #[test]
@@ -860,7 +878,7 @@ mod tests {
 
         smc.read().unwrap();
 
-        assert_eq!(usize::from(fan_count), smc.fan_rpm.len());
+        assert_eq!(usize::from(fan_count), smc.fan_rpm().len());
     }
 
     #[test]
@@ -872,7 +890,7 @@ mod tests {
 
         smc.read().unwrap();
 
-        for &rpm in &smc.fan_rpm {
+        for &rpm in smc.fan_rpm() {
             assert!(rpm >= 0.0, "{rpm} rpm");
             assert!(rpm < 10_000.0, "{rpm} rpm");
         }
@@ -886,7 +904,7 @@ mod tests {
 
         smc.read().unwrap();
 
-        assert!(smc.soc_celsius > 15.0, "{} °C", smc.soc_celsius);
-        assert!(smc.soc_celsius < 115.0, "{} °C", smc.soc_celsius);
+        assert!(smc.soc_celsius() > 15.0, "{} °C", smc.soc_celsius());
+        assert!(smc.soc_celsius() < 115.0, "{} °C", smc.soc_celsius());
     }
 }
