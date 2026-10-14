@@ -31,8 +31,7 @@ snake_case too, which nothing checks.
 - Keep assertions on in production. Write `assert!`, never `debug_assert!`, and make
   the release profile trap integer overflow and abort on a panic.
 - Treat every compiler and clippy warning as an error, clippy's pedantic group included.
-- Assert arguments, return values, preconditions, postconditions and invariants, at
-  least two assertions a function on average.
+- Assert arguments, return values, preconditions, postconditions and invariants.
 - Assert only what the code itself guarantees. Handle what a kernel call or another
   program returns as an operating error and never assert it, because under
   `panic = "abort"` an assertion on it turns a change in macOS into a crash.
@@ -140,6 +139,9 @@ snake_case too, which nothing checks.
 - `usize` indexes, counts and sizes things in memory, where Tiger avoids it everywhere,
   because TigerBeetle's own code uses it that way and a ban would put a conversion
   beside every slice index.
+- Flightdeck sets no number of assertions a function, where Tiger asks for two on average,
+  because code held to a count fills its accessors and thin wrappers with assertions that
+  cannot fail.
 - Markdown may run past 100 columns, since a table row or a link cannot wrap.
 - The functions `main` calls are the program's own steps and keep their own names,
   since every function is called from `main` at some depth.
