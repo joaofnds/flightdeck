@@ -48,14 +48,14 @@ struct Options {
     rescan_interval: Duration,
 }
 
-fn options_from(args: &[String]) -> Result<Options, String> {
+fn options_from(arguments: &[String]) -> Result<Options, String> {
     let usage = || "usage: collector [--seconds N] [--rescan-ms N]".to_owned();
     let mut options = Options {
         seconds: None,
         rescan_interval: DEFAULT_RESCAN_INTERVAL,
     };
 
-    for pair in args.chunks(2) {
+    for pair in arguments.chunks(2) {
         match pair {
             [flag, seconds] if flag == "--seconds" => {
                 options.seconds = Some(seconds.parse().map_err(|_| usage())?);
