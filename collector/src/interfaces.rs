@@ -108,10 +108,10 @@ impl Interfaces {
         &self.readings
     }
 
-    pub fn read_all(&mut self) -> io::Result<()> {
+    pub fn read(&mut self) -> io::Result<()> {
         assert!(self.readings.capacity() >= interface_count_max(self.buffer.len()));
 
-        let filled = self.read_all_fill_buffer()?;
+        let filled = self.read_fill_buffer()?;
         let Some(dump) = self.buffer.get(..filled) else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -120,7 +120,7 @@ impl Interfaces {
         };
 
         self.readings.clear();
-        read_all_messages(dump, &mut self.readings)?;
+        read_messages(dump, &mut self.readings)?;
 
         assert!(self.readings.len() <= interface_count_max(self.buffer.len()));
         Ok(())
@@ -128,7 +128,7 @@ impl Interfaces {
 
     /// Fills the buffer with the routing dump of every interface and returns the bytes the
     /// kernel wrote. A dump past the buffer is an error, since the buffer does not grow.
-    fn read_all_fill_buffer(&mut self) -> io::Result<usize> {
+    fn read_fill_buffer(&mut self) -> io::Result<usize> {
         // A buffer of no bytes would have the kernel report the dump's size and write none.
         assert!(!self.buffer.is_empty());
 
@@ -173,7 +173,7 @@ impl Interfaces {
 /// Reads into `readings` the interface each message of `dump` names, skipping loopback and the
 /// messages of other kinds. A message the dump cannot hold, or that names no interface, is
 /// an error.
-fn read_all_messages(dump: &[u8], readings: &mut Vec<Interface>) -> io::Result<()> {
+fn read_messages(dump: &[u8], readings: &mut Vec<Interface>) -> io::Result<()> {
     assert!(readings.is_empty());
 
     let mut offset = 0;
@@ -208,7 +208,7 @@ fn read_all_messages(dump: &[u8], readings: &mut Vec<Interface>) -> io::Result<(
         };
 
         if c_int::from(header[MESSAGE_TYPE_OFFSET]) == RTM_IFINFO2 {
-            if let Some(interface) = read_all_interface(message)? {
+            if let Some(interface) = read_interface(message)? {
                 push_without_growing(readings, interface);
             }
         }
@@ -221,7 +221,7 @@ fn read_all_messages(dump: &[u8], readings: &mut Vec<Interface>) -> io::Result<(
 
 /// Reads the interface `message` names, or `None` for loopback, whose traffic is not
 /// external.
-fn read_all_interface(message: &[u8]) -> io::Result<Option<Interface>> {
+fn read_interface(message: &[u8]) -> io::Result<Option<Interface>> {
     assert!(message.len() >= MESSAGE_PREFIX_SIZE);
     assert_eq!(RTM_IFINFO2, c_int::from(message[MESSAGE_TYPE_OFFSET]));
 
@@ -440,7 +440,7 @@ mod tests {
     /// Reads `dump` into room for every interface it could hold.
     fn read_dump(dump: &[u8]) -> io::Result<Vec<Interface>> {
         let mut readings = Vec::with_capacity(interface_count_max(dump.len()));
-        read_all_messages(dump, &mut readings)?;
+        read_messages(dump, &mut readings)?;
         Ok(readings)
     }
 
@@ -619,7 +619,7 @@ mod tests {
         let mut interfaces = Interfaces::with_dump_size(MESSAGE_PREFIX_SIZE);
         let capacity = interfaces.buffer.capacity();
 
-        let read = interfaces.read_all();
+        let read = interfaces.read();
 
         assert_eq!(io::ErrorKind::QuotaExceeded, read.unwrap_err().kind());
         assert_eq!(capacity, interfaces.buffer.capacity());
@@ -631,7 +631,7 @@ mod tests {
         // Method: compare the names read with the names if_nameindex lists, less lo0.
         let mut interfaces = Interfaces::default();
 
-        interfaces.read_all().unwrap();
+        interfaces.read().unwrap();
 
         let mut read: Vec<String> = interfaces
             .readings

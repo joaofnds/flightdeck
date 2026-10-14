@@ -124,7 +124,7 @@ impl Coalitions {
         }
     }
 
-    pub fn read_all(&mut self) -> io::Result<()> {
+    pub fn read(&mut self) -> io::Result<()> {
         assert!(self.ids.len() <= self.coalition_limit);
         assert!(self.coalition_limit <= self.readings.capacity());
         assert!(self.ids.windows(2).all(|pair| pair[0] < pair[1]));
@@ -135,7 +135,7 @@ impl Coalitions {
             let returned = unsafe {
                 coalition_info_resource_usage(id, &raw mut usage, size_of::<ResourceUsage>())
             };
-            if read_all_returned(returned, io::Error::last_os_error())? {
+            if read_returned(returned, io::Error::last_os_error())? {
                 let coalition = Coalition {
                     id,
                     tasks_started: usage.tasks_started,
@@ -152,7 +152,7 @@ impl Coalitions {
             }
         }
 
-        read_all_retain(&mut self.ids, &self.readings);
+        read_retain(&mut self.ids, &self.readings);
 
         assert!(self.readings.len() <= self.coalition_limit);
         Ok(())
@@ -165,7 +165,7 @@ impl Coalitions {
 /// A coalition with no process left stays readable for minutes at least, so holding it would
 /// fill the list over a long run. Its last reading is in `readings`, and a start that names it
 /// again adds it back.
-fn read_all_retain(ids: &mut Vec<u64>, readings: &[Coalition]) {
+fn read_retain(ids: &mut Vec<u64>, readings: &[Coalition]) {
     assert!(readings.len() <= ids.len());
 
     let mut unmatched = readings.iter().peekable();
@@ -182,7 +182,7 @@ fn read_all_retain(ids: &mut Vec<u64>, readings: &[Coalition]) {
 /// Reads what a `coalition_info_resource_usage` `returned`, and the `error` it set where it
 /// failed, which it does by returning -1: true where it read the coalition, false where macOS
 /// no longer has it, and any other failure as the error it is.
-fn read_all_returned(returned: c_int, error: io::Error) -> io::Result<bool> {
+fn read_returned(returned: c_int, error: io::Error) -> io::Result<bool> {
     assert!(error.raw_os_error().is_some());
 
     if returned == 0 {
@@ -282,12 +282,12 @@ mod tests {
         // only when the thread blocks or its 10 ms time slice ends.
         let mut coalitions = Coalitions::new(Timebase::read().unwrap(), COALITION_LIMIT);
         coalitions.add(own_coalition()).unwrap();
-        coalitions.read_all().unwrap();
+        coalitions.read().unwrap();
         let before = coalitions.readings[0];
 
         spin_on_this_thread_for(Duration::from_millis(50));
         std::thread::sleep(Duration::from_millis(1));
-        coalitions.read_all().unwrap();
+        coalitions.read().unwrap();
 
         let after = coalitions.readings[0];
         assert!(
@@ -305,14 +305,14 @@ mod tests {
         let pid = std::process::id().cast_signed();
         let mut coalitions = Coalitions::new(timebase, COALITION_LIMIT);
         coalitions.add(own_coalition()).unwrap();
-        coalitions.read_all().unwrap();
+        coalitions.read().unwrap();
         let before = coalitions.readings[0];
         let own_before = processes::read_usage(timebase, pid).unwrap().unwrap();
 
         spin_on_this_thread_for(Duration::from_millis(50));
 
         let own_after = processes::read_usage(timebase, pid).unwrap().unwrap();
-        coalitions.read_all().unwrap();
+        coalitions.read().unwrap();
         let after = coalitions.readings[0];
         let own_nj = own_after.energy_nj - own_before.energy_nj;
         assert!(
@@ -330,7 +330,7 @@ mod tests {
         coalitions.add(own_coalition()).unwrap();
         coalitions.add(own_coalition()).unwrap();
 
-        coalitions.read_all().unwrap();
+        coalitions.read().unwrap();
 
         assert_eq!(1, coalitions.readings.len());
     }
@@ -417,7 +417,7 @@ mod tests {
         ];
         let mut ids = vec![1, 2, 3, 4];
 
-        read_all_retain(&mut ids, &readings);
+        read_retain(&mut ids, &readings);
 
         assert_eq!(vec![2, 4], ids);
     }
@@ -431,7 +431,7 @@ mod tests {
         let mut coalitions = Coalitions::new(Timebase::read().unwrap(), 1);
         coalitions.add(0).unwrap();
 
-        coalitions.read_all().unwrap();
+        coalitions.read().unwrap();
         let added = coalitions.add(own_coalition());
 
         assert!(coalitions.readings.is_empty());
@@ -451,7 +451,7 @@ mod tests {
         let mut coalitions = Coalitions::new(Timebase::read().unwrap(), COALITION_LIMIT);
         coalitions.add(jetsam).unwrap();
 
-        let read = coalitions.read_all();
+        let read = coalitions.read();
 
         assert_eq!(Some(EINVAL), read.unwrap_err().raw_os_error());
     }
@@ -461,7 +461,7 @@ mod tests {
         // Goal: coalition_info_resource_usage returns 0 or -1, so any other value is an error
         // rather than a reading taken from whatever errno an earlier call left.
         // Method: read a call that returned 1 with ESRCH left in errno.
-        let returned = read_all_returned(1, io::Error::from_raw_os_error(ESRCH));
+        let returned = read_returned(1, io::Error::from_raw_os_error(ESRCH));
 
         assert_eq!(io::ErrorKind::InvalidData, returned.unwrap_err().kind());
     }

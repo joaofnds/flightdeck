@@ -80,7 +80,7 @@ impl Collector {
         let events_capacity = self.events.capacity();
 
         meter.measure(Source::Machine, || self.machine.read())?;
-        meter.measure(Source::Interfaces, || self.interfaces.read_all())?;
+        meter.measure(Source::Interfaces, || self.interfaces.read())?;
         meter.measure(Source::IOReport, || self.ioreport.read())?;
         meter.measure(Source::Smc, || self.smc.read())?;
 
@@ -153,7 +153,7 @@ fn read_coalitions(
         add_listed_coalitions(listing, coalitions)?;
     }
 
-    coalitions.read_all()
+    coalitions.read()
 }
 
 /// Adds the coalition of every process in `listing`.
