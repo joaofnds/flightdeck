@@ -211,17 +211,15 @@ impl Cost {
         self.cpu.div_duration_f64(self.elapsed)
     }
 
+    /// The power spent, as nanojoules a second divided by the million of them in a milliwatt.
     #[must_use]
     pub fn milliwatts(&self) -> f64 {
-        ratio(u128::from(self.energy_nj), self.elapsed.as_nanos()) * 1_000.0
+        f64_from_u64(self.energy_nj) / self.elapsed.as_secs_f64() / 1_000_000.0
     }
 
     #[must_use]
     pub fn share_on_super_cores(&self) -> f64 {
-        ratio(
-            u128::from(self.super_instructions),
-            u128::from(self.instructions),
-        )
+        f64_from_u64(self.super_instructions) / f64_from_u64(self.instructions)
     }
 
     #[must_use]
@@ -239,9 +237,19 @@ impl Cost {
     }
 }
 
-fn ratio(part: u128, whole: u128) -> f64 {
-    let parts_per_million = part * 1_000_000 / whole.max(1);
-    f64::from(u32::try_from(parts_per_million).unwrap_or(u32::MAX)) / 1_000_000.0
+/// Converts `value` to the nearest f64, which `f64::from` does not do for a u64, from its two
+/// halves, each of which an f64 holds exactly.
+fn f64_from_u64(value: u64) -> f64 {
+    let high = match u32::try_from(value >> 32) {
+        Ok(high) => high,
+        Err(error) => unreachable!("{error}"),
+    };
+    let low = match u32::try_from(value & u64::from(u32::MAX)) {
+        Ok(low) => low,
+        Err(error) => unreachable!("{error}"),
+    };
+
+    f64::from(high) * 4_294_967_296.0 + f64::from(low)
 }
 
 #[cfg(test)]
@@ -283,6 +291,43 @@ mod tests {
         let cost = ten_seconds_later(0, 25_000_000, 0);
 
         assert!((cost.milliwatts() - 2.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn gives_power_past_what_a_millionth_in_a_u32_holds() {
+        // Goal: power reads as what was spent, however large, never as a cap.
+        // Method: spend 50 kJ in ten seconds, 5 kW, past the 4,295 W that parts per million
+        // in a u32 hold.
+        let cost = ten_seconds_later(0, 50_000_000_000_000, 0);
+
+        assert!(
+            (cost.milliwatts() - 5_000_000.0).abs() < 1e-6,
+            "{}",
+            cost.milliwatts()
+        );
+    }
+
+    #[test]
+    fn gives_no_share_where_no_instructions_ran() {
+        // Goal: a span that ran no instructions gives no share on super cores, never a made-up
+        // share of 0.
+        // Method: share no instructions on super cores among none.
+        let cost = Cost {
+            instructions: 0,
+            super_instructions: 0,
+            ..ten_seconds_later(0, 0, 0)
+        };
+
+        assert!(cost.share_on_super_cores().is_nan());
+    }
+
+    #[test]
+    fn converts_a_u64_to_the_nearest_f64() {
+        // Goal: a u64 past the 2^53 an f64 holds exactly converts to the nearest f64.
+        // Method: convert the largest u64, 2^64 - 1, whose nearest f64 is 2^64.
+        let converted = f64_from_u64(u64::MAX);
+
+        assert_eq!(2_f64.powi(64).to_bits(), converted.to_bits());
     }
 
     #[test]
