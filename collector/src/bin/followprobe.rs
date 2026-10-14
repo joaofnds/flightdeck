@@ -262,10 +262,18 @@ impl Generators {
         Ok(generators)
     }
 
+    /// Whether every generator has exited, or an error where one exited with a failure, since
+    /// the children it wrote may then be short of those it forked.
     fn all_exited(&mut self) -> io::Result<bool> {
         for generator in &mut self.running {
-            if generator.try_wait()?.is_none() {
+            let Some(status) = generator.try_wait()? else {
                 return Ok(false);
+            };
+            if !status.success() {
+                return Err(io::Error::other(format!(
+                    "generator {} exited with {status}",
+                    generator.id()
+                )));
             }
         }
         Ok(true)
@@ -410,6 +418,37 @@ mod tests {
         // error.
         // Method: parse a rate of 3 a second over 4 generators.
         assert!(probe_from(&arguments(&["0", "3", "15", "6", "4"])).is_err());
+    }
+
+    #[test]
+    fn the_generators_exited_once_each_exited_successfully() {
+        // Goal: generators that each exited successfully have all exited.
+        // Method: wait on a child that runs true, then ask whether the generators exited.
+        let mut succeeded = Command::new("/usr/bin/true").spawn().unwrap();
+        succeeded.wait().unwrap();
+        let mut generators = Generators {
+            running: vec![succeeded],
+        };
+
+        let exited = generators.all_exited();
+
+        assert!(exited.unwrap());
+    }
+
+    #[test]
+    fn refuses_a_generator_that_failed() {
+        // Goal: a generator that exits with a failure fails the probe, since the children it
+        // wrote may be short of those it forked.
+        // Method: wait on a child that runs false, then ask whether the generators exited.
+        let mut failed = Command::new("/usr/bin/false").spawn().unwrap();
+        failed.wait().unwrap();
+        let mut generators = Generators {
+            running: vec![failed],
+        };
+
+        let exited = generators.all_exited();
+
+        assert_eq!(io::ErrorKind::Other, exited.unwrap_err().kind());
     }
 
     #[test]
