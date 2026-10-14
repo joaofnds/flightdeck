@@ -24,7 +24,7 @@ const fn cpu_ticks_index(state: c_int) -> usize {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-pub struct CpuTicks {
+pub struct CPUTicks {
     pub user: u32,
     pub system: u32,
     pub nice: u32,
@@ -85,18 +85,18 @@ const PROCESSOR_CPU_LOAD_INFO: c_int = 2;
 
 /// A core's ticks in each state, as `struct processor_cpu_load_info` declares it.
 #[repr(C)]
-struct ProcessorCpuLoadInfo {
+struct ProcessorCPULoadInfo {
     cpu_ticks: [u32; CPU_STATE_MAX],
 }
 
-const _: () = assert!(size_of::<ProcessorCpuLoadInfo>() == 16);
-const _: () = assert!(offset_of!(ProcessorCpuLoadInfo, cpu_ticks) == 0);
+const _: () = assert!(size_of::<ProcessorCPULoadInfo>() == 16);
+const _: () = assert!(offset_of!(ProcessorCPULoadInfo, cpu_ticks) == 0);
 
 /// The machine's page counts, as `struct vm_statistics64` declares them through its first
 /// revision. The kernel fills only the integers the call's count asks for, and the struct
 /// has grown past this since.
 #[repr(C)]
-struct VmStatistics64 {
+struct VMStatistics64 {
     free_count: u32,
     active_count: u32,
     inactive_count: u32,
@@ -123,29 +123,29 @@ struct VmStatistics64 {
     total_uncompressed_pages_in_compressor: u64,
 }
 
-const _: () = assert!(size_of::<VmStatistics64>() == 152);
-const _: () = assert!(offset_of!(VmStatistics64, free_count) == 0);
-const _: () = assert!(offset_of!(VmStatistics64, active_count) == 4);
-const _: () = assert!(offset_of!(VmStatistics64, inactive_count) == 8);
-const _: () = assert!(offset_of!(VmStatistics64, wire_count) == 12);
-const _: () = assert!(offset_of!(VmStatistics64, pageins) == 32);
-const _: () = assert!(offset_of!(VmStatistics64, pageouts) == 40);
-const _: () = assert!(offset_of!(VmStatistics64, purgeable_count) == 88);
-const _: () = assert!(offset_of!(VmStatistics64, speculative_count) == 92);
-const _: () = assert!(offset_of!(VmStatistics64, decompressions) == 96);
-const _: () = assert!(offset_of!(VmStatistics64, compressions) == 104);
-const _: () = assert!(offset_of!(VmStatistics64, swapins) == 112);
-const _: () = assert!(offset_of!(VmStatistics64, swapouts) == 120);
-const _: () = assert!(offset_of!(VmStatistics64, compressor_page_count) == 128);
-const _: () = assert!(offset_of!(VmStatistics64, external_page_count) == 136);
-const _: () = assert!(offset_of!(VmStatistics64, internal_page_count) == 140);
+const _: () = assert!(size_of::<VMStatistics64>() == 152);
+const _: () = assert!(offset_of!(VMStatistics64, free_count) == 0);
+const _: () = assert!(offset_of!(VMStatistics64, active_count) == 4);
+const _: () = assert!(offset_of!(VMStatistics64, inactive_count) == 8);
+const _: () = assert!(offset_of!(VMStatistics64, wire_count) == 12);
+const _: () = assert!(offset_of!(VMStatistics64, pageins) == 32);
+const _: () = assert!(offset_of!(VMStatistics64, pageouts) == 40);
+const _: () = assert!(offset_of!(VMStatistics64, purgeable_count) == 88);
+const _: () = assert!(offset_of!(VMStatistics64, speculative_count) == 92);
+const _: () = assert!(offset_of!(VMStatistics64, decompressions) == 96);
+const _: () = assert!(offset_of!(VMStatistics64, compressions) == 104);
+const _: () = assert!(offset_of!(VMStatistics64, swapins) == 112);
+const _: () = assert!(offset_of!(VMStatistics64, swapouts) == 120);
+const _: () = assert!(offset_of!(VMStatistics64, compressor_page_count) == 128);
+const _: () = assert!(offset_of!(VMStatistics64, external_page_count) == 136);
+const _: () = assert!(offset_of!(VMStatistics64, internal_page_count) == 140);
 
 const HOST_VM_INFO64: c_int = 4;
-/// The size of `VmStatistics64` in integers, the count `host_statistics64` fills, as the
+/// The size of `VMStatistics64` in integers, the count `host_statistics64` fills, as the
 /// header computes it.
-const HOST_VM_INFO64_REV1_COUNT: usize = size_of::<VmStatistics64>() / size_of::<c_int>();
+const HOST_VM_INFO64_REV1_COUNT: usize = size_of::<VMStatistics64>() / size_of::<c_int>();
 
-const _: () = assert!(size_of::<VmStatistics64>().is_multiple_of(size_of::<c_int>()));
+const _: () = assert!(size_of::<VMStatistics64>().is_multiple_of(size_of::<c_int>()));
 const _: () = assert!(HOST_VM_INFO64_REV1_COUNT == 38);
 
 /// The machine's swap, as `struct xsw_usage` declares it without the `xsu_` prefix.
@@ -206,7 +206,7 @@ pub struct Machine {
     page_size: u64,
     swap_usage: Sysctl,
     pressure_level: Sysctl,
-    pub cpus: Vec<CpuTicks>,
+    pub cpus: Vec<CPUTicks>,
     pub memory: Memory,
 }
 
@@ -265,10 +265,10 @@ impl Machine {
         let capacity = self.cpus.capacity();
         let cpu_count = read_cpus_count_check(counts, capacity)?;
         let loads = unsafe {
-            std::slice::from_raw_parts(info.address.cast::<ProcessorCpuLoadInfo>(), cpu_count)
+            std::slice::from_raw_parts(info.address.cast::<ProcessorCPULoadInfo>(), cpu_count)
         };
         self.cpus.clear();
-        self.cpus.extend(loads.iter().map(|load| CpuTicks {
+        self.cpus.extend(loads.iter().map(|load| CPUTicks {
             user: load.cpu_ticks[USER_INDEX],
             system: load.cpu_ticks[SYSTEM_INDEX],
             nice: load.cpu_ticks[NICE_INDEX],
@@ -280,7 +280,7 @@ impl Machine {
     }
 
     fn read_memory(&mut self) -> io::Result<()> {
-        let mut vm = std::mem::MaybeUninit::<VmStatistics64>::zeroed();
+        let mut statistics = std::mem::MaybeUninit::<VMStatistics64>::zeroed();
         let mut count = match u32::try_from(HOST_VM_INFO64_REV1_COUNT) {
             Ok(count) => count,
             Err(error) => unreachable!("{error}"),
@@ -289,36 +289,36 @@ impl Machine {
             host_statistics64(
                 self.host,
                 HOST_VM_INFO64,
-                vm.as_mut_ptr().cast(),
+                statistics.as_mut_ptr().cast(),
                 &raw mut count,
             )
         };
         kern_return_check(result, "host_statistics64")?;
         read_memory_count_check(count)?;
 
-        let vm = unsafe { vm.assume_init() };
+        let statistics = unsafe { statistics.assume_init() };
         let swap: XswUsage = self.swap_usage.read()?;
         let pages = |count: u32| u64::from(count) * self.page_size;
 
         self.memory = Memory {
             total_bytes: self.memory.total_bytes,
-            free_bytes: pages(vm.free_count),
-            active_bytes: pages(vm.active_count),
-            inactive_bytes: pages(vm.inactive_count),
-            speculative_bytes: pages(vm.speculative_count),
-            wired_bytes: pages(vm.wire_count),
-            compressed_bytes: pages(vm.compressor_page_count),
-            anonymous_bytes: pages(vm.internal_page_count),
-            file_backed_bytes: pages(vm.external_page_count),
-            purgeable_bytes: pages(vm.purgeable_count),
+            free_bytes: pages(statistics.free_count),
+            active_bytes: pages(statistics.active_count),
+            inactive_bytes: pages(statistics.inactive_count),
+            speculative_bytes: pages(statistics.speculative_count),
+            wired_bytes: pages(statistics.wire_count),
+            compressed_bytes: pages(statistics.compressor_page_count),
+            anonymous_bytes: pages(statistics.internal_page_count),
+            file_backed_bytes: pages(statistics.external_page_count),
+            purgeable_bytes: pages(statistics.purgeable_count),
             swap_total_bytes: swap.total,
             swap_used_bytes: swap.used,
-            swapped_in_bytes: vm.swapins * self.page_size,
-            swapped_out_bytes: vm.swapouts * self.page_size,
-            pageins: vm.pageins,
-            pageouts: vm.pageouts,
-            compressions: vm.compressions,
-            decompressions: vm.decompressions,
+            swapped_in_bytes: statistics.swapins * self.page_size,
+            swapped_out_bytes: statistics.swapouts * self.page_size,
+            pageins: statistics.pageins,
+            pageouts: statistics.pageouts,
+            compressions: statistics.compressions,
+            decompressions: statistics.decompressions,
             pressure: Pressure::from_level(self.pressure_level.read()?)?,
         };
 
@@ -363,7 +363,7 @@ fn read_cpus_count_check(counts: ReplyCounts, capacity: usize) -> io::Result<usi
     Ok(cpu_count)
 }
 
-/// Checks that `host_statistics64` wrote back `count` integers, all of `VmStatistics64`,
+/// Checks that `host_statistics64` wrote back `count` integers, all of `VMStatistics64`,
 /// since one it left unwritten would read as a count of 0.
 fn read_memory_count_check(count: u32) -> io::Result<()> {
     if usize_from_u32(count) != HOST_VM_INFO64_REV1_COUNT {
