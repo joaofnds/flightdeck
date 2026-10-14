@@ -68,6 +68,8 @@ fn options_from(arguments: &[String]) -> Result<Options, String> {
         }
     }
 
+    // Each flag took the word after it, so the words came in pairs.
+    assert!(arguments.len().is_multiple_of(2));
     Ok(options)
 }
 
@@ -81,6 +83,7 @@ fn run(options: &Options) -> io::Result<()> {
     let mut tick = run.first_tick;
     loop {
         let following = run.tick(tick, &mut out)?;
+        assert!(following > tick);
         if options
             .seconds
             .is_some_and(|seconds| following > seconds.get())
@@ -152,8 +155,9 @@ impl Markers {
                 live_between += 1;
             }
         }
-        // Each pid counted is a distinct one between the marks.
+        // Each pid counted is a distinct one between the marks, and one of the listing's.
         assert!(live_between <= between);
+        assert!(live_between <= u64_from_usize(live_at_first_scan.len()));
         Some(between - live_between)
     }
 }
@@ -256,6 +260,8 @@ impl Run {
         out: &mut impl Write,
     ) -> io::Result<()> {
         assert!(last_tick >= self.first_tick);
+        // The run finishes only after its first tick.
+        assert!(self.whole.tally.ticks > 0);
 
         let end = Mark::take(&self.meter, self.timebase, &self.collector)?;
         self.whole
@@ -360,6 +366,8 @@ fn start_warm_up_starts(events: &[Event]) -> u64 {
             starts += 1;
         }
     }
+
+    assert!(starts <= u64_from_usize(events.len()));
     starts
 }
 
@@ -384,8 +392,14 @@ impl Starts {
     /// The processes started that no event reported, or `None` where the run gives no count
     /// of the processes started or found more than it counted.
     fn missed(&self) -> Option<u64> {
-        self.started
-            .and_then(|started| started.checked_sub(self.found))
+        let missed = self
+            .started
+            .and_then(|started| started.checked_sub(self.found));
+
+        if let Some(missed) = missed {
+            assert_eq!(self.started, Some(missed + self.found));
+        }
+        missed
     }
 }
 
@@ -509,11 +523,16 @@ struct Exits {
 
 impl Exits {
     fn add(&mut self, last: &Result<Usage, Unreadable>) {
+        let total = self.read + self.refused + self.gone;
+
         match last {
             Ok(_) => self.read += 1,
             Err(Unreadable::Refused) => self.refused += 1,
             Err(Unreadable::Gone) => self.gone += 1,
         }
+
+        // Each exit counts in exactly one of the three.
+        assert_eq!(total + 1, self.read + self.refused + self.gone);
     }
 }
 
@@ -536,6 +555,11 @@ fn report_cost(
     tally: &Tally,
     late_average: Duration,
 ) -> io::Result<()> {
+    // The average tick is no later than the latest, and the latest no later than all of the
+    // span's ticks together.
+    assert!(late_average <= tally.late_max);
+    assert!(tally.late_max <= tally.late_total);
+
     let share = cost.share_of_a_core();
     write!(
         out,
