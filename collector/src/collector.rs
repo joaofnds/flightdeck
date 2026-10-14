@@ -22,7 +22,7 @@ pub struct Collector {
     pub smc: Smc,
     pub processes: Sweep,
     pub coalitions: Coalitions,
-    pub events: Vec<Event>,
+    events: Vec<Event>,
     /// What the tracker had counted when the previous tick was read.
     counts_previous: Counts,
 }
@@ -60,6 +60,13 @@ impl Collector {
         add_listed_coalitions(&collector.listing, &mut collector.coalitions)?;
 
         Ok(collector)
+    }
+
+    /// The events the last tick drained from the tracker. The list is private, since a tick
+    /// fills it within the room `new` gave it and never grows it.
+    #[must_use]
+    pub fn events(&self) -> &[Event] {
+        &self.events
     }
 
     pub fn wait_until(&mut self, deadline: u64, meter: &mut Meter) -> io::Result<()> {

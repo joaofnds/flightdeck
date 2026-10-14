@@ -142,7 +142,7 @@ impl Run {
 
         collector.wait_until(schedule.deadline(0), &mut meter)?;
         collector.read(&mut meter)?;
-        let warm_up_starts = starts_in(&collector.events);
+        let warm_up_starts = starts_in(collector.events());
 
         let first_tick = schedule.first_ahead_of(clock::now()).max(1);
         let start = Mark::take(&meter, timebase, &collector)?;
@@ -380,7 +380,7 @@ impl Tally {
         self.late_total += late;
         self.late_max = self.late_max.max(late);
 
-        for event in &collector.events {
+        for event in collector.events() {
             match event {
                 Event::Start { .. } => self.starts += 1,
                 Event::Exec { .. } => self.execs += 1,
