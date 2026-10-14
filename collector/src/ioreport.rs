@@ -56,6 +56,8 @@ impl States {
     /// The time spent in each active state, in nanoseconds, at the last read.
     #[must_use]
     pub fn active_ns(&self) -> &[u64] {
+        assert!(self.active_ns.len() <= self.active_states_max);
+
         &self.active_ns
     }
 }
@@ -97,6 +99,9 @@ impl ChannelCounts {
             ));
         }
 
+        assert_eq!(1, self.gpu_energy);
+        assert_eq!(1, self.gpu_states);
+        assert!(self.core_states > 0);
         Ok(())
     }
 
@@ -227,6 +232,7 @@ impl ChannelsKey {
             ));
         }
 
+        assert!(!channels.is_null());
         Ok(channels)
     }
 }
@@ -243,7 +249,9 @@ impl Owned {
             return Err(io::Error::other(format!("{call} returned null")));
         }
 
-        Ok(Self(object))
+        let owned = Self(object);
+        assert!(!owned.0.is_null());
+        Ok(owned)
     }
 }
 
@@ -332,6 +340,8 @@ unsafe extern "C" {
 
 impl IOReport {
     pub fn open(timebase: Timebase, cpu_limit: usize) -> io::Result<Self> {
+        assert!(cpu_limit > 0);
+
         let channels_key = ChannelsKey::new()?;
 
         let wanted = channels_in_group(&ENERGY_MODEL)?;
@@ -355,6 +365,8 @@ impl IOReport {
         };
         ioreport.learn()?;
 
+        assert_eq!(cpu_limit, ioreport.cores.len());
+        assert!(ioreport.counts.core_states > 0);
         Ok(ioreport)
     }
 
@@ -425,8 +437,10 @@ impl IOReport {
                 None => {}
             }
         }
+        counts.read_check(&self.counts)?;
 
-        counts.read_check(&self.counts)
+        assert_eq!(self.gpu.active_indices.len(), self.gpu.active_ns.len());
+        Ok(())
     }
 
     /// The energy the GPU had spent at the last read, in nanojoules.
@@ -518,6 +532,8 @@ fn each_channel_count_check(channel_count: isize) -> io::Result<()> {
         ));
     }
 
+    assert!(channel_count >= 0);
+    assert!(channel_count <= CHANNELS_MAX);
     Ok(())
 }
 
@@ -606,6 +622,8 @@ fn learn_active_states_count_check(state_count: i32) -> io::Result<()> {
         ));
     }
 
+    assert!(state_count >= 0);
+    assert!(state_count <= STATES_MAX);
     Ok(())
 }
 
@@ -623,6 +641,8 @@ fn read_active_states(timebase: Timebase, channel: CFTypeRef, into: &mut States)
         ));
     }
 
+    // Learning bounded the states and the active ones among them.
+    assert!(into.state_count <= STATES_MAX);
     assert!(into.active_indices.len() <= into.active_states_max);
     into.active_ns.clear();
     for &index in &into.active_indices {
