@@ -23,10 +23,12 @@ pub struct IOReport {
 impl IOReport {
     pub fn open(timebase: Timebase, cpu_limit: usize) -> io::Result<Self> {
         let channels_key = ChannelsKey::new()?;
+
         let wanted = channels_in_group(&ENERGY_MODEL)?;
         open_merge_group(&wanted, &GPU_PERFORMANCE_STATES)?;
         open_merge_group(&wanted, &CPU_CORE_PERFORMANCE_STATES)?;
         open_keep_read_channels(&wanted, &channels_key)?;
+
         let subscription = Subscription::new(&wanted)?;
 
         let mut ioreport = Self {
@@ -349,6 +351,7 @@ impl ChannelsKey {
 fn channels_in_group(group: &Group) -> io::Result<Owned> {
     let name = string(group.name)?;
     let subgroup = group.subgroup.map(string).transpose()?;
+
     let channels = unsafe {
         IOReportCopyChannelsInGroup(
             name.0,
@@ -363,6 +366,7 @@ fn channels_in_group(group: &Group) -> io::Result<Owned> {
 
 fn open_merge_group(into: &Owned, group: &Group) -> io::Result<()> {
     let more = channels_in_group(group)?;
+
     unsafe { IOReportMergeChannels(into.0, more.0, ptr::null()) };
 
     Ok(())
@@ -372,6 +376,7 @@ fn open_merge_group(into: &Owned, group: &Group) -> io::Result<()> {
 /// reads rather than the 383 the groups hold.
 fn open_keep_read_channels(channels: &Owned, key: &ChannelsKey) -> io::Result<()> {
     let all = key.channels_of(channels)?;
+
     let kept = unsafe { CFArrayCreateMutable(ptr::null(), 0, &raw const kCFTypeArrayCallBacks) };
     let kept = Owned::new(kept, "creating an array")?;
 
