@@ -77,6 +77,10 @@ impl Collector {
     }
 
     pub fn read(&mut self, meter: &mut Meter) -> io::Result<()> {
+        // A tick fills the lists `new` sized and never grows them.
+        let listing_capacity = self.listing.capacity();
+        let events_capacity = self.events.capacity();
+
         meter.measure(Source::Machine, || self.machine.read())?;
         meter.measure(Source::Interfaces, || self.interfaces.read_all())?;
         meter.measure(Source::IOReport, || self.ioreport.read())?;
@@ -110,6 +114,8 @@ impl Collector {
 
         assert!(!self.listing.is_empty());
         assert!(self.events.len() <= EVENTS_PER_TICK_MAX);
+        assert_eq!(listing_capacity, self.listing.capacity());
+        assert_eq!(events_capacity, self.events.capacity());
         Ok(())
     }
 }
@@ -133,9 +139,6 @@ fn read_coalitions(
     coalitions: &mut Coalitions,
 ) -> io::Result<()> {
     assert!(events.len() <= EVENTS_PER_TICK_MAX);
-    if dropped_starts > 0 {
-        assert!(!listing.is_empty());
-    }
 
     for event in events {
         if let Event::Start {

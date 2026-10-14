@@ -47,9 +47,7 @@ impl Service {
             ));
         }
 
-        let service = Self(service);
-        assert_ne!(0, service.0);
-        Ok(service)
+        Ok(Self(service))
     }
 }
 
@@ -105,7 +103,6 @@ impl Drop for Connection {
 impl Connection {
     fn open() -> io::Result<Self> {
         let service = Service::matching(c"AppleSMCKeysEndpoint")?;
-        assert_ne!(0, service.0);
 
         let mut port = 0;
         let opened = unsafe { IOServiceOpen(service.0, kernel::task_self(), 0, &raw mut port) };
@@ -114,9 +111,7 @@ impl Connection {
             return Err(io::Error::other("connecting to the SMC gave no connection"));
         }
 
-        let connection = Self(port);
-        assert_ne!(0, connection.0);
-        Ok(connection)
+        Ok(Self(port))
     }
 
     fn hottest_soc_sensor(&self) -> io::Result<FloatKey> {
@@ -211,7 +206,6 @@ impl Connection {
         };
 
         held_check_of(held, wanted)?;
-        assert!(held.info.is(wanted));
         // A read of `wanted` then takes as many bytes as the SMC holds.
         assert_eq!(held.info.size, wanted.size);
         Ok(())
@@ -245,6 +239,17 @@ impl Connection {
         assert!(COMMANDS.contains(&question.command));
         assert_eq!(0, question.padding);
         assert_eq!([0; 3], question.info.padding);
+        // Only a read of bytes names a type, and only a read by index names an index.
+        if question.command == READ_BYTES {
+            assert!(question.info.size > 0);
+        } else {
+            assert_eq!(0, question.info.size);
+        }
+        if question.command == READ_INDEX {
+            assert!(question.index < KEYS_MAX);
+        } else {
+            assert_eq!(0, question.index);
+        }
 
         let mut answer = Message::default();
         let mut answer_size = size_of::<Message>();
@@ -259,10 +264,7 @@ impl Connection {
             )
         };
 
-        let answer = ask_answered(question, returned, answer_size, answer)?;
-        assert_eq!(size_of::<Message>(), answer_size);
-        assert_eq!(SUCCESS, answer.result);
-        Ok(answer)
+        ask_answered(question, returned, answer_size, answer)
     }
 }
 
@@ -284,6 +286,16 @@ const SYSTEM_POWER: Key = Key::named(*b"PSTR");
 const SOC_TEMPERATURE_PREFIXES: [[u8; 2]; 8] = [
     *b"TC", *b"Tp", *b"Tf", *b"Ts", *b"Te", *b"TR", *b"Tg", *b"TP",
 ];
+
+// Open looks for the SoC's sensors among every key, so no fan's speed key, which starts with
+// `F`, may look like one.
+const _: () = {
+    let mut index = 0;
+    while index < SOC_TEMPERATURE_PREFIXES.len() {
+        assert!(SOC_TEMPERATURE_PREFIXES[index][0] != b'F');
+        index += 1;
+    }
+};
 
 /// The most fans the SMC's keys can name, since a fan's speed key names it with one digit.
 const FANS_MAX: u8 = 10;
@@ -307,10 +319,7 @@ impl Key {
     fn fan_speed(fan_index: u8) -> Self {
         assert!(fan_index < FANS_MAX);
 
-        let key = Key::named([b'F', b'0' + fan_index, b'A', b'c']);
-        // Open looks for the SoC's sensors among every key, so no fan's key may look like one.
-        assert!(!key.is_soc_temperature());
-        key
+        Key::named([b'F', b'0' + fan_index, b'A', b'c'])
     }
 
     fn is_soc_temperature(self) -> bool {
@@ -360,6 +369,8 @@ const _: () = assert!(MESSAGE_BYTES_SIZE == 32);
 const FLOAT: KeyInfo = KeyInfo::of(*b"flt ", 4);
 const UNSIGNED_8: KeyInfo = KeyInfo::of(*b"ui8 ", 1);
 const UNSIGNED_32: KeyInfo = KeyInfo::of(*b"ui32", 4);
+/// The types a read names.
+const READ_TYPES: [KeyInfo; 3] = [FLOAT, UNSIGNED_8, UNSIGNED_32];
 
 impl KeyInfo {
     const fn of(kind: [u8; 4], size: u32) -> Self {
@@ -435,9 +446,8 @@ impl Smc {
             .map(|fan_index| connection.float_key(Key::fan_speed(fan_index)))
             .collect::<io::Result<Vec<FloatKey>>>()?;
         let soc_sensor = connection.hottest_soc_sensor()?;
-        assert!(soc_sensor.0.is_soc_temperature());
         let fan_rpm = Vec::with_capacity(fans.len());
-        assert_eq!(usize::from(fan_count), fans.len());
+        assert!(fans.len() <= usize::from(FANS_MAX));
         assert!(fans.len() <= fan_rpm.capacity());
 
         Ok(Self {
@@ -469,8 +479,6 @@ impl Smc {
     /// The power the Mac drew at the last read, in watts.
     #[must_use]
     pub fn power_watts(&self) -> f32 {
-        assert_eq!(FloatKey(SYSTEM_POWER), self.power);
-
         self.power_watts
     }
 
@@ -532,13 +540,17 @@ fn ask_answered(
         )));
     }
 
-    assert_eq!(size_of::<Message>(), answer_size);
-    assert_eq!(SUCCESS, answer.result);
     Ok(answer)
 }
 
 /// Checks that the SMC holds a key as a value of `wanted`, from the info `held` gives.
 fn held_check_of(held: Held, wanted: KeyInfo) -> io::Result<()> {
+    assert!(
+        READ_TYPES
+            .iter()
+            .any(|read_type| read_type.kind == wanted.kind)
+    );
+
     if !held.info.is(wanted) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -549,7 +561,6 @@ fn held_check_of(held: Held, wanted: KeyInfo) -> io::Result<()> {
         ));
     }
 
-    assert!(held.info.is(wanted));
     Ok(())
 }
 
@@ -562,7 +573,6 @@ fn fan_count_check(fan_count: u8) -> io::Result<()> {
         ));
     }
 
-    assert!(fan_count <= FANS_MAX);
     Ok(())
 }
 
@@ -575,7 +585,6 @@ fn key_count_check(key_count: u32) -> io::Result<()> {
         ));
     }
 
-    assert!(key_count <= KEYS_MAX);
     Ok(())
 }
 

@@ -101,16 +101,15 @@ impl ChannelCounts {
             ));
         }
 
-        assert_eq!(1, self.gpu_energy);
-        assert_eq!(1, self.gpu_states);
-        assert!(self.core_states > 0);
         Ok(())
     }
 
     /// Checks that a read found the channels open found, since a channel it missed would keep
     /// the value of the read before.
     fn read_check(&self, at_open: &ChannelCounts) -> io::Result<()> {
+        // Open found what a read takes.
         assert_eq!(1, at_open.gpu_energy);
+        assert_eq!(1, at_open.gpu_states);
         assert!(at_open.core_states > 0);
 
         if self != at_open {
@@ -120,7 +119,6 @@ impl ChannelCounts {
             ));
         }
 
-        assert_eq!(at_open.core_states, self.core_states);
         Ok(())
     }
 }
@@ -207,13 +205,10 @@ impl Subscription {
         let handle = Owned::new(handle, "subscribing to IOReport's channels");
         let channels = Owned::new(channels, "listing the channels IOReport subscribed to");
 
-        let subscription = Self {
+        Ok(Self {
             handle: handle?,
             channels: channels?,
-        };
-        assert!(!subscription.handle.0.is_null());
-        assert!(!subscription.channels.0.is_null());
-        Ok(subscription)
+        })
     }
 
     /// Takes a sample of every channel the subscription holds.
@@ -231,9 +226,7 @@ struct ChannelsKey(Owned);
 
 impl ChannelsKey {
     fn new() -> io::Result<Self> {
-        let key = Self(string(c"IOReportChannels")?);
-        assert!(!key.0.0.is_null());
-        Ok(key)
+        Ok(Self(string(c"IOReportChannels")?))
     }
 
     fn channels_of(&self, dictionary: &Owned) -> io::Result<CFTypeRef> {
@@ -254,7 +247,6 @@ impl ChannelsKey {
             ));
         }
 
-        assert!(!channels.is_null());
         Ok(channels)
     }
 }
@@ -273,9 +265,7 @@ impl Owned {
             return Err(io::Error::other(format!("{call} returned null")));
         }
 
-        let owned = Self(object);
-        assert!(!owned.0.is_null());
-        Ok(owned)
+        Ok(Self(object))
     }
 }
 
@@ -521,8 +511,6 @@ fn open_merge_group(into: &Owned, group: &Group) -> io::Result<()> {
     assert!(!into.0.is_null());
 
     let more = channels_in_group(group)?;
-    assert!(!more.0.is_null());
-
     unsafe { IOReportMergeChannels(into.0, more.0, ptr::null()) };
 
     Ok(())
@@ -531,20 +519,18 @@ fn open_merge_group(into: &Owned, group: &Group) -> io::Result<()> {
 /// Keeps in `channels` only those a read takes, so each sample copies the 20 channels an M5 Pro
 /// reads rather than the 383 the groups hold.
 fn open_keep_read_channels(channels: &Owned, key: &ChannelsKey) -> io::Result<()> {
+    assert!(!channels.0.is_null());
+
     let all = key.channels_of(channels)?;
 
     let kept = unsafe { CFArrayCreateMutable(ptr::null(), 0, &raw const kCFTypeArrayCallBacks) };
     let kept = Owned::new(kept, "creating an array")?;
 
-    let mut kept_count: isize = 0;
     for channel in each(all)? {
         if Kind::of(channel).is_some() {
             unsafe { CFArrayAppendValue(kept.0, channel) };
-            kept_count += 1;
         }
     }
-    assert!(kept_count <= CHANNELS_MAX);
-    assert!(!kept.0.is_null());
     unsafe { CFDictionarySetValue(channels.0, key.0.0, kept.0) };
 
     Ok(())
@@ -561,7 +547,6 @@ fn each(array: CFTypeRef) -> io::Result<impl Iterator<Item = CFTypeRef>> {
 
     let channel_count = unsafe { CFArrayGetCount(array) };
     each_channel_count_check(channel_count)?;
-    assert!(channel_count <= CHANNELS_MAX);
 
     Ok((0..channel_count).map(move |index| unsafe { CFArrayGetValueAtIndex(array, index) }))
 }
@@ -581,8 +566,6 @@ fn each_channel_count_check(channel_count: isize) -> io::Result<()> {
         ));
     }
 
-    assert!(channel_count >= 0);
-    assert!(channel_count <= CHANNELS_MAX);
     Ok(())
 }
 
@@ -652,7 +635,6 @@ fn learn_active_states_is_active(name: CFTypeRef) -> io::Result<bool> {
         ));
     }
 
-    assert!(!name.is_null());
     for inactive in [c"OFF", c"IDLE", c"DOWN"] {
         if is(name, inactive) {
             return Ok(false);
@@ -680,8 +662,6 @@ fn learn_active_states_count_check(state_count: i32) -> io::Result<()> {
         ));
     }
 
-    assert!(state_count >= 0);
-    assert!(state_count <= STATES_MAX);
     Ok(())
 }
 
@@ -724,8 +704,6 @@ fn read_active_states_residency(residency: i64) -> io::Result<u64> {
         ));
     };
 
-    assert!(residency >= 0);
-    assert_eq!(residency, ticks.cast_signed());
     Ok(ticks)
 }
 
@@ -750,7 +728,6 @@ fn learn_nj_per_unit(channel: CFTypeRef) -> io::Result<u64> {
 fn learn_nj_per_unit_of(unit: CFTypeRef) -> io::Result<u64> {
     for (label, nj_per_unit) in ENERGY_UNITS {
         if is(unit, label) {
-            assert!(nj_per_unit > 0);
             return Ok(nj_per_unit);
         }
     }
@@ -802,9 +779,7 @@ fn string(text: &CStr) -> io::Result<Owned> {
     assert!(!text.is_empty());
 
     let created = unsafe { CFStringCreateWithCString(ptr::null(), text.as_ptr(), UTF8) };
-    let string = Owned::new(created, "creating a string")?;
-    assert!(!string.0.is_null());
-    Ok(string)
+    Owned::new(created, "creating a string")
 }
 
 /// Whether `text` is a string that holds `want`. A string the buffer cannot hold is longer than

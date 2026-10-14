@@ -101,7 +101,6 @@ fn run(probe: &Probe) -> io::Result<()> {
 
     let timebase = Timebase::read()?;
     let process_limit = processes::process_limit()?;
-    assert!(process_limit > 0);
     let limits = Limits {
         process_limit,
         events_per_tick_max: EVENTS_PER_TICK_MAX,
@@ -231,7 +230,6 @@ fn run_report_children(followed: &Followed) -> io::Result<Children> {
         ));
     }
 
-    assert!(forked > 0);
     let mut children = Children {
         forked,
         found: 0,
@@ -353,7 +351,6 @@ impl Generators {
                             generator.id()
                         )));
                     }
-                    assert!(status.success());
                 }
             }
         }

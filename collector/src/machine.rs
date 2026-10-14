@@ -84,9 +84,7 @@ impl PageSize {
             ));
         }
 
-        let page_size = Self { bytes };
-        assert!(page_size.bytes > 0);
-        Ok(page_size)
+        Ok(Self { bytes })
     }
 
     /// Returns the bytes `pages` pages hold, or an error where a u64 cannot hold them.
@@ -127,7 +125,6 @@ impl Machine {
             },
         };
         assert!(machine.cpus.capacity() >= cpu_limit);
-        assert!(machine.page_size.bytes > 0);
         Ok(machine)
     }
 
@@ -295,9 +292,6 @@ fn read_cpus_count_check(counts: ReplyCounts, capacity: usize) -> io::Result<usi
         ));
     }
 
-    assert!(cpu_count > 0);
-    assert!(cpu_count <= capacity);
-    assert_eq!(cpu_count * CPU_STATE_MAX, integer_count);
     Ok(cpu_count)
 }
 
@@ -311,7 +305,6 @@ fn read_memory_count_check(count: u32) -> io::Result<()> {
         ));
     }
 
-    assert_eq!(HOST_VM_INFO64_REV1_COUNT, usize_from_u32(count));
     Ok(())
 }
 
@@ -350,10 +343,7 @@ impl Drop for MachMemory {
 /// Returns how many entries a list takes to hold one for every logical CPU the machine runs,
 /// which `hw.logicalcpu_max` gives.
 pub fn cpu_limit() -> io::Result<usize> {
-    let cpu_limit = kernel::read_limit(c"hw.logicalcpu_max")?;
-
-    assert!(cpu_limit > 0);
-    Ok(cpu_limit)
+    kernel::read_limit(c"hw.logicalcpu_max")
 }
 
 // `processor_cpu_load_info.cpu_ticks` holds a core's ticks at the indices the CPU_STATE

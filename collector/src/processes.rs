@@ -230,10 +230,7 @@ unsafe extern "C" {
 /// Returns how many entries a list takes to hold one for every process macOS runs at once,
 /// which `kern.maxproc` gives.
 pub fn process_limit() -> io::Result<usize> {
-    let process_limit = kernel::read_limit(c"kern.maxproc")?;
-
-    assert!(process_limit > 0);
-    Ok(process_limit)
+    kernel::read_limit(c"kern.maxproc")
 }
 
 /// Returns an empty pid list with room for every process `process_limit` allows and one more,
@@ -289,7 +286,6 @@ fn list_pids_check(pids: &[i32]) -> io::Result<()> {
         ));
     }
 
-    assert!(!pids.is_empty());
     pids.iter().try_for_each(|&pid| {
         if (0..=PID_MAX).contains(&pid) {
             Ok(())
@@ -445,13 +441,10 @@ fn pid_info_size<T>() -> c_int {
     const { assert!(size_of::<T>() > 0) };
     const { assert!(size_of::<T>() < 1 << 31) };
 
-    let size = match c_int::try_from(size_of::<T>()) {
+    match c_int::try_from(size_of::<T>()) {
         Ok(size) => size,
         Err(error) => unreachable!("{error}"),
-    };
-    assert!(size > 0);
-    assert_eq!(usize::try_from(size), Ok(size_of::<T>()));
-    size
+    }
 }
 
 /// Reads what a `proc_pidinfo` asked for a `T` returned: `written`, the count of bytes it

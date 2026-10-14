@@ -64,7 +64,6 @@ pub(crate) fn kern_return_check(returned: KernReturn, call: &str) -> io::Result<
         return Err(io::Error::other(format!("{call} returned {returned:#x}")));
     }
 
-    assert_eq!(KERN_SUCCESS, returned);
     Ok(())
 }
 
@@ -131,7 +130,6 @@ impl Sysctl {
             ));
         }
 
-        assert_eq!(size, size_of::<T>());
         Ok(value)
     }
 }
@@ -152,8 +150,6 @@ fn named_check(path_count: usize) -> io::Result<()> {
         ));
     }
 
-    assert!(path_count > 0);
-    assert!(path_count <= CTL_MAXNAME);
     Ok(())
 }
 
@@ -185,8 +181,6 @@ fn read_limit_check(name: &CStr, limit: c_int) -> io::Result<usize> {
         ));
     }
 
-    assert!(count > 0);
-    assert_eq!(Ok(limit), c_int::try_from(count));
     Ok(count)
 }
 

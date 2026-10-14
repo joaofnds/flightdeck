@@ -23,6 +23,8 @@ const CONDITION_MS_MAX: u64 = 10_000;
 const POLL_MS: u64 = 100;
 /// Counts the output files this process has created, so that no two share a path.
 static OUTPUT_FILES_CREATED: AtomicU64 = AtomicU64::new(0);
+/// Starts the name of every output file, so a drop removes no other file.
+const OUTPUT_FILE_PREFIX: &str = "burst_minute-";
 const USAGE: &str = "usage: burst_minute --rescan-ms N --per-second N -- COLLECTOR [ARGUMENT...]";
 
 fn main() -> ExitCode {
@@ -124,7 +126,6 @@ fn run(options: &Options) -> io::Result<()> {
         collector: OutputFile::create("collector")?,
         followprobe: OutputFile::create("followprobe")?,
     };
-    assert!(reports.collector.path != reports.followprobe.path);
     let minute = run_minute(options, &followprobe, &reports);
 
     // Both reports are written whatever the minute's outcome, since a program that failed
@@ -166,8 +167,6 @@ fn run_minute(options: &Options, followprobe: &Path, reports: &Reports) -> io::R
 
 /// Runs followprobe for the burst and waits for it to end.
 fn run_burst(options: &Options, followprobe: &Path, report: &OutputFile) -> io::Result<()> {
-    assert!(followprobe.ends_with("followprobe"));
-
     let mut probe = StartedProcess::start(
         "followprobe",
         Command::new(followprobe)
@@ -211,7 +210,6 @@ fn run_burst_arguments(options: &Options) -> [String; 5] {
 /// Finds the `followprobe` built beside this program, in the same target directory.
 fn run_followprobe_path() -> io::Result<PathBuf> {
     let path = std::env::current_exe()?.with_file_name("followprobe");
-    assert!(path.ends_with("followprobe"));
 
     match fs::exists(&path) {
         Ok(true) => Ok(path),
@@ -378,7 +376,7 @@ impl OutputFile {
 
         let sequence = OUTPUT_FILES_CREATED.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "burst_minute-{}-{sequence}-{name}.txt",
+            "{OUTPUT_FILE_PREFIX}{}-{sequence}-{name}.txt",
             std::process::id()
         ));
         let file = OpenOptions::new()
@@ -412,9 +410,10 @@ impl OutputFile {
 
     /// Whether the file has the name `create` gave it, so a drop removes no other file.
     fn is_named(&self) -> bool {
-        self.path
-            .file_name()
-            .is_some_and(|name| name.as_encoded_bytes().starts_with(b"burst_minute-"))
+        self.path.file_name().is_some_and(|name| {
+            name.as_encoded_bytes()
+                .starts_with(OUTPUT_FILE_PREFIX.as_bytes())
+        })
     }
 }
 

@@ -52,7 +52,6 @@ impl Name {
             bytes,
             length: name.len(),
         };
-        assert!(taken.length <= IFNAMSIZ);
         assert_eq!(name, &taken.bytes[..taken.length]);
         assert!(taken.bytes[taken.length..].iter().all(|&byte| byte == 0));
         Ok(taken)
@@ -62,12 +61,10 @@ impl Name {
     pub fn as_str(&self) -> &str {
         assert!(self.length <= IFNAMSIZ);
 
-        let name = match std::str::from_utf8(&self.bytes[..self.length]) {
+        match std::str::from_utf8(&self.bytes[..self.length]) {
             Ok(name) => name,
             Err(error) => unreachable!("{error}"),
-        };
-        assert_eq!(self.length, name.len());
-        name
+        }
     }
 }
 
@@ -79,10 +76,7 @@ impl std::fmt::Debug for Name {
 
 impl Default for Interfaces {
     fn default() -> Self {
-        let interfaces = Self::with_dump_size(DUMP_SIZE);
-
-        assert_eq!(DUMP_SIZE, interfaces.buffer.len());
-        interfaces
+        Self::with_dump_size(DUMP_SIZE)
     }
 }
 
@@ -110,7 +104,6 @@ impl Interfaces {
             buffer: vec![0; dump_size],
             read: Vec::with_capacity(interface_count_max(dump_size)),
         };
-        assert_eq!(dump_size, interfaces.buffer.len());
         assert!(interfaces.read.capacity() >= interface_count_max(dump_size));
         interfaces
     }
@@ -135,8 +128,6 @@ impl Interfaces {
                 format!("sysctl wrote {filled} bytes into {}", self.buffer.len()),
             ));
         };
-        assert_eq!(filled, dump.len());
-        assert!(filled <= self.buffer.len());
 
         self.read.clear();
         read_all_messages(dump, &mut self.read)?;
@@ -216,8 +207,6 @@ fn read_all_messages(dump: &[u8], read: &mut Vec<Interface>) -> io::Result<()> {
                 format!("a routing message gave its length as {length} bytes"),
             ));
         }
-        // Each message moves the offset on by its length, so the walk ends.
-        assert!(length >= MESSAGE_PREFIX_SIZE);
         let Some(message) = dump.get(offset..offset + length) else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -227,7 +216,6 @@ fn read_all_messages(dump: &[u8], read: &mut Vec<Interface>) -> io::Result<()> {
                 ),
             ));
         };
-        assert_eq!(length, message.len());
 
         if c_int::from(header[MESSAGE_TYPE_OFFSET]) == RTM_IFINFO2 {
             if let Some(interface) = read_all_interface(message)? {
@@ -280,7 +268,6 @@ fn read_all_interface(message: &[u8]) -> io::Result<Option<Interface>> {
             ),
         ));
     };
-    assert_eq!(usize::from(name_length), name.len());
 
     let data = info.data;
     Ok(Some(Interface {

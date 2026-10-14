@@ -9,7 +9,7 @@ use collector::collector::Collector;
 use collector::cost::{Cost, Meter, Snapshot, Source};
 use collector::processes::{self, Unreadable, Usage};
 use collector::schedule::Schedule;
-use collector::tracker::{Counts, EVENTS_PER_TICK_MAX, Event, Noticed};
+use collector::tracker::{Counts, Event, Noticed};
 use collector::u64_from_usize;
 
 const QOS_CLASS_DEFAULT: u32 = 0x15;
@@ -109,7 +109,6 @@ fn run_set_qos_class_default() -> io::Result<()> {
         return Err(io::Error::from_raw_os_error(error));
     }
 
-    assert_eq!(0, error);
     Ok(())
 }
 
@@ -240,6 +239,19 @@ impl Run {
         // A span closes on its last tick, so it never runs more ticks than it spans.
         assert!(self.window.tally.ticks <= TICKS_PER_WINDOW);
         assert!(self.minute.tally.ticks <= TICKS_PER_MINUTE);
+        // A span runs or slips each of its ticks, from its first to the one before `following`.
+        assert_eq!(
+            following,
+            self.whole.first_tick + self.whole.tally.ticks + self.whole.tally.slips
+        );
+        assert_eq!(
+            following,
+            self.minute.first_tick + self.minute.tally.ticks + self.minute.tally.slips
+        );
+        assert_eq!(
+            following,
+            self.window.first_tick + self.window.tally.ticks + self.window.tally.slips
+        );
 
         let step = Step { tick, following };
         if step.closes_span(TICKS_PER_WINDOW) {
@@ -306,13 +318,11 @@ impl Span {
     fn begin(start: Mark, first_tick: u64) -> Self {
         assert!(first_tick > 0);
 
-        let span = Self {
+        Self {
             start,
             first_tick,
             tally: Tally::default(),
-        };
-        assert_eq!(0, span.tally.ticks);
-        span
+        }
     }
 
     /// Writes what the span's ticks, `first_tick` to `last_tick`, cost and counted, with
@@ -367,8 +377,6 @@ fn run_throwaway_child() -> io::Result<i32> {
 }
 
 fn start_warm_up_starts(events: &[Event]) -> u64 {
-    assert!(events.len() <= EVENTS_PER_TICK_MAX);
-
     let mut starts = 0;
     for event in events {
         if matches!(event, Event::Start { .. }) {
@@ -384,9 +392,7 @@ fn start_warm_up_starts(events: &[Event]) -> u64 {
 fn processes_started_pid_lap() -> u64 {
     const { assert!(processes::PID_MAX > 0) };
 
-    let lap = u64::from(processes::PID_MAX.cast_unsigned());
-    assert!(lap > 0);
-    lap
+    u64::from(processes::PID_MAX.cast_unsigned())
 }
 
 /// The processes that started over a run, as the run's report counts them.
@@ -515,11 +521,7 @@ impl Tally {
     /// The events the tally has counted, in all of its counts of them.
     fn events_counted(&self) -> u64 {
         let exits = self.seen_exiting.count() + self.found_exited.count();
-        let events = self.starts + self.execs + exits;
-
-        assert!(events >= exits);
-        assert!(events >= self.starts);
-        events
+        self.starts + self.execs + exits
     }
 
     /// The lateness of the average tick the tally counts, floored to the nanosecond, or an
@@ -557,12 +559,7 @@ struct Exits {
 impl Exits {
     /// The exits counted, each in exactly one of the three.
     fn count(&self) -> u64 {
-        let count = self.read + self.refused + self.gone;
-
-        assert!(count >= self.read);
-        assert!(count >= self.refused);
-        assert!(count >= self.gone);
-        count
+        self.read + self.refused + self.gone
     }
 
     fn add(&mut self, last: &Result<Usage, Unreadable>) {

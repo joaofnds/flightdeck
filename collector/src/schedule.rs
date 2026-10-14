@@ -20,12 +20,10 @@ impl Schedule {
             ));
         }
 
-        let schedule = Self {
+        Ok(Self {
             start: clock::now(),
             period,
-        };
-        assert!(schedule.period > 0);
-        Ok(schedule)
+        })
     }
 
     /// Gives the clock reading at which `tick` falls due.
@@ -33,9 +31,7 @@ impl Schedule {
     pub fn deadline(&self, tick: u64) -> u64 {
         assert!(self.period > 0);
 
-        let deadline = self.start + tick * self.period;
-        assert!(deadline >= self.start);
-        deadline
+        self.start + tick * self.period
     }
 
     /// Gives the first tick whose deadline is past `now`.

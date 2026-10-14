@@ -43,10 +43,7 @@ pub fn usize_from_u32(value: u32) -> usize {
     const { assert!(size_of::<u32>() <= size_of::<usize>()) };
 
     match usize::try_from(value) {
-        Ok(widened) => {
-            assert_eq!(u32::try_from(widened), Ok(value));
-            widened
-        }
+        Ok(widened) => widened,
         Err(error) => unreachable!("{error}"),
     }
 }
@@ -57,10 +54,7 @@ pub fn u64_from_usize(value: usize) -> u64 {
     const { assert!(size_of::<usize>() <= size_of::<u64>()) };
 
     match u64::try_from(value) {
-        Ok(widened) => {
-            assert_eq!(usize::try_from(widened), Ok(value));
-            widened
-        }
+        Ok(widened) => widened,
         Err(error) => unreachable!("{error}"),
     }
 }

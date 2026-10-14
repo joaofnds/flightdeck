@@ -42,7 +42,8 @@ impl Timebase {
             ));
         };
 
-        // A tick lasts a nanosecond or more exactly when the numerator is the larger.
+        // A tick lasts a nanosecond or more exactly when the numerator is at least the
+        // denominator.
         if self.numerator >= self.denominator {
             assert!(nanoseconds >= ticks);
         } else {
@@ -65,7 +66,8 @@ impl Timebase {
             ));
         };
 
-        // A tick lasts a nanosecond or more exactly when the numerator is the larger.
+        // A tick lasts a nanosecond or more exactly when the numerator is at least the
+        // denominator.
         if self.numerator >= self.denominator {
             assert!(ticks <= nanoseconds);
         } else {
@@ -91,8 +93,6 @@ fn read_check(info: MachTimebaseInfo) -> io::Result<Timebase> {
         ));
     }
 
-    assert!(info.numer > 0);
-    assert!(info.denom > 0);
     Ok(Timebase {
         numerator: info.numer.into(),
         denominator: info.denom.into(),

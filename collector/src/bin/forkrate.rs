@@ -315,7 +315,6 @@ fn run_forks_wait_until(deadline: u64) -> io::Result<()> {
         )));
     }
 
-    assert_eq!(KERN_SUCCESS, returned);
     Ok(())
 }
 
@@ -384,7 +383,6 @@ fn run_reap_rest(outstanding: u32) -> io::Result<Reaped> {
                 "waitpid returned no child though it was asked to wait for one",
             ));
         }
-        assert!(pid > 0);
         reaped.add_exit(status);
     }
 

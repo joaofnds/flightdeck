@@ -144,18 +144,13 @@ enum Cause {
 
 impl Throttle {
     fn new(interval_ticks: u64) -> Self {
-        let throttle = Self {
+        Self {
             interval_ticks,
             rescan_ticks_last: 0,
             pending: false,
             deferred: false,
             armed: false,
-        };
-
-        // A throttle starts with no rescan pending and no timer armed for one.
-        assert!(!throttle.pending);
-        assert!(!throttle.armed);
-        throttle
+        }
     }
 
     fn woke(&mut self, wake: Wake) {
@@ -169,10 +164,6 @@ impl Throttle {
         }
         if wake.forked {
             self.pending = true;
-        }
-
-        if wake.forked {
-            assert!(self.pending);
         }
     }
 
@@ -380,6 +371,13 @@ impl Tracker {
             if woke.due {
                 assert!(self.starts.is_empty());
                 assert!(self.exits.is_empty());
+                // The tracker scans once as it starts, and counts each rescan since by its cause.
+                assert_eq!(
+                    self.scans,
+                    1 + self.counts.leading_rescans
+                        + self.counts.trailing_rescans
+                        + self.counts.listing_rescans
+                );
                 self.failed = false;
                 return Ok(());
             }
@@ -401,6 +399,13 @@ impl Tracker {
 
         assert!(self.starts.is_empty());
         assert!(self.exits.is_empty());
+        // The tracker scans once as it starts, and counts each rescan since by its cause.
+        assert_eq!(
+            self.scans,
+            1 + self.counts.leading_rescans
+                + self.counts.trailing_rescans
+                + self.counts.listing_rescans
+        );
         self.failed = false;
         Ok(())
     }
@@ -447,6 +452,8 @@ impl Tracker {
     fn compare(&mut self, listing: &[i32]) -> io::Result<()> {
         assert!(listing.len() < self.changes.capacity());
         assert!(self.starts.is_empty());
+        // The exits queued before are read, so each known pid's `exited` is current.
+        assert!(self.exits.is_empty());
         let previous = self.scans;
         self.scans += 1;
         let reporting = previous > 0;
@@ -482,12 +489,16 @@ impl Tracker {
             }
         }
 
-        assert!(self.changes.len() <= listing.len());
-        assert!(self.reuse_candidates.len() <= listing.len());
+        // A pid adds a watch or becomes a candidate, never both, so the candidates' watches fit.
+        assert!(self.changes.len() + self.reuse_candidates.len() <= listing.len());
+        // Every start compare reports is watched.
+        assert!(self.starts.len() <= self.changes.len());
         Ok(())
     }
 
     fn observe_reused_pids(&mut self) -> io::Result<()> {
+        assert!(self.changes.len() + self.reuse_candidates.len() <= self.changes.capacity());
+
         for &(pid, index) in &self.reuse_candidates {
             assert!(self.known[index].exited);
             assert_eq!(self.scans, self.known[index].listed_in);
@@ -497,6 +508,9 @@ impl Tracker {
                 push_without_growing(&mut self.starts, pid);
             }
         }
+
+        // Every start a reused pid adds is watched.
+        assert!(self.starts.len() <= self.changes.len());
         Ok(())
     }
 
@@ -523,6 +537,8 @@ impl Tracker {
     }
 
     fn read_exits(&mut self, meter: &mut Meter) -> io::Result<()> {
+        // The starts are read first, so a process's start reaches the events before its exit.
+        assert!(self.starts.is_empty());
         if self.exits.is_empty() {
             return Ok(());
         }
@@ -742,7 +758,6 @@ fn known_index(pid: i32, known_count: usize) -> io::Result<usize> {
         return Err(outside());
     };
     if index < known_count {
-        assert_eq!(Ok(pid), i32::try_from(index));
         Ok(index)
     } else {
         Err(outside())
@@ -759,7 +774,6 @@ fn pid_of(ident: usize) -> io::Result<i32> {
     };
 
     assert!(pid >= 0);
-    assert_eq!(Ok(ident), usize::try_from(pid));
     Ok(pid)
 }
 
@@ -776,7 +790,6 @@ fn errno_of(data: isize) -> io::Result<i32> {
         return Err(refused());
     };
     if errno >= 0 {
-        assert_eq!(Ok(data), isize::try_from(errno));
         Ok(errno)
     } else {
         Err(refused())
@@ -785,6 +798,9 @@ fn errno_of(data: isize) -> io::Result<i32> {
 
 /// A watch on the process at `index` in the known table, whose index is its pid.
 fn watch(index: usize) -> Kevent {
+    // A process event names its pid in the ident the watch gives it.
+    assert!(i32::try_from(index).is_ok());
+
     Kevent::new(
         index,
         EVFILT_PROC,
@@ -806,7 +822,6 @@ fn follow_until_timer(ident: usize, deadline_ticks: u64) -> io::Result<Kevent> {
         ));
     };
 
-    assert_eq!(Ok(deadline_ticks), u64::try_from(data));
     Ok(Kevent::new(
         ident,
         EVFILT_TIMER,
@@ -1138,13 +1153,17 @@ mod tests {
         }
     }
 
-    /// The receipt the kernel returns for `watch(ident)`, reporting `errno`, with `EV_ERROR` set as
-    /// macOS 27.0.1 sets it on every receipt.
+    /// The receipt the kernel returns for a watch on `ident`, reporting `errno`, with
+    /// `EV_ERROR` set as macOS 27.0.1 sets it on every receipt. It is built field by field,
+    /// since `watch` takes only an ident that names a pid, and a receipt can name any.
     fn receipt(ident: usize, errno: isize) -> Kevent {
-        let mut receipt = watch(ident);
-        receipt.flags |= EV_ERROR;
-        receipt.data = errno;
-        receipt
+        Kevent::new(
+            ident,
+            EVFILT_PROC,
+            EV_ADD | EV_RECEIPT | EV_ERROR,
+            NOTE_FORK | NOTE_EXEC | NOTE_EXIT,
+            errno,
+        )
     }
 
     #[test]
