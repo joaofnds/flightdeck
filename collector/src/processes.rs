@@ -289,6 +289,7 @@ fn list_pids_check(pids: &[i32]) -> io::Result<()> {
         ));
     }
 
+    assert!(!pids.is_empty());
     pids.iter().try_for_each(|&pid| {
         if (0..=PID_MAX).contains(&pid) {
             Ok(())

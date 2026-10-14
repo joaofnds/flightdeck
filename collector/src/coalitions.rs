@@ -156,6 +156,9 @@ impl Coalitions {
         }
 
         read_all_retain(&mut self.ids, &self.read);
+
+        assert!(self.read.len() <= self.coalition_limit);
+        assert!(self.ids.len() <= self.read.len());
         Ok(())
     }
 }
@@ -235,6 +238,9 @@ fn coalition_of_info(
     pid: i32,
     info: Result<PidCoalitionInfo, Unreadable>,
 ) -> io::Result<Option<u64>> {
+    assert!(pid >= 0);
+    assert!(pid <= processes::PID_MAX);
+
     match info {
         Ok(info) => Ok(Some(info.coalition_id[COALITION_TYPE_RESOURCE])),
         Err(Unreadable::Gone) => Ok(None),
