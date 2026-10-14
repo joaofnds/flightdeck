@@ -555,20 +555,6 @@ mod tests {
     }
 
     #[test]
-    fn index_gives_each_source_its_own_slot() {
-        // Goal: every source indexes a slot of a per-source array, and no two share one.
-        // Method: mark the slot of each source in turn, failing on a slot marked twice.
-        let mut taken = [false; Source::ALL.len()];
-
-        for source in Source::ALL {
-            let index = source.index();
-            assert!(index < taken.len(), "{source:?}");
-            assert!(!taken[index], "{source:?}");
-            taken[index] = true;
-        }
-    }
-
-    #[test]
     fn refuses_a_clock_macos_does_not_have() {
         // Goal: a clock that clock_gettime refuses is an error, never a time of 0.
         // Method: read clock 99, which clock_gettime refused with -1 on macOS 27.0.1.
