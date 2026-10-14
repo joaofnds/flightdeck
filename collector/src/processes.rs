@@ -230,7 +230,10 @@ unsafe extern "C" {
 /// Returns how many entries a list takes to hold one for every process macOS runs at once,
 /// which `kern.maxproc` gives.
 pub fn process_limit() -> io::Result<usize> {
-    kernel::read_limit(c"kern.maxproc")
+    let process_limit = kernel::read_limit(c"kern.maxproc")?;
+
+    assert!(process_limit > 0);
+    Ok(process_limit)
 }
 
 /// Returns an empty pid list with room for every process `process_limit` allows and one more,
