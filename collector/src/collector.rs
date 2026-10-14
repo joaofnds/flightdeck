@@ -213,6 +213,7 @@ mod tests {
         collector.read(&mut Meter::default()).unwrap();
 
         assert!(!collector.processes.readings.is_empty());
+        assert!(!collector.coalitions.readings.is_empty());
     }
 
     #[test]
