@@ -488,9 +488,10 @@ mod tests {
     fn refuses_a_message_shorter_than_its_length_and_type() {
         // Goal: a message whose length does not cover its own length and type is an error,
         // since the dump cannot be read past it.
-        // Method: read a dump whose one message gives its length as 0.
+        // Method: read a dump whose one message gives its length as one byte short of its
+        // length and type.
         let mut dump = message(RTM_IFINFO2, 0, b"en0");
-        set_length(&mut dump, 0);
+        set_length(&mut dump, u16::try_from(MESSAGE_PREFIX_SIZE - 1).unwrap());
 
         let read = read_dump(&dump);
 
