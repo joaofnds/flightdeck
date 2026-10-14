@@ -91,6 +91,8 @@ fn read_check(info: MachTimebaseInfo) -> io::Result<Timebase> {
         ));
     }
 
+    assert!(info.numer > 0);
+    assert!(info.denom > 0);
     Ok(Timebase {
         numerator: info.numer.into(),
         denominator: info.denom.into(),

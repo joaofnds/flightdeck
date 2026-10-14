@@ -64,6 +64,7 @@ pub(crate) fn kern_return_check(returned: KernReturn, call: &str) -> io::Result<
         return Err(io::Error::other(format!("{call} returned {returned:#x}")));
     }
 
+    assert_eq!(KERN_SUCCESS, returned);
     Ok(())
 }
 
@@ -151,12 +152,16 @@ fn named_check(path_count: usize) -> io::Result<()> {
         ));
     }
 
+    assert!(path_count > 0);
+    assert!(path_count <= CTL_MAXNAME);
     Ok(())
 }
 
 /// Reads the limit the kernel state `name` gives as a `c_int`, the count of entries a list
 /// takes to hold one for each thing the limit allows.
 pub(crate) fn read_limit(name: &CStr) -> io::Result<usize> {
+    assert!(!name.is_empty());
+
     let limit: c_int = Sysctl::named(name)?.read()?;
     let count = read_limit_check(name, limit)?;
 
