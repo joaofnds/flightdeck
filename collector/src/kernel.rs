@@ -146,6 +146,34 @@ fn named_check(path_count: usize) -> io::Result<()> {
     Ok(())
 }
 
+/// Reads the limit the kernel state `name` gives as a `c_int`, the count of entries a list
+/// takes to hold one for each thing the limit allows.
+pub(crate) fn read_limit(name: &CStr) -> io::Result<usize> {
+    let limit: c_int = Sysctl::named(name)?.read()?;
+    read_limit_check(name, limit)
+}
+
+/// Checks that `limit`, which the kernel state `name` gave, allows one thing or more, and
+/// returns it as a count.
+fn read_limit_check(name: &CStr, limit: c_int) -> io::Result<usize> {
+    let Ok(count) = usize::try_from(limit) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{name:?} gave a negative limit, {limit}"),
+        ));
+    };
+    if count == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{name:?} gave a limit of 0"),
+        ));
+    }
+
+    assert!(count > 0);
+    assert_eq!(Ok(limit), c_int::try_from(count));
+    Ok(count)
+}
+
 /// Reads the kernel state that `name`, a dotted string, names, as the bytes of a number of
 /// `SIZE` bytes, so a test can compare a reading with what the kernel reports.
 #[cfg(test)]
@@ -226,6 +254,31 @@ mod tests {
         // read past the path.
         // Method: check a path of CTL_MAXNAME + 1 levels.
         let checked = named_check(CTL_MAXNAME + 1);
+
+        assert_eq!(io::ErrorKind::InvalidData, checked.unwrap_err().kind());
+    }
+
+    #[test]
+    fn takes_a_limit_of_one_or_more() {
+        // Goal: a limit of one or more is the count of entries a list takes.
+        // Method: check the 18 this Mac's hw.logicalcpu_max gave.
+        assert_eq!(18, read_limit_check(c"hw.logicalcpu_max", 18).unwrap());
+    }
+
+    #[test]
+    fn refuses_a_limit_of_0() {
+        // Goal: a limit of 0 is an error, never a list with room for nothing.
+        // Method: check a kern.maxproc of 0, which would allow no process, this one included.
+        let checked = read_limit_check(c"kern.maxproc", 0);
+
+        assert_eq!(io::ErrorKind::InvalidData, checked.unwrap_err().kind());
+    }
+
+    #[test]
+    fn refuses_a_negative_limit() {
+        // Goal: a negative limit is an error, since no count is negative.
+        // Method: check a kern.maxproc of -1.
+        let checked = read_limit_check(c"kern.maxproc", -1);
 
         assert_eq!(io::ErrorKind::InvalidData, checked.unwrap_err().kind());
     }

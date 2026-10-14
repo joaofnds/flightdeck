@@ -3,7 +3,7 @@ use std::io;
 use std::mem::offset_of;
 
 use crate::clock::Timebase;
-use crate::kernel::{EPERM, ESRCH, Sysctl};
+use crate::kernel::{self, EPERM, ESRCH};
 use crate::push_without_growing;
 
 #[derive(Debug, Clone, Copy)]
@@ -230,31 +230,7 @@ unsafe extern "C" {
 /// Returns how many entries a list takes to hold one for every process macOS runs at once,
 /// which `kern.maxproc` gives.
 pub fn process_limit() -> io::Result<usize> {
-    let maxproc: c_int = Sysctl::named(c"kern.maxproc")?.read()?;
-    let limit = process_limit_of(maxproc)?;
-
-    assert!(limit > 0);
-    Ok(limit)
-}
-
-/// The process limit a `kern.maxproc` of `maxproc` gives, which allows at least this process.
-fn process_limit_of(maxproc: c_int) -> io::Result<usize> {
-    let allows_no_process = || {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("kern.maxproc of {maxproc} allows no process"),
-        )
-    };
-
-    let Ok(limit) = usize::try_from(maxproc) else {
-        return Err(allows_no_process());
-    };
-    if limit > 0 {
-        assert_eq!(Ok(maxproc), c_int::try_from(limit));
-        Ok(limit)
-    } else {
-        Err(allows_no_process())
-    }
+    kernel::read_limit(c"kern.maxproc")
 }
 
 /// Returns an empty pid list with room for every process `process_limit` allows and one more,
@@ -785,27 +761,9 @@ mod tests {
     fn reads_the_process_limit_from_kern_maxproc() {
         // Goal: the process limit is kern.maxproc, the most processes macOS runs at once.
         // Method: compare the limit with kern.maxproc read as raw bytes.
-        let maxproc = i32::from_ne_bytes(crate::kernel::sysctl_bytes(c"kern.maxproc"));
+        let maxproc = i32::from_ne_bytes(kernel::sysctl_bytes(c"kern.maxproc"));
 
         assert_eq!(usize::try_from(maxproc).unwrap(), process_limit().unwrap());
-    }
-
-    #[test]
-    fn refuses_a_kern_maxproc_of_zero() {
-        // Goal: a kern.maxproc that allows no process is an error, since this process runs.
-        // Method: take the process limit of a kern.maxproc of 0.
-        let limit = process_limit_of(0);
-
-        assert_eq!(io::ErrorKind::InvalidData, limit.unwrap_err().kind());
-    }
-
-    #[test]
-    fn refuses_a_negative_kern_maxproc() {
-        // Goal: a negative kern.maxproc is an error, since no count of processes is negative.
-        // Method: take the process limit of a kern.maxproc of -1.
-        let limit = process_limit_of(-1);
-
-        assert_eq!(io::ErrorKind::InvalidData, limit.unwrap_err().kind());
     }
 
     #[test]

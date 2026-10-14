@@ -186,19 +186,7 @@ unsafe extern "C" {
 /// Returns how many entries a list takes to hold one for every logical CPU the machine runs,
 /// which `hw.logicalcpu_max` gives.
 pub fn cpu_limit() -> io::Result<usize> {
-    let limit: c_int = Sysctl::named(c"hw.logicalcpu_max")?.read()?;
-    cpu_limit_check(limit)
-}
-
-/// Checks that `limit` counts one CPU or more, and returns it as a count.
-fn cpu_limit_check(limit: c_int) -> io::Result<usize> {
-    match usize::try_from(limit) {
-        Ok(0) | Err(_) => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("hw.logicalcpu_max gave {limit} CPUs"),
-        )),
-        Ok(count) => Ok(count),
-    }
+    kernel::read_limit(c"hw.logicalcpu_max")
 }
 
 pub struct Machine {
@@ -492,31 +480,6 @@ mod tests {
         let cpus = u32::from_ne_bytes(kernel::sysctl_bytes(c"hw.logicalcpu_max"));
 
         assert_eq!(usize::try_from(cpus).unwrap(), cpu_limit().unwrap());
-    }
-
-    #[test]
-    fn takes_a_cpu_limit_of_one_or_more() {
-        // Goal: a CPU limit of one or more is the room the CPU list takes.
-        // Method: check the 18 this Mac's hw.logicalcpu_max gave.
-        assert_eq!(18, cpu_limit_check(18).unwrap());
-    }
-
-    #[test]
-    fn refuses_a_cpu_limit_of_0() {
-        // Goal: a CPU limit of 0 is an error, never a list with no room for any CPU.
-        // Method: check a limit of 0.
-        let checked = cpu_limit_check(0);
-
-        assert_eq!(io::ErrorKind::InvalidData, checked.unwrap_err().kind());
-    }
-
-    #[test]
-    fn refuses_a_negative_cpu_limit() {
-        // Goal: a negative CPU limit is an error, since no count of CPUs is negative.
-        // Method: check a limit of -1.
-        let checked = cpu_limit_check(-1);
-
-        assert_eq!(io::ErrorKind::InvalidData, checked.unwrap_err().kind());
     }
 
     #[test]
