@@ -58,9 +58,9 @@ fn options_from(args: &[String]) -> Result<Options, String> {
             [flag, seconds] if flag == "--seconds" => {
                 options.seconds = Some(seconds.parse().map_err(|_| usage())?);
             }
-            [flag, millis] if flag == "--rescan-ms" => {
+            [flag, milliseconds] if flag == "--rescan-ms" => {
                 options.rescan_interval =
-                    Duration::from_millis(millis.parse().map_err(|_| usage())?);
+                    Duration::from_millis(milliseconds.parse().map_err(|_| usage())?);
             }
             _ => return Err(usage()),
         }
@@ -447,9 +447,9 @@ impl Exits {
 }
 
 impl std::fmt::Display for Exits {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
-            f,
+            formatter,
             "{} ({} read, {} refused, {} gone)",
             self.read + self.refused + self.gone,
             self.read,
