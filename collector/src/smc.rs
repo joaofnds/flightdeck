@@ -105,6 +105,7 @@ impl Drop for Connection {
 impl Connection {
     fn open() -> io::Result<Self> {
         let service = Service::matching(c"AppleSMCKeysEndpoint")?;
+        assert_ne!(0, service.0);
 
         let mut port = 0;
         let opened = unsafe { IOServiceOpen(service.0, kernel::task_self(), 0, &raw mut port) };
@@ -195,6 +196,9 @@ impl Connection {
     /// Reads `key` as a value of `info` once the SMC shows it holds one, since the SMC answers
     /// a read of a key with its bytes whatever type the read names.
     fn read(&self, key: Key, info: KeyInfo) -> io::Result<[u8; MESSAGE_BYTES_SIZE]> {
+        assert!(info.size > 0);
+        assert!(info.size <= VALUE_SIZE_MAX);
+
         self.held_check(key, info)?;
         self.bytes(key, info)
     }
@@ -301,7 +305,10 @@ impl Key {
     fn fan_speed(fan_index: u8) -> Self {
         assert!(fan_index < FANS_MAX);
 
-        Key::named([b'F', b'0' + fan_index, b'A', b'c'])
+        let key = Key::named([b'F', b'0' + fan_index, b'A', b'c']);
+        // Open looks for the SoC's sensors among every key, so no fan's key may look like one.
+        assert!(!key.is_soc_temperature());
+        key
     }
 
     fn is_soc_temperature(self) -> bool {
@@ -365,7 +372,11 @@ impl KeyInfo {
         }
     }
 
+    /// Whether `self`, which the SMC gave, is `other`, one of the types a read names.
     fn is(self, other: KeyInfo) -> bool {
+        assert!(other.size > 0);
+        assert!(other.size <= VALUE_SIZE_MAX);
+
         if self.kind != other.kind {
             return false;
         }
@@ -422,6 +433,7 @@ impl Smc {
             .map(|fan_index| connection.float_key(Key::fan_speed(fan_index)))
             .collect::<io::Result<Vec<FloatKey>>>()?;
         let soc_sensor = connection.hottest_soc_sensor()?;
+        assert!(soc_sensor.0.is_soc_temperature());
         let fan_rpm = Vec::with_capacity(fans.len());
         assert_eq!(usize::from(fan_count), fans.len());
         assert!(fans.len() <= fan_rpm.capacity());
@@ -438,6 +450,7 @@ impl Smc {
     }
 
     pub fn read(&mut self) -> io::Result<()> {
+        assert!(self.fans.len() <= usize::from(FANS_MAX));
         assert!(self.fans.len() <= self.fan_rpm.capacity());
 
         self.power_watts = self.connection.read_float(self.power)?;
@@ -454,6 +467,8 @@ impl Smc {
     /// The power the Mac drew at the last read, in watts.
     #[must_use]
     pub fn power_watts(&self) -> f32 {
+        assert_eq!(FloatKey(SYSTEM_POWER), self.power);
+
         self.power_watts
     }
 
@@ -462,6 +477,7 @@ impl Smc {
     pub fn fan_rpm(&self) -> &[f32] {
         // Empty until the first read, and one speed for each fan after it.
         assert!(self.fan_rpm.len() <= self.fans.len());
+        assert!(self.fans.len() <= usize::from(FANS_MAX));
 
         &self.fan_rpm
     }
@@ -469,6 +485,8 @@ impl Smc {
     /// The temperature at the last read of the chip's sensor open picked, in degrees Celsius.
     #[must_use]
     pub fn soc_celsius(&self) -> f32 {
+        assert!(self.soc_sensor.0.is_soc_temperature());
+
         self.soc_celsius
     }
 }
