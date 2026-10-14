@@ -242,7 +242,7 @@ impl Connection {
 
     /// Reads `key` as a value of `info` once the SMC shows it holds one, since the SMC answers
     /// a read of a key with its bytes whatever type the read names.
-    fn read(&self, key: Key, info: KeyInfo) -> io::Result<[u8; 32]> {
+    fn read(&self, key: Key, info: KeyInfo) -> io::Result<[u8; MESSAGE_BYTES_SIZE]> {
         self.held_check(key, info)?;
         self.bytes(key, info)
     }
@@ -269,7 +269,7 @@ impl Connection {
     }
 
     /// The bytes of `key` read as a value of `info`, which the caller checked the SMC holds.
-    fn bytes(&self, key: Key, info: KeyInfo) -> io::Result<[u8; 32]> {
+    fn bytes(&self, key: Key, info: KeyInfo) -> io::Result<[u8; MESSAGE_BYTES_SIZE]> {
         assert!(info.size > 0);
         assert!(info.size <= VALUE_SIZE_MAX);
 
@@ -441,6 +441,8 @@ const SOC_TEMPERATURE_PREFIXES: [[u8; 2]; 8] = [
 
 /// The most fans the SMC's keys can name, since a fan's speed key names it with one digit.
 const FANS_MAX: u8 = 10;
+const _: () = assert!((b'0' + FANS_MAX - 1).is_ascii_digit());
+
 /// The most keys open lists, past four times the 3,626 the SMC of an M5 Pro lists.
 const KEYS_MAX: u32 = 16_384;
 
@@ -498,6 +500,13 @@ const _: () = assert!(std::mem::offset_of!(KeyInfo, padding) == 9);
 
 /// The most bytes a key's value has, the 32 a message's `bytes` hold.
 const VALUE_SIZE_MAX: u32 = 32;
+/// The size of a message's `bytes`, which hold a key's value.
+const MESSAGE_BYTES_SIZE: usize = 32;
+
+// Rust converts no integer to another type in a constant, so each size is held to 32, which
+// keeps the largest value a key has within a message.
+const _: () = assert!(VALUE_SIZE_MAX == 32);
+const _: () = assert!(MESSAGE_BYTES_SIZE == 32);
 
 const FLOAT: KeyInfo = KeyInfo::of(*b"flt ", 4);
 const UNSIGNED_8: KeyInfo = KeyInfo::of(*b"ui8 ", 1);
@@ -538,7 +547,7 @@ struct Message {
     command: u8,
     padding: u8,
     index: u32,
-    bytes: [u8; 32],
+    bytes: [u8; MESSAGE_BYTES_SIZE],
 }
 
 const _: () = assert!(size_of::<Message>() == 80);
