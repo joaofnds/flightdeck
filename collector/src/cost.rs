@@ -419,13 +419,12 @@ mod tests {
         // addition that traps.
         // Method: add a user time of u64::MAX nanoseconds to a system time of 1.
         let timebase = Timebase::read().unwrap();
-        let own = processes::read_usage(timebase, processes::own_pid().unwrap())
-            .unwrap()
-            .unwrap();
         let own = Usage {
             user_ns: u64::MAX,
             system_ns: 1,
-            ..own
+            ..processes::read_usage(timebase, processes::own_pid().unwrap())
+                .unwrap()
+                .unwrap()
         };
 
         let cpu_ns = take_cpu_ns(&own);
