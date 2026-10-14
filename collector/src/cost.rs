@@ -532,6 +532,36 @@ mod tests {
     }
 
     #[test]
+    fn refuses_a_negative_count_of_nanoseconds() {
+        // Goal: a clock that gives a negative count of nanoseconds is an error, never a time
+        // read as 0 nanoseconds past its second.
+        // Method: read 0 s and -1 ns.
+        let time = Timespec {
+            tv_sec: 0,
+            tv_nsec: -1,
+        };
+
+        let read = thread_cpu_ns_from(time);
+
+        assert_eq!(io::ErrorKind::InvalidData, read.unwrap_err().kind());
+    }
+
+    #[test]
+    fn refuses_nanoseconds_that_carry_a_time_past_what_a_u64_holds() {
+        // Goal: a time whose seconds a u64 holds in nanoseconds, but not with its nanoseconds
+        // added, is an error, never a time that wrapped.
+        // Method: read the seconds of u64::MAX nanoseconds, with 1 ns more than the rest.
+        let time = Timespec {
+            tv_sec: 18_446_744_073,
+            tv_nsec: 709_551_616,
+        };
+
+        let read = thread_cpu_ns_from(time);
+
+        assert_eq!(io::ErrorKind::InvalidData, read.unwrap_err().kind());
+    }
+
+    #[test]
     fn refuses_a_time_past_the_nanoseconds_a_u64_holds() {
         // Goal: a time whose nanoseconds a u64 cannot hold is an error, never a made-up time.
         // Method: read the most seconds an i64 holds.
