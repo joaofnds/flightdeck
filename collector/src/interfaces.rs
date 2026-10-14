@@ -7,7 +7,7 @@ use crate::push_without_growing;
 
 pub struct Interfaces {
     buffer: Vec<u8>,
-    read: Vec<Interface>,
+    readings: Vec<Interface>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -94,22 +94,22 @@ impl Interfaces {
 
         Self {
             buffer: vec![0; dump_size],
-            read: Vec::with_capacity(interface_count_max(dump_size)),
+            readings: Vec::with_capacity(interface_count_max(dump_size)),
         }
     }
 
     /// The interfaces the last read found. The list is private, since a read fills it within
     /// the room `with_dump_size` gave it and never grows it.
     #[must_use]
-    pub fn read(&self) -> &[Interface] {
+    pub fn readings(&self) -> &[Interface] {
         assert!(!self.buffer.is_empty());
-        assert!(self.read.len() <= interface_count_max(self.buffer.len()));
+        assert!(self.readings.len() <= interface_count_max(self.buffer.len()));
 
-        &self.read
+        &self.readings
     }
 
     pub fn read_all(&mut self) -> io::Result<()> {
-        assert!(self.read.capacity() >= interface_count_max(self.buffer.len()));
+        assert!(self.readings.capacity() >= interface_count_max(self.buffer.len()));
 
         let filled = self.read_all_fill_buffer()?;
         let Some(dump) = self.buffer.get(..filled) else {
@@ -119,10 +119,10 @@ impl Interfaces {
             ));
         };
 
-        self.read.clear();
-        read_all_messages(dump, &mut self.read)?;
+        self.readings.clear();
+        read_all_messages(dump, &mut self.readings)?;
 
-        assert!(self.read.len() <= interface_count_max(self.buffer.len()));
+        assert!(self.readings.len() <= interface_count_max(self.buffer.len()));
         Ok(())
     }
 
@@ -170,11 +170,11 @@ impl Interfaces {
     }
 }
 
-/// Reads into `read` the interface each message of `dump` names, skipping loopback and the
+/// Reads into `readings` the interface each message of `dump` names, skipping loopback and the
 /// messages of other kinds. A message the dump cannot hold, or that names no interface, is
 /// an error.
-fn read_all_messages(dump: &[u8], read: &mut Vec<Interface>) -> io::Result<()> {
-    assert!(read.is_empty());
+fn read_all_messages(dump: &[u8], readings: &mut Vec<Interface>) -> io::Result<()> {
+    assert!(readings.is_empty());
 
     let mut offset = 0;
     while offset < dump.len() {
@@ -209,13 +209,13 @@ fn read_all_messages(dump: &[u8], read: &mut Vec<Interface>) -> io::Result<()> {
 
         if c_int::from(header[MESSAGE_TYPE_OFFSET]) == RTM_IFINFO2 {
             if let Some(interface) = read_all_interface(message)? {
-                push_without_growing(read, interface);
+                push_without_growing(readings, interface);
             }
         }
         offset += length;
     }
 
-    assert!(read.len() <= interface_count_max(dump.len()));
+    assert!(readings.len() <= interface_count_max(dump.len()));
     Ok(())
 }
 
@@ -439,14 +439,15 @@ mod tests {
 
     /// Reads `dump` into room for every interface it could hold.
     fn read_dump(dump: &[u8]) -> io::Result<Vec<Interface>> {
-        let mut read = Vec::with_capacity(interface_count_max(dump.len()));
-        read_all_messages(dump, &mut read)?;
-        Ok(read)
+        let mut readings = Vec::with_capacity(interface_count_max(dump.len()));
+        read_all_messages(dump, &mut readings)?;
+        Ok(readings)
     }
 
-    /// The names of `read`, in order.
-    fn names(read: &[Interface]) -> Vec<&str> {
-        read.iter()
+    /// The names of `readings`, in order.
+    fn names(readings: &[Interface]) -> Vec<&str> {
+        readings
+            .iter()
             .map(|interface| interface.name.as_str())
             .collect()
     }
@@ -633,7 +634,7 @@ mod tests {
         interfaces.read_all().unwrap();
 
         let mut read: Vec<String> = interfaces
-            .read
+            .readings
             .iter()
             .map(|interface| interface.name.as_str().to_owned())
             .collect();

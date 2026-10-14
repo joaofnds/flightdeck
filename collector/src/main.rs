@@ -492,11 +492,11 @@ impl Tally {
             self.events_counted()
         );
 
-        self.processes_read = u64_from_usize(collector.processes.read.len());
+        self.processes_read = u64_from_usize(collector.processes.readings.len());
         self.processes_refused = collector.processes.refused;
         self.processes_gone = collector.processes.gone;
-        self.coalitions = u64_from_usize(collector.coalitions.read.len());
-        self.interfaces = u64_from_usize(collector.interfaces.read().len());
+        self.coalitions = u64_from_usize(collector.coalitions.readings.len());
+        self.interfaces = u64_from_usize(collector.interfaces.readings().len());
         self.cpus = u64_from_usize(collector.machine.cpus().len());
     }
 

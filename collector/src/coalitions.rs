@@ -14,7 +14,7 @@ pub struct Coalitions {
     /// The coalitions to read, sorted, with each id once. A coalition leaves once a read finds
     /// no process in it.
     ids: Vec<u64>,
-    pub read: Vec<Coalition>,
+    pub readings: Vec<Coalition>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -88,7 +88,7 @@ impl Coalitions {
             timebase,
             coalition_limit,
             ids: Vec::with_capacity(coalition_limit),
-            read: Vec::with_capacity(coalition_limit),
+            readings: Vec::with_capacity(coalition_limit),
         }
     }
 
@@ -126,9 +126,9 @@ impl Coalitions {
 
     pub fn read_all(&mut self) -> io::Result<()> {
         assert!(self.ids.len() <= self.coalition_limit);
-        assert!(self.coalition_limit <= self.read.capacity());
+        assert!(self.coalition_limit <= self.readings.capacity());
         assert!(self.ids.windows(2).all(|pair| pair[0] < pair[1]));
-        self.read.clear();
+        self.readings.clear();
 
         for &id in &self.ids {
             let mut usage = ResourceUsage::default();
@@ -148,35 +148,35 @@ impl Coalitions {
                     gpu_ns: usage.gpu_time,
                     energy_nj: usage.energy,
                 };
-                push_without_growing(&mut self.read, coalition);
+                push_without_growing(&mut self.readings, coalition);
             }
         }
 
-        read_all_retain(&mut self.ids, &self.read);
+        read_all_retain(&mut self.ids, &self.readings);
 
-        assert!(self.read.len() <= self.coalition_limit);
+        assert!(self.readings.len() <= self.coalition_limit);
         Ok(())
     }
 }
 
-/// Keeps among `ids` each coalition whose reading in `read` holds a process. `read` holds a
-/// reading for each coalition macOS still has, in the order of `ids`.
+/// Keeps among `ids` each coalition whose reading in `readings` holds a process. `readings`
+/// holds a reading for each coalition macOS still has, in the order of `ids`.
 ///
 /// A coalition with no process left stays readable for minutes at least, so holding it would
-/// fill the list over a long run. Its last reading is in `read`, and a start that names it
+/// fill the list over a long run. Its last reading is in `readings`, and a start that names it
 /// again adds it back.
-fn read_all_retain(ids: &mut Vec<u64>, read: &[Coalition]) {
-    assert!(read.len() <= ids.len());
+fn read_all_retain(ids: &mut Vec<u64>, readings: &[Coalition]) {
+    assert!(readings.len() <= ids.len());
 
-    let mut readings = read.iter().peekable();
+    let mut unmatched = readings.iter().peekable();
     ids.retain(|&id| {
-        readings
+        unmatched
             .next_if(|coalition| coalition.id == id)
             .is_some_and(Coalition::holds_a_process)
     });
 
-    assert!(readings.next().is_none());
-    assert!(ids.len() <= read.len());
+    assert!(unmatched.next().is_none());
+    assert!(ids.len() <= readings.len());
 }
 
 /// Reads what a `coalition_info_resource_usage` `returned`, and the `error` it set where it
@@ -283,13 +283,13 @@ mod tests {
         let mut coalitions = Coalitions::new(Timebase::read().unwrap(), COALITION_LIMIT);
         coalitions.add(own_coalition()).unwrap();
         coalitions.read_all().unwrap();
-        let before = coalitions.read[0];
+        let before = coalitions.readings[0];
 
         spin_on_this_thread_for(Duration::from_millis(50));
         std::thread::sleep(Duration::from_millis(1));
         coalitions.read_all().unwrap();
 
-        let after = coalitions.read[0];
+        let after = coalitions.readings[0];
         assert!(
             after.cpu_ns - before.cpu_ns >= 50_000_000,
             "grew {} ns",
@@ -306,14 +306,14 @@ mod tests {
         let mut coalitions = Coalitions::new(timebase, COALITION_LIMIT);
         coalitions.add(own_coalition()).unwrap();
         coalitions.read_all().unwrap();
-        let before = coalitions.read[0];
+        let before = coalitions.readings[0];
         let own_before = processes::read_usage(timebase, pid).unwrap().unwrap();
 
         spin_on_this_thread_for(Duration::from_millis(50));
 
         let own_after = processes::read_usage(timebase, pid).unwrap().unwrap();
         coalitions.read_all().unwrap();
-        let after = coalitions.read[0];
+        let after = coalitions.readings[0];
         let own_nj = own_after.energy_nj - own_before.energy_nj;
         assert!(
             after.energy_nj - before.energy_nj >= own_nj,
@@ -332,7 +332,7 @@ mod tests {
 
         coalitions.read_all().unwrap();
 
-        assert_eq!(1, coalitions.read.len());
+        assert_eq!(1, coalitions.readings.len());
     }
 
     #[test]
@@ -410,14 +410,14 @@ mod tests {
             tasks_exited: 1,
             ..READING
         };
-        let read = [
+        let readings = [
             Coalition { id: 2, ..running },
             ended,
             Coalition { id: 4, ..running },
         ];
         let mut ids = vec![1, 2, 3, 4];
 
-        read_all_retain(&mut ids, &read);
+        read_all_retain(&mut ids, &readings);
 
         assert_eq!(vec![2, 4], ids);
     }
@@ -434,7 +434,7 @@ mod tests {
         coalitions.read_all().unwrap();
         let added = coalitions.add(own_coalition());
 
-        assert!(coalitions.read.is_empty());
+        assert!(coalitions.readings.is_empty());
         assert!(added.is_ok(), "{added:?}");
     }
 

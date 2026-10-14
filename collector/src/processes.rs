@@ -47,7 +47,7 @@ pub enum Unreadable {
 }
 
 pub struct Sweep {
-    pub read: Vec<Process>,
+    pub readings: Vec<Process>,
     pub refused: u32,
     pub gone: u32,
 }
@@ -60,15 +60,15 @@ impl Sweep {
         assert!(process_limit > 0);
 
         Self {
-            read: Vec::with_capacity(process_limit),
+            readings: Vec::with_capacity(process_limit),
             refused: 0,
             gone: 0,
         }
     }
 
     pub fn run(&mut self, timebase: Timebase, pids: &[i32]) -> io::Result<()> {
-        assert!(pids.len() <= self.read.capacity());
-        self.read.clear();
+        assert!(pids.len() <= self.readings.capacity());
+        self.readings.clear();
         self.refused = 0;
         self.gone = 0;
 
@@ -76,7 +76,7 @@ impl Sweep {
             match read(timebase, pid)? {
                 Ok(process) => {
                     assert_eq!(pid, process.pid);
-                    push_without_growing(&mut self.read, process);
+                    push_without_growing(&mut self.readings, process);
                 }
                 Err(Unreadable::Refused) => self.refused += 1,
                 Err(Unreadable::Gone) => self.gone += 1,
@@ -84,8 +84,8 @@ impl Sweep {
         }
 
         // Each pid is read or counted once.
-        assert!(self.read.len() <= pids.len());
-        let unread = pids.len() - self.read.len();
+        assert!(self.readings.len() <= pids.len());
+        let unread = pids.len() - self.readings.len();
         assert_eq!(Ok(unread), usize::try_from(self.refused + self.gone));
         Ok(())
     }
@@ -719,7 +719,7 @@ mod tests {
 
         sweep.run(Timebase::read().unwrap(), &[pid]).unwrap();
 
-        let read: Vec<i32> = sweep.read.iter().map(|process| process.pid).collect();
+        let read: Vec<i32> = sweep.readings.iter().map(|process| process.pid).collect();
         assert_eq!(vec![pid], read);
     }
 
@@ -735,7 +735,7 @@ mod tests {
 
         assert_eq!(
             pids.len(),
-            sweep.read.len() + usize::try_from(sweep.refused + sweep.gone).unwrap()
+            sweep.readings.len() + usize::try_from(sweep.refused + sweep.gone).unwrap()
         );
     }
 
@@ -757,7 +757,7 @@ mod tests {
 
         let sweep = Sweep::new(limit);
 
-        assert!(sweep.read.capacity() >= limit);
+        assert!(sweep.readings.capacity() >= limit);
     }
 
     #[test]

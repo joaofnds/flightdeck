@@ -230,10 +230,11 @@ mod tests {
 
         read_coalitions(&[start], 0, &[], &mut coalitions).unwrap();
 
-        let read = &coalitions.read;
+        let readings = &coalitions.readings;
         assert_eq!(
             vec![launchd],
-            read.iter()
+            readings
+                .iter()
                 .map(|coalition| coalition.id)
                 .collect::<Vec<_>>()
         );
@@ -251,7 +252,7 @@ mod tests {
 
         read_coalitions(&[], 0, &listing, &mut coalitions).unwrap();
 
-        assert!(coalitions.read.is_empty());
+        assert!(coalitions.readings.is_empty());
     }
 
     #[test]
@@ -268,7 +269,7 @@ mod tests {
         read_coalitions(&[], 1, &listing, &mut coalitions).unwrap();
 
         let launchd = coalitions::coalition_of(1).unwrap().unwrap();
-        let read = &coalitions.read;
-        assert!(read.iter().any(|coalition| coalition.id == launchd));
+        let readings = &coalitions.readings;
+        assert!(readings.iter().any(|coalition| coalition.id == launchd));
     }
 }
