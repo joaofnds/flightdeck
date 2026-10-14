@@ -117,7 +117,7 @@ fn run(burst: &Burst) -> io::Result<()> {
     let start = unsafe { mach_absolute_time() };
     let forked = run_forks(burst, timebase, start)?;
     let forks = forked.forks();
-    let rest = reap_rest(forks - forked.reaped.count)?;
+    let rest = run_reap_rest(forks - forked.reaped.count)?;
     let end = unsafe { mach_absolute_time() };
 
     let mut reaped = forked.reaped;
@@ -216,13 +216,15 @@ fn run_forks(burst: &Burst, timebase: Timebase, start: u64) -> io::Result<Forked
     let run_ends = start + run;
     let mut this_second = 0_u64;
     for fork in 0..burst.forks {
-        forked.children.push(fork_child(burst.child_ms)?);
+        forked.children.push(run_forks_fork_child(burst.child_ms)?);
         this_second += 1;
         next += period;
 
         let now = unsafe { mach_absolute_time() };
         if now >= next_reap {
-            forked.reaped.add(&reap(fork + 1 - forked.reaped.count)?);
+            forked
+                .reaped
+                .add(&run_forks_reap(fork + 1 - forked.reaped.count)?);
             next_reap += reap_every;
         }
         if now >= second_ends {
@@ -239,7 +241,7 @@ fn run_forks(burst: &Burst, timebase: Timebase, start: u64) -> io::Result<Forked
             break;
         }
 
-        wait_until(next)?;
+        run_forks_wait_until(next)?;
     }
     forked.per_second_reached.push(this_second);
 
@@ -257,7 +259,7 @@ fn run_write_pids(file: &str, children: &[i32]) -> io::Result<()> {
 }
 
 /// Forks a child that sleeps `child_ms` and exits, and returns its pid.
-fn fork_child(child_ms: u32) -> io::Result<i32> {
+fn run_forks_fork_child(child_ms: u32) -> io::Result<i32> {
     assert!(child_ms <= CHILD_MS_MAX);
     const { assert!(CHILD_MS_MAX.checked_mul(1_000).is_some()) };
     let microseconds = child_ms * 1_000;
@@ -281,7 +283,7 @@ fn fork_child(child_ms: u32) -> io::Result<i32> {
     Ok(pid)
 }
 
-fn wait_until(deadline: u64) -> io::Result<()> {
+fn run_forks_wait_until(deadline: u64) -> io::Result<()> {
     let returned = unsafe { mach_wait_until(deadline) };
     if returned != KERN_SUCCESS {
         return Err(io::Error::other(format!(
@@ -316,7 +318,7 @@ impl Reaped {
 }
 
 /// Reaps the children that have exited, at most `outstanding`, without waiting for one.
-fn reap(outstanding: u32) -> io::Result<Reaped> {
+fn run_forks_reap(outstanding: u32) -> io::Result<Reaped> {
     assert!(outstanding > 0);
 
     let mut reaped = Reaped::default();
@@ -338,7 +340,7 @@ fn reap(outstanding: u32) -> io::Result<Reaped> {
 }
 
 /// Waits for the `outstanding` children still running to exit, and reaps each.
-fn reap_rest(outstanding: u32) -> io::Result<Reaped> {
+fn run_reap_rest(outstanding: u32) -> io::Result<Reaped> {
     let mut reaped = Reaped::default();
     while reaped.count < outstanding {
         let mut status: c_int = 0;
@@ -482,7 +484,7 @@ mod tests {
         // a reaping that found none.
         // Method: reap one child from this test process, which forks none, so waitpid fails
         // with ECHILD.
-        let reaped = reap(1);
+        let reaped = run_forks_reap(1);
 
         assert_eq!(Some(ECHILD), reaped.unwrap_err().raw_os_error());
     }
@@ -493,7 +495,7 @@ mod tests {
         // error, not a wait that ends early.
         // Method: wait for one child from this test process, which forks none, so waitpid
         // fails with ECHILD.
-        let reaped = reap_rest(1);
+        let reaped = run_reap_rest(1);
 
         assert_eq!(Some(ECHILD), reaped.unwrap_err().raw_os_error());
     }
