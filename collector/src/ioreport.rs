@@ -7,9 +7,8 @@ use crate::push_without_growing;
 
 pub struct IOReport {
     timebase: Timebase,
-    channels_key: Owned,
-    subscription: Owned,
-    subscribed: Owned,
+    channels_key: ChannelsKey,
+    subscription: Subscription,
     pub gpu_energy_nj: u64,
     /// The nanojoules in one unit of the GPU's energy, learned at open.
     gpu_nj_per_unit: u64,
@@ -23,24 +22,17 @@ pub struct IOReport {
 
 impl IOReport {
     pub fn open(timebase: Timebase, cpu_limit: usize) -> io::Result<Self> {
-        let channels_key = string(c"IOReportChannels")?;
-        let wanted = channels_in_group(c"Energy Model", None)?;
-        merge_group(&wanted, c"GPU Stats", c"GPU Performance States")?;
-        merge_group(&wanted, c"CPU Stats", c"CPU Core Performance States")?;
+        let channels_key = ChannelsKey::new()?;
+        let wanted = channels_in_group(&ENERGY_MODEL)?;
+        merge_group(&wanted, &GPU_PERFORMANCE_STATES)?;
+        merge_group(&wanted, &CPU_CORE_PERFORMANCE_STATES)?;
         keep_read_channels(&wanted, &channels_key)?;
-
-        let mut subscribed = ptr::null();
-        let subscription = unsafe {
-            IOReportCreateSubscription(ptr::null(), wanted.0, &raw mut subscribed, 0, ptr::null())
-        };
-        let subscription = Owned::new(subscription, "subscribing to IOReport's channels")?;
-        let subscribed = Owned::new(subscribed, "listing the channels IOReport subscribed to")?;
+        let subscription = Subscription::new(&wanted)?;
 
         let mut ioreport = Self {
             timebase,
             channels_key,
             subscription,
-            subscribed,
             gpu_energy_nj: 0,
             gpu_nj_per_unit: 0,
             gpu: States::new(ACTIVE_STATES_MAX),
@@ -60,8 +52,8 @@ impl IOReport {
     fn learn(&mut self) -> io::Result<()> {
         assert_eq!(ChannelCounts::default(), self.counts);
 
-        let samples = sample(&self.subscription, &self.subscribed)?;
-        let channels = channels_of(&samples, &self.channels_key)?;
+        let samples = self.subscription.sample()?;
+        let channels = self.channels_key.channels_of(&samples)?;
 
         let mut counts = ChannelCounts::default();
         for channel in each(channels)? {
@@ -92,8 +84,8 @@ impl IOReport {
     pub fn read(&mut self) -> io::Result<()> {
         assert!(self.gpu_nj_per_unit > 0);
 
-        let samples = sample(&self.subscription, &self.subscribed)?;
-        let channels = channels_of(&samples, &self.channels_key)?;
+        let samples = self.subscription.sample()?;
+        let channels = self.channels_key.channels_of(&samples)?;
 
         let mut counts = ChannelCounts::default();
         let cores = &mut self.cores[..self.counts.cores];
@@ -219,38 +211,117 @@ enum Kind {
 
 impl Kind {
     fn of(channel: CFTypeRef) -> Option<Kind> {
-        let group = unsafe { IOReportChannelGetGroup(channel) };
-        let subgroup = unsafe { IOReportChannelGetSubGroup(channel) };
         let name = unsafe { IOReportChannelGetChannelName(channel) };
 
-        if is(group, c"Energy Model") {
+        if ENERGY_MODEL.holds(channel) {
             if is(name, c"GPU Energy") {
                 return Some(Kind::GpuEnergy);
             }
         }
-        if is(group, c"GPU Stats") {
-            if is(subgroup, c"GPU Performance States") {
-                if is(name, c"GPUPH") {
-                    return Some(Kind::GpuStates);
-                }
+        if GPU_PERFORMANCE_STATES.holds(channel) {
+            if is(name, c"GPUPH") {
+                return Some(Kind::GpuStates);
             }
         }
-        if is(group, c"CPU Stats") {
-            if is(subgroup, c"CPU Core Performance States") {
-                return Some(Kind::CoreStates);
-            }
+        if CPU_CORE_PERFORMANCE_STATES.holds(channel) {
+            return Some(Kind::CoreStates);
         }
 
         None
     }
 }
 
-fn channels_in_group(group: &CStr, subgroup: Option<&CStr>) -> io::Result<Owned> {
-    let group = string(group)?;
-    let subgroup = subgroup.map(string).transpose()?;
+/// A group of `IOReport`'s channels, and the subgroup within it where only one is wanted.
+struct Group {
+    name: &'static CStr,
+    subgroup: Option<&'static CStr>,
+}
+
+const ENERGY_MODEL: Group = Group {
+    name: c"Energy Model",
+    subgroup: None,
+};
+const GPU_PERFORMANCE_STATES: Group = Group {
+    name: c"GPU Stats",
+    subgroup: Some(c"GPU Performance States"),
+};
+const CPU_CORE_PERFORMANCE_STATES: Group = Group {
+    name: c"CPU Stats",
+    subgroup: Some(c"CPU Core Performance States"),
+};
+
+impl Group {
+    /// Whether `channel` is in this group, and in its subgroup where it has one.
+    fn holds(&self, channel: CFTypeRef) -> bool {
+        if !is(unsafe { IOReportChannelGetGroup(channel) }, self.name) {
+            return false;
+        }
+        let Some(subgroup) = self.subgroup else {
+            return true;
+        };
+
+        is(unsafe { IOReportChannelGetSubGroup(channel) }, subgroup)
+    }
+}
+
+/// `IOReport`'s subscription to the channels a read takes, and the channels it subscribed to.
+struct Subscription {
+    handle: Owned,
+    channels: Owned,
+}
+
+impl Subscription {
+    fn new(wanted: &Owned) -> io::Result<Self> {
+        let mut channels = ptr::null();
+        let handle = unsafe {
+            IOReportCreateSubscription(ptr::null(), wanted.0, &raw mut channels, 0, ptr::null())
+        };
+        let handle = Owned::new(handle, "subscribing to IOReport's channels")?;
+        let channels = Owned::new(channels, "listing the channels IOReport subscribed to")?;
+
+        Ok(Self { handle, channels })
+    }
+
+    /// Takes a sample of every channel the subscription holds.
+    fn sample(&self) -> io::Result<Owned> {
+        let samples = unsafe { IOReportCreateSamples(self.handle.0, self.channels.0, ptr::null()) };
+        Owned::new(samples, "sampling IOReport")
+    }
+}
+
+/// The key under which `IOReport`'s dictionaries hold their list of channels.
+struct ChannelsKey(Owned);
+
+impl ChannelsKey {
+    fn new() -> io::Result<Self> {
+        Ok(Self(string(c"IOReportChannels")?))
+    }
+
+    fn channels_of(&self, dictionary: &Owned) -> io::Result<CFTypeRef> {
+        let channels = unsafe { CFDictionaryGetValue(dictionary.0, self.0.0) };
+        if channels.is_null() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "IOReport gave no list of channels",
+            ));
+        }
+        if unsafe { CFGetTypeID(channels) } != unsafe { CFArrayGetTypeID() } {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "IOReport gave a list of channels that is not an array",
+            ));
+        }
+
+        Ok(channels)
+    }
+}
+
+fn channels_in_group(group: &Group) -> io::Result<Owned> {
+    let name = string(group.name)?;
+    let subgroup = group.subgroup.map(string).transpose()?;
     let channels = unsafe {
         IOReportCopyChannelsInGroup(
-            group.0,
+            name.0,
             subgroup.as_ref().map_or(ptr::null(), |subgroup| subgroup.0),
             0,
             0,
@@ -260,8 +331,8 @@ fn channels_in_group(group: &CStr, subgroup: Option<&CStr>) -> io::Result<Owned>
     Owned::new(channels, "copying IOReport's channels in a group")
 }
 
-fn merge_group(into: &Owned, group: &CStr, subgroup: &CStr) -> io::Result<()> {
-    let more = channels_in_group(group, Some(subgroup))?;
+fn merge_group(into: &Owned, group: &Group) -> io::Result<()> {
+    let more = channels_in_group(group)?;
     unsafe { IOReportMergeChannels(into.0, more.0, ptr::null()) };
 
     Ok(())
@@ -269,8 +340,8 @@ fn merge_group(into: &Owned, group: &CStr, subgroup: &CStr) -> io::Result<()> {
 
 /// Keeps in `channels` only those a read takes, so each sample copies the 20 channels an M5 Pro
 /// reads rather than the 383 the groups hold.
-fn keep_read_channels(channels: &Owned, key: &Owned) -> io::Result<()> {
-    let all = channels_of(channels, key)?;
+fn keep_read_channels(channels: &Owned, key: &ChannelsKey) -> io::Result<()> {
+    let all = key.channels_of(channels)?;
     let kept = unsafe { CFArrayCreateMutable(ptr::null(), 0, &raw const kCFTypeArrayCallBacks) };
     let kept = Owned::new(kept, "creating an array")?;
 
@@ -279,33 +350,9 @@ fn keep_read_channels(channels: &Owned, key: &Owned) -> io::Result<()> {
             unsafe { CFArrayAppendValue(kept.0, channel) };
         }
     }
-    unsafe { CFDictionarySetValue(channels.0, key.0, kept.0) };
+    unsafe { CFDictionarySetValue(channels.0, key.0.0, kept.0) };
 
     Ok(())
-}
-
-/// Takes a sample of every channel `subscribed` holds.
-fn sample(subscription: &Owned, subscribed: &Owned) -> io::Result<Owned> {
-    let samples = unsafe { IOReportCreateSamples(subscription.0, subscribed.0, ptr::null()) };
-    Owned::new(samples, "sampling IOReport")
-}
-
-fn channels_of(dictionary: &Owned, key: &Owned) -> io::Result<CFTypeRef> {
-    let channels = unsafe { CFDictionaryGetValue(dictionary.0, key.0) };
-    if channels.is_null() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "IOReport gave no list of channels",
-        ));
-    }
-    if unsafe { CFGetTypeID(channels) } != unsafe { CFArrayGetTypeID() } {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "IOReport gave a list of channels that is not an array",
-        ));
-    }
-
-    Ok(channels)
 }
 
 /// The most channels walked in one list, past ten times the 383 the groups the collector reads
@@ -663,7 +710,7 @@ mod tests {
     /// The first channel of `kind` among the channels `samples` holds, a sample of
     /// `ioreport`'s.
     fn first_channel(ioreport: &IOReport, samples: &Owned, kind: Kind) -> CFTypeRef {
-        each(channels_of(samples, &ioreport.channels_key).unwrap())
+        each(ioreport.channels_key.channels_of(samples).unwrap())
             .unwrap()
             .find(|&channel| Kind::of(channel) == Some(kind))
             .unwrap()
@@ -841,10 +888,14 @@ mod tests {
         // empty list.
         // Method: look for the list in what IOReport gives for a group it does not have, which
         // on an M5 Pro holds only its query options.
-        let key = string(c"IOReportChannels").unwrap();
-        let missing = channels_in_group(c"No Such Group", None).unwrap();
+        let key = ChannelsKey::new().unwrap();
+        let missing = channels_in_group(&Group {
+            name: c"No Such Group",
+            subgroup: None,
+        })
+        .unwrap();
 
-        let channels = channels_of(&missing, &key);
+        let channels = key.channels_of(&missing);
 
         assert_eq!(io::ErrorKind::InvalidData, channels.unwrap_err().kind());
     }
@@ -855,12 +906,16 @@ mod tests {
         // an array.
         // Method: put a string where the list goes, in what IOReport gives for a group it does
         // not have.
-        let key = string(c"IOReportChannels").unwrap();
-        let missing = channels_in_group(c"No Such Group", None).unwrap();
+        let key = ChannelsKey::new().unwrap();
+        let missing = channels_in_group(&Group {
+            name: c"No Such Group",
+            subgroup: None,
+        })
+        .unwrap();
         let text = string(c"not an array").unwrap();
-        unsafe { CFDictionarySetValue(missing.0, key.0, text.0) };
+        unsafe { CFDictionarySetValue(missing.0, key.0.0, text.0) };
 
-        let channels = channels_of(&missing, &key);
+        let channels = key.channels_of(&missing);
 
         assert_eq!(io::ErrorKind::InvalidData, channels.unwrap_err().kind());
     }
@@ -1043,7 +1098,7 @@ mod tests {
         // with no active state.
         // Method: learn the GPU's energy channel, whose state count IOReport gives as -1.
         let ioreport = open();
-        let samples = sample(&ioreport.subscription, &ioreport.subscribed).unwrap();
+        let samples = ioreport.subscription.sample().unwrap();
         let energy = first_channel(&ioreport, &samples, Kind::GpuEnergy);
         let mut states = States::new(ACTIVE_STATES_MAX);
 
@@ -1076,9 +1131,14 @@ mod tests {
         // those open found.
         let ioreport = open();
 
-        let subscribed = each(channels_of(&ioreport.subscribed, &ioreport.channels_key).unwrap())
-            .unwrap()
-            .count();
+        let subscribed = each(
+            ioreport
+                .channels_key
+                .channels_of(&ioreport.subscription.channels)
+                .unwrap(),
+        )
+        .unwrap()
+        .count();
 
         let counts = ioreport.counts;
         assert_eq!(
@@ -1103,7 +1163,7 @@ mod tests {
         // the list keeps that room.
         // Method: learn a core's channel on this Mac, which has many states, into room for one.
         let ioreport = open();
-        let samples = sample(&ioreport.subscription, &ioreport.subscribed).unwrap();
+        let samples = ioreport.subscription.sample().unwrap();
         let core = first_channel(&ioreport, &samples, Kind::CoreStates);
         let mut states = States::new(1);
         let capacity = states.active_indices.capacity();
@@ -1121,7 +1181,7 @@ mod tests {
         // Method: learn a core's channel on this Mac, against the filter asked about each of
         // its states.
         let ioreport = open();
-        let samples = sample(&ioreport.subscription, &ioreport.subscribed).unwrap();
+        let samples = ioreport.subscription.sample().unwrap();
         let core = first_channel(&ioreport, &samples, Kind::CoreStates);
         let mut states = States::new(ACTIVE_STATES_MAX);
 
@@ -1143,7 +1203,7 @@ mod tests {
         // Method: learn the GPU's channel, 16 states on this Mac, and read a core's channel, 17
         // or 22 states, with what was learned.
         let ioreport = open();
-        let samples = sample(&ioreport.subscription, &ioreport.subscribed).unwrap();
+        let samples = ioreport.subscription.sample().unwrap();
         let gpu = first_channel(&ioreport, &samples, Kind::GpuStates);
         let core = first_channel(&ioreport, &samples, Kind::CoreStates);
         let mut states = States::new(ACTIVE_STATES_MAX);
@@ -1209,8 +1269,8 @@ mod tests {
         // Method: sample IOReport and look for a state the filter leaves out in each
         // channel of core or GPU states.
         let ioreport = open();
-        let samples = sample(&ioreport.subscription, &ioreport.subscribed).unwrap();
-        let channels = channels_of(&samples, &ioreport.channels_key).unwrap();
+        let samples = ioreport.subscription.sample().unwrap();
+        let channels = ioreport.channels_key.channels_of(&samples).unwrap();
 
         let states: Vec<CFTypeRef> = each(channels)
             .unwrap()
@@ -1254,7 +1314,7 @@ mod tests {
 
         ioreport.read().unwrap();
         let before = ioreport.gpu_energy_nj;
-        let samples = sample(&ioreport.subscription, &ioreport.subscribed).unwrap();
+        let samples = ioreport.subscription.sample().unwrap();
         let energy = first_channel(&ioreport, &samples, Kind::GpuEnergy);
         let units = u64::try_from(unsafe { IOReportSimpleGetIntegerValue(energy, 0) }).unwrap();
         ioreport.read().unwrap();
