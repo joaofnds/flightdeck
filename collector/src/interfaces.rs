@@ -35,7 +35,10 @@ impl Name {
             ));
         }
         if let Err(error) = std::str::from_utf8(name) {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, error));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("an interface name that is not UTF-8, {error}"),
+            ));
         }
 
         let mut bytes = [0; IFNAMSIZ];
