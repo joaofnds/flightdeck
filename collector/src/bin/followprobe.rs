@@ -21,6 +21,10 @@ const TRACKING: [Source; 5] = [
 /// it gives up on them.
 const FOLLOW_SECONDS_PAST_RUN: u64 = 10;
 
+/// The most generators a probe runs, well past the two that `burst_minute` and the measured
+/// research ran, so a probe's pid files stay a bounded list.
+const GENERATORS_MAX: u64 = 64;
+
 fn main() -> ExitCode {
     let probe = match probe_from(&std::env::args().skip(1).collect::<Vec<_>>()) {
         Ok(probe) => probe,
@@ -64,6 +68,11 @@ fn probe_from(arguments: &[String]) -> Result<Probe, String> {
     if generators == 0 {
         return Err("followprobe: a probe of 0 generators forks nothing".to_owned());
     }
+    if generators > GENERATORS_MAX {
+        return Err(format!(
+            "followprobe: {generators} generators pass the {GENERATORS_MAX} a probe runs"
+        ));
+    }
     if per_second < generators {
         return Err(format!(
             "followprobe: a rate of {per_second} a second leaves some of {generators} \
@@ -72,6 +81,7 @@ fn probe_from(arguments: &[String]) -> Result<Probe, String> {
     }
 
     assert!(generators > 0);
+    assert!(generators <= GENERATORS_MAX);
     assert!(per_second / generators > 0);
     Ok(Probe {
         rescan_interval: Duration::from_millis(rescan_ms),
@@ -410,6 +420,19 @@ mod tests {
         // Goal: a probe of no generators is a usage error, not a probe of one.
         // Method: parse 0 generators.
         assert!(probe_from(&arguments(&["0", "300", "15", "6", "0"])).is_err());
+    }
+
+    #[test]
+    fn refuses_more_generators_than_a_probe_runs() {
+        // Goal: a probe of more generators than GENERATORS_MAX is a usage error, not a list
+        // of pid files sized to whatever was asked.
+        // Method: parse one generator past GENERATORS_MAX, at a rate that gives each one a
+        // fork a second.
+        let generators = (GENERATORS_MAX + 1).to_string();
+
+        let probe = probe_from(&arguments(&["0", "1000", "15", "6", &generators]));
+
+        assert!(probe.is_err());
     }
 
     #[test]
