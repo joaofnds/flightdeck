@@ -117,6 +117,7 @@ fn run(burst: &Burst) -> io::Result<()> {
     let start = unsafe { mach_absolute_time() };
     let forked = run_forks(burst, timebase, start)?;
     let forks = forked.forks();
+    assert!(forks <= burst.forks);
     let rest = run_reap_rest(forks - forked.reaped.count)?;
     let end = unsafe { mach_absolute_time() };
 
@@ -247,6 +248,12 @@ fn run_forks(burst: &Burst, timebase: Timebase, start: u64) -> io::Result<Forked
 
     assert!(forked.children.len() <= capacity);
     assert!(forked.reaped.count <= forked.forks());
+    // Each fork is late at most once, and counts in exactly one second.
+    assert!(forked.late <= forked.forks());
+    assert_eq!(
+        u64::from(forked.forks()),
+        forked.per_second_reached.iter().sum::<u64>()
+    );
     Ok(forked)
 }
 
