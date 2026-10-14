@@ -76,6 +76,8 @@ impl Counts {
 /// and an exit and most an exec, so 16,384 holds about three seconds of them.
 pub const EVENTS_PER_TICK_MAX: usize = 16_384;
 
+const _: () = assert!(EVENTS_PER_TICK_MAX > 0);
+
 /// The room a tracker takes once, when it starts.
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {

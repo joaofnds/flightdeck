@@ -38,7 +38,6 @@ impl Collector {
         // Room for a coalition for every process macOS runs and one for every start a tick
         // holds, with a coalition past it reported as an error.
         let coalition_limit = limits.process_limit + limits.events_per_tick_max;
-        assert!(coalition_limit > limits.process_limit);
 
         let mut collector = Self {
             timebase,
