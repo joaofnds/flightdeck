@@ -116,7 +116,13 @@ struct RusageInfoV6 {
     child_elapsed_abstime: u64,
     diskio_bytesread: u64,
     diskio_byteswritten: u64,
-    cpu_time_qos: [u64; 7],
+    cpu_time_qos_default: u64,
+    cpu_time_qos_maintenance: u64,
+    cpu_time_qos_background: u64,
+    cpu_time_qos_utility: u64,
+    cpu_time_qos_legacy: u64,
+    cpu_time_qos_user_initiated: u64,
+    cpu_time_qos_user_interactive: u64,
     billed_system_time: u64,
     serviced_system_time: u64,
     logical_writes: u64,
@@ -467,21 +473,21 @@ pub(crate) fn child_that_has_exited() -> std::process::Child {
 
     /// Room for `siginfo_t`, which `waitid` fills and the tests never read.
     #[repr(C)]
-    struct SigInfo([u64; 13]);
+    struct Siginfo([u64; 13]);
 
-    const _: () = assert!(size_of::<SigInfo>() == 104);
-    const _: () = assert!(align_of::<SigInfo>() == 8);
+    const _: () = assert!(size_of::<Siginfo>() == 104);
+    const _: () = assert!(align_of::<Siginfo>() == 8);
 
     const P_PID: c_uint = 1;
     const WEXITED: c_int = 4;
     const WNOWAIT: c_int = 32;
 
     unsafe extern "C" {
-        fn waitid(kind: c_uint, id: u32, info: *mut SigInfo, options: c_int) -> c_int;
+        fn waitid(kind: c_uint, id: u32, info: *mut Siginfo, options: c_int) -> c_int;
     }
 
     let child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
-    let mut info = std::mem::MaybeUninit::<SigInfo>::zeroed();
+    let mut info = std::mem::MaybeUninit::<Siginfo>::zeroed();
     let waited = unsafe { waitid(P_PID, child.id(), info.as_mut_ptr(), WEXITED | WNOWAIT) };
     assert_eq!(0, waited, "{}", io::Error::last_os_error());
 
@@ -546,11 +552,11 @@ mod tests {
         assert_eq!(0, measured, "{}", io::Error::last_os_error());
 
         let usage = unsafe { usage.assume_init() };
-        let micros = |t: Timeval| {
-            u64::try_from(t.tv_sec).unwrap() * 1_000_000 + u64::try_from(t.tv_usec).unwrap()
+        let microseconds = |time: Timeval| {
+            u64::try_from(time.tv_sec).unwrap() * 1_000_000 + u64::try_from(time.tv_usec).unwrap()
         };
 
-        (micros(usage.utime) + micros(usage.stime)) * 1_000
+        (microseconds(usage.utime) + microseconds(usage.stime)) * 1_000
     }
 
     #[test]

@@ -44,7 +44,7 @@ impl Coalition {
 /// the size it is given.
 #[repr(C)]
 #[derive(Default)]
-struct ResourceUsage {
+struct CoalitionResourceUsage {
     tasks_started: u64,
     tasks_exited: u64,
     time_nonempty: u64,
@@ -59,21 +59,21 @@ struct ResourceUsage {
     energy: u64,
 }
 
-const _: () = assert!(size_of::<ResourceUsage>() == 96);
-const _: () = assert!(offset_of!(ResourceUsage, tasks_started) == 0);
-const _: () = assert!(offset_of!(ResourceUsage, tasks_exited) == 8);
-const _: () = assert!(offset_of!(ResourceUsage, cpu_time) == 24);
-const _: () = assert!(offset_of!(ResourceUsage, interrupt_wakeups) == 32);
-const _: () = assert!(offset_of!(ResourceUsage, platform_idle_wakeups) == 40);
-const _: () = assert!(offset_of!(ResourceUsage, bytesread) == 48);
-const _: () = assert!(offset_of!(ResourceUsage, byteswritten) == 56);
-const _: () = assert!(offset_of!(ResourceUsage, gpu_time) == 64);
-const _: () = assert!(offset_of!(ResourceUsage, energy) == 88);
+const _: () = assert!(size_of::<CoalitionResourceUsage>() == 96);
+const _: () = assert!(offset_of!(CoalitionResourceUsage, tasks_started) == 0);
+const _: () = assert!(offset_of!(CoalitionResourceUsage, tasks_exited) == 8);
+const _: () = assert!(offset_of!(CoalitionResourceUsage, cpu_time) == 24);
+const _: () = assert!(offset_of!(CoalitionResourceUsage, interrupt_wakeups) == 32);
+const _: () = assert!(offset_of!(CoalitionResourceUsage, platform_idle_wakeups) == 40);
+const _: () = assert!(offset_of!(CoalitionResourceUsage, bytesread) == 48);
+const _: () = assert!(offset_of!(CoalitionResourceUsage, byteswritten) == 56);
+const _: () = assert!(offset_of!(CoalitionResourceUsage, gpu_time) == 64);
+const _: () = assert!(offset_of!(CoalitionResourceUsage, energy) == 88);
 
 unsafe extern "C" {
     fn coalition_info_resource_usage(
         coalition_id: u64,
-        usage: *mut ResourceUsage,
+        usage: *mut CoalitionResourceUsage,
         size: usize,
     ) -> c_int;
 }
@@ -131,9 +131,13 @@ impl Coalitions {
         self.readings.clear();
 
         for &id in &self.ids {
-            let mut usage = ResourceUsage::default();
+            let mut usage = CoalitionResourceUsage::default();
             let returned = unsafe {
-                coalition_info_resource_usage(id, &raw mut usage, size_of::<ResourceUsage>())
+                coalition_info_resource_usage(
+                    id,
+                    &raw mut usage,
+                    size_of::<CoalitionResourceUsage>(),
+                )
             };
             if read_returned(returned, io::Error::last_os_error())? {
                 let coalition = Coalition {
@@ -206,15 +210,15 @@ fn read_returned(returned: c_int, error: io::Error) -> io::Result<bool> {
 /// A process's coalitions, as `struct proc_pidcoalitioninfo` declares it, one id for each
 /// coalition type.
 #[repr(C)]
-struct PidCoalitionInfo {
+struct ProcPidcoalitioninfo {
     coalition_id: [u64; 2],
     reserved: [u64; 3],
 }
 
-const _: () = assert!(size_of::<PidCoalitionInfo>() == 40);
-const _: () = assert!(offset_of!(PidCoalitionInfo, coalition_id) == 0);
+const _: () = assert!(size_of::<ProcPidcoalitioninfo>() == 40);
+const _: () = assert!(offset_of!(ProcPidcoalitioninfo, coalition_id) == 0);
 
-impl processes::PidInfo for PidCoalitionInfo {
+impl processes::PidInfo for ProcPidcoalitioninfo {
     const FLAVOR: c_int = 20; // PROC_PIDCOALITIONINFO
 }
 const COALITION_TYPE_RESOURCE: usize = 0;
@@ -223,7 +227,7 @@ pub fn coalition_of(pid: i32) -> io::Result<Option<u64>> {
     assert!(pid >= 0);
     assert!(pid <= processes::PID_MAX);
 
-    let info = unsafe { processes::pid_info::<PidCoalitionInfo>(pid) }?;
+    let info = unsafe { processes::pid_info::<ProcPidcoalitioninfo>(pid) }?;
     coalition_of_info(pid, info)
 }
 
@@ -232,7 +236,7 @@ pub fn coalition_of(pid: i32) -> io::Result<Option<u64>> {
 /// an error.
 fn coalition_of_info(
     pid: i32,
-    info: Result<PidCoalitionInfo, Unreadable>,
+    info: Result<ProcPidcoalitioninfo, Unreadable>,
 ) -> io::Result<Option<u64>> {
     match info {
         Ok(info) => Ok(Some(info.coalition_id[COALITION_TYPE_RESOURCE])),
@@ -446,7 +450,7 @@ mod tests {
         // refuses to read its resource usage with EINVAL.
         const COALITION_TYPE_JETSAM: usize = 1;
         let pid = std::process::id().cast_signed();
-        let info = unsafe { processes::pid_info::<PidCoalitionInfo>(pid) };
+        let info = unsafe { processes::pid_info::<ProcPidcoalitioninfo>(pid) };
         let jetsam = info.unwrap().ok().unwrap().coalition_id[COALITION_TYPE_JETSAM];
         let mut coalitions = Coalitions::new(Timebase::read().unwrap(), COALITION_LIMIT);
         coalitions.add(jetsam).unwrap();
