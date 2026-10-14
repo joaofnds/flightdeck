@@ -836,6 +836,36 @@ mod tests {
     }
 
     #[test]
+    fn refuses_a_dictionary_with_no_list_of_channels() {
+        // Goal: a dictionary IOReport gives without a list of channels is an error, never an
+        // empty list.
+        // Method: look for the list in what IOReport gives for a group it does not have, which
+        // on an M5 Pro holds only its query options.
+        let key = string(c"IOReportChannels").unwrap();
+        let missing = channels_in_group(c"No Such Group", None).unwrap();
+
+        let channels = channels_of(&missing, &key);
+
+        assert_eq!(io::ErrorKind::InvalidData, channels.unwrap_err().kind());
+    }
+
+    #[test]
+    fn refuses_a_list_of_channels_that_is_not_an_array() {
+        // Goal: a list of channels of another type than an array is an error, never walked as
+        // an array.
+        // Method: put a string where the list goes, in what IOReport gives for a group it does
+        // not have.
+        let key = string(c"IOReportChannels").unwrap();
+        let missing = channels_in_group(c"No Such Group", None).unwrap();
+        let text = string(c"not an array").unwrap();
+        unsafe { CFDictionarySetValue(missing.0, key.0, text.0) };
+
+        let channels = channels_of(&missing, &key);
+
+        assert_eq!(io::ErrorKind::InvalidData, channels.unwrap_err().kind());
+    }
+
+    #[test]
     fn takes_as_many_channels_as_its_bound() {
         // Goal: a list with as many channels as the bound passes the check.
         // Method: check a count equal to the bound.
