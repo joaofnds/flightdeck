@@ -31,6 +31,28 @@ fn arguments_from(
         .collect()
 }
 
+/// Widens `value`, which a `usize` holds on every 64-bit Mac.
+#[must_use]
+pub fn usize_from_u32(value: u32) -> usize {
+    const { assert!(size_of::<u32>() <= size_of::<usize>()) };
+
+    match usize::try_from(value) {
+        Ok(value) => value,
+        Err(error) => unreachable!("{error}"),
+    }
+}
+
+/// Widens `value`, which a `u64` holds on every 64-bit Mac.
+#[must_use]
+pub fn u64_from_usize(value: usize) -> u64 {
+    const { assert!(size_of::<usize>() <= size_of::<u64>()) };
+
+    match u64::try_from(value) {
+        Ok(value) => value,
+        Err(error) => unreachable!("{error}"),
+    }
+}
+
 /// Pushes `item` onto `list`, whose room was taken at startup for every item it holds, so
 /// the push never grows it.
 pub(crate) fn push_without_growing<T>(list: &mut Vec<T>, item: T) {

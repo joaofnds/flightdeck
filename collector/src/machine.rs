@@ -3,6 +3,7 @@ use std::io;
 use std::mem::offset_of;
 
 use crate::kernel::{self, KernReturn, MachPort, Sysctl, kern_return_check};
+use crate::{u64_from_usize, usize_from_u32};
 
 pub struct Machine {
     host: MachPort,
@@ -75,12 +76,7 @@ struct PageSize {
 impl PageSize {
     /// Takes `size`, the bytes `vm_page_size` gives, or an error where it is 0.
     fn new(size: usize) -> io::Result<Self> {
-        const { assert!(size_of::<usize>() <= size_of::<u64>()) };
-
-        let bytes = match u64::try_from(size) {
-            Ok(bytes) => bytes,
-            Err(error) => unreachable!("{error}"),
-        };
+        let bytes = u64_from_usize(size);
         if bytes == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -326,16 +322,6 @@ impl Drop for MachMemory {
         if let Err(error) = self.drop_deallocate() {
             eprintln!("collector: {error}");
         }
-    }
-}
-
-/// Widens a count the kernel returns as a `u32`, which a `usize` holds on every 64-bit Mac.
-fn usize_from_u32(value: u32) -> usize {
-    const { assert!(size_of::<u32>() <= size_of::<usize>()) };
-
-    match usize::try_from(value) {
-        Ok(value) => value,
-        Err(error) => unreachable!("{error}"),
     }
 }
 

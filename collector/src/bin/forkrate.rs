@@ -4,6 +4,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use collector::clock::Timebase;
+use collector::usize_from_u32;
 
 const WNOHANG: c_int = 1;
 const KERN_SUCCESS: c_int = 0;
@@ -201,11 +202,7 @@ fn run_forks(burst: &Burst, timebase: Timebase, start: u64) -> io::Result<Forked
     assert!(burst.seconds <= u64::from(burst.forks));
     let run = timebase.ticks(burst.seconds * NANOSECONDS_PER_SECOND)?;
 
-    const { assert!(size_of::<u32>() <= size_of::<usize>()) };
-    let capacity = match usize::try_from(burst.forks) {
-        Ok(capacity) => capacity,
-        Err(error) => unreachable!("{error}"),
-    };
+    let capacity = usize_from_u32(burst.forks);
     let mut forked = Forked {
         children: Vec::with_capacity(capacity),
         per_second_reached: Vec::new(),

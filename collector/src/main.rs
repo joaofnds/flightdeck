@@ -10,6 +10,7 @@ use collector::cost::{Cost, Meter, Snapshot, Source};
 use collector::processes::{self, Unreadable, Usage};
 use collector::schedule::Schedule;
 use collector::tracker::{Counts, Event, Noticed};
+use collector::u64_from_usize;
 
 const QOS_CLASS_DEFAULT: u32 = 0x15;
 const TICK_PERIOD_NS: u64 = 1_000_000_000;
@@ -442,22 +443,12 @@ impl Tally {
             }
         }
 
-        self.processes_read = Self::add_count(collector.processes.read.len());
+        self.processes_read = u64_from_usize(collector.processes.read.len());
         self.processes_refused = collector.processes.refused;
         self.processes_gone = collector.processes.gone;
-        self.coalitions = Self::add_count(collector.coalitions.read.len());
-        self.interfaces = Self::add_count(collector.interfaces.read().len());
-        self.cpus = Self::add_count(collector.machine.cpus().len());
-    }
-
-    /// Takes the length of a list the last tick read as a count the report gives.
-    fn add_count(length: usize) -> u64 {
-        const { assert!(size_of::<usize>() <= size_of::<u64>()) };
-
-        match u64::try_from(length) {
-            Ok(count) => count,
-            Err(error) => unreachable!("{error}"),
-        }
+        self.coalitions = u64_from_usize(collector.coalitions.read.len());
+        self.interfaces = u64_from_usize(collector.interfaces.read().len());
+        self.cpus = u64_from_usize(collector.machine.cpus().len());
     }
 }
 
