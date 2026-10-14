@@ -131,6 +131,8 @@ impl Machine {
     }
 
     pub fn read(&mut self) -> io::Result<()> {
+        assert!(self.cpus.capacity() > 0);
+
         self.read_cpus()?;
         assert!(!self.cpus.is_empty());
 
@@ -193,6 +195,8 @@ impl Machine {
     }
 
     fn read_memory(&mut self) -> io::Result<()> {
+        assert!(self.page_size.bytes > 0);
+
         let mut statistics = std::mem::MaybeUninit::<VMStatistics64>::zeroed();
         let mut count = match u32::try_from(HOST_VM_INFO64_REV1_COUNT) {
             Ok(count) => count,
@@ -243,6 +247,13 @@ impl Machine {
             pressure: Pressure::from_level(self.pressure_level.read()?)?,
         };
 
+        // Each count of pages converts to bytes in whole pages.
+        assert!(self.memory.free_bytes.is_multiple_of(self.page_size.bytes));
+        assert!(
+            self.memory
+                .swapped_out_bytes
+                .is_multiple_of(self.page_size.bytes)
+        );
         Ok(())
     }
 }
@@ -313,6 +324,7 @@ impl MachMemory {
     fn drop_deallocate(&self) -> io::Result<()> {
         // A reply with no address makes no memory to free.
         assert!(!self.address.is_null());
+        assert!(self.size.is_multiple_of(size_of::<c_int>()));
 
         let returned =
             unsafe { vm_deallocate(kernel::task_self(), self.address.addr(), self.size) };
