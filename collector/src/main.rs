@@ -182,6 +182,9 @@ impl Run {
         self.whole.tally.add(late, slips, &self.collector);
         self.minute.tally.add(late, slips, &self.collector);
         self.window.tally.add(late, slips, &self.collector);
+        // A span closes on its last tick, so it never runs more ticks than it spans.
+        assert!(self.window.tally.ticks <= TICKS_PER_WINDOW);
+        assert!(self.minute.tally.ticks <= TICKS_PER_MINUTE);
 
         if closes_span(tick, following, TICKS_PER_WINDOW) {
             let now = Mark::take(&self.meter, self.timebase, &self.collector)?;
