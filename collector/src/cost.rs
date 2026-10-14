@@ -209,6 +209,15 @@ impl Snapshot {
             self.cost_since_counter(earlier, "super core instructions", |snapshot| {
                 snapshot.super_instructions
             })?;
+        if super_instructions > instructions {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "this process ran {super_instructions} instructions on super cores of \
+                     {instructions} in all"
+                ),
+            ));
+        }
         let spent = std::array::from_fn(|source| {
             assert!(self.spent_ns[source] >= earlier.spent_ns[source]);
             Duration::from_nanos(self.spent_ns[source] - earlier.spent_ns[source])
@@ -282,9 +291,15 @@ impl Cost {
         f64_from_u64(self.energy_nj) / self.elapsed.as_secs_f64() / 1_000_000.0
     }
 
+    /// The share of the instructions run that ran on super cores, or `None` where none ran.
     #[must_use]
-    pub fn share_on_super_cores(&self) -> f64 {
-        f64_from_u64(self.super_instructions) / f64_from_u64(self.instructions)
+    pub fn share_on_super_cores(&self) -> Option<f64> {
+        assert!(self.super_instructions <= self.instructions);
+
+        if self.instructions == 0 {
+            return None;
+        }
+        Some(f64_from_u64(self.super_instructions) / f64_from_u64(self.instructions))
     }
 
     #[must_use]
@@ -356,6 +371,23 @@ mod tests {
         let later = Snapshot {
             at_ns: EARLIER.at_ns + 1,
             energy_nj: EARLIER.energy_nj - 1,
+            ..EARLIER
+        };
+
+        let cost = later.cost_since(&EARLIER);
+
+        assert_eq!(io::ErrorKind::InvalidData, cost.unwrap_err().kind());
+    }
+
+    #[test]
+    fn refuses_more_super_core_instructions_than_instructions_in_all() {
+        // Goal: a span whose super core instructions outnumber every instruction it ran is an
+        // error, never a share past 100%.
+        // Method: take the cost to a snapshot 2 instructions later, 3 of them on super cores.
+        let later = Snapshot {
+            at_ns: EARLIER.at_ns + 1,
+            instructions: EARLIER.instructions + 2,
+            super_instructions: EARLIER.super_instructions + 3,
             ..EARLIER
         };
 
@@ -437,7 +469,7 @@ mod tests {
             ..ten_seconds_later(0, 0, 0)
         };
 
-        assert!(cost.share_on_super_cores().is_nan());
+        assert_eq!(None, cost.share_on_super_cores());
     }
 
     #[test]
@@ -478,7 +510,7 @@ mod tests {
         // Method: run 3,000 of 4,000 instructions on super cores.
         let cost = ten_seconds_later(0, 0, 0);
 
-        assert!((cost.share_on_super_cores() - 0.75).abs() < 1e-12);
+        assert!((cost.share_on_super_cores().unwrap() - 0.75).abs() < 1e-12);
     }
 
     #[test]

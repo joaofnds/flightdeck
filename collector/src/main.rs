@@ -438,15 +438,24 @@ impl std::fmt::Display for Exits {
 
 fn report_cost(out: &mut impl Write, cost: &Cost, tally: &Tally) -> io::Result<()> {
     let share = cost.share_of_a_core();
-    writeln!(
+    write!(
         out,
-        "CPU {:.2}% of a core, {:.0}% of the budget, {:.2} mW, \
-         {:.0}% of instructions on Super cores; \
-         ticks late {:.1} ms on average, {:.1} ms at most, {} slips",
+        "CPU {:.2}% of a core, {:.0}% of the budget, {:.2} mW, ",
         share * 100.0,
         share / BUDGET_SHARE_OF_A_CORE * 100.0,
         cost.milliwatts(),
-        cost.share_on_super_cores() * 100.0,
+    )?;
+    match cost.share_on_super_cores() {
+        Some(super_share) => write!(
+            out,
+            "{:.0}% of instructions on Super cores",
+            super_share * 100.0
+        )?,
+        None => write!(out, "no instructions run")?,
+    }
+    writeln!(
+        out,
+        "; ticks late {:.1} ms on average, {:.1} ms at most, {} slips",
         milliseconds(tally.late_total / u32::try_from(tally.ticks.max(1)).unwrap_or(u32::MAX)),
         milliseconds(tally.late_max),
         tally.slips,
