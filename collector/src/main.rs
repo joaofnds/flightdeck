@@ -201,12 +201,13 @@ impl Run {
         assert!(self.window.tally.ticks <= TICKS_PER_WINDOW);
         assert!(self.minute.tally.ticks <= TICKS_PER_MINUTE);
 
-        if closes_span(tick, following, TICKS_PER_WINDOW) {
+        let step = Step { tick, following };
+        if step.closes_span(TICKS_PER_WINDOW) {
             let now = Mark::take(&self.meter, self.timebase, &self.collector)?;
             self.window.report(out, "ticks", tick, &now)?;
             self.window = Span::begin(now, following);
         }
-        if closes_span(tick, following, TICKS_PER_MINUTE) {
+        if step.closes_span(TICKS_PER_MINUTE) {
             let now = Mark::take(&self.meter, self.timebase, &self.collector)?;
             self.minute.report(out, "minute, ticks", tick, &now)?;
             self.minute = Span::begin(now, following);
@@ -293,16 +294,24 @@ impl Span {
     }
 }
 
-/// Whether the span of `ticks_per_span` ticks that holds `tick` ends before `following`,
-/// with spans counted from tick 1.
-fn closes_span(tick: u64, following: u64, ticks_per_span: u64) -> bool {
-    // `Run::start` runs the warm-up tick, 0, apart from every span.
-    assert!(tick > 0);
-    assert!(following > tick);
-    assert!(ticks_per_span > 0);
+/// A tick the run ran and the tick that follows it, past any tick the run slipped.
+struct Step {
+    tick: u64,
+    following: u64,
+}
 
-    // Each division floors, to the span the tick falls in.
-    (following - 1) / ticks_per_span > (tick - 1) / ticks_per_span
+impl Step {
+    /// Whether the span of `ticks_per_span` ticks that holds the tick ends before the one
+    /// that follows it, with spans counted from tick 1.
+    fn closes_span(&self, ticks_per_span: u64) -> bool {
+        // `Run::start` runs the warm-up tick, 0, apart from every span.
+        assert!(self.tick > 0);
+        assert!(self.following > self.tick);
+        assert!(ticks_per_span > 0);
+
+        // Each division floors, to the span the tick falls in.
+        (self.following - 1) / ticks_per_span > (self.tick - 1) / ticks_per_span
+    }
 }
 
 fn throwaway_child() -> io::Result<i32> {
@@ -901,35 +910,55 @@ mod tests {
     fn closes_a_window_after_its_tenth_tick() {
         // Goal: a window closes after its tenth tick.
         // Method: ask whether tick 10 closes a window, with tick 11 following it.
-        assert!(closes_span(10, 11, TICKS_PER_WINDOW));
+        let step = Step {
+            tick: 10,
+            following: 11,
+        };
+        assert!(step.closes_span(TICKS_PER_WINDOW));
     }
 
     #[test]
     fn keeps_a_window_open_before_its_tenth_tick() {
         // Goal: a window stays open through its ninth tick.
         // Method: ask whether tick 9 closes a window, with tick 10 following it.
-        assert!(!closes_span(9, 10, TICKS_PER_WINDOW));
+        let step = Step {
+            tick: 9,
+            following: 10,
+        };
+        assert!(!step.closes_span(TICKS_PER_WINDOW));
     }
 
     #[test]
     fn closes_a_window_whose_tenth_tick_slipped() {
         // Goal: a window whose tenth tick slipped still closes, after the tick before it.
         // Method: ask whether tick 9 closes a window, with tick 11 following it.
-        assert!(closes_span(9, 11, TICKS_PER_WINDOW));
+        let step = Step {
+            tick: 9,
+            following: 11,
+        };
+        assert!(step.closes_span(TICKS_PER_WINDOW));
     }
 
     #[test]
     fn closes_a_minute_after_its_sixtieth_tick() {
         // Goal: a minute closes after its sixtieth tick.
         // Method: ask whether tick 60 closes a minute, with tick 61 following it.
-        assert!(closes_span(60, 61, TICKS_PER_MINUTE));
+        let step = Step {
+            tick: 60,
+            following: 61,
+        };
+        assert!(step.closes_span(TICKS_PER_MINUTE));
     }
 
     #[test]
-    #[should_panic(expected = "tick > 0")]
+    #[should_panic(expected = "self.tick > 0")]
     fn refuses_the_warm_up_tick() {
         // Goal: the warm-up tick, which `Run::start` runs apart, never reaches a span.
         // Method: ask whether tick 0 closes a window.
-        closes_span(0, 1, TICKS_PER_WINDOW);
+        let step = Step {
+            tick: 0,
+            following: 1,
+        };
+        step.closes_span(TICKS_PER_WINDOW);
     }
 }
