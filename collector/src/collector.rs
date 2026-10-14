@@ -84,13 +84,11 @@ impl Collector {
             Ok(())
         })?;
         meter.measure(Source::Coalitions, || {
-            let counts = self.tracker.counts();
-            let added = counts.since(&self.counts_previous);
-            self.counts_previous = counts;
-
+            let dropped_starts =
+                read_dropped_starts(&mut self.counts_previous, self.tracker.counts());
             read_coalitions(
                 &self.events,
-                added.dropped_starts,
+                dropped_starts,
                 &self.listing,
                 &mut self.coalitions,
             )
@@ -98,6 +96,16 @@ impl Collector {
 
         Ok(())
     }
+}
+
+/// Returns the starts the tracker dropped since the previous tick, whose counts
+/// `counts_previous` holds, and keeps `counts` there for the next tick.
+fn read_dropped_starts(counts_previous: &mut Counts, counts: Counts) -> u64 {
+    let added = counts.since(counts_previous);
+    *counts_previous = counts;
+
+    assert!(added.dropped_starts <= counts.dropped_starts);
+    added.dropped_starts
 }
 
 /// Adds the coalition of each process `events` saw start, and of every process in `listing`
@@ -148,6 +156,40 @@ mod tests {
         let mut listing = processes::pid_list(processes::process_limit().unwrap());
         processes::list_pids(&mut listing).unwrap();
         listing
+    }
+
+    #[test]
+    fn reads_the_starts_dropped_since_the_previous_tick() {
+        // Goal: a tick's dropped starts are those the tracker dropped since the previous tick,
+        // never the total it has dropped.
+        // Method: read the dropped starts of a tick whose tracker has dropped 3, after a tick
+        // whose tracker had dropped 2.
+        let mut counts_previous = Counts {
+            dropped_starts: 2,
+            ..Counts::default()
+        };
+        let counts = Counts {
+            dropped_starts: 3,
+            ..Counts::default()
+        };
+
+        assert_eq!(1, read_dropped_starts(&mut counts_previous, counts));
+    }
+
+    #[test]
+    fn keeps_the_counts_of_a_tick_for_the_next() {
+        // Goal: a tick's counts are the previous counts of the tick after it, so a start dropped
+        // once counts in one tick only.
+        // Method: read the dropped starts of two ticks whose tracker has dropped 1 start, both
+        // after no start dropped.
+        let mut counts_previous = Counts::default();
+        let counts = Counts {
+            dropped_starts: 1,
+            ..Counts::default()
+        };
+        read_dropped_starts(&mut counts_previous, counts);
+
+        assert_eq!(0, read_dropped_starts(&mut counts_previous, counts));
     }
 
     #[test]
