@@ -195,6 +195,10 @@ impl Registry {
                 }
             }
         };
+        if identity.recording != recording {
+            eprintln!("recording recovery: previous ring belongs to another recording; retained");
+            return Ok(());
+        }
         self.add(RegisteredRun {
             identity,
             ring_name: name.to_owned(),
