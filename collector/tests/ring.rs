@@ -896,6 +896,39 @@ mod tests {
     }
 
     #[test]
+    fn a_reader_follows_a_writer_restarted_after_dying_between_a_ticks_events_and_its_slot() {
+        // Goal: events a dead writer logged for a tick it never published, which no
+        // publication names, do not keep a reader from following the restarted writer.
+        // Method: read a ring's publication and its event, let the writer panic in the slot
+        // store of a tick whose event it already logged, restart it, and follow.
+        let place = TestPlace::new("orphan");
+        let mut first = Writer::create(&place.place, SHAPE).unwrap();
+        publish_events(&mut first, 1, &[exit(1)]);
+        let mut reader = Reader::open(place.lock_path()).unwrap();
+        reader.read().unwrap();
+        reader.read_event().unwrap();
+        let memory = Memory::default();
+        let processes = [process(2), process(3)];
+        let died = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            first.publish(&Readings {
+                events: &[exit(2)],
+                processes: &processes,
+                ..readings(2, &memory)
+            });
+        }));
+        let spawns = spawns();
+        drop(first);
+        let second = Writer::create(&place.place, SHAPE).unwrap();
+        drop(spawns);
+
+        let followed = reader.follow(place.lock_path()).unwrap();
+
+        assert!(died.is_err());
+        assert!(followed);
+        drop(second);
+    }
+
+    #[test]
     fn a_reader_stays_put_when_the_ring_the_lock_file_names_is_gone() {
         // Goal: a reader that reads the lock file just before a starting writer removes the
         // ring it names looks again later, rather than failing.

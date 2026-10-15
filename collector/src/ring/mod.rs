@@ -284,8 +284,8 @@ impl Reader {
     }
 
     /// Opens the ring the lock file at `lock_path` names in place of the reader's own, once
-    /// the writer restarted and the reader has read every publication and event its own ring
-    /// holds, and returns whether it did. The reader reads on from where it stood, so the next
+    /// the writer restarted and the reader has read every publication its own ring holds and
+    /// the events of the last, and returns whether it did. The reader reads on from where it stood, so the next
     /// reads return what the newer writer overwrote first as missed. A newer ring whose ticks
     /// have other capacities is refused with `io::ErrorKind::Unsupported`.
     pub fn follow(&mut self, lock_path: &Path) -> io::Result<bool> {
@@ -299,7 +299,10 @@ impl Reader {
             return Ok(false);
         }
 
-        if self.events.next <= words[HEADER_NEWEST_EVENT].load(Ordering::Relaxed) {
+        // Only the events a publication names are the reader's to read before it moves. A
+        // writer that died between logging a tick's events and publishing its slot left
+        // events no publication names, which the reader learns as missed on the newer ring.
+        if self.events.next < self.tick.last.events.end {
             return Ok(false);
         }
 
