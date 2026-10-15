@@ -1379,6 +1379,58 @@ mod tests {
             .unwrap();
     }
 
+    /// The most steps a test follows the tracker for while it waits on an outcome. A count of
+    /// steps rather than a time bounds the wait, so a slow machine only stretches it.
+    const STEPS_MAX: u32 = 100;
+    const STEP_MS: u64 = 100;
+
+    /// Follows `tracker` a step at a time, draining its events into `events`, until they hold
+    /// one `is_awaited` accepts. Fails after `STEPS_MAX` steps, naming the `awaited` event.
+    fn follow_until_drained(
+        tracker: &mut Tracker,
+        meter: &mut Meter,
+        events: &mut Vec<Event>,
+        awaited: &str,
+        is_awaited: impl Fn(&Event) -> bool,
+    ) {
+        for _ in 0..STEPS_MAX {
+            follow_for(tracker, meter, STEP_MS);
+            events.extend(tracker.drain_events());
+            if events.iter().any(&is_awaited) {
+                return;
+            }
+        }
+        panic!("no {awaited} after {STEPS_MAX} steps of {STEP_MS} ms: {events:?}");
+    }
+
+    fn is_start_of(pid: i32) -> impl Fn(&Event) -> bool {
+        move |event| matches!(event, Event::Start { pid: p, .. } if *p == pid)
+    }
+
+    fn is_exec_of(pid: i32) -> impl Fn(&Event) -> bool {
+        move |event| matches!(event, Event::Exec { pid: p } if *p == pid)
+    }
+
+    fn is_exit_of(pid: i32) -> impl Fn(&Event) -> bool {
+        move |event| matches!(event, Event::Exit { pid: p, .. } if *p == pid)
+    }
+
+    /// Spawns `program` with its stdin on a pipe this test holds, so a child that reads it
+    /// waits there until `release`.
+    fn spawn_held(program: &str, args: &[&str]) -> std::process::Child {
+        std::process::Command::new(program)
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap()
+    }
+
+    /// Lets a held child go on, by closing the pipe it reads.
+    fn release(child: &mut std::process::Child) {
+        let stdin = child.stdin.take().expect("a held child's stdin");
+        drop(stdin);
+    }
+
     #[test]
     fn reports_a_child_exiting_with_its_final_usage() {
         // Goal: a child the tracker follows is reported as an exit that carries the CPU time it
@@ -1409,23 +1461,36 @@ mod tests {
     #[test]
     fn reports_a_watched_process_replacing_its_program() {
         // Goal: a watched process that replaces its program is reported as an exec under its pid.
-        // Method: follow for 500 ms while a shell child waits 100 ms and then execs true.
+        // Method: hold a shell child on its stdin until the tracker reports its start, which
+        // comes after the tracker watches it, then let it exec true and follow until it exits.
+        // Bash runs the shell itself, where /bin/sh execs the shell it selects before it reads.
         let mut tracker = tracker(INTERVAL);
+        let mut child = spawn_held("/bin/bash", &["-c", "read -r line; exec /usr/bin/true"]);
+        let pid = child.id().cast_signed();
+        let mut held = Vec::new();
+        follow_until_drained(
+            &mut tracker,
+            &mut Meter::default(),
+            &mut held,
+            "start of the held child",
+            is_start_of(pid),
+        );
 
-        let mut child = std::process::Command::new("/bin/sh")
-            .args(["-c", "sleep 0.1; exec /usr/bin/true"])
-            .spawn()
-            .unwrap();
-        follow_for(&mut tracker, &mut Meter::default(), 500);
+        release(&mut child);
+        let mut released = Vec::new();
+        follow_until_drained(
+            &mut tracker,
+            &mut Meter::default(),
+            &mut released,
+            "exit of the released child",
+            is_exit_of(pid),
+        );
         child.wait().unwrap();
 
-        let pid = child.id().cast_signed();
-        let events: Vec<Event> = tracker.drain_events().collect();
+        assert!(!held.iter().any(is_exec_of(pid)), "child {pid}: {held:?}");
         assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, Event::Exec { pid: p } if *p == pid)),
-            "child {pid}: {events:?}"
+            released.iter().any(is_exec_of(pid)),
+            "child {pid}: {released:?}"
         );
     }
 
