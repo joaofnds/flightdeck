@@ -33,10 +33,6 @@ pub(crate) const EFAULT: c_int = 14;
 #[cfg(test)]
 pub(crate) const EINVAL: c_int = 22;
 
-/// Says an argument is outside what a call works on.
-#[cfg(test)]
-pub(crate) const EDOM: c_int = 33;
-
 /// Says a call's timeout ran out.
 pub(crate) const ETIMEDOUT: c_int = 60;
 

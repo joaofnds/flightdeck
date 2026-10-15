@@ -7,8 +7,6 @@ use std::io;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
-#[cfg(test)]
-use crate::kernel::EDOM;
 use crate::kernel::{EFAULT, EINTR, ENOENT, ETIMEDOUT};
 
 unsafe extern "C" {
@@ -116,12 +114,18 @@ mod tests {
             });
             let deadline = Instant::now() + Duration::from_secs(1);
             let mut woken = wake_all(&word);
-            while woken.is_ok() && Instant::now() < deadline {
+            while woken.is_ok() {
+                if Instant::now() >= deadline {
+                    break;
+                }
+
                 std::thread::sleep(Duration::from_millis(1));
                 woken = wake_all(&word);
             }
 
-            assert_eq!(Err(EDOM), woken);
+            // The header names EINVAL for a waiter that disagrees on the size, and macOS 27
+            // returns EDOM, so the test holds the refusal and not its number.
+            assert!(woken.is_err(), "{woken:?}");
         });
     }
 }
