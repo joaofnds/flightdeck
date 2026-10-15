@@ -91,7 +91,7 @@ pub struct Tick {
 }
 
 impl Tick {
-    pub(super) fn new(layout: Layout) -> Self {
+    pub(super) fn new(layout: &Layout) -> Self {
         let state_capacity = layout.gpu_states.capacity;
         Self {
             run_tick: 0,
@@ -165,7 +165,7 @@ pub fn shape_for(readings: &Readings, slot_count: u64) -> Shape {
 /// the numbers `events` the log gave the tick's events.
 pub(super) fn store_tick(
     slot: &[AtomicU64],
-    layout: Layout,
+    layout: &Layout,
     readings: &Readings,
     events: Range<u64>,
 ) {
@@ -271,7 +271,7 @@ fn store_tick_counts(slot: &[AtomicU64], readings: &Readings) {
     }
 }
 
-fn store_tick_ioreport(slot: &[AtomicU64], layout: Layout, ioreport: &IOReportReadings) {
+fn store_tick_ioreport(slot: &[AtomicU64], layout: &Layout, ioreport: &IOReportReadings) {
     store(slot, SLOT_GPU_ENERGY_NJ, ioreport.gpu_energy_nj);
     let gpu = ioreport.gpu.active_ns();
     let gpu_start = layout.gpu_states.start;
@@ -292,7 +292,7 @@ fn store_tick_ioreport(slot: &[AtomicU64], layout: Layout, ioreport: &IOReportRe
 
 /// Loads the tick `slot` holds into `tick`, and returns whether every word made a reading,
 /// which a slot the writer overwrote during the load may not.
-pub(super) fn load_tick(slot: &[AtomicU64], layout: Layout, tick: &mut Tick) -> bool {
+pub(super) fn load_tick(slot: &[AtomicU64], layout: &Layout, tick: &mut Tick) -> bool {
     assert_eq!(layout.slot_words, slot.len());
 
     let count = |index: usize, capacity: usize| {
@@ -355,7 +355,7 @@ pub(super) fn load_tick(slot: &[AtomicU64], layout: Layout, tick: &mut Tick) -> 
     true
 }
 
-fn load_tick_ioreport(slot: &[AtomicU64], layout: Layout, read: bool, tick: &mut Tick) -> bool {
+fn load_tick_ioreport(slot: &[AtomicU64], layout: &Layout, read: bool, tick: &mut Tick) -> bool {
     tick.ioreport_read = read;
     tick.gpu_energy_nj = 0;
     tick.gpu_active_ns.clear();
@@ -403,7 +403,7 @@ fn load_tick_ioreport(slot: &[AtomicU64], layout: Layout, read: bool, tick: &mut
     true
 }
 
-fn load_tick_smc(slot: &[AtomicU64], layout: Layout, read: bool, tick: &mut Tick) -> bool {
+fn load_tick_smc(slot: &[AtomicU64], layout: &Layout, read: bool, tick: &mut Tick) -> bool {
     tick.smc_read = read;
     tick.power_watts = 0.0;
     tick.soc_celsius = 0.0;
@@ -430,7 +430,7 @@ fn load_tick_smc(slot: &[AtomicU64], layout: Layout, read: bool, tick: &mut Tick
 
 fn load_tick_records(
     slot: &[AtomicU64],
-    layout: Layout,
+    layout: &Layout,
     processes: usize,
     coalitions: usize,
     tick: &mut Tick,
@@ -805,7 +805,7 @@ mod tests {
         }
     }
 
-    fn slot_of(layout: Layout) -> Vec<AtomicU64> {
+    fn slot_of(layout: &Layout) -> Vec<AtomicU64> {
         (0..layout.slot_words).map(|_| AtomicU64::new(0)).collect()
     }
 
@@ -830,12 +830,12 @@ mod tests {
     /// Stores `readings` in a slot with room for them, and loads it into a tick.
     fn store_and_load(readings: &Readings) -> Tick {
         let layout = Layout::new(shape_for(readings, 1)).unwrap();
-        let slot = slot_of(layout);
-        let mut tick = Tick::new(layout);
+        let slot = slot_of(&layout);
+        let mut tick = Tick::new(&layout);
 
-        store_tick(&slot, layout, readings, 1..1);
+        store_tick(&slot, &layout, readings, 1..1);
 
-        assert!(load_tick(&slot, layout, &mut tick));
+        assert!(load_tick(&slot, &layout, &mut tick));
         tick
     }
 
@@ -954,14 +954,14 @@ mod tests {
             ..with_sources
         };
         let layout = Layout::new(shape_for(&with_sources, 1)).unwrap();
-        let mut tick = Tick::new(layout);
-        let first = slot_of(layout);
-        store_tick(&first, layout, &with_sources, 1..1);
-        assert!(load_tick(&first, layout, &mut tick));
-        let second = slot_of(layout);
+        let mut tick = Tick::new(&layout);
+        let first = slot_of(&layout);
+        store_tick(&first, &layout, &with_sources, 1..1);
+        assert!(load_tick(&first, &layout, &mut tick));
+        let second = slot_of(&layout);
 
-        store_tick(&second, layout, &without_sources, 1..1);
-        let loaded = load_tick(&second, layout, &mut tick);
+        store_tick(&second, &layout, &without_sources, 1..1);
+        let loaded = load_tick(&second, &layout, &mut tick);
 
         assert!(loaded);
         assert!(!tick.ioreport_read);
@@ -994,12 +994,12 @@ mod tests {
         ];
 
         for (index, word) in breaks {
-            let slot = slot_of(layout);
-            store_tick(&slot, layout, &readings, 1..1);
+            let slot = slot_of(&layout);
+            store_tick(&slot, &layout, &readings, 1..1);
             slot[index].store(word, Ordering::Relaxed);
 
             assert!(
-                !load_tick(&slot, layout, &mut Tick::new(layout)),
+                !load_tick(&slot, &layout, &mut Tick::new(&layout)),
                 "word {index}"
             );
         }

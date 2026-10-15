@@ -130,7 +130,7 @@ impl Writer {
 
         let lock = create_lock(&place.lock_path)?;
         let previous = create_previous(&place.name_prefix, &lock)?;
-        let created = create_object(&place.name_prefix, previous.generation, layout)?;
+        let created = create_object(&place.name_prefix, previous.generation, &layout)?;
         let mapping = Mapping::new(&created.object, layout.word_count(), PROT_READ | PROT_WRITE)?;
         let header = Header {
             generation: created.generation,
@@ -138,7 +138,7 @@ impl Writer {
             run_start_ns: u64::try_from(run_start_ns).map_err(io::Error::other)?,
             first_event: previous.newest_event + 1,
         };
-        store_header(mapping.words(), layout, header);
+        store_header(mapping.words(), &layout, &header);
 
         create_unlink_older(&place.name_prefix, previous.generation);
         // Writing the name before cutting the file to its length never leaves the lock file
@@ -179,7 +179,7 @@ impl Writer {
         let slot = &words[self.layout.slot(publication)];
         slot[SLOT_SEQUENCE].store(2 * publication - 1, Ordering::Relaxed);
         fence(Ordering::Release);
-        store_tick(slot, self.layout, readings, events_first..self.event + 1);
+        store_tick(slot, &self.layout, readings, events_first..self.event + 1);
         slot[SLOT_SEQUENCE].store(2 * publication, Ordering::Release);
 
         words[HEADER_NEWEST_PUBLICATION].store(publication, Ordering::Release);
@@ -229,11 +229,12 @@ impl Reader {
         Ok(Self {
             name: locked,
             mapping,
-            layout,
             publications: Cursor::new(first, layout.oldest_held(newest)),
             run_start_ns,
-            tick: LoadedTick::new(layout),
+            tick: LoadedTick::new(&layout),
             events: Cursor::new(first_event, layout.oldest_event_held(newest_event)),
+            // Last, since the fields above read it.
+            layout,
         })
     }
 
@@ -305,7 +306,7 @@ impl Reader {
             Step::Read(publication) => publication,
         };
         let slot = &words[self.layout.slot(publication)];
-        if self.tick.read_slot(slot, self.layout, publication)? {
+        if self.tick.read_slot(slot, &self.layout, publication)? {
             Ok(Found::Publication {
                 publication,
                 tick: self.tick.last.run_tick,
@@ -410,7 +411,7 @@ struct LoadedTick {
 }
 
 impl LoadedTick {
-    fn new(layout: Layout) -> Self {
+    fn new(layout: &Layout) -> Self {
         Self {
             last: Tick::new(layout),
             next: Tick::new(layout),
@@ -423,7 +424,7 @@ impl LoadedTick {
     fn read_slot(
         &mut self,
         slot: &[AtomicU64],
-        layout: Layout,
+        layout: &Layout,
         publication: u64,
     ) -> io::Result<bool> {
         let loaded = read_finished(slot, SLOT_SEQUENCE, publication, || {
@@ -514,14 +515,14 @@ mod tests {
             events: &[],
             dropped: Dropped::default(),
         };
-        store_tick(&slot, layout, &readings, 1..1);
+        store_tick(&slot, &layout, &readings, 1..1);
         slot[SLOT_SEQUENCE].store(sequence, Ordering::Relaxed);
         slot
     }
 
     fn read(slot: &[AtomicU64], publication: u64) -> io::Result<Option<u64>> {
-        let mut tick = LoadedTick::new(layout());
-        let read = tick.read_slot(slot, layout(), publication)?;
+        let mut tick = LoadedTick::new(&layout());
+        let read = tick.read_slot(slot, &layout(), publication)?;
         Ok(read.then_some(tick.last.run_tick))
     }
 
@@ -533,10 +534,10 @@ mod tests {
         // a slot the writer is rewriting with tick 99, and look at the tick held.
         let finished = slot_holding(6, 40);
         let rewritten = slot_holding(13, 99);
-        let mut tick = LoadedTick::new(layout());
-        assert!(tick.read_slot(&finished, layout(), 3).unwrap());
+        let mut tick = LoadedTick::new(&layout());
+        assert!(tick.read_slot(&finished, &layout(), 3).unwrap());
 
-        let read = tick.read_slot(&rewritten, layout(), 4).unwrap();
+        let read = tick.read_slot(&rewritten, &layout(), 4).unwrap();
 
         assert!(!read);
         assert_eq!(40, tick.last.run_tick);

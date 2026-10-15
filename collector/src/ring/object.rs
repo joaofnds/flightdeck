@@ -247,7 +247,7 @@ pub(super) struct Created {
 
 /// Makes the object of a ring of `layout` under the first generation past `previous` whose
 /// name no object holds.
-pub(super) fn create_object(prefix: &str, previous: u64, layout: Layout) -> io::Result<Created> {
+pub(super) fn create_object(prefix: &str, previous: u64, layout: &Layout) -> io::Result<Created> {
     // The lock file another program may write names the previous generation, so it may be
     // any number.
     let Some(last) = previous.checked_add(GENERATION_TRIES) else {

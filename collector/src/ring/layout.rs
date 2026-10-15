@@ -109,7 +109,7 @@ pub(super) const EVENT_WORDS: usize = 19;
 const SHAPE_FIELD_MAX: u64 = 1 << 24;
 
 /// Where each part of a ring lies.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(super) struct Layout {
     pub(super) shape: Shape,
     pub(super) slot_words: usize,
@@ -125,7 +125,7 @@ pub(super) struct Layout {
 }
 
 /// A run of records of one size within a slot.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(super) struct Section {
     /// The section's first word, from the slot's start.
     pub(super) start: usize,
@@ -135,14 +135,14 @@ pub(super) struct Section {
 
 impl Section {
     /// The words of the record at `index`, from the slot's start.
-    pub(super) fn record(self, index: usize) -> Range<usize> {
+    pub(super) fn record(&self, index: usize) -> Range<usize> {
         assert!(index < self.capacity);
 
         let start = self.start + index * self.record_words;
         start..start + self.record_words
     }
 
-    fn end(self) -> usize {
+    fn end(&self) -> usize {
         self.start + self.capacity * self.record_words
     }
 }
@@ -188,9 +188,10 @@ impl Layout {
             return None;
         }
 
+        let slot_words = coalitions.end();
         Some(Self {
             shape,
-            slot_words: coalitions.end(),
+            slot_words,
             cpus,
             interfaces,
             gpu_states,
@@ -198,32 +199,32 @@ impl Layout {
             fans,
             processes,
             coalitions,
-            events_start: HEADER_WORDS + usize_from(shape.slot_count) * coalitions.end(),
+            events_start: HEADER_WORDS + usize_from(shape.slot_count) * slot_words,
         })
     }
 
-    pub(super) fn word_count(self) -> usize {
+    pub(super) fn word_count(&self) -> usize {
         self.events_start + usize_from(self.shape.event_capacity) * EVENT_WORDS
     }
 
-    pub(super) fn size_bytes(self) -> usize {
+    pub(super) fn size_bytes(&self) -> usize {
         self.word_count() * size_of::<u64>()
     }
 
     /// The oldest publication the slots hold once `newest` is published, where every
     /// publication numbered from 1 went into them.
-    pub(super) fn oldest_held(self, newest: u64) -> u64 {
+    pub(super) fn oldest_held(&self, newest: u64) -> u64 {
         newest.saturating_sub(self.shape.slot_count) + 1
     }
 
     /// The oldest event the log holds once `newest` is written, where every event numbered
     /// from 1 went into it.
-    pub(super) fn oldest_event_held(self, newest: u64) -> u64 {
+    pub(super) fn oldest_event_held(&self, newest: u64) -> u64 {
         newest.saturating_sub(self.shape.event_capacity) + 1
     }
 
     /// The words of the record that holds the event numbered `number`, from the ring's start.
-    pub(super) fn event(self, number: u64) -> Range<usize> {
+    pub(super) fn event(&self, number: u64) -> Range<usize> {
         assert!(number > 0);
 
         let index = usize_from((number - 1) % self.shape.event_capacity);
@@ -232,7 +233,7 @@ impl Layout {
     }
 
     /// The words of the slot that holds `publication`, from the ring's start.
-    pub(super) fn slot(self, publication: u64) -> Range<usize> {
+    pub(super) fn slot(&self, publication: u64) -> Range<usize> {
         assert!(publication > 0);
 
         let index = usize_from((publication - 1) % self.shape.slot_count);
@@ -263,7 +264,7 @@ fn usize_from(value: u64) -> usize {
 }
 
 /// Writes the header of a ring of `layout`.
-pub(super) fn store_header(words: &[AtomicU64], layout: Layout, header: Header) {
+pub(super) fn store_header(words: &[AtomicU64], layout: &Layout, header: &Header) {
     let shape = layout.shape;
     let fields = [
         (HEADER_MAGIC, MAGIC),
@@ -293,7 +294,7 @@ pub(super) fn store_header(words: &[AtomicU64], layout: Layout, header: Header) 
 }
 
 /// What a ring's header holds besides its shape.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 pub(super) struct Header {
     pub(super) generation: u64,
     pub(super) first_publication: u64,
@@ -381,7 +382,7 @@ mod tests {
             run_start_ns: 1,
             first_event: 1,
         };
-        store_header(&words, layout(), header);
+        store_header(&words, &layout(), &header);
         words
     }
 
