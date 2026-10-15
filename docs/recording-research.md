@@ -443,16 +443,24 @@ Recommendation: the shared-memory ring, made with `shm_open`. The object outlive
 process that wrote it: a second process read what the first wrote after the first had
 exited. A reader that opens it read-only cannot make its mapping writable, since the
 kernel refused the attempt. The writer wakes readers once a tick with
-`os_sync_wake_by_address_any` and the `SHARED` flag, which macOS has had since 14.4.
+`os_sync_wake_by_address_all` and the `SHARED` flag, which macOS has had since 14.4,
+since several readers may wait.
 [iceoryx2](https://github.com/eclipse-iceoryx/iceoryx2) offers the same in Rust,
 publish-subscribe with events over shared memory, and lists macOS at its tier 2, "a
-restricted security and safety feature set". It is weighed against a ring written here,
-in the comparison under Next measurements, and it is not measured yet.
+restricted security and safety feature set". The ring is written here instead, in
+`collector/src/ring`. iceoryx2 keeps a publisher's history in the publisher's own process
+(`iceoryx2/src/port/publisher.rs`), and its cleanup of stale resources removes a dead
+publisher's data segment (`iceoryx2/src/service/stale_resource_cleanup.rs`), both read in
+its source at commit 0763bbc and not run. Its ticks would die with the collector, which
+the restart below rules out. Its latency and CPU were not compared, since that failure
+decides it.
 
 Because the ring outlives the collector, a crash of the collector loses nothing the
 ring holds. On restart it seals whatever the ring holds past the last sealed tick
-before writing new ticks, so the ring should hold two sealing windows, 1.2 MB for the
-changes measured here. A kernel panic or a power loss loses the open window, as
+before writing new ticks, so the ring holds two sealing windows, 120 ticks. Each slot
+holds full records with room for every process and coalition the collector's limits
+allow, so the ring's object is about 800 MB of address space, of which only the pages
+written take memory. A kernel panic or a power loss loses the open window, as
 decided.
 
 ## What aerospace, automotive and robotics systems do
@@ -631,8 +639,8 @@ rather than block when full.
    carries a fork, or at most once per interval as an option, and reading each exiting process's final usage, into an event queue that counts what it drops. Everything carries one tick number.
 2. It writes each tick into a shared-memory ring that only the user can read, holding
    two sealing windows. The writer never waits for a reader and wakes readers once a
-   tick. Whether the ring is iceoryx2 or written here waits on the comparison under
-   Next measurements.
+   tick. The ring is written here, as Moving the data says, with process events in a
+   log of their own beside the ticks.
 3. A persister in the same agent seals each 60-second window into Parquet or DuckLake,
    sorted by series, delta encoded, zstd, no bloom filter, and compacts sealed windows
    into the per-minute and per-hour tiers. On start it first seals what the ring holds
@@ -688,9 +696,10 @@ them against.
 6. Whether coalitions group processes the way the app's notion of an app does, and how
    many coalitions the collector never learns because their processes are gone before a
    rescan.
-7. iceoryx2 on this Mac against a ring written here, comparing the latency and CPU of a
-   tick through each, how much of iceoryx2 the ring would use, and how much code a ring
-   written here would take to maintain.
+7. Settled without measuring, under Moving the data: the ring is written here, since
+   iceoryx2 loses a dead publisher's history. Not done: the latency and CPU of a tick
+   through each, how much of iceoryx2 the ring would use, and how much code a ring
+   written here takes to maintain.
 8. Parquet against Vortex, which claims much faster random access and cannot yet read
    files written by a newer version of itself.
 9. For the root option: `eslogger`'s events a second and its CPU, file opens most of
