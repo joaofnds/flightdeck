@@ -1,12 +1,15 @@
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use collector::ring::{Found, FoundEvent, Place, Reader};
 
 /// The longest the reader waits for the next publication before it looks again.
 const WAIT_TIMEOUT: Duration = Duration::from_secs(2);
+/// The longest the reader goes without a publication before it gives up on the writer. The
+/// collector publishes every second, so a writer this quiet has stopped.
+const IDLE_MAX: Duration = Duration::from_secs(30);
 
 fn main() -> ExitCode {
     let options =
@@ -68,8 +71,14 @@ fn run(options: &Options) -> std::io::Result<()> {
 
     let mut read = 0;
     let mut last = None;
+    // The loop ends on the count read, or on a writer quiet for `IDLE_MAX`.
+    let mut idle_since = Instant::now();
     while read < options.publications {
-        match reader.read()? {
+        let found = reader.read()?;
+        if found != Found::Nothing {
+            idle_since = Instant::now();
+        }
+        match found {
             Found::Publication { publication, tick } => {
                 let readings = reader.tick();
                 println!(
@@ -91,6 +100,12 @@ fn run(options: &Options) -> std::io::Result<()> {
                     reader.follow(&options.lock_path)?;
                     println!("moved to the writer's newer ring");
                 } else {
+                    if idle_since.elapsed() > IDLE_MAX {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            format!("the writer published nothing for {IDLE_MAX:?}"),
+                        ));
+                    }
                     reader.wait(WAIT_TIMEOUT)?;
                 }
             }

@@ -50,8 +50,17 @@ mod tests {
         std::str::from_utf8(&output.stdout).unwrap()
     }
 
-    /// The tick and the process count of each publication line `out` holds, in order.
-    fn publications(out: &str) -> Vec<(u64, u64, usize)> {
+    /// What `ring_reader` printed of one publication.
+    #[derive(Debug)]
+    struct Published {
+        publication: u64,
+        tick: u64,
+        processes: usize,
+        coalitions: usize,
+    }
+
+    /// Each publication line `out` holds, in order.
+    fn publications(out: &str) -> Vec<Published> {
         out.lines()
             .filter_map(|line| {
                 let words: Vec<&str> = line.split(' ').collect();
@@ -63,43 +72,63 @@ mod tests {
                         tick,
                         "processes",
                         processes,
-                        ..,
-                    ] => Some((
-                        publication.parse().unwrap(),
-                        tick.parse().unwrap(),
-                        processes.parse().unwrap(),
-                    )),
+                        "coalitions",
+                        coalitions,
+                    ] => Some(Published {
+                        publication: publication.parse().unwrap(),
+                        tick: tick.parse().unwrap(),
+                        processes: processes.parse().unwrap(),
+                        coalitions: coalitions.parse().unwrap(),
+                    }),
                     _ => None,
                 }
             })
             .collect()
     }
 
+    /// The last tick of the run the collector's summary `out` reports, from its line
+    /// "whole run, ticks 1-N".
+    fn last_tick(out: &str) -> u64 {
+        let line = out
+            .lines()
+            .find(|line| line.starts_with("whole run, ticks 1-"))
+            .unwrap();
+        let ticks = line.trim_start_matches("whole run, ticks 1-");
+        ticks.split(':').next().unwrap().parse().unwrap()
+    }
+
     #[test]
     fn publishes_each_tick_to_the_ring() {
         // Goal: the collector hands each tick it reads to the ring, the warm-up tick 0
-        // included, with the processes it read.
+        // included, with the processes and coalitions it read.
         // Method: run the collector for two seconds under a ring name of this test's own, then
-        // read the first two publications of the ring it left.
+        // read as many publications of the ring it left as the run took ticks.
         let ring = TestRing::new("ticks");
         let collected = Command::new(env!("CARGO_BIN_EXE_collector"))
             .args(["--seconds", "2", "--ring", &ring.name])
             .output()
             .unwrap();
-        stdout(&collected);
+        let last_tick = last_tick(stdout(&collected));
+        let count = (last_tick + 1).to_string();
 
         let read = Command::new(env!("CARGO_BIN_EXE_ring_reader"))
-            .args(["--ring", &ring.name, "--publications", "2"])
+            .args(["--ring", &ring.name, "--publications", &count])
             .output()
             .unwrap();
         let found = publications(stdout(&read));
 
-        assert_eq!(2, found.len(), "{found:?}");
-        assert_eq!((1, 0), (found[0].0, found[0].1));
-        assert_eq!(2, found[1].0);
-        assert!(found[1].1 >= 1, "{found:?}");
+        let numbers: Vec<(u64, u64)> = found
+            .iter()
+            .map(|published| (published.publication, published.tick))
+            .collect();
+        let expected: Vec<(u64, u64)> = (0..=last_tick).map(|tick| (tick + 1, tick)).collect();
+        assert_eq!(expected, numbers);
         assert!(
-            found.iter().all(|&(_, _, processes)| processes > 0),
+            found.iter().all(|published| published.processes > 0),
+            "{found:?}"
+        );
+        assert!(
+            found.iter().all(|published| published.coalitions > 0),
             "{found:?}"
         );
     }
