@@ -9,7 +9,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Read};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering, fence};
 
 use crate::u64_from_usize;
@@ -51,8 +51,10 @@ const HEADER_LAYOUT_VERSION: usize = 1;
 const HEADER_GENERATION: usize = 2;
 const HEADER_SLOT_COUNT: usize = 3;
 const HEADER_SLOT_WORDS: usize = 4;
-/// The newest publication the writer finished, or 0 before its first.
-const HEADER_NEWEST_PUBLICATION: usize = 5;
+/// The ring's first publication, one past the newest of the ring before it.
+const HEADER_FIRST_PUBLICATION: usize = 5;
+/// The newest publication the writer finished, which before its first is the previous ring's.
+const HEADER_NEWEST_PUBLICATION: usize = 6;
 const HEADER_WORDS: usize = 8;
 
 /// The words of a slot. The sequence word holds twice the publication the slot holds once
@@ -68,6 +70,12 @@ const PSHMNAMLEN: usize = 31;
 /// it, no process can open it for writing, the writer's own included.
 const RING_MODE: c_uint = 0o400;
 const LOCK_MODE: u32 = 0o600;
+
+/// The generations a writer tries past the previous ring's before it gives up, each name
+/// taken by an object it did not make.
+const GENERATION_TRIES: u64 = 16;
+
+const ENOENT: i32 = 2;
 
 const O_RDONLY: c_int = 0x0000;
 const O_RDWR: c_int = 0x0002;
@@ -89,6 +97,7 @@ unsafe extern "C" {
         offset: i64,
     ) -> *mut c_void;
     fn munmap(address: *mut c_void, length: usize) -> c_int;
+    fn shm_unlink(name: *const c_char) -> c_int;
     fn getuid() -> u32;
 }
 
@@ -97,48 +106,48 @@ pub struct Writer {
     _lock: File,
     mapping: Mapping,
     layout: Layout,
-    /// The newest publication written, or 0 before the first.
+    /// The newest publication written, or the previous ring's newest before the first.
     publication: u64,
 }
 
 impl Writer {
-    /// Takes the lock of `place` and makes a ring of `shape` in it, or returns an error where
-    /// another writer holds the lock.
+    /// Takes the lock of `place` and makes a ring of `shape` in it, under the generation past
+    /// the ring the lock file names, whose publication numbers it continues. Returns an error
+    /// where another writer holds the lock.
     pub fn create(place: &Place, shape: Shape) -> io::Result<Self> {
         assert!(shape.slot_count > 0);
 
-        let mut lock = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(LOCK_MODE)
-            .open(&place.lock_path)?;
-        create_lock(&lock)?;
-        let mut previous_name = String::new();
-        lock.read_to_string(&mut previous_name)?;
-
+        let mut lock = create_lock(&place.lock_path)?;
+        let previous = create_previous(&place.name_prefix, &mut lock)?;
         let layout = Layout::new(shape);
-        let generation = generation_of(&place.name_prefix, &previous_name) + 1;
-        let name = ring_name(&place.name_prefix, generation)?;
-        let object = create_object(&name, layout.size_bytes())?;
-        let mapping = Mapping::new(&object, layout.word_count(), PROT_READ | PROT_WRITE)?;
+        let created = create_object(&place.name_prefix, previous.generation, layout)?;
+        let mapping = Mapping::new(&created.object, layout.word_count(), PROT_READ | PROT_WRITE)?;
 
         let words = mapping.words();
         store(words, HEADER_MAGIC, MAGIC);
         store(words, HEADER_LAYOUT_VERSION, LAYOUT_VERSION);
-        store(words, HEADER_GENERATION, generation);
+        store(words, HEADER_GENERATION, created.generation);
         store(words, HEADER_SLOT_COUNT, shape.slot_count);
         store(words, HEADER_SLOT_WORDS, u64_from_usize(SLOT_WORDS));
-        store(words, HEADER_NEWEST_PUBLICATION, 0);
+        store(
+            words,
+            HEADER_FIRST_PUBLICATION,
+            previous.newest_publication + 1,
+        );
+        store(
+            words,
+            HEADER_NEWEST_PUBLICATION,
+            previous.newest_publication,
+        );
 
+        create_unlink_older(&place.name_prefix, previous.generation);
         lock.set_len(0)?;
-        lock.write_all_at(name.as_bytes(), 0)?;
+        lock.write_all_at(created.name.as_bytes(), 0)?;
         Ok(Self {
             _lock: lock,
             mapping,
             layout,
-            publication: 0,
+            publication: previous.newest_publication,
         })
     }
 
@@ -164,6 +173,8 @@ impl Writer {
 pub struct Reader {
     mapping: Mapping,
     layout: Layout,
+    /// The first publication of the ring, past the previous ring's.
+    first: u64,
     /// The publication the reader reads next.
     next: u64,
 }
@@ -171,25 +182,19 @@ pub struct Reader {
 impl Reader {
     /// Opens the ring the lock file at `lock_path` names, starting at the oldest publication
     /// it holds.
-    pub fn open(lock_path: &std::path::Path) -> io::Result<Self> {
+    pub fn open(lock_path: &Path) -> io::Result<Self> {
         let mut name = String::new();
         File::open(lock_path)?.read_to_string(&mut name)?;
-        let name = CString::new(name).map_err(io::Error::other)?;
 
-        let object = unsafe { shm_open(name.as_ptr(), O_RDONLY) };
-        if object < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let object = unsafe { OwnedFd::from_raw_fd(object) };
-        let size_bytes = open_check(&File::from(object.try_clone()?))?;
-        let header = Mapping::new(&object, HEADER_WORDS, PROT_READ)?;
-        let layout = open_layout(header.words(), size_bytes)?;
-        let mapping = Mapping::new(&object, layout.word_count(), PROT_READ)?;
-
+        let (mapping, layout) = open_ring(&name)?;
+        let words = mapping.words();
+        let first = words[HEADER_FIRST_PUBLICATION].load(Ordering::Relaxed);
+        let newest = words[HEADER_NEWEST_PUBLICATION].load(Ordering::Relaxed);
         Ok(Self {
             mapping,
             layout,
-            next: 1,
+            first,
+            next: first.max(layout.oldest_held(newest)),
         })
     }
 
@@ -202,7 +207,7 @@ impl Reader {
             return Ok(Found::Nothing);
         }
 
-        let oldest = self.layout.oldest_held(newest);
+        let oldest = self.first.max(self.layout.oldest_held(newest));
         if self.next < oldest {
             let first = self.next;
             self.next = oldest;
@@ -276,10 +281,9 @@ impl Layout {
         self.word_count() * size_of::<u64>()
     }
 
-    /// The oldest publication the ring holds once `newest` is published.
+    /// The oldest publication the slots hold once `newest` is published, where every
+    /// publication numbered from 1 went into them.
     fn oldest_held(self, newest: u64) -> u64 {
-        assert!(newest > 0);
-
         newest.saturating_sub(self.shape.slot_count) + 1
     }
 
@@ -343,9 +347,19 @@ fn store(words: &[AtomicU64], index: usize, value: u64) {
     words[index].store(value, Ordering::Relaxed);
 }
 
-fn create_lock(lock: &File) -> io::Result<()> {
+/// Opens the lock file at `lock_path` and takes its lock, or returns an error where another
+/// writer holds it.
+fn create_lock(lock_path: &Path) -> io::Result<File> {
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(LOCK_MODE)
+        .open(lock_path)?;
+
     match lock.try_lock() {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(lock),
         Err(std::fs::TryLockError::WouldBlock) => Err(io::Error::new(
             io::ErrorKind::WouldBlock,
             "another writer holds the ring's lock",
@@ -354,12 +368,81 @@ fn create_lock(lock: &File) -> io::Result<()> {
     }
 }
 
-/// The generation of the ring `name` names, or 0 where it names no ring of `prefix`.
-fn generation_of(prefix: &str, name: &str) -> u64 {
-    match name.strip_prefix(prefix) {
-        Some(generation) => generation.parse().unwrap_or(0),
-        None => 0,
+/// What a writer continues from the ring before it.
+struct Previous {
+    /// The previous ring's generation, or 0 where the lock file names none.
+    generation: u64,
+    /// The previous ring's newest publication, or 0 where it is gone.
+    newest_publication: u64,
+}
+
+/// The ring the lock file `lock` names, of a name that starts with `prefix`.
+fn create_previous(prefix: &str, lock: &mut File) -> io::Result<Previous> {
+    let mut name = String::new();
+    lock.read_to_string(&mut name)?;
+
+    // A lock file a writer never wrote is empty.
+    let generation = if let Some(Ok(generation)) = name.strip_prefix(prefix).map(str::parse) {
+        generation
+    } else {
+        if !name.is_empty() {
+            eprintln!("ring: numbering from 1, since the lock file names {name:?}");
+        }
+        0
+    };
+    if generation == 0 {
+        return Ok(Previous {
+            generation,
+            newest_publication: 0,
+        });
     }
+
+    // A restart after the Mac restarted finds no ring, which is no fault.
+    let newest_publication = match open_ring(&name) {
+        Ok((mapping, _)) => mapping.words()[HEADER_NEWEST_PUBLICATION].load(Ordering::Relaxed),
+        Err(error) if error.raw_os_error() == Some(ENOENT) => 0,
+        Err(error) => {
+            eprintln!("ring: numbering from 1, since the ring {name} is unreadable: {error}");
+            0
+        }
+    };
+    Ok(Previous {
+        generation,
+        newest_publication,
+    })
+}
+
+/// A ring's object a writer made.
+struct Created {
+    name: String,
+    generation: u64,
+    object: OwnedFd,
+}
+
+/// Makes the object of a ring of `layout` under the first generation past `previous` whose
+/// name no object holds.
+fn create_object(prefix: &str, previous: u64, layout: Layout) -> io::Result<Created> {
+    for generation in previous + 1..=previous + GENERATION_TRIES {
+        let name = ring_name(prefix, generation)?;
+        match create_object_named(&name, layout.size_bytes()) {
+            Ok(object) => {
+                return Ok(Created {
+                    name,
+                    generation,
+                    object,
+                });
+            }
+            Err(error) => {
+                if error.kind() != io::ErrorKind::AlreadyExists {
+                    return Err(error);
+                }
+            }
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        format!("objects hold the {GENERATION_TRIES} ring names past generation {previous}"),
+    ))
 }
 
 fn ring_name(prefix: &str, generation: u64) -> io::Result<String> {
@@ -373,7 +456,7 @@ fn ring_name(prefix: &str, generation: u64) -> io::Result<String> {
     Ok(name)
 }
 
-fn create_object(name: &str, size_bytes: usize) -> io::Result<OwnedFd> {
+fn create_object_named(name: &str, size_bytes: usize) -> io::Result<OwnedFd> {
     let name = CString::new(name).map_err(io::Error::other)?;
     // macOS makes the descriptor close on exec itself, and refuses O_CLOEXEC with EINVAL.
     let object = unsafe { shm_open(name.as_ptr(), O_RDWR | O_CREAT | O_EXCL, RING_MODE) };
@@ -384,9 +467,54 @@ fn create_object(name: &str, size_bytes: usize) -> io::Result<OwnedFd> {
 
     let length = i64::try_from(size_bytes).map_err(io::Error::other)?;
     if unsafe { ftruncate(object.as_raw_fd(), length) } != 0 {
-        return Err(io::Error::last_os_error());
+        let error = io::Error::last_os_error();
+        // An object of no size is no ring, and nothing else would remove it.
+        if unsafe { shm_unlink(name.as_ptr()) } != 0 {
+            eprintln!(
+                "ring: unlink {name:?} failed: {}",
+                io::Error::last_os_error()
+            );
+        }
+        return Err(error);
     }
     Ok(object)
+}
+
+/// Removes the ring before the previous one, so at most two rings exist: the new one and the
+/// previous one, which the persister seals.
+fn create_unlink_older(prefix: &str, previous: u64) {
+    if previous < 2 {
+        return;
+    }
+
+    let name = match ring_name(prefix, previous - 1).map(CString::new) {
+        Ok(Ok(name)) => name,
+        Ok(Err(error)) => unreachable!("{error}"),
+        Err(error) => unreachable!("the longer name {previous} took was short enough: {error}"),
+    };
+    if unsafe { shm_unlink(name.as_ptr()) } != 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(ENOENT) {
+            eprintln!("ring: unlink {name:?} failed: {error}");
+        }
+    }
+}
+
+/// Maps the header and then the whole of the ring `name`, after checking that this user owns
+/// it and nobody may write it.
+fn open_ring(name: &str) -> io::Result<(Mapping, Layout)> {
+    let name = CString::new(name).map_err(io::Error::other)?;
+    let object = unsafe { shm_open(name.as_ptr(), O_RDONLY) };
+    if object < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let object = unsafe { OwnedFd::from_raw_fd(object) };
+
+    let size_bytes = open_check(&File::from(object.try_clone()?))?;
+    let header = Mapping::new(&object, HEADER_WORDS, PROT_READ)?;
+    let layout = open_layout(header.words(), size_bytes)?;
+    let mapping = Mapping::new(&object, layout.word_count(), PROT_READ)?;
+    Ok((mapping, layout))
 }
 
 /// The size of the object `object`, or an error where this user does not own it or anyone
