@@ -33,6 +33,10 @@ const LAST_GONE: u32 = 2;
 const NOTICED_ON_EXIT: u32 = 0;
 const NOTICED_ALREADY_EXITED: u32 = 1;
 
+/// Whether a start's record names the coalition the process started in, in its detail word.
+const COALITION_NONE: u64 = 0;
+const COALITION_NAMED: u64 = 1;
+
 /// Stores `event` of `tick` in `record`, a record of the log whose sequence word the caller
 /// keeps. Every word is stored, so no word of an event the record held before stays.
 pub(super) fn store_event(record: &[AtomicU64], tick: u64, event: &Event) {
@@ -68,7 +72,7 @@ fn event_words(tick: u64, event: &Event) -> [u64; STORED_WORDS] {
             }
             .word();
             if let Some(coalition) = coalition {
-                words[stored(EVENT_DETAIL)] = 1;
+                words[stored(EVENT_DETAIL)] = COALITION_NAMED;
                 words[stored(EVENT_COALITION)] = *coalition;
             }
         }
@@ -115,8 +119,8 @@ fn event_from(words: &[u64; STORED_WORDS]) -> Option<(u64, Event)> {
         KIND_START => Event::Start {
             pid,
             coalition: match detail {
-                0 => None,
-                1 => Some(words[stored(EVENT_COALITION)]),
+                COALITION_NONE => None,
+                COALITION_NAMED => Some(words[stored(EVENT_COALITION)]),
                 _ => return None,
             },
         },

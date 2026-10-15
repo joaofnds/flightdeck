@@ -502,11 +502,18 @@ fn cpu_from(words: &[u64; CPU_WORDS]) -> CPUTicks {
     }
 }
 
+/// The word of a memory record that holds the pressure, its last.
+const MEMORY_PRESSURE: usize = MEMORY_WORDS - 1;
+/// The memory pressure, as the pressure word holds it.
+const PRESSURE_NORMAL: u64 = 0;
+const PRESSURE_WARNING: u64 = 1;
+const PRESSURE_CRITICAL: u64 = 2;
+
 fn memory_words(memory: &Memory) -> [u64; MEMORY_WORDS] {
     let pressure = match memory.pressure {
-        Pressure::Normal => 0,
-        Pressure::Warning => 1,
-        Pressure::Critical => 2,
+        Pressure::Normal => PRESSURE_NORMAL,
+        Pressure::Warning => PRESSURE_WARNING,
+        Pressure::Critical => PRESSURE_CRITICAL,
     };
     [
         memory.total_bytes,
@@ -532,10 +539,10 @@ fn memory_words(memory: &Memory) -> [u64; MEMORY_WORDS] {
 }
 
 fn memory_from(words: &[u64; MEMORY_WORDS]) -> Option<Memory> {
-    let pressure = match words[18] {
-        0 => Pressure::Normal,
-        1 => Pressure::Warning,
-        2 => Pressure::Critical,
+    let pressure = match words[MEMORY_PRESSURE] {
+        PRESSURE_NORMAL => Pressure::Normal,
+        PRESSURE_WARNING => Pressure::Warning,
+        PRESSURE_CRITICAL => Pressure::Critical,
         _ => return None,
     };
     Some(Memory {
@@ -561,6 +568,9 @@ fn memory_from(words: &[u64; MEMORY_WORDS]) -> Option<Memory> {
     })
 }
 
+/// Where an interface's first word holds the length of its name, above its 16-bit index.
+const INTERFACE_NAME_LENGTH_SHIFT: u32 = 16;
+
 fn interface_words(interface: &Interface) -> [u64; INTERFACE_WORDS] {
     const { assert!(IFNAMSIZ == 2 * size_of::<u64>()) };
     let name = interface.name.bytes();
@@ -570,7 +580,7 @@ fn interface_words(interface: &Interface) -> [u64; INTERFACE_WORDS] {
     high.copy_from_slice(&name[8..]);
     let length = u64_from_usize(interface.name.as_str().len());
     [
-        u64::from(interface.index) | (length << 16),
+        u64::from(interface.index) | (length << INTERFACE_NAME_LENGTH_SHIFT),
         u64::from_le_bytes(low),
         u64::from_le_bytes(high),
         interface.received_bytes,
@@ -587,7 +597,7 @@ fn interface_from(words: &[u64; INTERFACE_WORDS]) -> Option<Interface> {
     let mut name = [0; IFNAMSIZ];
     name[..8].copy_from_slice(&words[1].to_le_bytes());
     name[8..].copy_from_slice(&words[2].to_le_bytes());
-    let length = usize::try_from(words[0] >> 16).ok()?;
+    let length = usize::try_from(words[0] >> INTERFACE_NAME_LENGTH_SHIFT).ok()?;
     let index = u16::try_from(words[0] & u64::from(u16::MAX)).ok()?;
     Some(Interface {
         index,
@@ -1013,8 +1023,8 @@ mod tests {
         let name_word = layout.interfaces.record(0).start;
         let breaks = [
             (SLOT_PROCESS_COUNT, 2),
-            (SLOT_MEMORY + MEMORY_WORDS - 1, 3),
-            (name_word, 1 | (17 << 16)),
+            (SLOT_MEMORY + MEMORY_PRESSURE, 3),
+            (name_word, 1 | (17 << INTERFACE_NAME_LENGTH_SHIFT)),
         ];
 
         for (index, word) in breaks {
