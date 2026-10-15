@@ -748,7 +748,7 @@ mod tests {
         fn shm_unlink(name: *const std::ffi::c_char) -> c_int;
     }
 
-    /// A ring only one test uses, whose lock file and first ring are removed when the test
+    /// A ring only one test uses, whose lock file and ring are removed when the test
     /// ends, since a shared-memory object outlives the process that made it.
     struct TestRing {
         place: Place,
@@ -765,13 +765,20 @@ mod tests {
 
     impl Drop for TestRing {
         fn drop(&mut self) {
-            let ring = std::ffi::CString::new(format!("{}1", self.place.name_prefix)).unwrap();
-            if unsafe { shm_unlink(ring.as_ptr()) } != 0 {
-                assert_eq!(Some(2), io::Error::last_os_error().raw_os_error(), "ENOENT");
+            // The lock file names the ring, as the writer recorded it, so a change to how rings
+            // are named cannot leave one behind unseen.
+            let name = match std::fs::read(&self.place.lock_path) {
+                Ok(name) => name,
+                Err(error) => {
+                    assert_eq!(io::ErrorKind::NotFound, error.kind());
+                    return;
+                }
+            };
+            if !name.is_empty() {
+                let ring = std::ffi::CString::new(name).unwrap();
+                assert_eq!(0, unsafe { shm_unlink(ring.as_ptr()) }, "unlink {ring:?}");
             }
-            if let Err(error) = std::fs::remove_file(&self.place.lock_path) {
-                assert_eq!(io::ErrorKind::NotFound, error.kind());
-            }
+            std::fs::remove_file(&self.place.lock_path).unwrap();
         }
     }
 
