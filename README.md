@@ -23,11 +23,13 @@ list after every wake that carries a fork. `--rescan-ms N` rescans at most once 
 instead, which costs less in bursts of forks and misses more of the processes that start
 and exit between two rescans.
 
-It hands each tick to a shared-memory ring that only its user can read, named with
-`--ring NAME` (default `flightdeck`), and it exits with an error while another collector
-holds that ring. The ring stays after the collector exits, about 800 MB of address space,
+It hands each tick to a shared-memory ring that only its user can read. `--ring NAME`
+(default `flightdeck`) names the lock file that holds the ring's name,
+`~/Library/Application Support/Flightdeck/NAME.lock`, and the collector exits with an error
+while another collector holds that lock. The ring stays after the collector exits, about 800 MB of address space,
 and after a restart the previous ring stays beside it. `ring_reader` prints each tick it
-reads, the events, and what it missed, until it has read the publications asked for:
+reads, the events, and what it missed, until it has read the publications asked for. It
+finds the ring through `--ring NAME`, or through `--lock PATH` for a lock file elsewhere:
 
 ```sh
 cargo build --release -p collector

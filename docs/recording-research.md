@@ -649,12 +649,20 @@ and a reader learns what it missed from the gap. The writer holds a lock file, a
 process of the same user that takes that lock keeps a new collector from starting.
 
 Every user shares the names of shared-memory objects, so each ring's name carries 60
-random bits that only its lock file holds, and the lock files sit in a directory of the
-user's Application Support that only the user may enter. Another user therefore cannot
-know the names a writer will make, and cannot take them first to keep the collector from
-starting. That directory is outside what macOS cleans, since dirhelper removes files
-older than three days from `/var/folders` and `/tmp`, where a collector running longer
-would lose the lock file its single writer and its readers rely on.
+random bits that only its lock file holds, and the lock file sits at
+`~/Library/Application Support/Flightdeck/NAME.lock`, in a directory only the user may
+enter. Another user therefore cannot know the names a writer will make, and cannot take
+them first to keep the collector from starting. The writer draws the bits once and keeps
+them for as long as the lock file names a ring, so the collector prints no ring name to its
+log, and a process that once read the lock file knows the names of every later ring. A
+lock file lost or rewritten by another program makes the next writer draw new bits, and
+the rings named under the old ones stay until the Mac restarts, since nothing knows their
+names any more. The directory is outside what dirhelper cleans. Its launch daemon runs it
+daily at 03:35 with `CLEAN_FILES_OLDER_THAN_DAYS` set to 3, as
+`/System/Library/LaunchDaemons/com.apple.bsd.dirhelper.plist` shows, and we infer from
+Apple's description of dirhelper, not from a run we watched, that it cleans the user's
+temporary directory under `/var/folders`, where a collector running longer than three
+days would lose the lock file its single writer and its readers rely on.
 
 ## Recommended pipeline
 
