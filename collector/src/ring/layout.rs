@@ -24,6 +24,10 @@ pub(super) const HEADER_NEWEST_PUBLICATION: usize = 4;
 /// When the writer's run started, in nanoseconds since 1970 by the wall clock, which tells
 /// runs apart where a restart of the Mac numbers publications from 1 again.
 pub(super) const HEADER_RUN_START_NS: usize = 5;
+/// The ring's first event, one past the newest of the ring before it.
+pub(super) const HEADER_FIRST_EVENT: usize = 6;
+/// The newest event the writer finished, which before its first is the previous ring's.
+pub(super) const HEADER_NEWEST_EVENT: usize = 7;
 /// The shape, a word for each of its fields.
 pub(super) const HEADER_SLOT_COUNT: usize = 8;
 pub(super) const HEADER_CPU_CAPACITY: usize = 9;
@@ -33,6 +37,7 @@ pub(super) const HEADER_STATE_CAPACITY: usize = 12;
 pub(super) const HEADER_FAN_CAPACITY: usize = 13;
 pub(super) const HEADER_PROCESS_CAPACITY: usize = 14;
 pub(super) const HEADER_COALITION_CAPACITY: usize = 15;
+pub(super) const HEADER_EVENT_CAPACITY: usize = 16;
 pub(super) const HEADER_WORDS: usize = 32;
 
 /// The words that start each slot. The sequence word holds twice the publication the slot
@@ -54,7 +59,14 @@ pub(super) const SLOT_SOURCES: usize = 11;
 pub(super) const SLOT_GPU_ENERGY_NJ: usize = 12;
 pub(super) const SLOT_POWER_WATTS: usize = 13;
 pub(super) const SLOT_SOC_CELSIUS: usize = 14;
-pub(super) const SLOT_MEMORY: usize = 15;
+/// The tick's events, from the first up to the end, which the event log holds.
+pub(super) const SLOT_EVENTS_FIRST: usize = 15;
+pub(super) const SLOT_EVENTS_END: usize = 16;
+/// The events of each kind the tracker dropped in the tick, which never reach the log.
+pub(super) const SLOT_DROPPED_STARTS: usize = 17;
+pub(super) const SLOT_DROPPED_EXECS: usize = 18;
+pub(super) const SLOT_DROPPED_EXITS: usize = 19;
+pub(super) const SLOT_MEMORY: usize = 20;
 pub(super) const MEMORY_WORDS: usize = 19;
 pub(super) const SLOT_FIXED_WORDS: usize = SLOT_MEMORY + MEMORY_WORDS;
 
@@ -67,6 +79,11 @@ pub(super) const CPU_WORDS: usize = 2;
 pub(super) const INTERFACE_WORDS: usize = 10;
 pub(super) const PROCESS_WORDS: usize = 18;
 pub(super) const COALITION_WORDS: usize = 10;
+
+/// The words of an event's record in the log. The sequence word holds twice the event's
+/// number once the writer finished it, and one less while the writer writes it.
+pub(super) const EVENT_SEQUENCE: usize = 0;
+pub(super) const EVENT_WORDS: usize = 19;
 
 /// The most a shape's slot count and each capacity may be, which keeps a reader's sums of
 /// them far from overflow whatever another program wrote in the header.
@@ -84,6 +101,8 @@ pub(super) struct Layout {
     pub(super) fans: Section,
     pub(super) processes: Section,
     pub(super) coalitions: Section,
+    /// The event log's first word, from the ring's start.
+    pub(super) events_start: usize,
 }
 
 /// A run of records of one size within a slot.
@@ -121,6 +140,7 @@ impl Layout {
             shape.fan_capacity,
             shape.process_capacity,
             shape.coalition_capacity,
+            shape.event_capacity,
         ];
         for field in fields {
             if field == 0 || field > SHAPE_FIELD_MAX {
@@ -140,6 +160,7 @@ impl Layout {
         let size_bytes = u64_from_usize(coalitions.end())
             .checked_mul(shape.slot_count)?
             .checked_add(u64_from_usize(HEADER_WORDS))?
+            .checked_add(u64_from_usize(EVENT_WORDS).checked_mul(shape.event_capacity)?)?
             .checked_mul(u64_from_usize(size_of::<u64>()))?;
         if i64::try_from(size_bytes).is_err() {
             return None;
@@ -155,11 +176,12 @@ impl Layout {
             fans,
             processes,
             coalitions,
+            events_start: HEADER_WORDS + usize_from(shape.slot_count) * coalitions.end(),
         })
     }
 
     pub(super) fn word_count(self) -> usize {
-        HEADER_WORDS + usize_from(self.shape.slot_count) * self.slot_words
+        self.events_start + usize_from(self.shape.event_capacity) * EVENT_WORDS
     }
 
     pub(super) fn size_bytes(self) -> usize {
@@ -170,6 +192,21 @@ impl Layout {
     /// publication numbered from 1 went into them.
     pub(super) fn oldest_held(self, newest: u64) -> u64 {
         newest.saturating_sub(self.shape.slot_count) + 1
+    }
+
+    /// The oldest event the log holds once `newest` is written, where every event numbered
+    /// from 1 went into it.
+    pub(super) fn oldest_event_held(self, newest: u64) -> u64 {
+        newest.saturating_sub(self.shape.event_capacity) + 1
+    }
+
+    /// The words of the record that holds the event numbered `number`, from the ring's start.
+    pub(super) fn event(self, number: u64) -> Range<usize> {
+        assert!(number > 0);
+
+        let index = usize_from((number - 1) % self.shape.event_capacity);
+        let start = self.events_start + index * EVENT_WORDS;
+        start..start + EVENT_WORDS
     }
 
     /// The words of the slot that holds `publication`, from the ring's start.
@@ -213,6 +250,8 @@ pub(super) fn store_header(words: &[AtomicU64], layout: Layout, header: Header) 
         (HEADER_FIRST_PUBLICATION, header.first_publication),
         (HEADER_NEWEST_PUBLICATION, header.first_publication - 1),
         (HEADER_RUN_START_NS, header.run_start_ns),
+        (HEADER_FIRST_EVENT, header.first_event),
+        (HEADER_NEWEST_EVENT, header.first_event - 1),
         (HEADER_SLOT_COUNT, shape.slot_count),
         (HEADER_CPU_CAPACITY, shape.cpu_capacity),
         (HEADER_INTERFACE_CAPACITY, shape.interface_capacity),
@@ -221,6 +260,7 @@ pub(super) fn store_header(words: &[AtomicU64], layout: Layout, header: Header) 
         (HEADER_FAN_CAPACITY, shape.fan_capacity),
         (HEADER_PROCESS_CAPACITY, shape.process_capacity),
         (HEADER_COALITION_CAPACITY, shape.coalition_capacity),
+        (HEADER_EVENT_CAPACITY, shape.event_capacity),
     ];
     for (index, value) in fields {
         words[index].store(value, Ordering::Relaxed);
@@ -233,6 +273,7 @@ pub(super) struct Header {
     pub(super) generation: u64,
     pub(super) first_publication: u64,
     pub(super) run_start_ns: u64,
+    pub(super) first_event: u64,
 }
 
 /// The layout the header `header` describes, or an error where it is no ring of this layout
@@ -258,6 +299,7 @@ pub(super) fn open_layout(header: &[AtomicU64], size_bytes: usize) -> io::Result
         fan_capacity: load(HEADER_FAN_CAPACITY),
         process_capacity: load(HEADER_PROCESS_CAPACITY),
         coalition_capacity: load(HEADER_COALITION_CAPACITY),
+        event_capacity: load(HEADER_EVENT_CAPACITY),
     };
     let Some(layout) = Layout::new(shape) else {
         return Err(io::Error::new(

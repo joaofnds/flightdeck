@@ -8,7 +8,9 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::layout::{HEADER_NEWEST_PUBLICATION, HEADER_WORDS, Layout, open_layout};
+use super::layout::{
+    HEADER_NEWEST_EVENT, HEADER_NEWEST_PUBLICATION, HEADER_WORDS, Layout, open_layout,
+};
 
 /// The longest name macOS gives a shared-memory object, `PSHMNAMLEN` in `sys/posix_shm.h`.
 const PSHMNAMLEN: usize = 31;
@@ -119,6 +121,8 @@ pub(super) struct Previous {
     pub(super) generation: u64,
     /// The previous ring's newest publication, or 0 where it is gone.
     pub(super) newest_publication: u64,
+    /// The previous ring's newest event, or 0 where it is gone.
+    pub(super) newest_event: u64,
 }
 
 /// The ring the lock file `lock` names, of a name that starts with `prefix`.
@@ -139,21 +143,29 @@ pub(super) fn create_previous(prefix: &str, lock: &mut File) -> io::Result<Previ
         return Ok(Previous {
             generation,
             newest_publication: 0,
+            newest_event: 0,
         });
     }
 
     // A restart after the Mac restarted finds no ring, which is no fault.
-    let newest_publication = match open_ring(&name) {
-        Ok((mapping, _)) => mapping.words()[HEADER_NEWEST_PUBLICATION].load(Ordering::Relaxed),
-        Err(error) if error.raw_os_error() == Some(ENOENT) => 0,
+    let (newest_publication, newest_event) = match open_ring(&name) {
+        Ok((mapping, _)) => {
+            let words = mapping.words();
+            (
+                words[HEADER_NEWEST_PUBLICATION].load(Ordering::Relaxed),
+                words[HEADER_NEWEST_EVENT].load(Ordering::Relaxed),
+            )
+        }
+        Err(error) if error.raw_os_error() == Some(ENOENT) => (0, 0),
         Err(error) => {
             eprintln!("ring: numbering from 1, since the ring {name} is unreadable: {error}");
-            0
+            (0, 0)
         }
     };
     Ok(Previous {
         generation,
         newest_publication,
+        newest_event,
     })
 }
 

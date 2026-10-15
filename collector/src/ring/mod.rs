@@ -3,7 +3,12 @@
 //! next slot and never waits for a reader. A reader copies a slot and checks its sequence word
 //! again, as a single-writer seqlock does, so it drops a slot overwritten during the copy
 //! instead of reading it torn, and learns from the publication numbers which it missed.
+//!
+//! Process events go to a log of their own beside the slots, so a tick with many events
+//! overwrites no other tick's. Each record of the log is a seqlock of its own, numbered by
+//! event, and each slot names the events of its tick.
 
+mod event;
 mod layout;
 mod object;
 mod tick;
@@ -15,15 +20,19 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering, fence};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use event::{load_event, store_event};
 use layout::{
-    HEADER_FIRST_PUBLICATION, HEADER_NEWEST_PUBLICATION, HEADER_RUN_START_NS, Header, Layout,
-    SLOT_SEQUENCE, store_header,
+    EVENT_SEQUENCE, HEADER_FIRST_EVENT, HEADER_FIRST_PUBLICATION, HEADER_NEWEST_EVENT,
+    HEADER_NEWEST_PUBLICATION, HEADER_RUN_START_NS, Header, Layout, SLOT_SEQUENCE, store_header,
 };
 use object::{
     Mapping, PROT_READ, PROT_WRITE, create_lock, create_object, create_previous,
     create_unlink_older, open_ring,
 };
-pub use tick::{IOReportReadings, Readings, SmcReadings, Tick, shape_for};
+pub use tick::{Dropped, IOReportReadings, Readings, SmcReadings, Tick, shape_for};
+
+use crate::tracker::Event;
+use crate::u64_from_usize;
 use tick::{load_tick, store_tick};
 
 /// Where a ring lives: the lock file its writer holds, which names the ring, and the start of
@@ -46,6 +55,8 @@ pub struct Shape {
     pub fan_capacity: u64,
     pub process_capacity: u64,
     pub coalition_capacity: u64,
+    /// The events the log holds before it overwrites the oldest.
+    pub event_capacity: u64,
 }
 
 /// What a reader found at its next publication.
@@ -61,6 +72,22 @@ pub enum Found {
     Nothing,
 }
 
+/// What a reader found at its next event.
+#[derive(Debug, PartialEq)]
+pub enum FoundEvent {
+    /// The event numbered `number`, which the tick of the collector's run `tick` drained.
+    Event {
+        number: u64,
+        tick: u64,
+        event: Event,
+    },
+    /// The events from `first` up to `end` that the writer overwrote before the reader read
+    /// them, which it reads past.
+    Missed { first: u64, end: u64 },
+    /// No event past those it has read yet.
+    Nothing,
+}
+
 /// The writer of a ring, which holds the lock file for as long as it lives.
 pub struct Writer {
     _lock: File,
@@ -68,6 +95,8 @@ pub struct Writer {
     layout: Layout,
     /// The newest publication written, or the previous ring's newest before the first.
     publication: u64,
+    /// The newest event written, or the previous ring's newest before the first.
+    event: u64,
 }
 
 impl Writer {
@@ -94,6 +123,7 @@ impl Writer {
             generation: created.generation,
             first_publication: previous.newest_publication + 1,
             run_start_ns: u64::try_from(run_start_ns).map_err(io::Error::other)?,
+            first_event: previous.newest_event + 1,
         };
         store_header(mapping.words(), layout, header);
 
@@ -105,19 +135,35 @@ impl Writer {
             mapping,
             layout,
             publication: previous.newest_publication,
+            event: previous.newest_event,
         })
     }
 
     /// Publishes `readings` in the next slot, overwriting the oldest publication once every
-    /// slot holds one.
+    /// slot holds one, and its events in the log, overwriting the oldest events once every
+    /// record holds one.
     pub fn publish(&mut self, readings: &Readings) {
-        let publication = self.publication + 1;
-        let words = self.mapping.words();
-        let slot = &words[self.layout.slot(publication)];
+        // A tick's events fit in the log, so a reader can read every one of them.
+        assert!(u64_from_usize(readings.events.len()) <= self.layout.shape.event_capacity);
 
+        let words = self.mapping.words();
+        let events_first = self.event + 1;
+        for event in readings.events {
+            let number = self.event + 1;
+            let record = &words[self.layout.event(number)];
+            record[EVENT_SEQUENCE].store(2 * number - 1, Ordering::Relaxed);
+            fence(Ordering::Release);
+            store_event(record, readings.run_tick, event);
+            record[EVENT_SEQUENCE].store(2 * number, Ordering::Release);
+            self.event = number;
+        }
+        words[HEADER_NEWEST_EVENT].store(self.event, Ordering::Release);
+
+        let publication = self.publication + 1;
+        let slot = &words[self.layout.slot(publication)];
         slot[SLOT_SEQUENCE].store(2 * publication - 1, Ordering::Relaxed);
         fence(Ordering::Release);
-        store_tick(slot, self.layout, readings);
+        store_tick(slot, self.layout, readings, events_first..self.event + 1);
         slot[SLOT_SEQUENCE].store(2 * publication, Ordering::Release);
 
         words[HEADER_NEWEST_PUBLICATION].store(publication, Ordering::Release);
@@ -136,6 +182,10 @@ pub struct Reader {
     /// When the writer's run started, in nanoseconds since 1970 by the wall clock.
     run_start_ns: u64,
     tick: Tick,
+    /// The first event of the ring, past the previous ring's.
+    first_event: u64,
+    /// The event the reader reads next.
+    next_event: u64,
 }
 
 impl Reader {
@@ -150,6 +200,8 @@ impl Reader {
         let first = words[HEADER_FIRST_PUBLICATION].load(Ordering::Relaxed);
         let newest = words[HEADER_NEWEST_PUBLICATION].load(Ordering::Relaxed);
         let run_start_ns = words[HEADER_RUN_START_NS].load(Ordering::Relaxed);
+        let first_event = words[HEADER_FIRST_EVENT].load(Ordering::Relaxed);
+        let newest_event = words[HEADER_NEWEST_EVENT].load(Ordering::Relaxed);
         Ok(Self {
             mapping,
             layout,
@@ -157,6 +209,8 @@ impl Reader {
             next: first.max(layout.oldest_held(newest)),
             run_start_ns,
             tick: Tick::new(layout),
+            first_event,
+            next_event: first_event.max(layout.oldest_event_held(newest_event)),
         })
     }
 
@@ -203,6 +257,38 @@ impl Reader {
             })
         }
     }
+
+    /// Reads the next event, or the range of those the writer overwrote first.
+    pub fn read_event(&mut self) -> io::Result<FoundEvent> {
+        let words = self.mapping.words();
+        let newest = words[HEADER_NEWEST_EVENT].load(Ordering::Relaxed);
+        fence(Ordering::Acquire);
+        if self.next_event > newest {
+            return Ok(FoundEvent::Nothing);
+        }
+
+        let oldest = self.first_event.max(self.layout.oldest_event_held(newest));
+        if self.next_event < oldest {
+            let first = self.next_event;
+            self.next_event = oldest;
+            return Ok(FoundEvent::Missed { first, end: oldest });
+        }
+
+        let number = self.next_event;
+        self.next_event += 1;
+        let record = &words[self.layout.event(number)];
+        match read_finished(record, EVENT_SEQUENCE, number, || load_event(record))? {
+            Some((tick, event)) => Ok(FoundEvent::Event {
+                number,
+                tick,
+                event,
+            }),
+            None => Ok(FoundEvent::Missed {
+                first: number,
+                end: number + 1,
+            }),
+        }
+    }
 }
 
 /// Loads the tick the slot `slot` holds for `publication` into `tick`, and returns whether it
@@ -214,33 +300,49 @@ fn read_slot(
     publication: u64,
     tick: &mut Tick,
 ) -> io::Result<bool> {
-    assert!(publication > 0);
+    let loaded = read_finished(slot, SLOT_SEQUENCE, publication, || {
+        load_tick(slot, layout, tick).then_some(())
+    })?;
+    Ok(loaded.is_some())
+}
 
-    let sequence = slot[SLOT_SEQUENCE].load(Ordering::Relaxed);
-    fence(Ordering::Acquire);
-    let loaded = load_tick(slot, layout, tick);
-    fence(Ordering::Acquire);
-    let sequence_after = slot[SLOT_SEQUENCE].load(Ordering::Relaxed);
+/// What `load` makes of the words `record` holds for the number `number`, under the sequence
+/// word at `sequence_index`, or `None` where the writer overwrote the record with a later
+/// number before or during the load. The header said the writer finished `number`, so a
+/// record behind it, or one that holds it and makes nothing, is a broken ring.
+fn read_finished<T>(
+    record: &[AtomicU64],
+    sequence_index: usize,
+    number: u64,
+    load: impl FnOnce() -> Option<T>,
+) -> io::Result<Option<T>> {
+    assert!(number > 0);
 
-    if sequence < 2 * publication {
-        // The header said the writer finished this publication, and a slot only moves on.
+    let sequence = record[sequence_index].load(Ordering::Relaxed);
+    fence(Ordering::Acquire);
+    let loaded = load();
+    fence(Ordering::Acquire);
+    let sequence_after = record[sequence_index].load(Ordering::Relaxed);
+
+    if sequence < 2 * number {
+        // A record only moves on to later numbers.
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("the slot of publication {publication} holds sequence {sequence}"),
+            format!("the record of {number} holds sequence {sequence}"),
         ));
     }
-    if sequence == 2 * publication {
+    if sequence == 2 * number {
         if sequence_after == sequence {
-            if !loaded {
+            if loaded.is_none() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("the slot of publication {publication} holds no tick"),
+                    format!("the record of {number} holds words that make nothing"),
                 ));
             }
-            return Ok(true);
+            return Ok(loaded);
         }
     }
-    Ok(false)
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -259,6 +361,7 @@ mod tests {
             fan_capacity: 1,
             process_capacity: 1,
             coalition_capacity: 1,
+            event_capacity: 1,
         })
         .unwrap()
     }
@@ -278,8 +381,10 @@ mod tests {
             processes_refused: 0,
             processes_gone: 0,
             coalitions: &[],
+            events: &[],
+            dropped: Dropped::default(),
         };
-        store_tick(&slot, layout, &readings);
+        store_tick(&slot, layout, &readings, 1..1);
         slot[SLOT_SEQUENCE].store(sequence, Ordering::Relaxed);
         slot
     }

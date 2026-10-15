@@ -11,7 +11,7 @@ use crate::kernel::{EPERM, ESRCH, Timespec};
 use crate::processes::{self, Unreadable, Usage};
 use crate::push_without_growing;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Event {
     Start {
         pid: i32,

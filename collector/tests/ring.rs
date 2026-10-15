@@ -14,7 +14,8 @@ mod tests {
     use collector::coalitions::Coalition;
     use collector::machine::Memory;
     use collector::processes::{Process, Task, Usage};
-    use collector::ring::{Found, Place, Reader, Readings, Shape, Writer};
+    use collector::ring::{Dropped, Found, FoundEvent, Place, Reader, Readings, Shape, Writer};
+    use collector::tracker::{Event, Noticed};
 
     unsafe extern "C" {
         fn shm_open(name: *const c_char, oflag: c_int, ...) -> c_int;
@@ -71,6 +72,7 @@ mod tests {
         fan_capacity: 1,
         process_capacity: 1,
         coalition_capacity: 1,
+        event_capacity: 4,
     };
 
     /// The readings of a tick of `run_tick` that read nothing else.
@@ -86,6 +88,8 @@ mod tests {
             processes_refused: 0,
             processes_gone: 0,
             coalitions: &[],
+            events: &[],
+            dropped: Dropped::default(),
         }
     }
 
@@ -308,6 +312,146 @@ mod tests {
                 tick: 30
             },
             reader.read().unwrap()
+        );
+    }
+
+    /// Publishes a tick of `run_tick` that drained `events`.
+    fn publish_events(writer: &mut Writer, run_tick: u64, events: &[Event]) {
+        writer.publish(&Readings {
+            events,
+            ..readings(run_tick, &Memory::default())
+        });
+    }
+
+    fn exit(pid: i32) -> Event {
+        Event::Exit {
+            pid,
+            last: Ok(process(pid).usage),
+            noticed: Noticed::OnExit,
+        }
+    }
+
+    fn found(number: u64, tick: u64, event: Event) -> FoundEvent {
+        FoundEvent::Event {
+            number,
+            tick,
+            event,
+        }
+    }
+
+    #[test]
+    fn events_reach_a_reader_in_order_under_their_ticks() {
+        // Goal: process starts, execs and exits reach a reader in the order the tracker drained
+        // them, each under its tick, and each tick names its events.
+        // Method: publish a tick with a start and an exec and a tick with an exit, then read
+        // each event and the second tick.
+        let place = TestPlace::new("events");
+        let mut writer = Writer::create(&place.place, SHAPE).unwrap();
+        let mut reader = Reader::open(place.lock_path()).unwrap();
+        let start = Event::Start {
+            pid: 30,
+            coalition: Some(5),
+        };
+
+        publish_events(&mut writer, 1, &[start, Event::Exec { pid: 30 }]);
+        publish_events(&mut writer, 2, &[exit(30)]);
+        let events: Vec<FoundEvent> = (0..4).map(|_| reader.read_event().unwrap()).collect();
+        reader.read().unwrap();
+        reader.read().unwrap();
+
+        assert_eq!(
+            vec![
+                found(
+                    1,
+                    1,
+                    Event::Start {
+                        pid: 30,
+                        coalition: Some(5)
+                    }
+                ),
+                found(2, 1, Event::Exec { pid: 30 }),
+                found(3, 2, exit(30)),
+                FoundEvent::Nothing,
+            ],
+            events
+        );
+        assert_eq!(3..4, reader.tick().events.clone());
+    }
+
+    #[test]
+    fn a_reader_behind_the_event_log_learns_which_events_it_missed() {
+        // Goal: events the log overwrote before a reader read them are missed and counted,
+        // never read as later events, and the ticks keep every slot.
+        // Method: open a reader, then publish six events into a log of four, two a tick.
+        let place = TestPlace::new("evbehind");
+        let mut writer = Writer::create(&place.place, SHAPE).unwrap();
+        let mut reader = Reader::open(place.lock_path()).unwrap();
+
+        for tick in 1..=3 {
+            let pid = i32::try_from(tick).unwrap();
+            publish_events(&mut writer, tick, &[Event::Exec { pid }, exit(pid)]);
+        }
+        let events: Vec<FoundEvent> = (0..6).map(|_| reader.read_event().unwrap()).collect();
+
+        assert_eq!(
+            vec![
+                FoundEvent::Missed { first: 1, end: 3 },
+                found(3, 2, Event::Exec { pid: 2 }),
+                found(4, 2, exit(2)),
+                found(5, 3, Event::Exec { pid: 3 }),
+                found(6, 3, exit(3)),
+                FoundEvent::Nothing,
+            ],
+            events
+        );
+    }
+
+    #[test]
+    fn a_tick_carries_the_events_the_tracker_dropped() {
+        // Goal: a reader learns how many starts, execs and exits the tracker dropped in a tick,
+        // since those never reach the log.
+        // Method: publish a tick that dropped one start, two execs and three exits, and read it.
+        let place = TestPlace::new("dropped");
+        let mut writer = Writer::create(&place.place, SHAPE).unwrap();
+        let mut reader = Reader::open(place.lock_path()).unwrap();
+        let dropped = Dropped {
+            starts: 1,
+            execs: 2,
+            exits: 3,
+        };
+
+        writer.publish(&Readings {
+            dropped,
+            ..readings(1, &Memory::default())
+        });
+        reader.read().unwrap();
+
+        assert_eq!(dropped, reader.tick().dropped);
+    }
+
+    #[test]
+    fn a_restarted_writer_continues_the_events_of_the_previous_ring() {
+        // Goal: event numbers rise across a restart, as publication numbers do.
+        // Method: publish two events, drop the writer, make another in the same place, publish
+        // one event and read it.
+        let place = TestPlace::new("evrestart");
+        let mut first = Writer::create(&place.place, SHAPE).unwrap();
+        publish_events(
+            &mut first,
+            1,
+            &[Event::Exec { pid: 1 }, Event::Exec { pid: 2 }],
+        );
+        let spawns = spawns();
+        drop(first);
+        let mut second = Writer::create(&place.place, SHAPE).unwrap();
+        drop(spawns);
+        let mut reader = Reader::open(place.lock_path()).unwrap();
+
+        publish_events(&mut second, 0, &[Event::Exec { pid: 3 }]);
+
+        assert_eq!(
+            found(3, 0, Event::Exec { pid: 3 }),
+            reader.read_event().unwrap()
         );
     }
 

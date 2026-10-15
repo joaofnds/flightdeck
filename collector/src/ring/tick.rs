@@ -2,12 +2,14 @@
 //! reading becomes whole 64-bit words, two 32-bit values sharing a word where a reading holds
 //! them, so the writer stores and a reader loads every word as an atomic.
 
+use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::Shape;
 use super::layout::{
     COALITION_WORDS, CPU_WORDS, INTERFACE_WORDS, Layout, MEMORY_WORDS, PROCESS_WORDS,
-    SLOT_COALITION_COUNT, SLOT_CORE_COUNT, SLOT_CPU_COUNT, SLOT_FAN_COUNT, SLOT_GPU_ENERGY_NJ,
+    SLOT_COALITION_COUNT, SLOT_CORE_COUNT, SLOT_CPU_COUNT, SLOT_DROPPED_EXECS, SLOT_DROPPED_EXITS,
+    SLOT_DROPPED_STARTS, SLOT_EVENTS_END, SLOT_EVENTS_FIRST, SLOT_FAN_COUNT, SLOT_GPU_ENERGY_NJ,
     SLOT_GPU_STATE_COUNT, SLOT_INTERFACE_COUNT, SLOT_MEMORY, SLOT_POWER_WATTS, SLOT_PROCESS_COUNT,
     SLOT_PROCESSES_GONE, SLOT_PROCESSES_REFUSED, SLOT_RUN_TICK, SLOT_SOC_CELSIUS, SLOT_SOURCES,
     SOURCE_IOREPORT, SOURCE_SMC,
@@ -17,6 +19,7 @@ use crate::interfaces::{IFNAMSIZ, Interface, Name};
 use crate::ioreport::States;
 use crate::machine::{CPUTicks, Memory, Pressure};
 use crate::processes::{Process, Task, Usage};
+use crate::tracker::Event;
 use crate::{push_without_growing, u64_from_usize};
 
 /// What the collector read in one tick, as the writer publishes it.
@@ -33,6 +36,17 @@ pub struct Readings<'a> {
     pub processes_refused: u32,
     pub processes_gone: u32,
     pub coalitions: &'a [Coalition],
+    /// The process events the tracker drained in the tick, which go to the event log.
+    pub events: &'a [Event],
+    pub dropped: Dropped,
+}
+
+/// The process events of each kind the tracker dropped in a tick.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Dropped {
+    pub starts: u64,
+    pub execs: u64,
+    pub exits: u64,
 }
 
 pub struct IOReportReadings<'a> {
@@ -71,6 +85,9 @@ pub struct Tick {
     pub processes_refused: u32,
     pub processes_gone: u32,
     pub coalitions: Vec<Coalition>,
+    /// The numbers of the tick's events in the event log, from the first up to the end.
+    pub events: Range<u64>,
+    pub dropped: Dropped,
 }
 
 impl Tick {
@@ -95,6 +112,8 @@ impl Tick {
             processes_refused: 0,
             processes_gone: 0,
             coalitions: Vec::with_capacity(layout.coalitions.capacity),
+            events: 0..0,
+            dropped: Dropped::default(),
         }
     }
 
@@ -138,14 +157,37 @@ pub fn shape_for(readings: &Readings, slot_count: u64) -> Shape {
         fan_capacity: at_least_one(readings.smc.as_ref().map_or(0, |smc| smc.fan_rpm.len())),
         process_capacity: at_least_one(readings.processes.len()),
         coalition_capacity: at_least_one(readings.coalitions.len()),
+        event_capacity: at_least_one(readings.events.len()),
     }
 }
 
-/// Stores `readings` in `slot`, a slot of `layout` whose sequence word the caller keeps.
-pub(super) fn store_tick(slot: &[AtomicU64], layout: Layout, readings: &Readings) {
+/// Stores `readings` in `slot`, a slot of `layout` whose sequence word the caller keeps, with
+/// the numbers `events` the log gave the tick's events.
+pub(super) fn store_tick(
+    slot: &[AtomicU64],
+    layout: Layout,
+    readings: &Readings,
+    events: Range<u64>,
+) {
     assert_eq!(layout.slot_words, slot.len());
+    assert!(events.start <= events.end);
+    assert_eq!(
+        u64_from_usize(readings.events.len()),
+        events.end - events.start
+    );
 
     store_tick_counts(slot, readings);
+    let dropped = readings.dropped;
+    let words = [
+        (SLOT_EVENTS_FIRST, events.start),
+        (SLOT_EVENTS_END, events.end),
+        (SLOT_DROPPED_STARTS, dropped.starts),
+        (SLOT_DROPPED_EXECS, dropped.execs),
+        (SLOT_DROPPED_EXITS, dropped.exits),
+    ];
+    for (index, value) in words {
+        store(slot, index, value);
+    }
     store_words(
         &slot[SLOT_MEMORY..SLOT_MEMORY + MEMORY_WORDS],
         &memory_words(readings.memory),
@@ -270,6 +312,17 @@ pub(super) fn load_tick(slot: &[AtomicU64], layout: Layout, tick: &mut Tick) -> 
     tick.run_tick = slot[SLOT_RUN_TICK].load(Ordering::Relaxed);
     tick.processes_refused = load_half(slot, SLOT_PROCESSES_REFUSED);
     tick.processes_gone = load_half(slot, SLOT_PROCESSES_GONE);
+    let events_first = slot[SLOT_EVENTS_FIRST].load(Ordering::Relaxed);
+    let events_end = slot[SLOT_EVENTS_END].load(Ordering::Relaxed);
+    if events_first > events_end {
+        return false;
+    }
+    tick.events = events_first..events_end;
+    tick.dropped = Dropped {
+        starts: slot[SLOT_DROPPED_STARTS].load(Ordering::Relaxed),
+        execs: slot[SLOT_DROPPED_EXECS].load(Ordering::Relaxed),
+        exits: slot[SLOT_DROPPED_EXITS].load(Ordering::Relaxed),
+    };
     let Some(memory) = memory_from(&load_words(&slot[SLOT_MEMORY..SLOT_MEMORY + MEMORY_WORDS]))
     else {
         return false;
@@ -401,7 +454,7 @@ fn store(slot: &[AtomicU64], index: usize, value: u64) {
 }
 
 /// Stores `words` in `target`, which is as long.
-fn store_words(target: &[AtomicU64], words: &[u64]) {
+pub(super) fn store_words(target: &[AtomicU64], words: &[u64]) {
     assert_eq!(target.len(), words.len());
 
     for (target, &word) in target.iter().zip(words) {
@@ -410,7 +463,7 @@ fn store_words(target: &[AtomicU64], words: &[u64]) {
 }
 
 /// Loads the `N` words of `source`.
-fn load_words<const N: usize>(source: &[AtomicU64]) -> [u64; N] {
+pub(super) fn load_words<const N: usize>(source: &[AtomicU64]) -> [u64; N] {
     assert_eq!(N, source.len());
 
     let mut words = [0; N];
@@ -425,21 +478,21 @@ fn load_half(slot: &[AtomicU64], index: usize) -> u32 {
     low_half(slot[index].load(Ordering::Relaxed))
 }
 
-fn low_half(word: u64) -> u32 {
+pub(super) fn low_half(word: u64) -> u32 {
     match u32::try_from(word & u64::from(u32::MAX)) {
         Ok(half) => half,
         Err(error) => unreachable!("{error}"),
     }
 }
 
-fn high_half(word: u64) -> u32 {
+pub(super) fn high_half(word: u64) -> u32 {
     match u32::try_from(word >> 32) {
         Ok(half) => half,
         Err(error) => unreachable!("{error}"),
     }
 }
 
-fn halves(low: u32, high: u32) -> u64 {
+pub(super) fn halves(low: u32, high: u32) -> u64 {
     u64::from(low) | (u64::from(high) << 32)
 }
 
@@ -768,6 +821,8 @@ mod tests {
             processes_refused: 0,
             processes_gone: 0,
             coalitions: &[],
+            events: &[],
+            dropped: Dropped::default(),
         }
     }
 
@@ -777,7 +832,7 @@ mod tests {
         let slot = slot_of(layout);
         let mut tick = Tick::new(layout);
 
-        store_tick(&slot, layout, readings);
+        store_tick(&slot, layout, readings, 1..1);
 
         assert!(load_tick(&slot, layout, &mut tick));
         tick
@@ -879,10 +934,6 @@ mod tests {
         let gpu = States::with_active_ns(&[1]);
         let cores = [States::with_active_ns(&[2])];
         let with_sources = Readings {
-            run_tick: 1,
-            cpus: &[],
-            memory: &memory,
-            interfaces: &[],
             ioreport: Some(IOReportReadings {
                 gpu_energy_nj: 5,
                 gpu: &gpu,
@@ -893,10 +944,7 @@ mod tests {
                 soc_celsius: 2.0,
                 fan_rpm: &[3.0],
             }),
-            processes: &[],
-            processes_refused: 0,
-            processes_gone: 0,
-            coalitions: &[],
+            ..empty_readings(&memory)
         };
         let without_sources = Readings {
             run_tick: 2,
@@ -907,11 +955,11 @@ mod tests {
         let layout = Layout::new(shape_for(&with_sources, 1)).unwrap();
         let mut tick = Tick::new(layout);
         let first = slot_of(layout);
-        store_tick(&first, layout, &with_sources);
+        store_tick(&first, layout, &with_sources, 1..1);
         assert!(load_tick(&first, layout, &mut tick));
         let second = slot_of(layout);
 
-        store_tick(&second, layout, &without_sources);
+        store_tick(&second, layout, &without_sources, 1..1);
         let loaded = load_tick(&second, layout, &mut tick);
 
         assert!(loaded);
@@ -944,7 +992,7 @@ mod tests {
 
         for (index, word) in breaks {
             let slot = slot_of(layout);
-            store_tick(&slot, layout, &readings);
+            store_tick(&slot, layout, &readings, 1..1);
             slot[index].store(word, Ordering::Relaxed);
 
             assert!(
