@@ -63,6 +63,7 @@ pub struct SmcReadings<'a> {
 /// A tick as a reader loads it, in lists with room taken once for all the ring's shape holds.
 #[derive(Debug, PartialEq)]
 pub struct Tick {
+    pub times: Option<super::ObservationTimes>,
     pub run_tick: u64,
     pub cpus: Vec<CPUTicks>,
     pub memory: Memory,
@@ -90,9 +91,62 @@ pub struct Tick {
 }
 
 impl Tick {
+    /// Adopts caller-allocated storage. No capacity is grown by a ring read.
+    #[must_use]
+    pub fn from_buffers(buffers: super::TickBuffers) -> Self {
+        Self {
+            times: None,
+            run_tick: 0,
+            cpus: buffers.cpus,
+            memory: Memory::default(),
+            interfaces: buffers.interfaces,
+            ioreport_read: false,
+            gpu_energy_nj: 0,
+            gpu_active_ns: buffers.gpu_active_ns,
+            core_active_ns: buffers.core_active_ns,
+            core_state_counts: buffers.core_state_counts,
+            state_capacity: buffers.state_capacity,
+            smc_read: false,
+            power_watts: 0.0,
+            soc_celsius: 0.0,
+            fan_rpm: buffers.fan_rpm,
+            processes: buffers.processes,
+            processes_refused: 0,
+            processes_gone: 0,
+            coalitions: buffers.coalitions,
+            events: 0..0,
+            dropped: Dropped::default(),
+        }
+    }
+
+    pub(super) fn fits(&self, layout: &Layout) -> bool {
+        let required = [
+            (self.cpus.capacity(), layout.cpus.capacity),
+            (self.interfaces.capacity(), layout.interfaces.capacity),
+            (self.gpu_active_ns.capacity(), layout.gpu_states.capacity),
+            (self.core_state_counts.capacity(), layout.cores.capacity),
+            (self.fan_rpm.capacity(), layout.fans.capacity),
+            (self.processes.capacity(), layout.processes.capacity),
+            (self.coalitions.capacity(), layout.coalitions.capacity),
+        ];
+        for (available, needed) in required {
+            if available < needed {
+                return false;
+            }
+        }
+        if self.state_capacity < layout.gpu_states.capacity {
+            return false;
+        }
+        let Some(needed) = layout.cores.capacity.checked_mul(self.state_capacity) else {
+            return false;
+        };
+        self.core_active_ns.len() >= needed
+    }
+
     pub(super) fn new(layout: &Layout) -> Self {
         let state_capacity = layout.gpu_states.capacity;
         Self {
+            times: None,
             run_tick: 0,
             cpus: Vec::with_capacity(layout.cpus.capacity),
             memory: Memory::default(),
@@ -149,6 +203,9 @@ pub(super) fn store_tick(
     );
 
     store_tick_counts(slot, readings);
+    slot[super::layout::SLOT_WALL_NS].store(0, Ordering::Relaxed);
+    slot[super::layout::SLOT_CONTINUOUS_NS].store(0, Ordering::Relaxed);
+    slot[super::layout::SLOT_AWAKE_NS].store(0, Ordering::Relaxed);
     let dropped = readings.dropped;
     let words = [
         (SLOT_EVENTS_FIRST, events.start),
@@ -265,6 +322,7 @@ fn store_tick_ioreport(slot: &[AtomicU64], layout: &Layout, ioreport: &IOReportR
 /// Loads the tick `slot` holds into `tick`, and returns whether every word made a reading,
 /// which a slot the writer overwrote during the load may not.
 pub(super) fn load_tick(slot: &[AtomicU64], layout: &Layout, tick: &mut Tick) -> bool {
+    tick.times = load_tick_times(slot, layout);
     assert_eq!(layout.slot_words, slot.len());
 
     let count = |index: usize, capacity: usize| {
@@ -328,6 +386,23 @@ pub(super) fn load_tick(slot: &[AtomicU64], layout: &Layout, tick: &mut Tick) ->
     load_tick_processes(slot, layout, processes, tick);
     load_tick_coalitions(slot, layout, coalitions, tick);
     true
+}
+
+fn load_tick_times(slot: &[AtomicU64], layout: &Layout) -> Option<super::ObservationTimes> {
+    if layout.version < 3 {
+        return None;
+    }
+
+    let sources = slot[SLOT_SOURCES].load(Ordering::Relaxed);
+    if sources & super::layout::SOURCE_OBSERVATION_TIMES == 0 {
+        return None;
+    }
+
+    Some(super::ObservationTimes {
+        wall_ns: slot[super::layout::SLOT_WALL_NS].load(Ordering::Relaxed),
+        continuous_ns: slot[super::layout::SLOT_CONTINUOUS_NS].load(Ordering::Relaxed),
+        awake_ns: slot[super::layout::SLOT_AWAKE_NS].load(Ordering::Relaxed),
+    })
 }
 
 /// Loads the first `cpus` CPU records of `slot` into `tick`.

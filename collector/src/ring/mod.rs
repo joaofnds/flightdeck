@@ -12,6 +12,7 @@ mod event;
 mod layout;
 mod object;
 mod tick;
+mod view;
 mod wake;
 
 use std::fs::File;
@@ -31,7 +32,29 @@ use object::{
     LockedName, Mapping, NUMBER_MAX, PROT_READ, PROT_WRITE, RingNames, create_lock, create_object,
     create_previous, create_unlink, create_unlink_older, open_ring, place_for_user, ring_name,
 };
+pub use object::{generation_name, unlink_generation};
 pub use tick::{Dropped, IOReportReadings, Readings, SmcReadings, Tick};
+pub use view::{RingReader, TickBuffers};
+
+/// An opaque identity, independent of clocks and publication numbering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Identity(pub [u64; 2]);
+
+/// The durable recording, this collector run and the boot it observed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunIdentity {
+    pub recording: Identity,
+    pub run: Identity,
+    pub boot: Identity,
+}
+
+/// Measured clocks in nanoseconds: Unix wall time, continuous time and awake time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObservationTimes {
+    pub wall_ns: u64,
+    pub continuous_ns: u64,
+    pub awake_ns: u64,
+}
 
 use crate::kernel::ENOENT;
 use crate::tracker::Event;
@@ -113,6 +136,7 @@ pub struct Writer {
     publication: u64,
     /// The newest event written, or the previous ring's newest before the first.
     event: u64,
+    name: String,
 }
 
 impl Writer {
@@ -120,6 +144,25 @@ impl Writer {
     /// the ring the lock file names, whose publication numbers it continues. Returns an error
     /// where another writer holds the lock.
     pub fn create(place: &Place, shape: Shape) -> io::Result<Self> {
+        Self::create_inner(place, shape, None)
+    }
+
+    /// Creates a run without reclaiming any older generation. The owner registers and
+    /// explicitly reclaims retained generations after accounting for their loss or seal.
+    pub fn create_recording(
+        place: &Place,
+        shape: Shape,
+        identity: &RunIdentity,
+        run_start_continuous_ns: u64,
+    ) -> io::Result<Self> {
+        Self::create_inner(place, shape, Some((identity, run_start_continuous_ns)))
+    }
+
+    fn create_inner(
+        place: &Place,
+        shape: Shape,
+        identity: Option<(&RunIdentity, u64)>,
+    ) -> io::Result<Self> {
         let Some(layout) = Layout::new(shape) else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -162,12 +205,18 @@ impl Writer {
             event_first: previous.event_newest + 1,
         };
         store_header(mapping.words(), &layout, &header);
+        if let Some((identity, continuous_ns)) = identity {
+            store_identity(mapping.words(), identity);
+            mapping.words()[30].store(continuous_ns, Ordering::Relaxed);
+        }
 
         create_name(&lock, &created.name).inspect_err(|_| create_unlink(&created.name))?;
         // Only once the lock file names the new ring, so a reader that reads the lock file from
         // now on never finds the ring it names gone. One that read it just before finds the
         // empty ring gone and looks again.
-        create_unlink_older(&names, previous.generation);
+        if identity.is_none() {
+            create_unlink_older(&names, previous.generation);
+        }
 
         Ok(Self {
             _lock: lock,
@@ -175,6 +224,7 @@ impl Writer {
             layout,
             publication: previous.publication_newest,
             event: previous.event_newest,
+            name: created.name,
         })
     }
 
@@ -182,6 +232,14 @@ impl Writer {
     /// slot holds one, and its events in the log, overwriting the oldest events once every
     /// record holds one.
     pub fn publish(&mut self, readings: &Readings) {
+        self.publish_inner(readings, None);
+    }
+
+    pub fn publish_observed(&mut self, readings: &Readings, times: ObservationTimes) {
+        self.publish_inner(readings, Some(times));
+    }
+
+    fn publish_inner(&mut self, readings: &Readings, times: Option<ObservationTimes>) {
         // A tick's events fit in the log, so a reader can read every one of them.
         assert!(u64_from_usize(readings.events.len()) <= self.layout.shape.event_capacity);
 
@@ -203,6 +261,13 @@ impl Writer {
         slot[SLOT_SEQUENCE].store(2 * publication - 1, Ordering::Relaxed);
         fence(Ordering::Release);
         store_tick(slot, &self.layout, readings, events_first..self.event + 1);
+        if let Some(times) = times {
+            slot[layout::SLOT_WALL_NS].store(times.wall_ns, Ordering::Relaxed);
+            slot[layout::SLOT_CONTINUOUS_NS].store(times.continuous_ns, Ordering::Relaxed);
+            slot[layout::SLOT_AWAKE_NS].store(times.awake_ns, Ordering::Relaxed);
+            slot[layout::SLOT_SOURCES]
+                .fetch_or(layout::SOURCE_OBSERVATION_TIMES, Ordering::Relaxed);
+        }
         slot[SLOT_SEQUENCE].store(2 * publication, Ordering::Release);
 
         words[HEADER_PUBLICATION_NEWEST].store(publication, Ordering::Release);
@@ -212,6 +277,52 @@ impl Writer {
             eprintln!("ring: waking readers failed with errno {errno}");
         }
     }
+
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.mapping.words()[layout::HEADER_GENERATION].load(Ordering::Relaxed)
+    }
+
+    #[must_use]
+    pub fn identity(&self) -> Option<RunIdentity> {
+        read_identity(self.mapping.words(), &self.layout)
+    }
+
+    /// Marks a known orderly end; a crash leaves this false.
+    pub fn finish(&mut self) {
+        self.mapping.words()[layout::HEADER_COMPLETED].store(1, Ordering::Release);
+    }
+}
+
+fn store_identity(words: &[AtomicU64], identity: &RunIdentity) {
+    for (index, value) in [identity.recording.0, identity.run.0, identity.boot.0]
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        words[layout::HEADER_IDENTITY + index].store(value, Ordering::Relaxed);
+    }
+    words[31].store(1, Ordering::Relaxed);
+}
+
+fn read_identity(words: &[AtomicU64], layout: &Layout) -> Option<RunIdentity> {
+    if layout.version < 3 {
+        return None;
+    }
+    if words[31].load(Ordering::Relaxed) != 1 {
+        return None;
+    }
+    let load = |index: usize| words[index].load(Ordering::Relaxed);
+    Some(RunIdentity {
+        recording: Identity([load(23), load(24)]),
+        run: Identity([load(25), load(26)]),
+        boot: Identity([load(27), load(28)]),
+    })
 }
 
 /// A reader of a ring, which maps it read-only.
@@ -260,12 +371,13 @@ impl Reader {
     fn open_named(lock_path: &Path) -> io::Result<Opened> {
         let name = LockedName::read(&File::open(lock_path)?)?;
         if name.as_str().is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "the lock file names no ring yet",
-            ));
+            return Err(io::Error::from(io::ErrorKind::NotFound));
         }
 
+        Self::open_name(name)
+    }
+
+    fn open_name(name: LockedName) -> io::Result<Opened> {
         let (mapping, layout) = open_ring(name.as_str())?;
         let words = mapping.words();
         let first = words[HEADER_PUBLICATION_FIRST].load(Ordering::Relaxed);
@@ -488,10 +600,7 @@ struct Cursor {
 fn open_named_check(numbering: &Numbering) -> io::Result<()> {
     let Numbering { first, newest } = *numbering;
     if first == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "the header numbers from 0",
-        ));
+        return Err(io::Error::from(io::ErrorKind::InvalidData));
     }
 
     if first > NUMBER_MAX {
@@ -515,10 +624,8 @@ struct Numbering {
 
 /// The error of a ring whose header names `number`, past any a writer hands out.
 fn number_past_max(number: u64) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!("the header names number {number}, past any a writer hands out"),
-    )
+    assert!(number > NUMBER_MAX);
+    io::Error::from(io::ErrorKind::InvalidData)
 }
 
 /// What a reader does next with a cursor's numbers.
@@ -627,19 +734,13 @@ fn read_finished<T>(
 
     if sequence < finished {
         // A record only moves on to later numbers.
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("the record of {number} holds sequence {sequence}"),
-        ));
+        return Err(io::Error::from(io::ErrorKind::InvalidData));
     }
 
     if sequence == finished {
         if sequence_after == sequence {
             if loaded.is_none() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("the record of {number} holds words that make nothing"),
-                ));
+                return Err(io::Error::from(io::ErrorKind::InvalidData));
             }
 
             return Ok(loaded);
@@ -788,5 +889,22 @@ mod tests {
             io::ErrorKind::InvalidData,
             read(&slot, 3).unwrap_err().kind()
         );
+    }
+
+    #[test]
+    fn layout_two_readings_keep_their_values_and_have_unknown_exact_clocks() {
+        // Goal: old measured readings survive without invented observation timestamps.
+        // Method: remove layout-three extension words from a published slot and decode it.
+        let current = layout();
+        let legacy = Layout::versioned(current.shape, 2).unwrap();
+        let mut slot = slot_holding(2, 73);
+        slot.drain(layout::SLOT_WALL_NS..layout::SLOT_FIXED_WORDS);
+        let mut tick = Tick::new(&legacy);
+
+        assert!(load_tick(&slot, &legacy, &mut tick));
+
+        assert_eq!(73, tick.run_tick);
+        assert_eq!(None, tick.times);
+        assert_eq!(Memory::default(), tick.memory);
     }
 }

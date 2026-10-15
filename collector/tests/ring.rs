@@ -17,7 +17,10 @@ mod tests {
     use collector::coalitions::Coalition;
     use collector::machine::Memory;
     use collector::processes::{Process, Task, Usage};
-    use collector::ring::{Dropped, Found, FoundEvent, Place, Reader, Readings, Shape, Writer};
+    use collector::ring::{
+        Dropped, Found, FoundEvent, Identity, ObservationTimes, Place, Reader, Readings,
+        RingReader, RunIdentity, Shape, Tick, TickBuffers, Writer,
+    };
     use collector::tracker::{Event, Noticed};
 
     unsafe extern "C" {
@@ -152,6 +155,181 @@ mod tests {
     /// Publishes a tick of `run_tick` that read nothing else.
     fn publish(writer: &mut Writer, run_tick: u64) {
         writer.publish(&readings(run_tick, &Memory::default()));
+    }
+
+    fn run_identity(run: u64) -> RunIdentity {
+        RunIdentity {
+            recording: Identity([11, 12]),
+            run: Identity([21, run]),
+            boot: Identity([31, 32]),
+        }
+    }
+
+    fn tick_buffer(shape: Shape) -> Tick {
+        let count = |value| usize::try_from(value).unwrap();
+        Tick::from_buffers(TickBuffers {
+            cpus: Vec::with_capacity(count(shape.cpu_capacity)),
+            interfaces: Vec::with_capacity(count(shape.interface_capacity)),
+            gpu_active_ns: Vec::with_capacity(count(shape.state_capacity)),
+            core_active_ns: vec![0; count(shape.core_capacity * shape.state_capacity)],
+            core_state_counts: Vec::with_capacity(count(shape.core_capacity)),
+            state_capacity: count(shape.state_capacity),
+            fan_rpm: Vec::with_capacity(count(shape.fan_capacity)),
+            processes: Vec::with_capacity(count(shape.process_capacity)),
+            coalitions: Vec::with_capacity(count(shape.coalition_capacity)),
+        })
+    }
+
+    #[test]
+    fn recording_identity_and_observed_clocks_survive_backward_wall_time() {
+        // Goal: run identity and measured clocks survive publication without wall ordering.
+        // Method: publish a backward wall clock with increasing elapsed clocks and reopen.
+        let place = TestPlace::new("clocks");
+        let identity = run_identity(1);
+        let mut writer = Writer::create_recording(&place.place, SHAPE, &identity, 40).unwrap();
+        let mut reader = RingReader::open(place.lock_path()).unwrap();
+        assert_eq!(Some(identity), reader.identity());
+        assert_eq!(Some(40), reader.run_start_continuous_ns());
+        assert!(!reader.completed());
+        let mut tick = tick_buffer(SHAPE);
+        for wall_ns in [100, 50] {
+            let times = ObservationTimes {
+                wall_ns,
+                continuous_ns: 60,
+                awake_ns: 55,
+            };
+            writer.publish_observed(&readings(3, &Memory::default()), times);
+            assert!(matches!(
+                reader.read_into(&mut tick).unwrap(),
+                Found::Publication { .. }
+            ));
+            assert_eq!(Some(times), tick.times);
+        }
+        writer.finish();
+        assert!(reader.completed());
+    }
+
+    #[test]
+    fn caller_buffers_read_changed_generations_without_allocating() {
+        // Goal: capacity changes need only caller allocation, never shared-library growth.
+        // Method: map larger generation, refuse old storage, then supply larger storage.
+        let place = TestPlace::new("callerbuf");
+        let mut first = Writer::create_recording(&place.place, SHAPE, &run_identity(1), 1).unwrap();
+        publish(&mut first, 1);
+        let old_name = first.name().to_owned();
+        let spawns = spawns();
+        drop(first);
+        let larger = Shape {
+            process_capacity: 2,
+            ..SHAPE
+        };
+        let mut second =
+            Writer::create_recording(&place.place, larger, &run_identity(2), 2).unwrap();
+        drop(spawns);
+        publish(&mut second, 2);
+        let mut reader = None;
+        let calls = allocator_calls_in(|| {
+            reader = Some(RingReader::open(place.lock_path()).unwrap());
+        });
+        assert_eq!(0, calls);
+        let mut reader = reader.unwrap();
+        let mut small = tick_buffer(SHAPE);
+        let calls = allocator_calls_in(|| {
+            assert_eq!(
+                std::io::ErrorKind::Unsupported,
+                reader.read_into(&mut small).unwrap_err().kind()
+            );
+        });
+        assert_eq!(0, calls);
+        let mut large = tick_buffer(larger);
+        let calls = allocator_calls_in(|| {
+            assert_eq!(
+                Found::Publication {
+                    publication: 2,
+                    tick: 2
+                },
+                reader.read_into(&mut large).unwrap()
+            );
+            let mut retained = RingReader::open_generation(&old_name).unwrap();
+            assert_eq!(
+                Found::Publication {
+                    publication: 1,
+                    tick: 1
+                },
+                retained.read_into(&mut large).unwrap()
+            );
+        });
+        assert_eq!(0, calls);
+    }
+
+    #[test]
+    fn recording_restarts_preserve_unreadable_generations_and_refuse_them_without_allocating() {
+        // Goal: an unknown old layout remains available for explicit loss accounting.
+        // Method: forge its version, restart recording and count the refused reopen.
+        let place = TestPlace::new("preservebad");
+        let forged = forge(&place, &[]);
+        forged.write(1, 999);
+        let old_name = std::fs::read_to_string(place.lock_path()).unwrap();
+        let spawns = spawns();
+        let writer = Writer::create_recording(&place.place, SHAPE, &run_identity(1), 1).unwrap();
+        drop(spawns);
+
+        assert!(place.holds(5));
+        assert_eq!(6, writer.generation());
+        let calls = allocator_calls_in(|| {
+            let error = RingReader::open_generation(&old_name).err().unwrap();
+            assert_eq!(std::io::ErrorKind::InvalidData, error.kind());
+        });
+        assert_eq!(0, calls);
+    }
+
+    #[test]
+    fn caller_reads_report_corruption_without_allocating() {
+        // Goal: a corrupt finished slot returns a refusal without allocating a message.
+        // Method: break a finished slot's sequence and count read-into allocator calls.
+        let place = TestPlace::new("badcaller");
+        let forged = forge(&place, &[]);
+        forged.write(32, 0);
+        let mut reader = RingReader::open(place.lock_path()).unwrap();
+        let mut tick = tick_buffer(SHAPE);
+
+        let calls = allocator_calls_in(|| {
+            assert_eq!(
+                std::io::ErrorKind::InvalidData,
+                reader.read_into(&mut tick).unwrap_err().kind()
+            );
+        });
+
+        assert_eq!(0, calls);
+    }
+
+    #[test]
+    fn a_reopened_mapping_resumes_at_its_saved_publication() {
+        // Goal: closing a source during encoding does not force rescanning its old ticks.
+        // Method: reopen by retained name and seek to the second publication.
+        let place = TestPlace::new("seekcaller");
+        let mut writer =
+            Writer::create_recording(&place.place, SHAPE, &run_identity(1), 1).unwrap();
+        publish(&mut writer, 1);
+        publish(&mut writer, 2);
+        let mut reader = RingReader::open_generation(writer.name()).unwrap();
+        let mut tick = tick_buffer(SHAPE);
+
+        reader.seek_publication(2).unwrap();
+        let found = reader.read_into(&mut tick).unwrap();
+
+        assert_eq!(
+            Found::Publication {
+                publication: 2,
+                tick: 2
+            },
+            found
+        );
+        assert_eq!(3, reader.next_publication());
+        assert_eq!(
+            std::io::ErrorKind::InvalidInput,
+            reader.seek_publication(0).unwrap_err().kind()
+        );
     }
 
     fn process(pid: i32) -> Process {

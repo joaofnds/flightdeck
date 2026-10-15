@@ -57,7 +57,8 @@ impl Name {
     /// The name the first `length` of `bytes` hold, or `None` where `length` passes them or
     /// they are not UTF-8. It allocates no error, since a reader of the ring meets a torn name
     /// in its normal course.
-    pub(crate) fn from_bytes(bytes: [u8; IFNAMSIZ], length: usize) -> Option<Self> {
+    #[must_use]
+    pub fn from_bytes(bytes: [u8; IFNAMSIZ], length: usize) -> Option<Self> {
         let name = bytes.get(..length)?;
         if std::str::from_utf8(name).is_err() {
             return None;
@@ -411,6 +412,35 @@ mod tests {
     use std::ffi::c_uint;
 
     use super::*;
+
+    #[test]
+    fn adopts_a_caller_supplied_interface_name() {
+        // Goal: deterministic sources supply the same validated name the kernel does.
+        // Method: adopt a zero-padded name with an explicit length.
+        let mut bytes = [0; IFNAMSIZ];
+        bytes[..3].copy_from_slice(b"en0");
+
+        let name = Name::from_bytes(bytes, 3).unwrap();
+
+        assert_eq!("en0", name.as_str());
+    }
+
+    #[test]
+    fn refuses_a_caller_name_with_nonzero_padding() {
+        // Goal: persisted names cannot hide bytes outside their declared text.
+        // Method: supply an otherwise valid name with a nonzero trailing byte.
+        let mut bytes = [0; IFNAMSIZ];
+        bytes[..4].copy_from_slice(b"en0x");
+
+        assert!(Name::from_bytes(bytes, 3).is_none());
+    }
+
+    #[test]
+    fn refuses_a_caller_name_longer_than_its_buffer() {
+        // Goal: a caller cannot name text outside its fixed storage.
+        // Method: request one byte past the array.
+        assert!(Name::from_bytes([0; IFNAMSIZ], IFNAMSIZ + 1).is_none());
+    }
 
     /// An interface's index and name, as `struct if_nameindex` declares it.
     #[repr(C)]

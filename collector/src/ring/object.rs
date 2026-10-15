@@ -189,6 +189,17 @@ pub(super) struct LockedName {
 }
 
 impl LockedName {
+    pub(super) fn from_str(name: &str) -> io::Result<Self> {
+        if name.len() > PSHMNAMLEN {
+            return Err(io::Error::from(io::ErrorKind::InvalidInput));
+        }
+        let mut bytes = [0; PSHMNAMLEN];
+        bytes[..name.len()].copy_from_slice(name.as_bytes());
+        Ok(Self {
+            bytes,
+            length: name.len(),
+        })
+    }
     /// Reads the name the lock file `lock` holds, which is empty where no writer wrote one, or
     /// an error where it is longer than a ring name or no text.
     pub(super) fn read(lock: &File) -> io::Result<Self> {
@@ -206,17 +217,11 @@ impl LockedName {
         }
 
         if length > PSHMNAMLEN {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("the lock file holds more than a ring name of {PSHMNAMLEN} bytes"),
-            ));
+            return Err(io::Error::from(io::ErrorKind::InvalidData));
         }
 
         if std::str::from_utf8(&bytes[..length]).is_err() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "the lock file holds no text",
-            ));
+            return Err(io::Error::from(io::ErrorKind::InvalidData));
         }
 
         let mut name = [0; PSHMNAMLEN];
@@ -538,6 +543,9 @@ pub(super) fn open_ring(name: &str) -> io::Result<(Mapping, Layout)> {
     let object = unsafe { OwnedFd::from_raw_fd(object) };
 
     let size_bytes = open_ring_check(&File::from(object.try_clone()?))?;
+    if size_bytes < HEADER_WORDS * size_of::<u64>() {
+        return Err(io::Error::from(io::ErrorKind::InvalidData));
+    }
 
     let header = Mapping::new(&object, HEADER_WORDS, PROT_READ)?;
     let layout = open_layout(header.words(), size_bytes)?;
@@ -545,6 +553,60 @@ pub(super) fn open_ring(name: &str) -> io::Result<(Mapping, Layout)> {
     let mapping = Mapping::new(&object, layout.word_count(), PROT_READ)?;
 
     Ok((mapping, layout))
+}
+
+/// Removes an explicitly accounted-for generation, including an unreadable old layout.
+/// Ownership and permissions are checked without interpreting its payload.
+pub fn unlink_generation(name: &str) -> io::Result<()> {
+    let mut buffer = [0; PSHMNAMLEN + 1];
+    let name = open_ring_name(name, &mut buffer)?;
+    let object = unsafe { shm_open(name.as_ptr(), O_RDONLY) };
+    if object < 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    let object = unsafe { OwnedFd::from_raw_fd(object) };
+
+    open_ring_check(&File::from(object))?;
+    if unsafe { shm_unlink(name.as_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Builds another generation's name in fixed caller storage, without heap allocation.
+pub fn generation_name<'buffer>(
+    current: &str,
+    generation: u64,
+    buffer: &'buffer mut [u8; 32],
+) -> io::Result<&'buffer str> {
+    let (prefix, suffix) = current
+        .rsplit_once('.')
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    if suffix.parse::<u64>().is_err() {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    }
+    let mut digits = [0; 20];
+    let mut start = digits.len();
+    let mut remaining = generation;
+    for _ in 0..20 {
+        start -= 1;
+        digits[start] = b'0'
+            + u8::try_from(remaining % 10)
+                .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+        remaining /= 10;
+        if remaining == 0 {
+            break;
+        }
+    }
+    let length = prefix.len() + 1 + digits.len() - start;
+    if length > PSHMNAMLEN {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    }
+    buffer[..prefix.len()].copy_from_slice(prefix.as_bytes());
+    buffer[prefix.len()] = b'.';
+    buffer[prefix.len() + 1..length].copy_from_slice(&digits[start..]);
+    std::str::from_utf8(&buffer[..length]).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))
 }
 
 /// The name `name` with the NUL a kernel call needs, in `buffer`, so a reader that follows a
@@ -555,10 +617,13 @@ fn open_ring_name<'buffer>(
 ) -> io::Result<&'buffer CStr> {
     // Every name comes from a lock file read, or from ring_name, and both refuse a longer one.
     let length = name.len();
-    assert!(length <= PSHMNAMLEN);
+    if length > PSHMNAMLEN {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    }
     buffer[..length].copy_from_slice(name.as_bytes());
     buffer[length] = 0;
-    CStr::from_bytes_with_nul(&buffer[..=length]).map_err(io::Error::other)
+    CStr::from_bytes_with_nul(&buffer[..=length])
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))
 }
 
 /// The size of the object `object`, or an error where this user does not own it or anyone
@@ -566,17 +631,11 @@ fn open_ring_name<'buffer>(
 fn open_ring_check(object: &File) -> io::Result<usize> {
     let metadata = object.metadata()?;
     if metadata.uid() != unsafe { getuid() } {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            format!("the ring belongs to uid {}", metadata.uid()),
-        ));
+        return Err(io::Error::from(io::ErrorKind::PermissionDenied));
     }
 
     if metadata.mode() & 0o777 != RING_MODE {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            format!("the ring has mode {:o}", metadata.mode() & 0o777),
-        ));
+        return Err(io::Error::from(io::ErrorKind::PermissionDenied));
     }
 
     usize::try_from(metadata.len()).map_err(io::Error::other)

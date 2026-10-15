@@ -11,7 +11,7 @@ use crate::u64_from_usize;
 /// Marks the start of a ring, so a reader never takes another object for one.
 pub(super) const MAGIC: u64 = u64::from_be_bytes(*b"FLTDRING");
 /// The layout this code writes and reads, which a change to the layout raises.
-pub(super) const LAYOUT_VERSION: u64 = 2;
+pub(super) const LAYOUT_VERSION: u64 = 3;
 
 /// The words of the header, which starts the ring.
 pub(super) const HEADER_MAGIC: usize = 0;
@@ -46,6 +46,8 @@ pub(super) const HEADER_INTERFACE_WORDS: usize = 19;
 pub(super) const HEADER_PROCESS_WORDS: usize = 20;
 pub(super) const HEADER_COALITION_WORDS: usize = 21;
 pub(super) const HEADER_EVENT_WORDS: usize = 22;
+pub(super) const HEADER_IDENTITY: usize = 23;
+pub(super) const HEADER_COMPLETED: usize = 29;
 pub(super) const HEADER_WORDS: usize = 32;
 const _: () = assert!(HEADER_EVENT_WORDS < HEADER_WORDS);
 
@@ -87,7 +89,11 @@ pub(super) const SLOT_DROPPED_EXECS: usize = 18;
 pub(super) const SLOT_DROPPED_EXITS: usize = 19;
 pub(super) const SLOT_MEMORY: usize = 20;
 pub(super) const MEMORY_WORDS: usize = 19;
-pub(super) const SLOT_FIXED_WORDS: usize = SLOT_MEMORY + MEMORY_WORDS;
+pub(super) const SLOT_WALL_NS: usize = SLOT_MEMORY + MEMORY_WORDS;
+pub(super) const SLOT_CONTINUOUS_NS: usize = SLOT_WALL_NS + 1;
+pub(super) const SLOT_AWAKE_NS: usize = SLOT_CONTINUOUS_NS + 1;
+pub(super) const SLOT_FIXED_WORDS: usize = SLOT_AWAKE_NS + 1;
+pub(super) const SOURCE_OBSERVATION_TIMES: u64 = 4;
 
 pub(super) const SOURCE_IOREPORT: u64 = 1;
 pub(super) const SOURCE_SMC: u64 = 2;
@@ -111,6 +117,7 @@ const SHAPE_FIELD_MAX: u64 = 1 << 24;
 /// Where each part of a ring lies.
 #[derive(Debug, Clone)]
 pub(super) struct Layout {
+    pub(super) version: u64,
     pub(super) shape: Shape,
     pub(super) slot_words: usize,
     pub(super) cpus: Section,
@@ -150,6 +157,10 @@ impl Section {
 impl Layout {
     /// The layout of `shape`, or `None` where a field of it is 0 or past `SHAPE_FIELD_MAX`.
     pub(super) fn new(shape: Shape) -> Option<Self> {
+        Self::versioned(shape, LAYOUT_VERSION)
+    }
+
+    pub(super) fn versioned(shape: Shape, version: u64) -> Option<Self> {
         let fields = [
             shape.slot_count,
             shape.cpu_capacity,
@@ -172,7 +183,11 @@ impl Layout {
         }
 
         let mut plan = SlotPlan {
-            end: SLOT_FIXED_WORDS,
+            end: if version == 2 {
+                SLOT_WALL_NS
+            } else {
+                SLOT_FIXED_WORDS
+            },
         };
         let cpus = plan.section(shape.cpu_capacity, CPU_WORDS);
         let interfaces = plan.section(shape.interface_capacity, INTERFACE_WORDS);
@@ -194,6 +209,7 @@ impl Layout {
         }
 
         Some(Self {
+            version,
             shape,
             slot_words,
             cpus,
@@ -288,7 +304,7 @@ pub(super) fn store_header(words: &[AtomicU64], layout: &Layout, header: &Header
     let shape = layout.shape;
     let fields = [
         (HEADER_MAGIC, MAGIC),
-        (HEADER_LAYOUT_VERSION, LAYOUT_VERSION),
+        (HEADER_LAYOUT_VERSION, layout.version),
         (HEADER_GENERATION, header.generation),
         (HEADER_PUBLICATION_FIRST, header.publication_first),
         (HEADER_PUBLICATION_NEWEST, header.publication_first - 1),
@@ -334,25 +350,24 @@ pub(super) struct Header {
 pub(super) fn open_layout(header: &[AtomicU64], size_bytes: usize) -> io::Result<Layout> {
     let load = |index: usize| header[index].load(Ordering::Relaxed);
     if load(HEADER_MAGIC) != MAGIC {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "not a ring"));
+        return Err(io::Error::from(io::ErrorKind::InvalidData));
     }
 
-    if load(HEADER_LAYOUT_VERSION) != LAYOUT_VERSION {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("a ring of layout {}", load(HEADER_LAYOUT_VERSION)),
-        ));
+    let version = load(HEADER_LAYOUT_VERSION);
+    if version != LAYOUT_VERSION {
+        if version != 2 {
+            return Err(io::Error::from(io::ErrorKind::InvalidData));
+        }
     }
 
     for (index, width) in RECORD_WIDTHS {
+        let width = if index == HEADER_SLOT_FIXED_WORDS && version == 2 {
+            SLOT_WALL_NS
+        } else {
+            width
+        };
         if load(index) != u64_from_usize(width) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "a ring whose header word {index} holds a width of {}",
-                    load(index)
-                ),
-            ));
+            return Err(io::Error::from(io::ErrorKind::InvalidData));
         }
     }
 
@@ -367,18 +382,12 @@ pub(super) fn open_layout(header: &[AtomicU64], size_bytes: usize) -> io::Result
         coalition_capacity: load(HEADER_COALITION_CAPACITY),
         event_capacity: load(HEADER_EVENT_CAPACITY),
     };
-    let Some(layout) = Layout::new(shape) else {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("a ring of shape {shape:?}"),
-        ));
+    let Some(layout) = Layout::versioned(shape, version) else {
+        return Err(io::Error::from(io::ErrorKind::InvalidData));
     };
 
     if layout.size_bytes() > size_bytes {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("a ring of {size_bytes} bytes, short of its layout"),
-        ));
+        return Err(io::Error::from(io::ErrorKind::InvalidData));
     }
 
     Ok(layout)
@@ -424,6 +433,22 @@ mod tests {
         let opened = open_layout(&header(), layout().size_bytes()).unwrap();
 
         assert_eq!(layout().shape, opened.shape);
+    }
+
+    #[test]
+    fn opens_layout_two_with_its_original_section_offsets() {
+        // Goal: old headers retain their original narrower slots and data offsets.
+        // Method: open a legacy header and compare its section offsets to the old widths.
+        let words = header();
+        words[HEADER_LAYOUT_VERSION].store(2, Ordering::Relaxed);
+        words[HEADER_SLOT_FIXED_WORDS].store(39, Ordering::Relaxed);
+        let legacy = Layout::versioned(layout().shape, 2).unwrap();
+
+        let opened = open_layout(&words, legacy.size_bytes()).unwrap();
+
+        assert_eq!(2, opened.version);
+        assert_eq!(39, opened.cpus.start);
+        assert_eq!(legacy.events_start, opened.events_start);
     }
 
     #[test]
