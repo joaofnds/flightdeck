@@ -1384,35 +1384,55 @@ mod tests {
     const STEPS_MAX: u32 = 100;
     const STEP_MS: u64 = 100;
 
-    /// Follows `tracker` a step at a time, draining its events into `events`, until they hold
-    /// one `is_awaited` accepts. Fails after `STEPS_MAX` steps, naming the `awaited` event.
+    /// Follows `tracker` a step at a time, keeping in `events` the drained events about the
+    /// child `awaited` names, until they hold the `awaited` event. Fails after `STEPS_MAX`
+    /// steps, naming that event and the child's events.
     fn follow_until_drained(
         tracker: &mut Tracker,
         meter: &mut Meter,
         events: &mut Vec<Event>,
-        awaited: &str,
-        is_awaited: impl Fn(&Event) -> bool,
+        awaited: Awaited,
     ) {
         for _ in 0..STEPS_MAX {
             follow_for(tracker, meter, STEP_MS);
-            events.extend(tracker.drain_events());
-            if events.iter().any(&is_awaited) {
+            let about_child = tracker
+                .drain_events()
+                .filter(|event| pid_of_event(event) == awaited.pid());
+            events.extend(about_child);
+            if events.iter().any(|event| awaited.is(event)) {
                 return;
             }
         }
-        panic!("no {awaited} after {STEPS_MAX} steps of {STEP_MS} ms: {events:?}");
+        panic!("no {awaited:?} after {STEPS_MAX} steps of {STEP_MS} ms: {events:?}");
     }
 
-    fn is_start_of(pid: i32) -> impl Fn(&Event) -> bool {
-        move |event| matches!(event, Event::Start { pid: p, .. } if *p == pid)
+    /// An event a test waits for, about the child it names by its pid.
+    #[derive(Debug, Clone, Copy)]
+    enum Awaited {
+        Start(i32),
+        Exit(i32),
     }
 
-    fn is_exec_of(pid: i32) -> impl Fn(&Event) -> bool {
-        move |event| matches!(event, Event::Exec { pid: p } if *p == pid)
+    impl Awaited {
+        fn pid(self) -> i32 {
+            match self {
+                Awaited::Start(pid) | Awaited::Exit(pid) => pid,
+            }
+        }
+
+        fn is(self, event: &Event) -> bool {
+            match (self, event) {
+                (Awaited::Start(pid), Event::Start { pid: p, .. })
+                | (Awaited::Exit(pid), Event::Exit { pid: p, .. }) => *p == pid,
+                _ => false,
+            }
+        }
     }
 
-    fn is_exit_of(pid: i32) -> impl Fn(&Event) -> bool {
-        move |event| matches!(event, Event::Exit { pid: p, .. } if *p == pid)
+    fn pid_of_event(event: &Event) -> i32 {
+        match event {
+            Event::Start { pid, .. } | Event::Exec { pid } | Event::Exit { pid, .. } => *pid,
+        }
     }
 
     /// Spawns `program` with its stdin on a pipe this test holds, so a child that reads it
@@ -1446,8 +1466,7 @@ mod tests {
             &mut tracker,
             &mut Meter::default(),
             &mut events,
-            "start of the held child",
-            is_start_of(pid),
+            Awaited::Start(pid),
         );
 
         release(&mut child);
@@ -1455,8 +1474,7 @@ mod tests {
             &mut tracker,
             &mut Meter::default(),
             &mut events,
-            "exit of the released child",
-            is_exit_of(pid),
+            Awaited::Exit(pid),
         );
         child.wait().unwrap();
 
@@ -1488,8 +1506,7 @@ mod tests {
             &mut tracker,
             &mut Meter::default(),
             &mut held,
-            "start of the held child",
-            is_start_of(pid),
+            Awaited::Start(pid),
         );
 
         release(&mut child);
@@ -1498,16 +1515,13 @@ mod tests {
             &mut tracker,
             &mut Meter::default(),
             &mut released,
-            "exit of the released child",
-            is_exit_of(pid),
+            Awaited::Exit(pid),
         );
         child.wait().unwrap();
 
-        assert!(!held.iter().any(is_exec_of(pid)), "child {pid}: {held:?}");
-        assert!(
-            released.iter().any(is_exec_of(pid)),
-            "child {pid}: {released:?}"
-        );
+        let exec = Event::Exec { pid };
+        assert!(!held.contains(&exec), "{held:?}");
+        assert!(released.contains(&exec), "{released:?}");
     }
 
     #[test]
@@ -1527,8 +1541,7 @@ mod tests {
             &mut tracker,
             &mut Meter::default(),
             &mut events,
-            "start of the held child",
-            is_start_of(pid),
+            Awaited::Start(pid),
         );
         release(&mut child);
         child.wait().unwrap();
@@ -1555,21 +1568,9 @@ mod tests {
         let pid = child.id().cast_signed();
         let mut events = Vec::new();
 
-        follow_until_drained(
-            &mut tracker,
-            &mut meter,
-            &mut events,
-            "start of the held child",
-            is_start_of(pid),
-        );
+        follow_until_drained(&mut tracker, &mut meter, &mut events, Awaited::Start(pid));
         release(&mut child);
-        follow_until_drained(
-            &mut tracker,
-            &mut meter,
-            &mut events,
-            "exit of the released child",
-            is_exit_of(pid),
-        );
+        follow_until_drained(&mut tracker, &mut meter, &mut events, Awaited::Exit(pid));
         child.wait().unwrap();
 
         let cost = Snapshot::take(&meter, timebase)
