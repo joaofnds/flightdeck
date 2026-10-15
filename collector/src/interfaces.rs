@@ -118,6 +118,12 @@ impl Interfaces {
         }
     }
 
+    /// The most interfaces a read finds.
+    #[must_use]
+    pub fn readings_max(&self) -> usize {
+        interface_count_max(self.buffer.len())
+    }
+
     /// The interfaces the last read found. The list is private, since a read fills it within
     /// the room `with_dump_size` gave it and never grows it.
     #[must_use]

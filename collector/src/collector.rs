@@ -5,11 +5,11 @@ use crate::clock::Timebase;
 use crate::coalitions::{self, Coalitions};
 use crate::cost::{Meter, Source};
 use crate::interfaces::Interfaces;
-use crate::ioreport::IOReport;
+use crate::ioreport::{ACTIVE_STATES_MAX, IOReport};
 use crate::machine::{self, Machine};
 use crate::processes::{self, Sweep};
 use crate::push_without_growing;
-use crate::smc::Smc;
+use crate::smc::{FANS_MAX, Smc};
 use crate::tracker::{Counts, EVENTS_PER_TICK_MAX, Event, Limits, Tracker};
 
 pub struct Collector {
@@ -27,6 +27,26 @@ pub struct Collector {
     events: Vec<Event>,
     /// What the tracker had counted when the previous tick was read.
     counts_previous: Counts,
+    /// What the tracker counted in the last tick.
+    counts_tick: Counts,
+    cpu_limit: usize,
+    process_limit: usize,
+    coalition_limit: usize,
+}
+
+/// The most of each kind of reading a tick holds, fixed when the collector starts.
+#[derive(Debug, Clone, Copy)]
+pub struct Capacities {
+    pub cpus: usize,
+    pub interfaces: usize,
+    /// The cores `IOReport` reads, which are at most the logical CPUs.
+    pub cores: usize,
+    /// The most active states the GPU or one core has.
+    pub states: usize,
+    pub fans: usize,
+    pub processes: usize,
+    pub coalitions: usize,
+    pub events: usize,
 }
 
 impl Collector {
@@ -54,6 +74,10 @@ impl Collector {
             // The tracker holds at most this many events a tick, so a tick's events fit.
             events: Vec::with_capacity(limits.events_per_tick_max),
             counts_previous: Counts::default(),
+            counts_tick: Counts::default(),
+            cpu_limit,
+            process_limit: limits.process_limit,
+            coalition_limit,
         };
 
         processes::list_pids(&mut collector.listing)?;
@@ -70,6 +94,26 @@ impl Collector {
         assert!(self.events.capacity() >= EVENTS_PER_TICK_MAX);
 
         &self.events
+    }
+
+    /// What the tracker counted in the last tick, such as the events it dropped.
+    #[must_use]
+    pub fn counts_tick(&self) -> Counts {
+        self.counts_tick
+    }
+
+    #[must_use]
+    pub fn capacities(&self) -> Capacities {
+        Capacities {
+            cpus: self.cpu_limit,
+            interfaces: self.interfaces.readings_max(),
+            cores: self.cpu_limit,
+            states: ACTIVE_STATES_MAX,
+            fans: usize::from(FANS_MAX),
+            processes: self.process_limit,
+            coalitions: self.coalition_limit,
+            events: EVENTS_PER_TICK_MAX,
+        }
     }
 
     pub fn wait_until(&mut self, deadline: u64, meter: &mut Meter) -> io::Result<()> {
@@ -106,11 +150,10 @@ impl Collector {
             Ok(())
         })?;
         meter.measure(Source::Coalitions, || {
-            let dropped_starts =
-                read_dropped_starts(&mut self.counts_previous, self.tracker.counts());
+            self.counts_tick = read_counts_added(&mut self.counts_previous, self.tracker.counts());
             read_coalitions(
                 &self.events,
-                dropped_starts,
+                self.counts_tick.dropped_starts,
                 &self.listing,
                 &mut self.coalitions,
             )
@@ -136,14 +179,14 @@ fn new_source<T>(name: &str, opened: io::Result<T>) -> Option<T> {
     }
 }
 
-/// Returns the starts the tracker dropped since the previous tick, whose counts
-/// `counts_previous` holds, and keeps `counts` there for the next tick.
-fn read_dropped_starts(counts_previous: &mut Counts, counts: Counts) -> u64 {
+/// Returns what the tracker counted since the previous tick, whose counts `counts_previous`
+/// holds, and keeps `counts` there for the next tick.
+fn read_counts_added(counts_previous: &mut Counts, counts: Counts) -> Counts {
     let added = counts.since(counts_previous);
     *counts_previous = counts;
 
     assert!(added.dropped_starts <= counts.dropped_starts);
-    added.dropped_starts
+    added
 }
 
 /// Adds the coalition of each process `events` saw start, and of every process in `listing`
@@ -231,7 +274,10 @@ mod tests {
             ..Counts::default()
         };
 
-        assert_eq!(1, read_dropped_starts(&mut counts_previous, counts));
+        assert_eq!(
+            1,
+            read_counts_added(&mut counts_previous, counts).dropped_starts
+        );
     }
 
     #[test]
@@ -245,9 +291,12 @@ mod tests {
             dropped_starts: 1,
             ..Counts::default()
         };
-        read_dropped_starts(&mut counts_previous, counts);
+        read_counts_added(&mut counts_previous, counts);
 
-        assert_eq!(0, read_dropped_starts(&mut counts_previous, counts));
+        assert_eq!(
+            0,
+            read_counts_added(&mut counts_previous, counts).dropped_starts
+        );
     }
 
     #[test]

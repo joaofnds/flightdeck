@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use collector::ring::{Found, FoundEvent, Reader};
+use collector::ring::{Found, FoundEvent, Place, Reader};
 
 /// The longest the reader waits for the next publication before it looks again.
 const WAIT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -32,13 +32,20 @@ struct Options {
 }
 
 fn options_from(arguments: &[String]) -> Result<Options, String> {
-    let usage = || "usage: ring_reader --lock PATH --publications N".to_owned();
+    let usage = || "usage: ring_reader (--lock PATH | --ring NAME) --publications N".to_owned();
     let mut lock_path = None;
     let mut publications = None;
 
     for pair in arguments.chunks(2) {
         match pair {
             [flag, path] if flag == "--lock" => lock_path = Some(PathBuf::from(path)),
+            [flag, name] if flag == "--ring" => {
+                lock_path = Some(
+                    Place::for_user(name)
+                        .map_err(|error| error.to_string())?
+                        .lock_path,
+                );
+            }
             [flag, count] if flag == "--publications" => {
                 publications = Some(count.parse().map_err(|_| usage())?);
             }

@@ -28,7 +28,7 @@ use layout::{
 };
 use object::{
     Mapping, PROT_READ, PROT_WRITE, create_lock, create_object, create_previous,
-    create_unlink_older, open_ring,
+    create_unlink_older, open_ring, place_for_user,
 };
 pub use tick::{Dropped, IOReportReadings, Readings, SmcReadings, Tick, shape_for};
 
@@ -45,6 +45,14 @@ const POLL_INTERVAL: Duration = Duration::from_millis(10);
 pub struct Place {
     pub lock_path: PathBuf,
     pub name_prefix: String,
+}
+
+impl Place {
+    /// The place of the ring `name` of this user, whose lock file is in this user's own
+    /// temporary directory. Returns an error where `name` makes a ring's name too long.
+    pub fn for_user(name: &str) -> io::Result<Self> {
+        place_for_user(name)
+    }
 }
 
 /// The room a ring takes, fixed when its writer makes it: the publications it holds before

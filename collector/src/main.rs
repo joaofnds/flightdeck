@@ -5,9 +5,10 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use collector::clock::{self, Timebase};
-use collector::collector::Collector;
+use collector::collector::{Capacities, Collector};
 use collector::cost::{Cost, Meter, Snapshot, Source};
 use collector::processes::{self, Unreadable, Usage};
+use collector::ring::{Dropped, IOReportReadings, Place, Readings, Shape, SmcReadings, Writer};
 use collector::schedule::Schedule;
 use collector::tracker::{Counts, Event, Noticed};
 use collector::u64_from_usize;
@@ -18,6 +19,10 @@ const TICKS_PER_WINDOW: u64 = 10;
 const TICKS_PER_MINUTE: u64 = 60;
 const BUDGET_SHARE_OF_A_CORE: f64 = 0.05;
 const DEFAULT_RESCAN_INTERVAL: Duration = Duration::ZERO;
+/// The ring readers find unless the collector is told another.
+const DEFAULT_RING: &str = "flightdeck";
+/// The ticks the ring holds, two minutes of them, so a reader that stops for less loses none.
+const RING_SLOTS: u64 = 120;
 
 unsafe extern "C" {
     fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: c_int) -> c_int;
@@ -46,13 +51,15 @@ fn main() -> ExitCode {
 struct Options {
     seconds: Option<NonZeroU64>,
     rescan_interval: Duration,
+    ring: String,
 }
 
 fn options_from(arguments: &[String]) -> Result<Options, String> {
-    let usage = || "usage: collector [--seconds N] [--rescan-ms N]".to_owned();
+    let usage = || "usage: collector [--seconds N] [--rescan-ms N] [--ring NAME]".to_owned();
     let mut options = Options {
         seconds: None,
         rescan_interval: DEFAULT_RESCAN_INTERVAL,
+        ring: DEFAULT_RING.to_owned(),
     };
 
     for pair in arguments.chunks(2) {
@@ -64,6 +71,7 @@ fn options_from(arguments: &[String]) -> Result<Options, String> {
                 options.rescan_interval =
                     Duration::from_millis(milliseconds.parse().map_err(|_| usage())?);
             }
+            [flag, ring] if flag == "--ring" => options.ring.clone_from(ring),
             _ => return Err(usage()),
         }
     }
@@ -79,7 +87,14 @@ fn run(options: &Options) -> io::Result<()> {
     let timebase = Timebase::read()?;
     let first_marker_pid = run_throwaway_child();
     let mut out = io::stdout().lock();
-    let mut run = Run::start(timebase, TICK_PERIOD_NS, options.rescan_interval, &mut out)?;
+    let ring = Place::for_user(&options.ring)?;
+    let mut run = Run::start(
+        timebase,
+        TICK_PERIOD_NS,
+        options.rescan_interval,
+        &ring,
+        &mut out,
+    )?;
     let mut tick = run.first_tick;
     // Tick 0 is the warm-up tick, which `Run::start` ran.
     assert!(tick > 0);
@@ -103,6 +118,58 @@ fn run(options: &Options) -> io::Result<()> {
     }
 }
 
+/// The shape of a ring with room for every tick the collector of `capacities` reads.
+fn ring_shape(capacities: Capacities) -> Shape {
+    Shape {
+        slot_count: RING_SLOTS,
+        cpu_capacity: u64_from_usize(capacities.cpus),
+        interface_capacity: u64_from_usize(capacities.interfaces),
+        core_capacity: u64_from_usize(capacities.cores),
+        state_capacity: u64_from_usize(capacities.states),
+        fan_capacity: u64_from_usize(capacities.fans),
+        process_capacity: u64_from_usize(capacities.processes),
+        coalition_capacity: u64_from_usize(capacities.coalitions),
+        // Every event of the ticks the ring holds, at the most a tick holds.
+        event_capacity: RING_SLOTS * u64_from_usize(capacities.events),
+    }
+}
+
+/// Publishes what `collector` read in `tick` to `ring`.
+fn publish(ring: &mut Writer, collector: &Collector, tick: u64) {
+    let ioreport = collector
+        .ioreport
+        .as_ref()
+        .map(|ioreport| IOReportReadings {
+            gpu_energy_nj: ioreport.gpu_energy_nj(),
+            gpu: ioreport.gpu(),
+            cores: ioreport.cores(),
+        });
+    let smc = collector.smc.as_ref().map(|smc| SmcReadings {
+        power_watts: smc.power_watts(),
+        soc_celsius: smc.soc_celsius(),
+        fan_rpm: smc.fan_rpm(),
+    });
+    let counts = collector.counts_tick();
+    ring.publish(&Readings {
+        run_tick: tick,
+        cpus: collector.machine.cpus(),
+        memory: &collector.machine.memory,
+        interfaces: collector.interfaces.readings(),
+        ioreport,
+        smc,
+        processes: &collector.processes.readings,
+        processes_refused: collector.processes.refused,
+        processes_gone: collector.processes.gone,
+        coalitions: &collector.coalitions.readings,
+        events: collector.events(),
+        dropped: Dropped {
+            starts: counts.dropped_starts,
+            execs: counts.dropped_execs,
+            exits: counts.dropped_exits,
+        },
+    });
+}
+
 fn run_set_qos_class_default() -> io::Result<()> {
     let error = unsafe { pthread_set_qos_class_self_np(QOS_CLASS_DEFAULT, 0) };
     if error != 0 {
@@ -118,6 +185,7 @@ struct Run {
     schedule: Schedule,
     meter: Meter,
     collector: Collector,
+    ring: Writer,
     live_at_first_scan: Vec<i32>,
     warm_up_starts: u64,
     first_tick: u64,
@@ -172,12 +240,15 @@ impl Run {
         timebase: Timebase,
         tick_period_ns: u64,
         rescan_interval: Duration,
+        ring: &Place,
         out: &mut impl Write,
     ) -> io::Result<Self> {
         assert!(tick_period_ns > 0);
 
         let mut meter = Meter::default();
         let mut collector = Collector::new(timebase, rescan_interval)?;
+        // A second collector stops here, before it reads anything, so the first runs on.
+        let mut ring = Writer::create(ring, ring_shape(collector.capacities()))?;
         let live_at_first_scan = Self::start_live_at_first_scan(collector.tracker.last_listing());
         let schedule = Schedule::starting_now(timebase.ticks(tick_period_ns)?)?;
 
@@ -185,6 +256,10 @@ impl Run {
 
         collector.wait_until(schedule.deadline(0), &mut meter)?;
         collector.read(&mut meter)?;
+        meter.measure(Source::Ring, || {
+            publish(&mut ring, &collector, 0);
+            Ok(())
+        })?;
         let warm_up_starts = start_warm_up_starts(collector.events());
 
         // Tick 0 is the warm-up tick, so the spans start past it.
@@ -195,6 +270,7 @@ impl Run {
             schedule,
             meter,
             collector,
+            ring,
             live_at_first_scan,
             warm_up_starts,
             first_tick,
@@ -223,6 +299,10 @@ impl Run {
         let late_ticks = clock::now().saturating_sub(deadline);
         let late = Duration::from_nanos(self.timebase.nanoseconds(late_ticks)?);
         self.collector.read(&mut self.meter)?;
+        self.meter.measure(Source::Ring, || {
+            publish(&mut self.ring, &self.collector, tick);
+            Ok(())
+        })?;
 
         let following = self.schedule.first_ahead_of(clock::now()).max(tick + 1);
         let slips = following - tick - 1;
@@ -664,6 +744,37 @@ mod tests {
 
     const TEST_TICK_PERIOD_NS: u64 = 20_000_000;
 
+    unsafe extern "C" {
+        fn shm_unlink(name: *const std::ffi::c_char) -> c_int;
+    }
+
+    /// A ring only one test uses, whose lock file and first ring are removed when the test
+    /// ends, since a shared-memory object outlives the process that made it.
+    struct TestRing {
+        place: Place,
+    }
+
+    impl TestRing {
+        fn new(test: &str) -> Self {
+            let name = format!("fdm{}{test}", std::process::id());
+            Self {
+                place: Place::for_user(&name).unwrap(),
+            }
+        }
+    }
+
+    impl Drop for TestRing {
+        fn drop(&mut self) {
+            let ring = std::ffi::CString::new(format!("{}1", self.place.name_prefix)).unwrap();
+            if unsafe { shm_unlink(ring.as_ptr()) } != 0 {
+                assert_eq!(Some(2), io::Error::last_os_error().raw_os_error(), "ENOENT");
+            }
+            if let Err(error) = std::fs::remove_file(&self.place.lock_path) {
+                assert_eq!(io::ErrorKind::NotFound, error.kind());
+            }
+        }
+    }
+
     /// The system's allocator, counting the calls made to it on a thread while that thread
     /// asks it to, so a test can see whether its own thread allocates.
     struct Counting;
@@ -745,10 +856,12 @@ mod tests {
         // allocator calls made on this thread.
         let timebase = Timebase::read().unwrap();
         let mut sink = io::sink();
+        let ring = TestRing::new("alloc");
         let mut run = Run::start(
             timebase,
             TEST_TICK_PERIOD_NS,
             DEFAULT_RESCAN_INTERVAL,
+            &ring.place,
             &mut sink,
         )
         .unwrap();
@@ -826,6 +939,7 @@ mod tests {
             Ok(Options {
                 seconds: NonZeroU64::new(5),
                 rescan_interval: Duration::from_millis(20),
+                ring: DEFAULT_RING.to_owned(),
             }),
             options_from(&arguments(&["--rescan-ms", "20", "--seconds", "5"]))
         );

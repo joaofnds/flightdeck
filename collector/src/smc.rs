@@ -295,7 +295,7 @@ const _: () = {
 };
 
 /// The most fans the SMC's keys can name, since a fan's speed key names it with one digit.
-const FANS_MAX: u8 = 10;
+pub const FANS_MAX: u8 = 10;
 const _: () = assert!((b'0' + FANS_MAX - 1).is_ascii_digit());
 
 /// The most keys open lists, past four times the 3,626 the SMC of an M5 Pro lists.

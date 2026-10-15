@@ -1,11 +1,13 @@
 //! The shared-memory object that holds a ring, and the lock file that names it.
 
+use std::ffi::OsStr;
 use std::ffi::{CString, c_char, c_int, c_uint, c_void};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::layout::{
@@ -25,6 +27,11 @@ const LOCK_MODE: u32 = 0o600;
 const GENERATION_TRIES: u64 = 16;
 
 const ENOENT: i32 = 2;
+
+/// The `confstr` name of this user's own temporary directory, from `unistd.h`.
+const CS_DARWIN_USER_TEMP_DIR: c_int = 65537;
+/// The longest path macOS takes, `PATH_MAX` in `sys/syslimits.h`.
+const PATH_MAX: usize = 1024;
 
 const O_RDONLY: c_int = 0x0000;
 const O_RDWR: c_int = 0x0002;
@@ -48,6 +55,7 @@ unsafe extern "C" {
     fn munmap(address: *mut c_void, length: usize) -> c_int;
     fn shm_unlink(name: *const c_char) -> c_int;
     fn getuid() -> u32;
+    fn confstr(name: c_int, buffer: *mut c_char, length: usize) -> usize;
 }
 
 /// A shared-memory object mapped into this process, which unmaps it when it drops.
@@ -291,4 +299,37 @@ fn open_check(object: &File) -> io::Result<usize> {
         ));
     }
     usize::try_from(metadata.len()).map_err(io::Error::other)
+}
+
+/// The place of the ring `name` of this user: its lock file in this user's own temporary
+/// directory, which no other user may enter, and objects named for the user, since every
+/// user shares the names of shared-memory objects.
+pub(super) fn place_for_user(name: &str) -> io::Result<super::Place> {
+    let mut buffer = [0u8; PATH_MAX];
+    let length = unsafe {
+        confstr(
+            CS_DARWIN_USER_TEMP_DIR,
+            buffer.as_mut_ptr().cast::<c_char>(),
+            buffer.len(),
+        )
+    };
+    if length == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // The length counts the closing NUL, and one past the buffer means the path was cut off.
+    if length > buffer.len() {
+        return Err(io::Error::other(
+            "this user's temporary directory is past PATH_MAX",
+        ));
+    }
+    let directory = PathBuf::from(OsStr::from_bytes(&buffer[..length - 1]));
+    let uid = unsafe { getuid() };
+
+    let place = super::Place {
+        lock_path: directory.join(format!("{name}.lock")),
+        name_prefix: format!("/{name}.{uid}."),
+    };
+    // A ring's name holds the prefix and a generation, within what macOS takes.
+    ring_name(&place.name_prefix, u64::from(u32::MAX))?;
+    Ok(place)
 }

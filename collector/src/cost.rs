@@ -19,10 +19,12 @@ pub enum Source {
     ExitReads,
     IOReport,
     Smc,
+    /// Publishing each tick to the ring.
+    Ring,
 }
 
 impl Source {
-    pub const ALL: [Source; 11] = [
+    pub const ALL: [Source; 12] = [
         Source::Processes,
         Source::Coalitions,
         Source::Events,
@@ -34,6 +36,7 @@ impl Source {
         Source::Smc,
         Source::Machine,
         Source::Interfaces,
+        Source::Ring,
     ];
 
     #[must_use]
@@ -50,6 +53,7 @@ impl Source {
             Source::ExitReads => "exit reads",
             Source::IOReport => "ioreport",
             Source::Smc => "smc",
+            Source::Ring => "ring",
         }
     }
 
@@ -68,6 +72,7 @@ impl Source {
             Source::ExitReads => 8,
             Source::IOReport => 9,
             Source::Smc => 10,
+            Source::Ring => 11,
         }
     }
 }
