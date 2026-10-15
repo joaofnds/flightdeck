@@ -586,6 +586,42 @@ mod tests {
     }
 
     #[test]
+    fn a_reader_that_follows_a_restarted_writer_learns_what_it_missed_in_between() {
+        // Goal: a reader that moves to the newer ring learns the publications and events the
+        // new writer overwrote before the reader got there, rather than skipping them.
+        // Method: read the one publication and event of a ring, restart the writer and publish
+        // six ticks of one event each into its four slots, follow it, and read.
+        let place = TestPlace::new("follow");
+        let mut first = Writer::create(&place.place, SHAPE).unwrap();
+        publish_events(&mut first, 1, &[exit(1)]);
+        let mut reader = Reader::open(place.lock_path()).unwrap();
+        reader.read().unwrap();
+        reader.read_event().unwrap();
+
+        let spawns = spawns();
+        drop(first);
+        let mut second = Writer::create(&place.place, SHAPE).unwrap();
+        drop(spawns);
+        for run_tick in 1..=6 {
+            publish_events(&mut second, run_tick, &[exit(2)]);
+        }
+        reader.follow(place.lock_path()).unwrap();
+
+        assert_eq!(Found::Missed { first: 2, end: 4 }, reader.read().unwrap());
+        assert_eq!(
+            Found::Publication {
+                publication: 4,
+                tick: 3
+            },
+            reader.read().unwrap()
+        );
+        assert_eq!(
+            FoundEvent::Missed { first: 2, end: 4 },
+            reader.read_event().unwrap()
+        );
+    }
+
+    #[test]
     fn a_restarted_writer_keeps_the_previous_ring_and_removes_older_ones() {
         // Goal: a restart keeps the ring before it for the persister to seal, and at most two
         // rings exist.

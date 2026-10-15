@@ -88,7 +88,7 @@ fn run(options: &Options) -> std::io::Result<()> {
             Found::Nothing => {
                 // The writer restarted, and the reader has read all the previous ring holds.
                 if reader.moved(&options.lock_path)? {
-                    reader = Reader::open(&options.lock_path)?;
+                    reader.follow(&options.lock_path)?;
                     println!("moved to the writer's newer ring");
                 } else {
                     reader.wait(WAIT_TIMEOUT)?;

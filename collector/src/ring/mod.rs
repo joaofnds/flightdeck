@@ -234,6 +234,17 @@ impl Reader {
         Ok(!name.is_empty() && name != self.name)
     }
 
+    /// Opens the ring the lock file at `lock_path` names in place of the reader's own, as
+    /// once `moved` says the writer restarted, and reads on from where the reader stood, so
+    /// the next reads return what the newer writer overwrote first as missed.
+    pub fn follow(&mut self, lock_path: &Path) -> io::Result<()> {
+        let mut newer = Self::open(lock_path)?;
+        newer.publications.carry(&self.publications);
+        newer.events.carry(&self.events);
+        *self = newer;
+        Ok(())
+    }
+
     /// The tick of the publication the reader read last.
     #[must_use]
     pub fn tick(&self) -> &Tick {
@@ -345,6 +356,15 @@ impl Cursor {
         Self {
             first,
             next: first.max(oldest_held),
+        }
+    }
+
+    /// Takes the position of `older`, a cursor over the previous ring, where the numbers
+    /// this ring continues start at or past it. A ring whose numbers start before it begins
+    /// a numbering of its own, as after a reboot, and the cursor stays where it opened.
+    fn carry(&mut self, older: &Self) {
+        if older.next <= self.first {
+            self.next = older.next;
         }
     }
 
