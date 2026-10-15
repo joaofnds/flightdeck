@@ -8,8 +8,9 @@ file and socket was doing. The design research is in
 ## Collector
 
 `collector` reads the whole machine once a second without root and starts a separate
-persister. It reports each source's CPU and the combined collector and persister CPU
-against the 5% budget for one core. Build both sibling executables before running it:
+persister. Each `recording minute` reports `combined_percent` of one core for collection
+and persistence together; compare it with the 5% budget. The source-cost report's
+budget share and power in mW describe the collector alone. Build both sibling executables:
 
 ```sh
 cargo build --release -p collector -p persistence --bin collector --bin persister
@@ -29,17 +30,34 @@ It hands each tick to a shared-memory ring that only its user can read. `--ring 
 `~/Library/Application Support/Flightdeck/NAME.lock`, and the collector exits with an error
 while another collector holds that lock. The home directory is resolved from the user's
 uid. The default private recording is beside that lock at `NAME.recording`;
-`--recording PATH` selects an isolated recording destination independently of `--ring`. The persister
-keeps immutable Parquet windows of 60 elapsed seconds, with shorter final windows and
+`--recording PATH` selects an isolated recording destination independently of `--ring`.
+One collector owns that recording at a time. A second collector using another ring and
+the same recording continues collecting but cannot persist its readings there.
+Choose a UTF-8 recording path containing none of `*`, `?` or `[`. Creation accepts other
+paths, but the query API and checker refuse them because the engine interprets them as
+file patterns. The persister keeps immutable Parquet windows of 60 elapsed seconds,
+with shorter final windows and
 explicit availability and gaps. Stopping and restarting continues the recording.
 
 The ring stays after the collector exits, about 800 MB of address space, and the recording
 registry retains at most the active and one earlier ring. Disk recordings survive the
 rings' removal or a reboot; unsealed data may be lost. A missing, refused or failed
 persister reports failure while collection continues into the bounded ring. The collector
-starts it once at startup and does not respawn it during collection. Finite runs drain
-and reap their child, and report the drain's CPU separately. Recording files and pending
-artifacts are private to the user.
+starts it once at startup and does not respawn it during collection. Finite runs, Ctrl-C
+and SIGTERM drain and reap their child, and report the drain's CPU separately. If an
+earlier persister still owns the recording, its replacement reports that ownership and
+unavailable CPU while collection continues. Recording directories are created with
+owner-only access; files use mode 0600 and inherited access-control entries are removed.
+
+The disk query API is `persistence::query::processes_at_second`; the viewer that calls
+it is future work. `recording_check` is a diagnostic for comparing a live source with
+the saved recording across all ten tables. Build it with
+`cargo build --release -p persistence --bin recording_check`.
+Start `./target/release/recording_check capture --lock-path PATH --reference FILE --seconds N`
+before the collector, using a fresh reference file and
+a duration longer than the collection run. Once both finish, run
+`./target/release/recording_check verify --recording PATH --reference FILE`.
+The reference contains private readings too.
 
 `ring_reader` prints each tick it reads, the events, and what it missed, until it has read
 the publications asked for. It finds the ring through `--ring NAME`, or through

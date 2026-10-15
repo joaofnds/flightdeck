@@ -2,14 +2,16 @@
 
 Research for a Rust and GPUI app that records the whole machine once a second, keeps
 the recording, and lets you go back to any second and join what every process, file
-and socket was doing. Every number below was measured on this M5 Pro on 2026-10-12 or
-2026-10-13 unless it cites a source. The evidence programs are described at the end.
+and socket was doing. Unless dated otherwise or attributed to a source, numbers below
+were measured on this M5 Pro on 2026-10-12 or 2026-10-13. The evidence programs are
+described at the end.
 
 ## Decisions
 
 - The whole machine is read at most once a second. The measurements go down to
   100 ms to show the headroom, and a later mode may read one process tree at 100 ms.
-- The collector gets 5% of one core, averaged over each minute, for now. Completeness
+- Collection and persistence together get 5% of one core, averaged over each minute,
+  for now (confirmed 2026-10-15). Completeness
   comes first, then benchmarks that run on CI, then optimizing against them ("let's try
   to keep it under 5% for now and aim for completeness", 2026-10-13).
 - The collector runs without root. Root may come later as an option the user turns on
@@ -127,9 +129,10 @@ minute on AC power that held 14 forks, the collector in Rust spent 0.08 s in use
 and 0.99 s in system time, 124 ms of it starting up, and 1.58% of a core after that.
 User time also counts the code of IOReport and the system library, so rewriting the
 collector as it reads today could save at most 1.3 ms a second, 0.13% of a core, and
-only by taking its own code to zero. That bound leaves out what is not built yet: the
+only by taking its own code to zero. That historical bound left out the
 open-file list, the GPU, and the persister, which sorts, encodes and compresses each
-window in user space, where a language and its compiler matter most. It leaves out
+window in user space, where a language and its compiler matter most. The persister's
+2026-10-15 implementation measurements appear under Persistence measurements. It leaves out
 tracking in a burst of forks too, which was not measured this way.
 
 The sweep of every process and every coalition was also written in Zig and run against
@@ -212,8 +215,8 @@ GPU, the open-file list, the rest of the SMC every 10 seconds and the keyframe e
 That puts the busier run at about 2.7% of a core over its five minutes, half a point
 over the estimate, and the quieter at about 2.2%, the top of the estimate. Minute by
 minute, the three minutes that held a burst would come to about 3.5 to 3.7%, inside the
-budget, before disk, per-process network, battery and the persister, which are not
-measured.
+budget, before disk, per-process network, battery and the persister, which that
+observation did not measure. Persistence measurements below cover the current encoder.
 
 Over 10-second windows, the 53 of 60 windows at 3 to 161 forks a second cost 1.0 to 2.6%
 of a core, 1.39% and 16.5 mW on average in the quieter run and 1.57% and 28.6 mW in the
@@ -461,13 +464,15 @@ ruling, since the Decisions above ask for that weighing. The ring here is about 
 lines in `collector/src/ring`, its unit tests included, and about 1,750 lines of tests in
 `collector/tests/ring.rs`.
 
-Because the ring outlives the collector, a crash of the collector loses nothing the
-ring holds. Each start writes a new ring under the next generation's name and keeps the
-newest earlier ring that holds publications for the persister to seal, so the ring holds
-two sealing windows, 120 ticks, and the kept ring holds what the crashed run left. A start
-removes every other earlier ring, so a second restart of a run that publishes before the
-persister seals loses the oldest ring's unsealed ticks, while a run that dies before its
-first publication costs nothing. The persister (TASK-19) decides when a sealed ring goes. Each slot
+Because the ring outlives the collector, a crash leaves its retained publications
+recoverable. Each start writes a new ring and registers it with its private recording.
+The registry holds at most two sources, and the persister seals recoverable older
+publications before newer ones. Fully drained sources retire without an eviction;
+exceeding the source bound reports that the lost extent is unknown. An unreadable
+source also leaves an explicit unknown extent while healthy collection continues.
+If registration fails, bounded anonymous-ring cleanup retains the current ring and its
+actual predecessor; those sources have no recording identity and recovery is unavailable.
+Each active ring holds two sealing windows, 120 ticks. Each slot
 holds full records with room for every process and coalition the collector's limits
 allow, about 500 MB of address space for the slots together, of which only the pages
 written take memory. The
@@ -648,6 +653,11 @@ exclude application discovery. The production layout partitions immutable direct
 by run and elapsed day, with wall-time bounds selecting candidate windows; readers
 validate canonical commit markers and filter actual tick timestamps.
 
+Peak query-process RSS was 713,785,344 bytes for Parquet, 68,108,288 for sealed DuckDB
+and 315,457,536 for DuckLake. Parquet's memory cost is a tradeoff of the selection.
+These query processes are separate from the production recording worker's memory
+budget; the future viewer's query-process boundary and memory allowance remain unsettled.
+
 The preserved driver commands are `benchmark --mode build --fixture baseline
 --minutes 10080 --processes 953`, `benchmark_checked --mode build-lake --fixture baseline
 --minutes 10080 --processes 953`, and `benchmark_queries --mode queries --fixture baseline
@@ -662,15 +672,16 @@ all 54 outputs; its day medians were Parquet 0.598066/0.300822, DuckDB
 with the early ranked passes. Neither family establishes cold-cache performance.
 
 Exact source/binary families, SQL, settings, individual timings and incident records
-remain in private board evidence `TASK-19/storage/report.txt` and
-`source_binary_sha256.txt`. The optional peak-load week was omitted. The original
+remain in `backlog/evidence/TASK-19/storage/report.txt` and
+`source_binary_sha256.txt` on this Mac. The private board is git-ignored and absent
+from a clone. The optional peak-load week was omitted. The original
 monitor failed during a WAL removal race while its bounded engine child continued;
 sealed outputs and subsequent queries completed. A separate post-run version command
 read a user init file and failed, outside the timed engines. Those limitations do not
 change the returned answers, and the complete production resource checks below remain
 separate from the format experiment.
 
-The viewer joins history with the live tail in one query. DuckDB's Rust crate scans
+The planned viewer joins history with the live tail in one query. DuckDB's Rust crate scans
 Arrow record batches held in the same process (`ArrowVTab`, behind the `vtab-arrow`
 feature), so the viewer copies the unsealed ticks out of the ring into Arrow batches
 and queries them together with the sealed files. The ring could hold Arrow IPC batches
@@ -685,13 +696,13 @@ of root's coalitions. Command lines still often carry tokens, and the recording 
 them for as long as its retention, so the ring and the sealed files need modes that let
 only the user read them, and arguments may need redacting before they are kept.
 
-Readers map the ring read-only, so no reader can corrupt it. The writer takes no lock,
-waits for no acknowledgment, and wakes readers with a broadcast, so no reader can stall
-it. The event queue is the one place that does not overwrite, and it drops and counts
-rather than block when full. The ring as built departs from this paragraph in two
-places, pending the user's ruling on TASK-18. Its event log overwrites its oldest records
-and a reader learns what it missed from the gap. The writer holds a lock file, and a
+Readers map the ring read-only, so no reader can corrupt it. While publishing, the
+writer waits for no acknowledgment and wakes readers with a broadcast, so no reader
+can stall it. The ring's event log overwrites its oldest records, and a reader learns
+what it missed from the gap. The writer holds a startup exclusion lock file, and a
 process of the same user that takes that lock keeps a new collector from starting.
+The recording also has a lifetime `collector.lock`; another process of the same user
+holding it prevents persistence for a new collector, which continues collection.
 
 Every user shares the names of shared-memory objects, so each ring's name carries 60
 random bits that the collector writes nowhere but its lock file. The lock file is
@@ -739,6 +750,12 @@ two readings, and no run has watched it.
    sealed files, and joins the two through the ring's unsealed tail as Arrow batches.
 
 The dated week-query experiment under Where it is kept selects step 3's storage.
+The collector and separate persister implement step 3. The viewer's Arrow union and
+launch-agent registration remain future callers. Legacy layout-2 rings retain their
+readings, with unknown observation timestamps and an all-zero unknown boot identity.
+Choose UTF-8 recording roots without `*`, `?` or `[`. Creation accepts other paths, but
+the query API and checker refuse them so an engine file pattern cannot expand a private
+path into another recording.
 
 ## Crates from outside the workspace
 
@@ -761,9 +778,12 @@ missing an entry, and on a case whose crate no member depends on.
 
 - Used: Persistence alone uses duckdb =1.10506.0 with default features disabled and the parquet feature (which includes bundled DuckDB 1.5.6), through typed appenders, bounded in-memory tables and immutable Parquet COPY. Arrow is an unconditional transitive dependency. Neither the collector nor shared allocation-constrained code calls the engine. Extensions are bundled; runtime extension installation and autoloading are disabled.
 - Performance: On the M5 Pro, macOS 27.0.1, 2026-10-15, a 10,080-window/953-process synthetic week used 566.30 seconds native build CPU and 7,232,847,872 allocated bytes in Parquet, against 687.43 seconds/34,470,232,064 bytes for per-minute DuckDB and 655.41 seconds/7,924,731,904 bytes for DuckLake. Parquet's original week-query median was 1.611054 seconds first and 0.763221 repeat; DuckLake was 1.558944/0.706168. Both the original and ranked 54-answer families matched an independent Rust oracle. These are engine prototypes, not the combined collector-plus-persister budget or a cold-cache comparison. Implementing equivalent typed column encoding, Zstandard and query execution here would not credibly match the measured engine with comparable maintenance cost. The complete-schema Rust feed and physical-footprint measurements below are the implementation gate.
-- Maintenance: Pin the Rust crate exactly and keep Cargo.lock, including its bundled native engine and Arrow graph. The build graph also compiles ureq, rustls, ring, webpki-roots, tar, zip and flate2; bundled mode compiles out the download branch, but those crates still add supply-chain surface. This adds a C++ build and native allocation observation; the 512 MiB DuckDB buffer limit does not bound whole-process memory. A separate worker, 2 GiB physical-footprint watchdog and bounded one-window staging contain the engine; failures retain unacknowledged source and let collection continue. Immutable Parquet avoids a mutable catalog and extensions needed by DuckLake. Revalidate the typed schema, native resource checks and build time when upgrading. Sources: https://github.com/duckdb/duckdb-rs/releases/tag/v1.10506.0 and https://raw.githubusercontent.com/duckdb/duckdb-rs/v1.10506.0/crates/duckdb/Cargo.toml .
+- Maintenance: Pin the Rust crate exactly and keep Cargo.lock, including its bundled native engine and Arrow graph. The build graph also compiles ureq, rustls, ring, webpki-roots, tar, zip and flate2; bundled mode compiles out the download branch, but those crates still add supply-chain surface. The normal dependency graph also includes comfy-table and crossterm. Recheck either graph with `cargo tree --locked --offline -p persistence -e normal,build -i CRATE`. This adds a C++ build and native allocation observation; the 512 MiB DuckDB buffer limit does not bound whole-process memory. A separate worker, 2 GiB physical-footprint watchdog and bounded one-window staging contain the engine; failures retain unacknowledged source and let collection continue. Immutable Parquet avoids a mutable catalog and extensions needed by DuckLake. Revalidate the typed schema, native resource checks and build time when upgrading. Sources: https://github.com/duckdb/duckdb-rs/releases/tag/v1.10506.0 and https://raw.githubusercontent.com/duckdb/duckdb-rs/v1.10506.0/crates/duckdb/Cargo.toml .
 
 
+## Persistence measurements
+
+The implementation observations in this section were measured on 2026-10-15.
 The complete-schema encoder uses ten typed Parquet tables: ticks, memory, CPUs,
 interfaces, GPU states, core states, fans, processes, coalitions and raw numbered events.
 Child rows key back to their publication; the immutable window metadata identifies the
@@ -776,49 +796,51 @@ On the same Mac, a fresh-target `cargo +1.95.0 build --locked -p persistence --l
 --target-dir /tmp/task19-cold-bundled-20261015` completed in 49.36 seconds wall,
 517.01 user and 52.71 system, with 3,581,493,248-byte maximum compiler RSS. The registry
 was already fetched; no target artifact existed. This includes Arrow and bundled C++
-compilation. It measures this 18-core Mac, not the CI VM; it does not justify changing
-CI's 15-minute timeout.
+compilation. CI build duration for the native dependency is unmeasured; this 18-core
+Mac's result supplies no evidence for changing CI's 15-minute timeout.
 
-The debug encoder's full injected capacity profile has 60 populated ticks with 12,000
+The debug encoder's full injected capacity profile has 61 populated ticks with 12,000
 processes, 28,384 coalitions, 1,638 interfaces, 18 CPUs/cores, 64 states, 10 fans and
-16,384 events per tick. It staged 400,756,320 payload bytes in 78,249,041 ns and completed
-Rust feed plus encoding in 18,511,139,333 ns, with native physical-footprint lifetime peak
-744,801,504 bytes, below the 2 GiB working allowance and without a watchdog trip.
+16,384 events per tick. A carried late tick and sixty scheduled observations can share
+one elapsed minute. It staged 407,435,592 payload bytes in 78,092,042 ns and completed
+Rust feed plus encoding in 18,248,752,167 ns, with native physical-footprint lifetime peak
+761,382,136 bytes, below the 2 GiB working allowance and without a watchdog trip.
 The generated source has no ring mapping; the worker's mapping closure and durable
 publication are separate checks. These debug timings exclude full-sync publication and
 are not the combined recording CPU acceptance observation.
 
 An isolated process encoded 8 warmups and 64 repeated populated small windows. Completed
-window physical footprint rose from 18,612,824 to 18,989,680 bytes over the observed 64;
+window physical footprint rose from 18,743,896 to 22,102,640 bytes over the observed 64;
 the 8 MiB growth bound passed. A native `malloc` mutant retaining and touching 1 MiB per
-window failed that same check (31,015,512 to 97,895,048 bytes). A separate child touched a
+window failed that same check (31,081,048 to 99,369,608 bytes). A separate child touched a
 16 MiB native allocation against a limit 4 MiB above its initial lifetime peak. The
-watchdog observed 21,971,496 current/peak bytes against a 9,355,816-byte limit and
+watchdog observed 21,971,520 current/peak bytes against a 9,355,840-byte limit and
 terminated the child with status 74 before a successful encode. The observer polls
 `proc_pid_rusage` V6 every 100 ms, checks current physical footprint and kernel lifetime
 peak, and reports failure before process exit. This is an observed termination threshold
 with possible overshoot, not an OS allocation quota. The parent integrates refusal,
-reaping and continued collection separately.
+reaping and continued collection separately. Another guard test reached real Parquet
+writes in a pending directory, exited with status 74, and left no canonical commit.
+A guarded blocked operation exits with status 75 after its deadline. Immediate native
+exit avoids running C/C++ cleanup concurrently with the engine.
 
-Recheck with `cargo +1.95.0 test --locked -p persistence --test encoder -- --nocapture
---test-threads=1`. The full test uses explicit capacities rather than the host's smaller
+The encoder configures one thread before opening each engine connection. Opening with
+defaults started seventeen extra workers on this Mac before a later SQL setting removed
+them. The default configuration also exceeded the growth bound once in three runs
+(13,975,552 bytes); the growth checks passed in all three preconfigured comparisons.
+One comparison suite also hit a temporary-directory name collision, since fixed with
+an atomic ordinal. The original spike's
+cause remains unsettled. A malloc cache-release probe released no bytes and was not
+added. The final uninstrumented nine-test encoder suite passed with the figures above;
+the growth assertion and deliberate native leak remain regression gates.
+
+Recheck with `cargo +1.95.0 test --locked -p persistence --test encoder -- --nocapture`.
+The full test uses explicit capacities rather than the host's smaller
 live shape. Source-to-staging byte and row bounds refuse excess input before copying;
 encoder connections close after each window. Raw build and resource output is retained
-in `backlog/evidence/TASK-19/build/encoder`.
-
-The collector declares the kernel
-calls it makes instead of taking them from libc, which added 631 lines to `collector/src`
-and removed 172 (72a35a7..de6cc13). Each struct and constant it declares that the macOS SDK
-headers also declare matches what a C program built against the macOS 27.0 SDK printed. A
-compile-time assertion holds each struct's size, and the offset of each field the collector
-reads, to that output, and each constant holds the printed value. The program is in the
-message of the latest commit that changes a pin, which `git log --grep 'xcrun clang'` lists
-first. Nothing runs it again, so a later SDK that changed one of them would go unnoticed
-until someone does, and nothing checks the argument types of the functions declared against
-the headers. The ring's `struct passwd` and its shared-memory constants came after
-that program, and the same check for them, in the message of the commit that adds this
-sentence, printed what their pins hold. The structs `coalitions.rs` and `smc.rs` declare have no SDK header to check
-them against.
+in `backlog/evidence/TASK-19/build/review-fixes/encoder-verified.log` on this Mac,
+alongside the failed and comparison runs. This private board evidence is git-ignored
+and absent from a clone. Earlier encoder observations remain under `build/encoder`.
 
 ## Next measurements
 
@@ -850,6 +872,19 @@ them against.
 
 ## Evidence
 
+The collector declares the kernel calls it makes instead of taking them from libc,
+which added 631 lines to `collector/src` and removed 172 (72a35a7..de6cc13). Each struct
+and constant covered by the retained C probes matches the macOS 27.0 SDK values those
+probes checked. Compile-time assertions pin Rust sizes and field offsets.
+`git log --grep 'xcrun clang'` finds the commit messages containing the probes,
+including the ring's `struct passwd` and shared-memory constants. Commit 7536d79 retains
+the re-runnable `sigaction` and `proc_bsdshortinfo` static assertions. The documentation
+commit adding Persistence measurements also retains the probe for the recording
+child's `timeval`/`rusage`, both resource observers' `rusage_info_v6`, and both
+attribute-list layouts. Those static assertions compiled on 2026-10-15. These pins
+alone do not compare Rust declarations with a new header or check function argument types.
+`coalitions.rs` and `smc.rs` declare structures with no SDK header to check against.
+
 A reboot on 2026-10-13 cleared `/tmp`, so the programs and output kept there are gone
 and only their descriptions remain. The programs were in `/tmp/sysmon-xray`:
 `xray.c` (one full pass), `sample.c` (300 seconds of processes and open files),
@@ -863,8 +898,10 @@ time, and an exited child's CPU),
 windows were compared with `clickhouse-local` over `procs.csv`. The machine readings
 were timed with a test added to a copy of the Go collector in `/tmp/sysmon-bench`.
 
-The collector is in `collector/`, and `cargo run --release -p collector --bin collector -- --seconds 300` prints its
-cost for each 10-second window and for the run, with each source apart. Its three
+Build the sibling binaries with `cargo build --release -p collector -p persistence
+--bin collector --bin persister`, then run `./target/release/collector --seconds 300`.
+It prints each source's cost, the combined recording CPU, and separate drain cost.
+The historical collector's three
 five-minute runs were release builds of d8788c8, before IOReport and the SMC, 737719d
 and c7bb9ba, at load averages of 5 to 14. The third ran on AC power, and the first two
 did not record the power source. Their output was in `/tmp/fd-probe` as `run1.txt`,
