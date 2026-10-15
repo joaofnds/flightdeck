@@ -321,6 +321,13 @@ impl Reader {
         }
     }
 
+    /// The number of the event the reader reads next, so it can read the events of one tick
+    /// and no further.
+    #[must_use]
+    pub fn next_event(&self) -> u64 {
+        self.events.next
+    }
+
     /// Reads the next event, or the range of those the writer overwrote first.
     pub fn read_event(&mut self) -> io::Result<FoundEvent> {
         let words = self.mapping.words();

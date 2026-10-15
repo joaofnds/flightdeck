@@ -138,13 +138,17 @@ fn slipped(last: Option<Seen>, seen: Seen) -> Option<RangeInclusive<u64>> {
     (seen.tick > last.tick + 1).then(|| last.tick + 1..=seen.tick - 1)
 }
 
-/// Reads the events the writer has logged so far, and prints how many it read, which it
-/// missed, and how many the tick says the collector dropped.
+/// Reads the events of the tick the reader read last, and prints how many it read, which it
+/// missed, and how many the tick says the collector dropped. Events the log holds past the
+/// tick's wait for the tick that drained them, so each count stands beside its own tick.
 fn run_events(reader: &mut Reader) -> std::io::Result<()> {
     let events = reader.tick().events.clone();
     let dropped = reader.tick().dropped;
     let mut read = 0;
     for _ in 0..EVENTS_PER_LOOK_MAX {
+        if reader.next_event() >= events.end {
+            break;
+        }
         match reader.read_event()? {
             FoundEvent::Event { .. } => read += 1,
             FoundEvent::Missed { first, end } => println!("missed events {first}-{}", end - 1),

@@ -384,7 +384,8 @@ mod tests {
         // Goal: events the log overwrote before a reader read them are missed and counted,
         // never read as later events, and the ticks keep every slot.
         // Method: open a reader, then publish six events into a log of four, two a tick, and
-        // read the events and then the ticks.
+        // read the events, with the number the reader reads next before and after, and then
+        // the ticks.
         let place = TestPlace::new("evbehind");
         let mut writer = Writer::create(&place.place, SHAPE).unwrap();
         let mut reader = Reader::open(place.lock_path()).unwrap();
@@ -393,7 +394,9 @@ mod tests {
             let pid = i32::try_from(tick).unwrap();
             publish_events(&mut writer, tick, &[Event::Exec { pid }, exit(pid)]);
         }
+        let next_before = reader.next_event();
         let events: Vec<FoundEvent> = (0..6).map(|_| reader.read_event().unwrap()).collect();
+        let next_after = reader.next_event();
         let ticks: Vec<Found> = (0..4).map(|_| reader.read().unwrap()).collect();
 
         assert_eq!(
@@ -425,6 +428,7 @@ mod tests {
             ],
             events
         );
+        assert_eq!((1, 7), (next_before, next_after));
     }
 
     #[test]
