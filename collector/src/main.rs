@@ -1094,7 +1094,7 @@ fn report_cost(
     let share = cost.share_of_a_core();
     write!(
         out,
-        "CPU {:.2}% of a core, {:.0}% of the budget, {:.2} mW, ",
+        "collector CPU {:.2}% of a core, {:.0}% of the combined budget, {:.2} mW, ",
         share * 100.0,
         share / BUDGET_SHARE_OF_A_CORE * 100.0,
         cost.milliwatts(),
