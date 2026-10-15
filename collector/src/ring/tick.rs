@@ -969,6 +969,8 @@ mod tests {
         assert!(tick.gpu_active_ns.is_empty());
         assert_eq!(0, tick.core_count());
         assert!(!tick.smc_read);
+        assert_eq!(0.0_f32.to_bits(), tick.power_watts.to_bits());
+        assert_eq!(0.0_f32.to_bits(), tick.soc_celsius.to_bits());
         assert!(tick.fan_rpm.is_empty());
     }
 
