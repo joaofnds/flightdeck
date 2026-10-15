@@ -1,17 +1,21 @@
 //! Bounded, separate-process persistence of the collector's published measurements.
 mod encoder;
+pub mod layout;
 mod metadata;
 pub mod query;
+mod reader;
 pub mod resources;
-mod schema;
+pub mod schema;
 mod store;
 mod window;
 pub mod worker;
 
 pub use metadata::{Losses, Manifest, TimeBounds};
-pub use store::{Begin, CommitBoundary, PendingWindow, Store, read_committed};
+pub use reader::tick_buffer;
+pub use store::{Begin, CommitBoundary, PendingWindow, Store, ownership_contended, read_committed};
 
-pub use encoder::{Encoder, SCHEMA_VERSION, TableManifest};
+pub use encoder::{Encoder, TableManifest};
+pub use schema::SCHEMA_VERSION;
 pub use window::{Limits, NumberedEvent, Observation, Window, WindowIdentity};
 
 pub type Result<T> = std::result::Result<T, Error>;

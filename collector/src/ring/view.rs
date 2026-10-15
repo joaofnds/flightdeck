@@ -5,9 +5,8 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 
 use super::{
-    EVENT_SEQUENCE, Found, FoundEvent, HEADER_EVENT_NEWEST, HEADER_PUBLICATION_NEWEST, LockedName,
-    Opened, Reader, RunIdentity, SLOT_SEQUENCE, Shape, Step, Tick, layout, load_event, load_tick,
-    read_finished, read_identity, read_newest,
+    Found, FoundEvent, HEADER_PUBLICATION_NEWEST, LockedName, Opened, RunIdentity, Shape, Tick,
+    layout, read_identity, read_newest,
 };
 use crate::coalitions::Coalition;
 use crate::interfaces::Interface;
@@ -79,14 +78,14 @@ impl RingReader {
     /// Opens the current ring without allocating reading storage.
     pub fn open(lock_path: &Path) -> io::Result<Self> {
         Ok(Self {
-            opened: Reader::open_named(lock_path)?,
+            opened: Opened::open_named(lock_path)?,
         })
     }
 
     /// Opens an explicitly registered retained generation without consulting a lock file.
     pub fn open_generation(name: &str) -> io::Result<Self> {
         Ok(Self {
-            opened: Reader::open_name(LockedName::from_str(name)?)?,
+            opened: Opened::open_name(LockedName::from_str(name)?)?,
         })
     }
 
@@ -112,16 +111,21 @@ impl RingReader {
 
     #[must_use]
     pub fn run_start_continuous_ns(&self) -> Option<u64> {
-        if self.identity().is_some() {
-            Some(self.opened.mapping.words()[30].load(Ordering::Relaxed))
-        } else {
-            None
+        if self.opened.layout.version < layout::LAYOUT_VERSION_OBSERVED {
+            return None;
+        }
+        let words = self.opened.mapping.words();
+        match words[layout::HEADER_ORIGIN_STATE].load(Ordering::Relaxed) {
+            layout::ORIGIN_IDENTIFIED | layout::ORIGIN_UNREGISTERED => {
+                Some(words[layout::HEADER_RUN_START_CONTINUOUS_NS].load(Ordering::Relaxed))
+            }
+            _ => None,
         }
     }
 
     #[must_use]
     pub fn completed(&self) -> bool {
-        if self.opened.layout.version < 3 {
+        if self.opened.layout.version < layout::LAYOUT_VERSION_OBSERVED {
             return false;
         }
         self.opened.mapping.words()[layout::HEADER_COMPLETED].load(Ordering::Acquire) == 1
@@ -130,35 +134,7 @@ impl RingReader {
     /// Reads into caller storage. Only a returned publication makes its contents valid.
     /// A capacity refusal leaves the publication cursor unchanged.
     pub fn read_into(&mut self, tick: &mut Tick) -> io::Result<Found> {
-        if !tick.fits(&self.opened.layout) {
-            return Err(io::Error::from(io::ErrorKind::Unsupported));
-        }
-        let words = self.opened.mapping.words();
-        let newest = read_newest(&words[HEADER_PUBLICATION_NEWEST])?;
-        let publication = match self
-            .opened
-            .publications
-            .step(self.opened.layout.publications_held(newest))
-        {
-            Step::Nothing => return Ok(Found::Nothing),
-            Step::Missed { first, end } => return Ok(Found::Missed { first, end }),
-            Step::Read(publication) => publication,
-        };
-        let slot = &words[self.opened.layout.slot(publication)];
-        let loaded = read_finished(slot, SLOT_SEQUENCE, publication, || {
-            load_tick(slot, &self.opened.layout, tick).then_some(())
-        })?;
-        if loaded.is_some() {
-            Ok(Found::Publication {
-                publication,
-                tick: tick.run_tick,
-            })
-        } else {
-            Ok(Found::Missed {
-                first: publication,
-                end: publication + 1,
-            })
-        }
+        self.opened.read_into(tick)
     }
 
     #[must_use]
@@ -167,28 +143,6 @@ impl RingReader {
     }
 
     pub fn read_event(&mut self) -> io::Result<FoundEvent> {
-        let words = self.opened.mapping.words();
-        let newest = read_newest(&words[HEADER_EVENT_NEWEST])?;
-        let number = match self
-            .opened
-            .events
-            .step(self.opened.layout.events_held(newest))
-        {
-            Step::Nothing => return Ok(FoundEvent::Nothing),
-            Step::Missed { first, end } => return Ok(FoundEvent::Missed { first, end }),
-            Step::Read(number) => number,
-        };
-        let record = &words[self.opened.layout.event(number)];
-        match read_finished(record, EVENT_SEQUENCE, number, || load_event(record))? {
-            Some((tick, event)) => Ok(FoundEvent::Event {
-                number,
-                tick,
-                event,
-            }),
-            None => Ok(FoundEvent::Missed {
-                first: number,
-                end: number + 1,
-            }),
-        }
+        self.opened.read_event()
     }
 }

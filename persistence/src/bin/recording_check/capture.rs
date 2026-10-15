@@ -4,8 +4,8 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use collector::recording::private;
-use collector::ring::{Found, FoundEvent, RingReader, RunIdentity, Shape, Tick, TickBuffers};
-use persistence::{Error, Limits, Result};
+use collector::ring::{Found, FoundEvent, RingReader, RunIdentity, Tick};
+use persistence::{Error, Result};
 
 use super::rows;
 
@@ -18,8 +18,7 @@ pub fn run(lock: &Path, reference: &Path, seconds: u64) -> Result<()> {
     let identity = reader
         .identity()
         .ok_or(Error::Bound("source run identity unavailable"))?;
-    Limits::from_shape(&reader.shape())?;
-    let mut tick = buffers(reader.shape())?;
+    let mut tick = persistence::tick_buffer(&reader.shape())?;
     if reader.next_publication() != reader.publication_first() {
         return Err(Error::Bound(
             "capture opened after initial publications were overwritten",
@@ -132,20 +131,4 @@ fn events(
         return Ok(());
     }
     Err(Error::Bound("source event bound"))
-}
-
-fn buffers(shape: Shape) -> Result<Tick> {
-    let count = |value| usize::try_from(value).map_err(|_| Error::Bound("source capacity"));
-    let state_capacity = count(shape.state_capacity)?;
-    Ok(Tick::from_buffers(TickBuffers {
-        cpus: Vec::with_capacity(count(shape.cpu_capacity)?),
-        interfaces: Vec::with_capacity(count(shape.interface_capacity)?),
-        gpu_active_ns: Vec::with_capacity(state_capacity),
-        core_active_ns: vec![0; count(shape.core_capacity)? * state_capacity],
-        core_state_counts: Vec::with_capacity(count(shape.core_capacity)?),
-        state_capacity,
-        fan_rpm: Vec::with_capacity(count(shape.fan_capacity)?),
-        processes: Vec::with_capacity(count(shape.process_capacity)?),
-        coalitions: Vec::with_capacity(count(shape.coalition_capacity)?),
-    }))
 }

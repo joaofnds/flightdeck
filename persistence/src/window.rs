@@ -29,7 +29,11 @@ pub struct NumberedEvent<'a> {
     pub event: &'a Event,
 }
 
-/// Validated per-tick section bounds; a window holds at most sixty publications.
+// A carried late deadline can join sixty scheduled observations in one elapsed minute.
+const WINDOW_TICKS_MAX: usize = 61;
+const _: () = assert!(WINDOW_TICKS_MAX == 60 + 1);
+
+/// Validated per-tick section bounds for one elapsed minute.
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
     pub(crate) cpus: usize,
@@ -118,13 +122,14 @@ impl Limits {
 }
 
 impl Window {
-    pub fn new(identity: WindowIdentity, limits: Limits) -> Result<Self> {
-        Ok(Self {
+    #[must_use]
+    pub fn new(identity: WindowIdentity, limits: Limits) -> Self {
+        Self {
             identity,
             limits,
-            ticks: Vec::with_capacity(60),
+            ticks: Vec::with_capacity(WINDOW_TICKS_MAX),
             bytes: 0,
-        })
+        }
     }
 
     #[must_use]
@@ -194,7 +199,7 @@ impl Window {
         if tick.events.start > tick.events.end {
             return Err(Error::Bound("event range"));
         }
-        if self.ticks.len() == 60 {
+        if self.ticks.len() == WINDOW_TICKS_MAX {
             return Err(Error::Bound("window ticks"));
         }
         if let Some(last) = self.ticks.last() {
@@ -308,20 +313,42 @@ fn staging_bytes(tick: &Tick, event_count: usize) -> u64 {
 
 impl EventRecord {
     fn copy(source: &NumberedEvent<'_>) -> Self {
+        use crate::schema::{availability, event_kind, noticed};
         let (pid, kind, coalition, usage, availability, noticed) = match source.event {
-            Event::Start { pid, coalition } => (*pid, 1, *coalition, None, 3, None),
-            Event::Exec { pid } => (*pid, 2, None, None, 3, None),
+            Event::Start { pid, coalition } => (
+                *pid,
+                event_kind::START,
+                *coalition,
+                None,
+                availability::NOT_APPLICABLE,
+                None,
+            ),
+            Event::Exec { pid } => (
+                *pid,
+                event_kind::EXEC,
+                None,
+                None,
+                availability::NOT_APPLICABLE,
+                None,
+            ),
             Event::Exit { pid, last, noticed } => {
                 let (usage, availability) = match last {
-                    Ok(usage) => (Some(*usage), 0),
-                    Err(collector::processes::Unreadable::Refused) => (None, 1),
-                    Err(collector::processes::Unreadable::Gone) => (None, 2),
+                    Ok(usage) => (Some(*usage), availability::MEASURED),
+                    Err(collector::processes::Unreadable::Refused) => (None, availability::REFUSED),
+                    Err(collector::processes::Unreadable::Gone) => (None, availability::GONE),
                 };
                 let noticed = match noticed {
-                    Noticed::OnExit => 0,
-                    Noticed::AlreadyExited => 1,
+                    Noticed::OnExit => noticed::ON_EXIT,
+                    Noticed::AlreadyExited => noticed::ALREADY_EXITED,
                 };
-                (*pid, 3, None, usage, availability, Some(noticed))
+                (
+                    *pid,
+                    event_kind::EXIT,
+                    None,
+                    usage,
+                    availability,
+                    Some(noticed),
+                )
             }
         };
         Self {

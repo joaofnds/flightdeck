@@ -28,12 +28,15 @@ use layout::{
     HEADER_PUBLICATION_NEWEST, HEADER_RUN_START_NS, Header, Held, Layout, SLOT_SEQUENCE,
     store_header,
 };
+pub use object::{
+    GENERATION_BUFFER_SIZE, GENERATION_SCAN_MAX, GenerationName, generation_name,
+    previous_generation, unlink_generation,
+};
 use object::{
     LockedName, Mapping, NUMBER_MAX, PROT_READ, PROT_WRITE, RingNames, create_lock, create_object,
     create_previous, create_unlink, create_unlink_older, open_lock_file, open_ring, place_for_user,
     ring_name,
 };
-pub use object::{generation_name, unlink_generation};
 pub use tick::{Dropped, IOReportReadings, Readings, SmcReadings, Tick};
 pub use view::{RingReader, TickBuffers};
 
@@ -131,6 +134,7 @@ pub enum FoundEvent {
 /// The writer of a ring, which holds the lock file for as long as it lives.
 pub struct Writer {
     _lock: File,
+    recording_ownership: Option<File>,
     mapping: Mapping,
     layout: Layout,
     /// The newest publication written, or the previous ring's newest before the first.
@@ -138,6 +142,46 @@ pub struct Writer {
     /// The newest event written, or the previous ring's newest before the first.
     event: u64,
     name: String,
+    previous_generation: u64,
+}
+
+/// The exclusive place lock acquired before recording metadata may be changed.
+pub(crate) struct LockedPlace<'place> {
+    place: &'place Place,
+    lock: File,
+}
+
+impl<'place> LockedPlace<'place> {
+    pub(crate) fn acquire(place: &'place Place) -> io::Result<Self> {
+        Ok(Self {
+            place,
+            lock: create_lock(&place.lock_path)?,
+        })
+    }
+
+    pub(crate) fn create_recording(
+        self,
+        shape: Shape,
+        identity: &RunIdentity,
+        start_continuous_ns: u64,
+    ) -> io::Result<Writer> {
+        Writer::create_inner(
+            self,
+            shape,
+            WriterOrigin::Identified(identity, start_continuous_ns),
+        )
+    }
+
+    pub(crate) fn create_unregistered(self, shape: Shape, start_ns: u64) -> io::Result<Writer> {
+        Writer::create_inner(self, shape, WriterOrigin::Unregistered(start_ns))
+    }
+}
+
+#[derive(Clone, Copy)]
+enum WriterOrigin<'identity> {
+    Legacy,
+    Identified(&'identity RunIdentity, u64),
+    Unregistered(u64),
 }
 
 impl Writer {
@@ -145,7 +189,7 @@ impl Writer {
     /// the ring the lock file names, whose publication numbers it continues. Returns an error
     /// where another writer holds the lock.
     pub fn create(place: &Place, shape: Shape) -> io::Result<Self> {
-        Self::create_inner(place, shape, None)
+        Self::create_inner(LockedPlace::acquire(place)?, shape, WriterOrigin::Legacy)
     }
 
     /// Creates a run without reclaiming any older generation. The owner registers and
@@ -156,14 +200,50 @@ impl Writer {
         identity: &RunIdentity,
         run_start_continuous_ns: u64,
     ) -> io::Result<Self> {
-        Self::create_inner(place, shape, Some((identity, run_start_continuous_ns)))
+        LockedPlace::acquire(place)?.create_recording(shape, identity, run_start_continuous_ns)
+    }
+
+    pub(crate) fn reclaim_unregistered(&self) {
+        let first = self.generation().saturating_sub(GENERATION_SCAN_MAX).max(1);
+        let mut buffer = [0; GENERATION_BUFFER_SIZE];
+        for generation in first..self.generation() {
+            if generation == self.previous_generation {
+                continue;
+            }
+            let name = match generation_name(self.name(), generation, &mut buffer) {
+                Ok(name) => name,
+                Err(error) => {
+                    eprintln!("ring: retention name refused: {error}");
+                    continue;
+                }
+            };
+            match RingReader::open_generation(name) {
+                Ok(reader) => {
+                    if reader.identity().is_some() {
+                        continue;
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    eprintln!("ring: preserving undecodable generation {generation}: {error}");
+                    continue;
+                }
+            }
+            eprintln!(
+                "recording retention eviction generation={generation}; unsealed extent unknown"
+            );
+            if let Err(error) = unlink_generation(name) {
+                eprintln!("ring: retention eviction refused: {error}");
+            }
+        }
     }
 
     fn create_inner(
-        place: &Place,
+        locked: LockedPlace<'_>,
         shape: Shape,
-        identity: Option<(&RunIdentity, u64)>,
+        origin: WriterOrigin,
     ) -> io::Result<Self> {
+        let LockedPlace { place, lock } = locked;
         let Some(layout) = Layout::new(shape) else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -176,8 +256,6 @@ impl Writer {
             .map_err(io::Error::other)?
             .as_nanos();
         let run_start_ns = u64::try_from(run_start_ns).map_err(io::Error::other)?;
-
-        let lock = create_lock(&place.lock_path)?;
 
         let previous = create_previous(&place.name_prefix, &lock)?;
 
@@ -206,27 +284,31 @@ impl Writer {
             event_first: previous.event_newest + 1,
         };
         store_header(mapping.words(), &layout, &header);
-        if let Some((identity, continuous_ns)) = identity {
-            store_identity(mapping.words(), identity);
-            mapping.words()[30].store(continuous_ns, Ordering::Relaxed);
-        }
+        store_origin(mapping.words(), &origin);
 
         create_name(&lock, &created.name).inspect_err(|_| create_unlink(&created.name))?;
         // Only once the lock file names the new ring, so a reader that reads the lock file from
         // now on never finds the ring it names gone. One that read it just before finds the
         // empty ring gone and looks again.
-        if identity.is_none() {
+        if let WriterOrigin::Legacy = origin {
             create_unlink_older(&names, previous.generation);
         }
 
         Ok(Self {
             _lock: lock,
+            recording_ownership: None,
             mapping,
             layout,
             publication: previous.publication_newest,
             event: previous.event_newest,
             name: created.name,
+            previous_generation: previous.generation,
         })
+    }
+
+    pub(crate) fn retain_recording_ownership(&mut self, ownership: File) {
+        assert!(self.recording_ownership.is_none());
+        self.recording_ownership = Some(ownership);
     }
 
     /// Publishes `readings` in the next slot, overwriting the oldest publication once every
@@ -236,11 +318,11 @@ impl Writer {
         self.publish_inner(readings, None);
     }
 
-    pub fn publish_observed(&mut self, readings: &Readings, times: ObservationTimes) {
+    pub fn publish_observed(&mut self, readings: &Readings, times: &ObservationTimes) {
         self.publish_inner(readings, Some(times));
     }
 
-    fn publish_inner(&mut self, readings: &Readings, times: Option<ObservationTimes>) {
+    fn publish_inner(&mut self, readings: &Readings, times: Option<&ObservationTimes>) {
         // A tick's events fit in the log, so a reader can read every one of them.
         assert!(u64_from_usize(readings.events.len()) <= self.layout.shape.event_capacity);
 
@@ -261,14 +343,13 @@ impl Writer {
         let slot = &words[self.layout.slot(publication)];
         slot[SLOT_SEQUENCE].store(2 * publication - 1, Ordering::Relaxed);
         fence(Ordering::Release);
-        store_tick(slot, &self.layout, readings, events_first..self.event + 1);
-        if let Some(times) = times {
-            slot[layout::SLOT_WALL_NS].store(times.wall_ns, Ordering::Relaxed);
-            slot[layout::SLOT_CONTINUOUS_NS].store(times.continuous_ns, Ordering::Relaxed);
-            slot[layout::SLOT_AWAKE_NS].store(times.awake_ns, Ordering::Relaxed);
-            slot[layout::SLOT_SOURCES]
-                .fetch_or(layout::SOURCE_OBSERVATION_TIMES, Ordering::Relaxed);
-        }
+        store_tick(
+            slot,
+            &self.layout,
+            readings,
+            events_first..self.event + 1,
+            times,
+        );
         slot[SLOT_SEQUENCE].store(2 * publication, Ordering::Release);
 
         words[HEADER_PUBLICATION_NEWEST].store(publication, Ordering::Release);
@@ -300,6 +381,25 @@ impl Writer {
     }
 }
 
+fn store_origin(words: &[AtomicU64], origin: &WriterOrigin) {
+    let continuous_ns = match origin {
+        WriterOrigin::Legacy => {
+            words[layout::HEADER_ORIGIN_STATE].store(layout::ORIGIN_UNAVAILABLE, Ordering::Relaxed);
+            return;
+        }
+        WriterOrigin::Identified(identity, continuous_ns) => {
+            store_identity(words, identity);
+            *continuous_ns
+        }
+        WriterOrigin::Unregistered(continuous_ns) => {
+            words[layout::HEADER_ORIGIN_STATE]
+                .store(layout::ORIGIN_UNREGISTERED, Ordering::Relaxed);
+            *continuous_ns
+        }
+    };
+    words[layout::HEADER_RUN_START_CONTINUOUS_NS].store(continuous_ns, Ordering::Relaxed);
+}
+
 fn store_identity(words: &[AtomicU64], identity: &RunIdentity) {
     for (index, value) in [identity.recording.0, identity.run.0, identity.boot.0]
         .into_iter()
@@ -308,37 +408,33 @@ fn store_identity(words: &[AtomicU64], identity: &RunIdentity) {
     {
         words[layout::HEADER_IDENTITY + index].store(value, Ordering::Relaxed);
     }
-    words[31].store(1, Ordering::Relaxed);
+    words[layout::HEADER_ORIGIN_STATE].store(layout::ORIGIN_IDENTIFIED, Ordering::Relaxed);
 }
 
 fn read_identity(words: &[AtomicU64], layout: &Layout) -> Option<RunIdentity> {
-    if layout.version < 3 {
+    if layout.version < layout::LAYOUT_VERSION_OBSERVED {
         return None;
     }
-    if words[31].load(Ordering::Relaxed) != 1 {
+    if words[layout::HEADER_ORIGIN_STATE].load(Ordering::Relaxed) != layout::ORIGIN_IDENTIFIED {
         return None;
     }
-    let load = |index: usize| words[index].load(Ordering::Relaxed);
+    let identity = |offset: usize| {
+        Identity([
+            words[layout::HEADER_IDENTITY + offset].load(Ordering::Relaxed),
+            words[layout::HEADER_IDENTITY + offset + 1].load(Ordering::Relaxed),
+        ])
+    };
     Some(RunIdentity {
-        recording: Identity([load(23), load(24)]),
-        run: Identity([load(25), load(26)]),
-        boot: Identity([load(27), load(28)]),
+        recording: identity(0),
+        run: identity(layout::IDENTITY_WORDS),
+        boot: identity(2 * layout::IDENTITY_WORDS),
     })
 }
 
 /// A reader of a ring, which maps it read-only.
 pub struct Reader {
-    /// The name of the ring, which the lock file named when the reader opened it.
-    name: LockedName,
-    mapping: Mapping,
-    layout: Layout,
-    /// Where the reader stands in the publications, which start past the previous ring's.
-    publications: Cursor,
-    /// When the writer's run started, in nanoseconds since 1970 by the wall clock.
-    run_start_ns: u64,
+    opened: Opened,
     tick: LoadedTick,
-    /// Where the reader stands in the event log, which starts past the previous ring's.
-    events: Cursor,
 }
 
 /// A ring a reader opened, before it has room for the ring's ticks.
@@ -351,22 +447,7 @@ struct Opened {
     layout: Layout,
 }
 
-impl Reader {
-    /// Opens the ring the lock file at `lock_path` names, starting at the oldest publication
-    /// it holds.
-    pub fn open(lock_path: &Path) -> io::Result<Self> {
-        let opened = Self::open_named(lock_path)?;
-        Ok(Self {
-            tick: LoadedTick::new(&opened.layout),
-            name: opened.name,
-            mapping: opened.mapping,
-            publications: opened.publications,
-            run_start_ns: opened.run_start_ns,
-            events: opened.events,
-            layout: opened.layout,
-        })
-    }
-
+impl Opened {
     /// The ring the lock file at `lock_path` names, with the reader's place at the oldest
     /// publication and event it holds, and no room for its ticks, which `follow` keeps.
     fn open_named(lock_path: &Path) -> io::Result<Opened> {
@@ -402,6 +483,71 @@ impl Reader {
         })
     }
 
+    fn read_into(&mut self, tick: &mut Tick) -> io::Result<Found> {
+        if !tick.fits(&self.layout) {
+            return Err(io::Error::from(io::ErrorKind::Unsupported));
+        }
+        let words = self.mapping.words();
+        let newest = read_newest(&words[HEADER_PUBLICATION_NEWEST])?;
+        let publication = match self
+            .publications
+            .step(self.layout.publications_held(newest))
+        {
+            Step::Nothing => return Ok(Found::Nothing),
+            Step::Missed { first, end } => return Ok(Found::Missed { first, end }),
+            Step::Read(publication) => publication,
+        };
+        let slot = &words[self.layout.slot(publication)];
+        let loaded = read_finished(slot, SLOT_SEQUENCE, publication, || {
+            load_tick(slot, &self.layout, tick).then_some(())
+        })?;
+        if loaded.is_some() {
+            Ok(Found::Publication {
+                publication,
+                tick: tick.run_tick,
+            })
+        } else {
+            Ok(Found::Missed {
+                first: publication,
+                end: publication + 1,
+            })
+        }
+    }
+
+    fn read_event(&mut self) -> io::Result<FoundEvent> {
+        let words = self.mapping.words();
+        let newest = read_newest(&words[HEADER_EVENT_NEWEST])?;
+        let number = match self.events.step(self.layout.events_held(newest)) {
+            Step::Nothing => return Ok(FoundEvent::Nothing),
+            Step::Missed { first, end } => return Ok(FoundEvent::Missed { first, end }),
+            Step::Read(number) => number,
+        };
+        let record = &words[self.layout.event(number)];
+        match read_finished(record, EVENT_SEQUENCE, number, || load_event(record))? {
+            Some((tick, event)) => Ok(FoundEvent::Event {
+                number,
+                tick,
+                event,
+            }),
+            None => Ok(FoundEvent::Missed {
+                first: number,
+                end: number + 1,
+            }),
+        }
+    }
+}
+
+impl Reader {
+    /// Opens the ring the lock file at `lock_path` names, starting at the oldest publication
+    /// it holds.
+    pub fn open(lock_path: &Path) -> io::Result<Self> {
+        let opened = Opened::open_named(lock_path)?;
+        Ok(Self {
+            tick: LoadedTick::new(&opened.layout),
+            opened,
+        })
+    }
+
     /// Whether the lock file at `lock_path` names another ring than the reader's, as it does
     /// once the writer restarted, so the reader opens the newer ring after it has read every
     /// publication of its own. A lock file the writer is part-way through writing, or one
@@ -418,7 +564,7 @@ impl Reader {
             return Ok(false);
         }
 
-        Ok(name != self.name.as_str())
+        Ok(name != self.opened.name.as_str())
     }
 
     /// Opens the ring the lock file at `lock_path` names in place of the reader's own, once
@@ -432,19 +578,20 @@ impl Reader {
         }
 
         // The writer that left this ring may have published once more before it stopped.
-        let words = self.mapping.words();
-        if self.publications.next <= words[HEADER_PUBLICATION_NEWEST].load(Ordering::Relaxed) {
+        let words = self.opened.mapping.words();
+        if self.opened.publications.next <= words[HEADER_PUBLICATION_NEWEST].load(Ordering::Relaxed)
+        {
             return Ok(false);
         }
 
         // Only the events a publication names are the reader's to read before it moves. A
         // writer that died between logging a tick's events and publishing its slot left
         // events no publication names, which the reader learns as missed on the newer ring.
-        if self.events.next < self.tick.last.events.end {
+        if self.opened.events.next < self.tick.last.events.end {
             return Ok(false);
         }
 
-        let mut newer = match Self::open_named(lock_path) {
+        let mut newer = match Opened::open_named(lock_path) {
             Ok(newer) => newer,
             // A writer started after the lock file was read, and removed the empty ring it
             // named, so the reader looks again on its next follow.
@@ -460,20 +607,15 @@ impl Reader {
         let tick_shape = Shape {
             slot_count: newer.layout.shape.slot_count,
             event_capacity: newer.layout.shape.event_capacity,
-            ..self.layout.shape
+            ..self.opened.layout.shape
         };
         if tick_shape != newer.layout.shape {
             return Err(io::Error::from(io::ErrorKind::Unsupported));
         }
 
-        newer.publications.carry(&self.publications);
-        newer.events.carry(&self.events);
-        self.name = newer.name;
-        self.mapping = newer.mapping;
-        self.publications = newer.publications;
-        self.run_start_ns = newer.run_start_ns;
-        self.events = newer.events;
-        self.layout = newer.layout;
+        newer.publications.carry(&self.opened.publications);
+        newer.events.carry(&self.opened.events);
+        self.opened = newer;
         Ok(true)
     }
 
@@ -486,7 +628,7 @@ impl Reader {
     /// When the writer's run started, in nanoseconds since 1970 by the wall clock.
     #[must_use]
     pub fn run_start_ns(&self) -> u64 {
-        self.run_start_ns
+        self.opened.run_start_ns
     }
 
     /// Sleeps until the writer publishes past the publications the reader has read, for at
@@ -495,9 +637,9 @@ impl Reader {
     pub fn wait(&self, timeout: Duration) -> io::Result<()> {
         assert!(!timeout.is_zero());
 
-        let newest_word = &self.mapping.words()[HEADER_PUBLICATION_NEWEST];
+        let newest_word = &self.opened.mapping.words()[HEADER_PUBLICATION_NEWEST];
         let newest = newest_word.load(Ordering::Relaxed);
-        if self.publications.next <= newest {
+        if self.opened.publications.next <= newest {
             return Ok(());
         }
 
@@ -509,60 +651,23 @@ impl Reader {
 
     /// Reads the next publication, or the range of those the writer overwrote first.
     pub fn read(&mut self) -> io::Result<Found> {
-        let words = self.mapping.words();
-        let newest = read_newest(&words[HEADER_PUBLICATION_NEWEST])?;
-        let publication = match self
-            .publications
-            .step(self.layout.publications_held(newest))
-        {
-            Step::Nothing => return Ok(Found::Nothing),
-            Step::Missed { first, end } => return Ok(Found::Missed { first, end }),
-            Step::Read(publication) => publication,
-        };
-
-        let slot = &words[self.layout.slot(publication)];
-        if self.tick.read_slot(slot, &self.layout, publication)? {
-            Ok(Found::Publication {
-                publication,
-                tick: self.tick.last.run_tick,
-            })
-        } else {
-            Ok(Found::Missed {
-                first: publication,
-                end: publication + 1,
-            })
+        let found = self.opened.read_into(&mut self.tick.next)?;
+        if matches!(found, Found::Publication { .. }) {
+            std::mem::swap(&mut self.tick.last, &mut self.tick.next);
         }
+        Ok(found)
     }
 
     /// The number of the event the reader reads next, so it can read the events of one tick
     /// and no further.
     #[must_use]
     pub fn next_event(&self) -> u64 {
-        self.events.next
+        self.opened.events.next
     }
 
     /// Reads the next event, or the range of those the writer overwrote first.
     pub fn read_event(&mut self) -> io::Result<FoundEvent> {
-        let words = self.mapping.words();
-        let newest = read_newest(&words[HEADER_EVENT_NEWEST])?;
-        let number = match self.events.step(self.layout.events_held(newest)) {
-            Step::Nothing => return Ok(FoundEvent::Nothing),
-            Step::Missed { first, end } => return Ok(FoundEvent::Missed { first, end }),
-            Step::Read(number) => number,
-        };
-
-        let record = &words[self.layout.event(number)];
-        match read_finished(record, EVENT_SEQUENCE, number, || load_event(record))? {
-            Some((tick, event)) => Ok(FoundEvent::Event {
-                number,
-                tick,
-                event,
-            }),
-            None => Ok(FoundEvent::Missed {
-                first: number,
-                end: number + 1,
-            }),
-        }
+        self.opened.read_event()
     }
 }
 
@@ -695,6 +800,7 @@ impl LoadedTick {
     /// Loads the tick the slot `slot` holds for `publication` in place of the last, and
     /// returns whether it did, which it did not where the writer overwrote the slot with a
     /// later publication before or during the load.
+    #[cfg(test)]
     fn read_slot(
         &mut self,
         slot: &[AtomicU64],
@@ -790,7 +896,7 @@ mod tests {
             events: &[],
             dropped: Dropped::default(),
         };
-        store_tick(&slot, &layout, &readings, 1..1);
+        store_tick(&slot, &layout, &readings, 1..1, None);
         slot[SLOT_SEQUENCE].store(sequence, Ordering::Relaxed);
         slot
     }
@@ -897,8 +1003,28 @@ mod tests {
         // Goal: old measured readings survive without invented observation timestamps.
         // Method: remove layout-three extension words from a published slot and decode it.
         let current = layout();
-        let legacy = Layout::versioned(current.shape, 2).unwrap();
+        let legacy = Layout::versioned(current.shape, layout::LAYOUT_VERSION_LEGACY).unwrap();
+        let memory = Memory {
+            total_bytes: 987_654_321,
+            ..Memory::default()
+        };
+        let process = legacy_process();
+        let readings = Readings {
+            run_tick: 73,
+            cpus: &[],
+            memory: &memory,
+            interfaces: &[],
+            ioreport: None,
+            smc: None,
+            processes: &[process],
+            processes_refused: 2,
+            processes_gone: 3,
+            coalitions: &[],
+            events: &[],
+            dropped: Dropped::default(),
+        };
         let mut slot = slot_holding(2, 73);
+        store_tick(&slot, &current, &readings, 1..1, None);
         slot.drain(layout::SLOT_WALL_NS..layout::SLOT_FIXED_WORDS);
         let mut tick = Tick::new(&legacy);
 
@@ -906,6 +1032,39 @@ mod tests {
 
         assert_eq!(73, tick.run_tick);
         assert_eq!(None, tick.times);
-        assert_eq!(Memory::default(), tick.memory);
+        assert_eq!(memory, tick.memory);
+        assert_eq!(&[process], tick.processes.as_slice());
+        assert_eq!(2, tick.processes_refused);
+        assert_eq!(3, tick.processes_gone);
+    }
+
+    fn legacy_process() -> crate::processes::Process {
+        use crate::processes::{Process, Task, Usage};
+        Process {
+            pid: 42,
+            usage: Usage {
+                awake_ns_at_start: 100,
+                user_ns: 101,
+                system_ns: 102,
+                energy_nj: 103,
+                instructions: 104,
+                super_instructions: 105,
+                cycles: 106,
+                idle_wakeups: 107,
+                interrupt_wakeups: 108,
+                pageins: 109,
+                resident_bytes: 110,
+                footprint_bytes: 111,
+                disk_read_bytes: 112,
+                disk_written_bytes: 113,
+            },
+            task: Task {
+                threads: 2,
+                faults: 3,
+                context_switches: 4,
+                mach_syscalls: 5,
+                unix_syscalls: 6,
+            },
+        }
     }
 }

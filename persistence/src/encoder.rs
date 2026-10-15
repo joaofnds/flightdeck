@@ -2,7 +2,7 @@ use std::path::Path;
 
 use duckdb::{Connection, params};
 
-use crate::schema::TABLES;
+use crate::schema::{TABLES, Table};
 use crate::window::StagedTick;
 use crate::{Error, Result, Window};
 
@@ -15,35 +15,32 @@ pub struct TableManifest {
     pub rows: u64,
 }
 
-pub const SCHEMA_VERSION: u32 = 1;
-
 impl Encoder {
-    pub fn new() -> Result<Self> {
-        Ok(Self)
-    }
-
     /// Writes complete typed files into an already private directory. The caller owns
     /// synchronization/publication, and must release its ring mappings before this call.
     pub fn encode(&self, window: &Window, pending: &Path) -> Result<Vec<TableManifest>> {
         if window.ticks.is_empty() {
             return Err(Error::Bound("empty window"));
         }
-        let connection = Connection::open_in_memory()?;
+        // Configure before open so construction never starts the default CPU-sized pool.
+        let config = duckdb::Config::default().threads(1)?;
+        let connection = Connection::open_in_memory_with_flags(config)?;
         connection.execute_batch(
-            "SET threads=1; SET memory_limit='512MiB'; \
+            "SET memory_limit='512MiB'; \
             SET max_temp_directory_size='0B'; SET autoinstall_known_extensions=false; \
             SET autoload_known_extensions=false;",
         )?;
         let mut tables = Vec::with_capacity(TABLES.len());
-        for (name, columns, order) in TABLES {
+        for (table, columns, order) in TABLES {
+            let name = table.name();
             connection.execute_batch(&format!("CREATE TABLE {name} ({columns})"))?;
-            append(&connection, name, window)?;
+            append(&connection, table, window)?;
             let count: u64 =
                 connection.query_row(&format!("SELECT count(*) FROM {name}"), [], |row| {
                     row.get(0)
                 })?;
             let path = pending.join(format!("{name}.parquet"));
-            if path.exists() {
+            if path.try_exists()? {
                 return Err(Error::Bound("existing table"));
             }
             let path = path
@@ -62,21 +59,20 @@ impl Encoder {
     }
 }
 
-fn append(connection: &Connection, name: &str, window: &Window) -> Result<()> {
-    let mut appender = connection.appender(name)?;
+fn append(connection: &Connection, table: Table, window: &Window) -> Result<()> {
+    let mut appender = connection.appender(table.name())?;
     for tick in &window.ticks {
-        match name {
-            "ticks" => append_tick(&mut appender, tick)?,
-            "memory" => append_memory(&mut appender, tick)?,
-            "cpus" => append_cpus(&mut appender, tick)?,
-            "interfaces" => append_interfaces(&mut appender, tick)?,
-            "gpu_states" => append_gpu(&mut appender, tick)?,
-            "core_states" => append_cores(&mut appender, tick)?,
-            "fans" => append_fans(&mut appender, tick)?,
-            "processes" => append_processes(&mut appender, tick)?,
-            "coalitions" => append_coalitions(&mut appender, tick)?,
-            "events" => append_events(&mut appender, tick)?,
-            _ => unreachable!("fixed table name"),
+        match table {
+            Table::Ticks => append_tick(&mut appender, tick)?,
+            Table::Memory => append_memory(&mut appender, tick)?,
+            Table::Cpus => append_cpus(&mut appender, tick)?,
+            Table::Interfaces => append_interfaces(&mut appender, tick)?,
+            Table::GpuStates => append_gpu(&mut appender, tick)?,
+            Table::CoreStates => append_cores(&mut appender, tick)?,
+            Table::Fans => append_fans(&mut appender, tick)?,
+            Table::Processes => append_processes(&mut appender, tick)?,
+            Table::Coalitions => append_coalitions(&mut appender, tick)?,
+            Table::Events => append_events(&mut appender, tick)?,
         }
     }
     appender.flush()?;
@@ -125,9 +121,9 @@ fn append_tick(appender: &mut duckdb::Appender<'_>, tick: &StagedTick) -> Result
 fn append_memory(appender: &mut duckdb::Appender<'_>, tick: &StagedTick) -> Result<()> {
     let memory = tick.memory;
     let pressure: u8 = match memory.pressure {
-        collector::machine::Pressure::Normal => 0,
-        collector::machine::Pressure::Warning => 1,
-        collector::machine::Pressure::Critical => 2,
+        collector::machine::Pressure::Normal => crate::schema::pressure::NORMAL,
+        collector::machine::Pressure::Warning => crate::schema::pressure::WARNING,
+        collector::machine::Pressure::Critical => crate::schema::pressure::CRITICAL,
     };
     appender.append_row(params![
         tick.observation.publication,

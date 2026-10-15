@@ -2,11 +2,10 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-use collector::recording::discovery::{
-    DIRECTORY_BUFFER_WORDS, DirectoryCursor, DirectoryEntry, Selection, WindowName,
-};
+use collector::recording::discovery::Selection;
 use collector::ring::{Identity, RunIdentity};
 use duckdb::types::ValueRef;
+use persistence::layout::{self, DirectoryNames, Kind, WindowLocation};
 use persistence::{Error, Manifest, Result, read_committed};
 
 use super::rows::{Row, TABLES};
@@ -21,6 +20,7 @@ struct Reference {
 
 pub fn run(root: &Path, reference: &Path) -> Result<()> {
     persistence::query::validate_root(root)?;
+    collector::recording::private::verify_directory(root)?;
     let source = inspect(reference)?;
     let manifests = discover(root, &source)?;
     if manifests.is_empty() {
@@ -154,13 +154,21 @@ fn inspect(path: &Path) -> Result<Reference> {
 
 fn discover(root: &Path, source: &Reference) -> Result<Vec<Manifest>> {
     let mut manifests = Vec::with_capacity(64);
-    visit(&root.join("data"), |run| {
-        visit(&root.join("data").join(run), |day| {
-            visit(&root.join("data").join(run).join(day), |name| {
+    visit(&layout::base(root, Kind::Data), |run| {
+        layout::validate_run(run)?;
+        let run_path = layout::run(root, Kind::Data, collector::recording::parse_identity(run)?);
+        visit(&run_path, |day| {
+            layout::validate_day(day)?;
+            visit(&run_path.join(day), |name| {
                 if name.starts_with('.') {
                     return Ok(());
                 }
-                let window = WindowName::parse(name)?;
+                let location = WindowLocation::parse(&DirectoryNames {
+                    run,
+                    day,
+                    window: name,
+                })?;
+                let window = location.name;
                 let mut selected = false;
                 for second in &source.seconds {
                     if window.select_second(*second)? == Selection::Match {
@@ -171,11 +179,7 @@ fn discover(root: &Path, source: &Reference) -> Result<Vec<Manifest>> {
                 if !selected {
                     return Ok(());
                 }
-                let marker = root
-                    .join("commits")
-                    .join(run)
-                    .join(day)
-                    .join(format!("{:020}.seal", window.window));
+                let marker = location.key.marker(root);
                 let manifest = match read_committed(root, &marker) {
                     Ok(manifest) => manifest,
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -184,7 +188,7 @@ fn discover(root: &Path, source: &Reference) -> Result<Vec<Manifest>> {
                 if manifest.identity.run != source.identity {
                     return Ok(());
                 }
-                if manifest.data_directory != format!("data/{run}/{day}/{name}") {
+                if Path::new(&manifest.data_directory) != location.ready_relative() {
                     return Err(bound(
                         "discovered directory does not match canonical marker",
                     ));
@@ -200,19 +204,8 @@ fn discover(root: &Path, source: &Reference) -> Result<Vec<Manifest>> {
     Ok(manifests)
 }
 
-fn visit(path: &Path, mut entry: impl FnMut(&str) -> Result<()>) -> Result<()> {
-    let mut buffer: Box<[u64; DIRECTORY_BUFFER_WORDS]> = vec![0; DIRECTORY_BUFFER_WORDS]
-        .into_boxed_slice()
-        .try_into()
-        .map_err(|_| bound("directory buffer"))?;
-    let mut cursor = DirectoryCursor::open(path, &mut buffer)?;
-    for _ in 0..10_000_000_u64 {
-        match cursor.next_name()? {
-            DirectoryEntry::Name(name) => entry(name)?,
-            DirectoryEntry::Complete => return Ok(()),
-        }
-    }
-    Err(bound("discovery incomplete"))
+fn visit(path: &Path, entry: impl FnMut(&str) -> Result<()>) -> Result<()> {
+    layout::visit_names(path, entry)
 }
 
 fn compare_table(

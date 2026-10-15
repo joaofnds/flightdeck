@@ -9,13 +9,13 @@ pub use registry::{RegisteredRun, Registry};
 
 use std::ffi::{c_char, c_int, c_void};
 use std::fs::File;
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::clock::{self, Timebase};
-use crate::ring::{Identity, ObservationTimes, Place, RunIdentity};
-use private::{FileLock, create_private_dir, full_sync, open_private_file, sync_directory};
+use crate::ring::{Identity, LockedPlace, ObservationTimes, Place, RunIdentity, Shape, Writer};
+use private::{FileLock, create_private_dir, open_private_file};
 
 unsafe extern "C" {
     fn getentropy(buffer: *mut c_void, length: usize) -> c_int;
@@ -35,13 +35,93 @@ pub struct Registration {
     identity: RunIdentity,
 }
 
+pub struct StartedRecording {
+    writer: Writer,
+    registered: io::Result<()>,
+}
+
+impl StartedRecording {
+    pub fn into_parts(self) -> (Writer, io::Result<()>) {
+        (self.writer, self.registered)
+    }
+}
+
 impl Registration {
-    pub fn prepare(root: &Path, place: &Place) -> io::Result<Self> {
+    /// Creates and registers one source in the required startup order.
+    pub fn start(
+        root: &Path,
+        place: &Place,
+        shape: Shape,
+        start_continuous_ns: u64,
+    ) -> io::Result<StartedRecording> {
+        let locked = LockedPlace::acquire(place)?;
+        let ownership = match Self::start_ownership(root) {
+            Ok(ownership) => ownership,
+            Err(error) => {
+                let reclaim = error.kind() != io::ErrorKind::WouldBlock;
+                return Self::start_unregistered(
+                    locked,
+                    shape,
+                    start_continuous_ns,
+                    error,
+                    None,
+                    reclaim,
+                );
+            }
+        };
+        let registration = match Self::prepare(root, place) {
+            Ok(registration) => registration,
+            Err(error) => {
+                return Self::start_unregistered(
+                    locked,
+                    shape,
+                    start_continuous_ns,
+                    error,
+                    Some(ownership),
+                    true,
+                );
+            }
+        };
+        let mut writer =
+            locked.create_recording(shape, registration.identity(), start_continuous_ns)?;
+        writer.retain_recording_ownership(ownership);
+        let registered = registration.register(writer.name());
+        Ok(StartedRecording { writer, registered })
+    }
+
+    fn start_ownership(root: &Path) -> io::Result<File> {
         create_private_dir(root)?;
-        let lock = FileLock::try_lock(&root.join("registration.lock"))?;
+        let ownership = FileLock::try_lock(&root.join("collector.lock"))?;
+        ownership.file().try_clone()
+    }
+
+    fn start_unregistered(
+        locked: LockedPlace<'_>,
+        shape: Shape,
+        start_continuous_ns: u64,
+        error: io::Error,
+        ownership: Option<File>,
+        reclaim: bool,
+    ) -> io::Result<StartedRecording> {
+        let mut writer = locked.create_unregistered(shape, start_continuous_ns)?;
+        if let Some(ownership) = ownership {
+            writer.retain_recording_ownership(ownership);
+        }
+        if reclaim {
+            writer.reclaim_unregistered();
+        }
+        Ok(StartedRecording {
+            writer,
+            registered: Err(error),
+        })
+    }
+
+    fn prepare(root: &Path, place: &Place) -> io::Result<Self> {
+        create_private_dir(root)?;
+        let lock = FileLock::wait_short(&root.join("registration.lock"))?;
         let recording = recording_identity(root)?;
         let mut registry = Registry::read(root)?;
-        registry.capture_previous(&place.lock_path, recording)?;
+        registry.capture_previous(root, place, recording)?;
         registry.write(root)?;
         let identity = new_run_identity(recording)?;
         let registration = Self {
@@ -57,38 +137,73 @@ impl Registration {
         &self.identity
     }
 
-    pub fn register(&self, ring_name: &str) -> io::Result<()> {
-        let lock = FileLock::try_lock(&self.root.join("registration.lock"))?;
+    fn register(&self, ring_name: &str) -> io::Result<()> {
+        let lock = FileLock::wait_short(&self.root.join("registration.lock"))?;
         let mut registry = Registry::read(&self.root)?;
-        registry.add(RegisteredRun {
-            identity: self.identity,
-            ring_name: ring_name.to_owned(),
-            collector_pid: std::process::id(),
-        })?;
+        registry.add(
+            &self.root,
+            RegisteredRun {
+                identity: self.identity,
+                ring_name: ring_name.to_owned(),
+                collector_pid: std::process::id(),
+            },
+        )?;
         registry.write(&self.root)?;
         drop(lock);
         Ok(())
     }
 }
 
-pub fn recording_identity(root: &Path) -> io::Result<Identity> {
-    let path = root.join("identity");
-    match open_private_file(&path, false) {
-        Ok(mut file) => {
-            let mut text = String::new();
-            Read::by_ref(&mut file).take(34).read_to_string(&mut text)?;
-            parse_identity(text.trim_end_matches('\n'))
+/// Reads the one canonical 32-hex-digit identity and its single line ending.
+pub fn read_identity(root: &Path) -> io::Result<Identity> {
+    let mut path_buffer = [0; private::PATH_MAX];
+    let path = private::join_path(root, "identity", &mut path_buffer)?;
+    let mut file = open_private_file(path, false)?;
+    let mut bytes = [0; 34];
+    let mut length = 0;
+    while length < bytes.len() {
+        let read = file.read(&mut bytes[length..])?;
+        if read == 0 {
+            break;
         }
+        length += read;
+    }
+    if length != 33 {
+        return Err(io::Error::from(io::ErrorKind::InvalidData));
+    }
+    if bytes[32] != b'\n' {
+        return Err(io::Error::from(io::ErrorKind::InvalidData));
+    }
+    let text = std::str::from_utf8(&bytes[..32])
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+    parse_identity(text)
+}
+
+/// Initializes only an absent identity, under the caller's registration lock.
+pub fn recording_identity(root: &Path) -> io::Result<Identity> {
+    match read_identity(root) {
+        Ok(identity) => Ok(identity),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            recording_identity_check_new(root)?;
             let identity = random_identity()?;
-            let mut file = open_private_file(&path, true)?;
-            writeln!(file, "{}", identity_text(identity))?;
-            full_sync(&file)?;
-            sync_directory(root)?;
+            write_atomic(root, "identity", &format!("{}\n", identity_text(identity)))?;
             Ok(identity)
         }
         Err(error) => Err(error),
     }
+}
+
+fn recording_identity_check_new(root: &Path) -> io::Result<()> {
+    for artifact in ["data", "commits", "runs", "retired"] {
+        let mut buffer = [0; private::PATH_MAX];
+        let path = private::join_path(root, artifact, &mut buffer)?;
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => return Err(io::Error::from(io::ErrorKind::InvalidData)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 pub fn random_identity() -> io::Result<Identity> {
@@ -139,10 +254,15 @@ pub fn parse_identity(text: &str) -> io::Result<Identity> {
 }
 
 pub fn observation_times(timebase: Timebase) -> io::Result<ObservationTimes> {
-    let wall = SystemTime::now()
+    observation_times_at(timebase, SystemTime::now())
+}
+
+fn observation_times_at(timebase: Timebase, wall: SystemTime) -> io::Result<ObservationTimes> {
+    let wall = wall
         .duration_since(UNIX_EPOCH)
-        .map_err(io::Error::other)?;
-    let wall_ns = u64::try_from(wall.as_nanos()).map_err(io::Error::other)?;
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+    let wall_ns =
+        u64::try_from(wall.as_nanos()).map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
     let continuous_ns = timebase.nanoseconds(clock::now())?;
     let awake_ns = timebase.nanoseconds(unsafe { mach_absolute_time() })?;
     Ok(ObservationTimes {
@@ -183,14 +303,53 @@ fn boot_identity() -> io::Result<Identity> {
 }
 
 pub(crate) fn write_atomic(root: &Path, name: &str, text: &str) -> io::Result<()> {
-    let temporary = root.join(format!("{name}.pending"));
-    if temporary.try_exists()? {
-        private::verify_file(&temporary)?;
-        std::fs::remove_file(&temporary)?;
+    private::atomic_write(root, name, text.as_bytes())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::recording::discovery::tests::allocator_calls_in;
+
+    #[test]
+    fn canonical_identity_reads_and_refusals_allocate_nothing() {
+        // Goal: every shared disk identity reader uses the same fixed boundary.
+        // Method: count reads of the valid 33-byte form and an extra line ending.
+        let root =
+            std::env::temp_dir().join(format!("flightdeck-identity-fixed-{}", std::process::id()));
+        create_private_dir(&root).unwrap();
+        private::atomic_write(&root, "identity", b"00000000000000010000000000000002\n").unwrap();
+
+        let valid = allocator_calls_in(|| {
+            assert_eq!(Identity([1, 2]), read_identity(&root).unwrap());
+        });
+        private::atomic_write(&root, "identity", b"00000000000000010000000000000002\n\n").unwrap();
+        let refused = allocator_calls_in(|| {
+            assert_eq!(
+                io::ErrorKind::InvalidData,
+                read_identity(&root).unwrap_err().kind()
+            );
+        });
+
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(0, valid);
+        assert_eq!(0, refused);
     }
-    let mut file: File = open_private_file(&temporary, true)?;
-    file.write_all(text.as_bytes())?;
-    full_sync(&file)?;
-    std::fs::rename(&temporary, root.join(name))?;
-    sync_directory(root)
+
+    #[test]
+    fn refuses_a_wall_clock_before_the_epoch_without_allocating() {
+        // Goal: a wall clock outside the stored range remains explicitly unavailable.
+        // Method: inject a pre-epoch clock and count allocations on the refused snapshot.
+        let timebase = Timebase::read().unwrap();
+        let wall = UNIX_EPOCH - std::time::Duration::from_secs(1);
+
+        let calls = allocator_calls_in(|| {
+            assert_eq!(
+                io::ErrorKind::InvalidData,
+                observation_times_at(timebase, wall).unwrap_err().kind()
+            );
+        });
+
+        assert_eq!(0, calls);
+    }
 }

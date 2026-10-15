@@ -1,5 +1,10 @@
 #[cfg(test)]
+#[path = "encoder_fixture/mod.rs"]
+mod engine_fixture;
+
+#[cfg(test)]
 mod tests {
+    use super::engine_fixture;
     use std::fs::{self, OpenOptions};
     use std::io::Write;
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -93,6 +98,16 @@ mod tests {
         }
     }
 
+    fn submit_manifest(store: &Store, candidate: Manifest) -> Manifest {
+        match store.begin(&candidate.identity).unwrap() {
+            Begin::Committed(committed) => committed,
+            Begin::Pending(pending) => {
+                write_tables(&pending, &candidate);
+                store.commit(pending, candidate).unwrap()
+            }
+        }
+    }
+
     #[test]
     fn a_complete_window_reopens_by_its_fixed_key_after_wall_bounds_change() {
         // Goal: replay uses the committed identity and ranges despite a changed surviving tail.
@@ -109,15 +124,47 @@ mod tests {
         let mut changed_tail = committed.clone();
         changed_tail.wall_ns = Some(TimeBounds { min: 151, max: 199 });
         changed_tail.publication_first = 21;
-        let replay = store.begin(&changed_tail.identity).unwrap();
+        let replayed = submit_manifest(&store, changed_tail);
 
         assert_eq!(recording_identity, store.recording());
-        let Begin::Committed(replayed) = replay else {
-            panic!("committed key became pending");
-        };
         assert_eq!(20, replayed.publication_first);
         assert_eq!(Some(TimeBounds { min: 100, max: 200 }), replayed.wall_ns);
         assert_eq!(committed.data_directory, replayed.data_directory);
+    }
+
+    #[test]
+    fn a_ready_orphan_preserves_original_bounds_when_a_changed_tail_is_submitted() {
+        // Goal: an immutable ready window survives a replay with different observed bounds.
+        // Method: interrupt after rename, then submit a whole replacement manifest and files.
+        let recording = Recording::new();
+        let store = Store::open(&recording.0).unwrap();
+        let original = manifest(identity(&store));
+        let pending = stage(&store, &original);
+        let result = store.commit_observed(pending, original.clone(), &mut |boundary| {
+            if boundary == persistence::CommitBoundary::ReadyRenamed {
+                Err(std::io::ErrorKind::Interrupted.into())
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(std::io::ErrorKind::Interrupted, result.unwrap_err().kind());
+        assert!(!store.marker_path(&original.identity).try_exists().unwrap());
+        drop(store);
+
+        let store = Store::open(&recording.0).unwrap();
+        let mut changed_tail = original.clone();
+        changed_tail.wall_ns = Some(TimeBounds { min: 151, max: 199 });
+        changed_tail.publication_first = 21;
+        let replayed = submit_manifest(&store, changed_tail);
+
+        assert_eq!(original.wall_ns, replayed.wall_ns);
+        assert_eq!(original.publication_first, replayed.publication_first);
+        let persisted =
+            persistence::read_committed(&recording.0, &store.marker_path(&original.identity))
+                .unwrap();
+        assert_eq!(original.wall_ns, persisted.wall_ns);
+        assert_eq!(original.publication_first, persisted.publication_first);
+        assert_complete_fixture(&recording.0, &store, &persisted);
     }
 
     #[test]
@@ -130,13 +177,48 @@ mod tests {
         let refused = Store::open(&recording.0);
         let registration = owner.registration_lock().unwrap();
 
-        assert_eq!(
-            std::io::ErrorKind::WouldBlock,
-            refused.err().unwrap().kind()
-        );
+        let error = refused.err().unwrap();
+        assert_eq!(std::io::ErrorKind::WouldBlock, error.kind());
+        assert!(persistence::ownership_contended(&error));
         drop(registration);
         drop(owner);
         assert!(Store::open(&recording.0).is_ok());
+    }
+
+    #[test]
+    fn registration_contention_is_distinct_from_a_surviving_persister() {
+        // Goal: startup coordination cannot be mistaken for existing persistence ownership.
+        // Method: refuse opening while holding only the short registration lock.
+        let recording = Recording::new();
+        let store = Store::open(&recording.0).unwrap();
+        let lock = store.registration_lock().unwrap();
+        drop(store);
+
+        let error = Store::open(&recording.0).err().unwrap();
+
+        assert_eq!(std::io::ErrorKind::WouldBlock, error.kind());
+        assert!(!persistence::ownership_contended(&error));
+        drop(lock);
+    }
+
+    #[test]
+    fn opening_a_store_waits_for_a_short_registration_transaction() {
+        // Goal: a live registry transaction cannot make a newly launched persister disappear.
+        // Method: hold the native registration lock for 100 ms while opening a fresh owner.
+        let recording = Recording::new();
+        let store = Store::open(&recording.0).unwrap();
+        let recording_identity = store.recording();
+        let lock = store.registration_lock().unwrap();
+        drop(store);
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            drop(lock);
+        });
+
+        let reopened = Store::open(&recording.0);
+
+        release.join().unwrap();
+        assert_eq!(recording_identity, reopened.unwrap().recording());
     }
 
     #[test]
@@ -173,23 +255,24 @@ mod tests {
         let store = Store::open(&recording.0).unwrap();
         let original = manifest(identity(&store));
         let pending = stage(&store, &original);
-        assert_eq!(0o700, fs::metadata(pending.path()).unwrap().mode() & 0o777);
+        inspect_private_directories(&recording.0, pending.path());
+        inspect_private_tables(pending.path(), &original);
 
         let committed = store.commit(pending, original).unwrap();
         let data = recording.0.join(&committed.data_directory);
-
-        assert_eq!(0o700, fs::metadata(&data).unwrap().mode() & 0o777);
-        assert_eq!(
-            0o600,
-            fs::metadata(data.join("ticks.parquet")).unwrap().mode() & 0o777
-        );
-        assert_eq!(
-            0o600,
-            fs::metadata(store.marker_path(&committed.identity))
-                .unwrap()
-                .mode()
-                & 0o777
-        );
+        let marker = store.marker_path(&committed.identity);
+        inspect_private_directories(&recording.0, &data);
+        inspect_private_directories(&recording.0, marker.parent().unwrap());
+        inspect_private_tables(&data, &committed);
+        for path in [
+            recording.0.join("identity"),
+            recording.0.join("registration.lock"),
+            recording.0.join("persister.lock"),
+            data.join("metadata"),
+            marker,
+        ] {
+            collector::recording::private::verify_file(&path).unwrap();
+        }
     }
 
     #[test]
@@ -272,7 +355,9 @@ mod tests {
         drop(store);
 
         let store = Store::open(&recording.0).unwrap();
-        let committed = match store.begin(&original.identity).unwrap() {
+        let recovered = store.begin(&original.identity).unwrap();
+        assert_recovery_boundary(&recovered, boundary);
+        let committed = match recovered {
             Begin::Committed(committed) => committed,
             Begin::Pending(pending) => {
                 write_tables(&pending, &original);
@@ -285,6 +370,31 @@ mod tests {
         assert_eq!(
             committed,
             store.existing(&committed.identity).unwrap().unwrap()
+        );
+    }
+
+    fn assert_recovery_boundary(recovered: &Begin, boundary: persistence::CommitBoundary) {
+        use persistence::CommitBoundary;
+        let committed = match boundary {
+            CommitBoundary::ReadyRenamed
+            | CommitBoundary::BeforeReadySync
+            | CommitBoundary::ReadySynced
+            | CommitBoundary::BeforeMarkerLink
+            | CommitBoundary::MarkerLinked
+            | CommitBoundary::BeforeMarkerSync
+            | CommitBoundary::MarkerSynced => true,
+            CommitBoundary::BeforeFilesSync
+            | CommitBoundary::FilesSynced
+            | CommitBoundary::BeforeMetadataWrite
+            | CommitBoundary::MetadataSynced
+            | CommitBoundary::BeforePendingSync
+            | CommitBoundary::PendingSynced
+            | CommitBoundary::BeforeReadyRename => false,
+        };
+        assert_eq!(
+            committed,
+            matches!(recovered, Begin::Committed(_)),
+            "wrong recovery variant after {boundary:?}"
         );
     }
 
@@ -393,21 +503,197 @@ mod tests {
     fn another_user_cannot_read_pending_or_committed_recording_artifacts() {
         // Goal: another unprivileged user cannot open any recording artifact.
         // Method: attempt actual nobody reads of pending files and then committed metadata/data.
+        parquet_privacy(
+            true,
+            "tests::another_user_cannot_read_pending_or_committed_recording_artifacts",
+        );
+    }
+
+    #[test]
+    fn real_parquet_artifacts_are_private_below_an_inheriting_acl() {
+        // Goal: native encoder output stays private even under an otherwise permissive ACL.
+        // Method: encode in an isolated worker with umask077 and inspect pending and sealed files.
+        parquet_privacy(
+            false,
+            "tests::real_parquet_artifacts_are_private_below_an_inheriting_acl",
+        );
+    }
+
+    #[test]
+    fn a_table_path_inspection_error_is_reported_before_native_file_writing() {
+        // Goal: failed metadata inspection cannot be treated as permission to create a file.
+        // Method: provide a regular file where the table directory must be.
         let recording = Recording::new();
         let store = Store::open(&recording.0).unwrap();
-        let original = manifest(identity(&store));
-        let pending = stage(&store, &original);
-        for table in &original.tables {
-            refused_for_nobody(&pending.path().join(format!("{}.parquet", table.name)));
-        }
-        let committed = store.commit(pending, original).unwrap();
-        let data = recording.0.join(&committed.data_directory);
+        let destination = recording.0.join("not_a_directory");
+        fs::write(&destination, b"keep this file").unwrap();
+        let window = engine_fixture::window(false);
 
-        refused_for_nobody(&recording.0.join("identity"));
-        refused_for_nobody(&store.marker_path(&committed.identity));
-        refused_for_nobody(&data.join("metadata"));
-        for table in &committed.tables {
-            refused_for_nobody(&data.join(format!("{}.parquet", table.name)));
+        let result = persistence::Encoder.encode(&window, &destination);
+
+        assert!(matches!(result, Err(persistence::Error::Io(error))
+            if error.raw_os_error() == Some(20)));
+        assert_eq!(b"keep this file", fs::read(destination).unwrap().as_slice());
+        drop(store);
+    }
+
+    #[test]
+    fn invalid_manifest_bounds_are_refused_before_a_ready_name_is_formatted() {
+        // Goal: an invalid boundary value remains an operating error rather than a panic.
+        // Method: stage files, then submit reversed measured wall bounds.
+        let recording = Recording::new();
+        let store = Store::open(&recording.0).unwrap();
+        let mut original = manifest(identity(&store));
+        let pending = stage(&store, &original);
+        original.wall_ns = Some(TimeBounds { min: 200, max: 100 });
+
+        let result = store.commit(pending, original);
+
+        assert_eq!(std::io::ErrorKind::InvalidData, result.unwrap_err().kind());
+    }
+
+    fn parquet_privacy(other_user: bool, test: &str) {
+        const CHILD_ROOT: &str = "FLIGHTDECK_STORE_TEST_PARQUET_ROOT";
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            parquet_privacy_child(&PathBuf::from(root), other_user);
+            return;
+        }
+        let recording = Recording::new();
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                test,
+                "--include-ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD_ROOT, &recording.0)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            b"verified",
+            fs::read(recording.0.join("verified")).unwrap().as_slice()
+        );
+    }
+
+    fn parquet_privacy_child(parent: &std::path::Path, other_user: bool) {
+        parquet_privacy_inherited_parent(parent, other_user);
+        let root = parent.join("recording");
+        let store = Store::open(&root).unwrap();
+        let mut window = engine_fixture::window(false);
+        window.identity.run.recording = store.recording();
+        let Begin::Pending(pending) = store.begin(&window.identity).unwrap() else {
+            panic!("new encoder fixture was committed");
+        };
+        let mut manifest = manifest(window.identity);
+        manifest.publication_first = window.publication_range().start;
+        manifest.publication_end = window.publication_range().end;
+        manifest.events_first = window.event_range().start;
+        manifest.events_end = window.event_range().end;
+        manifest.wall_ns = Some(TimeBounds {
+            min: 1_000_000_000_000,
+            max: 1_060_000_000_000,
+        });
+        manifest.tables = persistence::Encoder
+            .encode(&window, pending.path())
+            .unwrap();
+        inspect_private_directories(&root, pending.path());
+        inspect_parquet_files(pending.path(), &manifest, other_user);
+        let committed = store.commit(pending, manifest).unwrap();
+        inspect_private_directories(&root, &root.join(&committed.data_directory));
+        inspect_private_directories(
+            &root,
+            store.marker_path(&committed.identity).parent().unwrap(),
+        );
+        inspect_parquet_files(
+            &root.join(&committed.data_directory),
+            &committed,
+            other_user,
+        );
+        for path in [
+            root.join("identity"),
+            store.marker_path(&committed.identity),
+            root.join(&committed.data_directory).join("metadata"),
+        ] {
+            collector::recording::private::verify_file(&path).unwrap();
+            if other_user {
+                refused_for_nobody(&path);
+            }
+        }
+        fs::write(parent.join("verified"), b"verified").unwrap();
+    }
+
+    fn parquet_privacy_inherited_parent(parent: &std::path::Path, other_user: bool) {
+        unsafe extern "C" {
+            fn umask(mask: u16) -> u16;
+        }
+        let previous = unsafe { umask(0o077) };
+        assert!(previous <= 0o777);
+        fs::create_dir(parent).unwrap();
+        let added = std::process::Command::new("/bin/chmod")
+            .args([
+                "+a",
+                concat!(
+                    "everyone allow read,execute,readattr,readextattr,",
+                    "readsecurity,file_inherit,directory_inherit"
+                ),
+            ])
+            .arg(parent)
+            .status()
+            .unwrap();
+        assert!(added.success());
+        let control = parent.join("inherited_control");
+        fs::write(&control, b"inherited ACL is active").unwrap();
+        assert!(collector::recording::private::verify_file(&control).is_err());
+        if other_user {
+            let allowed = std::process::Command::new("sudo")
+                .args(["-n", "-u", "nobody", "/bin/cat"])
+                .arg(&control)
+                .output()
+                .unwrap();
+            assert!(
+                allowed.status.success(),
+                "{}",
+                String::from_utf8_lossy(&allowed.stderr)
+            );
+        }
+    }
+
+    fn inspect_parquet_files(directory: &std::path::Path, manifest: &Manifest, other_user: bool) {
+        collector::recording::private::verify_directory(directory).unwrap();
+        assert_eq!(10, manifest.tables.len());
+        for table in &manifest.tables {
+            let path = directory.join(format!("{}.parquet", table.name));
+            collector::recording::private::verify_file(&path).unwrap();
+            let bytes = fs::read(&path).unwrap();
+            assert_eq!(b"PAR1", &bytes[..4]);
+            assert_eq!(b"PAR1", &bytes[bytes.len() - 4..]);
+            if other_user {
+                refused_for_nobody(&path);
+            }
+        }
+    }
+
+    fn inspect_private_directories(root: &std::path::Path, leaf: &std::path::Path) {
+        for directory in leaf.ancestors().take(8) {
+            collector::recording::private::verify_directory(directory).unwrap();
+            if directory == root {
+                return;
+            }
+        }
+        panic!("artifact directory was outside the bounded recording hierarchy");
+    }
+
+    fn inspect_private_tables(directory: &std::path::Path, manifest: &Manifest) {
+        assert_eq!(10, manifest.tables.len());
+        for table in &manifest.tables {
+            let path = directory.join(format!("{}.parquet", table.name));
+            collector::recording::private::verify_file(&path).unwrap();
         }
     }
 
@@ -577,7 +863,9 @@ mod tests {
         let store = Store::open(&recording.0).unwrap();
         let original = manifest(identity(&store));
 
-        let committed = match store.begin(&original.identity).unwrap() {
+        let recovered = store.begin(&original.identity).unwrap();
+        assert_recovery_boundary(&recovered, boundary);
+        let committed = match recovered {
             Begin::Committed(committed) => committed,
             Begin::Pending(pending) => {
                 write_tables(&pending, &original);
@@ -805,6 +1093,33 @@ mod tests {
             }
         }
         panic!("partial table crash boundary was not reached");
+    }
+
+    #[test]
+    fn a_window_in_the_wrong_elapsed_day_is_an_error_instead_of_complete_empty() {
+        // Goal: malformed partition placement cannot hide a recorded second as absent.
+        // Method: move a committed ready set into a different well-formed day directory.
+        let recording = Recording::new();
+        let store = Store::open(&recording.0).unwrap();
+        let original = manifest(identity(&store));
+        let pending = stage(&store, &original);
+        let committed = store.commit(pending, original).unwrap();
+        let ready = recording.0.join(&committed.data_directory);
+        let wrong = ready
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("00000000000000000001");
+        collector::recording::private::create_private_dir(&wrong).unwrap();
+        fs::rename(&ready, wrong.join(ready.file_name().unwrap())).unwrap();
+
+        let answer = persistence::query::processes_at_second(&recording.0, 0);
+
+        assert!(
+            answer.is_err(),
+            "wrong partition returned a complete empty answer"
+        );
     }
 
     fn assert_complete_fixture(root: &std::path::Path, store: &Store, committed: &Manifest) {

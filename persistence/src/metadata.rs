@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::io::{self, Read, Write};
 
+pub use collector::recording::discovery::TimeBounds;
 use collector::ring::{Identity, RunIdentity};
 
 use crate::{TableManifest, WindowIdentity};
@@ -20,12 +21,6 @@ pub struct Manifest {
     pub tables: Vec<TableManifest>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TimeBounds {
-    pub min: u64,
-    pub max: u64,
-}
-
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Losses {
     pub publications: u64,
@@ -34,6 +29,7 @@ pub struct Losses {
 }
 
 const MAGIC: &[u8; 8] = b"FDSEAL01";
+const ENCODING_VERSION: u64 = 1;
 const METADATA_BYTES_MAX: u64 = 4096;
 const TABLES_MAX: usize = 16;
 const DIRECTORY_BYTES_MAX: usize = 256;
@@ -42,8 +38,8 @@ impl Manifest {
     pub(crate) fn write(&self, file: &mut File) -> io::Result<()> {
         self.validate()?;
         file.write_all(MAGIC)?;
-        file.write_all(&1_u64.to_le_bytes())?;
-        file.write_all(&1_u64.to_le_bytes())?;
+        file.write_all(&u64::from(crate::SCHEMA_VERSION).to_le_bytes())?;
+        file.write_all(&ENCODING_VERSION.to_le_bytes())?;
         for identity in [
             self.identity.run.recording,
             self.identity.run.run,
@@ -96,10 +92,10 @@ impl Manifest {
         if decoder.take(8)? != MAGIC {
             return Err(invalid("metadata version"));
         }
-        if decoder.word()? != 1 {
+        if decoder.word()? != u64::from(crate::SCHEMA_VERSION) {
             return Err(invalid("schema version"));
         }
-        if decoder.word()? != 1 {
+        if decoder.word()? != ENCODING_VERSION {
             return Err(invalid("encoding version"));
         }
         let identity = WindowIdentity {
@@ -135,8 +131,8 @@ impl Manifest {
             let name = decoder.string()?;
             let name = crate::schema::TABLES
                 .iter()
-                .find(|table| table.0 == name)
-                .map(|table| table.0)
+                .find(|table| table.0.name() == name)
+                .map(|table| table.0.name())
                 .ok_or_else(|| invalid("unknown table"))?;
             manifest.tables.push(TableManifest {
                 name,
@@ -177,7 +173,7 @@ impl Manifest {
         for (index, table) in self.tables.iter().enumerate() {
             if !crate::schema::TABLES
                 .iter()
-                .any(|known| known.0 == table.name)
+                .any(|known| known.0.name() == table.name)
             {
                 return Err(invalid("unknown table"));
             }

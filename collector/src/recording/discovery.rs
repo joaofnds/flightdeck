@@ -10,6 +10,9 @@ use std::path::Path;
 pub const DIRECTORY_BUFFER_WORDS: usize = 8192;
 const DIRECTORY_BUFFER_BYTES: usize = DIRECTORY_BUFFER_WORDS * size_of::<u64>();
 const DIRECTORY_ENTRIES_MAX: u32 = 2048;
+const ATTR_BIT_MAP_COUNT: u16 = 5;
+const ATTR_CMN_RETURNED_ATTRS: u32 = 0x8000_0000;
+const ATTR_CMN_NAME: u32 = 0x0000_0001;
 
 /// Owns the kernel enumeration position and borrows fixed caller storage for its pages.
 pub struct DirectoryCursor<'buffer> {
@@ -100,9 +103,9 @@ impl<'buffer> DirectoryCursor<'buffer> {
 
     fn read_page(&mut self) -> io::Result<u32> {
         let mut attributes = Attrlist {
-            bitmapcount: 5,
+            bitmapcount: ATTR_BIT_MAP_COUNT,
             reserved: 0,
-            commonattr: 0x8000_0001,
+            commonattr: ATTR_CMN_RETURNED_ATTRS | ATTR_CMN_NAME,
             volattr: 0,
             dirattr: 0,
             fileattr: 0,
@@ -167,6 +170,22 @@ pub enum Selection {
     Match,
     Outside,
     Unknown,
+}
+
+impl std::fmt::Display for WindowName {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.bounds {
+            Some(bounds) => {
+                assert!(bounds.min <= bounds.max);
+                write!(
+                    formatter,
+                    "{:020}_w{:020}-{:020}",
+                    self.window, bounds.min, bounds.max
+                )
+            }
+            None => write!(formatter, "{:020}_unknown", self.window),
+        }
+    }
 }
 
 impl WindowName {
@@ -372,5 +391,42 @@ pub(crate) mod tests {
                 .is_err()
         );
         assert!(WindowName::parse("00000000000000000017_w100-200").is_err());
+    }
+
+    #[test]
+    fn formatted_names_round_trip_without_allocating_shared_storage() {
+        // Goal: the writer and discovery share one name grammar without heap work.
+        // Method: format maximum-width measured bounds into caller bytes and parse them.
+        assert_formatted_name(&WindowName {
+            window: u64::MAX,
+            bounds: Some(TimeBounds {
+                min: 0,
+                max: u64::MAX,
+            }),
+        });
+    }
+
+    #[test]
+    fn formatted_unknown_names_round_trip_without_allocating_shared_storage() {
+        // Goal: unavailable wall bounds keep their explicit name rather than inventing zero.
+        // Method: format the unknown state into caller bytes and parse it.
+        assert_formatted_name(&WindowName {
+            window: 0,
+            bounds: None,
+        });
+    }
+
+    fn assert_formatted_name(name: &WindowName) {
+        use std::io::Write;
+        let mut buffer = [0_u8; 64];
+        let calls = allocator_calls_in(|| {
+            let mut target = io::Cursor::new(&mut buffer[..]);
+            write!(&mut target, "{name}").unwrap();
+            let length = usize::try_from(target.position()).unwrap();
+            let text = std::str::from_utf8(&buffer[..length]).unwrap();
+            assert_eq!(*name, WindowName::parse(text).unwrap());
+        });
+
+        assert_eq!(0, calls);
     }
 }

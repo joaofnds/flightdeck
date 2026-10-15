@@ -183,7 +183,7 @@ mod tests {
     #[test]
     fn recording_identity_and_observed_clocks_survive_backward_wall_time() {
         // Goal: run identity and measured clocks survive publication without wall ordering.
-        // Method: publish a backward wall clock with increasing elapsed clocks and reopen.
+        // Method: publish a backward wall clock with unchanged measured elapsed clocks and read.
         let place = TestPlace::new("clocks");
         let identity = run_identity(1);
         let mut writer = Writer::create_recording(&place.place, SHAPE, &identity, 40).unwrap();
@@ -198,7 +198,7 @@ mod tests {
                 continuous_ns: 60,
                 awake_ns: 55,
             };
-            writer.publish_observed(&readings(3, &Memory::default()), times);
+            writer.publish_observed(&readings(3, &Memory::default()), &times);
             assert!(matches!(
                 reader.read_into(&mut tick).unwrap(),
                 Found::Publication { .. }
@@ -268,7 +268,7 @@ mod tests {
         // Method: forge its version, restart recording and count the refused reopen.
         let place = TestPlace::new("preservebad");
         let forged = forge(&place, &[]);
-        forged.write(1, 999);
+        forged.write(HEADER_LAYOUT_VERSION, 999);
         let old_name = std::fs::read_to_string(place.lock_path()).unwrap();
         let spawns = spawns();
         let writer = Writer::create_recording(&place.place, SHAPE, &run_identity(1), 1).unwrap();
@@ -289,7 +289,7 @@ mod tests {
         // Method: break a finished slot's sequence and count read-into allocator calls.
         let place = TestPlace::new("badcaller");
         let forged = forge(&place, &[]);
-        forged.write(32, 0);
+        forged.write(HEADER_WORDS, 0);
         let mut reader = RingReader::open(place.lock_path()).unwrap();
         let mut tick = tick_buffer(SHAPE);
 
@@ -514,6 +514,9 @@ mod tests {
     }
 
     /// Header words the forging tests change, as the ring's layout places them.
+    const HEADER_LAYOUT_VERSION: usize = 1;
+    const HEADER_WORDS: usize = 32;
+    const LAYOUT_VERSION_OBSERVED: u64 = 3;
     const HEADER_PUBLICATION_FIRST: usize = 3;
     const HEADER_PUBLICATION_NEWEST: usize = 4;
     const HEADER_EVENT_NEWEST: usize = 7;
@@ -576,6 +579,12 @@ mod tests {
         let to = map(&forged, PROT_READ | PROT_WRITE);
         unsafe {
             std::ptr::copy_nonoverlapping(from.cast::<u8>(), to.cast::<u8>(), length);
+            assert_eq!(
+                LAYOUT_VERSION_OBSERVED,
+                to.cast::<u64>().add(HEADER_LAYOUT_VERSION).read()
+            );
+            // The source published once, so its first slot must start with finished sequence2.
+            assert_eq!(2, to.cast::<u64>().add(HEADER_WORDS).read());
             for &(word, value) in edits {
                 // A ring that published once numbers its first and newest publication 1, so
                 // a layout that moved the word fails here and not as a refusal of another.
@@ -1668,6 +1677,92 @@ mod tests {
             "publication 1 tick 9 processes 0 coalitions 0\n",
             stdout(&output)
         );
+    }
+
+    #[test]
+    fn anonymous_fallback_keeps_the_actual_prior_when_an_occupied_name_is_skipped() {
+        // Goal: fallback retention preserves the last actual run, not a numeric neighbor.
+        // Method: occupy generation two between anonymous runs one and three.
+        use collector::recording::{Registration, private};
+        let place = TestPlace::new("anonoccupied");
+        let refused = place.lock_path().with_extension("refused");
+        drop(private::open_private_file(&refused, true).unwrap());
+        let (mut first, status) = Registration::start(&refused, &place.place, SHAPE, 71)
+            .unwrap()
+            .into_parts();
+        assert!(status.is_err());
+        publish(&mut first, 17);
+        drop(first);
+        let squatter = unsafe {
+            shm_open(
+                place.ring_name(2).as_ptr(),
+                O_RDWR | O_CREAT | O_EXCL,
+                0o600,
+            )
+        };
+        assert!(squatter >= 0);
+        drop(unsafe { OwnedFd::from_raw_fd(squatter) });
+
+        let (second, status) = Registration::start(&refused, &place.place, SHAPE, 81)
+            .unwrap()
+            .into_parts();
+        std::fs::remove_file(refused).unwrap();
+
+        assert!(status.is_err());
+        assert_eq!(3, second.generation());
+        assert!(place.holds(1));
+        assert!(place.holds(2));
+        assert!(place.holds(3));
+    }
+
+    #[test]
+    fn four_completed_runs_reclaim_old_sources_and_keep_the_latest_two_readable() {
+        // Goal: orderly draining cannot orphan one shared-memory source per collector run.
+        // Method: complete four real rings, then inspect old names and retained tick values.
+        use collector::recording::{Registration, Registry, private};
+        let place = TestPlace::new("retiredfour");
+        let root = place.lock_path().with_extension("recording");
+        private::create_private_dir(&root).unwrap();
+        let mut names = Vec::new();
+        for run in 1..=4 {
+            let (mut writer, status) = Registration::start(&root, &place.place, SHAPE, run)
+                .unwrap()
+                .into_parts();
+            status.unwrap();
+            let memory = Memory {
+                total_bytes: run * 1_000,
+                ..Memory::default()
+            };
+            writer.publish(&readings(run, &memory));
+            names.push(writer.name().to_owned());
+            let identity = writer.identity().unwrap();
+            writer.finish();
+            drop(writer);
+            Registry::retire(&root, &identity).unwrap();
+        }
+        let registry = Registry::read(&root).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+
+        assert_eq!(0, registry.evictions);
+        for (index, name) in names.iter().enumerate() {
+            if index < 2 {
+                assert_eq!(
+                    std::io::ErrorKind::NotFound,
+                    RingReader::open_generation(name).err().unwrap().kind()
+                );
+            } else {
+                let mut reader = RingReader::open_generation(name).unwrap();
+                let mut tick = tick_buffer(SHAPE);
+                assert!(matches!(
+                    reader.read_into(&mut tick).unwrap(),
+                    Found::Publication { .. }
+                ));
+                let run = u64::try_from(index).unwrap() + 1;
+                assert_eq!(run, tick.run_tick);
+                assert_eq!(run * 1_000, tick.memory.total_bytes);
+            }
+        }
+        assert_eq!(2, registry.runs.len());
     }
 
     #[test]

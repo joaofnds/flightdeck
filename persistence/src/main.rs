@@ -11,8 +11,12 @@ fn main() -> ExitCode {
     }
     let options = collector::arguments("persister").and_then(|words| options(&words));
     match options {
-        Ok((root, parent, memory)) => match persistence::worker::run(&root, parent, memory) {
-            Ok(()) => ExitCode::SUCCESS,
+        Ok((root, memory)) => match persistence::worker::run(&root, memory) {
+            Ok(persistence::worker::Outcome::Complete) => ExitCode::SUCCESS,
+            Ok(persistence::worker::Outcome::Owned) => {
+                eprintln!("recording owned by surviving persister; CPU not measured");
+                ExitCode::from(collector::recording::child::OWNERSHIP_EXIT_STATUS)
+            }
             Err(error) => {
                 eprintln!("persister failed; unsealed history is at risk: {error}");
                 ExitCode::FAILURE
@@ -25,23 +29,18 @@ fn main() -> ExitCode {
     }
 }
 
-fn options(words: &[String]) -> Result<(PathBuf, u32, u64), String> {
-    let usage =
-        || "usage: persister --recording PATH --parent-pid PID [--memory-bytes N]".to_owned();
+fn options(words: &[String]) -> Result<(PathBuf, u64), String> {
+    let usage = || "usage: persister --recording PATH [--memory-bytes N]".to_owned();
     let mut root = None;
-    let mut parent = None;
     let mut memory = persistence::worker::default_memory_limit();
     for pair in words.chunks(2) {
         match pair {
             [flag, value] if flag == "--recording" => root = Some(PathBuf::from(value)),
-            [flag, value] if flag == "--parent-pid" => {
-                parent = Some(value.parse().map_err(|_| usage())?);
-            }
             [flag, value] if flag == "--memory-bytes" => {
                 memory = value.parse().map_err(|_| usage())?;
             }
             _ => return Err(usage()),
         }
     }
-    Ok((root.ok_or_else(usage)?, parent.ok_or_else(usage)?, memory))
+    Ok((root.ok_or_else(usage)?, memory))
 }

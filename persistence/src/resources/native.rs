@@ -5,6 +5,55 @@ use std::mem::offset_of;
 
 use super::Footprint;
 
+pub(super) fn immediate_exit(status: c_int) -> ! {
+    // No C/C++ exit handler may race the engine executing on the main thread.
+    unsafe { _exit(status) }
+}
+
+pub(super) fn producer_owner_changed(pid: i32) -> io::Result<bool> {
+    let mut record = ProcBsdShortInfo::default();
+    let size = c_int::try_from(size_of::<ProcBsdShortInfo>()).map_err(io::Error::other)?;
+    let count = unsafe {
+        proc_pidinfo(
+            pid,
+            PROC_PIDT_SHORTBSDINFO,
+            0,
+            std::ptr::from_mut(&mut record).cast(),
+            size,
+        )
+    };
+    if count != size {
+        return Err(io::Error::last_os_error());
+    }
+    if record.pid != u32::try_from(pid).map_err(io::Error::other)? {
+        return Err(io::Error::from(io::ErrorKind::InvalidData));
+    }
+    // The original collector does not change credentials. Another real owner proves reuse.
+    Ok(record.ruid != unsafe { getuid() })
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct ProcBsdShortInfo {
+    pid: u32,
+    ppid: u32,
+    pgid: u32,
+    status: u32,
+    comm: [u8; 16],
+    flags: u32,
+    uid: u32,
+    gid: u32,
+    ruid: u32,
+    rgid: u32,
+    svuid: u32,
+    svgid: u32,
+    rfu: u32,
+}
+
+const PROC_PIDT_SHORTBSDINFO: c_int = 13;
+const _: () = assert!(size_of::<ProcBsdShortInfo>() == 64);
+const _: () = assert!(offset_of!(ProcBsdShortInfo, ruid) == 44);
+
 pub(super) fn read() -> io::Result<Footprint> {
     let mut record = RusageInfoV6::default();
     let status = unsafe {
@@ -88,6 +137,15 @@ const _: () = assert!(offset_of!(RusageInfoV6, lifetime_max_phys_footprint) == 2
 const RUSAGE_INFO_V6: c_int = 6;
 
 unsafe extern "C" {
+    fn _exit(status: c_int) -> !;
     fn proc_pid_rusage(pid: c_int, flavor: c_int, buffer: *mut c_void) -> c_int;
     fn getpid() -> c_int;
+    fn getuid() -> u32;
+    fn proc_pidinfo(
+        pid: c_int,
+        flavor: c_int,
+        arg: u64,
+        buffer: *mut c_void,
+        buffer_size: c_int,
+    ) -> c_int;
 }

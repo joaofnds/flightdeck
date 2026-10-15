@@ -6,6 +6,7 @@ use collector::ring::{Identity, RunIdentity, Shape, Tick, TickBuffers};
 use collector::tracker::{Event, Noticed};
 use persistence::{Limits, NumberedEvent, Observation, Window, WindowIdentity};
 
+#[must_use]
 pub fn profile(full: bool) -> Shape {
     if full {
         Shape {
@@ -71,6 +72,7 @@ pub fn tick(shape: &Shape) -> Tick {
     tick
 }
 
+#[must_use]
 pub fn window(full: bool) -> Window {
     let shape = profile(full);
     let mut tick = tick(&shape);
@@ -90,8 +92,8 @@ pub fn window(full: bool) -> Window {
         },
         window: 0,
     };
-    let mut window = Window::new(identity, Limits::from_shape(&shape).unwrap()).unwrap();
-    for index in 0..60 {
+    let mut window = Window::new(identity, Limits::from_shape(&shape).unwrap());
+    for index in 0..61 {
         tick.run_tick = index;
         tick.events = index * event_count..(index + 1) * event_count;
         let numbered: Vec<_> = events
@@ -114,6 +116,7 @@ pub fn window(full: bool) -> Window {
     window
 }
 
+#[must_use]
 pub fn usage(base: u64) -> Usage {
     Usage {
         awake_ns_at_start: base + 1,

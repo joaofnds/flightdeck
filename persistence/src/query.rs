@@ -3,9 +3,8 @@
 use std::io;
 use std::path::Path;
 
-use collector::recording::discovery::{
-    DIRECTORY_BUFFER_WORDS, DirectoryCursor, DirectoryEntry, Selection, WindowName,
-};
+use crate::layout::{self, DirectoryNames, Kind, WindowLocation};
+use collector::recording::discovery::Selection;
 
 use crate::{Manifest, Result, read_committed};
 
@@ -18,30 +17,33 @@ pub struct Second {
 /// Errors preserve incomplete enumeration rather than returning a complete empty answer.
 pub fn processes_at_second(root: &Path, second: u64) -> Result<Second> {
     validate_root(root)?;
+    collector::recording::private::verify_directory(root)?;
     let mut result = Second::default();
-    visit_names(&root.join("data"), |run| {
-        validate_run(run)?;
-        visit_names(&root.join("data").join(run), |day| {
-            validate_day(day)?;
-            visit_names(&root.join("data").join(run).join(day), |name| {
+    visit_names(&layout::base(root, Kind::Data), |run| {
+        layout::validate_run(run)?;
+        let run_path = layout::run(root, Kind::Data, collector::recording::parse_identity(run)?);
+        visit_names(&run_path, |day| {
+            layout::validate_day(day)?;
+            visit_names(&run_path.join(day), |name| {
                 if name.starts_with('.') {
                     return Ok(());
                 }
-                let window = WindowName::parse(name)?;
+                let location = WindowLocation::parse(&DirectoryNames {
+                    run,
+                    day,
+                    window: name,
+                })?;
+                let window = location.name;
                 if window.select_second(second)? == Selection::Outside {
                     return Ok(());
                 }
-                let marker = root
-                    .join("commits")
-                    .join(run)
-                    .join(day)
-                    .join(format!("{:020}.seal", window.window));
+                let marker = location.key.marker(root);
                 let manifest = match read_committed(root, &marker) {
                     Ok(manifest) => manifest,
                     Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
                     Err(error) => return Err(error.into()),
                 };
-                if manifest.data_directory != format!("data/{run}/{day}/{name}") {
+                if Path::new(&manifest.data_directory) != location.ready_relative() {
                     return Err(io::Error::from(io::ErrorKind::InvalidData).into());
                 }
                 match window.select_second(second)? {
@@ -80,18 +82,7 @@ pub fn parquet_source(path: &Path) -> Result<String> {
 }
 
 fn visit_names(path: &Path, mut visit: impl FnMut(&str) -> Result<()>) -> Result<()> {
-    let mut buffer: Box<[u64; DIRECTORY_BUFFER_WORDS]> = vec![0; DIRECTORY_BUFFER_WORDS]
-        .into_boxed_slice()
-        .try_into()
-        .map_err(|_| crate::Error::Bound("directory buffer"))?;
-    let mut cursor = DirectoryCursor::open(path, &mut buffer)?;
-    for _entry in 0..u64::MAX {
-        match cursor.next_name()? {
-            DirectoryEntry::Complete => return Ok(()),
-            DirectoryEntry::Name(name) => visit(name)?,
-        }
-    }
-    Err(crate::Error::Bound("query directory traversal"))
+    layout::visit_names(path, &mut visit)
 }
 
 fn query_window(root: &Path, manifest: &Manifest, second: u64) -> Result<Vec<(i32, u64)>> {
@@ -108,6 +99,8 @@ fn query_window(root: &Path, manifest: &Manifest, second: u64) -> Result<Vec<(i3
     let end = first
         .checked_add(1_000_000_000)
         .ok_or(crate::Error::Bound("query time"))?;
+    let exit = crate::schema::event_kind::EXIT;
+    let measured = crate::schema::availability::MEASURED;
     let sql = format!(
         "WITH t AS (SELECT publication FROM read_parquet('{}') \
         WHERE wall_ns>={first} AND wall_ns<{end}), all_usage AS (\
@@ -116,7 +109,7 @@ fn query_window(root: &Path, manifest: &Manifest, second: u64) -> Result<Vec<(i3
         JOIN t USING(publication) UNION ALL \
         SELECT e.publication,e.pid,e.awake_ns_at_start,e.user_ns,1 priority \
         FROM read_parquet('{}') e \
-        JOIN t USING(publication) WHERE e.kind=3 AND e.availability=0) \
+        JOIN t USING(publication) WHERE e.kind={exit} AND e.availability={measured}) \
         SELECT pid,user_ns FROM all_usage QUALIFY row_number() OVER \
         (PARTITION BY publication,pid,awake_ns_at_start ORDER BY priority DESC)=1 ORDER BY pid",
         source("ticks")?,
@@ -127,24 +120,4 @@ fn query_window(root: &Path, manifest: &Manifest, second: u64) -> Result<Vec<(i3
     let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
         .map_err(crate::Error::Engine)
-}
-
-fn validate_run(name: &str) -> Result<()> {
-    if name.len() != 32 {
-        return Err(crate::Error::Bound("run directory"));
-    }
-    if !name.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(crate::Error::Bound("run directory"));
-    }
-    Ok(())
-}
-
-fn validate_day(name: &str) -> Result<()> {
-    if name.len() != 20 {
-        return Err(crate::Error::Bound("elapsed day directory"));
-    }
-    if !name.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err(crate::Error::Bound("elapsed day directory"));
-    }
-    Ok(())
 }

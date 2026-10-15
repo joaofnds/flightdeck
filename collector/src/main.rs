@@ -1,3 +1,5 @@
+mod stop;
+
 use std::ffi::c_int;
 use std::io::{self, Write};
 use std::num::NonZeroU64;
@@ -9,9 +11,11 @@ use collector::clock::{self, Timebase};
 use collector::collector::{Capacities, Collector};
 use collector::cost::{Cost, Meter, Snapshot, Source};
 use collector::processes::{self, Unreadable, Usage};
-use collector::recording::child::Persister;
+use collector::recording::child::{ChildCost, Persister};
 use collector::recording::{self, Registration};
-use collector::ring::{Dropped, IOReportReadings, Place, Readings, Shape, SmcReadings, Writer};
+use collector::ring::{
+    Dropped, IOReportReadings, ObservationTimes, Place, Readings, Shape, SmcReadings, Writer,
+};
 use collector::schedule::Schedule;
 use collector::tracker::{Counts, Event, Noticed};
 use collector::u64_from_usize;
@@ -93,6 +97,7 @@ fn options_from(arguments: &[String]) -> Result<Options, String> {
 
 fn run(options: &Options) -> io::Result<()> {
     run_set_qos_class_default()?;
+    let _stop = stop::Stop::install()?;
 
     let timebase = Timebase::read()?;
     let first_marker_pid = run_throwaway_child();
@@ -107,30 +112,52 @@ fn run(options: &Options) -> io::Result<()> {
         TICK_PERIOD_NS,
         options.rescan_interval,
         &place,
-        Some(&recording),
+        &recording,
         &mut out,
     )?;
     let mut tick = run.first_tick;
     // Tick 0 is the warm-up tick, which `Run::start` ran.
     assert!(tick > 0);
     loop {
-        let following = run.tick(tick, &mut out)?;
+        let following = match run.tick(tick, &mut out) {
+            Ok(following) => following,
+            Err(error) => {
+                if error.kind() == io::ErrorKind::Interrupted {
+                    if stop::Stop::requested() {
+                        return run.finish_recording(&mut out);
+                    }
+                }
+                return Err(error);
+            }
+        };
         assert!(following > tick);
-        if options
+        let elapsed = options
             .seconds
-            .is_some_and(|seconds| following > seconds.get())
-        {
-            let markers = first_marker_pid.and_then(|first| {
-                Ok(Markers {
-                    first,
-                    last: run_throwaway_child()?,
-                })
-            });
-            return run.finish(tick, &markers, &mut out);
+            .is_some_and(|seconds| following > seconds.get());
+        if elapsed {
+            return run_finish(&mut run, tick, first_marker_pid, &mut out);
+        }
+        if stop::Stop::requested() {
+            return run_finish(&mut run, tick, first_marker_pid, &mut out);
         }
 
         tick = following;
     }
+}
+
+fn run_finish(
+    run: &mut Run,
+    tick: u64,
+    first_marker_pid: io::Result<i32>,
+    out: &mut impl Write,
+) -> io::Result<()> {
+    let markers = first_marker_pid.and_then(|first| {
+        Ok(Markers {
+            first,
+            last: run_throwaway_child()?,
+        })
+    });
+    run.finish(tick, &markers, out)
 }
 
 /// The shape of a ring with room for every tick the collector of `capacities` reads.
@@ -150,12 +177,7 @@ fn start_ring_shape(capacities: Capacities) -> Shape {
 }
 
 /// Publishes what `collector` read in `tick` to `ring`.
-fn publish(
-    ring: &mut Writer,
-    collector: &Collector,
-    tick: u64,
-    times: collector::ring::ObservationTimes,
-) {
+fn publish(ring: &mut Writer, collector: &Collector, tick: u64, times: Option<&ObservationTimes>) {
     let ioreport = collector
         .ioreport
         .as_ref()
@@ -170,27 +192,46 @@ fn publish(
         fan_rpm: smc.fan_rpm(),
     });
     let counts = collector.counts_tick();
-    ring.publish_observed(
-        &Readings {
-            run_tick: tick,
-            cpus: collector.machine.cpus(),
-            memory: &collector.machine.memory,
-            interfaces: collector.interfaces.readings(),
-            ioreport,
-            smc,
-            processes: &collector.processes.readings,
-            processes_refused: collector.processes.refused,
-            processes_gone: collector.processes.gone,
-            coalitions: &collector.coalitions.readings,
-            events: collector.events(),
-            dropped: Dropped {
-                starts: counts.dropped_starts,
-                execs: counts.dropped_execs,
-                exits: counts.dropped_exits,
-            },
+    let readings = Readings {
+        run_tick: tick,
+        cpus: collector.machine.cpus(),
+        memory: &collector.machine.memory,
+        interfaces: collector.interfaces.readings(),
+        ioreport,
+        smc,
+        processes: &collector.processes.readings,
+        processes_refused: collector.processes.refused,
+        processes_gone: collector.processes.gone,
+        coalitions: &collector.coalitions.readings,
+        events: collector.events(),
+        dropped: Dropped {
+            starts: counts.dropped_starts,
+            execs: counts.dropped_execs,
+            exits: counts.dropped_exits,
         },
-        times,
-    );
+    };
+    match times {
+        Some(times) => ring.publish_observed(&readings, times),
+        None => ring.publish(&readings),
+    }
+}
+
+fn observation_or_unavailable(
+    measured: io::Result<ObservationTimes>,
+    out: &mut impl Write,
+) -> io::Result<Option<ObservationTimes>> {
+    match measured {
+        Ok(times) => Ok(Some(times)),
+        Err(error) => {
+            writeln!(
+                out,
+                "observation clocks unavailable kind={:?} raw_status={:?}",
+                error.kind(),
+                error.raw_os_error()
+            )?;
+            Ok(None)
+        }
+    }
 }
 
 fn run_set_qos_class_default() -> io::Result<()> {
@@ -222,31 +263,13 @@ struct Run {
 fn start_recording_ring(
     place: &Place,
     shape: Shape,
-    root: Option<&Path>,
+    root: &Path,
     timebase: Timebase,
     out: &mut impl Write,
 ) -> io::Result<(Writer, bool)> {
-    let Some(root) = root else {
-        return Ok((Writer::create(place, shape)?, false));
-    };
-    let registration = match Registration::prepare(root, place) {
-        Ok(registration) => registration,
-        Err(error) => {
-            writeln!(
-                out,
-                "recording registration failed: {error}; collection continues; \
-                unsealed history may be lost, extent unknown"
-            )?;
-            let identity = recording::new_run_identity(recording::random_identity()?)?;
-            let start_ns = timebase.nanoseconds(clock::now())?;
-            let ring = Writer::create_recording(place, shape, &identity, start_ns)?;
-            reclaim_unregistered(&ring, out)?;
-            return Ok((ring, false));
-        }
-    };
     let start_ns = timebase.nanoseconds(clock::now())?;
-    let ring = Writer::create_recording(place, shape, registration.identity(), start_ns)?;
-    match registration.register(ring.name()) {
+    let (ring, registered) = Registration::start(root, place, shape, start_ns)?.into_parts();
+    match registered {
         Ok(()) => Ok((ring, true)),
         Err(error) => {
             writeln!(
@@ -254,60 +277,47 @@ fn start_recording_ring(
                 "recording registration failed: {error}; collection continues; \
                 unregistered history recovery is unavailable"
             )?;
-            reclaim_unregistered(&ring, out)?;
             Ok((ring, false))
         }
     }
 }
 
-fn reclaim_unregistered(ring: &Writer, out: &mut impl Write) -> io::Result<()> {
-    let mut buffer = [0_u8; 32];
-    // Retain the active generation and its immediate predecessor even when undecodable.
-    for generation in 1..ring.generation().saturating_sub(1) {
-        let name = collector::ring::generation_name(ring.name(), generation, &mut buffer)?;
-        match collector::ring::RingReader::open_generation(name) {
-            Ok(reader) => drop(reader),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(error) => writeln!(out, "retained generation {generation} unavailable: {error}")?,
-        }
-        writeln!(
-            out,
-            "unregistered retention eviction generation={generation}; \
-            unsealed status unknown; history may be lost, extent unknown"
-        )?;
-        if let Err(error) = collector::ring::unlink_generation(name) {
-            writeln!(
-                out,
-                "retention eviction refused generation={generation}: {error}"
-            )?;
-        }
-    }
-    Ok(())
-}
-
 struct Persistence {
     child: Option<Persister>,
-    available: bool,
     reported: bool,
     minute_at_ns: u64,
     minute_collector_ns: u64,
     minute_persister_ns: Option<u64>,
 }
 
+struct RecordingInterval {
+    elapsed: Duration,
+    collector: Duration,
+    persister: Option<Duration>,
+}
+
+struct OptionalNanoseconds(Option<u64>);
+
+impl std::fmt::Display for OptionalNanoseconds {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Some(value) => write!(formatter, "{value}"),
+            None => formatter.write_str("unavailable"),
+        }
+    }
+}
+
 impl Persistence {
-    fn start(
+    fn start_with(
         root: Option<&Path>,
-        registered: bool,
         start: &Mark,
         timebase: Timebase,
         out: &mut impl Write,
+        launch: impl FnOnce(&Path, Timebase) -> io::Result<Persister>,
     ) -> io::Result<Self> {
         let minute_at_ns = timebase.nanoseconds(clock::now())?;
-        let child = if registered {
-            let Some(root) = root else {
-                unreachable!("a registered run has a destination");
-            };
-            match Self::start_child(root, timebase) {
+        let child = if let Some(root) = root {
+            match launch(root, timebase) {
                 Ok(child) => Some(child),
                 Err(error) => {
                     writeln!(
@@ -321,19 +331,18 @@ impl Persistence {
         } else {
             None
         };
-        let available = child.is_some();
+        let minute_persister_ns = child.as_ref().map(|_child| 0);
         Ok(Self {
             child,
-            available,
             reported: false,
             minute_at_ns,
             minute_collector_ns: start.snapshot.cpu_ns(),
-            minute_persister_ns: available.then_some(0),
+            minute_persister_ns,
         })
     }
 
     fn start_child(root: &Path, timebase: Timebase) -> io::Result<Persister> {
-        let executable = std::env::current_exe()?;
+        let executable = std::env::current_exe()?.canonicalize()?;
         let directory = executable
             .parent()
             .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
@@ -347,19 +356,25 @@ impl Persistence {
         match child.poll() {
             Ok(None) => {}
             Ok(Some(finished)) => {
-                self.available = false;
                 if !self.reported {
-                    writeln!(
-                        out,
-                        "persister exited status={} cpu_ns={}; collection continues; \
-                        unsealed history may be lost",
-                        finished.status, finished.cpu_ns
-                    )?;
+                    if finished.owned_by_surviving_persister() {
+                        writeln!(
+                            out,
+                            "recording owned by surviving persister; CPU not measured; \
+                            collection continues"
+                        )?;
+                    } else {
+                        writeln!(
+                            out,
+                            "persister exited status={} cpu_ns={}; collection continues; \
+                            unsealed history may be lost",
+                            finished.status, finished.cpu_ns
+                        )?;
+                    }
                     self.reported = true;
                 }
             }
             Err(error) => {
-                self.available = false;
                 if !self.reported {
                     writeln!(
                         out,
@@ -378,7 +393,7 @@ impl Persistence {
     fn report(
         &mut self,
         label: &str,
-        now: &Mark,
+        collector_cpu_ns: u64,
         timebase: Timebase,
         out: &mut impl Write,
     ) -> io::Result<()> {
@@ -389,9 +404,7 @@ impl Persistence {
         if elapsed_ns == 0 {
             return Err(io::Error::from(io::ErrorKind::InvalidData));
         }
-        let collector_ns = now
-            .snapshot
-            .cpu_ns()
+        let collector_ns = collector_cpu_ns
             .checked_sub(self.minute_collector_ns)
             .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
         let sample = self.sample(out)?;
@@ -400,38 +413,61 @@ impl Persistence {
             (Some(end), Some(start)) => end.checked_sub(start),
             _ => None,
         };
-        match delta {
-            Some(persister_ns) => {
-                let total_ns = collector_ns
-                    .checked_add(persister_ns)
+        Self::report_interval(
+            label,
+            &RecordingInterval {
+                elapsed: Duration::from_nanos(elapsed_ns),
+                collector: Duration::from_nanos(collector_ns),
+                persister: delta.map(Duration::from_nanos),
+            },
+            out,
+        )?;
+        Self::report_cumulative(collector_cpu_ns, sample.as_ref(), out)?;
+        self.minute_at_ns = at_ns;
+        self.minute_collector_ns = collector_cpu_ns;
+        self.minute_persister_ns = child_ns;
+        Ok(())
+    }
+
+    fn report_interval(
+        label: &str,
+        interval: &RecordingInterval,
+        out: &mut impl Write,
+    ) -> io::Result<()> {
+        assert!(!interval.elapsed.is_zero());
+        match interval.persister {
+            Some(persister) => {
+                let total = interval
+                    .collector
+                    .checked_add(persister)
                     .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
-                let percent = Duration::from_nanos(total_ns)
-                    .div_duration_f64(Duration::from_nanos(elapsed_ns))
-                    * 100.0;
+                let percent = total.div_duration_f64(interval.elapsed) * 100.0;
                 writeln!(
                     out,
-                    "recording {label} elapsed_ns={elapsed_ns} \
-                    collector_cpu_ns={collector_ns} persister_cpu_ns={persister_ns} \
-                    combined_cpu_ns={total_ns} combined_percent={percent:.6}"
+                    "recording {label} elapsed_ns={} \
+                    collector_cpu_ns={} persister_cpu_ns={} \
+                    combined_cpu_ns={} combined_percent={percent:.6}",
+                    interval.elapsed.as_nanos(),
+                    interval.collector.as_nanos(),
+                    persister.as_nanos(),
+                    total.as_nanos()
                 )?;
             }
             None => writeln!(
                 out,
-                "recording {label} elapsed_ns={elapsed_ns} \
-                collector_cpu_ns={collector_ns} persister_cpu_ns=unavailable \
-                combined_cpu_ns=unavailable combined_percent=unavailable"
+                "recording {label} elapsed_ns={} \
+                collector_cpu_ns={} persister_cpu_ns=unavailable \
+                combined_cpu_ns=unavailable combined_percent=unavailable",
+                interval.elapsed.as_nanos(),
+                interval.collector.as_nanos()
             )?,
         }
-        Self::report_cumulative(now.snapshot.cpu_ns(), sample.as_ref(), out)?;
-        self.minute_at_ns = at_ns;
-        self.minute_collector_ns = now.snapshot.cpu_ns();
-        self.minute_persister_ns = child_ns;
         Ok(())
     }
 
     fn report_cumulative(
         collector_ns: u64,
-        sample: Option<&recording::child::ChildCost>,
+        sample: Option<&ChildCost>,
         out: &mut impl Write,
     ) -> io::Result<()> {
         match sample {
@@ -450,12 +486,9 @@ impl Persistence {
         }
     }
 
-    fn sample(&mut self, out: &mut impl Write) -> io::Result<Option<recording::child::ChildCost>> {
-        if !self.available {
-            return Ok(None);
-        }
+    fn sample(&mut self, out: &mut impl Write) -> io::Result<Option<ChildCost>> {
         let Some(child) = &mut self.child else {
-            unreachable!("an available child is owned");
+            return Ok(None);
         };
         match child.sample() {
             Ok(sample) => Ok(sample),
@@ -495,14 +528,27 @@ impl Persistence {
             .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
         match finished {
             Some(finished) => {
+                if finished.owned_by_surviving_persister() {
+                    writeln!(
+                        out,
+                        "recording drain owned by surviving persister; CPU not measured; \
+                        collector_cpu_ns={collector_ns} persister_cpu_ns=unavailable \
+                        combined_cpu_ns=unavailable"
+                    )?;
+                    return Ok(());
+                }
+
                 let drain_ns = sampled.and_then(|sample| finished.cpu_ns.checked_sub(sample));
                 writeln!(
                     out,
                     "recording drain elapsed_ns={elapsed_ns} \
-                    collector_cpu_ns={collector_ns} persister_cpu_ns={drain_ns:?} \
+                    collector_cpu_ns={collector_ns} persister_cpu_ns={} \
                     persister_total_cpu_ns={} persister_status={} \
                     persister_resident_bytes_max={}",
-                    finished.cpu_ns, finished.status, finished.resident_bytes_max
+                    OptionalNanoseconds(drain_ns),
+                    finished.cpu_ns,
+                    finished.status,
+                    finished.resident_bytes_max
                 )?;
                 if !finished.successful() {
                     writeln!(
@@ -570,8 +616,28 @@ impl Run {
         tick_period_ns: u64,
         rescan_interval: Duration,
         place: &Place,
-        recording: Option<&Path>,
+        recording: &Path,
         out: &mut impl Write,
+    ) -> io::Result<Self> {
+        Self::start_with(
+            timebase,
+            tick_period_ns,
+            rescan_interval,
+            place,
+            recording,
+            out,
+            Persistence::start_child,
+        )
+    }
+
+    fn start_with(
+        timebase: Timebase,
+        tick_period_ns: u64,
+        rescan_interval: Duration,
+        place: &Place,
+        recording: &Path,
+        out: &mut impl Write,
+        launch: impl FnOnce(&Path, Timebase) -> io::Result<Persister>,
     ) -> io::Result<Self> {
         assert!(tick_period_ns > 0);
 
@@ -591,10 +657,10 @@ impl Run {
         start_report(out, &meter, timebase)?;
 
         collector.wait_until(schedule.deadline(0), &mut meter)?;
-        let observed = recording::observation_times(timebase)?;
+        let observed = observation_or_unavailable(recording::observation_times(timebase), out)?;
         collector.read(&mut meter)?;
         meter.measure(Source::Ring, || {
-            publish(&mut ring, &collector, 0, observed);
+            publish(&mut ring, &collector, 0, observed.as_ref());
             Ok(())
         })?;
         let warm_up_starts = start_warm_up_starts(collector.events());
@@ -602,7 +668,8 @@ impl Run {
         // Tick 0 is the warm-up tick, so the spans start past it.
         let first_tick = schedule.first_ahead_of(clock::now()).max(1);
         let start = Mark::take(&meter, timebase, &collector)?;
-        let persistence = Persistence::start(recording, registered, &start, timebase, out)?;
+        let registered_root = if registered { Some(recording) } else { None };
+        let persistence = Persistence::start_with(registered_root, &start, timebase, out, launch)?;
         Ok(Self {
             timebase,
             schedule,
@@ -631,16 +698,25 @@ impl Run {
     /// Runs `tick`, writes the reports of the spans it closes, and returns the tick that
     /// follows it, past any tick the run slipped.
     fn tick(&mut self, tick: u64, out: &mut impl Write) -> io::Result<u64> {
+        self.tick_with_observation(tick, out, recording::observation_times)
+    }
+
+    fn tick_with_observation(
+        &mut self,
+        tick: u64,
+        out: &mut impl Write,
+        observe: impl FnOnce(Timebase) -> io::Result<ObservationTimes>,
+    ) -> io::Result<u64> {
         assert!(tick >= self.first_tick);
 
         let deadline = self.schedule.deadline(tick);
         self.collector.wait_until(deadline, &mut self.meter)?;
         let late_ticks = clock::now().saturating_sub(deadline);
         let late = Duration::from_nanos(self.timebase.nanoseconds(late_ticks)?);
-        let observed = recording::observation_times(self.timebase)?;
+        let observed = observation_or_unavailable(observe(self.timebase), out)?;
         self.collector.read(&mut self.meter)?;
         self.meter.measure(Source::Ring, || {
-            publish(&mut self.ring, &self.collector, tick, observed);
+            publish(&mut self.ring, &self.collector, tick, observed.as_ref());
             Ok(())
         })?;
 
@@ -667,7 +743,7 @@ impl Run {
             let now = Mark::take(&self.meter, self.timebase, &self.collector)?;
             self.minute.report(out, "minute, ticks", tick, &now)?;
             self.persistence
-                .report("minute", &now, self.timebase, out)?;
+                .report("minute", now.snapshot.cpu_ns(), self.timebase, out)?;
             self.minute = Span::begin(now, following);
         }
 
@@ -702,9 +778,13 @@ impl Run {
                 "  processes missed are not counted, a marker child failed: {error}"
             ),
         }?;
-        if self.minute.tally.ticks > 0 {
-            self.persistence.report("tail", &end, self.timebase, out)?;
-        }
+        self.finish_recording(out)
+    }
+
+    fn finish_recording(&mut self, out: &mut impl Write) -> io::Result<()> {
+        let end = Snapshot::take(&self.meter, self.timebase)?;
+        self.persistence
+            .report("tail", end.cpu_ns(), self.timebase, out)?;
         self.ring.finish();
         self.persistence.finish(&self.meter, self.timebase, out)
     }
@@ -1104,6 +1184,39 @@ mod tests {
         place: Place,
     }
 
+    struct TestRecording {
+        ring: TestRing,
+        root: PathBuf,
+    }
+
+    impl TestRecording {
+        fn new(name: &str) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "flightdeck-main-recording-{}-{name}",
+                std::process::id()
+            ));
+            assert!(!root.exists());
+            Self {
+                ring: TestRing::new(name),
+                root,
+            }
+        }
+    }
+
+    impl Drop for TestRecording {
+        fn drop(&mut self) {
+            if self.root.exists() {
+                std::fs::remove_dir_all(&self.root).unwrap();
+            }
+        }
+    }
+
+    fn slow_persister(timebase: Timebase, seconds: u64) -> io::Result<Persister> {
+        let mut command = std::process::Command::new("/bin/sleep");
+        command.arg(seconds.to_string());
+        Persister::spawn_command(&mut command, timebase)
+    }
+
     impl TestRing {
         fn new(test: &str) -> Self {
             let name = format!("fdm{}{test}", std::process::id());
@@ -1209,18 +1322,19 @@ mod tests {
         // Goal: a tick after the warm-up allocates nothing, with the window and minute
         // reports it writes, as Tiger Style's allocation at startup only asks.
         // Method: run ticks 20 ms apart until the minute closes, so they write six window
-        // reports and a minute report, while another thread starts processes, and count the
-        // allocator calls made on this thread.
+        // reports and a live child's minute cost while another thread starts processes.
+        // Count the allocator calls made on this thread after private startup completes.
         let timebase = Timebase::read().unwrap();
         let mut sink = io::sink();
-        let ring = TestRing::new("alloc");
-        let mut run = Run::start(
+        let recording = TestRecording::new("alloc");
+        let mut run = Run::start_with(
             timebase,
             TEST_TICK_PERIOD_NS,
             DEFAULT_RESCAN_INTERVAL,
-            &ring.place,
-            None,
+            &recording.ring.place,
+            &recording.root,
             &mut sink,
+            |_root, timebase| slow_persister(timebase, 30),
         )
         .unwrap();
 
@@ -1238,6 +1352,112 @@ mod tests {
     }
 
     #[test]
+    fn keeps_publishing_while_its_started_persister_has_not_finished() {
+        // Goal: storage work cannot hold collector startup or the collection loop.
+        // Method: run actual collector ticks with a slow native child, before any seal.
+        let timebase = Timebase::read().unwrap();
+        let recording = TestRecording::new("continuing");
+        let mut output = io::Cursor::new(vec![0_u8; 32_768].into_boxed_slice());
+        let mut run = Run::start_with(
+            timebase,
+            TEST_TICK_PERIOD_NS,
+            DEFAULT_RESCAN_INTERVAL,
+            &recording.ring.place,
+            &recording.root,
+            &mut output,
+            |_root, timebase| slow_persister(timebase, 3),
+        )
+        .unwrap();
+        let before = collector::ring::RingReader::open(&recording.ring.place.lock_path)
+            .unwrap()
+            .publication_newest()
+            .unwrap();
+
+        let next = run.tick(run.first_tick, &mut output).unwrap();
+        run.tick(next, &mut output).unwrap();
+
+        let after = collector::ring::RingReader::open(&recording.ring.place.lock_path)
+            .unwrap()
+            .publication_newest()
+            .unwrap();
+        assert!(after > before);
+        assert!(run.persistence.sample(&mut output).unwrap().is_some());
+        assert!(!recording.root.join("commits").exists());
+    }
+
+    #[test]
+    fn keeps_publishing_when_private_registration_is_refused() {
+        // Goal: an unusable recording destination cannot stop collection or launch a child.
+        // Method: use a public directory, then read the actual collector's next publication.
+        use std::os::unix::fs::PermissionsExt;
+
+        let timebase = Timebase::read().unwrap();
+        let recording = TestRecording::new("registrationrefusal");
+        std::fs::create_dir(&recording.root).unwrap();
+        std::fs::set_permissions(&recording.root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut output = io::Cursor::new(vec![0_u8; 32_768].into_boxed_slice());
+        let mut run = Run::start_with(
+            timebase,
+            TEST_TICK_PERIOD_NS,
+            DEFAULT_RESCAN_INTERVAL,
+            &recording.ring.place,
+            &recording.root,
+            &mut output,
+            |_root, _timebase| panic!("a refused destination cannot launch its persister"),
+        )
+        .unwrap();
+        let before = collector::ring::RingReader::open(&recording.ring.place.lock_path)
+            .unwrap()
+            .publication_newest()
+            .unwrap();
+
+        run.tick(run.first_tick, &mut output).unwrap();
+
+        let reader = collector::ring::RingReader::open(&recording.ring.place.lock_path).unwrap();
+        assert!(reader.publication_newest().unwrap() > before);
+        assert!(run.persistence.sample(&mut output).unwrap().is_none());
+        let count = usize::try_from(output.position()).unwrap();
+        let report = std::str::from_utf8(&output.get_ref()[..count]).unwrap();
+        assert!(report.contains("recording registration failed:"));
+    }
+
+    #[test]
+    fn keeps_collecting_when_observation_clocks_are_unavailable() {
+        // Goal: a clock snapshot outside its representable range cannot stop collection.
+        // Method: refuse the clock at the actual tick boundary and read its next publication.
+        let timebase = Timebase::read().unwrap();
+        let recording = TestRecording::new("clockrefusal");
+        let mut output = io::Cursor::new(vec![0_u8; 32_768].into_boxed_slice());
+        let mut run = Run::start_with(
+            timebase,
+            TEST_TICK_PERIOD_NS,
+            DEFAULT_RESCAN_INTERVAL,
+            &recording.ring.place,
+            &recording.root,
+            &mut output,
+            |_root, timebase| slow_persister(timebase, 30),
+        )
+        .unwrap();
+
+        let calls = allocator_calls_in(|| {
+            run.tick_with_observation(run.first_tick, &mut output, |_timebase| {
+                Err(io::Error::from(io::ErrorKind::InvalidData))
+            })
+            .unwrap();
+        });
+
+        let mut reader = Reader::open(&recording.ring.place.lock_path).unwrap();
+        reader.read().unwrap();
+        reader.read().unwrap();
+        assert_eq!(None, reader.tick().times);
+        assert!(!reader.tick().processes.is_empty());
+        assert_eq!(0, calls);
+        let count = usize::try_from(output.position()).unwrap();
+        let report = std::str::from_utf8(&output.get_ref()[..count]).unwrap();
+        assert!(report.contains("observation clocks unavailable kind=InvalidData"));
+    }
+
+    #[test]
     fn publishes_the_events_cpus_and_interfaces_each_tick_read() {
         // Goal: each tick hands the ring the process events it drained, under the event
         // numbers its publication names, with the CPUs and interfaces it read.
@@ -1245,14 +1465,15 @@ mod tests {
         // every publication and every event the ring holds.
         let timebase = Timebase::read().unwrap();
         let mut sink = io::sink();
-        let ring = TestRing::new("event");
-        let mut run = Run::start(
+        let recording = TestRecording::new("event");
+        let mut run = Run::start_with(
             timebase,
             TEST_TICK_PERIOD_NS,
             DEFAULT_RESCAN_INTERVAL,
-            &ring.place,
-            None,
+            &recording.ring.place,
+            &recording.root,
             &mut sink,
+            |_root, timebase| slow_persister(timebase, 30),
         )
         .unwrap();
         while_forking(|| {
@@ -1262,7 +1483,7 @@ mod tests {
             }
         });
 
-        let mut reader = Reader::open(&ring.place.lock_path).unwrap();
+        let mut reader = Reader::open(&recording.ring.place.lock_path).unwrap();
         let mut named = 0;
         while let Found::Publication { .. } = reader.read().unwrap() {
             assert!(!reader.tick().cpus.is_empty());
@@ -1284,6 +1505,51 @@ mod tests {
 
     fn arguments(words: &[&str]) -> Vec<String> {
         words.iter().map(|&word| word.to_owned()).collect()
+    }
+
+    #[test]
+    fn reports_the_sum_of_both_measured_cpu_costs() {
+        // Goal: the budget line charges persistence as well as collection.
+        // Method: render known independent costs over one measured minute.
+        let mut output = Vec::new();
+        let interval = RecordingInterval {
+            elapsed: Duration::from_mins(1),
+            collector: Duration::from_millis(600),
+            persister: Some(Duration::from_millis(300)),
+        };
+
+        Persistence::report_interval("minute", &interval, &mut output).unwrap();
+
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            concat!(
+                "recording minute elapsed_ns=60000000000 collector_cpu_ns=600000000 ",
+                "persister_cpu_ns=300000000 combined_cpu_ns=900000000 combined_percent=1.500000\n"
+            )
+        );
+    }
+
+    #[test]
+    fn reports_unavailable_combined_cost_when_persistence_is_unmeasured() {
+        // Goal: missing child cost cannot become a plausible zero or collector-only total.
+        // Method: render a known collector cost with unavailable persistence.
+        let mut output = Vec::new();
+        let interval = RecordingInterval {
+            elapsed: Duration::from_mins(1),
+            collector: Duration::from_millis(600),
+            persister: None,
+        };
+
+        Persistence::report_interval("minute", &interval, &mut output).unwrap();
+
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            concat!(
+                "recording minute elapsed_ns=60000000000 collector_cpu_ns=600000000 ",
+                "persister_cpu_ns=unavailable combined_cpu_ns=unavailable ",
+                "combined_percent=unavailable\n"
+            )
+        );
     }
 
     #[test]
@@ -1327,32 +1593,37 @@ mod tests {
     #[test]
     fn observes_a_persister_exit_without_allocating_after_startup() {
         // Goal: detecting and reaping worker failure stays outside the allocation boundary.
-        // Method: poll a real exiting child through Persistence under the counting allocator.
+        // Method: start a real run with a failing child and count its exit report's calls.
         let timebase = Timebase::read().unwrap();
-        let child =
-            Persister::spawn(Path::new("/usr/bin/true"), Path::new("/unused"), timebase).unwrap();
-        let mut persistence = Persistence {
-            child: Some(child),
-            available: true,
-            reported: false,
-            minute_at_ns: 1,
-            minute_collector_ns: 0,
-            minute_persister_ns: Some(0),
-        };
-        let mut sink = io::sink();
+        let recording = TestRecording::new("persisterexit");
+        let mut output = io::Cursor::new(vec![0_u8; 32_768].into_boxed_slice());
+        let mut run = Run::start_with(
+            timebase,
+            TEST_TICK_PERIOD_NS,
+            DEFAULT_RESCAN_INTERVAL,
+            &recording.ring.place,
+            &recording.root,
+            &mut output,
+            |root, timebase| Persister::spawn(Path::new("/usr/bin/false"), root, timebase),
+        )
+        .unwrap();
+        output.set_position(0);
 
         let calls = allocator_calls_in(|| {
             for _attempt in 0..2_000 {
-                persistence.poll(&mut sink).unwrap();
-                if persistence.reported {
+                run.persistence.poll(&mut output).unwrap();
+                if output.position() > 0 {
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(1));
             }
         });
 
-        assert!(persistence.reported);
-        assert!(!persistence.available);
+        let count = usize::try_from(output.position()).unwrap();
+        let report = std::str::from_utf8(&output.get_ref()[..count]).unwrap();
+        assert!(report.contains("persister exited status=256"), "{report}");
+        assert!(report.contains("collection continues"), "{report}");
+        assert!(report.contains("unsealed history may be lost"), "{report}");
         assert_eq!(calls, 0);
     }
 

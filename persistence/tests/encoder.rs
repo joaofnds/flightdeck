@@ -8,20 +8,21 @@ mod tests {
 
     use collector::processes::Unreadable;
     use collector::tracker::{Event, Noticed};
-    use persistence::resources::{Footprint, WORKING_BYTES_MAX, Watchdog, stable_growth};
+    use persistence::resources::{Footprint, WORKING_BYTES_MAX, Watchdog};
     use persistence::{Encoder, Limits, Observation, Window};
+    use std::io::Write;
     use std::os::unix::fs::DirBuilderExt;
     use std::path::PathBuf;
     use std::process::{Command, Output};
-    use std::time::{Instant, SystemTime, UNIX_EPOCH};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Instant;
 
     struct Directory(PathBuf);
+    static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+
     impl Directory {
         fn new() -> Self {
-            let unique = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
+            let unique = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
             let directory = std::env::temp_dir()
                 .join(format!("task19-encoder-{}-{unique}", std::process::id()));
             std::fs::DirBuilder::new()
@@ -44,10 +45,7 @@ mod tests {
         let directory = Directory::new();
         let window = unavailable_window();
 
-        let manifest = Encoder::new()
-            .unwrap()
-            .encode(&window, &directory.0)
-            .unwrap();
+        let manifest = Encoder.encode(&window, &directory.0).unwrap();
 
         assert_eq!(manifest.len(), 10);
         assert_eq!(
@@ -145,7 +143,7 @@ mod tests {
             })
             .collect();
         let identity = fixture::window(false).identity;
-        let mut window = Window::new(identity, Limits::from_shape(&shape).unwrap()).unwrap();
+        let mut window = Window::new(identity, Limits::from_shape(&shape).unwrap());
         window
             .push_tick(
                 &Observation {
@@ -177,7 +175,7 @@ mod tests {
     #[test]
     fn refuses_an_overfull_window_without_changing_its_staged_readings() {
         // Goal: delayed persistence cannot accumulate a second window in working memory.
-        // Method: fill sixty publications, refuse the next, then check retained counts.
+        // Method: fill sixty-one publications, refuse the next, then check retained counts.
         let mut window = fixture::window(false);
         let shape = fixture::profile(false);
         let tick = fixture::tick(&shape);
@@ -185,7 +183,7 @@ mod tests {
 
         let refused = window.push_tick(
             &Observation {
-                publication: 61,
+                publication: 62,
                 wall_ns: Some(1),
                 continuous_ns: Some(60_000_000_000),
                 awake_ns: Some(60_000_000_000),
@@ -198,7 +196,7 @@ mod tests {
             refused,
             Err(persistence::Error::Bound("window ticks"))
         ));
-        assert_eq!(window.tick_count(), 60);
+        assert_eq!(window.tick_count(), 61);
         assert_eq!(window.staged_bytes(), before);
     }
 
@@ -212,8 +210,7 @@ mod tests {
         let mut window = Window::new(
             fixture::window(false).identity,
             Limits::from_shape(&shape).unwrap(),
-        )
-        .unwrap();
+        );
 
         let refused = window.push_tick(
             &Observation {
@@ -235,9 +232,9 @@ mod tests {
     }
 
     #[test]
-    fn bounds_a_fully_populated_sixty_tick_capacity_profile() {
+    fn bounds_a_fully_populated_sixty_one_tick_capacity_profile() {
         // Goal: the complete measured-capacity schema fits the proposed whole-worker budget.
-        // Method: stage and encode 60 injected ticks in an isolated native-observed child.
+        // Method: stage and encode 61 injected ticks in an isolated native-observed child.
         let output = child("full");
         assert!(
             output.status.success(),
@@ -276,23 +273,106 @@ mod tests {
         assert!(String::from_utf8_lossy(&output.stderr).contains("memory limit current="));
     }
 
+    #[test]
+    fn terminates_a_blocked_operation_at_its_drain_deadline() {
+        // Goal: native engine or durability hangs cannot hold the steady worker forever.
+        // Method: block a guarded native call past a short configured drain deadline.
+        let output = child("deadline");
+
+        assert_eq!(output.status.code(), Some(75));
+    }
+
+    #[test]
+    fn terminates_native_encoding_before_a_pending_window_can_publish() {
+        // Goal: real engine allocations during encoding cannot publish beyond the guard.
+        // Method: encode a full window above a small native allowance after creating pending.
+        let run = child_fixture("pending-watchdog");
+
+        assert_eq!(run.output.status.code(), Some(74));
+        let stdout = String::from_utf8(run.output.stdout).unwrap();
+        let pending = stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("pending_path="))
+            .map(PathBuf::from)
+            .unwrap();
+        assert!(pending.starts_with(&run.directory.0));
+        assert!(std::fs::read_dir(pending).unwrap().take(11).any(|entry| {
+            entry
+                .unwrap()
+                .path()
+                .extension()
+                .is_some_and(|value| value == "parquet")
+        }));
+        let store = persistence::Store::open(&run.directory.0).unwrap();
+        let mut identity = fixture::window(false).identity;
+        identity.run.recording = store.recording();
+        assert!(store.existing(&identity).unwrap().is_none());
+    }
+
+    struct ResourceRun {
+        output: Output,
+        directory: Directory,
+    }
+
     fn child(mode: &str) -> Output {
+        child_fixture(mode).output
+    }
+
+    fn child_fixture(mode: &str) -> ResourceRun {
+        if let Ok(selected) = std::env::var("FLIGHTDECK_ENCODER_RESOURCE_TEST") {
+            assert_eq!(selected, mode);
+            println!("resource_child_started={mode}");
+            std::io::stdout().flush().unwrap();
+            resource_child(mode);
+            std::process::exit(0);
+        }
+        let test = match mode {
+            "full" => "tests::bounds_a_fully_populated_sixty_one_tick_capacity_profile",
+            "growth" => "tests::releases_native_window_working_state_after_warmup",
+            "leak" => "tests::rejects_a_native_megabyte_per_window_leak",
+            "watchdog" => "tests::terminates_on_a_low_native_footprint_allowance",
+            "deadline" => "tests::terminates_a_blocked_operation_at_its_drain_deadline",
+            "pending-watchdog" => {
+                "tests::terminates_native_encoding_before_a_pending_window_can_publish"
+            }
+            _ => panic!("unknown resource child"),
+        };
+        let directory = Directory::new();
         let output = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "tests::resource_child", "--nocapture"])
+            .args(["--exact", test, "--nocapture"])
             .env("FLIGHTDECK_ENCODER_RESOURCE_TEST", mode)
+            .env("FLIGHTDECK_ENCODER_RESOURCE_ROOT", &directory.0)
             .output()
             .unwrap();
         println!("{}", String::from_utf8_lossy(&output.stdout));
         println!("{}", String::from_utf8_lossy(&output.stderr));
-        output
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .any(|line| line == format!("resource_child_started={mode}"))
+        );
+        ResourceRun { output, directory }
     }
 
-    #[test]
-    fn resource_child() {
-        let Ok(mode) = std::env::var("FLIGHTDECK_ENCODER_RESOURCE_TEST") else {
-            return;
-        };
+    fn resource_child(mode: &str) {
+        if mode == "pending-watchdog" {
+            pending_native_encode();
+            panic!("native encoding watchdog did not terminate");
+        }
+        if mode == "deadline" {
+            let guard = Watchdog::with_operation_limit(
+                WORKING_BYTES_MAX,
+                std::time::Duration::from_millis(100),
+            )
+            .unwrap();
+            let operation = guard.operation().unwrap();
+            assert_eq!(unsafe { usleep(500_000) }, 0);
+            drop(operation);
+            drop(guard);
+            panic!("watchdog did not terminate blocked operation");
+        }
         if mode == "watchdog" {
+            assert_eq!(unsafe { atexit(unexpected_cleanup) }, 0);
             let baseline = Footprint::read().unwrap();
             let guard = Watchdog::start(baseline.lifetime_bytes_max + 4 * 1024 * 1024).unwrap();
             let native = NativeBlock::new(16 * 1024 * 1024);
@@ -310,6 +390,22 @@ mod tests {
         drop(guard);
     }
 
+    fn pending_native_encode() {
+        let root = PathBuf::from(std::env::var_os("FLIGHTDECK_ENCODER_RESOURCE_ROOT").unwrap());
+        let store = persistence::Store::open(&root).unwrap();
+        let mut window = fixture::window(true);
+        window.identity.run.recording = store.recording();
+        let persistence::Begin::Pending(pending) = store.begin(&window.identity).unwrap() else {
+            panic!("fresh resource window already committed");
+        };
+        println!("pending_path={}", pending.path().display());
+        std::io::stdout().flush().unwrap();
+        let baseline = Footprint::read().unwrap();
+        let guard = Watchdog::start(baseline.lifetime_bytes_max + 32 * 1024 * 1024).unwrap();
+        Encoder.encode(&window, pending.path()).unwrap();
+        drop(guard);
+    }
+
     fn full_window() {
         let directory = Directory::new();
         let start = Instant::now();
@@ -319,10 +415,7 @@ mod tests {
             window.staged_bytes(),
             start.elapsed().as_nanos()
         );
-        let encoded = Encoder::new()
-            .unwrap()
-            .encode(&window, &directory.0)
-            .unwrap();
+        let encoded = Encoder.encode(&window, &directory.0).unwrap();
         let footprint = Footprint::read().unwrap();
         println!(
             "full total_ns={} current_bytes={} peak_bytes={} tables={encoded:?}",
@@ -331,9 +424,9 @@ mod tests {
             footprint.lifetime_bytes_max
         );
         assert!(footprint.lifetime_bytes_max <= WORKING_BYTES_MAX);
-        assert_eq!(count(&directory, "processes", "true"), 720_000);
-        assert_eq!(count(&directory, "coalitions", "true"), 1_703_040);
-        assert_eq!(count(&directory, "events", "true"), 983_040);
+        assert_eq!(count(&directory, "processes", "true"), 732_000);
+        assert_eq!(count(&directory, "coalitions", "true"), 1_731_424);
+        assert_eq!(count(&directory, "events", "true"), 999_424);
     }
 
     fn growth_windows(leak: bool) {
@@ -342,10 +435,7 @@ mod tests {
         for index in 0..72 {
             let directory = Directory::new();
             let window = fixture::window(false);
-            Encoder::new()
-                .unwrap()
-                .encode(&window, &directory.0)
-                .unwrap();
+            Encoder.encode(&window, &directory.0).unwrap();
             drop(window);
             if leak {
                 leaks.push(NativeBlock::new(1024 * 1024));
@@ -365,7 +455,29 @@ mod tests {
         );
     }
 
+    /// Evaluates the observed completed-window footprints after the warmup period.
+    #[must_use]
+    pub fn stable_growth(footprints: &[u64]) -> bool {
+        if footprints.len() != 64 {
+            return false;
+        }
+        let first = footprints[0];
+        let Some(last) = footprints.last() else {
+            return false;
+        };
+        if last.saturating_sub(first) > 63 * 128 * 1024 {
+            return false;
+        }
+        let minimum = footprints.iter().min();
+        let maximum = footprints.iter().max();
+        match (minimum, maximum) {
+            (Some(minimum), Some(maximum)) => maximum.saturating_sub(*minimum) <= 8 * 1024 * 1024,
+            _ => false,
+        }
+    }
+
     struct NativeBlock(*mut std::ffi::c_void);
+
     impl NativeBlock {
         fn new(bytes: usize) -> Self {
             assert!(bytes <= 16 * 1024 * 1024);
@@ -385,7 +497,15 @@ mod tests {
         }
     }
     unsafe extern "C" {
+        fn usleep(microseconds: u32) -> i32;
+        fn atexit(callback: extern "C" fn()) -> i32;
+        fn _exit(status: i32) -> !;
         fn malloc(bytes: usize) -> *mut std::ffi::c_void;
         fn free(pointer: *mut std::ffi::c_void);
+    }
+
+    extern "C" fn unexpected_cleanup() {
+        // Immediate watchdog termination must not run C++ or C exit handlers.
+        unsafe { _exit(99) }
     }
 }

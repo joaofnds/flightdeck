@@ -11,7 +11,9 @@ use crate::u64_from_usize;
 /// Marks the start of a ring, so a reader never takes another object for one.
 pub(super) const MAGIC: u64 = u64::from_be_bytes(*b"FLTDRING");
 /// The layout this code writes and reads, which a change to the layout raises.
-pub(super) const LAYOUT_VERSION: u64 = 3;
+pub(super) const LAYOUT_VERSION_LEGACY: u64 = 2;
+pub(super) const LAYOUT_VERSION_OBSERVED: u64 = 3;
+pub(super) const LAYOUT_VERSION: u64 = LAYOUT_VERSION_OBSERVED;
 
 /// The words of the header, which starts the ring.
 pub(super) const HEADER_MAGIC: usize = 0;
@@ -47,9 +49,18 @@ pub(super) const HEADER_PROCESS_WORDS: usize = 20;
 pub(super) const HEADER_COALITION_WORDS: usize = 21;
 pub(super) const HEADER_EVENT_WORDS: usize = 22;
 pub(super) const HEADER_IDENTITY: usize = 23;
-pub(super) const HEADER_COMPLETED: usize = 29;
-pub(super) const HEADER_WORDS: usize = 32;
+pub(super) const IDENTITY_WORDS: usize = 2;
+pub(super) const HEADER_COMPLETED: usize = HEADER_IDENTITY + 3 * IDENTITY_WORDS;
+pub(super) const HEADER_RUN_START_CONTINUOUS_NS: usize = HEADER_COMPLETED + 1;
+pub(super) const HEADER_ORIGIN_STATE: usize = HEADER_RUN_START_CONTINUOUS_NS + 1;
+pub(super) const HEADER_WORDS: usize = HEADER_ORIGIN_STATE + 1;
+pub(super) const ORIGIN_UNAVAILABLE: u64 = 0;
+pub(super) const ORIGIN_IDENTIFIED: u64 = 1;
+/// The source has an exact elapsed origin but no assigned recording/run/boot identity.
+pub(super) const ORIGIN_UNREGISTERED: u64 = 2;
 const _: () = assert!(HEADER_EVENT_WORDS < HEADER_WORDS);
+const _: () = assert!(HEADER_IDENTITY == HEADER_EVENT_WORDS + 1);
+const _: () = assert!(HEADER_WORDS == 32);
 
 /// Each header word that holds a record's width, with the width this code reads.
 const RECORD_WIDTHS: [(usize, usize); 6] = [
@@ -161,6 +172,11 @@ impl Layout {
     }
 
     pub(super) fn versioned(shape: Shape, version: u64) -> Option<Self> {
+        if version != LAYOUT_VERSION_OBSERVED {
+            if version != LAYOUT_VERSION_LEGACY {
+                return None;
+            }
+        }
         let fields = [
             shape.slot_count,
             shape.cpu_capacity,
@@ -183,7 +199,7 @@ impl Layout {
         }
 
         let mut plan = SlotPlan {
-            end: if version == 2 {
+            end: if version == LAYOUT_VERSION_LEGACY {
                 SLOT_WALL_NS
             } else {
                 SLOT_FIXED_WORDS
@@ -355,17 +371,18 @@ pub(super) fn open_layout(header: &[AtomicU64], size_bytes: usize) -> io::Result
 
     let version = load(HEADER_LAYOUT_VERSION);
     if version != LAYOUT_VERSION {
-        if version != 2 {
+        if version != LAYOUT_VERSION_LEGACY {
             return Err(io::Error::from(io::ErrorKind::InvalidData));
         }
     }
 
     for (index, width) in RECORD_WIDTHS {
-        let width = if index == HEADER_SLOT_FIXED_WORDS && version == 2 {
-            SLOT_WALL_NS
-        } else {
-            width
-        };
+        let mut width = width;
+        if index == HEADER_SLOT_FIXED_WORDS {
+            if version == LAYOUT_VERSION_LEGACY {
+                width = SLOT_WALL_NS;
+            }
+        }
         if load(index) != u64_from_usize(width) {
             return Err(io::Error::from(io::ErrorKind::InvalidData));
         }
@@ -440,15 +457,23 @@ mod tests {
         // Goal: old headers retain their original narrower slots and data offsets.
         // Method: open a legacy header and compare its section offsets to the old widths.
         let words = header();
-        words[HEADER_LAYOUT_VERSION].store(2, Ordering::Relaxed);
+        words[HEADER_LAYOUT_VERSION].store(LAYOUT_VERSION_LEGACY, Ordering::Relaxed);
         words[HEADER_SLOT_FIXED_WORDS].store(39, Ordering::Relaxed);
-        let legacy = Layout::versioned(layout().shape, 2).unwrap();
+        let legacy = Layout::versioned(layout().shape, LAYOUT_VERSION_LEGACY).unwrap();
 
         let opened = open_layout(&words, legacy.size_bytes()).unwrap();
 
-        assert_eq!(2, opened.version);
+        assert_eq!(LAYOUT_VERSION_LEGACY, opened.version);
         assert_eq!(39, opened.cpus.start);
-        assert_eq!(legacy.events_start, opened.events_start);
+        // Header32 + fixed39 + CPU2 + interface10 + GPU1 + core2 + fan1 + process18 + coalition10.
+        assert_eq!(115, opened.events_start);
+    }
+
+    #[test]
+    fn cannot_construct_a_plan_for_an_unknown_layout_version() {
+        // Goal: a speculative layout version cannot silently acquire today's offsets.
+        // Method: ask the internal planner directly for a version neither reader supports.
+        assert!(Layout::versioned(layout().shape, LAYOUT_VERSION + 1).is_none());
     }
 
     #[test]

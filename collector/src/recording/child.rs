@@ -2,12 +2,17 @@
 mod native;
 
 use std::io;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
 use crate::clock::Timebase;
+use crate::kernel::ESRCH;
 use native::kill;
+
+pub const OWNERSHIP_EXIT_STATUS: u8 = 73;
+const SIGKILL: i32 = 9;
 
 pub struct Persister {
     pid: i32,
@@ -38,6 +43,11 @@ enum State {
 
 impl Finished {
     #[must_use]
+    pub fn owned_by_surviving_persister(&self) -> bool {
+        self.status == i32::from(OWNERSHIP_EXIT_STATUS) << 8
+    }
+
+    #[must_use]
     pub fn successful(&self) -> bool {
         self.status == 0
     }
@@ -47,15 +57,12 @@ impl Persister {
     /// Runs only at startup; sampling never starts a replacement process.
     pub fn spawn(executable: &Path, recording: &Path, timebase: Timebase) -> io::Result<Self> {
         let mut command = Command::new(executable);
-        command
-            .arg("--recording")
-            .arg(recording)
-            .arg("--parent-pid")
-            .arg(std::process::id().to_string());
+        command.arg("--recording").arg(recording).process_group(0);
         Self::spawn_command(&mut command, timebase)
     }
 
-    fn spawn_command(command: &mut Command, timebase: Timebase) -> io::Result<Self> {
+    /// Starts a caller-configured child and takes responsibility for its final wait4.
+    pub fn spawn_command(command: &mut Command, timebase: Timebase) -> io::Result<Self> {
         let mut child = command.spawn()?;
         let pid = child.id().cast_signed();
         if pid <= 0 {
@@ -126,9 +133,9 @@ impl Persister {
         if let Some(finished) = self.poll()? {
             return Ok(finished);
         }
-        if unsafe { kill(self.pid, 9) } != 0 {
+        if unsafe { kill(self.pid, SIGKILL) } != 0 {
             let error = io::Error::last_os_error();
-            if error.raw_os_error() != Some(3) {
+            if error.raw_os_error() != Some(ESRCH) {
                 return Err(error);
             }
         }
@@ -158,6 +165,7 @@ mod tests {
     use crate::clock::Timebase;
     use std::process::Command;
     use std::time::Duration;
+    const ECHILD: i32 = 10;
 
     #[test]
     fn reaps_a_failed_child_with_its_final_cpu_usage() {
@@ -170,8 +178,8 @@ mod tests {
         let finished = persister.finish(Duration::from_secs(2)).unwrap();
 
         assert!(!finished.successful());
-        assert!(finished.cpu_ns > 0);
-        assert!(persister.poll().unwrap().is_some());
+        assert_eq!(1 << 8, finished.status);
+        assert_eq!(finished.cpu_ns, persister.poll().unwrap().unwrap().cpu_ns);
     }
 
     #[test]
@@ -186,7 +194,12 @@ mod tests {
         let finished = persister.finish(Duration::ZERO).unwrap();
 
         assert!(!finished.successful());
-        assert_eq!(unsafe { kill(persister.pid, 0) }, -1);
-        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(3));
+        assert_eq!(
+            Some(ECHILD),
+            native::wait(persister.pid, false)
+                .err()
+                .unwrap()
+                .raw_os_error()
+        );
     }
 }

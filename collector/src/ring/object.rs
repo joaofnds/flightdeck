@@ -19,6 +19,20 @@ use crate::u64_from_usize;
 
 /// The longest name macOS gives a shared-memory object, `PSHMNAMLEN` in `sys/posix_shm.h`.
 const PSHMNAMLEN: usize = 31;
+/// A complete shared-memory name plus room for its syscall NUL terminator.
+pub const GENERATION_BUFFER_SIZE: usize = PSHMNAMLEN + 1;
+const U64_DECIMAL_DIGITS_MAX: usize = 20;
+const _: () = {
+    let mut remaining = u64::MAX;
+    let mut digits = 1;
+    while digits < U64_DECIMAL_DIGITS_MAX {
+        digits += 1;
+        remaining /= 10;
+    }
+    // Exactly one leading digit remains after removing all lower decimal places.
+    assert!(remaining > 0);
+    assert!(remaining < 10);
+};
 
 /// The mode of every ring: its owner reads it and nobody writes it, so after the writer made
 /// it, no process can open it for writing, the writer's own included.
@@ -28,6 +42,8 @@ const LOCK_MODE: u32 = 0o600;
 /// The generations a writer tries past the previous ring's before it gives up, each name
 /// taken by an object it did not make.
 const GENERATION_TRIES: u64 = 16;
+/// A startup only inspects the bounded generations its predecessor could have created.
+pub const GENERATION_SCAN_MAX: u64 = GENERATION_TRIES + 2;
 
 /// The start of the name of every ring of a user's place. Every user shares the names of
 /// shared-memory objects, and the token after it tells one place's rings from another's.
@@ -373,20 +389,48 @@ pub(super) fn create_previous(prefix: &str, lock: &File) -> io::Result<Previous>
 /// The token and the generation of the ring name `name`, which a writer wrote under
 /// `prefix`, or `None` where another program wrote something else.
 fn create_previous_parse(prefix: &str, name: &str) -> Option<(Token, u64)> {
-    let (token, generation) = name.strip_prefix(prefix)?.split_once('.')?;
+    let (token, digits) = name.strip_prefix(prefix)?.split_once('.')?;
     let token = Token::parse(token)?;
-    let generation = generation.parse().ok()?;
-    // A writer writes a generation without a sign or a leading zero, so the name rebuilt from
-    // the generation is the name read. One another program wrote with them names no ring.
-    let rebuilt = match ring_name(&RingNames { prefix, token }, generation) {
-        Ok(rebuilt) => rebuilt,
-        Err(error) => unreachable!("a generation's own digits fit where they were read: {error}"),
-    };
-    if rebuilt != name {
+    if !digits.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
-
+    if digits.len() > 1 {
+        if digits.starts_with('0') {
+            return None;
+        }
+    }
+    let generation = digits.parse().ok()?;
     Some((token, generation))
+}
+
+pub struct GenerationName(LockedName);
+
+impl GenerationName {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+/// Reads only a canonical generation of this place, using the writer's own name parser.
+pub fn previous_generation(place: &super::Place) -> io::Result<Option<GenerationName>> {
+    let file = match open_lock_file(&place.lock_path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let name = match LockedName::read(&file) {
+        Ok(name) => name,
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let Some((_, generation)) = create_previous_parse(&place.name_prefix, name.as_str()) else {
+        return Ok(None);
+    };
+    if generation == 0 {
+        return Ok(None);
+    }
+    Ok(Some(GenerationName(name)))
 }
 
 /// The number `newest` the ring `name` names, to continue from, or 0 where it is past
@@ -601,7 +645,7 @@ pub fn unlink_generation(name: &str) -> io::Result<()> {
 pub fn generation_name<'buffer>(
     current: &str,
     generation: u64,
-    buffer: &'buffer mut [u8; 32],
+    buffer: &'buffer mut [u8; GENERATION_BUFFER_SIZE],
 ) -> io::Result<&'buffer str> {
     let (prefix, suffix) = current
         .rsplit_once('.')
@@ -609,19 +653,22 @@ pub fn generation_name<'buffer>(
     if suffix.parse::<u64>().is_err() {
         return Err(io::Error::from(io::ErrorKind::InvalidInput));
     }
-    let mut digits = [0; 20];
+    let mut digits = [0; U64_DECIMAL_DIGITS_MAX];
     let mut start = digits.len();
     let mut remaining = generation;
-    for _ in 0..20 {
+    for _ in 0..U64_DECIMAL_DIGITS_MAX {
         start -= 1;
-        digits[start] = b'0'
-            + u8::try_from(remaining % 10)
-                .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+        let digit = match u8::try_from(remaining % 10) {
+            Ok(digit) => digit,
+            Err(error) => unreachable!("a decimal remainder is at most nine: {error}"),
+        };
+        digits[start] = b'0' + digit;
         remaining /= 10;
         if remaining == 0 {
             break;
         }
     }
+    assert_eq!(0, remaining);
     let length = prefix.len() + 1 + digits.len() - start;
     if length > PSHMNAMLEN {
         return Err(io::Error::from(io::ErrorKind::InvalidInput));
@@ -806,6 +853,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn formats_every_decimal_width_in_fixed_generation_storage() {
+        // Goal: generation naming covers zero through the largest u64 without heap work.
+        // Method: format boundary values into the shared buffer while counting allocations.
+        use crate::recording::discovery::tests::allocator_calls_in;
+        let mut buffer = [0; GENERATION_BUFFER_SIZE];
+
+        let calls = allocator_calls_in(|| {
+            assert_eq!("/g.0", generation_name("/g.1", 0, &mut buffer).unwrap());
+            assert_eq!("/g.9", generation_name("/g.1", 9, &mut buffer).unwrap());
+            assert_eq!("/g.10", generation_name("/g.1", 10, &mut buffer).unwrap());
+            assert_eq!(
+                "/g.18446744073709551615",
+                generation_name("/g.1", u64::MAX, &mut buffer).unwrap()
+            );
+            assert_eq!(
+                io::ErrorKind::InvalidInput,
+                generation_name("/fd.abcdefghijkl.1", u64::MAX, &mut buffer)
+                    .unwrap_err()
+                    .kind()
+            );
+        });
+
+        assert_eq!(0, calls);
+    }
+
+    #[test]
     fn reads_a_lock_file_name_as_long_as_macos_gives_and_no_longer() {
         // Goal: a lock file holding a name of the longest length macOS gives is read whole,
         // and one a byte longer is refused rather than cut.
@@ -874,3 +947,7 @@ mod tests {
         assert_eq!(io::ErrorKind::PermissionDenied, placed.unwrap_err().kind());
     }
 }
+
+#[cfg(test)]
+#[path = "lock_tests.rs"]
+mod lock_tests;

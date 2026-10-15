@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use collector::recording::discovery::WindowName;
 
 use super::{Store, partition_root, read_committed, ready_relative, visit_names};
+use crate::layout::Kind;
 use crate::{Losses, Manifest, TableManifest, TimeBounds, WindowIdentity};
 
 const WINDOWS: u64 = 10_081;
@@ -24,12 +25,19 @@ fn a_history_longer_than_a_week_is_complete_for_recovery_and_read_only_discovery
     // Method: create filesystem-valid immutable sets with shared opaque payloads, then read all.
     let history = History::new();
 
+    let started = std::time::Instant::now();
     let progress = history
         .store
         .progress(&history.identity.run)
         .unwrap()
         .unwrap();
+    let progress_ns = started.elapsed().as_nanos();
+    let started = std::time::Instant::now();
     let discovered = history.discover();
+    eprintln!(
+        "history windows={WINDOWS} progress_ns={progress_ns} discovery_ns={}",
+        started.elapsed().as_nanos()
+    );
 
     assert_eq!(WINDOWS - 1, progress.identity.window);
     assert_eq!((WINDOWS - 1) * 60 + 2, progress.publication_end);
@@ -71,7 +79,7 @@ impl History {
                 .write(true)
                 .read(false)
                 .mode(0o600)
-                .open(payloads.join(table.0))
+                .open(payloads.join(table.0.name()))
                 .unwrap();
             file.write_all(b"closed opaque filesystem fixture, not Parquet fidelity")
                 .unwrap();
@@ -83,7 +91,7 @@ impl History {
 
     fn discover(&self) -> Vec<bool> {
         let mut discovered = vec![false; usize::try_from(WINDOWS).unwrap()];
-        let run = partition_root(&self.root, "data", &self.identity)
+        let run = partition_root(&self.root, Kind::Data, &self.identity)
             .parent()
             .unwrap()
             .to_owned();
@@ -138,7 +146,7 @@ fn history_window(store: &Store, identity: &WindowIdentity, payload: &Path, wind
         tables: crate::schema::TABLES
             .iter()
             .map(|table| TableManifest {
-                name: table.0,
+                name: table.0.name(),
                 rows: 1,
             })
             .collect(),
@@ -168,7 +176,7 @@ fn history_window(store: &Store, identity: &WindowIdentity, payload: &Path, wind
 
 fn history_directories(store: &Store, identity: &WindowIdentity) {
     if identity.window == 0 {
-        for kind in ["data", "commits"] {
+        for kind in [Kind::Data, Kind::Commits] {
             let parent = partition_root(&store.root, kind, identity)
                 .parent()
                 .unwrap()
@@ -177,7 +185,7 @@ fn history_directories(store: &Store, identity: &WindowIdentity) {
         }
     }
     if identity.window.is_multiple_of(1440) {
-        for kind in ["data", "commits"] {
+        for kind in [Kind::Data, Kind::Commits] {
             DirBuilder::new()
                 .mode(0o700)
                 .create(partition_root(&store.root, kind, identity))

@@ -1,13 +1,19 @@
 //! Native child usage and reaping; every byte of kernel output starts zeroed.
 use super::{ChildCost, Finished};
 use crate::clock::Timebase;
+use crate::kernel::EINTR;
 use std::ffi::{c_int, c_void};
 use std::io;
 use std::mem::offset_of;
 
+const RUSAGE_INFO_V6: i32 = 6;
+const WNOHANG: i32 = 1;
+const WAIT_INTERRUPTS_MAX: usize = 8;
+
 pub(super) fn sample(pid: i32, timebase: Timebase) -> io::Result<ChildCost> {
     let mut record = RusageInfoV6::default();
-    if unsafe { proc_pid_rusage(pid, 6, std::ptr::from_mut(&mut record).cast()) } != 0 {
+    if unsafe { proc_pid_rusage(pid, RUSAGE_INFO_V6, std::ptr::from_mut(&mut record).cast()) } != 0
+    {
         return Err(io::Error::last_os_error());
     }
     let user_ns = timebase.nanoseconds(record.user_time)?;
@@ -48,8 +54,8 @@ pub(super) fn wait(pid: i32, blocking: bool) -> io::Result<Option<Reaped>> {
         status: 0,
         usage: Rusage::default(),
     };
-    let options = i32::from(!blocking); // WNOHANG is 1 on Darwin.
-    for _interruption in 0..8 {
+    let options = if blocking { 0 } else { WNOHANG };
+    for _interruption in 0..WAIT_INTERRUPTS_MAX {
         let returned =
             unsafe { wait4(pid, &raw mut reaped.status, options, &raw mut reaped.usage) };
         if returned == pid {
@@ -60,7 +66,7 @@ pub(super) fn wait(pid: i32, blocking: bool) -> io::Result<Option<Reaped>> {
         }
         if returned == -1 {
             let error = io::Error::last_os_error();
-            if error.raw_os_error() == Some(4) {
+            if error.raw_os_error() == Some(EINTR) {
                 continue;
             }
             return Err(error);

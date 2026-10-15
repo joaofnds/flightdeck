@@ -6,11 +6,175 @@ mod support;
 
 #[cfg(test)]
 mod tests {
-    use super::support::RecordingHarness;
+    use super::support::{RecordingHarness, SourceFault};
+
+    macro_rules! unavailable_source {
+        ($name:ident, $fault:expr) => {
+            #[test]
+            fn $name() {
+                // Goal: unavailable old sources cannot prevent a healthy new run sealing.
+                // Method: retain a faulty source, restart, and query the new disk window.
+                let mut recording = RecordingHarness::start();
+                recording.leave_a_faulty_old_source($fault);
+
+                recording.restart_collection_with_new_window();
+                recording.restart_worker();
+                recording.wait_for_new_window();
+
+                assert_eq!(recording.processes_at_second(2_000), vec![(41, 101)]);
+                recording.assert_old_source_retained();
+                assert!(recording.new_window_prior_loss_unknown());
+            }
+        };
+    }
+
+    unavailable_source!(
+        seals_healthy_history_after_a_corrupt_source,
+        SourceFault::Corrupt
+    );
+    unavailable_source!(
+        seals_healthy_history_after_a_refused_source,
+        SourceFault::Permission
+    );
+    unavailable_source!(
+        seals_healthy_history_after_a_foreign_source,
+        SourceFault::Foreign
+    );
 
     #[test]
-    fn keeps_old_readings_once_before_new_seals_while_collection_continues() {
-        // Goal: a restart keeps the recoverable tail exactly once while sampling continues.
+    fn drains_a_tail_when_its_pid_is_now_owned_by_another_user() {
+        // Goal: refused usage alone stays unknown, but a different real UID proves reuse.
+        // Method: register root launchd's PID for our old tail and recover through the worker.
+        let mut recording = RecordingHarness::start();
+
+        recording.record_a_tail_with_a_pid_now_owned_by_another_user();
+        recording.wait_for_worker_exit();
+
+        assert_eq!(recording.processes_at_second(1_000), vec![(41, 7)]);
+    }
+
+    #[test]
+    fn persists_new_retention_loss_as_unknown_extent_with_the_next_healthy_seal() {
+        // Goal: an evicted unsealed tail remains explicit without invented missing counts.
+        // Method: retain the worker across two rapid restarts and read its next prior seal.
+        let mut recording = RecordingHarness::start();
+
+        let losses = recording.evict_unsealed_history_with_surviving_worker();
+
+        assert!(losses.unknown);
+        assert_eq!(losses.publications, 0);
+        assert_eq!(losses.events, 0);
+    }
+
+    #[test]
+    fn keeps_reused_process_pids_distinct_by_their_measured_birth() {
+        // Goal: a PID reused within one window never merges different process readings.
+        // Method: publish the same PID with two births and read its typed disk identities.
+        let mut recording = RecordingHarness::start();
+
+        recording.record_reused_process_identity();
+        recording.wait_for_worker_exit();
+
+        assert_eq!(
+            recording.old_process_identities(),
+            vec![(41, 7, 11), (41, 8, 22)]
+        );
+    }
+
+    #[test]
+    fn records_the_exact_overwritten_publication_count_with_surviving_readings() {
+        // Goal: overwritten history is explicit while recoverable observations stay exact.
+        // Method: overfill the bounded ring before starting persistence and read the seal.
+        let mut recording = RecordingHarness::start();
+
+        recording.record_overwritten_history();
+        recording.wait_for_worker_exit();
+
+        recording.assert_exact_publication_loss(61);
+        assert_eq!(recording.processes_at_second(1_061), vec![(41, 61)]);
+        assert_eq!(recording.processes_at_second(1_060), vec![]);
+    }
+
+    #[test]
+    fn blocks_new_seals_until_an_old_storage_failure_is_resolved() {
+        // Goal: storage refusal cannot let new commits overtake recoverable old history.
+        // Method: refuse storage, continue publishing, then restore it and recover in order.
+        let mut recording = RecordingHarness::start();
+
+        recording.refuse_storage_then_recover();
+
+        assert_eq!(recording.processes_at_second(1_060), vec![(41, 60)]);
+        assert_eq!(recording.processes_at_second(2_000), vec![(41, 101)]);
+    }
+
+    #[test]
+    fn preserves_a_late_tick_and_sixty_scheduled_observations_in_one_elapsed_minute() {
+        // Goal: the actual elapsed-minute key accommodates one carried delayed deadline.
+        // Method: publish tick59 late beside scheduled ticks60..119 and drain the ring.
+        let mut recording = RecordingHarness::start();
+
+        recording.record_one_late_tick_before_a_full_scheduled_minute();
+        recording.wait_for_worker_exit();
+
+        assert_eq!(recording.old_window_tick_count(1), 61);
+        assert_eq!(recording.processes_at_second(1_059), vec![(41, 59)]);
+    }
+
+    #[test]
+    fn bounds_four_orderly_drains_without_counting_retention_loss() {
+        // Goal: fully durable runs do not consume the two retained unsealed sources.
+        // Method: drain four runs, inspect retained sources and query the original disk values.
+        let mut recording = RecordingHarness::start();
+        recording.finish_collection_and_drain(1);
+        recording.restart_collection_with_new_window();
+        recording.finish_collection_and_drain(2);
+        recording.restart_collection_with_new_window();
+        recording.finish_collection_and_drain(3);
+        recording.restart_collection_with_new_window();
+        recording.finish_collection_and_drain(4);
+
+        recording.assert_two_completed_sources_retained_without_loss();
+        assert_eq!(
+            recording.processes_at_second(3_062),
+            vec![(41, 1), (41, 2), (41, 3), (41, 4)]
+        );
+    }
+
+    #[test]
+    fn refuses_a_second_worker_while_the_surviving_owner_keeps_sealing() {
+        // Goal: an ownership refusal identifies the survivor without stopping its work.
+        // Method: launch another real worker while the owner spans two collector runs.
+        let mut recording = RecordingHarness::start();
+        recording.record_old_window_and_tail();
+        recording.wait_for_old_full_window();
+
+        recording.refuse_second_worker();
+        recording.restart_collection_with_new_window();
+        recording.wait_for_recovered_tail_and_new_window();
+
+        recording.assert_second_worker_owned();
+        assert_eq!(recording.processes_at_second(2_000), vec![(41, 101)]);
+    }
+
+    #[test]
+    fn seals_healthy_history_after_an_unsupported_retained_source() {
+        // Goal: unavailable retained history cannot prevent a healthy new run sealing.
+        // Method: alter the old layout version, restart, and query only the new disk window.
+        let mut recording = RecordingHarness::start();
+        recording.leave_an_unsupported_old_source();
+
+        recording.restart_collection_with_new_window();
+        recording.restart_worker();
+        recording.wait_for_new_window();
+
+        assert_eq!(recording.processes_at_second(2_000), vec![(41, 101)]);
+        recording.assert_old_source_retained();
+        assert!(recording.new_window_prior_loss_unknown());
+    }
+
+    #[test]
+    fn keeps_old_readings_once_before_new_seals_with_publication_number_continuity() {
+        // Goal: a restart keeps the recoverable tail exactly once with ring number continuity.
         // Method: kill the worker after one seal, restart collection and query only disk.
         let mut recording = RecordingHarness::start();
         recording.record_old_window_and_tail();
@@ -27,8 +191,7 @@ mod tests {
         );
         assert_eq!(recording.processes_at_second(1_060), vec![(41, 60)]);
         assert_eq!(recording.processes_at_second(2_000), vec![(41, 101)]);
-        recording.assert_old_tail_committed_before_new_window();
-        recording.assert_collection_advanced_during_recovery();
+        recording.assert_publication_number_continuity();
     }
 
     #[test]
@@ -96,7 +259,6 @@ mod tests {
 
         assert_eq!(recording.processes_at_second(1_060), vec![(41, 60)]);
         assert_eq!(recording.processes_at_second(2_000), vec![(41, 101)]);
-        recording.assert_old_tail_committed_before_new_window();
     }
 
     #[test]

@@ -21,6 +21,8 @@ use crate::processes::{Process, Task, Usage};
 use crate::tracker::Event;
 use crate::{push_without_growing, u64_from_usize};
 
+const _: () = assert!(super::layout::LAYOUT_VERSION == super::layout::LAYOUT_VERSION_OBSERVED);
+
 /// What the collector read in one tick, as the writer publishes it.
 pub struct Readings<'a> {
     pub run_tick: u64,
@@ -194,7 +196,9 @@ pub(super) fn store_tick(
     layout: &Layout,
     readings: &Readings,
     events: Range<u64>,
+    times: Option<&super::ObservationTimes>,
 ) {
+    assert_eq!(super::layout::LAYOUT_VERSION_OBSERVED, layout.version);
     assert_eq!(layout.slot_words, slot.len());
     assert!(events.start <= events.end);
     assert_eq!(
@@ -202,10 +206,8 @@ pub(super) fn store_tick(
         events.end - events.start
     );
 
-    store_tick_counts(slot, readings);
-    slot[super::layout::SLOT_WALL_NS].store(0, Ordering::Relaxed);
-    slot[super::layout::SLOT_CONTINUOUS_NS].store(0, Ordering::Relaxed);
-    slot[super::layout::SLOT_AWAKE_NS].store(0, Ordering::Relaxed);
+    store_tick_counts(slot, readings, times);
+    store_tick_times(slot, times);
     let dropped = readings.dropped;
     let words = [
         (SLOT_EVENTS_FIRST, events.start),
@@ -259,7 +261,11 @@ pub(super) fn store_tick(
 }
 
 /// Stores the tick number, the count of each section's records, and which sources it read.
-fn store_tick_counts(slot: &[AtomicU64], readings: &Readings) {
+fn store_tick_counts(
+    slot: &[AtomicU64],
+    readings: &Readings,
+    times: Option<&super::ObservationTimes>,
+) {
     let (gpu_states, cores) = match &readings.ioreport {
         Some(ioreport) => (ioreport.gpu.active_ns().len(), ioreport.cores.len()),
         None => (0, 0),
@@ -271,6 +277,9 @@ fn store_tick_counts(slot: &[AtomicU64], readings: &Readings) {
     }
     if readings.smc.is_some() {
         sources |= SOURCE_SMC;
+    }
+    if times.is_some() {
+        sources |= super::layout::SOURCE_OBSERVATION_TIMES;
     }
 
     let words = [
@@ -300,6 +309,16 @@ fn store_tick_counts(slot: &[AtomicU64], readings: &Readings) {
     }
 }
 
+fn store_tick_times(slot: &[AtomicU64], times: Option<&super::ObservationTimes>) {
+    let words = match times {
+        Some(times) => [times.wall_ns, times.continuous_ns, times.awake_ns],
+        None => [0; 3],
+    };
+    store(slot, super::layout::SLOT_WALL_NS, words[0]);
+    store(slot, super::layout::SLOT_CONTINUOUS_NS, words[1]);
+    store(slot, super::layout::SLOT_AWAKE_NS, words[2]);
+}
+
 fn store_tick_ioreport(slot: &[AtomicU64], layout: &Layout, ioreport: &IOReportReadings) {
     store(slot, SLOT_GPU_ENERGY_NJ, ioreport.gpu_energy_nj);
     let gpu = ioreport.gpu.active_ns();
@@ -322,8 +341,8 @@ fn store_tick_ioreport(slot: &[AtomicU64], layout: &Layout, ioreport: &IOReportR
 /// Loads the tick `slot` holds into `tick`, and returns whether every word made a reading,
 /// which a slot the writer overwrote during the load may not.
 pub(super) fn load_tick(slot: &[AtomicU64], layout: &Layout, tick: &mut Tick) -> bool {
-    tick.times = load_tick_times(slot, layout);
     assert_eq!(layout.slot_words, slot.len());
+    tick.times = load_tick_times(slot, layout);
 
     let count = |index: usize, capacity: usize| {
         let count = slot[index].load(Ordering::Relaxed);
@@ -389,7 +408,7 @@ pub(super) fn load_tick(slot: &[AtomicU64], layout: &Layout, tick: &mut Tick) ->
 }
 
 fn load_tick_times(slot: &[AtomicU64], layout: &Layout) -> Option<super::ObservationTimes> {
-    if layout.version < 3 {
+    if layout.version < super::layout::LAYOUT_VERSION_OBSERVED {
         return None;
     }
 
@@ -968,10 +987,67 @@ mod tests {
         let slot = slot_of(&layout);
         let mut tick = Tick::new(&layout);
 
-        store_tick(&slot, &layout, readings, 1..1);
+        store_tick(&slot, &layout, readings, 1..1, None);
 
         assert!(load_tick(&slot, &layout, &mut tick));
         tick
+    }
+
+    #[test]
+    fn caller_storage_refuses_a_state_stride_smaller_than_the_source() {
+        // Goal: state rows cannot be loaded into a caller's narrower core records.
+        // Method: keep all vectors large enough but provide an insufficient state stride.
+        let memory = Memory::default();
+        let mut shape = shape_for(&empty_readings(&memory), 1);
+        shape.state_capacity = 2;
+        let layout = Layout::new(shape).unwrap();
+        let mut tick = Tick::new(&layout);
+        tick.state_capacity = 1;
+
+        assert!(!tick.fits(&layout));
+    }
+
+    #[test]
+    fn caller_storage_refuses_a_short_flat_core_state_buffer() {
+        // Goal: validated counts cannot hide a missing element in flattened core storage.
+        // Method: allocate the right stride and core count, then shorten the backing values.
+        let memory = Memory::default();
+        let mut shape = shape_for(&empty_readings(&memory), 1);
+        shape.core_capacity = 2;
+        shape.state_capacity = 2;
+        let layout = Layout::new(shape).unwrap();
+        let mut tick = Tick::new(&layout);
+        tick.core_active_ns.truncate(3);
+
+        assert!(!tick.fits(&layout));
+    }
+
+    #[test]
+    fn observation_clocks_and_their_availability_round_trip_and_clear_together() {
+        // Goal: a slot's measured clocks and availability have one storage boundary.
+        // Method: store a measured zero wall time, then reuse the slot without a snapshot.
+        let memory = Memory::default();
+        let readings = empty_readings(&memory);
+        let layout = Layout::new(shape_for(&readings, 1)).unwrap();
+        let slot = slot_of(&layout);
+        let mut tick = Tick::new(&layout);
+        let times = super::super::ObservationTimes {
+            wall_ns: 0,
+            continuous_ns: 123,
+            awake_ns: 45,
+        };
+
+        store_tick(&slot, &layout, &readings, 1..1, Some(&times));
+        assert!(load_tick(&slot, &layout, &mut tick));
+        assert_eq!(Some(times), tick.times);
+        store_tick(&slot, &layout, &readings, 1..1, None);
+        assert!(load_tick(&slot, &layout, &mut tick));
+
+        assert_eq!(None, tick.times);
+        assert_eq!(
+            0,
+            slot[super::super::layout::SLOT_CONTINUOUS_NS].load(Ordering::Relaxed)
+        );
     }
 
     #[test]
@@ -1091,11 +1167,11 @@ mod tests {
         let layout = Layout::new(shape_for(&with_sources, 1)).unwrap();
         let mut tick = Tick::new(&layout);
         let first = slot_of(&layout);
-        store_tick(&first, &layout, &with_sources, 1..1);
+        store_tick(&first, &layout, &with_sources, 1..1, None);
         assert!(load_tick(&first, &layout, &mut tick));
         let second = slot_of(&layout);
 
-        store_tick(&second, &layout, &without_sources, 1..1);
+        store_tick(&second, &layout, &without_sources, 1..1, None);
         let loaded = load_tick(&second, &layout, &mut tick);
 
         assert!(loaded);
@@ -1130,7 +1206,7 @@ mod tests {
 
         for (index, word) in breaks {
             let slot = slot_of(&layout);
-            store_tick(&slot, &layout, &readings, 1..1);
+            store_tick(&slot, &layout, &readings, 1..1, None);
             slot[index].store(word, Ordering::Relaxed);
 
             assert!(

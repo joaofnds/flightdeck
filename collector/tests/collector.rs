@@ -4,12 +4,17 @@
 #[cfg(test)]
 mod tests {
     use std::ffi::{CString, c_char, c_int};
-    use std::process::{Command, Output};
+    use std::os::unix::fs::{DirBuilderExt, symlink};
+    use std::os::unix::process::CommandExt;
+    use std::path::Path;
+    use std::process::{Child, Command, Output, Stdio};
+    use std::time::Duration;
 
     use collector::ring::{Found, Place, Reader};
 
     unsafe extern "C" {
         fn shm_unlink(name: *const c_char) -> c_int;
+        fn kill(pid: c_int, signal: c_int) -> c_int;
     }
 
     /// A ring name only one test uses, whose lock file and ring are removed when the test
@@ -64,6 +69,84 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         std::str::from_utf8(&output.stdout).unwrap()
+    }
+
+    struct RunningCollector(Option<Child>);
+
+    impl RunningCollector {
+        fn start(ring: &TestRing) -> Self {
+            let child = Command::new(env!("CARGO_BIN_EXE_collector"))
+                .arg("--ring")
+                .arg(&ring.name)
+                .arg("--recording")
+                .arg(&ring.recording)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .process_group(0)
+                .spawn()
+                .unwrap();
+            Self(Some(child))
+        }
+
+        fn interrupt_group(&self) {
+            const SIGINT: c_int = 2;
+            let pid = i32::try_from(self.0.as_ref().unwrap().id()).unwrap();
+            assert_eq!(0, unsafe { kill(-pid, SIGINT) });
+        }
+
+        fn finish(&mut self) -> Output {
+            for _attempt in 0..2_000 {
+                if self.0.as_mut().unwrap().try_wait().unwrap().is_some() {
+                    return self.0.take().unwrap().wait_with_output().unwrap();
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            panic!("collector did not finish its interrupted recording");
+        }
+    }
+
+    impl Drop for RunningCollector {
+        fn drop(&mut self) {
+            if let Some(mut child) = self.0.take() {
+                if child.try_wait().unwrap().is_none() {
+                    child.kill().unwrap();
+                    child.wait().unwrap();
+                }
+            }
+        }
+    }
+
+    fn wait_for_publications(ring: &TestRing) {
+        for _attempt in 0..2_000 {
+            match collector::ring::RingReader::open(&ring.place.lock_path) {
+                Ok(reader) => {
+                    if reader.publication_newest().unwrap() >= 2 {
+                        return;
+                    }
+                }
+                Err(error) => assert_eq!(std::io::ErrorKind::NotFound, error.kind()),
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("collector did not publish its first scheduled tick");
+    }
+
+    fn only_entry(path: &Path) -> std::path::PathBuf {
+        let mut entries = std::fs::read_dir(path).unwrap();
+        let path = entries.next().unwrap().unwrap().path();
+        assert!(entries.next().is_none());
+        path
+    }
+
+    fn committed_range(root: &Path) -> std::ops::Range<u64> {
+        let run = only_entry(&root.join("commits"));
+        let day = only_entry(&run);
+        let marker = only_entry(&day);
+        let bytes = std::fs::read(marker).unwrap();
+        assert_eq!(&bytes[..8], b"FDSEAL01");
+        let first = u64::from_le_bytes(bytes[80..88].try_into().unwrap());
+        let end = u64::from_le_bytes(bytes[88..96].try_into().unwrap());
+        first..end
     }
 
     /// What the test read of one publication.
@@ -160,5 +243,58 @@ mod tests {
             found.iter().all(|published| published.coalitions > 0),
             "{found:?}"
         );
+        assert!(stdout(&collected).contains("persister_status=0"));
+        assert_eq!(1..last_tick + 2, committed_range(&ring.recording));
+    }
+
+    #[test]
+    fn launches_its_real_sibling_when_invoked_through_a_symlink() {
+        // Goal: an invocation directory cannot substitute a different persistence executable.
+        // Method: place a failing sibling beside a collector symlink and inspect the seal.
+        let ring = TestRing::new("symlink");
+        let launch = ring.recording.join("launch");
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&launch)
+            .unwrap();
+        let collector = launch.join("collector");
+        symlink(env!("CARGO_BIN_EXE_collector"), &collector).unwrap();
+        symlink("/usr/bin/false", launch.join("persister")).unwrap();
+
+        let output = Command::new(collector)
+            .args(["--seconds", "1", "--ring", &ring.name])
+            .arg("--recording")
+            .arg(&ring.recording)
+            .output()
+            .unwrap();
+
+        assert!(stdout(&output).contains("persister_status=0"));
+        let reader = collector::ring::RingReader::open(&ring.place.lock_path).unwrap();
+        assert_eq!(
+            reader.publication_first()..reader.publication_newest().unwrap() + 1,
+            committed_range(&ring.recording)
+        );
+    }
+
+    #[test]
+    fn drains_its_partial_recording_when_its_process_group_is_interrupted() {
+        // Goal: an ordinary terminal stop seals the tail instead of killing both processes.
+        // Method: interrupt a real collector's group after publications, then inspect disk.
+        let ring = TestRing::new("interrupt");
+        let mut collector = RunningCollector::start(&ring);
+        wait_for_publications(&ring);
+
+        collector.interrupt_group();
+        let output = collector.finish();
+
+        assert!(output.status.success(), "{output:?}");
+        let reader = collector::ring::RingReader::open(&ring.place.lock_path).unwrap();
+        assert!(reader.completed());
+        assert_eq!(
+            reader.publication_first()..reader.publication_newest().unwrap() + 1,
+            committed_range(&ring.recording)
+        );
+        assert!(stdout(&output).contains("persister_status=0"));
     }
 }
