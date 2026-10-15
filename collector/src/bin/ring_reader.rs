@@ -10,6 +10,9 @@ const WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 /// The longest the reader goes without a publication before it gives up on the writer. The
 /// collector publishes every second, so a writer this quiet has stopped.
 const IDLE_MAX: Duration = Duration::from_secs(30);
+/// The most events one look reads, over twice what the collector's log holds, so a look ends
+/// while the writer goes on appending. The next look reads on from where this one stopped.
+const EVENTS_PER_LOOK_MAX: u64 = 1 << 22;
 
 fn main() -> ExitCode {
     let options =
@@ -140,8 +143,7 @@ fn run_events(reader: &mut Reader) -> std::io::Result<()> {
     let events = reader.tick().events.clone();
     let dropped = reader.tick().dropped;
     let mut read = 0;
-    // The log holds a bounded count of events, so reading it ends.
-    loop {
+    for _ in 0..EVENTS_PER_LOOK_MAX {
         match reader.read_event()? {
             FoundEvent::Event { .. } => read += 1,
             FoundEvent::Missed { first, end } => println!("missed events {first}-{}", end - 1),
