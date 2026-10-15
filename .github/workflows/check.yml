@@ -30,9 +30,13 @@ jobs:
       - run: cargo clippy --locked --workspace --all-targets -- --deny warnings
       # The runner is a virtual machine with no SMC, no IOReport channels and energy counters
       # that read 0, so the tests that read them run only on a Mac. --exact keeps each skip
-      # from matching a longer name, so a new test runs here until it is listed.
+      # from matching a longer name, so a new test runs here until it is listed. A test that
+      # needs a second user, which the runner's sudo gives without a password and a
+      # contributor's machine does not, is ignored elsewhere, and --include-ignored runs it
+      # here under whatever name it takes. It fails, rather than skips, where sudo asks for a
+      # password.
       - run: >-
-          cargo test --locked --workspace --no-fail-fast -- --exact
+          cargo test --locked --workspace --no-fail-fast -- --exact --include-ignored
           --skip coalitions::tests::counts_the_energy_this_process_spends_in_its_coalition
           --skip ioreport::tests::counts_a_busy_cpu_in_its_cores_active_time
           --skip ioreport::tests::counts_the_energy_the_gpu_spends
@@ -57,9 +61,3 @@ jobs:
           --skip smc::tests::reads_the_temperature_of_a_soc_sensor
           --skip smc::tests::refuses_a_float_key_the_smc_holds_as_another_type
           --skip smc::tests::refuses_a_key_read_as_a_type_it_does_not_hold
-      # Another user's open of the ring needs a second user, which the runner's sudo gives
-      # without a password and a contributor's machine does not, so the test is ignored
-      # elsewhere and runs here. It fails, rather than skips, where sudo asks for a password.
-      - run: >-
-          cargo test --locked --test ring -- --exact --ignored
-          tests::another_user_cannot_open_the_ring

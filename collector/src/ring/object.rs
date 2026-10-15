@@ -35,7 +35,7 @@ const RING_NAME_PREFIX: &str = "/fd.";
 
 /// The characters of a token, the lowercase base32 alphabet of RFC 4648, 5 bits each.
 const TOKEN_ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
-/// The characters of a token, 60 random bits, so another user who cannot read the lock file
+/// The count of a token's characters, 60 random bits, so another user who cannot read the lock file
 /// cannot guess the names a writer will make and take them first.
 const TOKEN_LENGTH: usize = 12;
 
@@ -46,6 +46,8 @@ const _: () = {
     // A lock file holds a name of at most PSHMNAMLEN bytes, a token and a dot among them, so
     // the generation it names has at most 18 digits, and the tries past it fit in a u64.
     assert!(PSHMNAMLEN - TOKEN_LENGTH - 1 <= 18);
+    // Each of a byte's 256 values maps to one character, and each character is as likely.
+    assert!(256 % TOKEN_ALPHABET.len() == 0);
 };
 
 /// The largest publication or event number a ring may name. A record's sequence word holds
@@ -249,9 +251,8 @@ impl Token {
             return Err(io::Error::last_os_error());
         }
 
-        // The alphabet's 32 characters divide a byte's 256 values, so each is as likely.
         for byte in &mut bytes {
-            *byte = TOKEN_ALPHABET[usize::from(*byte % 32)];
+            *byte = TOKEN_ALPHABET[usize::from(*byte) % TOKEN_ALPHABET.len()];
         }
         Ok(Self { bytes })
     }
@@ -302,11 +303,12 @@ pub(super) fn create_previous(prefix: &str, lock: &File) -> io::Result<Previous>
     let name = locked.as_ref().map_or("", LockedName::as_str);
 
     // A lock file a writer never wrote is empty.
-    let (token, generation) = if let Some(named) = create_previous_parse(prefix, name) {
-        named
+    let (token, generation) = if let Some(parsed) = create_previous_parse(prefix, name) {
+        parsed
     } else {
         if !name.is_empty() {
-            eprintln!("ring: numbering from 1, since the lock file names {name:?}");
+            // The name may hold a token, which other users must not learn from the log.
+            eprintln!("ring: numbering from 1, since the lock file names no ring of this place");
         }
         (Token::random()?, 0)
     };
@@ -330,15 +332,15 @@ pub(super) fn create_previous(prefix: &str, lock: &File) -> io::Result<Previous>
         }
         Err(error) if error.raw_os_error() == Some(ENOENT) => (0, 0),
         Err(error) => {
-            eprintln!("ring: numbering from 1, since the ring {name} is unreadable: {error}");
+            eprintln!("ring: numbering from 1, since ring {generation} is unreadable: {error}");
             (0, 0)
         }
     };
     Ok(Previous {
         token,
         generation,
-        publication_newest: create_previous_continued(publication_newest, name),
-        event_newest: create_previous_continued(event_newest, name),
+        publication_newest: create_previous_continued(publication_newest, generation),
+        event_newest: create_previous_continued(event_newest, generation),
     })
 }
 
@@ -348,14 +350,24 @@ fn create_previous_parse(prefix: &str, name: &str) -> Option<(Token, u64)> {
     let (token, generation) = name.strip_prefix(prefix)?.split_once('.')?;
     let token = Token::parse(token)?;
     let generation = generation.parse().ok()?;
+    // A writer writes a generation without a sign or a leading zero, so the name rebuilt from
+    // the generation is the name read. One another program wrote with them names no ring.
+    let rebuilt = match ring_name(Naming { prefix, token }, generation) {
+        Ok(rebuilt) => rebuilt,
+        Err(error) => unreachable!("a generation's own digits fit where they were read: {error}"),
+    };
+    if rebuilt != name {
+        return None;
+    }
+
     Some((token, generation))
 }
 
 /// The number `newest` the ring `name` names, to continue from, or 0 where it is past
 /// `NUMBER_MAX`, which only another program of this user could have written.
-fn create_previous_continued(newest: u64, name: &str) -> u64 {
+fn create_previous_continued(newest: u64, generation: u64) -> u64 {
     if newest > NUMBER_MAX {
-        eprintln!("ring: numbering from 1, since the ring {name} names number {newest}");
+        eprintln!("ring: numbering from 1, since ring {generation} names number {newest}");
         return 0;
     }
 
@@ -379,6 +391,8 @@ pub(super) struct Naming<'prefix> {
 /// Makes the object of a ring of `layout` under the first generation past `previous` whose
 /// name no object holds.
 pub(super) fn create_object(naming: Naming, previous: u64, layout: &Layout) -> io::Result<Created> {
+    // A generation's digits fit in a ring name only far below the largest u64.
+    assert!(previous <= u64::MAX - GENERATION_TRIES);
     for generation in previous + 1..=previous + GENERATION_TRIES {
         let name = ring_name(naming, generation)?;
         match create_object_named(&name, layout.size_bytes()) {
@@ -407,7 +421,7 @@ fn ring_name(naming: Naming, generation: u64) -> io::Result<String> {
     if name.len() > PSHMNAMLEN {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("ring name {name} is past {PSHMNAMLEN} characters"),
+            format!("the name of ring {generation} is past {PSHMNAMLEN} characters"),
         ));
     }
 
@@ -430,7 +444,7 @@ fn create_object_named(name: &str, size_bytes: usize) -> io::Result<OwnedFd> {
         // An object of no size is no ring, and nothing else would remove it.
         if unsafe { shm_unlink(name.as_ptr()) } != 0 {
             eprintln!(
-                "ring: unlink {name:?} failed: {}",
+                "ring: unlink of a ring it could not size failed: {}",
                 io::Error::last_os_error()
             );
         }
@@ -453,11 +467,11 @@ pub(super) fn create_unlink_older(naming: Naming, previous: u64) {
         let name = match ring_name(naming, generation) {
             Ok(name) => name,
             Err(error) => {
-                unreachable!("the longer name {previous} took was short enough: {error}")
+                unreachable!("ring {previous} had a name, as each shorter one fits: {error}")
             }
         };
         if !kept {
-            if create_unlink_older_holds_publications(&name) {
+            if create_unlink_older_holds_publications(&name, generation) {
                 kept = true;
                 continue;
             }
@@ -470,7 +484,7 @@ pub(super) fn create_unlink_older(naming: Naming, previous: u64) {
         if unsafe { shm_unlink(name.as_ptr()) } != 0 {
             let error = io::Error::last_os_error();
             if error.raw_os_error() != Some(ENOENT) {
-                eprintln!("ring: unlink {name:?} failed: {error}");
+                eprintln!("ring: unlink of ring {generation} failed: {error}");
             }
         }
     }
@@ -478,7 +492,7 @@ pub(super) fn create_unlink_older(naming: Naming, previous: u64) {
 
 /// Whether the ring `name` is a ring of this user that holds a publication of its own. One
 /// that is gone, another program's, of another layout, or empty holds nothing to keep.
-fn create_unlink_older_holds_publications(name: &str) -> bool {
+fn create_unlink_older_holds_publications(name: &str, generation: u64) -> bool {
     match open_ring(name) {
         Ok((mapping, _)) => {
             let words = mapping.words();
@@ -488,7 +502,7 @@ fn create_unlink_older_holds_publications(name: &str) -> bool {
         }
         Err(error) => {
             if error.raw_os_error() != Some(ENOENT) {
-                eprintln!("ring: removing {name}, which is unreadable: {error}");
+                eprintln!("ring: removing ring {generation}, which is unreadable: {error}");
             }
             false
         }
@@ -703,8 +717,8 @@ mod tests {
         // starts the numbering again, rather than overflowing when the writer counts on.
         // Method: ask for the number to continue from of the largest number allowed and of
         // the one past it.
-        let largest = create_previous_continued(NUMBER_MAX, "/r.1");
-        let past = create_previous_continued(NUMBER_MAX + 1, "/r.1");
+        let largest = create_previous_continued(NUMBER_MAX, 1);
+        let past = create_previous_continued(NUMBER_MAX + 1, 1);
 
         assert_eq!(NUMBER_MAX, largest);
         assert_eq!(0, past);

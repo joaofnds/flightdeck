@@ -440,9 +440,8 @@ impl Reader {
     }
 }
 
-/// The newest number the header word `newest_word` says the writer finished, with what the
-/// writer wrote before it made visible, for both the publications and the events, so the
-/// two reads refuse a forged number alike.
+/// The newest number the header word `newest_word` holds, with what the writer wrote before
+/// it made visible, or an error where it is past any number a writer stores.
 fn read_newest(newest_word: &AtomicU64) -> io::Result<u64> {
     let newest = newest_word.load(Ordering::Relaxed);
     fence(Ordering::Acquire);

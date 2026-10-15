@@ -101,6 +101,9 @@ mod tests {
     /// named when the test ends, since a shared-memory object outlives the process that made it.
     struct TestPlace {
         place: Place,
+        /// The prefix and token of each ring name a spoiled lock file named, so the place
+        /// removes the rings made under a token the lock file no longer names.
+        tokens_spoiled: Mutex<Vec<String>>,
     }
 
     /// Held while a test spawns a reader, and while a test drops a writer and makes the next.
@@ -207,6 +210,7 @@ mod tests {
                     lock_path,
                     name_prefix: format!("/fdt{pid}{}.", &test[..test.len().min(6)]),
                 },
+                tokens_spoiled: Mutex::new(Vec::new()),
             }
         }
 
@@ -217,9 +221,29 @@ mod tests {
         /// The name of the ring of `generation`, under the token of the ring the lock file
         /// names.
         fn ring_name(&self, generation: u64) -> CString {
-            let named = std::fs::read_to_string(self.lock_path()).unwrap();
-            let (token_named, _) = named.rsplit_once('.').unwrap();
-            CString::new(format!("{token_named}.{generation}")).unwrap()
+            CString::new(format!("{}.{generation}", self.token_named().unwrap())).unwrap()
+        }
+
+        /// The prefix and token of the ring name the lock file holds, if it holds one.
+        fn token_named(&self) -> Option<String> {
+            let named = match std::fs::read_to_string(self.lock_path()) {
+                Ok(named) => named,
+                Err(error) => {
+                    assert_eq!(std::io::ErrorKind::NotFound, error.kind());
+                    return None;
+                }
+            };
+            let (token_named, _) = named.rsplit_once('.')?;
+            Some(token_named.to_owned())
+        }
+
+        /// Writes `contents` over the lock file, as another program might, after noting the
+        /// token of the ring name it held for the place to clean up.
+        fn spoil(&self, contents: &[u8]) {
+            if let Some(token_named) = self.token_named() {
+                self.tokens_spoiled.lock().unwrap().push(token_named);
+            }
+            std::fs::write(self.lock_path(), contents).unwrap();
         }
 
         /// Writes into the lock file the name of a ring of generation 0 under `token`, as a
@@ -256,28 +280,19 @@ mod tests {
 
     impl Drop for TestPlace {
         fn drop(&mut self) {
-            // A test that never named a ring left no ring.
-            let named = match std::fs::read_to_string(self.lock_path()) {
-                Ok(named) => named,
-                Err(error) => {
-                    assert_eq!(std::io::ErrorKind::NotFound, error.kind());
-                    return;
-                }
-            };
-            if !named.contains('.') {
-                std::fs::remove_file(&self.place.lock_path).unwrap();
-                return;
-            }
-
-            for generation in 1..=TEST_GENERATIONS_MAX {
-                let name = self.ring_name(generation);
-                // A generation the test never made is no object, so its unlink fails.
-                if unsafe { shm_unlink(name.as_ptr()) } != 0 {
-                    assert_eq!(
-                        Some(ENOENT),
-                        std::io::Error::last_os_error().raw_os_error(),
-                        "unlink {name:?}"
-                    );
+            let mut tokens_named = std::mem::take(self.tokens_spoiled.get_mut().unwrap());
+            tokens_named.extend(self.token_named());
+            for token_named in &tokens_named {
+                for generation in 1..=TEST_GENERATIONS_MAX {
+                    let name = CString::new(format!("{token_named}.{generation}")).unwrap();
+                    // A generation the test never made is no object, so its unlink fails.
+                    if unsafe { shm_unlink(name.as_ptr()) } != 0 {
+                        assert_eq!(
+                            Some(ENOENT),
+                            std::io::Error::last_os_error().raw_os_error(),
+                            "unlink {name:?}"
+                        );
+                    }
                 }
             }
             if let Err(error) = std::fs::remove_file(&self.place.lock_path) {
@@ -1183,7 +1198,7 @@ mod tests {
 
         let spawns = spawns();
         drop(first);
-        std::fs::write(place.lock_path(), [b'a'; 64]).unwrap();
+        place.spoil(&[b'a'; 64]);
         let mut second = Writer::create(&place.place, SHAPE).unwrap();
         drop(spawns);
         for run_tick in 1..=6 {
@@ -1292,10 +1307,10 @@ mod tests {
 
         let created = Writer::create(&place.place, SHAPE);
 
-        assert_eq!(
-            std::io::ErrorKind::InvalidInput,
-            created.err().unwrap().kind()
-        );
+        let error = created.err().unwrap();
+        assert_eq!(std::io::ErrorKind::InvalidInput, error.kind());
+        // The token keeps the ring's names from other users, who may read the writer's errors.
+        assert!(!error.to_string().contains("lastlastlast"), "{error}");
     }
 
     #[test]
@@ -1375,7 +1390,7 @@ mod tests {
     }
 
     #[test]
-    fn a_ring_takes_a_name_no_other_place_can_know_before_its_writer_makes_it() {
+    fn two_places_sharing_a_prefix_take_different_ring_names() {
         // Goal: another user, who cannot read this user's lock files, cannot know the names a
         // writer will make, so it cannot take them first and keep the collector from starting.
         // Method: make a writer in each of two places that share a name prefix, and compare
@@ -1403,13 +1418,14 @@ mod tests {
     fn a_writer_passes_over_a_name_it_did_not_make() {
         // Goal: an object under the next ring's name, which only a program that read the lock
         // file could know, never becomes the ring.
-        // Method: name a token in the lock file, make an object under generation 1's name
+        // Method: make a writer and drop it, make an object under the next generation's name
         // first, then make a writer and read what it publishes.
         let place = TestPlace::new("squat");
-        place.name_token("squattingabc");
+        let spawns = spawns();
+        drop(Writer::create(&place.place, SHAPE).unwrap());
         let squatter = unsafe {
             shm_open(
-                place.ring_name(1).as_ptr(),
+                place.ring_name(2).as_ptr(),
                 O_RDWR | O_CREAT | O_EXCL,
                 0o600,
             )
@@ -1418,14 +1434,52 @@ mod tests {
         drop(unsafe { OwnedFd::from_raw_fd(squatter) });
 
         let mut writer = Writer::create(&place.place, SHAPE).unwrap();
+        drop(spawns);
         publish(&mut writer, 9);
         let output = read_ring(&place, &["--publications", "1"]);
 
-        assert!(place.holds(2));
+        assert!(place.holds(3));
         assert_eq!(
             "publication 1 tick 9 processes 0 coalitions 0\n",
             stdout(&output)
         );
+    }
+
+    #[test]
+    fn a_lock_file_naming_a_token_of_capitals_starts_the_numbering_again() {
+        // Goal: a writer takes a token only from the letters it draws tokens from, so a lock
+        // file another program wrote never chooses the names of the rings.
+        // Method: name a token of capitals in the lock file, then make a writer and read the
+        // name its lock file holds.
+        let place = TestPlace::new("caps");
+        place.name_token("CAPITALSCAPI");
+
+        drop(Writer::create(&place.place, SHAPE).unwrap());
+
+        let named = std::fs::read_to_string(place.lock_path()).unwrap();
+        assert!(!named.contains("CAPITALSCAPI"), "{named}");
+        assert!(named.ends_with(".1"), "{named}");
+        assert!(place.holds(1));
+    }
+
+    #[test]
+    fn a_lock_file_naming_a_generation_with_a_leading_zero_starts_the_numbering_again() {
+        // Goal: a writer reads a generation only as a writer writes it, so it never takes a
+        // lock file naming one ring for the name of another.
+        // Method: make a writer and drop it, write its generation with a leading zero into
+        // the lock file, then make a writer and read the name its lock file holds.
+        let place = TestPlace::new("zero");
+        let spawns = spawns();
+        drop(Writer::create(&place.place, SHAPE).unwrap());
+        let token_first = place.token_named().unwrap();
+        place.spoil(format!("{token_first}.01").as_bytes());
+
+        drop(Writer::create(&place.place, SHAPE).unwrap());
+        drop(spawns);
+
+        let named = std::fs::read_to_string(place.lock_path()).unwrap();
+        assert!(!named.starts_with(&token_first), "{named}");
+        assert!(named.ends_with(".1"), "{named}");
     }
 
     #[test]
