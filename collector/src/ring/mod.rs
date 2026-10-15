@@ -33,6 +33,7 @@ use object::{
 };
 pub use tick::{Dropped, IOReportReadings, Readings, SmcReadings, Tick};
 
+use crate::kernel::ENOENT;
 use crate::tracker::Event;
 use crate::u64_from_usize;
 use tick::{load_tick, store_tick};
@@ -146,8 +147,9 @@ impl Writer {
         // the next writer number from 1.
         lock.write_all_at(created.name.as_bytes(), 0)?;
         lock.set_len(u64_from_usize(created.name.len()))?;
-        // Only once the lock file names the new ring, so a reader opening the ring it named
-        // before never finds that ring gone.
+        // Only once the lock file names the new ring, so a reader that reads the lock file from
+        // now on never finds the ring it names gone. One that read it just before finds the
+        // empty ring gone and looks again.
         create_unlink_older(&place.name_prefix, previous.generation);
         Ok(Self {
             _lock: lock,
@@ -278,21 +280,31 @@ impl Reader {
     }
 
     /// Opens the ring the lock file at `lock_path` names in place of the reader's own, once
-    /// the writer restarted and the reader has read every publication its own ring holds, and
-    /// returns whether it did. The reader reads on from where it stood, so the next reads
-    /// return what the newer writer overwrote first as missed.
+    /// the writer restarted and the reader has read every publication and event its own ring
+    /// holds, and returns whether it did. The reader reads on from where it stood, so the next
+    /// reads return what the newer writer overwrote first as missed.
     pub fn follow(&mut self, lock_path: &Path) -> io::Result<bool> {
         if !self.moved(lock_path)? {
             return Ok(false);
         }
 
         // The writer that left this ring may have published once more before it stopped.
-        let newest = self.mapping.words()[HEADER_NEWEST_PUBLICATION].load(Ordering::Relaxed);
-        if self.publications.next <= newest {
+        let words = self.mapping.words();
+        if self.publications.next <= words[HEADER_NEWEST_PUBLICATION].load(Ordering::Relaxed) {
             return Ok(false);
         }
 
-        let mut newer = Self::open_named(lock_path)?;
+        if self.events.next <= words[HEADER_NEWEST_EVENT].load(Ordering::Relaxed) {
+            return Ok(false);
+        }
+
+        let mut newer = match Self::open_named(lock_path) {
+            Ok(newer) => newer,
+            // A writer started after the lock file was read, and removed the empty ring it
+            // named, so the reader looks again on its next follow.
+            Err(error) if error.raw_os_error() == Some(ENOENT) => return Ok(false),
+            Err(error) => return Err(error),
+        };
         // The room for ticks is sized to the capacities of a tick, so the reader keeps its own
         // and allocates nothing, and a ring whose ticks hold more is opened afresh.
         let tick_shape = Shape {

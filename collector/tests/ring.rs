@@ -732,6 +732,56 @@ mod tests {
     }
 
     #[test]
+    fn a_reader_follows_a_restarted_writer_only_once_it_read_its_own_events() {
+        // Goal: a reader that finds the writer restarted reads the events its own ring still
+        // holds before it moves, rather than learning them as missed.
+        // Method: read a ring's publication but not its event, restart the writer, follow,
+        // read the event, and follow again.
+        let place = TestPlace::new("evdrain");
+        let mut first = Writer::create(&place.place, SHAPE).unwrap();
+        publish_events(&mut first, 1, &[exit(1)]);
+        let mut reader = Reader::open(place.lock_path()).unwrap();
+        reader.read().unwrap();
+        let spawns = spawns();
+        drop(first);
+        let second = Writer::create(&place.place, SHAPE).unwrap();
+        drop(spawns);
+
+        let follows_before_reading = reader.follow(place.lock_path()).unwrap();
+        let found = reader.read_event().unwrap();
+        let follows_after_reading = reader.follow(place.lock_path()).unwrap();
+
+        assert!(!follows_before_reading);
+        assert!(
+            matches!(found, FoundEvent::Event { number: 1, .. }),
+            "{found:?}"
+        );
+        assert!(follows_after_reading);
+        drop(second);
+    }
+
+    #[test]
+    fn a_reader_stays_put_when_the_ring_the_lock_file_names_is_gone() {
+        // Goal: a reader that reads the lock file just before a starting writer removes the
+        // ring it names looks again later, rather than failing.
+        // Method: read a ring to its end, point the lock file at a ring that does not exist,
+        // as a reader sees it in that moment, and follow.
+        let place = TestPlace::new("gone");
+        let mut writer = Writer::create(&place.place, SHAPE).unwrap();
+        publish(&mut writer, 1);
+        let mut reader = Reader::open(place.lock_path()).unwrap();
+        reader.read().unwrap();
+        let named = std::fs::read(place.lock_path()).unwrap();
+        std::fs::write(place.lock_path(), place.ring_name(7).as_bytes()).unwrap();
+
+        let followed = reader.follow(place.lock_path()).unwrap();
+
+        std::fs::write(place.lock_path(), named).unwrap();
+        assert!(!followed);
+        drop(writer);
+    }
+
+    #[test]
     fn a_reader_allocates_nothing_to_follow_or_read_a_newer_ring() {
         // Goal: a reader that follows a restarted writer of the same shape allocates nothing,
         // as Tiger Style's allocation at startup only asks of library code.
