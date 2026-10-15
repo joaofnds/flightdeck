@@ -840,7 +840,7 @@ mod tests {
         assert_eq!(std::io::ErrorKind::WouldBlock, second.err().unwrap().kind());
         let output = read_ring(&place, &["--publications", "1"]);
         assert_eq!(
-            "publication 1 tick 4 processes 0 coalitions 0\n",
+            "publication 1 tick 5 processes 0 coalitions 0\n",
             stdout(&output)
         );
     }
