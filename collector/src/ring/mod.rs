@@ -192,16 +192,11 @@ pub struct Reader {
     mapping: Mapping,
     layout: Layout,
     /// The first publication of the ring, past the previous ring's.
-    first: u64,
-    /// The publication the reader reads next.
-    next: u64,
+    publications: Cursor,
     /// When the writer's run started, in nanoseconds since 1970 by the wall clock.
     run_start_ns: u64,
     tick: Tick,
-    /// The first event of the ring, past the previous ring's.
-    first_event: u64,
-    /// The event the reader reads next.
-    next_event: u64,
+    events: Cursor,
 }
 
 impl Reader {
@@ -222,12 +217,10 @@ impl Reader {
             name,
             mapping,
             layout,
-            first,
-            next: first.max(layout.oldest_held(newest)),
+            publications: Cursor::new(first, layout.oldest_held(newest)),
             run_start_ns,
             tick: Tick::new(layout),
-            first_event,
-            next_event: first_event.max(layout.oldest_event_held(newest_event)),
+            events: Cursor::new(first_event, layout.oldest_event_held(newest_event)),
         })
     }
 
@@ -261,7 +254,7 @@ impl Reader {
 
         let newest_word = &self.mapping.words()[HEADER_NEWEST_PUBLICATION];
         let newest = newest_word.load(Ordering::Relaxed);
-        if self.next <= newest {
+        if self.publications.next <= newest {
             return Ok(());
         }
         let timeout_ns = u64::try_from(timeout.as_nanos()).map_err(io::Error::other)?;
@@ -276,19 +269,14 @@ impl Reader {
         let words = self.mapping.words();
         let newest = words[HEADER_NEWEST_PUBLICATION].load(Ordering::Relaxed);
         fence(Ordering::Acquire);
-        if self.next > newest {
-            return Ok(Found::Nothing);
-        }
-
-        let oldest = self.first.max(self.layout.oldest_held(newest));
-        if self.next < oldest {
-            let first = self.next;
-            self.next = oldest;
-            return Ok(Found::Missed { first, end: oldest });
-        }
-
-        let publication = self.next;
-        self.next += 1;
+        let publication = match self
+            .publications
+            .step(newest, self.layout.oldest_held(newest))
+        {
+            Step::Nothing => return Ok(Found::Nothing),
+            Step::Missed { first, end } => return Ok(Found::Missed { first, end }),
+            Step::Read(publication) => publication,
+        };
         let slot = &words[self.layout.slot(publication)];
         if read_slot(slot, self.layout, publication, &mut self.tick)? {
             Ok(Found::Publication {
@@ -308,19 +296,14 @@ impl Reader {
         let words = self.mapping.words();
         let newest = words[HEADER_NEWEST_EVENT].load(Ordering::Relaxed);
         fence(Ordering::Acquire);
-        if self.next_event > newest {
-            return Ok(FoundEvent::Nothing);
-        }
-
-        let oldest = self.first_event.max(self.layout.oldest_event_held(newest));
-        if self.next_event < oldest {
-            let first = self.next_event;
-            self.next_event = oldest;
-            return Ok(FoundEvent::Missed { first, end: oldest });
-        }
-
-        let number = self.next_event;
-        self.next_event += 1;
+        let number = match self
+            .events
+            .step(newest, self.layout.oldest_event_held(newest))
+        {
+            Step::Nothing => return Ok(FoundEvent::Nothing),
+            Step::Missed { first, end } => return Ok(FoundEvent::Missed { first, end }),
+            Step::Read(number) => number,
+        };
         let record = &words[self.layout.event(number)];
         match read_finished(record, EVENT_SEQUENCE, number, || load_event(record))? {
             Some((tick, event)) => Ok(FoundEvent::Event {
@@ -333,6 +316,53 @@ impl Reader {
                 end: number + 1,
             }),
         }
+    }
+}
+
+/// Where a reader stands in numbers the writer hands out from 1 and overwrites oldest first,
+/// as its publications and its events.
+struct Cursor {
+    /// The first number of the ring, past the previous ring's.
+    first: u64,
+    /// The number the reader reads next.
+    next: u64,
+}
+
+/// What a reader does next with a cursor's numbers.
+enum Step {
+    /// Waits, since the writer has written no number past those read.
+    Nothing,
+    /// Reads past the numbers from `first` up to `end`, which the writer overwrote.
+    Missed { first: u64, end: u64 },
+    /// Reads the number it holds.
+    Read(u64),
+}
+
+impl Cursor {
+    /// A cursor at the oldest number the ring holds, `oldest_held`, or at `first` where the
+    /// ring has not written that far.
+    fn new(first: u64, oldest_held: u64) -> Self {
+        Self {
+            first,
+            next: first.max(oldest_held),
+        }
+    }
+
+    /// The next step once the writer has written `newest` and holds the numbers from
+    /// `oldest_held`, moving the cursor past what the step covers.
+    fn step(&mut self, newest: u64, oldest_held: u64) -> Step {
+        if self.next > newest {
+            return Step::Nothing;
+        }
+        let oldest = self.first.max(oldest_held);
+        if self.next < oldest {
+            let first = self.next;
+            self.next = oldest;
+            return Step::Missed { first, end: oldest };
+        }
+        let number = self.next;
+        self.next += 1;
+        Step::Read(number)
     }
 }
 
