@@ -505,6 +505,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn reads_a_lock_file_name_as_long_as_macos_gives_and_no_longer() {
+        // Goal: a lock file holding a name of the longest length macOS gives is read whole,
+        // and one a byte longer is refused rather than cut.
+        // Method: write names of 31 and 32 bytes into a lock file of this test's own and read.
+        let path = std::env::temp_dir().join(format!("flightdeck-name-{}", std::process::id()));
+        let longest = "a".repeat(PSHMNAMLEN);
+        let longer = "a".repeat(PSHMNAMLEN + 1);
+
+        std::fs::write(&path, &longest).unwrap();
+        let read_longest = LockedName::read(&File::open(&path).unwrap());
+        std::fs::write(&path, &longer).unwrap();
+        let read_longer = LockedName::read(&File::open(&path).unwrap());
+        std::fs::remove_file(&path).unwrap();
+
+        assert_eq!(longest, read_longest.unwrap().as_str());
+        assert_eq!(
+            io::ErrorKind::InvalidData,
+            read_longer.err().unwrap().kind()
+        );
+    }
+
+    #[test]
     fn a_writer_continues_a_numbering_only_far_from_overflow() {
         // Goal: a ring of this user whose header names a number near the largest a word holds
         // starts the numbering again, rather than overflowing when the writer counts on.
