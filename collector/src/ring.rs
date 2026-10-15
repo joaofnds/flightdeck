@@ -1,0 +1,395 @@
+//! The shared-memory ring the collector hands each tick to, which other processes of the same
+//! user map read-only and read at their own pace. One writer publishes each tick into the
+//! next slot and never waits for a reader. A reader copies a slot and checks its sequence word
+//! again, as a single-writer seqlock does, so it drops a slot overwritten during the copy
+//! instead of reading it torn, and learns from the publication numbers which it missed.
+
+use std::ffi::{CString, c_char, c_int, c_uint, c_void};
+use std::fs::{File, OpenOptions};
+use std::io::{self, Read};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering, fence};
+
+use crate::u64_from_usize;
+
+/// Where a ring lives: the lock file its writer holds, which names the ring, and the start of
+/// the name of each ring the writer makes.
+pub struct Place {
+    pub lock_path: PathBuf,
+    pub name_prefix: String,
+}
+
+/// The room a ring takes, fixed when its writer makes it.
+#[derive(Debug, Clone, Copy)]
+pub struct Shape {
+    /// The publications the ring holds before it overwrites the oldest.
+    pub slot_count: u64,
+}
+
+/// What a reader found at its next publication.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Found {
+    /// The publication it read, which carries the tick of the collector's run.
+    Publication { publication: u64, tick: u64 },
+    /// No publication past those it has read yet.
+    Nothing,
+}
+
+/// Marks the start of a ring, so a reader never takes another object for one.
+const MAGIC: u64 = u64::from_be_bytes(*b"FLTDRING");
+/// The layout this code writes and reads, which a change to the layout raises.
+const LAYOUT_VERSION: u64 = 1;
+
+/// The words of the header, which starts the ring.
+const HEADER_MAGIC: usize = 0;
+const HEADER_LAYOUT_VERSION: usize = 1;
+const HEADER_GENERATION: usize = 2;
+const HEADER_SLOT_COUNT: usize = 3;
+const HEADER_SLOT_WORDS: usize = 4;
+/// The newest publication the writer finished, or 0 before its first.
+const HEADER_NEWEST_PUBLICATION: usize = 5;
+const HEADER_WORDS: usize = 8;
+
+/// The words of a slot. The sequence word holds twice the publication the slot holds once
+/// the writer finished it, and one less while the writer writes it.
+const SLOT_SEQUENCE: usize = 0;
+const SLOT_RUN_TICK: usize = 1;
+const SLOT_WORDS: usize = 2;
+
+/// The longest name macOS gives a shared-memory object, `PSHMNAMLEN` in `sys/posix_shm.h`.
+const PSHMNAMLEN: usize = 31;
+
+/// The mode of every ring: its owner reads it and nobody writes it, so after the writer made
+/// it, no process can open it for writing, the writer's own included.
+const RING_MODE: c_uint = 0o400;
+const LOCK_MODE: u32 = 0o600;
+
+const O_RDONLY: c_int = 0x0000;
+const O_RDWR: c_int = 0x0002;
+const O_CREAT: c_int = 0x0200;
+const O_EXCL: c_int = 0x0800;
+const PROT_READ: c_int = 0x01;
+const PROT_WRITE: c_int = 0x02;
+const MAP_SHARED: c_int = 0x0001;
+
+unsafe extern "C" {
+    fn shm_open(name: *const c_char, oflag: c_int, ...) -> c_int;
+    fn ftruncate(fd: c_int, length: i64) -> c_int;
+    fn mmap(
+        address: *mut c_void,
+        length: usize,
+        protection: c_int,
+        flags: c_int,
+        fd: c_int,
+        offset: i64,
+    ) -> *mut c_void;
+    fn munmap(address: *mut c_void, length: usize) -> c_int;
+    fn getuid() -> u32;
+}
+
+/// The writer of a ring, which holds the lock file for as long as it lives.
+pub struct Writer {
+    _lock: File,
+    mapping: Mapping,
+    layout: Layout,
+    /// The newest publication written, or 0 before the first.
+    publication: u64,
+}
+
+impl Writer {
+    /// Takes the lock of `place` and makes a ring of `shape` in it, or returns an error where
+    /// another writer holds the lock.
+    pub fn create(place: &Place, shape: Shape) -> io::Result<Self> {
+        assert!(shape.slot_count > 0);
+
+        let mut lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(LOCK_MODE)
+            .open(&place.lock_path)?;
+        create_lock(&lock)?;
+        let mut previous_name = String::new();
+        lock.read_to_string(&mut previous_name)?;
+
+        let layout = Layout::new(shape);
+        let generation = generation_of(&place.name_prefix, &previous_name) + 1;
+        let name = ring_name(&place.name_prefix, generation)?;
+        let object = create_object(&name, layout.size_bytes())?;
+        let mapping = Mapping::new(&object, layout.word_count(), PROT_READ | PROT_WRITE)?;
+
+        let words = mapping.words();
+        store(words, HEADER_MAGIC, MAGIC);
+        store(words, HEADER_LAYOUT_VERSION, LAYOUT_VERSION);
+        store(words, HEADER_GENERATION, generation);
+        store(words, HEADER_SLOT_COUNT, shape.slot_count);
+        store(words, HEADER_SLOT_WORDS, u64_from_usize(SLOT_WORDS));
+        store(words, HEADER_NEWEST_PUBLICATION, 0);
+
+        lock.set_len(0)?;
+        lock.write_all_at(name.as_bytes(), 0)?;
+        Ok(Self {
+            _lock: lock,
+            mapping,
+            layout,
+            publication: 0,
+        })
+    }
+
+    /// Publishes the tick `tick` of the collector's run in the next slot, overwriting the
+    /// oldest publication once every slot holds one.
+    pub fn publish(&mut self, tick: u64) -> io::Result<()> {
+        let publication = self.publication + 1;
+        let words = self.mapping.words();
+        let slot = self.layout.slot_start(publication);
+
+        words[slot + SLOT_SEQUENCE].store(2 * publication - 1, Ordering::Relaxed);
+        fence(Ordering::Release);
+        store(words, slot + SLOT_RUN_TICK, tick);
+        words[slot + SLOT_SEQUENCE].store(2 * publication, Ordering::Release);
+
+        words[HEADER_NEWEST_PUBLICATION].store(publication, Ordering::Release);
+        self.publication = publication;
+        Ok(())
+    }
+}
+
+/// A reader of a ring, which maps it read-only.
+pub struct Reader {
+    mapping: Mapping,
+    layout: Layout,
+    /// The publication the reader reads next.
+    next: u64,
+}
+
+impl Reader {
+    /// Opens the ring the lock file at `lock_path` names, starting at the oldest publication
+    /// it holds.
+    pub fn open(lock_path: &std::path::Path) -> io::Result<Self> {
+        let mut name = String::new();
+        File::open(lock_path)?.read_to_string(&mut name)?;
+        let name = CString::new(name).map_err(io::Error::other)?;
+
+        let object = unsafe { shm_open(name.as_ptr(), O_RDONLY) };
+        if object < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let object = unsafe { OwnedFd::from_raw_fd(object) };
+        let size_bytes = open_check(&File::from(object.try_clone()?))?;
+        let header = Mapping::new(&object, HEADER_WORDS, PROT_READ)?;
+        let layout = open_layout(header.words(), size_bytes)?;
+        let mapping = Mapping::new(&object, layout.word_count(), PROT_READ)?;
+
+        Ok(Self {
+            mapping,
+            layout,
+            next: 1,
+        })
+    }
+
+    /// Reads the next publication.
+    pub fn read(&mut self) -> io::Result<Found> {
+        let words = self.mapping.words();
+        let newest = words[HEADER_NEWEST_PUBLICATION].load(Ordering::Relaxed);
+        fence(Ordering::Acquire);
+        if self.next > newest {
+            return Ok(Found::Nothing);
+        }
+
+        let publication = self.next;
+        let slot = self.layout.slot_start(publication);
+        let sequence = words[slot + SLOT_SEQUENCE].load(Ordering::Relaxed);
+        fence(Ordering::Acquire);
+        let tick = words[slot + SLOT_RUN_TICK].load(Ordering::Relaxed);
+        fence(Ordering::Acquire);
+        let sequence_after = words[slot + SLOT_SEQUENCE].load(Ordering::Relaxed);
+        if sequence != 2 * publication || sequence_after != sequence {
+            return Err(io::Error::other(format!(
+                "slot of publication {publication} holds sequence {sequence}"
+            )));
+        }
+
+        self.next += 1;
+        Ok(Found::Publication { publication, tick })
+    }
+}
+
+/// Where each part of a ring lies, in words from its start.
+#[derive(Debug, Clone, Copy)]
+struct Layout {
+    shape: Shape,
+}
+
+impl Layout {
+    fn new(shape: Shape) -> Self {
+        assert!(shape.slot_count > 0);
+
+        Self { shape }
+    }
+
+    fn slot_count(self) -> usize {
+        match usize::try_from(self.shape.slot_count) {
+            Ok(count) => count,
+            Err(error) => unreachable!("{error}"),
+        }
+    }
+
+    fn word_count(self) -> usize {
+        HEADER_WORDS + self.slot_count() * SLOT_WORDS
+    }
+
+    fn size_bytes(self) -> usize {
+        self.word_count() * size_of::<u64>()
+    }
+
+    /// The first word of the slot that holds `publication`.
+    fn slot_start(self, publication: u64) -> usize {
+        assert!(publication > 0);
+
+        let index = (publication - 1) % self.shape.slot_count;
+        match usize::try_from(index) {
+            Ok(index) => HEADER_WORDS + index * SLOT_WORDS,
+            Err(error) => unreachable!("{error}"),
+        }
+    }
+}
+
+/// A shared-memory object mapped into this process, which unmaps it when it drops.
+struct Mapping {
+    address: *mut c_void,
+    word_count: usize,
+}
+
+impl Mapping {
+    fn new(object: &OwnedFd, word_count: usize, protection: c_int) -> io::Result<Self> {
+        assert!(word_count > 0);
+
+        let address = unsafe {
+            mmap(
+                std::ptr::null_mut(),
+                word_count * size_of::<u64>(),
+                protection,
+                MAP_SHARED,
+                object.as_raw_fd(),
+                0,
+            )
+        };
+        // MAP_FAILED, which sys/mman.h declares as -1 cast to a pointer.
+        if address.addr() == usize::MAX {
+            return Err(io::Error::last_os_error());
+        }
+
+        Ok(Self {
+            address,
+            word_count,
+        })
+    }
+
+    fn words(&self) -> &[AtomicU64] {
+        unsafe { std::slice::from_raw_parts(self.address.cast::<AtomicU64>(), self.word_count) }
+    }
+}
+
+impl Drop for Mapping {
+    fn drop(&mut self) {
+        if unsafe { munmap(self.address, self.word_count * size_of::<u64>()) } != 0 {
+            eprintln!("ring: munmap failed: {}", io::Error::last_os_error());
+        }
+    }
+}
+
+fn store(words: &[AtomicU64], index: usize, value: u64) {
+    words[index].store(value, Ordering::Relaxed);
+}
+
+fn create_lock(lock: &File) -> io::Result<()> {
+    match lock.try_lock() {
+        Ok(()) => Ok(()),
+        Err(std::fs::TryLockError::WouldBlock) => Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "another writer holds the ring's lock",
+        )),
+        Err(std::fs::TryLockError::Error(error)) => Err(error),
+    }
+}
+
+/// The generation of the ring `name` names, or 0 where it names no ring of `prefix`.
+fn generation_of(prefix: &str, name: &str) -> u64 {
+    match name.strip_prefix(prefix) {
+        Some(generation) => generation.parse().unwrap_or(0),
+        None => 0,
+    }
+}
+
+fn ring_name(prefix: &str, generation: u64) -> io::Result<String> {
+    let name = format!("{prefix}{generation}");
+    if name.len() > PSHMNAMLEN {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("ring name {name} is past {PSHMNAMLEN} characters"),
+        ));
+    }
+    Ok(name)
+}
+
+fn create_object(name: &str, size_bytes: usize) -> io::Result<OwnedFd> {
+    let name = CString::new(name).map_err(io::Error::other)?;
+    // macOS makes the descriptor close on exec itself, and refuses O_CLOEXEC with EINVAL.
+    let object = unsafe { shm_open(name.as_ptr(), O_RDWR | O_CREAT | O_EXCL, RING_MODE) };
+    if object < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let object = unsafe { OwnedFd::from_raw_fd(object) };
+
+    let length = i64::try_from(size_bytes).map_err(io::Error::other)?;
+    if unsafe { ftruncate(object.as_raw_fd(), length) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(object)
+}
+
+/// The size of the object `object`, or an error where this user does not own it or anyone
+/// may write it.
+fn open_check(object: &File) -> io::Result<usize> {
+    let metadata = object.metadata()?;
+    if metadata.uid() != unsafe { getuid() } {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("the ring belongs to uid {}", metadata.uid()),
+        ));
+    }
+    if metadata.mode() & 0o777 != RING_MODE {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("the ring has mode {:o}", metadata.mode() & 0o777),
+        ));
+    }
+    usize::try_from(metadata.len()).map_err(io::Error::other)
+}
+
+fn open_layout(header: &[AtomicU64], size_bytes: usize) -> io::Result<Layout> {
+    let load = |index: usize| header[index].load(Ordering::Relaxed);
+    if load(HEADER_MAGIC) != MAGIC {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "not a ring"));
+    }
+    if load(HEADER_LAYOUT_VERSION) != LAYOUT_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("a ring of layout {}", load(HEADER_LAYOUT_VERSION)),
+        ));
+    }
+
+    let layout = Layout::new(Shape {
+        slot_count: load(HEADER_SLOT_COUNT),
+    });
+    if layout.size_bytes() > size_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("a ring of {size_bytes} bytes, short of its layout"),
+        ));
+    }
+    Ok(layout)
+}
