@@ -91,43 +91,66 @@ mod tests {
             .collect()
     }
 
-    /// The last tick of the run the collector's summary `out` reports, from its line
-    /// "whole run, ticks 1-N".
-    fn last_tick(out: &str) -> u64 {
+    /// The ticks of a run the collector's summary reports.
+    struct RunTicks {
+        /// The span's first tick, the first past the warm-up tick 0.
+        first: u64,
+        last: u64,
+        /// The ticks of the span that never ran, since the run fell behind them.
+        slips: u64,
+    }
+
+    /// The ticks the collector's summary `out` reports for its whole run, from its line
+    /// "whole run, ticks F-L: ..., S slips".
+    fn run_ticks(out: &str) -> RunTicks {
         let line = out
             .lines()
-            .find(|line| line.starts_with("whole run, ticks 1-"))
+            .find(|line| line.starts_with("whole run, ticks "))
             .unwrap();
-        let ticks = line.trim_start_matches("whole run, ticks 1-");
-        ticks.split(':').next().unwrap().parse().unwrap()
+        let span = line.trim_start_matches("whole run, ticks ");
+        let (first, rest) = span.split_once('-').unwrap();
+        let (last, rest) = rest.split_once(':').unwrap();
+        let slips = rest.trim_end_matches(" slips").rsplit(' ').next().unwrap();
+        RunTicks {
+            first: first.parse().unwrap(),
+            last: last.parse().unwrap(),
+            slips: slips.parse().unwrap(),
+        }
     }
 
     #[test]
     fn publishes_each_tick_to_the_ring() {
-        // Goal: the collector hands each tick it reads to the ring, the warm-up tick 0
-        // included, with the processes and coalitions it read.
+        // Goal: the collector hands each tick it runs to the ring, the warm-up tick 0
+        // included, with the processes and coalitions it read, and numbers the publications
+        // without a gap whatever ticks the run slipped.
         // Method: run the collector for two seconds under a ring name of this test's own, then
-        // read as many publications of the ring it left as the run took ticks.
+        // read as many publications of the ring it left as the run ran ticks.
         let ring = TestRing::new("ticks");
         let collected = Command::new(env!("CARGO_BIN_EXE_collector"))
             .args(["--seconds", "2", "--ring", &ring.name])
             .output()
             .unwrap();
-        let last_tick = last_tick(stdout(&collected));
-        let count = (last_tick + 1).to_string();
+        let run = run_ticks(stdout(&collected));
+        let ran = 1 + run.last - run.first + 1 - run.slips;
 
         let read = Command::new(env!("CARGO_BIN_EXE_ring_reader"))
-            .args(["--ring", &ring.name, "--publications", &count])
+            .args(["--ring", &ring.name, "--publications", &ran.to_string()])
             .output()
             .unwrap();
         let found = publications(stdout(&read));
 
-        let numbers: Vec<(u64, u64)> = found
+        let numbers: Vec<u64> = found
             .iter()
-            .map(|published| (published.publication, published.tick))
+            .map(|published| published.publication)
             .collect();
-        let expected: Vec<(u64, u64)> = (0..=last_tick).map(|tick| (tick + 1, tick)).collect();
-        assert_eq!(expected, numbers);
+        let ticks: Vec<u64> = found.iter().map(|published| published.tick).collect();
+        assert_eq!((1..=ran).collect::<Vec<u64>>(), numbers);
+        assert_eq!(Some(&0), ticks.first());
+        assert_eq!(Some(&run.last), ticks.last());
+        assert!(
+            ticks.is_sorted_by(|earlier, later| earlier < later),
+            "{ticks:?}"
+        );
         assert!(
             found.iter().all(|published| published.processes > 0),
             "{found:?}"
