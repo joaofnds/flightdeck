@@ -7,7 +7,7 @@ use std::io;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
-use crate::kernel::{EFAULT, EINTR, ENOENT, ETIMEDOUT};
+use crate::kernel::{EDOM, EFAULT, EINTR, EINVAL, ENOENT, ETIMEDOUT};
 
 unsafe extern "C" {
     fn os_sync_wait_on_address_with_timeout(
@@ -34,8 +34,8 @@ pub(super) enum Waited {
     /// A wake came, the word no longer held the value, the timeout ran out, or a signal
     /// interrupted the wait. The caller looks at the word again in each case.
     Ended,
-    /// macOS cannot wait on the word, as on a page this process has not touched yet, so the
-    /// caller polls instead.
+    /// macOS cannot wait on the word, as on a page this process has not touched yet, or
+    /// while another process waits on it with another size, so the caller polls instead.
     Unsupported,
 }
 
@@ -61,7 +61,10 @@ pub(super) fn wait(word: &AtomicU64, value: u64, timeout: Duration) -> io::Resul
     let error = io::Error::last_os_error();
     match error.raw_os_error() {
         Some(ETIMEDOUT | EINTR) => Ok(Waited::Ended),
-        Some(EFAULT) => Ok(Waited::Unsupported),
+        // The header names EINVAL for a size another waiter disagrees with, and macOS 27
+        // returns EDOM. Polling keeps a reader that waits with another size from costing the
+        // others their reads.
+        Some(EFAULT | EINVAL | EDOM) => Ok(Waited::Unsupported),
         _ => Err(error),
     }
 }
@@ -92,7 +95,47 @@ pub(super) fn wake_all(word: &AtomicU64) -> Result<(), i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_wait_beside_a_waiter_of_another_size_falls_back_to_polling() {
+        // Goal: a process that waits on the word with another size, which makes macOS refuse
+        // every other wait on it, costs a reader its wakes and never its reads.
+        // Method: wait on the word with four bytes on another thread, again each time macOS
+        // refuses it for the eight-byte wait parked first, and wait with eight until macOS
+        // refuses, within a second.
+        let word = AtomicU64::new(0);
+        let done = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while !done.load(Ordering::Relaxed) {
+                    unsafe {
+                        os_sync_wait_on_address_with_timeout(
+                            word.as_ptr().cast::<c_void>(),
+                            0,
+                            size_of::<u32>(),
+                            OS_SYNC_WAIT_ON_ADDRESS_SHARED,
+                            OS_CLOCK_MACH_ABSOLUTE_TIME,
+                            50_000_000,
+                        )
+                    };
+                }
+            });
+            let deadline = Instant::now() + Duration::from_secs(1);
+            let mut waited = wait(&word, 0, Duration::from_millis(10));
+            while matches!(waited, Ok(Waited::Ended)) {
+                if Instant::now() >= deadline {
+                    break;
+                }
+
+                waited = wait(&word, 0, Duration::from_millis(10));
+            }
+            done.store(true, Ordering::Relaxed);
+
+            assert!(matches!(waited, Ok(Waited::Unsupported)), "{waited:?}");
+        });
+    }
 
     #[test]
     fn a_wake_that_macos_refuses_is_an_error_and_not_a_crash() {

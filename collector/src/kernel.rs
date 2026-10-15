@@ -30,8 +30,11 @@ pub(crate) const EINTR: c_int = 4;
 pub(crate) const EFAULT: c_int = 14;
 
 /// Says a call was given an argument it does not take.
-#[cfg(test)]
 pub(crate) const EINVAL: c_int = 22;
+
+/// Says a call was given an argument outside the values it takes, as macOS 27's address waits
+/// do for a size other than the one another thread waits with.
+pub(crate) const EDOM: c_int = 33;
 
 /// Says a call's timeout ran out.
 pub(crate) const ETIMEDOUT: c_int = 60;
