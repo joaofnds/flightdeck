@@ -201,7 +201,7 @@ pub struct Reader {
     publications: Cursor,
     /// When the writer's run started, in nanoseconds since 1970 by the wall clock.
     run_start_ns: u64,
-    tick: Tick,
+    tick: LoadedTick,
     /// Where the reader stands in the event log, which starts past the previous ring's.
     events: Cursor,
 }
@@ -232,7 +232,7 @@ impl Reader {
             layout,
             publications: Cursor::new(first, layout.oldest_held(newest)),
             run_start_ns,
-            tick: Tick::new(layout),
+            tick: LoadedTick::new(layout),
             events: Cursor::new(first_event, layout.oldest_event_held(newest_event)),
         })
     }
@@ -264,7 +264,7 @@ impl Reader {
     /// The tick of the publication the reader read last.
     #[must_use]
     pub fn tick(&self) -> &Tick {
-        &self.tick
+        &self.tick.last
     }
 
     /// When the writer's run started, in nanoseconds since 1970 by the wall clock.
@@ -305,10 +305,10 @@ impl Reader {
             Step::Read(publication) => publication,
         };
         let slot = &words[self.layout.slot(publication)];
-        if read_slot(slot, self.layout, publication, &mut self.tick)? {
+        if self.tick.read_slot(slot, self.layout, publication)? {
             Ok(Found::Publication {
                 publication,
-                tick: self.tick.run_tick,
+                tick: self.tick.last.run_tick,
             })
         } else {
             Ok(Found::Missed {
@@ -402,19 +402,38 @@ impl Cursor {
     }
 }
 
-/// Loads the tick the slot `slot` holds for `publication` into `tick`, and returns whether it
-/// did, which it did not where the writer overwrote the slot with a later publication before
-/// or during the load.
-fn read_slot(
-    slot: &[AtomicU64],
-    layout: Layout,
-    publication: u64,
-    tick: &mut Tick,
-) -> io::Result<bool> {
-    let loaded = read_finished(slot, SLOT_SEQUENCE, publication, || {
-        load_tick(slot, layout, tick).then_some(())
-    })?;
-    Ok(loaded.is_some())
+/// The tick a reader read last, and the room it loads the next tick into, so a load the
+/// writer overwrites leaves the last tick whole rather than part of a later one.
+struct LoadedTick {
+    last: Tick,
+    next: Tick,
+}
+
+impl LoadedTick {
+    fn new(layout: Layout) -> Self {
+        Self {
+            last: Tick::new(layout),
+            next: Tick::new(layout),
+        }
+    }
+
+    /// Loads the tick the slot `slot` holds for `publication` in place of the last, and
+    /// returns whether it did, which it did not where the writer overwrote the slot with a
+    /// later publication before or during the load.
+    fn read_slot(
+        &mut self,
+        slot: &[AtomicU64],
+        layout: Layout,
+        publication: u64,
+    ) -> io::Result<bool> {
+        let loaded = read_finished(slot, SLOT_SEQUENCE, publication, || {
+            load_tick(slot, layout, &mut self.next).then_some(())
+        })?;
+        if loaded.is_some() {
+            std::mem::swap(&mut self.last, &mut self.next);
+        }
+        Ok(loaded.is_some())
+    }
 }
 
 /// What `load` makes of the words `record` holds for the number `number`, under the sequence
@@ -501,9 +520,26 @@ mod tests {
     }
 
     fn read(slot: &[AtomicU64], publication: u64) -> io::Result<Option<u64>> {
-        let mut tick = Tick::new(layout());
-        let read = read_slot(slot, layout(), publication, &mut tick)?;
-        Ok(read.then_some(tick.run_tick))
+        let mut tick = LoadedTick::new(layout());
+        let read = tick.read_slot(slot, layout(), publication)?;
+        Ok(read.then_some(tick.last.run_tick))
+    }
+
+    #[test]
+    fn a_dropped_slot_leaves_the_last_tick_read() {
+        // Goal: after a slot the writer overwrote, the reader still holds the tick it read
+        // last, never words of the later publication.
+        // Method: read publication 3 from a finished slot of tick 40, then publication 4 from
+        // a slot the writer is rewriting with tick 99, and look at the tick held.
+        let finished = slot_holding(6, 40);
+        let rewritten = slot_holding(13, 99);
+        let mut tick = LoadedTick::new(layout());
+        assert!(tick.read_slot(&finished, layout(), 3).unwrap());
+
+        let read = tick.read_slot(&rewritten, layout(), 4).unwrap();
+
+        assert!(!read);
+        assert_eq!(40, tick.last.run_tick);
     }
 
     #[test]
