@@ -141,8 +141,11 @@ impl Writer {
         store_header(mapping.words(), layout, header);
 
         create_unlink_older(&place.name_prefix, previous.generation);
-        lock.set_len(0)?;
+        // Writing the name before cutting the file to its length never leaves the lock file
+        // empty, as cutting first would for a writer stopped between the two, which would make
+        // the next writer number from 1.
         lock.write_all_at(created.name.as_bytes(), 0)?;
+        lock.set_len(u64_from_usize(created.name.len()))?;
         Ok(Self {
             _lock: lock,
             mapping,
@@ -181,7 +184,10 @@ impl Writer {
 
         words[HEADER_NEWEST_PUBLICATION].store(publication, Ordering::Release);
         self.publication = publication;
-        wake_all(&words[HEADER_NEWEST_PUBLICATION]);
+        // A refused wake costs the readers it missed one wait at most, so the writer goes on.
+        if let Err(errno) = wake_all(&words[HEADER_NEWEST_PUBLICATION]) {
+            eprintln!("ring: waking readers failed with errno {errno}");
+        }
     }
 }
 
@@ -191,11 +197,12 @@ pub struct Reader {
     name: String,
     mapping: Mapping,
     layout: Layout,
-    /// The first publication of the ring, past the previous ring's.
+    /// Where the reader stands in the publications, which start past the previous ring's.
     publications: Cursor,
     /// When the writer's run started, in nanoseconds since 1970 by the wall clock.
     run_start_ns: u64,
     tick: Tick,
+    /// Where the reader stands in the event log, which starts past the previous ring's.
     events: Cursor,
 }
 
@@ -205,6 +212,12 @@ impl Reader {
     pub fn open(lock_path: &Path) -> io::Result<Self> {
         let mut name = String::new();
         File::open(lock_path)?.read_to_string(&mut name)?;
+        if name.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "the lock file names no ring yet",
+            ));
+        }
 
         let (mapping, layout) = open_ring(&name)?;
         let words = mapping.words();
@@ -231,7 +244,10 @@ impl Reader {
     pub fn moved(&self, lock_path: &Path) -> io::Result<bool> {
         let mut name = String::new();
         File::open(lock_path)?.read_to_string(&mut name)?;
-        Ok(!name.is_empty() && name != self.name)
+        if name.is_empty() {
+            return Ok(false);
+        }
+        Ok(name != self.name)
     }
 
     /// Opens the ring the lock file at `lock_path` names in place of the reader's own, as

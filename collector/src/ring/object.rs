@@ -187,7 +187,15 @@ pub(super) struct Created {
 /// Makes the object of a ring of `layout` under the first generation past `previous` whose
 /// name no object holds.
 pub(super) fn create_object(prefix: &str, previous: u64, layout: Layout) -> io::Result<Created> {
-    for generation in previous + 1..=previous + GENERATION_TRIES {
+    // The lock file another program may write names the previous generation, so it may be
+    // any number.
+    let Some(last) = previous.checked_add(GENERATION_TRIES) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("the lock file names generation {previous}, past the last a ring takes"),
+        ));
+    };
+    for generation in previous + 1..=last {
         let name = ring_name(prefix, generation)?;
         match create_object_named(&name, layout.size_bytes()) {
             Ok(object) => {
@@ -245,22 +253,25 @@ fn create_object_named(name: &str, size_bytes: usize) -> io::Result<OwnedFd> {
     Ok(object)
 }
 
-/// Removes the ring before the previous one, so at most two rings exist: the new one and the
-/// previous one, which the persister seals.
+/// Removes the rings before the previous one, so at most two rings exist: the new one and the
+/// previous one, which the persister seals. A start that passed over generations held by
+/// other objects left a ring further back, so the generations a start may pass over are
+/// removed too.
 pub(super) fn create_unlink_older(prefix: &str, previous: u64) {
-    if previous < 2 {
-        return;
-    }
-
-    let name = match ring_name(prefix, previous - 1).map(CString::new) {
-        Ok(Ok(name)) => name,
-        Ok(Err(error)) => unreachable!("{error}"),
-        Err(error) => unreachable!("the longer name {previous} took was short enough: {error}"),
-    };
-    if unsafe { shm_unlink(name.as_ptr()) } != 0 {
-        let error = io::Error::last_os_error();
-        if error.raw_os_error() != Some(ENOENT) {
-            eprintln!("ring: unlink {name:?} failed: {error}");
+    let first = previous.saturating_sub(GENERATION_TRIES + 1).max(1);
+    for generation in first..previous {
+        let name = match ring_name(prefix, generation).map(CString::new) {
+            Ok(Ok(name)) => name,
+            Ok(Err(error)) => unreachable!("{error}"),
+            Err(error) => {
+                unreachable!("the longer name {previous} took was short enough: {error}")
+            }
+        };
+        if unsafe { shm_unlink(name.as_ptr()) } != 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(ENOENT) {
+                eprintln!("ring: unlink {name:?} failed: {error}");
+            }
         }
     }
 }

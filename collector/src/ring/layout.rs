@@ -143,7 +143,10 @@ impl Layout {
             shape.event_capacity,
         ];
         for field in fields {
-            if field == 0 || field > SHAPE_FIELD_MAX {
+            if field == 0 {
+                return None;
+            }
+            if field > SHAPE_FIELD_MAX {
                 return None;
             }
         }

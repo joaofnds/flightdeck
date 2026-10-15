@@ -247,7 +247,7 @@ impl Run {
 
         let mut meter = Meter::default();
         let mut collector = Collector::new(timebase, rescan_interval)?;
-        // A second collector stops here, before it reads anything, so the first runs on.
+        // A second collector stops here, before its first tick, so the first runs on.
         let mut ring = Writer::create(ring, ring_shape(collector.capacities()))?;
         let live_at_first_scan = Self::start_live_at_first_scan(collector.tracker.last_listing());
         let schedule = Schedule::starting_now(timebase.ticks(tick_period_ns)?)?;

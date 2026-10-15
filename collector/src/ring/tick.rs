@@ -275,6 +275,7 @@ fn store_tick_ioreport(slot: &[AtomicU64], layout: Layout, ioreport: &IOReportRe
     store(slot, SLOT_GPU_ENERGY_NJ, ioreport.gpu_energy_nj);
     let gpu = ioreport.gpu.active_ns();
     let gpu_start = layout.gpu_states.start;
+    assert!(gpu.len() <= layout.gpu_states.capacity);
     store_words(&slot[gpu_start..gpu_start + gpu.len()], gpu);
     for (index, core) in ioreport.cores.iter().enumerate() {
         let record = layout.cores.record(index);

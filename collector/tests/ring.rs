@@ -640,6 +640,49 @@ mod tests {
     }
 
     #[test]
+    fn a_restart_removes_the_rings_a_skipped_generation_left_behind() {
+        // Goal: a ring stays removed once two newer rings exist, also where a start passed
+        // over a generation another object held.
+        // Method: make a writer, make an object under generation 2's name, then make three
+        // more writers, which take generations 3 to 5, and look for generations 1 and 2.
+        let place = TestPlace::new("skip");
+        let spawns = spawns();
+        drop(Writer::create(&place.place, SHAPE).unwrap());
+        let squatter = unsafe {
+            shm_open(
+                place.ring_name(2).as_ptr(),
+                O_RDWR | O_CREAT | O_EXCL,
+                0o600,
+            )
+        };
+        assert!(squatter >= 0);
+        drop(unsafe { OwnedFd::from_raw_fd(squatter) });
+
+        for _ in 0..3 {
+            drop(Writer::create(&place.place, SHAPE).unwrap());
+        }
+        drop(spawns);
+
+        assert!(!place.holds(1));
+        assert!(!place.holds(2));
+        assert!(place.holds(4));
+        assert!(place.holds(5));
+    }
+
+    #[test]
+    fn a_lock_file_naming_the_last_generation_is_an_error_and_not_a_crash() {
+        // Goal: a lock file another program wrote never crashes the writer that reads it.
+        // Method: write the largest generation into the lock file, then make a writer.
+        let place = TestPlace::new("last");
+        let name = format!("{}{}", place.place.name_prefix, u64::MAX);
+        std::fs::write(place.lock_path(), name).unwrap();
+
+        let created = Writer::create(&place.place, SHAPE);
+
+        assert!(created.is_err());
+    }
+
+    #[test]
     fn a_writer_passes_over_a_name_it_did_not_make() {
         // Goal: an object under the next ring's name, another user's or another program's,
         // never becomes the ring.

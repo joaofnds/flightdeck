@@ -125,7 +125,9 @@ fn run_events(reader: &mut Reader) -> std::io::Result<()> {
             FoundEvent::Nothing => break,
         }
     }
-    if !events.is_empty() || read > 0 {
+    // A tick that logged events, or a read of events an earlier tick logged, is printed.
+    let logged = !events.is_empty();
+    if logged || read > 0 {
         println!(
             "events {}..{} read {read} dropped starts {} execs {} exits {}",
             events.start, events.end, dropped.starts, dropped.execs, dropped.exits
