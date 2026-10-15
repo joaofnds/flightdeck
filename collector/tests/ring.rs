@@ -805,6 +805,9 @@ mod tests {
         // many ticks and missed some, checking every process of every tick it read.
         const PROCESSES: usize = 64;
         const READS: u64 = 200;
+        // A bound on the reads keeps a broken copy from hanging the test: the reader gives up
+        // after this many tries rather than waiting forever for a whole tick.
+        const ATTEMPTS: u64 = 10_000_000;
         let place = TestPlace::new("torn");
         let shape = Shape {
             slot_count: 2,
@@ -834,9 +837,15 @@ mod tests {
                 }
             });
             writer_created.recv().unwrap();
+            // The guard stops the writer when this thread leaves the scope, a failed assertion
+            // included, so a failure ends the test instead of leaving the writer running.
+            let _stop = StopOnDrop(&done);
             let mut reader = Reader::open(place.lock_path()).unwrap();
             let (mut read, mut missed) = (0, 0);
-            while read < READS {
+            for _ in 0..ATTEMPTS {
+                if read == READS {
+                    break;
+                }
                 match reader.read().unwrap() {
                     Found::Publication { tick, .. } => {
                         read += 1;
@@ -848,11 +857,19 @@ mod tests {
                     Found::Nothing => {}
                 }
             }
-            done.store(true, std::sync::atomic::Ordering::Relaxed);
             (read, missed)
         });
 
         assert_eq!(READS, read);
         assert!(missed > 0);
+    }
+
+    /// Stops a writer thread when dropped, so a test that fails still ends.
+    struct StopOnDrop<'flag>(&'flag std::sync::atomic::AtomicBool);
+
+    impl Drop for StopOnDrop<'_> {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 }
