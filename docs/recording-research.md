@@ -611,7 +611,7 @@ keeping minimum, maximum, average and last so a spike survives.
 |---|---|---|
 | Sealed Parquet files, one per table per time window, sorted by series inside, queried with DuckDB or DataFusion | Readers never block the writer, any tool opens them, delta encoding and no bloom filter reach 0.218 above | Sealing, compaction, tiers and retention are ours to write |
 | [DuckLake](https://ducklake.select/), DuckDB's catalog over Parquet files | Keeps small inserts in the catalog until flushed, merges adjacent files and expires old snapshots, which is most of the code the row above leaves to us | One more moving part, the catalog database, and young |
-| Sealed DuckDB files per window, opened read-only | DuckDB's own compression, including ALP for floats | Not measured. Only one process may have a DuckDB file open for writing, so the open window lives in the ring |
+| Sealed DuckDB files per window, opened read-only | DuckDB's own compression, including ALP for floats | The week-query experiment below used 4.8 times Parquet's allocated space and slower week scans. The open window lives in the ring |
 | tsink | Gorilla, WAL, retention and PromQL in one Rust crate | Young, changed its disk format between 0.8 and 0.9, numbers only |
 | ClickHouse, or chDB embedded | Best compression measured, SQL, `ASOF JOIN` | A 360 MB server here, or experimental Rust bindings to a large library |
 | VictoriaMetrics, GreptimeDB, InfluxDB 3 | Proven or built on Arrow, DataFusion and Parquet | Servers, and numbers only in VictoriaMetrics' case |
@@ -621,9 +621,54 @@ keeping minimum, maximum, average and last so a spike survives.
 
 A file covering a time window, sorted by series inside, serves both ways of asking.
 "Everything at second T" opens one window. "One process over a month" reads one run
-per file across a month of windows, or the per-minute tier. How fast either query is
-has not been measured on any option, so the choice among the first rows waits on that
-benchmark.
+per file across a month of windows, or the per-minute tier. Query speed for the first
+three options was measured on 2026-10-15. Immutable Parquet is selected
+for the recording: it used the least disk space and native write CPU in this experiment,
+and needs no mutable catalog. DuckLake's slightly faster week scans do not establish a
+reliable speed ranking or a new chart latency requirement.
+
+The M5 Pro, arm64, macOS 27.0.1 build 26A434 experiment used DuckDB 1.5.6
+(069cc9f9b5), DuckLake ac7595b0 and SQLite extension 5274128. Its synthetic week has
+10,080 windows, 953 sampled processes a second with specified missing ticks, and 64
+events a second, including event-only exiting processes. Each format held 576,317,220
+samples and 38,707,200 events. Three rotated passes ran each query twice in one engine
+process. These are median seconds, first query / repeat:
+
+| Format | Everything at one second | One process, week into 1,280 buckets | Synthetic app CPU totals, day |
+|---|---:|---:|---:|
+| Parquet | 0.006459 / 0.003927 | 1.611054 / 0.763221 | 0.599288 / 0.300055 |
+| Sealed DuckDB | 0.005047 / 0.003391 | 13.953710 / 12.456842 | 1.745486 / 1.408108 |
+| DuckLake | 0.158556 / 0.085003 | 1.558944 / 0.706168 | 0.682634 / 0.362450 |
+
+Parquet allocated 7,232,847,872 bytes, sealed DuckDB 34,470,232,064 and DuckLake
+7,924,731,904 including its catalog. Their generation and encoding/writing CPU totals
+were 566.30, 687.43 and 655.41 seconds respectively. These exclude the production
+full-sync publication protocol. The point timings begin with selected files, so they
+exclude application discovery. The production layout partitions immutable directories
+by run and elapsed day, with wall-time bounds selecting candidate windows; readers
+validate canonical commit markers and filter actual tick timestamps.
+
+The preserved driver commands are `benchmark --mode build --fixture baseline
+--minutes 10080 --processes 953`, `benchmark_checked --mode build-lake --fixture baseline
+--minutes 10080 --processes 953`, and `benchmark_queries --mode queries --fixture baseline
+--minutes 10080 --processes 953`. Every
+timed engine used `-no-init -batch -bail`, four threads, a 2 GB buffer limit and a 4 GB
+spill limit. Parquet uses explicit selected-file lists, series order, Zstandard level 3,
+16,384-row groups and no Bloom filters. Installed DuckLake writes Bloom filters and
+rejects the disabling option, so the configurations differ there. All 54 outputs
+matched a separate Rust oracle. A later explicit app-ranking supplement also matched
+all 54 outputs; its day medians were Parquet 0.598066/0.300822, DuckDB
+2.770925/1.402990 and DuckLake 0.675318/0.355611 seconds. Metadata scans interfered
+with the early ranked passes. Neither family establishes cold-cache performance.
+
+Exact source/binary families, SQL, settings, individual timings and incident records
+remain in private board evidence `TASK-19/storage/report.txt` and
+`source_binary_sha256.txt`. The optional peak-load week was omitted. The original
+monitor failed during a WAL removal race while its bounded engine child continued;
+sealed outputs and subsequent queries completed. A separate post-run version command
+read a user init file and failed, outside the timed engines. Those limitations do not
+change the returned answers, and the complete production resource checks below remain
+separate from the format experiment.
 
 The viewer joins history with the live tail in one query. DuckDB's Rust crate scans
 Arrow record batches held in the same process (`ArrowVTab`, behind the `vtab-arrow`
@@ -682,15 +727,18 @@ two readings, and no run has watched it.
    two sealing windows. The writer never waits for a reader and wakes readers once a
    tick. The ring is written here, as Moving the data says, with process events in a
    log of their own beside the ticks.
-3. A persister in the same agent seals each 60-second window into Parquet or DuckLake,
-   sorted by series, delta encoded, zstd, no bloom filter, and compacts sealed windows
-   into the per-minute and per-hour tiers. On start it first seals the publications of
-   the kept ring and of the new one past the last publication number it sealed, since
-   tick numbers start again with each run.
+3. A separate Rust persister seals each 60-elapsed-second window into immutable Parquet,
+   sorted by series with Zstandard and no Bloom filters. It seals recoverable older
+   publications before newer disk windows while collection continues. Recording, run,
+   boot and publication identify readings across restarts; actual observation clocks
+   preserve gaps and backward wall time. Complete table sets become visible through
+   full-synced canonical no-overwrite commit markers. Empty windows produce no files,
+   and stopping may seal a partial window. Per-minute/hour compaction and retention
+   remain future work.
 4. The GPUI viewer draws live data from the ring, asks DuckDB for history over the
    sealed files, and joins the two through the ring's unsealed tail as Arrow batches.
 
-The storage choice in step 3 waits on the query benchmark below.
+The dated week-query experiment under Where it is kept selects step 3's storage.
 
 ## Crates from outside the workspace
 
@@ -713,7 +761,7 @@ missing an entry, and on a case whose crate no member depends on.
 
 - Used: Persistence alone uses duckdb =1.10506.0 with default features disabled and the parquet feature (which includes bundled DuckDB 1.5.6), through typed appenders, bounded in-memory tables and immutable Parquet COPY. Arrow is an unconditional transitive dependency. Neither the collector nor shared allocation-constrained code calls the engine. Extensions are bundled; runtime extension installation and autoloading are disabled.
 - Performance: On the M5 Pro, macOS 27.0.1, 2026-10-15, a 10,080-window/953-process synthetic week used 566.30 seconds native build CPU and 7,232,847,872 allocated bytes in Parquet, against 687.43 seconds/34,470,232,064 bytes for per-minute DuckDB and 655.41 seconds/7,924,731,904 bytes for DuckLake. Parquet's original week-query median was 1.611054 seconds first and 0.763221 repeat; DuckLake was 1.558944/0.706168. Both the original and ranked 54-answer families matched an independent Rust oracle. These are engine prototypes, not the combined collector-plus-persister budget or a cold-cache comparison. Implementing equivalent typed column encoding, Zstandard and query execution here would not credibly match the measured engine with comparable maintenance cost. The complete-schema Rust feed and physical-footprint measurements below are the implementation gate.
-- Maintenance: Pin the Rust crate exactly and keep Cargo.lock, including its bundled native engine and Arrow graph. This adds a C++ build and native allocation observation; the 512 MiB DuckDB buffer limit does not bound whole-process memory. A separate worker, 2 GiB physical-footprint watchdog and bounded one-window staging contain the engine; failures retain unacknowledged source and let collection continue. Immutable Parquet avoids a mutable catalog and extensions needed by DuckLake. Revalidate the typed schema, native resource checks and build time when upgrading. Sources: https://github.com/duckdb/duckdb-rs/releases/tag/v1.10506.0 and https://raw.githubusercontent.com/duckdb/duckdb-rs/v1.10506.0/crates/duckdb/Cargo.toml .
+- Maintenance: Pin the Rust crate exactly and keep Cargo.lock, including its bundled native engine and Arrow graph. The build graph also compiles ureq, rustls, ring, webpki-roots, tar, zip and flate2; bundled mode compiles out the download branch, but those crates still add supply-chain surface. This adds a C++ build and native allocation observation; the 512 MiB DuckDB buffer limit does not bound whole-process memory. A separate worker, 2 GiB physical-footprint watchdog and bounded one-window staging contain the engine; failures retain unacknowledged source and let collection continue. Immutable Parquet avoids a mutable catalog and extensions needed by DuckLake. Revalidate the typed schema, native resource checks and build time when upgrading. Sources: https://github.com/duckdb/duckdb-rs/releases/tag/v1.10506.0 and https://raw.githubusercontent.com/duckdb/duckdb-rs/v1.10506.0/crates/duckdb/Cargo.toml .
 
 
 The complete-schema encoder uses ten typed Parquet tables: ticks, memory, CPUs,
@@ -783,8 +831,9 @@ them against.
    pros and cons and see what the tradeoffs are", 2026-10-13).
 2. The rows the collector does not read yet, against the room left in the budget: GPU
    from the I/O Registry, open files, disk, battery, and the 10 s and 60 s rows.
-3. Query speed on a week of synthetic data in each storage option: one process over
-   the week at screen resolution, top apps over a day, everything at one second.
+3. Answered for Parquet, sealed DuckDB and DuckLake under Where it is kept: one process
+   over a synthetic week at screen resolution, app CPU totals/ranking over a day and
+   everything at one second. Peak-load storage remains measurement 4.
 4. Bytes a day at peak load.
 5. Per-process network bytes through NetworkStatistics directly, and what it costs.
 6. Whether coalitions group processes the way the app's notion of an app does, and how
