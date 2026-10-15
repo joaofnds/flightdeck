@@ -201,8 +201,18 @@ mod tests {
     /// The most generations a test makes in one place.
     const TEST_GENERATIONS_MAX: u64 = 8;
 
+    /// The names of the places tests made, since two tests sharing one would share its lock
+    /// file and each would remove what the other made.
+    static TEST_PLACES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
     impl TestPlace {
         fn new(test: &str) -> Self {
+            let mut tests = TEST_PLACES.lock().unwrap();
+            let shared = tests.iter().any(|named| named == test);
+            tests.push(test.to_owned());
+            drop(tests);
+            assert!(!shared, "two tests share place {test}");
+
             let pid = std::process::id();
             let lock_path = std::env::temp_dir().join(format!("flightdeck-ring-{pid}-{test}.lock"));
             Self {
@@ -1512,7 +1522,7 @@ mod tests {
         // lock file naming one ring for the name of another.
         // Method: make a writer and drop it, write its generation with a leading zero into
         // the lock file, then make a writer and read the name its lock file holds.
-        let place = TestPlace::new("zero");
+        let place = TestPlace::new("leading");
         let spawns = spawns();
         drop(Writer::create(&place.place, SHAPE).unwrap());
         let token_first = place.token_named().unwrap();
