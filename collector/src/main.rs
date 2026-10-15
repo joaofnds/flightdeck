@@ -740,6 +740,8 @@ mod tests {
     use std::panic::AssertUnwindSafe;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    use collector::ring::{Found, FoundEvent, Reader};
+
     use super::*;
 
     const TEST_TICK_PERIOD_NS: u64 = 20_000_000;
@@ -884,6 +886,50 @@ mod tests {
 
         assert!(run.whole.tally.starts > 0);
         assert_eq!(0, calls);
+    }
+
+    #[test]
+    fn publishes_the_events_cpus_and_interfaces_each_tick_read() {
+        // Goal: each tick hands the ring the process events it drained, under the event
+        // numbers its publication names, with the CPUs and interfaces it read.
+        // Method: run ten ticks 20 ms apart while another thread starts processes, then read
+        // every publication and every event the ring holds.
+        let timebase = Timebase::read().unwrap();
+        let mut sink = io::sink();
+        let ring = TestRing::new("event");
+        let mut run = Run::start(
+            timebase,
+            TEST_TICK_PERIOD_NS,
+            DEFAULT_RESCAN_INTERVAL,
+            &ring.place,
+            &mut sink,
+        )
+        .unwrap();
+        while_forking(|| {
+            let mut tick = run.first_tick;
+            while tick <= 10 {
+                tick = run.tick(tick, &mut sink).unwrap();
+            }
+        });
+
+        let mut reader = Reader::open(&ring.place.lock_path).unwrap();
+        let mut named = 0;
+        while let Found::Publication { .. } = reader.read().unwrap() {
+            assert!(!reader.tick().cpus.is_empty());
+            assert!(!reader.tick().interfaces.is_empty());
+            named += reader.tick().events.end - reader.tick().events.start;
+        }
+        let mut starts = 0;
+        let mut found = 0;
+        while let FoundEvent::Event { event, .. } = reader.read_event().unwrap() {
+            found += 1;
+            if let Event::Start { .. } = event {
+                starts += 1;
+            }
+        }
+
+        assert!(starts > 0);
+        assert_eq!(named, found);
     }
 
     fn arguments(words: &[&str]) -> Vec<String> {

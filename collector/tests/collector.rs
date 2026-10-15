@@ -64,17 +64,26 @@ mod tests {
         coalitions: usize,
     }
 
-    /// The last tick of the run the collector's summary `out` reports, from its line
-    /// "whole run, ticks F-L: ...".
-    fn last_tick(out: &str) -> u64 {
-        let line = out
-            .lines()
+    /// The line "whole run, ticks F-L: ..., N slips" of the collector's summary `out`.
+    fn whole_run(out: &str) -> &str {
+        out.lines()
             .find(|line| line.starts_with("whole run, ticks "))
-            .unwrap();
-        let span = line.trim_start_matches("whole run, ticks ");
+            .unwrap()
+    }
+
+    /// The last tick of the run the collector's summary `out` reports.
+    fn last_tick(out: &str) -> u64 {
+        let span = whole_run(out).trim_start_matches("whole run, ticks ");
         let (_, rest) = span.split_once('-').unwrap();
         let (last, _) = rest.split_once(':').unwrap();
         last.parse().unwrap()
+    }
+
+    /// The ticks the run the collector's summary `out` reports slipped, and so never ran.
+    fn slips(out: &str) -> u64 {
+        let line = whole_run(out).trim_end_matches(" slips");
+        let (_, count) = line.rsplit_once(' ').unwrap();
+        count.parse().unwrap()
     }
 
     /// Every publication the ring of `place` holds, read until the reader finds none, at most
@@ -100,8 +109,8 @@ mod tests {
     #[test]
     fn publishes_each_tick_to_the_ring() {
         // Goal: the collector hands each tick it runs to the ring, the warm-up tick 0
-        // included, with the processes and coalitions it read, and numbers the publications
-        // without a gap whatever ticks the run slipped.
+        // included and every tick it did not slip, with the processes and coalitions it read,
+        // and numbers the publications without a gap whatever ticks the run slipped.
         // Method: run the collector for two seconds under a ring name of this test's own, then
         // read every publication of the ring it left, in this process.
         let ring = TestRing::new("ticks");
@@ -110,6 +119,7 @@ mod tests {
             .output()
             .unwrap();
         let last_tick = last_tick(stdout(&collected));
+        let slips = slips(stdout(&collected));
 
         let found = read_all(&ring.place, last_tick + 2);
 
@@ -122,6 +132,7 @@ mod tests {
             (1..=u64::try_from(found.len()).unwrap()).collect::<Vec<u64>>(),
             numbers
         );
+        assert_eq!(last_tick + 1 - slips, u64::try_from(found.len()).unwrap());
         assert_eq!(Some(&0), ticks.first());
         assert_eq!(Some(&last_tick), ticks.last());
         assert!(

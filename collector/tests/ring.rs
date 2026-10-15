@@ -264,11 +264,31 @@ mod tests {
     /// Header words the forging tests change, as the ring's layout places them.
     const HEADER_PUBLICATION_FIRST: usize = 3;
     const HEADER_PUBLICATION_NEWEST: usize = 4;
+    const HEADER_EVENT_NEWEST: usize = 7;
+
+    /// The writable mapping of a forged ring, which its forger keeps to change the ring
+    /// under a reader, as the creator of a ring may.
+    struct Forged {
+        address: *mut c_void,
+        length: usize,
+    }
+
+    impl Forged {
+        fn write(&self, word: usize, value: u64) {
+            unsafe { self.address.cast::<u64>().add(word).write(value) };
+        }
+    }
+
+    impl Drop for Forged {
+        fn drop(&mut self) {
+            assert_eq!(0, unsafe { munmap(self.address, self.length) });
+        }
+    }
 
     /// Leaves in `place` a ring of generation 5 that another program of this user forged: a
     /// copy of a ring that published once, with the header words `edits` changed, which the
     /// lock file names. Only the ring's creator may write it, as with a ring a writer makes.
-    fn forge(place: &TestPlace, edits: &[(usize, u64)]) {
+    fn forge(place: &TestPlace, edits: &[(usize, u64)]) -> Forged {
         let spawns = spawns();
         let mut writer = Writer::create(&place.place, SHAPE).unwrap();
         publish(&mut writer, 1);
@@ -305,12 +325,18 @@ mod tests {
         unsafe {
             std::ptr::copy_nonoverlapping(from.cast::<u8>(), to.cast::<u8>(), length);
             for &(word, value) in edits {
+                // A ring that published once numbers its first and newest publication 1, so
+                // a layout that moved the word fails here and not as a refusal of another.
+                assert_eq!(1, to.cast::<u64>().add(word).read());
                 to.cast::<u64>().add(word).write(value);
             }
             assert_eq!(0, munmap(from, length));
-            assert_eq!(0, munmap(to, length));
         }
         std::fs::write(place.lock_path(), name.as_bytes()).unwrap();
+        Forged {
+            address: to,
+            length,
+        }
     }
 
     #[test]
@@ -354,10 +380,9 @@ mod tests {
 
     #[test]
     fn a_reader_refuses_a_newest_publication_past_any_a_writer_numbers() {
-        // Goal: a ring whose newest publication turns huge after the reader opened it is a
-        // broken ring, which the reader reports rather than crashing on.
-        // Method: forge a ring whose newest publication is the largest number, which open
-        // takes as written past the reader's place, and read it.
+        // Goal: a ring whose newest publication is huge, where its first is not, is a broken
+        // ring, which the reader refuses to open.
+        // Method: forge a ring whose newest publication is the largest number, and open it.
         let place = TestPlace::new("newest");
         forge(&place, &[(HEADER_PUBLICATION_NEWEST, u64::MAX)]);
 
@@ -367,6 +392,38 @@ mod tests {
             std::io::ErrorKind::InvalidData,
             opened.err().unwrap().kind()
         );
+    }
+
+    #[test]
+    fn a_reader_refuses_a_newest_publication_that_turns_huge_after_it_opened() {
+        // Goal: a ring whose newest publication turns huge after the reader opened it is a
+        // broken ring, which the reader reports rather than crashing on.
+        // Method: forge a ring, open it, make its newest publication the largest number
+        // through the forger's mapping, and read.
+        let place = TestPlace::new("turned");
+        let forged = forge(&place, &[]);
+        let mut reader = Reader::open(place.lock_path()).unwrap();
+
+        forged.write(HEADER_PUBLICATION_NEWEST, u64::MAX);
+        let read = reader.read();
+
+        assert_eq!(std::io::ErrorKind::InvalidData, read.err().unwrap().kind());
+    }
+
+    #[test]
+    fn a_reader_refuses_a_newest_event_that_turns_huge_after_it_opened() {
+        // Goal: a ring whose newest event turns huge after the reader opened it is a broken
+        // ring, which the reader reports rather than crashing on.
+        // Method: forge a ring, open it, make its newest event the largest number through
+        // the forger's mapping, and read an event.
+        let place = TestPlace::new("evhuge");
+        let forged = forge(&place, &[]);
+        let mut reader = Reader::open(place.lock_path()).unwrap();
+
+        forged.write(HEADER_EVENT_NEWEST, u64::MAX);
+        let read = reader.read_event();
+
+        assert_eq!(std::io::ErrorKind::InvalidData, read.err().unwrap().kind());
     }
 
     #[test]
@@ -827,6 +884,36 @@ mod tests {
         );
         assert_eq!(
             FoundEvent::Missed { first: 2, end: 4 },
+            reader.read_event().unwrap()
+        );
+    }
+
+    #[test]
+    fn a_reader_that_slept_through_two_restarts_learns_the_ring_it_never_saw() {
+        // Goal: a reader that was away while the writer restarted twice learns the
+        // publications and events of the ring between, which it never opened, as missed.
+        // Method: read the one tick and event of a ring, restart the writer to publish one
+        // tick and event and again to publish one more, follow it, and read.
+        let place = TestPlace::new("twice");
+        let mut first = Writer::create(&place.place, SHAPE).unwrap();
+        publish_events(&mut first, 1, &[exit(1)]);
+        let mut reader = Reader::open(place.lock_path()).unwrap();
+        reader.read().unwrap();
+        reader.read_event().unwrap();
+
+        let spawns = spawns();
+        drop(first);
+        let mut second = Writer::create(&place.place, SHAPE).unwrap();
+        publish_events(&mut second, 1, &[exit(2)]);
+        drop(second);
+        let mut third = Writer::create(&place.place, SHAPE).unwrap();
+        drop(spawns);
+        publish_events(&mut third, 1, &[exit(3)]);
+        assert!(reader.follow(place.lock_path()).unwrap());
+
+        assert_eq!(Found::Missed { first: 2, end: 3 }, reader.read().unwrap());
+        assert_eq!(
+            FoundEvent::Missed { first: 2, end: 3 },
             reader.read_event().unwrap()
         );
     }
