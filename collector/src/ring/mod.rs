@@ -260,8 +260,11 @@ impl Reader {
         let run_start_ns = words[HEADER_RUN_START_NS].load(Ordering::Relaxed);
         let event_first = words[HEADER_EVENT_FIRST].load(Ordering::Relaxed);
         let event_newest = words[HEADER_EVENT_NEWEST].load(Ordering::Relaxed);
-        open_named_check(first, newest)?;
-        open_named_check(event_first, event_newest)?;
+        open_named_check(&Numbering { first, newest })?;
+        open_named_check(&Numbering {
+            first: event_first,
+            newest: event_newest,
+        })?;
 
         Ok(Opened {
             name,
@@ -451,10 +454,11 @@ struct Cursor {
     next: u64,
 }
 
-/// Refuses the numbers a header names, from `first` up to `newest`, where no writer hands them
+/// Refuses the numbers a header names in `numbering`, where no writer hands them
 /// out: a numbering that starts at 0, or a number past `NUMBER_MAX`, which only another
 /// program of this user could have written.
-fn open_named_check(first: u64, newest: u64) -> io::Result<()> {
+fn open_named_check(numbering: &Numbering) -> io::Result<()> {
+    let Numbering { first, newest } = *numbering;
     if first == 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -471,6 +475,14 @@ fn open_named_check(first: u64, newest: u64) -> io::Result<()> {
     }
 
     Ok(())
+}
+
+/// The first and newest number a ring's header names for its publications or its events,
+/// held apart by name since the two would swap unnoticed as arguments.
+#[derive(Clone, Copy)]
+struct Numbering {
+    first: u64,
+    newest: u64,
 }
 
 /// The error of a ring whose header names `number`, past any a writer hands out.
