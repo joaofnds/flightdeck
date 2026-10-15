@@ -683,6 +683,19 @@ mod tests {
     }
 
     #[test]
+    fn a_ring_name_that_would_leave_the_users_directory_is_refused() {
+        // Goal: a ring's name never puts its lock file outside this user's temporary
+        // directory, where the writer would cut and rewrite a file it does not own.
+        // Method: ask for the place of names with a slash, a parent step, a dot and nothing.
+        let names = ["../x", "a/b", ".x", ""];
+
+        for name in names {
+            assert!(Place::for_user(name).is_err(), "{name:?}");
+        }
+        assert!(Place::for_user("flight-deck_2").is_ok());
+    }
+
+    #[test]
     fn a_writer_passes_over_a_name_it_did_not_make() {
         // Goal: an object under the next ring's name, another user's or another program's,
         // never becomes the ring.

@@ -316,6 +316,22 @@ fn open_check(object: &File) -> io::Result<usize> {
 /// directory, which no other user may enter, and objects named for the user, since every
 /// user shares the names of shared-memory objects.
 pub(super) fn place_for_user(name: &str) -> io::Result<super::Place> {
+    // The name becomes a file name in the directory, so it holds no slash and no step out of it.
+    let named = name
+        .bytes()
+        .all(|byte| matches!(byte, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_'));
+    if !named {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("ring name {name:?} holds more than letters, digits, - and _"),
+        ));
+    }
+    if name.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the ring name is empty",
+        ));
+    }
     let mut buffer = [0u8; PATH_MAX];
     let length = unsafe {
         confstr(
