@@ -1443,13 +1443,13 @@ mod tests {
     ) {
         for _ in 0..STEPS_MAX {
             follow_for(tracker, &mut Meter::default(), STEP_MS);
-            if is_reached(&tracker.counts) {
+            if is_reached(&tracker.counts()) {
                 return;
             }
         }
         panic!(
             "no {description} after {STEPS_MAX} steps of {STEP_MS} ms: {:?}",
-            tracker.counts
+            tracker.counts()
         );
     }
 
