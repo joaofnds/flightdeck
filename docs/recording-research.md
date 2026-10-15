@@ -708,7 +708,57 @@ says its part on that line: `- Used:` how much of the crate Flightdeck uses,
 its heading, and fails when the heading is gone, on a dependency with no case, on a case
 missing an entry, and on a case whose crate no member depends on.
 
-No crate has a case, since the workspace depends on none. The collector declares the kernel
+
+### duckdb
+
+- Used: Persistence alone uses duckdb =1.10506.0 with default features disabled and the parquet feature (which includes bundled DuckDB 1.5.6), through typed appenders, bounded in-memory tables and immutable Parquet COPY. Arrow is an unconditional transitive dependency. Neither the collector nor shared allocation-constrained code calls the engine. Extensions are bundled; runtime extension installation and autoloading are disabled.
+- Performance: On the M5 Pro, macOS 27.0.1, 2026-10-15, a 10,080-window/953-process synthetic week used 566.30 seconds native build CPU and 7,232,847,872 allocated bytes in Parquet, against 687.43 seconds/34,470,232,064 bytes for per-minute DuckDB and 655.41 seconds/7,924,731,904 bytes for DuckLake. Parquet's original week-query median was 1.611054 seconds first and 0.763221 repeat; DuckLake was 1.558944/0.706168. Both the original and ranked 54-answer families matched an independent Rust oracle. These are engine prototypes, not the combined collector-plus-persister budget or a cold-cache comparison. Implementing equivalent typed column encoding, Zstandard and query execution here would not credibly match the measured engine with comparable maintenance cost. The complete-schema Rust feed and physical-footprint measurements below are the implementation gate.
+- Maintenance: Pin the Rust crate exactly and keep Cargo.lock, including its bundled native engine and Arrow graph. This adds a C++ build and native allocation observation; the 512 MiB DuckDB buffer limit does not bound whole-process memory. A separate worker, 2 GiB physical-footprint watchdog and bounded one-window staging contain the engine; failures retain unacknowledged source and let collection continue. Immutable Parquet avoids a mutable catalog and extensions needed by DuckLake. Revalidate the typed schema, native resource checks and build time when upgrading. Sources: https://github.com/duckdb/duckdb-rs/releases/tag/v1.10506.0 and https://raw.githubusercontent.com/duckdb/duckdb-rs/v1.10506.0/crates/duckdb/Cargo.toml .
+
+
+The complete-schema encoder uses ten typed Parquet tables: ticks, memory, CPUs,
+interfaces, GPU states, core states, fans, processes, coalitions and raw numbered events.
+Child rows key back to their publication; the immutable window metadata identifies the
+recording, run and boot. The files use series order, Zstandard level 3, 16,384-row groups
+and disabled Bloom filters. Unread sources and unavailable exit usage produce NULL values
+with explicit source/availability state. Unknown legacy observation times remain NULL.
+No mutable catalog or runtime extension installation is needed.
+
+On the same Mac, a fresh-target `cargo +1.95.0 build --locked -p persistence --lib
+--target-dir /tmp/task19-cold-bundled-20261015` completed in 49.36 seconds wall,
+517.01 user and 52.71 system, with 3,581,493,248-byte maximum compiler RSS. The registry
+was already fetched; no target artifact existed. This includes Arrow and bundled C++
+compilation. It measures this 18-core Mac, not the CI VM; it does not justify changing
+CI's 15-minute timeout.
+
+The debug encoder's full injected capacity profile has 60 populated ticks with 12,000
+processes, 28,384 coalitions, 1,638 interfaces, 18 CPUs/cores, 64 states, 10 fans and
+16,384 events per tick. It staged 400,756,320 payload bytes in 78,249,041 ns and completed
+Rust feed plus encoding in 18,511,139,333 ns, with native physical-footprint lifetime peak
+744,801,504 bytes, below the 2 GiB working allowance and without a watchdog trip.
+The generated source has no ring mapping; the worker's mapping closure and durable
+publication are separate checks. These debug timings exclude full-sync publication and
+are not the combined recording CPU acceptance observation.
+
+An isolated process encoded 8 warmups and 64 repeated populated small windows. Completed
+window physical footprint rose from 18,612,824 to 18,989,680 bytes over the observed 64;
+the 8 MiB growth bound passed. A native `malloc` mutant retaining and touching 1 MiB per
+window failed that same check (31,015,512 to 97,895,048 bytes). A separate child touched a
+16 MiB native allocation against a limit 4 MiB above its initial lifetime peak. The
+watchdog observed 21,971,496 current/peak bytes against a 9,355,816-byte limit and
+terminated the child with status 74 before a successful encode. The observer polls
+`proc_pid_rusage` V6 every 100 ms, checks current physical footprint and kernel lifetime
+peak, and reports failure before process exit. This is an observed termination threshold
+with possible overshoot, not an OS allocation quota. The parent integrates refusal,
+reaping and continued collection separately.
+
+Recheck with `cargo +1.95.0 test --locked -p persistence --test encoder -- --nocapture
+--test-threads=1`. The full test uses explicit capacities rather than the host's smaller
+live shape. Source-to-staging byte and row bounds refuse excess input before copying;
+encoder connections close after each window. Raw build and resource output is retained
+in `backlog/evidence/TASK-19/build/encoder`.
+
+The collector declares the kernel
 calls it makes instead of taking them from libc, which added 631 lines to `collector/src`
 and removed 172 (72a35a7..de6cc13). Each struct and constant it declares that the macOS SDK
 headers also declare matches what a C program built against the macOS 27.0 SDK printed. A

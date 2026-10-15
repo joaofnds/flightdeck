@@ -332,6 +332,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_reader_opens_a_long_lock_path_without_allocating() {
+        // Goal: long home paths do not allocate a temporary CString during ring reopen.
+        // Method: open a lock under seven long path components with allocator counting.
+        let mut place = TestPlace::new("longlock");
+        let root = std::env::temp_dir().join(format!("ring-long-lock-{}", std::process::id()));
+        let mut directory = root.clone();
+        for _ in 0..7 {
+            directory.push("x".repeat(100));
+        }
+        std::fs::create_dir_all(&directory).unwrap();
+        place.place.lock_path = directory.join("ring.lock");
+        let writer = Writer::create(&place.place, SHAPE).unwrap();
+
+        let calls = allocator_calls_in(|| {
+            drop(RingReader::open(place.lock_path()).unwrap());
+        });
+
+        drop(writer);
+        drop(place);
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(0, calls);
+    }
+
     fn process(pid: i32) -> Process {
         Process {
             pid,

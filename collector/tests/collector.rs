@@ -17,13 +17,21 @@ mod tests {
     struct TestRing {
         name: String,
         place: Place,
+        recording: std::path::PathBuf,
     }
 
     impl TestRing {
         fn new(test: &str) -> Self {
             let name = format!("fdc{}{test}", std::process::id());
             let place = Place::for_user(&name).unwrap();
-            Self { name, place }
+            let recording =
+                std::env::temp_dir().join(format!("fdc-recording-{}{test}", std::process::id()));
+            assert!(!recording.exists());
+            Self {
+                name,
+                place,
+                recording,
+            }
         }
     }
 
@@ -43,6 +51,9 @@ mod tests {
                 assert_eq!(0, unsafe { shm_unlink(ring.as_ptr()) }, "unlink {ring:?}");
             }
             std::fs::remove_file(&self.place.lock_path).unwrap();
+            if self.recording.exists() {
+                std::fs::remove_dir_all(&self.recording).unwrap();
+            }
         }
     }
 
@@ -116,6 +127,8 @@ mod tests {
         let ring = TestRing::new("ticks");
         let collected = Command::new(env!("CARGO_BIN_EXE_collector"))
             .args(["--seconds", "2", "--ring", &ring.name])
+            .arg("--recording")
+            .arg(&ring.recording)
             .output()
             .unwrap();
         let last_tick = last_tick(stdout(&collected));

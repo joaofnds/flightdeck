@@ -56,10 +56,7 @@ impl<'buffer> DirectoryCursor<'buffer> {
         path: &Path,
         buffer: &'buffer mut [u64; DIRECTORY_BUFFER_WORDS],
     ) -> io::Result<Self> {
-        let directory = File::open(path)?;
-        if !directory.metadata()?.is_dir() {
-            return Err(invalid());
-        }
+        let directory = super::private::open_directory(path)?;
 
         Ok(Self {
             directory,
@@ -247,7 +244,7 @@ fn invalid() -> io::Error {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::alloc::{GlobalAlloc, Layout, System};
     use std::cell::Cell;
@@ -262,6 +259,14 @@ mod tests {
     thread_local! {
         static COUNTING: Cell<bool> = const { Cell::new(false) };
         static CALLS: Cell<u64> = const { Cell::new(0) };
+    }
+
+    pub(crate) fn allocator_calls_in(work: impl FnOnce()) -> u64 {
+        CALLS.set(0);
+        COUNTING.set(true);
+        work();
+        COUNTING.set(false);
+        CALLS.get()
     }
 
     unsafe impl GlobalAlloc for Counting {
@@ -320,26 +325,24 @@ mod tests {
             .unwrap();
         let mut cursor = DirectoryCursor::open(&directory.0, &mut buffer).unwrap();
         let mut count = 0;
-        CALLS.set(0);
-
-        COUNTING.set(true);
-        for _ in 0..10_083 {
-            match cursor.next_name().unwrap() {
-                DirectoryEntry::Name(name) => {
-                    assert_eq!(
-                        Selection::Unknown,
-                        WindowName::parse(name).unwrap().select(0)
-                    );
-                    count += 1;
+        let calls = allocator_calls_in(|| {
+            for _ in 0..10_083 {
+                match cursor.next_name().unwrap() {
+                    DirectoryEntry::Name(name) => {
+                        assert_eq!(
+                            Selection::Unknown,
+                            WindowName::parse(name).unwrap().select(0)
+                        );
+                        count += 1;
+                    }
+                    DirectoryEntry::Complete => break,
                 }
-                DirectoryEntry::Complete => break,
             }
-        }
-        COUNTING.set(false);
+        });
 
         assert_eq!(10_082, count);
         assert!(cursor.complete());
-        assert_eq!(0, CALLS.get());
+        assert_eq!(0, calls);
     }
 
     #[test]

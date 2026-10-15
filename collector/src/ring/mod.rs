@@ -30,7 +30,8 @@ use layout::{
 };
 use object::{
     LockedName, Mapping, NUMBER_MAX, PROT_READ, PROT_WRITE, RingNames, create_lock, create_object,
-    create_previous, create_unlink, create_unlink_older, open_ring, place_for_user, ring_name,
+    create_previous, create_unlink, create_unlink_older, open_lock_file, open_ring, place_for_user,
+    ring_name,
 };
 pub use object::{generation_name, unlink_generation};
 pub use tick::{Dropped, IOReportReadings, Readings, SmcReadings, Tick};
@@ -369,7 +370,7 @@ impl Reader {
     /// The ring the lock file at `lock_path` names, with the reader's place at the oldest
     /// publication and event it holds, and no room for its ticks, which `follow` keeps.
     fn open_named(lock_path: &Path) -> io::Result<Opened> {
-        let name = LockedName::read(&File::open(lock_path)?)?;
+        let name = LockedName::read(&open_lock_file(lock_path)?)?;
         if name.as_str().is_empty() {
             return Err(io::Error::from(io::ErrorKind::NotFound));
         }
@@ -407,7 +408,7 @@ impl Reader {
     /// naming generation 0, which a writer names before it makes its first ring, names no
     /// ring yet, which is no move.
     pub fn moved(&self, lock_path: &Path) -> io::Result<bool> {
-        let locked = LockedName::read(&File::open(lock_path)?)?;
+        let locked = LockedName::read(&open_lock_file(lock_path)?)?;
         let name = locked.as_str();
         if name.is_empty() {
             return Ok(false);

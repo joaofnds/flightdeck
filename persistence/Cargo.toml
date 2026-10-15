@@ -1,0 +1,16 @@
+[package]
+name = "persistence"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "persister"
+path = "src/main.rs"
+
+[dependencies]
+collector = { path = "../collector" }
+duckdb = { version = "=1.10506.0", default-features = false, features = ["parquet"] }
+
+[lints]
+workspace = true

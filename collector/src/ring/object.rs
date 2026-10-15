@@ -63,11 +63,14 @@ const O_RDONLY: c_int = 0x0000;
 const O_RDWR: c_int = 0x0002;
 const O_CREAT: c_int = 0x0200;
 const O_EXCL: c_int = 0x0800;
+const O_CLOEXEC: c_int = 0x0100_0000;
+const PATH_MAX: usize = 1024;
 pub(super) const PROT_READ: c_int = 0x01;
 pub(super) const PROT_WRITE: c_int = 0x02;
 const MAP_SHARED: c_int = 0x0001;
 
 unsafe extern "C" {
+    fn open(path: *const c_char, flags: c_int, ...) -> c_int;
     fn shm_open(name: *const c_char, oflag: c_int, ...) -> c_int;
     fn ftruncate(fd: c_int, length: i64) -> c_int;
     fn mmap(
@@ -89,6 +92,26 @@ unsafe extern "C" {
         buffer_size: usize,
         result: *mut *mut Passwd,
     ) -> c_int;
+}
+
+/// Opens a reader's lock path without the standard library's long-path `CString` allocation.
+pub(super) fn open_lock_file(path: &Path) -> io::Result<File> {
+    let bytes = path.as_os_str().as_bytes();
+    if bytes.len() >= PATH_MAX {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    }
+    let mut buffer = [0; PATH_MAX];
+    buffer[..bytes.len()].copy_from_slice(bytes);
+    let name = CStr::from_bytes_with_nul(&buffer[..=bytes.len()])
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let descriptor = unsafe { open(name.as_ptr(), O_RDONLY | O_CLOEXEC, 0) };
+    if descriptor < 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    let file = unsafe { File::from_raw_fd(descriptor) };
+
+    Ok(file)
 }
 
 /// `struct passwd` in `pwd.h`, its fields' `pw_` dropped, and `pw_passwd` given its full name,
