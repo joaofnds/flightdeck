@@ -1384,8 +1384,21 @@ mod tests {
         // Goal: the lock file the single writer holds, and readers find the ring by, is never
         // swept by dirhelper, which removes files under /var/folders and /tmp older than three
         // days, and no other user may enter its directory.
-        // Method: ask for a user's place and look at its lock file's directory.
-        let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+        // Method: ask for a user's place and look at its lock file's directory, against the
+        // home the directory service gives this uid, since HOME may name another directory.
+        let uid = unsafe { getuid() };
+        let spawns = spawns();
+        let entry = Command::new("dscacheutil")
+            .args(["-q", "user", "-a", "uid", &uid.to_string()])
+            .output()
+            .unwrap();
+        drop(spawns);
+        let home = PathBuf::from(
+            stdout(&entry)
+                .lines()
+                .find_map(|line| line.strip_prefix("dir: "))
+                .unwrap(),
+        );
 
         let place = Place::for_user("flightdeck").unwrap();
 
@@ -1395,14 +1408,14 @@ mod tests {
             home.join("Library/Application Support/Flightdeck"),
             directory
         );
-        assert_eq!(unsafe { getuid() }, metadata.uid());
+        assert_eq!(uid, metadata.uid());
         assert_eq!(0o700, metadata.permissions().mode() & 0o777);
     }
 
     #[test]
     fn two_places_sharing_a_prefix_take_different_ring_names() {
-        // Goal: another user, who cannot read this user's lock files, cannot know the names a
-        // writer will make, so it cannot take them first and keep the collector from starting.
+        // Goal: two places that share a name prefix take different ring names, since each
+        // writer names its rings with a token of its own rather than with the prefix alone.
         // Method: make a writer in each of two places that share a name prefix, and compare
         // the names their lock files hold.
         let first = TestPlace::new("unseen");
@@ -1489,11 +1502,13 @@ mod tests {
             process_capacity: 1 << 20,
             ..SHAPE
         };
+        let spawns = spawns();
         for _ in 0..17 {
             assert!(Writer::create(&place.place, shape).is_err());
         }
 
         let writer = Writer::create(&place.place, SHAPE);
+        drop(spawns);
 
         assert!(writer.is_ok(), "{:?}", writer.err());
         assert!(place.holds(1));

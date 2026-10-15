@@ -630,7 +630,11 @@ fn place_for_user_home() -> io::Result<PathBuf> {
         )
     };
     if status != 0 {
-        return Err(io::Error::from_raw_os_error(status));
+        let error = io::Error::from_raw_os_error(status);
+        return Err(io::Error::new(
+            error.kind(),
+            format!("reading this user's home from the user database: {error}"),
+        ));
     }
 
     if result.is_null() {
@@ -641,7 +645,16 @@ fn place_for_user_home() -> io::Result<PathBuf> {
     }
 
     // getpwuid_r filled passwd, since it returned it as the result.
-    let directory = unsafe { CStr::from_ptr(passwd.assume_init_ref().dir) };
+    let directory = unsafe { passwd.assume_init_ref().dir };
+    if directory.is_null() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "the user database names no home for this user",
+        ));
+    }
+
+    // The user database ends the home it names with a nul.
+    let directory = unsafe { CStr::from_ptr(directory) };
     let home = PathBuf::from(OsStr::from_bytes(directory.to_bytes()));
     if !home.is_absolute() {
         return Err(io::Error::new(
@@ -670,7 +683,12 @@ fn place_for_user_directory(directory: &Path) -> io::Result<()> {
         }
     }
 
-    let metadata = std::fs::metadata(directory)?;
+    let metadata = std::fs::metadata(directory).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("reading {}: {error}", directory.display()),
+        )
+    })?;
     if !metadata.is_dir() {
         return Err(io::Error::new(
             io::ErrorKind::NotADirectory,
@@ -754,7 +772,7 @@ mod tests {
         let mode = std::fs::metadata(&directory).unwrap().mode() & 0o777;
         std::fs::remove_dir(&directory).unwrap();
         placed.unwrap();
-        assert_eq!(DIRECTORY_MODE, mode);
+        assert_eq!(0o700, mode);
     }
 
     #[test]
