@@ -261,7 +261,7 @@ mod tests {
         /// names the next writer makes.
         fn name_token(&self, token: &str) {
             let name = format!("{}{token}.0", self.place.name_prefix);
-            std::fs::write(self.lock_path(), name).unwrap();
+            self.spoil(name.as_bytes());
         }
 
         /// The ring the lock file names, opened with `oflag`, or the error that refused it.
@@ -1457,10 +1457,11 @@ mod tests {
 
     #[test]
     fn a_writer_names_its_token_in_the_lock_file_before_it_makes_a_ring() {
-        // Goal: a writer stopped after it made a ring under a token it drew leaves the token
-        // in the lock file, so the next writer finds that ring and removes it in time.
+        // Goal: the lock file names a writer's token before its first ring is in use, so a
+        // writer killed after making that ring leaves one the next writers can name.
         // Method: make a writer of a shape too large to map, which fails after it drew its
-        // token, and read the name its lock file holds.
+        // token, and read the name its lock file holds. No shape stops a writer before it
+        // makes its ring, so the test pins that the token is named, not that it comes first.
         let place = TestPlace::new("reserve");
         let shape = Shape {
             slot_count: 1 << 24,
@@ -1477,6 +1478,28 @@ mod tests {
     }
 
     #[test]
+    fn a_writer_that_fails_after_making_its_ring_removes_it() {
+        // Goal: failed starts never use up the generations a writer may take, so a cause
+        // that clears, such as memory too short to map a ring, leaves the next start free.
+        // Method: fail one start more than the 16 generations a writer passes over, with a
+        // shape too large to map, then make a writer of a shape that maps.
+        let place = TestPlace::new("failed");
+        let shape = Shape {
+            slot_count: 1 << 24,
+            process_capacity: 1 << 20,
+            ..SHAPE
+        };
+        for _ in 0..17 {
+            assert!(Writer::create(&place.place, shape).is_err());
+        }
+
+        let writer = Writer::create(&place.place, SHAPE);
+
+        assert!(writer.is_ok(), "{:?}", writer.err());
+        assert!(place.holds(1));
+    }
+
+    #[test]
     fn a_reader_takes_a_lock_file_naming_generation_0_for_one_naming_no_ring_yet() {
         // Goal: the name a writer writes before it makes its first ring sends no reader to a
         // ring that does not exist.
@@ -1487,13 +1510,13 @@ mod tests {
         publish(&mut writer, 1);
         let mut reader = Reader::open(place.lock_path()).unwrap();
         reader.read().unwrap();
-        let named = std::fs::read(place.lock_path()).unwrap();
         place.name_token("reservedabcd");
 
+        let moved = reader.moved(place.lock_path()).unwrap();
         let followed = reader.follow(place.lock_path()).unwrap();
         let opened = Reader::open(place.lock_path());
 
-        std::fs::write(place.lock_path(), named).unwrap();
+        assert!(!moved);
         assert!(!followed);
         assert_eq!(std::io::ErrorKind::NotFound, opened.err().unwrap().kind());
         drop(writer);

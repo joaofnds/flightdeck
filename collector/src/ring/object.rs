@@ -114,8 +114,6 @@ const _: () = assert!(offset_of!(Passwd, dir) == 48);
 /// gives on macOS.
 const PASSWD_BUFFER_SIZE: usize = 4096;
 
-unsafe extern "C" {}
-
 /// A shared-memory object mapped into this process, which unmaps it when it drops.
 pub(super) struct Mapping {
     address: *mut c_void,
@@ -352,7 +350,7 @@ fn create_previous_parse(prefix: &str, name: &str) -> Option<(Token, u64)> {
     let generation = generation.parse().ok()?;
     // A writer writes a generation without a sign or a leading zero, so the name rebuilt from
     // the generation is the name read. One another program wrote with them names no ring.
-    let rebuilt = match ring_name(Naming { prefix, token }, generation) {
+    let rebuilt = match ring_name(&RingNames { prefix, token }, generation) {
         Ok(rebuilt) => rebuilt,
         Err(error) => unreachable!("a generation's own digits fit where they were read: {error}"),
     };
@@ -383,18 +381,22 @@ pub(super) struct Created {
 
 /// The names of a place's rings: the prefix, the place's token, and a generation.
 #[derive(Clone, Copy)]
-pub(super) struct Naming<'prefix> {
+pub(super) struct RingNames<'prefix> {
     pub(super) prefix: &'prefix str,
     pub(super) token: Token,
 }
 
 /// Makes the object of a ring of `layout` under the first generation past `previous` whose
 /// name no object holds.
-pub(super) fn create_object(naming: Naming, previous: u64, layout: &Layout) -> io::Result<Created> {
+pub(super) fn create_object(
+    names: &RingNames,
+    previous: u64,
+    layout: &Layout,
+) -> io::Result<Created> {
     // A generation's digits fit in a ring name only far below the largest u64.
     assert!(previous <= u64::MAX - GENERATION_TRIES);
     for generation in previous + 1..=previous + GENERATION_TRIES {
-        let name = ring_name(naming, generation)?;
+        let name = ring_name(names, generation)?;
         match create_object_named(&name, layout.size_bytes()) {
             Ok(object) => {
                 return Ok(Created {
@@ -416,8 +418,8 @@ pub(super) fn create_object(naming: Naming, previous: u64, layout: &Layout) -> i
     ))
 }
 
-pub(super) fn ring_name(naming: Naming, generation: u64) -> io::Result<String> {
-    let name = format!("{}{}.{generation}", naming.prefix, naming.token.as_str());
+pub(super) fn ring_name(names: &RingNames, generation: u64) -> io::Result<String> {
+    let name = format!("{}{}.{generation}", names.prefix, names.token.as_str());
     if name.len() > PSHMNAMLEN {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -454,17 +456,31 @@ fn create_object_named(name: &str, size_bytes: usize) -> io::Result<OwnedFd> {
     Ok(object)
 }
 
+/// Removes the ring `name`, which a start made and then failed past.
+pub(super) fn create_unlink(name: &str) {
+    let name = match CString::new(name) {
+        Ok(name) => name,
+        Err(error) => unreachable!("{error}"),
+    };
+    if unsafe { shm_unlink(name.as_ptr()) } != 0 {
+        eprintln!(
+            "ring: unlink of a ring a failed start made failed: {}",
+            io::Error::last_os_error()
+        );
+    }
+}
+
 /// Removes every ring before the new one but the newest that holds publications, so at most
 /// two rings exist: the new one and the last with something to read, which the persister
 /// seals. A writer that died before its first publication left an empty ring, which goes,
 /// so a collector failing at each start never costs the publications of the run before. A
 /// start that passed over generations held by other objects left a ring further back, so the
 /// generations a start may pass over are looked at too.
-pub(super) fn create_unlink_older(naming: Naming, previous: u64) {
+pub(super) fn create_unlink_older(names: &RingNames, previous: u64) {
     let first = previous.saturating_sub(GENERATION_TRIES + 1).max(1);
     let mut kept = false;
     for generation in (first..=previous).rev() {
-        let name = match ring_name(naming, generation) {
+        let name = match ring_name(names, generation) {
             Ok(name) => name,
             Err(error) => {
                 unreachable!("ring {previous} had a name, as each shorter one fits: {error}")

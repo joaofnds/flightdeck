@@ -28,8 +28,8 @@ use layout::{
     store_header,
 };
 use object::{
-    LockedName, Mapping, NUMBER_MAX, Naming, PROT_READ, PROT_WRITE, create_lock, create_object,
-    create_previous, create_unlink_older, open_ring, place_for_user, ring_name,
+    LockedName, Mapping, NUMBER_MAX, PROT_READ, PROT_WRITE, RingNames, create_lock, create_object,
+    create_previous, create_unlink, create_unlink_older, open_ring, place_for_user, ring_name,
 };
 pub use tick::{Dropped, IOReportReadings, Readings, SmcReadings, Tick};
 
@@ -131,12 +131,13 @@ impl Writer {
             .duration_since(UNIX_EPOCH)
             .map_err(io::Error::other)?
             .as_nanos();
+        let run_start_ns = u64::try_from(run_start_ns).map_err(io::Error::other)?;
 
         let lock = create_lock(&place.lock_path)?;
 
         let previous = create_previous(&place.name_prefix, &lock)?;
 
-        let naming = Naming {
+        let names = RingNames {
             prefix: &place.name_prefix,
             token: previous.token,
         };
@@ -144,31 +145,30 @@ impl Writer {
         // nothing can name, so the lock file names the token first. Generation 0 is no ring,
         // and a reader takes it as a ring that is gone.
         if previous.generation == 0 {
-            let reserved = ring_name(naming, 0)?;
-            lock.write_all_at(reserved.as_bytes(), 0)?;
-            lock.set_len(u64_from_usize(reserved.len()))?;
+            create_name(&lock, &ring_name(&names, 0)?)?;
         }
-        let created = create_object(naming, previous.generation, &layout)?;
 
-        let mapping = Mapping::new(&created.object, layout.word_count(), PROT_READ | PROT_WRITE)?;
+        let created = create_object(&names, previous.generation, &layout)?;
+
+        // The lock file names no ring a start made and then failed past, so the start removes
+        // it, or each failed start would hold one of the generations the next may take.
+        let mapping = Mapping::new(&created.object, layout.word_count(), PROT_READ | PROT_WRITE)
+            .inspect_err(|_| create_unlink(&created.name))?;
 
         let header = Header {
             generation: created.generation,
             publication_first: previous.publication_newest + 1,
-            run_start_ns: u64::try_from(run_start_ns).map_err(io::Error::other)?,
+            run_start_ns,
             event_first: previous.event_newest + 1,
         };
         store_header(mapping.words(), &layout, &header);
 
-        // Writing the name before cutting the file to its length never leaves the lock file
-        // empty, as cutting first would for a writer stopped between the two, which would make
-        // the next writer number from 1.
-        lock.write_all_at(created.name.as_bytes(), 0)?;
-        lock.set_len(u64_from_usize(created.name.len()))?;
+        create_name(&lock, &created.name).inspect_err(|_| create_unlink(&created.name))?;
         // Only once the lock file names the new ring, so a reader that reads the lock file from
         // now on never finds the ring it names gone. One that read it just before finds the
         // empty ring gone and looks again.
-        create_unlink_older(naming, previous.generation);
+        create_unlink_older(&names, previous.generation);
+
         Ok(Self {
             _lock: lock,
             mapping,
@@ -291,12 +291,17 @@ impl Reader {
 
     /// Whether the lock file at `lock_path` names another ring than the reader's, as it does
     /// once the writer restarted, so the reader opens the newer ring after it has read every
-    /// publication of its own. A lock file the writer is part-way through writing names no
+    /// publication of its own. A lock file the writer is part-way through writing, or one
+    /// naming generation 0, which a writer names before it makes its first ring, names no
     /// ring yet, which is no move.
     pub fn moved(&self, lock_path: &Path) -> io::Result<bool> {
         let locked = LockedName::read(&File::open(lock_path)?)?;
         let name = locked.as_str();
         if name.is_empty() {
+            return Ok(false);
+        }
+
+        if name.ends_with(".0") {
             return Ok(false);
         }
 
@@ -446,6 +451,14 @@ impl Reader {
             }),
         }
     }
+}
+
+/// Writes `name` into the lock file. Writing the name before cutting the file to its length
+/// never leaves the lock file empty, as cutting first would for a writer stopped between the
+/// two, which would make the next writer number from 1.
+fn create_name(lock: &File, name: &str) -> io::Result<()> {
+    lock.write_all_at(name.as_bytes(), 0)?;
+    lock.set_len(u64_from_usize(name.len()))
 }
 
 /// The newest number the header word `newest_word` holds, with what the writer wrote before
