@@ -341,6 +341,7 @@ pub(super) fn open_layout(header: &[AtomicU64], size_bytes: usize) -> io::Result
             format!("a ring of layout {}", load(HEADER_LAYOUT_VERSION)),
         ));
     }
+
     for (index, width) in RECORD_WIDTHS {
         if load(index) != u64_from_usize(width) {
             return Err(io::Error::new(
@@ -376,6 +377,7 @@ pub(super) fn open_layout(header: &[AtomicU64], size_bytes: usize) -> io::Result
             format!("a ring of {size_bytes} bytes, short of its layout"),
         ));
     }
+
     Ok(layout)
 }
 

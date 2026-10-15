@@ -108,6 +108,7 @@ fn run(options: &Options) -> std::io::Result<()> {
                             format!("the writer published nothing for {IDLE_MAX:?}"),
                         ));
                     }
+
                     reader.wait(WAIT_TIMEOUT)?;
                 }
             }
@@ -147,6 +148,7 @@ fn run_events(reader: &mut Reader) -> std::io::Result<()> {
         if reader.next_event() >= events.end {
             break;
         }
+
         match reader.read_event()? {
             FoundEvent::Event { .. } => read += 1,
             FoundEvent::Missed { first, end } => println!("missed events {first}-{}", end - 1),
@@ -154,13 +156,16 @@ fn run_events(reader: &mut Reader) -> std::io::Result<()> {
         }
     }
     // A tick that logged events, or a read of events an earlier tick logged, is printed.
-    let logged = !events.is_empty();
-    if logged || read > 0 {
-        println!(
-            "events {}..{} read {read} dropped starts {} execs {} exits {}",
-            events.start, events.end, dropped.starts, dropped.execs, dropped.exits
-        );
+    if events.is_empty() {
+        if read == 0 {
+            return Ok(());
+        }
     }
+
+    println!(
+        "events {}..{} read {read} dropped starts {} execs {} exits {}",
+        events.start, events.end, dropped.starts, dropped.execs, dropped.exits
+    );
     Ok(())
 }
 

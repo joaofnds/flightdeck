@@ -539,9 +539,11 @@ fn read_finished<T>(
                     format!("the record of {number} holds words that make nothing"),
                 ));
             }
+
             return Ok(loaded);
         }
     }
+
     Ok(None)
 }
 

@@ -164,6 +164,7 @@ impl LockedName {
                 "the lock file holds no text",
             ));
         }
+
         let mut name = [0; PSHMNAMLEN];
         name.copy_from_slice(&bytes[..PSHMNAMLEN]);
         Ok(Self {
@@ -304,6 +305,7 @@ fn ring_name(prefix: &str, generation: u64) -> io::Result<String> {
             format!("ring name {name} is past {PSHMNAMLEN} characters"),
         ));
     }
+
     Ok(name)
 }
 
@@ -355,6 +357,7 @@ pub(super) fn create_unlink_older(prefix: &str, previous: u64) {
                 continue;
             }
         }
+
         let name = match CString::new(name) {
             Ok(name) => name,
             Err(error) => unreachable!("{error}"),
@@ -441,6 +444,7 @@ fn open_check(object: &File) -> io::Result<usize> {
             format!("the ring has mode {:o}", metadata.mode() & 0o777),
         ));
     }
+
     usize::try_from(metadata.len()).map_err(io::Error::other)
 }
 
@@ -464,6 +468,7 @@ pub(super) fn place_for_user(name: &str) -> io::Result<super::Place> {
             "the ring name is empty",
         ));
     }
+
     let mut buffer = [0u8; PATH_MAX];
     let length = unsafe {
         confstr(
@@ -482,6 +487,7 @@ pub(super) fn place_for_user(name: &str) -> io::Result<super::Place> {
             "this user's temporary directory is past PATH_MAX",
         ));
     }
+
     let directory = PathBuf::from(OsStr::from_bytes(&buffer[..length - 1]));
     let uid = unsafe { getuid() };
 
