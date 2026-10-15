@@ -59,6 +59,7 @@ pub(super) fn wait(word: &AtomicU64, value: u64, timeout: Duration) -> io::Resul
     if returned >= 0 {
         return Ok(Waited::Ended);
     }
+
     let error = io::Error::last_os_error();
     match error.raw_os_error() {
         Some(ETIMEDOUT | EINTR) => Ok(Waited::Ended),

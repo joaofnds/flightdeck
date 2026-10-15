@@ -134,6 +134,7 @@ fn slipped(last: Option<Seen>, seen: Seen) -> Option<RangeInclusive<u64>> {
     if seen.publication != last.publication + 1 {
         return None;
     }
+
     (seen.tick > last.tick + 1).then(|| last.tick + 1..=seen.tick - 1)
 }
 

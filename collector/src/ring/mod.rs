@@ -249,6 +249,7 @@ impl Reader {
         if name.is_empty() {
             return Ok(false);
         }
+
         Ok(name != self.name.as_str())
     }
 
@@ -286,6 +287,7 @@ impl Reader {
         if self.publications.next <= newest {
             return Ok(());
         }
+
         if wait(newest_word, newest, timeout)? == Waited::Unsupported {
             std::thread::sleep(timeout.min(POLL_INTERVAL));
         }
@@ -388,12 +390,14 @@ impl Cursor {
         if self.next > held.newest {
             return Step::Nothing;
         }
+
         let oldest = self.first.max(held.oldest);
         if self.next < oldest {
             let first = self.next;
             self.next = oldest;
             return Step::Missed { first, end: oldest };
         }
+
         let number = self.next;
         self.next += 1;
         Step::Read(number)

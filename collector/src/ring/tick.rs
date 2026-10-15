@@ -290,6 +290,7 @@ pub(super) fn load_tick(slot: &[AtomicU64], layout: &Layout, tick: &mut Tick) ->
     if events_first > events_end {
         return false;
     }
+
     tick.events = events_first..events_end;
     tick.dropped = Dropped {
         starts: slot[SLOT_DROPPED_STARTS].load(Ordering::Relaxed),
@@ -323,6 +324,7 @@ pub(super) fn load_tick(slot: &[AtomicU64], layout: &Layout, tick: &mut Tick) ->
     if !load_tick_smc(slot, layout, sources & SOURCE_SMC != 0, tick) {
         return false;
     }
+
     load_tick_processes(slot, layout, processes, tick);
     load_tick_coalitions(slot, layout, coalitions, tick);
     true

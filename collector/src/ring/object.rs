@@ -143,6 +143,7 @@ impl LockedName {
             if read == 0 {
                 break;
             }
+
             length += read;
         }
 
@@ -192,6 +193,7 @@ pub(super) fn create_previous(prefix: &str, lock: &File) -> io::Result<Previous>
             if error.kind() != io::ErrorKind::InvalidData {
                 return Err(error);
             }
+
             eprintln!("ring: numbering from 1, since {error}");
             None
         }
@@ -296,6 +298,7 @@ fn create_object_named(name: &str, size_bytes: usize) -> io::Result<OwnedFd> {
     if object < 0 {
         return Err(io::Error::last_os_error());
     }
+
     let object = unsafe { OwnedFd::from_raw_fd(object) };
 
     let length = i64::try_from(size_bytes).map_err(io::Error::other)?;
@@ -310,6 +313,7 @@ fn create_object_named(name: &str, size_bytes: usize) -> io::Result<OwnedFd> {
         }
         return Err(error);
     }
+
     Ok(object)
 }
 
@@ -344,6 +348,7 @@ pub(super) fn open_ring(name: &str) -> io::Result<(Mapping, Layout)> {
     if object < 0 {
         return Err(io::Error::last_os_error());
     }
+
     let object = unsafe { OwnedFd::from_raw_fd(object) };
 
     let size_bytes = open_check(&File::from(object.try_clone()?))?;
@@ -403,6 +408,7 @@ pub(super) fn place_for_user(name: &str) -> io::Result<super::Place> {
     if length == 0 {
         return Err(io::Error::last_os_error());
     }
+
     // The length counts the closing NUL, and one past the buffer means the path was cut off.
     if length > buffer.len() {
         return Err(io::Error::other(
