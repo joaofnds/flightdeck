@@ -11,7 +11,10 @@ mod tests {
     use std::process::{Command, Output};
     use std::sync::{Mutex, MutexGuard};
 
-    use collector::ring::{Found, Place, Reader, Shape, Writer};
+    use collector::coalitions::Coalition;
+    use collector::machine::Memory;
+    use collector::processes::{Process, Task, Usage};
+    use collector::ring::{Found, Place, Reader, Readings, Shape, Writer};
 
     unsafe extern "C" {
         fn shm_open(name: *const c_char, oflag: c_int, ...) -> c_int;
@@ -56,6 +59,83 @@ mod tests {
         SPAWNS
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// A ring of four slots with room for one record of each kind.
+    const SHAPE: Shape = Shape {
+        slot_count: 4,
+        cpu_capacity: 1,
+        interface_capacity: 1,
+        core_capacity: 1,
+        state_capacity: 1,
+        fan_capacity: 1,
+        process_capacity: 1,
+        coalition_capacity: 1,
+    };
+
+    /// The readings of a tick of `run_tick` that read nothing else.
+    fn readings(run_tick: u64, memory: &Memory) -> Readings<'_> {
+        Readings {
+            run_tick,
+            cpus: &[],
+            memory,
+            interfaces: &[],
+            ioreport: None,
+            smc: None,
+            processes: &[],
+            processes_refused: 0,
+            processes_gone: 0,
+            coalitions: &[],
+        }
+    }
+
+    /// Publishes a tick of `run_tick` that read nothing else.
+    fn publish(writer: &mut Writer, run_tick: u64) {
+        writer.publish(&readings(run_tick, &Memory::default()));
+    }
+
+    fn process(pid: i32) -> Process {
+        Process {
+            pid,
+            usage: Usage {
+                awake_ns_at_start: 1,
+                user_ns: 2,
+                system_ns: 3,
+                energy_nj: 4,
+                instructions: 5,
+                super_instructions: 6,
+                cycles: 7,
+                idle_wakeups: 8,
+                interrupt_wakeups: 9,
+                pageins: 10,
+                resident_bytes: 11,
+                footprint_bytes: 12,
+                disk_read_bytes: 13,
+                disk_written_bytes: 14,
+            },
+            task: Task {
+                threads: 1,
+                faults: 2,
+                context_switches: 3,
+                mach_syscalls: 4,
+                unix_syscalls: 5,
+            },
+        }
+    }
+
+    fn coalition(id: u64) -> Coalition {
+        Coalition {
+            id,
+            tasks_started: 1,
+            tasks_exited: 0,
+            cpu_ns: 2,
+            interrupt_wakeups: 3,
+            idle_wakeups: 4,
+            disk_read_bytes: 5,
+            disk_written_bytes: 6,
+            gpu_ns: 7,
+            energy_nj: 8,
+        }
     }
 
     /// The most generations a test makes in one place.
@@ -144,15 +224,29 @@ mod tests {
     #[test]
     fn a_reader_in_another_process_reads_the_tick_a_writer_published() {
         // Goal: a process other than the writer reads a tick the writer published, with its tick
-        // number.
-        // Method: publish tick 7 in this process and read one publication with the reader binary.
+        // number and its readings.
+        // Method: publish tick 7 with two processes and a coalition in this process, and read
+        // one publication with the reader binary.
         let place = TestPlace::new("first");
-        let mut writer = Writer::create(&place.place, Shape { slot_count: 4 }).unwrap();
+        let shape = Shape {
+            process_capacity: 2,
+            ..SHAPE
+        };
+        let mut writer = Writer::create(&place.place, shape).unwrap();
+        let processes = [process(10), process(20)];
+        let coalitions = [coalition(4)];
 
-        writer.publish(7).unwrap();
+        writer.publish(&Readings {
+            processes: &processes,
+            coalitions: &coalitions,
+            ..readings(7, &Memory::default())
+        });
         let output = read_ring(&place, &["--publications", "1"]);
 
-        assert_eq!("publication 1 tick 7\n", stdout(&output));
+        assert_eq!(
+            "publication 1 tick 7 processes 2 coalitions 1\n",
+            stdout(&output)
+        );
     }
 
     #[test]
@@ -162,11 +256,11 @@ mod tests {
         // Method: open a reader, then publish six ticks into a ring of four slots before it
         // reads.
         let place = TestPlace::new("behind");
-        let mut writer = Writer::create(&place.place, Shape { slot_count: 4 }).unwrap();
+        let mut writer = Writer::create(&place.place, SHAPE).unwrap();
         let mut reader = Reader::open(place.lock_path()).unwrap();
 
         for tick in 1..=6 {
-            writer.publish(tick * 10).unwrap();
+            publish(&mut writer, tick * 10);
         }
         let found: Vec<Found> = (0..6).map(|_| reader.read().unwrap()).collect();
 
@@ -201,10 +295,10 @@ mod tests {
         // publication it holds, and reports no publication missed, since it was not there.
         // Method: publish six ticks into a ring of four slots, then open a reader.
         let place = TestPlace::new("late");
-        let mut writer = Writer::create(&place.place, Shape { slot_count: 4 }).unwrap();
+        let mut writer = Writer::create(&place.place, SHAPE).unwrap();
 
         for tick in 1..=6 {
-            writer.publish(tick * 10).unwrap();
+            publish(&mut writer, tick * 10);
         }
         let mut reader = Reader::open(place.lock_path()).unwrap();
 
@@ -223,14 +317,17 @@ mod tests {
         // Method: make a writer, try a second in the same place, then publish with the first and
         // read what it published.
         let place = TestPlace::new("second");
-        let mut writer = Writer::create(&place.place, Shape { slot_count: 4 }).unwrap();
+        let mut writer = Writer::create(&place.place, SHAPE).unwrap();
 
-        let second = Writer::create(&place.place, Shape { slot_count: 4 });
-        writer.publish(5).unwrap();
+        let second = Writer::create(&place.place, SHAPE);
+        publish(&mut writer, 5);
 
         assert_eq!(std::io::ErrorKind::WouldBlock, second.err().unwrap().kind());
         let output = read_ring(&place, &["--publications", "1"]);
-        assert_eq!("publication 1 tick 5\n", stdout(&output));
+        assert_eq!(
+            "publication 1 tick 5 processes 0 coalitions 0\n",
+            stdout(&output)
+        );
     }
 
     #[test]
@@ -240,19 +337,22 @@ mod tests {
         // Method: publish three ticks, drop the writer, make another in the same place and
         // publish once, then read the new ring.
         let place = TestPlace::new("restart");
-        let mut first = Writer::create(&place.place, Shape { slot_count: 4 }).unwrap();
+        let mut first = Writer::create(&place.place, SHAPE).unwrap();
         for tick in 1..=3 {
-            first.publish(tick).unwrap();
+            publish(&mut first, tick);
         }
         let spawns = spawns();
         drop(first);
-        let mut second = Writer::create(&place.place, Shape { slot_count: 4 }).unwrap();
+        let mut second = Writer::create(&place.place, SHAPE).unwrap();
         drop(spawns);
 
-        second.publish(1).unwrap();
+        publish(&mut second, 1);
         let output = read_ring(&place, &["--publications", "1"]);
 
-        assert_eq!("publication 4 tick 1\n", stdout(&output));
+        assert_eq!(
+            "publication 4 tick 1 processes 0 coalitions 0\n",
+            stdout(&output)
+        );
     }
 
     #[test]
@@ -264,7 +364,7 @@ mod tests {
 
         let spawns = spawns();
         for _ in 0..3 {
-            drop(Writer::create(&place.place, Shape { slot_count: 4 }).unwrap());
+            drop(Writer::create(&place.place, SHAPE).unwrap());
         }
         drop(spawns);
 
@@ -290,12 +390,15 @@ mod tests {
         assert!(squatter >= 0);
         drop(unsafe { OwnedFd::from_raw_fd(squatter) });
 
-        let mut writer = Writer::create(&place.place, Shape { slot_count: 4 }).unwrap();
-        writer.publish(9).unwrap();
+        let mut writer = Writer::create(&place.place, SHAPE).unwrap();
+        publish(&mut writer, 9);
         let output = read_ring(&place, &["--publications", "1"]);
 
         assert!(place.holds(2));
-        assert_eq!("publication 1 tick 9\n", stdout(&output));
+        assert_eq!(
+            "publication 1 tick 9 processes 0 coalitions 0\n",
+            stdout(&output)
+        );
     }
 
     #[test]
@@ -305,7 +408,7 @@ mod tests {
         // owner stand for the first half.
         // Method: make a writer, read the ring's owner and mode, and open it to write.
         let place = TestPlace::new("mode");
-        let _writer = Writer::create(&place.place, Shape { slot_count: 4 }).unwrap();
+        let _writer = Writer::create(&place.place, SHAPE).unwrap();
 
         let ring = File::from(place.open_named(O_RDONLY).unwrap())
             .metadata()
@@ -324,7 +427,7 @@ mod tests {
         // Method: open the ring as a reader does, then map it writable, and map it read-only
         // and ask for write access to the mapping.
         let place = TestPlace::new("rdonly");
-        let _writer = Writer::create(&place.place, Shape { slot_count: 4 }).unwrap();
+        let _writer = Writer::create(&place.place, SHAPE).unwrap();
         let object = place.open_named(O_RDONLY).unwrap();
         let map = |protection| unsafe {
             mmap(
@@ -369,5 +472,65 @@ mod tests {
             std::io::ErrorKind::PermissionDenied,
             opened.err().unwrap().kind()
         );
+    }
+
+    #[test]
+    fn a_reader_never_returns_a_tick_the_writer_overwrote_during_the_copy() {
+        // Goal: a slot the writer rewrites while a reader copies it is dropped, never returned
+        // with words of two ticks.
+        // Method: a thread publishes ticks as fast as it can into two slots, each tick's
+        // processes all carrying the tick's number, while this thread reads until it has read
+        // many ticks and missed some, checking every process of every tick it read.
+        const PROCESSES: usize = 64;
+        const READS: u64 = 200;
+        let place = TestPlace::new("torn");
+        let shape = Shape {
+            slot_count: 2,
+            process_capacity: 64,
+            ..SHAPE
+        };
+        let done = std::sync::atomic::AtomicBool::new(false);
+        let (created, writer_created) = std::sync::mpsc::channel();
+
+        let (read, missed) = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                // A writer maps the ring into its own thread, since a mapping is not Send.
+                let mut writer = Writer::create(&place.place, shape).unwrap();
+                created.send(()).unwrap();
+                let memory = Memory::default();
+                let mut run_tick = 0;
+                while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                    run_tick += 1;
+                    let processes = [process(i32::try_from(run_tick).unwrap()); PROCESSES];
+                    writer.publish(&Readings {
+                        processes: &processes,
+                        ..readings(run_tick, &memory)
+                    });
+                    // A writer that never pauses rewrites a slot faster than a reader copies
+                    // it, and the reader then never finishes a copy.
+                    std::thread::yield_now();
+                }
+            });
+            writer_created.recv().unwrap();
+            let mut reader = Reader::open(place.lock_path()).unwrap();
+            let (mut read, mut missed) = (0, 0);
+            while read < READS {
+                match reader.read().unwrap() {
+                    Found::Publication { tick, .. } => {
+                        read += 1;
+                        for process in &reader.tick().processes {
+                            assert_eq!(i64::from(process.pid), i64::try_from(tick).unwrap());
+                        }
+                    }
+                    Found::Missed { first, end } => missed += end - first,
+                    Found::Nothing => {}
+                }
+            }
+            done.store(true, std::sync::atomic::Ordering::Relaxed);
+            (read, missed)
+        });
+
+        assert_eq!(READS, read);
+        assert!(missed > 0);
     }
 }

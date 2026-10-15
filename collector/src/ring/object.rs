@@ -92,10 +92,6 @@ impl Drop for Mapping {
     }
 }
 
-pub(super) fn store(words: &[AtomicU64], index: usize, value: u64) {
-    words[index].store(value, Ordering::Relaxed);
-}
-
 /// Opens the lock file at `lock_path` and takes its lock, or returns an error where another
 /// writer holds it.
 pub(super) fn create_lock(lock_path: &Path) -> io::Result<File> {

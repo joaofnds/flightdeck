@@ -62,7 +62,12 @@ fn run(options: &Options) -> std::io::Result<()> {
     while read < options.publications {
         match reader.read()? {
             Found::Publication { publication, tick } => {
-                println!("publication {publication} tick {tick}");
+                let readings = reader.tick();
+                println!(
+                    "publication {publication} tick {tick} processes {} coalitions {}",
+                    readings.processes.len(),
+                    readings.coalitions.len()
+                );
                 read += 1;
             }
             Found::Missed { first, end } => println!("missed publications {first}-{}", end - 1),

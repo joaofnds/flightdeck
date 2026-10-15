@@ -6,14 +6,14 @@ use crate::clock::Timebase;
 use crate::kernel::{self, EPERM, ESRCH};
 use crate::push_without_growing;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Process {
     pub pid: i32,
     pub usage: Usage,
     pub task: Task,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Usage {
     pub awake_ns_at_start: u64,
     pub user_ns: u64,
@@ -31,7 +31,7 @@ pub struct Usage {
     pub disk_written_bytes: u64,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Task {
     pub threads: i32,
     pub faults: i32,

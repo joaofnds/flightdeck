@@ -14,7 +14,7 @@ pub struct Machine {
     pub memory: Memory,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct CPUTicks {
     pub user: u32,
     pub system: u32,
@@ -22,7 +22,7 @@ pub struct CPUTicks {
     pub idle: u32,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Memory {
     pub total_bytes: u64,
     pub free_bytes: u64,

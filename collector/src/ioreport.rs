@@ -34,9 +34,18 @@ pub struct States {
 
 /// The most active performance states read from one channel, three times the 20 a core of
 /// the M5 Pro reports.
-const ACTIVE_STATES_MAX: usize = 64;
+pub const ACTIVE_STATES_MAX: usize = 64;
 
 impl States {
+    /// States that hold `active_ns` as a read would, for a test of what carries them.
+    #[cfg(test)]
+    pub(crate) fn with_active_ns(active_ns: &[u64]) -> Self {
+        let mut states = Self::new(ACTIVE_STATES_MAX);
+        states.active_ns.extend_from_slice(active_ns);
+        states.active_indices.extend((0..).take(active_ns.len()));
+        states
+    }
+
     fn new(active_states_max: usize) -> Self {
         assert!(active_states_max > 0);
 

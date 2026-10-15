@@ -6,23 +6,25 @@
 
 mod layout;
 mod object;
+mod tick;
 
 use std::fs::File;
 use std::io::{self, Read};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering, fence};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::u64_from_usize;
 use layout::{
-    HEADER_FIRST_PUBLICATION, HEADER_GENERATION, HEADER_LAYOUT_VERSION, HEADER_MAGIC,
-    HEADER_NEWEST_PUBLICATION, HEADER_SLOT_COUNT, HEADER_SLOT_WORDS, LAYOUT_VERSION, Layout, MAGIC,
-    SLOT_RUN_TICK, SLOT_SEQUENCE, SLOT_WORDS,
+    HEADER_FIRST_PUBLICATION, HEADER_NEWEST_PUBLICATION, HEADER_RUN_START_NS, Header, Layout,
+    SLOT_SEQUENCE, store_header,
 };
 use object::{
     Mapping, PROT_READ, PROT_WRITE, create_lock, create_object, create_previous,
-    create_unlink_older, open_ring, store,
+    create_unlink_older, open_ring,
 };
+pub use tick::{IOReportReadings, Readings, SmcReadings, Tick, shape_for};
+use tick::{load_tick, store_tick};
 
 /// Where a ring lives: the lock file its writer holds, which names the ring, and the start of
 /// the name of each ring the writer makes.
@@ -31,17 +33,26 @@ pub struct Place {
     pub name_prefix: String,
 }
 
-/// The room a ring takes, fixed when its writer makes it.
-#[derive(Debug, Clone, Copy)]
+/// The room a ring takes, fixed when its writer makes it: the publications it holds before
+/// it overwrites the oldest, and the most records of each kind a tick holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Shape {
-    /// The publications the ring holds before it overwrites the oldest.
     pub slot_count: u64,
+    pub cpu_capacity: u64,
+    pub interface_capacity: u64,
+    pub core_capacity: u64,
+    /// The most active states the GPU or one core has.
+    pub state_capacity: u64,
+    pub fan_capacity: u64,
+    pub process_capacity: u64,
+    pub coalition_capacity: u64,
 }
 
 /// What a reader found at its next publication.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Found {
-    /// The publication it read, which carries the tick of the collector's run.
+    /// The publication it read, which carries the tick of the collector's run. The reader's
+    /// `tick` holds the rest of it.
     Publication { publication: u64, tick: u64 },
     /// The publications from `first` up to `end` that the writer overwrote before the reader
     /// read them, which it reads past.
@@ -64,30 +75,27 @@ impl Writer {
     /// the ring the lock file names, whose publication numbers it continues. Returns an error
     /// where another writer holds the lock.
     pub fn create(place: &Place, shape: Shape) -> io::Result<Self> {
-        assert!(shape.slot_count > 0);
+        let Some(layout) = Layout::new(shape) else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("a ring of shape {shape:?}"),
+            ));
+        };
+        let run_start_ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(io::Error::other)?
+            .as_nanos();
 
         let mut lock = create_lock(&place.lock_path)?;
         let previous = create_previous(&place.name_prefix, &mut lock)?;
-        let layout = Layout::new(shape);
         let created = create_object(&place.name_prefix, previous.generation, layout)?;
         let mapping = Mapping::new(&created.object, layout.word_count(), PROT_READ | PROT_WRITE)?;
-
-        let words = mapping.words();
-        store(words, HEADER_MAGIC, MAGIC);
-        store(words, HEADER_LAYOUT_VERSION, LAYOUT_VERSION);
-        store(words, HEADER_GENERATION, created.generation);
-        store(words, HEADER_SLOT_COUNT, shape.slot_count);
-        store(words, HEADER_SLOT_WORDS, u64_from_usize(SLOT_WORDS));
-        store(
-            words,
-            HEADER_FIRST_PUBLICATION,
-            previous.newest_publication + 1,
-        );
-        store(
-            words,
-            HEADER_NEWEST_PUBLICATION,
-            previous.newest_publication,
-        );
+        let header = Header {
+            generation: created.generation,
+            first_publication: previous.newest_publication + 1,
+            run_start_ns: u64::try_from(run_start_ns).map_err(io::Error::other)?,
+        };
+        store_header(mapping.words(), layout, header);
 
         create_unlink_older(&place.name_prefix, previous.generation);
         lock.set_len(0)?;
@@ -100,21 +108,20 @@ impl Writer {
         })
     }
 
-    /// Publishes the tick `tick` of the collector's run in the next slot, overwriting the
-    /// oldest publication once every slot holds one.
-    pub fn publish(&mut self, tick: u64) -> io::Result<()> {
+    /// Publishes `readings` in the next slot, overwriting the oldest publication once every
+    /// slot holds one.
+    pub fn publish(&mut self, readings: &Readings) {
         let publication = self.publication + 1;
         let words = self.mapping.words();
-        let slot = self.layout.slot_start(publication);
+        let slot = &words[self.layout.slot(publication)];
 
-        words[slot + SLOT_SEQUENCE].store(2 * publication - 1, Ordering::Relaxed);
+        slot[SLOT_SEQUENCE].store(2 * publication - 1, Ordering::Relaxed);
         fence(Ordering::Release);
-        store(words, slot + SLOT_RUN_TICK, tick);
-        words[slot + SLOT_SEQUENCE].store(2 * publication, Ordering::Release);
+        store_tick(slot, self.layout, readings);
+        slot[SLOT_SEQUENCE].store(2 * publication, Ordering::Release);
 
         words[HEADER_NEWEST_PUBLICATION].store(publication, Ordering::Release);
         self.publication = publication;
-        Ok(())
     }
 }
 
@@ -126,6 +133,9 @@ pub struct Reader {
     first: u64,
     /// The publication the reader reads next.
     next: u64,
+    /// When the writer's run started, in nanoseconds since 1970 by the wall clock.
+    run_start_ns: u64,
+    tick: Tick,
 }
 
 impl Reader {
@@ -139,12 +149,27 @@ impl Reader {
         let words = mapping.words();
         let first = words[HEADER_FIRST_PUBLICATION].load(Ordering::Relaxed);
         let newest = words[HEADER_NEWEST_PUBLICATION].load(Ordering::Relaxed);
+        let run_start_ns = words[HEADER_RUN_START_NS].load(Ordering::Relaxed);
         Ok(Self {
             mapping,
             layout,
             first,
             next: first.max(layout.oldest_held(newest)),
+            run_start_ns,
+            tick: Tick::new(layout),
         })
+    }
+
+    /// The tick of the publication the reader read last.
+    #[must_use]
+    pub fn tick(&self) -> &Tick {
+        &self.tick
+    }
+
+    /// When the writer's run started, in nanoseconds since 1970 by the wall clock.
+    #[must_use]
+    pub fn run_start_ns(&self) -> u64 {
+        self.run_start_ns
     }
 
     /// Reads the next publication, or the range of those the writer overwrote first.
@@ -165,25 +190,35 @@ impl Reader {
 
         let publication = self.next;
         self.next += 1;
-        let slot = self.layout.slot_start(publication);
-        match read_slot(&words[slot..slot + SLOT_WORDS], publication)? {
-            Some(tick) => Ok(Found::Publication { publication, tick }),
-            None => Ok(Found::Missed {
+        let slot = &words[self.layout.slot(publication)];
+        if read_slot(slot, self.layout, publication, &mut self.tick)? {
+            Ok(Found::Publication {
+                publication,
+                tick: self.tick.run_tick,
+            })
+        } else {
+            Ok(Found::Missed {
                 first: publication,
                 end: publication + 1,
-            }),
+            })
         }
     }
 }
 
-/// The tick the slot `slot` holds for `publication`, or `None` where the writer overwrote
-/// the slot with a later publication before or during the copy.
-fn read_slot(slot: &[AtomicU64], publication: u64) -> io::Result<Option<u64>> {
+/// Loads the tick the slot `slot` holds for `publication` into `tick`, and returns whether it
+/// did, which it did not where the writer overwrote the slot with a later publication before
+/// or during the load.
+fn read_slot(
+    slot: &[AtomicU64],
+    layout: Layout,
+    publication: u64,
+    tick: &mut Tick,
+) -> io::Result<bool> {
     assert!(publication > 0);
 
     let sequence = slot[SLOT_SEQUENCE].load(Ordering::Relaxed);
     fence(Ordering::Acquire);
-    let tick = slot[SLOT_RUN_TICK].load(Ordering::Relaxed);
+    let loaded = load_tick(slot, layout, tick);
     fence(Ordering::Acquire);
     let sequence_after = slot[SLOT_SEQUENCE].load(Ordering::Relaxed);
 
@@ -196,21 +231,63 @@ fn read_slot(slot: &[AtomicU64], publication: u64) -> io::Result<Option<u64>> {
     }
     if sequence == 2 * publication {
         if sequence_after == sequence {
-            return Ok(Some(tick));
+            if !loaded {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("the slot of publication {publication} holds no tick"),
+                ));
+            }
+            return Ok(true);
         }
     }
-    Ok(None)
+    Ok(false)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::machine::Memory;
 
-    fn slot_holding(sequence: u64, tick: u64) -> [AtomicU64; SLOT_WORDS] {
-        let mut slot = [const { AtomicU64::new(0) }; SLOT_WORDS];
-        slot[SLOT_SEQUENCE] = AtomicU64::new(sequence);
-        slot[SLOT_RUN_TICK] = AtomicU64::new(tick);
+    /// A layout of one slot with room for one record of each kind.
+    fn layout() -> Layout {
+        Layout::new(Shape {
+            slot_count: 1,
+            cpu_capacity: 1,
+            interface_capacity: 1,
+            core_capacity: 1,
+            state_capacity: 1,
+            fan_capacity: 1,
+            process_capacity: 1,
+            coalition_capacity: 1,
+        })
+        .unwrap()
+    }
+
+    /// A slot of `layout()` that holds a tick of `run_tick` under the sequence `sequence`.
+    fn slot_holding(sequence: u64, run_tick: u64) -> Vec<AtomicU64> {
+        let layout = layout();
+        let slot: Vec<AtomicU64> = (0..layout.slot_words).map(|_| AtomicU64::new(0)).collect();
+        let readings = Readings {
+            run_tick,
+            cpus: &[],
+            memory: &Memory::default(),
+            interfaces: &[],
+            ioreport: None,
+            smc: None,
+            processes: &[],
+            processes_refused: 0,
+            processes_gone: 0,
+            coalitions: &[],
+        };
+        store_tick(&slot, layout, &readings);
+        slot[SLOT_SEQUENCE].store(sequence, Ordering::Relaxed);
         slot
+    }
+
+    fn read(slot: &[AtomicU64], publication: u64) -> io::Result<Option<u64>> {
+        let mut tick = Tick::new(layout());
+        let read = read_slot(slot, layout(), publication, &mut tick)?;
+        Ok(read.then_some(tick.run_tick))
     }
 
     #[test]
@@ -219,7 +296,7 @@ mod tests {
         // Method: read publication 3 from a slot whose sequence is twice 3.
         let slot = slot_holding(6, 40);
 
-        assert_eq!(Some(40), read_slot(&slot, 3).unwrap());
+        assert_eq!(Some(40), read(&slot, 3).unwrap());
     }
 
     #[test]
@@ -229,7 +306,7 @@ mod tests {
         // which leaves its sequence at twice 7 less 1.
         let slot = slot_holding(13, 40);
 
-        assert_eq!(None, read_slot(&slot, 3).unwrap());
+        assert_eq!(None, read(&slot, 3).unwrap());
     }
 
     #[test]
@@ -239,7 +316,7 @@ mod tests {
         // Method: read publication 3 from a slot that holds publication 7.
         let slot = slot_holding(14, 40);
 
-        assert_eq!(None, read_slot(&slot, 3).unwrap());
+        assert_eq!(None, read(&slot, 3).unwrap());
     }
 
     #[test]
@@ -251,7 +328,22 @@ mod tests {
 
         assert_eq!(
             io::ErrorKind::InvalidData,
-            read_slot(&slot, 3).unwrap_err().kind()
+            read(&slot, 3).unwrap_err().kind()
+        );
+    }
+
+    #[test]
+    fn refuses_a_finished_slot_whose_words_make_no_tick() {
+        // Goal: a slot the writer finished that holds no tick is a broken ring, which the
+        // reader reports rather than reading.
+        // Method: read publication 3 from a finished slot that says it holds two processes in
+        // room for one.
+        let slot = slot_holding(6, 40);
+        slot[layout::SLOT_PROCESS_COUNT].store(2, Ordering::Relaxed);
+
+        assert_eq!(
+            io::ErrorKind::InvalidData,
+            read(&slot, 3).unwrap_err().kind()
         );
     }
 }

@@ -10,7 +10,7 @@ pub struct Interfaces {
     readings: Vec<Interface>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Interface {
     pub index: u16,
     pub name: Name,
@@ -52,6 +52,26 @@ impl Name {
             bytes,
             length: name.len(),
         })
+    }
+
+    /// The name the first `length` of `bytes` hold, or `None` where `length` passes them or
+    /// they are not UTF-8. It allocates no error, since a reader of the ring meets a torn name
+    /// in its normal course.
+    pub(crate) fn from_bytes(bytes: [u8; IFNAMSIZ], length: usize) -> Option<Self> {
+        let name = bytes.get(..length)?;
+        if std::str::from_utf8(name).is_err() {
+            return None;
+        }
+        if bytes[length..].iter().any(|&byte| byte != 0) {
+            return None;
+        }
+
+        Some(Self { bytes, length })
+    }
+
+    /// The name's bytes, with zeros past its length.
+    pub(crate) fn bytes(&self) -> [u8; IFNAMSIZ] {
+        self.bytes
     }
 
     #[must_use]
@@ -376,7 +396,7 @@ const NET_RT_IFLIST2: c_int = 6;
 const EVERY_INTERFACE: c_int = 0;
 const RTM_IFINFO2: c_int = 18;
 const IFF_LOOPBACK: c_int = 0x8;
-const IFNAMSIZ: usize = 16;
+pub(crate) const IFNAMSIZ: usize = 16;
 const ENOMEM: c_int = 12;
 
 #[cfg(test)]

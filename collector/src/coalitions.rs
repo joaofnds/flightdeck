@@ -17,7 +17,7 @@ pub struct Coalitions {
     pub readings: Vec<Coalition>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Coalition {
     pub id: u64,
     pub tasks_started: u64,
