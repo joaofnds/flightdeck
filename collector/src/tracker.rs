@@ -1796,15 +1796,16 @@ mod tests {
         // Goal: forks however frequent cause at most one rescan an interval.
         // Method: follow for 300 ms with a 50 ms interval while a thread forks every 2 ms, and hold
         // the rescans from forks to one more than the intervals the follow took, however long
-        // that was. Each rescan from a fork begins an interval or more after the one before.
-        let timebase = Timebase::read().unwrap();
+        // that was. The first rescan from a fork begins during the follow, and each one after it
+        // begins an interval or more after the one before.
         let mut tracker = tracker(INTERVAL);
-        let interval_ns = u64::try_from(INTERVAL.as_nanos()).unwrap();
-        let interval_ticks = timebase.ticks(interval_ns).unwrap();
         let start_ticks = clock::now();
 
         while_forking_every_2_ms(|| follow_for(&mut tracker, &mut Meter::default(), 300));
 
+        let timebase = Timebase::read().unwrap();
+        let interval_ns = u64::try_from(INTERVAL.as_nanos()).unwrap();
+        let interval_ticks = timebase.ticks(interval_ns).unwrap();
         // The division floors.
         let cap = (clock::now() - start_ticks) / interval_ticks + 1;
         assert!(
