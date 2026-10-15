@@ -990,9 +990,10 @@ mod tests {
 
     #[test]
     fn a_reader_refuses_to_follow_a_ring_whose_ticks_hold_more() {
-        // Goal: a reader whose room for a tick is too small for the newer ring's ticks says so
-        // rather than allocating mid-run or reading past its room.
-        // Method: read a ring, restart the writer with room for two processes, and follow.
+        // Goal: a reader whose room for a tick is too small for the newer ring's ticks says so,
+        // without allocating, rather than growing its room mid-run or reading past it.
+        // Method: read a ring, restart the writer with room for two processes, and count the
+        // allocator calls this thread makes to follow.
         let place = TestPlace::new("wider");
         let mut first = Writer::create(&place.place, SHAPE).unwrap();
         publish(&mut first, 1);
@@ -1007,12 +1008,14 @@ mod tests {
         let second = Writer::create(&place.place, shape).unwrap();
         drop(spawns);
 
-        let followed = reader.follow(place.lock_path());
+        let mut followed = Ok(true);
+        let calls = allocator_calls_in(|| followed = reader.follow(place.lock_path()));
 
         assert_eq!(
             std::io::ErrorKind::Unsupported,
             followed.unwrap_err().kind()
         );
+        assert_eq!(0, calls);
         drop(second);
     }
 
