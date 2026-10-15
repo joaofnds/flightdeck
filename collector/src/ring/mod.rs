@@ -187,6 +187,8 @@ impl Writer {
 
 /// A reader of a ring, which maps it read-only.
 pub struct Reader {
+    /// The name of the ring, which the lock file named when the reader opened it.
+    name: String,
     mapping: Mapping,
     layout: Layout,
     /// The first publication of the ring, past the previous ring's.
@@ -217,6 +219,7 @@ impl Reader {
         let first_event = words[HEADER_FIRST_EVENT].load(Ordering::Relaxed);
         let newest_event = words[HEADER_NEWEST_EVENT].load(Ordering::Relaxed);
         Ok(Self {
+            name,
             mapping,
             layout,
             first,
@@ -226,6 +229,16 @@ impl Reader {
             first_event,
             next_event: first_event.max(layout.oldest_event_held(newest_event)),
         })
+    }
+
+    /// Whether the lock file at `lock_path` names another ring than the reader's, as it does
+    /// once the writer restarted, so the reader opens the newer ring after it has read every
+    /// publication of its own. A lock file the writer is part-way through writing names no
+    /// ring yet, which is no move.
+    pub fn moved(&self, lock_path: &Path) -> io::Result<bool> {
+        let mut name = String::new();
+        File::open(lock_path)?.read_to_string(&mut name)?;
+        Ok(!name.is_empty() && name != self.name)
     }
 
     /// The tick of the publication the reader read last.

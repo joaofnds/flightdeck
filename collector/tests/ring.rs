@@ -554,6 +554,38 @@ mod tests {
     }
 
     #[test]
+    fn a_reader_learns_that_a_restarted_writer_moved_to_a_newer_ring() {
+        // Goal: a reader of a ring whose writer restarted learns that the lock file names a
+        // newer ring, and reads on there from the publication after the last it read.
+        // Method: read the one publication of a ring, ask whether the ring moved, restart the
+        // writer and publish once, ask again, then open the newer ring and read.
+        let place = TestPlace::new("moved");
+        let mut first = Writer::create(&place.place, SHAPE).unwrap();
+        publish(&mut first, 1);
+        let mut reader = Reader::open(place.lock_path()).unwrap();
+        reader.read().unwrap();
+        let moved_before = reader.moved(place.lock_path()).unwrap();
+
+        let spawns = spawns();
+        drop(first);
+        let mut second = Writer::create(&place.place, SHAPE).unwrap();
+        drop(spawns);
+        publish(&mut second, 1);
+        let moved_after = reader.moved(place.lock_path()).unwrap();
+        let mut newer = Reader::open(place.lock_path()).unwrap();
+
+        assert!(!moved_before);
+        assert!(moved_after);
+        assert_eq!(
+            Found::Publication {
+                publication: 2,
+                tick: 1
+            },
+            newer.read().unwrap()
+        );
+    }
+
+    #[test]
     fn a_restarted_writer_keeps_the_previous_ring_and_removes_older_ones() {
         // Goal: a restart keeps the ring before it for the persister to seal, and at most two
         // rings exist.

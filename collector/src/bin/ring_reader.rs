@@ -85,7 +85,15 @@ fn run(options: &Options) -> std::io::Result<()> {
                 read += 1;
             }
             Found::Missed { first, end } => println!("missed publications {first}-{}", end - 1),
-            Found::Nothing => reader.wait(WAIT_TIMEOUT)?,
+            Found::Nothing => {
+                // The writer restarted, and the reader has read all the previous ring holds.
+                if reader.moved(&options.lock_path)? {
+                    reader = Reader::open(&options.lock_path)?;
+                    println!("moved to the writer's newer ring");
+                } else {
+                    reader.wait(WAIT_TIMEOUT)?;
+                }
+            }
         }
     }
     Ok(())
