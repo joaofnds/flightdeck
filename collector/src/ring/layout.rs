@@ -18,16 +18,16 @@ pub(super) const HEADER_MAGIC: usize = 0;
 pub(super) const HEADER_LAYOUT_VERSION: usize = 1;
 pub(super) const HEADER_GENERATION: usize = 2;
 /// The ring's first publication, one past the newest of the ring before it.
-pub(super) const HEADER_FIRST_PUBLICATION: usize = 3;
+pub(super) const HEADER_PUBLICATION_FIRST: usize = 3;
 /// The newest publication the writer finished, which before its first is the previous ring's.
-pub(super) const HEADER_NEWEST_PUBLICATION: usize = 4;
+pub(super) const HEADER_PUBLICATION_NEWEST: usize = 4;
 /// When the writer's run started, in nanoseconds since 1970 by the wall clock, which tells
 /// runs apart where a restart of the Mac numbers publications from 1 again.
 pub(super) const HEADER_RUN_START_NS: usize = 5;
 /// The ring's first event, one past the newest of the ring before it.
-pub(super) const HEADER_FIRST_EVENT: usize = 6;
+pub(super) const HEADER_EVENT_FIRST: usize = 6;
 /// The newest event the writer finished, which before its first is the previous ring's.
-pub(super) const HEADER_NEWEST_EVENT: usize = 7;
+pub(super) const HEADER_EVENT_NEWEST: usize = 7;
 /// The shape, a word for each of its fields.
 pub(super) const HEADER_SLOT_COUNT: usize = 8;
 pub(super) const HEADER_CPU_CAPACITY: usize = 9;
@@ -290,11 +290,11 @@ pub(super) fn store_header(words: &[AtomicU64], layout: &Layout, header: &Header
         (HEADER_MAGIC, MAGIC),
         (HEADER_LAYOUT_VERSION, LAYOUT_VERSION),
         (HEADER_GENERATION, header.generation),
-        (HEADER_FIRST_PUBLICATION, header.first_publication),
-        (HEADER_NEWEST_PUBLICATION, header.first_publication - 1),
+        (HEADER_PUBLICATION_FIRST, header.publication_first),
+        (HEADER_PUBLICATION_NEWEST, header.publication_first - 1),
         (HEADER_RUN_START_NS, header.run_start_ns),
-        (HEADER_FIRST_EVENT, header.first_event),
-        (HEADER_NEWEST_EVENT, header.first_event - 1),
+        (HEADER_EVENT_FIRST, header.event_first),
+        (HEADER_EVENT_NEWEST, header.event_first - 1),
         (HEADER_SLOT_COUNT, shape.slot_count),
         (HEADER_CPU_CAPACITY, shape.cpu_capacity),
         (HEADER_INTERFACE_CAPACITY, shape.interface_capacity),
@@ -324,9 +324,9 @@ pub(super) struct Held {
 #[derive(Debug)]
 pub(super) struct Header {
     pub(super) generation: u64,
-    pub(super) first_publication: u64,
+    pub(super) publication_first: u64,
     pub(super) run_start_ns: u64,
-    pub(super) first_event: u64,
+    pub(super) event_first: u64,
 }
 
 /// The layout the header `header` describes, or an error where it is no ring of this layout
@@ -409,9 +409,9 @@ mod tests {
         let words: Vec<AtomicU64> = (0..HEADER_WORDS).map(|_| AtomicU64::new(0)).collect();
         let header = Header {
             generation: 1,
-            first_publication: 1,
+            publication_first: 1,
             run_start_ns: 1,
-            first_event: 1,
+            event_first: 1,
         };
         store_header(&words, &layout(), &header);
         words

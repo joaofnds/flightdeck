@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::layout::{
-    HEADER_FIRST_PUBLICATION, HEADER_NEWEST_EVENT, HEADER_NEWEST_PUBLICATION, HEADER_WORDS, Layout,
+    HEADER_EVENT_NEWEST, HEADER_PUBLICATION_FIRST, HEADER_PUBLICATION_NEWEST, HEADER_WORDS, Layout,
     open_layout,
 };
 use crate::kernel::ENOENT;
@@ -189,9 +189,9 @@ pub(super) struct Previous {
     /// The previous ring's generation, or 0 where the lock file names none.
     pub(super) generation: u64,
     /// The previous ring's newest publication, or 0 where it is gone.
-    pub(super) newest_publication: u64,
+    pub(super) publication_newest: u64,
     /// The previous ring's newest event, or 0 where it is gone.
-    pub(super) newest_event: u64,
+    pub(super) event_newest: u64,
 }
 
 /// The ring the lock file `lock` names, of a name that starts with `prefix`.
@@ -221,18 +221,18 @@ pub(super) fn create_previous(prefix: &str, lock: &File) -> io::Result<Previous>
     if generation == 0 {
         return Ok(Previous {
             generation,
-            newest_publication: 0,
-            newest_event: 0,
+            publication_newest: 0,
+            event_newest: 0,
         });
     }
 
     // A restart after the Mac restarted finds no ring, which is no fault.
-    let (newest_publication, newest_event) = match open_ring(name) {
+    let (publication_newest, event_newest) = match open_ring(name) {
         Ok((mapping, _)) => {
             let words = mapping.words();
             (
-                words[HEADER_NEWEST_PUBLICATION].load(Ordering::Relaxed),
-                words[HEADER_NEWEST_EVENT].load(Ordering::Relaxed),
+                words[HEADER_PUBLICATION_NEWEST].load(Ordering::Relaxed),
+                words[HEADER_EVENT_NEWEST].load(Ordering::Relaxed),
             )
         }
         Err(error) if error.raw_os_error() == Some(ENOENT) => (0, 0),
@@ -243,8 +243,8 @@ pub(super) fn create_previous(prefix: &str, lock: &File) -> io::Result<Previous>
     };
     Ok(Previous {
         generation,
-        newest_publication: create_previous_continued(newest_publication, name),
-        newest_event: create_previous_continued(newest_event, name),
+        publication_newest: create_previous_continued(publication_newest, name),
+        event_newest: create_previous_continued(event_newest, name),
     })
 }
 
@@ -381,8 +381,8 @@ fn create_unlink_older_holds_publications(name: &str) -> bool {
     match open_ring(name) {
         Ok((mapping, _)) => {
             let words = mapping.words();
-            let first = words[HEADER_FIRST_PUBLICATION].load(Ordering::Relaxed);
-            let newest = words[HEADER_NEWEST_PUBLICATION].load(Ordering::Relaxed);
+            let first = words[HEADER_PUBLICATION_FIRST].load(Ordering::Relaxed);
+            let newest = words[HEADER_PUBLICATION_NEWEST].load(Ordering::Relaxed);
             newest >= first
         }
         Err(error) => {

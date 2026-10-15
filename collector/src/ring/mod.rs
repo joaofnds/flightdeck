@@ -23,8 +23,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use event::{load_event, store_event};
 use layout::{
-    EVENT_SEQUENCE, HEADER_FIRST_EVENT, HEADER_FIRST_PUBLICATION, HEADER_NEWEST_EVENT,
-    HEADER_NEWEST_PUBLICATION, HEADER_RUN_START_NS, Header, Held, Layout, SLOT_SEQUENCE,
+    EVENT_SEQUENCE, HEADER_EVENT_FIRST, HEADER_EVENT_NEWEST, HEADER_PUBLICATION_FIRST,
+    HEADER_PUBLICATION_NEWEST, HEADER_RUN_START_NS, Header, Held, Layout, SLOT_SEQUENCE,
     store_header,
 };
 use object::{
@@ -137,9 +137,9 @@ impl Writer {
         let mapping = Mapping::new(&created.object, layout.word_count(), PROT_READ | PROT_WRITE)?;
         let header = Header {
             generation: created.generation,
-            first_publication: previous.newest_publication + 1,
+            publication_first: previous.publication_newest + 1,
             run_start_ns: u64::try_from(run_start_ns).map_err(io::Error::other)?,
-            first_event: previous.newest_event + 1,
+            event_first: previous.event_newest + 1,
         };
         store_header(mapping.words(), &layout, &header);
 
@@ -156,8 +156,8 @@ impl Writer {
             _lock: lock,
             mapping,
             layout,
-            publication: previous.newest_publication,
-            event: previous.newest_event,
+            publication: previous.publication_newest,
+            event: previous.event_newest,
         })
     }
 
@@ -179,7 +179,7 @@ impl Writer {
             record[EVENT_SEQUENCE].store(2 * number, Ordering::Release);
             self.event = number;
         }
-        words[HEADER_NEWEST_EVENT].store(self.event, Ordering::Release);
+        words[HEADER_EVENT_NEWEST].store(self.event, Ordering::Release);
 
         let publication = self.publication + 1;
         let slot = &words[self.layout.slot(publication)];
@@ -188,10 +188,10 @@ impl Writer {
         store_tick(slot, &self.layout, readings, events_first..self.event + 1);
         slot[SLOT_SEQUENCE].store(2 * publication, Ordering::Release);
 
-        words[HEADER_NEWEST_PUBLICATION].store(publication, Ordering::Release);
+        words[HEADER_PUBLICATION_NEWEST].store(publication, Ordering::Release);
         self.publication = publication;
         // A refused wake costs the readers it missed one wait at most, so the writer goes on.
-        if let Err(errno) = wake_all(&words[HEADER_NEWEST_PUBLICATION]) {
+        if let Err(errno) = wake_all(&words[HEADER_PUBLICATION_NEWEST]) {
             eprintln!("ring: waking readers failed with errno {errno}");
         }
     }
@@ -251,19 +251,19 @@ impl Reader {
 
         let (mapping, layout) = open_ring(name.as_str())?;
         let words = mapping.words();
-        let first = words[HEADER_FIRST_PUBLICATION].load(Ordering::Relaxed);
-        let newest = words[HEADER_NEWEST_PUBLICATION].load(Ordering::Relaxed);
+        let first = words[HEADER_PUBLICATION_FIRST].load(Ordering::Relaxed);
+        let newest = words[HEADER_PUBLICATION_NEWEST].load(Ordering::Relaxed);
         let run_start_ns = words[HEADER_RUN_START_NS].load(Ordering::Relaxed);
-        let first_event = words[HEADER_FIRST_EVENT].load(Ordering::Relaxed);
-        let newest_event = words[HEADER_NEWEST_EVENT].load(Ordering::Relaxed);
+        let event_first = words[HEADER_EVENT_FIRST].load(Ordering::Relaxed);
+        let event_newest = words[HEADER_EVENT_NEWEST].load(Ordering::Relaxed);
         open_named_check(first, newest)?;
-        open_named_check(first_event, newest_event)?;
+        open_named_check(event_first, event_newest)?;
 
         Ok(Opened {
             name,
             publications: Cursor::new(first, layout.publications_held(newest)),
             run_start_ns,
-            events: Cursor::new(first_event, layout.events_held(newest_event)),
+            events: Cursor::new(event_first, layout.events_held(event_newest)),
             mapping,
             layout,
         })
@@ -285,9 +285,9 @@ impl Reader {
 
     /// Opens the ring the lock file at `lock_path` names in place of the reader's own, once
     /// the writer restarted and the reader has read every publication its own ring holds and
-    /// the events of the last, and returns whether it did. The reader reads on from where it stood, so the next
-    /// reads return what the newer writer overwrote first as missed. A newer ring whose ticks
-    /// have other capacities is refused with `io::ErrorKind::Unsupported`.
+    /// the events of the last, and returns whether it did. The reader reads on from where it
+    /// stood, so the next reads return what the newer writer overwrote first as missed. A newer
+    /// ring whose ticks have other capacities is refused with `io::ErrorKind::Unsupported`.
     pub fn follow(&mut self, lock_path: &Path) -> io::Result<bool> {
         if !self.moved(lock_path)? {
             return Ok(false);
@@ -295,7 +295,7 @@ impl Reader {
 
         // The writer that left this ring may have published once more before it stopped.
         let words = self.mapping.words();
-        if self.publications.next <= words[HEADER_NEWEST_PUBLICATION].load(Ordering::Relaxed) {
+        if self.publications.next <= words[HEADER_PUBLICATION_NEWEST].load(Ordering::Relaxed) {
             return Ok(false);
         }
 
@@ -356,7 +356,7 @@ impl Reader {
     pub fn wait(&self, timeout: Duration) -> io::Result<()> {
         assert!(!timeout.is_zero());
 
-        let newest_word = &self.mapping.words()[HEADER_NEWEST_PUBLICATION];
+        let newest_word = &self.mapping.words()[HEADER_PUBLICATION_NEWEST];
         let newest = newest_word.load(Ordering::Relaxed);
         if self.publications.next <= newest {
             return Ok(());
@@ -371,7 +371,7 @@ impl Reader {
     /// Reads the next publication, or the range of those the writer overwrote first.
     pub fn read(&mut self) -> io::Result<Found> {
         let words = self.mapping.words();
-        let newest = words[HEADER_NEWEST_PUBLICATION].load(Ordering::Relaxed);
+        let newest = words[HEADER_PUBLICATION_NEWEST].load(Ordering::Relaxed);
         fence(Ordering::Acquire);
         if newest > NUMBER_MAX {
             return Err(number_past_max(newest));
@@ -409,7 +409,7 @@ impl Reader {
     /// Reads the next event, or the range of those the writer overwrote first.
     pub fn read_event(&mut self) -> io::Result<FoundEvent> {
         let words = self.mapping.words();
-        let newest = words[HEADER_NEWEST_EVENT].load(Ordering::Relaxed);
+        let newest = words[HEADER_EVENT_NEWEST].load(Ordering::Relaxed);
         fence(Ordering::Acquire);
         if newest > NUMBER_MAX {
             return Err(number_past_max(newest));

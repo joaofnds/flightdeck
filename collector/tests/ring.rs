@@ -262,8 +262,8 @@ mod tests {
     }
 
     /// Header words the forging tests change, as the ring's layout places them.
-    const HEADER_FIRST_PUBLICATION: usize = 3;
-    const HEADER_NEWEST_PUBLICATION: usize = 4;
+    const HEADER_PUBLICATION_FIRST: usize = 3;
+    const HEADER_PUBLICATION_NEWEST: usize = 4;
 
     /// Leaves in `place` a ring of generation 5 that another program of this user forged: a
     /// copy of a ring that published once, with the header words `edits` changed, which the
@@ -323,8 +323,8 @@ mod tests {
         forge(
             &place,
             &[
-                (HEADER_FIRST_PUBLICATION, u64::MAX),
-                (HEADER_NEWEST_PUBLICATION, u64::MAX),
+                (HEADER_PUBLICATION_FIRST, u64::MAX),
+                (HEADER_PUBLICATION_NEWEST, u64::MAX),
             ],
         );
 
@@ -342,7 +342,7 @@ mod tests {
         // hands out, is a broken ring.
         // Method: forge a ring whose first publication is 0, and open it.
         let place = TestPlace::new("zero");
-        forge(&place, &[(HEADER_FIRST_PUBLICATION, 0)]);
+        forge(&place, &[(HEADER_PUBLICATION_FIRST, 0)]);
 
         let opened = Reader::open(place.lock_path());
 
@@ -359,7 +359,7 @@ mod tests {
         // Method: forge a ring whose newest publication is the largest number, which open
         // takes as written past the reader's place, and read it.
         let place = TestPlace::new("newest");
-        forge(&place, &[(HEADER_NEWEST_PUBLICATION, u64::MAX)]);
+        forge(&place, &[(HEADER_PUBLICATION_NEWEST, u64::MAX)]);
 
         let opened = Reader::open(place.lock_path());
 
@@ -376,7 +376,7 @@ mod tests {
         // Method: forge a ring whose newest publication is the largest number, start a writer
         // after it, publish, and read.
         let place = TestPlace::new("cont");
-        forge(&place, &[(HEADER_NEWEST_PUBLICATION, u64::MAX)]);
+        forge(&place, &[(HEADER_PUBLICATION_NEWEST, u64::MAX)]);
 
         let spawns = spawns();
         let mut writer = Writer::create(&place.place, SHAPE).unwrap();
