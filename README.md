@@ -12,7 +12,7 @@ reading costs: its CPU as a share of one core against the 5% budget, its power, 
 the CPU of each source.
 
 ```sh
-cargo run --release -p collector -- --seconds 300
+cargo run --release -p collector --bin collector -- --seconds 300
 ```
 
 It reports every 10 seconds and every minute, and with `--seconds` over the whole run,
@@ -25,11 +25,12 @@ and exit between two rescans.
 
 It hands each tick to a shared-memory ring that only its user can read, named with
 `--ring NAME` (default `flightdeck`), and it exits with an error while another collector
-holds that ring. The ring stays after the collector exits, about 800 MB of address space.
-`ring_reader` prints each tick it reads, the events, and what it missed, until it has read
-the publications asked for:
+holds that ring. The ring stays after the collector exits, about 800 MB of address space,
+and after a restart the previous ring stays beside it. `ring_reader` prints each tick it
+reads, the events, and what it missed, until it has read the publications asked for:
 
 ```sh
+cargo build --release -p collector
 ./target/release/ring_reader --ring flightdeck --publications 60
 ```
 

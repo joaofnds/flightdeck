@@ -426,8 +426,8 @@ One writer, the collector, and several readers: the live view, the persister, an
 tool you point at it.
 
 The writer never waits for a reader. It overwrites the oldest tick, and each slot
-carries a publication number, which rises by one a slot and goes on across restarts,
-beside the tick number of the collector's run. A reader copies a slot and then checks
+carries a publication number, which rises by one a slot and goes on across a restart
+that finds the previous ring, beside the tick number of the collector's run. A reader copies a slot and then checks
 its sequence word again, as a single-writer seqlock does, so a slot overwritten during
 the copy is detected and dropped instead of read torn. A reader that falls behind knows
 which publications it missed from a gap in their numbers, and tells that from a tick the
@@ -437,7 +437,7 @@ below.
 
 | Option | What it costs here |
 |---|---|
-| Shared-memory ring with a single writer, as in the LMAX Disruptor, Aeron and Chronicle Queue | 53 µs a tick for writer and reader together with one wake a tick, measured above. Readers map it read-only and read in place, so the viewer draws live data with no request. |
+| Shared-memory ring with a single writer, as in the LMAX Disruptor, Aeron and Chronicle Queue | 53 µs a tick for writer and reader together with one wake a tick, measured above. Readers map it read-only and copy each slot out, so the viewer draws live data with no request. |
 | Unix socket, or ZeroMQ's `ipc` transport, which is a socket | 80 µs a tick, and each reader receives its own copy. ZeroMQ's published numbers put `ipc` far below its in-process transport. |
 | NATS, JetStream, Kafka, Redpanda, Iggy | A broker process between writer and readers, two socket hops and a protocol to parse per message. They earn that cost across machines. The durable replay that JetStream and Kafka offer is what the sealed files below provide. |
 
@@ -457,8 +457,8 @@ its source at commit 0763bbc and not run. Its ticks would die with the collector
 the restart below rules out. Its cleanup of dead nodes is configuration that defaults to
 on (`iceoryx2/src/config.rs`), and its blackboard pattern was not surveyed. Its latency
 and CPU were not compared. TASK-18 took this choice unattended, and it waits on the user's
-ruling, since the Decisions above ask for that weighing. The ring here is about 3,000
-lines in `collector/src/ring`, its unit tests included, and 940 lines of tests in
+ruling, since the Decisions above ask for that weighing. The ring here is about 3,300
+lines in `collector/src/ring`, its unit tests included, and about 1,500 lines of tests in
 `collector/tests/ring.rs`.
 
 Because the ring outlives the collector, a crash of the collector loses nothing the
@@ -469,10 +469,12 @@ removes every other earlier ring, so a second restart of a run that publishes be
 persister seals loses the oldest ring's unsealed ticks, while a run that dies before its
 first publication costs nothing. The persister (TASK-19) decides when a sealed ring goes. Each slot
 holds full records with room for every process and coalition the collector's limits
-allow, about 500 MB of address space, of which only the pages written take memory. The
+allow, about 500 MB of address space for the slots together, of which only the pages
+written take memory. The
 event log beside the slots holds 120 ticks of events at the tracker's bound, about
 300 MB, and the writer fills it in a circle, so once it wraps all of it is in memory: at
-the 62 events a second measured on 2026-10-15 that takes about 9 hours. The object is
+the 43 to 418 events a second that runs on 2026-10-15 measured, that takes from about
+12.7 hours down to about 1.3. The object is
 796 MB, and after a restart two of them exist, both staying in memory or swap after the
 collector exits. A kernel panic or a power loss loses the open window, as decided.
 
@@ -496,7 +498,8 @@ is first in, first out, and discards a message that arrives when it is full. DDS
 `KEEP_ALL` history with reliable delivery, and `TRANSIENT_LOCAL` durability to fill a
 reader that joins late with past samples. Here process starts and exits cannot share
 the ring's overwrite rule. They go in a queue of their own with a count of what it
-dropped.
+dropped. The ring as built does otherwise, as the end of this section says: its event
+log overwrites its oldest records, and a reader counts what it missed.
 
 Scheduling follows one clock. NASA JPL's F´ flight software divides one clock into
 rate groups, 1,000 Hz into 100, 10 and 1 Hz in its own example, and detects a slip
@@ -640,10 +643,13 @@ only the user read them, and arguments may need redacting before they are kept.
 Readers map the ring read-only, so no reader can corrupt it. The writer takes no lock,
 waits for no acknowledgment, and wakes readers with a broadcast, so no reader can stall
 it. The event queue is the one place that does not overwrite, and it drops and counts
-rather than block when full. The ring as built departs from this paragraph in two
-places, pending the user's ruling on TASK-18: its event log overwrites its oldest records
-and a reader learns what it missed from the gap, and the writer holds a lock file, which a
-process of the same user that takes it keeps a new collector from starting.
+rather than block when full. The ring as built departs from this paragraph in three
+places, pending the user's ruling on TASK-18. Its event log overwrites its oldest records
+and a reader learns what it missed from the gap. The writer holds a lock file, and a
+process of the same user that takes that lock keeps a new collector from starting. Its
+ring names are fixed and every user shares the names of shared-memory objects, so a
+process of another user that creates the next 16 names first keeps the collector from
+starting, which reasoning from the code shows and no run has observed.
 
 ## Recommended pipeline
 
@@ -659,8 +665,9 @@ process of the same user that takes it keeps a new collector from starting.
    log of their own beside the ticks.
 3. A persister in the same agent seals each 60-second window into Parquet or DuckLake,
    sorted by series, delta encoded, zstd, no bloom filter, and compacts sealed windows
-   into the per-minute and per-hour tiers. On start it first seals what the ring holds
-   past the last sealed tick.
+   into the per-minute and per-hour tiers. On start it first seals the publications of
+   the kept ring and of the new one past the last publication number it sealed, since
+   tick numbers start again with each run.
 4. The GPUI viewer draws live data from the ring, asks DuckDB for history over the
    sealed files, and joins the two through the ring's unsealed tail as Arrow batches.
 
@@ -736,7 +743,7 @@ time, and an exited child's CPU),
 windows were compared with `clickhouse-local` over `procs.csv`. The machine readings
 were timed with a test added to a copy of the Go collector in `/tmp/sysmon-bench`.
 
-The collector is in `collector/`, and `cargo run --release -- --seconds 300` prints its
+The collector is in `collector/`, and `cargo run --release -p collector --bin collector -- --seconds 300` prints its
 cost for each 10-second window and for the run, with each source apart. Its three
 five-minute runs were release builds of d8788c8, before IOReport and the SMC, 737719d
 and c7bb9ba, at load averages of 5 to 14. The third ran on AC power, and the first two
