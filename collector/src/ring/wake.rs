@@ -141,8 +141,8 @@ mod tests {
     fn a_wake_that_macos_refuses_is_an_error_and_not_a_crash() {
         // Goal: a reader that waits on the word with another size, which macOS then refuses
         // to wake, never stops the writer that wakes it.
-        // Method: wait on the word with four bytes on another thread, and wake it with eight
-        // until macOS refuses, within a second.
+        // Method: wait on the word with four bytes on another thread for 300 ms, and wake it
+        // with eight until macOS refuses, within 250 ms.
         let word = AtomicU64::new(0);
         std::thread::scope(|scope| {
             scope.spawn(|| unsafe {
@@ -152,10 +152,10 @@ mod tests {
                     size_of::<u32>(),
                     OS_SYNC_WAIT_ON_ADDRESS_SHARED,
                     OS_CLOCK_MACH_ABSOLUTE_TIME,
-                    1_100_000_000,
+                    300_000_000,
                 )
             });
-            let deadline = Instant::now() + Duration::from_secs(1);
+            let deadline = Instant::now() + Duration::from_millis(250);
             let mut woken = wake_all(&word);
             while woken.is_ok() {
                 if Instant::now() >= deadline {
