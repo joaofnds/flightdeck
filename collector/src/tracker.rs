@@ -1386,15 +1386,12 @@ mod tests {
     const STEPS_MAX: u32 = 100;
     const STEP_MS: u64 = 100;
 
-    /// Follows `tracker` a step at a time, keeping in `events` the drained events about the
-    /// child `awaited` names, until they hold the `awaited` event. Fails after `STEPS_MAX`
-    /// steps, naming that event and the child's events.
-    fn follow_to_event(
-        tracker: &mut Tracker,
-        meter: &mut Meter,
-        events: &mut Vec<Event>,
-        awaited: Awaited,
-    ) {
+    /// Follows `tracker` a step at a time until it reports the `awaited` event, and returns the
+    /// drained events about the child `awaited` names from this call alone, so one wait never
+    /// ends on an event an earlier wait drained. Fails after `STEPS_MAX` steps, naming that
+    /// event and the child's events.
+    fn follow_to_event(tracker: &mut Tracker, meter: &mut Meter, awaited: Awaited) -> Vec<Event> {
+        let mut events = Vec::new();
         for _ in 0..STEPS_MAX {
             follow_for(tracker, meter, STEP_MS);
             let about_child = tracker
@@ -1402,7 +1399,7 @@ mod tests {
                 .filter(|event| pid_of_event(event) == awaited.pid());
             events.extend(about_child);
             if events.iter().any(|event| awaited.is(event)) {
-                return;
+                return events;
             }
         }
         panic!("no {awaited:?} after {STEPS_MAX} steps of {STEP_MS} ms: {events:?}");
@@ -1482,21 +1479,10 @@ mod tests {
         let mut tracker = tracker(INTERVAL);
         let mut child = spawn_held("/bin/cat", &[]);
         let pid = child.id().cast_signed();
-        let mut events = Vec::new();
-        follow_to_event(
-            &mut tracker,
-            &mut Meter::default(),
-            &mut events,
-            Awaited::Start(pid),
-        );
+        follow_to_event(&mut tracker, &mut Meter::default(), Awaited::Start(pid));
 
         release(&mut child);
-        follow_to_event(
-            &mut tracker,
-            &mut Meter::default(),
-            &mut events,
-            Awaited::Exit(pid),
-        );
+        let released = follow_to_event(&mut tracker, &mut Meter::default(), Awaited::Exit(pid));
         child.wait().unwrap();
 
         let exited_with_usage = |event: &Event| match event {
@@ -1508,8 +1494,8 @@ mod tests {
             _ => false,
         };
         assert!(
-            events.iter().any(exited_with_usage),
-            "child {pid}: {events:?}"
+            released.iter().any(exited_with_usage),
+            "child {pid}: {released:?}"
         );
     }
 
@@ -1522,22 +1508,10 @@ mod tests {
         let mut tracker = tracker(INTERVAL);
         let mut child = spawn_held("/bin/bash", &["-c", "read -r line; exec /usr/bin/true"]);
         let pid = child.id().cast_signed();
-        let mut held = Vec::new();
-        follow_to_event(
-            &mut tracker,
-            &mut Meter::default(),
-            &mut held,
-            Awaited::Start(pid),
-        );
+        let held = follow_to_event(&mut tracker, &mut Meter::default(), Awaited::Start(pid));
 
         release(&mut child);
-        let mut released = Vec::new();
-        follow_to_event(
-            &mut tracker,
-            &mut Meter::default(),
-            &mut released,
-            Awaited::Exit(pid),
-        );
+        let released = follow_to_event(&mut tracker, &mut Meter::default(), Awaited::Exit(pid));
         child.wait().unwrap();
 
         let exec = Event::Exec { pid };
@@ -1557,13 +1531,7 @@ mod tests {
         let mut child = spawn_held("/bin/cat", &[]);
         let pid = child.id().cast_signed();
 
-        let mut events = Vec::new();
-        follow_to_event(
-            &mut tracker,
-            &mut Meter::default(),
-            &mut events,
-            Awaited::Start(pid),
-        );
+        let held = follow_to_event(&mut tracker, &mut Meter::default(), Awaited::Start(pid));
         release(&mut child);
         child.wait().unwrap();
 
@@ -1571,7 +1539,7 @@ mod tests {
             pid,
             coalition: Some(own),
         };
-        assert!(events.contains(&start), "{start:?}: {events:?}");
+        assert!(held.contains(&start), "{start:?}: {held:?}");
     }
 
     #[test]
@@ -1587,11 +1555,10 @@ mod tests {
         let start = Snapshot::take(&meter, timebase).unwrap();
         let mut child = spawn_held("/bin/cat", &[]);
         let pid = child.id().cast_signed();
-        let mut events = Vec::new();
 
-        follow_to_event(&mut tracker, &mut meter, &mut events, Awaited::Start(pid));
+        follow_to_event(&mut tracker, &mut meter, Awaited::Start(pid));
         release(&mut child);
-        follow_to_event(&mut tracker, &mut meter, &mut events, Awaited::Exit(pid));
+        follow_to_event(&mut tracker, &mut meter, Awaited::Exit(pid));
         child.wait().unwrap();
 
         let cost = Snapshot::take(&meter, timebase)
