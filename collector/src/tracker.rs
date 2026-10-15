@@ -1459,6 +1459,8 @@ mod tests {
         std::process::Command::new(program)
             .args(args)
             .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
             .spawn()
             .unwrap()
     }
