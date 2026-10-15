@@ -351,7 +351,8 @@ pub(super) fn load_tick(slot: &[AtomicU64], layout: &Layout, tick: &mut Tick) ->
     if !load_tick_smc(slot, layout, sources & SOURCE_SMC != 0, tick) {
         return false;
     }
-    load_tick_records(slot, layout, processes, coalitions, tick);
+    load_tick_processes(slot, layout, processes, tick);
+    load_tick_coalitions(slot, layout, coalitions, tick);
     true
 }
 
@@ -428,23 +429,21 @@ fn load_tick_smc(slot: &[AtomicU64], layout: &Layout, read: bool, tick: &mut Tic
     true
 }
 
-fn load_tick_records(
-    slot: &[AtomicU64],
-    layout: &Layout,
-    processes: usize,
-    coalitions: usize,
-    tick: &mut Tick,
-) {
-    assert!(processes <= tick.processes.capacity());
-    assert!(coalitions <= tick.coalitions.capacity());
+fn load_tick_processes(slot: &[AtomicU64], layout: &Layout, count: usize, tick: &mut Tick) {
+    assert!(count <= tick.processes.capacity());
 
     tick.processes.clear();
-    for index in 0..processes {
+    for index in 0..count {
         let words = load_words(&slot[layout.processes.record(index)]);
         push_without_growing(&mut tick.processes, process_from(&words));
     }
+}
+
+fn load_tick_coalitions(slot: &[AtomicU64], layout: &Layout, count: usize, tick: &mut Tick) {
+    assert!(count <= tick.coalitions.capacity());
+
     tick.coalitions.clear();
-    for index in 0..coalitions {
+    for index in 0..count {
         let words = load_words(&slot[layout.coalitions.record(index)]);
         push_without_growing(&mut tick.coalitions, coalition_from(&words));
     }
@@ -493,12 +492,31 @@ pub(super) fn high_half(word: u64) -> u32 {
     }
 }
 
-pub(super) fn halves(low: u32, high: u32) -> u64 {
-    u64::from(low) | (u64::from(high) << 32)
+/// Two 32-bit values one word holds, `low` in its low half.
+pub(super) struct Halves {
+    pub(super) low: u32,
+    pub(super) high: u32,
+}
+
+impl Halves {
+    pub(super) fn word(self) -> u64 {
+        u64::from(self.low) | (u64::from(self.high) << 32)
+    }
 }
 
 fn cpu_words(cpu: &CPUTicks) -> [u64; CPU_WORDS] {
-    [halves(cpu.user, cpu.system), halves(cpu.nice, cpu.idle)]
+    [
+        Halves {
+            low: cpu.user,
+            high: cpu.system,
+        }
+        .word(),
+        Halves {
+            low: cpu.nice,
+            high: cpu.idle,
+        }
+        .word(),
+    ]
 }
 
 fn cpu_from(words: &[u64; CPU_WORDS]) -> CPUTicks {
@@ -658,11 +676,16 @@ fn process_words(process: &Process) -> [u64; PROCESS_WORDS] {
     let mut words = [0; PROCESS_WORDS];
     words[0] = u64::from(process.pid.cast_unsigned());
     words[1..=USAGE_WORDS].copy_from_slice(&usage);
-    words[USAGE_WORDS + 1] = halves(task.threads.cast_unsigned(), task.faults.cast_unsigned());
-    words[USAGE_WORDS + 2] = halves(
-        task.context_switches.cast_unsigned(),
-        task.mach_syscalls.cast_unsigned(),
-    );
+    words[USAGE_WORDS + 1] = Halves {
+        low: task.threads.cast_unsigned(),
+        high: task.faults.cast_unsigned(),
+    }
+    .word();
+    words[USAGE_WORDS + 2] = Halves {
+        low: task.context_switches.cast_unsigned(),
+        high: task.mach_syscalls.cast_unsigned(),
+    }
+    .word();
     words[USAGE_WORDS + 3] = u64::from(task.unix_syscalls.cast_unsigned());
     words
 }

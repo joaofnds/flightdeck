@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use super::layout::{
     HEADER_NEWEST_EVENT, HEADER_NEWEST_PUBLICATION, HEADER_WORDS, Layout, open_layout,
 };
+use crate::kernel::ENOENT;
 use crate::u64_from_usize;
 
 /// The longest name macOS gives a shared-memory object, `PSHMNAMLEN` in `sys/posix_shm.h`.
@@ -26,8 +27,6 @@ const LOCK_MODE: u32 = 0o600;
 /// The generations a writer tries past the previous ring's before it gives up, each name
 /// taken by an object it did not make.
 const GENERATION_TRIES: u64 = 16;
-
-const ENOENT: i32 = 2;
 
 /// The `confstr` name of this user's own temporary directory, from `unistd.h`.
 const CS_DARWIN_USER_TEMP_DIR: c_int = 65537;

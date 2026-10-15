@@ -24,7 +24,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use event::{load_event, store_event};
 use layout::{
     EVENT_SEQUENCE, HEADER_FIRST_EVENT, HEADER_FIRST_PUBLICATION, HEADER_NEWEST_EVENT,
-    HEADER_NEWEST_PUBLICATION, HEADER_RUN_START_NS, Header, Layout, SLOT_SEQUENCE, store_header,
+    HEADER_NEWEST_PUBLICATION, HEADER_RUN_START_NS, Header, Held, Layout, SLOT_SEQUENCE,
+    store_header,
 };
 use object::{
     LockedName, Mapping, PROT_READ, PROT_WRITE, create_lock, create_object, create_previous,
@@ -229,10 +230,10 @@ impl Reader {
         Ok(Self {
             name: locked,
             mapping,
-            publications: Cursor::new(first, layout.oldest_held(newest)),
+            publications: Cursor::new(first, layout.publications_held(newest)),
             run_start_ns,
             tick: LoadedTick::new(&layout),
-            events: Cursor::new(first_event, layout.oldest_event_held(newest_event)),
+            events: Cursor::new(first_event, layout.events_held(newest_event)),
             // Last, since the fields above read it.
             layout,
         })
@@ -285,8 +286,7 @@ impl Reader {
         if self.publications.next <= newest {
             return Ok(());
         }
-        let timeout_ns = u64::try_from(timeout.as_nanos()).map_err(io::Error::other)?;
-        if wait(newest_word, newest, timeout_ns)? == Waited::Unsupported {
+        if wait(newest_word, newest, timeout)? == Waited::Unsupported {
             std::thread::sleep(timeout.min(POLL_INTERVAL));
         }
         Ok(())
@@ -299,7 +299,7 @@ impl Reader {
         fence(Ordering::Acquire);
         let publication = match self
             .publications
-            .step(newest, self.layout.oldest_held(newest))
+            .step(self.layout.publications_held(newest))
         {
             Step::Nothing => return Ok(Found::Nothing),
             Step::Missed { first, end } => return Ok(Found::Missed { first, end }),
@@ -324,10 +324,7 @@ impl Reader {
         let words = self.mapping.words();
         let newest = words[HEADER_NEWEST_EVENT].load(Ordering::Relaxed);
         fence(Ordering::Acquire);
-        let number = match self
-            .events
-            .step(newest, self.layout.oldest_event_held(newest))
-        {
+        let number = match self.events.step(self.layout.events_held(newest)) {
             Step::Nothing => return Ok(FoundEvent::Nothing),
             Step::Missed { first, end } => return Ok(FoundEvent::Missed { first, end }),
             Step::Read(number) => number,
@@ -367,12 +364,12 @@ enum Step {
 }
 
 impl Cursor {
-    /// A cursor at the oldest number the ring holds, `oldest_held`, or at `first` where the
-    /// ring has not written that far.
-    fn new(first: u64, oldest_held: u64) -> Self {
+    /// A cursor at the oldest number the ring holds, or at `first` where the ring has not
+    /// written that far.
+    fn new(first: u64, held: Held) -> Self {
         Self {
             first,
-            next: first.max(oldest_held),
+            next: first.max(held.oldest),
         }
     }
 
@@ -385,13 +382,13 @@ impl Cursor {
         }
     }
 
-    /// The next step once the writer has written `newest` and holds the numbers from
-    /// `oldest_held`, moving the cursor past what the step covers.
-    fn step(&mut self, newest: u64, oldest_held: u64) -> Step {
-        if self.next > newest {
+    /// The next step once the writer holds the numbers `held`, moving the cursor past what
+    /// the step covers.
+    fn step(&mut self, held: Held) -> Step {
+        if self.next > held.newest {
             return Step::Nothing;
         }
-        let oldest = self.first.max(oldest_held);
+        let oldest = self.first.max(held.oldest);
         if self.next < oldest {
             let first = self.next;
             self.next = oldest;

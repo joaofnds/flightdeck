@@ -86,10 +86,11 @@ fn run(options: &Options) -> std::io::Result<()> {
                     readings.processes.len(),
                     readings.coalitions.len()
                 );
-                if let Some(slipped) = slipped(last, publication, tick) {
+                let seen = Seen { publication, tick };
+                if let Some(slipped) = slipped(last, seen) {
                     println!("slipped ticks {}-{}", slipped.start(), slipped.end());
                 }
-                last = Some((publication, tick));
+                last = Some(seen);
                 run_events(&mut reader)?;
                 read += 1;
             }
@@ -114,16 +115,23 @@ fn run(options: &Options) -> std::io::Result<()> {
     Ok(())
 }
 
-/// The ticks the collector slipped between the publication and tick `last` and `publication`
-/// of `tick`. The collector numbers ticks from its run's start and skips those it slipped,
-/// so a gap in ticks between publications that follow each other is a slip. Across a gap in
-/// publications the reader missed the ticks between, and cannot tell.
-fn slipped(last: Option<(u64, u64)>, publication: u64, tick: u64) -> Option<RangeInclusive<u64>> {
-    let (publication_last, tick_last) = last?;
-    if publication != publication_last + 1 {
+/// A publication the reader read, and the tick it holds.
+#[derive(Clone, Copy)]
+struct Seen {
+    publication: u64,
+    tick: u64,
+}
+
+/// The ticks the collector slipped between the publication `last` and `seen`. The collector
+/// numbers ticks from its run's start and skips those it slipped, so a gap in ticks between
+/// publications that follow each other is a slip. Across a gap in publications the reader
+/// missed the ticks between, and cannot tell.
+fn slipped(last: Option<Seen>, seen: Seen) -> Option<RangeInclusive<u64>> {
+    let last = last?;
+    if seen.publication != last.publication + 1 {
         return None;
     }
-    (tick > tick_last + 1).then(|| tick_last + 1..=tick - 1)
+    (seen.tick > last.tick + 1).then(|| last.tick + 1..=seen.tick - 1)
 }
 
 /// Reads the events the writer has logged so far, and prints how many it read, which it
@@ -160,13 +168,31 @@ mod tests {
         // Goal: the reader reports the ticks the collector skipped between two publications
         // that follow each other.
         // Method: find the slip from publication 4 of tick 10 to publication 5 of tick 13.
-        assert_eq!(Some(11..=12), slipped(Some((4, 10)), 5, 13));
+        let last = Seen {
+            publication: 4,
+            tick: 10,
+        };
+        let seen = Seen {
+            publication: 5,
+            tick: 13,
+        };
+
+        assert_eq!(Some(11..=12), slipped(Some(last), seen));
     }
 
     #[test]
     fn a_tick_gap_across_missed_publications_is_no_slip() {
         // Goal: ticks the reader missed are not reported as ticks the collector slipped.
         // Method: find the slip from publication 4 of tick 10 to publication 25 of tick 31.
-        assert_eq!(None, slipped(Some((4, 10)), 25, 31));
+        let last = Seen {
+            publication: 4,
+            tick: 10,
+        };
+        let seen = Seen {
+            publication: 25,
+            tick: 31,
+        };
+
+        assert_eq!(None, slipped(Some(last), seen));
     }
 }

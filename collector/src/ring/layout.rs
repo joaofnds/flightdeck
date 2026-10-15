@@ -170,16 +170,20 @@ impl Layout {
             }
         }
 
-        let cpus = new_section(SLOT_FIXED_WORDS, shape.cpu_capacity, CPU_WORDS);
-        let interfaces = new_section(cpus.end(), shape.interface_capacity, INTERFACE_WORDS);
+        let mut plan = SlotPlan {
+            end: SLOT_FIXED_WORDS,
+        };
+        let cpus = plan.section(shape.cpu_capacity, CPU_WORDS);
+        let interfaces = plan.section(shape.interface_capacity, INTERFACE_WORDS);
         let state_capacity = usize_from(shape.state_capacity);
-        let gpu_states = new_section(interfaces.end(), shape.state_capacity, 1);
-        let cores = new_section(gpu_states.end(), shape.core_capacity, 1 + state_capacity);
-        let fans = new_section(cores.end(), shape.fan_capacity, 1);
-        let processes = new_section(fans.end(), shape.process_capacity, PROCESS_WORDS);
-        let coalitions = new_section(processes.end(), shape.coalition_capacity, COALITION_WORDS);
+        let gpu_states = plan.section(shape.state_capacity, 1);
+        let cores = plan.section(shape.core_capacity, 1 + state_capacity);
+        let fans = plan.section(shape.fan_capacity, 1);
+        let processes = plan.section(shape.process_capacity, PROCESS_WORDS);
+        let coalitions = plan.section(shape.coalition_capacity, COALITION_WORDS);
+        let slot_words = plan.end;
         // A core's record grows with the states, so the size may pass what an object holds.
-        let size_bytes = u64_from_usize(coalitions.end())
+        let size_bytes = u64_from_usize(slot_words)
             .checked_mul(shape.slot_count)?
             .checked_add(u64_from_usize(HEADER_WORDS))?
             .checked_add(u64_from_usize(EVENT_WORDS).checked_mul(shape.event_capacity)?)?
@@ -188,7 +192,6 @@ impl Layout {
             return None;
         }
 
-        let slot_words = coalitions.end();
         Some(Self {
             shape,
             slot_words,
@@ -211,16 +214,22 @@ impl Layout {
         self.word_count() * size_of::<u64>()
     }
 
-    /// The oldest publication the slots hold once `newest` is published, where every
-    /// publication numbered from 1 went into them.
-    pub(super) fn oldest_held(&self, newest: u64) -> u64 {
-        newest.saturating_sub(self.shape.slot_count) + 1
+    /// The publications the slots hold once `newest` is published, where every publication
+    /// numbered from 1 went into them.
+    pub(super) fn publications_held(&self, newest: u64) -> Held {
+        Held {
+            oldest: newest.saturating_sub(self.shape.slot_count) + 1,
+            newest,
+        }
     }
 
-    /// The oldest event the log holds once `newest` is written, where every event numbered
-    /// from 1 went into it.
-    pub(super) fn oldest_event_held(&self, newest: u64) -> u64 {
-        newest.saturating_sub(self.shape.event_capacity) + 1
+    /// The events the log holds once `newest` is written, where every event numbered from 1
+    /// went into it.
+    pub(super) fn events_held(&self, newest: u64) -> Held {
+        Held {
+            oldest: newest.saturating_sub(self.shape.event_capacity) + 1,
+            newest,
+        }
     }
 
     /// The words of the record that holds the event numbered `number`, from the ring's start.
@@ -242,14 +251,24 @@ impl Layout {
     }
 }
 
-fn new_section(start: usize, capacity: u64, record_words: usize) -> Section {
-    assert!(capacity <= SHAPE_FIELD_MAX);
-    assert!(record_words > 0);
+/// The words of a slot laid out so far, which each section it lays out extends.
+struct SlotPlan {
+    end: usize,
+}
 
-    Section {
-        start,
-        capacity: usize_from(capacity),
-        record_words,
+impl SlotPlan {
+    /// Lays out a section of `capacity` records of `record_words` each after the last.
+    fn section(&mut self, capacity: u64, record_words: usize) -> Section {
+        assert!(capacity <= SHAPE_FIELD_MAX);
+        assert!(record_words > 0);
+
+        let section = Section {
+            start: self.end,
+            capacity: usize_from(capacity),
+            record_words,
+        };
+        self.end = section.end();
+        section
     }
 }
 
@@ -291,6 +310,13 @@ pub(super) fn store_header(words: &[AtomicU64], layout: &Layout, header: &Header
     for (index, width) in RECORD_WIDTHS {
         words[index].store(u64_from_usize(width), Ordering::Relaxed);
     }
+}
+
+/// The numbers a ring holds, from the oldest it has not overwritten to the newest written.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Held {
+    pub(super) oldest: u64,
+    pub(super) newest: u64,
 }
 
 /// What a ring's header holds besides its shape.

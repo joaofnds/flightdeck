@@ -5,7 +5,7 @@ use std::sync::atomic::AtomicU64;
 
 use super::layout::{EVENT_SEQUENCE, EVENT_WORDS};
 use super::tick::{
-    USAGE_WORDS, halves, high_half, load_words, low_half, store_words, usage_from, usage_words,
+    Halves, USAGE_WORDS, high_half, load_words, low_half, store_words, usage_from, usage_words,
 };
 use crate::processes::Unreadable;
 use crate::tracker::{Event, Noticed};
@@ -62,17 +62,29 @@ fn event_words(tick: u64, event: &Event) -> [u64; STORED_WORDS] {
     words[stored(EVENT_TICK)] = tick;
     match event {
         Event::Start { pid, coalition } => {
-            words[stored(EVENT_KIND_PID)] = halves(KIND_START, pid.cast_unsigned());
+            words[stored(EVENT_KIND_PID)] = Halves {
+                low: KIND_START,
+                high: pid.cast_unsigned(),
+            }
+            .word();
             if let Some(coalition) = coalition {
                 words[stored(EVENT_DETAIL)] = 1;
                 words[stored(EVENT_COALITION)] = *coalition;
             }
         }
         Event::Exec { pid } => {
-            words[stored(EVENT_KIND_PID)] = halves(KIND_EXEC, pid.cast_unsigned());
+            words[stored(EVENT_KIND_PID)] = Halves {
+                low: KIND_EXEC,
+                high: pid.cast_unsigned(),
+            }
+            .word();
         }
         Event::Exit { pid, last, noticed } => {
-            words[stored(EVENT_KIND_PID)] = halves(KIND_EXIT, pid.cast_unsigned());
+            words[stored(EVENT_KIND_PID)] = Halves {
+                low: KIND_EXIT,
+                high: pid.cast_unsigned(),
+            }
+            .word();
             let last_word = match last {
                 Ok(usage) => {
                     words[stored(EVENT_USAGE)..].copy_from_slice(&usage_words(usage));
@@ -85,7 +97,11 @@ fn event_words(tick: u64, event: &Event) -> [u64; STORED_WORDS] {
                 Noticed::OnExit => NOTICED_ON_EXIT,
                 Noticed::AlreadyExited => NOTICED_ALREADY_EXITED,
             };
-            words[stored(EVENT_DETAIL)] = halves(last_word, noticed_word);
+            words[stored(EVENT_DETAIL)] = Halves {
+                low: last_word,
+                high: noticed_word,
+            }
+            .word();
         }
     }
     words
@@ -224,10 +240,26 @@ mod tests {
             noticed: Noticed::OnExit,
         };
         let broken = [
-            (&start, EVENT_KIND_PID, halves(4, 7)),
+            (&start, EVENT_KIND_PID, Halves { low: 4, high: 7 }.word()),
             (&start, EVENT_DETAIL, 2),
-            (&exit, EVENT_DETAIL, halves(3, NOTICED_ON_EXIT)),
-            (&exit, EVENT_DETAIL, halves(LAST_GONE, 2)),
+            (
+                &exit,
+                EVENT_DETAIL,
+                Halves {
+                    low: 3,
+                    high: NOTICED_ON_EXIT,
+                }
+                .word(),
+            ),
+            (
+                &exit,
+                EVENT_DETAIL,
+                Halves {
+                    low: LAST_GONE,
+                    high: 2,
+                }
+                .word(),
+            ),
         ];
 
         for (event, index, word) in broken {

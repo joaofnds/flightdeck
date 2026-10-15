@@ -5,6 +5,11 @@
 use std::ffi::{c_int, c_void};
 use std::io;
 use std::sync::atomic::AtomicU64;
+use std::time::Duration;
+
+#[cfg(test)]
+use crate::kernel::EDOM;
+use crate::kernel::{EFAULT, EINTR, ENOENT, ETIMEDOUT};
 
 unsafe extern "C" {
     fn os_sync_wait_on_address_with_timeout(
@@ -18,18 +23,12 @@ unsafe extern "C" {
     fn os_sync_wake_by_address_all(address: *mut c_void, size: usize, flags: u32) -> c_int;
 }
 
-/// The flag that makes a wait or a wake reach every process mapping the word, from
+/// The flags that make a wait and a wake reach every process mapping the word, from
 /// `os/os_sync_wait_on_address.h`.
-const OS_SYNC_SHARED: u32 = 0x1;
+const OS_SYNC_WAIT_ON_ADDRESS_SHARED: u32 = 0x1;
+const OS_SYNC_WAKE_BY_ADDRESS_SHARED: u32 = 0x1;
 /// The clock that measures a wait's timeout, which is in nanoseconds whatever the clock.
 const OS_CLOCK_MACH_ABSOLUTE_TIME: u32 = 32;
-
-const ENOENT: i32 = 2;
-const EINTR: i32 = 4;
-const EFAULT: i32 = 14;
-#[cfg(test)]
-const EDOM: i32 = 33;
-const ETIMEDOUT: i32 = 60;
 
 /// How a wait ended.
 #[derive(Debug, PartialEq, Eq)]
@@ -42,17 +41,17 @@ pub(super) enum Waited {
     Unsupported,
 }
 
-/// Sleeps until a wake on `word`, while it holds `value`, for at most `timeout_ns`
-/// nanoseconds.
-pub(super) fn wait(word: &AtomicU64, value: u64, timeout_ns: u64) -> io::Result<Waited> {
-    assert!(timeout_ns > 0);
+/// Sleeps until a wake on `word`, while it holds `value`, for at most `timeout`.
+pub(super) fn wait(word: &AtomicU64, value: u64, timeout: Duration) -> io::Result<Waited> {
+    assert!(!timeout.is_zero());
+    let timeout_ns = u64::try_from(timeout.as_nanos()).map_err(io::Error::other)?;
 
     let returned = unsafe {
         os_sync_wait_on_address_with_timeout(
             word.as_ptr().cast::<c_void>(),
             value,
             size_of::<u64>(),
-            OS_SYNC_SHARED,
+            OS_SYNC_WAIT_ON_ADDRESS_SHARED,
             OS_CLOCK_MACH_ABSOLUTE_TIME,
             timeout_ns,
         )
@@ -77,7 +76,7 @@ pub(super) fn wake_all(word: &AtomicU64) -> Result<(), i32> {
         os_sync_wake_by_address_all(
             word.as_ptr().cast::<c_void>(),
             size_of::<u64>(),
-            OS_SYNC_SHARED,
+            OS_SYNC_WAKE_BY_ADDRESS_SHARED,
         )
     };
     if returned == 0 {
@@ -109,7 +108,7 @@ mod tests {
                     word.as_ptr().cast::<c_void>(),
                     0,
                     size_of::<u32>(),
-                    OS_SYNC_SHARED,
+                    OS_SYNC_WAIT_ON_ADDRESS_SHARED,
                     OS_CLOCK_MACH_ABSOLUTE_TIME,
                     1_100_000_000,
                 )

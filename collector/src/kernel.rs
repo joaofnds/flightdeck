@@ -17,12 +17,28 @@ pub(crate) const KERN_SUCCESS: KernReturn = 0;
 /// Says the caller may not act on the process a call named.
 pub(crate) const EPERM: c_int = 1;
 
+/// Says no file or object has the name a call named.
+pub(crate) const ENOENT: c_int = 2;
+
 /// Says no process has the pid a call named.
 pub(crate) const ESRCH: c_int = 3;
+
+/// Says a signal interrupted a call before it finished.
+pub(crate) const EINTR: c_int = 4;
+
+/// Says a call was given an address it cannot use.
+pub(crate) const EFAULT: c_int = 14;
 
 /// Says a call was given an argument it does not take.
 #[cfg(test)]
 pub(crate) const EINVAL: c_int = 22;
+
+/// Says an argument is outside what a call works on.
+#[cfg(test)]
+pub(crate) const EDOM: c_int = 33;
+
+/// Says a call's timeout ran out.
+pub(crate) const ETIMEDOUT: c_int = 60;
 
 /// A time in seconds and nanoseconds, as `struct timespec` declares it.
 #[repr(C)]
