@@ -99,9 +99,7 @@ fn run(options: &Options) -> std::io::Result<()> {
             }
             Found::Missed { first, end } => println!("missed publications {first}-{}", end - 1),
             Found::Nothing => {
-                // The writer restarted, and the reader has read all the previous ring holds.
-                if reader.moved(&options.lock_path)? {
-                    reader.follow(&options.lock_path)?;
+                if reader.follow(&options.lock_path)? {
                     println!("moved to the writer's newer ring");
                 } else {
                     if idle_since.elapsed() > IDLE_MAX {

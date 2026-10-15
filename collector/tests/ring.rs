@@ -629,7 +629,7 @@ mod tests {
         for run_tick in 1..=6 {
             publish_events(&mut second, run_tick, &[exit(2)]);
         }
-        reader.follow(place.lock_path()).unwrap();
+        assert!(reader.follow(place.lock_path()).unwrap());
 
         assert_eq!(Found::Missed { first: 2, end: 4 }, reader.read().unwrap());
         assert_eq!(
@@ -643,6 +643,41 @@ mod tests {
             FoundEvent::Missed { first: 2, end: 4 },
             reader.read_event().unwrap()
         );
+    }
+
+    #[test]
+    fn a_reader_follows_a_restarted_writer_only_once_it_read_its_own_ring() {
+        // Goal: a reader that finds the writer restarted reads the publications its own ring
+        // still holds before it moves, and never stays on a ring the writer left.
+        // Method: read a ring to its end, publish once more, restart the writer, follow, read,
+        // and follow again.
+        let place = TestPlace::new("drain");
+        let mut first = Writer::create(&place.place, SHAPE).unwrap();
+        publish(&mut first, 1);
+        let mut reader = Reader::open(place.lock_path()).unwrap();
+        reader.read().unwrap();
+        let stays_on_its_writer = reader.follow(place.lock_path()).unwrap();
+        publish(&mut first, 2);
+
+        let spawns = spawns();
+        drop(first);
+        let second = Writer::create(&place.place, SHAPE).unwrap();
+        drop(spawns);
+        let follows_before_reading = reader.follow(place.lock_path()).unwrap();
+        let found = reader.read().unwrap();
+        let follows_after_reading = reader.follow(place.lock_path()).unwrap();
+
+        assert!(!stays_on_its_writer);
+        assert!(!follows_before_reading);
+        assert_eq!(
+            Found::Publication {
+                publication: 2,
+                tick: 2
+            },
+            found
+        );
+        assert!(follows_after_reading);
+        drop(second);
     }
 
     #[test]
@@ -670,7 +705,7 @@ mod tests {
         for run_tick in 1..=6 {
             publish_events(&mut second, run_tick, &[exit(2)]);
         }
-        reader.follow(place.lock_path()).unwrap();
+        assert!(reader.follow(place.lock_path()).unwrap());
 
         assert_eq!(Found::Missed { first: 1, end: 3 }, reader.read().unwrap());
         assert_eq!(

@@ -253,15 +253,26 @@ impl Reader {
         Ok(name != self.name.as_str())
     }
 
-    /// Opens the ring the lock file at `lock_path` names in place of the reader's own, as
-    /// once `moved` says the writer restarted, and reads on from where the reader stood, so
-    /// the next reads return what the newer writer overwrote first as missed.
-    pub fn follow(&mut self, lock_path: &Path) -> io::Result<()> {
+    /// Opens the ring the lock file at `lock_path` names in place of the reader's own, once
+    /// the writer restarted and the reader has read every publication its own ring holds, and
+    /// returns whether it did. The reader reads on from where it stood, so the next reads
+    /// return what the newer writer overwrote first as missed.
+    pub fn follow(&mut self, lock_path: &Path) -> io::Result<bool> {
+        if !self.moved(lock_path)? {
+            return Ok(false);
+        }
+
+        // The writer that left this ring may have published once more before it stopped.
+        let newest = self.mapping.words()[HEADER_NEWEST_PUBLICATION].load(Ordering::Relaxed);
+        if self.publications.next <= newest {
+            return Ok(false);
+        }
+
         let mut newer = Self::open(lock_path)?;
         newer.publications.carry(&self.publications);
         newer.events.carry(&self.events);
         *self = newer;
-        Ok(())
+        Ok(true)
     }
 
     /// The tick of the publication the reader read last.
