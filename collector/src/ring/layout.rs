@@ -165,6 +165,7 @@ impl Layout {
             if field == 0 {
                 return None;
             }
+
             if field > SHAPE_FIELD_MAX {
                 return None;
             }
@@ -335,6 +336,7 @@ pub(super) fn open_layout(header: &[AtomicU64], size_bytes: usize) -> io::Result
     if load(HEADER_MAGIC) != MAGIC {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "not a ring"));
     }
+
     if load(HEADER_LAYOUT_VERSION) != LAYOUT_VERSION {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -371,6 +373,7 @@ pub(super) fn open_layout(header: &[AtomicU64], size_bytes: usize) -> io::Result
             format!("a ring of shape {shape:?}"),
         ));
     };
+
     if layout.size_bytes() > size_bytes {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,

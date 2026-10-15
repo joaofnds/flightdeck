@@ -225,6 +225,7 @@ mod tests {
             if object < 0 {
                 return Err(std::io::Error::last_os_error().raw_os_error().unwrap());
             }
+
             Ok(unsafe { OwnedFd::from_raw_fd(object) })
         }
 
@@ -235,6 +236,7 @@ mod tests {
                 assert_eq!(Some(ENOENT), std::io::Error::last_os_error().raw_os_error());
                 return false;
             }
+
             drop(unsafe { OwnedFd::from_raw_fd(object) });
             true
         }
@@ -1008,7 +1010,7 @@ mod tests {
         let followed = reader.follow(place.lock_path());
 
         assert_eq!(
-            std::io::ErrorKind::InvalidData,
+            std::io::ErrorKind::Unsupported,
             followed.unwrap_err().kind()
         );
         drop(second);
@@ -1326,6 +1328,7 @@ mod tests {
                 if read == READS {
                     break;
                 }
+
                 match reader.read().unwrap() {
                     Found::Publication { tick, .. } => {
                         read += 1;

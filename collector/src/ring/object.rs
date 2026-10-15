@@ -160,6 +160,7 @@ impl LockedName {
                 format!("the lock file holds more than a ring name of {PSHMNAMLEN} bytes"),
             ));
         }
+
         if std::str::from_utf8(&bytes[..length]).is_err() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -276,6 +277,7 @@ pub(super) fn create_object(prefix: &str, previous: u64, layout: &Layout) -> io:
             format!("the lock file names generation {previous}, past the last a ring takes"),
         ));
     };
+
     for generation in previous + 1..=last {
         let name = ring_name(prefix, generation)?;
         match create_object_named(&name, layout.size_bytes()) {
@@ -417,14 +419,9 @@ fn open_ring_name<'buffer>(
     name: &str,
     buffer: &'buffer mut [u8; PSHMNAMLEN + 1],
 ) -> io::Result<&'buffer CStr> {
+    // Every name comes from a lock file read, or from ring_name, and both refuse a longer one.
     let length = name.len();
-    if length > PSHMNAMLEN {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("a ring name of more than {PSHMNAMLEN} bytes"),
-        ));
-    }
-
+    assert!(length <= PSHMNAMLEN);
     buffer[..length].copy_from_slice(name.as_bytes());
     buffer[length] = 0;
     CStr::from_bytes_with_nul(&buffer[..=length]).map_err(io::Error::other)
@@ -440,6 +437,7 @@ fn open_check(object: &File) -> io::Result<usize> {
             format!("the ring belongs to uid {}", metadata.uid()),
         ));
     }
+
     if metadata.mode() & 0o777 != RING_MODE {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -464,6 +462,7 @@ pub(super) fn place_for_user(name: &str) -> io::Result<super::Place> {
             format!("ring name {name:?} holds more than letters, digits, - and _"),
         ));
     }
+
     if name.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,

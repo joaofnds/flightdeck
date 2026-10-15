@@ -321,6 +321,7 @@ pub(super) fn load_tick(slot: &[AtomicU64], layout: &Layout, tick: &mut Tick) ->
     if !load_tick_ioreport(slot, layout, sources & SOURCE_IOREPORT != 0, tick) {
         return false;
     }
+
     if !load_tick_smc(slot, layout, sources & SOURCE_SMC != 0, tick) {
         return false;
     }

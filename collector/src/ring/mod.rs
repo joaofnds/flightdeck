@@ -125,6 +125,7 @@ impl Writer {
                 format!("a ring of shape {shape:?}"),
             ));
         };
+
         let run_start_ns = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(io::Error::other)?
@@ -285,7 +286,8 @@ impl Reader {
     /// Opens the ring the lock file at `lock_path` names in place of the reader's own, once
     /// the writer restarted and the reader has read every publication and event its own ring
     /// holds, and returns whether it did. The reader reads on from where it stood, so the next
-    /// reads return what the newer writer overwrote first as missed.
+    /// reads return what the newer writer overwrote first as missed. A newer ring whose ticks
+    /// have other capacities is refused with `io::ErrorKind::Unsupported`.
     pub fn follow(&mut self, lock_path: &Path) -> io::Result<bool> {
         if !self.moved(lock_path)? {
             return Ok(false);
@@ -309,17 +311,17 @@ impl Reader {
             Err(error) => return Err(error),
         };
         // The room for ticks is sized to the capacities of a tick, so the reader keeps its own
-        // and allocates nothing, and a ring whose ticks hold more is opened afresh.
+        // and allocates nothing only when the newer ring's ticks have the same capacities. A
+        // ring whose ticks hold more or fewer is refused as Unsupported, which allocates no
+        // message, and a caller that wants it opens it afresh. Slot and event counts size
+        // nothing the reader holds, so they may differ.
         let tick_shape = Shape {
             slot_count: newer.layout.shape.slot_count,
             event_capacity: newer.layout.shape.event_capacity,
             ..self.layout.shape
         };
         if tick_shape != newer.layout.shape {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "the newer ring has another shape, so open it afresh",
-            ));
+            return Err(io::Error::from(io::ErrorKind::Unsupported));
         }
 
         newer.publications.carry(&self.publications);
@@ -580,6 +582,7 @@ fn read_finished<T>(
             format!("the record of {number} holds sequence {sequence}"),
         ));
     }
+
     if sequence == finished {
         if sequence_after == sequence {
             if loaded.is_none() {
