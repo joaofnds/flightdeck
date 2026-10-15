@@ -141,12 +141,14 @@ impl Writer {
         };
         store_header(mapping.words(), &layout, &header);
 
-        create_unlink_older(&place.name_prefix, previous.generation);
         // Writing the name before cutting the file to its length never leaves the lock file
         // empty, as cutting first would for a writer stopped between the two, which would make
         // the next writer number from 1.
         lock.write_all_at(created.name.as_bytes(), 0)?;
         lock.set_len(u64_from_usize(created.name.len()))?;
+        // Only once the lock file names the new ring, so a reader opening the ring it named
+        // before never finds that ring gone.
+        create_unlink_older(&place.name_prefix, previous.generation);
         Ok(Self {
             _lock: lock,
             mapping,
