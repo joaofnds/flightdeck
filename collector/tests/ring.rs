@@ -214,8 +214,20 @@ mod tests {
             &self.place.lock_path
         }
 
+        /// The name of the ring of `generation`, under the token of the ring the lock file
+        /// names.
         fn ring_name(&self, generation: u64) -> CString {
-            CString::new(format!("{}{generation}", self.place.name_prefix)).unwrap()
+            let named = std::fs::read_to_string(self.lock_path()).unwrap();
+            let (token_named, _) = named.rsplit_once('.').unwrap();
+            CString::new(format!("{token_named}.{generation}")).unwrap()
+        }
+
+        /// Writes into the lock file the name of a ring of generation 0 under `token`, as a
+        /// writer that knew the token would leave it, so a test can make objects under the
+        /// names the next writer makes.
+        fn name_token(&self, token: &str) {
+            let name = format!("{}{token}.0", self.place.name_prefix);
+            std::fs::write(self.lock_path(), name).unwrap();
         }
 
         /// The ring the lock file names, opened with `oflag`, or the error that refused it.
@@ -244,6 +256,19 @@ mod tests {
 
     impl Drop for TestPlace {
         fn drop(&mut self) {
+            // A test that never named a ring left no ring.
+            let named = match std::fs::read_to_string(self.lock_path()) {
+                Ok(named) => named,
+                Err(error) => {
+                    assert_eq!(std::io::ErrorKind::NotFound, error.kind());
+                    return;
+                }
+            };
+            if !named.contains('.') {
+                std::fs::remove_file(&self.place.lock_path).unwrap();
+                return;
+            }
+
             for generation in 1..=TEST_GENERATIONS_MAX {
                 let name = self.ring_name(generation);
                 // A generation the test never made is no object, so its unlink fails.
@@ -1258,17 +1283,17 @@ mod tests {
     #[test]
     fn a_lock_file_naming_the_last_generation_is_an_error_and_not_a_crash() {
         // Goal: a lock file another program wrote never crashes the writer that reads it.
-        // Method: write the largest generation into the lock file, under a prefix short enough
-        // that the name fits a ring name, then make a writer.
-        let mut place = TestPlace::new("last");
-        place.place.name_prefix = format!("/f{}.", std::process::id());
-        let name = format!("{}{}", place.place.name_prefix, u64::MAX);
+        // Method: write into the lock file the largest generation a ring name holds, whose
+        // next generation makes a name past what macOS takes, then make a writer.
+        let place = TestPlace::new("last");
+        let named = format!("{}lastlastlast.", place.place.name_prefix);
+        let name = format!("{named}{}", "9".repeat(31 - named.len()));
         std::fs::write(place.lock_path(), name).unwrap();
 
         let created = Writer::create(&place.place, SHAPE);
 
         assert_eq!(
-            std::io::ErrorKind::InvalidData,
+            std::io::ErrorKind::InvalidInput,
             created.err().unwrap().kind()
         );
     }
@@ -1321,12 +1346,38 @@ mod tests {
     }
 
     #[test]
+    fn a_ring_takes_a_name_no_other_place_can_know_before_its_writer_makes_it() {
+        // Goal: another user, who cannot read this user's lock files, cannot know the names a
+        // writer will make, so it cannot take them first and keep the collector from starting.
+        // Method: make a writer in each of two places that share a name prefix, and compare
+        // the names their lock files hold.
+        let first = TestPlace::new("unseen");
+        let mut second = TestPlace::new("unseen2");
+        second
+            .place
+            .name_prefix
+            .clone_from(&first.place.name_prefix);
+
+        let spawns = spawns();
+        let _first_writer = Writer::create(&first.place, SHAPE).unwrap();
+        let _second_writer = Writer::create(&second.place, SHAPE).unwrap();
+        drop(spawns);
+
+        let first_name = std::fs::read_to_string(first.lock_path()).unwrap();
+        let second_name = std::fs::read_to_string(second.lock_path()).unwrap();
+        assert_ne!(first_name, second_name);
+        assert!(first_name.ends_with(".1"), "{first_name}");
+        assert!(second_name.ends_with(".1"), "{second_name}");
+    }
+
+    #[test]
     fn a_writer_passes_over_a_name_it_did_not_make() {
-        // Goal: an object under the next ring's name, another user's or another program's,
-        // never becomes the ring.
-        // Method: make an object under generation 1's name first, then make a writer and read
-        // what it publishes.
+        // Goal: an object under the next ring's name, which only a program that read the lock
+        // file could know, never becomes the ring.
+        // Method: name a token in the lock file, make an object under generation 1's name
+        // first, then make a writer and read what it publishes.
         let place = TestPlace::new("squat");
+        place.name_token("squattingabc");
         let squatter = unsafe {
             shm_open(
                 place.ring_name(1).as_ptr(),
@@ -1407,6 +1458,7 @@ mod tests {
         // process have written.
         // Method: write the name of an object of mode 600 into a lock file, then open a reader.
         let place = TestPlace::new("refuse");
+        place.name_token("refusedrefus");
         let name = place.ring_name(1);
         let object = unsafe { shm_open(name.as_ptr(), O_RDWR | O_CREAT | O_EXCL, 0o600) };
         assert!(object >= 0);

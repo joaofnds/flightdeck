@@ -643,13 +643,18 @@ only the user read them, and arguments may need redacting before they are kept.
 Readers map the ring read-only, so no reader can corrupt it. The writer takes no lock,
 waits for no acknowledgment, and wakes readers with a broadcast, so no reader can stall
 it. The event queue is the one place that does not overwrite, and it drops and counts
-rather than block when full. The ring as built departs from this paragraph in three
+rather than block when full. The ring as built departs from this paragraph in two
 places, pending the user's ruling on TASK-18. Its event log overwrites its oldest records
 and a reader learns what it missed from the gap. The writer holds a lock file, and a
-process of the same user that takes that lock keeps a new collector from starting. Its
-ring names are fixed and every user shares the names of shared-memory objects, so a
-process of another user that creates the next 16 names first keeps the collector from
-starting, which reasoning from the code shows and no run has observed.
+process of the same user that takes that lock keeps a new collector from starting.
+
+Every user shares the names of shared-memory objects, so each ring's name carries 60
+random bits that only its lock file holds, and the lock files sit in a directory of the
+user's Application Support that only the user may enter. Another user therefore cannot
+know the names a writer will make, and cannot take them first to keep the collector from
+starting. That directory is outside what macOS cleans, since dirhelper removes files
+older than three days from `/var/folders` and `/tmp`, where a collector running longer
+would lose the lock file its single writer and its readers rely on.
 
 ## Recommended pipeline
 

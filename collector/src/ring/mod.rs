@@ -28,7 +28,7 @@ use layout::{
     store_header,
 };
 use object::{
-    LockedName, Mapping, NUMBER_MAX, PROT_READ, PROT_WRITE, create_lock, create_object,
+    LockedName, Mapping, NUMBER_MAX, Naming, PROT_READ, PROT_WRITE, create_lock, create_object,
     create_previous, create_unlink_older, open_ring, place_for_user,
 };
 pub use tick::{Dropped, IOReportReadings, Readings, SmcReadings, Tick};
@@ -52,7 +52,7 @@ pub struct Place {
 impl Place {
     /// The place of the ring `name` of this user, whose lock file is in a directory of this
     /// user's Application Support that only this user may enter. Returns an error where `name`
-    /// makes a ring's name too long, or where that directory lets another user in.
+    /// is no file name, or where that directory lets another user in.
     pub fn for_user(name: &str) -> io::Result<Self> {
         place_for_user(name)
     }
@@ -136,7 +136,11 @@ impl Writer {
 
         let previous = create_previous(&place.name_prefix, &lock)?;
 
-        let created = create_object(&place.name_prefix, previous.generation, &layout)?;
+        let naming = Naming {
+            prefix: &place.name_prefix,
+            token: previous.token,
+        };
+        let created = create_object(naming, previous.generation, &layout)?;
 
         let mapping = Mapping::new(&created.object, layout.word_count(), PROT_READ | PROT_WRITE)?;
 
@@ -156,7 +160,7 @@ impl Writer {
         // Only once the lock file names the new ring, so a reader that reads the lock file from
         // now on never finds the ring it names gone. One that read it just before finds the
         // empty ring gone and looks again.
-        create_unlink_older(&place.name_prefix, previous.generation);
+        create_unlink_older(naming, previous.generation);
         Ok(Self {
             _lock: lock,
             mapping,

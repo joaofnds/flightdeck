@@ -27,6 +27,25 @@ const LOCK_MODE: u32 = 0o600;
 /// taken by an object it did not make.
 const GENERATION_TRIES: u64 = 16;
 
+/// The start of the name of every ring of a user's place. Every user shares the names of
+/// shared-memory objects, and the token after it tells one place's rings from another's.
+const RING_NAME_PREFIX: &str = "/fd.";
+
+/// The characters of a token, the lowercase base32 alphabet of RFC 4648, 5 bits each.
+const TOKEN_ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+/// The characters of a token, 60 random bits, so another user who cannot read the lock file
+/// cannot guess the names a writer will make and take them first.
+const TOKEN_LENGTH: usize = 12;
+
+const _: () = {
+    // A ring of a user's place takes a generation of at least 10 digits, past what the starts
+    // of a lifetime reach.
+    assert!(RING_NAME_PREFIX.len() + TOKEN_LENGTH + 1 + 10 <= PSHMNAMLEN);
+    // A lock file holds a name of at most PSHMNAMLEN bytes, a token and a dot among them, so
+    // the generation it names has at most 18 digits, and the tries past it fit in a u64.
+    assert!(PSHMNAMLEN - TOKEN_LENGTH - 1 <= 18);
+};
+
 /// The largest publication or event number a ring may name. A record's sequence word holds
 /// twice its number, so a number past half of what a word holds overflows it, and this bound
 /// leaves a writer room to count on from a ring at the bound. At ten ticks a second no run
@@ -58,6 +77,7 @@ unsafe extern "C" {
     fn munmap(address: *mut c_void, length: usize) -> c_int;
     fn shm_unlink(name: *const c_char) -> c_int;
     fn getuid() -> u32;
+    fn getentropy(buffer: *mut c_void, size: usize) -> c_int;
 }
 
 /// A shared-memory object mapped into this process, which unmaps it when it drops.
@@ -181,8 +201,49 @@ impl LockedName {
     }
 }
 
+/// The random part of the names of a place's rings, which only the lock file holds.
+#[derive(Clone, Copy)]
+pub(super) struct Token {
+    bytes: [u8; TOKEN_LENGTH],
+}
+
+impl Token {
+    /// A token of the operating system's random bits.
+    fn random() -> io::Result<Self> {
+        let mut bytes = [0; TOKEN_LENGTH];
+        if unsafe { getentropy(bytes.as_mut_ptr().cast::<c_void>(), bytes.len()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        // The alphabet's 32 characters divide a byte's 256 values, so each is as likely.
+        for byte in &mut bytes {
+            *byte = TOKEN_ALPHABET[usize::from(*byte % 32)];
+        }
+        Ok(Self { bytes })
+    }
+
+    /// The token `text` spells, or `None` where it is no token.
+    fn parse(text: &str) -> Option<Self> {
+        let bytes: [u8; TOKEN_LENGTH] = text.as_bytes().try_into().ok()?;
+        if !bytes.iter().all(|byte| TOKEN_ALPHABET.contains(byte)) {
+            return None;
+        }
+
+        Some(Self { bytes })
+    }
+
+    fn as_str(&self) -> &str {
+        match std::str::from_utf8(&self.bytes) {
+            Ok(token) => token,
+            Err(error) => unreachable!("a token holds only its alphabet: {error}"),
+        }
+    }
+}
+
 /// What a writer continues from the ring before it.
 pub(super) struct Previous {
+    /// The token of the previous ring's name, or a new one where the lock file names none.
+    pub(super) token: Token,
     /// The previous ring's generation, or 0 where the lock file names none.
     pub(super) generation: u64,
     /// The previous ring's newest publication, or 0 where it is gone.
@@ -207,16 +268,17 @@ pub(super) fn create_previous(prefix: &str, lock: &File) -> io::Result<Previous>
     let name = locked.as_ref().map_or("", LockedName::as_str);
 
     // A lock file a writer never wrote is empty.
-    let generation = if let Some(Ok(generation)) = name.strip_prefix(prefix).map(str::parse) {
-        generation
+    let (token, generation) = if let Some(named) = create_previous_parse(prefix, name) {
+        named
     } else {
         if !name.is_empty() {
             eprintln!("ring: numbering from 1, since the lock file names {name:?}");
         }
-        0
+        (Token::random()?, 0)
     };
     if generation == 0 {
         return Ok(Previous {
+            token,
             generation,
             publication_newest: 0,
             event_newest: 0,
@@ -239,10 +301,20 @@ pub(super) fn create_previous(prefix: &str, lock: &File) -> io::Result<Previous>
         }
     };
     Ok(Previous {
+        token,
         generation,
         publication_newest: create_previous_continued(publication_newest, name),
         event_newest: create_previous_continued(event_newest, name),
     })
+}
+
+/// The token and the generation of the ring name `name`, which a writer wrote under
+/// `prefix`, or `None` where another program wrote something else.
+fn create_previous_parse(prefix: &str, name: &str) -> Option<(Token, u64)> {
+    let (token, generation) = name.strip_prefix(prefix)?.split_once('.')?;
+    let token = Token::parse(token)?;
+    let generation = generation.parse().ok()?;
+    Some((token, generation))
 }
 
 /// The number `newest` the ring `name` names, to continue from, or 0 where it is past
@@ -263,20 +335,18 @@ pub(super) struct Created {
     pub(super) object: OwnedFd,
 }
 
+/// The names of a place's rings: the prefix, the place's token, and a generation.
+#[derive(Clone, Copy)]
+pub(super) struct Naming<'prefix> {
+    pub(super) prefix: &'prefix str,
+    pub(super) token: Token,
+}
+
 /// Makes the object of a ring of `layout` under the first generation past `previous` whose
 /// name no object holds.
-pub(super) fn create_object(prefix: &str, previous: u64, layout: &Layout) -> io::Result<Created> {
-    // The lock file another program may write names the previous generation, so it may be
-    // any number.
-    let Some(last) = previous.checked_add(GENERATION_TRIES) else {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("the lock file names generation {previous}, past the last a ring takes"),
-        ));
-    };
-
-    for generation in previous + 1..=last {
-        let name = ring_name(prefix, generation)?;
+pub(super) fn create_object(naming: Naming, previous: u64, layout: &Layout) -> io::Result<Created> {
+    for generation in previous + 1..=previous + GENERATION_TRIES {
+        let name = ring_name(naming, generation)?;
         match create_object_named(&name, layout.size_bytes()) {
             Ok(object) => {
                 return Ok(Created {
@@ -298,8 +368,8 @@ pub(super) fn create_object(prefix: &str, previous: u64, layout: &Layout) -> io:
     ))
 }
 
-fn ring_name(prefix: &str, generation: u64) -> io::Result<String> {
-    let name = format!("{prefix}{generation}");
+fn ring_name(naming: Naming, generation: u64) -> io::Result<String> {
+    let name = format!("{}{}.{generation}", naming.prefix, naming.token.as_str());
     if name.len() > PSHMNAMLEN {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -342,11 +412,11 @@ fn create_object_named(name: &str, size_bytes: usize) -> io::Result<OwnedFd> {
 /// so a collector failing at each start never costs the publications of the run before. A
 /// start that passed over generations held by other objects left a ring further back, so the
 /// generations a start may pass over are looked at too.
-pub(super) fn create_unlink_older(prefix: &str, previous: u64) {
+pub(super) fn create_unlink_older(naming: Naming, previous: u64) {
     let first = previous.saturating_sub(GENERATION_TRIES + 1).max(1);
     let mut kept = false;
     for generation in (first..=previous).rev() {
-        let name = match ring_name(prefix, generation) {
+        let name = match ring_name(naming, generation) {
             Ok(name) => name,
             Err(error) => {
                 unreachable!("the longer name {previous} took was short enough: {error}")
@@ -450,8 +520,8 @@ fn open_ring_check(object: &File) -> io::Result<usize> {
 
 /// The place of the ring `name` of this user: its lock file in a directory of this user's
 /// Application Support that no other user may enter, and which macOS never cleans as it
-/// cleans the temporary directories, and objects named for the user, since every user shares
-/// the names of shared-memory objects.
+/// cleans the temporary directories. Its rings' names hold a token only that lock file
+/// holds, since every user shares the names of shared-memory objects.
 pub(super) fn place_for_user(name: &str) -> io::Result<super::Place> {
     // The name becomes a file name in the directory, so it holds no slash and no step out of it.
     let named = name
@@ -480,15 +550,10 @@ pub(super) fn place_for_user(name: &str) -> io::Result<super::Place> {
     let directory = home.join("Library/Application Support/Flightdeck");
     place_directory(&directory)?;
 
-    let uid = unsafe { getuid() };
-
-    let place = super::Place {
+    Ok(super::Place {
         lock_path: directory.join(format!("{name}.lock")),
-        name_prefix: format!("/{name}.{uid}."),
-    };
-    // A ring's name holds the prefix and a generation, within what macOS takes.
-    ring_name(&place.name_prefix, u64::from(u32::MAX))?;
-    Ok(place)
+        name_prefix: RING_NAME_PREFIX.to_owned(),
+    })
 }
 
 /// Makes `directory` for this user alone where it is missing, or an error where it is no
