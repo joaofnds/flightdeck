@@ -11,7 +11,7 @@ use crate::u64_from_usize;
 /// Marks the start of a ring, so a reader never takes another object for one.
 pub(super) const MAGIC: u64 = u64::from_be_bytes(*b"FLTDRING");
 /// The layout this code writes and reads, which a change to the layout raises.
-pub(super) const LAYOUT_VERSION: u64 = 1;
+pub(super) const LAYOUT_VERSION: u64 = 2;
 
 /// The words of the header, which starts the ring.
 pub(super) const HEADER_MAGIC: usize = 0;
@@ -38,7 +38,26 @@ pub(super) const HEADER_FAN_CAPACITY: usize = 13;
 pub(super) const HEADER_PROCESS_CAPACITY: usize = 14;
 pub(super) const HEADER_COALITION_CAPACITY: usize = 15;
 pub(super) const HEADER_EVENT_CAPACITY: usize = 16;
+/// The words of each kind of record, a word for each, so a reader built with records of
+/// another width refuses the ring even where the layout version was not raised.
+pub(super) const HEADER_SLOT_FIXED_WORDS: usize = 17;
+pub(super) const HEADER_CPU_WORDS: usize = 18;
+pub(super) const HEADER_INTERFACE_WORDS: usize = 19;
+pub(super) const HEADER_PROCESS_WORDS: usize = 20;
+pub(super) const HEADER_COALITION_WORDS: usize = 21;
+pub(super) const HEADER_EVENT_WORDS: usize = 22;
 pub(super) const HEADER_WORDS: usize = 32;
+const _: () = assert!(HEADER_EVENT_WORDS < HEADER_WORDS);
+
+/// Each header word that holds a record's width, with the width this code reads.
+const RECORD_WIDTHS: [(usize, usize); 6] = [
+    (HEADER_SLOT_FIXED_WORDS, SLOT_FIXED_WORDS),
+    (HEADER_CPU_WORDS, CPU_WORDS),
+    (HEADER_INTERFACE_WORDS, INTERFACE_WORDS),
+    (HEADER_PROCESS_WORDS, PROCESS_WORDS),
+    (HEADER_COALITION_WORDS, COALITION_WORDS),
+    (HEADER_EVENT_WORDS, EVENT_WORDS),
+];
 
 /// The words that start each slot. The sequence word holds twice the publication the slot
 /// holds once the writer finished it, and one less while the writer writes it.
@@ -268,6 +287,9 @@ pub(super) fn store_header(words: &[AtomicU64], layout: Layout, header: Header) 
     for (index, value) in fields {
         words[index].store(value, Ordering::Relaxed);
     }
+    for (index, width) in RECORD_WIDTHS {
+        words[index].store(u64_from_usize(width), Ordering::Relaxed);
+    }
 }
 
 /// What a ring's header holds besides its shape.
@@ -291,6 +313,17 @@ pub(super) fn open_layout(header: &[AtomicU64], size_bytes: usize) -> io::Result
             io::ErrorKind::InvalidData,
             format!("a ring of layout {}", load(HEADER_LAYOUT_VERSION)),
         ));
+    }
+    for (index, width) in RECORD_WIDTHS {
+        if load(index) != u64_from_usize(width) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "a ring whose header word {index} holds a width of {}",
+                    load(index)
+                ),
+            ));
+        }
     }
 
     let shape = Shape {
@@ -366,11 +399,12 @@ mod tests {
         // Goal: a reader never reads an object as a ring where its header is another
         // program's, another layout's, or a shape no ring has.
         // Method: open headers that hold, one at a time, another magic, the next layout
-        // version, and a slot count of zero.
+        // version, a slot count of zero, and a process record one word wider.
         let breaks = [
             (HEADER_MAGIC, MAGIC + 1),
             (HEADER_LAYOUT_VERSION, LAYOUT_VERSION + 1),
             (HEADER_SLOT_COUNT, 0),
+            (HEADER_PROCESS_WORDS, u64_from_usize(PROCESS_WORDS + 1)),
         ];
 
         for (index, word) in breaks {
