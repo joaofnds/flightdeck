@@ -746,6 +746,23 @@ mod tests {
     }
 
     #[test]
+    fn drops_a_slot_its_writer_rewrote_during_the_load() {
+        // Goal: a slot the writer starts rewriting while a reader loads it is dropped, never
+        // returned with words of two publications, however the two threads are paced.
+        // Method: read publication 3 from a slot finished for it, with a load that moves the
+        // slot's sequence to twice 5 less 1, as a writer a lap ahead in a ring of two slots
+        // leaves it when it starts publication 5.
+        let slot = slot_holding(6, 40);
+
+        let loaded = read_finished(&slot, SLOT_SEQUENCE, 3, || {
+            slot[SLOT_SEQUENCE].store(9, Ordering::Relaxed);
+            Some(())
+        });
+
+        assert_eq!(None, loaded.unwrap());
+    }
+
+    #[test]
     fn refuses_a_slot_behind_the_publication_the_header_finished() {
         // Goal: a slot behind a publication the header calls finished is a broken ring, which
         // the reader reports rather than reading.
