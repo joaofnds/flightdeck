@@ -426,10 +426,12 @@ One writer, the collector, and several readers: the live view, the persister, an
 tool you point at it.
 
 The writer never waits for a reader. It overwrites the oldest tick, and each slot
-carries its tick number. A reader copies a slot and then checks the tick number again,
-as a single-writer seqlock does, so a slot overwritten during the copy is detected and
-dropped instead of read torn, and a reader that falls behind knows which ticks it
-missed. A slow or stopped reader, the viewer under a debugger or a persister waiting
+carries a publication number, which rises by one a slot and goes on across restarts,
+beside the tick number of the collector's run. A reader copies a slot and then checks
+its sequence word again, as a single-writer seqlock does, so a slot overwritten during
+the copy is detected and dropped instead of read torn. A reader that falls behind knows
+which publications it missed from a gap in their numbers, and tells that from a tick the
+collector slipped, which is a gap in tick numbers alone. A slow or stopped reader, the viewer under a debugger or a persister waiting
 on disk, cannot slow collection. This is the sampling port of the aircraft systems
 below.
 
@@ -443,8 +445,8 @@ Recommendation: the shared-memory ring, made with `shm_open`. The object outlive
 process that wrote it: a second process read what the first wrote after the first had
 exited. A reader that opens it read-only cannot make its mapping writable, since the
 kernel refused the attempt. The writer wakes readers once a tick with
-`os_sync_wake_by_address_all` and the `SHARED` flag, which macOS has had since 14.4,
-since several readers may wait.
+`os_sync_wake_by_address_all` and the `SHARED` flag, available from macOS 14.4, because
+several readers may wait.
 [iceoryx2](https://github.com/eclipse-iceoryx/iceoryx2) offers the same in Rust,
 publish-subscribe with events over shared memory, and lists macOS at its tier 2, "a
 restricted security and safety feature set". The ring is written here instead, in
@@ -452,16 +454,25 @@ restricted security and safety feature set". The ring is written here instead, i
 (`iceoryx2/src/port/publisher.rs`), and its cleanup of stale resources removes a dead
 publisher's data segment (`iceoryx2/src/service/stale_resource_cleanup.rs`), both read in
 its source at commit 0763bbc and not run. Its ticks would die with the collector, which
-the restart below rules out. Its latency and CPU were not compared, since that failure
-decides it.
+the restart below rules out. Its cleanup of dead nodes is configuration that defaults to
+on (`iceoryx2/src/config.rs`), and its blackboard pattern was not surveyed. Its latency
+and CPU were not compared. TASK-18 took this choice unattended, and it waits on the user's
+ruling, since the Decisions above ask for that weighing. The ring here is about 2,500
+lines in `collector/src/ring` and 770 lines of tests in `collector/tests/ring.rs`.
 
 Because the ring outlives the collector, a crash of the collector loses nothing the
-ring holds. On restart it seals whatever the ring holds past the last sealed tick
-before writing new ticks, so the ring holds two sealing windows, 120 ticks. Each slot
+ring holds. Each start writes a new ring under the next generation's name and keeps the
+previous ring for the persister to seal, so the ring holds two sealing windows, 120 ticks,
+and the previous ring holds what the crashed run left. A start also removes the ring
+before the previous one, so a second restart before the persister seals loses the oldest
+ring's unsealed ticks. The persister (TASK-19) decides when a sealed ring goes. Each slot
 holds full records with room for every process and coalition the collector's limits
-allow, so the ring's object is about 800 MB of address space, of which only the pages
-written take memory. A kernel panic or a power loss loses the open window, as
-decided.
+allow, about 500 MB of address space, of which only the pages written take memory. The
+event log beside the slots holds 120 ticks of events at the tracker's bound, about
+300 MB, and the writer fills it in a circle, so once it wraps all of it is in memory: at
+the 62 events a second measured on 2026-10-15 that takes about 9 hours. The object is
+796 MB, and after a restart two of them exist, both staying in memory or swap after the
+collector exits. A kernel panic or a power loss loses the open window, as decided.
 
 ## What aerospace, automotive and robotics systems do
 
@@ -494,7 +505,7 @@ its reason.
 | System | What it is | Fit here |
 |---|---|---|
 | DDS: Fast DDS, Cyclone DDS, RTI Connext | The OMG publish-subscribe standard that ROS 2 robots run on: discovery, typed topics and the QoS above, across a network of nodes. Cyclone DDS reaches shared memory through iceoryx. eProsima, which sells Fast DDS, reports severe problems with Cyclone and iceoryx above 1,000 messages a second, a competitor's claim. | Its QoS vocabulary fits. Discovery, a network protocol and C or C++ libraries buy nothing for one writer on one Mac. |
-| iceoryx2 | Eclipse's Rust rewrite of iceoryx: zero-copy shared memory, publish-subscribe, events, request-response and a blackboard. | The library candidate for the ring. |
+| iceoryx2 | Eclipse's Rust rewrite of iceoryx: zero-copy shared memory, publish-subscribe, events, request-response and a blackboard. | The library candidate for the ring, set aside under Moving the data. |
 | Zenoh | A Rust publish-subscribe and query protocol that ROS 2 can also run on. Its 1.5 release reports over 10 million 8-byte messages a second on MacBooks, and 3 million a second through shared memory. Its storages, with filesystem, RocksDB, S3 and InfluxDB backends, answer queries for stored data under the same keys as live data. | Only if the recording should also stream to another machine. Its storages are not a columnar engine, so DuckDB would still be needed. |
 | Aeron, Chronicle Queue, LMAX Disruptor | Single-writer rings from trading. Chronicle Queue keeps the ring in a memory-mapped file. | The pattern measured above. |
 
@@ -627,7 +638,10 @@ only the user read them, and arguments may need redacting before they are kept.
 Readers map the ring read-only, so no reader can corrupt it. The writer takes no lock,
 waits for no acknowledgment, and wakes readers with a broadcast, so no reader can stall
 it. The event queue is the one place that does not overwrite, and it drops and counts
-rather than block when full.
+rather than block when full. The ring as built departs from this paragraph in two
+places, pending the user's ruling on TASK-18: its event log overwrites its oldest records
+and a reader learns what it missed from the gap, and the writer holds a lock file, which a
+process of the same user that takes it keeps a new collector from starting.
 
 ## Recommended pipeline
 
@@ -696,10 +710,10 @@ them against.
 6. Whether coalitions group processes the way the app's notion of an app does, and how
    many coalitions the collector never learns because their processes are gone before a
    rescan.
-7. Settled without measuring, under Moving the data: the ring is written here, since
-   iceoryx2 loses a dead publisher's history. Not done: the latency and CPU of a tick
-   through each, how much of iceoryx2 the ring would use, and how much code a ring
-   written here takes to maintain.
+7. Taken without measuring and open for the user's ruling, under Moving the data: the
+   ring is written here, since iceoryx2 loses a dead publisher's history. Not done: the
+   latency and CPU of a tick through each, how much of iceoryx2 Flightdeck would use, and
+   a survey of its blackboard.
 8. Parquet against Vortex, which claims much faster random access and cannot yet read
    files written by a newer version of itself.
 9. For the root option: `eslogger`'s events a second and its CPU, file opens most of
