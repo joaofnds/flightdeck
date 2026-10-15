@@ -1435,15 +1435,31 @@ mod tests {
     fn reports_a_child_exiting_with_its_final_usage() {
         // Goal: a child the tracker follows is reported as an exit that carries the CPU time it
         // used, noticed as it exited.
-        // Method: follow for 500 ms while a child sleeps 200 ms and exits.
+        // Method: hold a child on its stdin until the tracker reports its start, which comes
+        // after the tracker watches it, then let it exit and follow until its exit. The child is
+        // reaped only after that, since its usage is read from the unreaped child.
         let mut tracker = tracker(INTERVAL);
+        let mut child = spawn_held("/bin/cat", &[]);
+        let pid = child.id().cast_signed();
+        let mut events = Vec::new();
+        follow_until_drained(
+            &mut tracker,
+            &mut Meter::default(),
+            &mut events,
+            "start of the held child",
+            is_start_of(pid),
+        );
 
-        let mut child = spawn_sleeper();
-        follow_for(&mut tracker, &mut Meter::default(), 500);
+        release(&mut child);
+        follow_until_drained(
+            &mut tracker,
+            &mut Meter::default(),
+            &mut events,
+            "exit of the released child",
+            is_exit_of(pid),
+        );
         child.wait().unwrap();
 
-        let pid = child.id().cast_signed();
-        let events: Vec<Event> = tracker.drain_events().collect();
         let exited_with_usage = |event: &Event| match event {
             Event::Exit {
                 pid: p,
@@ -1497,42 +1513,63 @@ mod tests {
     #[test]
     fn reports_a_child_with_the_coalition_it_started_in() {
         // Goal: a child's start carries the coalition it started in, which is its parent's.
-        // Method: follow for 500 ms while a child of this test sleeps, and compare the coalition
-        // its start carries with this test process's own.
+        // Method: hold a child of this test on its stdin, so it lives until the tracker reports
+        // its start, and compare the coalition its start carries with this test process's own.
         let mut tracker = tracker(INTERVAL);
-
-        let mut child = spawn_sleeper();
-        follow_for(&mut tracker, &mut Meter::default(), 500);
-        child.wait().unwrap();
-
-        let pid = child.id().cast_signed();
         let own = coalitions::coalition_of(std::process::id().cast_signed())
             .unwrap()
             .expect("this test process's coalition");
-        let events: Vec<Event> = tracker.drain_events().collect();
-        let started_in_own = |event: &Event| match event {
-            Event::Start { pid: p, coalition } => *p == pid && *coalition == Some(own),
-            _ => false,
-        };
-        assert!(
-            events.iter().any(started_in_own),
-            "child {pid} in {own:?}: {events:?}"
+        let mut child = spawn_held("/bin/cat", &[]);
+        let pid = child.id().cast_signed();
+
+        let mut events = Vec::new();
+        follow_until_drained(
+            &mut tracker,
+            &mut Meter::default(),
+            &mut events,
+            "start of the held child",
+            is_start_of(pid),
         );
+        release(&mut child);
+        child.wait().unwrap();
+
+        let start = Event::Start {
+            pid,
+            coalition: Some(own),
+        };
+        assert!(events.contains(&start), "{start:?}: {events:?}");
     }
 
     #[test]
     fn charges_each_step_of_following_a_child_to_its_own_source() {
         // Goal: scanning, reading a start, watching and reading an exit each charge their time to
         // their own source.
-        // Method: follow a child through its start and exit for 500 ms, and read each source's time
-        // from the cost of those 500 ms.
+        // Method: follow a child held on its stdin until the tracker reports its start, then let
+        // it exit and follow until its exit, and read each source's time from the cost of
+        // following.
         let timebase = Timebase::read().unwrap();
         let mut tracker = tracker(INTERVAL);
         let mut meter = Meter::default();
         let start = Snapshot::take(&meter, timebase).unwrap();
+        let mut child = spawn_held("/bin/cat", &[]);
+        let pid = child.id().cast_signed();
+        let mut events = Vec::new();
 
-        let mut child = spawn_sleeper();
-        follow_for(&mut tracker, &mut meter, 500);
+        follow_until_drained(
+            &mut tracker,
+            &mut meter,
+            &mut events,
+            "start of the held child",
+            is_start_of(pid),
+        );
+        release(&mut child);
+        follow_until_drained(
+            &mut tracker,
+            &mut meter,
+            &mut events,
+            "exit of the released child",
+            is_exit_of(pid),
+        );
         child.wait().unwrap();
 
         let cost = Snapshot::take(&meter, timebase)
