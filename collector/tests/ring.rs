@@ -1326,6 +1326,35 @@ mod tests {
     }
 
     #[test]
+    fn a_reader_with_another_home_finds_its_users_ring() {
+        // Goal: a user's place follows the user, not the environment, so a reader or a second
+        // writer started with another HOME meets the same lock file.
+        // Method: publish in a user's place, then read it with ring_reader run under a HOME
+        // that holds no Library.
+        let name = format!("fdh{}", std::process::id());
+        let place = Place::for_user(&name).unwrap();
+        let spawns = spawns();
+        let mut writer = Writer::create(&place, SHAPE).unwrap();
+        publish(&mut writer, 4);
+
+        let output = Command::new(env!("CARGO_BIN_EXE_ring_reader"))
+            .args(["--ring", &name, "--publications", "1"])
+            .env("HOME", "/var/empty")
+            .output()
+            .unwrap();
+        drop(spawns);
+
+        let ring = CString::new(std::fs::read(&place.lock_path).unwrap()).unwrap();
+        drop(writer);
+        assert_eq!(0, unsafe { shm_unlink(ring.as_ptr()) });
+        std::fs::remove_file(&place.lock_path).unwrap();
+        assert_eq!(
+            "publication 1 tick 4 processes 0 coalitions 0\n",
+            stdout(&output)
+        );
+    }
+
+    #[test]
     fn a_users_lock_file_lives_in_an_owner_only_directory_macos_never_cleans() {
         // Goal: the lock file the single writer holds, and readers find the ring by, is never
         // swept by dirhelper, which removes files under /var/folders and /tmp older than three

@@ -1,11 +1,13 @@
 //! The shared-memory object that holds a ring, and the lock file that names it.
 
-use std::ffi::{CStr, CString, c_char, c_int, c_uint, c_void};
+use std::ffi::{CStr, CString, OsStr, c_char, c_int, c_uint, c_void};
 use std::fs::{DirBuilder, File, OpenOptions};
 use std::io;
+use std::mem::offset_of;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, FileExt, MetadataExt, OpenOptionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::layout::{
@@ -78,7 +80,39 @@ unsafe extern "C" {
     fn shm_unlink(name: *const c_char) -> c_int;
     fn getuid() -> u32;
     fn getentropy(buffer: *mut c_void, size: usize) -> c_int;
+    fn getpwuid_r(
+        uid: u32,
+        passwd: *mut Passwd,
+        buffer: *mut c_char,
+        buffer_size: usize,
+        result: *mut *mut Passwd,
+    ) -> c_int;
 }
+
+/// `struct passwd` in `pwd.h`, its fields' `pw_` dropped, and `pw_passwd` given its full name,
+/// since clippy refuses a field named for its struct.
+#[repr(C)]
+struct Passwd {
+    name: *mut c_char,
+    password: *mut c_char,
+    uid: u32,
+    gid: u32,
+    change: i64,
+    class: *mut c_char,
+    gecos: *mut c_char,
+    dir: *mut c_char,
+    shell: *mut c_char,
+    expire: i64,
+}
+
+const _: () = assert!(size_of::<Passwd>() == 72);
+const _: () = assert!(offset_of!(Passwd, dir) == 48);
+
+/// The room `getpwuid_r` fills with a user's strings, what `sysconf(_SC_GETPW_R_SIZE_MAX)`
+/// gives on macOS.
+const PASSWD_BUFFER_SIZE: usize = 4096;
+
+unsafe extern "C" {}
 
 /// A shared-memory object mapped into this process, which unmaps it when it drops.
 pub(super) struct Mapping {
@@ -541,14 +575,8 @@ pub(super) fn place_for_user(name: &str) -> io::Result<super::Place> {
         ));
     }
 
-    let Some(home) = std::env::home_dir() else {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "this user has no home directory",
-        ));
-    };
-    let directory = home.join("Library/Application Support/Flightdeck");
-    place_directory(&directory)?;
+    let directory = place_for_user_home()?.join("Library/Application Support/Flightdeck");
+    place_for_user_directory(&directory)?;
 
     Ok(super::Place {
         lock_path: directory.join(format!("{name}.lock")),
@@ -556,17 +584,59 @@ pub(super) fn place_for_user(name: &str) -> io::Result<super::Place> {
     })
 }
 
+/// This user's home directory, from the user database by uid rather than from HOME, so every
+/// process of the user, whatever its environment, meets the same lock files.
+fn place_for_user_home() -> io::Result<PathBuf> {
+    let mut passwd = std::mem::MaybeUninit::<Passwd>::uninit();
+    let mut buffer: [c_char; PASSWD_BUFFER_SIZE] = [0; PASSWD_BUFFER_SIZE];
+    let mut result = std::ptr::null_mut();
+    let status = unsafe {
+        getpwuid_r(
+            getuid(),
+            passwd.as_mut_ptr(),
+            buffer.as_mut_ptr(),
+            buffer.len(),
+            &raw mut result,
+        )
+    };
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status));
+    }
+
+    if result.is_null() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "the user database holds no entry for this user",
+        ));
+    }
+
+    // getpwuid_r filled passwd, since it returned it as the result.
+    let directory = unsafe { CStr::from_ptr(passwd.assume_init_ref().dir) };
+    let home = PathBuf::from(OsStr::from_bytes(directory.to_bytes()));
+    if !home.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("this user's home {} is no absolute path", home.display()),
+        ));
+    }
+
+    Ok(home)
+}
+
 /// Makes `directory` for this user alone where it is missing, or an error where it is no
 /// directory, another user's, or one another user may enter, since its lock files name the
 /// rings.
-fn place_directory(directory: &Path) -> io::Result<()> {
+fn place_for_user_directory(directory: &Path) -> io::Result<()> {
     let made = DirBuilder::new()
         .recursive(false)
         .mode(DIRECTORY_MODE)
         .create(directory);
     if let Err(error) = made {
         if error.kind() != io::ErrorKind::AlreadyExists {
-            return Err(error);
+            return Err(io::Error::new(
+                error.kind(),
+                format!("making {}: {error}", directory.display()),
+            ));
         }
     }
 
@@ -601,6 +671,8 @@ fn place_directory(directory: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
     use super::*;
 
     #[test]
@@ -647,7 +719,7 @@ mod tests {
         let directory =
             std::env::temp_dir().join(format!("flightdeck-made-{}", std::process::id()));
 
-        let placed = place_directory(&directory);
+        let placed = place_for_user_directory(&directory);
 
         let mode = std::fs::metadata(&directory).unwrap().mode() & 0o777;
         std::fs::remove_dir(&directory).unwrap();
@@ -662,9 +734,11 @@ mod tests {
         // it.
         let directory =
             std::env::temp_dir().join(format!("flightdeck-open-{}", std::process::id()));
-        DirBuilder::new().mode(0o755).create(&directory).unwrap();
+        std::fs::create_dir(&directory).unwrap();
+        // Set apart from the create, which the process's umask would narrow.
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        let placed = place_directory(&directory);
+        let placed = place_for_user_directory(&directory);
 
         std::fs::remove_dir(&directory).unwrap();
         assert_eq!(io::ErrorKind::PermissionDenied, placed.unwrap_err().kind());
