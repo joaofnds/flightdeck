@@ -1008,19 +1008,21 @@ mod tests {
     fn keeps_a_tick_to_its_event_bound_and_counts_the_rest_as_dropped() {
         // Goal: a tick that sees more process events than the tracker's bound keeps to the
         // bound and counts the rest as dropped.
-        // Method: follow one tick of 300 ms with room for one event while a thread forks every
-        // 2 ms, each fork a start and an exit.
+        // Method: with room for one event, follow one tick without draining while a thread forks
+        // every 2 ms, each fork a start and an exit, until a dropped start or exit is counted.
         let limits = Limits {
             events_per_tick_max: 1,
             ..limits()
         };
         let mut tracker = Tracker::new(Timebase::read().unwrap(), INTERVAL, limits).unwrap();
 
-        while_forking_every_2_ms(|| follow_for(&mut tracker, &mut Meter::default(), 300));
+        while_forking_every_2_ms(|| {
+            follow_until_counted(&mut tracker, "dropped start or exit", |counts| {
+                counts.dropped_starts + counts.dropped_exits > 0
+            });
+        });
 
         assert_eq!(1, tracker.drain_events().count());
-        let dropped = tracker.counts.dropped_starts + tracker.counts.dropped_exits;
-        assert!(dropped > 0, "{:?}", tracker.counts);
     }
 
     #[test]
@@ -1435,6 +1437,25 @@ mod tests {
         }
     }
 
+    /// Follows `tracker` a step at a time, draining nothing, until its counts satisfy
+    /// `is_awaited`. Fails after `STEPS_MAX` steps, naming the `awaited` count.
+    fn follow_until_counted(
+        tracker: &mut Tracker,
+        awaited: &str,
+        is_awaited: impl Fn(&Counts) -> bool,
+    ) {
+        for _ in 0..STEPS_MAX {
+            follow_for(tracker, &mut Meter::default(), STEP_MS);
+            if is_awaited(&tracker.counts) {
+                return;
+            }
+        }
+        panic!(
+            "no {awaited} after {STEPS_MAX} steps of {STEP_MS} ms: {:?}",
+            tracker.counts
+        );
+    }
+
     /// Spawns `program` with its stdin on a pipe this test holds, so a child that reads it
     /// waits there until `release`.
     fn spawn_held(program: &str, args: &[&str]) -> std::process::Child {
@@ -1758,27 +1779,27 @@ mod tests {
     fn rescans_an_interval_after_forks_that_came_too_soon() {
         // Goal: forks within an interval of the last rescan are rescanned for once the interval
         // passes, as a trailing rescan.
-        // Method: start two children 1 ms apart and follow for 600 ms with a 300 ms interval.
-        let mut tracker = tracker(Duration::from_millis(300));
+        // Method: follow with a 1 s interval while a thread forks every 2 ms, until a trailing
+        // rescan is counted. The test keeps one window: it fails with no defect only if every
+        // wake for its whole bound comes a second or more after the rescan before it.
+        let mut tracker = tracker(Duration::from_secs(1));
 
-        let mut first = spawn_sleeper();
-        std::thread::sleep(Duration::from_millis(1));
-        let mut second = spawn_sleeper();
-        follow_for(&mut tracker, &mut Meter::default(), 600);
-        first.wait().unwrap();
-        second.wait().unwrap();
-
-        assert!(tracker.counts.trailing_rescans >= 1, "{:?}", tracker.counts);
+        while_forking_every_2_ms(|| {
+            follow_until_counted(&mut tracker, "trailing rescan", |counts| {
+                counts.trailing_rescans > 0
+            });
+        });
     }
 
     #[test]
     fn waits_an_interval_after_a_listing_before_rescanning_on_a_fork() {
         // Goal: a listing the tracker observes counts as a rescan, so a fork within an interval of
         // it waits for the interval rather than rescanning at once.
-        // Method: 250 ms after the tracker's first scan, observe a listing, start a child, and
-        // follow for 100 ms with a 200 ms interval.
-        let mut tracker = tracker(Duration::from_millis(200));
-        std::thread::sleep(Duration::from_millis(250));
+        // Method: with the last rescan put long past and a 10 s interval, observe a listing, start
+        // a child, and follow for 100 ms. Without the listing the child's fork would bring a
+        // rescan at once, and with it only a 10 s stall before the fork's wake could.
+        let mut tracker = tracker(Duration::from_secs(10));
+        tracker.throttle.rescan_ticks_last = 0;
         let listing = current_listing();
         tracker.observe(&listing, &mut Meter::default()).unwrap();
         let before = tracker.counts;
@@ -1788,6 +1809,7 @@ mod tests {
         child.wait().unwrap();
 
         let since = tracker.counts.since(&before);
+        assert!(since.forks > 0, "{since:?}");
         assert_eq!(0, since.leading_rescans, "{since:?}");
         assert_eq!(1, tracker.counts.listing_rescans);
     }
@@ -1810,15 +1832,20 @@ mod tests {
 
     #[test]
     fn rescans_at_most_once_an_interval_however_often_processes_fork() {
-        // Goal: forks however frequent cause at most about one rescan an interval.
+        // Goal: forks however frequent cause at most one rescan an interval.
         // Method: follow for 300 ms with a 50 ms interval while a thread forks every 2 ms, and hold
-        // the rescans from forks to one an interval plus two.
+        // the rescans from forks to one more than the intervals the follow took, however long
+        // that was. Each rescan from a fork begins an interval or more after the one before.
+        let timebase = Timebase::read().unwrap();
         let mut tracker = tracker(INTERVAL);
-        let follow_ms = 300;
+        let interval_ns = u64::try_from(INTERVAL.as_nanos()).unwrap();
+        let interval_ticks = timebase.ticks(interval_ns).unwrap();
+        let start_ticks = clock::now();
 
-        while_forking_every_2_ms(|| follow_for(&mut tracker, &mut Meter::default(), follow_ms));
+        while_forking_every_2_ms(|| follow_for(&mut tracker, &mut Meter::default(), 300));
 
-        let cap = follow_ms / u64::try_from(INTERVAL.as_millis()).unwrap() + 2;
+        // The division floors.
+        let cap = (clock::now() - start_ticks) / interval_ticks + 1;
         assert!(
             rescans_from_forks(&tracker.counts) <= cap,
             "{:?} over {cap}",
