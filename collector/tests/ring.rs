@@ -1289,8 +1289,8 @@ mod tests {
 
     #[test]
     fn a_ring_name_that_would_leave_the_users_directory_is_refused() {
-        // Goal: a ring's name never puts its lock file outside this user's temporary
-        // directory, where the writer would cut and rewrite a file it does not own.
+        // Goal: a ring's name never puts its lock file outside this user's directory of lock
+        // files, where the writer would cut and rewrite a file it does not own.
         // Method: ask for the place of names with a slash, a parent step, a dot and nothing.
         let names = ["../x", "a/b", ".x", ""];
 
@@ -1298,6 +1298,26 @@ mod tests {
             assert!(Place::for_user(name).is_err(), "{name:?}");
         }
         assert!(Place::for_user("flight-deck_2").is_ok());
+    }
+
+    #[test]
+    fn a_users_lock_file_lives_in_an_owner_only_directory_macos_never_cleans() {
+        // Goal: the lock file the single writer holds, and readers find the ring by, is never
+        // swept by dirhelper, which removes files under /var/folders and /tmp older than three
+        // days, and no other user may enter its directory.
+        // Method: ask for a user's place and look at its lock file's directory.
+        let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+
+        let place = Place::for_user("flightdeck").unwrap();
+
+        let directory = place.lock_path.parent().unwrap();
+        let metadata = std::fs::metadata(directory).unwrap();
+        assert_eq!(
+            home.join("Library/Application Support/Flightdeck"),
+            directory
+        );
+        assert_eq!(unsafe { getuid() }, metadata.uid());
+        assert_eq!(0o700, metadata.permissions().mode() & 0o777);
     }
 
     #[test]

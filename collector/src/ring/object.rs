@@ -1,13 +1,11 @@
 //! The shared-memory object that holds a ring, and the lock file that names it.
 
-use std::ffi::OsStr;
 use std::ffi::{CStr, CString, c_char, c_int, c_uint, c_void};
-use std::fs::{File, OpenOptions};
+use std::fs::{DirBuilder, File, OpenOptions};
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt};
-use std::path::{Path, PathBuf};
+use std::os::unix::fs::{DirBuilderExt, FileExt, MetadataExt, OpenOptionsExt};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::layout::{
@@ -35,10 +33,8 @@ const GENERATION_TRIES: u64 = 16;
 /// comes near it.
 pub(super) const NUMBER_MAX: u64 = u64::MAX / 4;
 
-/// The `confstr` name of this user's own temporary directory, from `unistd.h`.
-const CS_DARWIN_USER_TEMP_DIR: c_int = 65537;
-/// The longest path macOS takes, `PATH_MAX` in `sys/syslimits.h`.
-const PATH_MAX: usize = 1024;
+/// The mode of the directory of a user's lock files, which no other user may enter.
+const DIRECTORY_MODE: u32 = 0o700;
 
 const O_RDONLY: c_int = 0x0000;
 const O_RDWR: c_int = 0x0002;
@@ -62,7 +58,6 @@ unsafe extern "C" {
     fn munmap(address: *mut c_void, length: usize) -> c_int;
     fn shm_unlink(name: *const c_char) -> c_int;
     fn getuid() -> u32;
-    fn confstr(name: c_int, buffer: *mut c_char, length: usize) -> usize;
 }
 
 /// A shared-memory object mapped into this process, which unmaps it when it drops.
@@ -453,9 +448,10 @@ fn open_ring_check(object: &File) -> io::Result<usize> {
     usize::try_from(metadata.len()).map_err(io::Error::other)
 }
 
-/// The place of the ring `name` of this user: its lock file in this user's own temporary
-/// directory, which no other user may enter, and objects named for the user, since every
-/// user shares the names of shared-memory objects.
+/// The place of the ring `name` of this user: its lock file in a directory of this user's
+/// Application Support that no other user may enter, and which macOS never cleans as it
+/// cleans the temporary directories, and objects named for the user, since every user shares
+/// the names of shared-memory objects.
 pub(super) fn place_for_user(name: &str) -> io::Result<super::Place> {
     // The name becomes a file name in the directory, so it holds no slash and no step out of it.
     let named = name
@@ -475,26 +471,15 @@ pub(super) fn place_for_user(name: &str) -> io::Result<super::Place> {
         ));
     }
 
-    let mut buffer = [0u8; PATH_MAX];
-    let length = unsafe {
-        confstr(
-            CS_DARWIN_USER_TEMP_DIR,
-            buffer.as_mut_ptr().cast::<c_char>(),
-            buffer.len(),
-        )
-    };
-    if length == 0 {
-        return Err(io::Error::last_os_error());
-    }
-
-    // The length counts the closing NUL, and one past the buffer means the path was cut off.
-    if length > buffer.len() {
-        return Err(io::Error::other(
-            "this user's temporary directory is past PATH_MAX",
+    let Some(home) = std::env::home_dir() else {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "this user has no home directory",
         ));
-    }
+    };
+    let directory = home.join("Library/Application Support/Flightdeck");
+    place_directory(&directory)?;
 
-    let directory = PathBuf::from(OsStr::from_bytes(&buffer[..length - 1]));
     let uid = unsafe { getuid() };
 
     let place = super::Place {
@@ -504,6 +489,49 @@ pub(super) fn place_for_user(name: &str) -> io::Result<super::Place> {
     // A ring's name holds the prefix and a generation, within what macOS takes.
     ring_name(&place.name_prefix, u64::from(u32::MAX))?;
     Ok(place)
+}
+
+/// Makes `directory` for this user alone where it is missing, or an error where it is no
+/// directory, another user's, or one another user may enter, since its lock files name the
+/// rings.
+fn place_directory(directory: &Path) -> io::Result<()> {
+    let made = DirBuilder::new()
+        .recursive(false)
+        .mode(DIRECTORY_MODE)
+        .create(directory);
+    if let Err(error) = made {
+        if error.kind() != io::ErrorKind::AlreadyExists {
+            return Err(error);
+        }
+    }
+
+    let metadata = std::fs::metadata(directory)?;
+    if !metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotADirectory,
+            format!("{} is no directory", directory.display()),
+        ));
+    }
+
+    if metadata.uid() != unsafe { getuid() } {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("{} belongs to uid {}", directory.display(), metadata.uid()),
+        ));
+    }
+
+    if metadata.mode() & 0o777 != DIRECTORY_MODE {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "{} has mode {:o}, where the rings need {DIRECTORY_MODE:o}",
+                directory.display(),
+                metadata.mode() & 0o777
+            ),
+        ));
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -543,5 +571,37 @@ mod tests {
 
         assert_eq!(NUMBER_MAX, largest);
         assert_eq!(0, past);
+    }
+
+    #[test]
+    fn makes_a_missing_place_directory_for_its_user_alone() {
+        // Goal: the directory of a user's lock files, where it is missing, is made so that no
+        // other user may enter it.
+        // Method: ask for a directory of this test's own that does not exist, and read its
+        // mode.
+        let directory =
+            std::env::temp_dir().join(format!("flightdeck-made-{}", std::process::id()));
+
+        let placed = place_directory(&directory);
+
+        let mode = std::fs::metadata(&directory).unwrap().mode() & 0o777;
+        std::fs::remove_dir(&directory).unwrap();
+        placed.unwrap();
+        assert_eq!(DIRECTORY_MODE, mode);
+    }
+
+    #[test]
+    fn refuses_a_place_directory_another_user_may_enter() {
+        // Goal: lock files never go where another user could read the ring names they hold.
+        // Method: make a directory of this test's own that every user may enter, and ask for
+        // it.
+        let directory =
+            std::env::temp_dir().join(format!("flightdeck-open-{}", std::process::id()));
+        DirBuilder::new().mode(0o755).create(&directory).unwrap();
+
+        let placed = place_directory(&directory);
+
+        std::fs::remove_dir(&directory).unwrap();
+        assert_eq!(io::ErrorKind::PermissionDenied, placed.unwrap_err().kind());
     }
 }
