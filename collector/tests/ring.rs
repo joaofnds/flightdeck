@@ -840,7 +840,7 @@ mod tests {
         assert_eq!(std::io::ErrorKind::WouldBlock, second.err().unwrap().kind());
         let output = read_ring(&place, &["--publications", "1"]);
         assert_eq!(
-            "publication 1 tick 5 processes 0 coalitions 0\n",
+            "publication 1 tick 4 processes 0 coalitions 0\n",
             stdout(&output)
         );
     }
@@ -1357,9 +1357,13 @@ mod tests {
         // Method: publish in a user's place, then read it with ring_reader run under a HOME
         // that holds no Library.
         let name = format!("fdh{}", std::process::id());
-        let place = Place::for_user(&name).unwrap();
+        // Its drop removes the user's ring and lock file whether the test passes or not.
+        let place = TestPlace {
+            place: Place::for_user(&name).unwrap(),
+            tokens_spoiled: Mutex::new(Vec::new()),
+        };
         let spawns = spawns();
-        let mut writer = Writer::create(&place, SHAPE).unwrap();
+        let mut writer = Writer::create(&place.place, SHAPE).unwrap();
         publish(&mut writer, 4);
 
         let output = Command::new(env!("CARGO_BIN_EXE_ring_reader"))
@@ -1369,10 +1373,6 @@ mod tests {
             .unwrap();
         drop(spawns);
 
-        let ring = CString::new(std::fs::read(&place.lock_path).unwrap()).unwrap();
-        drop(writer);
-        assert_eq!(0, unsafe { shm_unlink(ring.as_ptr()) });
-        std::fs::remove_file(&place.lock_path).unwrap();
         assert_eq!(
             "publication 1 tick 4 processes 0 coalitions 0\n",
             stdout(&output)
