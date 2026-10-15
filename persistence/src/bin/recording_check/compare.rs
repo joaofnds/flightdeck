@@ -20,6 +20,7 @@ struct Reference {
 }
 
 pub fn run(root: &Path, reference: &Path) -> Result<()> {
+    persistence::query::validate_root(root)?;
     let source = inspect(reference)?;
     let manifests = discover(root, &source)?;
     if manifests.is_empty() {
@@ -229,9 +230,9 @@ fn compare_table(
             let path = root
                 .join(&manifest.data_directory)
                 .join(format!("{table}.parquet"));
-            format!("'{}'", path.to_string_lossy().replace('\'', "''"))
+            persistence::query::parquet_source(&path).map(|path| format!("'{path}'"))
         })
-        .collect();
+        .collect::<Result<_>>()?;
     let sql = format!(
         "SELECT * FROM read_parquet([{}]) WHERE publication>={} \
         AND publication<={} ORDER BY {order}",

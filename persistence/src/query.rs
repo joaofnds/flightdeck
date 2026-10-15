@@ -17,6 +17,7 @@ pub struct Second {
 
 /// Errors preserve incomplete enumeration rather than returning a complete empty answer.
 pub fn processes_at_second(root: &Path, second: u64) -> Result<Second> {
+    validate_root(root)?;
     let mut result = Second::default();
     visit_names(&root.join("data"), |run| {
         validate_run(run)?;
@@ -58,6 +59,26 @@ pub fn processes_at_second(root: &Path, second: u64) -> Result<Second> {
     Ok(result)
 }
 
+/// Refuses paths the engine could interpret as patterns or change during UTF-8 conversion.
+pub fn validate_root(path: &Path) -> Result<()> {
+    let text = path
+        .to_str()
+        .ok_or(crate::Error::Bound("query path encoding"))?;
+    if text.bytes().any(|byte| matches!(byte, b'*' | b'?' | b'[')) {
+        return Err(crate::Error::Bound("query path glob"));
+    }
+    Ok(())
+}
+
+/// Produces one literal SQL path after rejecting the engine's glob metacharacters.
+pub fn parquet_source(path: &Path) -> Result<String> {
+    validate_root(path)?;
+    let text = path
+        .to_str()
+        .ok_or(crate::Error::Bound("query path encoding"))?;
+    Ok(text.replace('\'', "''"))
+}
+
 fn visit_names(path: &Path, mut visit: impl FnMut(&str) -> Result<()>) -> Result<()> {
     let mut buffer: Box<[u64; DIRECTORY_BUFFER_WORDS]> = vec![0; DIRECTORY_BUFFER_WORDS]
         .into_boxed_slice()
@@ -80,12 +101,7 @@ fn query_window(root: &Path, manifest: &Manifest, second: u64) -> Result<Vec<(i3
         SET autoload_known_extensions=false; SET threads=1; SET memory_limit='256MB';",
     )?;
     let directory = root.join(&manifest.data_directory);
-    let source = |table| {
-        directory
-            .join(format!("{table}.parquet"))
-            .to_string_lossy()
-            .replace('\'', "''")
-    };
+    let source = |table| parquet_source(&directory.join(format!("{table}.parquet")));
     let first = second
         .checked_mul(1_000_000_000)
         .ok_or(crate::Error::Bound("query time"))?;
@@ -103,9 +119,9 @@ fn query_window(root: &Path, manifest: &Manifest, second: u64) -> Result<Vec<(i3
         JOIN t USING(publication) WHERE e.kind=3 AND e.availability=0) \
         SELECT pid,user_ns FROM all_usage QUALIFY row_number() OVER \
         (PARTITION BY publication,pid,awake_ns_at_start ORDER BY priority DESC)=1 ORDER BY pid",
-        source("ticks"),
-        source("processes"),
-        source("events")
+        source("ticks")?,
+        source("processes")?,
+        source("events")?
     );
     let mut statement = connection.prepare(&sql)?;
     let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
