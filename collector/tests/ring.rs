@@ -1690,7 +1690,10 @@ mod tests {
         // with words of two ticks.
         // Method: a thread publishes ticks as fast as it can into two slots, each tick's
         // processes all carrying the tick's number, while this thread reads until it has read
-        // many ticks and missed some, checking every process of every tick it read.
+        // many ticks, checking every process of every tick it read. Whether the writer rewrites
+        // a slot during a copy depends on how the two threads are paced, so the test asserts
+        // nothing about misses, and drops_a_slot_its_writer_rewrote_during_the_load in the ring
+        // module holds that rule at any pace.
         const PROCESSES: usize = 64;
         const READS: u64 = 200;
         // A bound on the reads keeps a broken copy from hanging the test: the reader gives up
@@ -1705,7 +1708,7 @@ mod tests {
         let done = std::sync::atomic::AtomicBool::new(false);
         let (created, writer_created) = std::sync::mpsc::channel();
 
-        let (read, missed) = std::thread::scope(|scope| {
+        let read = std::thread::scope(|scope| {
             scope.spawn(|| {
                 // A writer maps the ring into its own thread, since a mapping is not Send.
                 let mut writer = Writer::create(&place.place, shape).unwrap();
@@ -1729,7 +1732,7 @@ mod tests {
             // included, so a failure ends the test instead of leaving the writer running.
             let _stop = StopOnDrop(&done);
             let mut reader = Reader::open(place.lock_path()).unwrap();
-            let (mut read, mut missed) = (0, 0);
+            let mut read = 0;
             for _ in 0..ATTEMPTS {
                 if read == READS {
                     break;
@@ -1742,15 +1745,13 @@ mod tests {
                             assert_eq!(i64::from(process.pid), i64::try_from(tick).unwrap());
                         }
                     }
-                    Found::Missed { first, end } => missed += end - first,
-                    Found::Nothing => {}
+                    Found::Missed { .. } | Found::Nothing => {}
                 }
             }
-            (read, missed)
+            read
         });
 
         assert_eq!(READS, read);
-        assert!(missed > 0);
     }
 
     /// Stops a writer thread when dropped, so a test that fails still ends.
