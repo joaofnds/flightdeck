@@ -1401,9 +1401,9 @@ mod tests {
 
     #[test]
     fn only_the_writers_user_reads_the_ring_and_nobody_writes_it() {
-        // Goal: another user cannot open the ring, and no process opens it to write, the
-        // writer's own user's included. No second user is reachable here, so the mode and the
-        // owner stand for the first half.
+        // Goal: only the writer's user may read the ring, and no process opens it to write,
+        // the writer's own user's included. another_user_cannot_open_the_ring opens it as a
+        // second user where one is reachable.
         // Method: make a writer, read the ring's owner and mode, and open it to write.
         let place = TestPlace::new("mode");
         let _writer = Writer::create(&place.place, SHAPE).unwrap();
@@ -1417,6 +1417,42 @@ mod tests {
         assert_eq!(0o400, ring.mode() & 0o777);
         assert_eq!(Err(EACCES), place.open_named(O_RDWR).map(drop));
         assert_eq!(0o600, lock.permissions().mode() & 0o777);
+    }
+
+    #[test]
+    #[ignore = "runs a process as nobody through sudo without a password, which CI's runner allows"]
+    fn another_user_cannot_open_the_ring() {
+        // Goal: a process of another user is refused the ring, and it is the ring's mode that
+        // refuses it.
+        // Method: make a writer, copy the ring_open binary where every user may run it, since
+        // nobody may be unable to enter the build's directory, and open the ring with it as
+        // this user and as nobody.
+        let place = TestPlace::new("other");
+        let _writer = Writer::create(&place.place, SHAPE).unwrap();
+        let name = std::fs::read_to_string(place.lock_path()).unwrap();
+        let directory = PathBuf::from(format!("/tmp/flightdeck-other-{}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let ring_open = directory.join("ring_open");
+        std::fs::copy(env!("CARGO_BIN_EXE_ring_open"), &ring_open).unwrap();
+        std::fs::set_permissions(&ring_open, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let spawns = spawns();
+        let own = Command::new(&ring_open)
+            .args(["--name", &name])
+            .output()
+            .unwrap();
+        let other = Command::new("sudo")
+            .args(["-n", "-u", "nobody"])
+            .arg(&ring_open)
+            .args(["--name", &name])
+            .output()
+            .unwrap();
+        drop(spawns);
+
+        std::fs::remove_dir_all(&directory).unwrap();
+        assert_eq!("opened\n", stdout(&own));
+        assert_eq!(format!("refused with errno {EACCES}\n"), stdout(&other));
     }
 
     #[test]

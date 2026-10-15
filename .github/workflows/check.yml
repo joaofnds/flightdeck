@@ -57,3 +57,9 @@ jobs:
           --skip smc::tests::reads_the_temperature_of_a_soc_sensor
           --skip smc::tests::refuses_a_float_key_the_smc_holds_as_another_type
           --skip smc::tests::refuses_a_key_read_as_a_type_it_does_not_hold
+      # Another user's open of the ring needs a second user, which the runner's sudo gives
+      # without a password and a contributor's machine does not, so the test is ignored
+      # elsewhere and runs here. It fails, rather than skips, where sudo asks for a password.
+      - run: >-
+          cargo test --locked --test ring -- --exact --ignored
+          tests::another_user_cannot_open_the_ring
