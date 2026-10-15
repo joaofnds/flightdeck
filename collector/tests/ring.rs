@@ -9,7 +9,8 @@ mod tests {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::path::PathBuf;
     use std::process::{Command, Output};
-    use std::sync::{Mutex, MutexGuard};
+    use std::sync::{Barrier, Mutex, MutexGuard};
+    use std::time::{Duration, Instant};
 
     use collector::coalitions::Coalition;
     use collector::machine::Memory;
@@ -453,6 +454,59 @@ mod tests {
             found(3, 0, Event::Exec { pid: 3 }),
             reader.read_event().unwrap()
         );
+    }
+
+    #[test]
+    fn a_waiting_reader_wakes_when_the_writer_publishes() {
+        // Goal: a reader that waits for the next tick learns of it when the writer publishes,
+        // rather than when its wait runs out.
+        // Method: a thread opens a reader and waits up to 20 seconds on the empty ring, while
+        // this thread publishes 100 milliseconds after the reader opened. The thread times its
+        // wait.
+        let place = TestPlace::new("wake");
+        let mut writer = Writer::create(&place.place, SHAPE).unwrap();
+        let opened = Barrier::new(2);
+
+        let (waited, found) = std::thread::scope(|scope| {
+            let waiter = scope.spawn(|| {
+                // A reader maps the ring into its own thread, since a mapping is not Send.
+                let mut reader = Reader::open(place.lock_path()).unwrap();
+                opened.wait();
+                let start = Instant::now();
+                reader.wait(Duration::from_secs(20)).unwrap();
+                (start.elapsed(), reader.read().unwrap())
+            });
+            opened.wait();
+            std::thread::sleep(Duration::from_millis(100));
+            publish(&mut writer, 3);
+            waiter.join().unwrap()
+        });
+
+        assert!(waited < Duration::from_secs(5), "waited {waited:?}");
+        assert_eq!(
+            Found::Publication {
+                publication: 1,
+                tick: 3
+            },
+            found
+        );
+    }
+
+    #[test]
+    fn a_waiting_reader_returns_when_its_wait_runs_out() {
+        // Goal: a reader's wait ends at its timeout when the writer publishes nothing, so a
+        // reader can look for a newer ring.
+        // Method: wait 200 milliseconds on an empty ring, and time the wait.
+        let place = TestPlace::new("timeout");
+        let _writer = Writer::create(&place.place, SHAPE).unwrap();
+        let reader = Reader::open(place.lock_path()).unwrap();
+
+        let start = Instant::now();
+        reader.wait(Duration::from_millis(200)).unwrap();
+        let waited = start.elapsed();
+
+        assert!(waited >= Duration::from_millis(150), "waited {waited:?}");
+        assert!(waited < Duration::from_secs(5), "waited {waited:?}");
     }
 
     #[test]

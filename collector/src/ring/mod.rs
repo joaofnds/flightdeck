@@ -12,13 +12,14 @@ mod event;
 mod layout;
 mod object;
 mod tick;
+mod wake;
 
 use std::fs::File;
 use std::io::{self, Read};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering, fence};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use event::{load_event, store_event};
 use layout::{
@@ -34,6 +35,10 @@ pub use tick::{Dropped, IOReportReadings, Readings, SmcReadings, Tick, shape_for
 use crate::tracker::Event;
 use crate::u64_from_usize;
 use tick::{load_tick, store_tick};
+use wake::{Waited, wait, wake_all};
+
+/// How long a reader whose wait macOS cannot take sleeps before it looks again.
+const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// Where a ring lives: the lock file its writer holds, which names the ring, and the start of
 /// the name of each ring the writer makes.
@@ -168,6 +173,7 @@ impl Writer {
 
         words[HEADER_NEWEST_PUBLICATION].store(publication, Ordering::Release);
         self.publication = publication;
+        wake_all(&words[HEADER_NEWEST_PUBLICATION]);
     }
 }
 
@@ -224,6 +230,24 @@ impl Reader {
     #[must_use]
     pub fn run_start_ns(&self) -> u64 {
         self.run_start_ns
+    }
+
+    /// Sleeps until the writer publishes past the publications the reader has read, for at
+    /// most `timeout`, and returns at once where it already has. A reader whose wait macOS
+    /// cannot take sleeps `POLL_INTERVAL` instead, or `timeout` where that is shorter.
+    pub fn wait(&self, timeout: Duration) -> io::Result<()> {
+        assert!(!timeout.is_zero());
+
+        let newest_word = &self.mapping.words()[HEADER_NEWEST_PUBLICATION];
+        let newest = newest_word.load(Ordering::Relaxed);
+        if self.next <= newest {
+            return Ok(());
+        }
+        let timeout_ns = u64::try_from(timeout.as_nanos()).map_err(io::Error::other)?;
+        if wait(newest_word, newest, timeout_ns)? == Waited::Unsupported {
+            std::thread::sleep(timeout.min(POLL_INTERVAL));
+        }
+        Ok(())
     }
 
     /// Reads the next publication, or the range of those the writer overwrote first.
