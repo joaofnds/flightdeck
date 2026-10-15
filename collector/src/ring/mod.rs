@@ -31,7 +31,7 @@ use object::{
     LockedName, Mapping, PROT_READ, PROT_WRITE, create_lock, create_object, create_previous,
     create_unlink_older, open_ring, place_for_user,
 };
-pub use tick::{Dropped, IOReportReadings, Readings, SmcReadings, Tick, shape_for};
+pub use tick::{Dropped, IOReportReadings, Readings, SmcReadings, Tick};
 
 use crate::tracker::Event;
 use crate::u64_from_usize;

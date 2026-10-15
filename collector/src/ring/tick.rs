@@ -5,7 +5,6 @@
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::Shape;
 use super::layout::{
     COALITION_WORDS, CPU_WORDS, INTERFACE_WORDS, Layout, MEMORY_WORDS, PROCESS_WORDS,
     SLOT_COALITION_COUNT, SLOT_CORE_COUNT, SLOT_CPU_COUNT, SLOT_DROPPED_EXECS, SLOT_DROPPED_EXITS,
@@ -131,33 +130,6 @@ impl Tick {
 
         let start = core * self.state_capacity;
         &self.core_active_ns[start..start + self.core_state_counts[core]]
-    }
-}
-
-/// A shape with room for `readings` and nothing more, in `slot_count` slots.
-#[must_use]
-pub fn shape_for(readings: &Readings, slot_count: u64) -> Shape {
-    let at_least_one = |count: usize| u64_from_usize(count.max(1));
-    let (cores, states) = match &readings.ioreport {
-        Some(ioreport) => {
-            let mut states = ioreport.gpu.active_ns().len();
-            for core in ioreport.cores {
-                states = states.max(core.active_ns().len());
-            }
-            (ioreport.cores.len(), states)
-        }
-        None => (0, 0),
-    };
-    Shape {
-        slot_count,
-        cpu_capacity: at_least_one(readings.cpus.len()),
-        interface_capacity: at_least_one(readings.interfaces.len()),
-        core_capacity: at_least_one(cores),
-        state_capacity: at_least_one(states),
-        fan_capacity: at_least_one(readings.smc.as_ref().map_or(0, |smc| smc.fan_rpm.len())),
-        process_capacity: at_least_one(readings.processes.len()),
-        coalition_capacity: at_least_one(readings.coalitions.len()),
-        event_capacity: at_least_one(readings.events.len()),
     }
 }
 
@@ -740,6 +712,33 @@ fn coalition_from(words: &[u64; COALITION_WORDS]) -> Coalition {
 mod tests {
     use super::*;
     use crate::interfaces::Name;
+    use crate::ring::Shape;
+
+    /// A shape with room for `readings` and nothing more, in `slot_count` slots.
+    fn shape_for(readings: &Readings, slot_count: u64) -> Shape {
+        let at_least_one = |count: usize| u64_from_usize(count.max(1));
+        let (cores, states) = match &readings.ioreport {
+            Some(ioreport) => {
+                let mut states = ioreport.gpu.active_ns().len();
+                for core in ioreport.cores {
+                    states = states.max(core.active_ns().len());
+                }
+                (ioreport.cores.len(), states)
+            }
+            None => (0, 0),
+        };
+        Shape {
+            slot_count,
+            cpu_capacity: at_least_one(readings.cpus.len()),
+            interface_capacity: at_least_one(readings.interfaces.len()),
+            core_capacity: at_least_one(cores),
+            state_capacity: at_least_one(states),
+            fan_capacity: at_least_one(readings.smc.as_ref().map_or(0, |smc| smc.fan_rpm.len())),
+            process_capacity: at_least_one(readings.processes.len()),
+            coalition_capacity: at_least_one(readings.coalitions.len()),
+            event_capacity: at_least_one(readings.events.len()),
+        }
+    }
 
     /// A process whose every field holds its own value, so a field read from the wrong word
     /// shows.
