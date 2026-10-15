@@ -318,3 +318,83 @@ pub(super) fn open_layout(header: &[AtomicU64], size_bytes: usize) -> io::Result
     }
     Ok(layout)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A layout of one slot with room for one record of each kind.
+    fn layout() -> Layout {
+        Layout::new(Shape {
+            slot_count: 1,
+            cpu_capacity: 1,
+            interface_capacity: 1,
+            core_capacity: 1,
+            state_capacity: 1,
+            fan_capacity: 1,
+            process_capacity: 1,
+            coalition_capacity: 1,
+            event_capacity: 1,
+        })
+        .unwrap()
+    }
+
+    /// The header of a ring of `layout()`.
+    fn header() -> Vec<AtomicU64> {
+        let words: Vec<AtomicU64> = (0..HEADER_WORDS).map(|_| AtomicU64::new(0)).collect();
+        let header = Header {
+            generation: 1,
+            first_publication: 1,
+            run_start_ns: 1,
+            first_event: 1,
+        };
+        store_header(&words, layout(), header);
+        words
+    }
+
+    #[test]
+    fn opens_the_layout_a_header_of_this_code_describes() {
+        // Goal: a ring this code wrote opens with the layout it was written with.
+        // Method: open a header of a known layout in an object of its size.
+        let opened = open_layout(&header(), layout().size_bytes()).unwrap();
+
+        assert_eq!(layout().shape, opened.shape);
+    }
+
+    #[test]
+    fn refuses_a_header_of_another_program_or_layout() {
+        // Goal: a reader never reads an object as a ring where its header is another
+        // program's, another layout's, or a shape no ring has.
+        // Method: open headers that hold, one at a time, another magic, the next layout
+        // version, and a slot count of zero.
+        let breaks = [
+            (HEADER_MAGIC, MAGIC + 1),
+            (HEADER_LAYOUT_VERSION, LAYOUT_VERSION + 1),
+            (HEADER_SLOT_COUNT, 0),
+        ];
+
+        for (index, word) in breaks {
+            let header = header();
+            header[index].store(word, Ordering::Relaxed);
+
+            let opened = open_layout(&header, layout().size_bytes());
+
+            assert_eq!(
+                io::ErrorKind::InvalidData,
+                opened.unwrap_err().kind(),
+                "word {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_an_object_shorter_than_its_header_says() {
+        // Goal: a reader never maps a ring past the end of its object.
+        // Method: open a header in an object one word short of the layout it describes.
+        let short_bytes = layout().size_bytes() - size_of::<u64>();
+
+        let opened = open_layout(&header(), short_bytes);
+
+        assert_eq!(io::ErrorKind::InvalidData, opened.unwrap_err().kind());
+    }
+}
