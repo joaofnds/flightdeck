@@ -384,12 +384,7 @@ impl Reader {
     /// Reads the next publication, or the range of those the writer overwrote first.
     pub fn read(&mut self) -> io::Result<Found> {
         let words = self.mapping.words();
-        let newest = words[HEADER_PUBLICATION_NEWEST].load(Ordering::Relaxed);
-        fence(Ordering::Acquire);
-        if newest > NUMBER_MAX {
-            return Err(number_past_max(newest));
-        }
-
+        let newest = read_newest(&words[HEADER_PUBLICATION_NEWEST])?;
         let publication = match self
             .publications
             .step(self.layout.publications_held(newest))
@@ -423,12 +418,7 @@ impl Reader {
     /// Reads the next event, or the range of those the writer overwrote first.
     pub fn read_event(&mut self) -> io::Result<FoundEvent> {
         let words = self.mapping.words();
-        let newest = words[HEADER_EVENT_NEWEST].load(Ordering::Relaxed);
-        fence(Ordering::Acquire);
-        if newest > NUMBER_MAX {
-            return Err(number_past_max(newest));
-        }
-
+        let newest = read_newest(&words[HEADER_EVENT_NEWEST])?;
         let number = match self.events.step(self.layout.events_held(newest)) {
             Step::Nothing => return Ok(FoundEvent::Nothing),
             Step::Missed { first, end } => return Ok(FoundEvent::Missed { first, end }),
@@ -448,6 +438,19 @@ impl Reader {
             }),
         }
     }
+}
+
+/// The newest number the header word `newest_word` says the writer finished, with what the
+/// writer wrote before it made visible, for both the publications and the events, so the
+/// two reads refuse a forged number alike.
+fn read_newest(newest_word: &AtomicU64) -> io::Result<u64> {
+    let newest = newest_word.load(Ordering::Relaxed);
+    fence(Ordering::Acquire);
+    if newest > NUMBER_MAX {
+        return Err(number_past_max(newest));
+    }
+
+    Ok(newest)
 }
 
 /// Where a reader stands in numbers the writer hands out from 1 and overwrites oldest first,
