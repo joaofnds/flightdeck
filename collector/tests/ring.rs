@@ -89,4 +89,27 @@ mod tests {
 
         assert_eq!("publication 1 tick 7\n", stdout(&output));
     }
+
+    #[test]
+    fn a_reader_behind_the_writer_learns_the_publications_it_missed() {
+        // Goal: a reader that falls further behind than the ring holds learns which
+        // publications it missed, and reads on from the oldest the ring still holds.
+        // Method: publish six ticks into a ring of four slots before the reader opens it.
+        let place = TestPlace::new("behind");
+        let mut writer = Writer::create(&place.place, Shape { slot_count: 4 }).unwrap();
+
+        for tick in 1..=6 {
+            writer.publish(tick * 10).unwrap();
+        }
+        let output = read_ring(&place, &["--publications", "4"]);
+
+        assert_eq!(
+            "missed publications 1-2\n\
+             publication 3 tick 30\n\
+             publication 4 tick 40\n\
+             publication 5 tick 50\n\
+             publication 6 tick 60\n",
+            stdout(&output)
+        );
+    }
 }

@@ -33,6 +33,9 @@ pub struct Shape {
 pub enum Found {
     /// The publication it read, which carries the tick of the collector's run.
     Publication { publication: u64, tick: u64 },
+    /// The publications from `first` up to `end` that the writer overwrote before the reader
+    /// read them, which it reads past.
+    Missed { first: u64, end: u64 },
     /// No publication past those it has read yet.
     Nothing,
 }
@@ -190,7 +193,7 @@ impl Reader {
         })
     }
 
-    /// Reads the next publication.
+    /// Reads the next publication, or the range of those the writer overwrote first.
     pub fn read(&mut self) -> io::Result<Found> {
         let words = self.mapping.words();
         let newest = words[HEADER_NEWEST_PUBLICATION].load(Ordering::Relaxed);
@@ -199,22 +202,50 @@ impl Reader {
             return Ok(Found::Nothing);
         }
 
-        let publication = self.next;
-        let slot = self.layout.slot_start(publication);
-        let sequence = words[slot + SLOT_SEQUENCE].load(Ordering::Relaxed);
-        fence(Ordering::Acquire);
-        let tick = words[slot + SLOT_RUN_TICK].load(Ordering::Relaxed);
-        fence(Ordering::Acquire);
-        let sequence_after = words[slot + SLOT_SEQUENCE].load(Ordering::Relaxed);
-        if sequence != 2 * publication || sequence_after != sequence {
-            return Err(io::Error::other(format!(
-                "slot of publication {publication} holds sequence {sequence}"
-            )));
+        let oldest = self.layout.oldest_held(newest);
+        if self.next < oldest {
+            let first = self.next;
+            self.next = oldest;
+            return Ok(Found::Missed { first, end: oldest });
         }
 
+        let publication = self.next;
         self.next += 1;
-        Ok(Found::Publication { publication, tick })
+        let slot = self.layout.slot_start(publication);
+        match read_slot(&words[slot..slot + SLOT_WORDS], publication)? {
+            Some(tick) => Ok(Found::Publication { publication, tick }),
+            None => Ok(Found::Missed {
+                first: publication,
+                end: publication + 1,
+            }),
+        }
     }
+}
+
+/// The tick the slot `slot` holds for `publication`, or `None` where the writer overwrote
+/// the slot with a later publication before or during the copy.
+fn read_slot(slot: &[AtomicU64], publication: u64) -> io::Result<Option<u64>> {
+    assert!(publication > 0);
+
+    let sequence = slot[SLOT_SEQUENCE].load(Ordering::Relaxed);
+    fence(Ordering::Acquire);
+    let tick = slot[SLOT_RUN_TICK].load(Ordering::Relaxed);
+    fence(Ordering::Acquire);
+    let sequence_after = slot[SLOT_SEQUENCE].load(Ordering::Relaxed);
+
+    if sequence < 2 * publication {
+        // The header said the writer finished this publication, and a slot only moves on.
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("the slot of publication {publication} holds sequence {sequence}"),
+        ));
+    }
+    if sequence == 2 * publication {
+        if sequence_after == sequence {
+            return Ok(Some(tick));
+        }
+    }
+    Ok(None)
 }
 
 /// Where each part of a ring lies, in words from its start.
@@ -243,6 +274,13 @@ impl Layout {
 
     fn size_bytes(self) -> usize {
         self.word_count() * size_of::<u64>()
+    }
+
+    /// The oldest publication the ring holds once `newest` is published.
+    fn oldest_held(self, newest: u64) -> u64 {
+        assert!(newest > 0);
+
+        newest.saturating_sub(self.shape.slot_count) + 1
     }
 
     /// The first word of the slot that holds `publication`.
@@ -392,4 +430,58 @@ fn open_layout(header: &[AtomicU64], size_bytes: usize) -> io::Result<Layout> {
         ));
     }
     Ok(layout)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn slot_holding(sequence: u64, tick: u64) -> [AtomicU64; SLOT_WORDS] {
+        let mut slot = [const { AtomicU64::new(0) }; SLOT_WORDS];
+        slot[SLOT_SEQUENCE] = AtomicU64::new(sequence);
+        slot[SLOT_RUN_TICK] = AtomicU64::new(tick);
+        slot
+    }
+
+    #[test]
+    fn reads_the_tick_of_a_slot_its_writer_finished() {
+        // Goal: a finished slot gives its tick.
+        // Method: read publication 3 from a slot whose sequence is twice 3.
+        let slot = slot_holding(6, 40);
+
+        assert_eq!(Some(40), read_slot(&slot, 3).unwrap());
+    }
+
+    #[test]
+    fn drops_a_slot_its_writer_is_writing_a_later_publication_into() {
+        // Goal: a reader never reads a slot the writer is part-way through.
+        // Method: read publication 3 from a slot of four whose writer started publication 7,
+        // which leaves its sequence at twice 7 less 1.
+        let slot = slot_holding(13, 40);
+
+        assert_eq!(None, read_slot(&slot, 3).unwrap());
+    }
+
+    #[test]
+    fn drops_a_slot_its_writer_finished_a_later_publication_in() {
+        // Goal: a slot overwritten before the reader came to it is missed, never read as the
+        // publication the reader asked for.
+        // Method: read publication 3 from a slot that holds publication 7.
+        let slot = slot_holding(14, 40);
+
+        assert_eq!(None, read_slot(&slot, 3).unwrap());
+    }
+
+    #[test]
+    fn refuses_a_slot_behind_the_publication_the_header_finished() {
+        // Goal: a slot behind a publication the header calls finished is a broken ring, which
+        // the reader reports rather than reading.
+        // Method: read publication 3 from a slot that holds publication 2.
+        let slot = slot_holding(4, 40);
+
+        assert_eq!(
+            io::ErrorKind::InvalidData,
+            read_slot(&slot, 3).unwrap_err().kind()
+        );
+    }
 }

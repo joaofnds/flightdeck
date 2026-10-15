@@ -65,6 +65,7 @@ fn run(options: &Options) -> std::io::Result<()> {
                 println!("publication {publication} tick {tick}");
                 read += 1;
             }
+            Found::Missed { first, end } => println!("missed publications {first}-{}", end - 1),
             Found::Nothing => std::thread::sleep(POLL_INTERVAL),
         }
     }
