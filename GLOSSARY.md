@@ -1,5 +1,14 @@
 # Glossary
 
+**Recording**: the readings kept so the user can return to an earlier second. A recording
+continues across collector restarts.
+
+**Tick**: one scheduled collection of the Mac's readings. A missed tick has no readings.
+
+**Sealed minute**: the saved, immutable readings of a window of 60 elapsed seconds of a
+collector run. The window may contain gaps. An empty window is not saved, and stopping
+or recovery may seal a shorter final window.
+
 **App**: the outermost `.app` bundle a process runs from, such as Brave Browser with all
 its helper processes. Processes outside any bundle group by executable name, so eleven
 `claude` processes are one app.

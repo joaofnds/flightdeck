@@ -53,8 +53,11 @@ snake_case too, which nothing checks.
 - Allocate all memory at startup, and never allocate, or free and allocate again,
   after it. Size every buffer once, to a bound read from the system or chosen above the
   largest need measured. This binds the `collector` binary and the library code it runs.
-  A test and the code of a binary other than `collector` may allocate, and the library
-  code they call stays bound.
+  A test and the code of a binary other than `collector` or the persister may allocate.
+  The separate persister, and library code and dependencies used only by persistence,
+  may allocate within a fixed working-memory bound for encoding and compressing its
+  windows outside the collection loop. All other library code stays startup-allocated,
+  whichever binary calls it.
 - Handle every error. Report a failed kernel call, and never replace it with a made-up
   value, so an `unwrap_or` or `.ok()` that hides a failure is a defect. Write no
   `unwrap` and no `expect` outside tests, and no `as` conversion anywhere, tests
