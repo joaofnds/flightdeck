@@ -383,7 +383,8 @@ mod tests {
     fn a_reader_behind_the_event_log_learns_which_events_it_missed() {
         // Goal: events the log overwrote before a reader read them are missed and counted,
         // never read as later events, and the ticks keep every slot.
-        // Method: open a reader, then publish six events into a log of four, two a tick.
+        // Method: open a reader, then publish six events into a log of four, two a tick, and
+        // read the events and then the ticks.
         let place = TestPlace::new("evbehind");
         let mut writer = Writer::create(&place.place, SHAPE).unwrap();
         let mut reader = Reader::open(place.lock_path()).unwrap();
@@ -393,7 +394,26 @@ mod tests {
             publish_events(&mut writer, tick, &[Event::Exec { pid }, exit(pid)]);
         }
         let events: Vec<FoundEvent> = (0..6).map(|_| reader.read_event().unwrap()).collect();
+        let ticks: Vec<Found> = (0..4).map(|_| reader.read().unwrap()).collect();
 
+        assert_eq!(
+            vec![
+                Found::Publication {
+                    publication: 1,
+                    tick: 1
+                },
+                Found::Publication {
+                    publication: 2,
+                    tick: 2
+                },
+                Found::Publication {
+                    publication: 3,
+                    tick: 3
+                },
+                Found::Nothing,
+            ],
+            ticks
+        );
         assert_eq!(
             vec![
                 FoundEvent::Missed { first: 1, end: 3 },
