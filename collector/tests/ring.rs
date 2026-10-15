@@ -692,14 +692,33 @@ mod tests {
     #[test]
     fn a_lock_file_naming_the_last_generation_is_an_error_and_not_a_crash() {
         // Goal: a lock file another program wrote never crashes the writer that reads it.
-        // Method: write the largest generation into the lock file, then make a writer.
-        let place = TestPlace::new("last");
+        // Method: write the largest generation into the lock file, under a prefix short enough
+        // that the name fits a ring name, then make a writer.
+        let mut place = TestPlace::new("last");
+        place.place.name_prefix = format!("/f{}.", std::process::id());
         let name = format!("{}{}", place.place.name_prefix, u64::MAX);
         std::fs::write(place.lock_path(), name).unwrap();
 
         let created = Writer::create(&place.place, SHAPE);
 
-        assert!(created.is_err());
+        assert_eq!(
+            std::io::ErrorKind::InvalidData,
+            created.err().unwrap().kind()
+        );
+    }
+
+    #[test]
+    fn a_lock_file_longer_than_a_ring_name_starts_the_numbering_again() {
+        // Goal: a lock file another program filled past a ring name's length is read only as
+        // far as a ring name goes, and the writer numbers from 1 rather than failing.
+        // Method: write a kilobyte into the lock file, then make a writer and look for its
+        // first generation.
+        let place = TestPlace::new("long");
+        std::fs::write(place.lock_path(), [b'a'; 1024]).unwrap();
+
+        drop(Writer::create(&place.place, SHAPE).unwrap());
+
+        assert!(place.holds(1));
     }
 
     #[test]

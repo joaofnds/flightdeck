@@ -3,16 +3,17 @@
 use std::ffi::OsStr;
 use std::ffi::{CString, c_char, c_int, c_uint, c_void};
 use std::fs::{File, OpenOptions};
-use std::io::{self, Read};
+use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::layout::{
     HEADER_NEWEST_EVENT, HEADER_NEWEST_PUBLICATION, HEADER_WORDS, Layout, open_layout,
 };
+use crate::u64_from_usize;
 
 /// The longest name macOS gives a shared-memory object, `PSHMNAMLEN` in `sys/posix_shm.h`.
 const PSHMNAMLEN: usize = 31;
@@ -123,6 +124,57 @@ pub(super) fn create_lock(lock_path: &Path) -> io::Result<File> {
     }
 }
 
+/// The name of a ring a lock file holds, read into a buffer of the longest name macOS gives,
+/// since another program of this user may write the lock file at any length.
+pub(super) struct LockedName {
+    bytes: [u8; PSHMNAMLEN],
+    length: usize,
+}
+
+impl LockedName {
+    /// Reads the name the lock file `lock` holds, which is empty where no writer wrote one, or
+    /// an error where it is longer than a ring name or no text.
+    pub(super) fn read(lock: &File) -> io::Result<Self> {
+        // One byte past the longest name tells a name that fills the buffer from a longer one.
+        let mut bytes = [0; PSHMNAMLEN + 1];
+        let mut length = 0;
+        // Each read but the last fills at least a byte of the buffer, so the loop ends.
+        while length < bytes.len() {
+            let read = lock.read_at(&mut bytes[length..], u64_from_usize(length))?;
+            if read == 0 {
+                break;
+            }
+            length += read;
+        }
+
+        if length > PSHMNAMLEN {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("the lock file holds more than a ring name of {PSHMNAMLEN} bytes"),
+            ));
+        }
+        if std::str::from_utf8(&bytes[..length]).is_err() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "the lock file holds no text",
+            ));
+        }
+        let mut name = [0; PSHMNAMLEN];
+        name.copy_from_slice(&bytes[..PSHMNAMLEN]);
+        Ok(Self {
+            bytes: name,
+            length,
+        })
+    }
+
+    pub(super) fn as_str(&self) -> &str {
+        match std::str::from_utf8(&self.bytes[..self.length]) {
+            Ok(name) => name,
+            Err(error) => unreachable!("read refuses a name that is no text: {error}"),
+        }
+    }
+}
+
 /// What a writer continues from the ring before it.
 pub(super) struct Previous {
     /// The previous ring's generation, or 0 where the lock file names none.
@@ -134,9 +186,18 @@ pub(super) struct Previous {
 }
 
 /// The ring the lock file `lock` names, of a name that starts with `prefix`.
-pub(super) fn create_previous(prefix: &str, lock: &mut File) -> io::Result<Previous> {
-    let mut name = String::new();
-    lock.read_to_string(&mut name)?;
+pub(super) fn create_previous(prefix: &str, lock: &File) -> io::Result<Previous> {
+    let locked = match LockedName::read(lock) {
+        Ok(locked) => Some(locked),
+        Err(error) => {
+            if error.kind() != io::ErrorKind::InvalidData {
+                return Err(error);
+            }
+            eprintln!("ring: numbering from 1, since {error}");
+            None
+        }
+    };
+    let name = locked.as_ref().map_or("", LockedName::as_str);
 
     // A lock file a writer never wrote is empty.
     let generation = if let Some(Ok(generation)) = name.strip_prefix(prefix).map(str::parse) {
@@ -156,7 +217,7 @@ pub(super) fn create_previous(prefix: &str, lock: &mut File) -> io::Result<Previ
     }
 
     // A restart after the Mac restarted finds no ring, which is no fault.
-    let (newest_publication, newest_event) = match open_ring(&name) {
+    let (newest_publication, newest_event) = match open_ring(name) {
         Ok((mapping, _)) => {
             let words = mapping.words();
             (

@@ -15,7 +15,7 @@ mod tick;
 mod wake;
 
 use std::fs::File;
-use std::io::{self, Read};
+use std::io;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering, fence};
@@ -27,7 +27,7 @@ use layout::{
     HEADER_NEWEST_PUBLICATION, HEADER_RUN_START_NS, Header, Layout, SLOT_SEQUENCE, store_header,
 };
 use object::{
-    Mapping, PROT_READ, PROT_WRITE, create_lock, create_object, create_previous,
+    LockedName, Mapping, PROT_READ, PROT_WRITE, create_lock, create_object, create_previous,
     create_unlink_older, open_ring, place_for_user,
 };
 pub use tick::{Dropped, IOReportReadings, Readings, SmcReadings, Tick, shape_for};
@@ -128,8 +128,8 @@ impl Writer {
             .map_err(io::Error::other)?
             .as_nanos();
 
-        let mut lock = create_lock(&place.lock_path)?;
-        let previous = create_previous(&place.name_prefix, &mut lock)?;
+        let lock = create_lock(&place.lock_path)?;
+        let previous = create_previous(&place.name_prefix, &lock)?;
         let created = create_object(&place.name_prefix, previous.generation, layout)?;
         let mapping = Mapping::new(&created.object, layout.word_count(), PROT_READ | PROT_WRITE)?;
         let header = Header {
@@ -194,7 +194,7 @@ impl Writer {
 /// A reader of a ring, which maps it read-only.
 pub struct Reader {
     /// The name of the ring, which the lock file named when the reader opened it.
-    name: String,
+    name: LockedName,
     mapping: Mapping,
     layout: Layout,
     /// Where the reader stands in the publications, which start past the previous ring's.
@@ -210,8 +210,8 @@ impl Reader {
     /// Opens the ring the lock file at `lock_path` names, starting at the oldest publication
     /// it holds.
     pub fn open(lock_path: &Path) -> io::Result<Self> {
-        let mut name = String::new();
-        File::open(lock_path)?.read_to_string(&mut name)?;
+        let locked = LockedName::read(&File::open(lock_path)?)?;
+        let name = locked.as_str();
         if name.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
@@ -219,7 +219,7 @@ impl Reader {
             ));
         }
 
-        let (mapping, layout) = open_ring(&name)?;
+        let (mapping, layout) = open_ring(name)?;
         let words = mapping.words();
         let first = words[HEADER_FIRST_PUBLICATION].load(Ordering::Relaxed);
         let newest = words[HEADER_NEWEST_PUBLICATION].load(Ordering::Relaxed);
@@ -227,7 +227,7 @@ impl Reader {
         let first_event = words[HEADER_FIRST_EVENT].load(Ordering::Relaxed);
         let newest_event = words[HEADER_NEWEST_EVENT].load(Ordering::Relaxed);
         Ok(Self {
-            name,
+            name: locked,
             mapping,
             layout,
             publications: Cursor::new(first, layout.oldest_held(newest)),
@@ -242,12 +242,12 @@ impl Reader {
     /// publication of its own. A lock file the writer is part-way through writing names no
     /// ring yet, which is no move.
     pub fn moved(&self, lock_path: &Path) -> io::Result<bool> {
-        let mut name = String::new();
-        File::open(lock_path)?.read_to_string(&mut name)?;
+        let locked = LockedName::read(&File::open(lock_path)?)?;
+        let name = locked.as_str();
         if name.is_empty() {
             return Ok(false);
         }
-        Ok(name != self.name)
+        Ok(name != self.name.as_str())
     }
 
     /// Opens the ring the lock file at `lock_path` names in place of the reader's own, as
