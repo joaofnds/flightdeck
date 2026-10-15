@@ -132,9 +132,13 @@ impl Writer {
             .as_nanos();
 
         let lock = create_lock(&place.lock_path)?;
+
         let previous = create_previous(&place.name_prefix, &lock)?;
+
         let created = create_object(&place.name_prefix, previous.generation, &layout)?;
+
         let mapping = Mapping::new(&created.object, layout.word_count(), PROT_READ | PROT_WRITE)?;
+
         let header = Header {
             generation: created.generation,
             publication_first: previous.publication_newest + 1,
@@ -313,6 +317,7 @@ impl Reader {
             Err(error) if error.raw_os_error() == Some(ENOENT) => return Ok(false),
             Err(error) => return Err(error),
         };
+
         // The room for ticks is sized to the capacities of a tick, so the reader keeps its own
         // and allocates nothing only when the newer ring's ticks have the same capacities. A
         // ring whose ticks hold more or fewer is refused as Unsupported, which allocates no
@@ -385,6 +390,7 @@ impl Reader {
             Step::Missed { first, end } => return Ok(Found::Missed { first, end }),
             Step::Read(publication) => publication,
         };
+
         let slot = &words[self.layout.slot(publication)];
         if self.tick.read_slot(slot, &self.layout, publication)? {
             Ok(Found::Publication {
@@ -420,6 +426,7 @@ impl Reader {
             Step::Missed { first, end } => return Ok(FoundEvent::Missed { first, end }),
             Step::Read(number) => number,
         };
+
         let record = &words[self.layout.event(number)];
         match read_finished(record, EVENT_SEQUENCE, number, || load_event(record))? {
             Some((tick, event)) => Ok(FoundEvent::Event {

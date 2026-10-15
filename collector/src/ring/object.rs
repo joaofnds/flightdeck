@@ -117,6 +117,8 @@ pub(super) fn create_lock(lock_path: &Path) -> io::Result<File> {
         .write(true)
         .create(true)
         .truncate(false)
+        .append(false)
+        .create_new(false)
         .mode(LOCK_MODE)
         .open(lock_path)?;
 
@@ -406,10 +408,13 @@ pub(super) fn open_ring(name: &str) -> io::Result<(Mapping, Layout)> {
 
     let object = unsafe { OwnedFd::from_raw_fd(object) };
 
-    let size_bytes = open_check(&File::from(object.try_clone()?))?;
+    let size_bytes = open_ring_check(&File::from(object.try_clone()?))?;
+
     let header = Mapping::new(&object, HEADER_WORDS, PROT_READ)?;
     let layout = open_layout(header.words(), size_bytes)?;
+
     let mapping = Mapping::new(&object, layout.word_count(), PROT_READ)?;
+
     Ok((mapping, layout))
 }
 
@@ -429,7 +434,7 @@ fn open_ring_name<'buffer>(
 
 /// The size of the object `object`, or an error where this user does not own it or anyone
 /// may write it.
-fn open_check(object: &File) -> io::Result<usize> {
+fn open_ring_check(object: &File) -> io::Result<usize> {
     let metadata = object.metadata()?;
     if metadata.uid() != unsafe { getuid() } {
         return Err(io::Error::new(

@@ -301,29 +301,28 @@ pub(super) fn load_tick(slot: &[AtomicU64], layout: &Layout, tick: &mut Tick) ->
     else {
         return false;
     };
+
     tick.memory = memory;
 
-    tick.cpus.clear();
-    for index in 0..cpus {
-        push_without_growing(
-            &mut tick.cpus,
-            cpu_from(&load_words(&slot[layout.cpus.record(index)])),
-        );
-    }
-    tick.interfaces.clear();
-    for index in 0..interfaces {
-        match interface_from(&load_words(&slot[layout.interfaces.record(index)])) {
-            Some(interface) => push_without_growing(&mut tick.interfaces, interface),
-            None => return false,
-        }
-    }
-    let sources = slot[SLOT_SOURCES].load(Ordering::Relaxed);
-    if !load_tick_ioreport(slot, layout, sources & SOURCE_IOREPORT != 0, tick) {
+    load_tick_cpus(slot, layout, cpus, tick);
+    if !load_tick_interfaces(slot, layout, interfaces, tick) {
         return false;
     }
 
-    if !load_tick_smc(slot, layout, sources & SOURCE_SMC != 0, tick) {
-        return false;
+    let sources = slot[SLOT_SOURCES].load(Ordering::Relaxed);
+    tick.ioreport_read = sources & SOURCE_IOREPORT != 0;
+    tick.smc_read = sources & SOURCE_SMC != 0;
+    load_tick_clear_sources(tick);
+    if tick.ioreport_read {
+        if !load_tick_ioreport(slot, layout, tick) {
+            return false;
+        }
+    }
+
+    if tick.smc_read {
+        if !load_tick_smc(slot, layout, tick) {
+            return false;
+        }
     }
 
     load_tick_processes(slot, layout, processes, tick);
@@ -331,15 +330,47 @@ pub(super) fn load_tick(slot: &[AtomicU64], layout: &Layout, tick: &mut Tick) ->
     true
 }
 
-fn load_tick_ioreport(slot: &[AtomicU64], layout: &Layout, read: bool, tick: &mut Tick) -> bool {
-    tick.ioreport_read = read;
+/// Loads the first `cpus` CPU records of `slot` into `tick`.
+fn load_tick_cpus(slot: &[AtomicU64], layout: &Layout, cpus: usize, tick: &mut Tick) {
+    tick.cpus.clear();
+    for index in 0..cpus {
+        push_without_growing(
+            &mut tick.cpus,
+            cpu_from(&load_words(&slot[layout.cpus.record(index)])),
+        );
+    }
+}
+
+/// Loads the first `interfaces` interface records of `slot` into `tick`, and returns whether
+/// each made an interface.
+fn load_tick_interfaces(
+    slot: &[AtomicU64],
+    layout: &Layout,
+    interfaces: usize,
+    tick: &mut Tick,
+) -> bool {
+    tick.interfaces.clear();
+    for index in 0..interfaces {
+        match interface_from(&load_words(&slot[layout.interfaces.record(index)])) {
+            Some(interface) => push_without_growing(&mut tick.interfaces, interface),
+            None => return false,
+        }
+    }
+    true
+}
+
+/// Clears the readings of `IOReport` and the SMC, which a tick that did not read them holds
+/// as zero and empty.
+fn load_tick_clear_sources(tick: &mut Tick) {
     tick.gpu_energy_nj = 0;
     tick.gpu_active_ns.clear();
     tick.core_state_counts.clear();
-    if !read {
-        return true;
-    }
+    tick.power_watts = 0.0;
+    tick.soc_celsius = 0.0;
+    tick.fan_rpm.clear();
+}
 
+fn load_tick_ioreport(slot: &[AtomicU64], layout: &Layout, tick: &mut Tick) -> bool {
     tick.gpu_energy_nj = slot[SLOT_GPU_ENERGY_NJ].load(Ordering::Relaxed);
     let gpu_states = slot[SLOT_GPU_STATE_COUNT].load(Ordering::Relaxed);
     let cores = slot[SLOT_CORE_COUNT].load(Ordering::Relaxed);
@@ -367,6 +398,7 @@ fn load_tick_ioreport(slot: &[AtomicU64], layout: &Layout, read: bool, tick: &mu
         else {
             return false;
         };
+
         let target = index * tick.state_capacity;
         for (offset, word) in slot[record.start + 1..record.start + 1 + states]
             .iter()
@@ -379,15 +411,7 @@ fn load_tick_ioreport(slot: &[AtomicU64], layout: &Layout, read: bool, tick: &mu
     true
 }
 
-fn load_tick_smc(slot: &[AtomicU64], layout: &Layout, read: bool, tick: &mut Tick) -> bool {
-    tick.smc_read = read;
-    tick.power_watts = 0.0;
-    tick.soc_celsius = 0.0;
-    tick.fan_rpm.clear();
-    if !read {
-        return true;
-    }
-
+fn load_tick_smc(slot: &[AtomicU64], layout: &Layout, tick: &mut Tick) -> bool {
     let fans = slot[SLOT_FAN_COUNT].load(Ordering::Relaxed);
     let Some(fans) = usize::try_from(fans)
         .ok()
@@ -395,6 +419,7 @@ fn load_tick_smc(slot: &[AtomicU64], layout: &Layout, read: bool, tick: &mut Tic
     else {
         return false;
     };
+
     tick.power_watts = f32::from_bits(load_half(slot, SLOT_POWER_WATTS));
     tick.soc_celsius = f32::from_bits(load_half(slot, SLOT_SOC_CELSIUS));
     for index in 0..fans {

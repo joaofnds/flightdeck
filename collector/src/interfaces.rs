@@ -62,6 +62,7 @@ impl Name {
         if std::str::from_utf8(name).is_err() {
             return None;
         }
+
         if bytes[length..].iter().any(|&byte| byte != 0) {
             return None;
         }

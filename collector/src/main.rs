@@ -51,7 +51,7 @@ fn main() -> ExitCode {
 struct Options {
     seconds: Option<NonZeroU64>,
     rescan_interval: Duration,
-    ring: String,
+    ring_name: String,
 }
 
 fn options_from(arguments: &[String]) -> Result<Options, String> {
@@ -59,7 +59,7 @@ fn options_from(arguments: &[String]) -> Result<Options, String> {
     let mut options = Options {
         seconds: None,
         rescan_interval: DEFAULT_RESCAN_INTERVAL,
-        ring: DEFAULT_RING.to_owned(),
+        ring_name: DEFAULT_RING.to_owned(),
     };
 
     for pair in arguments.chunks(2) {
@@ -71,7 +71,7 @@ fn options_from(arguments: &[String]) -> Result<Options, String> {
                 options.rescan_interval =
                     Duration::from_millis(milliseconds.parse().map_err(|_| usage())?);
             }
-            [flag, ring] if flag == "--ring" => options.ring.clone_from(ring),
+            [flag, ring] if flag == "--ring" => options.ring_name.clone_from(ring),
             _ => return Err(usage()),
         }
     }
@@ -87,12 +87,12 @@ fn run(options: &Options) -> io::Result<()> {
     let timebase = Timebase::read()?;
     let first_marker_pid = run_throwaway_child();
     let mut out = io::stdout().lock();
-    let ring = Place::for_user(&options.ring)?;
+    let place = Place::for_user(&options.ring_name)?;
     let mut run = Run::start(
         timebase,
         TICK_PERIOD_NS,
         options.rescan_interval,
-        &ring,
+        &place,
         &mut out,
     )?;
     let mut tick = run.first_tick;
@@ -119,7 +119,7 @@ fn run(options: &Options) -> io::Result<()> {
 }
 
 /// The shape of a ring with room for every tick the collector of `capacities` reads.
-fn ring_shape(capacities: Capacities) -> Shape {
+fn start_ring_shape(capacities: Capacities) -> Shape {
     Shape {
         slot_count: RING_SLOTS,
         cpu_capacity: u64_from_usize(capacities.cpus),
@@ -240,7 +240,7 @@ impl Run {
         timebase: Timebase,
         tick_period_ns: u64,
         rescan_interval: Duration,
-        ring: &Place,
+        place: &Place,
         out: &mut impl Write,
     ) -> io::Result<Self> {
         assert!(tick_period_ns > 0);
@@ -248,7 +248,7 @@ impl Run {
         let mut meter = Meter::default();
         let mut collector = Collector::new(timebase, rescan_interval)?;
         // A second collector stops here, before its first tick, so the first runs on.
-        let mut ring = Writer::create(ring, ring_shape(collector.capacities()))?;
+        let mut ring = Writer::create(place, start_ring_shape(collector.capacities()))?;
         let live_at_first_scan = Self::start_live_at_first_scan(collector.tracker.last_listing());
         let schedule = Schedule::starting_now(timebase.ticks(tick_period_ns)?)?;
 
@@ -946,7 +946,7 @@ mod tests {
             Ok(Options {
                 seconds: NonZeroU64::new(5),
                 rescan_interval: Duration::from_millis(20),
-                ring: DEFAULT_RING.to_owned(),
+                ring_name: DEFAULT_RING.to_owned(),
             }),
             options_from(&arguments(&["--rescan-ms", "20", "--seconds", "5"]))
         );
