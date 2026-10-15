@@ -29,9 +29,11 @@ const LOCK_MODE: u32 = 0o600;
 /// taken by an object it did not make.
 const GENERATION_TRIES: u64 = 16;
 
-/// The largest publication or event number a writer continues from. Twice a number past it
-/// would overflow the sequence word, and at ten ticks a second no run comes near it.
-const NUMBER_MAX: u64 = u64::MAX / 4;
+/// The largest publication or event number a ring may name. A record's sequence word holds
+/// twice its number, so a number past half of what a word holds overflows it, and this bound
+/// leaves a writer room to count on from a ring at the bound. At ten ticks a second no run
+/// comes near it.
+pub(super) const NUMBER_MAX: u64 = u64::MAX / 4;
 
 /// The `confstr` name of this user's own temporary directory, from `unistd.h`.
 const CS_DARWIN_USER_TEMP_DIR: c_int = 65537;

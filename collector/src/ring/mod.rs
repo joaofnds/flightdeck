@@ -28,8 +28,8 @@ use layout::{
     store_header,
 };
 use object::{
-    LockedName, Mapping, PROT_READ, PROT_WRITE, create_lock, create_object, create_previous,
-    create_unlink_older, open_ring, place_for_user,
+    LockedName, Mapping, NUMBER_MAX, PROT_READ, PROT_WRITE, create_lock, create_object,
+    create_previous, create_unlink_older, open_ring, place_for_user,
 };
 pub use tick::{Dropped, IOReportReadings, Readings, SmcReadings, Tick};
 
@@ -255,6 +255,9 @@ impl Reader {
         let run_start_ns = words[HEADER_RUN_START_NS].load(Ordering::Relaxed);
         let first_event = words[HEADER_FIRST_EVENT].load(Ordering::Relaxed);
         let newest_event = words[HEADER_NEWEST_EVENT].load(Ordering::Relaxed);
+        open_named_check(first, newest)?;
+        open_named_check(first_event, newest_event)?;
+
         Ok(Opened {
             name,
             publications: Cursor::new(first, layout.publications_held(newest)),
@@ -365,6 +368,10 @@ impl Reader {
         let words = self.mapping.words();
         let newest = words[HEADER_NEWEST_PUBLICATION].load(Ordering::Relaxed);
         fence(Ordering::Acquire);
+        if newest > NUMBER_MAX {
+            return Err(number_past_max(newest));
+        }
+
         let publication = match self
             .publications
             .step(self.layout.publications_held(newest))
@@ -399,6 +406,10 @@ impl Reader {
         let words = self.mapping.words();
         let newest = words[HEADER_NEWEST_EVENT].load(Ordering::Relaxed);
         fence(Ordering::Acquire);
+        if newest > NUMBER_MAX {
+            return Err(number_past_max(newest));
+        }
+
         let number = match self.events.step(self.layout.events_held(newest)) {
             Step::Nothing => return Ok(FoundEvent::Nothing),
             Step::Missed { first, end } => return Ok(FoundEvent::Missed { first, end }),
@@ -426,6 +437,36 @@ struct Cursor {
     first: u64,
     /// The number the reader reads next.
     next: u64,
+}
+
+/// Refuses the numbers a header names, from `first` up to `newest`, where no writer hands them
+/// out: a numbering that starts at 0, or a number past `NUMBER_MAX`, which only another
+/// program of this user could have written.
+fn open_named_check(first: u64, newest: u64) -> io::Result<()> {
+    if first == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "the header numbers from 0",
+        ));
+    }
+
+    if first > NUMBER_MAX {
+        return Err(number_past_max(first));
+    }
+
+    if newest > NUMBER_MAX {
+        return Err(number_past_max(newest));
+    }
+
+    Ok(())
+}
+
+/// The error of a ring whose header names `number`, past any a writer hands out.
+fn number_past_max(number: u64) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("the header names number {number}, past any a writer hands out"),
+    )
 }
 
 /// What a reader does next with a cursor's numbers.
@@ -522,14 +563,10 @@ fn read_finished<T>(
 ) -> io::Result<Option<T>> {
     assert!(number > 0);
 
-    // The number comes from the header, which another program of this user may have written.
-    let Some(finished) = number.checked_mul(2) else {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("the header names number {number}, past any a writer hands out"),
-        ));
-    };
+    // The reader refuses a header naming a newer number, so the sequence cannot overflow.
+    assert!(number <= NUMBER_MAX);
 
+    let finished = 2 * number;
     let sequence = record[sequence_index].load(Ordering::Relaxed);
     fence(Ordering::Acquire);
     let loaded = load();
@@ -665,19 +702,6 @@ mod tests {
         assert_eq!(
             io::ErrorKind::InvalidData,
             read(&slot, 3).unwrap_err().kind()
-        );
-    }
-
-    #[test]
-    fn refuses_a_publication_past_any_a_writer_numbers() {
-        // Goal: a header that names a number twice of which overflows a word is a broken
-        // ring, which the reader reports rather than crashing on.
-        // Method: read the largest publication a word holds from a slot of publication 2.
-        let slot = slot_holding(4, 40);
-
-        assert_eq!(
-            io::ErrorKind::InvalidData,
-            read(&slot, u64::MAX).unwrap_err().kind()
         );
     }
 

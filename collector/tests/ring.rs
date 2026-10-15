@@ -34,6 +34,7 @@ mod tests {
         fn mprotect(address: *mut c_void, length: usize, protection: c_int) -> c_int;
         fn munmap(address: *mut c_void, length: usize) -> c_int;
         fn getuid() -> u32;
+        fn ftruncate(fd: c_int, length: i64) -> c_int;
     }
 
     const O_RDONLY: c_int = 0x0000;
@@ -256,6 +257,138 @@ mod tests {
                 assert_eq!(std::io::ErrorKind::NotFound, error.kind());
             }
         }
+    }
+
+    /// Header words the forging tests change, as the ring's layout places them.
+    const HEADER_FIRST_PUBLICATION: usize = 3;
+    const HEADER_NEWEST_PUBLICATION: usize = 4;
+
+    /// Leaves in `place` a ring of generation 5 that another program of this user forged: a
+    /// copy of a ring that published once, with the header words `edits` changed, which the
+    /// lock file names. Only the ring's creator may write it, as with a ring a writer makes.
+    fn forge(place: &TestPlace, edits: &[(usize, u64)]) {
+        let spawns = spawns();
+        let mut writer = Writer::create(&place.place, SHAPE).unwrap();
+        publish(&mut writer, 1);
+        drop(writer);
+        drop(spawns);
+        let source = place.open_named(O_RDONLY).unwrap();
+        let length = usize::try_from(
+            File::from(source.try_clone().unwrap())
+                .metadata()
+                .unwrap()
+                .len(),
+        )
+        .unwrap();
+        let name = place.ring_name(5);
+        let forged = unsafe { shm_open(name.as_ptr(), O_RDWR | O_CREAT | O_EXCL, 0o400) };
+        assert!(forged >= 0);
+        let forged = unsafe { OwnedFd::from_raw_fd(forged) };
+        assert_eq!(0, unsafe {
+            ftruncate(forged.as_raw_fd(), i64::try_from(length).unwrap())
+        });
+
+        let map = |fd: &OwnedFd, protection| unsafe {
+            mmap(
+                std::ptr::null_mut(),
+                length,
+                protection,
+                MAP_SHARED,
+                fd.as_raw_fd(),
+                0,
+            )
+        };
+        let from = map(&source, PROT_READ);
+        let to = map(&forged, PROT_READ | PROT_WRITE);
+        unsafe {
+            std::ptr::copy_nonoverlapping(from.cast::<u8>(), to.cast::<u8>(), length);
+            for &(word, value) in edits {
+                to.cast::<u64>().add(word).write(value);
+            }
+            assert_eq!(0, munmap(from, length));
+            assert_eq!(0, munmap(to, length));
+        }
+        std::fs::write(place.lock_path(), name.as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn a_reader_refuses_a_header_naming_a_publication_past_any_a_writer_numbers() {
+        // Goal: a ring whose header names a publication number near the largest a word holds
+        // is a broken ring, which the reader reports rather than crashing on.
+        // Method: forge a ring whose first and newest publication are the largest number,
+        // and open and read it.
+        let place = TestPlace::new("huge");
+        forge(
+            &place,
+            &[
+                (HEADER_FIRST_PUBLICATION, u64::MAX),
+                (HEADER_NEWEST_PUBLICATION, u64::MAX),
+            ],
+        );
+
+        let opened = Reader::open(place.lock_path());
+
+        assert_eq!(
+            std::io::ErrorKind::InvalidData,
+            opened.err().unwrap().kind()
+        );
+    }
+
+    #[test]
+    fn a_reader_refuses_a_header_whose_numbering_starts_at_0() {
+        // Goal: a ring whose header says its publications start at 0, a number no writer
+        // hands out, is a broken ring.
+        // Method: forge a ring whose first publication is 0, and open it.
+        let place = TestPlace::new("zero");
+        forge(&place, &[(HEADER_FIRST_PUBLICATION, 0)]);
+
+        let opened = Reader::open(place.lock_path());
+
+        assert_eq!(
+            std::io::ErrorKind::InvalidData,
+            opened.err().unwrap().kind()
+        );
+    }
+
+    #[test]
+    fn a_reader_refuses_a_newest_publication_past_any_a_writer_numbers() {
+        // Goal: a ring whose newest publication turns huge after the reader opened it is a
+        // broken ring, which the reader reports rather than crashing on.
+        // Method: forge a ring whose newest publication is the largest number, which open
+        // takes as written past the reader's place, and read it.
+        let place = TestPlace::new("newest");
+        forge(&place, &[(HEADER_NEWEST_PUBLICATION, u64::MAX)]);
+
+        let opened = Reader::open(place.lock_path());
+
+        assert_eq!(
+            std::io::ErrorKind::InvalidData,
+            opened.err().unwrap().kind()
+        );
+    }
+
+    #[test]
+    fn a_writer_after_a_ring_naming_a_huge_number_numbers_from_1() {
+        // Goal: a writer continuing from a ring whose header names a number near the largest
+        // a word holds starts the numbering again, rather than overflowing as it counts on.
+        // Method: forge a ring whose newest publication is the largest number, start a writer
+        // after it, publish, and read.
+        let place = TestPlace::new("cont");
+        forge(&place, &[(HEADER_NEWEST_PUBLICATION, u64::MAX)]);
+
+        let spawns = spawns();
+        let mut writer = Writer::create(&place.place, SHAPE).unwrap();
+        drop(spawns);
+        publish(&mut writer, 3);
+        let mut reader = Reader::open(place.lock_path()).unwrap();
+
+        assert_eq!(
+            Found::Publication {
+                publication: 1,
+                tick: 3
+            },
+            reader.read().unwrap()
+        );
     }
 
     fn read_ring(place: &TestPlace, flags: &[&str]) -> Output {
