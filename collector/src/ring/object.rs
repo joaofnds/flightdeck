@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::layout::{
-    HEADER_NEWEST_EVENT, HEADER_NEWEST_PUBLICATION, HEADER_WORDS, Layout, open_layout,
+    HEADER_FIRST_PUBLICATION, HEADER_NEWEST_EVENT, HEADER_NEWEST_PUBLICATION, HEADER_WORDS, Layout,
+    open_layout,
 };
 use crate::kernel::ENOENT;
 use crate::u64_from_usize;
@@ -317,25 +318,56 @@ fn create_object_named(name: &str, size_bytes: usize) -> io::Result<OwnedFd> {
     Ok(object)
 }
 
-/// Removes the rings before the previous one, so at most two rings exist: the new one and the
-/// previous one, which the persister seals. A start that passed over generations held by
-/// other objects left a ring further back, so the generations a start may pass over are
-/// removed too.
+/// Removes every ring before the new one but the newest that holds publications, so at most
+/// two rings exist: the new one and the last with something to read, which the persister
+/// seals. A writer that died before its first publication left an empty ring, which goes,
+/// so a collector failing at each start never costs the publications of the run before. A
+/// start that passed over generations held by other objects left a ring further back, so the
+/// generations a start may pass over are looked at too.
 pub(super) fn create_unlink_older(prefix: &str, previous: u64) {
     let first = previous.saturating_sub(GENERATION_TRIES + 1).max(1);
-    for generation in first..previous {
-        let name = match ring_name(prefix, generation).map(CString::new) {
-            Ok(Ok(name)) => name,
-            Ok(Err(error)) => unreachable!("{error}"),
+    let mut kept = false;
+    for generation in (first..=previous).rev() {
+        let name = match ring_name(prefix, generation) {
+            Ok(name) => name,
             Err(error) => {
                 unreachable!("the longer name {previous} took was short enough: {error}")
             }
+        };
+        if !kept {
+            if create_unlink_older_holds_publications(&name) {
+                kept = true;
+                continue;
+            }
+        }
+        let name = match CString::new(name) {
+            Ok(name) => name,
+            Err(error) => unreachable!("{error}"),
         };
         if unsafe { shm_unlink(name.as_ptr()) } != 0 {
             let error = io::Error::last_os_error();
             if error.raw_os_error() != Some(ENOENT) {
                 eprintln!("ring: unlink {name:?} failed: {error}");
             }
+        }
+    }
+}
+
+/// Whether the ring `name` is a ring of this user that holds a publication of its own. One
+/// that is gone, another program's, of another layout, or empty holds nothing to keep.
+fn create_unlink_older_holds_publications(name: &str) -> bool {
+    match open_ring(name) {
+        Ok((mapping, _)) => {
+            let words = mapping.words();
+            let first = words[HEADER_FIRST_PUBLICATION].load(Ordering::Relaxed);
+            let newest = words[HEADER_NEWEST_PUBLICATION].load(Ordering::Relaxed);
+            newest >= first
+        }
+        Err(error) => {
+            if error.raw_os_error() != Some(ENOENT) {
+                eprintln!("ring: removing {name}, which is unreadable: {error}");
+            }
+            false
         }
     }
 }

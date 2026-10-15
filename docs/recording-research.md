@@ -457,15 +457,17 @@ its source at commit 0763bbc and not run. Its ticks would die with the collector
 the restart below rules out. Its cleanup of dead nodes is configuration that defaults to
 on (`iceoryx2/src/config.rs`), and its blackboard pattern was not surveyed. Its latency
 and CPU were not compared. TASK-18 took this choice unattended, and it waits on the user's
-ruling, since the Decisions above ask for that weighing. The ring here is about 2,500
-lines in `collector/src/ring` and 770 lines of tests in `collector/tests/ring.rs`.
+ruling, since the Decisions above ask for that weighing. The ring here is about 3,000
+lines in `collector/src/ring`, its unit tests included, and 940 lines of tests in
+`collector/tests/ring.rs`.
 
 Because the ring outlives the collector, a crash of the collector loses nothing the
 ring holds. Each start writes a new ring under the next generation's name and keeps the
-previous ring for the persister to seal, so the ring holds two sealing windows, 120 ticks,
-and the previous ring holds what the crashed run left. A start also removes the ring
-before the previous one, so a second restart before the persister seals loses the oldest
-ring's unsealed ticks. The persister (TASK-19) decides when a sealed ring goes. Each slot
+newest earlier ring that holds publications for the persister to seal, so the ring holds
+two sealing windows, 120 ticks, and the kept ring holds what the crashed run left. A start
+removes every other earlier ring, so a second restart of a run that publishes before the
+persister seals loses the oldest ring's unsealed ticks, while a run that dies before its
+first publication costs nothing. The persister (TASK-19) decides when a sealed ring goes. Each slot
 holds full records with room for every process and coalition the collector's limits
 allow, about 500 MB of address space, of which only the pages written take memory. The
 event log beside the slots holds 120 ticks of events at the tracker's bound, about

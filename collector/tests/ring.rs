@@ -649,8 +649,9 @@ mod tests {
         let place = TestPlace::new("keep");
 
         let spawns = spawns();
-        for _ in 0..3 {
-            drop(Writer::create(&place.place, SHAPE).unwrap());
+        for run_tick in 1..=3 {
+            let mut writer = Writer::create(&place.place, SHAPE).unwrap();
+            publish(&mut writer, run_tick);
         }
         drop(spawns);
 
@@ -660,14 +661,39 @@ mod tests {
     }
 
     #[test]
+    fn a_restart_keeps_the_last_ring_that_holds_publications() {
+        // Goal: writers that die before their first publication never cost the ring that
+        // holds the last run's publications, and leave no empty ring behind but the newest.
+        // Method: make a writer that publishes, then two that publish nothing, as a
+        // collector failing at startup under a supervisor would, and look for each generation.
+        let place = TestPlace::new("crashes");
+
+        let spawns = spawns();
+        let mut writer = Writer::create(&place.place, SHAPE).unwrap();
+        publish(&mut writer, 1);
+        drop(writer);
+        for _ in 0..2 {
+            drop(Writer::create(&place.place, SHAPE).unwrap());
+        }
+        drop(spawns);
+
+        assert!(place.holds(1));
+        assert!(!place.holds(2));
+        assert!(place.holds(3));
+    }
+
+    #[test]
     fn a_restart_removes_the_rings_a_skipped_generation_left_behind() {
         // Goal: a ring stays removed once two newer rings exist, also where a start passed
         // over a generation another object held.
         // Method: make a writer, make an object under generation 2's name, then make three
-        // more writers, which take generations 3 to 5, and look for generations 1 and 2.
+        // more writers, which take generations 3 to 5, each publishing once, and look for
+        // generations 1 and 2.
         let place = TestPlace::new("skip");
         let spawns = spawns();
-        drop(Writer::create(&place.place, SHAPE).unwrap());
+        let mut writer = Writer::create(&place.place, SHAPE).unwrap();
+        publish(&mut writer, 1);
+        drop(writer);
         let squatter = unsafe {
             shm_open(
                 place.ring_name(2).as_ptr(),
@@ -678,8 +704,9 @@ mod tests {
         assert!(squatter >= 0);
         drop(unsafe { OwnedFd::from_raw_fd(squatter) });
 
-        for _ in 0..3 {
-            drop(Writer::create(&place.place, SHAPE).unwrap());
+        for run_tick in 2..=4 {
+            let mut writer = Writer::create(&place.place, SHAPE).unwrap();
+            publish(&mut writer, run_tick);
         }
         drop(spawns);
 
