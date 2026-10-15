@@ -457,8 +457,8 @@ its source at commit 0763bbc and not run. Its ticks would die with the collector
 the restart below rules out. Its cleanup of dead nodes is configuration that defaults to
 on (`iceoryx2/src/config.rs`), and its blackboard pattern was not surveyed. Its latency
 and CPU were not compared. TASK-18 took this choice unattended, and it waits on the user's
-ruling, since the Decisions above ask for that weighing. The ring here is about 3,300
-lines in `collector/src/ring`, its unit tests included, and about 1,500 lines of tests in
+ruling, since the Decisions above ask for that weighing. The ring here is about 3,550
+lines in `collector/src/ring`, its unit tests included, and about 1,750 lines of tests in
 `collector/tests/ring.rs`.
 
 Because the ring outlives the collector, a crash of the collector loses nothing the
@@ -649,20 +649,26 @@ and a reader learns what it missed from the gap. The writer holds a lock file, a
 process of the same user that takes that lock keeps a new collector from starting.
 
 Every user shares the names of shared-memory objects, so each ring's name carries 60
-random bits that only its lock file holds, and the lock file sits at
-`~/Library/Application Support/Flightdeck/NAME.lock`, in a directory only the user may
-enter. Another user therefore cannot know the names a writer will make, and cannot take
-them first to keep the collector from starting. The writer draws the bits once and keeps
-them for as long as the lock file names a ring, so the collector prints no ring name to its
-log, and a process that once read the lock file knows the names of every later ring. A
-lock file lost or rewritten by another program makes the next writer draw new bits, and
-the rings named under the old ones stay until the Mac restarts, since nothing knows their
-names any more. The directory is outside what dirhelper cleans. Its launch daemon runs it
-daily at 03:35 with `CLEAN_FILES_OLDER_THAN_DAYS` set to 3, as
-`/System/Library/LaunchDaemons/com.apple.bsd.dirhelper.plist` shows, and we infer from
-Apple's description of dirhelper, not from a run we watched, that it cleans the user's
-temporary directory under `/var/folders`, where a collector running longer than three
-days would lose the lock file its single writer and its readers rely on.
+random bits that the collector writes nowhere but its lock file. The lock file is
+`NAME.lock`, where NAME is the ring name `--ring` gives, in
+`Library/Application Support/Flightdeck` under the home the user database gives for the
+user's uid, whatever HOME says. The collector refuses that directory unless its mode lets
+only the user enter it, and it reads the mode alone, not an access control list. Another
+user therefore cannot know the names a writer will make, and cannot take them first to keep
+the collector from starting. That follows from the code, and no run has tried it as
+another user yet, since the CI test that does has not run. The writer draws the bits once
+and keeps them for as long as the lock file names a ring, so the collector prints no ring
+name to its log, and a process that once read the lock file knows the names of every later
+ring. A lock file lost or rewritten by another program, or a deleted directory, makes the
+next writer draw new bits, and the rings named under the old ones stay until the Mac
+restarts, about 800 MB of address space each at the default shape, since nothing knows
+their names any more. The directory is outside both paths dirhelper's binary names. Its
+launch daemon runs it daily at 03:35 with `CLEAN_FILES_OLDER_THAN_DAYS` set to 3, as
+`/System/Library/LaunchDaemons/com.apple.bsd.dirhelper.plist` shows, and the only absolute
+paths `strings /usr/libexec/dirhelper` prints are `/tmp/` and `/var/folders/`. That it
+removes files older than three days under those two, where a collector running longer
+would lose the lock file its single writer and its readers rely on, is inferred from those
+two readings, and no run has watched it.
 
 ## Recommended pipeline
 
@@ -711,7 +717,9 @@ reads, to that output, and each constant holds the printed value. The program is
 message of the latest commit that changes a pin, which `git log --grep 'xcrun clang'` lists
 first. Nothing runs it again, so a later SDK that changed one of them would go unnoticed
 until someone does, and nothing checks the argument types of the functions declared against
-the headers. The structs `coalitions.rs` and `smc.rs` declare have no SDK header to check
+the headers. The ring's `struct passwd` and its shared-memory constants came after
+that program, and the same check for them, in the message of the commit that adds this
+sentence, printed what their pins hold. The structs `coalitions.rs` and `smc.rs` declare have no SDK header to check
 them against.
 
 ## Next measurements
