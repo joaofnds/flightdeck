@@ -510,20 +510,28 @@ fn read_finished<T>(
 ) -> io::Result<Option<T>> {
     assert!(number > 0);
 
+    // The number comes from the header, which another program of this user may have written.
+    let Some(finished) = number.checked_mul(2) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("the header names number {number}, past any a writer hands out"),
+        ));
+    };
+
     let sequence = record[sequence_index].load(Ordering::Relaxed);
     fence(Ordering::Acquire);
     let loaded = load();
     fence(Ordering::Acquire);
     let sequence_after = record[sequence_index].load(Ordering::Relaxed);
 
-    if sequence < 2 * number {
+    if sequence < finished {
         // A record only moves on to later numbers.
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("the record of {number} holds sequence {sequence}"),
         ));
     }
-    if sequence == 2 * number {
+    if sequence == finished {
         if sequence_after == sequence {
             if loaded.is_none() {
                 return Err(io::Error::new(
@@ -643,6 +651,19 @@ mod tests {
         assert_eq!(
             io::ErrorKind::InvalidData,
             read(&slot, 3).unwrap_err().kind()
+        );
+    }
+
+    #[test]
+    fn refuses_a_publication_past_any_a_writer_numbers() {
+        // Goal: a header that names a number twice of which overflows a word is a broken
+        // ring, which the reader reports rather than crashing on.
+        // Method: read the largest publication a word holds from a slot of publication 2.
+        let slot = slot_holding(4, 40);
+
+        assert_eq!(
+            io::ErrorKind::InvalidData,
+            read(&slot, u64::MAX).unwrap_err().kind()
         );
     }
 

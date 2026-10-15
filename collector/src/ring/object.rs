@@ -29,6 +29,10 @@ const LOCK_MODE: u32 = 0o600;
 /// taken by an object it did not make.
 const GENERATION_TRIES: u64 = 16;
 
+/// The largest publication or event number a writer continues from. Twice a number past it
+/// would overflow the sequence word, and at ten ticks a second no run comes near it.
+const NUMBER_MAX: u64 = u64::MAX / 4;
+
 /// The `confstr` name of this user's own temporary directory, from `unistd.h`.
 const CS_DARWIN_USER_TEMP_DIR: c_int = 65537;
 /// The longest path macOS takes, `PATH_MAX` in `sys/syslimits.h`.
@@ -235,9 +239,20 @@ pub(super) fn create_previous(prefix: &str, lock: &File) -> io::Result<Previous>
     };
     Ok(Previous {
         generation,
-        newest_publication,
-        newest_event,
+        newest_publication: create_previous_continued(newest_publication, name),
+        newest_event: create_previous_continued(newest_event, name),
     })
+}
+
+/// The number `newest` the ring `name` names, to continue from, or 0 where it is past
+/// `NUMBER_MAX`, which only another program of this user could have written.
+fn create_previous_continued(newest: u64, name: &str) -> u64 {
+    if newest > NUMBER_MAX {
+        eprintln!("ring: numbering from 1, since the ring {name} names number {newest}");
+        return 0;
+    }
+
+    newest
 }
 
 /// A ring's object a writer made.
@@ -477,4 +492,22 @@ pub(super) fn place_for_user(name: &str) -> io::Result<super::Place> {
     // A ring's name holds the prefix and a generation, within what macOS takes.
     ring_name(&place.name_prefix, u64::from(u32::MAX))?;
     Ok(place)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_writer_continues_a_numbering_only_far_from_overflow() {
+        // Goal: a ring of this user whose header names a number near the largest a word holds
+        // starts the numbering again, rather than overflowing when the writer counts on.
+        // Method: ask for the number to continue from of the largest number allowed and of
+        // the one past it.
+        let largest = create_previous_continued(NUMBER_MAX, "/r.1");
+        let past = create_previous_continued(NUMBER_MAX + 1, "/r.1");
+
+        assert_eq!(NUMBER_MAX, largest);
+        assert_eq!(0, past);
+    }
 }
