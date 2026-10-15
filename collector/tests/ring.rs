@@ -646,6 +646,47 @@ mod tests {
     }
 
     #[test]
+    fn a_reader_that_follows_a_writer_numbering_from_1_learns_what_it_missed() {
+        // Goal: a reader that moves to a ring whose numbering started again learns the
+        // publications the new writer overwrote before the reader got there.
+        // Method: read the three publications of a ring, spoil the lock file so the next
+        // writer numbers from 1, publish six ticks into its four slots, follow it, and read.
+        let place = TestPlace::new("renum");
+        let mut first = Writer::create(&place.place, SHAPE).unwrap();
+        for run_tick in 1..=3 {
+            publish_events(&mut first, run_tick, &[exit(1)]);
+        }
+        let mut reader = Reader::open(place.lock_path()).unwrap();
+        for _ in 1..=3 {
+            reader.read().unwrap();
+            reader.read_event().unwrap();
+        }
+
+        let spawns = spawns();
+        drop(first);
+        std::fs::write(place.lock_path(), [b'a'; 64]).unwrap();
+        let mut second = Writer::create(&place.place, SHAPE).unwrap();
+        drop(spawns);
+        for run_tick in 1..=6 {
+            publish_events(&mut second, run_tick, &[exit(2)]);
+        }
+        reader.follow(place.lock_path()).unwrap();
+
+        assert_eq!(Found::Missed { first: 1, end: 3 }, reader.read().unwrap());
+        assert_eq!(
+            Found::Publication {
+                publication: 3,
+                tick: 3
+            },
+            reader.read().unwrap()
+        );
+        assert_eq!(
+            FoundEvent::Missed { first: 1, end: 3 },
+            reader.read_event().unwrap()
+        );
+    }
+
+    #[test]
     fn a_restarted_writer_keeps_the_previous_ring_and_removes_older_ones() {
         // Goal: a restart keeps the ring before it for the persister to seal, and at most two
         // rings exist.

@@ -384,11 +384,10 @@ impl Cursor {
 
     /// Takes the position of `older`, a cursor over the previous ring, where the numbers
     /// this ring continues start at or past it. A ring whose numbers start before it begins
-    /// a numbering of its own, as after a reboot, and the cursor stays where it opened.
+    /// a numbering of its own, as after a lock file nobody could read, so the cursor starts
+    /// at that numbering's first and the next step reports what the ring no longer holds.
     fn carry(&mut self, older: &Self) {
-        if older.next <= self.first {
-            self.next = older.next;
-        }
+        self.next = older.next.min(self.first);
     }
 
     /// The next step once the writer holds the numbers `held`, moving the cursor past what
