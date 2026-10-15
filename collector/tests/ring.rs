@@ -3,6 +3,8 @@
 // Clippy lets a test unwrap only inside a module marked as a test's.
 #[cfg(test)]
 mod tests {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
     use std::ffi::{CString, c_char, c_int, c_void};
     use std::fs::File;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -44,6 +46,55 @@ mod tests {
     const PROT_READ: c_int = 0x01;
     const PROT_WRITE: c_int = 0x02;
     const MAP_SHARED: c_int = 0x0001;
+
+    /// The system's allocator, counting the calls made to it on a thread while that thread
+    /// asks it to, so a test can see whether its own thread allocates.
+    struct Counting;
+
+    #[global_allocator]
+    static COUNTING: Counting = Counting;
+
+    thread_local! {
+        static COUNTING_THIS_THREAD: Cell<bool> = const { Cell::new(false) };
+        static CALLS_THIS_THREAD: Cell<u64> = const { Cell::new(0) };
+    }
+
+    fn count_call() {
+        if COUNTING_THIS_THREAD.get() {
+            CALLS_THIS_THREAD.set(CALLS_THIS_THREAD.get() + 1);
+        }
+    }
+
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            count_call();
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            count_call();
+            unsafe { System.alloc_zeroed(layout) }
+        }
+
+        unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+            count_call();
+            unsafe { System.dealloc(pointer, layout) }
+        }
+
+        unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+            count_call();
+            unsafe { System.realloc(pointer, layout, size) }
+        }
+    }
+
+    /// Returns how many times `work` called the allocator on this thread.
+    fn allocator_calls_in(work: impl FnOnce()) -> u64 {
+        CALLS_THIS_THREAD.set(0);
+        COUNTING_THIS_THREAD.set(true);
+        work();
+        COUNTING_THIS_THREAD.set(false);
+        CALLS_THIS_THREAD.get()
+    }
 
     /// A ring's place that only one test uses, which removes the lock file and every ring it
     /// named when the test ends, since a shared-memory object outlives the process that made it.
@@ -677,6 +728,106 @@ mod tests {
             found
         );
         assert!(follows_after_reading);
+        drop(second);
+    }
+
+    #[test]
+    fn a_reader_allocates_nothing_to_follow_or_read_a_newer_ring() {
+        // Goal: a reader that follows a restarted writer of the same shape allocates nothing,
+        // as Tiger Style's allocation at startup only asks of library code.
+        // Method: read a ring, restart the writer and publish, then count the allocator calls
+        // this thread makes to follow and read the newer ring.
+        let place = TestPlace::new("nalloc");
+        let mut first = Writer::create(&place.place, SHAPE).unwrap();
+        publish_events(&mut first, 1, &[exit(1)]);
+        let mut reader = Reader::open(place.lock_path()).unwrap();
+        reader.read().unwrap();
+        reader.read_event().unwrap();
+        let spawns = spawns();
+        drop(first);
+        let mut second = Writer::create(&place.place, SHAPE).unwrap();
+        drop(spawns);
+        publish_events(&mut second, 1, &[exit(2)]);
+        let lock_path = place.lock_path().clone();
+        let mut followed = false;
+        let mut found = Found::Nothing;
+
+        let calls = allocator_calls_in(|| {
+            followed = reader.follow(&lock_path).unwrap();
+            found = reader.read().unwrap();
+            reader.read_event().unwrap();
+        });
+
+        assert!(followed);
+        assert_eq!(
+            Found::Publication {
+                publication: 2,
+                tick: 1
+            },
+            found
+        );
+        assert_eq!(0, calls);
+    }
+
+    #[test]
+    fn a_reader_follows_a_ring_of_other_slot_and_event_counts() {
+        // Goal: a reader follows a restarted writer whose ring holds more publications and
+        // events, since its room for a tick still fits.
+        // Method: read a ring, restart the writer with twice the slots and events, publish,
+        // follow, and read.
+        let place = TestPlace::new("bigger");
+        let mut first = Writer::create(&place.place, SHAPE).unwrap();
+        publish(&mut first, 1);
+        let mut reader = Reader::open(place.lock_path()).unwrap();
+        reader.read().unwrap();
+        let spawns = spawns();
+        drop(first);
+        let shape = Shape {
+            slot_count: 8,
+            event_capacity: 8,
+            ..SHAPE
+        };
+        let mut second = Writer::create(&place.place, shape).unwrap();
+        drop(spawns);
+        publish(&mut second, 1);
+
+        let followed = reader.follow(place.lock_path()).unwrap();
+
+        assert!(followed);
+        assert_eq!(
+            Found::Publication {
+                publication: 2,
+                tick: 1
+            },
+            reader.read().unwrap()
+        );
+    }
+
+    #[test]
+    fn a_reader_refuses_to_follow_a_ring_whose_ticks_hold_more() {
+        // Goal: a reader whose room for a tick is too small for the newer ring's ticks says so
+        // rather than allocating mid-run or reading past its room.
+        // Method: read a ring, restart the writer with room for two processes, and follow.
+        let place = TestPlace::new("wider");
+        let mut first = Writer::create(&place.place, SHAPE).unwrap();
+        publish(&mut first, 1);
+        let mut reader = Reader::open(place.lock_path()).unwrap();
+        reader.read().unwrap();
+        let spawns = spawns();
+        drop(first);
+        let shape = Shape {
+            process_capacity: 2,
+            ..SHAPE
+        };
+        let second = Writer::create(&place.place, shape).unwrap();
+        drop(spawns);
+
+        let followed = reader.follow(place.lock_path());
+
+        assert_eq!(
+            std::io::ErrorKind::InvalidData,
+            followed.unwrap_err().kind()
+        );
         drop(second);
     }
 

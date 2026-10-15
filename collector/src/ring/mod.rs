@@ -209,34 +209,56 @@ pub struct Reader {
     events: Cursor,
 }
 
+/// A ring a reader opened, before it has room for the ring's ticks.
+struct Opened {
+    name: LockedName,
+    mapping: Mapping,
+    publications: Cursor,
+    run_start_ns: u64,
+    events: Cursor,
+    layout: Layout,
+}
+
 impl Reader {
     /// Opens the ring the lock file at `lock_path` names, starting at the oldest publication
     /// it holds.
     pub fn open(lock_path: &Path) -> io::Result<Self> {
-        let locked = LockedName::read(&File::open(lock_path)?)?;
-        let name = locked.as_str();
-        if name.is_empty() {
+        let opened = Self::open_named(lock_path)?;
+        Ok(Self {
+            tick: LoadedTick::new(&opened.layout),
+            name: opened.name,
+            mapping: opened.mapping,
+            publications: opened.publications,
+            run_start_ns: opened.run_start_ns,
+            events: opened.events,
+            layout: opened.layout,
+        })
+    }
+
+    /// The ring the lock file at `lock_path` names, with the reader's place at the oldest
+    /// publication and event it holds, and no room for its ticks, which `follow` keeps.
+    fn open_named(lock_path: &Path) -> io::Result<Opened> {
+        let name = LockedName::read(&File::open(lock_path)?)?;
+        if name.as_str().is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 "the lock file names no ring yet",
             ));
         }
 
-        let (mapping, layout) = open_ring(name)?;
+        let (mapping, layout) = open_ring(name.as_str())?;
         let words = mapping.words();
         let first = words[HEADER_FIRST_PUBLICATION].load(Ordering::Relaxed);
         let newest = words[HEADER_NEWEST_PUBLICATION].load(Ordering::Relaxed);
         let run_start_ns = words[HEADER_RUN_START_NS].load(Ordering::Relaxed);
         let first_event = words[HEADER_FIRST_EVENT].load(Ordering::Relaxed);
         let newest_event = words[HEADER_NEWEST_EVENT].load(Ordering::Relaxed);
-        Ok(Self {
-            name: locked,
-            mapping,
+        Ok(Opened {
+            name,
             publications: Cursor::new(first, layout.publications_held(newest)),
             run_start_ns,
-            tick: LoadedTick::new(&layout),
             events: Cursor::new(first_event, layout.events_held(newest_event)),
-            // Last, since the fields above read it.
+            mapping,
             layout,
         })
     }
@@ -270,10 +292,29 @@ impl Reader {
             return Ok(false);
         }
 
-        let mut newer = Self::open(lock_path)?;
+        let mut newer = Self::open_named(lock_path)?;
+        // The room for ticks is sized to the capacities of a tick, so the reader keeps its own
+        // and allocates nothing, and a ring whose ticks hold more is opened afresh.
+        let tick_shape = Shape {
+            slot_count: newer.layout.shape.slot_count,
+            event_capacity: newer.layout.shape.event_capacity,
+            ..self.layout.shape
+        };
+        if tick_shape != newer.layout.shape {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "the newer ring has another shape, so open it afresh",
+            ));
+        }
+
         newer.publications.carry(&self.publications);
         newer.events.carry(&self.events);
-        *self = newer;
+        self.name = newer.name;
+        self.mapping = newer.mapping;
+        self.publications = newer.publications;
+        self.run_start_ns = newer.run_start_ns;
+        self.events = newer.events;
+        self.layout = newer.layout;
         Ok(true)
     }
 

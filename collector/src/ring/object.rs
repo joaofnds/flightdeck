@@ -1,7 +1,7 @@
 //! The shared-memory object that holds a ring, and the lock file that names it.
 
 use std::ffi::OsStr;
-use std::ffi::{CString, c_char, c_int, c_uint, c_void};
+use std::ffi::{CStr, CString, c_char, c_int, c_uint, c_void};
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -375,7 +375,8 @@ fn create_unlink_older_holds_publications(name: &str) -> bool {
 /// Maps the header and then the whole of the ring `name`, after checking that this user owns
 /// it and nobody may write it.
 pub(super) fn open_ring(name: &str) -> io::Result<(Mapping, Layout)> {
-    let name = CString::new(name).map_err(io::Error::other)?;
+    let mut buffer = [0; PSHMNAMLEN + 1];
+    let name = open_ring_name(name, &mut buffer)?;
     let object = unsafe { shm_open(name.as_ptr(), O_RDONLY) };
     if object < 0 {
         return Err(io::Error::last_os_error());
@@ -388,6 +389,25 @@ pub(super) fn open_ring(name: &str) -> io::Result<(Mapping, Layout)> {
     let layout = open_layout(header.words(), size_bytes)?;
     let mapping = Mapping::new(&object, layout.word_count(), PROT_READ)?;
     Ok((mapping, layout))
+}
+
+/// The name `name` with the NUL a kernel call needs, in `buffer`, so a reader that follows a
+/// newer ring allocates nothing to name it.
+fn open_ring_name<'buffer>(
+    name: &str,
+    buffer: &'buffer mut [u8; PSHMNAMLEN + 1],
+) -> io::Result<&'buffer CStr> {
+    let length = name.len();
+    if length > PSHMNAMLEN {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("a ring name of more than {PSHMNAMLEN} bytes"),
+        ));
+    }
+
+    buffer[..length].copy_from_slice(name.as_bytes());
+    buffer[length] = 0;
+    CStr::from_bytes_with_nul(&buffer[..=length]).map_err(io::Error::other)
 }
 
 /// The size of the object `object`, or an error where this user does not own it or anyone
