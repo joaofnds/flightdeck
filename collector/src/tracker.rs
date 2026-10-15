@@ -1017,7 +1017,7 @@ mod tests {
         let mut tracker = Tracker::new(Timebase::read().unwrap(), INTERVAL, limits).unwrap();
 
         while_forking_every_2_ms(|| {
-            follow_until_counted(&mut tracker, "dropped start or exit", |counts| {
+            follow_to_count(&mut tracker, "dropped start or exit", |counts| {
                 counts.dropped_starts + counts.dropped_exits > 0
             });
         });
@@ -1389,7 +1389,7 @@ mod tests {
     /// Follows `tracker` a step at a time, keeping in `events` the drained events about the
     /// child `awaited` names, until they hold the `awaited` event. Fails after `STEPS_MAX`
     /// steps, naming that event and the child's events.
-    fn follow_until_drained(
+    fn follow_to_event(
         tracker: &mut Tracker,
         meter: &mut Meter,
         events: &mut Vec<Event>,
@@ -1438,20 +1438,20 @@ mod tests {
     }
 
     /// Follows `tracker` a step at a time, draining nothing, until its counts satisfy
-    /// `is_awaited`. Fails after `STEPS_MAX` steps, naming the `awaited` count.
-    fn follow_until_counted(
+    /// `is_reached`. Fails after `STEPS_MAX` steps, naming the count by its `description`.
+    fn follow_to_count(
         tracker: &mut Tracker,
-        awaited: &str,
-        is_awaited: impl Fn(&Counts) -> bool,
+        description: &str,
+        is_reached: impl Fn(&Counts) -> bool,
     ) {
         for _ in 0..STEPS_MAX {
             follow_for(tracker, &mut Meter::default(), STEP_MS);
-            if is_awaited(&tracker.counts) {
+            if is_reached(&tracker.counts) {
                 return;
             }
         }
         panic!(
-            "no {awaited} after {STEPS_MAX} steps of {STEP_MS} ms: {:?}",
+            "no {description} after {STEPS_MAX} steps of {STEP_MS} ms: {:?}",
             tracker.counts
         );
     }
@@ -1483,7 +1483,7 @@ mod tests {
         let mut child = spawn_held("/bin/cat", &[]);
         let pid = child.id().cast_signed();
         let mut events = Vec::new();
-        follow_until_drained(
+        follow_to_event(
             &mut tracker,
             &mut Meter::default(),
             &mut events,
@@ -1491,7 +1491,7 @@ mod tests {
         );
 
         release(&mut child);
-        follow_until_drained(
+        follow_to_event(
             &mut tracker,
             &mut Meter::default(),
             &mut events,
@@ -1523,7 +1523,7 @@ mod tests {
         let mut child = spawn_held("/bin/bash", &["-c", "read -r line; exec /usr/bin/true"]);
         let pid = child.id().cast_signed();
         let mut held = Vec::new();
-        follow_until_drained(
+        follow_to_event(
             &mut tracker,
             &mut Meter::default(),
             &mut held,
@@ -1532,7 +1532,7 @@ mod tests {
 
         release(&mut child);
         let mut released = Vec::new();
-        follow_until_drained(
+        follow_to_event(
             &mut tracker,
             &mut Meter::default(),
             &mut released,
@@ -1558,7 +1558,7 @@ mod tests {
         let pid = child.id().cast_signed();
 
         let mut events = Vec::new();
-        follow_until_drained(
+        follow_to_event(
             &mut tracker,
             &mut Meter::default(),
             &mut events,
@@ -1589,9 +1589,9 @@ mod tests {
         let pid = child.id().cast_signed();
         let mut events = Vec::new();
 
-        follow_until_drained(&mut tracker, &mut meter, &mut events, Awaited::Start(pid));
+        follow_to_event(&mut tracker, &mut meter, &mut events, Awaited::Start(pid));
         release(&mut child);
-        follow_until_drained(&mut tracker, &mut meter, &mut events, Awaited::Exit(pid));
+        follow_to_event(&mut tracker, &mut meter, &mut events, Awaited::Exit(pid));
         child.wait().unwrap();
 
         let cost = Snapshot::take(&meter, timebase)
@@ -1785,7 +1785,7 @@ mod tests {
         let mut tracker = tracker(Duration::from_secs(1));
 
         while_forking_every_2_ms(|| {
-            follow_until_counted(&mut tracker, "trailing rescan", |counts| {
+            follow_to_count(&mut tracker, "trailing rescan", |counts| {
                 counts.trailing_rescans > 0
             });
         });
