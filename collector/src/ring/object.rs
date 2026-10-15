@@ -416,7 +416,7 @@ pub(super) fn create_object(naming: Naming, previous: u64, layout: &Layout) -> i
     ))
 }
 
-fn ring_name(naming: Naming, generation: u64) -> io::Result<String> {
+pub(super) fn ring_name(naming: Naming, generation: u64) -> io::Result<String> {
     let name = format!("{}{}.{generation}", naming.prefix, naming.token.as_str());
     if name.len() > PSHMNAMLEN {
         return Err(io::Error::new(

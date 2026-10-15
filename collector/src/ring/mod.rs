@@ -29,7 +29,7 @@ use layout::{
 };
 use object::{
     LockedName, Mapping, NUMBER_MAX, Naming, PROT_READ, PROT_WRITE, create_lock, create_object,
-    create_previous, create_unlink_older, open_ring, place_for_user,
+    create_previous, create_unlink_older, open_ring, place_for_user, ring_name,
 };
 pub use tick::{Dropped, IOReportReadings, Readings, SmcReadings, Tick};
 
@@ -140,6 +140,14 @@ impl Writer {
             prefix: &place.name_prefix,
             token: previous.token,
         };
+        // A writer stopped after making a ring under a token it just drew would leave a ring
+        // nothing can name, so the lock file names the token first. Generation 0 is no ring,
+        // and a reader takes it as a ring that is gone.
+        if previous.generation == 0 {
+            let reserved = ring_name(naming, 0)?;
+            lock.write_all_at(reserved.as_bytes(), 0)?;
+            lock.set_len(u64_from_usize(reserved.len()))?;
+        }
         let created = create_object(naming, previous.generation, &layout)?;
 
         let mapping = Mapping::new(&created.object, layout.word_count(), PROT_READ | PROT_WRITE)?;

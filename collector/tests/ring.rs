@@ -1446,6 +1446,50 @@ mod tests {
     }
 
     #[test]
+    fn a_writer_names_its_token_in_the_lock_file_before_it_makes_a_ring() {
+        // Goal: a writer stopped after it made a ring under a token it drew leaves the token
+        // in the lock file, so the next writer finds that ring and removes it in time.
+        // Method: make a writer of a shape too large to map, which fails after it drew its
+        // token, and read the name its lock file holds.
+        let place = TestPlace::new("reserve");
+        let shape = Shape {
+            slot_count: 1 << 24,
+            process_capacity: 1 << 20,
+            ..SHAPE
+        };
+
+        let created = Writer::create(&place.place, shape);
+
+        assert!(created.is_err());
+        let named = std::fs::read_to_string(place.lock_path()).unwrap();
+        assert!(named.starts_with(&place.place.name_prefix), "{named}");
+        assert!(named.ends_with(".0"), "{named}");
+    }
+
+    #[test]
+    fn a_reader_takes_a_lock_file_naming_generation_0_for_one_naming_no_ring_yet() {
+        // Goal: the name a writer writes before it makes its first ring sends no reader to a
+        // ring that does not exist.
+        // Method: read a ring to its end and follow a lock file naming generation 0 of
+        // another token, then open a reader on it.
+        let place = TestPlace::new("gen0");
+        let mut writer = Writer::create(&place.place, SHAPE).unwrap();
+        publish(&mut writer, 1);
+        let mut reader = Reader::open(place.lock_path()).unwrap();
+        reader.read().unwrap();
+        let named = std::fs::read(place.lock_path()).unwrap();
+        place.name_token("reservedabcd");
+
+        let followed = reader.follow(place.lock_path()).unwrap();
+        let opened = Reader::open(place.lock_path());
+
+        std::fs::write(place.lock_path(), named).unwrap();
+        assert!(!followed);
+        assert_eq!(std::io::ErrorKind::NotFound, opened.err().unwrap().kind());
+        drop(writer);
+    }
+
+    #[test]
     fn a_lock_file_naming_a_token_of_capitals_starts_the_numbering_again() {
         // Goal: a writer takes a token only from the letters it draws tokens from, so a lock
         // file another program wrote never chooses the names of the rings.
