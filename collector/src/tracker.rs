@@ -1421,8 +1421,8 @@ mod tests {
 
         fn is(self, event: &Event) -> bool {
             match (self, event) {
-                (Awaited::Start(pid), Event::Start { pid: p, .. })
-                | (Awaited::Exit(pid), Event::Exit { pid: p, .. }) => *p == pid,
+                (Awaited::Start(pid), Event::Start { .. })
+                | (Awaited::Exit(pid), Event::Exit { .. }) => pid_of_event(event) == pid,
                 _ => false,
             }
         }
@@ -1633,11 +1633,7 @@ mod tests {
 
         let pid = child.id().cast_signed();
         let events: Vec<Event> = tracker.drain_events().collect();
-        let about_child = |event: &Event| match event {
-            Event::Start { pid: p, .. } | Event::Exec { pid: p } | Event::Exit { pid: p, .. } => {
-                *p == pid
-            }
-        };
+        let about_child = |event: &Event| pid_of_event(event) == pid;
         assert!(!events.iter().any(about_child), "child {pid}: {events:?}");
     }
 
@@ -1701,11 +1697,7 @@ mod tests {
         child.wait().unwrap();
 
         let events: Vec<Event> = tracker.drain_events().collect();
-        let about_child = |event: &Event| match event {
-            Event::Start { pid: p, .. } | Event::Exec { pid: p } | Event::Exit { pid: p, .. } => {
-                *p == pid
-            }
-        };
+        let about_child = |event: &Event| pid_of_event(event) == pid;
         assert!(!events.iter().any(about_child), "child {pid}: {events:?}");
     }
 
