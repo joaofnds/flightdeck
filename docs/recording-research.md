@@ -796,8 +796,13 @@ On the same Mac, a fresh-target `cargo +1.95.0 build --locked -p persistence --l
 --target-dir /tmp/task19-cold-bundled-20261015` completed in 49.36 seconds wall,
 517.01 user and 52.71 system, with 3,581,493,248-byte maximum compiler RSS. The registry
 was already fetched; no target artifact existed. This includes Arrow and bundled C++
-compilation. CI build duration for the native dependency is unmeasured; this 18-core
-Mac's result supplies no evidence for changing CI's 15-minute timeout.
+compilation. A fresh macos-26 CI run of 6e450cc took 6m 51s for the workspace
+dependency build and clippy, then 7m 39s to compile the test executables. These timings
+include Rust and native work, not an isolated C++ measurement. The 15-minute job limit
+canceled the run after tests began, so the job allows 30 minutes for cold builds and
+the complete suite. The completed tests reported no assertion failure before that
+cutoff; recording-file privacy had not run yet. Source:
+[CI run 38787804116](https://github.com/joaofnds/flightdeck/actions/runs/38787804116).
 
 The debug encoder's full injected capacity profile has 61 populated ticks with 12,000
 processes, 28,384 coalitions, 1,638 interfaces, 18 CPUs/cores, 64 states, 10 fans and

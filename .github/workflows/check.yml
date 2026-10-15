@@ -12,7 +12,7 @@ jobs:
   check:
     # The collector reads macOS kernel interfaces and frameworks, so it builds only on macOS.
     runs-on: macos-26
-    timeout-minutes: 15
+    timeout-minutes: 30
     env:
       # Pinned, so that a newer clippy never refuses code that passed before. Move it forward
       # in a commit of its own, together with the fixes the newer lints ask for.
