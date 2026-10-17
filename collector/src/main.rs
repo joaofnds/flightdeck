@@ -1,4 +1,6 @@
+mod identity_report;
 mod owner;
+mod publication;
 mod stop;
 
 #[cfg(test)]
@@ -17,12 +19,12 @@ use collector::cost::{Cost, Meter, Snapshot, Source};
 use collector::processes::{self, Unreadable, Usage};
 use collector::recording::child::{ChildCost, Persister};
 use collector::recording::{self, Registration};
-use collector::ring::{
-    Dropped, IOReportReadings, ObservationTimes, Place, Readings, Shape, SmcReadings, Writer,
-};
+use collector::ring::{DictionaryCapacity, ObservationTimes, Place, Shape, Writer};
 use collector::schedule::Schedule;
 use collector::tracker::{Counts, Event, Noticed};
 use collector::u64_from_usize;
+
+use publication::Publication;
 
 const QOS_CLASS_DEFAULT: u32 = 0x15;
 const TICK_PERIOD_NS: u64 = 1_000_000_000;
@@ -194,46 +196,6 @@ fn start_ring_shape(capacities: Capacities) -> Shape {
     }
 }
 
-/// Publishes what `collector` read in `tick` to `ring`.
-fn publish(ring: &mut Writer, collector: &Collector, tick: u64, times: Option<&ObservationTimes>) {
-    let ioreport = collector
-        .ioreport
-        .as_ref()
-        .map(|ioreport| IOReportReadings {
-            gpu_energy_nj: ioreport.gpu_energy_nj(),
-            gpu_active_ns: ioreport.gpu().active_ns(),
-            cores: ioreport.cores(),
-        });
-    let smc = collector.smc.as_ref().map(|smc| SmcReadings {
-        power_watts: smc.power_watts(),
-        soc_celsius: smc.soc_celsius(),
-        fan_rpm: smc.fan_rpm(),
-    });
-    let counts = collector.counts_tick();
-    let readings = Readings {
-        run_tick: tick,
-        cpus: collector.machine.cpus(),
-        memory: &collector.machine.memory,
-        interfaces: collector.interfaces.readings(),
-        ioreport,
-        smc,
-        processes: &collector.processes.readings,
-        processes_refused: collector.processes.refused,
-        processes_gone: collector.processes.gone,
-        coalitions: &collector.coalitions.readings,
-        events: collector.events(),
-        dropped: Dropped {
-            starts: counts.dropped_starts,
-            execs: counts.dropped_execs,
-            exits: counts.dropped_exits,
-        },
-    };
-    match times {
-        Some(times) => ring.publish_observed(&readings, times),
-        None => ring.publish(&readings),
-    }
-}
-
 fn observation_or_unavailable(
     measured: io::Result<ObservationTimes>,
     out: &mut impl Write,
@@ -268,6 +230,7 @@ struct Run {
     meter: Meter,
     collector: Collector,
     ring: Writer,
+    publication: Publication,
     persistence: Persistence,
     live_at_first_scan: Vec<i32>,
     warm_up_starts: u64,
@@ -286,7 +249,20 @@ fn start_recording_ring(
     out: &mut impl Write,
 ) -> io::Result<(Writer, bool)> {
     let start_ns = timebase.nanoseconds(clock::now())?;
-    let (ring, registered) = Registration::start(root, place, shape, start_ns)?.into_parts();
+    let capacity = DictionaryCapacity {
+        entries: 65_536,
+        arena_bytes: 64 * 1024 * 1024,
+    };
+    let size_bytes = Writer::identity_size_bytes(shape, capacity)?;
+
+    writeln!(
+        out,
+        "identity ring bytes={size_bytes} reader_limit_bytes=1073741824"
+    )?;
+
+    let (ring, registered) =
+        Registration::start_with_identity(root, place, shape, capacity, start_ns)?.into_parts();
+
     match registered {
         Ok(()) => Ok((ring, true)),
         Err(error) => {
@@ -669,6 +645,7 @@ impl Run {
             timebase,
             out,
         )?;
+        let mut publication = Publication::new(&ring)?;
         let live_at_first_scan = Self::start_live_at_first_scan(collector.tracker.last_listing());
         let schedule = Schedule::starting_now(timebase.ticks(tick_period_ns)?)?;
 
@@ -676,24 +653,26 @@ impl Run {
 
         collector.wait_until(schedule.deadline(0), &mut meter)?;
         let observed = observation_or_unavailable(recording::observation_times(timebase), out)?;
-        collector.read(&mut meter)?;
+        publication.read(&mut collector, &mut meter, &mut ring)?;
         meter.measure(Source::Ring, || {
-            publish(&mut ring, &collector, 0, observed.as_ref());
-            Ok(())
+            publication.publish(&mut ring, &collector, 0, observed.as_ref())
         })?;
         let warm_up_starts = start_warm_up_starts(collector.events());
+        publication.report(&ring, "warm-up", out)?;
 
         // Tick 0 is the warm-up tick, so the spans start past it.
         let first_tick = schedule.first_ahead_of(clock::now()).max(1);
         let start = Mark::take(&meter, timebase, &collector)?;
         let registered_root = if registered { Some(recording) } else { None };
         let persistence = Persistence::start_with(registered_root, &start, timebase, out, launch)?;
+
         Ok(Self {
             timebase,
             schedule,
             meter,
             collector,
             ring,
+            publication,
             persistence,
             live_at_first_scan,
             warm_up_starts,
@@ -732,10 +711,11 @@ impl Run {
         let late_ticks = clock::now().saturating_sub(deadline);
         let late = Duration::from_nanos(self.timebase.nanoseconds(late_ticks)?);
         let observed = observation_or_unavailable(observe(self.timebase), out)?;
-        self.collector.read(&mut self.meter)?;
+        self.publication
+            .read(&mut self.collector, &mut self.meter, &mut self.ring)?;
         self.meter.measure(Source::Ring, || {
-            publish(&mut self.ring, &self.collector, tick, observed.as_ref());
-            Ok(())
+            self.publication
+                .publish(&mut self.ring, &self.collector, tick, observed.as_ref())
         })?;
 
         self.persistence.poll(out)?;
@@ -762,6 +742,7 @@ impl Run {
             self.minute.report(out, "minute, ticks", tick, &now)?;
             self.persistence
                 .report("minute", now.snapshot.cpu_ns(), self.timebase, out)?;
+            self.publication.report(&self.ring, "minute", out)?;
             self.minute = Span::begin(now, following);
         }
 
@@ -803,6 +784,7 @@ impl Run {
         let end = Snapshot::take(&self.meter, self.timebase)?;
         self.persistence
             .report("tail", end.cpu_ns(), self.timebase, out)?;
+        self.publication.report(&self.ring, "tail", out)?;
         self.ring.finish();
         self.persistence.finish(&self.meter, self.timebase, out)
     }
@@ -1189,6 +1171,8 @@ mod tests {
     use collector::ring::{Found, FoundEvent, Reader};
 
     use super::*;
+
+    mod activation;
 
     const TEST_TICK_PERIOD_NS: u64 = 20_000_000;
 

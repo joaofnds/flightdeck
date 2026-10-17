@@ -30,7 +30,7 @@ fn run() -> io::Result<()> {
     }
     let mut fixture = Fixture::new()?;
     fixture.publish()?;
-    let status = Command::new(checks)
+    let status = Command::new(&checks)
         .arg("--live-fixture")
         .arg(&fixture.root)
         .status()?;
@@ -39,7 +39,7 @@ fn run() -> io::Result<()> {
             "native worker fixture failed: {status}"
         )));
     }
-    Ok(())
+    apps::run(Path::new(&checks))
 }
 
 struct Fixture {
@@ -134,3 +134,6 @@ fn fixture_remove(root: &Path) {
         eprintln!("native fixture directory cleanup: {error}");
     }
 }
+
+#[path = "native_fixture/apps.rs"]
+mod apps;

@@ -3,6 +3,7 @@ mod acquisition;
 mod native;
 mod path;
 mod readiness;
+pub mod sweep;
 
 pub use acquisition::{Acquisition, acquire};
 pub use native::{read_creation, read_path};

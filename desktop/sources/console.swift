@@ -12,6 +12,7 @@ struct Console: View {
                     .font(theme.brandFont).tracking(1.4).padding(.bottom, 28)
                 navigation("Overview", icon: "square.grid.2x2")
                 navigation("CPU & processes", icon: "cpu")
+                if model.isLiveSource { navigation("Apps", icon: "app.dashed") }
                 navigation("Memory", icon: "memorychip")
                 navigation("GPU", icon: "square.3.layers.3d")
                 navigation("Energy", icon: "bolt")
@@ -81,6 +82,19 @@ struct Console: View {
                             if let component = RecordedComponent(rawValue: model.route) {
                                 RecordedComponentPane(component: component)
                             }
+                            if model.route == "Apps" {
+                                LiveAppsPane(list: model.apps?.list, detail: model.apps?.detail,
+                                    history: model.apps.flatMap { reading in
+                                        guard let key = reading.key else { return nil }
+
+                                        return reading.history?.view(key: key, theme: theme)
+                                    }, selectedKey: model.appKey,
+                                    selectedProcessGroup: model.appProcessGroup,
+                                    busy: model.busy, error: model.apps?.notice,
+                                    onSelectApp: model.selectApp,
+                                    onSelectProcessGroup: model.selectAppProcessGroup,
+                                    onAppsPage: model.pageApps, onMembersPage: model.pageAppMembers)
+                            }
                             if !model.isLiveSource || model.route == "CPU & processes"
                                 || model.route == "Recorded readings" {
                                 RecordedReadings()
@@ -103,6 +117,7 @@ struct Console: View {
     private func navigation(_ title: String, icon: String) -> some View {
         Button {
             if let component = RecordedComponent(rawValue: title) { model.enterComponent(component) }
+            else if title == "Apps" { model.enterApps() }
             else if title == "Memory" { model.enterMemory() }
             else { model.route = title }
         } label: {

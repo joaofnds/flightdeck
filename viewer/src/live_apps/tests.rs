@@ -1,0 +1,409 @@
+use super::{Error, Frame, Member, Publication};
+use crate::apps;
+
+#[test]
+fn owns_live_metadata_and_computes_known_totals_after_source_scratch_reuse() {
+    // Goal: captured live frames retain bytes and exact counter baselines independently.
+    // Method: capture two real v4 publications, reuse the source, then inspect transient totals.
+    let mut fixture = None;
+    Fixture::initialize(&mut fixture, true);
+    let fixture = fixture.as_mut().unwrap();
+    fixture.publish(0, Change::None);
+    let mut previous = None;
+    fixture.capture(&mut previous);
+    fixture.publish(1, Change::None);
+    let mut selected = None;
+    fixture.capture(&mut selected);
+    fixture.publish(2, Change::None);
+    let mut later = None;
+    fixture.capture(&mut later);
+    fixture.finish();
+    let selected = selected.as_ref().unwrap();
+
+    selected
+        .with_aggregate(previous.as_deref(), |totals| {
+            let app = &totals.apps[&apps::AppKey::Bundle(b"/Applications/A.app")];
+            assert_eq!(app.cpu_ns.known, 500_000_000);
+            assert_eq!(
+                apps::cpu_percent_one_core(apps::CpuRate {
+                    cpu_ns: app.cpu_ns.known,
+                    elapsed_ns: totals.elapsed_ns.unwrap(),
+                }),
+                Some(50.0)
+            );
+            assert_eq!(app.energy_nj.known, 3_000_000_000);
+            assert_eq!(app.resident_bytes.known, 157_286_400);
+            assert_eq!(app.cpu_ns.unavailable_members, 1);
+            assert!(!totals.membership_complete);
+            assert_eq!(
+                totals.processes[0].executable_name,
+                Some(b"helper\xff".as_slice())
+            );
+            Ok(())
+        })
+        .unwrap();
+
+    assert!(selected.bytes() >= size_of::<Frame>());
+}
+
+mod fixture;
+use fixture::{Change, Fixture};
+
+#[test]
+fn keeps_invalid_utf8_and_literal_backslash_program_keys_separate() {
+    // Goal: live copying preserves byte identity before display escaping.
+    // Method: capture two outside-bundle executables whose escaped names could collide.
+    let mut fixture = None;
+    Fixture::initialize(&mut fixture, true);
+    let fixture = fixture.as_mut().unwrap();
+    fixture.publish(0, Change::None);
+    let mut frame = None;
+    fixture.capture(&mut frame);
+
+    frame
+        .as_ref()
+        .unwrap()
+        .with_aggregate(None, |totals| {
+            assert_eq!(
+                totals.apps[&apps::AppKey::Executable(b"name\xff")].members,
+                1
+            );
+            assert_eq!(
+                totals.apps[&apps::AppKey::Executable(b"name\\xff")].members,
+                1
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn has_no_rates_without_a_predecessor_but_keeps_selected_memory() {
+    // Goal: the first retained live frame cannot invent a counter baseline.
+    // Method: inspect a measured publication without an earlier cached frame.
+    let mut fixture = None;
+    Fixture::initialize(&mut fixture, true);
+    let fixture = fixture.as_mut().unwrap();
+    fixture.publish(1, Change::None);
+    let mut frame = None;
+    fixture.capture(&mut frame);
+
+    frame
+        .as_ref()
+        .unwrap()
+        .with_aggregate(None, |totals| {
+            assert!(matches!(
+                totals.processes[0].cpu_ns,
+                apps::Amount::Unavailable(_)
+            ));
+            assert_eq!(totals.processes[0].resident_bytes_last, Some(104_857_600));
+            assert_eq!(
+                totals.apps[&apps::AppKey::Bundle(b"/Applications/A.app")]
+                    .cpu_ns
+                    .known,
+                0
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn retains_legacy_usage_with_unsupported_identity_and_no_pid_only_rate() {
+    // Goal: legacy live sources expose raw gauges without claiming a captured App identity.
+    // Method: capture two consecutive legacy publications through the same frame API.
+    let mut fixture = None;
+    Fixture::initialize(&mut fixture, false);
+    let fixture = fixture.as_mut().unwrap();
+    fixture.publish(0, Change::None);
+    let mut previous = None;
+    fixture.capture(&mut previous);
+    fixture.publish(1, Change::None);
+    let mut selected = None;
+    fixture.capture(&mut selected);
+
+    selected
+        .as_ref()
+        .unwrap()
+        .with_aggregate(previous.as_deref(), |totals| {
+            assert!(totals.apps.is_empty());
+            assert_eq!(totals.ungrouped_members, 4);
+            assert_eq!(
+                totals.processes[0].program_unavailable,
+                Some(collector::ring::IdentityUnavailable::Unsupported)
+            );
+            assert!(matches!(
+                totals.processes[0].cpu_ns,
+                apps::Amount::Unavailable(_)
+            ));
+            assert_eq!(totals.processes[0].resident_bytes_last, Some(104_857_600));
+            Ok(())
+        })
+        .unwrap();
+}
+
+macro_rules! creation_change {
+    ($name:ident, $change:expr, $cpu:expr, $attribution:expr) => {
+        #[test]
+        fn $name() {
+            // Goal: creation and program boundaries keep exactly the supported attribution.
+            // Method: change one kernel identity field between two real live publications.
+            let mut fixture = None;
+            Fixture::initialize(&mut fixture, true);
+            let fixture = fixture.as_mut().unwrap();
+            fixture.publish(0, Change::None);
+            let mut previous = None;
+            fixture.capture(&mut previous);
+            fixture.publish(1, $change);
+            let mut selected = None;
+            fixture.capture(&mut selected);
+
+            selected
+                .as_ref()
+                .unwrap()
+                .with_aggregate(previous.as_deref(), |totals| {
+                    assert_eq!(totals.processes[0].cpu_ns, $cpu);
+                    assert_eq!(totals.processes[0].app_attribution, $attribution);
+                    Ok(())
+                })
+                .unwrap();
+        }
+    };
+}
+creation_change!(
+    does_not_join_pid_reuse_to_the_previous_creation,
+    Change::PidReuse,
+    apps::Amount::Unavailable(apps::Unavailable::Baseline),
+    None
+);
+creation_change!(
+    retains_process_usage_across_same_path_exec_with_unknown_app_split,
+    Change::Exec,
+    apps::Amount::Known(200_000_000),
+    Some(apps::Unavailable::Exec)
+);
+
+#[test]
+fn charges_member_and_program_capacities_to_the_live_cache() {
+    // Goal: retaining a frame charges its owned typed storage as well as captured bytes.
+    // Method: capture five members with an independently counted 88 raw name/App bytes.
+    let mut fixture = None;
+    Fixture::initialize(&mut fixture, true);
+    let fixture = fixture.as_mut().unwrap();
+    fixture.publish(0, Change::None);
+    let mut frame = None;
+    fixture.capture(&mut frame);
+    let frame = frame.as_ref().unwrap();
+
+    let bytes = frame.bytes();
+
+    assert_eq!(frame.process_count(), 5);
+    assert_eq!(bytes, size_of::<Frame>() + 5 * size_of::<Member>() + 88);
+    assert_eq!(frame.usage_refused, 1);
+}
+
+#[test]
+fn refuses_mismatching_numeric_and_identity_associations_without_retaining_partial_frame() {
+    // Goal: source rows cannot silently attach one PID's usage to another captured identity.
+    // Method: change a numeric PID after a successful real identity read.
+    let mut fixture = None;
+    Fixture::initialize(&mut fixture, true);
+    let fixture = fixture.as_mut().unwrap();
+    fixture.publish(0, Change::None);
+    let publication = fixture.read();
+    let mut frame = None;
+    Frame::capture(
+        &Publication {
+            reader: fixture.reader.as_ref().unwrap(),
+            tick: &fixture.tick,
+            identities: &fixture.identities,
+            publication,
+        },
+        &mut frame,
+    )
+    .unwrap();
+    fixture.tick.processes[0].pid = 99;
+
+    let result = Frame::capture(
+        &Publication {
+            reader: fixture.reader.as_ref().unwrap(),
+            tick: &fixture.tick,
+            identities: &fixture.identities,
+            publication,
+        },
+        &mut frame,
+    );
+
+    assert!(matches!(result, Err(Error::Bound(_))));
+    assert!(frame.is_none());
+}
+
+#[test]
+fn refuses_another_reader_owner_even_for_the_same_ring_generation() {
+    // Goal: copied program references remain tied to the exact decoding reader.
+    // Method: submit identities decoded by one reader through a newly opened reader handle.
+    let mut fixture = None;
+    Fixture::initialize(&mut fixture, true);
+    let fixture = fixture.as_mut().unwrap();
+    fixture.publish(0, Change::None);
+    let publication = fixture.read();
+    let mut reader =
+        collector::ring::RingReader::open_generation(fixture.reader.as_ref().unwrap().name())
+            .unwrap();
+    reader.seek_publication(publication + 1).unwrap();
+    let mut frame = None;
+
+    let result = Frame::capture(
+        &Publication {
+            reader: &reader,
+            tick: &fixture.tick,
+            identities: &fixture.identities,
+            publication,
+        },
+        &mut frame,
+    );
+
+    assert!(matches!(result, Err(Error::Io(_))));
+    assert!(frame.is_none());
+}
+
+#[test]
+fn refuses_a_frame_with_a_different_publication_cursor() {
+    // Goal: capture must occur before the source advances or changes its read position.
+    // Method: pair a successfully decoded tick with a different supplied publication number.
+    let mut fixture = None;
+    Fixture::initialize(&mut fixture, true);
+    let fixture = fixture.as_mut().unwrap();
+    fixture.publish(0, Change::None);
+    let publication = fixture.read();
+    let mut frame = None;
+
+    let result = Frame::capture(
+        &Publication {
+            reader: fixture.reader.as_ref().unwrap(),
+            tick: &fixture.tick,
+            identities: &fixture.identities,
+            publication: publication + 1,
+        },
+        &mut frame,
+    );
+
+    assert!(matches!(result, Err(Error::Bound(_))));
+    assert!(frame.is_none());
+}
+
+#[test]
+fn refuses_publication_zero_before_any_successful_source_read() {
+    // Goal: a new reader cursor cannot certify an unpublished empty frame.
+    // Method: submit publication zero with untouched startup reading buffers.
+    let mut fixture = None;
+    Fixture::initialize(&mut fixture, true);
+    let fixture = fixture.as_ref().unwrap();
+    let mut frame = None;
+
+    let result = Frame::capture(
+        &Publication {
+            reader: fixture.reader.as_ref().unwrap(),
+            tick: &fixture.tick,
+            identities: &fixture.identities,
+            publication: 0,
+        },
+        &mut frame,
+    );
+
+    assert!(matches!(result, Err(Error::Bound(_))));
+    assert!(frame.is_none());
+}
+
+#[test]
+fn refuses_captured_metadata_exceeding_the_frame_byte_budget() {
+    // Goal: valid repeated metadata cannot exceed the frame's independent 32 MiB byte bound.
+    // Method: decode 8195 refused members referencing one valid 4095-byte basename.
+    let shape = collector::ring::Shape {
+        process_capacity: 8195,
+        ..fixture::SHAPE
+    };
+    let mut fixture = None;
+    Fixture::initialize_with_shape(&mut fixture, true, &shape);
+    let fixture = fixture.as_mut().unwrap();
+    fixture.publish_refused_members(8195, &[b'x'; 4095]);
+    let publication = fixture.read();
+    let mut frame = None;
+
+    let result = Frame::capture(
+        &Publication {
+            reader: fixture.reader.as_ref().unwrap(),
+            tick: &fixture.tick,
+            identities: &fixture.identities,
+            publication,
+        },
+        &mut frame,
+    );
+
+    assert!(matches!(result, Err(Error::Bound(_))));
+    assert!(frame.is_none());
+}
+
+#[test]
+fn refuses_source_capacity_above_the_domain_result_bound() {
+    // Goal: a valid larger source cannot bypass the viewer's explicit operation result limit.
+    // Method: decode 24001 identity-only rows within a correspondingly sized real v4 ring.
+    let shape = collector::ring::Shape {
+        process_capacity: 24001,
+        ..fixture::SHAPE
+    };
+    let mut fixture = None;
+    Fixture::initialize_with_shape(&mut fixture, true, &shape);
+    let fixture = fixture.as_mut().unwrap();
+    fixture.publish_refused_members(24001, b"x");
+    let publication = fixture.read();
+    let mut frame = None;
+
+    let result = Frame::capture(
+        &Publication {
+            reader: fixture.reader.as_ref().unwrap(),
+            tick: &fixture.tick,
+            identities: &fixture.identities,
+            publication,
+        },
+        &mut frame,
+    );
+
+    assert!(matches!(result, Err(Error::Bound(_))));
+    assert!(frame.is_none());
+}
+
+#[test]
+fn refuses_to_bridge_a_missing_publication_in_the_live_cache() {
+    // Goal: an available older cached frame cannot bridge an unobserved source interval.
+    // Method: skip publication two and compare retained publications one and three.
+    let mut fixture = None;
+    Fixture::initialize(&mut fixture, true);
+    let fixture = fixture.as_mut().unwrap();
+    fixture.publish(0, Change::None);
+    let mut previous = None;
+    fixture.capture(&mut previous);
+    fixture.publish(1, Change::None);
+    fixture.publish(2, Change::None);
+    fixture
+        .reader
+        .as_mut()
+        .unwrap()
+        .seek_publication(3)
+        .unwrap();
+    let mut selected = None;
+    fixture.capture(&mut selected);
+
+    selected
+        .as_ref()
+        .unwrap()
+        .with_aggregate(previous.as_deref(), |totals| {
+            assert_eq!(
+                totals.processes[0].cpu_ns,
+                apps::Amount::Unavailable(apps::Unavailable::Interval)
+            );
+            assert!(totals.elapsed_ns.is_none());
+            Ok(())
+        })
+        .unwrap();
+}

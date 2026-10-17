@@ -8,6 +8,14 @@ struct RecordingStateChecks {
     @MainActor
     static func main() throws {
         if try runLiveCollectorChild(arguments: CommandLine.arguments) { return }
+        if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--live-apps-paging-fixture" {
+            try reads_live_apps_paging_through_the_real_worker(path: CommandLine.arguments[2])
+            return
+        }
+        if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--live-apps-fixture" {
+            try reads_live_apps_through_the_real_worker(path: CommandLine.arguments[2])
+            return
+        }
         if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--live-fixture" {
             try reads_the_latest_real_publication_after_rollback_and_repetition(
                 path: CommandLine.arguments[2])
@@ -41,11 +49,17 @@ struct RecordingStateChecks {
         keeps_paused_status_when_its_frozen_reading_ages()
         keeps_saved_recordings_on_the_existing_default_path()
         reports_a_stale_collector_using_the_injected_clock()
+        reports_live_from_a_catalog_second_without_an_observation()
         freezes_a_pending_live_poll_when_following_is_paused()
         reports_a_future_tick_clock_without_trusting_the_catalog_maximum()
         reports_reader_losses_without_a_selected_tick()
         opening_a_recording_exits_captured_reference_mode()
         entering_memory_retains_the_selected_live_publication()
+        entering_apps_retains_the_selected_live_publication()
+        try installs_completed_live_app_metrics_and_history()
+        try ignores_superseded_app_metrics_after_the_selected_key_changes()
+        try adopts_effective_app_pages_for_the_next_live_poll()
+        try explicit_observation_selection_resets_app_and_member_pages()
         entering_component_retains_the_selected_live_publication(.gpu)
         entering_component_retains_the_selected_live_publication(.energy)
         entering_component_retains_the_selected_live_publication(.network)
@@ -56,13 +70,186 @@ struct RecordingStateChecks {
         retains_exact_paused_identity_through_cpu_and_paging()
         chart_selection_requests_and_retains_exact_identity()
         unavailable_chart_identity_clears_readings_and_surfaces_error()
-        print("42 native recording state and table checks passed")
+        print("48 native recording state and table checks passed")
         try runReferenceDataChecks()
         runDashboardChecks()
         try runOverviewInspectionChecks()
         try runRecordedMemoryChecks()
         try runRecordedComponentChecks()
         try runLiveCollectorChecks()
+        try runLiveAppsChecks()
+    }
+
+    @MainActor
+    private static func installs_completed_live_app_metrics_and_history() throws {
+        // Goal: the native App pane receives the completed metrics and exact selected observation.
+        // Method: finish the existing controlled reader with the independent App DTO fixture.
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+        model.startLive()
+        reader.finishNext()
+        drainMainQueue()
+        let result = try appModelResult(LiveAppsFixture.read())
+
+        model.enterApps()
+        reader.finishNext(result: result)
+        drainMainQueue()
+        let installed = try appModelPayload(model.apps)
+
+        precondition(model.appKey == LiveAppKeyIdentity(kind: .bundle, bytes: Data("/A.app".utf8)),
+            "Completed Apps read did not install its exact key")
+        precondition(installed.key == model.appKey)
+        precondition(model.selection?.selected?.identity == result.selection?.selected?.identity)
+        precondition(model.apps?.list.header.selected == result.apps?.list.header.selected)
+        precondition(model.apps?.detail?.app.cpuNs.known.value == 500_000_000)
+        precondition(model.apps?.detail?.processes.map(\.pid) == [42, 43, 44])
+        precondition(model.apps?.history?.points.first?.cpuPercentOneCore == 50)
+        precondition(model.apps?.history?.selected == result.apps?.list.header.selected)
+        precondition(model.apps?.history?.points.first?.id
+            == "00000000000000030000000000000004:00000000000000050000000000000006:9007199254740993")
+    }
+
+    @MainActor
+    private static func ignores_superseded_app_metrics_after_the_selected_key_changes() throws {
+        // Goal: a late App response cannot overwrite a more recent selected App's facts.
+        // Method: change A to B while A is in flight, then complete both real model callbacks.
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+        model.startLive()
+        reader.finishNext()
+        drainMainQueue()
+        let old = try appModelResult(LiveAppsFixture.read())
+        let next = try appModelResult(LiveAppsFixture.read(otherApp: true))
+        let nextKey = LiveAppKeyIdentity(kind: .bundle, bytes: Data("/B.app".utf8))
+        model.enterApps()
+        reader.finishNext(result: old)
+        drainMainQueue()
+        model.selectApp(LiveAppKeyIdentity(kind: .bundle, bytes: Data("/A.app".utf8)))
+
+        model.selectApp(nextKey)
+        reader.finishNext(result: old)
+        drainMainQueue()
+
+        precondition(model.appKey == nextKey, "Superseded App result replaced the selected key")
+        precondition(model.apps == nil, "Superseded App result became visible")
+        precondition(reader.latestRequest?.apps?.key == nextKey)
+
+        reader.finishNext(result: next)
+        drainMainQueue()
+
+        precondition(model.appKey == nextKey)
+        precondition(model.apps?.detail?.app.key.identity == nextKey)
+        precondition(model.apps?.history?.selected == next.apps?.list.header.selected)
+        precondition(model.selection?.selected?.identity == next.selection?.selected?.identity)
+    }
+
+    @MainActor
+    private static func adopts_effective_app_pages_for_the_next_live_poll() throws {
+        // Goal: the next poll uses the worker's resolved pages after either population shrinks.
+        // Method: complete a 512/512 request with coherent zero-page App payloads.
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+        let result = try appModelResult(LiveAppsFixture.read())
+        model.startLive()
+        reader.finishNext()
+        drainMainQueue()
+        model.enterApps()
+        reader.finishNext(result: result)
+        drainMainQueue()
+        model.pageApps(512)
+        model.pageAppMembers(512)
+        reader.finishNext(result: result)
+        drainMainQueue()
+        precondition(reader.latestRequest?.apps?.appsOffset == 512)
+        precondition(reader.latestRequest?.apps?.membersOffset == 512)
+        reader.finishNext(result: result)
+        drainMainQueue()
+
+        model.pollLive()
+
+        precondition(reader.latestRequest?.apps?.appsOffset == 0,
+            "The next live poll retained an invalid App page")
+        precondition(reader.latestRequest?.apps?.membersOffset == 0,
+            "The next live poll retained an invalid process page")
+        precondition(reader.latestRequest?.apps?.key == result.apps?.key)
+        precondition(model.selection?.selected?.identity == result.selection?.selected?.identity)
+        precondition(model.apps?.detail?.header.selected == result.apps?.list.header.selected)
+    }
+
+    @MainActor
+    private static func explicit_observation_selection_resets_app_and_member_pages() throws {
+        // Goal: explicit observation navigation starts both App tables from their first pages.
+        // Method: select an exact observation while a 512/512 App request is pending.
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+        let result = try appModelResult(LiveAppsFixture.read())
+        let target = RecordedSelectionTarget(second: 1_800_000_000,
+            identity: result.selection!.selected!.identity)
+        model.startLive()
+        reader.finishNext()
+        drainMainQueue()
+        model.enterApps()
+        reader.finishNext(result: result)
+        drainMainQueue()
+        model.pageApps(512)
+        model.pageAppMembers(512)
+        reader.finishNext(result: result)
+        drainMainQueue()
+        precondition(reader.latestRequest?.apps?.appsOffset == 512)
+        precondition(reader.latestRequest?.apps?.membersOffset == 512)
+
+        model.select(target)
+        reader.finishNext(result: result)
+        drainMainQueue()
+
+        precondition(reader.latestRequest?.apps?.appsOffset == 0)
+        precondition(reader.latestRequest?.apps?.membersOffset == 0)
+        precondition(reader.latestRequest?.apps?.key == result.apps?.key)
+        precondition(reader.latestRequest?.target == target.identity)
+    }
+
+    private static func appModelPayload(_ value: LiveAppsRead?) throws -> LiveAppsRead {
+        guard let value else {
+            throw RecordingError(message: "Completed Apps read did not install its payload")
+        }
+
+        return value
+    }
+
+    private static func appModelResult(_ apps: LiveAppsRead) throws -> ReadResult {
+        let selected = apps.list.header.selected
+        guard let wall = selected.wallNs?.value else { throw LiveAppDataError.invalidQuantity }
+        let observation = Observation(run: selected.stamp.run.text, boot: selected.stamp.boot.text,
+            publication: selected.stamp.publication.value, runTick: selected.runTick.value,
+            wallNs: wall, windowLosses: Losses(publications: 0, events: 0, unknown: false))
+        let second = wall / 1_000_000_000
+
+        return ReadResult(catalog: Catalog(path: "/recording", firstSecond: second,
+            lastSecond: second, windows: 0, unknownClockTicks: 0, tables: ["processes"],
+            live: true, tailTicks: 1, collectorCompleted: false, latestObservation: observation),
+            selection: Selection(second: second, selected: observation, alternatives: [observation],
+                summary: nil, trends: [], contextSeconds: 900),
+            page: nil, machinePages: [:], apps: apps)
+    }
+
+    @MainActor
+    private static func entering_apps_retains_the_selected_live_publication() {
+        // App navigation requests real totals without pausing or replacing the live selection.
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+        model.startLive()
+        reader.finishNext()
+        drainMainQueue()
+        let identity = model.selection?.selected?.identity
+
+        model.enterApps()
+
+        precondition(model.following)
+        precondition(model.route == "Apps")
+        precondition(model.selection?.selected?.identity == identity)
+        precondition(reader.latestRequest?.live == true)
+        precondition(reader.latestRequest?.apps != nil)
+        precondition(reader.latestRequest?.target == nil)
     }
 
     @MainActor
@@ -741,6 +928,23 @@ struct RecordingStateChecks {
     }
 
     @MainActor
+    private static func reports_live_from_a_catalog_second_without_an_observation() {
+        // A whole-second catalog clock must be converted numerically, not as Double bits.
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false,
+            now: { Date(timeIntervalSince1970: 1_792_252_314) })
+        model.setLive(true)
+        let catalog = Catalog(path: "/recording", firstSecond: 1_792_252_314,
+            lastSecond: 1_792_252_314, windows: 0, unknownClockTicks: 0,
+            tables: [], live: true, tailTicks: 1, collectorCompleted: false)
+
+        reader.finishNext(catalog: catalog)
+        drainMainQueue()
+
+        precondition(model.liveStatus == "Live", "A current catalog second was treated as stale")
+    }
+
+    @MainActor
     private static func freezes_a_pending_live_poll_when_following_is_paused() {
         let reader = ControlledRecordingReader()
         let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
@@ -1082,7 +1286,7 @@ private final class ControlledRecordingReader: RecordingReading, @unchecked Send
 
     func finishNext(missingSecond: Bool = false, unchanged: Bool = false,
                     second: UInt64? = nil, publication: UInt64 = 9, catalog: Catalog? = nil,
-                    failure: RecordingError? = nil) {
+                    failure: RecordingError? = nil, result: ReadResult? = nil) {
         let next = lock.withLock {
             precondition(pending != nil)
             let next = pending
@@ -1092,6 +1296,10 @@ private final class ControlledRecordingReader: RecordingReading, @unchecked Send
         guard let (request, completion) = next else { preconditionFailure() }
         if let failure {
             completion(.failure(failure))
+            return
+        }
+        if let result {
+            completion(.success(result))
             return
         }
 

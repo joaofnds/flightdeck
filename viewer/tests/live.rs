@@ -1,4 +1,7 @@
 #[cfg(test)]
+#[path = "live/apps.rs"]
+mod app_checks;
+#[cfg(test)]
 #[path = "../src/live_fixture.rs"]
 mod identity_fixture;
 #[cfg(test)]
@@ -1222,6 +1225,7 @@ mod tests {
         session.begin(control.epoch()).unwrap();
         let selected = session.select(1000, 0).unwrap();
 
+        assert_rehydrated_apps(&session, 1);
         assert_eq!(selected["selected"], before["selected"]);
         assert_eq!(session.page("processes", 0).unwrap(), first);
         assert_eq!(session.page("processes", 11_776).unwrap(), last);
@@ -1238,6 +1242,8 @@ mod tests {
         assert_eq!(session.catalog()["reader_losses"], catalog["reader_losses"]);
         assert_eq!(session.page("processes", 0).unwrap(), first);
         assert_eq!(session.page("events", 0).unwrap(), events);
+        session.select(1001, 0).unwrap();
+        assert_rehydrated_apps(&session, 2);
         session.select(1032, 0).unwrap();
         assert_eq!(
             session.page("processes", 0).unwrap()["rows"][6][3],
@@ -1250,6 +1256,43 @@ mod tests {
                 "retained_tail_ticks_before_rehydration":catalog["tail_ticks"],
                 "retained_cache_bytes_before_rehydration":catalog["tail_cache_bytes"]})
         );
+    }
+
+    fn assert_rehydrated_apps(session: &LiveSession, publication: u64) {
+        let page = session.apps_page(0).unwrap();
+        let kind = viewer::live_app_response::KeyKind::Bundle;
+        let key = b"/Apps/Current.app";
+        let detail = session.app_detail(kind, key, 0).unwrap();
+        let history = session.app_history(kind, key).unwrap();
+
+        assert_eq!(
+            page["selected"]["stamp"]["publication"],
+            publication.to_string()
+        );
+        assert_eq!(detail["selected"], page["selected"]);
+        assert_eq!(history["selected"], page["selected"]);
+        assert_eq!(detail["app"]["resident_bytes"]["known"], "11");
+        assert_eq!(detail["app"]["footprint_bytes"]["known"], "12");
+        assert_eq!(detail["processes"][0]["pid"], 7);
+        assert_eq!(detail["processes"][0]["creation"]["unique_id"], "7");
+        assert_eq!(
+            history["points"].as_array().unwrap().len(),
+            usize::try_from(publication).unwrap()
+        );
+        assert_eq!(
+            history["points"][0]["cpu_percent_one_core"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            history["points"].as_array().unwrap().last().unwrap()["resident_bytes"]["known"],
+            "11"
+        );
+        let latest = history["points"].as_array().unwrap().last().unwrap();
+        assert_eq!(
+            detail["app"]["cpu_percent_one_core"],
+            latest["cpu_percent_one_core"]
+        );
+        assert_eq!(detail["app"]["energy_watts"], latest["energy_watts"]);
     }
 
     #[test]

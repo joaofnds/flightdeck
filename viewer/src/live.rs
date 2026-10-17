@@ -11,6 +11,9 @@ use serde_json::{Value, json};
 
 use crate::cancellation::Operation;
 use crate::data::{self, Table};
+use crate::live_app_history::{History, Point, Target};
+use crate::live_app_response::{Detail, KeyKind, Page, Sample};
+use crate::live_apps::{Frame, Publication};
 use crate::session::{OBSERVATIONS_MAX, Observation, PAGE_ROWS};
 use crate::{Cancellation, Session, metrics};
 
@@ -33,6 +36,7 @@ pub struct LiveSession {
     sources: Vec<Source>,
     observations: VecDeque<LiveObservation>,
     points: VecDeque<Value>,
+    app_history: History,
     connection: Connection,
     operation: Operation,
     cancellation: Arc<Cancellation>,
@@ -77,6 +81,8 @@ struct LiveObservation {
     identity: RunIdentity,
     observation: Observation,
     losses: Losses,
+    app_frame: Box<Frame>,
+    app_sample: Option<Box<Sample>>,
     tables: BTreeMap<&'static str, Table>,
     point: Value,
     bytes: usize,
@@ -114,6 +120,7 @@ impl LiveSession {
             sources: Vec::with_capacity(SOURCES_MAX),
             observations: VecDeque::new(),
             points: VecDeque::new(),
+            app_history: History::new(),
             connection,
             operation,
             cancellation,
@@ -370,6 +377,68 @@ impl LiveSession {
             .page(name, offset)
     }
 
+    pub fn apps_page(&self, offset: u32) -> Result<Value> {
+        self.operation.run(|| {
+            self.selected_apps()?.apps_page(Page {
+                offset,
+                limit: crate::live_app_response::PAGE_ROWS_MAX,
+            })
+        })
+    }
+
+    pub fn app_history(&self, kind: KeyKind, bytes: &[u8]) -> Result<Value> {
+        self.operation.run(|| {
+            self.app_history.response(
+                &self.selected_apps()?.selected,
+                &Target { kind, bytes },
+                &self.operation,
+            )
+        })
+    }
+
+    pub fn app_detail(&self, kind: KeyKind, bytes: &[u8], offset: u32) -> Result<Value> {
+        self.operation.run(|| {
+            let sample = self.selected_apps()?;
+            let index = sample.apps().iter().position(|app| {
+                if app.key.kind == kind {
+                    app.key.bytes == bytes
+                } else {
+                    false
+                }
+            });
+            let Some(index) = index else {
+                return Ok(Value::Null);
+            };
+
+            sample.app_detail(&Detail {
+                selected: &sample.selected,
+                app_index: u32::try_from(index).map_err(|_| Error::Bound("live App index"))?,
+                page: Page {
+                    offset,
+                    limit: crate::live_app_response::PAGE_ROWS_MAX,
+                },
+            })
+        })
+    }
+
+    fn selected_apps(&self) -> Result<&Sample> {
+        let selected = self
+            .selected
+            .as_ref()
+            .ok_or(Error::Bound("no selected observation"))?;
+        let current = self
+            .inspected
+            .iter()
+            .chain(self.observations.iter())
+            .find(|observation| same(&observation.json(), selected))
+            .ok_or(Error::Bound("live App raw observation unavailable"))?;
+
+        current
+            .app_sample
+            .as_deref()
+            .ok_or(Error::Bound("live App aggregate unavailable"))
+    }
+
     fn select_refresh_due(&self, second: u64) -> bool {
         self.observations.front().is_none_or(|observation| {
             second < observation.observation.wall / NANOSECONDS_PER_SECOND
@@ -557,14 +626,25 @@ impl LiveSession {
     }
 
     fn poll_store(&mut self, mut current: LiveObservation) -> Result<()> {
-        if current.bytes > CACHE_BYTES_MAX {
-            return Err(Error::Bound("live observation bytes"));
-        }
         let previous = self
             .observations
             .iter()
             .rev()
             .find(|observation| observation.identity == current.identity);
+        Sample::capture(
+            &current.app_frame,
+            previous.map(|observation| observation.app_frame.as_ref()),
+            &mut current.app_sample,
+        )?;
+        current.bytes += current
+            .app_sample
+            .as_ref()
+            .unwrap_or_else(|| unreachable!("successful App capture initializes its output"))
+            .bytes();
+        if current.bytes > CACHE_BYTES_MAX {
+            return Err(Error::Bound("live observation bytes"));
+        }
+
         let mut tables = metrics::Tables::new();
         for name in metrics::TABLE_NAMES {
             let mut publications = BTreeMap::new();
@@ -590,14 +670,25 @@ impl LiveSession {
         current.point["run"] = json!(identity_text(current.identity.run).to_string());
         current.point["boot"] = json!(identity_text(current.identity.boot).to_string());
         current.point["observation"] = current.json();
-        let first = current
-            .observation
-            .wall
-            .saturating_sub(899 * NANOSECONDS_PER_SECOND);
+        let mut app_point = None;
+        Point::capture(
+            current
+                .app_sample
+                .as_ref()
+                .unwrap_or_else(|| unreachable!()),
+            segment,
+            &mut app_point,
+        );
+        let first = (current.observation.wall / NANOSECONDS_PER_SECOND).saturating_sub(899)
+            * NANOSECONDS_PER_SECOND;
         self.poll_points(&current.point, first)?;
         self.cache_bytes += current.bytes;
         self.observations.push_back(current);
-        self.poll_evict(first)
+        self.poll_evict(first)?;
+        self.app_history
+            .push(app_point.unwrap_or_else(|| unreachable!()), first);
+
+        Ok(())
     }
 
     fn poll_evict(&mut self, first: u64) -> Result<()> {
@@ -744,6 +835,7 @@ impl LiveSession {
             &self.operation,
         )?
         .ok_or(Error::Bound("unsealed observation clock"))?;
+        self.select_rehydrate_apps(&mut current, &mut independent)?;
         if current.bytes > CACHE_BYTES_MAX {
             return Err(Error::Bound("live observation bytes"));
         }
@@ -751,6 +843,51 @@ impl LiveSession {
         current.point = point.clone();
 
         Ok(Some(current))
+    }
+
+    fn select_rehydrate_apps(
+        &self,
+        current: &mut LiveObservation,
+        source: &mut Source,
+    ) -> Result<()> {
+        let previous = self.points.iter().rev().find(|point| {
+            let selected = &point["observation"];
+            source_matches(source, selected)
+                && selected["publication"]
+                    .as_u64()
+                    .is_some_and(|publication| publication < current.observation.publication)
+        });
+        let mut previous_frame = None;
+        if let Some(previous) = previous {
+            if rehydrate_source_try_read(source, &previous["observation"])? {
+                let publication = previous["observation"]["publication"]
+                    .as_u64()
+                    .ok_or(Error::Bound("previous App publication"))?;
+
+                Frame::capture(
+                    &Publication {
+                        reader: &source.reader,
+                        tick: &source.tick,
+                        identities: &source.identities,
+                        publication,
+                    },
+                    &mut previous_frame,
+                )?;
+            }
+        }
+
+        Sample::capture(
+            &current.app_frame,
+            previous_frame.as_deref(),
+            &mut current.app_sample,
+        )?;
+        current.bytes += current
+            .app_sample
+            .as_ref()
+            .unwrap_or_else(|| unreachable!("successful App capture initializes its output"))
+            .bytes();
+
+        Ok(())
     }
 
     fn select_trends(&self, second: u64, response: &mut Value) -> Result<()> {
@@ -906,6 +1043,14 @@ fn rehydrate_source(
 }
 
 fn rehydrate_source_read(source: &mut Source, selected: &Value) -> Result<()> {
+    if !rehydrate_source_try_read(source, selected)? {
+        return Err(Error::Bound("unsealed publication no longer retained"));
+    }
+
+    Ok(())
+}
+
+fn rehydrate_source_try_read(source: &mut Source, selected: &Value) -> Result<bool> {
     let publication = selected["publication"]
         .as_u64()
         .ok_or(Error::Bound("selected publication"))?;
@@ -915,7 +1060,7 @@ fn rehydrate_source_read(source: &mut Source, selected: &Value) -> Result<()> {
         Found::Publication {
             publication: found, ..
         } if found == publication => {}
-        _ => return Err(Error::Bound("unsealed publication no longer retained")),
+        _ => return Ok(false),
     }
 
     if Some(source.tick.run_tick) != selected["run_tick"].as_u64() {
@@ -926,7 +1071,7 @@ fn rehydrate_source_read(source: &mut Source, selected: &Value) -> Result<()> {
         return Err(Error::Bound("changed inspection wall identity"));
     }
 
-    Ok(())
+    Ok(true)
 }
 
 fn project_observation(
@@ -942,6 +1087,19 @@ fn project_observation(
 
     operation.check()?;
 
+    let mut app_frame = None;
+    Frame::capture(
+        &Publication {
+            reader: &source.reader,
+            tick: &source.tick,
+            identities: &source.identities,
+            publication,
+        },
+        &mut app_frame,
+    )?;
+    let app_frame = app_frame
+        .unwrap_or_else(|| unreachable!("successful App frame capture initializes its output"));
+
     let mut window = Window::new(
         WindowIdentity {
             run: source.identity,
@@ -952,7 +1110,7 @@ fn project_observation(
     project_observation_stage(source, publication, &times, &mut window)?;
 
     let tables = project_observation_tables(connection, operation, &window)?;
-    let bytes = tables.values().map(table_bytes).sum();
+    let bytes = tables.values().map(table_bytes).sum::<usize>() + app_frame.bytes();
     let observation = Observation {
         window: 0,
         publication,
@@ -965,6 +1123,8 @@ fn project_observation(
         identity: source.identity,
         observation,
         losses: source.losses,
+        app_frame,
+        app_sample: None,
         tables,
         point: Value::Null,
         bytes,

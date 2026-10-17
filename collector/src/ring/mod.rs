@@ -207,6 +207,23 @@ impl<'place> LockedPlace<'place> {
         )
     }
 
+    pub(crate) fn create_with_identity(
+        self,
+        shape: Shape,
+        capacity: DictionaryCapacity,
+        identity: &RunIdentity,
+        start_continuous_ns: u64,
+    ) -> io::Result<Writer> {
+        let layout = Layout::identity(shape, capacity)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+
+        Writer::create_layout(
+            self,
+            layout,
+            WriterOrigin::Identified(identity, start_continuous_ns),
+        )
+    }
+
     pub(crate) fn create_unregistered(self, shape: Shape, start_ns: u64) -> io::Result<Writer> {
         Writer::create_inner(self, shape, WriterOrigin::Unregistered(start_ns))
     }
@@ -248,11 +265,20 @@ impl Writer {
     ) -> io::Result<Self> {
         let layout = Layout::identity(shape, capacity)
             .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+
         Self::create_layout(
             LockedPlace::acquire(place)?,
             layout,
             WriterOrigin::Identified(identity, start_continuous_ns),
         )
+    }
+
+    /// Exact reserved mapping size, planned before creating or touching the ring.
+    pub fn identity_size_bytes(shape: Shape, capacity: DictionaryCapacity) -> io::Result<u64> {
+        let layout = Layout::identity(shape, capacity)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+
+        Ok(u64_from_usize(layout.size_bytes()))
     }
 
     /// Interns retained bytes without allocation. Known keys survive dictionary exhaustion.

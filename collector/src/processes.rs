@@ -68,19 +68,10 @@ impl Sweep {
 
     pub fn run(&mut self, timebase: Timebase, pids: &[i32]) -> io::Result<()> {
         assert!(pids.len() <= self.readings.capacity());
-        self.readings.clear();
-        self.refused = 0;
-        self.gone = 0;
+        self.clear();
 
         for &pid in pids {
-            match read(timebase, pid)? {
-                Ok(process) => {
-                    assert_eq!(pid, process.pid);
-                    push_without_growing(&mut self.readings, process);
-                }
-                Err(Unreadable::Refused) => self.refused += 1,
-                Err(Unreadable::Gone) => self.gone += 1,
-            }
+            self.push_reading(pid, read(timebase, pid)?);
         }
 
         // Each pid is read or counted once.
@@ -88,6 +79,23 @@ impl Sweep {
         let unread = pids.len() - self.readings.len();
         assert_eq!(Ok(unread), usize::try_from(self.refused + self.gone));
         Ok(())
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.readings.clear();
+        self.refused = 0;
+        self.gone = 0;
+    }
+
+    pub(crate) fn push_reading(&mut self, pid: i32, reading: Result<Process, Unreadable>) {
+        match reading {
+            Ok(process) => {
+                assert_eq!(pid, process.pid);
+                push_without_growing(&mut self.readings, process);
+            }
+            Err(Unreadable::Refused) => self.refused += 1,
+            Err(Unreadable::Gone) => self.gone += 1,
+        }
     }
 }
 

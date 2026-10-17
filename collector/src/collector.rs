@@ -8,7 +8,9 @@ use crate::interfaces::Interfaces;
 use crate::ioreport::{ACTIVE_STATES_MAX, IOReport};
 use crate::machine::{self, Machine};
 use crate::processes::{self, Sweep};
+use crate::programs;
 use crate::push_without_growing;
+use crate::ring::Writer;
 use crate::smc::{FANS_MAX, Smc};
 use crate::tracker::{Counts, EVENTS_PER_TICK_MAX, Event, Limits, Tracker};
 
@@ -23,6 +25,7 @@ pub struct Collector {
     /// `None` where the SMC failed to open, as on a Mac with no SMC.
     pub smc: Option<Smc>,
     pub processes: Sweep,
+    pub identities: programs::sweep::Sweep,
     pub coalitions: Coalitions,
     events: Vec<Event>,
     /// What the tracker had counted when the previous tick was read.
@@ -70,6 +73,7 @@ impl Collector {
             ioreport: new_source("IOReport", IOReport::open(timebase, cpu_limit)),
             smc: new_source("SMC", Smc::open()),
             processes: Sweep::new(limits.process_limit),
+            identities: programs::sweep::Sweep::new(limits.process_limit),
             coalitions: Coalitions::new(timebase, coalition_limit),
             // The tracker holds at most this many events a tick, so a tick's events fit.
             events: Vec::with_capacity(limits.events_per_tick_max),
@@ -121,6 +125,16 @@ impl Collector {
     }
 
     pub fn read(&mut self, meter: &mut Meter) -> io::Result<()> {
+        self.read_inner(meter, None)
+    }
+
+    /// Acquires scheduled identities through the exact writer that will publish them.
+    /// Event identities remain separate and are not acquired by this call.
+    pub fn read_with_identity(&mut self, meter: &mut Meter, writer: &mut Writer) -> io::Result<()> {
+        self.read_inner(meter, Some(writer))
+    }
+
+    fn read_inner(&mut self, meter: &mut Meter, writer: Option<&mut Writer>) -> io::Result<()> {
         // A tick fills the lists that `new` sized and never grows them.
         let listing_capacity = self.listing.capacity();
         let events_capacity = self.events.capacity();
@@ -134,10 +148,7 @@ impl Collector {
             meter.measure(Source::Smc, || smc.read())?;
         }
 
-        meter.measure(Source::Processes, || {
-            processes::list_pids(&mut self.listing)?;
-            self.processes.run(self.timebase, &self.listing)
-        })?;
+        meter.measure(Source::Processes, || self.read_processes(writer))?;
         self.tracker.observe(&self.listing, meter)?;
         meter.measure(Source::Events, || {
             self.events.clear();
@@ -164,6 +175,22 @@ impl Collector {
         assert_eq!(listing_capacity, self.listing.capacity());
         assert_eq!(events_capacity, self.events.capacity());
         Ok(())
+    }
+
+    fn read_processes(&mut self, writer: Option<&mut Writer>) -> io::Result<()> {
+        processes::list_pids(&mut self.listing)?;
+
+        if let Some(writer) = writer {
+            self.identities.run(
+                self.timebase,
+                &mut self.processes,
+                &mut self.listing,
+                writer,
+            )
+        } else {
+            self.identities.clear();
+            self.processes.run(self.timebase, &self.listing)
+        }
     }
 }
 

@@ -4,6 +4,9 @@ mod bridge;
 mod cancellation;
 mod data;
 mod live;
+mod live_app_history;
+pub mod live_app_response;
+pub mod live_apps;
 mod metrics;
 mod session;
 

@@ -132,8 +132,17 @@ struct TablePage: Decodable, Sendable {
 }
 
 private struct Envelope<T: Decodable>: Decodable {
-    let value: T?
-    let error: String?
+    let value: T
+    private enum CodingKeys: String, CodingKey { case value, error }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        if let error = try container.decodeIfPresent(String.self, forKey: .error) {
+            throw RecordingError(message: error)
+        }
+
+        value = try container.decode(T.self, forKey: .value)
+    }
 }
 
 enum MachineSource: String, CaseIterable, Sendable {
@@ -161,10 +170,12 @@ struct ReadRequest: Sendable {
     let live: Bool
     let poll: Bool
     let target: RecordedObservationIdentity?
+    let apps: LiveAppsRequest?
 
     init(path: String, second: UInt64?, alternative: UInt32, table: UInt32, offset: UInt64,
          refresh: Bool, machineOffsets: [MachineSource: UInt64], includeMachine: Bool,
-         live: Bool = false, poll: Bool = false, target: RecordedObservationIdentity? = nil) {
+         live: Bool = false, poll: Bool = false, target: RecordedObservationIdentity? = nil,
+         apps: LiveAppsRequest? = nil) {
         self.path = path
         self.second = second
         self.alternative = alternative
@@ -176,8 +187,16 @@ struct ReadRequest: Sendable {
         self.live = live
         self.poll = poll
         self.target = target
+        self.apps = apps
     }
 
+    func hasSameProjection(as other: ReadRequest) -> Bool {
+        path == other.path && live == other.live && second == other.second
+            && alternative == other.alternative && target == other.target
+            && table == other.table && offset == other.offset
+            && machineOffsets == other.machineOffsets && includeMachine == other.includeMachine
+            && apps == other.apps
+    }
 }
 
 struct ReadResult: Sendable {
@@ -186,14 +205,16 @@ struct ReadResult: Sendable {
     let page: TablePage?
     let machinePages: [MachineSource: TablePage]
     let unchanged: Bool
+    let apps: LiveAppsRead?
 
     init(catalog: Catalog, selection: Selection?, page: TablePage?,
-         machinePages: [MachineSource: TablePage], unchanged: Bool = false) {
+         machinePages: [MachineSource: TablePage], unchanged: Bool = false, apps: LiveAppsRead? = nil) {
         self.catalog = catalog
         self.selection = selection
         self.page = page
         self.machinePages = machinePages
         self.unchanged = unchanged
+        self.apps = apps
     }
 
 }
@@ -217,6 +238,7 @@ final class RecordingWorker: RecordingReading, @unchecked Sendable {
     private var path: String?
     private var openedLive = false
     private var lastResult: ReadResult?
+    private var lastRequest: ReadRequest?
 
     func read(_ request: ReadRequest, completion: @escaping @Sendable
               (Result<ReadResult, RecordingError>) -> Void) {
@@ -249,6 +271,7 @@ final class RecordingWorker: RecordingReading, @unchecked Sendable {
             session = nil
             path = nil
             lastResult = nil
+            lastRequest = nil
             let bytes = Array(request.path.utf8)
             guard !bytes.isEmpty, bytes.count <= 4096 else {
                 session = nil
@@ -272,13 +295,16 @@ final class RecordingWorker: RecordingReading, @unchecked Sendable {
         let catalog: Catalog = try decode(fd_catalog(session))
         path = request.path
         openedLive = request.live
-        if !changed, let lastResult,
+        if !changed, let lastResult, lastRequest?.hasSameProjection(as: request) == true,
            request.target == nil || lastResult.selection?.selected?.identity == request.target {
             return ReadResult(catalog: catalog, selection: lastResult.selection,
-                page: lastResult.page, machinePages: lastResult.machinePages, unchanged: true)
+                page: lastResult.page, machinePages: lastResult.machinePages, unchanged: true,
+                apps: lastResult.apps)
         }
         let latestSecond = catalog.latestObservation.map { $0.wallNs / 1_000_000_000 }
         guard let second = request.second ?? latestSecond ?? catalog.lastSecond else {
+            lastResult = nil
+            lastRequest = nil
             return ReadResult(catalog: catalog, selection: nil, page: nil, machinePages: [:])
         }
         try prepare(session, epoch: epoch)
@@ -301,7 +327,7 @@ final class RecordingWorker: RecordingReading, @unchecked Sendable {
             }
         }
         let page: TablePage?
-        if selection.selected == nil {
+        if selection.selected == nil || request.apps != nil {
             page = nil
         } else {
             try prepare(session, epoch: epoch)
@@ -323,15 +349,88 @@ final class RecordingWorker: RecordingReading, @unchecked Sendable {
             }
         }
         try prepare(session, epoch: epoch)
+        let apps = try readApps(request.apps, session: session, selected: selection.selected, epoch: epoch)
+        try prepare(session, epoch: epoch)
         let result = ReadResult(catalog: catalog, selection: selection, page: page,
-                                machinePages: machinePages)
+                                machinePages: machinePages, apps: apps)
         lastResult = result
+        lastRequest = request
         return result
     }
 
     private func prepare(_ session: OpaquePointer, epoch: UInt64) throws {
         let ready: Bool = try decode(fd_prepare(session, epoch))
         guard ready else { throw RecordingError(message: "Recording query is not ready.") }
+    }
+
+    private func readApps(_ request: LiveAppsRequest?, session: OpaquePointer,
+                          selected: Observation?, epoch: UInt64) throws -> LiveAppsRead? {
+        guard let request, let selected else { return nil }
+
+        let list = try readAppsList(request, session: session, epoch: epoch)
+        guard list.header.selected.matches(selected) else {
+            throw RecordingError(message: "App totals do not match the selected observation.")
+        }
+
+        let key = request.key ?? list.apps.first?.key.identity
+        guard let key else {
+            return LiveAppsRead(key: nil, list: list, detail: nil, history: nil, notice: nil)
+        }
+
+        try prepare(session, epoch: epoch)
+        let history: LiveAppHistoryPayload = try key.bytes.withUnsafeBytes { bytes in
+            var input = FlightdeckAppKey(kind: key.kind == .bundle ? 0 : 1,
+                pointer: bytes.bindMemory(to: UInt8.self).baseAddress, length: bytes.count)
+
+            return try decode(fd_app_history(session, &input))
+        }
+        guard history.selected == list.header.selected else {
+            throw RecordingError(message: "App history does not match the selected observation.")
+        }
+        let detail = try readAppsDetail(request, key: key, session: session, epoch: epoch)
+        if let detail {
+            guard detail.header.selected == list.header.selected, detail.app.key.identity == key else {
+                throw RecordingError(message: "App processes do not match the selected observation.")
+            }
+        }
+
+        return LiveAppsRead(key: key, list: list, detail: detail, history: history,
+            notice: detail == nil ? "No processes for the selected App at this reading." : nil)
+    }
+
+    private func readAppsList(_ request: LiveAppsRequest, session: OpaquePointer,
+                              epoch: UInt64) throws -> LiveAppListPage {
+        try prepare(session, epoch: epoch)
+        let first: LiveAppListPage = try decode(fd_apps(session, 0))
+        let offset = LiveAppsRequest.validOffset(requested: request.appsOffset, total: first.page.total)
+        guard offset > 0 else { return first }
+
+        try prepare(session, epoch: epoch)
+
+        return try decode(fd_apps(session, offset))
+    }
+
+    private func readAppsDetail(_ request: LiveAppsRequest, key: LiveAppKeyIdentity,
+                                session: OpaquePointer, epoch: UInt64) throws -> LiveAppDetailPage? {
+        let first = try readAppsDetailPage(key, offset: 0, session: session, epoch: epoch)
+        guard let first else { return nil }
+
+        let offset = LiveAppsRequest.validOffset(requested: request.membersOffset, total: first.page.total)
+        guard offset > 0 else { return first }
+
+        return try readAppsDetailPage(key, offset: offset, session: session, epoch: epoch)
+    }
+
+    private func readAppsDetailPage(_ key: LiveAppKeyIdentity, offset: UInt32,
+                                    session: OpaquePointer, epoch: UInt64) throws -> LiveAppDetailPage? {
+        try prepare(session, epoch: epoch)
+
+        return try key.bytes.withUnsafeBytes { bytes in
+            var input = FlightdeckAppKey(kind: key.kind == .bundle ? 0 : 1,
+                pointer: bytes.bindMemory(to: UInt8.self).baseAddress, length: bytes.count)
+
+            return try decode(fd_app_detail(session, &input, offset))
+        }
     }
 
     private func decode<T: Decodable>(_ bytes: FlightdeckBytes) throws -> T {
@@ -363,6 +462,9 @@ final class RecordingModel: ObservableObject {
     @Published var table: UInt32 = 7
     @Published var secondText = ""
     @Published var row: Int?
+    @Published private(set) var apps: LiveAppsRead?
+    @Published private(set) var appKey: LiveAppKeyIdentity?
+    @Published private(set) var appProcessGroup: Data?
     private let reader: any RecordingReading
     private var useLive = false
     private var startedLive = false
@@ -378,6 +480,8 @@ final class RecordingModel: ObservableObject {
     private var requestedIdentity: RecordedObservationIdentity?
     private var requestedOffset: UInt64 = 0
     private var machineOffsets: [MachineSource: UInt64] = [:]
+    private var appsOffset: UInt32 = 0
+    private var appMembersOffset: UInt32 = 0
 
     init(path: String, reader: any RecordingReading = RecordingWorker(),
          pollingEnabled: Bool = true, now: @escaping @MainActor () -> Date = { Date() },
@@ -417,7 +521,7 @@ final class RecordingModel: ObservableObject {
         if catalog.collectorCompleted == true { return "Collector stopped" }
         if !following { return "Paused" }
         let last = catalog.latestObservation.map { Double($0.wallNs) / 1e9 }
-            ?? catalog.lastSecond.map(Double.init)
+            ?? catalog.lastSecond.map { Double($0) }
         guard let last else { return "No live readings" }
         let age = now().timeIntervalSince1970 - last
         if age < -3 { return "Clock changed" }
@@ -444,6 +548,8 @@ final class RecordingModel: ObservableObject {
         alternative = 0
         requestedOffset = 0
         machineOffsets.removeAll(keepingCapacity: true)
+        appsOffset = 0
+        appMembersOffset = 0
         enqueue(refresh: false)
         if pollingEnabled {
             liveTimer = Timer.publish(every: 0.25, on: .main, in: .common)
@@ -470,6 +576,8 @@ final class RecordingModel: ObservableObject {
               refresh: Bool = false) {
         if let second {
             if following { stopFollowing() }
+            appsOffset = 0
+            appMembersOffset = 0
             requestedIdentity = nil
             if requestedSecond != second {
                 self.alternative = 0
@@ -484,6 +592,7 @@ final class RecordingModel: ObservableObject {
         }
         requestedOffset = offset
         selection = nil
+        apps = nil
         page = nil
         machinePages.removeAll(keepingCapacity: true)
         row = nil
@@ -506,7 +615,9 @@ final class RecordingModel: ObservableObject {
             alternative: alternative, table: table, offset: requestedOffset,
             refresh: refresh || pending?.1.refresh == true,
             machineOffsets: machineOffsets, includeMachine: route == "CPU & processes",
-            live: useLive, poll: poll, target: following ? nil : requestedIdentity)
+            live: useLive, poll: poll, target: following ? nil : requestedIdentity,
+            apps: route == "Apps" ? LiveAppsRequest(key: appKey, appsOffset: appsOffset,
+                membersOffset: appMembersOffset) : nil)
         if reading { pending = (generation, request) }
         else { start(generation, request) }
     }
@@ -528,6 +639,12 @@ final class RecordingModel: ObservableObject {
                             selection = result.selection
                             page = result.page
                             machinePages = result.machinePages
+                            apps = result.apps
+                            if let reading = result.apps {
+                                appsOffset = reading.list.page.offset
+                                appMembersOffset = reading.detail?.page.offset ?? 0
+                                if let key = reading.key, appKey != key { appKey = key }
+                            }
                             requestedSecond = result.selection?.second
                             if !following {
                                 requestedIdentity = result.selection?.selected?.identity
@@ -580,6 +697,7 @@ final class RecordingModel: ObservableObject {
         stopFollowing()
         useLive = false
         showsReference = false
+        if route == "Apps" { route = "Overview" }
         self.path = path
         catalog = nil
         requestedSecond = nil
@@ -587,6 +705,11 @@ final class RecordingModel: ObservableObject {
         alternative = 0
         machineOffsets.removeAll(keepingCapacity: true)
         selection = nil
+        apps = nil
+        appKey = nil
+        appProcessGroup = nil
+        appsOffset = 0
+        appMembersOffset = 0
         page = nil
         machinePages.removeAll(keepingCapacity: true)
         load(refresh: true)
@@ -611,10 +734,39 @@ final class RecordingModel: ObservableObject {
         enqueue(refresh: false)
     }
 
+    func enterApps() {
+        route = "Apps"
+        enqueue(refresh: false)
+    }
+
+    func selectApp(_ key: LiveAppKeyIdentity) {
+        appKey = key
+        appProcessGroup = nil
+        appMembersOffset = 0
+        apps = nil
+        enqueue(refresh: false)
+    }
+
+    func selectAppProcessGroup(_ key: Data?) {
+        appProcessGroup = key
+    }
+
+    func pageApps(_ offset: UInt32) {
+        appsOffset = offset
+        enqueue(refresh: false)
+    }
+
+    func pageAppMembers(_ offset: UInt32) {
+        appMembersOffset = offset
+        enqueue(refresh: false)
+    }
+
     func select(_ target: RecordedSelectionTarget) {
         if following { stopFollowing() }
         requestedSecond = target.second
         requestedIdentity = target.identity
+        appsOffset = 0
+        appMembersOffset = 0
         alternative = 0
         requestedOffset = 0
         machineOffsets.removeAll(keepingCapacity: true)
@@ -622,6 +774,7 @@ final class RecordingModel: ObservableObject {
         page = nil
         machinePages.removeAll(keepingCapacity: true)
         row = nil
+        apps = nil
         enqueue(refresh: false)
     }
 
@@ -644,10 +797,5 @@ func recordedAlternative(selection: Selection, target: RecordedObservationIdenti
 func decodeRecordingResponse<T: Decodable>(_ data: Data) throws -> T {
     let decoder = JSONDecoder()
     decoder.keyDecodingStrategy = .convertFromSnakeCase
-    let envelope = try decoder.decode(Envelope<T>.self, from: data)
-    if let error = envelope.error { throw RecordingError(message: error) }
-    guard let value = envelope.value else {
-        throw RecordingError(message: "The recording query returned no value.")
-    }
-    return value
+    return try decoder.decode(Envelope<T>.self, from: data).value
 }

@@ -47,6 +47,27 @@ impl StartedRecording {
 }
 
 impl Registration {
+    /// Registered identity sources must fit the live reader's existing mapping bound.
+    pub fn start_with_identity(
+        root: &Path,
+        place: &Place,
+        shape: Shape,
+        capacity: crate::ring::DictionaryCapacity,
+        start_continuous_ns: u64,
+    ) -> io::Result<StartedRecording> {
+        let size_bytes = Writer::identity_size_bytes(shape, capacity)?;
+        if size_bytes > 1024 * 1024 * 1024 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "identity ring requires {size_bytes} bytes, above the 1073741824-byte limit"
+                ),
+            ));
+        }
+
+        Self::start_inner(root, place, shape, Some(capacity), start_continuous_ns)
+    }
+
     /// Creates and registers one source in the required startup order.
     pub fn start(
         root: &Path,
@@ -54,7 +75,18 @@ impl Registration {
         shape: Shape,
         start_continuous_ns: u64,
     ) -> io::Result<StartedRecording> {
+        Self::start_inner(root, place, shape, None, start_continuous_ns)
+    }
+
+    fn start_inner(
+        root: &Path,
+        place: &Place,
+        shape: Shape,
+        capacity: Option<crate::ring::DictionaryCapacity>,
+        start_continuous_ns: u64,
+    ) -> io::Result<StartedRecording> {
         let locked = LockedPlace::acquire(place)?;
+
         let ownership = match Self::start_ownership(root) {
             Ok(ownership) => ownership,
             Err(error) => {
@@ -69,6 +101,7 @@ impl Registration {
                 );
             }
         };
+
         let registration = match Self::prepare(root, place) {
             Ok(registration) => registration,
             Err(error) => {
@@ -82,10 +115,21 @@ impl Registration {
                 );
             }
         };
-        let mut writer =
-            locked.create_recording(shape, registration.identity(), start_continuous_ns)?;
+
+        let mut writer = if let Some(capacity) = capacity {
+            locked.create_with_identity(
+                shape,
+                capacity,
+                registration.identity(),
+                start_continuous_ns,
+            )?
+        } else {
+            locked.create_recording(shape, registration.identity(), start_continuous_ns)?
+        };
+
         writer.retain_recording_ownership(ownership);
         let registered = registration.register(writer.name());
+
         Ok(StartedRecording { writer, registered })
     }
 
@@ -353,3 +397,6 @@ mod tests {
         assert_eq!(0, calls);
     }
 }
+
+#[cfg(test)]
+mod activation_tests;

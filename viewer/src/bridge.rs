@@ -53,6 +53,13 @@ pub struct Bytes {
     length: usize,
 }
 
+#[repr(C)]
+pub struct AppKey {
+    kind: u32,
+    pointer: *const u8,
+    length: usize,
+}
+
 /// Opens an opaque session; errors are returned by its catalog request.
 /// # Safety
 /// `path` must address `length` readable bytes, UTF-8, with length at most 4096.
@@ -219,6 +226,77 @@ pub unsafe extern "C" fn fd_follow(handle: *mut Handle) -> Bytes {
             session.follow_latest().map_err(|error| error.to_string())
         }
         Ok(ViewedSession::Saved(_)) => Err("session has no live source".to_owned()),
+        Err(error) => Err(error.to_string()),
+    })
+}
+
+/// # Safety
+/// `handle` must be a live session result, exclusively borrowed for this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fd_apps(handle: *mut Handle, offset: u32) -> Bytes {
+    let handle = unsafe { &*handle };
+    response(match &handle.session {
+        Ok(ViewedSession::Live(session)) => {
+            session.apps_page(offset).map_err(|error| error.to_string())
+        }
+        Ok(ViewedSession::Saved(_)) => Err("session has no live App source".to_owned()),
+        Err(error) => Err(error.to_string()),
+    })
+}
+
+/// # Safety
+/// `handle` is exclusively borrowed. `key` addresses a live `AppKey` whose pointer
+/// addresses its readable length of bytes for the call; no key bytes are retained.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fd_app_detail(
+    handle: *mut Handle,
+    key: *const AppKey,
+    offset: u32,
+) -> Bytes {
+    unsafe {
+        app_query(handle, key, |session, kind, bytes| {
+            session.app_detail(kind, bytes, offset)
+        })
+    }
+}
+
+/// # Safety
+/// `handle` is exclusively borrowed. `key` addresses a live `AppKey` whose pointer
+/// addresses its readable length of bytes for the call; no key bytes are retained.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fd_app_history(handle: *mut Handle, key: *const AppKey) -> Bytes {
+    unsafe { app_query(handle, key, LiveSession::app_history) }
+}
+
+unsafe fn app_query(
+    handle: *mut Handle,
+    key: *const AppKey,
+    query: impl FnOnce(
+        &LiveSession,
+        crate::live_app_response::KeyKind,
+        &[u8],
+    ) -> persistence::Result<Value>,
+) -> Bytes {
+    let key = unsafe { &*key };
+    if key.length == 0 {
+        return response(Err("empty App key".to_owned()));
+    }
+    if key.length > collector::ring::PROGRAM_PATH_BYTES_MAX {
+        return response(Err("App key exceeds captured-byte bound".to_owned()));
+    }
+    let kind = match key.kind {
+        0 => crate::live_app_response::KeyKind::Bundle,
+        1 => crate::live_app_response::KeyKind::Executable,
+        _ => return response(Err("unknown App key kind".to_owned())),
+    };
+    let bytes = unsafe { std::slice::from_raw_parts(key.pointer, key.length) };
+    let handle = unsafe { &*handle };
+
+    response(match &handle.session {
+        Ok(ViewedSession::Live(session)) => {
+            query(session, kind, bytes).map_err(|error| error.to_string())
+        }
+        Ok(ViewedSession::Saved(_)) => Err("session has no live App source".to_owned()),
         Err(error) => Err(error.to_string()),
     })
 }
