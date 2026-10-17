@@ -450,7 +450,7 @@ impl LiveSession {
             .rev()
             .find(|observation| observation.identity == current.identity);
         let mut tables = metrics::Tables::new();
-        for name in ["ticks", "memory", "cpus", "interfaces"] {
+        for name in metrics::TABLE_NAMES {
             let mut publications = BTreeMap::new();
             if let Some(previous) = previous {
                 publications.insert(
@@ -638,7 +638,7 @@ impl LiveSession {
                 / NANOSECONDS_PER_SECOND;
             if (second.saturating_sub(899)..=second).contains(&current) {
                 if !points.iter().any(|existing| same(existing, point)) {
-                    points.push(point.clone());
+                    points.push(metrics::public_point(point)?);
                 }
             }
         }

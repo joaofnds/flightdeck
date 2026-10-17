@@ -34,7 +34,7 @@ mod tests {
                 cpu_capacity: 1,
                 interface_capacity: 1,
                 core_capacity: 1,
-                state_capacity: 1,
+                state_capacity: 2,
                 fan_capacity: 1,
                 process_capacity,
                 coalition_capacity: 1,
@@ -114,6 +114,49 @@ mod tests {
                     },
                 )
                 .unwrap();
+        }
+
+        fn publish_gpu(&mut self, second: u64) {
+            let memory = Memory {
+                total_bytes: 9_007_199_254_740_993,
+                ..Memory::default()
+            };
+            let cpus = [collector::machine::CPUTicks {
+                user: 1,
+                system: 2,
+                nice: 3,
+                idle: 4,
+            }];
+            let active_ns = [
+                1_000_000_000 + self.elapsed * 500_000_000,
+                2_000_000_000 + self.elapsed * 300_000_000,
+            ];
+            self.writer.publish_observed(
+                &Readings {
+                    run_tick: self.elapsed,
+                    cpus: &cpus,
+                    memory: &memory,
+                    interfaces: &[],
+                    ioreport: Some(collector::ring::IOReportReadings {
+                        gpu_energy_nj: 1_000_000_000 + self.elapsed * 4_000_000_000,
+                        gpu_active_ns: &active_ns,
+                        cores: &[],
+                    }),
+                    smc: None,
+                    processes: &[],
+                    processes_refused: 0,
+                    processes_gone: 0,
+                    coalitions: &[],
+                    events: &[],
+                    dropped: Dropped::default(),
+                },
+                &ObservationTimes {
+                    wall_ns: second * 1_000_000_000,
+                    continuous_ns: (self.elapsed * 2 + 1) * 1_000_000_000,
+                    awake_ns: self.elapsed * 1_000_000_000,
+                },
+            );
+            self.elapsed += 1;
         }
 
         fn publish(&mut self, second: u64) {
@@ -462,6 +505,37 @@ mod tests {
                 unix_syscalls: 0,
             },
         }
+    }
+
+    #[test]
+    fn preserves_the_scalar_point_shape_across_a_real_ring_seal() {
+        // Goal: public live point fields remain exactly equal after committing the same ticks.
+        // Method: publish positive GPU counters through the real ring, then seal and reopen
+        // history.
+        let mut recording = Recording::new();
+        recording.publish_gpu(1000);
+        recording.publish_gpu(1001);
+        let mut live = LiveSession::open(&recording.root).unwrap();
+        let before = live.select(1001, 0).unwrap();
+        assert_eq!(before["summary"]["gpu_active_percent"], 40.0);
+        assert_eq!(before["summary"]["gpu_watts"], 2.0);
+        assert_eq!(
+            live.page("gpu_states", 0).unwrap()["rows"],
+            serde_json::json!([["2", "0", "1500000000"], ["2", "1", "2300000000"]])
+        );
+        recording.seal();
+        let mut saved = viewer::Session::open(&recording.root).unwrap();
+
+        let after = saved.select(1001, 0).unwrap();
+
+        assert_eq!(before["summary"], after["summary"]);
+        assert_eq!(before["trends"], after["trends"]);
+        assert!(before["summary"].get("observation").is_none());
+        assert_eq!(live.catalog()["latest_observation"]["publication"], 2);
+        assert_eq!(
+            live.page("memory", 0).unwrap()["observation"]["publication"],
+            2
+        );
     }
 
     fn page_identity(page: &serde_json::Value) -> [&serde_json::Value; 5] {
