@@ -1,6 +1,8 @@
+import AppKit
 import Foundation
 import SwiftUI
 
+@MainActor
 func runLiveAppsChecks() throws {
     try preserves_exact_live_app_counters_above_double_precision()
     try groups_captured_executables_with_exact_subtotals_and_coverage()
@@ -16,7 +18,15 @@ func runLiveAppsChecks() throws {
     refuses_a_member_from_another_app_index()
     try round_trips_generated_exact_counters()
     preserves_exact_history_selection_when_wall_times_repeat()
-    print("14 live App native checks passed")
+    try renders_exact_process_identities_and_readings_in_fixed_native_rows()
+    try renders_group_subtotal_coverage_in_native_cells()
+    try distinguishes_native_measured_zero_from_absent_identity_and_readings()
+    try activates_only_known_group_buttons_without_update_callbacks()
+    refreshes_reused_native_cells_without_stale_text_or_help()
+    try applies_native_live_table_theme_without_enabling_row_selection()
+    renders_overflowed_group_subtotals_as_unavailable()
+    try renders_the_loaded_process_bound_and_clears_an_empty_page()
+    print("22 live App native checks passed")
 }
 
 private func preserves_exact_live_app_counters_above_double_precision() throws {
@@ -316,4 +326,245 @@ private func preserves_exact_history_selection_when_wall_times_repeat() {
     let value = history.selectedValue(model: model, line: line)
 
     precondition(value == 90, "Repeated-time selection read \(String(describing: value))")
+}
+
+
+@MainActor
+private func renders_exact_process_identities_and_readings_in_fixed_native_rows() throws {
+    // Goal: native cells retain exact identities and displayed readings without hosting row heights.
+    // Method: render the independent process fixture through the real native table coordinator.
+    let detail = try liveAppsNativeTableDetail()
+    let fixture = LiveAppsNativeTableFixture(data: .processes(detail.processes))
+
+    precondition(fixture.table.tableColumns.map(\.title) == ["PID", "Creation ID", "PID version",
+        "Executable", "CPU", "Resident", "Footprint", "Power", "Energy"])
+    precondition(!fixture.table.usesAutomaticRowHeights)
+    precondition(fixture.table.rowHeight == 26)
+    precondition(fixture.scroll.hasVerticalScroller)
+    precondition(fixture.scroll.hasHorizontalScroller)
+    precondition(fixture.table.accessibilityLabel() == "Exact process creation identities and readings")
+    precondition(fixture.field(row: 0, column: 0).stringValue == "42")
+    precondition(fixture.field(row: 0, column: 1).stringValue == "9007199254740993")
+    precondition(fixture.field(row: 0, column: 1).accessibilityValue()
+        == "9007199254740993")
+    precondition(liveAppsExposedValues(fixture.field(row: 0, column: 1))
+        == ["9007199254740993"])
+    precondition(fixture.field(row: 0, column: 2).stringValue == "1")
+    precondition(fixture.field(row: 0, column: 3).stringValue == "helper\\xff")
+    precondition(fixture.field(row: 0, column: 3).toolTip == "Captured executable")
+    precondition(fixture.field(row: 0, column: 4).stringValue == "20 %")
+    precondition(fixture.field(row: 0, column: 5).stringValue == "100 MiB")
+    precondition(fixture.field(row: 0, column: 6).stringValue == "105 MiB")
+    precondition(fixture.field(row: 0, column: 7).stringValue == "1 W")
+    precondition(fixture.field(row: 0, column: 8).stringValue == "1 J")
+    precondition(fixture.field(row: 2, column: 4).stringValue == "Unavailable refused")
+    precondition(fixture.field(row: 2, column: 5).accessibilityValue()
+        == "Unavailable unknown")
+}
+
+@MainActor
+private func renders_group_subtotal_coverage_in_native_cells() throws {
+    // Goal: the native group table retains partial coverage beside each subtotal and in help.
+    // Method: render two measured members and one refusal from the independent fixture.
+    let groups = LiveAppGroups(detail: try liveAppsNativeTableDetail())
+    let fixture = LiveAppsNativeTableFixture(data: .groups(groups.rows, selected: nil))
+
+    precondition(fixture.table.tableColumns.map(\.title) == ["Process group", "Instances", "CPU",
+        "Resident", "Footprint", "Power", "Energy"])
+    precondition(fixture.table.accessibilityLabel() == "Captured executable groups")
+    precondition(fixture.field(row: 0, column: 1).stringValue == "3")
+    precondition(fixture.field(row: 0, column: 2).stringValue == "50 % 2/3 measured")
+    precondition(fixture.field(row: 0, column: 2).toolTip == "2 measured · 1 unavailable")
+    precondition(fixture.field(row: 0, column: 3).stringValue == "150 MiB 2/3 measured")
+    precondition(fixture.field(row: 0, column: 3).accessibilityValue()
+        == "150 MiB 2/3 measured")
+    precondition(fixture.field(row: 0, column: 5).stringValue == "3 W 2/3 measured")
+}
+
+@MainActor
+private func distinguishes_native_measured_zero_from_absent_identity_and_readings() throws {
+    // Goal: zero stays measurable while missing identity and refused readings remain explicit.
+    // Method: remove identity and replace only known memory/CPU with literal zeros in the fixture.
+    let text = String(decoding: LiveAppsFixture.detail, as: UTF8.self)
+        .replacingOccurrences(of: #""creation":{"unique_id":"9007199254740993","pid_version":1}"#,
+            with: #""creation":null"#)
+        .replacingOccurrences(of: #""pid_version":1"#, with: #""pid_version":-70"#)
+        .replacingOccurrences(of: #""known":"200000000""#, with: #""known":"0""#)
+        .replacingOccurrences(of: #""cpu_percent_one_core":20"#, with: #""cpu_percent_one_core":0"#)
+        .replacingOccurrences(of: #""known":"104857600""#, with: #""known":"0""#)
+    let detail = try liveAppsNativeTableDetail(Data(text.utf8))
+    let fixture = LiveAppsNativeTableFixture(data: .processes(detail.processes))
+
+    precondition(fixture.field(row: 0, column: 1).stringValue == "Unavailable")
+    precondition(fixture.field(row: 0, column: 2).stringValue == "Unavailable")
+    precondition(fixture.field(row: 1, column: 2).stringValue == "-70")
+    precondition(fixture.field(row: 0, column: 4).stringValue == "0 %")
+    precondition(fixture.field(row: 0, column: 5).stringValue == "0 GiB")
+    precondition(fixture.field(row: 2, column: 5).stringValue == "Unavailable unknown")
+}
+
+@MainActor
+private func activates_only_known_group_buttons_without_update_callbacks() throws {
+    // Goal: only a known group-name button activates its byte key, including after updates.
+    // Method: render a known and unknown executable, update, then perform native button clicks.
+    let detail = try liveAppsNativeTableDetail()
+    let groups = LiveAppGroups(detail: detail).rows
+    var initial: [Data?] = []
+    var selected: [Data?] = []
+    let fixture = LiveAppsNativeTableFixture(data: .groups(groups, selected: nil),
+        onSelect: { initial.append($0) })
+
+    fixture.coordinator.apply(fixture.table, data: .groups(groups, selected: nil),
+        theme: FlightdeckTheme(), onSelect: { selected.append($0) })
+    precondition(initial.isEmpty)
+    precondition(selected.isEmpty)
+    let knownButton = fixture.button(row: 0)
+    knownButton.performClick(nil)
+    precondition(initial.isEmpty)
+    precondition(selected == [Data([104, 101, 108, 112, 101, 114, 255])])
+    fixture.coordinator.apply(fixture.table, data: .groups(groups, selected: groups[0].key),
+        theme: FlightdeckTheme(), onSelect: { selected.append($0) })
+    precondition(fixture.button(row: 0).attributedTitle.attribute(.foregroundColor,
+        at: 0, effectiveRange: nil) as? NSColor == NSColor(FlightdeckTheme().focus))
+    precondition(selected.count == 1)
+
+    let text = String(decoding: LiveAppsFixture.detail, as: UTF8.self)
+        .replacingOccurrences(of: #"{"bytes_hex":"68656c706572ff","display":"helper\\xff"}"#,
+            with: "null")
+    let unknown = LiveAppGroups(detail: try liveAppsNativeTableDetail(Data(text.utf8))).rows
+    fixture.coordinator.apply(fixture.table, data: .groups(unknown, selected: nil),
+        theme: FlightdeckTheme(), onSelect: { selected.append($0) })
+
+    precondition(selected.count == 1)
+    knownButton.performClick(nil)
+    precondition(selected.count == 1)
+    precondition(!fixture.button(row: 0).isEnabled)
+    fixture.button(row: 0).performClick(nil)
+    precondition(selected.count == 1)
+}
+
+@MainActor
+private func refreshes_reused_native_cells_without_stale_text_or_help() {
+    // Goal: recycling a native field clears old coverage, help and accessibility values.
+    // Method: update the same field from a partial subtotal to a measured zero.
+    let field = LiveAppsTableTextField(labelWithString: "")
+    let partial = LiveAppsTableCell(value: "150 MiB", annotation: "2/3 measured",
+        help: "2 measured · 1 unavailable")
+    field.apply(partial, theme: FlightdeckTheme())
+
+    field.apply(LiveAppsTableCell(value: "0 GiB"), theme: FlightdeckTheme())
+
+    precondition(field.stringValue == "0 GiB")
+    precondition(field.accessibilityValue() == "0 GiB")
+    precondition(field.toolTip == nil)
+    precondition(field.maximumNumberOfLines == 1)
+    precondition(liveAppsExposedValues(field) == ["0 GiB"])
+}
+
+@MainActor
+private func applies_native_live_table_theme_without_enabling_row_selection() throws {
+    // Goal: native table refreshes adopt theme changes while group buttons retain sole activation.
+    // Method: apply a larger contrasting theme to the real table and inspect its refreshed cells.
+    let detail = try liveAppsNativeTableDetail()
+    let data = LiveAppsTableData.processes(detail.processes)
+    let fixture = LiveAppsNativeTableFixture(data: data)
+    let original = fixture.displayedField(row: 0, column: 1)
+    precondition(original.font?.pointSize == FlightdeckTheme().tableFontSize)
+    var theme = FlightdeckTheme()
+    theme.tableFontSize = 19
+    theme.text = .yellow
+    theme.panel = .black
+
+    fixture.coordinator.apply(fixture.table, data: data, theme: theme, onSelect: nil)
+
+    fixture.table.layoutSubtreeIfNeeded()
+    precondition(fixture.displayedField(row: 0, column: 1).font?.pointSize == 19)
+    precondition(fixture.displayedField(row: 0, column: 1).textColor == NSColor(theme.text))
+    precondition(fixture.table.tableColumns[0].headerCell.font?.pointSize == 19)
+    precondition(fixture.table.backgroundColor == NSColor(theme.panel))
+    precondition(!fixture.coordinator.tableView(fixture.table, shouldSelectRow: 0))
+}
+
+private func liveAppsNativeTableDetail(_ data: Data = LiveAppsFixture.detail) throws -> LiveAppDetailPage {
+    let decoder = JSONDecoder()
+    decoder.keyDecodingStrategy = .convertFromSnakeCase
+    return try decoder.decode(LiveAppDetailPage.self, from: data)
+}
+
+@MainActor
+private func liveAppsExposedValues(_ field: NSTextField) -> [String] {
+    NSAccessibility.unignoredChildrenForOnlyChild(from: field).compactMap {
+        ($0 as? any NSAccessibilityProtocol)?.accessibilityValue() as? String
+    }
+}
+
+@MainActor
+private struct LiveAppsNativeTableFixture {
+    let coordinator: LiveAppsNativeTable.Coordinator
+    let scroll: NSScrollView
+    let table: NSTableView
+
+    init(data: LiveAppsTableData, onSelect: ((Data?) -> Void)? = nil) {
+        coordinator = LiveAppsNativeTable.Coordinator()
+        scroll = coordinator.makeScrollView()
+        guard let table = scroll.documentView as? NSTableView else { preconditionFailure() }
+        self.table = table
+        coordinator.apply(table, data: data, theme: FlightdeckTheme(), onSelect: onSelect)
+        scroll.frame = NSRect(x: 0, y: 0, width: 1400, height: 240)
+        scroll.tile()
+        table.layoutSubtreeIfNeeded()
+    }
+
+    func displayedField(row: Int, column: Int) -> NSTextField {
+        guard let field = table.view(atColumn: column, row: row, makeIfNecessary: true)
+            as? NSTextField else { preconditionFailure() }
+
+        return field
+    }
+
+    func field(row: Int, column: Int) -> NSTextField {
+        guard let field = coordinator.tableView(table, viewFor: table.tableColumns[column], row: row)
+            as? NSTextField else { preconditionFailure() }
+        return field
+    }
+
+    func button(row: Int) -> NSButton {
+        guard let button = coordinator.tableView(table, viewFor: table.tableColumns[0], row: row)
+            as? NSButton else { preconditionFailure() }
+        return button
+    }
+}
+
+
+@MainActor
+private func renders_overflowed_group_subtotals_as_unavailable() {
+    // Goal: an overflowed subtotal never looks like a known reading or a complete measurement.
+    // Method: render a group with a literal overflowed measure through its native cell.
+    let measure = LiveAppMeasure(known: LiveAppCounter(9), measuredMembers: 1,
+        unavailableMembers: 1, overflowed: true)
+    let group = LiveAppProcessGroup(key: nil, displayName: "Unknown executable", instances: 2,
+        cpuNs: measure, energyNj: measure, residentBytes: measure, footprintBytes: measure,
+        cpuPercentOneCore: nil, energyJoules: nil, energyWatts: nil)
+    let fixture = LiveAppsNativeTableFixture(data: .groups([group], selected: nil))
+
+    precondition(fixture.field(row: 0, column: 3).stringValue
+        == "Unavailable 1/2 measured · overflow")
+    precondition(fixture.field(row: 0, column: 3).toolTip
+        == "1 measured · 1 unavailable · overflow")
+}
+
+@MainActor
+private func renders_the_loaded_process_bound_and_clears_an_empty_page() throws {
+    // Goal: the native adapter handles the full loaded page and releases its rows on an empty page.
+    // Method: render 512 copies of a decoded process, then replace them with no processes.
+    let process = try liveAppsNativeTableDetail().processes[0]
+    let fixture = LiveAppsNativeTableFixture(data: .processes(Array(repeating: process, count: 512)))
+
+    precondition(fixture.table.numberOfRows == 512)
+    precondition(fixture.field(row: 511, column: 1).stringValue == "9007199254740993")
+    fixture.coordinator.apply(fixture.table, data: .processes([]),
+        theme: FlightdeckTheme(), onSelect: nil)
+
+    precondition(fixture.table.numberOfRows == 0)
+    precondition(fixture.table.tableColumns.count == 9)
 }
