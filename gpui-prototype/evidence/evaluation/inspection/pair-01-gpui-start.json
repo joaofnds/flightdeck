@@ -1,0 +1,12 @@
+{
+  "pid": 85595,
+  "implementation": "gpui",
+  "pair": 1,
+  "launched_wall_ms": "1792277982155",
+  "executable": "/Users/joaofnds/code/flightdeck/gpui-prototype/target/Flightdeck GPUI.app/Contents/MacOS/flightdeck-gpui",
+  "arguments": [
+    "--reference",
+    "--replay",
+    "/Users/joaofnds/code/flightdeck/gpui-prototype/target/evaluation-inspection/actions.json"
+  ]
+}

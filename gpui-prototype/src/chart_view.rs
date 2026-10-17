@@ -28,25 +28,7 @@ impl Dashboard {
         chart = self.chart_axes(chart, panel, inspection);
         chart = Self::chart_state(chart, panel, inspection);
         let is_diagnostic = panel.kind == "self-chart";
-        let chart = chart.on_mouse_move(cx.listener(
-            move |this, event: &gpui::MouseMoveEvent, _, cx| {
-                let rect = charts::plot_bounds(bounds.get());
-                let fraction =
-                    f32::from(event.position.x - rect.origin.x) / f32::from(rect.size.width);
-                let selected = inspection.select_fraction(fraction);
-                if is_diagnostic {
-                    if this.diagnostic_selected != selected {
-                        this.diagnostic_selected = selected;
-                        cx.notify();
-                    }
-                } else {
-                    if this.inspection.selected != selected {
-                        this.inspection.selected = selected;
-                        cx.notify();
-                    }
-                }
-            },
-        ));
+        let chart = self.chart_events(chart, bounds, panel, cx);
         let label = if is_diagnostic {
             "Separate diagnostic capture".into()
         } else {
@@ -69,6 +51,67 @@ impl Dashboard {
                     .child(end),
             )
             .child(self.chart_legend(panel, inspection, cx))
+    }
+
+    fn chart_events(
+        &self,
+        chart: gpui::Div,
+        bounds: Rc<Cell<Bounds<gpui::Pixels>>>,
+        panel: &Panel,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let inspection = self.chart_inspection(panel);
+        let diagnostic = panel.kind == "self-chart";
+        chart
+            .id(SharedString::from(format!("{}-plot", panel.id)))
+            .focusable()
+            .focus(|style| style.bg(rgb(0x20_30_41)))
+            .on_key_down(
+                cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
+                    let Some(delta) = crate::dashboard::keyboard_step(event) else {
+                        return;
+                    };
+                    let current = if diagnostic {
+                        this.diagnostic_selected
+                    } else {
+                        this.inspection.selected
+                    };
+                    let selected = if delta < 0 {
+                        current.saturating_sub(1).max(inspection.lower)
+                    } else {
+                        current.saturating_add(1).min(inspection.upper)
+                    };
+                    if diagnostic {
+                        this.diagnostic_selected = selected;
+                    } else {
+                        this.inspection.selected = selected;
+                    }
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    if selected != current {
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_mouse_move(
+                cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {
+                    let rect = charts::plot_bounds(bounds.get());
+                    let fraction =
+                        f32::from(event.position.x - rect.origin.x) / f32::from(rect.size.width);
+                    let selected = inspection.select_fraction(fraction);
+                    if diagnostic {
+                        if this.diagnostic_selected != selected {
+                            this.diagnostic_selected = selected;
+                            cx.notify();
+                        }
+                    } else {
+                        if this.inspection.selected != selected {
+                            this.inspection.selected = selected;
+                            cx.notify();
+                        }
+                    }
+                }),
+            )
     }
 
     fn chart_inspection(&self, panel: &Panel) -> Inspection {
@@ -209,6 +252,8 @@ impl Dashboard {
                 div()
                     .id(SharedString::from(format!("{}-{name}", panel.id)))
                     .cursor_pointer()
+                    .focusable()
+                    .focus(|style| style.bg(rgb(0x32_46_61)))
                     .py(px(5.0))
                     .opacity(opacity)
                     .text_color(rgb(charts::color(&line.color)))

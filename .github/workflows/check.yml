@@ -85,3 +85,10 @@ jobs:
       - run: >-
           cargo run --locked --manifest-path gpui-prototype/Cargo.toml
           --bin flightdeck-gpui -- --check
+      - run: >-
+          cargo run --locked --manifest-path gpui-prototype/Cargo.toml
+          --bin text_backend_check -- --check
+      - run: >-
+          cargo run --locked --manifest-path gpui-prototype/Cargo.toml
+          --bin native_replay_build -- --typecheck
+          --output gpui-prototype/target/native-replay-ci

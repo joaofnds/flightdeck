@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "started_wall_ms": "1792277800394",
+  "gpui": {
+    "path": "/Users/joaofnds/code/flightdeck/gpui-prototype/target/Flightdeck GPUI.app/Contents/MacOS/flightdeck-gpui",
+    "sha256": "29ce0e06bd22fe4fa61297bc3513bbc82223a9e6a8be01fdce7446867533d7d5"
+  },
+  "swift": {
+    "path": "/Users/joaofnds/code/flightdeck/gpui-prototype/target/native-replay-instrumented/Flightdeck Swift Replay.app/Contents/MacOS/FlightdeckSwiftReplay",
+    "sha256": "e189397df9697452fbf2e94dfade29e01018db84015af1cfdd449bbb1cb7d6f2"
+  },
+  "actions": {
+    "path": "/Users/joaofnds/code/flightdeck/gpui-prototype/target/evaluation-inspection/actions.json",
+    "sha256": "2b4d2ef8519b2b175bb95d2720df98d9e03ef59f6a0800b110cd9a935c144065"
+  },
+  "watcher": {
+    "path": "/Users/joaofnds/code/flightdeck/target/release/process_watch",
+    "sha256": "7c68fa7bf695663f96c08e462c9d8f9567ad78e51882a0adea5538815d072b8a"
+  },
+  "pairs": 3,
+  "warmup_ms": 20000,
+  "sample_seconds": 30,
+  "gpui_animate": false,
+  "scope": "Captured model-action replay; CPU acceptance and process resources",
+  "limitations": [
+    "No OS input or actual presentation measurement",
+    "Visibility, viewport, display, thermal state and source revision require recording",
+    "First replay acceptance is not first presented frame"
+  ]
+}

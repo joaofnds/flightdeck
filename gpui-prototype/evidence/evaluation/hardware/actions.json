@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "duration_ms": 60000,
+  "actions": [
+    {
+      "at_ms": 0,
+      "route": "overview",
+      "sample": 120,
+      "minutes": 15,
+      "scroll": "hardware"
+    }
+  ]
+}

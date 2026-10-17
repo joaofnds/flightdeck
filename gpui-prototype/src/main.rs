@@ -3,13 +3,21 @@ mod chart_view;
 mod charts;
 mod dashboard;
 mod data;
+mod diagnostics;
 mod hardware;
+mod hardware_clock;
+mod hardware_layout;
+mod hardware_motion;
+mod live_app_views;
+mod live_chart_view;
+mod live_cpu;
 mod live_dashboard;
 mod live_executables;
 mod live_hardware;
 mod live_inventory;
 mod live_launch;
 mod live_notices;
+mod live_presentation;
 mod live_probe;
 mod live_projection;
 mod live_source;
@@ -17,6 +25,9 @@ mod live_tables;
 mod live_timer;
 mod live_views;
 mod performance;
+mod render_evidence;
+mod replay;
+mod replay_dashboard;
 mod summary;
 
 #[cfg(test)]
@@ -37,6 +48,7 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
+    diagnostics::initialize()?;
     if std::env::args().nth(1).as_deref() == Some("--bundle") {
         return bundle::create();
     }
@@ -53,6 +65,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_reference(options: performance::Options) -> Result<(), Box<dyn std::error::Error>> {
+    let replay = options
+        .replay
+        .as_deref()
+        .map(replay::Replay::load)
+        .transpose()?;
     let capture = data::Capture::load()?;
     let catalog = data::Catalog::load()?;
     if !catalog
@@ -71,33 +88,64 @@ fn run_reference(options: performance::Options) -> Result<(), Box<dyn std::error
         );
         return Ok(());
     }
-    Application::new().run(move |cx: &mut App| {
-        cx.on_window_closed(|cx| {
-            if cx.windows().is_empty() {
-                cx.quit();
-            }
-        })
-        .detach();
-        let bounds = Bounds::centered(None, size(px(1320.0), px(900.0)), cx);
-        let options_window = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            titlebar: Some(gpui::TitlebarOptions {
-                title: Some("Flightdeck GPUI prototype".into()),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        match cx.open_window(options_window, move |_, cx| {
-            cx.new(|_| {
-                dashboard::Dashboard::new(capture, catalog, performance::Performance::new(options))
-            })
-        }) {
-            Ok(_) => cx.activate(true),
-            Err(error) => {
-                eprintln!("window failed: {error}");
-                cx.quit();
-            }
-        }
+    let application = Application::new();
+    diagnostics::verify_text_backend(&application.text_system())?;
+    application.run(move |cx: &mut App| {
+        run_reference_window(capture, catalog, options, replay, cx);
     });
     Ok(())
+}
+
+fn run_reference_window(
+    capture: data::Capture,
+    catalog: data::Catalog,
+    options: performance::Options,
+    replay: Option<replay::Replay>,
+    cx: &mut App,
+) {
+    cx.on_window_closed(|cx| {
+        if cx.windows().is_empty() {
+            cx.quit();
+        }
+    })
+    .detach();
+    let bounds = Bounds::centered(None, size(px(1320.0), px(900.0)), cx);
+    let options_window = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        titlebar: Some(gpui::TitlebarOptions {
+            title: Some("Flightdeck GPUI prototype".into()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    match cx.open_window(options_window, move |_, cx| {
+        let entity = cx.new(|_| {
+            dashboard::Dashboard::new(
+                capture,
+                catalog,
+                performance::Performance::new(options),
+                replay,
+            )
+        });
+        let hardware_state = std::rc::Rc::clone(&entity.read(cx).hardware_state);
+        if let Err(error) = performance::start_deadline(&entity, cx) {
+            eprintln!("Reference deadline failed: {error}");
+            cx.quit();
+        }
+        if let Err(error) = hardware_clock::install(&entity, &hardware_state, cx) {
+            eprintln!("Reference hardware timer failed: {error}");
+            cx.quit();
+        }
+        if let Err(error) = replay_dashboard::start(&entity, cx) {
+            eprintln!("Reference timer failed: {error}");
+            cx.quit();
+        }
+        entity
+    }) {
+        Ok(_) => cx.activate(true),
+        Err(error) => {
+            eprintln!("window failed: {error}");
+            cx.quit();
+        }
+    }
 }

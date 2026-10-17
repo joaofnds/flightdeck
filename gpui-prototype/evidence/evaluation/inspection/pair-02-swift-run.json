@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "pair": 2,
+  "implementation": "swift",
+  "pid": 87461,
+  "launched_wall_ms": "1792278102785",
+  "observed_wall_ms": "1792278123155",
+  "finished_wall_ms": "1792278163139",
+  "elapsed_ms": 60354,
+  "replay_ready_after_ms": 345,
+  "app_status": "exit status: 0",
+  "app_executable": "/Users/joaofnds/code/flightdeck/gpui-prototype/target/native-replay-instrumented/Flightdeck Swift Replay.app/Contents/MacOS/FlightdeckSwiftReplay",
+  "app_arguments": [
+    "--reference",
+    "--replay",
+    "/Users/joaofnds/code/flightdeck/gpui-prototype/target/evaluation-inspection/actions.json"
+  ],
+  "watcher_command": [
+    "/Users/joaofnds/code/flightdeck/target/release/process_watch",
+    "--pid",
+    "87461",
+    "--seconds",
+    "30"
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "pair": 1,
+  "implementation": "gpui",
+  "pid": 85595,
+  "launched_wall_ms": "1792277982155",
+  "observed_wall_ms": "1792278002309",
+  "finished_wall_ms": "1792278042323",
+  "elapsed_ms": 60167,
+  "replay_ready_after_ms": 143,
+  "app_status": "exit status: 0",
+  "app_executable": "/Users/joaofnds/code/flightdeck/gpui-prototype/target/Flightdeck GPUI.app/Contents/MacOS/flightdeck-gpui",
+  "app_arguments": [
+    "--reference",
+    "--replay",
+    "/Users/joaofnds/code/flightdeck/gpui-prototype/target/evaluation-inspection/actions.json"
+  ],
+  "watcher_command": [
+    "/Users/joaofnds/code/flightdeck/target/release/process_watch",
+    "--pid",
+    "85595",
+    "--seconds",
+    "30"
+  ]
+}

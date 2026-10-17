@@ -1,0 +1,1 @@
+{"page":"overview","scrub":false,"animate":false,"elapsed_seconds":60.000865667,"render_count":3,"measured_intervals":0,"render_interval_ms_p50":null,"render_interval_ms_p95":null,"render_interval_ms_p99":null,"note":"CPU-side view render intervals after ten warmup renders; not GPU presentation latency"}

@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "desktop_source_revision": "3832c6c1037f1b9456c85a412f1effe63cd8cc64",
+  "replay_helper_sha256": "c93075c7a6fe425e7e9f5cf52d69d8d4a7efd5dcdfd5308e091b16a15353a331",
+  "mode": "Swift captured views in AppKit replay shell; typecheck only",
+  "compiler": "xcrun swiftc -typecheck -swift-version 6 -warnings-as-errors",
+  "viewer_archive_required": false
+}

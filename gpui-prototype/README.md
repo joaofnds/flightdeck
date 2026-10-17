@@ -61,14 +61,18 @@ Paused inspection stops worker polling. Live context holds at most 4096 points o
 900 seconds, uses actual wall-clock spacing and splits lines by run, boot and segment.
 Null readings stay gaps. Captured histories retain their 121 samples.
 
-This is a prototype. Saved queries, full native accessibility, Swift's executable
-group subtotals, its new per-CPU interval presentation, every diagnostic detail and
-exact web chart smoothing remain outside it. Executable groups show page-scoped
-instance counts; app histories and totals retain their app scope. Fan blades use
-simplified vectors; web airflow particles and schematic
-QA overrides are not ported. App histories contain only observations seen by the
-reader session. Missing sensors are explicit and never filled from captured data.
-These differences matter when interpreting performance results.
+The live CPU view includes the same logical-CPU intervals and 20-segment meters as
+Swift. App tables include measured executable subtotals with explicit unavailable
+and overflow states. The schematic uses the shared chassis and rotor assets,
+anchored callouts, illustrative airflow and explicit QA simulation. Its 30 Hz clock
+suspends while inactive or offscreen. The macOS text backend is enabled and checked
+at startup; the earlier blank-text builds are unsuitable performance baselines.
+
+Saved queries, full native accessibility, every diagnostic detail and exact web
+chart smoothing remain outside this prototype. App histories contain observations
+seen by the reader session. Missing sensors stay unavailable. Captured Overview
+follows the web design's three-column panels; live Overview follows Swift's
+two-column panels. These are different workloads and must be measured separately.
 
 ## Measurement contract
 
@@ -87,16 +91,62 @@ if needed with `cargo build --release -p viewer --bin process_watch` from the ro
 Run only one measured app at a time and keep its window exposed. A zero CPU delta
 is resolution-limited; it does not establish zero resource use.
 
-The `--scrub` workload changes the selected captured sample on each requested
-animation frame. `--animate --hardware` animates the visible simplified fans.
+The legacy `--scrub` workload changes the selected captured sample on each requested
+animation frame. `--animate --hardware` animates the visible schematic.
 Their printed percentiles measure CPU-side view-render intervals after ten warmup
 renders. They are not GPU completion, display presentation, input latency, or
 proof that every frame met a deadline. Neither workload is an equivalent Swift
 benchmark until the same update/input pattern is run there.
 
+Use the replay harness for matched captured-model workloads. It builds a separate
+AppKit window hosting the committed Swift captured views, with replay hooks in its
+private source copy. The normal SwiftUI WindowGroup shell is excluded to make
+command-line startup deterministic; this is a renderer experiment baseline.
+It copies the existing optimized viewer archive and records its hash; that
+archive's source revision must be recorded separately for a live comparison.
+From the repository root, build it first with
+`cargo build --release --locked -p viewer --lib`. The commands below run from
+`gpui-prototype/`.
+
+```sh
+cargo run --release --locked --bin native_replay_build
+cargo run --release --locked --bin replay_workloads -- --output target/workloads --seconds 60
+cargo run --release --locked --bin benchmark_runner -- \
+  --gpui target/release/flightdeck-gpui \
+  --swift 'target/native-replay-source/Flightdeck Swift Replay.app/Contents/MacOS/FlightdeckSwiftReplay' \
+  --actions target/workloads/inspection-overview.json \
+  --output target/inspection-results --watcher ../target/release/process_watch \
+  --pairs 3 --warmup-ms 20000 --sample-seconds 30
+cargo run --release --locked --bin benchmark_report -- \
+  --input target/inspection-results --output target/inspection-summary.json
+```
+
+The generator writes idle Overview, 10 Hz Overview/CPU inspection, and visible
+hardware plans. Selecting `hardware.json` enables GPUI animation automatically;
+Swift animates the visible schematic by default. Plans default to 30 seconds;
+`--seconds 30..600` sets their duration. The
+runner alternates order, runs one app at a time, checks binary hashes, retains raw
+process observations and requires equal scheduled/effective action traces. Use a
+new output directory for each run. Schema 2 timestamps completed CPU model actions;
+schema 1 records only batch-dispatch timing. Neither measures presentation. Verify
+visible content, window dimensions and scale separately before treating the
+resource samples as a fair rendering comparison.
+
+The report retains raw-log paths and
+descriptive median/minimum/maximum statistics; it does not supply confidence intervals.
+
+The 240 cached rotor orientations preserve the artwork with GPUI 0.2.2's image
+primitives. Their CPU pixels occupy 41,533,440 bytes, plus chassis pixels and GPU
+atlas storage. Generation is timed on first schematic paint. This cost belongs
+in the prototype's memory and startup results.
+Live mode enables schematic animation by default, suspending its clock when
+inactive or outside the painted viewport. Its visible control can pause it.
+
 [First measurements and their limits](PERFORMANCE.md) include the raw process
 observations, render summaries and binary hashes.
 [Live verification and parity limits](LIVE.md) cover the shared backend prototype.
+[Current evaluation](EVALUATION.md) records the font fix, repeated measurements,
+implementation differences and remaining verification gaps.
 
 A performance verdict needs repeated matched workloads, including animation and
 interaction and the shared backend. Idle results alone can establish

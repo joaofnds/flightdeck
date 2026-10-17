@@ -42,10 +42,30 @@ pub fn plot(
     hidden: Rc<Vec<String>>,
     measured: Rc<Cell<Bounds<Pixels>>>,
 ) -> impl IntoElement {
+    plot_cursor(panel, inspection, hidden, measured, true)
+}
+
+pub fn plot_without_cursor(
+    panel: Rc<Panel>,
+    inspection: Inspection,
+    hidden: Rc<Vec<String>>,
+    measured: Rc<Cell<Bounds<Pixels>>>,
+) -> impl IntoElement {
+    plot_cursor(panel, inspection, hidden, measured, false)
+}
+
+fn plot_cursor(
+    panel: Rc<Panel>,
+    inspection: Inspection,
+    hidden: Rc<Vec<String>>,
+    measured: Rc<Cell<Bounds<Pixels>>>,
+    show_cursor: bool,
+) -> impl IntoElement {
     canvas(
         move |bounds, _, _| measured.set(bounds),
         move |bounds, (), window, _| {
             let chart = plot_bounds(bounds);
+            crate::render_evidence::chart(&panel, inspection, chart, window);
             paint_grid(chart, window);
             clip_plot(chart, window, |window| match panel.kind.as_str() {
                 "timeline" => paint_timeline(&panel, chart, inspection, &hidden, window),
@@ -53,6 +73,9 @@ pub fn plot(
                 "core-bars" | "pressure" => paint_bars(&panel, chart, inspection, &hidden, window),
                 _ => paint_lines(&panel, chart, inspection, &hidden, window),
             });
+            if !show_cursor {
+                return;
+            }
             if panel.positions.is_some() {
                 if panel.selected_index.is_none() {
                     return;

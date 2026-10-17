@@ -1,0 +1,73 @@
+    Updating crates.io index
+     Locking 20 packages to highest Rust 1.99.1 compatible versions
+      Adding byteorder v1.5.0
+      Adding dirs v5.0.1
+      Adding dirs-sys v0.4.1
+      Adding dlib v0.5.3
+      Adding dwrote v0.11.5
+      Adding float-ord v0.3.2
+      Adding freetype-sys v0.20.1
+      Adding option-ext v0.2.0
+      Adding windows-sys v0.48.0
+      Adding windows-targets v0.48.5
+      Adding windows_aarch64_gnullvm v0.48.5
+      Adding windows_aarch64_msvc v0.48.5
+      Adding windows_i686_gnu v0.48.5
+      Adding windows_i686_msvc v0.48.5
+      Adding windows_x86_64_gnu v0.48.5
+      Adding windows_x86_64_gnullvm v0.48.5
+      Adding windows_x86_64_msvc v0.48.5
+      Adding wio v0.2.2
+      Adding yeslogic-fontconfig-sys v6.0.1
+      Adding zed-font-kit v0.14.1-zed
+ Downloading crates ...
+  Downloaded dirs v5.0.1
+  Downloaded dirs-sys v0.4.1
+  Downloaded dlib v0.5.3
+  Downloaded float-ord v0.3.2
+  Downloaded lazy_static v1.5.1
+  Downloaded spin v0.9.9
+  Downloaded yeslogic-fontconfig-sys v6.0.1
+  Downloaded zed-font-kit v0.14.1-zed
+   Compiling option-ext v0.2.0
+   Compiling zed-font-kit v0.14.1-zed
+   Compiling gpui v0.2.2
+   Compiling lazy_static v1.5.1
+   Compiling byteorder v1.5.0
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+  --> /Users/joaofnds/code/flightdeck/collector/src/ring/mod.rs:96:10
+   |
+96 |         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+   |          ^^^^^^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+   |
+96 -         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+96 +         .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+   |
+
+   Compiling float-ord v0.3.2
+warning: `collector` (lib) generated 1 warning (run `cargo fix --lib -p collector` to apply 1 suggestion)
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+  --> /Users/joaofnds/code/flightdeck/viewer/src/cancellation.rs:46:14
+   |
+46 |             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |epoch| {
+   |              ^^^^^^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+   |
+46 -             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |epoch| {
+46 +             .try_update(Ordering::AcqRel, Ordering::Acquire, |epoch| {
+   |
+
+warning: `viewer` (lib) generated 1 warning (run `cargo fix --lib -p viewer` to apply 1 suggestion)
+   Compiling dirs-sys v0.4.1
+   Compiling dirs v5.0.1
+   Compiling flightdeck-gpui v0.1.0 (/Users/joaofnds/code/flightdeck/gpui-prototype)
+    Finished `release` profile [optimized] target(s) in 10.62s
+warning: the following packages contain code that will be rejected by a future version of Rust: block v0.1.6, proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running `gpui-prototype/target/release/text_backend_check --check`
+text-backend: W=15.171875px i=3.640625px bounds=Bounds { origin: Point { x: 0.703125px, y: 0px }, size: Size { 14.078125px × 11.2734375px } }

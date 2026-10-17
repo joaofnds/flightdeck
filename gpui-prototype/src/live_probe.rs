@@ -355,6 +355,9 @@ fn probe_route_report(snapshot: &Snapshot) -> Value {
         "selected": snapshot.selection["selected"],
         "pages": snapshot.pages.keys().collect::<Vec<_>>(),
         "app_count": snapshot.apps.as_ref().map(|apps| &apps["app_count"]),
+        "logical_cpu_count": snapshot.cpu_detail.as_ref().map(|activity| activity.cpus.len()),
+        "cpu_interval_available": snapshot.cpu_detail.as_ref()
+            .map(|activity| activity.interval_available),
         "read_ms": snapshot.read_ms
     })
 }

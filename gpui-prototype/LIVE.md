@@ -1,5 +1,11 @@
 # Live prototype verification
 
+**Historical run limitation:** the 2026-10-17 binary used GPUI's no-op text backend.
+Its backend observations below remain useful, but successful render callbacks did
+not establish a readable interface. Its UI performance figures exclude text
+painting and cannot support a comparison with Swift. Current builds enable the
+macOS font backend and verify real system glyph metrics at startup.
+
 The GPUI prototype reads the same `viewer::LiveSession` API as Swift. The original
 captured web reference remains behind `--reference`. Live mode has separate models
 and never fills unavailable readings from that reference.
@@ -86,11 +92,10 @@ sends plot below zero. The schematic uses recorded CPU/GPU activity, installed R
 and validated fan channels, with unavailable sensors labeled explicitly.
 
 App totals and histories stay at App scope. Executable groups use exact captured
-bytes and show instance counts/filtering for the loaded process page. Swift's
-executable subtotals and new selected per-CPU interval presentation are still
-parity gaps. Raw logical CPU counters are available. The simplified fan artwork,
-missing airflow particles, accessibility and chart smoothing differences from the
-first prototype also remain.
+bytes and show measured subtotals and instance filtering for the loaded process
+page. CPU activity uses the selected observation's validated logical-CPU interval.
+The schematic uses the shared rotor artwork, callouts and illustrative airflow at
+30 Hz. Native accessibility and exact chart smoothing remain incomplete.
 
 ## Review dispositions
 
@@ -108,8 +113,9 @@ pressure states and missing Memory tiles; CPU process paging; hidden collection
 losses; false advancement from loss metadata; compound formatting guards; hidden
 executable filters; and malformed executable inputs combined in one test. Added
 regression checks exercise the affected pure/worker behaviors and live pagination.
-Executable grouping supplies counts/filtering; full subtotals and selected CPU
-interval presentation remain disclosed partial parity, not equivalent workloads.
+That historical round covered counts/filtering; the current code also implements
+measured subgroup subtotals and selected logical-CPU intervals. Those additions
+require fresh runtime and performance evidence.
 
 No security defect or additional structural refactoring was identified. The
 after-task pass retained the independent live/captured paths and single reader

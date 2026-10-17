@@ -1,0 +1,346 @@
+{
+  "schema": 1,
+  "runs": [
+    {
+      "pid": 81934,
+      "implementation": "gpui",
+      "pair": 0,
+      "metadata_path": "gpui-prototype/evidence/evaluation/inspection/pair-00-gpui-run.json",
+      "raw_process": "gpui-prototype/evidence/evaluation/inspection/pair-00-gpui-process.jsonl",
+      "raw_app": "gpui-prototype/evidence/evaluation/inspection/pair-00-gpui-app.jsonl",
+      "process_samples": 31,
+      "acceptance": {
+        "actions": 300,
+        "scheduled_at_ms_min": 20000,
+        "scheduled_at_ms_end_exclusive": 50000,
+        "timing_schema": 1,
+        "metric": "cpu_batch_dispatch_lateness_ms; not presentation"
+      },
+      "metrics": {
+        "cpu_batch_dispatch_lateness_ms_max": 1.0,
+        "cpu_batch_dispatch_lateness_ms_p50": 1.0,
+        "cpu_batch_dispatch_lateness_ms_p95": 1.0,
+        "cpu_batch_dispatch_lateness_ms_p99": 1.0,
+        "cpu_percent_one_core": 0.8229157536392874,
+        "elapsed_seconds": 30.115380208,
+        "footprint_mib_end": 201.2823944091797,
+        "footprint_mib_first": 303.4073944091797,
+        "footprint_mib_max": 303.4386444091797,
+        "idle_wakeups_per_second": 0.9961687281647087,
+        "interrupt_wakeups_per_second": 55.75224315295153,
+        "resident_mib_end": 114.0
+      }
+    },
+    {
+      "pid": 83578,
+      "implementation": "swift",
+      "pair": 0,
+      "metadata_path": "gpui-prototype/evidence/evaluation/inspection/pair-00-swift-run.json",
+      "raw_process": "gpui-prototype/evidence/evaluation/inspection/pair-00-swift-process.jsonl",
+      "raw_app": "gpui-prototype/evidence/evaluation/inspection/pair-00-swift-app.jsonl",
+      "process_samples": 31,
+      "acceptance": {
+        "actions": 300,
+        "scheduled_at_ms_min": 20000,
+        "scheduled_at_ms_end_exclusive": 50000,
+        "timing_schema": 1,
+        "metric": "cpu_batch_dispatch_lateness_ms; not presentation"
+      },
+      "metrics": {
+        "cpu_batch_dispatch_lateness_ms_max": 148.0,
+        "cpu_batch_dispatch_lateness_ms_p50": 9.0,
+        "cpu_batch_dispatch_lateness_ms_p95": 100.0,
+        "cpu_batch_dispatch_lateness_ms_p99": 101.0,
+        "cpu_percent_one_core": 26.169624832054634,
+        "elapsed_seconds": 30.096840999999998,
+        "footprint_mib_end": 202.0479507446289,
+        "footprint_mib_first": 201.8135528564453,
+        "footprint_mib_max": 202.2198257446289,
+        "idle_wakeups_per_second": 1.727756079118071,
+        "interrupt_wakeups_per_second": 30.50154001212287,
+        "resident_mib_end": 133.40625
+      }
+    },
+    {
+      "pid": 85595,
+      "implementation": "gpui",
+      "pair": 1,
+      "metadata_path": "gpui-prototype/evidence/evaluation/inspection/pair-01-gpui-run.json",
+      "raw_process": "gpui-prototype/evidence/evaluation/inspection/pair-01-gpui-process.jsonl",
+      "raw_app": "gpui-prototype/evidence/evaluation/inspection/pair-01-gpui-app.jsonl",
+      "process_samples": 31,
+      "acceptance": {
+        "actions": 300,
+        "scheduled_at_ms_min": 20000,
+        "scheduled_at_ms_end_exclusive": 50000,
+        "timing_schema": 1,
+        "metric": "cpu_batch_dispatch_lateness_ms; not presentation"
+      },
+      "metrics": {
+        "cpu_batch_dispatch_lateness_ms_max": 1.0,
+        "cpu_batch_dispatch_lateness_ms_p50": 1.0,
+        "cpu_batch_dispatch_lateness_ms_p95": 1.0,
+        "cpu_batch_dispatch_lateness_ms_p99": 1.0,
+        "cpu_percent_one_core": 4.603804153096696,
+        "elapsed_seconds": 30.119576917,
+        "footprint_mib_end": 300.8292694091797,
+        "footprint_mib_first": 300.6105194091797,
+        "footprint_mib_max": 300.8292694091797,
+        "idle_wakeups_per_second": 13.479605013005568,
+        "interrupt_wakeups_per_second": 152.79099081244243,
+        "resident_mib_end": 113.890625
+      }
+    },
+    {
+      "pid": 84260,
+      "implementation": "swift",
+      "pair": 1,
+      "metadata_path": "gpui-prototype/evidence/evaluation/inspection/pair-01-swift-run.json",
+      "raw_process": "gpui-prototype/evidence/evaluation/inspection/pair-01-swift-process.jsonl",
+      "raw_app": "gpui-prototype/evidence/evaluation/inspection/pair-01-swift-app.jsonl",
+      "process_samples": 31,
+      "acceptance": {
+        "actions": 300,
+        "scheduled_at_ms_min": 20000,
+        "scheduled_at_ms_end_exclusive": 50000,
+        "timing_schema": 1,
+        "metric": "cpu_batch_dispatch_lateness_ms; not presentation"
+      },
+      "metrics": {
+        "cpu_batch_dispatch_lateness_ms_max": 2.0,
+        "cpu_batch_dispatch_lateness_ms_p50": 1.0,
+        "cpu_batch_dispatch_lateness_ms_p95": 2.0,
+        "cpu_batch_dispatch_lateness_ms_p99": 2.0,
+        "cpu_percent_one_core": 16.693921620224337,
+        "elapsed_seconds": 30.113585833,
+        "footprint_mib_end": 202.7198486328125,
+        "footprint_mib_first": 204.9385986328125,
+        "footprint_mib_max": 204.9854736328125,
+        "idle_wakeups_per_second": 3.0218918631828156,
+        "interrupt_wakeups_per_second": 52.733673392684736,
+        "resident_mib_end": 136.9375
+      }
+    },
+    {
+      "pid": 86447,
+      "implementation": "gpui",
+      "pair": 2,
+      "metadata_path": "gpui-prototype/evidence/evaluation/inspection/pair-02-gpui-run.json",
+      "raw_process": "gpui-prototype/evidence/evaluation/inspection/pair-02-gpui-process.jsonl",
+      "raw_app": "gpui-prototype/evidence/evaluation/inspection/pair-02-gpui-app.jsonl",
+      "process_samples": 31,
+      "acceptance": {
+        "actions": 300,
+        "scheduled_at_ms_min": 20000,
+        "scheduled_at_ms_end_exclusive": 50000,
+        "timing_schema": 1,
+        "metric": "cpu_batch_dispatch_lateness_ms; not presentation"
+      },
+      "metrics": {
+        "cpu_batch_dispatch_lateness_ms_max": 1.0,
+        "cpu_batch_dispatch_lateness_ms_p50": 0.0,
+        "cpu_batch_dispatch_lateness_ms_p95": 1.0,
+        "cpu_batch_dispatch_lateness_ms_p99": 1.0,
+        "cpu_percent_one_core": 4.252038655865615,
+        "elapsed_seconds": 30.107019917000002,
+        "footprint_mib_end": 302.7198944091797,
+        "footprint_mib_first": 302.8136444091797,
+        "footprint_mib_max": 305.4230194091797,
+        "idle_wakeups_per_second": 0.0,
+        "interrupt_wakeups_per_second": 154.31616987693374,
+        "resident_mib_end": 114.75
+      }
+    },
+    {
+      "pid": 87461,
+      "implementation": "swift",
+      "pair": 2,
+      "metadata_path": "gpui-prototype/evidence/evaluation/inspection/pair-02-swift-run.json",
+      "raw_process": "gpui-prototype/evidence/evaluation/inspection/pair-02-swift-process.jsonl",
+      "raw_app": "gpui-prototype/evidence/evaluation/inspection/pair-02-swift-app.jsonl",
+      "process_samples": 31,
+      "acceptance": {
+        "actions": 300,
+        "scheduled_at_ms_min": 20000,
+        "scheduled_at_ms_end_exclusive": 50000,
+        "timing_schema": 1,
+        "metric": "cpu_batch_dispatch_lateness_ms; not presentation"
+      },
+      "metrics": {
+        "cpu_batch_dispatch_lateness_ms_max": 2.0,
+        "cpu_batch_dispatch_lateness_ms_p50": 2.0,
+        "cpu_batch_dispatch_lateness_ms_p95": 2.0,
+        "cpu_batch_dispatch_lateness_ms_p99": 2.0,
+        "cpu_percent_one_core": 15.547630109195543,
+        "elapsed_seconds": 30.129718915999998,
+        "footprint_mib_end": 193.8448944091797,
+        "footprint_mib_first": 193.8605194091797,
+        "footprint_mib_max": 196.2198944091797,
+        "idle_wakeups_per_second": 0.0,
+        "interrupt_wakeups_per_second": 54.73001605482353,
+        "resident_mib_end": 135.84375
+      }
+    }
+  ],
+  "per_implementation": {
+    "gpui": {
+      "cpu_batch_dispatch_lateness_ms_max": {
+        "count": 3,
+        "median": 1.0,
+        "min": 1.0,
+        "max": 1.0
+      },
+      "cpu_batch_dispatch_lateness_ms_p50": {
+        "count": 3,
+        "median": 1.0,
+        "min": 0.0,
+        "max": 1.0
+      },
+      "cpu_batch_dispatch_lateness_ms_p95": {
+        "count": 3,
+        "median": 1.0,
+        "min": 1.0,
+        "max": 1.0
+      },
+      "cpu_batch_dispatch_lateness_ms_p99": {
+        "count": 3,
+        "median": 1.0,
+        "min": 1.0,
+        "max": 1.0
+      },
+      "cpu_percent_one_core": {
+        "count": 3,
+        "median": 4.252038655865615,
+        "min": 0.8229157536392874,
+        "max": 4.603804153096696
+      },
+      "elapsed_seconds": {
+        "count": 3,
+        "median": 30.115380208,
+        "min": 30.107019917000002,
+        "max": 30.119576917
+      },
+      "footprint_mib_end": {
+        "count": 3,
+        "median": 300.8292694091797,
+        "min": 201.2823944091797,
+        "max": 302.7198944091797
+      },
+      "footprint_mib_first": {
+        "count": 3,
+        "median": 302.8136444091797,
+        "min": 300.6105194091797,
+        "max": 303.4073944091797
+      },
+      "footprint_mib_max": {
+        "count": 3,
+        "median": 303.4386444091797,
+        "min": 300.8292694091797,
+        "max": 305.4230194091797
+      },
+      "idle_wakeups_per_second": {
+        "count": 3,
+        "median": 0.9961687281647087,
+        "min": 0.0,
+        "max": 13.479605013005568
+      },
+      "interrupt_wakeups_per_second": {
+        "count": 3,
+        "median": 152.79099081244243,
+        "min": 55.75224315295153,
+        "max": 154.31616987693374
+      },
+      "resident_mib_end": {
+        "count": 3,
+        "median": 114.0,
+        "min": 113.890625,
+        "max": 114.75
+      }
+    },
+    "swift": {
+      "cpu_batch_dispatch_lateness_ms_max": {
+        "count": 3,
+        "median": 2.0,
+        "min": 2.0,
+        "max": 148.0
+      },
+      "cpu_batch_dispatch_lateness_ms_p50": {
+        "count": 3,
+        "median": 2.0,
+        "min": 1.0,
+        "max": 9.0
+      },
+      "cpu_batch_dispatch_lateness_ms_p95": {
+        "count": 3,
+        "median": 2.0,
+        "min": 2.0,
+        "max": 100.0
+      },
+      "cpu_batch_dispatch_lateness_ms_p99": {
+        "count": 3,
+        "median": 2.0,
+        "min": 2.0,
+        "max": 101.0
+      },
+      "cpu_percent_one_core": {
+        "count": 3,
+        "median": 16.693921620224337,
+        "min": 15.547630109195543,
+        "max": 26.169624832054634
+      },
+      "elapsed_seconds": {
+        "count": 3,
+        "median": 30.113585833,
+        "min": 30.096840999999998,
+        "max": 30.129718915999998
+      },
+      "footprint_mib_end": {
+        "count": 3,
+        "median": 202.0479507446289,
+        "min": 193.8448944091797,
+        "max": 202.7198486328125
+      },
+      "footprint_mib_first": {
+        "count": 3,
+        "median": 201.8135528564453,
+        "min": 193.8605194091797,
+        "max": 204.9385986328125
+      },
+      "footprint_mib_max": {
+        "count": 3,
+        "median": 202.2198257446289,
+        "min": 196.2198944091797,
+        "max": 204.9854736328125
+      },
+      "idle_wakeups_per_second": {
+        "count": 3,
+        "median": 1.727756079118071,
+        "min": 0.0,
+        "max": 3.0218918631828156
+      },
+      "interrupt_wakeups_per_second": {
+        "count": 3,
+        "median": 52.733673392684736,
+        "min": 30.50154001212287,
+        "max": 54.73001605482353
+      },
+      "resident_mib_end": {
+        "count": 3,
+        "median": 135.84375,
+        "min": 133.40625,
+        "max": 136.9375
+      }
+    }
+  },
+  "excluded_runs": [],
+  "acceptance_filter": {
+    "scheduled_at_ms_start_inclusive": 20000,
+    "scheduled_at_ms_end_exclusive": 50000,
+    "quantiles": "nearest-rank"
+  },
+  "metric": "Process resources and identified CPU model timing; not presentation",
+  "limitations": [
+    "Descriptive pair ranges; no confidence intervals",
+    "Does not establish matched pixels or a framework performance verdict"
+  ]
+}

@@ -1,0 +1,6 @@
+Started owned collector 22287
+text-backend: W=15.171875px i=3.640625px bounds=Bounds { origin: Point { x: 0.703125px, y: 0px }, size: Size { 14.078125px × 11.2734375px } }
+live first-frame viewport=Size { 1320px × 901px } scale=2
+persister sealed window=0 publications=1..61 loss=0 events_lost=0 seal_ns=272070542 staged_bytes=85108920
+persister sealed window=1 publications=61..78 loss=0 events_lost=0 seal_ns=147975709 staged_bytes=75527408
+persister finished footprint_bytes=86033008 footprint_bytes_max=89637632

@@ -1,11 +1,12 @@
+use std::rc::Rc;
+
 use gpui::{Context, IntoElement, div, prelude::*, px, rgb};
 use serde_json::Value;
 
-use crate::charts::{BLUE, GREEN, GRID, MUTED, ORANGE, PANEL, PURPLE};
+use crate::charts::{GRID, ORANGE, PANEL};
 use crate::dashboard::control;
-use crate::data::reading;
+use crate::hardware::{Readings, hardware_caption, hardware_stage};
 use crate::live_dashboard::LiveDashboard;
-use crate::live_projection::quantity;
 use crate::live_source::Snapshot;
 
 impl LiveDashboard {
@@ -18,8 +19,12 @@ impl LiveDashboard {
             .snapshot
             .as_ref()
             .map_or(&Value::Null, |snapshot| &snapshot.selection["summary"]);
+        let (readings, summary_failure) = match live_readings(summary, speeds) {
+            Ok(readings) => (readings, None),
+            Err(error) => (Readings::default(), Some(error)),
+        };
         div()
-            .p(px(12.0))
+            .p(px(16.0))
             .rounded(px(12.0))
             .border_1()
             .border_color(rgb(GRID))
@@ -29,99 +34,82 @@ impl LiveDashboard {
                     .flex()
                     .justify_between()
                     .items_center()
-                    .child("MacBook · live recorded readings")
+                    .child(if self.hardware_state.qa.get() {
+                        "Readings · Simulated"
+                    } else {
+                        "Thermal state · Unavailable"
+                    })
                     .child(
-                        control(if self.animate {
-                            "Pause animation"
-                        } else {
-                            "Animate fans"
-                        })
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.animate = !this.animate;
-                            cx.notify();
-                        })),
+                        div()
+                            .flex()
+                            .gap(px(8.0))
+                            .child(
+                                control(if self.animate {
+                                    "Pause animation"
+                                } else {
+                                    "Animate fans"
+                                })
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.animate = !this.animate;
+                                        cx.notify();
+                                    },
+                                )),
+                            )
+                            .child(control("QA: 3000 rpm / 80°C").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    this.hardware_state.qa.set(!this.hardware_state.qa.get());
+                                    cx.notify();
+                                },
+                            ))),
                     ),
             )
-            .child(Self::live_hardware_values(summary, speeds))
-            .child(
-                div()
-                    .flex()
-                    .justify_center()
-                    .child(crate::hardware::hardware_stage(
-                        speeds,
-                        self.started.elapsed().as_secs_f32(),
-                        self.animate,
-                    )),
+            .child(hardware_stage(
+                readings,
+                Rc::clone(&self.hardware_state),
+                self.animate,
+            ))
+            .child(hardware_caption(self.hardware_state.qa.get()))
+            .children(
+                failure
+                    .into_iter()
+                    .chain(summary_failure)
+                    .map(|error| div().text_color(rgb(ORANGE)).child(error)),
             )
-            .child(
-                div()
-                    .text_color(rgb(MUTED))
-                    .text_size(px(11.0))
-                    .child(concat!(
-                        "16-inch assembly illustration; fan channel sides unverified. ",
-                        "Thermal: Unavailable.",
-                    )),
-            )
-            .children(failure.map(|error| div().text_color(rgb(ORANGE)).child(error)))
     }
+}
 
-    fn live_hardware_values(summary: &Value, speeds: [Option<f32>; 2]) -> impl IntoElement {
-        let mut values = div().flex().flex_wrap().gap(px(12.0));
-        for (label, primary, secondary, tint) in [
-            (
-                "CPU",
-                quantity(summary, "cpu_percent", "%", 1.0),
-                "Temperature unavailable",
-                BLUE,
-            ),
-            (
-                "GPU",
-                quantity(summary, "gpu_active_percent", "%", 1.0),
-                "Temperature unavailable",
-                PURPLE,
-            ),
-            (
-                "Installed memory",
-                quantity(summary, "memory_total_bytes", "GiB", 1_073_741_824.0),
-                "Used memory / temperature unavailable",
-                GREEN,
-            ),
-            (
-                "Fan 0",
-                reading(speeds[0], "rpm"),
-                fan_state(speeds[0]),
-                BLUE,
-            ),
-            (
-                "Fan 1",
-                reading(speeds[1], "rpm"),
-                fan_state(speeds[1]),
-                BLUE,
-            ),
-            ("Battery", "Unavailable".into(), "Power unavailable", ORANGE),
-        ] {
-            values = values.child(
-                div()
-                    .flex_1()
-                    .min_w(px(115.0))
-                    .p(px(10.0))
-                    .child(label)
-                    .child(
-                        div()
-                            .text_size(px(20.0))
-                            .text_color(rgb(tint))
-                            .child(primary),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(10.0))
-                            .text_color(rgb(MUTED))
-                            .child(secondary),
-                    ),
-            );
-        }
-        values
+fn live_readings(summary: &Value, speeds: [Option<f32>; 2]) -> Result<Readings, String> {
+    Ok(Readings {
+        speeds,
+        utilization: [
+            live_number(&summary["cpu_percent"], 1.0)?,
+            live_number(&summary["gpu_active_percent"], 1.0)?,
+        ],
+        memory: [
+            None,
+            live_number(&summary["memory_total_bytes"], 1_073_741_824.0)?,
+        ],
+        ..Readings::default()
+    })
+}
+
+fn live_number(value: &Value, divisor: f32) -> Result<Option<f32>, String> {
+    if value.is_null() {
+        return Ok(None);
     }
+    let text = crate::live_views::text(value);
+    if text.len() > 64 {
+        return Err("Schematic value exceeds its byte bound".into());
+    }
+    let value = text.parse::<f32>().map_err(|error| error.to_string())?;
+    if !value.is_finite() {
+        return Err("Schematic value is not finite".into());
+    }
+    if value < 0.0 {
+        return Err("Schematic value is negative".into());
+    }
+    Ok(Some(value / divisor))
 }
 
 fn fan_speeds(snapshot: Option<&Snapshot>) -> Result<[Option<f32>; 2], String> {
@@ -208,14 +196,6 @@ fn fan_speed(value: &Value) -> Result<Option<f32>, String> {
     Ok(Some(speed))
 }
 
-fn fan_state(speed: Option<f32>) -> &'static str {
-    match speed {
-        None => "Unavailable",
-        Some(0.0) => "Stopped",
-        Some(_) => "Running",
-    }
-}
-
 fn integer(value: &Value) -> Result<u64, String> {
     match value {
         Value::String(text) => {
@@ -250,6 +230,7 @@ mod tests {
             apps: None,
             detail: None,
             history: None,
+            cpu_detail: None,
             read_ms: 0.0,
         }
     }
@@ -297,7 +278,5 @@ mod tests {
             assert!(fan_speeds_rows(&[json!(["42", "0", speed])], 42).is_err());
         }
         assert!(fan_speeds_rows(&[json!(["42", "10", "1000"])], 42).is_err());
-        assert_eq!(fan_state(Some(0.0)), "Stopped");
-        assert_eq!(fan_state(None), "Unavailable");
     }
 }

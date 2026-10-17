@@ -1,24 +1,21 @@
 use gpui::{AnyElement, Context, IntoElement, SharedString, div, prelude::*, px, rgb};
 use serde_json::Value;
 
-use crate::charts::{BLUE, GRID, MUTED, PANEL};
+use crate::charts::{GRID, MUTED};
 use crate::dashboard::control;
 use crate::live_dashboard::LiveDashboard;
-use crate::live_source::AppKey;
 use crate::live_views::text;
 
 const COLUMNS_MAX: usize = 32;
-const JSON_BYTES_MAX: usize = 32 * 1024;
 const PAGE_ROWS: u64 = 512;
 const _: () = {
     assert!(COLUMNS_MAX >= 4);
-    assert!(JSON_BYTES_MAX >= 2 * 4095);
     assert!(PAGE_ROWS == 512);
 };
 
 impl LiveDashboard {
     pub fn table_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut picker = div().mt(px(12.0)).flex().flex_wrap().gap(px(5.0));
+        let mut picker = div().mt(px(8.0)).flex().flex_wrap().gap(px(5.0));
         let tables = self
             .snapshot
             .as_ref()
@@ -50,8 +47,8 @@ impl LiveDashboard {
 
     pub fn table_heading(&self, name: &str, cx: &mut Context<Self>) -> impl IntoElement {
         let page = self.table_page(name);
-        let mut heading = div().flex().flex_col().gap(px(8.0));
         let mut title = div()
+            .h(px(30.0))
             .flex()
             .justify_between()
             .items_center()
@@ -65,22 +62,32 @@ impl LiveDashboard {
                 }
             }
         }
-        heading = heading.child(title);
+        let mut heading = div().child(title);
         if let Some(columns) = page["columns"].as_array() {
             heading = heading.child(
-                div().flex().gap(px(10.0)).text_color(rgb(MUTED)).children(
-                    self.table_indices(name)
-                        .iter()
-                        .filter_map(|index| columns.get(*index))
-                        .map(|column| div().flex_1().min_w_0().child(text(column))),
-                ),
+                div()
+                    .h(px(26.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    .px(px(8.0))
+                    .bg(rgb(0x1a_22_2f))
+                    .text_size(px(11.0))
+                    .text_color(rgb(MUTED))
+                    .children(
+                        self.table_indices(name)
+                            .iter()
+                            .filter_map(|index| columns.get(*index))
+                            .map(|column| div().flex_1().min_w_0().truncate().child(text(column))),
+                    ),
             );
         }
         heading.child(
             div()
+                .py(px(4.0))
                 .text_size(px(10.0))
                 .text_color(rgb(MUTED))
-                .child("Select a row to inspect every recorded column. NULL means unavailable."),
+                .child("Select a row for all recorded columns. NULL means unavailable."),
         )
     }
 
@@ -96,10 +103,12 @@ impl LiveDashboard {
         let table = name.to_owned();
         let mut content = div()
             .id(SharedString::from(format!("raw-{name}-{index}")))
-            .p(px(10.0))
-            .rounded(px(5.0))
-            .bg(rgb(PANEL))
+            .border_b_1()
+            .border_color(rgb(GRID))
             .cursor_pointer()
+            .focusable()
+            .focus(|style| style.bg(rgb(0x32_46_61)))
+            .hover(|style| style.bg(rgb(0x20_29_36)))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.expanded = if expanded {
                     None
@@ -110,103 +119,24 @@ impl LiveDashboard {
                 cx.notify();
             }))
             .child(
-                div().flex().gap(px(10.0)).children(
-                    self.table_indices(name)
-                        .iter()
-                        .filter_map(|index| row.get(*index))
-                        .map(|value| div().flex_1().min_w_0().child(raw_text(value))),
-                ),
+                div()
+                    .h(px(26.0))
+                    .px(px(8.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    .text_size(px(11.0))
+                    .children(
+                        self.table_indices(name)
+                            .iter()
+                            .filter_map(|index| row.get(*index))
+                            .map(|value| {
+                                div().flex_1().min_w_0().truncate().child(raw_text(value))
+                            }),
+                    ),
             );
         if expanded {
             content = content.child(table_columns(page, row));
-        }
-        content.into_any_element()
-    }
-
-    pub fn app_row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
-        let Some(app) = self
-            .snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.apps.as_ref())
-            .and_then(|page| page["apps"].get(index))
-        else {
-            return unavailable("App row is unavailable");
-        };
-        let key = match app_key(app) {
-            Ok(key) => key,
-            Err(error) => return unavailable(&error),
-        };
-        let selected = self
-            .snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.detail.as_ref())
-            .is_some_and(|detail| detail["app"]["key"] == app["key"]);
-        let mut content = div()
-            .id(SharedString::from(format!("app-{index}")))
-            .p(px(12.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(rgb(GRID))
-            .bg(rgb(if selected { 0x1c_2b_40 } else { PANEL }))
-            .cursor_pointer()
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.request.app = Some(key.clone());
-                this.executable = None;
-                this.request.members_offset = 0;
-                this.submit();
-                this.rebuild();
-                cx.notify();
-            }))
-            .child(app_row_heading(app));
-        for (label, field, unit) in [
-            ("CPU time", "cpu_ns", "ns"),
-            ("Energy", "energy_nj", "nJ"),
-            ("Resident", "resident_bytes", "B"),
-            ("Footprint", "footprint_bytes", "B"),
-        ] {
-            content = content.child(div().mt(px(4.0)).text_size(px(11.0)).child(measure(
-                label,
-                &app[field],
-                unit,
-            )));
-        }
-        if selected {
-            content = content.child(exact_json(app));
-        }
-        content.into_any_element()
-    }
-
-    pub fn process_row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
-        let Some(process) = self
-            .snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.detail.as_ref())
-            .and_then(|detail| detail["processes"].get(index))
-        else {
-            return unavailable("Process instance is unavailable");
-        };
-        let expanded = self
-            .expanded
-            .as_ref()
-            .is_some_and(|(table, row)| table == "app_processes" && *row == index);
-        let mut content = div()
-            .id(SharedString::from(format!("process-{index}")))
-            .p(px(12.0))
-            .rounded(px(6.0))
-            .bg(rgb(PANEL))
-            .cursor_pointer()
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.expanded = if expanded {
-                    None
-                } else {
-                    Some(("app_processes".to_owned(), index))
-                };
-                this.rebuild();
-                cx.notify();
-            }))
-            .child(process_row_heading(process));
-        if expanded {
-            content = content.child(exact_json(process));
         }
         content.into_any_element()
     }
@@ -216,15 +146,17 @@ impl LiveDashboard {
             .snapshot
             .as_ref()
             .and_then(|snapshot| snapshot.apps.as_ref());
-        let detail = self
-            .snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.detail.as_ref());
+        let detail = self.snapshot.as_ref().and_then(|snapshot| {
+            crate::live_app_views::selected_detail(
+                snapshot.detail.as_ref(),
+                self.request.app.as_ref(),
+            )
+        });
         div()
-            .mt(px(10.0))
             .flex()
             .flex_wrap()
             .gap(px(10.0))
+            .text_size(px(11.0))
             .child(self.app_page_controls(apps, false, cx))
             .child(self.app_page_controls(detail, true, cx))
             .child(
@@ -237,7 +169,7 @@ impl LiveDashboard {
             .children(self.executable.as_ref().map(|key| {
                 div().text_color(rgb(MUTED)).child(
                     if self.executables.iter().any(|group| group.key == *key) {
-                        "Executable filter active · app charts remain app totals"
+                        "Executable filter active · charts show App totals"
                     } else {
                         "Selected executable is not in this process page"
                     },
@@ -254,6 +186,13 @@ impl LiveDashboard {
 
     fn table_indices(&self, name: &str) -> Vec<usize> {
         if self.request.route == "cpu" {
+            if matches!(name, "cpus" | "interfaces") {
+                return self.table_page(name)["columns"]
+                    .as_array()
+                    .map_or_else(Vec::new, |columns| {
+                        (0..columns.len().min(COLUMNS_MAX)).collect()
+                    });
+            }
             if name == "processes" {
                 let Some(columns) = self.table_page(name)["columns"].as_array() else {
                     return Vec::new();
@@ -274,6 +213,7 @@ impl LiveDashboard {
             .flex()
             .gap(px(6.0))
             .items_center()
+            .text_size(px(11.0))
             .child(format!("Offset {offset}"));
         if offset >= PAGE_ROWS {
             controls = controls.child(control("Previous 512").on_click(cx.listener(
@@ -295,6 +235,8 @@ impl LiveDashboard {
                         this.submit();
                         this.rebuild();
                         cx.notify();
+                    } else {
+                        this.error = Some("Recorded page offset overflow".into());
                     }
                 })));
         }
@@ -320,22 +262,21 @@ impl LiveDashboard {
             },
             None => None,
         };
+        let total = page.map_or_else(|| "Unavailable".into(), |page| text(&page["page"]["total"]));
         let mut controls = div()
             .flex()
             .items_center()
             .gap(px(6.0))
-            .child(format!("{label} · offset {offset}"));
+            .child(format!("{label} · offset {offset} of {total}"));
         if offset >= 512 {
-            let previous_label = format!("Previous 512 {label}");
-            controls = controls.child(control(&previous_label).on_click(cx.listener(
+            controls = controls.child(control(&format!("Previous {label}")).on_click(cx.listener(
                 move |this, _, _, cx| {
                     this.app_change_offset(offset.saturating_sub(512), members, cx);
                 },
             )));
         }
         if let Some(next) = next {
-            let next_label = format!("Next 512 {label}");
-            controls = controls.child(control(&next_label).on_click(
+            controls = controls.child(control(&format!("Next {label}")).on_click(
                 cx.listener(move |this, _, _, cx| this.app_change_offset(next, members, cx)),
             ));
         }
@@ -355,65 +296,8 @@ impl LiveDashboard {
     }
 }
 
-fn app_row_heading(app: &Value) -> impl IntoElement {
-    div()
-        .child(
-            div()
-                .flex()
-                .justify_between()
-                .child(text(&app["display_name"]))
-                .child(format!(
-                    "CPU {}% · Power {} W",
-                    text(&app["cpu_percent_one_core"]),
-                    text(&app["energy_watts"])
-                )),
-        )
-        .child(div().mt(px(5.0)).text_color(rgb(MUTED)).child(format!(
-            "{} members · {} live · membership complete: {}",
-            text(&app["members"]),
-            text(&app["live_members"]),
-            text(&app["membership_complete"])
-        )))
-}
-
-fn process_row_heading(process: &Value) -> impl IntoElement {
-    div()
-        .child(
-            div()
-                .flex()
-                .justify_between()
-                .child(format!(
-                    "{} · pid {} · {}",
-                    text(&process["executable_name"]["display"]),
-                    text(&process["pid"]),
-                    text(&process["state"])
-                ))
-                .child(format!(
-                    "CPU {}% · Power {} W",
-                    text(&process["cpu_percent_one_core"]),
-                    text(&process["energy_watts"])
-                )),
-        )
-        .child(
-            div()
-                .mt(px(5.0))
-                .text_size(px(11.0))
-                .text_color(rgb(MUTED))
-                .child(format!(
-                    "Process identity {} · pid version {}",
-                    text(&process["creation"]["unique_id"]),
-                    text(&process["creation"]["pid_version"])
-                )),
-        )
-        .child(div().mt(px(5.0)).child(format!(
-            "Resident {} · Footprint {}",
-            amount(&process["resident_bytes"]),
-            amount(&process["footprint_bytes"])
-        )))
-}
-
 fn table_columns(page: &Value, row: &[Value]) -> impl IntoElement {
-    let mut columns = div().mt(px(10.0)).border_t_1().border_color(rgb(GRID));
+    let mut columns = div().px(px(8.0)).py(px(6.0)).bg(rgb(0x10_15_20));
     if let Some(names) = page["columns"].as_array() {
         for (index, name) in names.iter().take(COLUMNS_MAX).enumerate() {
             let value = row
@@ -421,9 +305,10 @@ fn table_columns(page: &Value, row: &[Value]) -> impl IntoElement {
                 .map_or_else(|| "Missing column".to_owned(), raw_text);
             columns = columns.child(
                 div()
-                    .py(px(5.0))
+                    .py(px(3.0))
                     .flex()
                     .gap(px(12.0))
+                    .text_size(px(11.0))
                     .child(
                         div()
                             .w(px(220.0))
@@ -444,51 +329,6 @@ fn raw_text(value: &Value) -> String {
         Value::String(value) => value.clone(),
         value => value.to_string(),
     }
-}
-
-fn app_key(value: &Value) -> Result<AppKey, String> {
-    let kind = value["key"]["kind"]
-        .as_str()
-        .ok_or_else(|| "App key kind is unavailable".to_owned())?;
-    let bytes_hex = value["key"]["bytes_hex"]
-        .as_str()
-        .ok_or_else(|| "App key bytes are unavailable".to_owned())?;
-    Ok(AppKey {
-        kind: kind.to_owned(),
-        bytes_hex: bytes_hex.to_owned(),
-    })
-}
-
-fn measure(label: &str, value: &Value, unit: &str) -> String {
-    format!(
-        "{label}: known {} {unit} · {} measured · {} unavailable · overflow: {}",
-        text(&value["known"]),
-        text(&value["measured_members"]),
-        text(&value["unavailable_members"]),
-        text(&value["overflowed"])
-    )
-}
-
-fn amount(value: &Value) -> String {
-    if value["known"].is_null() {
-        format!("Unavailable ({})", text(&value["unavailable"]))
-    } else {
-        format!("{} B", text(&value["known"]))
-    }
-}
-
-fn exact_json(value: &Value) -> impl IntoElement {
-    let json = value.to_string();
-    let detail = if json.len() <= JSON_BYTES_MAX {
-        json
-    } else {
-        "Detail exceeds the 32 KiB display limit".to_owned()
-    };
-    div()
-        .mt(px(8.0))
-        .text_size(px(10.0))
-        .text_color(rgb(BLUE))
-        .child(detail)
 }
 
 fn unavailable(message: &str) -> AnyElement {

@@ -1,14 +1,8 @@
-use std::cell::Cell;
-use std::rc::Rc;
-
-use gpui::{
-    AnyElement, Bounds, Context, IntoElement, MouseButton, SharedString, div, prelude::*, px, rgb,
-};
+use gpui::{AnyElement, Context, IntoElement, div, prelude::*, px, rgb};
 use serde_json::Value;
 
-use crate::charts::{self, BLUE, GRID, Inspection, MUTED, PANEL, TEXT};
+use crate::charts::{BLUE, GRID, MUTED, PANEL, TEXT};
 use crate::dashboard::control;
-use crate::data::{Panel, reading};
 use crate::live_dashboard::{LiveDashboard, ROUTES, Row};
 use crate::live_projection::quantity;
 
@@ -40,6 +34,8 @@ impl LiveDashboard {
                     .py(px(11.0))
                     .rounded(px(5.0))
                     .cursor_pointer()
+                    .focusable()
+                    .focus(|style| style.bg(rgb(0x32_46_61)))
                     .bg(rgb(if self.request.route == route {
                         0x1c_2b_40
                     } else {
@@ -60,8 +56,7 @@ impl LiveDashboard {
                 .p(px(10.0))
                 .text_size(px(10.0))
                 .text_color(rgb(MUTED))
-                .child("Shared recording backend")
-                .child(div().child("250 ms · bounded worker")),
+                .child("Live system readings"),
         )
     }
 
@@ -72,7 +67,7 @@ impl LiveDashboard {
             .map_or("Flightdeck", |(_, title)| *title);
         let selected = self.snapshot.as_ref().map_or_else(
             || "Waiting for readings".into(),
-            |snapshot| identity_label(&snapshot.selection),
+            |snapshot| crate::live_presentation::selected_clock(&snapshot.selection),
         );
         let mut header = div()
             .px(px(24.0))
@@ -84,7 +79,12 @@ impl LiveDashboard {
                     .flex()
                     .justify_between()
                     .items_center()
-                    .child(div().text_size(px(22.0)).child(title))
+                    .child(
+                        div()
+                            .text_size(px(23.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(title),
+                    )
                     .child(self.header_controls(cx)),
             )
             .child(
@@ -92,12 +92,12 @@ impl LiveDashboard {
                     .mt(px(8.0))
                     .text_size(px(11.0))
                     .text_color(rgb(MUTED))
-                    .child(format!(
-                        "{} · {selected} · 15 minute context",
-                        self.status()
-                    )),
+                    .child(format!("{selected} · {}", self.status())),
             );
-        header = self.header_alternatives(header, cx);
+        header = header.child(self.missing_reading());
+        if self.request.route == "raw" {
+            header = self.header_alternatives(header, cx);
+        }
         if let Some(snapshot) = &self.snapshot {
             header = header.children(
                 crate::live_notices::losses(&snapshot.catalog, &snapshot.selection)
@@ -128,26 +128,40 @@ impl LiveDashboard {
                     cx.notify();
                 })));
         } else {
-            for (label, delta) in [("−15s", -15_i64), ("‹", -1), ("›", 1), ("+15s", 15)] {
-                controls =
-                    controls.child(control(label).on_click(cx.listener(move |this, _, _, cx| {
-                        if let Some(second) = this
-                            .snapshot
-                            .as_ref()
-                            .and_then(|snapshot| snapshot.selection["second"].as_u64())
-                        {
-                            this.inspect(second.saturating_add_signed(delta), cx);
-                        }
-                    })));
+            controls = controls.child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(MUTED))
+                    .mr(px(10.0))
+                    .child("Last 15 minutes"),
+            );
+            if self.request.second.is_some() {
+                for (label, delta) in [("‹", -1_i64), ("›", 1)] {
+                    controls = controls.child(control(label).on_click(cx.listener(
+                        move |this, _, _, cx| {
+                            if let Some(second) = this
+                                .snapshot
+                                .as_ref()
+                                .and_then(|snapshot| snapshot.selection["second"].as_u64())
+                            {
+                                this.inspect(second.saturating_add_signed(delta), cx);
+                            }
+                        },
+                    )));
+                }
             }
             controls = controls.child(
                 control(if self.request.second.is_some() {
-                    "Resume live"
+                    "Live"
                 } else {
-                    "Pause"
+                    "Pause live"
                 })
                 .on_click(cx.listener(|this, _, _, cx| this.pause(cx))),
             );
+            controls = controls.child(control("↻").on_click(cx.listener(|this, _, _, cx| {
+                this.submit();
+                cx.notify();
+            })));
         }
         controls
     }
@@ -187,11 +201,22 @@ impl LiveDashboard {
     }
 
     pub fn row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+        let compact = matches!(
+            &self.rows[index],
+            Row::Table(_, _) | Row::App(_) | Row::Process(_) | Row::Executable(_)
+        );
         let content = match &self.rows[index] {
             Row::Summary => self.summary().into_any_element(),
+            Row::CPUActivity => self.cpu_activity().into_any_element(),
+            Row::OverviewStatus => self.overview_status(cx).into_any_element(),
+            Row::AppSelector => self.app_selector(cx).into_any_element(),
+            Row::AppSummary => self.app_summary().into_any_element(),
+            Row::AppColumns(kind) => {
+                crate::live_app_views::app_table_columns(kind).into_any_element()
+            }
             Row::Charts(panels) => div()
                 .flex()
-                .gap(px(12.0))
+                .gap(px(16.0))
                 .children(
                     panels
                         .iter()
@@ -212,7 +237,7 @@ impl LiveDashboard {
         };
         div()
             .px(px(24.0))
-            .py(px(7.0))
+            .py(px(if compact { 0.0 } else { 8.0 }))
             .child(content)
             .into_any_element()
     }
@@ -228,15 +253,22 @@ impl LiveDashboard {
                 div()
                     .flex_1()
                     .min_w(px(120.0))
-                    .p(px(12.0))
-                    .rounded(px(8.0))
+                    .p(px(18.0))
+                    .rounded(px(7.0))
+                    .border_1()
+                    .border_color(rgb(GRID))
                     .bg(rgb(PANEL))
-                    .child(label)
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(MUTED))
+                            .child(label),
+                    )
                     .child(
                         div()
                             .mt(px(6.0))
-                            .text_size(px(20.0))
-                            .text_color(rgb(BLUE))
+                            .text_size(px(25.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
                             .child(quantity(summary, key, unit, divisor)),
                     ),
             );
@@ -244,112 +276,9 @@ impl LiveDashboard {
         div()
             .child(tiles)
             .child(div().mt(px(8.0)).text_color(rgb(MUTED)).child(format!(
-                "Memory pressure: {} · Installed: {}",
+                "Memory pressure: {}",
                 pressure(&summary["pressure"]),
-                quantity(summary, "memory_total_bytes", "GiB", 1_073_741_824.0)
             )))
-    }
-
-    fn live_chart(&self, panel: &Rc<Panel>, cx: &mut Context<Self>) -> impl IntoElement {
-        let upper = panel
-            .lines
-            .first()
-            .map_or(0, |line| line.values.len().saturating_sub(1));
-        let inspection = Inspection {
-            lower: 0,
-            selected: panel.selected_index.unwrap_or(upper),
-            upper,
-        };
-        let hidden = Rc::new(
-            panel
-                .lines
-                .iter()
-                .filter(|line| {
-                    self.hidden
-                        .contains(&format!("{}\t{}", panel.id, line.name))
-                })
-                .map(|line| line.name.clone())
-                .collect::<Vec<_>>(),
-        );
-        let measured = Rc::new(Cell::new(Bounds::default()));
-        let bounds = Rc::clone(&measured);
-        let (minimum, maximum) = charts::domain(panel, inspection, &hidden);
-        let plot = div()
-            .h(px(220.0))
-            .child(charts::plot(Rc::clone(panel), inspection, hidden, measured))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
-                    if let Some(snapshot) = &this.snapshot {
-                        let rect = charts::plot_bounds(bounds.get());
-                        let fraction = f32::from(event.position.x - rect.origin.x)
-                            / f32::from(rect.size.width);
-                        if let Some(second) =
-                            crate::live_projection::sample_second(&snapshot.selection, fraction)
-                        {
-                            this.inspect(second, cx);
-                        }
-                    }
-                }),
-            );
-        div()
-            .flex_1()
-            .min_w_0()
-            .rounded(px(10.0))
-            .border_1()
-            .border_color(rgb(GRID))
-            .bg(rgb(PANEL))
-            .p(px(14.0))
-            .child(
-                div()
-                    .flex()
-                    .justify_between()
-                    .child(panel.title.clone())
-                    .child(format!("{minimum:.0} … {maximum:.0} {}", panel.unit)),
-            )
-            .child(plot)
-            .child(Self::live_chart_legends(panel, cx))
-            .child(
-                div()
-                    .mt(px(5.0))
-                    .text_size(px(10.0))
-                    .text_color(rgb(MUTED))
-                    .child("15 minutes · click to pause and inspect a second"),
-            )
-    }
-
-    fn live_chart_legends(panel: &Panel, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut legends = div().flex().flex_wrap().gap(px(12.0)).text_size(px(11.0));
-        for line in &panel.lines {
-            let key = format!("{}\t{}", panel.id, line.name);
-            legends = legends.child(
-                div()
-                    .id(SharedString::from(key.clone()))
-                    .cursor_pointer()
-                    .text_color(rgb(charts::color(&line.color)))
-                    .child(format!(
-                        "{}  {}",
-                        line.name,
-                        reading(
-                            panel.selected_index.and_then(|index| line
-                                .values
-                                .get(index)
-                                .copied()
-                                .flatten()),
-                            &panel.unit
-                        )
-                    ))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if let Some(index) = this.hidden.iter().position(|value| *value == key) {
-                            this.hidden.remove(index);
-                        } else {
-                            this.hidden.push(key.clone());
-                        }
-                        cx.notify();
-                    })),
-            );
-        }
-        legends
     }
 
     fn computer(&self) -> impl IntoElement {
@@ -423,17 +352,4 @@ fn summary_tiles(route: &str) -> &'static [(&'static str, &'static str, &'static
         ("SoC", "soc_celsius", "°C", 1.0),
         ("Swap used", "swap_used_bytes", "GiB", 1_073_741_824.0),
     ]
-}
-
-fn identity_label(selection: &Value) -> String {
-    let identity = &selection["selected"];
-    if identity.is_null() {
-        return "No reading in selected second".into();
-    }
-    format!(
-        "second {} · publication {} · run {}",
-        text(&selection["second"]),
-        text(&identity["publication"]),
-        text(&identity["run"])
-    )
 }

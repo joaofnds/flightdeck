@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "desktop_source_revision": "3832c6c1037f1b9456c85a412f1effe63cd8cc64",
+  "viewer_archive": "/Users/joaofnds/code/flightdeck/gpui-prototype/target/native-replay-activity/libviewer.a",
+  "viewer_archive_source": "/Users/joaofnds/code/flightdeck/target/release/libviewer.a",
+  "viewer_archive_sha256": "8bd8dbebd6f766a39a8748ab0edf0fdb7334302bb6a2bb61cdeccd027ab11716",
+  "replay_helper_sha256": "c93075c7a6fe425e7e9f5cf52d69d8d4a7efd5dcdfd5308e091b16a15353a331",
+  "executable": "/Users/joaofnds/code/flightdeck/gpui-prototype/target/native-replay-activity/Flightdeck Swift Replay.app/Contents/MacOS/FlightdeckSwiftReplay",
+  "executable_sha256": "650f780d91d70c0635bb4caa545b65259fbb8b4aaa47bbb97759f775eacb48e8",
+  "resources": [
+    {
+      "name": "reference_self.json",
+      "sha256": "f1bdf01d9e22ad4c9f4c5d385a52b71919c371da74bb1afda2507a71936506f6"
+    },
+    {
+      "name": "schematic_chassis.png",
+      "sha256": "77b83cfc57b2ef418a91b365b0dc62102f1594d4560feeb5a28060e9230a1692"
+    },
+    {
+      "name": "reference_snapshot.json",
+      "sha256": "edacd3deddcd49d82847335a813ffc4d0c3243874dc0797ef618265253a88780"
+    },
+    {
+      "name": "schematic_chassis.svg",
+      "sha256": "91e54b146e70183cb6a89b149823085a3f2b9a46cb212b3eed8e3e4408e70315"
+    },
+    {
+      "name": "schematic_rotor.png",
+      "sha256": "206fe1f22981bd198656cfa1e861a9f00aa302d215b443739680e820a61cff3a"
+    },
+    {
+      "name": "schematic_rotor.svg",
+      "sha256": "6fe6806f486911d7551cf7d823cc67e088cbebd310a5c2d5a197ac1c2383306f"
+    },
+    {
+      "name": "reference_catalog.json",
+      "sha256": "bb513a6ab6ca44689b1a43203d9c6a104d7dd7d3def36e3a0a59134b278bf266"
+    }
+  ],
+  "compiler": "xcrun swiftc -swift-version 6 -warnings-as-errors -O",
+  "scope": "Swift captured views in AppKit replay shell",
+  "application_shell": "Explicit NSApplication/NSWindow/NSHostingView; archived @main excluded",
+  "limitations": [
+    "Viewer archive hash identifies its bytes, not its source revision",
+    "Captured ReferenceConsole views retained; original SwiftUI WindowGroup not exercised",
+    "No collector helpers packaged; window construction is not presentation evidence"
+  ]
+}

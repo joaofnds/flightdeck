@@ -1,0 +1,12 @@
+{
+  "pid": 87461,
+  "implementation": "swift",
+  "pair": 2,
+  "launched_wall_ms": "1792278102785",
+  "executable": "/Users/joaofnds/code/flightdeck/gpui-prototype/target/native-replay-instrumented/Flightdeck Swift Replay.app/Contents/MacOS/FlightdeckSwiftReplay",
+  "arguments": [
+    "--reference",
+    "--replay",
+    "/Users/joaofnds/code/flightdeck/gpui-prototype/target/evaluation-inspection/actions.json"
+  ]
+}

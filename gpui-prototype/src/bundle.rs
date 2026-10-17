@@ -16,6 +16,10 @@ pub fn create() -> Result<(), Box<dyn std::error::Error>> {
         contents.join("Resources/schematic_chassis.png"),
         include_bytes!("../resources/schematic_chassis.png"),
     )?;
+    std::fs::write(
+        contents.join("Resources/schematic_rotor.png"),
+        include_bytes!("../resources/schematic_rotor.png"),
+    )?;
     let collector =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/release/collector");
     if collector.is_file() {

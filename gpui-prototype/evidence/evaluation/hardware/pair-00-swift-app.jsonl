@@ -1,0 +1,3 @@
+{"baseline":"Swift captured views in AppKit replay shell","content_height":900,"content_width":1320,"event":"replay_window","metric":"Constructed application window; not presentation evidence","scale":2,"schema":1,"visible":true}
+{"actions":1,"baseline":"Swift captured views in AppKit replay shell","duration_ms":60000,"event":"replay_started","metric":"CPU model application completed; not layout or presentation","schema":2}
+{"acceptance_lateness_ms":40,"accepted_at_ms":40,"effective":{"app":"Brave Browser","lower":90,"process":"*","route":"overview","sample":120,"scroll_requested":"hardware","upper":120},"event":"replay_action","index":0,"metric":"CPU model application completed; not layout or presentation","scheduled_at_ms":0,"schema":2}

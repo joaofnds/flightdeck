@@ -1,0 +1,5 @@
+hw.model: Mac17,8
+hw.memsize: 51539607552
+hw.logicalcpu: 18
+machdep.cpu.brand_string: Apple M5 Pro
+kern.osrelease: 27.0.0

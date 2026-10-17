@@ -4,18 +4,29 @@ use core_foundation::runloop::{
     CFRunLoopAddTimer, CFRunLoopGetMain, CFRunLoopTimerContext, CFRunLoopTimerCreate,
     CFRunLoopTimerInvalidate, CFRunLoopTimerRef, kCFRunLoopCommonModes,
 };
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::ptr;
 use std::rc::Rc;
+use std::time::Duration;
 
 pub struct Timer {
-    timer: CFRunLoopTimerRef,
+    reference: CFRunLoopTimerRef,
+    interval: Duration,
+    running: Cell<bool>,
     _callback: Rc<RefCell<Box<dyn FnMut()>>>,
 }
 
 impl Timer {
     pub fn start(callback: impl FnMut() + 'static) -> Result<Self, String> {
+        Self::with_interval(Duration::from_millis(250), callback)
+    }
+
+    pub fn with_interval(
+        interval: Duration,
+        callback: impl FnMut() + 'static,
+    ) -> Result<Self, String> {
+        assert!(!interval.is_zero());
         // The callback and its owner are confined to the main run loop by Rc.
         if unsafe { libc::pthread_main_np() } != 1 {
             return Err("The live timer must start on the main thread".into());
@@ -33,8 +44,8 @@ impl Timer {
         let timer = unsafe {
             CFRunLoopTimerCreate(
                 ptr::null(),
-                CFAbsoluteTimeGetCurrent() + 0.25,
-                0.25,
+                CFAbsoluteTimeGetCurrent() + interval.as_secs_f64(),
+                interval.as_secs_f64(),
                 0,
                 0,
                 start_callback,
@@ -47,9 +58,29 @@ impl Timer {
         }
         unsafe { CFRunLoopAddTimer(CFRunLoopGetMain(), timer, kCFRunLoopCommonModes) };
         Ok(Self {
-            timer,
+            reference: timer,
+            interval,
+            running: Cell::new(true),
             _callback: callback,
         })
+    }
+
+    pub fn set_running(&self, running: bool) {
+        if self.running.replace(running) == running {
+            return;
+        }
+        let delay = if running {
+            self.interval.as_secs_f64()
+        } else {
+            10_000_000_000.0
+        };
+        // A suspended clock retains its allocation while no animation work is scheduled.
+        unsafe {
+            core_foundation::runloop::CFRunLoopTimerSetNextFireDate(
+                self.reference,
+                CFAbsoluteTimeGetCurrent() + delay,
+            );
+        }
     }
 }
 
@@ -57,8 +88,8 @@ impl Drop for Timer {
     fn drop(&mut self) {
         // Invalidation removes the timer from every mode before its callback owner is released.
         unsafe {
-            CFRunLoopTimerInvalidate(self.timer);
-            CFRelease(self.timer.cast());
+            CFRunLoopTimerInvalidate(self.reference);
+            CFRelease(self.reference.cast());
         }
     }
 }

@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::rc::Rc;
 
 use gpui::{App, AppContext as _, Application, Bounds, WindowBounds, WindowOptions, px, size};
 
@@ -37,7 +38,9 @@ pub fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
         None
     };
     let worker = Worker::start(root)?;
-    Application::new().run(move |cx: &mut App| {
+    let application = Application::new();
+    crate::diagnostics::verify_text_backend(&application.text_system())?;
+    application.run(move |cx: &mut App| {
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
                 cx.quit();
@@ -53,30 +56,7 @@ pub fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
             }),
             ..Default::default()
         };
-        match cx.open_window(window, move |_, cx| {
-            let entity = cx.new(|_| {
-                let mut dashboard = LiveDashboard::new(worker, options.page, options.seconds);
-                dashboard.animate = options.animate;
-                dashboard.reveal_hardware = options.hardware;
-                dashboard
-            });
-            let weak = entity.downgrade();
-            let application = cx.to_async();
-            let timer = Timer::start(move || {
-                if let Err(error) = application.update(|cx| {
-                    if let Err(error) = weak.update(cx, LiveDashboard::tick) {
-                        eprintln!("Live view update: {error}");
-                    }
-                }) {
-                    eprintln!("Live application update: {error}");
-                }
-            });
-            entity.update(cx, |dashboard, _| match timer {
-                Ok(timer) => dashboard.timer = Some(timer),
-                Err(error) => dashboard.error = Some(error),
-            });
-            entity
-        }) {
+        match cx.open_window(window, move |_, cx| create_dashboard(worker, options, cx)) {
             Ok(_) => cx.activate(true),
             Err(error) => {
                 eprintln!("Live window failed: {error}");
@@ -86,6 +66,35 @@ pub fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
     });
     drop(collector);
     Ok(())
+}
+
+fn create_dashboard(worker: Worker, options: Options, cx: &mut App) -> gpui::Entity<LiveDashboard> {
+    let entity = cx.new(|_| {
+        let mut dashboard = LiveDashboard::new(worker, options.page, options.seconds);
+        dashboard.animate = true;
+        dashboard.reveal_hardware = options.hardware;
+        dashboard
+    });
+    let weak = entity.downgrade();
+    let application = cx.to_async();
+    let timer = Timer::start(move || {
+        if let Err(error) = application.update(|cx| {
+            if let Err(error) = weak.update(cx, LiveDashboard::tick) {
+                eprintln!("Live view update: {error}");
+            }
+        }) {
+            eprintln!("Live application update: {error}");
+        }
+    });
+    entity.update(cx, |dashboard, _| match timer {
+        Ok(timer) => dashboard.timer = Some(timer),
+        Err(error) => dashboard.error = Some(error),
+    });
+    let state = Rc::clone(&entity.read(cx).hardware_state);
+    if let Err(error) = crate::hardware_clock::install(&entity, &state, cx) {
+        entity.update(cx, |dashboard, _| dashboard.error = Some(error));
+    }
+    entity
 }
 
 pub fn recording(options: &Options) -> Result<PathBuf, Box<dyn std::error::Error>> {

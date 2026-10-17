@@ -1,0 +1,35 @@
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+  --> /Users/joaofnds/code/flightdeck/collector/src/ring/mod.rs:96:10
+   |
+96 |         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+   |          ^^^^^^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+   |
+96 -         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+96 +         .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+   |
+
+warning: `collector` (lib) generated 1 warning (run `cargo fix --lib -p collector` to apply 1 suggestion)
+   Compiling viewer v0.1.0 (/Users/joaofnds/code/flightdeck/viewer)
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+  --> /Users/joaofnds/code/flightdeck/viewer/src/cancellation.rs:46:14
+   |
+46 |             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |epoch| {
+   |              ^^^^^^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+   |
+46 -             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |epoch| {
+46 +             .try_update(Ordering::AcqRel, Ordering::Acquire, |epoch| {
+   |
+
+warning: `viewer` (lib) generated 1 warning (run `cargo fix --lib -p viewer` to apply 1 suggestion)
+   Compiling flightdeck-gpui v0.1.0 (/Users/joaofnds/code/flightdeck/gpui-prototype)
+    Finished `release` profile [optimized] target(s) in 4.68s
+warning: the following packages contain code that will be rejected by a future version of Rust: block v0.1.6, proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running `gpui-prototype/target/release/text_backend_check --check`
+text-backend-check: Text backend is a placeholder: W=9.6px, i=9.6px; enable font-kit

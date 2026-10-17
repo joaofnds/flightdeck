@@ -20,6 +20,9 @@ pub struct Dashboard {
     pub performance: Performance,
     pub animate: bool,
     pub diagnostic_selected: usize,
+    pub hardware_state: Rc<crate::hardware_motion::HardwareState>,
+    pub replay: Option<crate::replay::Replay>,
+    pub replay_timer: Option<crate::live_timer::Timer>,
     rows: Vec<Row>,
     list: ListState,
     help: Option<String>,
@@ -35,7 +38,12 @@ enum Row {
 }
 
 impl Dashboard {
-    pub fn new(capture: Capture, catalog: Catalog, performance: Performance) -> Self {
+    pub fn new(
+        capture: Capture,
+        catalog: Catalog,
+        performance: Performance,
+        replay: Option<crate::replay::Replay>,
+    ) -> Self {
         let route = performance.options.page.clone();
         let animate = performance.options.animate;
         let mut dashboard = Self {
@@ -53,6 +61,9 @@ impl Dashboard {
             performance,
             animate,
             diagnostic_selected: 29,
+            hardware_state: Rc::new(crate::hardware_motion::HardwareState::new()),
+            replay,
+            replay_timer: None,
             rows: Vec::with_capacity(128),
             list: ListState::new(0, ListAlignment::Top, px(100.0)),
             help: None,
@@ -179,6 +190,8 @@ impl Dashboard {
                     .py(px(11.0))
                     .rounded(px(5.0))
                     .cursor_pointer()
+                    .focusable()
+                    .focus(|style| style.bg(rgb(0x32_46_61)))
                     .bg(rgb(if self.route == *route {
                         0x1c_2b_40
                     } else {
@@ -416,12 +429,14 @@ impl Dashboard {
             let selected_app = app.clone();
             result = result.child(
                 div()
-                    .id(SharedString::from(app.clone()))
+                    .id(SharedString::from(format!("{}-app-{app}", panel.id)))
                     .flex()
                     .justify_between()
                     .gap(px(8.0))
                     .py(px(7.0))
                     .cursor_pointer()
+                    .focusable()
+                    .focus(|style| style.bg(rgb(0x32_46_61)))
                     .hover(|style| style.bg(rgb(GRID)))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.app.clone_from(&selected_app);
@@ -478,6 +493,8 @@ impl Dashboard {
                             .border_b_1()
                             .border_color(rgb(GRID))
                             .cursor_pointer()
+                            .focusable()
+                            .focus(|style| style.bg(rgb(0x32_46_61)))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.process = Some(process_name.clone());
                                 cx.notify();
@@ -615,8 +632,120 @@ impl Dashboard {
     }
 }
 
+impl Dashboard {
+    pub(crate) fn replay_apply(
+        &mut self,
+        action: &crate::replay::Action,
+    ) -> Result<serde_json::Value, String> {
+        self.replay_validate(action)?;
+        let mut rebuild = self.route != action.route;
+        self.route.clone_from(&action.route);
+        if let Some(minutes) = action.minutes {
+            let lower = if minutes == 60 { 0 } else { 90 };
+            rebuild |= self.inspection.lower != lower;
+            self.inspection.lower = lower;
+            self.inspection.selected = 120;
+            self.performance.options.range_minutes = minutes;
+        }
+        if let Some(app) = &action.app {
+            rebuild |= self.app != *app;
+            self.app.clone_from(app);
+            self.process = None;
+        }
+        if let Some(process) = &action.process {
+            self.process = if process == "*" {
+                None
+            } else {
+                Some(process.clone())
+            };
+        }
+        if let Some(sample) = action.sample {
+            self.inspection.selected = usize::from(sample);
+        }
+        if rebuild {
+            self.rebuild_rows();
+        }
+        if let Some(scroll) = action.scroll {
+            self.replay_scroll(scroll)?;
+        }
+        let mut effective = serde_json::json!({"route":self.route,
+            "sample":self.inspection.selected,"lower":self.inspection.lower,
+            "upper":self.inspection.upper,"app":self.app,
+            "process":self.process.as_deref().unwrap_or("*")});
+        if let Some(scroll) = action.scroll {
+            effective["scroll_requested"] = serde_json::json!(match scroll {
+                crate::replay::Scroll::Top => "top",
+                crate::replay::Scroll::Hardware => "hardware",
+            });
+        }
+        Ok(effective)
+    }
+
+    fn replay_validate(&self, action: &crate::replay::Action) -> Result<(), String> {
+        if !self
+            .catalog
+            .navigation
+            .iter()
+            .take(11)
+            .any(|entry| entry[0] == action.route)
+        {
+            return Err(format!("Replay route is not captured: {}", action.route));
+        }
+        let app = match &action.app {
+            Some(app) => app.as_str(),
+            None => self.app.as_str(),
+        };
+        if action.app.is_some() {
+            let captured = self
+                .capture
+                .series
+                .values()
+                .take(128)
+                .flat_map(|rows| rows.iter().take(2048))
+                .any(|row| row.app.as_deref() == Some(app));
+            if !captured {
+                return Err(format!("Replay App is not captured: {app}"));
+            }
+        }
+        if let Some(process) = &action.process {
+            if process != "*" {
+                let captured = self.capture.series.get("proc1").is_some_and(|rows| {
+                    rows.iter().take(2048).any(|row| {
+                        if row.app.as_deref() != Some(app) {
+                            return false;
+                        }
+                        row.labels.get("process") == Some(process)
+                    })
+                });
+                if !captured {
+                    return Err(format!("Replay process is not captured: {process}"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn replay_scroll(&self, scroll: crate::replay::Scroll) -> Result<(), String> {
+        let index = match scroll {
+            crate::replay::Scroll::Top => 0,
+            crate::replay::Scroll::Hardware => self
+                .rows
+                .iter()
+                .take(128)
+                .position(|row| matches!(row, Row::Hardware))
+                .ok_or("Captured hardware row missing")?,
+        };
+        self.list.scroll_to(ListOffset {
+            item_ix: index,
+            offset_in_item: px(0.0),
+        });
+        Ok(())
+    }
+}
+
 impl Render for Dashboard {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.hardware_state.begin_frame();
         self.performance.frame(window, cx);
         self.render_smoke(window);
         if self.performance.options.scrub {
@@ -638,6 +767,7 @@ impl Render for Dashboard {
             .text_color(rgb(TEXT))
             .font_family(".AppleSystemUIFont")
             .text_size(px(13.0))
+            .on_key_down(keyboard_navigation)
             .child(Self::render_chrome())
             .child(
                 div()
@@ -671,6 +801,45 @@ pub fn control(label: &str) -> gpui::Stateful<gpui::Div> {
         .rounded(px(5.0))
         .bg(rgb(0x22_25_2b))
         .cursor_pointer()
+        .focusable()
+        .focus(|style| style.bg(rgb(0x32_46_61)))
         .hover(|style| style.bg(rgb(0x2c_2f_35)))
         .child(label.to_owned())
+}
+
+pub fn keyboard_navigation(event: &gpui::KeyDownEvent, window: &mut Window, cx: &mut gpui::App) {
+    if event.keystroke.key != "tab" {
+        return;
+    }
+    let modifiers = event.keystroke.modifiers;
+    if modifiers.control {
+        return;
+    }
+    if modifiers.alt {
+        return;
+    }
+    if modifiers.platform {
+        return;
+    }
+    if modifiers.function {
+        return;
+    }
+    if modifiers.shift {
+        window.focus_prev();
+    } else {
+        window.focus_next();
+    }
+    window.prevent_default();
+    cx.stop_propagation();
+}
+
+pub fn keyboard_step(event: &gpui::KeyDownEvent) -> Option<i64> {
+    if event.keystroke.modifiers.modified() {
+        return None;
+    }
+    match event.keystroke.key.as_str() {
+        "left" => Some(-1),
+        "right" => Some(1),
+        _ => None,
+    }
 }

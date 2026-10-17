@@ -1,0 +1,15 @@
+[
+  {
+    "index": 0,
+    "scheduled_at_ms": 0,
+    "effective": {
+      "route": "overview",
+      "sample": 120,
+      "lower": 90,
+      "upper": 120,
+      "app": "Brave Browser",
+      "process": "*",
+      "scroll_requested": "hardware"
+    }
+  }
+]

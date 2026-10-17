@@ -1,0 +1,154 @@
+   Compiling flightdeck-gpui v0.1.0 (/Users/joaofnds/code/flightdeck/gpui-prototype)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.68s
+     Running unittests src/bin/benchmark_report.rs (gpui-prototype/target/debug/deps/benchmark_report-df20e354ae0d1d44)
+
+running 10 tests
+test tests::rejects_reused_process_identity ... ok
+test tests::measures_counter_deltas_over_the_observed_interval ... ok
+test tests::rejects_nonpositive_elapsed_time ... ok
+test tests::rejects_a_counter_reset_inside_the_observation ... ok
+test tests::rejects_a_cpu_counter_reset ... ok
+test tests::legacy_dispatch_records_never_claim_completed_action_latency ... ok
+test tests::filters_warmup_actions_before_computing_acceptance_quantiles ... ok
+test benchmark_helpers::tests::hashing_uses_a_bounded_process_wait ... ok
+test benchmark_helpers::tests::a_timed_out_owned_process_is_reaped ... ok
+test benchmark_helpers::tests::maximum_replay_keeps_its_summary_after_bounded_instrumentation ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+     Running unittests src/bin/benchmark_runner.rs (gpui-prototype/target/debug/deps/benchmark_runner-2d48644516dcd8e7)
+
+running 14 tests
+test replay::tests::refuses_reordered_actions ... ok
+test replay::tests::refuses_samples_outside_the_shared_captured_range ... ok
+test replay::tests::refuses_hardware_scroll_on_another_route ... ok
+test replay::tests::refuses_unknown_contract_fields ... ok
+test replay::tests::refuses_completion_outside_the_finite_benchmark_clock ... ok
+test replay::tests::refuses_out_of_order_completion ... ok
+test replay::tests::refuses_completion_for_an_undispatched_action ... ok
+test replay::tests::refuses_repeated_completion_without_changing_the_summary ... ok
+test replay::tests::dispatches_the_same_actions_when_the_clock_skips_render_frames ... ok
+test replay::tests::includes_each_application_and_prior_batch_work_in_its_completion_clock ... ok
+test replay::tests::bounds_catch_up_without_dropping_due_actions ... ok
+test benchmark_helpers::tests::a_timed_out_owned_process_is_reaped ... ok
+test benchmark_helpers::tests::hashing_uses_a_bounded_process_wait ... ok
+test benchmark_helpers::tests::maximum_replay_keeps_its_summary_after_bounded_instrumentation ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+     Running unittests src/main.rs (gpui-prototype/target/debug/deps/flightdeck_gpui-482cc90e5a1eae93)
+
+running 90 tests
+test live_cpu::tests::lights_segment_thresholds_and_keeps_missing_readings_dark ... ok
+test hardware_motion::tests::matches_swift_motion_and_preserves_phase_when_paused ... ok
+test live_chart_view::tests::fractional_axis_labels_do_not_round_small_activity_to_zero ... ok
+test charts::live_tests::a_two_point_dashed_run_keeps_measured_geometry ... ok
+test hardware_layout::tests::anchors_follow_swift_assembly_coordinates_at_each_width ... ok
+test hardware_motion::tests::airflow_clip_excludes_motor_and_exterior ... ok
+test live_chart_view::tests::timestamp_parsing_keeps_exact_seconds ... ok
+test live_chart_view::tests::queued_keyboard_steps_advance_and_reverse_before_a_new_snapshot_arrives ... ok
+test live_app_views::selection_tests::app_identity_includes_the_key_kind ... ok
+test live_app_views::selection_tests::changing_apps_hides_previous_details_until_the_requested_app_arrives ... ok
+test live_cpu::tests::rejects_out_of_domain_percentages_before_narrowing_to_f32 ... ok
+test live_cpu::tests::rejects_percentages_outside_the_scheduler_domain ... ok
+test live_chart_view::tests::hover_keeps_selected_alternative_and_does_not_fill_empty_seconds ... ok
+test live_executables::tests::incomplete_hex_bytes_are_unavailable ... ok
+test live_executables::tests::non_hex_bytes_are_unavailable ... ok
+test live_cpu::tests::rejects_a_payload_from_another_selected_publication ... ok
+test live_executables::tests::oversized_executable_bytes_are_unavailable ... ok
+test live_executables::tests::leaves_fully_unavailable_metrics_absent ... ok
+test live_executables::tests::excludes_cpu_and_energy_crossing_an_exec_boundary ... ok
+test live_executables::tests::groups_captured_bytes_instead_of_matching_display_names ... ok
+test live_executables::tests::excludes_exited_processes_from_memory_subtotals ... ok
+test live_executables::tests::rejects_malformed_exact_counters ... ok
+test live_cpu::tests::retains_missing_interval_reason_without_inventing_activity ... ok
+test live_cpu::tests::rejects_non_contiguous_logical_cpu_indices ... ok
+test live_cpu::tests::rejects_measurements_on_an_unavailable_interval ... ok
+test live_executables::tests::keeps_exact_known_subtotals_beside_unavailable_members ... ok
+test live_cpu::tests::rejects_a_counter_interval_crossing_a_missing_second ... ok
+test live_cpu::tests::groups_scheduler_domains_into_rows_of_eighteen ... ok
+test live_cpu::tests::rejects_non_finite_logical_cpu_percentages ... ok
+test live_hardware::tests::fans_refuse_invalid_values_and_channel ... ok
+test live_hardware::tests::fans_refuse_duplicate_channels_and_wrong_publication ... ok
+test live_notices::tests::zero_known_losses_do_not_raise_a_notice ... ok
+test live_executables::tests::suppresses_overflowed_subtotals_without_wrapping ... ok
+test live_executables::tests::unavailable_names_have_a_distinct_filter ... ok
+test live_notices::tests::an_inspected_retired_reader_keeps_its_own_loss_notice ... ok
+test live_notices::tests::collection_losses_keep_exact_counts_and_unknown_state ... ok
+test live_projection::tests::clicking_the_selected_second_keeps_its_chosen_publication ... ok
+test live_hardware::tests::fans_preserve_missing_speed ... ok
+test live_hardware::tests::fans_refuse_other_observation ... ok
+test live_hardware::tests::fans_refuse_invalid_schema ... ok
+test live_projection::tests::clicks_use_the_exact_nine_hundred_second_domain ... ok
+test live_projection::tests::cursor_identifies_the_exact_selected_alternative_instead_of_the_latest_point ... ok
+test live_projection::tests::history_projection_reads_decimal_stamps_and_partial_measurements ... ok
+test live_projection::tests::app_cursor_matches_decimal_stamp_identity_to_its_selected_observation ... ok
+test live_projection::tests::invalid_clocks_and_nonfinite_values_are_reported_instead_of_plotted ... ok
+test live_projection::tests::energy_series_remain_independent_and_memory_categories_only_stack_in_overview ... ok
+test live_projection::tests::quantities_follow_binary_memory_and_adaptive_power_units ... ok
+test live_projection::tests::missing_selected_second_keeps_context_but_has_no_current_readout ... ok
+test live_projection::tests::positions_use_wall_time_and_segments_include_run_identity ... ok
+test live_projection::tests::sends_are_mirrored_without_negating_readouts_or_errors ... ok
+test live_source::tests::refuses_a_missing_observation_instead_of_selecting_a_sibling ... ok
+test live_source::tests::refuses_missing_observation_identities ... ok
+test live_projection::tests::shared_chart_domain_keeps_sent_traffic_negative_and_power_unstacked ... ok
+test live_source::tests::decodes_non_utf8_app_key_bytes_without_changing_them ... ok
+test live_source::tests::matches_live_app_stamp_words_with_the_selected_hex_identity ... ok
+test live_source::tests::keeps_the_same_observation_when_loss_metadata_changes ... ok
+test live_source::tests::refuses_superseded_results_after_accepting_a_new_request ... ok
+test live_source::tests::rejects_an_incomplete_app_key_byte ... ok
+test live_source::tests::rejects_app_keys_beyond_the_path_bound ... ok
+test live_presentation::tests::local_clock_is_fixed_width_and_refuses_unrepresentable_time ... ok
+test live_source::tests::rejects_app_payloads_from_another_publication ... ok
+test live_source::tests::rejects_non_hexadecimal_app_key_bytes ... ok
+test live_source::tests::resolves_the_exact_observation_among_same_second_siblings ... ok
+test live_source::tests::the_default_app_survives_a_new_first_row_and_an_empty_page ... ok
+test replay::tests::refuses_reordered_actions ... ok
+test replay::tests::refuses_hardware_scroll_on_another_route ... ok
+test replay::tests::refuses_out_of_order_completion ... ok
+test replay::tests::refuses_completion_outside_the_finite_benchmark_clock ... ok
+test replay::tests::refuses_unknown_contract_fields ... ok
+test replay::tests::refuses_samples_outside_the_shared_captured_range ... ok
+test replay::tests::dispatches_the_same_actions_when_the_clock_skips_render_frames ... ok
+test replay::tests::refuses_repeated_completion_without_changing_the_summary ... ok
+test replay::tests::bounds_catch_up_without_dropping_due_actions ... ok
+test replay::tests::includes_each_application_and_prior_batch_work_in_its_completion_clock ... ok
+test tests::clamps_inspection_after_the_last_cell ... ok
+test replay::tests::refuses_completion_for_an_undispatched_action ... ok
+test tests::clamps_inspection_before_the_first_cell ... ok
+test tests::gives_outgoing_traffic_room_below_zero ... ok
+test tests::keeps_installed_memory_independent_of_stacked_categories ... ok
+test hardware_motion::tests::only_visible_running_fans_keep_the_clock_active ... ok
+test hardware_motion::tests::multi_day_uptime_preserves_each_thirtieth_second_phase_increment ... ok
+test hardware_motion::tests::airflow_has_the_same_bounded_route_and_particle_counts ... ok
+test live_executables::tests::rejects_pages_larger_than_the_loaded_page_bound ... ok
+test live_projection::tests::empty_or_unavailable_observations_never_fabricate_cpu_activity ... ok
+test tests::keeps_captured_missing_samples_unavailable ... ok
+test tests::loads_every_captured_destination_and_both_ranges ... ok
+test tests::keeps_secondary_units_out_of_the_primary_scale ... ok
+test hardware::tests::quarter_turn_moves_asymmetric_pixels_and_mirrors_the_right_fan ... ok
+test hardware::tests::rotor_cache_keeps_the_artwork_and_mirrors_the_right_fan ... ok
+test tests::retains_app_totals_when_process_histories_were_not_captured ... ok
+
+test result: ok. 90 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running unittests src/bin/native_replay_build.rs (gpui-prototype/target/debug/deps/native_replay_build-9084d56c08ac9418)
+
+running 3 tests
+test benchmark_helpers::tests::a_timed_out_owned_process_is_reaped ... ok
+test benchmark_helpers::tests::hashing_uses_a_bounded_process_wait ... ok
+test benchmark_helpers::tests::maximum_replay_keeps_its_summary_after_bounded_instrumentation ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+     Running unittests src/bin/replay_workloads.rs (gpui-prototype/target/debug/deps/replay_workloads-3319885317ab7906)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/text_backend_check.rs (gpui-prototype/target/debug/deps/text_backend_check-33616ce40153c942)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

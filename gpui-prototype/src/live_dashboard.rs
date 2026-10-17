@@ -37,18 +37,26 @@ pub struct LiveDashboard {
     pub inventory: Vec<(String, String)>,
     pub hidden: Vec<String>,
     pub timer: Option<Timer>,
+    pub hardware_state: Rc<crate::hardware_motion::HardwareState>,
     pub started: Instant,
     pub seconds: Option<u32>,
     pub updates: u32,
     pub renders: u64,
     pub animate: bool,
     pub reveal_hardware: bool,
+    pub hover_second: Option<u64>,
+    pub app_picker_open: bool,
     list: ListState,
     last_status: String,
 }
 
 pub enum Row {
     Summary,
+    OverviewStatus,
+    AppSelector,
+    AppSummary,
+    AppColumns(&'static str),
+    CPUActivity,
     Charts(Vec<Rc<Panel>>),
     Heading(String),
     Hardware,
@@ -85,12 +93,15 @@ impl LiveDashboard {
             inventory: Vec::with_capacity(16),
             hidden: Vec::with_capacity(64),
             timer: None,
+            hardware_state: Rc::new(crate::hardware_motion::HardwareState::new()),
             started: Instant::now(),
             seconds,
             updates: 0,
             renders: 0,
             animate: false,
             reveal_hardware: false,
+            hover_second: None,
+            app_picker_open: false,
             list: ListState::new(0, ListAlignment::Top, px(100.0)),
             last_status: String::new(),
         };
@@ -151,6 +162,13 @@ impl LiveDashboard {
             self.error = Some(error);
             return;
         }
+        let groups = match crate::live_executables::groups(snapshot.detail.as_ref()) {
+            Ok(groups) => groups,
+            Err(error) => {
+                self.error = Some(error);
+                return;
+            }
+        };
         match crate::live_projection::panels(
             &self.request.route,
             &snapshot.selection,
@@ -166,7 +184,7 @@ impl LiveDashboard {
             }
         }
         self.updates += 1;
-        self.executables = crate::live_executables::groups(snapshot.detail.as_ref());
+        self.executables = groups;
         self.snapshot = Some(snapshot);
         self.rebuild();
         if self.reveal_hardware {
@@ -234,6 +252,7 @@ impl LiveDashboard {
     }
 
     pub fn navigate(&mut self, route: &str, cx: &mut Context<Self>) {
+        self.hover_second = None;
         self.request.route = route.into();
         self.request.offset = 0;
         self.request.members_offset = 0;
@@ -321,11 +340,21 @@ impl LiveDashboard {
     }
 
     fn rebuild_readings(&mut self) {
-        self.rows.push(Row::Summary);
+        if self.request.route == "apps" {
+            self.rebuild_apps();
+            return;
+        }
+        if self.request.route == "memory" {
+            self.rows.push(Row::Summary);
+        }
+        if self.request.route == "cpu" {
+            self.rows.push(Row::CPUActivity);
+        }
         for panels in self.panels.chunks(2) {
             self.rows.push(Row::Charts(panels.to_vec()));
         }
         if self.request.route == "overview" {
+            self.rows.push(Row::OverviewStatus);
             self.rows.push(Row::Hardware);
         }
         if let Some(snapshot) = &self.snapshot {
@@ -339,26 +368,41 @@ impl LiveDashboard {
                 }
             }
         }
-        if self.request.route == "apps" {
-            self.rebuild_apps();
-        }
         assert!(self.rows.len() <= 4096);
     }
 
     fn rebuild_apps(&mut self) {
+        self.rows.push(Row::AppSelector);
         let Some(snapshot) = &self.snapshot else {
             return;
         };
-        let detail = snapshot.detail.as_ref().unwrap_or(&Value::Null);
+        if self.app_picker_open {
+            self.rows.push(Row::AppColumns("apps"));
+            for index in self.app_choice_indices() {
+                self.rows.push(Row::App(index));
+            }
+        }
+        self.rows.push(Row::AppSummary);
+        let Some(detail) = crate::live_app_views::selected_detail(
+            snapshot.detail.as_ref(),
+            self.request.app.as_ref(),
+        ) else {
+            return;
+        };
+        if detail.is_null() {
+            return;
+        }
         self.rows.push(Row::Heading(format!(
-            "{} · captured executable groups",
+            "Inside {} · executable groups",
             crate::live_views::text(&detail["app"]["display_name"])
         )));
+        self.rows.push(Row::AppColumns("executables"));
         for index in 0..self.executables.len() {
             self.rows.push(Row::Executable(index));
         }
         self.rows
             .push(Row::Heading("Process instances · selected app".into()));
+        self.rows.push(Row::AppColumns("processes"));
         for index in 0..array_len(Some(detail), "processes") {
             if let Some(key) = &self.executable {
                 if !crate::live_executables::matches(&detail["processes"][index], key) {
@@ -367,11 +411,10 @@ impl LiveDashboard {
             }
             self.rows.push(Row::Process(index));
         }
-        self.rows.push(Row::Heading(
-            "Choose an app · selected observation totals".into(),
-        ));
-        for index in 0..array_len(snapshot.apps.as_ref(), "apps") {
-            self.rows.push(Row::App(index));
+        self.rows
+            .push(Row::Heading("Selected app · last 15 minutes".into()));
+        for panels in self.panels.chunks(2) {
+            self.rows.push(Row::Charts(panels.to_vec()));
         }
     }
 }
@@ -384,6 +427,7 @@ fn array_len(value: Option<&Value>, key: &str) -> usize {
 
 impl Render for LiveDashboard {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.hardware_state.begin_frame();
         self.renders += 1;
         if self.renders == 1 {
             window.on_next_frame(|window, _| {
@@ -408,6 +452,7 @@ impl Render for LiveDashboard {
             .text_color(rgb(TEXT))
             .font_family(".AppleSystemUIFont")
             .text_size(px(13.0))
+            .on_key_down(crate::dashboard::keyboard_navigation)
             .child(
                 div()
                     .h(px(48.0))
@@ -418,11 +463,7 @@ impl Render for LiveDashboard {
                     .border_b_1()
                     .border_color(rgb(GRID))
                     .child("◉  FLIGHTDECK")
-                    .child(
-                        div()
-                            .text_color(rgb(MUTED))
-                            .child("Live · Rust / GPUI / Metal"),
-                    ),
+                    .child(div().text_color(rgb(MUTED)).child(self.status())),
             )
             .child(
                 div()

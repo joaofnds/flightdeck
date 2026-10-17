@@ -2,6 +2,37 @@ use std::time::{Duration, Instant};
 
 use gpui::{Context, Window};
 
+pub fn start_deadline(
+    entity: &gpui::Entity<crate::dashboard::Dashboard>,
+    cx: &mut gpui::App,
+) -> Result<(), String> {
+    let performance = &entity.read(cx).performance;
+    let Some(seconds) = performance.options.seconds else {
+        return Ok(());
+    };
+    let remaining = Duration::from_secs(u64::from(seconds))
+        .saturating_sub(performance.started.elapsed())
+        .max(Duration::from_millis(1));
+    let view = entity.downgrade();
+    let application = cx.to_async();
+    let timer = crate::live_timer::Timer::with_interval(remaining, move || {
+        if let Err(error) = application.update(|cx| {
+            if let Err(error) = view.update(cx, |dashboard, cx| {
+                dashboard.performance.report();
+                cx.quit();
+            }) {
+                eprintln!("Timed view shutdown: {error}");
+            }
+        }) {
+            eprintln!("Timed application shutdown: {error}");
+        }
+    })?;
+    entity.update(cx, |dashboard, _| {
+        dashboard.performance.deadline_timer = Some(timer);
+    });
+    Ok(())
+}
+
 pub struct Options {
     pub source: Source,
     pub page: String,
@@ -10,6 +41,7 @@ pub struct Options {
     pub hardware: bool,
     pub range_minutes: u16,
     pub seconds: Option<u32>,
+    pub replay: Option<std::path::PathBuf>,
     mode: RunMode,
 }
 
@@ -38,6 +70,7 @@ impl Options {
             hardware: false,
             range_minutes: 15,
             seconds: None,
+            replay: None,
             mode: RunMode::Interactive,
         };
         let arguments: Vec<_> = std::env::args().skip(1).collect();
@@ -51,17 +84,6 @@ impl Options {
             }
             position = options.parse_argument(&arguments, position)?;
         }
-        if options.source.reference {
-            if options.seconds.is_some() {
-                if !options.scrub {
-                    if !options.animate {
-                        if !options.smoke() {
-                            return Err("--seconds requires --scrub, --animate, or --smoke".into());
-                        }
-                    }
-                }
-            }
-        }
         if options.animate {
             if !options.hardware {
                 return Err("--animate requires --hardware".into());
@@ -70,6 +92,7 @@ impl Options {
                 return Err("animation is on the overview page".into());
             }
         }
+        options.validate_replay()?;
         Ok(options)
     }
 
@@ -79,6 +102,28 @@ impl Options {
 
     pub fn smoke(&self) -> bool {
         self.mode == RunMode::Smoke
+    }
+
+    fn validate_replay(&self) -> Result<(), &'static str> {
+        if self.replay.is_none() {
+            return Ok(());
+        }
+        if !self.source.reference {
+            return Err("--replay requires --reference");
+        }
+        if self.source.check {
+            return Err("--replay cannot run with --live-check");
+        }
+        if self.seconds.is_some() {
+            return Err("--replay duration comes from its action file");
+        }
+        if self.scrub {
+            return Err("--replay cannot run with --scrub");
+        }
+        if self.smoke() {
+            return Err("--replay cannot run with --smoke");
+        }
+        Ok(())
     }
 
     fn parse_argument(
@@ -98,6 +143,15 @@ impl Options {
             "--scrub" => self.scrub = true,
             "--animate" => self.animate = true,
             "--hardware" => self.hardware = true,
+            "--replay" => {
+                self.replay = Some(
+                    arguments
+                        .get(position)
+                        .ok_or("--replay needs a path")?
+                        .into(),
+                );
+                position += 1;
+            }
             "--smoke" => self.parse_mode(RunMode::Smoke)?,
             "--check" => self.parse_mode(RunMode::Check)?,
             "--minutes" => {
@@ -126,7 +180,8 @@ impl Options {
                 println!(
                     "flightdeck-gpui [--recording PATH] [--start-collector] [--page ROUTE]\n\
                      [--live-check --seconds 5..300] [--reference [--scrub] [--animate]\n\
-                     [--hardware] [--smoke] [--minutes 15|60] [--seconds 1..300]] [--check]"
+                     [--hardware] [--smoke] [--minutes 15|60] [--seconds 1..300]\n\
+                     [--replay ACTIONS.json]] [--check]"
                 );
                 std::process::exit(0);
             }
@@ -178,6 +233,7 @@ pub struct Performance {
     pub started: Instant,
     previous: Instant,
     intervals: Vec<f64>,
+    deadline_timer: Option<crate::live_timer::Timer>,
 }
 
 impl Performance {
@@ -189,6 +245,7 @@ impl Performance {
             started,
             previous: started,
             intervals: Vec::with_capacity(40_000),
+            deadline_timer: None,
         }
     }
 

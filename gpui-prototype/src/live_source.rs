@@ -40,6 +40,7 @@ pub struct Snapshot {
     pub apps: Option<Value>,
     pub detail: Option<Value>,
     pub history: Option<Value>,
+    pub cpu_detail: Option<crate::live_cpu::CPUActivity>,
     pub read_ms: f64,
 }
 
@@ -309,6 +310,7 @@ fn reader_snapshot(
         apps: None,
         detail: None,
         history: None,
+        cpu_detail: None,
         read_ms: 0.0,
     });
     reader_payload(session, &mut command.request, &mut snapshot)?;
@@ -336,6 +338,7 @@ fn reader_computer(reader: &mut Reader, command: &Command) -> Option<Box<Snapsho
         apps: None,
         detail: None,
         history: None,
+        cpu_detail: None,
         read_ms: 0.0,
     }))
 }
@@ -389,6 +392,13 @@ fn reader_payload(
     }
     if request.route == "apps" {
         reader_apps(session, request, snapshot)?;
+    }
+    if request.route == "cpu" {
+        let detail = session.cpu_detail().map_err(|error| error.to_string())?;
+        snapshot.cpu_detail = Some(crate::live_cpu::CPUActivity::decode(
+            detail,
+            &snapshot.selection["selected"],
+        )?);
     }
 
     Ok(())
@@ -489,7 +499,7 @@ fn selection_alternative(selection: &Value, identity: &Value) -> Result<usize, S
     Err("The selected observation is no longer available".to_owned())
 }
 
-fn identity_validate(observed: &Value, selected: &Value) -> Result<(), String> {
+pub(crate) fn identity_validate(observed: &Value, selected: &Value) -> Result<(), String> {
     if identity_signature(observed)? != identity_signature(selected)? {
         return Err("Live payload does not match the selected observation".to_owned());
     }

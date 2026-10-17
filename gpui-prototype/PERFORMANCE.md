@@ -1,5 +1,16 @@
 # First GPUI measurements
 
+**Superseded measurements.** The GPUI builds measured below disabled the `font-kit`
+feature. On macOS GPUI 0.2.2 then selects `NoopTextSystem`: glyphs have zero raster
+bounds and no application text is painted. These numbers omit a material part of
+the intended UI workload and cannot evaluate GPUI against Swift. The raw evidence
+is retained as a record of those binaries, not a performance baseline. Current
+builds enable `font-kit` and fail startup if system glyph metrics are placeholders.
+
+The replacement comparison uses the scheduled replay harness described in
+[README.md](README.md). CPU action acceptance and process resource usage remain
+separate from GPU completion and displayed-frame latency.
+
 The prototype's view-render callbacks run roughly 120 times per second while
 inspecting the captured Overview. Its CPU-side view loop keeps that cadence.
 This does not establish GPU presentation or input latency, or
