@@ -21,9 +21,29 @@ struct RecordingStateChecks {
                 path: CommandLine.arguments[2])
             try omits_unrequested_raw_pages_without_poisoning_later_queries(
                 path: CommandLine.arguments[2])
+            try reads_selected_fans_through_the_real_worker(path: CommandLine.arguments[2])
             return
         }
         precondition(CommandLine.arguments.count == 1, "Unknown native check arguments")
+        try preserves_selected_fan_channels_and_measured_zero()
+        rejects_a_fan_page_with_a_missing_channel()
+        try preserves_absent_and_invalid_fan_measurements_as_unavailable()
+        try preserves_the_full_fan_bound_without_clamping_measured_rpm()
+        rejects_invalid_selected_fan_page_structure()
+        rejects_mismatched_selected_fan_observations()
+        enters_overview_with_the_paused_exact_fan_observation()
+        follows_fans_without_retaining_missing_measurements()
+        clears_fans_before_loading_the_same_second()
+        clears_fans_before_selecting_the_same_observation()
+        clears_fans_before_reopening_the_same_recording()
+        ignores_fans_from_a_superseded_completion()
+        requests_fans_when_returning_from_captured_reference()
+        retains_schematic_simulation_through_refresh()
+        retains_schematic_simulation_through_selection()
+        resets_schematic_simulation_for_source(path: "/other", live: true, run: "run", boot: "boot")
+        resets_schematic_simulation_for_source(path: "/recording", live: false, run: "run", boot: "boot")
+        resets_schematic_simulation_for_source(path: "/recording", live: true, run: "other", boot: "boot")
+        resets_schematic_simulation_for_source(path: "/recording", live: true, run: "run", boot: "other")
         enters_processes_from_another_source()
         retains_refresh_after_a_later_selection()
         ignores_a_completed_stale_selection()
@@ -79,7 +99,7 @@ struct RecordingStateChecks {
         retains_exact_paused_identity_through_cpu_and_paging()
         chart_selection_requests_and_retains_exact_identity()
         unavailable_chart_identity_clears_readings_and_surfaces_error()
-        print("55 native recording state and table checks passed")
+        print("Native recording state, selected fan and table checks passed")
         try runReferenceDataChecks()
         runDashboardChecks()
         try runOverviewInspectionChecks()
@@ -87,6 +107,425 @@ struct RecordingStateChecks {
         try runRecordedComponentChecks()
         try runLiveCollectorChecks()
         try runLiveAppsChecks()
+    }
+
+    private static func preserves_selected_fan_channels_and_measured_zero() throws {
+        // Goal: channel identity, measured zero and exact publication survive page decoding.
+        // Method: reverse two fan rows at a publication beyond exact Double integers.
+        let selected = Observation(run: "run", boot: "boot", publication: 9_007_199_254_740_993,
+            runTick: 3, wallNs: 900_000_000_000, windowLosses: nil)
+        let page = TablePage(name: "fans", columns: ["publication", "fan", "rpm"],
+            rows: [["9007199254740993", "1", "0"], ["9007199254740993", "0", "1234.5"]],
+            offset: 0, total: 2, observation: selected)
+
+        let fans = try SelectedFanReadings(page: page, selected: selected)
+
+        precondition(fans.observation == selected)
+        precondition(fans.fan0 == 1234.5)
+        precondition(fans.fan1 == 0)
+    }
+
+    private static func rejects_a_fan_page_with_a_missing_channel() {
+        // Goal: an incomplete channel domain cannot masquerade as a complete fan page.
+        // Method: provide channel 1 as the only row, despite source channels starting at 0.
+        let selected = fanObservation()
+        let page = fanPage([["3", "1", "1234"]], observation: selected)
+
+        rejectsSelectedFanPage(page, selected: selected)
+    }
+
+    private static func preserves_absent_and_invalid_fan_measurements_as_unavailable() throws {
+        // Goal: empty, absent and physically invalid readings never become measured zero.
+        // Method: parse empty, one-channel, null/NaN and negative/infinite source pages.
+        let selected = fanObservation()
+        let empty = try SelectedFanReadings(page: fanPage([], observation: selected), selected: selected)
+        let one = try SelectedFanReadings(page: fanPage([["3", "0", "1200"]],
+            observation: selected), selected: selected)
+        let absent = try SelectedFanReadings(page: fanPage([["3", "0", nil], ["3", "1", "NaN"]],
+            observation: selected), selected: selected)
+        let invalid = try SelectedFanReadings(page: fanPage([["3", "0", "-1"], ["3", "1", "inf"]],
+            observation: selected), selected: selected)
+
+        precondition(empty.fan0 == nil)
+        precondition(empty.fan1 == nil)
+        precondition(one.fan0 == 1200)
+        precondition(one.fan1 == nil)
+        precondition(absent.fan0 == nil)
+        precondition(absent.fan1 == nil)
+        precondition(invalid.fan0 == nil)
+        precondition(invalid.fan1 == nil)
+    }
+
+    private static func preserves_the_full_fan_bound_without_clamping_measured_rpm() throws {
+        // Goal: the source's full channel domain fits and QA slider limits do not alter readings.
+        // Method: fill ten numbered channels with finite speeds above the slider range.
+        let selected = fanObservation()
+        let rows: [[String?]] = (0..<10).map { ["3", String($0), String(12_000 + $0 * 100)] }
+
+        let fans = try SelectedFanReadings(page: fanPage(rows, observation: selected), selected: selected)
+
+        precondition(fans.fan0 == 12_000)
+        precondition(fans.fan1 == 12_100)
+    }
+
+    private static func rejects_invalid_selected_fan_page_structure() {
+        // Goal: malformed, incomplete and oversized pages are refused before accepting channels.
+        // Method: vary schema, offset, count, row width, publication, channel and numeric syntax.
+        let selected = fanObservation()
+        let columns = ["publication", "fan", "rpm"]
+        let row: [String?] = ["3", "0", "1200"]
+
+        rejectsSelectedFanPage(TablePage(name: "memory", columns: columns, rows: [row],
+            offset: 0, total: 1, observation: selected), selected: selected)
+        rejectsSelectedFanPage(TablePage(name: "fans", columns: columns, rows: [row],
+            offset: 512, total: 1, observation: selected), selected: selected)
+        rejectsSelectedFanPage(TablePage(name: "fans", columns: columns, rows: [row],
+            offset: 0, total: 2, observation: selected), selected: selected)
+        rejectsSelectedFanPage(TablePage(name: "fans", columns: columns,
+            rows: Array(repeating: row, count: 11), offset: 0, total: 11,
+            observation: selected), selected: selected)
+        rejectsSelectedFanPage(TablePage(name: "fans", columns: ["publication", "fan", "fan"],
+            rows: [row], offset: 0, total: 1, observation: selected), selected: selected)
+        rejectsSelectedFanPage(fanPage([["3", "0"]], observation: selected), selected: selected)
+        rejectsSelectedFanPage(fanPage([["2", "0", "1200"]], observation: selected), selected: selected)
+        rejectsSelectedFanPage(fanPage([row, row], observation: selected), selected: selected)
+        rejectsSelectedFanPage(fanPage([["3", "10", "1200"]], observation: selected), selected: selected)
+        rejectsSelectedFanPage(fanPage([["3", nil, "1200"]], observation: selected), selected: selected)
+        rejectsSelectedFanPage(fanPage([["3", "0", "rpm"]], observation: selected), selected: selected)
+    }
+
+    private static func rejects_mismatched_selected_fan_observations() {
+        // Goal: a matching second cannot substitute a different observation or source.
+        // Method: independently change each identity or clock field on the returned fan page.
+        let selected = fanObservation()
+        let rows: [[String?]] = [["3", "0", "1200"]]
+
+        rejectsSelectedFanPage(fanPage(rows, observation: fanObservation(run: "other")),
+            selected: selected)
+        rejectsSelectedFanPage(fanPage(rows, observation: fanObservation(boot: "other")),
+            selected: selected)
+        rejectsSelectedFanPage(fanPage(rows, observation: fanObservation(publication: 4)),
+            selected: selected)
+        rejectsSelectedFanPage(fanPage(rows, observation: fanObservation(runTick: 4)),
+            selected: selected)
+        rejectsSelectedFanPage(fanPage(rows, observation: fanObservation(wallNs: 901_000_000_000)),
+            selected: selected)
+    }
+
+    private static func fanObservation(run: String = "run", boot: String = "boot",
+                                       publication: UInt64 = 3, runTick: UInt64? = nil,
+                                       wallNs: UInt64 = 900_000_000_000) -> Observation {
+        Observation(run: run, boot: boot, publication: publication, runTick: runTick ?? publication,
+            wallNs: wallNs, windowLosses: nil)
+    }
+
+    @MainActor
+    private static func enters_overview_with_the_paused_exact_fan_observation() {
+        // Goal: entering Overview while paused reads its fans without following a newer tick.
+        // Method: pause a completed Memory projection and inspect the next Overview request/result.
+        let selected = fanObservation(run: "run-0", publication: 9)
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+        model.route = "Memory"
+        model.startLive()
+        reader.finishNext(result: fanResult(selected: selected))
+        drainMainQueue()
+        model.setLive(false)
+
+        model.enterOverview()
+
+        precondition(reader.latestRequest?.includeFans == true)
+        precondition(reader.latestRequest?.includeMachine == false)
+        precondition(reader.latestRequest?.includePage == false)
+        precondition(reader.latestRequest?.target == selected.identity)
+        precondition(reader.latestRequest?.second == 900)
+        precondition(!model.following)
+        let reading = SelectedFanReadings(observation: selected, fan0: 1234, fan1: 0)
+        reader.finishNext(result: fanResult(selected: selected, fans: reading))
+        drainMainQueue()
+        precondition(model.fans?.observation.identity == selected.identity)
+        precondition(model.fans?.fan0 == 1234)
+        precondition(model.fans?.fan1 == 0)
+        precondition(!model.following)
+    }
+
+    private static func fanResult(selected: Observation, fans: SelectedFanReadings? = nil) -> ReadResult {
+        let second = selected.wallNs / 1_000_000_000
+        let selection = Selection(second: second, selected: selected, alternatives: [selected],
+            summary: nil, trends: [], contextSeconds: 900)
+        let catalog = Catalog(path: "/recording", firstSecond: second, lastSecond: second,
+            windows: 0, unknownClockTicks: 0, tables: ["fans"], live: true,
+            latestObservation: selected)
+
+        return ReadResult(catalog: catalog, selection: selection, page: nil, machinePages: [:], fans: fans)
+    }
+
+    @MainActor
+    private static func follows_fans_without_retaining_missing_measurements() {
+        // Goal: unavailable current fans and a missing observation both clear older RPM readings.
+        // Method: follow a valid point with an empty fan DTO, then a missing selected second.
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+        let selected = fanObservation(run: "run-0", publication: 9)
+        model.startLive()
+        reader.finishNext(result: fanResult(selected: selected,
+            fans: SelectedFanReadings(observation: selected, fan0: 1234, fan1: 0)))
+        drainMainQueue()
+
+        model.pollLive()
+
+        precondition(reader.latestRequest?.includeFans == true)
+        precondition(reader.latestRequest?.second == nil)
+        precondition(reader.latestRequest?.target == nil)
+        let next = fanObservation(run: "run-0", publication: 10, wallNs: 901_000_000_000)
+        reader.finishNext(result: fanResult(selected: next,
+            fans: SelectedFanReadings(observation: next, fan0: nil, fan1: nil)))
+        drainMainQueue()
+        precondition(model.fans?.observation.identity == next.identity)
+        precondition(model.fans?.fan0 == nil)
+        precondition(model.fans?.fan1 == nil)
+        model.pollLive()
+        reader.finishNext(missingSecond: true)
+        drainMainQueue()
+        precondition(model.selection?.selected == nil)
+        precondition(model.fans == nil)
+    }
+
+    @MainActor
+    private static func clears_fans_before_loading_the_same_second() {
+        // Goal: a new load cannot keep the previous fan payload while selection is absent.
+        // Method: reload the same second and inspect state before its completion.
+        let (model, reader, selected) = fanModel()
+
+        model.load(second: selected.wallNs / 1_000_000_000)
+
+        precondition(model.selection == nil)
+        precondition(model.fans == nil)
+        reader.finishNext(missingSecond: true)
+        drainMainQueue()
+    }
+
+    @MainActor
+    private static func clears_fans_before_selecting_the_same_observation() {
+        // Goal: an explicit selection clears fans even if its identity equals the old one.
+        // Method: select the visible exact target and inspect state before its completion.
+        let (model, reader, selected) = fanModel()
+
+        model.select(RecordedSelectionTarget(second: 900, identity: selected.identity))
+
+        precondition(model.selection == nil)
+        precondition(model.fans == nil)
+        precondition(reader.latestRequest?.target == selected.identity)
+        reader.finishNext(result: fanResult(selected: selected))
+        drainMainQueue()
+    }
+
+    @MainActor
+    private static func clears_fans_before_reopening_the_same_recording() {
+        // Goal: reopening the same source path cannot retain a previous source's fan payload.
+        // Method: choose the same path after a completed live fan read, before completing saved IO.
+        let (model, reader, selected) = fanModel()
+        precondition(model.fans?.observation.identity == selected.identity)
+
+        model.chooseRecording(path: "/recording")
+
+        precondition(model.selection == nil)
+        precondition(model.fans == nil)
+        precondition(reader.latestRequest?.live == false)
+        reader.finishNext(missingSecond: true)
+        drainMainQueue()
+    }
+
+    @MainActor
+    private static func ignores_fans_from_a_superseded_completion() {
+        // Goal: a superseded follow read cannot install its fan values over a pinned target.
+        // Method: complete a canceled background read before the queued exact-identity read.
+        let (model, reader, selected) = fanModel()
+        model.pollLive()
+        model.select(RecordedSelectionTarget(second: 900, identity: selected.identity))
+        let superseded = fanObservation(run: "other", publication: 10)
+
+        reader.finishNext(result: fanResult(selected: superseded,
+            fans: SelectedFanReadings(observation: superseded, fan0: 8000, fan1: 7000)))
+        drainMainQueue()
+
+        precondition(model.selection == nil)
+        precondition(model.fans == nil)
+        precondition(reader.latestRequest?.target == selected.identity)
+        reader.finishNext(result: fanResult(selected: selected,
+            fans: SelectedFanReadings(observation: selected, fan0: 1234, fan1: 0)))
+        drainMainQueue()
+        precondition(model.selection?.selected?.identity == selected.identity)
+        precondition(model.fans?.observation.identity == selected.identity)
+        precondition(model.fans?.fan0 == 1234)
+    }
+
+    @MainActor
+    private static func requests_fans_when_returning_from_captured_reference() {
+        // Goal: captured reference mode never requests actual fans, and returning can fetch them.
+        // Method: change reference visibility and explicitly enter actual Overview while paused.
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false,
+            showsReference: true)
+        model.startLive()
+        precondition(reader.latestRequest?.includeFans == false)
+        reader.finishNext()
+        drainMainQueue()
+        model.setLive(false)
+
+        model.showsReference = false
+        model.enterOverview()
+
+        precondition(reader.latestRequest?.includeFans == true)
+        precondition(!model.following)
+        reader.finishNext()
+        drainMainQueue()
+    }
+
+    @MainActor
+    private static func retains_schematic_simulation_through_refresh() {
+        // Goal: a same-source pending read and its completion keep explicit QA simulation.
+        // Method: refresh the real model through its controlled reader and forward its UI source.
+        let (model, reader, selected) = fanModel()
+        let preview = SchematicPreviewState()
+        preview.observeSource(model.schematicPreviewSource)
+        preview.overrides[.cpuTemperature] = 90
+
+        model.load(refresh: true)
+        preview.observeSource(model.schematicPreviewSource)
+
+        precondition(model.selection == nil)
+        precondition(preview.overrides[.cpuTemperature] == 90)
+        reader.finishNext(result: fanResult(selected: selected))
+        drainMainQueue()
+        preview.observeSource(model.schematicPreviewSource)
+        precondition(preview.overrides[.cpuTemperature] == 90)
+        model.chooseRecording(path: "/other")
+        preview.observeSource(model.schematicPreviewSource)
+        precondition(preview.overrides.isEmpty)
+        reader.finishNext(missingSecond: true)
+        drainMainQueue()
+    }
+
+    @MainActor
+    private static func retains_schematic_simulation_through_selection() {
+        // Goal: selecting within a run preserves simulation through absence and later ticks.
+        // Method: commit the selected identity, complete its read, then install a following tick.
+        let (model, reader, selected) = fanModel()
+        let preview = SchematicPreviewState()
+        preview.observeSource(model.schematicPreviewSource)
+        preview.overrides[.fan0] = 5000
+
+        model.select(RecordedSelectionTarget(second: 900, identity: selected.identity))
+        preview.observeSource(model.schematicPreviewSource)
+
+        precondition(model.selection == nil)
+        precondition(preview.overrides[.fan0] == 5000)
+        reader.finishNext(result: fanResult(selected: selected))
+        drainMainQueue()
+        preview.observeSource(model.schematicPreviewSource)
+        precondition(preview.overrides[.fan0] == 5000)
+        model.setLive(true)
+        reader.finishNext(result: fanResult(selected: fanObservation(run: selected.run, publication: 10)))
+        drainMainQueue()
+        preview.observeSource(model.schematicPreviewSource)
+        precondition(preview.overrides[.fan0] == 5000)
+        model.chooseRecording(path: "/recording")
+        preview.observeSource(model.schematicPreviewSource)
+        precondition(preview.overrides.isEmpty)
+        reader.finishNext(missingSecond: true)
+        drainMainQueue()
+    }
+
+    @MainActor
+    private static func resets_schematic_simulation_for_source(path: String, live: Bool,
+                                                               run: String, boot: String) {
+        // Goal: temporary absence does not hide a later genuine source identity change.
+        // Method: observe a known source, an absent selection, then a distinct source dimension.
+        let preview = SchematicPreviewState()
+        preview.observeSource(SchematicPreviewSource(path: "/recording", live: true,
+            run: "run", boot: "boot"))
+        preview.overrides[.gpuTemperature] = 45
+
+        preview.observeSource(SchematicPreviewSource(path: "/recording", live: true,
+            run: nil, boot: nil))
+
+        precondition(preview.overrides[.gpuTemperature] == 45)
+        preview.observeSource(SchematicPreviewSource(path: path, live: live, run: run, boot: boot))
+        precondition(preview.overrides.isEmpty)
+    }
+
+    @MainActor
+    private static func fanModel() -> (RecordingModel, ControlledRecordingReader, Observation) {
+        let selected = fanObservation(run: "run-0", publication: 9)
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+        model.startLive()
+        reader.finishNext(result: fanResult(selected: selected,
+            fans: SelectedFanReadings(observation: selected, fan0: 1234, fan1: 0)))
+        drainMainQueue()
+        precondition(model.fans?.fan0 == 1234)
+
+        return (model, reader, selected)
+    }
+
+    @MainActor
+    private static func reads_selected_fans_through_the_real_worker(path: String) throws {
+        // Goal: selected-only fan reads follow exact identities and respect projection caching.
+        // Method: change projection flags, pin a repeated-second sibling, then follow again.
+        let reader = RecordingWorker()
+        let chart = try nativeRead(reader, request: fanWorkerRequest(path: path, includeFans: false))
+        precondition(chart.fans == nil)
+
+        let current = try nativeRead(reader, request: fanWorkerRequest(path: path, includeFans: true))
+
+        precondition(!current.unchanged)
+        precondition(current.page == nil)
+        precondition(current.machinePages.isEmpty)
+        precondition(current.fans?.observation.identity == current.selection?.selected?.identity)
+        precondition(current.fans?.observation.publication == 3)
+        precondition(current.fans?.fan0 == 1234.5)
+        precondition(current.fans?.fan1 == 0)
+        let unchanged = try nativeRead(reader, request: fanWorkerRequest(path: path, includeFans: true))
+        precondition(unchanged.unchanged)
+        precondition(unchanged.fans?.fan0 == 1234.5)
+        let omitted = try nativeRead(reader, request: fanWorkerRequest(path: path, includeFans: false))
+        precondition(!omitted.unchanged)
+        precondition(omitted.fans == nil)
+        guard let selected = current.selection?.selected else { preconditionFailure() }
+        let sibling = RecordedObservationIdentity(run: selected.run, boot: selected.boot, publication: 2)
+        let pinned = try nativeRead(reader,
+            request: fanWorkerRequest(path: path, includeFans: true, target: sibling))
+        precondition(pinned.selection?.selected?.identity == sibling)
+        precondition(pinned.fans?.observation.identity == sibling)
+        precondition(pinned.fans?.fan0 == nil)
+        precondition(pinned.fans?.fan1 == nil)
+        let latest = try nativeRead(reader, request: fanWorkerRequest(path: path, includeFans: true))
+        precondition(latest.selection?.selected?.identity == selected.identity)
+        precondition(latest.fans?.observation.identity == selected.identity)
+        precondition(latest.fans?.fan0 == 1234.5)
+        print("Real RecordingWorker keeps selected fans bounded, optional and exact across projections")
+    }
+
+    private static func fanWorkerRequest(path: String, includeFans: Bool,
+                                          target: RecordedObservationIdentity? = nil) -> ReadRequest {
+        ReadRequest(path: path, second: target == nil ? nil : 900, alternative: 0, table: 1,
+            offset: 0, refresh: false, machineOffsets: [:], includeMachine: false,
+            includePage: false, includeFans: includeFans, live: true, poll: true, target: target)
+    }
+
+    private static func fanPage(_ rows: [[String?]], observation: Observation) -> TablePage {
+        TablePage(name: "fans", columns: ["publication", "fan", "rpm"], rows: rows,
+            offset: 0, total: UInt64(rows.count), observation: observation)
+    }
+
+    private static func rejectsSelectedFanPage(_ page: TablePage, selected: Observation) {
+        do {
+            let accepted = try SelectedFanReadings(page: page, selected: selected)
+            preconditionFailure("Accepted invalid fan page for \(accepted.observation.publication)")
+        } catch {
+            precondition(error is RecordingError)
+        }
     }
 
     @MainActor
@@ -914,6 +1353,7 @@ struct RecordingStateChecks {
         model.pollLive()
 
         precondition(reader.latestRequest?.includePage == false, route)
+        precondition(reader.latestRequest?.includeFans == (route == "Overview"), route)
         precondition(reader.latestRequest?.live == true, route)
         precondition(reader.latestRequest?.second == nil, route)
     }

@@ -67,7 +67,7 @@ impl Fixture {
             interface_capacity: 1,
             core_capacity: 1,
             state_capacity: 1,
-            fan_capacity: 1,
+            fan_capacity: 2,
             process_capacity: 1,
             coalition_capacity: 1,
             event_capacity: 4,
@@ -90,6 +90,21 @@ impl Fixture {
                 total_bytes: tick * 111,
                 ..Memory::default()
             };
+            let fan_rpm = if index == 0 {
+                [0.0, 4321.0]
+            } else {
+                [1234.5, 0.0]
+            };
+            let smc = if index == 1 {
+                None
+            } else {
+                Some(collector::ring::SmcReadings {
+                    power_watts: 1.0,
+                    soc_celsius: 42.0,
+                    fan_rpm: &fan_rpm,
+                })
+            };
+
             writer.publish_observed(
                 &Readings {
                     run_tick: tick,
@@ -97,7 +112,7 @@ impl Fixture {
                     memory: &memory,
                     interfaces: &[],
                     ioreport: None,
-                    smc: None,
+                    smc,
                     processes: &[],
                     processes_refused: 0,
                     processes_gone: 0,

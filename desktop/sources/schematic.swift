@@ -78,11 +78,11 @@ struct MacBookSchematic: View {
     private var controls: some View {
         VStack(alignment: .leading, spacing: theme.fieldGap) {
             HStack(alignment: .top) {
-                Text("Drag to override a reading. Charts keep captured data. "
+                Text("Drag to simulate a reading. Charts keep source data. "
                      + "Slider ranges are for testing, not device limits.")
                     .font(theme.compactReadingFont).foregroundStyle(theme.muted)
                 Spacer()
-                Button("Reset to recording") { overrides.removeAll() }
+                Button("Reset to source") { overrides.removeAll() }
                     .disabled(overrides.isEmpty)
             }
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 250))], spacing: theme.fieldGap) {
@@ -92,6 +92,7 @@ struct MacBookSchematic: View {
             }
         }
         .padding(.top, theme.fieldGap)
+        .accessibilityElement(children: .contain)
         .accessibilityLabel("Temporary QA controls")
     }
 
@@ -119,6 +120,36 @@ struct MacBookSchematic: View {
 @MainActor
 final class SchematicPreviewState: ObservableObject {
     @Published var overrides: [SchematicOverride: Double] = [:]
+    private var source: SchematicPreviewSource?
+
+    func observeSource(_ next: SchematicPreviewSource) {
+        guard let source else {
+            self.source = next
+            return
+        }
+
+        if source.path != next.path || source.live != next.live {
+            overrides.removeAll()
+            self.source = next
+            return
+        }
+
+        guard next.run != nil, next.boot != nil else { return }
+
+        if source.run != nil, source.boot != nil,
+           source.run != next.run || source.boot != next.boot {
+            overrides.removeAll()
+        }
+
+        self.source = next
+    }
+}
+
+struct SchematicPreviewSource: Equatable {
+    let path: String
+    let live: Bool
+    let run: String?
+    let boot: String?
 }
 
 enum SchematicOverride: String, CaseIterable, Identifiable {
@@ -218,7 +249,7 @@ private struct SchematicDiagram: View {
     }
 }
 
-private enum SchematicCallout: String, CaseIterable, Identifiable {
+enum SchematicCallout: String, CaseIterable, Identifiable {
     case fan0, fan1, cpu, gpu, memory, battery
     var id: String { rawValue }
     var isLeft: Bool { self == .fan0 || self == .cpu || self == .memory }
@@ -283,9 +314,19 @@ private enum SchematicCallout: String, CaseIterable, Identifiable {
         case .fan0: return fanValues(readings.fan0)
         case .fan1: return fanValues(readings.fan1)
         case .cpu:
+            guard readings.cpuTemperature?.isFinite == true else {
+                return (dashboardFixedReading(readings.cpuPercent, unit: "%"),
+                        "Temperature unavailable")
+            }
+
             return (dashboardFixedReading(readings.cpuTemperature, unit: " °C"),
                     "Utilization " + dashboardFixedReading(readings.cpuPercent, unit: "%"))
         case .gpu:
+            guard readings.gpuTemperature?.isFinite == true else {
+                return (dashboardFixedReading(readings.gpuPercent, unit: "%"),
+                        "Temperature unavailable")
+            }
+
             return (dashboardFixedReading(readings.gpuTemperature, unit: " °C"),
                     "Utilization " + dashboardFixedReading(readings.gpuPercent, unit: "%"))
         case .memory:
@@ -294,8 +335,15 @@ private enum SchematicCallout: String, CaseIterable, Identifiable {
             let available = readings.memoryUsedGiB?.isFinite == true
                 && readings.memoryTotalGiB?.isFinite == true
                 && (readings.memoryTotalGiB ?? 0) > 0
-            return (available ? used + " / " + total : "Unavailable",
-                    "Peak " + dashboardFixedReading(readings.memoryTemperature, unit: " °C"))
+            let installed = readings.memoryTotalGiB?.isFinite == true
+                && (readings.memoryTotalGiB ?? 0) > 0
+            let memory = available ? used + " / " + total
+                : installed ? total + " installed" : "Unavailable"
+            let temperature = readings.memoryTemperature?.isFinite == true
+                ? "Peak " + dashboardFixedReading(readings.memoryTemperature, unit: " °C")
+                : "Temperature unavailable"
+
+            return (memory, temperature)
         case .battery:
             let watts = readings.batteryWatts
             let milliwatts = watts.map { $0 != 0 && abs($0) < 0.1 } ?? false

@@ -111,6 +111,9 @@ struct Console: View {
         .preferredColorScheme(.dark)
         .onAppear {
             if model.catalog == nil, model.error == nil, !model.busy { model.load() }
+            else if model.route == "Overview", model.selection?.selected != nil {
+                model.enterOverview()
+            }
         }
     }
 
@@ -119,6 +122,7 @@ struct Console: View {
             if let component = RecordedComponent(rawValue: title) { model.enterComponent(component) }
             else if title == "Apps" { model.enterApps() }
             else if title == "Memory" { model.enterMemory() }
+            else if title == "Overview" { model.enterOverview() }
             else if title == "Recorded readings" { model.enterRawReadings() }
             else { model.route = title }
         } label: {

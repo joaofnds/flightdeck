@@ -4,6 +4,7 @@ struct Dashboard: View {
     @EnvironmentObject private var model: RecordingModel
     @Environment(\.flightdeckTheme) private var theme
     @StateObject private var inspection = ChartInspectionState()
+    @StateObject private var schematicPreview = SchematicPreviewState()
 
     private var points: [Metric] { model.selection?.trends ?? [] }
     private var summary: Metric? { model.selection?.summary }
@@ -49,6 +50,15 @@ struct Dashboard: View {
                 Spacer()
                 Button("Inspect processes →", action: model.enterProcesses)
             }.font(.callout).foregroundStyle(theme.muted)
+            VStack(alignment: .leading, spacing: theme.fieldGap) {
+                MacBookSchematic(readings: schematicReadings(selection: model.selection,
+                    fans: model.fans), preview: schematicPreview)
+                Text("Illustration: 16-inch MacBook Pro. Fan channel sides are unverified.")
+                    .font(theme.compactReadingFont).foregroundStyle(theme.muted)
+            }
+        }
+        .onChange(of: model.schematicPreviewSource, initial: true) { _, source in
+            schematicPreview.observeSource(source)
         }
     }
 

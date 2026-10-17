@@ -4,6 +4,7 @@ import SwiftUI
 
 @MainActor
 func runOverviewInspectionChecks() throws {
+    try uses_only_selected_schematic_sources()
     try reports_the_inspected_reading_to_accessibility()
     // Keyboard navigation must retain siblings that share a wall second.
     let data = Data(#"""
@@ -50,6 +51,74 @@ func runOverviewInspectionChecks() throws {
     precondition(inspection.date(in: selection) == nil)
     precondition(inspection.target(in: selection) == nil)
     print("Overview keyboard inspection preserves repeated-second identities and empty hover")
+}
+
+private func uses_only_selected_schematic_sources() throws {
+    // Goal: the schematic combines only the selected publication's measured sources.
+    // Method: decode independent values and substitute same-second run/boot/publication siblings.
+    let data = Data(#"""
+        {"value":{"run":"run","boot":"boot","publication":2,"wall_ns":1000000000000,
+          "segment":1,"cpu_percent":15.5,"gpu_active_percent":27.5,
+          "memory_total_bytes":51539607552,"memory_active_bytes":1234,"soc_celsius":99}}
+        """#.utf8)
+    let point: Metric = try decodeRecordingResponse(data)
+    let observation = Observation(run: "run", boot: "boot", publication: 2, runTick: 1,
+        wallNs: 1_000_000_000_000, windowLosses: nil)
+    let selection = Selection(second: 1000, selected: observation, alternatives: [observation],
+        summary: point, trends: [point], contextSeconds: 900)
+    let fans = SelectedFanReadings(observation: observation, fan0: 0, fan1: 1456)
+
+    let readings = schematicReadings(selection: selection, fans: fans)
+
+    precondition(readings.cpuPercent == 15.5)
+    precondition(readings.gpuPercent == 27.5)
+    precondition(readings.memoryTotalGiB == 48)
+    precondition(readings.fan0 == 0)
+    precondition(readings.fan1 == 1456)
+    precondition(readings.cpuTemperature == nil)
+    precondition(readings.gpuTemperature == nil)
+    precondition(readings.memoryUsedGiB == nil)
+    precondition(readings.memoryTemperature == nil)
+    precondition(readings.batteryPercent == nil)
+    precondition(readings.batteryWatts == nil)
+    precondition(readings.thermalState == nil)
+    let absent = schematicReadings(selection: selection, fans: nil)
+    precondition(absent.fan0 == nil)
+    precondition(absent.fan1 == nil)
+    refuses_schematic_sibling(selection,
+        identity: RecordedObservationIdentity(run: "other", boot: "boot", publication: 2))
+    refuses_schematic_sibling(selection,
+        identity: RecordedObservationIdentity(run: "run", boot: "other", publication: 2))
+    refuses_schematic_sibling(selection,
+        identity: RecordedObservationIdentity(run: "run", boot: "boot", publication: 1))
+    let gap = Selection(second: 1000, selected: nil, alternatives: [], summary: point,
+        trends: [point], contextSeconds: 900)
+    let missing = schematicReadings(selection: gap, fans: fans)
+    precondition(missing.fan0 == nil)
+    precondition(missing.cpuPercent == nil)
+}
+
+private func refuses_schematic_sibling(_ selection: Selection,
+                                       identity: RecordedObservationIdentity) {
+    guard let selected = selection.selected, let summary = selection.summary else {
+        preconditionFailure("The identity fixture needs a selected summary")
+    }
+
+    let sibling = Observation(run: identity.run, boot: identity.boot,
+        publication: identity.publication, runTick: selected.runTick,
+        wallNs: selected.wallNs, windowLosses: nil)
+    let other = Selection(second: selection.second, selected: sibling, alternatives: [sibling],
+        summary: summary, trends: selection.trends, contextSeconds: 900)
+
+    let mismatched = schematicReadings(selection: selection,
+        fans: SelectedFanReadings(observation: sibling, fan0: 5000, fan1: 6000))
+    let invalid = schematicReadings(selection: other, fans: nil)
+
+    precondition(mismatched.fan0 == nil)
+    precondition(mismatched.fan1 == nil)
+    precondition(invalid.cpuPercent == nil)
+    precondition(invalid.gpuPercent == nil)
+    precondition(invalid.memoryTotalGiB == nil)
 }
 
 func runRecordedComponentChecks() throws {
@@ -246,7 +315,33 @@ func runDashboardChecks() {
     checks_mirrored_inspection_reading()
     checks_continuous_fan_motion()
     checks_outgoing_airflow_routes()
+    preserves_partial_schematic_readouts()
     print("Dashboard selection, readings, schematic motion and bounded time-series checks passed")
+}
+
+private func preserves_partial_schematic_readouts() {
+    // Goal: useful measured activity and installed memory survive unavailable temperatures.
+    // Method: inspect literal partial readings without deriving missing source measurements.
+    let readings = SchematicReadings(cpuPercent: 15.5, gpuPercent: 27.5, memoryTotalGiB: 48)
+    let decimal = Locale.current.decimalSeparator ?? "."
+
+    precondition(SchematicCallout.cpu.values(readings).primary == "15\(decimal)5%")
+    precondition(SchematicCallout.gpu.values(readings).primary == "27\(decimal)5%")
+    precondition(SchematicCallout.cpu.values(readings).secondary == "Temperature unavailable")
+    precondition(SchematicCallout.gpu.values(readings).secondary == "Temperature unavailable")
+    precondition(SchematicCallout.memory.values(readings).primary == "48 GiB installed")
+    precondition(SchematicCallout.memory.values(readings).secondary == "Temperature unavailable")
+    let empty = SchematicReadings()
+    precondition(SchematicCallout.cpu.values(empty).primary == "Unavailable")
+    precondition(SchematicCallout.memory.values(empty).primary == "Unavailable")
+    let invalid = SchematicReadings(memoryTotalGiB: -1)
+    precondition(SchematicCallout.memory.values(invalid).primary == "Unavailable")
+    let complete = SchematicReadings(cpuTemperature: 63.4, gpuTemperature: 52.5,
+        cpuPercent: 15.5, gpuPercent: 27.5, memoryUsedGiB: 31.7, memoryTotalGiB: 48,
+        memoryTemperature: 57.2)
+    precondition(SchematicCallout.cpu.values(complete).primary == "63\(decimal)4 °C")
+    precondition(SchematicCallout.gpu.values(complete).primary == "52\(decimal)5 °C")
+    precondition(SchematicCallout.memory.values(complete).primary == "31\(decimal)7 / 48 GiB")
 }
 
 private func checks_recorded_plot_clock_boundaries() {

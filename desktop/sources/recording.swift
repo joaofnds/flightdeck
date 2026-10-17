@@ -176,6 +176,7 @@ struct ReadRequest: Sendable {
     let machineOffsets: [MachineSource: UInt64]
     let includeMachine: Bool
     let includePage: Bool
+    let includeFans: Bool
     let live: Bool
     let poll: Bool
     let target: RecordedObservationIdentity?
@@ -183,7 +184,8 @@ struct ReadRequest: Sendable {
 
     init(path: String, second: UInt64?, alternative: UInt32, table: UInt32, offset: UInt64,
          refresh: Bool, machineOffsets: [MachineSource: UInt64], includeMachine: Bool,
-         includePage: Bool = true, live: Bool = false, poll: Bool = false, target: RecordedObservationIdentity? = nil,
+         includePage: Bool = true, includeFans: Bool = false,
+         live: Bool = false, poll: Bool = false, target: RecordedObservationIdentity? = nil,
          apps: LiveAppsRequest? = nil) {
         self.path = path
         self.second = second
@@ -194,6 +196,7 @@ struct ReadRequest: Sendable {
         self.machineOffsets = machineOffsets
         self.includeMachine = includeMachine
         self.includePage = includePage
+        self.includeFans = includeFans
         self.live = live
         self.poll = poll
         self.target = target
@@ -205,7 +208,7 @@ struct ReadRequest: Sendable {
             && alternative == other.alternative && target == other.target
             && table == other.table && offset == other.offset
             && machineOffsets == other.machineOffsets && includeMachine == other.includeMachine
-            && includePage == other.includePage && apps == other.apps
+            && includePage == other.includePage && includeFans == other.includeFans && apps == other.apps
     }
 }
 
@@ -216,15 +219,18 @@ struct ReadResult: Sendable {
     let machinePages: [MachineSource: TablePage]
     let unchanged: Bool
     let apps: LiveAppsRead?
+    let fans: SelectedFanReadings?
 
     init(catalog: Catalog, selection: Selection?, page: TablePage?,
-         machinePages: [MachineSource: TablePage], unchanged: Bool = false, apps: LiveAppsRead? = nil) {
+         machinePages: [MachineSource: TablePage], unchanged: Bool = false, apps: LiveAppsRead? = nil,
+         fans: SelectedFanReadings? = nil) {
         self.catalog = catalog
         self.selection = selection
         self.page = page
         self.machinePages = machinePages
         self.unchanged = unchanged
         self.apps = apps
+        self.fans = fans
     }
 
 }
@@ -309,7 +315,7 @@ final class RecordingWorker: RecordingReading, @unchecked Sendable {
            request.target == nil || lastResult.selection?.selected?.identity == request.target {
             return ReadResult(catalog: catalog, selection: lastResult.selection,
                 page: lastResult.page, machinePages: lastResult.machinePages, unchanged: true,
-                apps: lastResult.apps)
+                apps: lastResult.apps, fans: lastResult.fans)
         }
         let latestSecond = catalog.latestObservation.map { $0.wallNs / 1_000_000_000 }
         guard let second = request.second ?? latestSecond ?? catalog.lastSecond else {
@@ -360,9 +366,11 @@ final class RecordingWorker: RecordingReading, @unchecked Sendable {
         }
         try prepare(session, epoch: epoch)
         let apps = try readApps(request.apps, session: session, selected: selection.selected, epoch: epoch)
+        let fans = try readFans(request.includeFans, session: session, catalog: catalog,
+            selected: selection.selected, epoch: epoch)
         try prepare(session, epoch: epoch)
         let result = ReadResult(catalog: catalog, selection: selection, page: page,
-                                machinePages: machinePages, apps: apps)
+                                machinePages: machinePages, apps: apps, fans: fans)
         lastResult = result
         lastRequest = request
         return result
@@ -371,6 +379,20 @@ final class RecordingWorker: RecordingReading, @unchecked Sendable {
     private func prepare(_ session: OpaquePointer, epoch: UInt64) throws {
         let ready: Bool = try decode(fd_prepare(session, epoch))
         guard ready else { throw RecordingError(message: "Recording query is not ready.") }
+    }
+
+    private func readFans(_ requested: Bool, session: OpaquePointer, catalog: Catalog,
+                          selected: Observation?, epoch: UInt64) throws -> SelectedFanReadings? {
+        guard requested, let selected else { return nil }
+
+        guard let index = catalog.tables.firstIndex(of: "fans"), let table = UInt32(exactly: index) else {
+            throw RecordingError(message: "The recording has no fans source.")
+        }
+
+        try prepare(session, epoch: epoch)
+        let page: TablePage = try decode(fd_page(session, table, 0))
+
+        return try SelectedFanReadings(page: page, selected: selected)
     }
 
     private func readApps(_ request: LiveAppsRequest?, session: OpaquePointer,
@@ -475,6 +497,7 @@ final class RecordingModel: ObservableObject {
     @Published private(set) var apps: LiveAppsRead?
     @Published private(set) var appKey: LiveAppKeyIdentity?
     @Published private(set) var appProcessGroup: Data?
+    @Published private(set) var fans: SelectedFanReadings?
     private let reader: any RecordingReading
     private var useLive = false
     private var startedLive = false
@@ -602,6 +625,7 @@ final class RecordingModel: ObservableObject {
         }
         requestedOffset = offset
         selection = nil
+        fans = nil
         apps = nil
         page = nil
         machinePages.removeAll(keepingCapacity: true)
@@ -626,6 +650,7 @@ final class RecordingModel: ObservableObject {
             refresh: refresh || pending?.1.refresh == true,
             machineOffsets: machineOffsets, includeMachine: route == "CPU & processes",
             includePage: !useLive || route == "CPU & processes" || route == "Recorded readings",
+            includeFans: route == "Overview" && !showsReference,
             live: useLive, poll: poll, target: following ? nil : requestedIdentity,
             apps: route == "Apps" ? LiveAppsRequest(key: appKey, appsOffset: appsOffset,
                 membersOffset: appMembersOffset) : nil)
@@ -648,6 +673,7 @@ final class RecordingModel: ObservableObject {
                         if catalog != result.catalog { catalog = result.catalog }
                         if !result.unchanged, !request.poll || following {
                             selection = result.selection
+                            fans = result.fans
                             page = result.page
                             machinePages = result.machinePages
                             apps = result.apps
@@ -716,6 +742,7 @@ final class RecordingModel: ObservableObject {
         alternative = 0
         machineOffsets.removeAll(keepingCapacity: true)
         selection = nil
+        fans = nil
         apps = nil
         appKey = nil
         appProcessGroup = nil
@@ -747,6 +774,11 @@ final class RecordingModel: ObservableObject {
 
     func enterRawReadings() {
         route = "Recorded readings"
+        enqueue(refresh: false)
+    }
+
+    func enterOverview() {
+        route = "Overview"
         enqueue(refresh: false)
     }
 
@@ -787,6 +819,7 @@ final class RecordingModel: ObservableObject {
         requestedOffset = 0
         machineOffsets.removeAll(keepingCapacity: true)
         selection = nil
+        fans = nil
         page = nil
         machinePages.removeAll(keepingCapacity: true)
         row = nil
