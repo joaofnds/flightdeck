@@ -6,6 +6,7 @@ struct Flightdeck: App {
     @NSApplicationDelegateAdaptor(FlightdeckLifecycle.self) private var lifecycle
     @StateObject private var recording: RecordingModel
     @StateObject private var collector: LiveCollectorSession
+    @StateObject private var computer = ComputerInventoryModel()
 
     init() {
         let arguments = CommandLine.arguments
@@ -34,6 +35,7 @@ struct Flightdeck: App {
     var body: some Scene {
         WindowGroup {
             ApplicationConsole().environmentObject(recording).environmentObject(collector)
+                .environmentObject(computer)
                 .environment(\.flightdeckTheme, FlightdeckTheme())
                 .frame(minWidth: 840, minHeight: 640)
         }.defaultSize(width: 1320, height: 900)

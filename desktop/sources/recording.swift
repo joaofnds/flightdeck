@@ -177,6 +177,7 @@ struct ReadRequest: Sendable {
     let includeMachine: Bool
     let includePage: Bool
     let includeFans: Bool
+    let catalogOnly: Bool
     let live: Bool
     let poll: Bool
     let target: RecordedObservationIdentity?
@@ -186,7 +187,7 @@ struct ReadRequest: Sendable {
          refresh: Bool, machineOffsets: [MachineSource: UInt64], includeMachine: Bool,
          includePage: Bool = true, includeFans: Bool = false,
          live: Bool = false, poll: Bool = false, target: RecordedObservationIdentity? = nil,
-         apps: LiveAppsRequest? = nil) {
+         apps: LiveAppsRequest? = nil, catalogOnly: Bool = false) {
         self.path = path
         self.second = second
         self.alternative = alternative
@@ -197,6 +198,7 @@ struct ReadRequest: Sendable {
         self.includeMachine = includeMachine
         self.includePage = includePage
         self.includeFans = includeFans
+        self.catalogOnly = catalogOnly
         self.live = live
         self.poll = poll
         self.target = target
@@ -209,6 +211,7 @@ struct ReadRequest: Sendable {
             && table == other.table && offset == other.offset
             && machineOffsets == other.machineOffsets && includeMachine == other.includeMachine
             && includePage == other.includePage && includeFans == other.includeFans && apps == other.apps
+            && catalogOnly == other.catalogOnly
     }
 }
 
@@ -311,6 +314,12 @@ final class RecordingWorker: RecordingReading, @unchecked Sendable {
         let catalog: Catalog = try decode(fd_catalog(session))
         path = request.path
         openedLive = request.live
+        if request.catalogOnly {
+            lastResult = nil
+            lastRequest = nil
+            return ReadResult(catalog: catalog, selection: nil, page: nil,
+                machinePages: [:], unchanged: true)
+        }
         if !changed, let lastResult, lastRequest?.hasSameProjection(as: request) == true,
            request.target == nil || lastResult.selection?.selected?.identity == request.target {
             return ReadResult(catalog: catalog, selection: lastResult.selection,
@@ -602,6 +611,7 @@ final class RecordingModel: ObservableObject {
 
     func pollLive() {
         guard following, !reading else { return }
+
         enqueue(refresh: false, poll: true)
     }
 
@@ -653,7 +663,7 @@ final class RecordingModel: ObservableObject {
             includeFans: route == "Overview" && !showsReference,
             live: useLive, poll: poll, target: following ? nil : requestedIdentity,
             apps: route == "Apps" ? LiveAppsRequest(key: appKey, appsOffset: appsOffset,
-                membersOffset: appMembersOffset) : nil)
+                membersOffset: appMembersOffset) : nil, catalogOnly: route == "Computer")
         if reading { pending = (generation, request) }
         else { start(generation, request) }
     }
@@ -780,6 +790,20 @@ final class RecordingModel: ObservableObject {
     func enterOverview() {
         route = "Overview"
         enqueue(refresh: false)
+    }
+
+    func navigate(to title: String) {
+        let wasComputer = route == "Computer"
+        if let component = RecordedComponent(rawValue: title) {
+            enterComponent(component)
+            if wasComputer, component != .cpu { enqueue(refresh: false) }
+        } else if title == "Memory" {
+            enterMemory()
+            if wasComputer { enqueue(refresh: false) }
+        } else if title == "Apps" { enterApps() }
+        else if title == "Overview" { enterOverview() }
+        else if title == "Recorded readings" { enterRawReadings() }
+        else { route = title }
     }
 
     func enterApps() {

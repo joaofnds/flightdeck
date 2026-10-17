@@ -3,6 +3,7 @@ import SwiftUI
 struct Console: View {
     @EnvironmentObject private var model: RecordingModel
     @EnvironmentObject private var collector: LiveCollectorSession
+    @EnvironmentObject private var computer: ComputerInventoryModel
     @Environment(\.flightdeckTheme) private var theme
 
     var body: some View {
@@ -17,6 +18,8 @@ struct Console: View {
                 navigation("GPU", icon: "square.3.layers.3d")
                 navigation("Energy", icon: "bolt")
                 navigation("Network", icon: "network")
+                Divider().padding(.vertical, theme.panelGap)
+                navigation("Computer", icon: "laptopcomputer")
                 if !model.isLiveSource || model.route == "Recorded readings" {
                     navigation("Recorded readings", icon: "chart.xyaxis.line")
                 }
@@ -37,69 +40,73 @@ struct Console: View {
                 Divider().overlay(theme.border)
                 ScrollView {
                     VStack(alignment: .leading, spacing: theme.sectionGap) {
-                        ForEach(model.readerLossNotices, id: \.self) { notice in
-                            Label(notice, systemImage: "exclamationmark.triangle")
-                                .font(.callout).foregroundStyle(theme.warning)
-                        }
-                        if case .starting = collector.state, model.isLiveSource {
-                            ContentUnavailableView {
-                                Label("Starting live metrics", systemImage: "waveform.path.ecg")
-                            } description: {
-                                Text("Connecting to the collector. Readings appear as they arrive.")
-                            }
-                        } else if case .failed(let message) = collector.state, model.isLiveSource {
-                            ContentUnavailableView {
-                                Label("Live metrics unavailable", systemImage: "exclamationmark.triangle")
-                            } description: { Text(message) }
-                            actions: {
-                                Button("Retry") {
-                                    collector.retry()
-                                    model.setLive(true)
-                                }
-                            }
-                        } else if let error = model.error {
-                            ContentUnavailableView {
-                                Label(model.isLiveSource ? "Live metrics unavailable" : "Recording unavailable",
-                                    systemImage: "externaldrive.badge.exclamationmark")
-                            } description: { Text(error) }
-                            actions: {
-                                if model.isLiveSource {
-                                    Button("Retry") { model.setLive(true) }
-                                } else {
-                                    Button("Choose a recording…", action: model.open)
-                                }
-                            }
-                        } else if model.catalog?.lastSecond == nil, !model.busy {
-                            ContentUnavailableView("No saved timestamps", systemImage: "clock.badge.questionmark",
-                                description: Text("Choose a recording with committed, timestamped ticks. Unknown-clock history cannot be assigned to a guessed second."))
+                        if model.route == "Computer" {
+                            ComputerPane()
                         } else {
-                            if let losses = model.selection?.selected?.windowLosses, losses.hasLosses {
-                                Label("This window reports \(losses.publications) lost publications and \(losses.events) lost events" + (losses.unknown ? "; additional loss is unknown." : "."), systemImage: "exclamationmark.triangle")
+                            ForEach(model.readerLossNotices, id: \.self) { notice in
+                                Label(notice, systemImage: "exclamationmark.triangle")
                                     .font(.callout).foregroundStyle(theme.warning)
                             }
-                            if model.route == "Overview" { Dashboard() }
-                            if model.route == "Memory" { RecordedMemory() }
-                            if let component = RecordedComponent(rawValue: model.route) {
-                                RecordedComponentPane(component: component)
-                            }
-                            if model.route == "Apps" {
-                                LiveAppsPane(list: model.apps?.list, detail: model.apps?.detail,
-                                    history: model.apps.flatMap { reading in
-                                        guard let key = reading.key else { return nil }
+                            if case .starting = collector.state, model.isLiveSource {
+                                ContentUnavailableView {
+                                    Label("Starting live metrics", systemImage: "waveform.path.ecg")
+                                } description: {
+                                    Text("Connecting to the collector. Readings appear as they arrive.")
+                                }
+                            } else if case .failed(let message) = collector.state, model.isLiveSource {
+                                ContentUnavailableView {
+                                    Label("Live metrics unavailable", systemImage: "exclamationmark.triangle")
+                                } description: { Text(message) }
+                                actions: {
+                                    Button("Retry") {
+                                        collector.retry()
+                                        model.setLive(true)
+                                    }
+                                }
+                            } else if let error = model.error {
+                                ContentUnavailableView {
+                                    Label(model.isLiveSource ? "Live metrics unavailable" : "Recording unavailable",
+                                        systemImage: "externaldrive.badge.exclamationmark")
+                                } description: { Text(error) }
+                                actions: {
+                                    if model.isLiveSource {
+                                        Button("Retry") { model.setLive(true) }
+                                    } else {
+                                        Button("Choose a recording…", action: model.open)
+                                    }
+                                }
+                            } else if model.catalog?.lastSecond == nil, !model.busy {
+                                ContentUnavailableView("No saved timestamps", systemImage: "clock.badge.questionmark",
+                                    description: Text("Choose a recording with committed, timestamped ticks. Unknown-clock history cannot be assigned to a guessed second."))
+                            } else {
+                                if let losses = model.selection?.selected?.windowLosses, losses.hasLosses {
+                                    Label("This window reports \(losses.publications) lost publications and \(losses.events) lost events" + (losses.unknown ? "; additional loss is unknown." : "."), systemImage: "exclamationmark.triangle")
+                                        .font(.callout).foregroundStyle(theme.warning)
+                                }
+                                if model.route == "Overview" { Dashboard() }
+                                if model.route == "Memory" { RecordedMemory() }
+                                if let component = RecordedComponent(rawValue: model.route) {
+                                    RecordedComponentPane(component: component)
+                                }
+                                if model.route == "Apps" {
+                                    LiveAppsPane(list: model.apps?.list, detail: model.apps?.detail,
+                                        history: model.apps.flatMap { reading in
+                                            guard let key = reading.key else { return nil }
 
-                                        return reading.history?.view(key: key, theme: theme)
-                                    }, selectedKey: model.appKey,
-                                    selectedProcessGroup: model.appProcessGroup,
-                                    busy: model.busy, error: model.apps?.notice,
-                                    onSelectApp: model.selectApp,
-                                    onSelectProcessGroup: model.selectAppProcessGroup,
-                                    onAppsPage: model.pageApps, onMembersPage: model.pageAppMembers)
+                                            return reading.history?.view(key: key, theme: theme)
+                                        }, selectedKey: model.appKey,
+                                        selectedProcessGroup: model.appProcessGroup,
+                                        busy: model.busy, error: model.apps?.notice,
+                                        onSelectApp: model.selectApp,
+                                        onSelectProcessGroup: model.selectAppProcessGroup,
+                                        onAppsPage: model.pageApps, onMembersPage: model.pageAppMembers)
+                                }
+                                if !model.isLiveSource || model.route == "CPU & processes"
+                                    || model.route == "Recorded readings" {
+                                    RecordedReadings()
+                                }
+                                if model.route == "CPU & processes" { MachineContext() }
                             }
-                            if !model.isLiveSource || model.route == "CPU & processes"
-                                || model.route == "Recorded readings" {
-                                RecordedReadings()
-                            }
-                            if model.route == "CPU & processes" { MachineContext() }
                         }
                     }.padding(theme.contentPadding)
                 }
@@ -110,6 +117,8 @@ struct Console: View {
         .tint(theme.focus)
         .preferredColorScheme(.dark)
         .onAppear {
+            guard model.route != "Computer" else { return }
+
             if model.catalog == nil, model.error == nil, !model.busy { model.load() }
             else if model.route == "Overview", model.selection?.selected != nil {
                 model.enterOverview()
@@ -119,12 +128,7 @@ struct Console: View {
 
     private func navigation(_ title: String, icon: String) -> some View {
         Button {
-            if let component = RecordedComponent(rawValue: title) { model.enterComponent(component) }
-            else if title == "Apps" { model.enterApps() }
-            else if title == "Memory" { model.enterMemory() }
-            else if title == "Overview" { model.enterOverview() }
-            else if title == "Recorded readings" { model.enterRawReadings() }
-            else { model.route = title }
+            model.navigate(to: title)
         } label: {
             Label(title, systemImage: icon).font(theme.navigationFont)
                 .frame(maxWidth: .infinity, alignment: .leading).padding(11)
@@ -135,6 +139,25 @@ struct Console: View {
     }
 
     private var header: some View {
+        Group {
+            if model.route == "Computer" { computerHeader }
+            else { metricHeader }
+        }
+    }
+
+    private var computerHeader: some View {
+        HStack(spacing: theme.panelGap) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Computer").font(theme.titleFont)
+                Text("This Mac").font(.callout).foregroundStyle(theme.muted)
+            }
+            Spacer()
+            Button("Refresh computer information", action: computer.refresh)
+                .keyboardShortcut("r")
+        }.padding(.horizontal, 24).padding(.vertical, 18)
+    }
+
+    private var metricHeader: some View {
         HStack(spacing: 14) {
             VStack(alignment: .leading, spacing: 5) {
                 Text(model.route).font(theme.titleFont)
@@ -176,7 +199,14 @@ struct Console: View {
 
     private var footer: some View {
         HStack {
-            if model.isLiveSource {
+            if model.route == "Computer" {
+                Text("Current Mac · inventory read on demand")
+                Spacer()
+                if let snapshot = computer.snapshot {
+                    Text("Read " + snapshot.readAt.formatted(.dateTime.hour().minute().second()))
+                        .monospacedDigit()
+                }
+            } else if model.isLiveSource {
                 Text("Last 15 minutes")
                 Spacer()
                 if let observation = model.selection?.selected {

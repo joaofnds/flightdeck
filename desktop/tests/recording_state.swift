@@ -22,9 +22,24 @@ struct RecordingStateChecks {
             try omits_unrequested_raw_pages_without_poisoning_later_queries(
                 path: CommandLine.arguments[2])
             try reads_selected_fans_through_the_real_worker(path: CommandLine.arguments[2])
+            try polls_catalog_without_reusing_or_decoding_a_metric_projection(
+                path: CommandLine.arguments[2])
             return
         }
         precondition(CommandLine.arguments.count == 1, "Unknown native check arguments")
+        runComputerInventoryChecks()
+        completes_collector_startup_while_showing_computer_inventory()
+        polls_without_projecting_metrics_while_showing_computer_inventory()
+        keeps_discovering_the_collector_while_showing_computer_inventory()
+        preserves_paused_metric_identity_through_computer_inventory()
+        returns_from_computer_to_metric_destination("Memory", paused: false)
+        returns_from_computer_to_metric_destination("GPU", paused: false)
+        returns_from_computer_to_metric_destination("Energy", paused: false)
+        returns_from_computer_to_metric_destination("Network", paused: false)
+        returns_from_computer_to_metric_destination("Memory", paused: true)
+        returns_from_computer_to_metric_destination("GPU", paused: true)
+        returns_from_computer_to_metric_destination("Energy", paused: true)
+        returns_from_computer_to_metric_destination("Network", paused: true)
         try preserves_selected_fan_channels_and_measured_zero()
         rejects_a_fan_page_with_a_missing_channel()
         try preserves_absent_and_invalid_fan_measurements_as_unavailable()
@@ -719,6 +734,148 @@ struct RecordingStateChecks {
     }
 
     @MainActor
+    private static func polls_without_projecting_metrics_while_showing_computer_inventory() {
+        // Goal: inventory keeps ingestion active without decoding hidden chart projections.
+        // Method: enter Computer after a completed poll, then return to Overview.
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+        model.startLive()
+        reader.finishNext(catalog: computerCatalog(collectorPID: 42))
+        drainMainQueue()
+        let selected = model.selection?.selected
+        model.route = "Computer"
+
+        model.pollLive()
+
+        precondition(reader.readCount == 2)
+        precondition(model.following)
+        precondition(model.selection?.selected == selected)
+
+        precondition(reader.latestRequest?.catalogOnly == true)
+        reader.finishNext(result: ReadResult(catalog: computerCatalog(collectorPID: 42),
+            selection: nil, page: nil, machinePages: [:], unchanged: true))
+        drainMainQueue()
+
+        model.enterOverview()
+
+        precondition(reader.readCount == 3)
+        precondition(reader.latestRequest?.catalogOnly == false)
+        precondition(reader.latestRequest?.live == true)
+        precondition(reader.latestRequest?.target == nil)
+        reader.finishNext()
+        drainMainQueue()
+    }
+
+    @MainActor
+    private static func keeps_discovering_the_collector_while_showing_computer_inventory() {
+        // Goal: opening inventory during startup does not strand collector discovery.
+        // Method: poll from Computer before the catalog identifies its live producer.
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+        model.startLive()
+        reader.finishNext(catalog: computerCatalog(collectorPID: nil))
+        drainMainQueue()
+        model.route = "Computer"
+
+        model.pollLive()
+
+        precondition(reader.readCount == 2)
+        precondition(model.following)
+        reader.finishNext(catalog: computerCatalog(collectorPID: 42))
+        drainMainQueue()
+    }
+
+    private static func computerCatalog(collectorPID: UInt32?, publication: UInt64 = 9) -> Catalog {
+        Catalog(path: "/recording", firstSecond: 17, lastSecond: 17, windows: 0,
+            unknownClockTicks: 0, tables: ["ticks"], live: true, tailTicks: 1,
+            collectorCompleted: false, latestObservation: Observation(run: "run-0", boot: "boot",
+                publication: publication, runTick: publication, wallNs: 17_000_000_000,
+                windowLosses: nil), latestCollectorPid: collectorPID)
+    }
+
+    @MainActor
+    private static func completes_collector_startup_while_showing_computer_inventory() {
+        // Goal: inventory must not prevent the two-publication collector handshake.
+        // Method: enter Computer after the first identity, then deliver a later publication.
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+        var instant = 0.0
+        let collector = LiveCollectorSession(process: ControlledLiveCollector(),
+            pollingEnabled: false, now: { instant }, onFailure: { model.cancel() })
+        collector.start()
+        model.startLive()
+        reader.finishNext(catalog: computerCatalog(collectorPID: 42))
+        drainMainQueue()
+        collector.observe(identity: model.catalog!.latestObservation!.identity, collectorPID: 42,
+            collectorCompleted: false)
+        model.route = "Computer"
+
+        model.pollLive()
+
+        precondition(reader.readCount == 2)
+        reader.finishNext(result: ReadResult(catalog: computerCatalog(collectorPID: 42, publication: 10),
+            selection: nil, page: nil, machinePages: [:], unchanged: true))
+        drainMainQueue()
+        collector.observe(identity: model.catalog!.latestObservation!.identity, collectorPID: 42,
+            collectorCompleted: false)
+        instant = 21
+        collector.step()
+
+        precondition(collector.state == .running)
+        precondition(model.following)
+        precondition(reader.cancellations == 0)
+    }
+
+    @MainActor
+    private static func preserves_paused_metric_identity_through_computer_inventory() {
+        // Goal: viewing current inventory does not change a paused metric selection.
+        // Method: pause an observation, navigate through Computer, then request Overview.
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+        model.startLive()
+        reader.finishNext()
+        drainMainQueue()
+        model.setLive(false)
+        let selected = model.selection?.selected
+        model.route = "Computer"
+
+        model.pollLive()
+        model.enterOverview()
+
+        precondition(!model.following)
+        precondition(model.selection?.selected == selected)
+        precondition(reader.readCount == 2)
+        precondition(reader.latestRequest?.target == selected?.identity)
+        reader.finishNext()
+        drainMainQueue()
+    }
+
+    @MainActor
+    private static func returns_from_computer_to_metric_destination(_ title: String, paused: Bool) {
+        // Goal: every route-only resource requests its proper projection when leaving inventory.
+        // Method: use the same navigation action as the sidebar with the timer disabled.
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+        model.startLive()
+        reader.finishNext()
+        drainMainQueue()
+        if paused { model.setLive(false) }
+        let identity = model.selection?.selected?.identity
+        model.navigate(to: "Computer")
+
+        model.navigate(to: title)
+
+        precondition(model.route == title)
+        precondition(model.following == !paused)
+        precondition(reader.readCount == 2)
+        precondition(reader.latestRequest?.catalogOnly == false)
+        precondition(reader.latestRequest?.target == (paused ? identity : nil))
+        precondition(model.selection?.selected?.identity == identity)
+        reader.finishNext()
+        drainMainQueue()
+    }
+
+    @MainActor
     private static func cancels_failed_startup_polling_with_reference_visible_and_resumes_on_retry() {
         // No mounted view may be necessary for failure to stop the actual model's read loop.
         let reader = ControlledRecordingReader()
@@ -1265,6 +1422,34 @@ struct RecordingStateChecks {
         ReadRequest(path: path, second: nil, alternative: 0, table: 1, offset: 0,
             refresh: false, machineOffsets: [:], includeMachine: false,
             includePage: includePage, live: true, poll: true)
+    }
+
+    @MainActor
+    private static func polls_catalog_without_reusing_or_decoding_a_metric_projection(
+        path: String
+    ) throws {
+        // Goal: inventory polls ingest publications without decoding any hidden metric payload.
+        // Method: alternate catalog-only and chart requests through the real worker.
+        let reader = RecordingWorker()
+        let chart = try nativeRead(reader, request: rawPageRequest(path: path, includePage: false))
+        let inventory = ReadRequest(path: path, second: nil, alternative: 0, table: 1, offset: 0,
+            refresh: false, machineOffsets: [:], includeMachine: true, includePage: true,
+            includeFans: true, live: true, poll: true, catalogOnly: true)
+
+        let result = try nativeRead(reader, request: inventory)
+
+        precondition(result.catalog.latestObservation == chart.catalog.latestObservation)
+        precondition(result.selection == nil)
+        precondition(result.page == nil)
+        precondition(result.machinePages.isEmpty)
+        precondition(result.fans == nil)
+        precondition(result.apps == nil)
+        precondition(result.unchanged)
+        let restored = try nativeRead(reader,
+            request: rawPageRequest(path: path, includePage: false))
+        precondition(!restored.unchanged)
+        precondition(restored.selection?.selected?.identity == chart.selection?.selected?.identity)
+        print("Real RecordingWorker inventory polls keep catalog ingestion and omit hidden projections")
     }
 
     @MainActor
