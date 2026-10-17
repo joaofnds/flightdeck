@@ -31,8 +31,9 @@ impl Encoder {
             SET autoload_known_extensions=false;",
         )?;
         let mut tables = Vec::with_capacity(TABLES.len());
-        for (table, columns, order) in TABLES {
+        for (table, _columns, order) in TABLES {
             let name = table.name();
+            let columns = table_columns(table, window);
             connection.execute_batch(&format!("CREATE TABLE {name} ({columns})"))?;
             append(&connection, table, window)?;
             let count: u64 =
@@ -70,9 +71,27 @@ pub fn append(connection: &Connection, table: Table, window: &Window) -> Result<
             Table::GpuStates => append_gpu(&mut appender, tick)?,
             Table::CoreStates => append_cores(&mut appender, tick)?,
             Table::Fans => append_fans(&mut appender, tick)?,
-            Table::Processes => append_processes(&mut appender, tick)?,
+            Table::Processes => match (&tick.identities, &window.programs) {
+                (Some(identities), Some(programs)) => crate::identity_encoder::append_processes(
+                    &mut appender,
+                    tick,
+                    identities,
+                    programs,
+                )?,
+                (None, None) => append_processes(&mut appender, tick)?,
+                _ => unreachable!("consistent window identity mode"),
+            },
             Table::Coalitions => append_coalitions(&mut appender, tick)?,
-            Table::Events => append_events(&mut appender, tick)?,
+            Table::Events => match (&tick.identities, &window.programs) {
+                (Some(identities), Some(programs)) => crate::identity_encoder::append_events(
+                    &mut appender,
+                    tick,
+                    identities,
+                    programs,
+                )?,
+                (None, None) => append_events(&mut appender, tick)?,
+                _ => unreachable!("consistent window identity mode"),
+            },
         }
     }
     appender.flush()?;
@@ -306,4 +325,26 @@ fn append_events(appender: &mut duckdb::Appender<'_>, tick: &StagedTick) -> Resu
         ])?;
     }
     Ok(())
+}
+
+/// The complete encoder-owned definition for this window's optional extensions.
+#[must_use]
+pub fn table_columns(table: Table, window: &Window) -> String {
+    let Some((_, columns, _)) = TABLES.iter().find(|entry| entry.0.name() == table.name()) else {
+        unreachable!("every table has a schema");
+    };
+
+    let mut columns = (*columns).to_owned();
+    if window.programs.is_some() {
+        if matches!(table, Table::Processes | Table::Events) {
+            for (name, kind) in crate::schema::IDENTITY_FIELDS {
+                columns.push_str(", ");
+                columns.push_str(name);
+                columns.push(' ');
+                columns.push_str(kind);
+            }
+        }
+    }
+
+    columns
 }

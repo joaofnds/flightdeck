@@ -211,6 +211,7 @@ mod tests {
             fixture::window(false).identity,
             Limits::from_shape(&shape).unwrap(),
         );
+        let before = window.staged_bytes();
 
         let refused = window.push_tick(
             &Observation {
@@ -228,7 +229,7 @@ mod tests {
             Err(persistence::Error::Bound("tick section rows"))
         ));
         assert_eq!(window.tick_count(), 0);
-        assert_eq!(window.staged_bytes(), 0);
+        assert_eq!(window.staged_bytes(), before);
     }
 
     #[test]

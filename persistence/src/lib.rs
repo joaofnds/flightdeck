@@ -1,8 +1,10 @@
 //! Bounded, separate-process persistence of the collector's published measurements.
 mod encoder;
 mod identity;
+mod identity_encoder;
 pub mod layout;
 mod metadata;
+mod owned_identity;
 pub mod query;
 mod reader;
 pub mod resources;
@@ -11,11 +13,13 @@ mod store;
 mod window;
 pub mod worker;
 
+pub use owned_identity::IdentitySource;
+
 pub use metadata::{Losses, Manifest, TimeBounds};
 pub use reader::{require_numeric_source, tick_buffer};
 pub use store::{Begin, CommitBoundary, PendingWindow, Store, ownership_contended, read_committed};
 
-pub use encoder::{Encoder, TableManifest, append};
+pub use encoder::{Encoder, TableManifest, append, table_columns};
 pub use schema::SCHEMA_VERSION;
 pub use window::{Limits, NumberedEvent, Observation, Window, WindowIdentity};
 

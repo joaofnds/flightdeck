@@ -37,7 +37,7 @@ pub enum UsageAvailability {
 /// A key belongs to its exact creating writer or decoding reader handle.
 /// Copy bytes through that same reader before dropping it. Reopening the same ring
 /// assigns a new owner; references never transfer between handles or processes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ProgramReference {
     generation: u64,
     identity: [u64; 6],

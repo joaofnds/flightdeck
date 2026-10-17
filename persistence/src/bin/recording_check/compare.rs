@@ -6,6 +6,7 @@ use collector::recording::discovery::Selection;
 use collector::ring::{Identity, RunIdentity};
 use duckdb::types::ValueRef;
 use persistence::layout::{self, DirectoryNames, Kind, WindowLocation};
+use persistence::schema::Table;
 use persistence::{Error, Manifest, Result, read_committed};
 
 use super::rows::{Row, TABLES};
@@ -46,7 +47,8 @@ pub fn run(root: &Path, reference: &Path) -> Result<()> {
     }
     println!(
         "verified {} publications and {rows} typed rows across {} immutable windows; \
-        all source fields, events, availability and float bits match",
+        original schema-1 source columns, events, availability and float bits match; \
+        identity metadata requires separate fidelity",
         source.publications,
         manifests.len()
     );
@@ -217,21 +219,15 @@ fn compare_table(
     table: &str,
     order: &str,
 ) -> Result<u64> {
-    let files: Vec<_> = manifests
+    let (schema, _, _) = persistence::schema::TABLES
         .iter()
-        .map(|manifest| {
-            let path = root
-                .join(&manifest.data_directory)
-                .join(format!("{table}.parquet"));
-            persistence::query::parquet_source(&path).map(|path| format!("'{path}'"))
-        })
-        .collect::<Result<_>>()?;
+        .find(|entry| entry.0.name() == table)
+        .ok_or(bound("reference table"))?;
+    let numeric = compare_table_numeric_source(connection, root, manifests, *schema)?;
     let sql = format!(
-        "SELECT * FROM read_parquet([{}]) WHERE publication>={} \
+        "SELECT * FROM ({numeric}) WHERE publication>={} \
         AND publication<={} ORDER BY {order}",
-        files.join(","),
-        source.first,
-        source.newest
+        source.first, source.newest
     );
     let mut statement = connection.prepare(&sql)?;
     let mut actual = statement.query([])?;
@@ -276,6 +272,39 @@ fn compare_table(
     }
     println!("{table}: {count} exact rows");
     Ok(count)
+}
+
+fn compare_table_numeric_source(
+    connection: &duckdb::Connection,
+    root: &Path,
+    manifests: &[Manifest],
+    table: Table,
+) -> Result<String> {
+    assert!(manifests.len() <= 128);
+    let columns = table.columns().collect::<Vec<_>>().join(",");
+    let mut sources = Vec::with_capacity(manifests.len());
+
+    for manifest in manifests {
+        let path = root
+            .join(&manifest.data_directory)
+            .join(format!("{}.parquet", table.name()));
+        let source = persistence::query::table_source(
+            connection,
+            table,
+            persistence::query::TableSource::Parquet(&path),
+        )?;
+        let measured = if matches!(table, Table::Processes) {
+            format!(
+                " WHERE usage_availability={}",
+                persistence::schema::availability::MEASURED
+            )
+        } else {
+            String::new()
+        };
+        sources.push(format!("SELECT {columns} FROM {source}{measured}"));
+    }
+
+    Ok(sources.join(" UNION ALL "))
 }
 
 fn value(target: &mut Row<'_, Vec<u8>>, value: ValueRef<'_>) -> Result<()> {

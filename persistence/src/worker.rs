@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use collector::processes::{self, Unreadable};
 use collector::recording::{RegisteredRun, Registry};
-use collector::ring::{Found, FoundEvent, RingReader, RunIdentity, Tick};
+use collector::ring::{Found, FoundEvent, IdentityObservation, RingReader, RunIdentity, Tick};
 use collector::tracker::Event;
 
 use crate::resources::{WORKING_BYTES_MAX, Watchdog};
@@ -353,7 +353,6 @@ fn persist_one_open(
         }
         Err(error) => return Err(error.into()),
     };
-    crate::require_numeric_source(&reader)?;
     if let Some(identity) = reader.identity() {
         if identity != registered.identity {
             source_unavailable(registered, state, "registered identity mismatch");
@@ -391,63 +390,128 @@ fn stage_window(
     losses: &mut Losses,
 ) -> Result<Window> {
     let mut window = Window::new(identity, limits);
+    let captured = reader.dictionary_capacity().is_some();
+    let mut identities = Vec::with_capacity(if captured { limits.processes } else { 0 });
+
     for _step in 0..=reader.shape().slot_count {
-        match reader.read_into(tick)? {
+        let found = if captured {
+            reader.read_identity_into(tick, &mut identities)?
+        } else {
+            reader.read_into(tick)?
+        };
+        match found {
             Found::Nothing => break,
             Found::Missed { first, end } => losses.publications += end - first,
             Found::Publication { publication, .. } => {
                 if window_number(reader, tick)? != identity.window {
                     break;
                 }
-                let events = read_events(reader, tick, losses)?;
-                let numbered: Vec<_> = events
-                    .iter()
-                    .map(|(number, run_tick, event)| NumberedEvent {
-                        number: *number,
-                        tick: *run_tick,
-                        event,
-                    })
-                    .collect();
+
+                let mut events = ReadEvents {
+                    records: Vec::new(),
+                    identities: Vec::new(),
+                };
+                read_events(reader, tick, losses, &mut events)?;
+                let numbered = stage_window_numbered(&events);
                 let observation = Observation {
                     publication,
                     wall_ns: tick.times.map(|times| times.wall_ns),
                     continuous_ns: tick.times.map(|times| times.continuous_ns),
                     awake_ns: tick.times.map(|times| times.awake_ns),
                 };
-                window.push_tick(&observation, tick, &numbered)?;
+
+                if captured {
+                    window.push_tick_with_identity(
+                        &observation,
+                        tick,
+                        &numbered,
+                        &crate::IdentitySource {
+                            reader,
+                            processes: &identities,
+                            events: &events.identities,
+                        },
+                    )?;
+                } else {
+                    window.push_tick(&observation, tick, &numbered)?;
+                }
             }
         }
     }
+
     Ok(window)
+}
+
+struct ReadEvents {
+    records: Vec<(u64, u64, Event)>,
+    identities: Vec<IdentityObservation>,
+}
+
+fn stage_window_numbered(events: &ReadEvents) -> Vec<NumberedEvent<'_>> {
+    events
+        .records
+        .iter()
+        .map(|(number, run_tick, event)| NumberedEvent {
+            number: *number,
+            tick: *run_tick,
+            event,
+        })
+        .collect()
 }
 
 fn read_events(
     reader: &mut RingReader,
     tick: &Tick,
     losses: &mut Losses,
-) -> Result<Vec<(u64, u64, Event)>> {
-    let mut events = Vec::new();
+    events: &mut ReadEvents,
+) -> Result<()> {
+    let count = tick
+        .events
+        .end
+        .checked_sub(tick.events.start)
+        .ok_or(crate::Error::Bound("tick event rows"))?;
+    let count = usize::try_from(count).map_err(|_| crate::Error::Bound("tick event rows"))?;
+    if count > collector::tracker::EVENTS_PER_TICK_MAX {
+        return Err(crate::Error::Bound("tick event rows"));
+    }
+
+    let captured = reader.dictionary_capacity().is_some();
+
+    events.records = Vec::with_capacity(count);
+    events.identities = Vec::with_capacity(if captured { count } else { 0 });
     reader.seek_event(tick.events.start)?;
     let bound = reader.shape().event_capacity + 1;
     for _step in 0..bound {
         if reader.next_event() >= tick.events.end {
-            return Ok(events);
+            return Ok(());
         }
-        match reader.read_event()? {
+
+        let mut identity = IdentityObservation::EMPTY;
+        let found = if captured {
+            reader.read_event_identity(&mut identity)?
+        } else {
+            reader.read_event()?
+        };
+        match found {
             FoundEvent::Event {
                 number,
                 tick,
                 event,
-            } => events.push((number, tick, event)),
+            } => {
+                events.records.push((number, tick, event));
+                if captured {
+                    events.identities.push(identity);
+                }
+            }
             FoundEvent::Missed { first, end } => {
                 losses.events += end.min(tick.events.end).saturating_sub(first);
             }
             FoundEvent::Nothing => {
                 losses.events += tick.events.end.saturating_sub(reader.next_event());
-                return Ok(events);
+                return Ok(());
             }
         }
     }
+
     Err(crate::Error::Bound("event scan"))
 }
 
@@ -643,11 +707,12 @@ mod tests {
     }
 
     #[test]
-    fn refuses_identity_sources_before_numeric_only_staging() {
-        // Goal: the legacy worker must not retire a source whose identity it would discard.
-        // Method: open an empty v4 source and assert hard refusal with its state untouched.
+    fn seals_readable_identity_with_refused_usage_through_the_worker() {
+        // Goal: the worker seals readable identity without inventing refused usage.
+        // Method: publish a real v4 source, drain one window and query its committed row.
         let root = Directory::new();
-        let mut registered = registered(Identity([1, 2]));
+        let store = Store::open(&root.0).unwrap();
+        let mut registered = registered(store.recording());
         let place = collector::ring::Place {
             lock_path: root.0.join("ring.lock"),
             name_prefix: format!("/fdworker{}", std::process::id()),
@@ -663,7 +728,7 @@ mod tests {
             coalition_capacity: 1,
             event_capacity: 1,
         };
-        let writer = collector::ring::Writer::create_with_identity(
+        let mut writer = collector::ring::Writer::create_with_identity(
             &place,
             shape,
             collector::ring::DictionaryCapacity {
@@ -675,17 +740,152 @@ mod tests {
         )
         .unwrap();
         registered.ring_name = writer.name().to_owned();
+        publish_readable_identity(&mut writer);
+        writer.finish();
         let mut state = RunState::default();
 
-        let result = persist_one_open(&registered, &mut state);
+        let result = persist_one(&store, &Encoder, &registered, true, &mut state);
 
         collector::ring::unlink_generation(writer.name()).unwrap();
-        assert!(matches!(
-            result,
-            Err(crate::Error::Bound("identity source preservation"))
-        ));
-        assert_eq!(state.source, SourceState::default());
-        assert_eq!(state.next_publication, 0);
+        assert!(matches!(result.unwrap(), Progress::Sealed));
+        assert_eq!(state.next_publication, 2);
+        assert_saved_identity(&root, &store, &registered.identity);
+    }
+
+    fn publish_readable_identity(writer: &mut collector::ring::Writer) {
+        use collector::ring::{IdentityObservation, IdentityPublication};
+        let mut process = IdentityObservation::EMPTY;
+        publish_readable_identity_process(writer, &mut process);
+        let memory = collector::machine::Memory::default();
+        let events = [Event::Start {
+            pid: 41,
+            coalition: None,
+        }];
+        let readings = collector::ring::Readings {
+            run_tick: 1,
+            cpus: &[],
+            memory: &memory,
+            interfaces: &[],
+            ioreport: None,
+            smc: None,
+            processes: &[],
+            processes_refused: 1,
+            processes_gone: 0,
+            coalitions: &[],
+            events: &events,
+            dropped: collector::ring::Dropped::default(),
+        };
+
+        writer
+            .publish_with_identity(
+                &readings,
+                Some(&collector::ring::ObservationTimes {
+                    wall_ns: 1_000_000_000_000,
+                    continuous_ns: 1,
+                    awake_ns: 1,
+                }),
+                &IdentityPublication {
+                    processes: &[process],
+                    events: &[IdentityObservation {
+                        usage: collector::ring::UsageAvailability::NotApplicable,
+                        ..process
+                    }],
+                },
+            )
+            .unwrap();
+    }
+
+    fn publish_readable_identity_process(
+        writer: &mut collector::ring::Writer,
+        process: &mut IdentityObservation,
+    ) {
+        let mut program = None;
+        writer
+            .intern_program(
+                &collector::ring::ProgramBytes {
+                    executable_name: b"worker\xff",
+                    app_path: Some(b"/A.app"),
+                },
+                &mut program,
+            )
+            .unwrap();
+        process.pid = 41;
+        process.usage = collector::ring::UsageAvailability::Refused;
+        process.identity = collector::ring::ProcessIdentity::Measured {
+            creation: collector::ring::ProcessCreation {
+                unique_id: u64::MAX,
+                pid_version: i32::MIN,
+            },
+            program: program.unwrap(),
+        };
+    }
+
+    fn assert_saved_identity(root: &Directory, store: &Store, run: &RunIdentity) {
+        let manifest = store
+            .existing(&WindowIdentity {
+                run: *run,
+                window: 0,
+            })
+            .unwrap()
+            .unwrap();
+        let connection = duckdb::Connection::open_in_memory().unwrap();
+        let path = root
+            .0
+            .join(&manifest.data_directory)
+            .join("processes.parquet");
+        let source = crate::query::table_source(
+            &connection,
+            crate::schema::Table::Processes,
+            crate::query::TableSource::Parquet(&path),
+        )
+        .unwrap();
+        let row: (i32, u64, i32, Vec<u8>, Option<u64>, u8) = connection
+            .query_row(
+                &format!(
+                    "SELECT pid,process_unique_id,pid_version,executable_name, \
+                    resident_bytes,usage_availability FROM {source}"
+                ),
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            (41, u64::MAX, i32::MIN, b"worker\xff".to_vec(), None, 1),
+            row
+        );
+        let event_path = root.0.join(&manifest.data_directory).join("events.parquet");
+        assert_saved_identity_event(&connection, &event_path);
+    }
+
+    fn assert_saved_identity_event(connection: &duckdb::Connection, path: &Path) {
+        let events = crate::query::table_source(
+            connection,
+            crate::schema::Table::Events,
+            crate::query::TableSource::Parquet(path),
+        )
+        .unwrap();
+        let event: (u64, i32, Vec<u8>, u8) = connection
+            .query_row(
+                &format!(
+                    "SELECT process_unique_id,pid_version,executable_name, \
+                    usage_availability FROM {events}"
+                ),
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+
+        assert_eq!((u64::MAX, i32::MIN, b"worker\xff".to_vec(), 3), event);
     }
 
     #[test]

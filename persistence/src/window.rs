@@ -5,6 +5,7 @@ use collector::processes::Usage;
 use collector::ring::{Dropped, RunIdentity, Shape, Tick};
 use collector::tracker::{Event, Noticed};
 
+use crate::owned_identity::{IdentitySource, OwnedIdentity, Prepared, Programs, usage_code};
 use crate::{Error, Result};
 
 /// One elapsed-minute identity, independent of wall-clock changes.
@@ -51,6 +52,7 @@ pub struct Window {
     pub(crate) limits: Limits,
     pub(crate) ticks: Vec<StagedTick>,
     bytes: u64,
+    pub(crate) programs: Option<Box<Programs>>,
 }
 
 pub(crate) struct StagedTick {
@@ -75,6 +77,12 @@ pub(crate) struct StagedTick {
     pub events_end: u64,
     pub dropped: Dropped,
     pub events: Vec<EventRecord>,
+    pub identities: Option<IdentityRows>,
+}
+
+pub(crate) struct IdentityRows {
+    pub processes: Vec<OwnedIdentity>,
+    pub events: Vec<OwnedIdentity>,
 }
 
 pub(crate) struct EventRecord {
@@ -128,7 +136,10 @@ impl Window {
             identity,
             limits,
             ticks: Vec::with_capacity(WINDOW_TICKS_MAX),
-            bytes: 0,
+            bytes: collector::u64_from_usize(
+                size_of::<Self>() + WINDOW_TICKS_MAX * size_of::<StagedTick>(),
+            ),
+            programs: None,
         }
     }
 
@@ -140,6 +151,12 @@ impl Window {
     #[must_use]
     pub fn staged_bytes(&self) -> u64 {
         self.bytes
+    }
+
+    /// Owned raw-byte occupancy; descriptor/index reservations are in `staged_bytes`.
+    #[must_use]
+    pub fn identity_program_usage(&self) -> Option<collector::ring::DictionaryUsage> {
+        self.programs.as_ref().map(|programs| programs.usage())
     }
 
     pub fn observations(&self) -> impl Iterator<Item = &Observation> {
@@ -170,7 +187,12 @@ impl Window {
         tick: &Tick,
         events: &[NumberedEvent<'_>],
     ) -> Result<()> {
+        if self.programs.is_some() {
+            return Err(Error::Bound("mixed window identity mode"));
+        }
+
         self.push_tick_validate(observation, tick, events)?;
+
         let bytes = staging_bytes(tick, events.len());
         let total = self
             .bytes
@@ -179,8 +201,129 @@ impl Window {
         if total > 768 * 1024 * 1024 {
             return Err(Error::Bound("staging bytes"));
         }
+
         self.ticks.push(StagedTick::copy(observation, tick, events));
         self.bytes = total;
+
+        Ok(())
+    }
+
+    /// Retains identity bytes while their exact decoding reader is still alive.
+    /// A refusal leaves all accepted ticks, dictionary bytes and accounting unchanged.
+    pub fn push_tick_with_identity(
+        &mut self,
+        observation: &Observation,
+        tick: &Tick,
+        events: &[NumberedEvent<'_>],
+        source: &IdentitySource<'_>,
+    ) -> Result<()> {
+        if self.programs.is_none() {
+            if !self.ticks.is_empty() {
+                return Err(Error::Bound("mixed window identity mode"));
+            }
+        }
+
+        self.push_tick_validate(observation, tick, events)?;
+        self.push_tick_validate_identity(tick, events, source)?;
+
+        let row_bytes = (source.processes.len() + source.events.len()) * size_of::<OwnedIdentity>();
+        let dictionary_bytes = if self.programs.is_none() {
+            Programs::allocation_bytes()
+        } else {
+            0
+        };
+        let total = self.bytes
+            + staging_bytes(tick, events.len())
+            + collector::u64_from_usize(row_bytes + dictionary_bytes);
+        let peak = total + collector::u64_from_usize(Prepared::peak_bytes(source));
+        if peak > 768 * 1024 * 1024 {
+            return Err(Error::Bound("staging bytes"));
+        }
+
+        let mut prepared = None;
+        Prepared::initialize(&mut prepared, source, self.programs.as_deref())?;
+        let Some(prepared) = prepared else {
+            unreachable!("successful identity preparation initializes output");
+        };
+
+        let mut staged = StagedTick::copy(observation, tick, events);
+        if self.programs.is_none() {
+            Programs::initialize(&mut self.programs);
+        }
+        let Some(programs) = self.programs.as_mut() else {
+            unreachable!("identity dictionary initialized before commit");
+        };
+
+        programs.commit(&prepared);
+        staged.identities = Some(IdentityRows {
+            processes: prepared.processes,
+            events: prepared.events,
+        });
+        self.ticks.push(staged);
+        self.bytes = total;
+
+        Ok(())
+    }
+
+    fn push_tick_validate_identity(
+        &self,
+        tick: &Tick,
+        events: &[NumberedEvent<'_>],
+        source: &IdentitySource<'_>,
+    ) -> Result<()> {
+        if source.reader.source_layout_version() != 4 {
+            return Err(Error::Bound("identity source layout"));
+        }
+
+        if source.reader.identity() != Some(self.identity.run) {
+            return Err(Error::Bound("identity source run"));
+        }
+
+        if source.processes.len() > self.limits.processes {
+            return Err(Error::Bound("identity process rows"));
+        }
+
+        if source.events.len() != events.len() {
+            return Err(Error::Bound("identity event rows"));
+        }
+
+        self.push_tick_validate_identity_rows(source)?;
+        push_tick_validate_identity_processes(tick, source.processes)?;
+
+        for (identity, event) in source.events.iter().zip(events) {
+            let numeric = EventRecord::copy(event);
+            if identity.pid != numeric.pid {
+                return Err(Error::Bound("identity event pid"));
+            }
+
+            if usage_code(identity.usage) != numeric.availability {
+                return Err(Error::Bound("identity event usage"));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn push_tick_validate_identity_rows(&self, source: &IdentitySource<'_>) -> Result<()> {
+        let mut processes = collector::u64_from_usize(source.processes.len());
+        let mut events = collector::u64_from_usize(source.events.len());
+        for tick in &self.ticks {
+            let Some(identities) = &tick.identities else {
+                unreachable!("consistent window identity mode");
+            };
+
+            processes += collector::u64_from_usize(identities.processes.len());
+            events += collector::u64_from_usize(identities.events.len());
+        }
+
+        if processes > crate::schema::IDENTITY_ROWS_MAX {
+            return Err(Error::Bound("process identity rows"));
+        }
+
+        if events > crate::schema::IDENTITY_ROWS_MAX {
+            return Err(Error::Bound("process identity rows"));
+        }
+
         Ok(())
     }
 
@@ -292,13 +435,13 @@ impl StagedTick {
             events_end: tick.events.end,
             dropped: tick.dropped,
             events: events.iter().map(EventRecord::copy).collect(),
+            identities: None,
         }
     }
 }
 
 fn staging_bytes(tick: &Tick, event_count: usize) -> u64 {
-    let mut bytes = size_of::<StagedTick>()
-        + tick.cpus.len() * size_of::<CPUTicks>()
+    let mut bytes = tick.cpus.len() * size_of::<CPUTicks>()
         + tick.interfaces.len() * size_of::<Interface>()
         + tick.gpu_active_ns.len() * 8
         + tick.fan_rpm.len() * 4
@@ -362,4 +505,55 @@ impl EventRecord {
             noticed,
         }
     }
+}
+
+fn push_tick_validate_identity_processes(
+    tick: &Tick,
+    identities: &[collector::ring::IdentityObservation],
+) -> Result<()> {
+    use collector::ring::UsageAvailability;
+    let mut measured = 0;
+    let mut refused = 0;
+    let mut gone = 0;
+    let mut previous = None;
+
+    for identity in identities {
+        if let Some(previous) = previous {
+            if identity.pid <= previous {
+                return Err(Error::Bound("identity process order"));
+            }
+        }
+
+        previous = Some(identity.pid);
+        match identity.usage {
+            UsageAvailability::Measured => {
+                let Some(process) = tick.processes.get(measured) else {
+                    return Err(Error::Bound("identity measured process"));
+                };
+
+                if process.pid != identity.pid {
+                    return Err(Error::Bound("identity measured pid"));
+                }
+
+                measured += 1;
+            }
+            UsageAvailability::Refused => refused += 1,
+            UsageAvailability::Gone => gone += 1,
+            UsageAvailability::NotApplicable => return Err(Error::Bound("identity process usage")),
+        }
+    }
+
+    if measured != tick.processes.len() {
+        return Err(Error::Bound("identity measured count"));
+    }
+
+    if refused != tick.processes_refused {
+        return Err(Error::Bound("identity refused count"));
+    }
+
+    if gone != tick.processes_gone {
+        return Err(Error::Bound("identity gone count"));
+    }
+
+    Ok(())
 }

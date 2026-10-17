@@ -1,11 +1,10 @@
 use duckdb::{Connection, types::ValueRef};
 
 use crate::schema::{
-    IDENTITY_FIELDS, IDENTITY_VERSION, Table, availability, identity_availability,
+    IDENTITY_FIELDS, IDENTITY_ROWS_MAX, IDENTITY_VERSION, Table, availability,
+    identity_availability,
 };
 use crate::{Error, Result};
-
-const ROWS_MAX: usize = 1_048_576;
 
 pub(crate) fn normalize(connection: &Connection, table: Table, source: &str) -> Result<String> {
     let mut statement = connection.prepare(&format!("DESCRIBE SELECT * FROM {source}"))?;
@@ -62,7 +61,7 @@ pub(crate) fn normalize(connection: &Connection, table: Table, source: &str) -> 
 }
 
 fn normalize_validate(connection: &Connection, table: Table, source: &str) -> Result<()> {
-    let maximum = ROWS_MAX + 1;
+    let maximum = IDENTITY_ROWS_MAX + 1;
     let payload = normalize_validate_payload(table);
     let availability = match table {
         Table::Events => "availability",
@@ -77,12 +76,12 @@ fn normalize_validate(connection: &Connection, table: Table, source: &str) -> Re
     ))?;
     let mut rows = statement.query([])?;
 
-    for index in 0..=ROWS_MAX {
+    for index in 0..=IDENTITY_ROWS_MAX {
         let Some(row) = rows.next()? else {
             return Ok(());
         };
 
-        if index == ROWS_MAX {
+        if index == IDENTITY_ROWS_MAX {
             return Err(Error::Bound("process identity rows"));
         }
 
