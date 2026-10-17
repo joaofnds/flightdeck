@@ -19,6 +19,23 @@ struct FlightdeckTheme {
     var networkSentSeries = Palette.purple
     var systemPowerSeries = Palette.orange
     var temperatureSeries = Palette.red
+    var airflowCool = Palette.blue
+    var airflowWarm = Color(red: 0.95, green: 0.80, blue: 0.05)
+    var airflowHot = Palette.red
+    var schematicMemory = Palette.green
+    var thermalNominal = Palette.green
+    var neutralSeries = Color(red: 0.56, green: 0.57, blue: 0.62)
+    var lightBlueSeries = Color(red: 0.54, green: 0.72, blue: 1.0)
+    var lightPurpleSeries = Color(red: 0.79, green: 0.58, blue: 0.90)
+    var chartPalette = [
+        Color(red: 0.45, green: 0.75, blue: 0.41),
+        Color(red: 0.95, green: 0.80, blue: 0.05),
+        Palette.blue, Palette.orange, Palette.red, Palette.purple,
+        Color(red: 0.22, green: 0.53, blue: 0.18),
+        Color(red: 0.88, green: 0.71, blue: 0.00),
+        Color(red: 0.12, green: 0.38, blue: 0.77),
+        Color(red: 0.76, green: 0.36, blue: 0.09)
+    ]
     var metricFont = Font.system(size: 25, weight: .semibold, design: .rounded)
     var tableFontSize: CGFloat = 12
     var tableTypeface: NSFont {
@@ -28,6 +45,13 @@ struct FlightdeckTheme {
     var titleFont = Font.system(size: 23, weight: .semibold)
     var navigationFont = Font.system(size: 13, weight: .medium)
     var brandFont = Font.system(size: 13, weight: .bold)
+    var chartAxisFont = Font.system(size: 10)
+    var chartSecondaryAxisFont = Font.system(size: 9)
+    var compactReadingFont = Font.system(size: 11)
+    var chartStateFont = Font.system(size: 12)
+    var readingFont = Font.system(size: 13)
+    var schematicLabelFont = Font.system(size: 11, weight: .medium)
+    var schematicValueFont = Font.system(size: 20, weight: .medium)
     var panelPadding: CGFloat = 18
     var contentPadding: CGFloat = 24
     var panelGap: CGFloat = 16

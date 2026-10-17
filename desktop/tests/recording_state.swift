@@ -6,6 +6,12 @@ import SwiftUI
 struct RecordingStateChecks {
     @MainActor
     static func main() throws {
+        if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--live-fixture" {
+            try reads_the_latest_real_publication_after_rollback_and_repetition(
+                path: CommandLine.arguments[2])
+            return
+        }
+        precondition(CommandLine.arguments.count == 1, "Unknown native check arguments")
         enters_processes_from_another_source()
         retains_refresh_after_a_later_selection()
         ignores_a_completed_stale_selection()
@@ -19,7 +25,208 @@ struct RecordingStateChecks {
         surfaces_a_failed_query_cancellation()
         try distinguishes_publications_from_different_runs_and_boots()
         applies_native_table_selection_values_and_theme_changes()
-        print("13 native recording state and table checks passed")
+        starts_live_without_building_a_poll_queue()
+        preserves_visible_readings_when_a_live_poll_is_unchanged()
+        keeps_live_tail_access_when_following_is_paused()
+        keeps_saved_recordings_on_the_existing_default_path()
+        reports_a_stale_collector_using_the_injected_clock()
+        freezes_a_pending_live_poll_when_following_is_paused()
+        reports_a_future_tick_clock_without_trusting_the_catalog_maximum()
+        reports_reader_losses_without_a_selected_tick()
+        opening_a_recording_exits_captured_reference_mode()
+        print("22 native recording state and table checks passed")
+        try runReferenceDataChecks()
+        runDashboardChecks()
+    }
+
+    @MainActor
+    private static func opening_a_recording_exits_captured_reference_mode() {
+        // Opening actual history must replace the captured-reference source on screen.
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/old", reader: reader, pollingEnabled: false,
+            showsReference: true)
+        model.chooseRecording(path: "/chosen")
+        precondition(!model.showsReference)
+        precondition(model.path == "/chosen")
+        precondition(reader.latestRequest?.path == "/chosen")
+        precondition(reader.latestRequest?.refresh == true)
+        reader.finishNext()
+        drainMainQueue()
+        precondition(model.selection?.second == 17)
+    }
+
+    @MainActor
+    private static func reads_the_latest_real_publication_after_rollback_and_repetition(
+        path: String
+    ) throws {
+        // Goal: the real bridge follows publication identity across repeated and older walls.
+        // Method: read the registered three-tick Rust fixture through RecordingWorker.
+        let reader = RecordingWorker()
+        let completion = NativeReadCompletion()
+        reader.read(ReadRequest(path: path, second: nil, alternative: 0, table: 1, offset: 0,
+            refresh: false, machineOffsets: [:], includeMachine: false, live: true)) {
+            result in completion.complete(result)
+        }
+        precondition(completion.ready.wait(timeout: .now() + 5) == .success,
+                     "Real recording worker exceeded five seconds")
+        guard let result = completion.take() else {
+            throw RecordingError(message: "Real recording worker returned no result")
+        }
+        let response = try result.get()
+
+        precondition(response.catalog.lastSecond == 1000)
+        guard response.selection?.second == 900 else {
+            throw RecordingError(message: "Worker chose the maximum wall second instead of 900")
+        }
+        guard response.selection?.selected?.publication == 3 else {
+            throw RecordingError(message: "Worker chose the default alternative instead of publication 3")
+        }
+        precondition(response.selection?.alternatives.map(\.publication) == [2, 3])
+        precondition(response.selection?.selected?.run == response.catalog.latestObservation?.run)
+        precondition(response.selection?.selected?.boot == response.catalog.latestObservation?.boot)
+        precondition(response.page?.observation.publication == 3)
+        precondition(response.page?.observation.wallNs == 900_000_000_000)
+        precondition(response.page?.rows == [["3", "333", "0", "0", "0", "0", "0", "0", "0",
+            "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0"]])
+        print("Real RecordingWorker rollback and repeated-second fixture passed")
+    }
+
+    @MainActor
+    private static func reports_reader_losses_without_a_selected_tick() {
+        // Catalog losses survive even when an overwrite leaves no selectable observation.
+        let model = RecordingModel(path: "/recording", reader: ControlledRecordingReader(), pollingEnabled: false)
+        model.catalog = Catalog(path: "/recording", firstSecond: nil, lastSecond: nil,
+            windows: 0, unknownClockTicks: 0, tables: [], live: true,
+            readerLosses: [ReaderLosses(run: "run", boot: "boot",
+                losses: Losses(publications: 7, events: 3, unknown: true))])
+        precondition(model.selection == nil)
+        precondition(model.readerLossNotices == ["Live reader · run run: 7 missed publications, 3 missed events; additional loss is unknown."])
+    }
+
+    @MainActor
+    private static func starts_live_without_building_a_poll_queue() {
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+
+        model.setLive(true)
+        model.pollLive()
+        model.pollLive()
+
+        precondition(model.following)
+        precondition(reader.readCount == 1)
+        precondition(reader.latestRequest?.live == true)
+        precondition(reader.latestRequest?.second == nil)
+        precondition(reader.cancellations == 0)
+        reader.finishNext()
+        drainMainQueue()
+        model.pollLive()
+        precondition(reader.readCount == 2)
+        precondition(reader.latestRequest?.poll == true)
+        reader.finishNext(unchanged: true)
+        drainMainQueue()
+    }
+
+    @MainActor
+    private static func preserves_visible_readings_when_a_live_poll_is_unchanged() {
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+        model.setLive(true)
+        reader.finishNext()
+        drainMainQueue()
+        model.row = 1
+
+        model.pollLive()
+        precondition(model.selection?.second == 17)
+        precondition(model.page != nil)
+        reader.finishNext(unchanged: true)
+        drainMainQueue()
+
+        precondition(model.selection?.second == 17)
+        precondition(model.page?.rows == [["1"], ["2"]])
+        precondition(model.row == 1)
+        precondition(!model.busy)
+    }
+
+    @MainActor
+    private static func keeps_live_tail_access_when_following_is_paused() {
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+        model.setLive(true)
+        reader.finishNext()
+        drainMainQueue()
+
+        model.setLive(false)
+        model.load(second: 16)
+        precondition(reader.latestRequest?.live == true)
+        reader.finishNext()
+        drainMainQueue()
+        model.pollLive()
+
+        precondition(!model.following)
+        precondition(model.selection?.second == 16)
+        precondition(reader.readCount == 2)
+    }
+
+    @MainActor
+    private static func keeps_saved_recordings_on_the_existing_default_path() {
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+
+        model.load()
+        reader.finishNext()
+        drainMainQueue()
+        model.pollLive()
+
+        precondition(!model.following)
+        precondition(reader.latestRequest?.live == false)
+        precondition(reader.readCount == 1)
+        precondition(model.liveStatus == "Recorded")
+    }
+
+    @MainActor
+    private static func reports_a_stale_collector_using_the_injected_clock() {
+        let reader = ControlledRecordingReader()
+        var instant = Date(timeIntervalSince1970: 17)
+        let model = RecordingModel(path: "/recording", reader: reader,
+            pollingEnabled: false, now: { instant })
+        model.setLive(true)
+        reader.finishNext()
+        drainMainQueue()
+        precondition(model.liveStatus == "Live")
+
+        instant = Date(timeIntervalSince1970: 21)
+
+        precondition(model.liveStatus == "Waiting for collector")
+    }
+
+    @MainActor
+    private static func freezes_a_pending_live_poll_when_following_is_paused() {
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+        model.setLive(true)
+        reader.finishNext()
+        drainMainQueue()
+        model.pollLive()
+
+        model.setLive(false)
+        reader.finishNext(second: 18)
+        drainMainQueue()
+
+        precondition(model.selection?.second == 17)
+        precondition(!model.following)
+        precondition(!model.busy)
+    }
+
+    @MainActor
+    private static func reports_a_future_tick_clock_without_trusting_the_catalog_maximum() {
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader,
+            pollingEnabled: false, now: { Date(timeIntervalSince1970: 10) })
+        model.setLive(true)
+        reader.finishNext()
+        drainMainQueue()
+
+        precondition(model.liveStatus == "Clock changed")
     }
 
     @MainActor
@@ -278,10 +485,25 @@ struct RecordingStateChecks {
     }
 }
 
+private final class NativeReadCompletion: @unchecked Sendable {
+    private let lock = NSLock()
+    private var result: Result<ReadResult, RecordingError>?
+    let ready = DispatchSemaphore(value: 0)
+
+    func complete(_ value: Result<ReadResult, RecordingError>) {
+        lock.withLock { result = value }
+        ready.signal()
+    }
+
+    func take() -> Result<ReadResult, RecordingError>? { lock.withLock { result } }
+}
+
 private final class ControlledRecordingReader: RecordingReading, @unchecked Sendable {
     private let lock = NSLock()
     private var pending: (ReadRequest, @Sendable (Result<ReadResult, RecordingError>) -> Void)?
     private var didRefresh = false
+    private var submitted: UInt64 = 0
+    private var mostRecent: ReadRequest?
     private var cancellationCount: UInt64 = 0
     private let cancellationFailure: RecordingError?
 
@@ -289,6 +511,8 @@ private final class ControlledRecordingReader: RecordingReading, @unchecked Send
         self.cancellationFailure = cancellationFailure
     }
 
+    var readCount: UInt64 { lock.withLock { submitted } }
+    var latestRequest: ReadRequest? { lock.withLock { mostRecent } }
     var cancellations: UInt64 { lock.withLock { cancellationCount } }
     var refreshed: Bool { lock.withLock { didRefresh } }
 
@@ -297,6 +521,8 @@ private final class ControlledRecordingReader: RecordingReading, @unchecked Send
         lock.withLock {
             precondition(pending == nil)
             pending = (request, completion)
+            submitted += 1
+            mostRecent = request
             didRefresh = didRefresh || request.refresh
         }
     }
@@ -308,7 +534,8 @@ private final class ControlledRecordingReader: RecordingReading, @unchecked Send
         }
     }
 
-    func finishNext(missingSecond: Bool = false) {
+    func finishNext(missingSecond: Bool = false, unchanged: Bool = false,
+                    second: UInt64? = nil) {
         let next = lock.withLock {
             precondition(pending != nil)
             let next = pending
@@ -316,22 +543,28 @@ private final class ControlledRecordingReader: RecordingReading, @unchecked Send
             return next
         }
         guard let (request, completion) = next else { preconditionFailure() }
-        completion(.success(response(request, missingSecond: missingSecond)))
+        let result = response(request, missingSecond: missingSecond, second: second)
+        completion(.success(ReadResult(catalog: result.catalog, selection: result.selection,
+            page: result.page, machinePages: result.machinePages, unchanged: unchanged)))
     }
 
-    private func response(_ request: ReadRequest, missingSecond: Bool) -> ReadResult {
+    private func response(_ request: ReadRequest, missingSecond: Bool,
+                          second: UInt64? = nil) -> ReadResult {
         let observations = (0..<2).map { index in
             Observation(run: "run-\(index)", boot: "boot", publication: 9, runTick: 9,
-                        wallNs: (request.second ?? 17) * 1_000_000_000,
+                        wallNs: (second ?? request.second ?? 17) * 1_000_000_000,
                         windowLosses: Losses(publications: 0, events: 0, unknown: false))
         }
         let observation = observations[Int(request.alternative)]
-        let selection = Selection(second: request.second ?? 17, selected: observation,
+        let selection = Selection(second: second ?? request.second ?? 17, selected: observation,
                                   alternatives: observations, summary: nil, trends: [],
                                   contextSeconds: 900)
         let tables = ["ticks", "memory", "cpus", "interfaces", "cores", "states", "events", "processes"]
-        let catalog = Catalog(path: request.path, firstSecond: 10, lastSecond: 17, windows: 1,
-                              unknownClockTicks: 0, tables: tables)
+        let catalog = Catalog(path: request.path, firstSecond: 10,
+                              lastSecond: request.live ? 99_999 : 17, windows: 1,
+                              unknownClockTicks: 0, tables: tables, live: request.live,
+                              tailTicks: request.live ? 1 : nil, collectorCompleted: false,
+                              latestObservation: request.live ? observation : nil)
         var machinePages: [MachineSource: TablePage] = [:]
         if request.includeMachine {
             for source in MachineSource.allCases {

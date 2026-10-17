@@ -68,17 +68,26 @@ cargo run --locked -p viewer --bin flightdeck -- --build
 open target/Flightdeck.app
 ```
 
-`--run --recording PATH` builds and starts it with an explicit saved recording. The default
-is the current user's `Library/Application Support/Flightdeck/flightdeck.recording`.
-The viewer opens existing files read-only and never starts a collector or repairs history.
-Open a recording directory from the File menu, then Refresh to discover newly sealed windows.
+Opening the app without arguments shows the captured prototype reference: eleven native
+views, shared time inspection, app/process drilldowns and the animated MacBook schematic.
+This mode uses bundled historical samples, clearly labelled as captured reference data.
+It does not describe the current Mac.
 
-Overview charts the 15 minutes ending at the selected saved second. Enter a Unix second,
-step one second, or inspect a chart. CPU/process inspection shares that selection.
-All ten recorded tables have 512-row pages and an exact-field row inspector. Repeated
-seconds retain separate run/publication alternatives. A missing second clears readings.
-Names and app identities are not in the current recording schema, so the app shows recorded
-PIDs and creation identities. Live following and the remaining prototype panes are later work.
+Choose **Flightdeck recording** in the data-source picker to inspect an actual recording.
+`--run --recording PATH` opens that mode directly. Its default directory is the current
+user's `Library/Application Support/Flightdeck/flightdeck.recording`. The viewer opens
+existing data read-only and never starts a collector or repairs history. Open a recording
+from the File menu. Refresh discovers newly sealed windows; **Live** follows the newest
+shared-memory ticks registered for that recording, including its unsealed tail. Pausing
+live following retains the tail for inspection.
+
+Recording mode currently provides Overview, CPU/process inspection and all ten recorded
+tables, with 512-row pages and an exact-field row inspector. Its charts cover the 15 minutes
+ending at the selected second. Enter a Unix second, step one second or inspect a chart.
+Repeated seconds retain separate run/publication alternatives. A missing second clears
+readings. Names and app identities are not yet in the recording schema, so this mode shows
+recorded PIDs and creation identities. The other reference views still need recording-backed
+sources; the captured reference is a presentation comparison, not full functional parity.
 
 The app uses native controls and drawing with no browser runtime. Theme tokens are shared
 across the dark UI and charts. The build uses optimized Swift and Rust, is

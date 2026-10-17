@@ -14,7 +14,7 @@ pub use metadata::{Losses, Manifest, TimeBounds};
 pub use reader::tick_buffer;
 pub use store::{Begin, CommitBoundary, PendingWindow, Store, ownership_contended, read_committed};
 
-pub use encoder::{Encoder, TableManifest};
+pub use encoder::{Encoder, TableManifest, append};
 pub use schema::SCHEMA_VERSION;
 pub use window::{Limits, NumberedEvent, Observation, Window, WindowIdentity};
 

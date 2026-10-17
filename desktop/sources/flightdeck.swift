@@ -15,12 +15,12 @@ struct Flightdeck: App {
             path = FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent("Library/Application Support/Flightdeck/flightdeck.recording").path
         }
-        _recording = StateObject(wrappedValue: RecordingModel(path: path))
+        _recording = StateObject(wrappedValue: RecordingModel(path: path, showsReference: !arguments.contains("--recording")))
     }
 
     var body: some Scene {
         WindowGroup {
-            Console().environmentObject(recording).environment(\.flightdeckTheme, FlightdeckTheme())
+            ApplicationConsole().environmentObject(recording).environment(\.flightdeckTheme, FlightdeckTheme())
                 .frame(minWidth: 840, minHeight: 640)
         }.defaultSize(width: 1320, height: 900)
         .commands {

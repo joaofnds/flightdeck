@@ -4,12 +4,47 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 
-use crate::{Cancellation, Session};
+use crate::{Cancellation, LiveSession, Session};
 
 const RESPONSE_BYTES_MAX: usize = 8 * 1024 * 1024;
 
 pub struct Handle {
-    session: persistence::Result<Session>,
+    session: persistence::Result<ViewedSession>,
+}
+
+enum ViewedSession {
+    Saved(Box<Session>),
+    Live(Box<LiveSession>),
+}
+
+impl ViewedSession {
+    fn begin(&mut self, epoch: u64) -> persistence::Result<()> {
+        match self {
+            Self::Saved(session) => session.begin(epoch),
+            Self::Live(session) => session.begin(epoch),
+        }
+    }
+
+    fn catalog(&self) -> Value {
+        match self {
+            Self::Saved(session) => session.catalog(),
+            Self::Live(session) => session.catalog(),
+        }
+    }
+
+    fn select(&mut self, second: u64, alternative: usize) -> persistence::Result<Value> {
+        match self {
+            Self::Saved(session) => session.select(second, alternative),
+            Self::Live(session) => session.select(second, alternative),
+        }
+    }
+
+    fn page(&self, name: &str, offset: u64) -> persistence::Result<Value> {
+        match self {
+            Self::Saved(session) => session.page(name, offset),
+            Self::Live(session) => session.page(name, offset),
+        }
+    }
 }
 
 #[repr(C)]
@@ -23,7 +58,7 @@ pub struct Bytes {
 /// `path` must address `length` readable bytes, UTF-8, with length at most 4096.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fd_open(path: *const u8, length: usize) -> *mut Handle {
-    unsafe { open_input(path, length, Arc::new(Cancellation::default()), 0) }
+    unsafe { open_input(path, length, Arc::new(Cancellation::default()), 0, false) }
 }
 
 unsafe fn open_input(
@@ -31,13 +66,24 @@ unsafe fn open_input(
     length: usize,
     control: Arc<Cancellation>,
     epoch: u64,
+    live: bool,
 ) -> *mut Handle {
     let session = if length > 4096 {
         Err(persistence::Error::Bound("recording path bytes"))
     } else {
         let bytes = unsafe { std::slice::from_raw_parts(path, length) };
         match std::str::from_utf8(bytes) {
-            Ok(path) => Session::open_with(Path::new(path), control, epoch),
+            Ok(path) => {
+                if live {
+                    LiveSession::open_with(Path::new(path), control, epoch)
+                        .map(Box::new)
+                        .map(ViewedSession::Live)
+                } else {
+                    Session::open_with(Path::new(path), control, epoch)
+                        .map(Box::new)
+                        .map(ViewedSession::Saved)
+                }
+            }
             Err(_) => Err(persistence::Error::Bound("path encoding")),
         }
     };
@@ -86,7 +132,35 @@ pub unsafe extern "C" fn fd_open_controlled(
     epoch: u64,
 ) -> *mut Handle {
     let control = Arc::clone(unsafe { &*control });
-    unsafe { open_input(path, length, control, epoch) }
+    unsafe { open_input(path, length, control, epoch, false) }
+}
+
+/// # Safety
+/// Path and control requirements match `fd_open_controlled`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fd_open_live_controlled(
+    path: *const u8,
+    length: usize,
+    control: *const Arc<Cancellation>,
+    epoch: u64,
+) -> *mut Handle {
+    let control = Arc::clone(unsafe { &*control });
+    unsafe { open_input(path, length, control, epoch, true) }
+}
+
+/// # Safety
+/// `handle` must be exclusively owned by the serial native worker during this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fd_live_poll(handle: *mut Handle) -> Bytes {
+    let handle = unsafe { &mut *handle };
+    response(match &mut handle.session {
+        Ok(ViewedSession::Live(session)) => session
+            .poll()
+            .map(|changed| json!(changed))
+            .map_err(|error| error.to_string()),
+        Ok(ViewedSession::Saved(_)) => Err("session has no live source".to_owned()),
+        Err(error) => Err(error.to_string()),
+    })
 }
 
 /// # Safety
@@ -112,7 +186,7 @@ pub unsafe extern "C" fn fd_catalog(handle: *mut Handle) -> Bytes {
         handle
             .session
             .as_ref()
-            .map(Session::catalog)
+            .map(ViewedSession::catalog)
             .map_err(ToString::to_string),
     )
 }

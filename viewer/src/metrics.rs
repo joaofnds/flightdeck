@@ -7,7 +7,7 @@ use crate::data::Table;
 use crate::session::{OBSERVATIONS_MAX, Observation, Session, partition};
 
 type ObservationKey = ([u64; 2], [u64; 2], u64);
-type Tables = BTreeMap<(usize, &'static str), BTreeMap<u64, Table>>;
+pub(crate) type Tables = BTreeMap<(usize, &'static str), BTreeMap<u64, Table>>;
 
 pub(crate) fn trends(session: &Session, observations: &[Observation]) -> Result<Vec<Value>> {
     let mut all: BTreeMap<_, _> = observations
@@ -85,7 +85,7 @@ fn get<'a>(tables: &'a Tables, observation: &Observation, name: &'static str) ->
         .ok_or(Error::Bound("missing required recorded table rows"))
 }
 
-fn point(
+pub(crate) fn point(
     tables: &Tables,
     current: &Observation,
     previous: Option<&Observation>,
@@ -96,6 +96,7 @@ fn point(
     let memory = get(tables, current, "memory")?;
     let row = only(memory)?;
     let mut value = json!({"wall_ns": current.wall, "publication": current.publication,
+        "run_tick": current.run_tick, "continuous_ns": current.continuous,
         "segment": segment, "cpu_percent": null, "network_rx_bps": null,
         "network_tx_bps": null, "gpu_watts": null,
         "power_watts": ticks.number(tick, "power_watts")?,
@@ -175,7 +176,7 @@ fn only(table: &Table) -> Result<&[Option<String>]> {
     Ok(&table.rows[0])
 }
 
-fn compatible(previous: &Observation, current: &Observation) -> bool {
+pub(crate) fn compatible(previous: &Observation, current: &Observation) -> bool {
     if previous.publication.checked_add(1) != Some(current.publication) {
         return false;
     }

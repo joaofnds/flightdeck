@@ -59,7 +59,7 @@ impl Encoder {
     }
 }
 
-fn append(connection: &Connection, table: Table, window: &Window) -> Result<()> {
+pub fn append(connection: &Connection, table: Table, window: &Window) -> Result<()> {
     let mut appender = connection.appender(table.name())?;
     for tick in &window.ticks {
         match table {

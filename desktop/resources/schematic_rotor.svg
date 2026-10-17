@@ -1,0 +1,184 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="312" height="312" viewBox="-52 -52 104 104"><defs>
+    <linearGradient id="hw-aluminum" x1="0" y1="0" x2=".8" y2="1">
+      <stop stop-color="#a0a2a3" />
+      <stop offset=".18" stop-color="#74777a" />
+      <stop offset=".48" stop-color="#414548" />
+      <stop offset=".75" stop-color="#74777a" />
+      <stop offset="1" stop-color="#a0a2a3" />
+    </linearGradient>
+    <linearGradient id="hw-frame-inset" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#6c7072" />
+      <stop offset=".4" stop-color="#363b3e" />
+      <stop offset="1" stop-color="#6c7072" />
+    </linearGradient>
+    <linearGradient id="hw-battery-foil" x1="0" y1="0" x2=".08" y2="1">
+      <stop stop-color="#525257" />
+      <stop offset=".045" stop-color="#39393e" />
+      <stop offset=".46" stop-color="#3c3c41" />
+      <stop offset=".88" stop-color="#39393e" />
+      <stop offset="1" stop-color="#27272c" />
+    </linearGradient>
+    <linearGradient id="hw-heatspreader" x1=".1" y1="0" x2=".4" y2="1">
+      <stop stop-color="#2b2c30" />
+      <stop offset=".35" stop-color="#212226" />
+      <stop offset="1" stop-color="#15161a" />
+    </linearGradient>
+    <linearGradient id="hw-cowling-metal" x1="0" y1="0" x2=".15" y2="1">
+      <stop stop-color="#9c9e9c" />
+      <stop offset=".15" stop-color="#787c7d" />
+      <stop offset=".7" stop-color="#606669" />
+      <stop offset="1" stop-color="#3f464a" />
+    </linearGradient>
+    <linearGradient id="hw-speaker-surface" x1="0" y1="0" x2="1" y2=".3">
+      <stop stop-color="#36383c" />
+      <stop offset=".22" stop-color="#25272b" />
+      <stop offset=".6" stop-color="#25272b" />
+      <stop offset="1" stop-color="#17191d" />
+    </linearGradient>
+    <radialGradient id="hw-hub-metal" cx=".42" cy=".35" r=".75">
+      <stop stop-color="#8c9497" />
+      <stop offset=".65" stop-color="#717b80" />
+      <stop offset=".92" stop-color="#586267" />
+      <stop offset="1" stop-color="#92999b" />
+    </radialGradient>
+    <radialGradient id="hw-rotor-dish">
+      <stop stop-color="#171c20" />
+      <stop offset=".48" stop-color="#171c20" />
+      <stop offset=".62" stop-color="#343c41" />
+      <stop offset=".77" stop-color="#262d32" />
+      <stop offset=".82" stop-color="#10161a" />
+      <stop offset="1" stop-color="#080d11" />
+    </radialGradient>
+    <pattern id="hw-exhaust-fins" width="4" height="48" patternUnits="userSpaceOnUse">
+      <rect width="4" height="48" fill="#101417" />
+      <path d="M1 0V48" stroke="#42484c" stroke-width="1" />
+      <path d="M2.2 0V48" stroke="#262d31" stroke-width=".6" />
+    </pattern>
+    <g id="hw-screw">
+      <circle r="4.1" fill="#696f73" stroke="#14191c" stroke-width="1.1" />
+      <circle r="2.7" fill="#333b40" />
+      <path d="m-1.7 0 .8-.45V-1.4l.9.5.9-.5v.95l.8.45-.8.45v.95L0 .9l-.9.5V.45Z" fill="#11171a" />
+    </g>
+    <g id="hw-post">
+      <circle r="5.1" fill="#575f64" stroke="#1a2024" stroke-width="1" />
+      <circle r="2.3" fill="#11171b" stroke="#7a8286" stroke-width=".7" />
+    </g>
+    <g id="hw-component-pair">
+      <path d="M0 0h3v5H0ZM5 1h2v4H5Z" fill="#88867c" />
+      <path d="M0 1h3v3H0ZM5 2h2v2H5Z" fill="#59574e" />
+      <path d="M0 8h7v3H0Z" fill="#0b0d0f" stroke="#4a4b47" stroke-width=".45" />
+      <path d="M1 8v3M3 8v3M5 8v3" stroke="#96968c" stroke-width=".45" />
+    </g>
+    <g id="hw-component-cluster">
+      <path d="M0 0h2v4H0ZM4 0h2v4H4ZM8 0h2v4H8ZM12 1h2v3h-2Z" fill="#8d8b7e" />
+      <path d="M0 1h2v2H0ZM4 1h2v2H4ZM8 1h2v2H8ZM12 2h2v1h-2Z" fill="#4b4b44" />
+      <rect x="2" y="7" width="8" height="7" rx=".5" fill="#131518" stroke="#595a50" stroke-width=".5" />
+      <path d="M1 8h1M1 10h1M1 12h1M10 8h1M10 10h1M10 12h1" stroke="#b4b2a0" stroke-width=".5" />
+      <path d="M14 8h3v2h-3ZM14 12h2v3h-2Z" fill="#64665e" />
+    </g>
+    <g id="hw-leaded-package">
+      <rect width="9" height="13" rx="1" fill="#4b4f4e" stroke="#0e1113" stroke-width="1" />
+      <path d="M1 2h7M1 10h7" stroke="#737773" stroke-width=".55" />
+      <path d="M1 13v3M4 13v3M7 13v3" stroke="#b4b09c" stroke-width=".9" />
+    </g>
+    <path id="hw-speaker-shell" d="M53 357H85Q91 357 91 365V443Q91 452 101 459L106 466V534Q104 548 88 558H62L49 544V366Q49 358 53 357Z" />
+    <path id="hw-board-contour" fill-rule="evenodd" d="       M48 77H78L93 87H291V103H365V78H473V103H547V79H739L752 88H789V354       H550L546 360H300L296 354H49V248H40V178H49V109H41V78Z       M110 134H292V221C292 277 251 319 194 319C141 319 102 281 102 227       V174C102 157 110 150 123 140Z       M730 134H548V221C548 277 589 319 646 319C699 319 738 281 738 227       V174C738 157 730 150 717 140Z" />
+    <path id="hw-fan-shell" d="       M110 133H292V221C292 277 251 319 194 319C141 319 102 281 102 227       V174C102 158 110 150 123 140L110 139Z" />
+    <path id="hw-fan-boundary" d="       M109 83H292V221C292 277 251 319 194 319C141 319 102 281 102 227       V174C102 157 110 150 123 140H109Z" />
+    <path id="hw-impeller-blade" d="       M42-7.3C45.1-6.8 48.2-3.2 50.4-.7L50.3.6       C47.8-2.9 44.8-5.7 42.2-5.9Z" />
+    <g id="hw-impeller">
+      <circle r="51.2" fill="#080d11" />
+      <circle r="50.5" fill="url(#hw-rotor-dish)" />
+      <g fill="#252e34" stroke="#4c5960" stroke-width=".3" stroke-linejoin="round">
+        <use href="#hw-impeller-blade" transform="rotate(0.0000)" />
+        <use href="#hw-impeller-blade" transform="rotate(5.6250)" />
+        <use href="#hw-impeller-blade" transform="rotate(11.2500)" />
+        <use href="#hw-impeller-blade" transform="rotate(16.8750)" />
+        <use href="#hw-impeller-blade" transform="rotate(22.5000)" />
+        <use href="#hw-impeller-blade" transform="rotate(28.1250)" />
+        <use href="#hw-impeller-blade" transform="rotate(33.7500)" />
+        <use href="#hw-impeller-blade" transform="rotate(39.3750)" />
+        <use href="#hw-impeller-blade" transform="rotate(45.0000)" />
+        <use href="#hw-impeller-blade" transform="rotate(50.6250)" />
+        <use href="#hw-impeller-blade" transform="rotate(56.2500)" />
+        <use href="#hw-impeller-blade" transform="rotate(61.8750)" />
+        <use href="#hw-impeller-blade" transform="rotate(67.5000)" />
+        <use href="#hw-impeller-blade" transform="rotate(73.1250)" />
+        <use href="#hw-impeller-blade" transform="rotate(78.7500)" />
+        <use href="#hw-impeller-blade" transform="rotate(84.3750)" />
+        <use href="#hw-impeller-blade" transform="rotate(90.0000)" />
+        <use href="#hw-impeller-blade" transform="rotate(95.6250)" />
+        <use href="#hw-impeller-blade" transform="rotate(101.2500)" />
+        <use href="#hw-impeller-blade" transform="rotate(106.8750)" />
+        <use href="#hw-impeller-blade" transform="rotate(112.5000)" />
+        <use href="#hw-impeller-blade" transform="rotate(118.1250)" />
+        <use href="#hw-impeller-blade" transform="rotate(123.7500)" />
+        <use href="#hw-impeller-blade" transform="rotate(129.3750)" />
+        <use href="#hw-impeller-blade" transform="rotate(135.0000)" />
+        <use href="#hw-impeller-blade" transform="rotate(140.6250)" />
+        <use href="#hw-impeller-blade" transform="rotate(146.2500)" />
+        <use href="#hw-impeller-blade" transform="rotate(151.8750)" />
+        <use href="#hw-impeller-blade" transform="rotate(157.5000)" />
+        <use href="#hw-impeller-blade" transform="rotate(163.1250)" />
+        <use href="#hw-impeller-blade" transform="rotate(168.7500)" />
+        <use href="#hw-impeller-blade" transform="rotate(174.3750)" />
+        <use href="#hw-impeller-blade" transform="rotate(180.0000)" />
+        <use href="#hw-impeller-blade" transform="rotate(185.6250)" />
+        <use href="#hw-impeller-blade" transform="rotate(191.2500)" />
+        <use href="#hw-impeller-blade" transform="rotate(196.8750)" />
+        <use href="#hw-impeller-blade" transform="rotate(202.5000)" />
+        <use href="#hw-impeller-blade" transform="rotate(208.1250)" />
+        <use href="#hw-impeller-blade" transform="rotate(213.7500)" />
+        <use href="#hw-impeller-blade" transform="rotate(219.3750)" />
+        <use href="#hw-impeller-blade" transform="rotate(225.0000)" />
+        <use href="#hw-impeller-blade" transform="rotate(230.6250)" />
+        <use href="#hw-impeller-blade" transform="rotate(236.2500)" />
+        <use href="#hw-impeller-blade" transform="rotate(241.8750)" />
+        <use href="#hw-impeller-blade" transform="rotate(247.5000)" />
+        <use href="#hw-impeller-blade" transform="rotate(253.1250)" />
+        <use href="#hw-impeller-blade" transform="rotate(258.7500)" />
+        <use href="#hw-impeller-blade" transform="rotate(264.3750)" />
+        <use href="#hw-impeller-blade" transform="rotate(270.0000)" />
+        <use href="#hw-impeller-blade" transform="rotate(275.6250)" />
+        <use href="#hw-impeller-blade" transform="rotate(281.2500)" />
+        <use href="#hw-impeller-blade" transform="rotate(286.8750)" />
+        <use href="#hw-impeller-blade" transform="rotate(292.5000)" />
+        <use href="#hw-impeller-blade" transform="rotate(298.1250)" />
+        <use href="#hw-impeller-blade" transform="rotate(303.7500)" />
+        <use href="#hw-impeller-blade" transform="rotate(309.3750)" />
+        <use href="#hw-impeller-blade" transform="rotate(315.0000)" />
+        <use href="#hw-impeller-blade" transform="rotate(320.6250)" />
+        <use href="#hw-impeller-blade" transform="rotate(326.2500)" />
+        <use href="#hw-impeller-blade" transform="rotate(331.8750)" />
+        <use href="#hw-impeller-blade" transform="rotate(337.5000)" />
+        <use href="#hw-impeller-blade" transform="rotate(343.1250)" />
+        <use href="#hw-impeller-blade" transform="rotate(348.7500)" />
+        <use href="#hw-impeller-blade" transform="rotate(354.3750)" />
+      </g>
+      <circle r="42.1" fill="none" stroke="#10161a" stroke-width=".7" />
+      <circle r="28" fill="#11191e" stroke="#465157" stroke-width=".55" />
+      <circle r="25.5" fill="url(#hw-hub-metal)" stroke="#a1a8aa" stroke-width=".35" />
+      <g fill="none" stroke="#b2b8b9" stroke-width=".18" opacity=".24">
+        <circle r="7" />
+        <circle r="9" />
+        <circle r="11" />
+        <circle r="13" />
+        <circle r="15" />
+        <circle r="17" />
+        <circle r="19" />
+        <circle r="21" />
+        <circle r="23" />
+        <circle r="24.5" />
+      </g>
+      <circle r="1.2" fill="#182126" />
+      <circle r=".45" fill="#818c91" />
+    </g>
+    <path id="hw-battery-left-upper" d="       M98 359H237Q244 359 244 367V442Q244 450 236 451H101Q93 451 93 442V368Q93 360 98 359Z" />
+    <path id="hw-battery-left-lower" d="       M115 455H236Q244 455 244 463V546Q244 554 236 554H119Q111 554 111 546V464Q111 458 115 455Z" />
+    <path id="hw-battery-center-left" d="       M277 359H390Q399 359 400 368V511Q400 521 390 522H277Q268 521 268 513V369Q268 360 277 359Z" />
+    <path id="hw-battery-center-right" d="       M449 359H559Q568 359 569 368V512Q568 522 559 522H449Q440 521 440 513V369Q440 360 449 359Z" />
+    <path id="hw-battery-right-upper" d="       M602 359H739Q747 359 747 367V442Q747 450 739 451H602Q594 451 594 443V368Q594 360 602 359Z" />
+    <path id="hw-battery-right-lower" d="       M602 455H722Q730 455 730 463V546Q730 554 722 554H602Q594 554 594 546V464Q594 456 602 455Z" />
+  </defs>
+
+  <use href="#hw-impeller" /></svg>

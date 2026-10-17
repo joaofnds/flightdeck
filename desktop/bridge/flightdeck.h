@@ -13,6 +13,9 @@ uint32_t fd_control_cancel(const FlightdeckControl *control);
 void fd_control_free(FlightdeckControl *control);
 FlightdeckSession *fd_open_controlled(const uint8_t *path, size_t length,
     const FlightdeckControl *control, uint64_t epoch);
+FlightdeckSession *fd_open_live_controlled(const uint8_t *path, size_t length,
+    const FlightdeckControl *control, uint64_t epoch);
+FlightdeckBytes fd_live_poll(FlightdeckSession *session);
 FlightdeckBytes fd_prepare(FlightdeckSession *session, uint64_t epoch);
 FlightdeckBytes fd_catalog(FlightdeckSession *session);
 FlightdeckBytes fd_select(FlightdeckSession *session, uint64_t second, uint32_t alternative);

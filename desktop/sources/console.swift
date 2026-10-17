@@ -14,7 +14,7 @@ struct Console: View {
                 navigation("Recorded readings", icon: "chart.xyaxis.line")
                 Spacer()
                 Divider()
-                Label("Historical recording", systemImage: "clock.arrow.circlepath")
+                Label(model.liveStatus, systemImage: model.following ? "dot.radiowaves.left.and.right" : "clock.arrow.circlepath")
                     .font(.caption).foregroundStyle(theme.muted).padding(.top, 10)
                 Button("Open recording…", action: model.open).buttonStyle(.plain).padding(.vertical, 8)
                     .keyboardShortcut("o")
@@ -27,6 +27,10 @@ struct Console: View {
                 Divider().overlay(theme.border)
                 ScrollView {
                     VStack(alignment: .leading, spacing: theme.sectionGap) {
+                        ForEach(model.readerLossNotices, id: \.self) { notice in
+                            Label(notice, systemImage: "exclamationmark.triangle")
+                                .font(.callout).foregroundStyle(theme.warning)
+                        }
                         if let error = model.error {
                             ContentUnavailableView {
                                 Label("Recording unavailable", systemImage: "externaldrive.badge.exclamationmark")
@@ -52,7 +56,9 @@ struct Console: View {
         .navigationTitle("Flightdeck")
         .tint(theme.focus)
         .preferredColorScheme(.dark)
-        .onAppear { model.load() }
+        .onAppear {
+            if model.catalog == nil, model.error == nil, !model.busy { model.load() }
+        }
     }
 
     private func navigation(_ title: String, icon: String) -> some View {
@@ -80,6 +86,9 @@ struct Console: View {
             }
             Spacer()
             if model.busy { ProgressView().controlSize(.small).accessibilityLabel("Reading recording") }
+            Button(model.following ? "Pause live" : "Live") { model.setLive(!model.following) }
+                .help("Follow the collector's newest shared-memory tick; pausing retains access to its unsealed tail.")
+            Text(model.liveStatus).font(.caption).foregroundStyle(theme.muted)
             Label("Last 15 minutes", systemImage: "clock").font(.callout).foregroundStyle(theme.muted)
             HStack {
                 Button { step(-1) } label: { Image(systemName: "chevron.left") }.help("Previous second")

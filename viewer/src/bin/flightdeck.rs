@@ -53,8 +53,7 @@ fn run() -> io::Result<()> {
 }
 
 fn archive(root: &Path) -> io::Result<PathBuf> {
-    let output = Command::new("cargo")
-        .current_dir(root)
+    let output = cargo(root)
         .args([
             "build",
             "--locked",
@@ -94,6 +93,24 @@ fn archive(root: &Path) -> io::Result<PathBuf> {
     archive.ok_or_else(|| io::Error::other("cargo returned no viewer archive"))
 }
 
+fn cargo(root: &Path) -> Command {
+    let mut command = Command::new("cargo");
+    command.current_dir(root);
+    // Cargo-run metadata otherwise changes ring's build fingerprint in nested invocations.
+    for name in [
+        "CARGO_MANIFEST_DIR",
+        "CARGO_PKG_NAME",
+        "CARGO_PKG_VERSION_MAJOR",
+        "CARGO_PKG_VERSION_MINOR",
+        "CARGO_PKG_VERSION_PATCH",
+        "CARGO_PKG_VERSION_PRE",
+    ] {
+        command.env_remove(name);
+    }
+
+    command
+}
+
 fn compiler(root: &Path, archive: &Path) -> Command {
     let mut compile = Command::new("xcrun");
     compile
@@ -121,19 +138,39 @@ fn compiler(root: &Path, archive: &Path) -> Command {
 
 fn check(root: &Path, archive: &Path) -> io::Result<()> {
     let executable = root.join("target/native-state-checks");
+    let sources = sources(root)?;
     success(
         compiler(root, archive)
+            .args(
+                sources.iter().filter(|path| {
+                    path.file_name() != Some(std::ffi::OsStr::new("flightdeck.swift"))
+                }),
+            )
             .args([
-                "desktop/sources/recording.swift",
-                "desktop/sources/theme.swift",
-                "desktop/sources/recorded_table.swift",
                 "desktop/tests/recording_state.swift",
+                "desktop/tests/reference_data_checks.swift",
+                "desktop/tests/dashboard_checks.swift",
             ])
             .arg("-o")
             .arg(&executable)
             .status()?,
     )?;
-    success(Command::new(executable).status()?)
+    success(Command::new(&executable).status()?)?;
+    success(
+        cargo(root)
+            .args([
+                "run",
+                "--locked",
+                "-p",
+                "viewer",
+                "--bin",
+                "native_fixture",
+                "--",
+                "--checks",
+            ])
+            .arg(&executable)
+            .status()?,
+    )
 }
 
 fn build(root: &Path, archive: &Path) -> io::Result<PathBuf> {
@@ -141,7 +178,23 @@ fn build(root: &Path, archive: &Path) -> io::Result<PathBuf> {
     let executable = app.join("Contents/MacOS");
     fs::create_dir_all(&executable)?;
     fs::write(app.join("Contents/Info.plist"), INFO)?;
+    resources(root, &app)?;
     let mut compile = compiler(root, archive);
+    compile
+        .args(sources(root)?)
+        .arg("-o")
+        .arg(executable.join("Flightdeck"));
+    success(compile.status()?)?;
+    success(
+        Command::new("codesign")
+            .args(["--force", "--sign", "-", "--timestamp=none"])
+            .arg(&app)
+            .status()?,
+    )?;
+    Ok(app)
+}
+
+fn sources(root: &Path) -> io::Result<Vec<PathBuf>> {
     let mut sources = Vec::new();
     for entry in fs::read_dir(root.join("desktop/sources"))? {
         if sources.len() == 64 {
@@ -156,18 +209,31 @@ fn build(root: &Path, archive: &Path) -> io::Result<PathBuf> {
         }
     }
     sources.sort();
-    compile
-        .args(sources)
-        .arg("-o")
-        .arg(executable.join("Flightdeck"));
-    success(compile.status()?)?;
-    success(
-        Command::new("codesign")
-            .args(["--force", "--sign", "-", "--timestamp=none"])
-            .arg(&app)
-            .status()?,
-    )?;
-    Ok(app)
+    Ok(sources)
+}
+
+fn resources(root: &Path, app: &Path) -> io::Result<()> {
+    let directory = app.join("Contents/Resources");
+    fs::create_dir_all(&directory)?;
+    let mut count = 0;
+    let mut bytes = 0_u64;
+    for entry in fs::read_dir(root.join("desktop/resources"))? {
+        count += 1;
+        let entry = entry?;
+        let metadata = entry.metadata()?;
+        bytes += metadata.len();
+        if count > 64 {
+            return Err(io::Error::other("native resource count bound"));
+        }
+        if bytes > 32 * 1024 * 1024 {
+            return Err(io::Error::other("native resource byte bound"));
+        }
+        if !metadata.is_file() {
+            return Err(io::Error::other("native resource bound"));
+        }
+        fs::copy(entry.path(), directory.join(entry.file_name()))?;
+    }
+    Ok(())
 }
 
 fn success(status: std::process::ExitStatus) -> io::Result<()> {
