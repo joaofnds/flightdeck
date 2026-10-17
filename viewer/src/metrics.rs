@@ -16,9 +16,13 @@ const MEMORY_RATES: [(&str, &str); 6] = [
     ("swap_in_bytes_per_second", "swapped_in_bytes"),
     ("swap_out_bytes_per_second", "swapped_out_bytes"),
 ];
-const TRAFFIC_RATES: [(&str, &str); 2] = [
+const TRAFFIC_RATES: [(&str, &str); 6] = [
     ("network_rx_bps", "received_bytes"),
     ("network_tx_bps", "sent_bytes"),
+    ("network_rx_packets_per_second", "received_packets"),
+    ("network_tx_packets_per_second", "sent_packets"),
+    ("network_rx_errors_per_second", "receive_errors"),
+    ("network_tx_errors_per_second", "send_errors"),
 ];
 
 pub(crate) type Tables = BTreeMap<(usize, &'static str), BTreeMap<u64, Table>>;

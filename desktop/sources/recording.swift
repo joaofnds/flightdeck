@@ -86,6 +86,10 @@ struct Metric: Decodable, Identifiable, Sendable {
     let gpuActivePercent: Double?
     let networkRxBps: Double?
     let networkTxBps: Double?
+    let networkRxPacketsPerSecond: Double?
+    let networkTxPacketsPerSecond: Double?
+    let networkRxErrorsPerSecond: Double?
+    let networkTxErrorsPerSecond: Double?
     let memoryTotalBytes: UInt64?
     let memoryActiveBytes: UInt64?
     let memoryWiredBytes: UInt64?

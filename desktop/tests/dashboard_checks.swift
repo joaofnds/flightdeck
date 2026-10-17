@@ -54,6 +54,7 @@ func runOverviewInspectionChecks() throws {
 
 func runRecordedComponentChecks() throws {
     try checks_recorded_component_projections()
+    try checks_recorded_network_packet_and_error_projections()
     try expands_gpu_activity_for_measured_values_above_nominal_capacity()
     try checks_recorded_alternative_targets()
     // Optional GPU activity distinguishes measured zero from missing source intervals.
@@ -73,6 +74,57 @@ func runRecordedComponentChecks() throws {
 
     precondition(points.map(\.gpuActivePercent) == [37.5, 0, nil, nil])
     print("GPU activity decoding preserves positive, zero and unavailable readings")
+}
+
+private func checks_recorded_network_packet_and_error_projections() throws {
+    // Goal: real packet/error units, gaps, identities and non-color cues reach both charts.
+    // Method: decode positive, zero, explicit-null and absent readings across two runs.
+    let data = Data(#"""
+        {"value":[
+          {"run":"first","boot":"boot","publication":1,"wall_ns":1000000000000,
+           "segment":1,"network_rx_packets_per_second":4,"network_tx_packets_per_second":6,
+           "network_rx_errors_per_second":1,"network_tx_errors_per_second":2},
+          {"run":"first","boot":"boot","publication":2,"wall_ns":1001000000000,
+           "segment":1,"network_rx_packets_per_second":0,"network_tx_packets_per_second":0,
+           "network_rx_errors_per_second":0,"network_tx_errors_per_second":0},
+          {"run":"first","boot":"boot","publication":3,"wall_ns":1002000000000,
+           "segment":1,"network_rx_packets_per_second":null,"network_tx_packets_per_second":null,
+           "network_rx_errors_per_second":null,"network_tx_errors_per_second":null},
+          {"run":"second","boot":"boot","publication":1,"wall_ns":1003000000000,
+           "segment":1}]}
+        """#.utf8)
+    let points: [Metric] = try decodeRecordingResponse(data)
+    let selected = Observation(run: "first", boot: "boot", publication: 1, runTick: 0,
+        wallNs: 1_000_000_000_000, windowLosses: nil)
+    let selection = Selection(second: 1003, selected: selected, alternatives: [selected],
+        summary: points[0], trends: points, contextSeconds: 900)
+    var theme = FlightdeckTheme()
+    theme.networkReceivedPacketsSeries = .pink
+    theme.networkSentPacketsSeries = .cyan
+    theme.networkReceiveErrorsSeries = .yellow
+    theme.networkSendErrorsSeries = .white
+
+    let component = RecordedComponentData(context: RecordedChartContext(selection: selection),
+        theme: theme)
+
+    precondition(component.networkPackets.map(\.values) == [[4, 0, nil, nil], [6, 0, nil, nil]])
+    precondition(component.networkErrors.map(\.values) == [[1, 0, nil, nil], [2, 0, nil, nil]])
+    precondition(component.networkPackets.map(\.unit) == ["packets/s", "packets/s"])
+    precondition(component.networkErrors.map(\.unit) == ["errors/s", "errors/s"])
+    precondition(component.networkPackets.map(\.name) == ["Received", "Sent"])
+    precondition(component.networkErrors.map(\.name) == ["Receive errors", "Send errors"])
+    precondition(component.networkPackets.map(\.strokePattern) == [.solid, .dashed])
+    precondition(component.networkErrors.map(\.strokePattern) == [.solid, .dashed])
+    precondition(component.networkPackets[1].negative == true)
+    precondition(component.networkErrors.allSatisfy { $0.negative != true })
+    precondition(component.networkPackets.map(\.color)
+        == [theme.networkReceivedPacketsSeries, theme.networkSentPacketsSeries])
+    precondition(component.networkErrors.map(\.color)
+        == [theme.networkReceiveErrorsSeries, theme.networkSendErrorsSeries])
+    precondition(component.context.domain == 104...1004)
+    precondition(component.context.selectedID == points[0].id)
+    precondition(component.context.plot(lines: component.networkPackets)?.segments(line: 0) == [[0, 1]])
+    precondition(component.context.plot(lines: component.networkErrors)?.segments(line: 1) == [[0, 1]])
 }
 
 private func expands_gpu_activity_for_measured_values_above_nominal_capacity() throws {

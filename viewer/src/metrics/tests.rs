@@ -221,6 +221,178 @@ fn set(table: &mut Table, row: usize, name: &str, value: Option<&str>) {
 }
 
 #[test]
+fn derives_independent_network_packet_and_error_rates() {
+    // Goal: packet and error counters use the measured interval and retain measured zero.
+    // Method: adjacent observations contain distinct deltas over two continuous seconds.
+    let value = Fixture::new().point();
+
+    assert_eq!(value["network_rx_packets_per_second"], 4.0);
+    assert_eq!(value["network_tx_packets_per_second"], 0.0);
+    assert_eq!(value["network_rx_errors_per_second"], 1.0);
+    assert_eq!(value["network_tx_errors_per_second"], 2.0);
+}
+
+fn network_rates(value: &Value) -> Value {
+    json!([
+        value["network_rx_packets_per_second"],
+        value["network_tx_packets_per_second"],
+        value["network_rx_errors_per_second"],
+        value["network_tx_errors_per_second"]
+    ])
+}
+
+macro_rules! unavailable_network_counter {
+    ($name:ident, $column:literal, $counter:expr, $expected:tt) => {
+        #[test]
+        fn $name() {
+            // Goal: one unavailable counter does not erase another measured rate.
+            // Method: remove or reset one current counter and compare all four outputs.
+            let mut fixture = Fixture::new();
+            set(fixture.row("interfaces", 2), 0, $column, $counter);
+
+            let value = fixture.point();
+
+            assert_eq!(network_rates(&value), json!($expected));
+            assert_eq!(value["network_rx_bps"], 1024.0);
+            assert_eq!(value["network_tx_bps"], 512.0);
+        }
+    };
+}
+
+unavailable_network_counter!(
+    preserves_other_network_rates_when_received_packets_reset,
+    "received_packets",
+    Some("0"),
+    [null, 0.0, 1.0, 2.0]
+);
+unavailable_network_counter!(
+    preserves_other_network_rates_when_sent_packets_reset,
+    "sent_packets",
+    Some("0"),
+    [4.0, null, 1.0, 2.0]
+);
+unavailable_network_counter!(
+    preserves_other_network_rates_when_receive_errors_reset,
+    "receive_errors",
+    Some("0"),
+    [4.0, 0.0, null, 2.0]
+);
+unavailable_network_counter!(
+    preserves_other_network_rates_when_send_errors_reset,
+    "send_errors",
+    Some("0"),
+    [4.0, 0.0, 1.0, null]
+);
+unavailable_network_counter!(
+    preserves_other_network_rates_when_received_packets_are_missing,
+    "received_packets",
+    None,
+    [null, 0.0, 1.0, 2.0]
+);
+unavailable_network_counter!(
+    preserves_other_network_rates_when_sent_packets_are_missing,
+    "sent_packets",
+    None,
+    [4.0, null, 1.0, 2.0]
+);
+unavailable_network_counter!(
+    preserves_other_network_rates_when_receive_errors_are_missing,
+    "receive_errors",
+    None,
+    [4.0, 0.0, null, 2.0]
+);
+unavailable_network_counter!(
+    preserves_other_network_rates_when_send_errors_are_missing,
+    "send_errors",
+    None,
+    [4.0, 0.0, 1.0, null]
+);
+
+macro_rules! changed_network_identity {
+    ($name:ident, $column:literal, $changed:literal) => {
+        #[test]
+        fn $name() {
+            // Goal: reused interface indices or renamed interfaces cannot authorize rates.
+            // Method: change one part of the current interface key, keeping the counters.
+            let mut fixture = Fixture::new();
+            set(fixture.row("interfaces", 2), 0, $column, Some($changed));
+
+            assert_eq!(
+                network_rates(&fixture.point()),
+                json!([null, null, null, null])
+            );
+        }
+    };
+}
+
+changed_network_identity!(
+    leaves_network_rates_unavailable_after_interface_renaming,
+    "name",
+    "utun0"
+);
+changed_network_identity!(
+    leaves_network_rates_unavailable_after_index_reuse,
+    "interface",
+    "8"
+);
+
+#[test]
+fn leaves_network_rates_unavailable_after_interface_membership_changes() {
+    // Goal: changing the interface set cannot make a partial aggregate look complete.
+    // Method: remove the current interface while retaining the earlier measurement.
+    let mut fixture = Fixture::new();
+    fixture.row("interfaces", 2).rows.clear();
+
+    assert_eq!(
+        network_rates(&fixture.point()),
+        json!([null, null, null, null])
+    );
+}
+
+#[test]
+fn sums_network_counters_by_interface_identity_instead_of_row_order() {
+    // Goal: multiple external interfaces contribute once despite a changed row order.
+    // Method: add a second interface with different counters before the current first row.
+    let mut fixture = Fixture::new();
+    fixture.row("interfaces", 1).rows.push(
+        ["8", "utun0", "0", "0", "2", "3", "4", "5", "0"]
+            .map(|value| Some(value.to_owned()))
+            .to_vec(),
+    );
+    fixture.row("interfaces", 2).rows.insert(
+        0,
+        ["8", "utun0", "0", "0", "8", "13", "12", "17", "0"]
+            .map(|value| Some(value.to_owned()))
+            .to_vec(),
+    );
+
+    assert_eq!(network_rates(&fixture.point()), json!([7.0, 5.0, 5.0, 8.0]));
+}
+
+#[test]
+fn measures_resource_projection_for_900_counter_intervals() {
+    // Goal: measure the same bounded projection and serialization before and after expansion.
+    // Method: project 900 identical real counter intervals and serialize their public output.
+    let fixture = Fixture::new();
+    let started = std::time::Instant::now();
+    let points: Vec<_> = (0..900)
+        .map(|_| public_point(&fixture.point()).unwrap())
+        .collect();
+    let projected = started.elapsed().as_nanos();
+    let bytes = serde_json::to_vec(&points).unwrap();
+
+    assert_eq!(points.len(), 900);
+    assert_eq!(points[899]["network_rx_bps"], 1024.0);
+    assert!(bytes.len() <= 8 * 1024 * 1024);
+    println!(
+        "{}",
+        json!({"intervals": points.len(), "projection_ns": projected,
+            "projection_and_serialize_ns": started.elapsed().as_nanos(),
+            "response_bytes": bytes.len()})
+    );
+}
+
+#[test]
 fn derives_resource_scalars_with_the_recorded_continuous_interval() {
     // Goal: physical source units produce exact scalar rates without synthetic labels.
     // Method: adjacent wall seconds carry an explicit two-second continuous interval.
@@ -257,6 +429,7 @@ fn leaves_counter_rates_unavailable_across_wall_gaps() {
     assert!(value["gpu_watts"].is_null());
     assert!(value["memory_pageins_per_second"].is_null());
     assert!(value["network_rx_bps"].is_null());
+    assert_eq!(network_rates(&value), json!([null, null, null, null]));
     assert_eq!(value["memory_free_bytes"], 2);
 }
 
@@ -379,7 +552,7 @@ fn preserves_independent_memory_and_network_counter_availability() {
     assert_eq!(value["network_tx_bps"], 512.0);
 }
 
-const POINT_FIELDS: [&str; 34] = [
+const POINT_FIELDS: [&str; 38] = [
     "boot",
     "continuous_ns",
     "cpu_percent",
@@ -401,7 +574,11 @@ const POINT_FIELDS: [&str; 34] = [
     "memory_total_bytes",
     "memory_wired_bytes",
     "network_rx_bps",
+    "network_rx_errors_per_second",
+    "network_rx_packets_per_second",
     "network_tx_bps",
+    "network_tx_errors_per_second",
+    "network_tx_packets_per_second",
     "power_watts",
     "pressure",
     "publication",
@@ -459,7 +636,7 @@ fn measures_scalar_selection_response_sizes_at_both_context_limits() {
         fields.keys().map(String::as_str).collect::<Vec<_>>(),
         POINT_FIELDS
     );
-    assert_eq!(fields.values().filter(|value| value.is_f64()).count(), 13);
+    assert_eq!(fields.values().filter(|value| value.is_f64()).count(), 17);
     assert_eq!(fields.values().filter(|value| value.is_u64()).count(), 18);
     assert_eq!(u64::MAX.to_string().len(), 20);
     let identity = &internal["observation"];
@@ -516,8 +693,13 @@ fn preserves_measured_empty_interface_domains_after_saved_partitioning() {
 
     assert_eq!(fixture.point(), live);
     assert_eq!(live["network_rx_bps"], 0.0);
+    assert_eq!(network_rates(&live), json!([0.0, 0.0, 0.0, 0.0]));
     fixture.tables.remove(&(0, "interfaces")).unwrap();
     assert!(fixture.point()["network_rx_bps"].is_null());
+    assert_eq!(
+        network_rates(&fixture.point()),
+        json!([null, null, null, null])
+    );
 }
 
 #[test]
@@ -546,8 +728,23 @@ fn leaves_rates_unavailable_without_a_compatible_predecessor() {
     let first = point(&fixture.tables, &fixture.current, None, 1).unwrap();
     assert!(first["gpu_active_percent"].is_null());
     assert!(first["memory_pageins_per_second"].is_null());
+    assert_eq!(network_rates(&first), json!([null, null, null, null]));
 
     fixture.current.run_tick += 1;
     assert!(fixture.point()["gpu_active_percent"].is_null());
     assert!(fixture.point()["network_rx_bps"].is_null());
+    assert_eq!(
+        network_rates(&fixture.point()),
+        json!([null, null, null, null])
+    );
+}
+
+#[test]
+fn preserves_measured_network_zeroes_without_traffic() {
+    // Goal: unchanged measured counters are zero, rather than absent observations.
+    // Method: keep the same interface and counters at both endpoints of a valid interval.
+    let mut fixture = Fixture::new();
+    fixture.row("interfaces", 2).rows = fixture.row("interfaces", 1).rows.clone();
+
+    assert_eq!(network_rates(&fixture.point()), json!([0.0, 0.0, 0.0, 0.0]));
 }

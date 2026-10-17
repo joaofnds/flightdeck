@@ -32,12 +32,25 @@ struct RecordedComponentData {
          line("Sent", unit: "KiB/s", color: theme.networkSentSeries,
               metric: \.networkTxBps, scale: 1024, negative: true)]
     }
+    var networkPackets: [TimeSeriesLine] {
+        [line("Received", unit: "packets/s", color: theme.networkReceivedPacketsSeries,
+              metric: \.networkRxPacketsPerSecond),
+         line("Sent", unit: "packets/s", color: theme.networkSentPacketsSeries,
+              metric: \.networkTxPacketsPerSecond, negative: true, pattern: .dashed)]
+    }
+    var networkErrors: [TimeSeriesLine] {
+        [line("Receive errors", unit: "errors/s", color: theme.networkReceiveErrorsSeries,
+              metric: \.networkRxErrorsPerSecond),
+         line("Send errors", unit: "errors/s", color: theme.networkSendErrorsSeries,
+              metric: \.networkTxErrorsPerSecond, pattern: .dashed)]
+    }
 
     private func line(_ name: String, unit: String, color: Color, metric: KeyPath<Metric, Double?>,
-                      scale: Double = 1, negative: Bool = false) -> TimeSeriesLine {
+                      scale: Double = 1, negative: Bool = false,
+                      pattern: TimeSeriesStrokePattern = .solid) -> TimeSeriesLine {
         TimeSeriesLine(name: name, color: color,
             values: context.selection.trends.map { $0[keyPath: metric].map { $0 / scale } },
-            unit: unit, negative: negative)
+            unit: unit, negative: negative, strokePattern: pattern)
     }
 }
 
@@ -85,6 +98,13 @@ struct RecordedComponentPane: View {
                     chart("External interfaces", data: data, lines: data.network,
                         style: TimeSeriesStyle(unit: "KiB/s", fill: 0.1),
                         explanation: "Byte rates across recorded non-loopback interfaces. Sent traffic is mirrored below zero; readouts remain positive. VPN and tunnel traffic may count the same bytes more than once.")
+                    ViewThatFits(in: .horizontal) {
+                        HStack(alignment: .top, spacing: theme.panelGap) {
+                            networkPackets(data).frame(minWidth: 330)
+                            networkErrors(data).frame(minWidth: 330)
+                        }
+                        VStack(spacing: theme.panelGap) { networkPackets(data); networkErrors(data) }
+                    }
                 }
                 Text(sourceNote).font(.callout).foregroundStyle(theme.muted)
             } else {
@@ -122,6 +142,18 @@ struct RecordedComponentPane: View {
         chart("GPU power", data: data, lines: [data.gpuPower],
             style: TimeSeriesStyle(unit: "W", fill: 0.1),
             explanation: "Recorded GPU energy change divided by the measured continuous interval.")
+    }
+
+    private func networkPackets(_ data: RecordedComponentData) -> some View {
+        chart("Packets", data: data, lines: data.networkPackets,
+            style: TimeSeriesStyle(unit: "packets/s", fill: 0.1),
+            explanation: "Packet rates across unchanged non-loopback interfaces over the measured continuous interval. Sent packets are mirrored below zero; readouts remain positive. VPN and tunnel traffic may count the same packets more than once.")
+    }
+
+    private func networkErrors(_ data: RecordedComponentData) -> some View {
+        chart("Network errors", data: data, lines: data.networkErrors,
+            style: TimeSeriesStyle(unit: "errors/s"),
+            explanation: "Receive and send error-counter changes per second across unchanged non-loopback interfaces. Each direction remains independent. A missing or reset counter leaves a gap for that direction.")
     }
 
     private func chart(_ title: String, data: RecordedComponentData, lines: [TimeSeriesLine],

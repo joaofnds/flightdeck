@@ -162,7 +162,7 @@ mod tests {
                 .unwrap();
         }
 
-        fn publish_gpu(&mut self, second: u64) {
+        fn publish_resources(&mut self, second: u64) {
             let memory = Memory {
                 total_bytes: 9_007_199_254_740_993,
                 ..Memory::default()
@@ -177,12 +177,26 @@ mod tests {
                 1_000_000_000 + self.elapsed * 500_000_000,
                 2_000_000_000 + self.elapsed * 300_000_000,
             ];
+            let mut name = [0; 16];
+            name[..3].copy_from_slice(b"en0");
+            let interfaces = [collector::interfaces::Interface {
+                index: 7,
+                name: collector::interfaces::Name::from_bytes(name, 3).unwrap(),
+                received_bytes: 1000 + self.elapsed * 2048,
+                sent_bytes: 2000 + self.elapsed * 1024,
+                received_packets: 10 + self.elapsed * 8,
+                sent_packets: 20,
+                receive_errors: 1 + self.elapsed * 2,
+                send_errors: 2 + self.elapsed * 4,
+                receive_drops: 0,
+            }];
+
             self.writer.publish_observed(
                 &Readings {
                     run_tick: self.elapsed,
                     cpus: &cpus,
                     memory: &memory,
-                    interfaces: &[],
+                    interfaces: &interfaces,
                     ioreport: Some(collector::ring::IOReportReadings {
                         gpu_energy_nj: 1_000_000_000 + self.elapsed * 4_000_000_000,
                         gpu_active_ns: &active_ns,
@@ -1053,13 +1067,43 @@ mod tests {
     }
 
     #[test]
+    fn preserves_network_packets_and_errors_across_a_real_ring_seal() {
+        // Goal: packets and errors retain their exact values and identity after sealing.
+        // Method: publish two counter samples through a real ring and reopen saved history.
+        let mut recording = Recording::new();
+        recording.publish_resources(1000);
+        recording.publish_resources(1001);
+        let mut live = LiveSession::open(&recording.root).unwrap();
+
+        let before = live.select(1001, 0).unwrap();
+
+        assert_eq!(before["summary"]["network_rx_packets_per_second"], 4.0);
+        assert_eq!(before["summary"]["network_tx_packets_per_second"], 0.0);
+        assert_eq!(before["summary"]["network_rx_errors_per_second"], 1.0);
+        assert_eq!(before["summary"]["network_tx_errors_per_second"], 2.0);
+        recording.seal();
+        let mut saved = viewer::Session::open(&recording.root).unwrap();
+
+        let after = saved.select(1001, 0).unwrap();
+
+        assert_eq!(before["summary"], after["summary"]);
+        assert_eq!(before["trends"], after["trends"]);
+        assert_eq!(before["selected"]["run"], after["selected"]["run"]);
+        assert_eq!(before["selected"]["boot"], after["selected"]["boot"]);
+        assert_eq!(
+            before["selected"]["publication"],
+            after["selected"]["publication"]
+        );
+    }
+
+    #[test]
     fn preserves_the_scalar_point_shape_across_a_real_ring_seal() {
         // Goal: public live point fields remain exactly equal after committing the same ticks.
         // Method: publish positive GPU counters through the real ring, then seal and reopen
         // history.
         let mut recording = Recording::new();
-        recording.publish_gpu(1000);
-        recording.publish_gpu(1001);
+        recording.publish_resources(1000);
+        recording.publish_resources(1001);
         let mut live = LiveSession::open(&recording.root).unwrap();
         let before = live.select(1001, 0).unwrap();
         assert_eq!(before["summary"]["gpu_active_percent"], 40.0);

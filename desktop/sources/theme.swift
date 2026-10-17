@@ -22,6 +22,10 @@ struct FlightdeckTheme {
     var memoryDecompressionsSeries = Palette.purple
     var networkReceivedSeries = Palette.green
     var networkSentSeries = Palette.purple
+    var networkReceivedPacketsSeries = Palette.green
+    var networkSentPacketsSeries = Palette.purple
+    var networkReceiveErrorsSeries = Palette.red
+    var networkSendErrorsSeries = Palette.orange
     var systemPowerSeries = Palette.orange
     var temperatureSeries = Palette.red
     var airflowCool = Palette.blue
