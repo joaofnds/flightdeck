@@ -72,6 +72,7 @@ impl Dashboard {
             if replay.complete(completed_ms) {
                 let mut report = replay.report();
                 report["view_render_count"] = json!(self.performance.frames);
+                report["hardware_paint_count"] = json!(self.hardware_state.paint_count());
                 println!("{report}");
                 cx.quit();
                 return;

@@ -53,7 +53,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return bundle::create();
     }
     let options = performance::Options::parse()?;
-    if options.source.check {
+    if options.source.probe != performance::ProbeMode::None {
         return live_launch::probe(&options);
     }
     if !options.source.reference {
@@ -109,7 +109,12 @@ fn run_reference_window(
         }
     })
     .detach();
-    let bounds = Bounds::centered(None, size(px(1320.0), px(900.0)), cx);
+    let width = if replay.as_ref().is_some_and(replay::Replay::shows_hardware) {
+        1272.0
+    } else {
+        1320.0
+    };
+    let bounds = Bounds::centered(None, size(px(width), px(900.0)), cx);
     let options_window = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         titlebar: Some(gpui::TitlebarOptions {

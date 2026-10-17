@@ -243,6 +243,14 @@ fn patch_hardware_geometry(output: &Path) -> io::Result<()> {
     let schematic = output.join("desktop/sources/schematic.swift");
     replace(
         &schematic,
+        "                        context.scaleBy(x: size.width / 840, y: size.height / 600)",
+        concat!(
+            "                        NativeReplay.hardwarePaint()\n",
+            "                        context.scaleBy(x: size.width / 840, y: size.height / 600)"
+        ),
+    )?;
+    replace(
+        &schematic,
         "        .onChange(of: animates) { updateMotion() }",
         concat!(
             "        .onChange(of: animates) { updateMotion() }\n",

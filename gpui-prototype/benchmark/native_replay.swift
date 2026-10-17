@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import SwiftUI
+import Synchronization
 
 @main
 @MainActor
@@ -49,7 +50,7 @@ private final class NativeReplayLifecycle: NSObject, NSApplicationDelegate {
         self.model = model
         self.window = window
         window.makeKeyAndOrderFront(nil)
-        NSApp.activate()
+        NSApp.activate(ignoringOtherApps: true)
         window.contentView?.layoutSubtreeIfNeeded()
         window.setContentSize(NSSize(width: 1320, height: 900))
         NativeReplay.emit(["event": "replay_window", "schema": 1,
@@ -109,6 +110,14 @@ final class NativeReplay {
     private static var hardwareLogs = 0
     private static var viewportLogs = 0
     private static var scrollLogs = 0
+    private nonisolated static let hardwarePaints = Mutex(UInt64(0))
+
+    nonisolated static func hardwarePaint() {
+        hardwarePaints.withLock { count in
+            precondition(count < 100_000)
+            count += 1
+        }
+    }
 
     static func hardwareGeometry(_ frame: CGRect) {
         hardwareStage = frame
@@ -301,6 +310,7 @@ final class NativeReplay {
         Self.emit(["event": "replay_summary", "schema": 2, "duration_ms": plan.durationMs,
             "actions": plan.actions.count, "accepted": next,
             "last_completed_at_ms": lastCompletedMs,
+            "hardware_paint_count": Self.hardwarePaints.withLock { $0 },
             "acceptance_lateness_ms_max": latenessMax,
             "acceptance_lateness_ms_total": latenessTotal,
             "metric": "CPU model application completed; not layout, GPU completion or presentation"])

@@ -1,6 +1,6 @@
 use std::cell::{Cell, RefCell};
 use std::sync::OnceLock;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use num_traits::ToPrimitive;
 
@@ -13,6 +13,7 @@ pub struct HardwareState {
     motions: RefCell<[FanMotion; 2]>,
     visibility: Cell<Option<VisibilitySignature>>,
     visibility_logs: Cell<u16>,
+    paints: Cell<u64>,
 }
 
 pub struct HardwareVisibility {
@@ -50,6 +51,7 @@ impl HardwareState {
             motions: RefCell::new([FanMotion::default(); 2]),
             visibility: Cell::new(None),
             visibility_logs: Cell::new(0),
+            paints: Cell::new(0),
         }
     }
 
@@ -58,6 +60,9 @@ impl HardwareState {
     }
 
     pub fn acknowledge_visibility(&self, geometry: &HardwareVisibility) {
+        if geometry.visible() {
+            self.paints.set(self.paints.get().saturating_add(1));
+        }
         let signature = VisibilitySignature {
             dimensions: [
                 geometry.clipped[0].to_bits(),
@@ -85,8 +90,13 @@ impl HardwareState {
             "stage_width":geometry.stage[0], "stage_height":geometry.stage[1],
             "window_active":geometry.window_active,
             "animation_enabled":signature.animation_enabled,
+            "elapsed_ms":self.started.elapsed().as_millis(), "wall_ms":observed_wall_ms(),
             "metric":"App-owned stage paint and clock eligibility; not presentation"})
         );
+    }
+
+    pub fn paint_count(&self) -> u64 {
+        self.paints.get()
     }
 
     pub fn needs_frame(&self) -> bool {
@@ -123,6 +133,22 @@ impl HardwareState {
             clock.set_running(running);
         }
         result
+    }
+}
+
+fn observed_wall_ms() -> Option<u64> {
+    let time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| error.to_string())
+        .and_then(|duration| {
+            u64::try_from(duration.as_millis()).map_err(|error| error.to_string())
+        });
+    match time {
+        Ok(time) => Some(time),
+        Err(error) => {
+            eprintln!("Hardware observation clock: {error}");
+            None
+        }
     }
 }
 

@@ -21,7 +21,15 @@ through Swift, or explicitly start a collector owned by this prototype:
 target/release/flightdeck-gpui --start-collector
 target/release/flightdeck-gpui --recording /path/to/session.recording
 target/release/flightdeck-gpui --recording /path/to/session.recording --live-check --seconds 30
+target/release/flightdeck-gpui --recording /path/to/session.recording --live-soak --seconds 900
 ```
+
+`--live-check` exercises live routes, selection identity, CPU intervals and App history
+endpoints. It reports scalar and App history coverage separately. `--live-soak` runs
+the same Overview worker headless for 5–1800 seconds (default 900), reporting distinct
+publications, observation gaps, errors and cache accounting. It stops/drops the worker,
+then waits five seconds before exiting; this does not prove a blocked worker joined.
+Neither mode opens a window or measures rendering performance.
 
 `--start-collector` writes new observations. The default recording uses the shared
 `flightdeck` ring; an explicit `--recording PATH` starts an isolated ring. Only one
@@ -131,6 +139,12 @@ new output directory for each run. Schema 2 timestamps completed CPU model actio
 schema 1 records only batch-dispatch timing. Neither measures presentation. Verify
 visible content, window dimensions and scale separately before treating the
 resource samples as a fair rendering comparison.
+
+Hardware replay uses a 1272-point GPUI window to match the assembly image size in
+the 1320-point Swift helper. Normal windows retain their existing width. Both helpers
+report stage paint callback counts and actual animation eligibility. Reject runs
+where either window becomes inactive or the assembly is clipped; those counters
+measure CPU paint work, not display presentation.
 
 The report retains raw-log paths and
 descriptive median/minimum/maximum statistics; it does not supply confidence intervals.

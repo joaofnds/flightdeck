@@ -16,7 +16,11 @@ pub fn probe(options: &Options) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         None
     };
-    crate::live_probe::run(root, options.seconds.unwrap_or(30))?;
+    if options.source.probe == crate::performance::ProbeMode::Soak {
+        crate::live_probe::soak(root, options.seconds.unwrap_or(900))?;
+    } else {
+        crate::live_probe::run(root, options.seconds.unwrap_or(30))?;
+    }
     drop(collector);
     Ok(())
 }

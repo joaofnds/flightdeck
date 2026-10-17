@@ -7,6 +7,16 @@ use serde_json::{Value, json};
 
 use crate::live_source::{Request, Snapshot, Update, Worker, identity_signature};
 
+#[path = "live_probe_workflows.rs"]
+mod workflows;
+
+#[path = "live_probe_soak.rs"]
+mod soak;
+
+pub fn soak(root: PathBuf, seconds: u32) -> Result<(), String> {
+    soak::run(root, seconds)
+}
+
 pub fn run(root: PathBuf, seconds: u32) -> Result<(), String> {
     if !(5..=300).contains(&seconds) {
         return Err("Live probe duration must be between 5 and 300 seconds".to_owned());
@@ -56,11 +66,14 @@ fn probe_routes(probe: &mut Probe) -> Result<Value, String> {
     }
     let initial = initial.ok_or_else(|| "Probe has no initial observation".to_owned())?;
     routes.insert("overview".to_owned(), probe_route_report(&initial));
+    let workflows = workflows::run(probe)?;
     let pagination = probe_pagination(probe)?;
     let latest = probe_overlapping(probe)?;
     let paused = probe_pause(probe, &latest)?;
     let resumed = probe_resume(probe, &paused)?;
     let missing_second = probe_missing(probe, &resumed)?;
+    let recovered = probe_read(probe, &probe_request("overview"))?;
+    probe_validate(&recovered, "overview")?;
 
     Ok(json!({
         "mode": "live", "routes": routes, "snapshots": probe.snapshots,
@@ -69,6 +82,9 @@ fn probe_routes(probe: &mut Probe) -> Result<Value, String> {
         "resumed_observation": resumed.selection["selected"],
         "advancing_observations": true, "paused_selection_stable": true,
         "missing_second": missing_second, "missing_selection_empty": true,
+        "missing_routes_recovered": ["overview", "apps", "cpu"],
+        "recovered_observation": recovered.selection["selected"],
+        "workflows": workflows,
         "pagination_offsets_reset": pagination,
         "overlapping_requests_latest_generation": latest.generation
     }))
@@ -89,7 +105,12 @@ fn probe_request(route: &str) -> Request {
 
 fn probe_read(probe: &mut Probe, request: &Request) -> Result<Box<Snapshot>, String> {
     let generation = probe.worker.request(request.clone())?;
-    probe_wait(probe, generation)
+    probe_wait(probe, generation).map_err(|error| {
+        format!(
+            "{} generation {generation}, second {:?}: {error}",
+            request.route, request.second
+        )
+    })
 }
 
 fn probe_wait(probe: &mut Probe, generation: u64) -> Result<Box<Snapshot>, String> {
@@ -333,9 +354,19 @@ fn probe_missing(probe: &mut Probe, resumed: &Snapshot) -> Result<u64, String> {
         .as_u64()
         .and_then(|second| second.checked_add(86_400))
         .ok_or_else(|| "Missing or invalid recording time bound".to_owned())?;
-    let mut request = probe_request("overview");
-    request.second = Some(second);
-    let missing = probe_read(probe, &request)?;
+    for route in ["overview", "apps", "cpu"] {
+        let mut request = probe_request(route);
+        request.second = Some(second);
+        let missing = probe_read(probe, &request)?;
+        probe_missing_validate(&missing)?;
+        let recovered = probe_read(probe, &probe_request(route))?;
+        probe_validate(&recovered, route)?;
+    }
+
+    Ok(second)
+}
+
+fn probe_missing_validate(missing: &Snapshot) -> Result<(), String> {
     if !missing.selection["selected"].is_null() {
         return Err("Missing second substituted another observation".to_owned());
     }
@@ -345,8 +376,16 @@ fn probe_missing(probe: &mut Probe, resumed: &Snapshot) -> Result<u64, String> {
     if !missing.pages.is_empty() {
         return Err("Missing second returned raw pages".to_owned());
     }
+    for payload in [&missing.apps, &missing.detail, &missing.history] {
+        if payload.is_some() {
+            return Err("Missing second returned App payloads".to_owned());
+        }
+    }
+    if missing.cpu_detail.is_some() {
+        return Err("Missing second returned CPU payload".to_owned());
+    }
 
-    Ok(second)
+    Ok(())
 }
 
 fn probe_route_report(snapshot: &Snapshot) -> Value {

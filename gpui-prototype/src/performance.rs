@@ -49,8 +49,16 @@ pub struct Options {
 pub struct Source {
     pub reference: bool,
     pub recording: Option<std::path::PathBuf>,
-    pub check: bool,
+    pub probe: ProbeMode,
     pub start_collector: bool,
+}
+
+#[derive(Clone, Copy, Default, PartialEq)]
+pub enum ProbeMode {
+    #[default]
+    None,
+    Check,
+    Soak,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -62,6 +70,11 @@ enum RunMode {
 
 impl Options {
     pub fn parse() -> Result<Self, Box<dyn std::error::Error>> {
+        let arguments: Vec<_> = std::env::args().skip(1).take(21).collect();
+        Self::parse_arguments(&arguments)
+    }
+
+    fn parse_arguments(arguments: &[String]) -> Result<Self, Box<dyn std::error::Error>> {
         let mut options = Self {
             source: Source::default(),
             page: "overview".into(),
@@ -73,7 +86,6 @@ impl Options {
             replay: None,
             mode: RunMode::Interactive,
         };
-        let arguments: Vec<_> = std::env::args().skip(1).collect();
         if arguments.len() > 20 {
             return Err("too many arguments".into());
         }
@@ -82,7 +94,7 @@ impl Options {
             if position == arguments.len() {
                 break;
             }
-            position = options.parse_argument(&arguments, position)?;
+            position = options.parse_argument(arguments, position)?;
         }
         if options.animate {
             if !options.hardware {
@@ -93,6 +105,7 @@ impl Options {
             }
         }
         options.validate_replay()?;
+        options.validate_seconds()?;
         Ok(options)
     }
 
@@ -104,6 +117,21 @@ impl Options {
         self.mode == RunMode::Smoke
     }
 
+    fn validate_seconds(&self) -> Result<(), &'static str> {
+        if self.source.probe == ProbeMode::Soak {
+            if self.source.reference {
+                return Err("--live-soak cannot use --reference");
+            }
+            if self.mode != RunMode::Interactive {
+                return Err("--live-soak cannot use --check or --smoke");
+            }
+        }
+        if let Some(seconds) = self.seconds {
+            return validate_duration(seconds, self.source.probe == ProbeMode::Soak);
+        }
+        Ok(())
+    }
+
     fn validate_replay(&self) -> Result<(), &'static str> {
         if self.replay.is_none() {
             return Ok(());
@@ -111,7 +139,7 @@ impl Options {
         if !self.source.reference {
             return Err("--replay requires --reference");
         }
-        if self.source.check {
+        if self.source.probe != ProbeMode::None {
             return Err("--replay cannot run with --live-check");
         }
         if self.seconds.is_some() {
@@ -170,9 +198,6 @@ impl Options {
                     .get(position)
                     .ok_or("--seconds needs a value")?
                     .parse()?;
-                if !(1..=300).contains(&seconds) {
-                    return Err("seconds must be 1..300".into());
-                }
                 self.seconds = Some(seconds);
                 position += 1;
             }
@@ -183,6 +208,7 @@ impl Options {
                      [--hardware] [--smoke] [--minutes 15|60] [--seconds 1..300]\n\
                      [--replay ACTIONS.json]] [--check]"
                 );
+                println!("--live-soak [--recording PATH] [--seconds 5..1800; default 900]");
                 std::process::exit(0);
             }
             _ => return self.source.parse_argument(flag, arguments, position),
@@ -210,7 +236,8 @@ impl Source {
     ) -> Result<usize, Box<dyn std::error::Error>> {
         match flag {
             "--reference" => self.reference = true,
-            "--live-check" => self.check = true,
+            "--live-check" => self.select_probe(ProbeMode::Check)?,
+            "--live-soak" => self.select_probe(ProbeMode::Soak)?,
             "--start-collector" => self.start_collector = true,
             "--recording" => {
                 self.recording = Some(
@@ -225,6 +252,29 @@ impl Source {
         }
         Ok(position)
     }
+
+    fn select_probe(&mut self, probe: ProbeMode) -> Result<(), &'static str> {
+        if self.probe != ProbeMode::None {
+            if self.probe != probe {
+                return Err("Select only one of --live-check and --live-soak");
+            }
+        }
+        self.probe = probe;
+        Ok(())
+    }
+}
+
+fn validate_duration(seconds: u32, soak: bool) -> Result<(), &'static str> {
+    if soak {
+        if !(5..=1800).contains(&seconds) {
+            return Err("Live soak seconds must be 5..1800");
+        }
+    } else {
+        if !(1..=300).contains(&seconds) {
+            return Err("seconds must be 1..300");
+        }
+    }
+    Ok(())
 }
 
 pub struct Performance {
@@ -296,5 +346,87 @@ impl Performance {
                 )
             })
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Options, ProbeMode};
+
+    #[test]
+    fn parses_a_long_soak_when_the_mode_precedes_its_duration() {
+        // The sustained control accepts 1800 seconds through the actual CLI parser.
+        let arguments = ["--live-soak", "--seconds", "1800"].map(str::to_owned);
+
+        let options = Options::parse_arguments(&arguments).unwrap();
+
+        assert_eq!(options.seconds, Some(1800));
+        assert!(options.source.probe == ProbeMode::Soak);
+    }
+
+    #[test]
+    fn parses_a_long_soak_when_the_duration_precedes_its_mode() {
+        // A valid duration must not depend on which flag arrives first.
+        let arguments = ["--seconds", "1800", "--live-soak"].map(str::to_owned);
+
+        let options = Options::parse_arguments(&arguments).unwrap();
+
+        assert_eq!(options.seconds, Some(1800));
+        assert!(options.source.probe == ProbeMode::Soak);
+    }
+
+    #[test]
+    fn accepts_the_shortest_live_soak() {
+        // Five seconds permits a bounded startup/lifecycle control.
+        let arguments = ["--live-soak", "--seconds", "5"].map(str::to_owned);
+
+        let options = Options::parse_arguments(&arguments).unwrap();
+
+        assert_eq!(options.seconds, Some(5));
+    }
+
+    #[test]
+    fn rejects_durations_outside_the_live_soak_contract() {
+        // Literal adjacent invalid boundaries catch accidental changes to either limit.
+        for duration in ["4", "1801"] {
+            let arguments = ["--live-soak", "--seconds", duration].map(str::to_owned);
+
+            assert!(Options::parse_arguments(&arguments).is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_conflicting_probe_modes_in_either_order() {
+        // Check and soak cannot silently select the last flag's meaning.
+        for arguments in [
+            ["--live-soak", "--live-check"],
+            ["--live-check", "--live-soak"],
+        ] {
+            let arguments = arguments.map(str::to_owned);
+
+            assert!(Options::parse_arguments(&arguments).is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_reference_and_reference_checks_in_live_soak_mode() {
+        // A headless live control must not dispatch a reference window or fixture check.
+        for flag in ["--reference", "--check", "--smoke"] {
+            for arguments in [["--live-soak", flag], [flag, "--live-soak"]] {
+                let arguments = arguments.map(str::to_owned);
+
+                assert!(Options::parse_arguments(&arguments).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn retains_the_normal_timed_window_limit() {
+        // Extending soak duration does not accidentally extend interactive test windows.
+        let valid = ["--reference", "--seconds", "300"].map(str::to_owned);
+        let invalid = ["--reference", "--seconds", "301"].map(str::to_owned);
+
+        assert!(Options::parse_arguments(&valid).is_ok());
+        assert!(Options::parse_arguments(&invalid).is_err());
     }
 }
