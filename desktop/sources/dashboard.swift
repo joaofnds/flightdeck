@@ -129,8 +129,68 @@ struct Dashboard: View {
 }
 
 @MainActor
-private final class ChartInspectionState: ObservableObject {
-    @Published var date: Date?
+final class ChartInspectionState: ObservableObject {
+    @Published private var value: Position?
+
+    private enum Position {
+        case pointer(Date)
+        case observation(String)
+    }
+
+    func date(in selection: Selection?) -> Date? {
+        if case .some(.pointer(let date)) = value { return date }
+
+        return point(in: selection)?.date
+    }
+
+    func point(in selection: Selection?) -> Metric? {
+        guard let value, let selection else { return nil }
+
+        switch value {
+        case .observation(let id):
+            return selection.trends.first { $0.id == id }
+        case .pointer(let date):
+            let seconds = date.timeIntervalSince1970
+            guard seconds.isFinite, seconds >= 0, seconds < Double(UInt64.max) else {
+                return nil
+            }
+
+            let second = UInt64(seconds)
+            if let selected = selection.summary, selected.wallNs / 1_000_000_000 == second {
+                return selected
+            }
+
+            return selection.trends.first { $0.wallNs / 1_000_000_000 == second }
+        }
+    }
+
+    func target(in selection: Selection?) -> RecordedSelectionTarget? {
+        point(in: selection).map {
+            RecordedSelectionTarget(second: $0.wallNs / 1_000_000_000, identity: $0.identity)
+        }
+    }
+
+    func hover(at date: Date?) { value = date.map(Position.pointer) }
+    func clear() { value = nil }
+
+    func move(step: Int, in selection: Selection?) -> Bool {
+        guard let points = selection?.trends, !points.isEmpty else { return false }
+
+        let index = point(in: selection).flatMap { point in
+            points.firstIndex { $0.id == point.id }
+        } ?? points.count - 1
+        value = .observation(points[min(points.count - 1, max(0, index + step))].id)
+        return true
+    }
+
+    func boundary(first: Bool, in selection: Selection?) -> Bool {
+        guard let point = first ? selection?.trends.first : selection?.trends.last else {
+            return false
+        }
+
+        value = .observation(point.id)
+        return true
+    }
 }
 
 private struct ChartInspection: ViewModifier {
@@ -149,7 +209,8 @@ private struct ChartInspection: ViewModifier {
                     ZStack(alignment: .topLeading) {
                         Color.clear.contentShape(Rectangle())
                             .onTapGesture { location in
-                                guard !model.busy, model.selection != nil else { return }
+                                guard !model.busy, let selection = model.selection else { return }
+
                                 guard let frame = proxy.plotFrame else { return }
                                 let plot = geometry[frame]
                                 guard plot.contains(location),
@@ -158,20 +219,26 @@ private struct ChartInspection: ViewModifier {
                                 let seconds = date.timeIntervalSince1970
                                 guard seconds.isFinite, seconds >= 0,
                                       seconds < Double(UInt64.max) else { return }
-                                inspection.date = nil
-                                model.load(second: UInt64(seconds))
+                                inspection.clear()
+                                let context = RecordedChartContext(selection: selection)
+                                if let point = context.point(at: seconds),
+                                   let target = context.target(id: point.id) {
+                                    model.select(target)
+                                } else {
+                                    model.load(second: UInt64(seconds))
+                                }
                             }
                             .onContinuousHover { phase in
                                 switch phase {
                                 case .active(let location):
                                     guard !model.busy, let frame = proxy.plotFrame else { return }
                                     let plot = geometry[frame]
-                                    inspection.date = plot.contains(location)
-                                        ? proxy.value(atX: location.x - plot.minX) : nil
-                                case .ended: inspection.date = nil
+                                    inspection.hover(at: plot.contains(location)
+                                        ? proxy.value(atX: location.x - plot.minX) : nil)
+                                case .ended: inspection.clear()
                                 }
                             }
-                        if let date = inspection.date {
+                        if let date = inspection.date(in: model.selection) {
                             VStack(alignment: .leading) {
                                 if let point = inspectedPoint {
                                     Text(point.date, format: .dateTime.hour().minute().second())
@@ -205,37 +272,31 @@ private struct ChartInspection: ViewModifier {
             .onKeyPress(.home) { inspectBoundary(first: true) }
             .onKeyPress(.end) { inspectBoundary(first: false) }
             .onKeyPress(.return) {
-                guard !model.busy, let point = inspectedPoint else { return .ignored }
-                inspection.date = nil
-                model.load(second: point.wallNs / 1_000_000_000)
+                guard !model.busy, let target = inspection.target(in: model.selection) else {
+                    return .ignored
+                }
+
+                inspection.clear()
+                model.select(target)
                 return .handled
             }
-            .onChange(of: model.selection?.second) { _, _ in inspection.date = nil }
+            .onChange(of: model.selection?.second) { _, _ in inspection.clear() }
     }
 
     private var inspectedPoint: Metric? {
-        guard let date = inspection.date else { return nil }
-        let seconds = date.timeIntervalSince1970
-        guard seconds.isFinite, seconds >= 0, seconds < Double(UInt64.max) else { return nil }
-        let second = UInt64(seconds)
-        if let selected = model.selection?.summary,
-           selected.wallNs / 1_000_000_000 == second { return selected }
-        return model.selection?.trends.first { $0.wallNs / 1_000_000_000 == second }
+        inspection.point(in: model.selection)
     }
 
     private func inspect(step: Int) -> KeyPress.Result {
-        guard !model.busy, let points = model.selection?.trends, !points.isEmpty else { return .ignored }
-        let index = inspectedPoint.flatMap { point in points.firstIndex { $0.id == point.id } }
-            ?? points.count - 1
-        inspection.date = points[min(points.count - 1, max(0, index + step))].date
-        return .handled
+        guard !model.busy else { return .ignored }
+
+        return inspection.move(step: step, in: model.selection) ? .handled : .ignored
     }
 
     private func inspectBoundary(first: Bool) -> KeyPress.Result {
-        guard !model.busy, let points = model.selection?.trends else { return .ignored }
-        guard let point = first ? points.first : points.last else { return .ignored }
-        inspection.date = point.date
-        return .handled
+        guard !model.busy else { return .ignored }
+
+        return inspection.boundary(first: first, in: model.selection) ? .handled : .ignored
     }
 
     private func cursorDate(_ selection: Selection) -> Date {

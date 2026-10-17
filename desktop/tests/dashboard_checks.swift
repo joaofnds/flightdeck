@@ -2,6 +2,184 @@ import Combine
 import Foundation
 import SwiftUI
 
+@MainActor
+func runOverviewInspectionChecks() throws {
+    // Keyboard navigation must retain siblings that share a wall second.
+    let data = Data(#"""
+        {"value":[
+          {"run":"first","boot":"boot","publication":1,"wall_ns":1000000000000,
+           "segment":1},
+          {"run":"second","boot":"boot","publication":1,"wall_ns":1000000000000,
+           "segment":2},
+          {"run":"second","boot":"boot","publication":2,"wall_ns":1001000000000,
+           "segment":2}]}
+        """#.utf8)
+    let points: [Metric] = try decodeRecordingResponse(data)
+    let selected = Observation(run: "second", boot: "boot", publication: 1, runTick: 1,
+        wallNs: 1_000_000_000_000, windowLosses: nil)
+    let first = Observation(run: "first", boot: "boot", publication: 1, runTick: 1,
+        wallNs: 1_000_000_000_000, windowLosses: nil)
+    let repeated = Selection(second: 1000, selected: selected, alternatives: [first, selected],
+        summary: points[1], trends: Array(points.prefix(2)), contextSeconds: 900)
+    let latest = Observation(run: "second", boot: "boot", publication: 2, runTick: 2,
+        wallNs: 1_001_000_000_000, windowLosses: nil)
+    let selection = Selection(second: 1001, selected: latest, alternatives: [latest],
+        summary: points[2], trends: points, contextSeconds: 900)
+    let inspection = ChartInspectionState()
+
+    precondition(inspection.boundary(first: true, in: repeated))
+    precondition(inspection.target(in: repeated)?.identity == points[0].identity,
+        "Overview Home reconstructed a different observation from the same date")
+    precondition(inspection.boundary(first: true, in: selection))
+    precondition(inspection.move(step: 1, in: selection))
+    precondition(inspection.target(in: selection)?.identity == points[1].identity,
+        "Overview Right lost the repeated-second sibling")
+    precondition(inspection.move(step: 1, in: selection))
+    precondition(inspection.target(in: selection)?.identity == points[2].identity)
+    precondition(inspection.move(step: -1, in: selection))
+    precondition(inspection.target(in: selection)?.identity == points[1].identity)
+    precondition(inspection.boundary(first: false, in: selection))
+    precondition(inspection.point(in: selection)?.id == points[2].id)
+    inspection.hover(at: Date(timeIntervalSince1970: 1000))
+    precondition(inspection.point(in: repeated)?.id == points[1].id)
+    inspection.hover(at: Date(timeIntervalSince1970: 999))
+    precondition(inspection.point(in: selection) == nil)
+    precondition(inspection.date(in: selection) == Date(timeIntervalSince1970: 999))
+    inspection.clear()
+    precondition(inspection.date(in: selection) == nil)
+    precondition(inspection.target(in: selection) == nil)
+    print("Overview keyboard inspection preserves repeated-second identities and empty hover")
+}
+
+func runRecordedComponentChecks() throws {
+    try checks_recorded_component_projections()
+    try expands_gpu_activity_for_measured_values_above_nominal_capacity()
+    try checks_recorded_alternative_targets()
+    // Optional GPU activity distinguishes measured zero from missing source intervals.
+    let data = Data(#"""
+        {"value":[
+          {"run":"run","boot":"boot","publication":1,"wall_ns":1000000000000,
+           "segment":1,"gpu_active_percent":37.5},
+          {"run":"run","boot":"boot","publication":2,"wall_ns":1001000000000,
+           "segment":1,"gpu_active_percent":0},
+          {"run":"run","boot":"boot","publication":3,"wall_ns":1002000000000,
+           "segment":1,"gpu_active_percent":null},
+          {"run":"run","boot":"boot","publication":4,"wall_ns":1003000000000,
+           "segment":1}]}
+        """#.utf8)
+
+    let points: [Metric] = try decodeRecordingResponse(data)
+
+    precondition(points.map(\.gpuActivePercent) == [37.5, 0, nil, nil])
+    print("GPU activity decoding preserves positive, zero and unavailable readings")
+}
+
+private func expands_gpu_activity_for_measured_values_above_nominal_capacity() throws {
+    // The source permits activity above 100%; its full recorded value must fit the plot.
+    let data = Data(#"""
+        {"value":[
+          {"run":"run","boot":"boot","publication":1,"wall_ns":1000000000000,
+           "segment":1,"gpu_active_percent":0},
+          {"run":"run","boot":"boot","publication":2,"wall_ns":1001000000000,
+           "segment":1,"gpu_active_percent":100},
+          {"run":"run","boot":"boot","publication":3,"wall_ns":1002000000000,
+           "segment":1,"gpu_active_percent":150},
+          {"run":"run","boot":"boot","publication":4,"wall_ns":1002000000000,
+           "segment":2}]}
+        """#.utf8)
+    let points: [Metric] = try decodeRecordingResponse(data)
+    let observation = Observation(run: "run", boot: "boot", publication: 3, runTick: 2,
+        wallNs: 1_002_000_000_000, windowLosses: nil)
+    let unavailable = Observation(run: "run", boot: "boot", publication: 4, runTick: 3,
+        wallNs: 1_002_000_000_000, windowLosses: nil)
+    let selection = Selection(second: 1002, selected: observation,
+        alternatives: [observation, unavailable],
+        summary: points[2], trends: points, contextSeconds: 900)
+
+    let component = RecordedComponentData(context: RecordedChartContext(selection: selection),
+        theme: FlightdeckTheme())
+    let plot = component.context.plot(lines: [component.gpuActivity])!
+    precondition(component.gpuActivity.values == [0, 100, 150, nil])
+    precondition(component.gpuActivityStyle.minimum == 0)
+    precondition(component.gpuActivityStyle.maximum == 150, "Measured GPU 150% exceeds its axis")
+    precondition(component.gpuActivityStyle.isValid)
+    precondition(plot.segments(line: 0) == [[0, 1, 2]])
+    precondition(dashboardReading(component.gpuActivity.values[2], unit: "%") == "150 %")
+}
+
+private func checks_recorded_component_projections() throws {
+    // Source units, measured zero and unavailable intervals survive every component projection.
+    let data = Data(#"""
+        {"value":[
+          {"run":"first","boot":"boot","publication":1,"wall_ns":1000000000000,
+           "segment":1,"cpu_percent":25,"gpu_active_percent":37.5,"gpu_watts":2,
+           "power_watts":12,"network_rx_bps":2048,"network_tx_bps":1024},
+          {"run":"first","boot":"boot","publication":2,"wall_ns":1001000000000,
+           "segment":1,"cpu_percent":0,"gpu_active_percent":0,"gpu_watts":0,
+           "power_watts":0,"network_rx_bps":0,"network_tx_bps":0},
+          {"run":"first","boot":"boot","publication":3,"wall_ns":1002000000000,
+           "segment":1},
+          {"run":"second","boot":"boot","publication":1,"wall_ns":1003000000000,
+           "segment":1,"cpu_percent":50,"gpu_active_percent":75,"gpu_watts":4,
+           "power_watts":16,"network_rx_bps":4096,"network_tx_bps":2048}]}
+        """#.utf8)
+    let points: [Metric] = try decodeRecordingResponse(data)
+    let observation = Observation(run: "second", boot: "boot", publication: 1, runTick: 0,
+        wallNs: 1_003_000_000_000, windowLosses: nil)
+    let selection = Selection(second: 1003, selected: observation, alternatives: [observation],
+        summary: points[3], trends: points, contextSeconds: 900)
+    let context = RecordedChartContext(selection: selection)
+
+    let component = RecordedComponentData(context: context, theme: FlightdeckTheme())
+
+    precondition(component.cpu.values == [25, 0, nil, 50])
+    precondition(component.gpuActivity.values == [37.5, 0, nil, 75])
+    precondition(component.gpuActivityStyle.minimum == 0)
+    precondition(component.gpuActivityStyle.maximum == 100)
+    precondition(component.energy.map(\.values) == [[12, 0, nil, 16], [2, 0, nil, 4]])
+    precondition(component.energy.map(\.unit) == ["W", "W"])
+    precondition(component.network.map(\.values) == [[2, 0, nil, 4], [1, 0, nil, 2]])
+    precondition(component.network[1].negative == true)
+    precondition(component.network[1].values[3] == 2)
+    precondition(component.network.map(\.unit) == ["KiB/s", "KiB/s"])
+    precondition(context.plot(lines: [component.cpu])?.segments(line: 0) == [[0, 1], [3]])
+    precondition(context.selectedID == points[3].id)
+    precondition(context.domain == 104...1004)
+}
+
+private func checks_recorded_alternative_targets() throws {
+    // Explicit alternatives, including repeated seconds, retain their full identity and order.
+    let data = Data(#"""
+        {"value":[
+          {"run":"first","boot":"boot","publication":9,"wall_ns":1000000000000,
+           "segment":1,"cpu_percent":10},
+          {"run":"second","boot":"other","publication":9,"wall_ns":1000000000000,
+           "segment":2,"cpu_percent":20}]}
+        """#.utf8)
+    let points: [Metric] = try decodeRecordingResponse(data)
+    let first = Observation(run: "first", boot: "boot", publication: 9, runTick: 8,
+        wallNs: 1_000_000_000_000, windowLosses: nil)
+    let latest = Observation(run: "second", boot: "other", publication: 9, runTick: 8,
+        wallNs: 1_000_000_000_000, windowLosses: nil)
+    let selection = Selection(second: 1000, selected: latest, alternatives: [latest, first],
+        summary: points[1], trends: points, contextSeconds: 900)
+
+    let context = RecordedChartContext(selection: selection)
+
+    let latestAlternative = try recordedAlternative(selection: selection, target: latest.identity)
+    let firstAlternative = try recordedAlternative(selection: selection, target: first.identity)
+
+    precondition(context.target(id: points[1].id) == RecordedSelectionTarget(second: 1000,
+        identity: latest.identity))
+    precondition(context.target(id: points[0].id) == RecordedSelectionTarget(second: 1000,
+        identity: first.identity))
+    precondition(latestAlternative == 0)
+    precondition(firstAlternative == 1)
+    precondition(context.target(id: "unknown") == nil)
+    precondition(context.point(at: 1000)?.id == points[1].id)
+    precondition(context.point(at: 999) == nil)
+}
+
 func runDashboardChecks() {
     checks_recorded_plot_boundaries()
     checks_recorded_plot_clock_boundaries()

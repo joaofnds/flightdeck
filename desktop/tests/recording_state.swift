@@ -35,10 +35,226 @@ struct RecordingStateChecks {
         reports_reader_losses_without_a_selected_tick()
         opening_a_recording_exits_captured_reference_mode()
         entering_memory_retains_the_selected_live_publication()
-        print("23 native recording state and table checks passed")
+        entering_component_retains_the_selected_live_publication(.gpu)
+        entering_component_retains_the_selected_live_publication(.energy)
+        entering_component_retains_the_selected_live_publication(.network)
+        entering_cpu_fetches_owned_tables_without_pausing_live()
+        pins_visible_identity_when_pausing_an_active_cpu_read()
+        pins_visible_identity_when_pausing_a_pending_cpu_read()
+        cancels_latest_work_when_pausing_without_visible_readings()
+        retains_exact_paused_identity_through_cpu_and_paging()
+        chart_selection_requests_and_retains_exact_identity()
+        unavailable_chart_identity_clears_readings_and_surfaces_error()
+        print("33 native recording state and table checks passed")
         try runReferenceDataChecks()
         runDashboardChecks()
+        try runOverviewInspectionChecks()
         try runRecordedMemoryChecks()
+        try runRecordedComponentChecks()
+    }
+
+    @MainActor
+    private static func chart_selection_requests_and_retains_exact_identity() {
+        // A chart click pauses following and carries identity independently of an index.
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+        model.setLive(true)
+        reader.finishNext()
+        drainMainQueue()
+        let identity = RecordedObservationIdentity(run: "run-1", boot: "boot", publication: 9)
+
+        model.select(RecordedSelectionTarget(second: 17, identity: identity))
+
+        precondition(!model.following)
+        precondition(reader.latestRequest?.target == identity)
+        precondition(reader.latestRequest?.alternative == 0)
+        precondition(model.selection == nil)
+        reader.finishNext()
+        drainMainQueue()
+        precondition(model.selection?.selected?.identity == identity)
+        model.chooseTable(1)
+        precondition(reader.latestRequest?.target == identity)
+        reader.finishNext()
+        drainMainQueue()
+        precondition(model.selection?.selected?.identity == identity)
+    }
+
+    @MainActor
+    private static func unavailable_chart_identity_clears_readings_and_surfaces_error() {
+        // An unavailable target cannot leave a sibling's row visible as the selected reading.
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+        model.load(second: 17)
+        reader.finishNext()
+        drainMainQueue()
+
+        model.select(RecordedSelectionTarget(second: 17,
+            identity: RecordedObservationIdentity(run: "gone", boot: "boot", publication: 9)))
+        reader.finishNext()
+        drainMainQueue()
+
+        precondition(model.error == "The requested observation is no longer available.")
+        precondition(model.selection == nil)
+        precondition(model.page == nil)
+        precondition(model.machinePages.isEmpty)
+    }
+
+    @MainActor
+    private static func entering_component_retains_the_selected_live_publication(
+        _ component: RecordedComponent
+    ) {
+        // Route-only panes reuse the newest selected publication without issuing a read.
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+        model.setLive(true)
+        reader.finishNext()
+        drainMainQueue()
+        let selected = model.selection?.selected?.identity
+
+        model.enterComponent(component)
+
+        precondition(model.route == component.rawValue)
+        precondition(model.following)
+        precondition(model.selection?.selected?.identity == selected)
+        precondition(reader.readCount == 1)
+        precondition(!model.busy)
+    }
+
+    @MainActor
+    private static func entering_cpu_fetches_owned_tables_without_pausing_live() {
+        // CPU needs process and machine pages while continuing to follow the live source.
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+        model.setLive(true)
+        reader.finishNext()
+        drainMainQueue()
+        let selected = model.selection?.selected?.identity
+
+        model.enterComponent(.cpu)
+
+        precondition(model.following)
+        precondition(model.selection?.selected?.identity == selected)
+        precondition(reader.latestRequest?.second == nil)
+        precondition(reader.latestRequest?.target == nil)
+        precondition(reader.latestRequest?.table == 7)
+        precondition(reader.latestRequest?.includeMachine == true)
+        reader.finishNext()
+        drainMainQueue()
+        precondition(model.machinePages.count == MachineSource.allCases.count)
+    }
+
+    @MainActor
+    private static func pins_visible_identity_when_pausing_an_active_cpu_read() {
+        // A latest CPU read can finish after pause, so complete it with a newer publication.
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+        model.setLive(true)
+        reader.finishNext()
+        drainMainQueue()
+        let selected = model.selection!.selected!.identity
+        model.enterComponent(.cpu)
+
+        model.setLive(false)
+        reader.finishNext(second: 18, publication: 10)
+        drainMainQueue()
+
+        precondition(model.selection?.second == 17, "Pause replaced visible second 17")
+        precondition(model.selection?.selected?.identity == selected)
+        precondition(!model.following)
+        precondition(reader.latestRequest?.second == 17)
+        precondition(reader.latestRequest?.target == selected)
+        precondition(reader.latestRequest?.includeMachine == true)
+        reader.finishNext()
+        drainMainQueue()
+        precondition(!model.busy)
+        precondition(model.page?.name == "processes")
+        precondition(model.page?.observation.identity == selected)
+        precondition(model.machinePages.count == MachineSource.allCases.count)
+        precondition(model.machinePages.values.allSatisfy { $0.observation.identity == selected })
+    }
+
+    @MainActor
+    private static func pins_visible_identity_when_pausing_a_pending_cpu_read() {
+        // CPU entry waits behind a poll; pause must replace that pending latest request too.
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+        model.setLive(true)
+        reader.finishNext()
+        drainMainQueue()
+        let selected = model.selection!.selected!.identity
+        model.pollLive()
+        model.enterComponent(.cpu)
+
+        model.setLive(false)
+        reader.finishNext(second: 18, publication: 10)
+        drainMainQueue()
+
+        precondition(model.selection?.second == 17)
+        precondition(model.selection?.selected?.identity == selected)
+        precondition(!model.following)
+        precondition(reader.latestRequest?.second == 17, "Pause retained the pending latest read")
+        precondition(reader.latestRequest?.target == selected)
+        precondition(reader.latestRequest?.includeMachine == true)
+        reader.finishNext()
+        drainMainQueue()
+        precondition(!model.busy)
+        precondition(model.page?.name == "processes")
+        precondition(model.page?.observation.identity == selected)
+        precondition(model.machinePages.count == MachineSource.allCases.count)
+        precondition(model.machinePages.values.allSatisfy { $0.observation.identity == selected })
+    }
+
+    @MainActor
+    private static func cancels_latest_work_when_pausing_without_visible_readings() {
+        // With no visible observation to pin, pause must discard the initial latest result.
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+        model.setLive(true)
+
+        model.setLive(false)
+        reader.finishNext(second: 18, publication: 10)
+        drainMainQueue()
+
+        precondition(!model.following)
+        precondition(!model.busy)
+        precondition(model.selection == nil)
+        precondition(model.page == nil)
+        precondition(model.machinePages.isEmpty)
+        precondition(reader.readCount == 1)
+        precondition(reader.cancellations == 1)
+    }
+
+    @MainActor
+    private static func retains_exact_paused_identity_through_cpu_and_paging() {
+        // Table requests retain identity until an explicit second, alternative or live choice.
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+        model.load(second: 17, alternative: 1)
+        reader.finishNext()
+        drainMainQueue()
+        let selected = model.selection!.selected!.identity
+
+        model.enterComponent(.cpu)
+
+        precondition(reader.latestRequest?.target == selected)
+        reader.finishNext()
+        drainMainQueue()
+        model.chooseTable(1)
+        precondition(reader.latestRequest?.target == selected)
+        reader.finishNext()
+        drainMainQueue()
+        model.load(offset: 512, refresh: true)
+        precondition(reader.latestRequest?.target == selected)
+        reader.finishNext()
+        drainMainQueue()
+        model.load(second: 17)
+        precondition(reader.latestRequest?.target == nil)
+        reader.finishNext()
+        drainMainQueue()
+        model.setLive(true)
+        precondition(reader.latestRequest?.target == nil)
+        reader.finishNext()
+        drainMainQueue()
     }
 
     @MainActor
@@ -112,7 +328,55 @@ struct RecordingStateChecks {
         precondition(response.page?.observation.wallNs == 900_000_000_000)
         precondition(response.page?.rows == [["3", "333", "0", "0", "0", "0", "0", "0", "0",
             "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0"]])
+        let target = RecordedObservationIdentity(run: response.selection!.selected!.run,
+            boot: response.selection!.selected!.boot, publication: 2)
+        let pinned = try nativeRead(reader, request: ReadRequest(path: path, second: 900,
+            alternative: 1, table: 1, offset: 0, refresh: false, machineOffsets: [:],
+            includeMachine: false, live: true, target: target))
+        precondition(pinned.selection?.selected?.identity == target,
+            "Expected requested publication 2, received \(String(describing: pinned.selection?.selected?.publication))")
+        precondition(pinned.page?.observation.identity == target)
+        precondition(pinned.page?.rows[0][1] == "222")
+        let earlier = RecordedObservationIdentity(run: target.run, boot: target.boot, publication: 1)
+        let differentSecond = try nativeRead(reader, request: ReadRequest(path: path, second: 1000,
+            alternative: 1, table: 1, offset: 0, refresh: false, machineOffsets: [:],
+            includeMachine: false, live: true, target: earlier))
+        precondition(differentSecond.selection?.selected?.identity == earlier)
+        precondition(differentSecond.page?.rows[0][1] == "111")
+        let missing = RecordedObservationIdentity(run: target.run, boot: target.boot,
+            publication: 999)
+        let failure = nativeFailure(reader, request: ReadRequest(path: path, second: 900,
+            alternative: 0, table: 1, offset: 0, refresh: false, machineOffsets: [:],
+            includeMachine: false, live: true, target: missing))
+        precondition(failure.message == "The requested observation is no longer available.")
         print("Real RecordingWorker rollback and repeated-second fixture passed")
+        print("Real RecordingWorker pins requested identity and refuses an unavailable sibling")
+    }
+
+    @MainActor
+    private static func nativeRead(_ reader: RecordingWorker, request: ReadRequest) throws -> ReadResult {
+        let completion = NativeReadCompletion()
+        reader.read(request) { result in completion.complete(result) }
+        precondition(completion.ready.wait(timeout: .now() + 5) == .success,
+            "Real recording worker exceeded five seconds")
+        guard let result = completion.take() else {
+            throw RecordingError(message: "Real recording worker returned no result")
+        }
+
+        return try result.get()
+    }
+
+    @MainActor
+    private static func nativeFailure(_ reader: RecordingWorker,
+                                      request: ReadRequest) -> RecordingError {
+        do {
+            let response = try nativeRead(reader, request: request)
+            preconditionFailure("Unavailable identity selected publication \(String(describing: response.selection?.selected?.publication))")
+        } catch let failure as RecordingError {
+            return failure
+        } catch {
+            preconditionFailure("Unexpected native error: \(error)")
+        }
     }
 
     @MainActor
@@ -238,6 +502,11 @@ struct RecordingStateChecks {
 
         precondition(model.selection?.second == 17)
         precondition(!model.following)
+        precondition(reader.latestRequest?.second == 17)
+        precondition(reader.latestRequest?.target == model.selection?.selected?.identity)
+        reader.finishNext()
+        drainMainQueue()
+        precondition(model.selection?.second == 17)
         precondition(!model.busy)
     }
 
@@ -559,7 +828,7 @@ private final class ControlledRecordingReader: RecordingReading, @unchecked Send
     }
 
     func finishNext(missingSecond: Bool = false, unchanged: Bool = false,
-                    second: UInt64? = nil) {
+                    second: UInt64? = nil, publication: UInt64 = 9) {
         let next = lock.withLock {
             precondition(pending != nil)
             let next = pending
@@ -567,19 +836,36 @@ private final class ControlledRecordingReader: RecordingReading, @unchecked Send
             return next
         }
         guard let (request, completion) = next else { preconditionFailure() }
-        let result = response(request, missingSecond: missingSecond, second: second)
-        completion(.success(ReadResult(catalog: result.catalog, selection: result.selection,
-            page: result.page, machinePages: result.machinePages, unchanged: unchanged)))
+        do {
+            let result = try response(request, missingSecond: missingSecond, second: second,
+                publication: publication)
+            completion(.success(ReadResult(catalog: result.catalog, selection: result.selection,
+                page: result.page, machinePages: result.machinePages, unchanged: unchanged)))
+        } catch let failure as RecordingError {
+            completion(.failure(failure))
+        } catch {
+            preconditionFailure("Unexpected controlled reader error: \(error)")
+        }
     }
 
     private func response(_ request: ReadRequest, missingSecond: Bool,
-                          second: UInt64? = nil) -> ReadResult {
+                          second: UInt64? = nil, publication: UInt64) throws -> ReadResult {
         let observations = (0..<2).map { index in
-            Observation(run: "run-\(index)", boot: "boot", publication: 9, runTick: 9,
+            Observation(run: "run-\(index)", boot: "boot", publication: publication,
+                        runTick: publication,
                         wallNs: (second ?? request.second ?? 17) * 1_000_000_000,
                         windowLosses: Losses(publications: 0, events: 0, unknown: false))
         }
-        let observation = observations[Int(request.alternative)]
+        let observation: Observation
+        if let target = request.target {
+            guard let exact = observations.first(where: { $0.identity == target }) else {
+                throw RecordingError(message: "The requested observation is no longer available.")
+            }
+
+            observation = exact
+        } else {
+            observation = observations[Int(request.alternative)]
+        }
         let selection = Selection(second: second ?? request.second ?? 17, selected: observation,
                                   alternatives: observations, summary: nil, trends: [],
                                   contextSeconds: 900)
@@ -593,7 +879,7 @@ private final class ControlledRecordingReader: RecordingReading, @unchecked Send
         if request.includeMachine {
             for source in MachineSource.allCases {
                 machinePages[source] = TablePage(name: source.rawValue, columns: ["publication"],
-                    rows: [["9"]], offset: request.machineOffsets[source] ?? 0, total: 2048,
+                    rows: [[String(publication)]], offset: request.machineOffsets[source] ?? 0, total: 2048,
                     observation: observation)
             }
         }

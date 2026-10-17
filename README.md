@@ -1,13 +1,13 @@
 # Flightdeck
 
 A macOS system monitor with a SwiftUI/AppKit client and a Rust recording core. It records
-the whole machine once a second, keeps the recording, and lets you go back to any second and see what every process,
-file and socket was doing. The design research is in
+process and system readings once a second and keeps them for later inspection.
+Open-file and socket collection is planned. The design research is in
 [docs/recording-research.md](docs/recording-research.md).
 
 ## Collector
 
-`collector` reads the whole machine once a second without root and starts a separate
+`collector` reads process and system counters once a second without root and starts a separate
 persister. Each `recording minute` reports `combined_percent` of one core for collection
 and persistence together; compare it with the 5% budget. The source-cost report's
 budget share and power in mW describe the collector alone. Build both sibling executables:
@@ -81,13 +81,17 @@ from the File menu. Refresh discovers newly sealed windows; **Live** follows the
 shared-memory ticks registered for that recording, including its unsealed tail. Pausing
 live following retains the tail for inspection.
 
-Recording mode currently provides Overview, CPU/process inspection, Memory and all ten recorded
-tables, with 512-row pages and an exact-field row inspector. Memory charts show independent
-recorded VM categories and swap, preserving missing observations and boundaries between collector runs.
-Its charts cover the 15 minutes
+Recording mode provides Overview, CPU/process inspection, GPU, Memory, Energy, Network and
+all ten recorded tables, with 512-row pages and an exact-field row inspector. CPU charts show
+aggregate logical CPU activity; GPU charts show activity and power. Energy keeps system and
+GPU power independent. Network mirrors sent traffic below zero while keeping readouts positive.
+Memory charts show independent recorded VM categories and swap. All component charts preserve
+missing observations and boundaries between collector runs. The charts cover the 15 minutes
 ending at the selected second. Enter a Unix second, step one second or inspect a chart.
-Repeated seconds retain separate run/publication alternatives. A missing second clears
-readings. Names and app identities are not yet in the recording schema, so this mode shows
+Repeated seconds retain separate run/publication alternatives. Chart selections carry the exact
+observation identity into table requests; unavailable raw observations report an error rather than
+selecting a sibling. A missing second clears readings. Names and app identities are not yet
+in the recording schema, so this mode shows
 recorded PIDs and creation identities. The other reference views still need recording-backed
 sources; the captured reference is a presentation comparison, not full functional parity.
 

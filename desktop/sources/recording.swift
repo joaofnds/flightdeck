@@ -44,6 +44,9 @@ struct Observation: Decodable, Sendable {
     let wallNs: UInt64
     let windowLosses: Losses?
     let readerLosses: Losses?
+    var identity: RecordedObservationIdentity {
+        RecordedObservationIdentity(run: run, boot: boot, publication: publication)
+    }
 
     init(run: String, boot: String, publication: UInt64, runTick: UInt64, wallNs: UInt64,
          windowLosses: Losses?, readerLosses: Losses? = nil) {
@@ -77,6 +80,7 @@ struct Metric: Decodable, Identifiable, Sendable {
     let publication: UInt64
     let segment: UInt64
     let cpuPercent: Double?
+    let gpuActivePercent: Double?
     let networkRxBps: Double?
     let networkTxBps: Double?
     let memoryTotalBytes: UInt64?
@@ -88,8 +92,17 @@ struct Metric: Decodable, Identifiable, Sendable {
     let socCelsius: Double?
     let powerWatts: Double?
     let gpuWatts: Double?
+    var identity: RecordedObservationIdentity {
+        RecordedObservationIdentity(run: run, boot: boot, publication: publication)
+    }
     var id: String { "\(run):\(boot):\(publication)" }
     var date: Date { Date(timeIntervalSince1970: Double(wallNs) / 1e9) }
+}
+
+struct RecordedObservationIdentity: Equatable, Sendable {
+    let run: String
+    let boot: String
+    let publication: UInt64
 }
 
 struct Selection: Decodable, Sendable {
@@ -144,10 +157,11 @@ struct ReadRequest: Sendable {
     let includeMachine: Bool
     let live: Bool
     let poll: Bool
+    let target: RecordedObservationIdentity?
 
     init(path: String, second: UInt64?, alternative: UInt32, table: UInt32, offset: UInt64,
          refresh: Bool, machineOffsets: [MachineSource: UInt64], includeMachine: Bool,
-         live: Bool = false, poll: Bool = false) {
+         live: Bool = false, poll: Bool = false, target: RecordedObservationIdentity? = nil) {
         self.path = path
         self.second = second
         self.alternative = alternative
@@ -158,6 +172,7 @@ struct ReadRequest: Sendable {
         self.includeMachine = includeMachine
         self.live = live
         self.poll = poll
+        self.target = target
     }
 
 }
@@ -254,7 +269,8 @@ final class RecordingWorker: RecordingReading, @unchecked Sendable {
         let catalog: Catalog = try decode(fd_catalog(session))
         path = request.path
         openedLive = request.live
-        if !changed, let lastResult {
+        if !changed, let lastResult,
+           request.target == nil || lastResult.selection?.selected?.identity == request.target {
             return ReadResult(catalog: catalog, selection: lastResult.selection,
                 page: lastResult.page, machinePages: lastResult.machinePages, unchanged: true)
         }
@@ -263,12 +279,19 @@ final class RecordingWorker: RecordingReading, @unchecked Sendable {
             return ReadResult(catalog: catalog, selection: nil, page: nil, machinePages: [:])
         }
         try prepare(session, epoch: epoch)
-        var selection: Selection = try decode(fd_select(session, second, request.alternative))
-        if request.live, request.second == nil, let latest = catalog.latestObservation,
-           let index = selection.alternatives.firstIndex(where: {
-               $0.run == latest.run && $0.boot == latest.boot && $0.publication == latest.publication
-           }), index != Int(request.alternative) {
-            selection = try decode(fd_select(session, second, UInt32(index)))
+        let target = request.target ?? (request.live && request.second == nil
+            ? catalog.latestObservation?.identity : nil)
+        var selection: Selection = try decode(fd_select(session, second,
+            target == nil ? request.alternative : 0))
+        if let target {
+            let alternative = try recordedAlternative(selection: selection, target: target)
+            if selection.selected?.identity != target {
+                try prepare(session, epoch: epoch)
+                selection = try decode(fd_select(session, second, alternative))
+            }
+            guard selection.selected?.identity == target else {
+                throw RecordingError(message: "The requested observation is no longer available.")
+            }
         }
         let page: TablePage?
         if selection.selected == nil {
@@ -342,6 +365,7 @@ final class RecordingModel: ObservableObject {
     private var pending: (UInt64, ReadRequest)?
     private var requestedSecond: UInt64?
     private var alternative: UInt32 = 0
+    private var requestedIdentity: RecordedObservationIdentity?
     private var requestedOffset: UInt64 = 0
     private var machineOffsets: [MachineSource: UInt64] = [:]
 
@@ -383,11 +407,21 @@ final class RecordingModel: ObservableObject {
     }
 
     func setLive(_ enabled: Bool) {
-        following = enabled
+        guard enabled else {
+            stopFollowing()
+            if busy {
+                if requestedIdentity != nil { enqueue(refresh: false) }
+                else { cancel() }
+            }
+
+            return
+        }
+
+        following = true
         liveTimer = nil
-        guard enabled else { return }
         useLive = true
         requestedSecond = nil
+        requestedIdentity = nil
         alternative = 0
         requestedOffset = 0
         machineOffsets.removeAll(keepingCapacity: true)
@@ -395,6 +429,16 @@ final class RecordingModel: ObservableObject {
         if pollingEnabled {
             liveTimer = Timer.publish(every: 0.25, on: .main, in: .common)
                 .autoconnect().sink { [weak self] _ in self?.pollLive() }
+        }
+    }
+
+    private func stopFollowing() {
+        following = false
+        liveTimer = nil
+
+        if let selected = selection?.selected {
+            requestedSecond = selection?.second
+            requestedIdentity = selected.identity
         }
     }
 
@@ -406,7 +450,8 @@ final class RecordingModel: ObservableObject {
     func load(second: UInt64? = nil, alternative: UInt32? = nil, offset: UInt64 = 0,
               refresh: Bool = false) {
         if let second {
-            if following { setLive(false) }
+            if following { stopFollowing() }
+            requestedIdentity = nil
             if requestedSecond != second {
                 self.alternative = 0
                 machineOffsets.removeAll(keepingCapacity: true)
@@ -414,6 +459,7 @@ final class RecordingModel: ObservableObject {
             requestedSecond = second
         }
         if let alternative {
+            requestedIdentity = nil
             if self.alternative != alternative { machineOffsets.removeAll(keepingCapacity: true) }
             self.alternative = alternative
         }
@@ -440,7 +486,7 @@ final class RecordingModel: ObservableObject {
             alternative: alternative, table: table, offset: requestedOffset,
             refresh: refresh || pending?.1.refresh == true,
             machineOffsets: machineOffsets, includeMachine: route == "CPU & processes",
-            live: useLive, poll: poll)
+            live: useLive, poll: poll, target: following ? nil : requestedIdentity)
         if busy { pending = (generation, request) }
         else { start(generation, request) }
     }
@@ -460,6 +506,9 @@ final class RecordingModel: ObservableObject {
                             page = result.page
                             machinePages = result.machinePages
                             requestedSecond = result.selection?.second
+                            if !following {
+                                requestedIdentity = result.selection?.selected?.identity
+                            }
                             secondText = result.selection.map { String($0.second) } ?? ""
                         }
                     case .failure(let failure):
@@ -475,7 +524,7 @@ final class RecordingModel: ObservableObject {
     }
 
     func cancel() {
-        setLive(false)
+        stopFollowing()
         generation += 1
         pending = nil
         if busy {
@@ -496,12 +545,13 @@ final class RecordingModel: ObservableObject {
     }
 
     func chooseRecording(path: String) {
-        setLive(false)
+        stopFollowing()
         useLive = false
         showsReference = false
         self.path = path
         catalog = nil
         requestedSecond = nil
+        requestedIdentity = nil
         alternative = 0
         machineOffsets.removeAll(keepingCapacity: true)
         selection = nil
@@ -511,14 +561,36 @@ final class RecordingModel: ObservableObject {
     }
 
     func chooseTable(_ index: UInt32) {
-        let second = selection?.second
         table = index
-        load(second: second)
+        load()
     }
 
     func enterProcesses() {
         route = "CPU & processes"
-        chooseTable(7)
+        table = 7
+        requestedOffset = 0
+        if !following, let selected = selection?.selected {
+            requestedSecond = selection?.second
+            requestedIdentity = selected.identity
+        }
+        page = nil
+        machinePages.removeAll(keepingCapacity: true)
+        row = nil
+        enqueue(refresh: false)
+    }
+
+    func select(_ target: RecordedSelectionTarget) {
+        if following { stopFollowing() }
+        requestedSecond = target.second
+        requestedIdentity = target.identity
+        alternative = 0
+        requestedOffset = 0
+        machineOffsets.removeAll(keepingCapacity: true)
+        selection = nil
+        page = nil
+        machinePages.removeAll(keepingCapacity: true)
+        row = nil
+        enqueue(refresh: false)
     }
 
     func pageMachine(_ source: MachineSource, offset: UInt64) {
@@ -526,6 +598,15 @@ final class RecordingModel: ObservableObject {
         machineOffsets[source] = offset
         enqueue(refresh: false)
     }
+}
+
+func recordedAlternative(selection: Selection, target: RecordedObservationIdentity) throws -> UInt32 {
+    guard let index = selection.alternatives.firstIndex(where: { $0.identity == target }),
+          let alternative = UInt32(exactly: index) else {
+        throw RecordingError(message: "The requested observation is no longer available.")
+    }
+
+    return alternative
 }
 
 func decodeRecordingResponse<T: Decodable>(_ data: Data) throws -> T {

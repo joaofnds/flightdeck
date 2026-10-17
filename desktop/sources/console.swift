@@ -12,6 +12,9 @@ struct Console: View {
                 navigation("Overview", icon: "square.grid.2x2")
                 navigation("CPU & processes", icon: "cpu")
                 navigation("Memory", icon: "memorychip")
+                navigation("GPU", icon: "square.3.layers.3d")
+                navigation("Energy", icon: "bolt")
+                navigation("Network", icon: "network")
                 navigation("Recorded readings", icon: "chart.xyaxis.line")
                 Spacer()
                 Divider()
@@ -47,6 +50,9 @@ struct Console: View {
                             }
                             if model.route == "Overview" { Dashboard() }
                             if model.route == "Memory" { RecordedMemory() }
+                            if let component = RecordedComponent(rawValue: model.route) {
+                                RecordedComponentPane(component: component)
+                            }
                             RecordedReadings()
                             if model.route == "CPU & processes" { MachineContext() }
                         }
@@ -65,7 +71,7 @@ struct Console: View {
 
     private func navigation(_ title: String, icon: String) -> some View {
         Button {
-            if title == "CPU & processes" { model.enterProcesses() }
+            if let component = RecordedComponent(rawValue: title) { model.enterComponent(component) }
             else if title == "Memory" { model.enterMemory() }
             else { model.route = title }
         } label: {
@@ -100,7 +106,7 @@ struct Console: View {
                     .accessibilityLabel("Recorded Unix second")
                 Button { step(1) } label: { Image(systemName: "chevron.right") }.help("Next second")
             }
-            Button { model.load(second: model.selection?.second, refresh: true) }
+            Button { model.load(refresh: true) }
                 label: { Image(systemName: "arrow.clockwise") }.help("Refresh committed history")
                 .keyboardShortcut("r")
         }.padding(.horizontal, 24).padding(.vertical, 18)
@@ -195,9 +201,9 @@ struct RecordedReadings: View {
     }
 
     private func pageBy(_ delta: Int64) {
-        guard let page = model.page, let selection = model.selection else { return }
+        guard let page = model.page else { return }
         let offset = delta < 0 ? page.offset - 512 : page.offset + 512
-        model.load(second: selection.second, offset: offset)
+        model.load(offset: offset)
     }
 }
 
