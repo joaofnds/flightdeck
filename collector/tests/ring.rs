@@ -2296,6 +2296,7 @@ mod tests {
         // Goal: fallback retention preserves the last actual run, not a numeric neighbor.
         // Method: occupy generation two between anonymous runs one and three.
         use collector::recording::{Registration, private};
+        let spawns = spawns();
         let place = TestPlace::new("anonoccupied");
         let refused = place.lock_path().with_extension("refused");
         drop(private::open_private_file(&refused, true).unwrap());
@@ -2318,6 +2319,7 @@ mod tests {
         let (second, status) = Registration::start(&refused, &place.place, SHAPE, 81)
             .unwrap()
             .into_parts();
+        drop(spawns);
         std::fs::remove_file(refused).unwrap();
 
         assert!(status.is_err());
