@@ -1,15 +1,17 @@
 use std::sync::Arc;
 
-use super::{App, BYTES_MAX, History, KeyKind, Measure, Observation, Point, Target};
+use super::compact::{CompactMeasure, capture_key};
+use super::{App, BYTES_MAX, History, KeyKind, Observation, Point, Target};
 use crate::Cancellation;
 use crate::apps::Stamp;
+use crate::live_app_response::{Key, Measure};
 use crate::session::OBSERVATIONS_MAX;
 
 #[test]
 fn shortens_dense_history_at_its_byte_limit_and_reports_the_loss() {
     // Large valid bundle keys force byte eviction while all observations remain within 15 minutes.
     let mut history = History::new();
-    for publication in 1..=9 {
+    for publication in 1..=18 {
         history.push(point(publication, 1024), 0);
     }
     let cancellation = Arc::new(Cancellation::default());
@@ -18,7 +20,7 @@ fn shortens_dense_history_at_its_byte_limit_and_reports_the_loss() {
 
     let response = history
         .response(
-            &observation(9),
+            &observation(18),
             &Target {
                 kind: KeyKind::Bundle,
                 bytes: &key,
@@ -28,14 +30,14 @@ fn shortens_dense_history_at_its_byte_limit_and_reports_the_loss() {
         .unwrap();
 
     assert!(history.bytes <= BYTES_MAX);
-    assert!(history.points.len() < 9);
+    assert!(history.points.len() < 18);
     assert!(history.points.len() > 1);
     assert_eq!(response["coverage"]["retention_limited"], true);
     let points = response["points"].as_array().unwrap();
     assert_eq!(points.len(), history.points.len());
     assert_eq!(
         points.last().unwrap()["observation"]["stamp"]["publication"],
-        "9"
+        "18"
     );
     assert_eq!(points.last().unwrap()["resident_bytes"]["known"], "42");
 }
@@ -135,8 +137,15 @@ fn refuses_app_history_after_its_operation_is_canceled() {
 fn point(publication: u64, app_count: usize) -> Box<Point> {
     let apps = (0..app_count)
         .map(|index| App {
-            kind: KeyKind::Bundle,
-            key: bundle_key(index),
+            key: capture_key(
+                &Key {
+                    kind: KeyKind::Bundle,
+                    bytes: bundle_key(index),
+                    display: String::new(),
+                },
+                &[],
+                &mut 0,
+            ),
             members: 1,
             membership_complete: false,
             cpu_ns: measure(),
@@ -177,11 +186,14 @@ fn bundle_key(index: usize) -> Vec<u8> {
     bytes
 }
 
-fn measure() -> Measure {
-    Measure {
+fn measure() -> CompactMeasure {
+    CompactMeasure::capture(&Measure {
         known: 42,
         measured_members: 1,
         unavailable_members: 0,
         overflowed: false,
-    }
+    })
 }
+
+#[path = "tests/accounting.rs"]
+mod accounting;

@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 
 use crate::cancellation::Operation;
 use crate::data::{self, Table};
-use crate::live_app_history::{History, Point, Target};
+use crate::live_app_history::{History, Target};
 use crate::live_app_response::{Detail, KeyKind, Page, Sample};
 use crate::live_apps::{Frame, Publication};
 use crate::session::{OBSERVATIONS_MAX, Observation, PAGE_ROWS};
@@ -671,7 +671,7 @@ impl LiveSession {
         current.point["boot"] = json!(identity_text(current.identity.boot).to_string());
         current.point["observation"] = current.json();
         let mut app_point = None;
-        Point::capture(
+        self.app_history.capture(
             current
                 .app_sample
                 .as_ref()

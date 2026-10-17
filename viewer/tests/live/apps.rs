@@ -89,11 +89,191 @@ fn retains_exact_app_history_while_following_the_fifteen_minute_window() {
     assert_eq!(history["selected"]["stamp"]["publication"], "2");
     let points = history["points"].as_array().unwrap();
     assert_eq!(points.len(), 2);
+    assert_eq!(points[0]["members"], 2);
+    assert_eq!(points[1]["members"], 2);
     assert_eq!(points[0]["cpu_percent_one_core"], serde_json::Value::Null);
     assert_eq!(points[1]["cpu_percent_one_core"], 50.0);
     assert_eq!(points[1]["resident_bytes"]["known"], "157286400");
     assert_eq!(points[1]["energy_watts"], 3.0);
     assert_eq!(history["coverage"]["retention_limited"], false);
+}
+
+#[test]
+fn retains_fifteen_minutes_for_an_ordinary_live_app_population() {
+    // A real identity ring keeps 640 distinct Apps throughout 901 observed publications.
+    let mut fixture = AppPopulation::new();
+    fixture.publish(1);
+    let mut session = LiveSession::open(&fixture.root).unwrap();
+
+    fixture.observe_through(&mut session, 901);
+    let selection = session.follow_latest().unwrap();
+    let history = session
+        .app_history(
+            viewer::live_app_response::KeyKind::Bundle,
+            b"/Applications/History Capacity 0000.app",
+        )
+        .unwrap();
+
+    let points = history["points"].as_array().unwrap();
+    assert_eq!(points.len(), 900);
+    assert_eq!(history["coverage"]["retention_limited"], false);
+    assert_eq!(history["coverage"]["observations_retained"], 900);
+    assert_eq!(selection["selected"]["publication"], 901);
+    assert_eq!(history["selected"]["stamp"]["publication"], "901");
+    assert_eq!(points[0]["observation"]["stamp"]["publication"], "2");
+    assert_eq!(points[899]["observation"]["stamp"]["publication"], "901");
+    assert_eq!(points[0]["resident_bytes"]["known"], "200");
+    assert_eq!(points[899]["resident_bytes"]["known"], "90100");
+    assert_eq!(points[0]["cpu_ns"]["known"], "1000000");
+    assert_eq!(points[899]["cpu_ns"]["known"], "1000000");
+    assert!(history["coverage"]["cache_bytes"].as_u64().unwrap() < 64 * 1024 * 1024);
+    eprintln!("ordinary App history coverage: {}", history["coverage"]);
+}
+
+struct AppPopulation {
+    root: std::path::PathBuf,
+    writer: collector::ring::Writer,
+    processes: Vec<Process>,
+    identities: Vec<IdentityObservation>,
+}
+
+impl AppPopulation {
+    fn new() -> Self {
+        let token =
+            collector::recording::identity_text(collector::recording::random_identity().unwrap())
+                .to_string();
+        let root = std::env::temp_dir().join(format!("flightdeck-app-history-{token}"));
+        collector::recording::private::create_private_dir(&root).unwrap();
+        let place = collector::ring::Place {
+            lock_path: root.join("ring.lock"),
+            name_prefix: format!("/fdah{}", std::process::id()),
+        };
+        let shape = collector::ring::Shape {
+            slot_count: 2,
+            cpu_capacity: 1,
+            interface_capacity: 1,
+            core_capacity: 1,
+            state_capacity: 1,
+            fan_capacity: 1,
+            process_capacity: 640,
+            coalition_capacity: 1,
+            event_capacity: 1,
+        };
+        let (writer, registered) = collector::recording::Registration::start_with_identity(
+            &root,
+            &place,
+            shape,
+            collector::ring::DictionaryCapacity {
+                entries: 640,
+                arena_bytes: 65_536,
+            },
+            0,
+        )
+        .unwrap()
+        .into_parts();
+        registered.unwrap();
+        let mut fixture = Self {
+            root,
+            writer,
+            processes: Vec::with_capacity(640),
+            identities: Vec::with_capacity(640),
+        };
+
+        fixture.initialize_apps();
+
+        fixture
+    }
+
+    fn initialize_apps(&mut self) {
+        for index in 0..640 {
+            let path = format!("/Applications/History Capacity {index:04}.app");
+            let mut program = None;
+            self.writer
+                .intern_program(
+                    &collector::ring::ProgramBytes {
+                        executable_name: b"main",
+                        app_path: Some(path.as_bytes()),
+                    },
+                    &mut program,
+                )
+                .unwrap();
+            let mut process = process(0, 0);
+            process.pid = index + 7;
+            self.identities.push(IdentityObservation {
+                pid: process.pid,
+                usage: UsageAvailability::Measured,
+                identity: ProcessIdentity::Measured {
+                    creation: ProcessCreation {
+                        unique_id: u64::try_from(index + 700).unwrap(),
+                        pid_version: 1,
+                    },
+                    program: program.unwrap(),
+                },
+            });
+            self.processes.push(process);
+        }
+    }
+
+    fn publish(&mut self, publication: u64) {
+        for (index, process) in self.processes.iter_mut().enumerate() {
+            process.usage.user_ns = publication * 1_000_000;
+            process.usage.energy_nj = publication * 2_000_000;
+            process.usage.resident_bytes = publication * 100 + u64::try_from(index).unwrap();
+            process.usage.footprint_bytes = publication * 200 + u64::try_from(index).unwrap();
+        }
+        let memory = Memory::default();
+
+        self.writer
+            .publish_with_identity(
+                &readings(&self.processes, &memory, publication),
+                Some(&ObservationTimes {
+                    wall_ns: (1000 + publication) * 1_000_000_000,
+                    continuous_ns: publication * 1_000_000_000,
+                    awake_ns: publication * 1_000_000_000,
+                }),
+                &IdentityPublication {
+                    processes: &self.identities,
+                    events: &[],
+                },
+            )
+            .unwrap();
+    }
+
+    fn observe_through(&mut self, session: &mut LiveSession, last: u64) {
+        let timebase = collector::clock::Timebase::read().unwrap();
+        let pid = i32::try_from(std::process::id()).unwrap();
+        let before = collector::processes::read_usage(timebase, pid)
+            .unwrap()
+            .unwrap();
+        let started = std::time::Instant::now();
+
+        for publication in 2..=last {
+            self.publish(publication);
+            session.poll().unwrap();
+        }
+        let elapsed_ns = started.elapsed().as_nanos();
+        let after = collector::processes::read_usage(timebase, pid)
+            .unwrap()
+            .unwrap();
+        let footprint = persistence::resources::Footprint::read().unwrap();
+
+        eprintln!(
+            "{}",
+            serde_json::json!({"fixture_publications":last,"apps_per_publication":640,
+                "elapsed_ns":elapsed_ns,
+                "process_cpu_ns":after.user_ns+after.system_ns-before.user_ns-before.system_ns,
+                "physical_footprint_bytes":footprint.current_bytes,
+                "process_lifetime_footprint_max_bytes":footprint.lifetime_bytes_max})
+        );
+    }
+}
+
+impl Drop for AppPopulation {
+    fn drop(&mut self) {
+        self.writer.finish();
+        collector::ring::unlink_generation(self.writer.name()).unwrap();
+        std::fs::remove_dir_all(&self.root).unwrap();
+    }
 }
 
 #[test]

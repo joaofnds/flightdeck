@@ -1,15 +1,19 @@
 //! Compact App facts retained independently of the bounded raw process cache.
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use persistence::{Error, Result};
 use serde_json::{Value, json};
 
 use crate::apps::{self, AppKey};
 use crate::cancellation::Operation;
-use crate::live_app_response::{KeyKind, Measure, Observation, Sample};
+use crate::live_app_response::{KeyKind, Observation, Sample};
 use crate::session::OBSERVATIONS_MAX;
 
-const BYTES_MAX: usize = 32 * 1024 * 1024;
+mod compact;
+use compact::{CompactMeasure, HistoryKey, count};
+
+const BYTES_MAX: usize = 64 * 1024 * 1024;
 const _: () = {
     assert!(OBSERVATIONS_MAX > 0);
     assert!(
@@ -34,14 +38,13 @@ pub(super) struct Point {
 }
 
 struct App {
-    kind: KeyKind,
-    key: Vec<u8>,
-    members: u32,
+    key: Arc<HistoryKey>,
+    members: u16,
     membership_complete: bool,
-    cpu_ns: Measure,
-    energy_nj: Measure,
-    resident_bytes: Measure,
-    footprint_bytes: Measure,
+    cpu_ns: CompactMeasure,
+    energy_nj: CompactMeasure,
+    resident_bytes: CompactMeasure,
+    footprint_bytes: CompactMeasure,
 }
 
 pub(super) struct Target<'bytes> {
@@ -63,7 +66,8 @@ impl History {
     }
 
     pub(super) fn push(&mut self, point: Box<Point>, first: u64) {
-        let bytes = point.bytes();
+        // Incoming references keep reused key allocations alive while older points are evicted.
+        let bytes = point.bytes() + point.unshared_key_bytes();
         for _attempt in 0..=OBSERVATIONS_MAX {
             let expired = self
                 .points
@@ -85,13 +89,17 @@ impl History {
                 .points
                 .pop_front()
                 .unwrap_or_else(|| unreachable!("one bounded App point fits the empty cache"));
-            self.bytes -= removed.bytes();
+            self.bytes -= removed.bytes() + removed.unshared_key_bytes();
             if !expired {
                 self.retention_limited = true;
             }
         }
 
         unreachable!("a bounded cache can evict all prior points");
+    }
+
+    pub(super) fn capture(&self, sample: &Sample, segment: u64, output: &mut Option<Box<Point>>) {
+        Point::capture(sample, segment, self.points.back().map(Box::as_ref), output);
     }
 
     pub(super) fn response(
@@ -140,45 +148,59 @@ impl History {
 }
 
 impl Point {
-    pub(super) fn capture(sample: &Sample, segment: u64, output: &mut Option<Box<Self>>) {
+    fn capture(
+        sample: &Sample,
+        segment: u64,
+        previous: Option<&Self>,
+        output: &mut Option<Box<Self>>,
+    ) {
         *output = None;
+        let previous = previous.map_or(&[][..], |point| &point.apps);
+        let mut previous_index = 0;
         let mut point = Box::new(Self {
             observation: sample.selected,
             segment,
             elapsed_ns: sample.elapsed_ns,
             apps: Vec::with_capacity(sample.apps().len()),
         });
+
         for app in sample.apps() {
             point.apps.push(App {
-                kind: app.key.kind,
-                key: app.key.bytes.clone(),
-                members: app.members,
+                key: compact::capture_key(&app.key, previous, &mut previous_index),
+                members: count(app.members),
                 membership_complete: app.membership_complete,
-                cpu_ns: app.cpu_ns,
-                energy_nj: app.energy_nj,
-                resident_bytes: app.resident_bytes,
-                footprint_bytes: app.footprint_bytes,
+                cpu_ns: CompactMeasure::capture(&app.cpu_ns),
+                energy_nj: CompactMeasure::capture(&app.energy_nj),
+                resident_bytes: CompactMeasure::capture(&app.resident_bytes),
+                footprint_bytes: CompactMeasure::capture(&app.footprint_bytes),
             });
         }
-        assert!(point.bytes() <= crate::live_app_response::SAMPLE_BYTES_MAX);
+
+        assert!(
+            point.bytes() + point.unshared_key_bytes()
+                <= crate::live_app_response::SAMPLE_BYTES_MAX
+        );
+
         *output = Some(point);
     }
 
     fn bytes(&self) -> usize {
-        size_of::<Self>()
-            + self.apps.capacity() * size_of::<App>()
-            + self
-                .apps
-                .iter()
-                .map(|app| app.key.capacity())
-                .sum::<usize>()
+        size_of::<Self>() + self.apps.capacity() * size_of::<App>()
+    }
+
+    fn unshared_key_bytes(&self) -> usize {
+        self.apps
+            .iter()
+            .filter(|app| Arc::strong_count(&app.key) == 1)
+            .map(|app| app.key.bytes())
+            .sum()
     }
 
     fn json(&self, target: &Target<'_>) -> Value {
         let target = key(target.kind, target.bytes);
         let app = match self
             .apps
-            .binary_search_by(|app| key(app.kind, &app.key).cmp(&target))
+            .binary_search_by(|app| app.key.view().cmp(&target))
         {
             Ok(index) => Some(&self.apps[index]),
             Err(_) => None,
