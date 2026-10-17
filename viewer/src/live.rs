@@ -44,6 +44,8 @@ pub struct LiveSession {
     operation: Operation,
     cancellation: Arc<Cancellation>,
     selected: Option<Value>,
+    selected_context: Vec<crate::cpu_history_sample::Identity>,
+    cpu_history: Option<crate::cpu_history::History>,
     inspected: Option<LiveObservation>,
     cache_bytes: usize,
     #[cfg(test)]
@@ -143,6 +145,8 @@ impl LiveSession {
             operation,
             cancellation,
             selected: None,
+            selected_context: Vec::new(),
+            cpu_history: None,
             inspected: None,
             cache_bytes: 0,
             #[cfg(test)]
@@ -150,6 +154,7 @@ impl LiveSession {
             #[cfg(test)]
             before_restore: None,
         };
+        crate::cpu_history::History::init(&mut session.cpu_history);
         if let Err(error) = session.refresh_history() {
             session.history_failure(error)?;
         }
@@ -308,6 +313,15 @@ impl LiveSession {
                 .ok_or(Error::Bound("selected context point"))?
                 .clone();
         }
+        let mut context = Vec::new();
+        crate::cpu_history::context(
+            response["trends"]
+                .as_array()
+                .ok_or(Error::Bound("CPU selected context"))?,
+            &mut context,
+        )?;
+        self.selected_context = context;
+
         Ok(response)
     }
 
@@ -367,12 +381,15 @@ impl LiveSession {
             .map(|point| point["observation"].clone())
             .collect::<Vec<_>>();
         alternatives.sort_by(|left, right| identity_order(left).cmp(&identity_order(right)));
+        let mut context = Vec::new();
+        crate::cpu_history::context(&trends, &mut context)?;
         self.operation.check()?;
 
         let response = json!({"second": second, "selected": selected,
             "alternatives": alternatives, "summary": summary, "trends": trends,
             "context_seconds": 900, "context_error": self.history_error});
         self.selected = Some(selected);
+        self.selected_context = context;
 
         Ok(response)
     }
@@ -487,6 +504,49 @@ impl LiveSession {
 
     pub fn cpu_detail(&self) -> Result<Value> {
         self.operation.run(|| self.cpu_detail_inner())
+    }
+
+    pub fn cpu_history(&mut self, offset: u32) -> Result<Value> {
+        let operation = self.operation.begin(self.operation.epoch())?;
+        operation.run(|| self.cpu_history_inner(offset))
+    }
+
+    fn cpu_history_inner(&mut self, offset: u32) -> Result<Value> {
+        let selected = self
+            .selected
+            .as_ref()
+            .ok_or(Error::Bound("no selected observation"))?
+            .clone();
+        let range = crate::cpu_history::range(&selected)?;
+        let mut restoration_error = None;
+        if let Some(history) = &mut self.history {
+            if let Err(error) = history.cpu_history_restore(range) {
+                self.operation.check()?;
+                if let Error::Io(problem) = &error {
+                    if problem.kind() == std::io::ErrorKind::Interrupted {
+                        return Err(error);
+                    }
+                }
+                restoration_error = Some(error.to_string().chars().take(512).collect::<String>());
+            }
+        }
+
+        let mut response = crate::cpu_history::project(&crate::cpu_history::Request {
+            selected: &selected,
+            context: &self.selected_context,
+            live: self.cpu_history.as_ref(),
+            saved: self
+                .history
+                .as_ref()
+                .and_then(|history| history.cpu_history_cache.as_ref()),
+            offset,
+        })?;
+        if let Some(message) = restoration_error {
+            response["restoration_error"] = json!(message);
+            crate::cpu_history::project_bytes(&response)?;
+        }
+
+        Ok(response)
     }
 
     fn cpu_detail_inner(&self) -> Result<Value> {
@@ -935,8 +995,34 @@ impl LiveSession {
         self.cache_bytes += current.bytes;
         self.observations.push_back(current);
         self.poll_evict(first)?;
+        self.poll_cpu_history()?;
         self.app_history
             .push(app_point.unwrap_or_else(|| unreachable!()), first);
+
+        Ok(())
+    }
+
+    fn poll_cpu_history(&mut self) -> Result<()> {
+        let current = self
+            .observations
+            .back()
+            .ok_or(Error::Bound("CPU live current"))?;
+        let mut identity = None;
+        crate::cpu_history_sample::Identity::read(
+            &current.point,
+            &current.observation,
+            &mut identity,
+        )?;
+        self.cpu_history
+            .as_mut()
+            .ok_or(Error::Bound("CPU live retention"))?
+            .capture(
+                &identity.ok_or(Error::Bound("CPU live identity"))?,
+                current
+                    .tables
+                    .get("cpus")
+                    .ok_or(Error::Bound("missing CPU table"))?,
+            )?;
 
         Ok(())
     }
@@ -1738,6 +1824,11 @@ mod tests {
     use collector::recording::{Registration, private};
     use collector::ring::{Dropped, ObservationTimes, Place, Readings, Shape, Writer};
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    mod cpu_history_tests {
+        use super::*;
+        include!("cpu_history_live_tests.rs");
+    }
 
     static NEXT: AtomicU64 = AtomicU64::new(0);
 

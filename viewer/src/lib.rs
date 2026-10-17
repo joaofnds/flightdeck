@@ -4,6 +4,8 @@ mod bridge;
 mod byte_display;
 mod cancellation;
 mod cpu_detail;
+mod cpu_history;
+mod cpu_history_sample;
 mod data;
 mod live;
 mod live_app_history;

@@ -28,19 +28,27 @@ struct RecordingStateChecks {
         }
         if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--live-cpu-fixture" {
             try reads_exact_selected_cpu_activity_through_the_real_worker(path: CommandLine.arguments[2])
+            try follows_cpu_history_through_the_real_worker(path: CommandLine.arguments[2])
             return
         }
         if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--live-cpu-delayed-fixture" {
             try recovers_selected_cpu_activity_after_a_delayed_commit(path: CommandLine.arguments[2])
+            try retries_cpu_history_after_a_committed_source_recovers(path: CommandLine.arguments[2])
             return
         }
         precondition(CommandLine.arguments.count == 1, "Unknown native check arguments")
         runComputerInventoryChecks()
         try runSelectedCPUChecks()
         try runSelectedCPUPresentationChecks()
+        try runCPUHistoryChecks()
+        try runCPUHistoryPanelChecks()
         try decodes_history_failure_without_rejecting_the_live_selection()
         try accepts_selection_from_a_source_without_history_diagnostics()
         try decodes_history_status_for_native_poll_cache_invalidation()
+        try pages_cpu_history_without_stopping_the_live_window()
+        try preserves_current_cpu_readings_when_history_is_unavailable()
+        try clears_and_rejects_superseded_cpu_history()
+        requests_cpu_history_only_for_the_actual_cpu_page()
         try installs_cpu_activity_when_entering_the_live_cpu_page()
         try clears_cpu_activity_before_a_new_selection_completes()
         try ignores_cpu_activity_from_a_superseded_completion()
@@ -627,12 +635,63 @@ struct RecordingStateChecks {
         print("Real RecordingWorker preserves optional and exact selected logical CPU activity")
     }
 
+    @MainActor
+    private static func follows_cpu_history_through_the_real_worker(path: String) throws {
+        // Goal: native CPU history follows the same exact common context without forcing replay.
+        // Method: read the real live fixture, reuse its unchanged page, pin, then follow again.
+        let reader = RecordingWorker()
+        let current = try nativeRead(reader, request: cpuWorkerRequest(path: path, include: true,
+            historyOffset: 0))
+        guard let history = current.cpuHistory?.readings else {
+            preconditionFailure("Live CPU history was not projected")
+        }
+
+        precondition(history.observation == current.selection?.selected)
+        precondition(history.observations.map(\.observation.identity)
+            == current.selection?.trends.map(\.identity))
+        precondition(history.cpus[0].busyPercent == [nil, 0, 25])
+        precondition(history.cpus[1].busyPercent == [nil, 100, 75])
+        let cached = try nativeRead(reader, request: cpuWorkerRequest(path: path, include: true,
+            historyOffset: 0))
+        precondition(cached.unchanged)
+        precondition(cached.cpuHistory?.readings?.cpus[0].busyPercent == [nil, 0, 25])
+        let target = RecordedObservationIdentity(run: history.observation.run,
+            boot: history.observation.boot, publication: 2)
+        let pinned = try nativeRead(reader, request: cpuWorkerRequest(path: path, include: true,
+            target: target, historyOffset: 0))
+        precondition(pinned.cpuHistory?.readings?.observation.identity == target)
+        precondition(pinned.cpuHistory?.readings?.cpus[0].busyPercent == [nil, 0])
+        let latest = try nativeRead(reader, request: cpuWorkerRequest(path: path, include: true,
+            historyOffset: 0))
+        precondition(latest.cpuHistory?.readings?.observation == history.observation)
+        let omitted = try nativeRead(reader, request: cpuWorkerRequest(path: path, include: true))
+        precondition(!omitted.unchanged)
+        precondition(omitted.cpuHistory == nil)
+        let normalized = try nativeRead(reader, request: cpuWorkerRequest(path: path, include: true,
+            historyOffset: 32))
+        precondition(normalized.cpuHistory?.readings?.offset == 0)
+        let invalid = try nativeRead(reader, request: cpuWorkerRequest(path: path, include: true,
+            historyOffset: 1))
+        precondition(invalid.cpuHistory?.notice != nil)
+        precondition(invalid.selection?.summary?.cpuPercent == 50)
+        precondition(invalid.cpuDetail?.cpus.first?.busyPercent == 25)
+        let retry = try nativeRead(reader, request: cpuWorkerRequest(path: path, include: true,
+            historyOffset: 1))
+        precondition(!retry.unchanged, "A transient history failure was cached indefinitely")
+        let recovered = try nativeRead(reader, request: cpuWorkerRequest(path: path, include: true,
+            historyOffset: 0))
+        precondition(recovered.cpuHistory?.notice == nil)
+        precondition(recovered.cpuHistory?.readings?.observation == history.observation)
+        print("Real worker follows exact independent CPU history and preserves current readings on failure")
+    }
+
     private static func cpuWorkerRequest(path: String, include: Bool,
-                                        target: RecordedObservationIdentity? = nil) -> ReadRequest {
+                                        target: RecordedObservationIdentity? = nil,
+                                        historyOffset: UInt32? = nil) -> ReadRequest {
         ReadRequest(path: path, second: target == nil ? nil : 2002, alternative: 0, table: 1,
             offset: 0, refresh: false, machineOffsets: [:], includeMachine: false,
             includePage: false, includeFans: false, live: true, poll: true, target: target,
-            includeCPUDetail: include)
+            includeCPUDetail: include, cpuHistoryOffset: historyOffset)
     }
 
     @MainActor
@@ -670,6 +729,199 @@ struct RecordingStateChecks {
         precondition(repeated.unchanged)
         precondition(repeated.cpuDetail?.cpus == recovered.cpuDetail?.cpus)
         print("Real RecordingWorker repairs selected CPU activity after a delayed predecessor commit")
+    }
+
+    @MainActor
+    private static func retries_cpu_history_after_a_committed_source_recovers(path: String) throws {
+        // Goal: a CPU-only query error stays local and retries without another publication.
+        // Method: warm scalar context, hide committed data, repeat the failure, then restore it.
+        let reader = RecordingWorker()
+        let warm = try nativeRead(reader, request: cpuWorkerRequest(path: path, include: true))
+        let request = cpuWorkerRequest(path: path, include: true, historyOffset: 0)
+        let root = URL(fileURLWithPath: path, isDirectory: true)
+        let data = root.appendingPathComponent("data", isDirectory: true)
+        let held = root.appendingPathComponent("held-cpu-history", isDirectory: true)
+        try FileManager.default.moveItem(at: data, to: held)
+        defer {
+            if FileManager.default.fileExists(atPath: held.path) {
+                do { try FileManager.default.moveItem(at: held, to: data) }
+                catch { preconditionFailure("Could not restore fixture data: \(error)") }
+            }
+        }
+
+        for _ in 0..<3 {
+            let failed = try nativeRead(reader, request: request)
+            precondition(!failed.unchanged, "CPU history failure suppressed its next retry")
+            precondition(failed.cpuHistory?.notice != nil, "CPU query failure lost its local notice")
+            precondition(failed.cpuHistory?.readings?.observation == warm.selection?.selected)
+            precondition(failed.cpuHistory?.readings?.cpus[0].busyPercent.last
+                == warm.cpuDetail?.cpus[0].busyPercent)
+            precondition(failed.catalog.historyError == warm.catalog.historyError)
+            precondition(failed.selection?.selected == warm.selection?.selected)
+            precondition(failed.selection?.summary?.cpuPercent == warm.selection?.summary?.cpuPercent)
+            precondition(failed.cpuDetail?.cpus == warm.cpuDetail?.cpus)
+        }
+        try FileManager.default.moveItem(at: held, to: data)
+        let recovered = try nativeRead(reader, request: request)
+        precondition(!recovered.unchanged)
+        precondition(recovered.cpuHistory?.notice == nil)
+        precondition(recovered.cpuHistory?.readings?.observation == warm.selection?.selected)
+        let cached = try nativeRead(reader, request: request)
+        precondition(cached.unchanged)
+        print("Real worker retries CPU history source failures without moving live selection")
+    }
+
+    @MainActor
+    private static func pages_cpu_history_without_stopping_the_live_window() throws {
+        // Goal: paging CPUs keeps the same visible observation while live following continues.
+        // Method: complete two history pages, poll, then adopt a smaller returned CPU domain.
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+        model.route = "CPU & processes"
+        model.startLive()
+        reader.finishNext(result: try cpuHistoryModelResult(publication: 10))
+        drainMainQueue()
+        let selected = model.selection?.selected
+
+        model.pageCPUHistory(32)
+
+        precondition(model.following)
+        precondition(model.selection?.selected == selected)
+        precondition(reader.latestRequest?.cpuHistoryOffset == 32)
+        precondition(reader.latestRequest?.second == nil)
+        precondition(reader.latestRequest?.target == nil)
+        reader.finishNext(result: try cpuHistoryModelResult(publication: 10, offset: 32))
+        drainMainQueue()
+        precondition(model.cpuHistory?.readings?.offset == 32)
+        precondition(model.cpuHistory?.readings?.cpus.first?.cpu == 32)
+        model.pollLive()
+        precondition(reader.latestRequest?.cpuHistoryOffset == 32)
+        reader.finishNext(result: try cpuHistoryModelResult(publication: 11, total: 2))
+        drainMainQueue()
+        model.pollLive()
+        precondition(reader.latestRequest?.cpuHistoryOffset == 0)
+        reader.finishNext(result: try cpuHistoryModelResult(publication: 12, total: 2))
+        drainMainQueue()
+        precondition(model.following)
+        precondition(model.selection?.selected?.publication == 12)
+    }
+
+    @MainActor
+    private static func preserves_current_cpu_readings_when_history_is_unavailable() throws {
+        // Goal: an unavailable history panel cannot erase healthy current CPU readings.
+        // Method: follow a typed history failure with a successful recovered history page.
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+        model.route = "CPU & processes"
+        model.startLive()
+
+        reader.finishNext(result: try cpuHistoryModelResult(publication: 10,
+            notice: "CPU history unavailable"))
+        drainMainQueue()
+
+        precondition(model.error == nil)
+        precondition(model.selection?.summary?.cpuPercent == 50)
+        precondition(model.cpuDetail?.cpus.first?.busyPercent == 0)
+        precondition(model.cpuHistory?.readings == nil)
+        precondition(model.cpuHistory?.notice == "CPU history unavailable")
+        precondition(model.following)
+        model.pollLive()
+        reader.finishNext(result: try cpuHistoryModelResult(publication: 11))
+        drainMainQueue()
+        precondition(model.cpuHistory?.readings?.observation.publication == 11)
+        precondition(model.cpuHistory?.notice == nil)
+    }
+
+    @MainActor
+    private static func clears_and_rejects_superseded_cpu_history() throws {
+        // Goal: an old follow completion cannot supply history to a newer exact selection.
+        // Method: supersede a poll, finish it, then complete the pinned replacement.
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+        model.route = "CPU & processes"
+        model.startLive()
+        reader.finishNext(result: try cpuHistoryModelResult(publication: 10))
+        drainMainQueue()
+        model.pollLive()
+        let next = try cpuHistoryModelResult(publication: 12)
+        guard let selected = next.selection?.selected else { preconditionFailure() }
+
+        model.select(RecordedSelectionTarget(second: 12, identity: selected.identity))
+
+        precondition(model.cpuHistory == nil)
+        reader.finishNext(result: try cpuHistoryModelResult(publication: 11))
+        drainMainQueue()
+        precondition(model.cpuHistory == nil)
+        precondition(reader.latestRequest?.target == selected.identity)
+        precondition(reader.latestRequest?.cpuHistoryOffset == 0)
+        reader.finishNext(result: next)
+        drainMainQueue()
+        precondition(model.cpuHistory?.readings?.observation == selected)
+        precondition(!model.following)
+        model.chooseRecording(path: "/other")
+        precondition(model.cpuHistory == nil)
+        reader.finishNext(result: try cpuHistoryModelResult(publication: 13))
+        drainMainQueue()
+    }
+
+    private static func cpuHistoryModelResult(publication: UInt64, offset: UInt32 = 0,
+        total: UInt32 = 64, notice: String? = nil) throws -> ReadResult {
+        let base = try cpuModelResult(publication: publication)
+        guard let selected = base.selection?.selected else { preconditionFailure() }
+        let previous = Observation(run: selected.run, boot: selected.boot,
+            publication: publication - 1, runTick: publication - 1,
+            wallNs: selected.wallNs - 1_000_000_000, windowLosses: nil)
+        let metricData = try JSONSerialization.data(withJSONObject: ["value": [
+            "run": selected.run, "boot": selected.boot, "publication": publication,
+            "run_tick": publication, "wall_ns": selected.wallNs, "segment": 0, "cpu_percent": 50]])
+        let metric: Metric = try decodeRecordingResponse(metricData)
+        let selection = Selection(second: publication, selected: selected, alternatives: [selected],
+            summary: metric, trends: [metric], contextSeconds: 900)
+        let rows = (offset..<min(offset + 32, total)).map { cpu in
+            LogicalCPUHistoryRow(cpu: cpu, busyPercent: [cpu == 0 ? 0 : 50])
+        }
+        let payload = CPUHistoryPayload(observation: selected, contextSeconds: 900, firstNs: 0,
+            endNs: selected.wallNs + 1_000_000_000, offset: offset, total: total,
+            retentionLimited: false, observations: [CPUHistoryObservation(observation: selected,
+                previousObservation: previous, intervalAvailable: true, cpuCount: total)], cpus: rows)
+        let history = try SelectedCPUHistory(payload: payload, selection: selection)
+        let current = try SelectedCPUReadings(payload: CPUDetailPayload(observation: selected,
+            previousObservation: previous, intervalAvailable: true, unavailableReason: nil,
+            cpus: (0..<total).map { LogicalCPUReading(cpu: $0, busyPercent: $0 == 0 ? 0 : 50) }),
+            selected: selected)
+
+        return ReadResult(catalog: base.catalog, selection: selection, page: nil,
+            machinePages: [:], cpuDetail: current,
+            cpuHistory: notice.map { CPUHistoryRead.unavailable($0) } ?? .readings(history))
+    }
+
+    @MainActor
+    private static func requests_cpu_history_only_for_the_actual_cpu_page() {
+        // Goal: only the visible actual CPU pane requests its bounded history projection.
+        // Method: enter from live Overview, then poll another route and reference CPU.
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+        model.startLive()
+        precondition(reader.latestRequest?.cpuHistoryOffset == nil)
+        reader.finishNext()
+        drainMainQueue()
+
+        model.enterComponent(.cpu)
+
+        precondition(reader.latestRequest?.cpuHistoryOffset == 0)
+        precondition(model.following)
+        reader.finishNext()
+        drainMainQueue()
+        model.navigate(to: "GPU")
+        model.pollLive()
+        precondition(reader.latestRequest?.cpuHistoryOffset == nil)
+        reader.finishNext()
+        drainMainQueue()
+        model.showsReference = true
+        model.enterComponent(.cpu)
+        precondition(reader.latestRequest?.cpuHistoryOffset == nil)
+        reader.finishNext()
+        drainMainQueue()
     }
 
     @MainActor

@@ -83,6 +83,9 @@ struct RecordedComponentPane: View {
                     chart("CPU activity", data: data, lines: [data.cpu], style: activityStyle,
                         explanation: "Busy scheduler ticks divided by total ticks across the recorded logical CPUs. An interval needs compatible consecutive observations.")
                     LogicalCPUActivity(readings: model.cpuDetail, busy: model.busy)
+                    LogicalCPUHistoryPanel(history: model.cpuHistory?.readings,
+                        notice: model.cpuHistory?.notice, busy: model.busy,
+                        onPage: model.pageCPUHistory, onSelect: model.select)
                 case .gpu:
                     ViewThatFits(in: .horizontal) {
                         HStack(alignment: .top, spacing: theme.panelGap) {

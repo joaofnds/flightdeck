@@ -27,9 +27,13 @@ pub struct Session {
     last: Option<u64>,
     unknown: u64,
     selected: Option<Observation>,
+    selected_context: Vec<crate::cpu_history_sample::Identity>,
+    pub(crate) cpu_history_cache: Option<crate::cpu_history::Cache>,
     operation: Operation,
     #[cfg(test)]
     pub(crate) source_reads: std::cell::Cell<u64>,
+    #[cfg(test)]
+    pub(crate) before_cpu_history_install: Option<Box<dyn FnOnce()>>,
 }
 
 #[derive(Clone, Copy)]
@@ -97,9 +101,13 @@ impl Session {
             last: None,
             unknown: 0,
             selected: None,
+            selected_context: Vec::new(),
+            cpu_history_cache: None,
             operation,
             #[cfg(test)]
             source_reads: std::cell::Cell::new(0),
+            #[cfg(test)]
+            before_cpu_history_install: None,
         };
         session.operation.begin(epoch)?.run(|| session.extent())?;
         Ok(session)
@@ -169,6 +177,9 @@ impl Session {
                 })
             })
             .cloned();
+        let mut selected_context = Vec::new();
+        crate::cpu_history::context(&points, &mut selected_context)?;
+        self.selected_context = selected_context;
         self.selected = chosen;
         Ok(json!({"second": second,
             "selected": self.selected.as_ref().map(|value| value.json(self)),
@@ -537,3 +548,6 @@ fn discover(root: &Path, windows: &mut Vec<Manifest>, operation: &Operation) -> 
     windows.sort_by_key(|manifest| (manifest.identity.run.run.0, manifest.publication_first));
     Ok(())
 }
+
+#[path = "cpu_history_saved.rs"]
+mod cpu_history_saved;

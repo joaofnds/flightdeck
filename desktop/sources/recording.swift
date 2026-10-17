@@ -83,6 +83,7 @@ struct Metric: Decodable, Identifiable, Sendable {
     let boot: String
     let wallNs: UInt64
     let publication: UInt64
+    let runTick: UInt64?
     let segment: UInt64
     let cpuPercent: Double?
     let gpuActivePercent: Double?
@@ -112,7 +113,7 @@ struct Metric: Decodable, Identifiable, Sendable {
     var date: Date { Date(timeIntervalSince1970: Double(wallNs) / 1e9) }
 }
 
-struct RecordedObservationIdentity: Equatable, Sendable {
+struct RecordedObservationIdentity: Hashable, Sendable {
     let run: String
     let boot: String
     let publication: UInt64
@@ -192,6 +193,7 @@ struct ReadRequest: Sendable {
     let includePage: Bool
     let includeFans: Bool
     let includeCPUDetail: Bool
+    let cpuHistoryOffset: UInt32?
     let catalogOnly: Bool
     let live: Bool
     let poll: Bool
@@ -202,7 +204,8 @@ struct ReadRequest: Sendable {
          refresh: Bool, machineOffsets: [MachineSource: UInt64], includeMachine: Bool,
          includePage: Bool = true, includeFans: Bool = false,
          live: Bool = false, poll: Bool = false, target: RecordedObservationIdentity? = nil,
-         apps: LiveAppsRequest? = nil, catalogOnly: Bool = false, includeCPUDetail: Bool = false) {
+         apps: LiveAppsRequest? = nil, catalogOnly: Bool = false, includeCPUDetail: Bool = false,
+         cpuHistoryOffset: UInt32? = nil) {
         self.path = path
         self.second = second
         self.alternative = alternative
@@ -214,6 +217,7 @@ struct ReadRequest: Sendable {
         self.includePage = includePage
         self.includeFans = includeFans
         self.includeCPUDetail = includeCPUDetail
+        self.cpuHistoryOffset = cpuHistoryOffset
         self.catalogOnly = catalogOnly
         self.live = live
         self.poll = poll
@@ -229,6 +233,7 @@ struct ReadRequest: Sendable {
             && includePage == other.includePage && includeFans == other.includeFans && apps == other.apps
             && catalogOnly == other.catalogOnly
             && includeCPUDetail == other.includeCPUDetail
+            && cpuHistoryOffset == other.cpuHistoryOffset
     }
 }
 
@@ -241,10 +246,12 @@ struct ReadResult: Sendable {
     let apps: LiveAppsRead?
     let fans: SelectedFanReadings?
     let cpuDetail: SelectedCPUReadings?
+    let cpuHistory: CPUHistoryRead?
 
     init(catalog: Catalog, selection: Selection?, page: TablePage?,
          machinePages: [MachineSource: TablePage], unchanged: Bool = false, apps: LiveAppsRead? = nil,
-         fans: SelectedFanReadings? = nil, cpuDetail: SelectedCPUReadings? = nil) {
+         fans: SelectedFanReadings? = nil, cpuDetail: SelectedCPUReadings? = nil,
+         cpuHistory: CPUHistoryRead? = nil) {
         self.catalog = catalog
         self.selection = selection
         self.page = page
@@ -253,8 +260,27 @@ struct ReadResult: Sendable {
         self.apps = apps
         self.fans = fans
         self.cpuDetail = cpuDetail
+        self.cpuHistory = cpuHistory
     }
 
+}
+
+enum CPUHistoryRead: Sendable {
+    case readings(SelectedCPUHistory)
+    case unavailable(String)
+
+    var readings: SelectedCPUHistory? {
+        if case .readings(let value) = self { return value }
+
+        return nil
+    }
+
+    var notice: String? {
+        if case .unavailable(let message) = self { return message }
+        if case .readings(let value) = self { return value.restorationError }
+
+        return nil
+    }
 }
 
 struct RecordingError: Error, LocalizedError, Sendable {
@@ -342,10 +368,12 @@ final class RecordingWorker: RecordingReading, @unchecked Sendable {
         if !changed, let lastResult, lastRequest?.hasSameProjection(as: request) == true,
            lastResult.catalog.windows == catalog.windows,
            lastResult.catalog.historyError == catalog.historyError,
+           lastResult.cpuHistory?.notice == nil,
            request.target == nil || lastResult.selection?.selected?.identity == request.target {
             return ReadResult(catalog: catalog, selection: lastResult.selection,
                 page: lastResult.page, machinePages: lastResult.machinePages, unchanged: true,
-                apps: lastResult.apps, fans: lastResult.fans, cpuDetail: lastResult.cpuDetail)
+                apps: lastResult.apps, fans: lastResult.fans, cpuDetail: lastResult.cpuDetail,
+                cpuHistory: lastResult.cpuHistory)
         }
         let latestSecond = catalog.latestObservation.map { $0.wallNs / 1_000_000_000 }
         guard let second = request.second ?? latestSecond ?? catalog.lastSecond else {
@@ -400,9 +428,12 @@ final class RecordingWorker: RecordingReading, @unchecked Sendable {
             selected: selection.selected, epoch: epoch)
         let cpuDetail = try readCPUDetail(request.includeCPUDetail, session: session,
             selected: selection.selected, epoch: epoch)
+        let cpuHistory = try readCPUHistory(request.cpuHistoryOffset, session: session,
+            selection: selection, cpuDetail: cpuDetail, epoch: epoch)
         try prepare(session, epoch: epoch)
         let result = ReadResult(catalog: catalog, selection: selection, page: page,
-            machinePages: machinePages, apps: apps, fans: fans, cpuDetail: cpuDetail)
+            machinePages: machinePages, apps: apps, fans: fans, cpuDetail: cpuDetail,
+            cpuHistory: cpuHistory)
         lastResult = result
         lastRequest = request
         return result
@@ -435,6 +466,31 @@ final class RecordingWorker: RecordingReading, @unchecked Sendable {
         let payload: CPUDetailPayload = try decode(fd_cpu_detail(session))
 
         return try SelectedCPUReadings(payload: payload, selected: selected)
+    }
+
+    private func readCPUHistory(_ requestedOffset: UInt32?, session: OpaquePointer,
+        selection: Selection, cpuDetail: SelectedCPUReadings?, epoch: UInt64) throws -> CPUHistoryRead? {
+        guard let requestedOffset, selection.selected != nil else { return nil }
+
+        do {
+            guard requestedOffset.isMultiple(of: SelectedCPUHistory.cpusPerPage) else {
+                throw CPUHistoryError.page
+            }
+
+            var offset = requestedOffset
+            if let cpuDetail, offset >= cpuDetail.cpus.count { offset = 0 }
+
+            try prepare(session, epoch: epoch)
+            let payload: CPUHistoryPayload = try decode(fd_cpu_history(session, offset))
+            let history = try SelectedCPUHistory(payload: payload, selection: selection)
+
+            return .readings(history)
+        } catch {
+            // A canceled epoch must reject the whole result instead of installing stale readings.
+            try prepare(session, epoch: epoch)
+
+            return .unavailable(String(error.localizedDescription.prefix(512)))
+        }
     }
 
     private func readApps(_ request: LiveAppsRequest?, session: OpaquePointer,
@@ -541,6 +597,7 @@ final class RecordingModel: ObservableObject {
     @Published private(set) var appProcessGroup: Data?
     @Published private(set) var fans: SelectedFanReadings?
     @Published private(set) var cpuDetail: SelectedCPUReadings?
+    @Published private(set) var cpuHistory: CPUHistoryRead?
     private let reader: any RecordingReading
     private var useLive = false
     private var startedLive = false
@@ -558,6 +615,7 @@ final class RecordingModel: ObservableObject {
     private var machineOffsets: [MachineSource: UInt64] = [:]
     private var appsOffset: UInt32 = 0
     private var appMembersOffset: UInt32 = 0
+    private var cpuHistoryOffset: UInt32 = 0
 
     init(path: String, reader: any RecordingReading = RecordingWorker(),
          pollingEnabled: Bool = true, now: @escaping @MainActor () -> Date = { Date() },
@@ -626,6 +684,7 @@ final class RecordingModel: ObservableObject {
         machineOffsets.removeAll(keepingCapacity: true)
         appsOffset = 0
         appMembersOffset = 0
+        cpuHistoryOffset = 0
         enqueue(refresh: false)
         if pollingEnabled {
             liveTimer = Timer.publish(every: 0.25, on: .main, in: .common)
@@ -668,9 +727,11 @@ final class RecordingModel: ObservableObject {
             self.alternative = alternative
         }
         requestedOffset = offset
+        cpuHistoryOffset = 0
         selection = nil
         fans = nil
         cpuDetail = nil
+        cpuHistory = nil
         apps = nil
         page = nil
         machinePages.removeAll(keepingCapacity: true)
@@ -699,7 +760,8 @@ final class RecordingModel: ObservableObject {
             live: useLive, poll: poll, target: following ? nil : requestedIdentity,
             apps: route == "Apps" ? LiveAppsRequest(key: appKey, appsOffset: appsOffset,
                 membersOffset: appMembersOffset) : nil, catalogOnly: route == "Computer",
-            includeCPUDetail: route == "CPU & processes" && !showsReference)
+            includeCPUDetail: route == "CPU & processes" && !showsReference,
+            cpuHistoryOffset: route == "CPU & processes" && !showsReference ? cpuHistoryOffset : nil)
         if reading { pending = (generation, request) }
         else { start(generation, request) }
     }
@@ -721,6 +783,10 @@ final class RecordingModel: ObservableObject {
                             selection = result.selection
                             fans = result.fans
                             cpuDetail = result.cpuDetail
+                            cpuHistory = result.cpuHistory
+                            if let history = result.cpuHistory?.readings {
+                                cpuHistoryOffset = history.offset
+                            }
                             page = result.page
                             machinePages = result.machinePages
                             apps = result.apps
@@ -791,6 +857,7 @@ final class RecordingModel: ObservableObject {
         selection = nil
         fans = nil
         cpuDetail = nil
+        cpuHistory = nil
         apps = nil
         appKey = nil
         appProcessGroup = nil
@@ -877,16 +944,25 @@ final class RecordingModel: ObservableObject {
         requestedIdentity = target.identity
         appsOffset = 0
         appMembersOffset = 0
+        cpuHistoryOffset = 0
         alternative = 0
         requestedOffset = 0
         machineOffsets.removeAll(keepingCapacity: true)
         selection = nil
         fans = nil
         cpuDetail = nil
+        cpuHistory = nil
         page = nil
         machinePages.removeAll(keepingCapacity: true)
         row = nil
         apps = nil
+        enqueue(refresh: false)
+    }
+
+    func pageCPUHistory(_ offset: UInt32) {
+        precondition(offset.isMultiple(of: SelectedCPUHistory.cpusPerPage))
+        precondition(offset < UInt32(SelectedCPUReadings.cpusMax))
+        cpuHistoryOffset = offset
         enqueue(refresh: false)
     }
 
