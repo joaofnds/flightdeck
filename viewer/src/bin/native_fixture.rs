@@ -39,7 +39,22 @@ fn run() -> io::Result<()> {
             "native worker fixture failed: {status}"
         )));
     }
-    apps::run(Path::new(&checks))
+    drop(fixture);
+    apps::run(Path::new(&checks))?;
+    let mut cpu_fixture = Fixture::new()?;
+    cpu_fixture.publish_cpu_checks()?;
+    let status = Command::new(&checks)
+        .arg("--live-cpu-fixture")
+        .arg(&cpu_fixture.root)
+        .status()?;
+    if !status.success() {
+        return Err(io::Error::other(format!(
+            "native CPU fixture failed: {status}"
+        )));
+    }
+    drop(cpu_fixture);
+
+    cpu_commit::run(Path::new(&checks))
 }
 
 struct Fixture {
@@ -63,7 +78,7 @@ impl Fixture {
         };
         let shape = Shape {
             slot_count: 4,
-            cpu_capacity: 1,
+            cpu_capacity: 2,
             interface_capacity: 1,
             core_capacity: 1,
             state_capacity: 1,
@@ -77,6 +92,54 @@ impl Fixture {
         fixture.writer = Some(writer);
         registered?;
         Ok(fixture)
+    }
+
+    fn publish_cpu_checks(&mut self) -> io::Result<()> {
+        let writer = self
+            .writer
+            .as_mut()
+            .ok_or_else(|| io::Error::other("missing fixture writer"))?;
+        for tick in 1..=3_u32 {
+            let (cpu0_busy, cpu1_busy) = if tick == 3 {
+                (25, 275)
+            } else {
+                (0, tick * 100)
+            };
+            let cpus = [
+                collector::machine::CPUTicks {
+                    user: cpu0_busy,
+                    idle: tick * 100 - cpu0_busy,
+                    ..collector::machine::CPUTicks::default()
+                },
+                collector::machine::CPUTicks {
+                    user: cpu1_busy,
+                    idle: tick * 100 - cpu1_busy,
+                    ..collector::machine::CPUTicks::default()
+                },
+            ];
+            writer.publish_observed(
+                &Readings {
+                    run_tick: u64::from(tick),
+                    cpus: &cpus,
+                    memory: &Memory::default(),
+                    interfaces: &[],
+                    ioreport: None,
+                    smc: None,
+                    processes: &[],
+                    processes_refused: 0,
+                    processes_gone: 0,
+                    coalitions: &[],
+                    events: &[],
+                    dropped: Dropped::default(),
+                },
+                &ObservationTimes {
+                    wall_ns: u64::from(2000 + tick) * 1_000_000_000,
+                    continuous_ns: u64::from(tick) * 1_000_000_000,
+                    awake_ns: u64::from(tick) * 1_000_000_000,
+                },
+            );
+        }
+        Ok(())
     }
 
     fn publish(&mut self) -> io::Result<()> {
@@ -105,10 +168,11 @@ impl Fixture {
                 })
             };
 
+            let cpus = fixture_cpus(u32::try_from(tick).map_err(io::Error::other)?);
             writer.publish_observed(
                 &Readings {
                     run_tick: tick,
-                    cpus: &[],
+                    cpus: &cpus,
                     memory: &memory,
                     interfaces: &[],
                     ioreport: None,
@@ -144,6 +208,22 @@ impl Drop for Fixture {
     }
 }
 
+fn fixture_cpus(tick: u32) -> [collector::machine::CPUTicks; 2] {
+    assert!((1..=3).contains(&tick));
+    [
+        collector::machine::CPUTicks {
+            user: tick * 25,
+            idle: tick * 75,
+            ..collector::machine::CPUTicks::default()
+        },
+        collector::machine::CPUTicks {
+            user: tick * 75,
+            idle: tick * 25,
+            ..collector::machine::CPUTicks::default()
+        },
+    ]
+}
+
 fn fixture_remove(root: &Path) {
     if let Err(error) = std::fs::remove_dir_all(root) {
         eprintln!("native fixture directory cleanup: {error}");
@@ -152,3 +232,42 @@ fn fixture_remove(root: &Path) {
 
 #[path = "native_fixture/apps.rs"]
 mod apps;
+#[path = "native_fixture/cpu_commit.rs"]
+mod cpu_commit;
+
+#[cfg(test)]
+mod tests {
+    use super::Fixture;
+    use serde_json::json;
+
+    #[test]
+    fn supplies_genuine_zero_full_and_independent_cpu_intervals() {
+        // Goal: native worker checks receive real independently varying CPU readings.
+        // Method: exercise exact selection and following through the genuine Rust adapter.
+        let mut fixture = Fixture::new().unwrap();
+        fixture.publish_cpu_checks().unwrap();
+        let mut session = viewer::LiveSession::open(&fixture.root).unwrap();
+        session.select(2002, 0).unwrap();
+
+        let pinned = session.cpu_detail().unwrap();
+        let pinned_again = session.cpu_detail().unwrap();
+        session.follow_latest().unwrap();
+        let latest = session.cpu_detail().unwrap();
+
+        assert_eq!(pinned, pinned_again);
+        assert_eq!(pinned["observation"]["publication"], 2);
+        assert_eq!(
+            pinned["cpus"],
+            json!([
+                {"cpu":0,"busy_percent":0.0}, {"cpu":1,"busy_percent":100.0}
+            ])
+        );
+        assert_eq!(latest["observation"]["publication"], 3);
+        assert_eq!(
+            latest["cpus"],
+            json!([
+                {"cpu":0,"busy_percent":25.0}, {"cpu":1,"busy_percent":75.0}
+            ])
+        );
+    }
+}

@@ -11,6 +11,10 @@ struct FlightdeckTheme {
     var focus = Palette.blue
     var warning = Palette.orange
     var cpuSeries = Palette.blue
+    var cpuActivityLow = Palette.green
+    var cpuActivityModerate = Color(red: 0.95, green: 0.80, blue: 0.05)
+    var cpuActivityHigh = Palette.orange
+    var cpuActivityPeak = Palette.red
     var gpuPowerSeries = Palette.purple
     var memoryActiveSeries = Palette.blue
     var memoryWiredSeries = Palette.orange

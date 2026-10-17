@@ -26,8 +26,22 @@ struct RecordingStateChecks {
                 path: CommandLine.arguments[2])
             return
         }
+        if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--live-cpu-fixture" {
+            try reads_exact_selected_cpu_activity_through_the_real_worker(path: CommandLine.arguments[2])
+            return
+        }
+        if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--live-cpu-delayed-fixture" {
+            try recovers_selected_cpu_activity_after_a_delayed_commit(path: CommandLine.arguments[2])
+            return
+        }
         precondition(CommandLine.arguments.count == 1, "Unknown native check arguments")
         runComputerInventoryChecks()
+        try runSelectedCPUChecks()
+        try runSelectedCPUPresentationChecks()
+        try installs_cpu_activity_when_entering_the_live_cpu_page()
+        try clears_cpu_activity_before_a_new_selection_completes()
+        try ignores_cpu_activity_from_a_superseded_completion()
+        omits_cpu_activity_in_captured_reference_mode()
         completes_collector_startup_while_showing_computer_inventory()
         polls_without_projecting_metrics_while_showing_computer_inventory()
         keeps_discovering_the_collector_while_showing_computer_inventory()
@@ -520,6 +534,184 @@ struct RecordingStateChecks {
         precondition(latest.fans?.observation.identity == selected.identity)
         precondition(latest.fans?.fan0 == 1234.5)
         print("Real RecordingWorker keeps selected fans bounded, optional and exact across projections")
+    }
+
+    @MainActor
+    private static func reads_exact_selected_cpu_activity_through_the_real_worker(path: String) throws {
+        // Goal: native CPU activity uses exact live identities and an independent optional projection.
+        // Method: read the genuine three-publication CPU fixture, pin its middle tick, then follow.
+        let reader = RecordingWorker()
+        let omitted = try nativeRead(reader, request: cpuWorkerRequest(path: path, include: false))
+        precondition(omitted.cpuDetail == nil)
+
+        let current = try nativeRead(reader, request: cpuWorkerRequest(path: path, include: true))
+
+        precondition(!current.unchanged)
+        precondition(current.page == nil)
+        precondition(current.machinePages.isEmpty)
+        precondition(current.cpuDetail?.observation == current.selection?.selected)
+        precondition(current.cpuDetail?.observation.publication == 3)
+        precondition(current.cpuDetail?.cpus == [LogicalCPUReading(cpu: 0, busyPercent: 25),
+            LogicalCPUReading(cpu: 1, busyPercent: 75)])
+        let cached = try nativeRead(reader, request: cpuWorkerRequest(path: path, include: true))
+        precondition(cached.unchanged)
+        precondition(cached.cpuDetail?.cpus == current.cpuDetail?.cpus)
+        guard let selected = current.selection?.selected else { preconditionFailure() }
+        let earlier = RecordedObservationIdentity(run: selected.run, boot: selected.boot, publication: 2)
+        let pinned = try nativeRead(reader,
+            request: cpuWorkerRequest(path: path, include: true, target: earlier))
+        precondition(pinned.selection?.selected?.identity == earlier)
+        precondition(pinned.cpuDetail?.observation.identity == earlier)
+        precondition(pinned.cpuDetail?.cpus == [LogicalCPUReading(cpu: 0, busyPercent: 0),
+            LogicalCPUReading(cpu: 1, busyPercent: 100)])
+        let latest = try nativeRead(reader, request: cpuWorkerRequest(path: path, include: true))
+        precondition(latest.cpuDetail?.observation == selected)
+        precondition(latest.cpuDetail?.cpus == current.cpuDetail?.cpus)
+        let omittedAgain = try nativeRead(reader, request: cpuWorkerRequest(path: path, include: false))
+        precondition(!omittedAgain.unchanged)
+        precondition(omittedAgain.cpuDetail == nil)
+        print("Real RecordingWorker preserves optional and exact selected logical CPU activity")
+    }
+
+    private static func cpuWorkerRequest(path: String, include: Bool,
+                                        target: RecordedObservationIdentity? = nil) -> ReadRequest {
+        ReadRequest(path: path, second: target == nil ? nil : 2002, alternative: 0, table: 1,
+            offset: 0, refresh: false, machineOffsets: [:], includeMachine: false,
+            includePage: false, includeFans: false, live: true, poll: true, target: target,
+            includeCPUDetail: include)
+    }
+
+    @MainActor
+    private static func recovers_selected_cpu_activity_after_a_delayed_commit(path: String) throws {
+        // Goal: a newly discovered predecessor repairs CPU bars without a new publication.
+        // Method: select the oldest retained tick, then seal its expired predecessor on request.
+        let reader = RecordingWorker()
+        let current = try nativeRead(reader, request: cpuWorkerRequest(path: path, include: false))
+        guard let latest = current.selection?.selected else { preconditionFailure() }
+        let target = RecordedObservationIdentity(run: latest.run, boot: latest.boot, publication: 3)
+        let request = ReadRequest(path: path, second: 2003, alternative: 0, table: 1,
+            offset: 0, refresh: false, machineOffsets: [:], includeMachine: false,
+            includePage: false, includeFans: false, live: true, poll: true, target: target,
+            includeCPUDetail: true)
+        let unavailable = try nativeRead(reader, request: request)
+        precondition(unavailable.selection?.selected?.identity == target)
+        precondition(unavailable.cpuDetail?.intervalAvailable == false)
+        precondition(unavailable.cpuDetail?.previousObservation == nil)
+        let root = URL(fileURLWithPath: path, isDirectory: true)
+        try Data().write(to: root.appendingPathComponent("cpu-commit-request"))
+        let deadline = Date().addingTimeInterval(5)
+        while !FileManager.default.fileExists(atPath: root.appendingPathComponent("cpu-commit-ready").path) {
+            precondition(Date() < deadline, "Fixture did not seal the delayed CPU predecessor")
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        }
+
+        let recovered = try nativeRead(reader, request: request)
+
+        precondition(!recovered.unchanged, "Delayed CPU commit reused the unavailable projection")
+        precondition(recovered.selection?.selected?.identity == target)
+        precondition(recovered.cpuDetail?.intervalAvailable == true)
+        precondition(recovered.cpuDetail?.cpus == [LogicalCPUReading(cpu: 0, busyPercent: 25),
+            LogicalCPUReading(cpu: 1, busyPercent: 75)])
+        let repeated = try nativeRead(reader, request: request)
+        precondition(repeated.unchanged)
+        precondition(repeated.cpuDetail?.cpus == recovered.cpuDetail?.cpus)
+        print("Real RecordingWorker repairs selected CPU activity after a delayed predecessor commit")
+    }
+
+    @MainActor
+    private static func installs_cpu_activity_when_entering_the_live_cpu_page() throws {
+        // Goal: CPU entry requests and installs its independent detail without changing live mode.
+        // Method: enter from Overview using the controlled I/O boundary and complete a real DTO.
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+        model.startLive()
+        precondition(reader.latestRequest?.includeCPUDetail == false)
+        reader.finishNext()
+        drainMainQueue()
+        let result = try cpuModelResult(publication: 10)
+
+        model.enterComponent(.cpu)
+        reader.finishNext(result: result)
+        drainMainQueue()
+
+        precondition(reader.latestRequest?.includeCPUDetail == true)
+        precondition(model.following)
+        precondition(model.cpuDetail?.observation == model.selection?.selected)
+        precondition(model.cpuDetail?.cpus == result.cpuDetail?.cpus)
+    }
+
+    @MainActor
+    private static func clears_cpu_activity_before_a_new_selection_completes() throws {
+        // Goal: a pending exact selection never displays bars from a previous observation.
+        // Method: install CPU data, select the same observation, then complete with no detail.
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+        let result = try cpuModelResult(publication: 10)
+        model.enterComponent(.cpu)
+        reader.finishNext(result: result)
+        drainMainQueue()
+        precondition(model.cpuDetail != nil)
+        guard let selected = result.selection?.selected else { preconditionFailure() }
+
+        model.select(RecordedSelectionTarget(second: 10, identity: selected.identity))
+
+        precondition(model.cpuDetail == nil)
+        reader.finishNext(result: fanResult(selected: selected))
+        drainMainQueue()
+        precondition(model.cpuDetail == nil)
+    }
+
+    @MainActor
+    private static func ignores_cpu_activity_from_a_superseded_completion() throws {
+        // Goal: a late live result cannot replace the CPU activity of a newer exact selection.
+        // Method: supersede an in-flight read and finish it before the replacement.
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+        let old = try cpuModelResult(publication: 10)
+        let next = try cpuModelResult(publication: 11)
+        model.enterComponent(.cpu)
+        guard let selected = next.selection?.selected else { preconditionFailure() }
+
+        model.select(RecordedSelectionTarget(second: 11, identity: selected.identity))
+        reader.finishNext(result: old)
+        drainMainQueue()
+
+        precondition(model.cpuDetail == nil)
+        precondition(reader.latestRequest?.target == selected.identity)
+        reader.finishNext(result: next)
+        drainMainQueue()
+        precondition(model.cpuDetail?.observation == selected)
+        precondition(model.cpuDetail?.cpus == next.cpuDetail?.cpus)
+    }
+
+    @MainActor
+    private static func omits_cpu_activity_in_captured_reference_mode() {
+        // Goal: actual CPU detail is not queried while showing captured reference visuals.
+        // Method: enter CPU with the existing captured-reference model option.
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false,
+            showsReference: true)
+
+        model.enterComponent(.cpu)
+
+        precondition(reader.latestRequest?.includeCPUDetail == false)
+        reader.finishNext()
+        drainMainQueue()
+    }
+
+    private static func cpuModelResult(publication: UInt64) throws -> ReadResult {
+        let selected = Observation(run: "run-0", boot: "boot", publication: publication,
+            runTick: publication, wallNs: publication * 1_000_000_000, windowLosses: nil)
+        let previous = Observation(run: selected.run, boot: selected.boot, publication: publication - 1,
+            runTick: publication - 1, wallNs: (publication - 1) * 1_000_000_000, windowLosses: nil)
+        let payload = CPUDetailPayload(observation: selected, previousObservation: previous,
+            intervalAvailable: true, unavailableReason: nil,
+            cpus: [LogicalCPUReading(cpu: 0, busyPercent: 25), LogicalCPUReading(cpu: 1, busyPercent: 75)])
+        let readings = try SelectedCPUReadings(payload: payload, selected: selected)
+        let result = fanResult(selected: selected)
+
+        return ReadResult(catalog: result.catalog, selection: result.selection, page: nil,
+            machinePages: [:], cpuDetail: readings)
     }
 
     private static func fanWorkerRequest(path: String, includeFans: Bool,

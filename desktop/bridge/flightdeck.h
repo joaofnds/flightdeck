@@ -21,6 +21,7 @@ FlightdeckBytes fd_prepare(FlightdeckSession *session, uint64_t epoch);
 FlightdeckBytes fd_catalog(FlightdeckSession *session);
 FlightdeckBytes fd_select(FlightdeckSession *session, uint64_t second, uint32_t alternative);
 FlightdeckBytes fd_follow(FlightdeckSession *session);
+FlightdeckBytes fd_cpu_detail(FlightdeckSession *session);
 FlightdeckBytes fd_apps(FlightdeckSession *session, uint32_t offset);
 FlightdeckBytes fd_app_detail(FlightdeckSession *session, const FlightdeckAppKey *key,
     uint32_t offset);

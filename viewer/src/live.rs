@@ -341,6 +341,87 @@ impl LiveSession {
         Ok(response)
     }
 
+    pub fn cpu_detail(&self) -> Result<Value> {
+        self.operation.run(|| self.cpu_detail_inner())
+    }
+
+    fn cpu_detail_inner(&self) -> Result<Value> {
+        let selected = self
+            .selected
+            .as_ref()
+            .ok_or(Error::Bound("no selected observation"))?;
+        let mut current_slot = None;
+        let mut previous_slot = None;
+        self.cpu_detail_cached(selected, &mut current_slot)?;
+        if current_slot.is_none() {
+            let history = self
+                .history
+                .as_ref()
+                .ok_or(Error::Bound("missing historical selection"))?;
+            let publication = selected["publication"]
+                .as_u64()
+                .ok_or(Error::Bound("selected publication"))?;
+            history.cpu_detail_publication(selected, publication, &mut current_slot)?;
+        }
+
+        let current = current_slot
+            .as_ref()
+            .ok_or(Error::Bound("missing selected CPU reading"))?;
+        if current.identity["run_tick"] != selected["run_tick"] {
+            return Err(Error::Bound("changed CPU selection tick"));
+        }
+
+        if current.identity["wall_ns"] != selected["wall_ns"] {
+            return Err(Error::Bound("changed CPU selection wall"));
+        }
+
+        if let Some(publication) = current.observation.publication.checked_sub(1) {
+            let mut identity = current.identity.clone();
+            identity["publication"] = json!(publication);
+            self.cpu_detail_cached(&identity, &mut previous_slot)?;
+            if previous_slot.is_none() {
+                if let Some(history) = &self.history {
+                    history.cpu_detail_publication(&identity, publication, &mut previous_slot)?;
+                }
+            }
+        }
+
+        crate::cpu_detail::project(current, previous_slot.as_ref())
+    }
+
+    fn cpu_detail_cached(
+        &self,
+        identity: &Value,
+        output: &mut Option<crate::cpu_detail::Sample>,
+    ) -> Result<()> {
+        assert!(output.is_none());
+
+        let Some(observation) = self
+            .inspected
+            .iter()
+            .chain(self.observations.iter())
+            .find(|observation| same(&observation.json(), identity))
+        else {
+            return Ok(());
+        };
+
+        let cpus = observation
+            .tables
+            .get("cpus")
+            .ok_or(Error::Bound("missing CPU table"))?;
+        if cpus.rows.len() > crate::cpu_detail::CPUS_MAX {
+            return Err(Error::Bound("logical CPU count"));
+        }
+
+        *output = Some(crate::cpu_detail::Sample {
+            identity: observation.json(),
+            observation: observation.observation.clone(),
+            cpus: cpus.clone(),
+        });
+
+        Ok(())
+    }
+
     pub fn page(&self, name: &str, offset: u64) -> Result<Value> {
         self.operation.check()?;
         let selected = self
@@ -1494,6 +1575,12 @@ mod tests {
 
     impl RingFixture {
         fn new() -> Self {
+            Self::new_with_cpu_capacity(1)
+        }
+
+        fn new_with_cpu_capacity(cpu_capacity: u64) -> Self {
+            assert!(cpu_capacity > 0);
+            assert!(cpu_capacity <= 2);
             let serial = NEXT.fetch_add(1, Ordering::Relaxed);
             let root = std::env::temp_dir()
                 .join(format!("flightdeck-retry-{}-{serial}", std::process::id()));
@@ -1504,7 +1591,7 @@ mod tests {
             };
             let shape = Shape {
                 slot_count: 2,
-                cpu_capacity: 1,
+                cpu_capacity,
                 interface_capacity: 1,
                 core_capacity: 1,
                 state_capacity: 1,
@@ -1518,6 +1605,42 @@ mod tests {
                 .into_parts();
             registered.unwrap();
             Self { root, writer }
+        }
+
+        fn publish_cpu_activity(&mut self, tick: u32) {
+            let cpus = [
+                collector::machine::CPUTicks {
+                    user: tick * 25,
+                    idle: tick * 75,
+                    ..collector::machine::CPUTicks::default()
+                },
+                collector::machine::CPUTicks {
+                    user: tick * 75,
+                    idle: tick * 25,
+                    ..collector::machine::CPUTicks::default()
+                },
+            ];
+            self.writer.publish_observed(
+                &Readings {
+                    run_tick: u64::from(tick),
+                    cpus: &cpus,
+                    memory: &collector::machine::Memory::default(),
+                    interfaces: &[],
+                    ioreport: None,
+                    smc: None,
+                    processes: &[],
+                    processes_refused: 0,
+                    processes_gone: 0,
+                    coalitions: &[],
+                    events: &[],
+                    dropped: Dropped::default(),
+                },
+                &ObservationTimes {
+                    wall_ns: (1000 + u64::from(tick)) * NANOSECONDS_PER_SECOND,
+                    continuous_ns: u64::from(tick) * NANOSECONDS_PER_SECOND,
+                    awake_ns: u64::from(tick) * NANOSECONDS_PER_SECOND,
+                },
+            );
         }
 
         fn publish(&mut self, tick: u64) {
@@ -1746,6 +1869,255 @@ mod tests {
         let history = session.history.as_ref().unwrap();
         refresh_history_pending(&mut session.sources, history);
         assert!(!session.sources[0].pending_windows.contains(&0));
+    }
+
+    #[test]
+    fn preserves_cpu_detail_across_live_and_sealed_sources() {
+        // Goal: the bounded live and saved adapters derive the same selected CPU interval.
+        // Method: seal two genuine ring publications and compare both public projections.
+        let mut fixture = RingFixture::new_with_cpu_capacity(2);
+        fixture.publish_cpu_activity(1);
+        let mut live = LiveSession::open(&fixture.root).unwrap();
+        let source = &live.sources[0];
+        let mut window = Window::new(
+            WindowIdentity {
+                run: source.identity,
+                window: 0,
+            },
+            Limits::from_shape(&source.reader.shape()).unwrap(),
+        );
+        cpu_detail_stage(&mut window, source, 1);
+        fixture.publish_cpu_activity(2);
+        live.poll().unwrap();
+        cpu_detail_stage(&mut window, &live.sources[0], 2);
+        let selection = live.select(1002, 0).unwrap();
+        let cursor = live.sources[0].reader.next_publication();
+        let event_cursor = live.sources[0].reader.next_event();
+        let losses = live.sources[0].losses;
+
+        let first = live.cpu_detail().unwrap();
+        let repeated = live.cpu_detail().unwrap();
+        seal_window(&fixture.root, &window);
+        let mut saved = Session::open(&fixture.root).unwrap();
+        saved.select(1002, 0).unwrap();
+        let sealed = saved.cpu_detail().unwrap();
+
+        assert_eq!(first, repeated);
+        assert_eq!(
+            first["cpus"],
+            json!([{ "cpu":0,"busy_percent":25.0 }, {"cpu":1,"busy_percent":75.0}])
+        );
+        assert_eq!(
+            sealed["cpus"],
+            json!([
+                {"cpu":0,"busy_percent":25.0}, {"cpu":1,"busy_percent":75.0}
+            ])
+        );
+        assert_eq!(sealed["interval_available"], true);
+        assert_eq!(live.selected.as_ref(), Some(&selection["selected"]));
+        assert_eq!(live.sources[0].reader.next_publication(), cursor);
+        assert_eq!(live.sources[0].reader.next_event(), event_cursor);
+        assert_eq!(live.sources[0].losses, losses);
+        assert_eq!(first["observation"]["run_tick"], 2);
+        assert_eq!(first["previous_observation"]["run_tick"], 1);
+    }
+
+    #[test]
+    fn gaps_cpu_detail_after_an_unsealed_predecessor_is_evicted() {
+        // Goal: an evicted predecessor never causes full-process rehydration or invented rates.
+        // Method: expire the first raw observation while keeping the selected second one.
+        let mut fixture = RingFixture::new_with_cpu_capacity(2);
+        fixture.publish_cpu_activity(1);
+        let mut live = LiveSession::open(&fixture.root).unwrap();
+        fixture.publish_cpu_activity(2);
+        live.poll().unwrap();
+        live.select(1002, 0).unwrap();
+        let cursor = live.sources[0].reader.next_publication();
+        let selected = live.selected.clone();
+        live.poll_evict(1002 * NANOSECONDS_PER_SECOND).unwrap();
+
+        let result = live.cpu_detail().unwrap();
+
+        assert_eq!(result["interval_available"], false);
+        assert_eq!(result["previous_observation"], Value::Null);
+        assert_eq!(
+            result["unavailable_reason"],
+            "Previous CPU reading unavailable"
+        );
+        assert_eq!(
+            result["cpus"],
+            json!([{ "cpu":0,"busy_percent":null }, {"cpu":1,"busy_percent":null}])
+        );
+        assert_eq!(live.sources[0].reader.next_publication(), cursor);
+        assert_eq!(live.selected, selected);
+    }
+
+    #[test]
+    fn recovers_cpu_detail_predecessor_from_its_exact_commit() {
+        // Goal: CPU-only committed queries fill a raw-cache gap without moving selection.
+        // Method: seal two ring readings, evict the predecessor, then project the live selection.
+        let mut fixture = RingFixture::new_with_cpu_capacity(2);
+        fixture.publish_cpu_activity(1);
+        let mut live = LiveSession::open(&fixture.root).unwrap();
+        let source = &live.sources[0];
+        let mut window = Window::new(
+            WindowIdentity {
+                run: source.identity,
+                window: 0,
+            },
+            Limits::from_shape(&source.reader.shape()).unwrap(),
+        );
+        cpu_detail_stage(&mut window, source, 1);
+        fixture.publish_cpu_activity(2);
+        live.poll().unwrap();
+        cpu_detail_stage(&mut window, &live.sources[0], 2);
+        live.select(1002, 0).unwrap();
+        seal_window(&fixture.root, &window);
+        live.refresh_history().unwrap();
+        live.poll_evict(1002 * NANOSECONDS_PER_SECOND).unwrap();
+        let selected = live.selected.clone();
+        let cursor = live.sources[0].reader.next_publication();
+
+        let result = live.cpu_detail().unwrap();
+
+        assert_eq!(result["interval_available"], true);
+        assert_eq!(
+            result["cpus"],
+            json!([{ "cpu":0,"busy_percent":25.0 }, {"cpu":1,"busy_percent":75.0}])
+        );
+        assert_eq!(live.selected, selected);
+        assert_eq!(live.sources[0].reader.next_publication(), cursor);
+    }
+
+    #[test]
+    fn reads_cpu_detail_from_commits_without_changing_the_historical_selection() {
+        // Goal: exact CPU recovery cannot rewrite a different historical selection.
+        // Method: evict both live raw rows after sealing and leave history selected elsewhere.
+        let mut fixture = RingFixture::new_with_cpu_capacity(2);
+        fixture.publish_cpu_activity(1);
+        let mut live = LiveSession::open(&fixture.root).unwrap();
+        let source = &live.sources[0];
+        let mut window = Window::new(
+            WindowIdentity {
+                run: source.identity,
+                window: 0,
+            },
+            Limits::from_shape(&source.reader.shape()).unwrap(),
+        );
+        cpu_detail_stage(&mut window, source, 1);
+        fixture.publish_cpu_activity(2);
+        live.poll().unwrap();
+        cpu_detail_stage(&mut window, &live.sources[0], 2);
+        live.select(1002, 0).unwrap();
+        seal_window(&fixture.root, &window);
+        live.refresh_history().unwrap();
+        live.history.as_mut().unwrap().select(1001, 0).unwrap();
+        live.poll_evict(1003 * NANOSECONDS_PER_SECOND).unwrap();
+        let selected = live.selected.clone();
+        let history_before = live.history.as_ref().unwrap().page("cpus", 0).unwrap();
+
+        let result = live.cpu_detail().unwrap();
+        let history_after = live.history.as_ref().unwrap().page("cpus", 0).unwrap();
+
+        assert_eq!(
+            result["cpus"],
+            json!([{ "cpu":0,"busy_percent":25.0 }, {"cpu":1,"busy_percent":75.0}])
+        );
+        assert_eq!(result["observation"]["publication"], 2);
+        assert_eq!(result["observation"]["run_tick"], 2);
+        assert_eq!(
+            result["observation"]["wall_ns"],
+            1002 * NANOSECONDS_PER_SECOND
+        );
+        assert_eq!(live.selected, selected);
+        assert_eq!(history_before, history_after);
+    }
+
+    #[test]
+    fn gaps_cpu_detail_when_its_committed_predecessor_has_no_wall_clock() {
+        // Goal: a clockless committed predecessor leaves selected CPU values unavailable.
+        // Method: seal a clockless first row, evict it from live cache, then query its successor.
+        let mut fixture = RingFixture::new_with_cpu_capacity(2);
+        fixture.publish_cpu_activity(1);
+        let mut live = LiveSession::open(&fixture.root).unwrap();
+        let source = &live.sources[0];
+        let mut window = Window::new(
+            WindowIdentity {
+                run: source.identity,
+                window: 0,
+            },
+            Limits::from_shape(&source.reader.shape()).unwrap(),
+        );
+        let times = source.tick.times.unwrap();
+        window
+            .push_tick(
+                &persistence::Observation {
+                    publication: 1,
+                    wall_ns: None,
+                    continuous_ns: Some(times.continuous_ns),
+                    awake_ns: Some(times.awake_ns),
+                },
+                &source.tick,
+                &[],
+            )
+            .unwrap();
+        fixture.publish_cpu_activity(2);
+        live.poll().unwrap();
+        cpu_detail_stage(&mut window, &live.sources[0], 2);
+        live.select(1002, 0).unwrap();
+        seal_window(&fixture.root, &window);
+        live.refresh_history().unwrap();
+        live.poll_evict(1002 * NANOSECONDS_PER_SECOND).unwrap();
+        let selected = live.selected.clone();
+        let cursor = live.sources[0].reader.next_publication();
+        let losses = live.sources[0].losses;
+
+        let response = live.cpu_detail();
+        let mut saved = Session::open(&fixture.root).unwrap();
+        saved.select(1002, 0).unwrap();
+        let saved_response = saved.cpu_detail();
+
+        assert!(response.is_ok(), "{response:?}");
+        assert!(saved_response.is_ok(), "{saved_response:?}");
+        let saved_result = saved_response.unwrap();
+        assert_eq!(saved_result["interval_available"], false);
+        assert_eq!(saved_result["previous_observation"], Value::Null);
+        assert_eq!(
+            saved_result["cpus"],
+            json!([
+                {"cpu":0,"busy_percent":null}, {"cpu":1,"busy_percent":null}
+            ])
+        );
+        let result = response.unwrap();
+        assert_eq!(result["interval_available"], false);
+        assert_eq!(result["previous_observation"], Value::Null);
+        assert_eq!(
+            result["unavailable_reason"],
+            "Previous CPU reading unavailable"
+        );
+        assert_eq!(
+            result["cpus"],
+            json!([{ "cpu":0,"busy_percent":null }, {"cpu":1,"busy_percent":null}])
+        );
+        assert_eq!(live.selected, selected);
+        assert_eq!(live.sources[0].reader.next_publication(), cursor);
+        assert_eq!(live.sources[0].losses, losses);
+    }
+
+    fn cpu_detail_stage(window: &mut Window, source: &Source, publication: u64) {
+        let times = source.tick.times.unwrap();
+        window
+            .push_tick(
+                &persistence::Observation {
+                    publication,
+                    wall_ns: Some(times.wall_ns),
+                    continuous_ns: Some(times.continuous_ns),
+                    awake_ns: Some(times.awake_ns),
+                },
+                &source.tick,
+                &[],
+            )
+            .unwrap();
     }
 
     fn seal_window(root: &Path, window: &Window) {

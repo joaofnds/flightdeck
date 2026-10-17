@@ -165,6 +165,95 @@ impl Session {
             "summary": summary, "trends": points, "context_seconds": 900}))
     }
 
+    pub fn cpu_detail(&self) -> Result<Value> {
+        self.operation.run(|| {
+            let selected = self
+                .selected
+                .as_ref()
+                .ok_or(Error::Bound("no selected observation"))?;
+            let mut current_slot = None;
+            let mut previous_slot = None;
+            self.cpu_detail_sample(selected, &mut current_slot)?;
+            let current = current_slot
+                .as_ref()
+                .ok_or(Error::Bound("missing selected CPU reading"))?;
+            if let Some(publication) = selected.publication.checked_sub(1) {
+                self.cpu_detail_publication(&current.identity, publication, &mut previous_slot)?;
+            }
+
+            crate::cpu_detail::project(current, previous_slot.as_ref())
+        })
+    }
+
+    pub(crate) fn cpu_detail_publication(
+        &self,
+        identity: &Value,
+        publication: u64,
+        output: &mut Option<crate::cpu_detail::Sample>,
+    ) -> Result<()> {
+        assert!(output.is_none());
+
+        for (window, manifest) in self.windows.iter().enumerate() {
+            if identity["run"] != identity_text(manifest.identity.run.run).to_string() {
+                continue;
+            }
+
+            if identity["boot"] != identity_text(manifest.identity.run.boot).to_string() {
+                continue;
+            }
+
+            if !(manifest.publication_first..manifest.publication_end).contains(&publication) {
+                continue;
+            }
+
+            let source = self.source(window, "ticks")?;
+            let table = data::query(
+                &self.connection,
+                &format!("SELECT * FROM {source} WHERE publication={publication} LIMIT 2"),
+                1,
+                &self.operation,
+            )?;
+            if let Some(row) = table.rows.first() {
+                if table.integer(row, "wall_ns")?.is_none() {
+                    return Ok(());
+                }
+
+                let observation = Observation::from_row(&table, row, window)?;
+                self.cpu_detail_sample(&observation, output)?;
+
+                return Ok(());
+            }
+        }
+
+        Ok(())
+    }
+
+    fn cpu_detail_sample(
+        &self,
+        observation: &Observation,
+        output: &mut Option<crate::cpu_detail::Sample>,
+    ) -> Result<()> {
+        assert!(output.is_none());
+
+        let source = self.source(observation.window, "cpus")?;
+        let publication = observation.publication;
+        let limit = crate::cpu_detail::CPUS_MAX + 1;
+        let cpus = data::query(
+            &self.connection,
+            &format!("SELECT * FROM {source} WHERE publication={publication} LIMIT {limit}"),
+            crate::cpu_detail::CPUS_MAX,
+            &self.operation,
+        )?;
+
+        *output = Some(crate::cpu_detail::Sample {
+            identity: observation.json(self),
+            observation: observation.clone(),
+            cpus,
+        });
+
+        Ok(())
+    }
+
     pub fn page(&self, name: &str, offset: u64) -> Result<Value> {
         self.operation.run(|| self.page_inner(name, offset))
     }

@@ -245,6 +245,20 @@ pub unsafe extern "C" fn fd_apps(handle: *mut Handle, offset: u32) -> Bytes {
 }
 
 /// # Safety
+/// `handle` must be a live session result, exclusively borrowed for this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fd_cpu_detail(handle: *mut Handle) -> Bytes {
+    let handle = unsafe { &*handle };
+    response(match &handle.session {
+        Ok(ViewedSession::Live(session)) => session.cpu_detail().map_err(|error| error.to_string()),
+        Ok(ViewedSession::Saved(session)) => {
+            session.cpu_detail().map_err(|error| error.to_string())
+        }
+        Err(error) => Err(error.to_string()),
+    })
+}
+
+/// # Safety
 /// `handle` is exclusively borrowed. `key` addresses a live `AppKey` whose pointer
 /// addresses its readable length of bytes for the call; no key bytes are retained.
 #[unsafe(no_mangle)]

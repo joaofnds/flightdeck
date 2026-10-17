@@ -177,6 +177,7 @@ struct ReadRequest: Sendable {
     let includeMachine: Bool
     let includePage: Bool
     let includeFans: Bool
+    let includeCPUDetail: Bool
     let catalogOnly: Bool
     let live: Bool
     let poll: Bool
@@ -187,7 +188,7 @@ struct ReadRequest: Sendable {
          refresh: Bool, machineOffsets: [MachineSource: UInt64], includeMachine: Bool,
          includePage: Bool = true, includeFans: Bool = false,
          live: Bool = false, poll: Bool = false, target: RecordedObservationIdentity? = nil,
-         apps: LiveAppsRequest? = nil, catalogOnly: Bool = false) {
+         apps: LiveAppsRequest? = nil, catalogOnly: Bool = false, includeCPUDetail: Bool = false) {
         self.path = path
         self.second = second
         self.alternative = alternative
@@ -198,6 +199,7 @@ struct ReadRequest: Sendable {
         self.includeMachine = includeMachine
         self.includePage = includePage
         self.includeFans = includeFans
+        self.includeCPUDetail = includeCPUDetail
         self.catalogOnly = catalogOnly
         self.live = live
         self.poll = poll
@@ -212,6 +214,7 @@ struct ReadRequest: Sendable {
             && machineOffsets == other.machineOffsets && includeMachine == other.includeMachine
             && includePage == other.includePage && includeFans == other.includeFans && apps == other.apps
             && catalogOnly == other.catalogOnly
+            && includeCPUDetail == other.includeCPUDetail
     }
 }
 
@@ -223,10 +226,11 @@ struct ReadResult: Sendable {
     let unchanged: Bool
     let apps: LiveAppsRead?
     let fans: SelectedFanReadings?
+    let cpuDetail: SelectedCPUReadings?
 
     init(catalog: Catalog, selection: Selection?, page: TablePage?,
          machinePages: [MachineSource: TablePage], unchanged: Bool = false, apps: LiveAppsRead? = nil,
-         fans: SelectedFanReadings? = nil) {
+         fans: SelectedFanReadings? = nil, cpuDetail: SelectedCPUReadings? = nil) {
         self.catalog = catalog
         self.selection = selection
         self.page = page
@@ -234,6 +238,7 @@ struct ReadResult: Sendable {
         self.unchanged = unchanged
         self.apps = apps
         self.fans = fans
+        self.cpuDetail = cpuDetail
     }
 
 }
@@ -321,10 +326,11 @@ final class RecordingWorker: RecordingReading, @unchecked Sendable {
                 machinePages: [:], unchanged: true)
         }
         if !changed, let lastResult, lastRequest?.hasSameProjection(as: request) == true,
+           lastResult.catalog.windows == catalog.windows,
            request.target == nil || lastResult.selection?.selected?.identity == request.target {
             return ReadResult(catalog: catalog, selection: lastResult.selection,
                 page: lastResult.page, machinePages: lastResult.machinePages, unchanged: true,
-                apps: lastResult.apps, fans: lastResult.fans)
+                apps: lastResult.apps, fans: lastResult.fans, cpuDetail: lastResult.cpuDetail)
         }
         let latestSecond = catalog.latestObservation.map { $0.wallNs / 1_000_000_000 }
         guard let second = request.second ?? latestSecond ?? catalog.lastSecond else {
@@ -377,9 +383,11 @@ final class RecordingWorker: RecordingReading, @unchecked Sendable {
         let apps = try readApps(request.apps, session: session, selected: selection.selected, epoch: epoch)
         let fans = try readFans(request.includeFans, session: session, catalog: catalog,
             selected: selection.selected, epoch: epoch)
+        let cpuDetail = try readCPUDetail(request.includeCPUDetail, session: session,
+            selected: selection.selected, epoch: epoch)
         try prepare(session, epoch: epoch)
         let result = ReadResult(catalog: catalog, selection: selection, page: page,
-                                machinePages: machinePages, apps: apps, fans: fans)
+            machinePages: machinePages, apps: apps, fans: fans, cpuDetail: cpuDetail)
         lastResult = result
         lastRequest = request
         return result
@@ -402,6 +410,16 @@ final class RecordingWorker: RecordingReading, @unchecked Sendable {
         let page: TablePage = try decode(fd_page(session, table, 0))
 
         return try SelectedFanReadings(page: page, selected: selected)
+    }
+
+    private func readCPUDetail(_ requested: Bool, session: OpaquePointer, selected: Observation?,
+                               epoch: UInt64) throws -> SelectedCPUReadings? {
+        guard requested, let selected else { return nil }
+
+        try prepare(session, epoch: epoch)
+        let payload: CPUDetailPayload = try decode(fd_cpu_detail(session))
+
+        return try SelectedCPUReadings(payload: payload, selected: selected)
     }
 
     private func readApps(_ request: LiveAppsRequest?, session: OpaquePointer,
@@ -507,6 +525,7 @@ final class RecordingModel: ObservableObject {
     @Published private(set) var appKey: LiveAppKeyIdentity?
     @Published private(set) var appProcessGroup: Data?
     @Published private(set) var fans: SelectedFanReadings?
+    @Published private(set) var cpuDetail: SelectedCPUReadings?
     private let reader: any RecordingReading
     private var useLive = false
     private var startedLive = false
@@ -636,6 +655,7 @@ final class RecordingModel: ObservableObject {
         requestedOffset = offset
         selection = nil
         fans = nil
+        cpuDetail = nil
         apps = nil
         page = nil
         machinePages.removeAll(keepingCapacity: true)
@@ -663,7 +683,8 @@ final class RecordingModel: ObservableObject {
             includeFans: route == "Overview" && !showsReference,
             live: useLive, poll: poll, target: following ? nil : requestedIdentity,
             apps: route == "Apps" ? LiveAppsRequest(key: appKey, appsOffset: appsOffset,
-                membersOffset: appMembersOffset) : nil, catalogOnly: route == "Computer")
+                membersOffset: appMembersOffset) : nil, catalogOnly: route == "Computer",
+            includeCPUDetail: route == "CPU & processes" && !showsReference)
         if reading { pending = (generation, request) }
         else { start(generation, request) }
     }
@@ -684,6 +705,7 @@ final class RecordingModel: ObservableObject {
                         if !result.unchanged, !request.poll || following {
                             selection = result.selection
                             fans = result.fans
+                            cpuDetail = result.cpuDetail
                             page = result.page
                             machinePages = result.machinePages
                             apps = result.apps
@@ -753,6 +775,7 @@ final class RecordingModel: ObservableObject {
         machineOffsets.removeAll(keepingCapacity: true)
         selection = nil
         fans = nil
+        cpuDetail = nil
         apps = nil
         appKey = nil
         appProcessGroup = nil
@@ -844,6 +867,7 @@ final class RecordingModel: ObservableObject {
         machineOffsets.removeAll(keepingCapacity: true)
         selection = nil
         fans = nil
+        cpuDetail = nil
         page = nil
         machinePages.removeAll(keepingCapacity: true)
         row = nil

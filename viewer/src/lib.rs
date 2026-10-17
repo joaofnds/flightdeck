@@ -3,6 +3,7 @@ pub mod apps;
 mod bridge;
 mod byte_display;
 mod cancellation;
+mod cpu_detail;
 mod data;
 mod live;
 mod live_app_history;

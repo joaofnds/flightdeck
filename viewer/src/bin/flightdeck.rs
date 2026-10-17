@@ -154,6 +154,7 @@ fn check(root: &Path, archive: &Path) -> io::Result<()> {
                 "desktop/tests/reference_data_checks.swift",
                 "desktop/tests/dashboard_checks.swift",
                 "desktop/tests/computer_inventory_checks.swift",
+                "desktop/tests/selected_cpu_checks.swift",
                 "desktop/tests/live_collector_checks.swift",
                 "desktop/tests/live_apps_checks.swift",
                 "desktop/tests/live_apps_worker_checks.swift",

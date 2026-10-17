@@ -82,6 +82,7 @@ struct RecordedComponentPane: View {
                 case .cpu:
                     chart("CPU activity", data: data, lines: [data.cpu], style: activityStyle,
                         explanation: "Busy scheduler ticks divided by total ticks across the recorded logical CPUs. An interval needs compatible consecutive observations.")
+                    LogicalCPUActivity(readings: model.cpuDetail, busy: model.busy)
                 case .gpu:
                     ViewThatFits(in: .horizontal) {
                         HStack(alignment: .top, spacing: theme.panelGap) {
@@ -124,7 +125,7 @@ struct RecordedComponentPane: View {
 
     private var sourceNote: String {
         switch component {
-        case .cpu: "Aggregate logical CPU activity. Core topology and clock frequencies were not recorded."
+        case .cpu: "Logical CPU activity uses independent scheduler counters. Core topology and clock frequencies are unavailable."
         case .gpu: "Activity and power use separate recorded counters. Unavailable intervals remain gaps."
         case .energy: "These readings do not identify CPU power or attribute system power to apps."
         case .network: "Counter rates use measured continuous elapsed time and require an unchanged interface set."
