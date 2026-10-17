@@ -1,7 +1,7 @@
 # Flightdeck
 
-A macOS system monitor in Rust and GPUI that records the whole machine once a second,
-keeps the recording, and lets you go back to any second and see what every process,
+A macOS system monitor with a SwiftUI/AppKit client and a Rust recording core. It records
+the whole machine once a second, keeps the recording, and lets you go back to any second and see what every process,
 file and socket was doing. The design research is in
 [docs/recording-research.md](docs/recording-research.md).
 
@@ -49,15 +49,59 @@ earlier persister still owns the recording, its replacement reports that ownersh
 unavailable CPU while collection continues. Recording directories are created with
 owner-only access; files use mode 0600 and inherited access-control entries are removed.
 
-The disk query API is `persistence::query::processes_at_second`; the viewer that calls
-it is future work. `recording_check` is a diagnostic for comparing a live source with
-the saved recording across all ten tables. Build it with
+The diagnostic query API is `persistence::query::processes_at_second`. The native viewer
+uses `viewer::Session` for complete saved-tick inspection. `recording_check` compares a live
+source with the saved recording across all ten tables. Build it with
 `cargo build --release -p persistence --bin recording_check`.
 Start `./target/release/recording_check capture --lock-path PATH --reference FILE --seconds N`
 before the collector, using a fresh reference file and
 a duration longer than the collection run. Once both finish, run
 `./target/release/recording_check verify --recording PATH --reference FILE`.
 The reference contains private readings too.
+
+## Native desktop app
+
+With Xcode's command-line tools and Rust installed, build the SwiftUI/AppKit application:
+
+```sh
+cargo run --locked -p viewer --bin flightdeck -- --build
+open target/Flightdeck.app
+```
+
+`--run --recording PATH` builds and starts it with an explicit saved recording. The default
+is the current user's `Library/Application Support/Flightdeck/flightdeck.recording`.
+The viewer opens existing files read-only and never starts a collector or repairs history.
+Open a recording directory from the File menu, then Refresh to discover newly sealed windows.
+
+Overview charts the 15 minutes ending at the selected saved second. Enter a Unix second,
+step one second, or inspect a chart. CPU/process inspection shares that selection.
+All ten recorded tables have 512-row pages and an exact-field row inspector. Repeated
+seconds retain separate run/publication alternatives. A missing second clears readings.
+Names and app identities are not in the current recording schema, so the app shows recorded
+PIDs and creation identities. Live following and the remaining prototype panes are later work.
+
+The app uses native controls and drawing with no browser runtime. Theme tokens are shared
+across the dark UI and charts. The build uses optimized Swift and Rust, is
+signed locally for development, and is not a notarized distribution. No build step installs
+a toolchain or changes local hooks.
+
+The builder’s `--check` also runs native model, decoder and table checks; CI runs that same
+command. Optional measurement tools report query wall/CPU time and process physical
+footprint separately from resident memory:
+
+```sh
+cargo run --locked --release -p viewer --bin query_bench -- \
+  --recording PATH --iterations 100
+cargo run --locked --release -p viewer --bin process_watch -- --pid PID --seconds 60
+```
+
+Record the app binary, recording/window/row counts, selected seconds, visibility and
+interaction state with each measurement. `query_bench` reads the 900-second context and
+first page of each table at up to 30 recent seconds; it labels missing-second iterations
+separately. `--second N` selects the ending second. These are opt-in observations, not a
+whole-process memory limit or an automatic application-performance budget.
+
+## Recording inspection tools
 
 `ring_reader` prints each tick it reads, the events, and what it missed, until it has read
 the publications asked for. It finds the ring through `--ring NAME`, or through
@@ -98,4 +142,5 @@ steps under that toolchain:
 cargo fmt --all --check
 cargo clippy --locked --workspace --all-targets -- --deny warnings
 cargo test --locked --workspace
+cargo run --locked -p viewer --bin flightdeck -- --check
 ```

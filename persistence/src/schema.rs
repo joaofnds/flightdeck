@@ -29,7 +29,7 @@ pub mod pressure {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum Table {
+pub enum Table {
     Ticks,
     Memory,
     Cpus,
@@ -43,7 +43,8 @@ pub(crate) enum Table {
 }
 
 impl Table {
-    pub(crate) fn name(self) -> &'static str {
+    #[must_use]
+    pub fn name(self) -> &'static str {
         match self {
             Self::Ticks => "ticks",
             Self::Memory => "memory",
@@ -59,7 +60,7 @@ impl Table {
     }
 }
 
-pub(crate) const TABLES: [(Table, &str, &str); 10] = [
+pub const TABLES: [(Table, &str, &str); 10] = [
     (
         Table::Ticks,
         "publication UBIGINT, run_tick UBIGINT, wall_ns UBIGINT, \

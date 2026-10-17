@@ -1,0 +1,364 @@
+use std::collections::BTreeMap;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use collector::recording::{identity_text, private};
+use duckdb::Connection;
+use persistence::layout::{self, Kind};
+use persistence::{Error, Manifest, Result, read_committed};
+use serde_json::{Value, json};
+
+use crate::Cancellation;
+use crate::cancellation::Operation;
+use crate::data::{self, Table};
+use crate::metrics;
+
+pub(crate) const OBSERVATIONS_MAX: usize = 4096;
+pub(crate) const PAGE_ROWS: u64 = 512;
+const WINDOWS_MAX: usize = 65_536;
+const NS: u64 = 1_000_000_000;
+
+pub struct Session {
+    root: PathBuf,
+    pub(crate) windows: Vec<Manifest>,
+    connection: Connection,
+    first: Option<u64>,
+    last: Option<u64>,
+    unknown: u64,
+    selected: Option<Observation>,
+    operation: Operation,
+}
+
+#[derive(Clone)]
+pub(crate) struct Observation {
+    pub window: usize,
+    pub publication: u64,
+    pub run_tick: u64,
+    pub wall: u64,
+    pub continuous: Option<u64>,
+}
+
+impl Observation {
+    fn from_row(table: &Table, row: &[Option<String>], window: usize) -> Result<Self> {
+        let required = |name| {
+            table
+                .integer(row, name)?
+                .ok_or(Error::Bound("missing tick field"))
+        };
+        Ok(Self {
+            window,
+            publication: required("publication")?,
+            run_tick: required("run_tick")?,
+            wall: required("wall_ns")?,
+            continuous: table.integer(row, "continuous_ns")?,
+        })
+    }
+
+    pub fn json(&self, session: &Session) -> Value {
+        let run = session.windows[self.window].identity.run;
+        let losses = session.windows[self.window].losses;
+        json!({"run": identity_text(run.run).to_string(),
+            "boot": identity_text(run.boot).to_string(),
+            "publication": self.publication, "run_tick": self.run_tick, "wall_ns": self.wall,
+            "window_losses": {"publications": losses.publications, "events": losses.events,
+                "unknown": losses.unknown}})
+    }
+}
+
+impl Session {
+    /// Opens only existing committed history. Never creates, locks or repairs a recording.
+    pub fn open(root: &Path) -> Result<Self> {
+        Self::open_with(root, Arc::new(Cancellation::default()), 0)
+    }
+
+    pub fn open_with(root: &Path, cancellation: Arc<Cancellation>, epoch: u64) -> Result<Self> {
+        let operation = cancellation.operation(epoch)?;
+        persistence::query::validate_root(root)?;
+        private::verify_directory(root)?;
+        collector::recording::read_identity(root)?;
+        let mut windows = Vec::new();
+        discover(root, &mut windows, &operation)?;
+        let connection = data::connection()?;
+        operation.attach(&connection)?;
+        let mut session = Self {
+            root: root.to_owned(),
+            windows,
+            connection,
+            first: None,
+            last: None,
+            unknown: 0,
+            selected: None,
+            operation,
+        };
+        session.operation.begin(epoch)?.run(|| session.extent())?;
+        Ok(session)
+    }
+
+    pub fn begin(&mut self, epoch: u64) -> Result<()> {
+        if self.operation.epoch() != epoch {
+            self.selected = None;
+        }
+        self.operation = self.operation.begin(epoch)?;
+        self.operation.attach(&self.connection)
+    }
+
+    #[must_use]
+    pub fn catalog(&self) -> Value {
+        json!({"path": self.root, "first_second": self.first, "last_second": self.last,
+            "windows": self.windows.len(), "unknown_clock_ticks": self.unknown,
+            "tables": persistence::schema::TABLES.map(|entry| entry.0.name())})
+    }
+
+    /// Every response belongs to one explicit saved second and optional repeated observation.
+    pub fn select(&mut self, second: u64, alternative: usize) -> Result<Value> {
+        self.operation
+            .begin(self.operation.epoch())?
+            .run(|| self.select_inner(second, alternative))
+    }
+
+    fn select_inner(&mut self, second: u64, alternative: usize) -> Result<Value> {
+        self.selected = None;
+        self.operation.check()?;
+        let end = second
+            .checked_add(1)
+            .and_then(|value| value.checked_mul(NS))
+            .ok_or(Error::Bound("selection time"))?;
+        let first = second.saturating_sub(899) * NS;
+        let mut observations = self.observations(first, end)?;
+        observations.sort_by_key(|value| (value.wall, value.window, value.publication));
+        let alternatives: Vec<_> = observations
+            .iter()
+            .filter(|value| value.wall / NS == second)
+            .cloned()
+            .collect();
+        let chosen = if alternatives.is_empty() {
+            None
+        } else {
+            Some(
+                alternatives
+                    .get(alternative)
+                    .ok_or(Error::Bound("observation alternative"))?
+                    .clone(),
+            )
+        };
+        let points = metrics::trends(self, &observations)?;
+        let summary = chosen
+            .as_ref()
+            .and_then(|selected| {
+                points.iter().find(|point| {
+                    let identity = selected.json(self);
+                    if point["publication"].as_u64() != Some(selected.publication) {
+                        return false;
+                    }
+                    if point["run"] != identity["run"] {
+                        return false;
+                    }
+                    point["boot"] == identity["boot"]
+                })
+            })
+            .cloned();
+        self.selected = chosen;
+        Ok(json!({"second": second,
+            "selected": self.selected.as_ref().map(|value| value.json(self)),
+            "alternatives": alternatives.iter().map(|value| value.json(self)).collect::<Vec<_>>(),
+            "summary": summary, "trends": points, "context_seconds": 900}))
+    }
+
+    pub fn page(&self, name: &str, offset: u64) -> Result<Value> {
+        self.operation.run(|| self.page_inner(name, offset))
+    }
+
+    fn page_inner(&self, name: &str, offset: u64) -> Result<Value> {
+        self.operation.check()?;
+        let selected = self
+            .selected
+            .as_ref()
+            .ok_or(Error::Bound("no selected observation"))?;
+        let (_, _, order) = persistence::schema::TABLES
+            .iter()
+            .find(|entry| entry.0.name() == name)
+            .ok_or(Error::Bound("table name"))?;
+        if !offset.is_multiple_of(PAGE_ROWS) {
+            return Err(Error::Bound("page offset"));
+        }
+        let source = self.source(selected.window, name)?;
+        let publication = selected.publication;
+        let total: u64 = self.connection.query_row(
+            &format!("SELECT count(*) FROM {source} WHERE publication={publication}"),
+            [],
+            |row| row.get(0),
+        )?;
+        if offset > total {
+            return Err(Error::Bound("page past end"));
+        }
+        let table = data::query(
+            &self.connection,
+            &format!(
+                "SELECT * FROM {source} WHERE publication={publication} ORDER BY {order} \
+            LIMIT {PAGE_ROWS} OFFSET {offset}"
+            ),
+            usize::try_from(PAGE_ROWS).map_err(|_| Error::Bound("page size"))?,
+            &self.operation,
+        )?;
+        Ok(
+            json!({"name": name, "columns": table.columns, "rows": table.rows,
+            "offset": offset, "total": total, "observation": selected.json(self)}),
+        )
+    }
+
+    pub(crate) fn source(&self, window: usize, name: &str) -> Result<String> {
+        self.operation.check()?;
+        let manifest = &self.windows[window];
+        // Revalidate the pinned commitment before opening any path through the engine.
+        let marker = layout::WindowKey::from(&manifest.identity).marker(&self.root);
+        if read_committed(&self.root, &marker)? != *manifest {
+            return Err(Error::Bound("changed commitment"));
+        }
+        let path = self
+            .root
+            .join(&manifest.data_directory)
+            .join(format!("{name}.parquet"));
+        Ok(format!(
+            "read_parquet('{}')",
+            persistence::query::parquet_source(&path)?
+        ))
+    }
+
+    pub(crate) fn table(&self, window: usize, name: &str) -> Result<Table> {
+        data::query(
+            &self.connection,
+            &format!(
+                "SELECT * FROM {} ORDER BY publication",
+                self.source(window, name)?
+            ),
+            data::ROWS_MAX,
+            &self.operation,
+        )
+    }
+
+    pub(crate) fn predecessor(&self, observation: &Observation) -> Result<Option<Observation>> {
+        let Some(publication) = observation.publication.checked_sub(1) else {
+            return Ok(None);
+        };
+        let run = self.windows[observation.window].identity.run;
+        for (window, manifest) in self.windows.iter().enumerate() {
+            if manifest.identity.run == run {
+                if (manifest.publication_first..manifest.publication_end).contains(&publication) {
+                    let table = self.table(window, "ticks")?;
+                    for row in &table.rows {
+                        if table.integer(row, "publication")? == Some(publication) {
+                            if table.integer(row, "wall_ns")?.is_some() {
+                                return Ok(Some(Observation::from_row(&table, row, window)?));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    fn extent(&mut self) -> Result<()> {
+        for window in 0..self.windows.len() {
+            let bounds = self.windows[window].wall_ns;
+            if let Some(bounds) = bounds {
+                self.first = Some(
+                    self.first
+                        .map_or(bounds.min / NS, |v| v.min(bounds.min / NS)),
+                );
+                self.last = Some(
+                    self.last
+                        .map_or(bounds.max / NS, |v| v.max(bounds.max / NS)),
+                );
+            } else {
+                let ticks = self.table(window, "ticks")?;
+                for row in &ticks.rows {
+                    if let Some(wall) = ticks.integer(row, "wall_ns")? {
+                        self.first = Some(self.first.map_or(wall / NS, |v| v.min(wall / NS)));
+                        self.last = Some(self.last.map_or(wall / NS, |v| v.max(wall / NS)));
+                    } else {
+                        self.unknown += 1;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn observations(&self, first: u64, end: u64) -> Result<Vec<Observation>> {
+        let mut observations = Vec::new();
+        for (window, manifest) in self.windows.iter().enumerate() {
+            if let Some(bounds) = manifest.wall_ns {
+                if bounds.max < first {
+                    continue;
+                }
+                if bounds.min >= end {
+                    continue;
+                }
+            }
+            let source = self.source(window, "ticks")?;
+            let ticks = data::query(
+                &self.connection,
+                &format!("SELECT * FROM {source} WHERE wall_ns>={first} AND wall_ns<{end}"),
+                OBSERVATIONS_MAX,
+                &self.operation,
+            )?;
+            if observations.len() + ticks.rows.len() > OBSERVATIONS_MAX {
+                return Err(Error::Bound("context observations"));
+            }
+            for row in &ticks.rows {
+                observations.push(Observation::from_row(&ticks, row, window)?);
+            }
+        }
+        Ok(observations)
+    }
+}
+
+pub(crate) fn partition(table: &Table) -> Result<BTreeMap<u64, Table>> {
+    let mut result = BTreeMap::new();
+    for row in &table.rows {
+        let publication = table
+            .integer(row, "publication")?
+            .ok_or(Error::Bound("publication"))?;
+        result
+            .entry(publication)
+            .or_insert_with(|| Table {
+                columns: table.columns.clone(),
+                rows: Vec::new(),
+            })
+            .rows
+            .push(row.clone());
+    }
+    Ok(result)
+}
+
+fn discover(root: &Path, windows: &mut Vec<Manifest>, operation: &Operation) -> Result<()> {
+    let base = layout::base(root, Kind::Commits);
+    if !base.try_exists()? {
+        return Err(io::Error::from(io::ErrorKind::InvalidData).into());
+    }
+    layout::visit_names(&base, |run| -> Result<()> {
+        layout::validate_run(run)?;
+        let run_path = base.join(run);
+        layout::visit_names(&run_path, |day| -> Result<()> {
+            layout::validate_day(day)?;
+            layout::visit_names(&run_path.join(day), |name| -> Result<()> {
+                operation.check()?;
+                if name.starts_with('.') {
+                    return Ok(());
+                }
+                if Path::new(name).extension() != Some(std::ffi::OsStr::new("seal")) {
+                    return Err(Error::Bound("unexpected commit file"));
+                }
+                if windows.len() == WINDOWS_MAX {
+                    return Err(Error::Bound("catalog windows"));
+                }
+                windows.push(read_committed(root, &run_path.join(day).join(name))?);
+                Ok(())
+            })
+        })
+    })?;
+    windows.sort_by_key(|manifest| (manifest.identity.run.run.0, manifest.publication_first));
+    Ok(())
+}

@@ -1,6 +1,6 @@
 # Recording a Mac every second
 
-Research for a Rust and GPUI app that records the whole machine once a second, keeps
+Research for a SwiftUI/AppKit app with a Rust core that records the whole machine once a second, keeps
 the recording, and lets you go back to any second and join what every process, file
 and socket was doing. Unless dated otherwise or attributed to a source, numbers below
 were measured on this M5 Pro on 2026-10-12 or 2026-10-13. The evidence programs are
@@ -746,7 +746,7 @@ two readings, and no run has watched it.
    full-synced canonical no-overwrite commit markers. Empty windows produce no files,
    and stopping may seal a partial window. Per-minute/hour compaction and retention
    remain future work.
-4. The GPUI viewer draws live data from the ring, asks DuckDB for history over the
+4. The SwiftUI/AppKit viewer draws live data from the ring, asks the Rust core for history over the
    sealed files, and joins the two through the ring's unsealed tail as Arrow batches.
 
 The dated week-query experiment under Where it is kept selects step 3's storage.
@@ -774,11 +774,17 @@ its heading, and fails when the heading is gone, on a dependency with no case, o
 missing an entry, and on a case whose crate no member depends on.
 
 
+### serde_json
+
+- Used: The viewer-only Rust adapter emits bounded JSON across the native C ABI. Raw database cells are decimal strings or NULL, so Swift never rounds a stored integer through a floating-point JSON representation. The crate is pinned to =1.0.154 and was already in DuckDB's transitive graph.
+- Performance: Responses are capped at 8 MiB with 512-row point pages and 4096 contextual observations. Serialization and native decoding need whole-viewer measurement; no allocation-free or comparative performance claim is made. Writing another JSON encoder here would duplicate escaping and integer correctness work.
+- Maintenance: Keep Cargo.lock and check native round trips with wide integers, NULL and refused reads. This reuses serde, serde_core, itoa, memchr and zmij already present in the engine graph. Recheck protocol bounds and the serde_json changelog on upgrades.
+
 ### duckdb
 
-- Used: Persistence alone uses duckdb =1.10506.0 with default features disabled and the parquet feature (which includes bundled DuckDB 1.5.6), through typed appenders, bounded in-memory tables and immutable Parquet COPY. Arrow is an unconditional transitive dependency. Neither the collector nor shared allocation-constrained code calls the engine. Extensions are bundled; runtime extension installation and autoloading are disabled.
+- Used: Persistence and viewer-only queries use duckdb =1.10506.0 with default features disabled and the parquet feature (which includes bundled DuckDB 1.5.6), through typed appenders, bounded in-memory tables and immutable Parquet COPY. Arrow is an unconditional transitive dependency. Neither the collector nor shared allocation-constrained code calls the engine. Extensions are bundled; runtime extension installation and autoloading are disabled.
 - Performance: On the M5 Pro, macOS 27.0.1, 2026-10-15, a 10,080-window/953-process synthetic week used 566.30 seconds native build CPU and 7,232,847,872 allocated bytes in Parquet, against 687.43 seconds/34,470,232,064 bytes for per-minute DuckDB and 655.41 seconds/7,924,731,904 bytes for DuckLake. Parquet's original week-query median was 1.611054 seconds first and 0.763221 repeat; DuckLake was 1.558944/0.706168. Both the original and ranked 54-answer families matched an independent Rust oracle. These are engine prototypes, not the combined collector-plus-persister budget or a cold-cache comparison. Implementing equivalent typed column encoding, Zstandard and query execution here would not credibly match the measured engine with comparable maintenance cost. The complete-schema Rust feed and physical-footprint measurements below are the implementation gate.
-- Maintenance: Pin the Rust crate exactly and keep Cargo.lock, including its bundled native engine and Arrow graph. The build graph also compiles ureq, rustls, ring, webpki-roots, tar, zip and flate2; bundled mode compiles out the download branch, but those crates still add supply-chain surface. The normal dependency graph also includes comfy-table and crossterm. Recheck either graph with `cargo tree --locked --offline -p persistence -e normal,build -i CRATE`. This adds a C++ build and native allocation observation; the 512 MiB DuckDB buffer limit does not bound whole-process memory. A separate worker, 2 GiB physical-footprint watchdog and bounded one-window staging contain the engine; failures retain unacknowledged source and let collection continue. Immutable Parquet avoids a mutable catalog and extensions needed by DuckLake. Revalidate the typed schema, native resource checks and build time when upgrading. Sources: https://github.com/duckdb/duckdb-rs/releases/tag/v1.10506.0 and https://raw.githubusercontent.com/duckdb/duckdb-rs/v1.10506.0/crates/duckdb/Cargo.toml .
+- Maintenance: Pin the Rust crate exactly and keep Cargo.lock, including its bundled native engine and Arrow graph. The build graph also compiles ureq, rustls, ring, webpki-roots, tar, zip and flate2; bundled mode compiles out the download branch, but those crates still add supply-chain surface. The normal dependency graph also includes comfy-table and crossterm. Recheck either graph with `cargo tree --locked --offline -p persistence -e normal,build -i CRATE`. This adds a C++ build and native allocation observation; the 512 MiB DuckDB buffer limit does not bound whole-process memory. For persistence, a separate worker, 2 GiB physical-footprint watchdog and bounded one-window staging contain the engine; failures retain unacknowledged source and let collection continue. Immutable Parquet avoids a mutable catalog and extensions needed by DuckLake. Viewer queries use a separate bounded request path with no extension downloads or disk spill, explicit result limits and visible refusal on overflow. The persistence watchdog does not bound viewer memory. Measure whole-viewer footprint and query latency on the native slice. Revalidate the typed schema, native resource checks and build time when upgrading. Sources: https://github.com/duckdb/duckdb-rs/releases/tag/v1.10506.0 and https://raw.githubusercontent.com/duckdb/duckdb-rs/v1.10506.0/crates/duckdb/Cargo.toml .
 
 
 ## Persistence measurements

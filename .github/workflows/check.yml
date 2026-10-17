@@ -61,3 +61,5 @@ jobs:
           --skip smc::tests::reads_the_temperature_of_a_soc_sensor
           --skip smc::tests::refuses_a_float_key_the_smc_holds_as_another_type
           --skip smc::tests::refuses_a_key_read_as_a_type_it_does_not_hold
+      # Opt-in locally; CI compiles and links the same SwiftUI app contributors can launch.
+      - run: cargo run --locked -p viewer --bin flightdeck -- --check

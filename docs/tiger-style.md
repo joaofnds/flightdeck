@@ -56,8 +56,11 @@ snake_case too, which nothing checks.
   A test and the code of a binary other than `collector` or the persister may allocate.
   The separate persister, and library code and dependencies used only by persistence,
   may allocate within a fixed working-memory bound for encoding and compressing its
-  windows outside the collection loop. All other library code stays startup-allocated,
-  whichever binary calls it.
+  windows outside the collection loop. The viewer's UI frameworks, viewer-only
+  presentation adapter and DuckDB query execution may allocate during viewing within
+  explicit operation, result and cache bounds. Collector code, dependencies it runs,
+  and all library code outside these exceptions stay startup-allocated, whichever
+  binary calls them.
 - Handle every error. Report a failed kernel call, and never replace it with a made-up
   value, so an `unwrap_or` or `.ok()` that hides a failure is a defect. Write no
   `unwrap` and no `expect` outside tests, and no `as` conversion anywhere, tests
