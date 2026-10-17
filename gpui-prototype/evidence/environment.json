@@ -1,0 +1,37 @@
+{
+  "date_utc": "2026-10-17",
+  "chip": "Apple M5 Pro",
+  "model": "Mac17,8",
+  "cpu_cores": 18,
+  "memory_bytes": 51539607552,
+  "macos": "27.0.1 (26A434)",
+  "power_source": "AC",
+  "display_points": [
+    1728,
+    1117
+  ],
+  "display_pixels": [
+    3456,
+    2234
+  ],
+  "display_refresh_hz": 120,
+  "gpui_reported_viewport_points": [
+    1320,
+    901
+  ],
+  "gpui_reported_scale": 2,
+  "rust_release_compiler": "1.99.1",
+  "verification_toolchain": "1.95.0",
+  "idle_warmup_seconds": 20,
+  "active_warmup_seconds": 10,
+  "observation_seconds": 15,
+  "native_binary_revision": "not recovered; SHA-256 in binary_hashes.txt",
+  "native_actual_window_size": "not independently verified",
+  "background_activity": "other sessions active; not controlled",
+  "input_data": "captured hour from approved web prototype v30",
+  "range_samples": [
+    90,
+    120
+  ],
+  "idle_selected_sample": 120
+}

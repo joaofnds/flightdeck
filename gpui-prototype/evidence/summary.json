@@ -1,0 +1,86 @@
+{
+  "gpui-scrub": {
+    "samples": 16,
+    "wall_seconds": 15.059076874999999,
+    "cpu_percent_of_one_core": 33.84854364786553,
+    "physical_footprint_mib_last": 297.3917694091797,
+    "physical_footprint_mib_max": 299.6573944091797,
+    "resident_mib_last": 105.53125,
+    "interrupt_wakeups_per_second": 139.18515838641008,
+    "idle_wakeups_per_second": 44.69065438647613,
+    "render_callbacks": {
+      "page": "overview",
+      "scrub": true,
+      "animate": false,
+      "elapsed_seconds": 28.0011995,
+      "render_count": 3352,
+      "measured_intervals": 3341,
+      "render_interval_ms_p50": 8.330542,
+      "render_interval_ms_p95": 9.085459,
+      "render_interval_ms_p99": 9.312334,
+      "note": "CPU-side view render intervals after ten warmup renders; not GPU presentation latency"
+    }
+  },
+  "gpui-animate": {
+    "samples": 16,
+    "wall_seconds": 15.066034167,
+    "cpu_percent_of_one_core": 17.399370630273708,
+    "physical_footprint_mib_last": 362.6104736328125,
+    "physical_footprint_mib_max": 362.6417236328125,
+    "resident_mib_last": 172.75,
+    "interrupt_wakeups_per_second": 138.0588930666269,
+    "idle_wakeups_per_second": 31.195999875632037,
+    "render_callbacks": {
+      "page": "overview",
+      "scrub": false,
+      "animate": true,
+      "elapsed_seconds": 28.008256667,
+      "render_count": 3357,
+      "measured_intervals": 3346,
+      "render_interval_ms_p50": 8.331,
+      "render_interval_ms_p95": 9.236625,
+      "render_interval_ms_p99": 9.329083,
+      "note": "CPU-side view render intervals after ten warmup renders; not GPU presentation latency"
+    }
+  },
+  "measured-gpui-idle": {
+    "samples": 16,
+    "wall_seconds": 15.054893417,
+    "cpu_percent_of_one_core": 18.57805497873356,
+    "physical_footprint_mib_last": 210.8136444091797,
+    "physical_footprint_mib_max": 301.2511444091797,
+    "resident_mib_last": 117.84375,
+    "interrupt_wakeups_per_second": 111.12665853288917,
+    "idle_wakeups_per_second": 20.19276999043533
+  },
+  "measured-swift-idle": {
+    "samples": 16,
+    "wall_seconds": 15.065379167,
+    "cpu_percent_of_one_core": 16.761746511706633,
+    "physical_footprint_mib_last": 114.2979965209961,
+    "physical_footprint_mib_max": 227.6729965209961,
+    "resident_mib_last": 187.78125,
+    "interrupt_wakeups_per_second": 22.236413454086946,
+    "idle_wakeups_per_second": 3.849886508468785
+  },
+  "settled-gpui-idle": {
+    "samples": 16,
+    "wall_seconds": 15.063665665999999,
+    "cpu_percent_of_one_core": 0.22498341872054664,
+    "physical_footprint_mib_last": 192.84477996826172,
+    "physical_footprint_mib_max": 192.84477996826172,
+    "resident_mib_last": 103.09375,
+    "interrupt_wakeups_per_second": 120.2894461531924,
+    "idle_wakeups_per_second": 0.0
+  },
+  "settled-swift-idle": {
+    "samples": 16,
+    "wall_seconds": 15.054736583,
+    "cpu_percent_of_one_core": 0.13384962193728742,
+    "physical_footprint_mib_last": 109.0792465209961,
+    "physical_footprint_mib_max": 109.4542465209961,
+    "resident_mib_last": 176.78125,
+    "interrupt_wakeups_per_second": 0.46496994227746824,
+    "idle_wakeups_per_second": 0.3985456648092585
+  }
+}

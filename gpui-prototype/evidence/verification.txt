@@ -1,0 +1,26 @@
+    Checking flightdeck-gpui v0.1.0 (/Users/joaofnds/code/flightdeck/gpui-prototype)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.39s
+   Compiling flightdeck-gpui v0.1.0 (/Users/joaofnds/code/flightdeck/gpui-prototype)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.57s
+     Running unittests src/main.rs (gpui-prototype/target/debug/deps/flightdeck_gpui-caf804799029725b)
+
+running 8 tests
+test tests::clamps_inspection_before_the_first_cell ... ok
+test tests::clamps_inspection_after_the_last_cell ... ok
+test tests::keeps_installed_memory_independent_of_stacked_categories ... ok
+test tests::gives_outgoing_traffic_room_below_zero ... ok
+test tests::keeps_captured_missing_samples_unavailable ... ok
+test tests::keeps_secondary_units_out_of_the_primary_scale ... ok
+test tests::loads_every_captured_destination_and_both_ranges ... ok
+test tests::retains_app_totals_when_process_histories_were_not_captured ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+   Compiling flightdeck-gpui v0.1.0 (/Users/joaofnds/code/flightdeck/gpui-prototype)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.17s
+     Running `gpui-prototype/target/debug/flightdeck-gpui --check`
+Captured prototype: 11 routes, 95 metric families, 121 samples per hour
+   Compiling flightdeck-gpui v0.1.0 (/Users/joaofnds/code/flightdeck/gpui-prototype)
+    Finished `release` profile [optimized] target(s) in 1.28s
+warning: the following packages contain code that will be rejected by a future version of Rust: block v0.1.6, proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`

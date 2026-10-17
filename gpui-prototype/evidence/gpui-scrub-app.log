@@ -1,0 +1,2 @@
+first-frame viewport=Size { 1320px × 901px } scale=2
+{"page":"overview","scrub":true,"animate":false,"elapsed_seconds":28.0011995,"render_count":3352,"measured_intervals":3341,"render_interval_ms_p50":8.330542,"render_interval_ms_p95":9.085459,"render_interval_ms_p99":9.312334,"note":"CPU-side view render intervals after ten warmup renders; not GPU presentation latency"}

@@ -63,3 +63,25 @@ jobs:
           --skip smc::tests::refuses_a_key_read_as_a_type_it_does_not_hold
       # Opt-in locally; CI compiles and links the same SwiftUI app contributors can launch.
       - run: cargo run --locked -p viewer --bin flightdeck -- --check
+
+  gpui-prototype:
+    # Keep the experiment's dependencies and lockfile outside the recording workspace.
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      RUSTUP_TOOLCHAIN: 1.95.0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: >-
+          rustup toolchain install "$RUSTUP_TOOLCHAIN"
+          --profile minimal --component rustfmt,clippy --no-self-update
+      - run: cargo fmt --manifest-path gpui-prototype/Cargo.toml --check
+      - run: >-
+          cargo clippy --locked --manifest-path gpui-prototype/Cargo.toml
+          --all-targets -- --deny warnings
+      - run: cargo test --locked --manifest-path gpui-prototype/Cargo.toml
+      - run: >-
+          cargo run --locked --manifest-path gpui-prototype/Cargo.toml
+          --bin flightdeck-gpui -- --check

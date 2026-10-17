@@ -1,0 +1,31 @@
+[package]
+name = "flightdeck-gpui"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Independent experiment: do not alter the recording workspace or its lockfile.
+[workspace]
+
+[dependencies]
+gpui = { version = "=0.2.2", default-features = false, features = ["runtime_shaders"] }
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+
+[profile.release]
+overflow-checks = true
+panic = "abort"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+warnings = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+as_conversions = "warn"
+unwrap_used = "warn"
+expect_used = "warn"
+collapsible_if = "allow"
+collapsible_else_if = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"

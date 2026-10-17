@@ -1,0 +1,19 @@
+first-frame viewport=Size { 1320px × 901px } scale=2
+smoke route=cpu rows=10 frame-completed
+smoke route=apps rows=14 frame-completed
+smoke route=gpu rows=8 frame-completed
+smoke route=memory rows=11 frame-completed
+smoke route=energy rows=9 frame-completed
+smoke route=storage rows=7 frame-completed
+smoke route=network rows=5 frame-completed
+smoke route=battery rows=3 frame-completed
+smoke route=computer rows=1 frame-completed
+smoke route=self rows=3 frame-completed
+smoke route=overview rows=14 frame-completed
+smoke route=cpu rows=10 frame-completed
+smoke route=apps rows=14 frame-completed
+smoke route=gpu rows=8 frame-completed
+smoke route=memory rows=11 frame-completed
+smoke route=energy rows=9 frame-completed
+smoke route=storage rows=7 frame-completed
+{"page":"overview","scrub":false,"animate":false,"elapsed_seconds":3.003438083,"render_count":356,"measured_intervals":345,"render_interval_ms_p50":8.331750000000001,"render_interval_ms_p95":8.813875000000001,"render_interval_ms_p99":9.213791,"note":"CPU-side view render intervals after ten warmup renders; not GPU presentation latency"}
