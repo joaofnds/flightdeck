@@ -1,5 +1,6 @@
 //! Bounded, separate-process persistence of the collector's published measurements.
 mod encoder;
+mod identity;
 pub mod layout;
 mod metadata;
 pub mod query;

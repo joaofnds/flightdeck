@@ -1,10 +1,11 @@
-//! Disk-only acceptance queries. The application query boundary belongs to TASK-20.
+//! Bounded query sources for saved and staged recording tables.
 
 use std::io;
 use std::path::Path;
 
 use crate::layout::{self, DirectoryNames, Kind, WindowLocation};
 use collector::recording::discovery::Selection;
+use duckdb::Connection;
 
 use crate::{Manifest, Result, read_committed};
 
@@ -12,6 +13,36 @@ use crate::{Manifest, Result, read_committed};
 pub struct Second {
     pub processes: Vec<(i32, u64)>,
     pub unavailable_time_windows: u64,
+}
+
+#[derive(Clone, Copy)]
+pub enum TableSource<'a> {
+    Parquet(&'a Path),
+    Staged,
+}
+
+/// Validates the optional identity extension before exposing its columns to queries.
+/// Legacy process/event sources gain typed unavailable metadata; counters remain unchanged.
+/// Extended sources scan at most 1,048,577 rows, rejecting more than 1,048,576.
+/// Callers own the connection's memory/time bounds and must not mutate a validated source.
+pub fn table_source(
+    connection: &Connection,
+    table: crate::schema::Table,
+    source: TableSource<'_>,
+) -> Result<String> {
+    let source = match source {
+        TableSource::Parquet(path) => format!("read_parquet('{}')", parquet_source(path)?),
+        TableSource::Staged => table.name().to_owned(),
+    };
+
+    if matches!(
+        table,
+        crate::schema::Table::Processes | crate::schema::Table::Events
+    ) {
+        return crate::identity::normalize(connection, table, &source);
+    }
+
+    Ok(source)
 }
 
 /// Errors preserve incomplete enumeration rather than returning a complete empty answer.
@@ -86,7 +117,7 @@ fn visit_names(path: &Path, mut visit: impl FnMut(&str) -> Result<()>) -> Result
 }
 
 fn query_window(root: &Path, manifest: &Manifest, second: u64) -> Result<Vec<(i32, u64)>> {
-    let connection = duckdb::Connection::open_in_memory()?;
+    let connection = Connection::open_in_memory()?;
     connection.execute_batch(
         "SET autoinstall_known_extensions=false; \
         SET autoload_known_extensions=false; SET threads=1; SET memory_limit='256MB';",

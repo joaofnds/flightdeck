@@ -4,6 +4,30 @@
 //! Memory pressure: normal=0, warning=1, critical=2. These stored codes are versioned.
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// Optional process/event columns; the original schema-1 tables and seal remain unchanged.
+/// A complete extension uses this version on every row. Absent columns mean legacy data.
+pub const IDENTITY_VERSION: u8 = 1;
+pub const IDENTITY_PATH_BYTES_MAX: usize = 4095;
+pub const IDENTITY_FIELDS: [(&str, &str); 7] = [
+    ("identity_version", "UTINYINT"),
+    ("identity_availability", "UTINYINT"),
+    ("usage_availability", "UTINYINT"),
+    ("process_unique_id", "UBIGINT"),
+    ("pid_version", "INTEGER"),
+    ("executable_name", "BLOB"),
+    ("app_path", "BLOB"),
+];
+
+pub mod identity_availability {
+    pub const MEASURED: u8 = 0;
+    pub const REFUSED: u8 = 1;
+    pub const GONE: u8 = 2;
+    pub const UNSUPPORTED: u8 = 3;
+    pub const CHANGED: u8 = 4;
+    pub const INVALID: u8 = 5;
+    pub const EXHAUSTED: u8 = 6;
+}
+
 pub mod event_kind {
     pub const START: u8 = 1;
     pub const EXEC: u8 = 2;
@@ -43,6 +67,22 @@ pub enum Table {
 }
 
 impl Table {
+    /// The original schema columns, excluding optional extensions.
+    pub fn columns(self) -> impl Iterator<Item = &'static str> {
+        let Some((_, columns, _)) = TABLES.iter().find(|entry| entry.0.name() == self.name())
+        else {
+            unreachable!("every table has a schema");
+        };
+
+        columns.split(',').map(|column| {
+            let Some((name, _)) = column.trim().split_once(' ') else {
+                unreachable!("every schema column has a type");
+            };
+
+            name
+        })
+    }
+
     #[must_use]
     pub fn name(self) -> &'static str {
         match self {
