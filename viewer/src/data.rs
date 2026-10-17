@@ -80,8 +80,8 @@ pub(crate) fn query(
             return Err(Error::Bound("query row limit"));
         }
         let mut values = Vec::with_capacity(columns.len());
-        for column in 0..columns.len() {
-            let value = cell(row.get_ref(column)?)?;
+        for (column, name) in columns.iter().enumerate() {
+            let value = cell(row.get_ref(column)?, name)?;
             bytes += value.as_ref().map_or(0, String::len);
             if bytes > 32 * 1024 * 1024 {
                 return Err(Error::Bound("query text bytes"));
@@ -93,7 +93,7 @@ pub(crate) fn query(
     Err(Error::Bound("query row limit"))
 }
 
-fn cell(value: ValueRef<'_>) -> Result<Option<String>> {
+fn cell(value: ValueRef<'_>, column: &str) -> Result<Option<String>> {
     let text = match value {
         ValueRef::Null => return Ok(None),
         ValueRef::Boolean(value) => value.to_string(),
@@ -105,6 +105,9 @@ fn cell(value: ValueRef<'_>) -> Result<Option<String>> {
         ValueRef::USmallInt(value) => value.to_string(),
         ValueRef::UInt(value) => value.to_string(),
         ValueRef::UBigInt(value) => value.to_string(),
+        ValueRef::Blob(value) if matches!(column, "executable_name" | "app_path") => {
+            return Ok(Some(cell_bytes(value)?));
+        }
         ValueRef::Text(value) => std::str::from_utf8(value)
             .map_err(|_| Error::Bound("text encoding"))?
             .to_owned(),
@@ -116,4 +119,148 @@ fn cell(value: ValueRef<'_>) -> Result<Option<String>> {
         return Err(Error::Bound("cell bytes"));
     }
     Ok(Some(text))
+}
+
+fn cell_bytes(value: &[u8]) -> Result<String> {
+    if value.len() > persistence::schema::IDENTITY_PATH_BYTES_MAX {
+        return Err(Error::Bound("captured path bytes"));
+    }
+
+    let mut text = String::with_capacity(value.len());
+
+    for chunk in value.utf8_chunks() {
+        for character in chunk.valid().chars() {
+            match character {
+                '\\' => text.push_str("\\\\"),
+                character if character.is_control() => {
+                    let mut bytes = [0; 4];
+                    for byte in character.encode_utf8(&mut bytes).bytes() {
+                        cell_bytes_escape(&mut text, byte);
+                    }
+                }
+                character => text.push(character),
+            }
+        }
+
+        for byte in chunk.invalid() {
+            cell_bytes_escape(&mut text, *byte);
+        }
+    }
+
+    assert!(text.len() <= value.len() * 4);
+
+    Ok(text)
+}
+
+fn cell_bytes_escape(text: &mut String, byte: u8) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    text.push_str("\\x");
+    text.push(char::from(HEX[usize::from(byte >> 4)]));
+    text.push(char::from(HEX[usize::from(byte & 15)]));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Table, connection, query};
+    use crate::Cancellation;
+    use std::sync::Arc;
+
+    #[test]
+    fn displays_captured_bytes_without_merging_invalid_and_literal_escape_names() {
+        // Goal: Unicode remains readable and invalid bytes never become replacement characters.
+        // Method: query a real BLOB with Unicode, invalid bytes, control and literal backslash.
+        let bytes = b"Analyse \xc3\xa9 \xff \\xff \n";
+
+        let result = captured(bytes).unwrap();
+
+        assert_eq!(
+            result.rows,
+            vec![vec![Some("Analyse é \\xff \\\\xff \\x0a".to_owned())]]
+        );
+    }
+
+    #[test]
+    fn displays_a_maximum_capture_after_escaping_expands_it() {
+        // Goal: supported raw-byte paths remain displayable beyond the ordinary text limit.
+        // Method: display 4095 invalid UTF-8 bytes, whose exact escape is four times longer.
+        let bytes = vec![0xff_u8; 4095];
+
+        let result = captured(&bytes).unwrap();
+
+        assert_eq!(result.rows, vec![vec![Some("\\xff".repeat(4095))]]);
+    }
+
+    #[test]
+    fn refuses_captured_bytes_exceeding_the_capture_limit() {
+        // Goal: path display cannot bypass the raw-byte capture bound.
+        // Method: query one byte beyond the permitted executable/App size.
+        let bytes = vec![b'a'; 4096];
+
+        let result = captured(&bytes);
+
+        assert!(
+            matches!(result, Err(persistence::Error::Bound(_))),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn preserves_a_nullable_app_path() {
+        // Goal: outside-bundle processes remain distinct from an empty or invented App path.
+        // Method: query a typed NULL through the same bounded presentation adapter.
+        let connection = connection().unwrap();
+        let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+
+        let result = query(&connection, "SELECT NULL::BLOB app_path", 1, &operation).unwrap();
+
+        assert_eq!(result.rows, vec![vec![None]]);
+    }
+
+    #[test]
+    fn refuses_unrelated_blob_columns() {
+        // Goal: captured path handling does not make arbitrary binary readings printable.
+        // Method: query a BLOB under an unrelated column name.
+        let connection = connection().unwrap();
+        let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+
+        let result = query(&connection, "SELECT 'abc'::BLOB unrelated", 1, &operation);
+
+        assert!(
+            matches!(result, Err(persistence::Error::Bound(_))),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn keeps_the_ordinary_text_cell_limit() {
+        // Goal: the narrowly bounded path adapter does not expand every text cell's budget.
+        // Method: query ordinary text one byte beyond its original bound.
+        let connection = connection().unwrap();
+        let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+
+        let result = query(
+            &connection,
+            "SELECT repeat('a',4097) ordinary",
+            1,
+            &operation,
+        );
+
+        assert!(
+            matches!(result, Err(persistence::Error::Bound(_))),
+            "{result:?}"
+        );
+    }
+
+    fn captured(bytes: &[u8]) -> persistence::Result<Table> {
+        let connection = connection()?;
+        connection.execute_batch("CREATE TABLE captured(executable_name BLOB)")?;
+        connection.execute("INSERT INTO captured VALUES(?)", duckdb::params![bytes])?;
+        let operation = Arc::new(Cancellation::default()).operation(0)?;
+        query(
+            &connection,
+            "SELECT executable_name FROM captured",
+            1,
+            &operation,
+        )
+    }
 }

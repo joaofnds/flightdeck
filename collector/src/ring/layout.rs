@@ -54,6 +54,23 @@ pub(super) const HEADER_COMPLETED: usize = HEADER_IDENTITY + 3 * IDENTITY_WORDS;
 pub(super) const HEADER_RUN_START_CONTINUOUS_NS: usize = HEADER_COMPLETED + 1;
 pub(super) const HEADER_ORIGIN_STATE: usize = HEADER_RUN_START_CONTINUOUS_NS + 1;
 pub(super) const HEADER_WORDS: usize = HEADER_ORIGIN_STATE + 1;
+pub(super) const LAYOUT_VERSION_IDENTITY: u64 = 4;
+pub(super) const HEADER_WORDS_IDENTITY: usize = 40;
+pub(super) const HEADER_DICTIONARY_CAPACITY: usize = 32;
+pub(super) const HEADER_ARENA_CAPACITY: usize = 33;
+pub(super) const HEADER_DICTIONARY_COUNT: usize = 34;
+pub(super) const HEADER_ARENA_USED: usize = 35;
+pub(super) const HEADER_PROCESS_IDENTITY_WORDS: usize = 36;
+pub(super) const HEADER_DESCRIPTOR_WORDS: usize = 37;
+pub(super) const SLOT_IDENTITY_COUNT: usize = 42;
+pub(super) const PROCESS_IDENTITY_WORDS: usize = 6;
+pub(super) const DESCRIPTOR_WORDS: usize = 4;
+pub(super) const EVENT_WORDS_IDENTITY: usize = EVENT_WORDS + 5;
+const _: () = assert!(HEADER_WORDS_IDENTITY == 40);
+const _: () = assert!(SLOT_IDENTITY_COUNT == SLOT_FIXED_WORDS);
+const _: () = assert!(PROCESS_IDENTITY_WORDS == 6);
+const _: () = assert!(EVENT_WORDS_IDENTITY == 24);
+const _: () = assert!(DESCRIPTOR_WORDS == 4);
 pub(super) const ORIGIN_UNAVAILABLE: u64 = 0;
 pub(super) const ORIGIN_IDENTIFIED: u64 = 1;
 /// The source has an exact elapsed origin but no assigned recording/run/boot identity.
@@ -140,6 +157,11 @@ pub(super) struct Layout {
     pub(super) coalitions: Section,
     /// The event log's first word, from the ring's start.
     pub(super) events_start: usize,
+    pub(super) event_words: usize,
+    pub(super) process_identities: Section,
+    pub(super) dictionary: Section,
+    pub(super) arena_start: usize,
+    pub(super) arena_bytes: usize,
 }
 
 /// A run of records of one size within a slot.
@@ -172,37 +194,58 @@ impl Layout {
     }
 
     pub(super) fn versioned(shape: Shape, version: u64) -> Option<Self> {
-        if version != LAYOUT_VERSION_OBSERVED {
-            if version != LAYOUT_VERSION_LEGACY {
-                return None;
-            }
+        if version == LAYOUT_VERSION_IDENTITY {
+            return Self::identity(shape, super::DictionaryCapacity::default());
         }
-        let fields = [
-            shape.slot_count,
-            shape.cpu_capacity,
-            shape.interface_capacity,
-            shape.core_capacity,
-            shape.state_capacity,
-            shape.fan_capacity,
-            shape.process_capacity,
-            shape.coalition_capacity,
-            shape.event_capacity,
-        ];
-        for field in fields {
-            if field == 0 {
-                return None;
-            }
 
-            if field > SHAPE_FIELD_MAX {
-                return None;
-            }
+        Self::planned(
+            shape,
+            version,
+            super::DictionaryCapacity {
+                entries: 0,
+                arena_bytes: 0,
+            },
+        )
+    }
+
+    pub(super) fn identity(shape: Shape, capacity: super::DictionaryCapacity) -> Option<Self> {
+        if capacity.entries == 0 {
+            return None;
+        }
+
+        if capacity.entries > 65_536 {
+            return None;
+        }
+
+        if capacity.arena_bytes == 0 {
+            return None;
+        }
+
+        if capacity.arena_bytes > 64 * 1024 * 1024 {
+            return None;
+        }
+
+        if !capacity.arena_bytes.is_multiple_of(8) {
+            return None;
+        }
+
+        Self::planned(shape, LAYOUT_VERSION_IDENTITY, capacity)
+    }
+
+    fn planned(shape: Shape, version: u64, capacity: super::DictionaryCapacity) -> Option<Self> {
+        if !(LAYOUT_VERSION_LEGACY..=LAYOUT_VERSION_IDENTITY).contains(&version) {
+            return None;
+        }
+
+        if !planned_shape(shape) {
+            return None;
         }
 
         let mut plan = SlotPlan {
             end: if version == LAYOUT_VERSION_LEGACY {
                 SLOT_WALL_NS
             } else {
-                SLOT_FIXED_WORDS
+                SLOT_FIXED_WORDS + usize::from(version == LAYOUT_VERSION_IDENTITY)
             },
         };
         let cpus = plan.section(shape.cpu_capacity, CPU_WORDS);
@@ -213,21 +256,37 @@ impl Layout {
         let fans = plan.section(shape.fan_capacity, 1);
         let processes = plan.section(shape.process_capacity, PROCESS_WORDS);
         let coalitions = plan.section(shape.coalition_capacity, COALITION_WORDS);
-        let slot_words = plan.end;
-        // A core's record grows with the states, so the size may pass what an object holds.
-        let size_bytes = u64_from_usize(slot_words)
-            .checked_mul(shape.slot_count)?
-            .checked_add(u64_from_usize(HEADER_WORDS))?
-            .checked_add(u64_from_usize(EVENT_WORDS).checked_mul(shape.event_capacity)?)?
-            .checked_mul(u64_from_usize(size_of::<u64>()))?;
-        if i64::try_from(size_bytes).is_err() {
-            return None;
+        let process_identities = plan.section(
+            if version == LAYOUT_VERSION_IDENTITY {
+                shape.process_capacity
+            } else {
+                0
+            },
+            PROCESS_IDENTITY_WORDS,
+        );
+        let mut widths = PlannedWords {
+            slot: plan.end,
+            header: HEADER_WORDS,
+            event: EVENT_WORDS,
+        };
+        if version == LAYOUT_VERSION_IDENTITY {
+            widths.header = HEADER_WORDS_IDENTITY;
+            widths.event = EVENT_WORDS_IDENTITY;
         }
+
+        planned_size(shape, capacity, &widths)?;
+
+        let events_start = widths.header + usize_from(shape.slot_count) * widths.slot;
+        let dictionary = Section {
+            start: events_start + usize_from(shape.event_capacity) * widths.event,
+            capacity: usize_from(capacity.entries),
+            record_words: DESCRIPTOR_WORDS,
+        };
 
         Some(Self {
             version,
             shape,
-            slot_words,
+            slot_words: widths.slot,
             cpus,
             interfaces,
             gpu_states,
@@ -235,12 +294,17 @@ impl Layout {
             fans,
             processes,
             coalitions,
-            events_start: HEADER_WORDS + usize_from(shape.slot_count) * slot_words,
+            events_start,
+            event_words: widths.event,
+            process_identities,
+            arena_start: dictionary.end(),
+            dictionary,
+            arena_bytes: usize::try_from(capacity.arena_bytes).ok()?,
         })
     }
 
     pub(super) fn word_count(&self) -> usize {
-        self.events_start + usize_from(self.shape.event_capacity) * EVENT_WORDS
+        self.arena_start + self.arena_bytes / 8
     }
 
     pub(super) fn size_bytes(&self) -> usize {
@@ -270,8 +334,8 @@ impl Layout {
         assert!(number > 0);
 
         let index = usize_from((number - 1) % self.shape.event_capacity);
-        let start = self.events_start + index * EVENT_WORDS;
-        start..start + EVENT_WORDS
+        let start = self.events_start + index * self.event_words;
+        start..start + self.event_words
     }
 
     /// The words of the slot that holds `publication`, from the ring's start.
@@ -279,9 +343,68 @@ impl Layout {
         assert!(publication > 0);
 
         let index = usize_from((publication - 1) % self.shape.slot_count);
-        let start = HEADER_WORDS + index * self.slot_words;
+        let header_words = if self.version == LAYOUT_VERSION_IDENTITY {
+            HEADER_WORDS_IDENTITY
+        } else {
+            HEADER_WORDS
+        };
+        let start = header_words + index * self.slot_words;
         start..start + self.slot_words
     }
+}
+
+struct PlannedWords {
+    slot: usize,
+    header: usize,
+    event: usize,
+}
+
+fn planned_size(
+    shape: Shape,
+    capacity: super::DictionaryCapacity,
+    widths: &PlannedWords,
+) -> Option<()> {
+    // Core capacity times state capacity times slot count can exceed the object bound.
+    let size_bytes = u64_from_usize(widths.slot)
+        .checked_mul(shape.slot_count)?
+        .checked_add(u64_from_usize(widths.header))?
+        .checked_add(u64_from_usize(widths.event).checked_mul(shape.event_capacity)?)?
+        .checked_add(
+            capacity
+                .entries
+                .checked_mul(u64_from_usize(DESCRIPTOR_WORDS))?,
+        )?
+        .checked_add(capacity.arena_bytes / 8)?
+        .checked_mul(u64_from_usize(size_of::<u64>()))?;
+
+    i64::try_from(size_bytes).ok()?;
+
+    Some(())
+}
+
+fn planned_shape(shape: Shape) -> bool {
+    let fields = [
+        shape.slot_count,
+        shape.cpu_capacity,
+        shape.interface_capacity,
+        shape.core_capacity,
+        shape.state_capacity,
+        shape.fan_capacity,
+        shape.process_capacity,
+        shape.coalition_capacity,
+        shape.event_capacity,
+    ];
+    for field in fields {
+        if field == 0 {
+            return false;
+        }
+
+        if field > SHAPE_FIELD_MAX {
+            return false;
+        }
+    }
+
+    true
 }
 
 /// The words of a slot laid out so far, which each section it lays out extends.
@@ -341,7 +464,23 @@ pub(super) fn store_header(words: &[AtomicU64], layout: &Layout, header: &Header
         words[index].store(value, Ordering::Relaxed);
     }
     for (index, width) in RECORD_WIDTHS {
+        let width = match index {
+            HEADER_SLOT_FIXED_WORDS if layout.version == LAYOUT_VERSION_IDENTITY => 43,
+            HEADER_EVENT_WORDS => layout.event_words,
+            _ => width,
+        };
         words[index].store(u64_from_usize(width), Ordering::Relaxed);
+    }
+    if layout.version == LAYOUT_VERSION_IDENTITY {
+        let fields = [
+            (HEADER_DICTIONARY_CAPACITY, layout.dictionary.capacity),
+            (HEADER_ARENA_CAPACITY, layout.arena_bytes),
+            (HEADER_PROCESS_IDENTITY_WORDS, PROCESS_IDENTITY_WORDS),
+            (HEADER_DESCRIPTOR_WORDS, DESCRIPTOR_WORDS),
+        ];
+        for (index, value) in fields {
+            words[index].store(u64_from_usize(value), Ordering::Relaxed);
+        }
     }
 }
 
@@ -364,29 +503,23 @@ pub(super) struct Header {
 /// The layout the header `header` describes, or an error where it is no ring of this layout
 /// or the object, of `size_bytes`, is too short for it.
 pub(super) fn open_layout(header: &[AtomicU64], size_bytes: usize) -> io::Result<Layout> {
+    if header.len() < HEADER_WORDS {
+        return Err(io::Error::from(io::ErrorKind::InvalidData));
+    }
     let load = |index: usize| header[index].load(Ordering::Relaxed);
     if load(HEADER_MAGIC) != MAGIC {
         return Err(io::Error::from(io::ErrorKind::InvalidData));
     }
 
     let version = load(HEADER_LAYOUT_VERSION);
-    if version != LAYOUT_VERSION {
-        if version != LAYOUT_VERSION_LEGACY {
-            return Err(io::Error::from(io::ErrorKind::InvalidData));
-        }
-    }
-
-    for (index, width) in RECORD_WIDTHS {
-        let mut width = width;
-        if index == HEADER_SLOT_FIXED_WORDS {
-            if version == LAYOUT_VERSION_LEGACY {
-                width = SLOT_WALL_NS;
+    if version != LAYOUT_VERSION_IDENTITY {
+        if version != LAYOUT_VERSION {
+            if version != LAYOUT_VERSION_LEGACY {
+                return Err(io::Error::from(io::ErrorKind::InvalidData));
             }
         }
-        if load(index) != u64_from_usize(width) {
-            return Err(io::Error::from(io::ErrorKind::InvalidData));
-        }
     }
+    open_layout_widths(header, version)?;
 
     let shape = Shape {
         slot_count: load(HEADER_SLOT_COUNT),
@@ -399,7 +532,18 @@ pub(super) fn open_layout(header: &[AtomicU64], size_bytes: usize) -> io::Result
         coalition_capacity: load(HEADER_COALITION_CAPACITY),
         event_capacity: load(HEADER_EVENT_CAPACITY),
     };
-    let Some(layout) = Layout::versioned(shape, version) else {
+    let planned = if version == LAYOUT_VERSION_IDENTITY {
+        Layout::identity(
+            shape,
+            super::DictionaryCapacity {
+                entries: load(HEADER_DICTIONARY_CAPACITY),
+                arena_bytes: load(HEADER_ARENA_CAPACITY),
+            },
+        )
+    } else {
+        Layout::versioned(shape, version)
+    };
+    let Some(layout) = planned else {
         return Err(io::Error::from(io::ErrorKind::InvalidData));
     };
 
@@ -408,6 +552,58 @@ pub(super) fn open_layout(header: &[AtomicU64], size_bytes: usize) -> io::Result
     }
 
     Ok(layout)
+}
+
+fn open_layout_widths(header: &[AtomicU64], version: u64) -> io::Result<()> {
+    let load = |index: usize| header[index].load(Ordering::Relaxed);
+    if version == LAYOUT_VERSION_IDENTITY {
+        if header.len() < HEADER_WORDS_IDENTITY {
+            return Err(io::Error::from(io::ErrorKind::InvalidData));
+        }
+        let count = header[HEADER_DICTIONARY_COUNT].load(Ordering::Acquire);
+        if count > load(HEADER_DICTIONARY_CAPACITY) {
+            return Err(io::Error::from(io::ErrorKind::InvalidData));
+        }
+        let used = load(HEADER_ARENA_USED);
+        if used > load(HEADER_ARENA_CAPACITY) {
+            return Err(io::Error::from(io::ErrorKind::InvalidData));
+        }
+
+        if !used.is_multiple_of(8) {
+            return Err(io::Error::from(io::ErrorKind::InvalidData));
+        }
+        let exact = [
+            (HEADER_PROCESS_IDENTITY_WORDS, 6),
+            (HEADER_DESCRIPTOR_WORDS, 4),
+            (38, 0),
+            (39, 0),
+        ];
+        for (index, value) in exact {
+            if load(index) != value {
+                return Err(io::Error::from(io::ErrorKind::InvalidData));
+            }
+        }
+    }
+    for (index, width) in RECORD_WIDTHS {
+        let mut width = width;
+        if version == LAYOUT_VERSION_IDENTITY {
+            match index {
+                HEADER_SLOT_FIXED_WORDS => width = 43,
+                HEADER_EVENT_WORDS => width = EVENT_WORDS_IDENTITY,
+                _ => {}
+            }
+        }
+        if index == HEADER_SLOT_FIXED_WORDS {
+            if version == LAYOUT_VERSION_LEGACY {
+                width = SLOT_WALL_NS;
+            }
+        }
+        if load(index) != u64_from_usize(width) {
+            return Err(io::Error::from(io::ErrorKind::InvalidData));
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -443,6 +639,150 @@ mod tests {
         words
     }
 
+    fn identity_header() -> (Layout, Vec<AtomicU64>) {
+        let layout = Layout::identity(
+            layout().shape,
+            super::super::DictionaryCapacity {
+                entries: 2,
+                arena_bytes: 32,
+            },
+        )
+        .unwrap();
+        let words = (0..HEADER_WORDS_IDENTITY)
+            .map(|_| AtomicU64::new(0))
+            .collect::<Vec<_>>();
+        store_header(
+            &words,
+            &layout,
+            &Header {
+                generation: 1,
+                publication_first: 1,
+                run_start_ns: 1,
+                event_first: 1,
+            },
+        );
+        (layout, words)
+    }
+
+    #[test]
+    fn refuses_identity_counts_past_declared_dictionary_storage() {
+        // Goal: corrupt dictionary accounting is refused before exposing the mapping.
+        // Method: commit more entries than the fixed dictionary can contain.
+        let (layout, words) = identity_header();
+        words[HEADER_DICTIONARY_COUNT].store(3, Ordering::Relaxed);
+
+        let result = open_layout(&words, layout.size_bytes());
+
+        assert_eq!(io::ErrorKind::InvalidData, result.unwrap_err().kind());
+    }
+
+    struct HeaderCorruption {
+        index: usize,
+        value: u64,
+    }
+
+    fn refuses_corrupt_identity_header(corruption: &HeaderCorruption) {
+        let (layout, words) = identity_header();
+        words[corruption.index].store(corruption.value, Ordering::Relaxed);
+
+        let result = open_layout(&words, layout.size_bytes());
+
+        assert_eq!(io::ErrorKind::InvalidData, result.unwrap_err().kind());
+    }
+
+    macro_rules! corrupt_identity_headers {
+        ($($name:ident, $index:expr, $value:expr;)*) => {$(
+            #[test]
+            fn $name() {
+                // Goal: v4 refuses a wrong width, capacity or reserved header word.
+                // Method: corrupt one discriminator in an otherwise valid header.
+                refuses_corrupt_identity_header(&HeaderCorruption { index: $index, value: $value });
+            }
+        )*};
+    }
+
+    corrupt_identity_headers! {
+        refuses_wrong_identity_slot_width, HEADER_SLOT_FIXED_WORDS, 42;
+        refuses_wrong_identity_event_width, HEADER_EVENT_WORDS, 19;
+        refuses_wrong_identity_process_width, HEADER_PROCESS_WORDS, 19;
+        refuses_wrong_process_identity_width, HEADER_PROCESS_IDENTITY_WORDS, 7;
+        refuses_wrong_descriptor_width, HEADER_DESCRIPTOR_WORDS, 5;
+        refuses_empty_dictionary_capacity, HEADER_DICTIONARY_CAPACITY, 0;
+        refuses_oversized_dictionary_capacity, HEADER_DICTIONARY_CAPACITY, 65_537;
+        refuses_empty_arena_capacity, HEADER_ARENA_CAPACITY, 0;
+        refuses_unaligned_arena_capacity, HEADER_ARENA_CAPACITY, 33;
+        refuses_used_arena_past_capacity, HEADER_ARENA_USED, 40;
+        refuses_unaligned_used_arena, HEADER_ARENA_USED, 1;
+        refuses_first_identity_reserved_word, 38, 1;
+        refuses_second_identity_reserved_word, 39, 1;
+    }
+
+    #[test]
+    fn refuses_identity_header_and_arena_truncation() {
+        // Goal: v4 cannot inherit legacy header size or map a truncated arena.
+        // Method: open its valid header with a short header and a one-word-short object.
+        let (layout, words) = identity_header();
+
+        let short_header = open_layout(&words[..HEADER_WORDS], layout.size_bytes());
+        let short_object = open_layout(&words, layout.size_bytes() - 8);
+
+        assert_eq!(io::ErrorKind::InvalidData, short_header.unwrap_err().kind());
+        assert_eq!(io::ErrorKind::InvalidData, short_object.unwrap_err().kind());
+    }
+
+    #[test]
+    fn reserves_exact_identity_bytes_for_the_documented_full_profile() {
+        // Goal: the documented full ring remains below the existing one-GiB admission bound.
+        // Method: compare exact v3/v4 arithmetic without allocating either full ring.
+        let shape = Shape {
+            slot_count: 120,
+            cpu_capacity: 18,
+            interface_capacity: 1638,
+            core_capacity: 18,
+            state_capacity: 64,
+            fan_capacity: 10,
+            process_capacity: 12000,
+            coalition_capacity: 28384,
+            event_capacity: 1_966_080,
+        };
+
+        let legacy = Layout::new(shape).unwrap();
+        let identity =
+            Layout::identity(shape, super::super::DictionaryCapacity::default()).unwrap();
+
+        assert_eq!(795_684_736, legacy.size_bytes());
+        assert_eq!(1_012_654_976, identity.size_bytes());
+        println!(
+            "ring={} index={} observation={} reference={} reader_identity_scratch={}",
+            identity.size_bytes(),
+            65_536 * 2 * size_of::<u64>(),
+            size_of::<super::super::IdentityObservation>(),
+            size_of::<super::super::ProgramReference>(),
+            12_000 * size_of::<super::super::IdentityObservation>()
+        );
+
+        assert!(identity.size_bytes() < 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn plans_identity_layout_without_changing_default_writes() {
+        // Goal: identity fixtures use v4 while the production constructor stays v3.
+        // Method: compare explicit identity planning with the existing constructor.
+        let identity = Layout::identity(
+            layout().shape,
+            super::super::DictionaryCapacity {
+                entries: 2,
+                arena_bytes: 32,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(4, identity.version);
+        assert_eq!(3, layout().version);
+        assert_eq!(43, identity.cpus.start);
+        assert_eq!(24, identity.event_words);
+    }
+
     #[test]
     fn opens_the_layout_a_header_of_this_code_describes() {
         // Goal: a ring this code wrote opens with the layout it was written with.
@@ -473,7 +813,7 @@ mod tests {
     fn cannot_construct_a_plan_for_an_unknown_layout_version() {
         // Goal: a speculative layout version cannot silently acquire today's offsets.
         // Method: ask the internal planner directly for a version neither reader supports.
-        assert!(Layout::versioned(layout().shape, LAYOUT_VERSION + 1).is_none());
+        assert!(Layout::versioned(layout().shape, LAYOUT_VERSION_IDENTITY + 1).is_none());
     }
 
     #[test]
@@ -484,7 +824,7 @@ mod tests {
         // version, a slot count of zero, and a process record one word wider.
         let breaks = [
             (HEADER_MAGIC, MAGIC + 1),
-            (HEADER_LAYOUT_VERSION, LAYOUT_VERSION + 1),
+            (HEADER_LAYOUT_VERSION, LAYOUT_VERSION_IDENTITY + 1),
             (HEADER_SLOT_COUNT, 0),
             (HEADER_PROCESS_WORDS, u64_from_usize(PROCESS_WORDS + 1)),
         ];

@@ -15,6 +15,7 @@ pub fn run(lock: &Path, reference: &Path, seconds: u64) -> Result<()> {
     }
     let started = Instant::now();
     let mut reader = open(lock, started, seconds)?;
+    persistence::require_numeric_source(&reader)?;
     let identity = reader
         .identity()
         .ok_or(Error::Bound("source run identity unavailable"))?;

@@ -615,7 +615,23 @@ pub(super) fn open_ring(name: &str) -> io::Result<(Mapping, Layout)> {
     }
 
     let header = Mapping::new(&object, HEADER_WORDS, PROT_READ)?;
-    let layout = open_layout(header.words(), size_bytes)?;
+    let header_words = if header.words()[super::layout::HEADER_LAYOUT_VERSION]
+        .load(Ordering::Relaxed)
+        == super::layout::LAYOUT_VERSION_IDENTITY
+    {
+        super::layout::HEADER_WORDS_IDENTITY
+    } else {
+        HEADER_WORDS
+    };
+    if size_bytes < header_words * size_of::<u64>() {
+        return Err(io::Error::from(io::ErrorKind::InvalidData));
+    }
+    let layout = if header_words == HEADER_WORDS {
+        open_layout(header.words(), size_bytes)?
+    } else {
+        let extended_header = Mapping::new(&object, header_words, PROT_READ)?;
+        open_layout(extended_header.words(), size_bytes)?
+    };
 
     let mapping = Mapping::new(&object, layout.word_count(), PROT_READ)?;
 

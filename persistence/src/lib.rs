@@ -12,7 +12,7 @@ mod window;
 pub mod worker;
 
 pub use metadata::{Losses, Manifest, TimeBounds};
-pub use reader::tick_buffer;
+pub use reader::{require_numeric_source, tick_buffer};
 pub use store::{Begin, CommitBoundary, PendingWindow, Store, ownership_contended, read_committed};
 
 pub use encoder::{Encoder, TableManifest, append};

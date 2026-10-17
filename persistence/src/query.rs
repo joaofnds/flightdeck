@@ -4,6 +4,7 @@ use std::io;
 use std::path::Path;
 
 use crate::layout::{self, DirectoryNames, Kind, WindowLocation};
+use crate::schema::Table;
 use collector::recording::discovery::Selection;
 use duckdb::Connection;
 
@@ -27,7 +28,7 @@ pub enum TableSource<'a> {
 /// Callers own the connection's memory/time bounds and must not mutate a validated source.
 pub fn table_source(
     connection: &Connection,
-    table: crate::schema::Table,
+    table: Table,
     source: TableSource<'_>,
 ) -> Result<String> {
     let source = match source {
@@ -35,10 +36,7 @@ pub fn table_source(
         TableSource::Staged => table.name().to_owned(),
     };
 
-    if matches!(
-        table,
-        crate::schema::Table::Processes | crate::schema::Table::Events
-    ) {
+    if matches!(table, Table::Processes | Table::Events) {
         return crate::identity::normalize(connection, table, &source);
     }
 
@@ -120,10 +118,17 @@ fn query_window(root: &Path, manifest: &Manifest, second: u64) -> Result<Vec<(i3
     let connection = Connection::open_in_memory()?;
     connection.execute_batch(
         "SET autoinstall_known_extensions=false; \
-        SET autoload_known_extensions=false; SET threads=1; SET memory_limit='256MB';",
+        SET autoload_known_extensions=false; SET threads=1; SET memory_limit='256MB'; \
+        SET max_temp_directory_size='0B';",
     )?;
     let directory = root.join(&manifest.data_directory);
-    let source = |table| parquet_source(&directory.join(format!("{table}.parquet")));
+    let source = |table: Table| {
+        table_source(
+            &connection,
+            table,
+            TableSource::Parquet(&directory.join(format!("{}.parquet", table.name()))),
+        )
+    };
     let first = second
         .checked_mul(1_000_000_000)
         .ok_or(crate::Error::Bound("query time"))?;
@@ -133,19 +138,19 @@ fn query_window(root: &Path, manifest: &Manifest, second: u64) -> Result<Vec<(i3
     let exit = crate::schema::event_kind::EXIT;
     let measured = crate::schema::availability::MEASURED;
     let sql = format!(
-        "WITH t AS (SELECT publication FROM read_parquet('{}') \
+        "WITH t AS (SELECT publication FROM {} \
         WHERE wall_ns>={first} AND wall_ns<{end}), all_usage AS (\
         SELECT p.publication,p.pid,p.awake_ns_at_start,p.user_ns,0 priority \
-        FROM read_parquet('{}') p \
-        JOIN t USING(publication) UNION ALL \
+        FROM {} p \
+        JOIN t USING(publication) WHERE p.usage_availability={measured} UNION ALL \
         SELECT e.publication,e.pid,e.awake_ns_at_start,e.user_ns,1 priority \
-        FROM read_parquet('{}') e \
+        FROM {} e \
         JOIN t USING(publication) WHERE e.kind={exit} AND e.availability={measured}) \
         SELECT pid,user_ns FROM all_usage QUALIFY row_number() OVER \
         (PARTITION BY publication,pid,awake_ns_at_start ORDER BY priority DESC)=1 ORDER BY pid",
-        source("ticks")?,
-        source("processes")?,
-        source("events")?
+        source(Table::Ticks)?,
+        source(Table::Processes)?,
+        source(Table::Events)?
     );
     let mut statement = connection.prepare(&sql)?;
     let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;

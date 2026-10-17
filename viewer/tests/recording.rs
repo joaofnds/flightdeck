@@ -11,13 +11,72 @@ mod tests {
     use persistence::{
         Begin, Encoder, Limits, NumberedEvent, Observation, Store, Window, WindowIdentity,
     };
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
     use viewer::Session;
 
     static NEXT: AtomicU64 = AtomicU64::new(0);
 
     struct Recording(PathBuf);
+
+    struct CapturedIdentity {
+        version: u8,
+        refused_pid: Option<i32>,
+    }
+
+    impl Default for CapturedIdentity {
+        fn default() -> Self {
+            Self {
+                version: 1,
+                refused_pid: None,
+            }
+        }
+    }
+
+    impl CapturedIdentity {
+        fn write(&self, directory: &Path) {
+            let config = duckdb::Config::default().threads(1).unwrap();
+            let connection = duckdb::Connection::open_in_memory_with_flags(config).unwrap();
+            let source =
+                persistence::query::parquet_source(&directory.join("processes.parquet")).unwrap();
+            let target =
+                persistence::query::parquet_source(&directory.join("captured.parquet")).unwrap();
+            let version = self.version;
+            connection
+                .execute_batch(&format!(
+                    r"CREATE TABLE captured AS SELECT *,
+                {version}::UTINYINT identity_version,0::UTINYINT identity_availability,
+                0::UTINYINT usage_availability,(CASE WHEN pid=0 THEN
+                1000000000+awake_ns_at_start ELSE 10000+pid END)::UBIGINT process_unique_id,
+                4::INTEGER pid_version,'worker\xFF'::BLOB executable_name,
+                '/Applications/Engine.app'::BLOB app_path FROM read_parquet('{source}')"
+                ))
+                .unwrap();
+            if let Some(pid) = self.refused_pid {
+                let fields = persistence::schema::Table::Processes
+                    .columns()
+                    .skip(2)
+                    .map(|field| format!("{field}=NULL"))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                connection
+                    .execute_batch(&format!(
+                        "UPDATE captured SET usage_availability=1,{fields} WHERE pid={pid}"
+                    ))
+                    .unwrap();
+            }
+            connection
+                .execute_batch(&format!(
+                    "COPY captured TO '{target}' (FORMAT PARQUET,COMPRESSION ZSTD)"
+                ))
+                .unwrap();
+            std::fs::rename(
+                directory.join("captured.parquet"),
+                directory.join("processes.parquet"),
+            )
+            .unwrap();
+        }
+    }
 
     impl Recording {
         fn new() -> Self {
@@ -33,6 +92,10 @@ mod tests {
         }
 
         fn write_processes(&self, processes: u64) {
+            self.write_processes_with(processes, |_| {});
+        }
+
+        fn write_processes_with(&self, processes: u64, extend: impl FnOnce(&Path)) {
             let store = Store::open(&self.0).unwrap();
             let mut shape = fixture::profile(false);
             shape.process_capacity = processes;
@@ -50,6 +113,7 @@ mod tests {
                 panic!("new fixture")
             };
             let tables = Encoder.encode(&window, pending.path()).unwrap();
+            extend(pending.path());
             let manifest = persistence::Manifest {
                 identity,
                 publication_first: 1,
@@ -135,6 +199,10 @@ mod tests {
         }
 
         fn standard_run(&self, run: [u64; 2]) {
+            self.standard_run_with(run, |_| {});
+        }
+
+        fn standard_run_with(&self, run: [u64; 2], extend: impl FnOnce(&Path)) {
             let store = Store::open(&self.0).unwrap();
             let mut window = fixture::window(false);
             window.identity.run.recording = store.recording();
@@ -144,6 +212,7 @@ mod tests {
                 panic!("new run");
             };
             let tables = Encoder.encode(&window, pending.path()).unwrap();
+            extend(pending.path());
             let manifest = persistence::Manifest {
                 identity,
                 publication_first: 1,
@@ -162,6 +231,168 @@ mod tests {
             };
             store.commit(pending, manifest).unwrap();
         }
+    }
+
+    #[test]
+    fn keeps_readable_identity_when_saved_process_usage_was_refused() {
+        // Goal: a readable process remains identifiable without fabricated numeric readings.
+        // Method: inspect a committed identity-only row through the production viewer page.
+        let recording = Recording::new();
+        let identity = CapturedIdentity {
+            refused_pid: Some(39),
+            ..CapturedIdentity::default()
+        };
+        recording.write_processes_with(40, |path| identity.write(path));
+        let mut session = Session::open(&recording.0).unwrap();
+        session.select(1001, 0).unwrap();
+
+        let page = session.page("processes", 0).unwrap();
+
+        assert!(
+            page["rows"][39].as_array().unwrap()[2..21]
+                .iter()
+                .all(serde_json::Value::is_null)
+        );
+        assert_eq!(
+            &page["rows"][39].as_array().unwrap()[21..],
+            serde_json::json!([
+                "1",
+                "0",
+                "1",
+                "10039",
+                "4",
+                "worker\\xff",
+                "/Applications/Engine.app"
+            ])
+            .as_array()
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn excludes_identity_only_presence_from_measured_usage_queries() {
+        // Goal: the numeric historical query excludes presence without a measured payload.
+        // Method: query a committed process with readable identity but refused usage.
+        let recording = Recording::new();
+        let identity = CapturedIdentity {
+            refused_pid: Some(39),
+            ..CapturedIdentity::default()
+        };
+        recording.standard_run_with([3, 4], |path| identity.write(path));
+
+        let result = persistence::query::processes_at_second(&recording.0, 1001).unwrap();
+
+        assert_eq!(result.processes.len(), 103);
+        assert!(!result.processes.iter().any(|(pid, _)| *pid == 39));
+        assert!(result.processes.contains(&(0, 2)));
+        assert!(result.processes.contains(&(30_000, 2)));
+    }
+
+    #[test]
+    fn keeps_captured_identity_with_the_process_beyond_the_first_page() {
+        // Goal: byte identity and numeric readings stay attached to the same paged process.
+        // Method: open a captured 600-process fixture and inspect its final saved process.
+        let recording = Recording::new();
+        recording.write_processes_with(600, |path| CapturedIdentity::default().write(path));
+        let mut session = Session::open(&recording.0).unwrap();
+        session.select(1001, 0).unwrap();
+
+        let page = session.page("processes", 512).unwrap();
+
+        assert_eq!(page["total"], 600);
+        assert_eq!(page["rows"].as_array().unwrap().len(), 88);
+        assert_eq!(page["rows"][87][3], "59902");
+        assert_eq!(
+            &page["rows"][87].as_array().unwrap()[21..],
+            serde_json::json!([
+                "1",
+                "0",
+                "0",
+                "10599",
+                "4",
+                "worker\\xff",
+                "/Applications/Engine.app"
+            ])
+            .as_array()
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn refuses_unknown_captured_identity_before_returning_a_saved_page() {
+        // Goal: the production viewer cannot bypass unsupported identity-version rejection.
+        // Method: open a real committed window with otherwise valid version-nine metadata.
+        let recording = Recording::new();
+        let identity = CapturedIdentity {
+            version: 9,
+            ..CapturedIdentity::default()
+        };
+        recording.write_processes_with(40, |path| identity.write(path));
+        let mut session = Session::open(&recording.0).unwrap();
+        session.select(1001, 0).unwrap();
+
+        let result = session.page("processes", 0);
+
+        assert!(
+            matches!(result, Err(persistence::Error::Bound(_))),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn normalizes_legacy_recordings_to_explicit_unsupported_identity() {
+        // Goal: the actual saved viewer binds a stable identity schema for old recordings.
+        // Method: select a real legacy window and inspect its process page metadata/payload.
+        let recording = Recording::new();
+        recording.write();
+        let mut session = Session::open(&recording.0).unwrap();
+        session.select(1001, 0).unwrap();
+
+        let page = session.page("processes", 0).unwrap();
+
+        assert_eq!(
+            &page["columns"].as_array().unwrap()[21..],
+            serde_json::json!([
+                "identity_version",
+                "identity_availability",
+                "usage_availability",
+                "process_unique_id",
+                "pid_version",
+                "executable_name",
+                "app_path"
+            ])
+            .as_array()
+            .unwrap()
+        );
+        assert_eq!(
+            &page["rows"][0].as_array().unwrap()[21..],
+            serde_json::json!([null, "3", "0", null, null, null, null])
+                .as_array()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn inspects_legacy_and_captured_processes_in_one_recording() {
+        // Goal: mixed format history keeps metadata availability with its selected run.
+        // Method: reopen one recording with legacy and augmented runs at the same second.
+        let recording = Recording::new();
+        recording.standard_run([3, 4]);
+        recording.standard_run_with([7, 8], |path| CapturedIdentity::default().write(path));
+        let mut session = Session::open(&recording.0).unwrap();
+
+        let legacy = session.select(1001, 0).unwrap();
+        let legacy_page = session.page("processes", 0).unwrap();
+        let captured = session.select(1001, 1).unwrap();
+        let captured_page = session.page("processes", 0).unwrap();
+
+        assert_ne!(legacy["selected"]["run"], captured["selected"]["run"]);
+        assert_eq!(legacy_page["rows"][1][3], "102");
+        assert_eq!(captured_page["rows"][1][3], "102");
+        assert_eq!(legacy_page["rows"][1][22], "3");
+        assert!(legacy_page["rows"][1][26].is_null());
+        assert_eq!(captured_page["rows"][1][22], "0");
+        assert_eq!(captured_page["rows"][1][26], "worker\\xff");
     }
 
     #[test]
@@ -256,7 +487,14 @@ mod tests {
                 "2",
                 "3",
                 "2147483647",
-                "-2147483648"
+                "-2147483648",
+                null,
+                "3",
+                "0",
+                null,
+                null,
+                null,
+                null
             ])
         );
         assert_eq!(events["rows"][1][6], "2");
@@ -299,7 +537,8 @@ mod tests {
             events["rows"][0],
             serde_json::json!([
                 "2", "5", "1", "42", "3", null, "0", "0", "101", "102", "103", "104", "105", "106",
-                "107", "108", "109", "110", "111", "112", "113", "114"
+                "107", "108", "109", "110", "111", "112", "113", "114", null, "3", "0", null, null,
+                null, null
             ])
         );
         assert_eq!(events["rows"][1][6], "2");

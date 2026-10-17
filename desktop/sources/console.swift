@@ -194,7 +194,7 @@ struct RecordedReadings: View {
     }
 
     private func description(_ name: String) -> String {
-        if name == "processes" { return "Sampled processes · CPU time is cumulative nanoseconds. Names were not recorded. PID plus awake start time identifies a creation." }
+        if name == "processes" { return "Recorded processes · CPU time is cumulative nanoseconds. Select a row for process identity and all available readings." }
         if name == "events" { return "Events received with this tick · kind: 1 start, 2 exec, 3 exit. Availability: 0 measured, 1 refused, 2 gone, 3 not applicable. These are not exact occurrence timestamps." }
         if name == "coalitions" { return "Raw resource coalitions. These are not app totals." }
         return "Exact source readings for the selected publication. Select a row for all recorded fields and units."

@@ -7,7 +7,7 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// Optional process/event columns; the original schema-1 tables and seal remain unchanged.
 /// A complete extension uses this version on every row. Absent columns mean legacy data.
 pub const IDENTITY_VERSION: u8 = 1;
-pub const IDENTITY_PATH_BYTES_MAX: usize = 4095;
+pub const IDENTITY_PATH_BYTES_MAX: usize = collector::ring::PROGRAM_PATH_BYTES_MAX;
 pub const IDENTITY_FIELDS: [(&str, &str); 7] = [
     ("identity_version", "UTINYINT"),
     ("identity_availability", "UTINYINT"),

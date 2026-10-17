@@ -209,6 +209,10 @@ impl Session {
 
     pub(crate) fn source(&self, window: usize, name: &str) -> Result<String> {
         self.operation.check()?;
+        let (table, _, _) = persistence::schema::TABLES
+            .iter()
+            .find(|entry| entry.0.name() == name)
+            .ok_or(Error::Bound("table name"))?;
         let manifest = &self.windows[window];
         // Revalidate the pinned commitment before opening any path through the engine.
         let marker = layout::WindowKey::from(&manifest.identity).marker(&self.root);
@@ -219,10 +223,11 @@ impl Session {
             .root
             .join(&manifest.data_directory)
             .join(format!("{name}.parquet"));
-        Ok(format!(
-            "read_parquet('{}')",
-            persistence::query::parquet_source(&path)?
-        ))
+        persistence::query::table_source(
+            &self.connection,
+            *table,
+            persistence::query::TableSource::Parquet(&path),
+        )
     }
 
     pub(crate) fn table(&self, window: usize, name: &str) -> Result<Table> {

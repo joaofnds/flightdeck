@@ -382,6 +382,7 @@ impl LiveSession {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(error) => return Err(error.into()),
             };
+            persistence::require_numeric_source(&reader)?;
             if reader.identity() != Some(run.identity) {
                 return Err(Error::Bound("changed live identity"));
             }
@@ -735,6 +736,7 @@ fn identity_matches(identity: RunIdentity, observation: &Value) -> bool {
 
 fn rehydrate_source(source: &Source, selected: &Value) -> Result<Source> {
     let mut reader = RingReader::open_generation(source.reader.name())?;
+    persistence::require_numeric_source(&reader)?;
     if reader.identity() != Some(source.identity) {
         return Err(Error::Bound("changed inspection source identity"));
     }
@@ -1023,11 +1025,16 @@ fn poll_project(
         let name = table.name();
         connection.execute_batch(&format!("DELETE FROM {name}"))?;
         persistence::append(connection, table, window)?;
+        let source = persistence::query::table_source(
+            connection,
+            table,
+            persistence::query::TableSource::Staged,
+        )?;
         tables.insert(
             name,
             data::query(
                 connection,
-                &format!("SELECT * FROM {name} ORDER BY {order}"),
+                &format!("SELECT * FROM {source} ORDER BY {order}"),
                 data::ROWS_MAX,
                 operation,
             )?,

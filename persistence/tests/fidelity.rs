@@ -1,4 +1,7 @@
 #[cfg(test)]
+#[path = "../src/bin/recording_check/capture.rs"]
+mod capture;
+#[cfg(test)]
 #[path = "../src/bin/recording_check/compare.rs"]
 mod compare;
 #[cfg(test)]
@@ -10,7 +13,7 @@ mod rows;
 
 #[cfg(test)]
 mod tests {
-    use super::{compare, fixture, rows};
+    use super::{capture, compare, fixture, rows};
     use std::fs;
     use std::io::Write;
     use std::path::PathBuf;
@@ -29,6 +32,45 @@ mod tests {
         publication: u64,
         tick: Tick,
         events: Vec<Event>,
+    }
+
+    #[test]
+    fn refuses_identity_sources_before_recording_a_numeric_only_reference() {
+        // Goal: a successful fidelity reference cannot silently omit a v4 identity section.
+        // Method: capture an orderly completed v4 source before creating any reference file.
+        let recording = Recording::new();
+        let store = Store::open(&recording.0).unwrap();
+        let place = collector::ring::Place {
+            lock_path: recording.0.join("ring.lock"),
+            name_prefix: format!("/fdfid{}", std::process::id()),
+        };
+        let identity = RunIdentity {
+            recording: store.recording(),
+            run: Identity([31, 32]),
+            boot: Identity([41, 42]),
+        };
+        let mut writer = collector::ring::Writer::create_with_identity(
+            &place,
+            fixture::profile(false),
+            collector::ring::DictionaryCapacity {
+                entries: 1,
+                arena_bytes: 32,
+            },
+            &identity,
+            1,
+        )
+        .unwrap();
+        writer.finish();
+        let reference = recording.0.join("source.reference");
+
+        let result = capture::run(&place.lock_path, &reference, 1);
+
+        collector::ring::unlink_generation(writer.name()).unwrap();
+        assert!(matches!(
+            result,
+            Err(persistence::Error::Bound("identity source preservation"))
+        ));
+        assert!(!reference.try_exists().unwrap());
     }
 
     #[test]

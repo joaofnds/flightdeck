@@ -1,8 +1,7 @@
 use duckdb::{Connection, types::ValueRef};
 
 use crate::schema::{
-    IDENTITY_FIELDS, IDENTITY_PATH_BYTES_MAX, IDENTITY_VERSION, Table, availability,
-    identity_availability,
+    IDENTITY_FIELDS, IDENTITY_VERSION, Table, availability, identity_availability,
 };
 use crate::{Error, Result};
 
@@ -182,27 +181,27 @@ fn normalize_validate_program(row: &duckdb::Row<'_>) -> Result<()> {
         return Err(Error::Bound("process executable bytes"));
     };
 
-    if executable.is_empty() {
-        return Err(Error::Bound("process executable bytes"));
-    }
+    let app_path = match row.get_ref(5)? {
+        ValueRef::Null => None,
+        ValueRef::Blob(path) => Some(path),
+        _ => return Err(Error::Bound("process app bytes")),
+    };
 
-    if executable.len() > IDENTITY_PATH_BYTES_MAX {
-        return Err(Error::Bound("process executable bytes"));
+    collector::ring::ProgramBytes {
+        executable_name: executable,
+        app_path,
     }
-
-    if executable.contains(&0) {
-        return Err(Error::Bound("process executable bytes"));
-    }
-
-    if executable.contains(&b'/') {
-        return Err(Error::Bound("process executable basename"));
-    }
-
-    match row.get_ref(5)? {
-        ValueRef::Null => Ok(()),
-        ValueRef::Blob(path) => normalize_validate_program_app(path),
-        _ => Err(Error::Bound("process app bytes")),
-    }
+    .validate()
+    .map_err(|error| {
+        use collector::ring::ProgramBytesError;
+        Error::Bound(match error {
+            ProgramBytesError::ExecutableBytes => "process executable bytes",
+            ProgramBytesError::ExecutableBasename => "process executable basename",
+            ProgramBytesError::AppBytes => "process app bytes",
+            ProgramBytesError::AppPath => "process app path",
+            ProgramBytesError::AppOutermost => "outermost process app",
+        })
+    })
 }
 
 fn normalize_validate_program_unavailable(row: &duckdb::Row<'_>) -> Result<()> {
@@ -212,34 +211,6 @@ fn normalize_validate_program_unavailable(row: &duckdb::Row<'_>) -> Result<()> {
 
     if row.get_ref(5)? != ValueRef::Null {
         return Err(Error::Bound("unavailable process app"));
-    }
-
-    Ok(())
-}
-
-fn normalize_validate_program_app(path: &[u8]) -> Result<()> {
-    if path.len() > IDENTITY_PATH_BYTES_MAX {
-        return Err(Error::Bound("process app bytes"));
-    }
-
-    if !path.starts_with(b"/") {
-        return Err(Error::Bound("process app path"));
-    }
-
-    if !path.ends_with(b".app") {
-        return Err(Error::Bound("process app path"));
-    }
-
-    if path.contains(&0) {
-        return Err(Error::Bound("process app bytes"));
-    }
-
-    let apps = path
-        .split(|byte| *byte == b'/')
-        .filter(|component| component.ends_with(b".app"))
-        .count();
-    if apps != 1 {
-        return Err(Error::Bound("outermost process app"));
     }
 
     Ok(())

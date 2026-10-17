@@ -1,7 +1,16 @@
-//! Bounded owned buffers for persistence and independent source capture.
-use collector::ring::{Shape, Tick, TickBuffers};
+//! Source admission and bounded owned buffers for numeric-only adapters.
+use collector::ring::{RingReader, Shape, Tick, TickBuffers};
 
-use crate::{Limits, Result};
+use crate::{Error, Limits, Result};
+
+/// Refuses formats whose identity would be omitted by numeric-only adapters.
+pub fn require_numeric_source(reader: &RingReader) -> Result<()> {
+    if reader.dictionary_capacity().is_some() {
+        return Err(Error::Bound("identity source preservation"));
+    }
+
+    Ok(())
+}
 
 /// Allocates once for a validated source shape, before reading its publications.
 pub fn tick_buffer(shape: &Shape) -> Result<Tick> {

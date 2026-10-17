@@ -89,6 +89,30 @@ impl RingReader {
         })
     }
 
+    /// The exact wire layout, including legacy2/3 versus optional identity4.
+    #[must_use]
+    pub fn source_layout_version(&self) -> u64 {
+        self.opened.layout.version
+    }
+
+    #[must_use]
+    pub fn dictionary_capacity(&self) -> Option<super::DictionaryCapacity> {
+        let layout = &self.opened.layout;
+        if layout.version != layout::LAYOUT_VERSION_IDENTITY {
+            return None;
+        }
+
+        Some(super::DictionaryCapacity {
+            entries: crate::u64_from_usize(layout.dictionary.capacity),
+            arena_bytes: crate::u64_from_usize(layout.arena_bytes),
+        })
+    }
+
+    /// Committed immutable entries and consumed arena bytes, including alignment padding.
+    pub fn dictionary_usage(&self) -> io::Result<Option<super::DictionaryUsage>> {
+        super::identity::dictionary_usage(self.opened.mapping.words(), &self.opened.layout)
+    }
+
     #[must_use]
     pub fn shape(&self) -> Shape {
         self.opened.layout.shape
@@ -135,6 +159,83 @@ impl RingReader {
     /// A capacity refusal leaves the publication cursor unchanged.
     pub fn read_into(&mut self, tick: &mut Tick) -> io::Result<Found> {
         self.opened.read_into(tick)
+    }
+
+    /// Reads numeric and identity rows under the same publication sequence check.
+    /// Identity rows are ordered by PID; measured rows follow numeric process order.
+    pub fn read_identity_into(
+        &mut self,
+        tick: &mut Tick,
+        identities: &mut Vec<super::IdentityObservation>,
+    ) -> io::Result<Found> {
+        self.opened.read_into_identity(tick, Some(identities))
+    }
+
+    /// Copies immutable bytes from a reference decoded by this exact reader handle.
+    /// Reopened handles reject the old reference, even when they map the same generation.
+    pub fn copy_program(
+        &self,
+        program: &super::ProgramReference,
+        buffers: &mut super::ProgramBuffers,
+    ) -> io::Result<(usize, usize)> {
+        if self.opened.layout.version != layout::LAYOUT_VERSION_IDENTITY {
+            return Err(io::Error::from(io::ErrorKind::Unsupported));
+        }
+
+        super::identity::copy_program(
+            self.opened.mapping.words(),
+            &self.opened.layout,
+            program,
+            self.opened.reference_owner,
+            buffers,
+        )
+    }
+
+    /// Reads event metadata under the event's own sequence, independent of slot lifetime.
+    /// Only a returned event makes the caller's identity output valid.
+    pub fn read_event_identity(
+        &mut self,
+        identity: &mut super::IdentityObservation,
+    ) -> io::Result<FoundEvent> {
+        let words = self.opened.mapping.words();
+        let newest = read_newest(&words[layout::HEADER_EVENT_NEWEST])?;
+        let number = match self
+            .opened
+            .events
+            .step(self.opened.layout.events_held(newest))
+        {
+            super::Step::Nothing => return Ok(FoundEvent::Nothing),
+            super::Step::Missed { first, end } => {
+                return Ok(FoundEvent::Missed { first, end });
+            }
+            super::Step::Read(number) => number,
+        };
+        let record = &words[self.opened.layout.event(number)];
+        let loaded = super::read_finished(record, layout::EVENT_SEQUENCE, number, || {
+            let (tick, event) = super::load_event(&record[..layout::EVENT_WORDS])?;
+            match super::identity::load_event_identity(
+                &super::identity::IdentityRecord { words, record },
+                &self.opened.layout,
+                &event,
+                self.opened.reference_owner,
+                identity,
+            ) {
+                Ok(()) => Some((tick, event)),
+                Err(_) => None,
+            }
+        })?;
+
+        match loaded {
+            Some((tick, event)) => Ok(FoundEvent::Event {
+                number,
+                tick,
+                event,
+            }),
+            None => Ok(FoundEvent::Missed {
+                first: number,
+                end: number + 1,
+            }),
+        }
     }
 
     #[must_use]

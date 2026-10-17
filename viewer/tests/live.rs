@@ -20,6 +20,39 @@ mod tests {
             Self::with_process_capacity(1)
         }
 
+        fn identity_source() -> Self {
+            let mut recording = Self::new();
+            let place = Place {
+                lock_path: recording.root.join("identity.lock"),
+                name_prefix: format!("/fdlid{}", std::process::id()),
+            };
+            let writer = Writer::create_with_identity(
+                &place,
+                collector::ring::RingReader::open_generation(recording.writer.name())
+                    .unwrap()
+                    .shape(),
+                collector::ring::DictionaryCapacity {
+                    entries: 1,
+                    arena_bytes: 32,
+                },
+                &recording.writer.identity().unwrap(),
+                1,
+            )
+            .unwrap();
+            collector::ring::unlink_generation(recording.writer.name()).unwrap();
+            recording.writer = writer;
+            let registry = collector::recording::Registry {
+                runs: vec![collector::recording::RegisteredRun {
+                    identity: recording.writer.identity().unwrap(),
+                    ring_name: recording.writer.name().to_owned(),
+                    collector_pid: 0,
+                }],
+                evictions: 0,
+            };
+            registry.write(&recording.root).unwrap();
+            recording
+        }
+
         fn with_process_capacity(process_capacity: u64) -> Self {
             let serial = NEXT.fetch_add(1, Ordering::Relaxed);
             let root = std::env::temp_dir()
@@ -214,6 +247,20 @@ mod tests {
             collector::ring::unlink_generation(&name).unwrap();
             std::fs::remove_dir_all(&self.root).unwrap();
         }
+    }
+
+    #[test]
+    fn refuses_identity_sources_before_numeric_only_projection() {
+        // Goal: the legacy live projector must not claim it preserved a v4 observation.
+        // Method: open an empty identity source, including no occupied dictionary entries.
+        let recording = Recording::identity_source();
+
+        let result = LiveSession::open(&recording.root);
+
+        assert!(matches!(
+            result,
+            Err(persistence::Error::Bound("identity source preservation"))
+        ));
     }
 
     #[test]

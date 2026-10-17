@@ -353,6 +353,7 @@ fn persist_one_open(
         }
         Err(error) => return Err(error.into()),
     };
+    crate::require_numeric_source(&reader)?;
     if let Some(identity) = reader.identity() {
         if identity != registered.identity {
             source_unavailable(registered, state, "registered identity mismatch");
@@ -639,6 +640,52 @@ mod tests {
             )
             .unwrap();
         window
+    }
+
+    #[test]
+    fn refuses_identity_sources_before_numeric_only_staging() {
+        // Goal: the legacy worker must not retire a source whose identity it would discard.
+        // Method: open an empty v4 source and assert hard refusal with its state untouched.
+        let root = Directory::new();
+        let mut registered = registered(Identity([1, 2]));
+        let place = collector::ring::Place {
+            lock_path: root.0.join("ring.lock"),
+            name_prefix: format!("/fdworker{}", std::process::id()),
+        };
+        let shape = Shape {
+            slot_count: 1,
+            cpu_capacity: 1,
+            interface_capacity: 1,
+            core_capacity: 1,
+            state_capacity: 1,
+            fan_capacity: 1,
+            process_capacity: 1,
+            coalition_capacity: 1,
+            event_capacity: 1,
+        };
+        let writer = collector::ring::Writer::create_with_identity(
+            &place,
+            shape,
+            collector::ring::DictionaryCapacity {
+                entries: 1,
+                arena_bytes: 32,
+            },
+            &registered.identity,
+            1,
+        )
+        .unwrap();
+        registered.ring_name = writer.name().to_owned();
+        let mut state = RunState::default();
+
+        let result = persist_one_open(&registered, &mut state);
+
+        collector::ring::unlink_generation(writer.name()).unwrap();
+        assert!(matches!(
+            result,
+            Err(crate::Error::Bound("identity source preservation"))
+        ));
+        assert_eq!(state.source, SourceState::default());
+        assert_eq!(state.next_publication, 0);
     }
 
     #[test]

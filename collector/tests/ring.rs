@@ -18,8 +18,10 @@ mod tests {
     use collector::machine::Memory;
     use collector::processes::{Process, Task, Usage};
     use collector::ring::{
-        Dropped, Found, FoundEvent, Identity, ObservationTimes, Place, Reader, Readings,
-        RingReader, RunIdentity, Shape, Tick, TickBuffers, Writer,
+        DictionaryCapacity, Dropped, Found, FoundEvent, Identity, IdentityAvailability,
+        IdentityObservation, IdentityPublication, ObservationTimes, Place, ProcessCreation,
+        ProcessIdentity, ProgramBuffers, ProgramBytes, ProgramReference, Reader, Readings,
+        RingReader, RunIdentity, Shape, Tick, TickBuffers, UsageAvailability, Writer,
     };
     use collector::tracker::{Event, Noticed};
 
@@ -178,6 +180,616 @@ mod tests {
             processes: Vec::with_capacity(count(shape.process_capacity)),
             coalitions: Vec::with_capacity(count(shape.coalition_capacity)),
         })
+    }
+
+    fn program_observation(program: &ProgramReference) -> IdentityObservation {
+        IdentityObservation {
+            pid: 1,
+            usage: UsageAvailability::Refused,
+            identity: ProcessIdentity::Measured {
+                creation: ProcessCreation {
+                    unique_id: 0,
+                    pid_version: 0,
+                },
+                program: *program,
+            },
+        }
+    }
+
+    fn identity_writer(place: &TestPlace, shape: Shape, run: u64) -> Writer {
+        Writer::create_with_identity(
+            &place.place,
+            shape,
+            DictionaryCapacity {
+                entries: 2,
+                arena_bytes: 64,
+            },
+            &run_identity(run),
+            run,
+        )
+        .unwrap()
+    }
+
+    fn publish_program(writer: &mut Writer, program: &ProgramReference) {
+        writer
+            .publish_with_identity(
+                &readings(1, &Memory::default()),
+                None,
+                &IdentityPublication {
+                    processes: &[program_observation(program)],
+                    events: &[],
+                },
+            )
+            .unwrap();
+    }
+
+    fn reader_program(reader: &mut RingReader) -> ProgramReference {
+        let mut tick = tick_buffer(reader.shape());
+        let mut identities = Vec::with_capacity(1);
+        reader
+            .read_identity_into(&mut tick, &mut identities)
+            .unwrap();
+        *identities[0].program().unwrap()
+    }
+
+    fn start_identity_event() -> Event {
+        Event::Start {
+            pid: 1,
+            coalition: None,
+        }
+    }
+
+    fn publish_identity_empty_slots(writer: &mut Writer, memory: &Memory) {
+        let empty = IdentityPublication {
+            processes: &[],
+            events: &[],
+        };
+        for number in 2..=122 {
+            writer
+                .publish_with_identity(&readings(number, memory), None, &empty)
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn dictionary_interning_uses_only_startup_storage() {
+        // Goal: insertion and lookup do not allocate after dictionary startup.
+        // Method: intern a known name and a new name while counting allocator calls.
+        let place = TestPlace::new("id_intern_alloc");
+        let mut writer = identity_writer(&place, SHAPE, 1);
+        let bytes = ProgramBytes {
+            executable_name: b"helper",
+            app_path: None,
+        };
+        let other = ProgramBytes {
+            executable_name: b"other",
+            app_path: None,
+        };
+        let mut first = None;
+        writer.intern_program(&bytes, &mut first).unwrap();
+        let mut repeated = None;
+        let mut different = None;
+
+        let calls = allocator_calls_in(|| {
+            writer.intern_program(&bytes, &mut repeated).unwrap();
+            writer.intern_program(&other, &mut different).unwrap();
+        });
+
+        assert_eq!(0, calls);
+        assert_eq!(first, repeated);
+        assert_ne!(first, different);
+    }
+
+    #[test]
+    fn identity_records_and_long_retained_events_read_without_allocating() {
+        // Goal: refused usage and old events retain original metadata without allocation.
+        // Method: read identity-only rows, recycle 120 slots, then read the old event.
+        let place = TestPlace::new("idretain");
+        let shape = Shape {
+            slot_count: 120,
+            ..SHAPE
+        };
+        let mut writer = identity_writer(&place, shape, 1);
+        let bytes = ProgramBytes {
+            executable_name: b"helper\xff",
+            app_path: Some(b"/A.app"),
+        };
+        let mut program = None;
+        writer.intern_program(&bytes, &mut program).unwrap();
+        let program = program.unwrap();
+        let process = program_observation(&program);
+        let event = IdentityObservation {
+            usage: UsageAvailability::NotApplicable,
+            ..process
+        };
+        let memory = Memory::default();
+        let mut source = readings(1, &memory);
+        let events = [start_identity_event()];
+        source.events = &events;
+        let mut reader = RingReader::open(place.lock_path()).unwrap();
+        let mut tick = tick_buffer(shape);
+        let mut identities = Vec::with_capacity(1);
+        let mut name = [0; 4095];
+        let mut app = [0; 4095];
+        let mut buffers = ProgramBuffers {
+            executable_name: &mut name,
+            app_path: &mut app,
+        };
+        let metadata = IdentityPublication {
+            processes: &[process],
+            events: &[event],
+        };
+        let calls = allocator_calls_in(|| {
+            writer
+                .publish_with_identity(&source, None, &metadata)
+                .unwrap();
+            assert!(matches!(
+                reader
+                    .read_identity_into(&mut tick, &mut identities)
+                    .unwrap(),
+                Found::Publication { .. }
+            ));
+            assert_eq!(process.creation(), identities[0].creation());
+            assert_eq!(process.usage, identities[0].usage);
+            publish_identity_empty_slots(&mut writer, &memory);
+            let mut identity = IdentityObservation::EMPTY;
+            let found = reader.read_event_identity(&mut identity).unwrap();
+            assert!(matches!(found, FoundEvent::Event { number: 1, .. }));
+
+            assert_eq!(event.creation(), identity.creation());
+            assert_eq!(event.usage, identity.usage);
+            assert_eq!(
+                (7, 6),
+                reader
+                    .copy_program(identity.program().unwrap(), &mut buffers)
+                    .unwrap()
+            );
+        });
+
+        assert_eq!(0, calls);
+        assert_eq!(4, reader.source_layout_version());
+        assert_eq!(b"helper\xff", &name[..7]);
+        assert_eq!(b"/A.app", &app[..6]);
+    }
+
+    #[test]
+    fn dictionary_references_belong_to_the_generation_that_created_them() {
+        // Goal: dictionary IDs never silently resolve in a successor generation.
+        // Method: intern each generation's first entry and try the old reference in both.
+        let place = TestPlace::new("idgener");
+        let capacity = DictionaryCapacity {
+            entries: 2,
+            arena_bytes: 64,
+        };
+        let mut writer =
+            Writer::create_with_identity(&place.place, SHAPE, capacity, &run_identity(1), 1)
+                .unwrap();
+        let bytes = ProgramBytes {
+            executable_name: b"first",
+            app_path: None,
+        };
+        let mut old = None;
+        writer.intern_program(&bytes, &mut old).unwrap();
+        let old = old.unwrap();
+        publish_program(&mut writer, &old);
+        let mut retained = RingReader::open(place.lock_path()).unwrap();
+        let old = reader_program(&mut retained);
+        let guard = spawns();
+        drop(writer);
+        let mut successor =
+            Writer::create_with_identity(&place.place, SHAPE, capacity, &run_identity(2), 2)
+                .unwrap();
+        drop(guard);
+        let mut new = None;
+        successor.intern_program(&bytes, &mut new).unwrap();
+        let new = new.unwrap();
+        publish_program(&mut successor, &new);
+        let mut reader = RingReader::open(place.lock_path()).unwrap();
+        let new = reader_program(&mut reader);
+        let mut name = [0; 4095];
+        let mut app = [0; 4095];
+
+        let old_result = reader.copy_program(
+            &old,
+            &mut ProgramBuffers {
+                executable_name: &mut name,
+                app_path: &mut app,
+            },
+        );
+        let retained_result = retained
+            .copy_program(
+                &old,
+                &mut ProgramBuffers {
+                    executable_name: &mut name,
+                    app_path: &mut app,
+                },
+            )
+            .unwrap();
+
+        assert_ne!(old, new);
+        assert_eq!(
+            std::io::ErrorKind::InvalidData,
+            old_result.unwrap_err().kind()
+        );
+        assert_eq!((5, 0), retained_result);
+    }
+
+    #[test]
+    fn dictionary_references_cannot_cross_handles_or_duplicate_run_metadata() {
+        // Goal: exact handle ownership closes duplicate run/generation identities.
+        // Method: open two handles of one ring and a second place with identical metadata.
+        let first = TestPlace::new("idowner1");
+        let second = TestPlace::new("idowner2");
+        let mut one = identity_writer(&first, SHAPE, 1);
+        let mut two = identity_writer(&second, SHAPE, 1);
+        let bytes = ProgramBytes {
+            executable_name: b"first",
+            app_path: None,
+        };
+        let mut program = None;
+        one.intern_program(&bytes, &mut program).unwrap();
+        let program = program.unwrap();
+        publish_program(&mut one, &program);
+        let mut program = None;
+        two.intern_program(&bytes, &mut program).unwrap();
+        let program = program.unwrap();
+        publish_program(&mut two, &program);
+        let mut original = RingReader::open(first.lock_path()).unwrap();
+        let mut reopened = RingReader::open(first.lock_path()).unwrap();
+        let mut other_place = RingReader::open(second.lock_path()).unwrap();
+        let reference = reader_program(&mut original);
+        let reopened_reference = reader_program(&mut reopened);
+        let other_reference = reader_program(&mut other_place);
+        let mut name = [0; 4095];
+        let mut app = [0; 4095];
+
+        let reopened_result = reopened.copy_program(
+            &reference,
+            &mut ProgramBuffers {
+                executable_name: &mut name,
+                app_path: &mut app,
+            },
+        );
+        let other_result = other_place.copy_program(
+            &reference,
+            &mut ProgramBuffers {
+                executable_name: &mut name,
+                app_path: &mut app,
+            },
+        );
+        let original_result = original
+            .copy_program(
+                &reference,
+                &mut ProgramBuffers {
+                    executable_name: &mut name,
+                    app_path: &mut app,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(original.identity(), other_place.identity());
+        assert_eq!(original.generation(), other_place.generation());
+        assert_ne!(reference, reopened_reference);
+        assert_ne!(reference, other_reference);
+        assert_eq!(
+            std::io::ErrorKind::InvalidData,
+            reopened_result.unwrap_err().kind()
+        );
+        assert_eq!(
+            std::io::ErrorKind::InvalidData,
+            other_result.unwrap_err().kind()
+        );
+        assert_eq!((5, 0), original_result);
+    }
+
+    #[test]
+    fn keeps_measured_usage_beside_independently_refused_identity_rows() {
+        // Goal: v4 pairs measured numeric rows with their PID and keeps identity-only rows.
+        // Method: publish distinct measured/refused members and read the same publication.
+        let place = TestPlace::new("idmixed");
+        let shape = Shape {
+            process_capacity: 2,
+            ..SHAPE
+        };
+        let mut writer = identity_writer(&place, shape, 1);
+        let mut program = None;
+        writer
+            .intern_program(
+                &ProgramBytes {
+                    executable_name: b"worker",
+                    app_path: Some(b"/A.app"),
+                },
+                &mut program,
+            )
+            .unwrap();
+        let program = program.unwrap();
+        let measured = IdentityObservation {
+            usage: UsageAvailability::Measured,
+            ..program_observation(&program)
+        };
+        let refused = IdentityObservation {
+            pid: 2,
+            ..program_observation(&program)
+        };
+        let processes = [process(1)];
+        let memory = Memory::default();
+        let mut source = readings(1, &memory);
+        source.processes = &processes;
+        source.processes_refused = 1;
+        let mut reader = RingReader::open(place.lock_path()).unwrap();
+        let mut tick = tick_buffer(shape);
+        let mut identities = Vec::with_capacity(2);
+
+        writer
+            .publish_with_identity(
+                &source,
+                None,
+                &IdentityPublication {
+                    processes: &[measured, refused],
+                    events: &[],
+                },
+            )
+            .unwrap();
+        let found = reader
+            .read_identity_into(&mut tick, &mut identities)
+            .unwrap();
+
+        assert!(matches!(found, Found::Publication { publication: 1, .. }));
+        assert_eq!(1, tick.processes.len());
+        assert_eq!(1, tick.processes[0].pid);
+        assert_eq!(2, tick.processes[0].usage.user_ns);
+        assert_eq!(11, tick.processes[0].usage.resident_bytes);
+        assert_eq!(1, tick.processes_refused);
+        assert_eq!(2, identities.len());
+        assert_eq!(measured.creation(), identities[0].creation());
+        assert_eq!(UsageAvailability::Measured, identities[0].usage);
+        assert_eq!(2, identities[1].pid);
+        assert_eq!(UsageAvailability::Refused, identities[1].usage);
+    }
+
+    fn writable_identity_ring(place: &TestPlace) -> Forged {
+        let source = place.open_named(O_RDONLY).unwrap();
+        let length = usize::try_from(
+            File::from(source.try_clone().unwrap())
+                .metadata()
+                .unwrap()
+                .len(),
+        )
+        .unwrap();
+        let name = place.ring_name(5);
+        let object = unsafe { shm_open(name.as_ptr(), O_RDWR | O_CREAT | O_EXCL, 0o400) };
+        assert!(object >= 0);
+        let object = unsafe { OwnedFd::from_raw_fd(object) };
+        assert_eq!(0, unsafe {
+            ftruncate(object.as_raw_fd(), i64::try_from(length).unwrap())
+        });
+        let original = unsafe {
+            mmap(
+                std::ptr::null_mut(),
+                length,
+                PROT_READ,
+                MAP_SHARED,
+                source.as_raw_fd(),
+                0,
+            )
+        };
+        assert_ne!(-1_isize, original.addr().cast_signed());
+        let address = unsafe {
+            mmap(
+                std::ptr::null_mut(),
+                length,
+                PROT_READ | PROT_WRITE,
+                MAP_SHARED,
+                object.as_raw_fd(),
+                0,
+            )
+        };
+        assert_ne!(-1_isize, address.addr().cast_signed());
+        let mapping = Forged { address, length };
+        unsafe {
+            std::ptr::copy_nonoverlapping(original.cast::<u8>(), address.cast::<u8>(), length);
+            assert_eq!(0, munmap(original, length));
+        }
+        place.spoil(name.as_bytes());
+
+        mapping
+    }
+
+    #[test]
+    fn refuses_a_reader_identity_associated_with_another_numeric_pid() {
+        // v4 header40 + slot43 + cpu2 + interface10 + gpu1 + core2 + fan1 = PID word99.
+        const NUMERIC_PID_WORD: usize = 40 + 43 + 2 + 10 + 1 + 2 + 1;
+        // Goal: untrusted measured identities cannot name another numeric process row.
+        // Method: publish valid v4 data, replace its numeric PID and read through RingReader.
+        let place = TestPlace::new("id_reader_pid");
+        let mut writer = identity_writer(&place, SHAPE, 1);
+        let mut program = None;
+        writer
+            .intern_program(
+                &ProgramBytes {
+                    executable_name: b"worker",
+                    app_path: None,
+                },
+                &mut program,
+            )
+            .unwrap();
+        let program = program.unwrap();
+        let measured = IdentityObservation {
+            usage: UsageAvailability::Measured,
+            ..program_observation(&program)
+        };
+        let memory = Memory::default();
+        let processes = [process(1)];
+        let mut source = readings(1, &memory);
+        source.processes = &processes;
+        writer
+            .publish_with_identity(
+                &source,
+                None,
+                &IdentityPublication {
+                    processes: &[measured],
+                    events: &[],
+                },
+            )
+            .unwrap();
+        let mapping = writable_identity_ring(&place);
+        assert_eq!(99, NUMERIC_PID_WORD);
+        assert!(NUMERIC_PID_WORD < mapping.length / size_of::<u64>());
+        assert_eq!(1, unsafe {
+            mapping.address.cast::<u64>().add(NUMERIC_PID_WORD).read()
+        });
+        mapping.write(NUMERIC_PID_WORD, 2);
+        let mut reader = RingReader::open(place.lock_path()).unwrap();
+        let mut tick = tick_buffer(SHAPE);
+        let mut identities = Vec::with_capacity(1);
+
+        let result = reader.read_identity_into(&mut tick, &mut identities);
+
+        assert_eq!(std::io::ErrorKind::InvalidData, result.unwrap_err().kind());
+    }
+
+    fn refuses_process_association(case: &str) {
+        let place = TestPlace::new(case);
+        let shape = Shape {
+            process_capacity: 2,
+            ..SHAPE
+        };
+        let mut writer = identity_writer(&place, shape, 1);
+        let mut program = None;
+        writer
+            .intern_program(
+                &ProgramBytes {
+                    executable_name: b"worker",
+                    app_path: None,
+                },
+                &mut program,
+            )
+            .unwrap();
+        let program = program.unwrap();
+        let measured = IdentityObservation {
+            usage: UsageAvailability::Measured,
+            ..program_observation(&program)
+        };
+        let refused = IdentityObservation {
+            pid: 2,
+            ..program_observation(&program)
+        };
+        let other = IdentityObservation { pid: 3, ..measured };
+        let identities = match case {
+            "missing" => vec![],
+            "wrong" => vec![other],
+            "extra" => vec![measured, other],
+            "duplicate" => vec![measured, program_observation(&program)],
+            "order" => vec![refused, measured],
+            "not_applicable" => vec![IdentityObservation {
+                usage: UsageAvailability::NotApplicable,
+                ..measured
+            }],
+            _ => panic!("unknown process association case"),
+        };
+        let processes = [process(1)];
+        let memory = Memory::default();
+        let mut source = readings(1, &memory);
+        source.processes = &processes;
+        let reader = RingReader::open(place.lock_path()).unwrap();
+
+        let result = writer.publish_with_identity(
+            &source,
+            None,
+            &IdentityPublication {
+                processes: &identities,
+                events: &[],
+            },
+        );
+
+        assert_eq!(std::io::ErrorKind::InvalidData, result.unwrap_err().kind());
+        assert_eq!(0, reader.publication_newest().unwrap());
+        assert_eq!(1, reader.next_publication());
+    }
+
+    macro_rules! invalid_process_association {
+        ($name:ident, $case:literal) => {
+            #[test]
+            fn $name() {
+                // Goal: malformed measured/identity association never publishes a tick.
+                // Method: offer one invalid pairing through the public v4 writer API.
+                refuses_process_association($case);
+            }
+        };
+    }
+
+    invalid_process_association!(refuses_a_measured_process_without_identity, "missing");
+    invalid_process_association!(refuses_a_measured_identity_for_a_different_pid, "wrong");
+    invalid_process_association!(refuses_a_measured_identity_without_numeric_usage, "extra");
+    invalid_process_association!(refuses_duplicate_process_identity_pids, "duplicate");
+    invalid_process_association!(refuses_out_of_order_process_identity_pids, "order");
+    invalid_process_association!(
+        refuses_not_applicable_usage_in_a_process_row,
+        "not_applicable"
+    );
+
+    #[test]
+    fn identity_capacity_refusal_keeps_the_publication_cursor() {
+        // Goal: an undersized identity buffer can be replaced without losing the tick.
+        // Method: refuse zero capacity, then read the same publication into sufficient storage.
+        let place = TestPlace::new("idcapacity");
+        let mut writer = identity_writer(&place, SHAPE, 1);
+        let mut program = None;
+        writer
+            .intern_program(
+                &ProgramBytes {
+                    executable_name: b"first",
+                    app_path: None,
+                },
+                &mut program,
+            )
+            .unwrap();
+        let program = program.unwrap();
+        publish_program(&mut writer, &program);
+        let mut reader = RingReader::open(place.lock_path()).unwrap();
+        let mut tick = tick_buffer(SHAPE);
+        let mut small = Vec::new();
+        let mut large = Vec::with_capacity(1);
+
+        let refused = reader.read_identity_into(&mut tick, &mut small);
+        let next = reader.next_publication();
+        let found = reader.read_identity_into(&mut tick, &mut large).unwrap();
+
+        assert_eq!(std::io::ErrorKind::Unsupported, refused.unwrap_err().kind());
+        assert_eq!(1, next);
+        assert!(matches!(found, Found::Publication { publication: 1, .. }));
+        assert_eq!(UsageAvailability::Refused, large[0].usage);
+    }
+
+    #[test]
+    fn legacy_processes_normalize_identity_to_unsupported() {
+        // Goal: optional readers preserve measured legacy usage without inventing identity.
+        // Method: publish a legacy numeric process and read through the identity API.
+        let place = TestPlace::new("idlegacy");
+        let mut writer = Writer::create(&place.place, SHAPE).unwrap();
+        let memory = Memory::default();
+        let mut source = readings(1, &memory);
+        let original = process(1);
+        source.processes = std::slice::from_ref(&original);
+        writer.publish(&source);
+        let mut reader = RingReader::open(place.lock_path()).unwrap();
+        let mut tick = tick_buffer(SHAPE);
+        let mut identities = Vec::with_capacity(1);
+
+        reader
+            .read_identity_into(&mut tick, &mut identities)
+            .unwrap();
+
+        assert_eq!(3, reader.source_layout_version());
+        assert!(reader.dictionary_capacity().is_none());
+        assert_eq!([original], tick.processes[..]);
+        assert_eq!(
+            IdentityAvailability::Unsupported,
+            identities[0].availability()
+        );
+        assert_eq!(UsageAvailability::Measured, identities[0].usage);
+        assert!(identities[0].creation().is_none());
+        assert!(identities[0].program().is_none());
     }
 
     #[test]

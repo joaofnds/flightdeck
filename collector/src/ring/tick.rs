@@ -198,7 +198,7 @@ pub(super) fn store_tick(
     events: Range<u64>,
     times: Option<&super::ObservationTimes>,
 ) {
-    assert_eq!(super::layout::LAYOUT_VERSION_OBSERVED, layout.version);
+    assert!(layout.version >= super::layout::LAYOUT_VERSION_OBSERVED);
     assert_eq!(layout.slot_words, slot.len());
     assert!(events.start <= events.end);
     assert_eq!(

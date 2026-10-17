@@ -9,6 +9,7 @@
 //! event, and each slot names the events of its tick.
 
 mod event;
+mod identity;
 mod layout;
 mod object;
 mod tick;
@@ -23,6 +24,11 @@ use std::sync::atomic::{AtomicU64, Ordering, fence};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use event::{load_event, store_event};
+pub use identity::{
+    DictionaryUsage, IdentityAvailability, IdentityObservation, IdentityPublication,
+    IdentityUnavailable, PROGRAM_PATH_BYTES_MAX, ProcessCreation, ProcessIdentity, ProgramBuffers,
+    ProgramBytes, ProgramBytesError, ProgramReference, UsageAvailability,
+};
 use layout::{
     EVENT_SEQUENCE, HEADER_EVENT_FIRST, HEADER_EVENT_NEWEST, HEADER_PUBLICATION_FIRST,
     HEADER_PUBLICATION_NEWEST, HEADER_RUN_START_NS, Header, Held, Layout, SLOT_SEQUENCE,
@@ -39,6 +45,22 @@ use object::{
 };
 pub use tick::{Dropped, IOReportReadings, Readings, SmcReadings, Tick};
 pub use view::{RingReader, TickBuffers};
+
+/// Explicit opt-in dictionary bounds; default writers continue using layout 3.
+#[derive(Debug, Clone, Copy)]
+pub struct DictionaryCapacity {
+    pub entries: u64,
+    pub arena_bytes: u64,
+}
+
+impl Default for DictionaryCapacity {
+    fn default() -> Self {
+        Self {
+            entries: 65_536,
+            arena_bytes: 64 * 1024 * 1024,
+        }
+    }
+}
 
 /// An opaque identity, independent of clocks and publication numbering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +87,17 @@ use crate::tracker::Event;
 use crate::u64_from_usize;
 use tick::{load_tick, store_tick};
 use wake::{Waited, wait, wake_all};
+
+/// A process never reuses a reference owner, even if the same object metadata is reopened.
+static REFERENCE_OWNER_NEXT: AtomicU64 = AtomicU64::new(1);
+
+fn next_reference_owner() -> io::Result<u64> {
+    REFERENCE_OWNER_NEXT
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            value.checked_add(1)
+        })
+        .map_err(|_| io::Error::from(io::ErrorKind::Other))
+}
 
 /// How long a reader whose wait macOS cannot take sleeps before it looks again.
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -143,6 +176,8 @@ pub struct Writer {
     event: u64,
     name: String,
     previous_generation: u64,
+    dictionary: Option<identity::DictionaryIndex>,
+    reference_owner: u64,
 }
 
 /// The exclusive place lock acquired before recording metadata may be changed.
@@ -203,6 +238,63 @@ impl Writer {
         LockedPlace::acquire(place)?.create_recording(shape, identity, run_start_continuous_ns)
     }
 
+    /// Creates an opt-in identity ring; ordinary create methods continue writing v3.
+    pub fn create_with_identity(
+        place: &Place,
+        shape: Shape,
+        capacity: DictionaryCapacity,
+        identity: &RunIdentity,
+        start_continuous_ns: u64,
+    ) -> io::Result<Self> {
+        let layout = Layout::identity(shape, capacity)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+        Self::create_layout(
+            LockedPlace::acquire(place)?,
+            layout,
+            WriterOrigin::Identified(identity, start_continuous_ns),
+        )
+    }
+
+    /// Interns retained bytes without allocation. Known keys survive dictionary exhaustion.
+    /// A successful output belongs only to this writer's `publish_with_identity` calls.
+    /// Failure leaves the caller's output unchanged.
+    pub fn intern_program(
+        &mut self,
+        bytes: &ProgramBytes,
+        program: &mut Option<ProgramReference>,
+    ) -> Result<(), IdentityAvailability> {
+        let Some(dictionary) = self.dictionary.as_mut() else {
+            return Err(IdentityAvailability::Unsupported);
+        };
+
+        dictionary.intern(self.mapping.words(), &self.layout, bytes, program)
+    }
+
+    /// Reports bounded dictionary occupancy without allocating.
+    pub fn dictionary_usage(&self) -> io::Result<Option<DictionaryUsage>> {
+        identity::dictionary_usage(self.mapping.words(), &self.layout)
+    }
+
+    /// Validates all references before publishing events or the tick.
+    pub fn publish_with_identity(
+        &mut self,
+        readings: &Readings,
+        times: Option<&ObservationTimes>,
+        identities: &IdentityPublication,
+    ) -> io::Result<()> {
+        identity::validate_publication(
+            self.mapping.words(),
+            &self.layout,
+            readings,
+            identities,
+            self.reference_owner,
+        )?;
+
+        self.publish_inner(readings, times, Some(identities));
+
+        Ok(())
+    }
+
     pub(crate) fn reclaim_unregistered(&self) {
         let first = self.generation().saturating_sub(GENERATION_SCAN_MAX).max(1);
         let mut buffer = [0; GENERATION_BUFFER_SIZE];
@@ -243,13 +335,44 @@ impl Writer {
         shape: Shape,
         origin: WriterOrigin,
     ) -> io::Result<Self> {
-        let LockedPlace { place, lock } = locked;
         let Some(layout) = Layout::new(shape) else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("a ring of shape {shape:?}"),
             ));
         };
+
+        Self::create_layout(locked, layout, origin)
+    }
+
+    fn create_layout_dictionary(
+        layout: &Layout,
+        reference_owner: u64,
+        dictionary: &mut Option<identity::DictionaryIndex>,
+    ) {
+        if layout.version != layout::LAYOUT_VERSION_IDENTITY {
+            return;
+        }
+
+        *dictionary = Some(identity::DictionaryIndex {
+            entries: Vec::new(),
+            owner: 0,
+        });
+        if let Some(dictionary) = dictionary.as_mut() {
+            dictionary.initialize(layout.dictionary.capacity, reference_owner);
+        }
+    }
+
+    fn create_layout(
+        locked: LockedPlace<'_>,
+        layout: Layout,
+        origin: WriterOrigin,
+    ) -> io::Result<Self> {
+        let LockedPlace { place, lock } = locked;
+        let reference_owner = next_reference_owner()?;
+        let mut dictionary = None;
+
+        Self::create_layout_dictionary(&layout, reference_owner, &mut dictionary);
 
         let run_start_ns = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -272,8 +395,7 @@ impl Writer {
 
         let created = create_object(&names, previous.generation, &layout)?;
 
-        // The lock file names no ring a start made and then failed past, so the start removes
-        // it, or each failed start would hold one of the generations the next may take.
+        // A failed start removes its unnamed ring, or it would consume future generations.
         let mapping = Mapping::new(&created.object, layout.word_count(), PROT_READ | PROT_WRITE)
             .inspect_err(|_| create_unlink(&created.name))?;
 
@@ -303,6 +425,8 @@ impl Writer {
             event: previous.event_newest,
             name: created.name,
             previous_generation: previous.generation,
+            dictionary,
+            reference_owner,
         })
     }
 
@@ -313,27 +437,37 @@ impl Writer {
 
     /// Publishes `readings` in the next slot, overwriting the oldest publication once every
     /// slot holds one, and its events in the log, overwriting the oldest events once every
-    /// record holds one.
+    /// record holds one. An identity writer uses `publish_with_identity` instead.
     pub fn publish(&mut self, readings: &Readings) {
-        self.publish_inner(readings, None);
+        self.publish_inner(readings, None, None);
     }
 
+    /// Publishes measured clocks in the default v3 layout.
     pub fn publish_observed(&mut self, readings: &Readings, times: &ObservationTimes) {
-        self.publish_inner(readings, Some(times));
+        self.publish_inner(readings, Some(times), None);
     }
 
-    fn publish_inner(&mut self, readings: &Readings, times: Option<&ObservationTimes>) {
+    fn publish_inner(
+        &mut self,
+        readings: &Readings,
+        times: Option<&ObservationTimes>,
+        identities: Option<&IdentityPublication>,
+    ) {
+        assert_eq!(identities.is_some(), self.dictionary.is_some());
         // A tick's events fit in the log, so a reader can read every one of them.
         assert!(u64_from_usize(readings.events.len()) <= self.layout.shape.event_capacity);
 
         let words = self.mapping.words();
         let events_first = self.event + 1;
-        for event in readings.events {
+        for (index, event) in readings.events.iter().enumerate() {
             let number = self.event + 1;
             let record = &words[self.layout.event(number)];
             record[EVENT_SEQUENCE].store(2 * number - 1, Ordering::Relaxed);
             fence(Ordering::Release);
-            store_event(record, readings.run_tick, event);
+            store_event(&record[..layout::EVENT_WORDS], readings.run_tick, event);
+            if let Some(identities) = identities {
+                identity::store_event_identity(record, &identities.events[index]);
+            }
             record[EVENT_SEQUENCE].store(2 * number, Ordering::Release);
             self.event = number;
         }
@@ -350,6 +484,9 @@ impl Writer {
             events_first..self.event + 1,
             times,
         );
+        if let Some(identities) = identities {
+            identity::store_processes(slot, &self.layout, identities.processes);
+        }
         slot[SLOT_SEQUENCE].store(2 * publication, Ordering::Release);
 
         words[HEADER_PUBLICATION_NEWEST].store(publication, Ordering::Release);
@@ -445,6 +582,7 @@ struct Opened {
     run_start_ns: u64,
     events: Cursor,
     layout: Layout,
+    reference_owner: u64,
 }
 
 impl Opened {
@@ -480,10 +618,24 @@ impl Opened {
             events: Cursor::new(event_first, layout.events_held(event_newest)),
             mapping,
             layout,
+            reference_owner: next_reference_owner()?,
         })
     }
 
     fn read_into(&mut self, tick: &mut Tick) -> io::Result<Found> {
+        self.read_into_identity(tick, None)
+    }
+
+    fn read_into_identity(
+        &mut self,
+        tick: &mut Tick,
+        mut identities: Option<&mut Vec<IdentityObservation>>,
+    ) -> io::Result<Found> {
+        if let Some(identities) = identities.as_ref() {
+            if identities.capacity() < self.layout.processes.capacity {
+                return Err(io::Error::from(io::ErrorKind::Unsupported));
+            }
+        }
         if !tick.fits(&self.layout) {
             return Err(io::Error::from(io::ErrorKind::Unsupported));
         }
@@ -499,7 +651,26 @@ impl Opened {
         };
         let slot = &words[self.layout.slot(publication)];
         let loaded = read_finished(slot, SLOT_SEQUENCE, publication, || {
-            load_tick(slot, &self.layout, tick).then_some(())
+            if !load_tick(slot, &self.layout, tick) {
+                return None;
+            }
+            if let Some(identities) = identities.as_mut() {
+                if identity::load_processes(
+                    &identity::IdentityRecord {
+                        words,
+                        record: slot,
+                    },
+                    &self.layout,
+                    tick,
+                    identities,
+                    self.reference_owner,
+                )
+                .is_err()
+                {
+                    return None;
+                }
+            }
+            Some(())
         })?;
         if loaded.is_some() {
             Ok(Found::Publication {
@@ -523,7 +694,9 @@ impl Opened {
             Step::Read(number) => number,
         };
         let record = &words[self.layout.event(number)];
-        match read_finished(record, EVENT_SEQUENCE, number, || load_event(record))? {
+        match read_finished(record, EVENT_SEQUENCE, number, || {
+            load_event(&record[..layout::EVENT_WORDS])
+        })? {
             Some((tick, event)) => Ok(FoundEvent::Event {
                 number,
                 tick,

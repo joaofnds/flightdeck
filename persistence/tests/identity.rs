@@ -481,6 +481,48 @@ mod tests {
         );
     }
 
+    fn matches_retained_program_contract(bytes: &collector::ring::ProgramBytes, valid: bool) {
+        let connection = identity_connection("BLOB");
+        connection
+            .execute(
+                "INSERT INTO processes(publication,pid,identity_version,identity_availability, \
+            usage_availability,process_unique_id,pid_version,executable_name,app_path) \
+            VALUES(9,42,1,0,1,123,4,?,?)",
+                duckdb::params![bytes.executable_name, bytes.app_path],
+            )
+            .unwrap();
+
+        let shared = bytes.validate();
+        let saved = table_source(&connection, Table::Processes, TableSource::Staged);
+
+        assert_eq!(valid, shared.is_ok());
+        assert_eq!(valid, saved.is_ok());
+    }
+
+    macro_rules! retained_program_contract {
+        ($($name:ident, $executable:expr, $app:expr, $valid:literal;)*) => {$(
+            #[test]
+            fn $name() {
+                // Goal: live and saved readers agree on retained program bytes.
+                // Method: validate one captured byte shape through the common owner and DuckDB.
+                matches_retained_program_contract(&collector::ring::ProgramBytes {
+                    executable_name: $executable, app_path: $app,
+                }, $valid);
+            }
+        )*};
+    }
+
+    retained_program_contract! {
+        preserves_repeated_app_suffix_in_one_component,
+            b"helper", Some(b"/Applications/A.app.app"), true;
+        rejects_nested_app_components_at_both_boundaries,
+            b"helper", Some(b"/A.app/Helper.app"), false;
+        preserves_non_utf8_program_bytes_at_both_boundaries,
+            b"helper\xff", Some(b"/A\xff.app"), true;
+        rejects_relative_app_bytes_at_both_boundaries,
+            b"helper", Some(b"A.app"), false;
+    }
+
     #[test]
     fn preserves_paths_at_the_capture_byte_limit() {
         // Goal: the reader accepts every path byte the bounded capture scratch can retain.
