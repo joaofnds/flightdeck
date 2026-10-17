@@ -34,9 +34,33 @@ struct RecordingStateChecks {
         reports_a_future_tick_clock_without_trusting_the_catalog_maximum()
         reports_reader_losses_without_a_selected_tick()
         opening_a_recording_exits_captured_reference_mode()
-        print("22 native recording state and table checks passed")
+        entering_memory_retains_the_selected_live_publication()
+        print("23 native recording state and table checks passed")
         try runReferenceDataChecks()
         runDashboardChecks()
+        try runRecordedMemoryChecks()
+    }
+
+    @MainActor
+    private static func entering_memory_retains_the_selected_live_publication() {
+        // Resource navigation reuses the selected publication without scheduling work.
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+        model.setLive(true)
+        reader.finishNext()
+        drainMainQueue()
+        let selected = model.selection?.selected
+        let reads = reader.readCount
+
+        model.enterMemory()
+
+        precondition(model.route == "Memory")
+        precondition(model.following)
+        precondition(model.selection?.selected?.run == selected?.run)
+        precondition(model.selection?.selected?.boot == selected?.boot)
+        precondition(model.selection?.selected?.publication == selected?.publication)
+        precondition(reader.readCount == reads)
+        precondition(!model.busy)
     }
 
     @MainActor

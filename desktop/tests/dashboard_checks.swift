@@ -1,14 +1,159 @@
 import Combine
 import Foundation
+import SwiftUI
 
 func runDashboardChecks() {
+    checks_recorded_plot_boundaries()
+    checks_recorded_plot_clock_boundaries()
+    checks_recorded_plot_validation()
     checks_shared_window_selection()
     checks_available_sample_statistics()
     checks_adaptive_quantity_precision()
     checks_mirrored_inspection_reading()
     checks_continuous_fan_motion()
     checks_outgoing_airflow_routes()
-    print("Dashboard selection, readings and schematic motion checks passed")
+    print("Dashboard selection, readings, schematic motion and bounded time-series checks passed")
+}
+
+private func checks_recorded_plot_clock_boundaries() {
+    // Equal and backward clocks retain observations while breaking interpolation.
+    let samples = [10.0, 11, 11, 9, 10].enumerated().map {
+        TimeSeriesSample(id: "run:\($0.offset)", time: $0.element, segment: "same")
+    }
+    let line = TimeSeriesLine(name: "Active", color: .blue, values: [1, 2, 3, 4, 5])
+
+    let plot = TimeSeriesModel(samples: samples, lines: [line], domain: 9...12)
+
+    precondition(plot?.segments(line: 0) == [[0, 1], [2], [3, 4]])
+    precondition(plot?.selectedTime(id: "run:2") == 11)
+}
+
+private func checks_recorded_plot_validation() {
+    // Invalid data is refused; the current maximum context remains representable.
+    let samples = (0..<4096).map {
+        TimeSeriesSample(id: "run:\($0)", time: Double($0), segment: "same")
+    }
+    let valid = TimeSeriesLine(name: "Active", color: .blue,
+        values: Array(repeating: 0, count: 4096))
+    precondition(TimeSeriesModel(samples: samples, lines: [valid], domain: 0...4096) != nil)
+    precondition(TimeSeriesModel(samples: samples + [TimeSeriesSample(id: "extra", time: 4096,
+        segment: "same")], lines: [], domain: 0...4096) == nil)
+    precondition(TimeSeriesModel(samples: [samples[0], samples[0]], lines: [],
+        domain: 0...1) == nil)
+    precondition(TimeSeriesModel(samples: [samples[0]], lines: [TimeSeriesLine(name: "bad",
+        color: .blue, values: [.infinity])], domain: 0...1) == nil)
+    precondition(TimeSeriesModel(samples: [samples[0]], lines: [TimeSeriesLine(name: "overflow",
+        color: .blue, values: [.greatestFiniteMagnitude])], domain: 0...1) == nil)
+    precondition(TimeSeriesModel(samples: [TimeSeriesSample(id: "far", time: -.greatestFiniteMagnitude,
+        segment: "same")], lines: [], domain: 0...1) == nil)
+    precondition(TimeSeriesModel(samples: [], lines: [],
+        domain: -Double.greatestFiniteMagnitude...Double.greatestFiniteMagnitude) == nil)
+    precondition(!TimeSeriesStyle(unit: "GiB", minimum: 2, maximum: 1).isValid)
+    precondition(!TimeSeriesStyle(unit: "GiB", maximum: .infinity).isValid)
+}
+
+private func checks_recorded_plot_boundaries() {
+    // Missing readings and changed segments never join across recorded observations.
+    let samples = [
+        TimeSeriesSample(id: "a", time: 10, segment: "first"),
+        TimeSeriesSample(id: "b", time: 11, segment: "first"),
+        TimeSeriesSample(id: "c", time: 12, segment: "first"),
+        TimeSeriesSample(id: "d", time: 13, segment: "second")
+    ]
+    let line = TimeSeriesLine(name: "Active", color: .blue, values: [1, nil, 3, 4])
+
+    let plot = TimeSeriesModel(samples: samples, lines: [line], domain: 10...13)
+
+    precondition(plot?.segments(line: 0) == [[0], [2], [3]])
+    precondition(plot?.selectedTime(id: "c") == 12)
+    precondition(plot?.selectedTime(id: "another-run:c") == nil)
+}
+
+func runRecordedMemoryChecks() throws {
+    try runRecordedMemoryBoundaryChecks()
+    try runRecordedMemoryThemeChecks()
+    // Raw VM categories retain their meaning and missing samples remain unavailable.
+    let data = Data(#"""
+        {"value":[
+          {"run":"run","boot":"boot","publication":2,"wall_ns":1001000000000,
+           "segment":1,"memory_active_bytes":3,"memory_wired_bytes":6,
+           "memory_compressed_bytes":7,"memory_total_bytes":1,"swap_used_bytes":12,
+           "pressure":1},
+          {"run":"run","boot":"boot","publication":3,"wall_ns":1002000000000,
+           "segment":2}]}
+        """#.utf8)
+    let points: [Metric] = try decodeRecordingResponse(data)
+    let observation = Observation(run: "run", boot: "boot", publication: 2, runTick: 1,
+        wallNs: 1_001_000_000_000, windowLosses: nil)
+    let selection = Selection(second: 1001, selected: observation, alternatives: [observation],
+        summary: points[0], trends: points, contextSeconds: 900)
+
+    let memory = RecordedMemoryData(selection: selection, theme: FlightdeckTheme())
+
+    precondition(memory.categories.map(\.name) == ["Active", "Wired", "Compressed"])
+    precondition(memory.categories.map(\.values) == [
+        [3.0 / 1_073_741_824, nil], [6.0 / 1_073_741_824, nil], [7.0 / 1_073_741_824, nil]])
+    precondition(memory.swap.values == [12.0 / 1_073_741_824, nil])
+    precondition(memory.selectedID == points[0].id)
+    precondition(memory.pressureText == "Warning")
+    let gap = Selection(second: 1002, selected: nil, alternatives: [], summary: nil,
+        trends: points, contextSeconds: 900)
+    precondition(RecordedMemoryData(selection: gap, theme: FlightdeckTheme()).selectedID == nil)
+    precondition(RecordedMemoryData(selection: gap, theme: FlightdeckTheme()).pressureText == "Unavailable")
+    print("Recorded memory categories and missing-selection checks passed")
+}
+
+func runRecordedMemoryThemeChecks() throws {
+    // Independent replacements catch accidental use of the equal default CPU and power colors.
+    let data = Data(#"""
+        {"value":[{"run":"run","boot":"boot","publication":1,"wall_ns":1000000000000,
+          "segment":1,"memory_active_bytes":1,"memory_wired_bytes":2,
+          "memory_compressed_bytes":3}]}
+        """#.utf8)
+    let points: [Metric] = try decodeRecordingResponse(data)
+    let selection = Selection(second: 1000, selected: nil, alternatives: [], summary: nil,
+        trends: points, contextSeconds: 900)
+    var theme = FlightdeckTheme()
+    theme.memoryActiveSeries = .pink
+    theme.memoryWiredSeries = .cyan
+    theme.memoryCompressedSeries = .yellow
+
+    let memory = RecordedMemoryData(selection: selection, theme: theme)
+
+    precondition(memory.categories.map(\.color) == [theme.memoryActiveSeries,
+        theme.memoryWiredSeries, theme.memoryCompressedSeries])
+    print("Memory projection follows distinct replacement memory theme tokens")
+}
+
+func runRecordedMemoryBoundaryChecks() throws {
+    // The adapter preserves an ordinary pair and splits changed recording identities.
+    let data = Data(#"""
+        {"value":[
+          {"run":"first","boot":"first","publication":1,"wall_ns":1000000000000,
+           "segment":1,"memory_active_bytes":1},
+          {"run":"first","boot":"first","publication":2,"wall_ns":1001000000000,
+           "segment":1,"memory_active_bytes":2},
+          {"run":"second","boot":"first","publication":1,"wall_ns":1002000000000,
+           "segment":1,"memory_active_bytes":3},
+          {"run":"second","boot":"second","publication":2,"wall_ns":1003000000000,
+           "segment":1,"memory_active_bytes":4},
+          {"run":"second","boot":"second","publication":3,"wall_ns":1004000000000,
+           "segment":2,"memory_active_bytes":5}]}
+        """#.utf8)
+    let points: [Metric] = try decodeRecordingResponse(data)
+    let observation = Observation(run: "second", boot: "second", publication: 3, runTick: 2,
+        wallNs: 1_004_000_000_000, windowLosses: nil)
+    let selection = Selection(second: 1004, selected: observation, alternatives: [observation],
+        summary: points[4], trends: points, contextSeconds: 900)
+    let memory = RecordedMemoryData(selection: selection, theme: FlightdeckTheme())
+
+    let plot = memory.plot(lines: memory.categories)
+
+    precondition(plot?.segments(line: 0) == [[0, 1], [2], [3], [4]],
+        "Memory adapter joined a changed run, boot or segment")
+    precondition(memory.selectedID == points[4].id)
+    precondition(plot?.selectedTime(id: points[4].id) == 1004)
+    print("Memory adapter preserves the connected pair and splits run, boot and segment changes")
 }
 
 private func checks_shared_window_selection() {

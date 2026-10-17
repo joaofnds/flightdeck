@@ -206,148 +206,38 @@ private struct ReferencePlot: View {
     let step: Double
 
     var body: some View {
-        Canvas { context, size in
-            let plot = CGRect(x: 50, y: 24, width: max(1, size.width - 115), height: max(1, size.height - 54))
-            let domains = domains()
-            for row in 0...4 {
-                let y = plot.minY + Double(row) / 4 * plot.height
-                var grid = Path(); grid.move(to: CGPoint(x: plot.minX, y: y)); grid.addLine(to: CGPoint(x: plot.maxX, y: y))
-                context.stroke(grid, with: .color(theme.border.opacity(0.65)), lineWidth: 0.5)
-                let domain = domains["left"] ?? 0...1
-                let number = domain.upperBound - Double(row) / 4 * (domain.upperBound - domain.lowerBound)
-                context.draw(Text(axis(number)).font(theme.chartAxisFont).foregroundColor(theme.muted), at: CGPoint(x: 42, y: y), anchor: .trailing)
-            }
-            var positive = Array(repeating: 0.0, count: max(0, upper + 1))
-            var negative = positive
-            for line in lines {
-                let domain = domains[line.axis ?? "left"] ?? 0...1
-                var top: [CGPoint] = [], bottom: [CGPoint] = []
-                for index in lower...max(lower, upper) {
-                    guard line.values.indices.contains(index), let raw = line.values[index] else {
-                        drawSegment(context: &context, top: top, bottom: bottom, line: line)
-                        top.removeAll(keepingCapacity: true); bottom.removeAll(keepingCapacity: true)
-                        continue
+        let samples = (lower...max(lower, upper)).map { index in
+            TimeSeriesSample(id: "reference:\(index)",
+                time: panel.times?[index] ?? start + Double(index) * step, segment: "reference")
+        }
+        let domain = panel.times == nil
+            ? (start + Double(lower) * step)...(start + Double(max(lower + 1, upper)) * step)
+            : 0...300
+        let values = lines.map { line in
+            TimeSeriesLine(name: line.name, color: theme.referenceColor(line.color),
+                values: samples.indices.map { offset in
+                    let index = lower + offset
+                    return line.values.indices.contains(index) ? line.values[index] : nil
+                }, unit: line.unit, stack: line.stack, negative: line.negative,
+                dashed: line.dashed, axis: line.axis, fill: line.fill)
+        }
+        if let model = TimeSeriesModel(samples: samples, lines: values, domain: domain) {
+            TimeSeriesPlot(model: model, style: TimeSeriesStyle(unit: panel.unit,
+                stack: panel.stack, minimum: panel.minimum, maximum: panel.maximum,
+                gradient: panel.gradient, lineWidth: panel.lineWidth, fill: panel.fill),
+                selectedTime: selectedElapsed.map { min(300, max(0, $0)) }
+                    ?? model.selectedTime(id: "reference:\(selected)"),
+                labels: (0...2).map { offset in
+                    if panel.times != nil {
+                        return "\(offset * 150 / 60):" + String(format: "%02d", offset * 150 % 60)
                     }
 
-                    let value = line.negative == true ? -raw : raw
-                    let stacked = panel.stack == true && line.stack != false && (line.axis == nil || line.axis == "left")
-                    let base = stacked ? (value >= 0 ? positive[index] : negative[index]) : 0
-                    let total = base + value
-                    if stacked { if value >= 0 { positive[index] = total } else { negative[index] = total } }
-                    let x = xPosition(index, plot: plot)
-                    top.append(CGPoint(x: x, y: yPosition(total, domain: domain, plot: plot)))
-                    bottom.append(CGPoint(x: x, y: yPosition(base, domain: domain, plot: plot)))
-                }
-                drawSegment(context: &context, top: top, bottom: bottom, line: line)
-            }
-            if selectedElapsed != nil || (selected >= lower && selected <= upper) {
-                let x = selectedElapsed.map { plot.minX + min(1, max(0, $0 / 300)) * plot.width }
-                    ?? xPosition(selected, plot: plot)
-                var cursor = Path(); cursor.move(to: CGPoint(x: x, y: plot.minY)); cursor.addLine(to: CGPoint(x: x, y: plot.maxY))
-                context.stroke(cursor, with: .color(theme.text.opacity(0.4)), style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
-            }
-            for offset in 0...2 {
-                let index = lower + (upper - lower) * offset / 2
-                let label = panel.times == nil ? timeLabel(index) : "\(offset * 150 / 60):" + String(format: "%02d", offset * 150 % 60)
-                context.draw(Text(label).font(theme.chartAxisFont).foregroundColor(theme.muted),
-                    at: CGPoint(x: plot.minX + Double(offset) / 2 * plot.width, y: plot.maxY + 18))
-            }
-            context.draw(Text(panel.unit).font(theme.chartAxisFont).foregroundColor(theme.muted), at: CGPoint(x: 0, y: 0), anchor: .topLeading)
-            for (offset, key) in ["right1", "right2"].enumerated() {
-                if let domain = domains[key], let line = lines.first(where: { $0.axis == key }) {
-                    context.draw(Text("\(axis(domain.upperBound)) \(line.unit ?? panel.unit)").font(theme.chartSecondaryAxisFont).foregroundColor(theme.referenceColor(line.color)),
-                        at: CGPoint(x: plot.maxX + 5, y: plot.minY + Double(offset) * 15), anchor: .topLeading)
-                }
-            }
+                    let index = lower + (upper - lower) * offset / 2
+                    return Date(timeIntervalSince1970: start + Double(index) * step)
+                        .formatted(.dateTime.hour().minute())
+                })
+        } else {
+            Text("Chart readings exceed the display bounds.")
         }
-    }
-
-    private func domains() -> [String: ClosedRange<Double>] {
-        var ranges: [String: (Double, Double)] = [:]
-        for line in lines {
-            let key = line.axis ?? "left"
-            let values = (lower...max(lower, upper)).compactMap { line.values.indices.contains($0) ? line.values[$0] : nil }
-                .map { line.negative == true ? -$0 : $0 }
-            ranges[key] = (min(ranges[key]?.0 ?? 0, values.min() ?? 0), max(ranges[key]?.1 ?? 0, values.max() ?? 0))
-        }
-        if panel.stack == true {
-            for index in lower...max(lower, upper) {
-                let values = lines.filter { $0.stack != false && $0.axis == nil }.compactMap { line -> Double? in
-                    guard line.values.indices.contains(index), let value = line.values[index] else { return nil }
-
-                    return line.negative == true ? -value : value
-                }
-                ranges["left"] = (min(ranges["left"]?.0 ?? 0, values.filter { $0 < 0 }.reduce(0, +)),
-                    max(ranges["left"]?.1 ?? 0, values.filter { $0 > 0 }.reduce(0, +)))
-            }
-        }
-        return ranges.mapValues { low, high in min(0, low)...max(1, high * 1.08) }
-            .merging(["left": (panel.minimum ?? min(0, ranges["left"]?.0 ?? 0))...max((panel.minimum ?? 0) + 1, panel.maximum ?? max(1, (ranges["left"]?.1 ?? 0) * 1.08))]) { _, new in new }
-    }
-
-    private func drawSegment(context: inout GraphicsContext, top: [CGPoint], bottom: [CGPoint], line: ReferenceLine) {
-        guard let first = top.first else { return }
-
-        let color = theme.referenceColor(line.color)
-        let path = smoothPath(top)
-        let opacity = line.fill ?? panel.fill ?? 0.1
-        if opacity > 0, !bottom.isEmpty {
-            var area = path
-            appendSmooth(Array(bottom.reversed()), to: &area, moving: false)
-            area.closeSubpath()
-            if panel.gradient != false, let highest = top.map(\.y).min(), let lowest = bottom.map(\.y).max() {
-                context.fill(area, with: .linearGradient(Gradient(colors: [color.opacity(opacity), color.opacity(opacity * 0.08)]), startPoint: CGPoint(x: 0, y: highest), endPoint: CGPoint(x: 0, y: max(highest + 1, lowest))))
-            } else {
-                context.fill(area, with: .color(color.opacity(opacity)))
-            }
-        }
-        context.stroke(path, with: .color(color), style: StrokeStyle(lineWidth: panel.lineWidth ?? theme.chartStroke, dash: line.dashed == true ? [5, 4] : []))
-        if top.count == 1 { context.fill(Path(ellipseIn: CGRect(x: first.x - 2, y: first.y - 2, width: 4, height: 4)), with: .color(color)) }
-    }
-
-    private func smoothPath(_ points: [CGPoint]) -> Path {
-        var path = Path()
-        appendSmooth(points, to: &path, moving: true)
-        return path
-    }
-
-    private func appendSmooth(_ points: [CGPoint], to path: inout Path, moving: Bool) {
-        guard let first = points.first else { return }
-
-        if moving { path.move(to: first) } else { path.addLine(to: first) }
-        for index in 1..<points.count {
-            let before = points[index - 1], after = points[index]
-            let width = after.x - before.x
-            guard width != 0 else { path.addLine(to: after); continue }
-
-            let slope = (after.y - before.y) / width
-            let oldSlope = index > 1 ? (before.y - points[index - 2].y) / (before.x - points[index - 2].x) : slope
-            let nextSlope = index + 1 < points.count ? (points[index + 1].y - after.y) / (points[index + 1].x - after.x) : slope
-            let firstSlope = slope * oldSlope > 0 ? 2 * slope * oldSlope / (slope + oldSlope) : 0
-            let lastSlope = slope * nextSlope > 0 ? 2 * slope * nextSlope / (slope + nextSlope) : 0
-            path.addCurve(to: after, control1: CGPoint(x: before.x + width / 3, y: before.y + firstSlope * width / 3),
-                control2: CGPoint(x: after.x - width / 3, y: after.y - lastSlope * width / 3))
-        }
-    }
-
-    private func xPosition(_ index: Int, plot: CGRect) -> Double {
-        if let times = panel.times, times.indices.contains(index) { return plot.minX + times[index] / 300 * plot.width }
-        return plot.minX + Double(index - lower) / Double(max(1, upper - lower)) * plot.width
-    }
-
-    private func yPosition(_ value: Double, domain: ClosedRange<Double>, plot: CGRect) -> Double {
-        plot.maxY - (value - domain.lowerBound) / (domain.upperBound - domain.lowerBound) * plot.height
-    }
-
-    private func timeLabel(_ index: Int) -> String {
-        if let times = panel.times, times.indices.contains(index) {
-            return "\(Int(times[index]) / 60):" + String(format: "%02d", Int(times[index]) % 60)
-        }
-        return Date(timeIntervalSince1970: start + Double(index) * step)
-            .formatted(.dateTime.hour().minute())
-    }
-
-    private func axis(_ value: Double) -> String {
-        value.formatted(.number.notation(abs(value) >= 10000 ? .compactName : .automatic).precision(.fractionLength(0...1)))
     }
 }

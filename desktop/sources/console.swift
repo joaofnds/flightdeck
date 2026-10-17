@@ -11,6 +11,7 @@ struct Console: View {
                     .font(theme.brandFont).tracking(1.4).padding(.bottom, 28)
                 navigation("Overview", icon: "square.grid.2x2")
                 navigation("CPU & processes", icon: "cpu")
+                navigation("Memory", icon: "memorychip")
                 navigation("Recorded readings", icon: "chart.xyaxis.line")
                 Spacer()
                 Divider()
@@ -45,6 +46,7 @@ struct Console: View {
                                     .font(.callout).foregroundStyle(theme.warning)
                             }
                             if model.route == "Overview" { Dashboard() }
+                            if model.route == "Memory" { RecordedMemory() }
                             RecordedReadings()
                             if model.route == "CPU & processes" { MachineContext() }
                         }
@@ -64,6 +66,7 @@ struct Console: View {
     private func navigation(_ title: String, icon: String) -> some View {
         Button {
             if title == "CPU & processes" { model.enterProcesses() }
+            else if title == "Memory" { model.enterMemory() }
             else { model.route = title }
         } label: {
             Label(title, systemImage: icon).font(theme.navigationFont)

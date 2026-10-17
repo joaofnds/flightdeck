@@ -81,8 +81,10 @@ from the File menu. Refresh discovers newly sealed windows; **Live** follows the
 shared-memory ticks registered for that recording, including its unsealed tail. Pausing
 live following retains the tail for inspection.
 
-Recording mode currently provides Overview, CPU/process inspection and all ten recorded
-tables, with 512-row pages and an exact-field row inspector. Its charts cover the 15 minutes
+Recording mode currently provides Overview, CPU/process inspection, Memory and all ten recorded
+tables, with 512-row pages and an exact-field row inspector. Memory charts show independent
+recorded VM categories and swap, preserving missing observations and boundaries between collector runs.
+Its charts cover the 15 minutes
 ending at the selected second. Enter a Unix second, step one second or inspect a chart.
 Repeated seconds retain separate run/publication alternatives. A missing second clears
 readings. Names and app identities are not yet in the recording schema, so this mode shows
