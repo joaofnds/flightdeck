@@ -4,7 +4,7 @@ import FlightdeckBridge
 import Foundation
 import SwiftUI
 
-struct Catalog: Decodable, Sendable {
+struct Catalog: Decodable, Equatable, Sendable {
     let path: String
     let firstSecond: UInt64?
     let lastSecond: UInt64?
@@ -36,7 +36,7 @@ struct Catalog: Decodable, Sendable {
 
 }
 
-struct Observation: Decodable, Sendable {
+struct Observation: Decodable, Equatable, Sendable {
     let run: String
     let boot: String
     let publication: UInt64
@@ -60,13 +60,13 @@ struct Observation: Decodable, Sendable {
     }
 }
 
-struct ReaderLosses: Decodable, Sendable {
+struct ReaderLosses: Decodable, Equatable, Sendable {
     let run: String
     let boot: String
     let losses: Losses
 }
 
-struct Losses: Decodable, Sendable {
+struct Losses: Decodable, Equatable, Sendable {
     let publications: UInt64
     let events: UInt64
     let unknown: Bool
@@ -361,6 +361,8 @@ final class RecordingModel: ObservableObject {
     private let pollingEnabled: Bool
     private let now: @MainActor () -> Date
     private var liveTimer: AnyCancellable?
+    private var reading = false
+    private var announcedLiveStatus = "Recorded"
     private var generation: UInt64 = 0
     private var pending: (UInt64, ReadRequest)?
     private var requestedSecond: UInt64?
@@ -409,7 +411,7 @@ final class RecordingModel: ObservableObject {
     func setLive(_ enabled: Bool) {
         guard enabled else {
             stopFollowing()
-            if busy {
+            if reading {
                 if requestedIdentity != nil { enqueue(refresh: false) }
                 else { cancel() }
             }
@@ -443,7 +445,7 @@ final class RecordingModel: ObservableObject {
     }
 
     func pollLive() {
-        guard following, !busy else { return }
+        guard following, !reading else { return }
         enqueue(refresh: false, poll: true)
     }
 
@@ -473,8 +475,9 @@ final class RecordingModel: ObservableObject {
 
     private func enqueue(refresh: Bool, poll: Bool = false) {
         generation += 1
-        error = nil
-        if busy {
+        if !poll, error != nil { error = nil }
+        if !poll, !busy { busy = true }
+        if reading {
             do { try reader.cancel() }
             catch let failure {
                 pending = nil
@@ -487,20 +490,23 @@ final class RecordingModel: ObservableObject {
             refresh: refresh || pending?.1.refresh == true,
             machineOffsets: machineOffsets, includeMachine: route == "CPU & processes",
             live: useLive, poll: poll, target: following ? nil : requestedIdentity)
-        if busy { pending = (generation, request) }
+        if reading { pending = (generation, request) }
         else { start(generation, request) }
     }
 
     private func start(_ token: UInt64, _ request: ReadRequest) {
-        busy = true
+        reading = true
+        if !request.poll, !busy { busy = true }
         reader.read(request) { [weak self] result in
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
-                busy = false
+                reading = false
+                if busy { busy = false }
                 if token == generation {
                     switch result {
                     case .success(let result):
-                        catalog = result.catalog
+                        if error != nil { error = nil }
+                        if catalog != result.catalog { catalog = result.catalog }
                         if !result.unchanged, !request.poll || following {
                             selection = result.selection
                             page = result.page
@@ -512,8 +518,9 @@ final class RecordingModel: ObservableObject {
                             secondText = result.selection.map { String($0.second) } ?? ""
                         }
                     case .failure(let failure):
-                        error = failure.message
+                        if error != failure.message { error = failure.message }
                     }
+                    publishStatusChange()
                 }
                 if let (nextToken, nextRequest) = pending {
                     pending = nil
@@ -523,11 +530,19 @@ final class RecordingModel: ObservableObject {
         }
     }
 
+    private func publishStatusChange() {
+        let status = liveStatus
+        if status != announcedLiveStatus {
+            announcedLiveStatus = status
+            objectWillChange.send()
+        }
+    }
+
     func cancel() {
         stopFollowing()
         generation += 1
         pending = nil
-        if busy {
+        if reading {
             do { try reader.cancel() }
             catch { self.error = error.localizedDescription }
         }

@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Foundation
 import SwiftUI
 
@@ -27,6 +28,12 @@ struct RecordingStateChecks {
         applies_native_table_selection_values_and_theme_changes()
         starts_live_without_building_a_poll_queue()
         preserves_visible_readings_when_a_live_poll_is_unchanged()
+        emits_no_changes_for_an_identical_background_poll()
+        publishes_catalog_changes_without_replacing_the_selected_payload()
+        publishes_clock_only_status_transitions_once()
+        shows_foreground_loading_while_a_background_poll_is_being_canceled()
+        advances_visible_readings_after_a_changed_background_poll()
+        retains_poll_errors_until_success_without_republishing_identical_failures()
         keeps_live_tail_access_when_following_is_paused()
         keeps_saved_recordings_on_the_existing_default_path()
         reports_a_stale_collector_using_the_injected_clock()
@@ -45,12 +52,174 @@ struct RecordingStateChecks {
         retains_exact_paused_identity_through_cpu_and_paging()
         chart_selection_requests_and_retains_exact_identity()
         unavailable_chart_identity_clears_readings_and_surfaces_error()
-        print("33 native recording state and table checks passed")
+        print("39 native recording state and table checks passed")
         try runReferenceDataChecks()
         runDashboardChecks()
         try runOverviewInspectionChecks()
         try runRecordedMemoryChecks()
         try runRecordedComponentChecks()
+    }
+
+    @MainActor
+    private static func emits_no_changes_for_an_identical_background_poll() {
+        // An unchanged background read must not ask the native view tree to redraw.
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false,
+            now: { Date(timeIntervalSince1970: 17) })
+        model.setLive(true)
+        reader.finishNext()
+        drainMainQueue()
+        var changes = 0
+        let subscription = model.objectWillChange.sink { changes += 1 }
+        defer { subscription.cancel() }
+
+        model.pollLive()
+        reader.finishNext(unchanged: true)
+        drainMainQueue()
+
+        precondition(changes == 0, "An identical background poll invalidated the native view")
+        precondition(!model.busy)
+        precondition(model.liveStatus == "Live")
+    }
+
+    @MainActor
+    private static func publishes_catalog_changes_without_replacing_the_selected_payload() {
+        // A seal or loss update remains visible even when its selected readings are unchanged.
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+        model.setLive(true)
+        reader.finishNext()
+        drainMainQueue()
+        model.row = 1
+        let original = model.catalog!
+        let metadata = Catalog(path: original.path, firstSecond: original.firstSecond,
+            lastSecond: original.lastSecond, windows: 2, unknownClockTicks: 0,
+            tables: original.tables, live: true, tailTicks: 0, collectorCompleted: true,
+            latestObservation: original.latestObservation,
+            readerLosses: [ReaderLosses(run: "run-0", boot: "boot",
+                losses: Losses(publications: 3, events: 2, unknown: true))])
+        var changes = 0
+        let subscription = model.objectWillChange.sink { changes += 1 }
+        defer { subscription.cancel() }
+
+        model.pollLive()
+        reader.finishNext(unchanged: true, catalog: metadata)
+        drainMainQueue()
+
+        precondition(changes > 0)
+        precondition(model.catalog?.windows == 2)
+        precondition(model.catalog?.tailTicks == 0)
+        precondition(model.liveStatus == "Collector stopped")
+        precondition(model.readerLossNotices.count == 1)
+        precondition(model.row == 1)
+        precondition(model.page?.rows == [["1"], ["2"]])
+    }
+
+    @MainActor
+    private static func publishes_clock_only_status_transitions_once() {
+        // Time can cross the stale boundary without a new publication or catalog value.
+        let reader = ControlledRecordingReader()
+        var instant = Date(timeIntervalSince1970: 17)
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false,
+            now: { instant })
+        model.setLive(true)
+        reader.finishNext()
+        drainMainQueue()
+        var changes = 0
+        let subscription = model.objectWillChange.sink { changes += 1 }
+        defer { subscription.cancel() }
+
+        instant = Date(timeIntervalSince1970: 21)
+        model.pollLive()
+        reader.finishNext(unchanged: true)
+        drainMainQueue()
+
+        precondition(model.liveStatus == "Waiting for collector")
+        precondition(changes == 1)
+
+        model.pollLive()
+        reader.finishNext(unchanged: true)
+        drainMainQueue()
+
+        precondition(changes == 1, "A stable stale status kept invalidating the native view")
+    }
+
+    @MainActor
+    private static func shows_foreground_loading_while_a_background_poll_is_being_canceled() {
+        // A foreground choice is loading even before its canceled predecessor completes.
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+        model.setLive(true)
+        reader.finishNext()
+        drainMainQueue()
+        model.pollLive()
+
+        model.load(second: 16)
+
+        precondition(model.busy, "Queued foreground work did not show its loading state")
+        precondition(model.selection == nil)
+        precondition(reader.readCount == 2)
+        precondition(reader.cancellations == 1)
+        reader.finishNext()
+        drainMainQueue()
+        precondition(model.busy)
+        reader.finishNext()
+        drainMainQueue()
+        precondition(!model.busy)
+        precondition(model.selection?.second == 16)
+    }
+
+    @MainActor
+    private static func advances_visible_readings_after_a_changed_background_poll() {
+        // An ordinary poll replaces the visible observation and its table atomically.
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+        model.setLive(true)
+        reader.finishNext()
+        drainMainQueue()
+
+        model.pollLive()
+        reader.finishNext(second: 18, publication: 10)
+        drainMainQueue()
+
+        precondition(model.selection?.second == 18)
+        precondition(model.selection?.selected?.publication == 10)
+        precondition(model.page?.observation.publication == 10)
+        precondition(model.secondText == "18")
+        precondition(model.following)
+    }
+
+    @MainActor
+    private static func retains_poll_errors_until_success_without_republishing_identical_failures() {
+        // A retry keeps the same error visible, then clears it when unchanged data recovers.
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false,
+            now: { Date(timeIntervalSince1970: 17) })
+        let failure = RecordingError(message: "Live reader unavailable")
+        model.setLive(true)
+        reader.finishNext()
+        drainMainQueue()
+        model.pollLive()
+        reader.finishNext(failure: failure)
+        drainMainQueue()
+        var changes = 0
+        let subscription = model.objectWillChange.sink { changes += 1 }
+        defer { subscription.cancel() }
+
+        model.pollLive()
+
+        precondition(model.error == failure.message)
+        reader.finishNext(failure: failure)
+        drainMainQueue()
+        precondition(changes == 0)
+
+        model.pollLive()
+        reader.finishNext(unchanged: true)
+        drainMainQueue()
+
+        precondition(model.error == nil)
+        precondition(changes == 1)
+        precondition(model.selection?.second == 17)
     }
 
     @MainActor
@@ -410,8 +579,13 @@ struct RecordingStateChecks {
         model.pollLive()
         precondition(reader.readCount == 2)
         precondition(reader.latestRequest?.poll == true)
+        model.pollLive()
+        model.pollLive()
+        precondition(reader.readCount == 2)
+        precondition(reader.cancellations == 0)
         reader.finishNext(unchanged: true)
         drainMainQueue()
+        precondition(reader.readCount == 2)
     }
 
     @MainActor
@@ -828,7 +1002,8 @@ private final class ControlledRecordingReader: RecordingReading, @unchecked Send
     }
 
     func finishNext(missingSecond: Bool = false, unchanged: Bool = false,
-                    second: UInt64? = nil, publication: UInt64 = 9) {
+                    second: UInt64? = nil, publication: UInt64 = 9, catalog: Catalog? = nil,
+                    failure: RecordingError? = nil) {
         let next = lock.withLock {
             precondition(pending != nil)
             let next = pending
@@ -836,10 +1011,15 @@ private final class ControlledRecordingReader: RecordingReading, @unchecked Send
             return next
         }
         guard let (request, completion) = next else { preconditionFailure() }
+        if let failure {
+            completion(.failure(failure))
+            return
+        }
+
         do {
             let result = try response(request, missingSecond: missingSecond, second: second,
                 publication: publication)
-            completion(.success(ReadResult(catalog: result.catalog, selection: result.selection,
+            completion(.success(ReadResult(catalog: catalog ?? result.catalog, selection: result.selection,
                 page: result.page, machinePages: result.machinePages, unchanged: unchanged)))
         } catch let failure as RecordingError {
             completion(.failure(failure))
