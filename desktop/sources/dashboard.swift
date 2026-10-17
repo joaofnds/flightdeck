@@ -1,4 +1,3 @@
-import Charts
 import SwiftUI
 
 struct Dashboard: View {
@@ -63,27 +62,24 @@ struct Dashboard: View {
                         .font(.caption).foregroundStyle(theme.muted)
                 }
             }
-            Chart(points) { point in
-                ForEach(Array(memoryValues(point).enumerated()), id: \.offset) { _, item in
-                    if let value = item.1 {
-                        AreaMark(x: .value("Time", point.date), y: .value("GiB", Double(value) / 1_073_741_824),
-                                 series: .value("Segment", "\(point.segment)-\(item.0)"))
-                            .foregroundStyle(by: .value("Memory", item.0))
-                    }
+            if let selection = model.selection {
+                let memory = RecordedMemoryData(selection: selection, theme: theme)
+                plot(context: memory.context, lines: memory.categories,
+                     style: TimeSeriesStyle(unit: "GiB", stack: true, gradient: false,
+                         fill: 1, interpolation: .linear)) { point in
+                    metricText(point.memoryActiveBytes.map { Double($0) / 1_073_741_824 },
+                               unit: "GiB active")
                 }
+                HStack(spacing: theme.panelGap) {
+                    ForEach(Array(memory.categories.enumerated()), id: \.offset) { _, line in
+                        HStack(spacing: 6) {
+                            Circle().fill(line.color).frame(width: 6, height: 6)
+                            Text(line.name).foregroundStyle(theme.muted)
+                        }
+                    }
+                }.font(.caption)
             }
-            .chartForegroundStyleScale(["Active": theme.memoryActiveSeries, "Wired": theme.memoryWiredSeries, "Compressed": theme.memoryCompressedSeries])
-            .chartYAxisLabel("GiB").chartLegend(position: .bottom)
-            .frame(height: theme.chartHeight)
-            .modifier(ChartInspection(inspection: inspection) { point in
-                metricText(point.memoryActiveBytes.map { Double($0) / 1_073_741_824 }, unit: "GiB active")
-            })
         }
-    }
-
-    private func memoryValues(_ point: Metric) -> [(String, UInt64?)] {
-        [("Active", point.memoryActiveBytes), ("Wired", point.memoryWiredBytes),
-         ("Compressed", point.memoryCompressedBytes)]
     }
 
     private func linePanel(_ title: String, value: Double?, unit: String, color: Color,
@@ -92,40 +88,42 @@ struct Dashboard: View {
         Panel(title: title, explanation: explanation) {
             Text(metricText(value, unit: unit)).font(theme.metricFont)
                 .monospacedDigit()
-            Chart(plotSamples(metric, scale: scale)) { sample in
-                LineMark(x: .value("Time", sample.date), y: .value(unit, sample.value),
-                         series: .value("Segment", sample.segment))
-                    .foregroundStyle(color).lineStyle(StrokeStyle(lineWidth: theme.chartStroke))
+            if let selection = model.selection {
+                let line = TimeSeriesLine(name: title, color: color,
+                    values: points.map { $0[keyPath: metric].map { $0 / scale } })
+                let upper = domain?.upperBound ?? max(1,
+                    line.values.compactMap { $0 }.max().map { $0 * 1.1 } ?? 1)
+                plot(context: RecordedChartContext(selection: selection), lines: [line],
+                     style: TimeSeriesStyle(unit: unit, minimum: domain?.lowerBound ?? 0,
+                         maximum: upper, fill: 0, interpolation: .linear)) { point in
+                    metricText(point[keyPath: metric].map { $0 / scale }, unit: unit)
+                }
             }
-            .chartYScale(domain: domain ?? 0...max(1, points.compactMap { $0[keyPath: metric] }.max().map { $0 / scale * 1.1 } ?? 1))
-            .chartYAxisLabel(unit)
-            .frame(height: theme.chartHeight)
-            .modifier(ChartInspection(inspection: inspection) { point in
-                metricText(point[keyPath: metric].map { $0 / scale }, unit: unit)
-            })
         }
     }
-    private struct PlotSample: Identifiable {
-        let id: String
-        let date: Date
-        let value: Double
-        let segment: UInt64
-    }
 
-    private func plotSamples(_ metric: KeyPath<Metric, Double?>, scale: Double) -> [PlotSample] {
-        var samples: [PlotSample] = []
-        var segment: UInt64 = 0
-        var previousSegment: UInt64?
-        for point in points {
-            if previousSegment != point.segment { segment += 1 }
-            previousSegment = point.segment
-            guard let value = point[keyPath: metric] else { segment += 1; continue }
-            samples.append(PlotSample(id: point.id, date: point.date,
-                                      value: value / scale, segment: segment))
+    @ViewBuilder
+    private func plot(context: RecordedChartContext, lines: [TimeSeriesLine],
+                      style: TimeSeriesStyle, readout: @escaping (Metric) -> String) -> some View {
+        if let plot = context.plot(lines: lines) {
+            let labels = (0...2).map { offset in
+                Date(timeIntervalSince1970: context.domain.lowerBound
+                    + (context.domain.upperBound - context.domain.lowerBound) * Double(offset) / 2)
+                    .formatted(.dateTime.hour().minute())
+            }
+            let selectedTime = context.selection.selected.map { Double($0.wallNs) / 1e9 }
+                ?? Double(context.selection.second)
+            TimeSeriesPlot(model: plot, style: style, selectedTime: selectedTime, labels: labels)
+                .frame(height: theme.chartHeight)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(lines.map(\.name).joined(separator: ", "))
+                .accessibilityValue(inspection.reading(in: context.selection, readout: readout))
+                .modifier(ChartInspection(inspection: inspection, domain: context.domain,
+                                          readout: readout))
+        } else {
+            Text("Chart readings exceed the display bounds.").foregroundStyle(theme.muted)
         }
-        return samples
     }
-
 }
 
 @MainActor
@@ -170,6 +168,15 @@ final class ChartInspectionState: ObservableObject {
         }
     }
 
+    func reading(in selection: Selection?, readout: (Metric) -> String) -> String {
+        guard let date = date(in: selection) else {
+            return selection?.summary.map(readout) ?? "Unavailable"
+        }
+
+        let reading = point(in: selection).map(readout) ?? "No recorded observation"
+        return date.formatted(.dateTime.hour().minute().second()) + ", " + reading
+    }
+
     func hover(at date: Date?) { value = date.map(Position.pointer) }
     func clear() { value = nil }
 
@@ -198,74 +205,67 @@ private struct ChartInspection: ViewModifier {
     @Environment(\.flightdeckTheme) private var theme
 
     @ObservedObject var inspection: ChartInspectionState
+    let domain: ClosedRange<Double>
     let readout: (Metric) -> String
+    @FocusState private var focused: Bool
 
     func body(content: Content) -> some View {
-        content.chartXScale(domain: contextDomain)
-            .chartXAxis { AxisMarks(values: .automatic(desiredCount: 4)) }
-            .chartYAxis { AxisMarks(values: .automatic(desiredCount: 4)) }
-            .chartOverlay { proxy in
-                GeometryReader { geometry in
-                    ZStack(alignment: .topLeading) {
-                        Color.clear.contentShape(Rectangle())
-                            .onTapGesture { location in
-                                guard !model.busy, let selection = model.selection else { return }
+        content.overlay {
+            GeometryReader { geometry in
+                let coordinates = TimeSeriesCoordinates(domain: domain, size: geometry.size)
+                ZStack(alignment: .topLeading) {
+                    Color.clear.contentShape(Rectangle())
+                        .onTapGesture { location in
+                            focused = true
+                            guard !model.busy, let selection = model.selection else { return }
 
-                                guard let frame = proxy.plotFrame else { return }
-                                let plot = geometry[frame]
-                                guard plot.contains(location),
-                                      let date: Date = proxy.value(atX: location.x - plot.minX)
-                                else { return }
-                                let seconds = date.timeIntervalSince1970
-                                guard seconds.isFinite, seconds >= 0,
-                                      seconds < Double(UInt64.max) else { return }
-                                inspection.clear()
-                                let context = RecordedChartContext(selection: selection)
-                                if let point = context.point(at: seconds),
-                                   let target = context.target(id: point.id) {
-                                    model.select(target)
-                                } else {
-                                    model.load(second: UInt64(seconds))
-                                }
-                            }
-                            .onContinuousHover { phase in
-                                switch phase {
-                                case .active(let location):
-                                    guard !model.busy, let frame = proxy.plotFrame else { return }
-                                    let plot = geometry[frame]
-                                    inspection.hover(at: plot.contains(location)
-                                        ? proxy.value(atX: location.x - plot.minX) : nil)
-                                case .ended: inspection.clear()
-                                }
-                            }
-                        if let date = inspection.date(in: model.selection) {
-                            VStack(alignment: .leading) {
-                                if let point = inspectedPoint {
-                                    Text(point.date, format: .dateTime.hour().minute().second())
-                                    Text(readout(point)).monospacedDigit()
-                                } else {
-                                    Text(date, format: .dateTime.hour().minute().second())
-                                    Text("No recorded observation")
-                                }
-                            }.font(.caption).padding(6)
-                                .background(theme.panel, in: RoundedRectangle(cornerRadius: theme.controlRadius))
-                                .allowsHitTesting(false)
-                            if let point = inspectedPoint,
-                               let x = proxy.position(forX: point.date), let frame = proxy.plotFrame {
-                                Rectangle().fill(theme.focus.opacity(0.6)).frame(width: 1)
-                                    .offset(x: geometry[frame].minX + x).allowsHitTesting(false)
+                            guard let seconds = coordinates.time(at: location) else { return }
+                            guard seconds.isFinite, seconds >= 0,
+                                  seconds < Double(UInt64.max) else { return }
+                            inspection.clear()
+                            let context = RecordedChartContext(selection: selection)
+                            if let point = context.point(at: seconds),
+                               let target = context.target(id: point.id) {
+                                model.select(target)
+                            } else {
+                                model.load(second: UInt64(seconds))
                             }
                         }
-                        if let selection = model.selection,
-                           let x = proxy.position(forX: cursorDate(selection)),
-                           let frame = proxy.plotFrame {
-                            Rectangle().fill(theme.muted.opacity(0.5)).frame(width: 1)
-                                .offset(x: geometry[frame].minX + x).allowsHitTesting(false)
+                        .onContinuousHover { phase in
+                            switch phase {
+                            case .active(let location):
+                                guard !model.busy else { return }
+                                inspection.hover(at: coordinates.time(at: location).map {
+                                    Date(timeIntervalSince1970: $0)
+                                })
+                            case .ended: inspection.clear()
+                            }
+                        }
+                    if let date = inspection.date(in: model.selection) {
+                        VStack(alignment: .leading) {
+                            if let point = inspectedPoint {
+                                Text(point.date, format: .dateTime.hour().minute().second())
+                                Text(readout(point)).monospacedDigit()
+                            } else {
+                                Text(date, format: .dateTime.hour().minute().second())
+                                Text("No recorded observation")
+                            }
+                        }.font(.caption).padding(6)
+                            .background(theme.panel, in: RoundedRectangle(cornerRadius: theme.controlRadius))
+                            .allowsHitTesting(false)
+                        if let point = inspectedPoint,
+                           let x = coordinates.position(at: point.date.timeIntervalSince1970) {
+                            Rectangle().fill(theme.focus.opacity(0.6))
+                                .frame(width: 1, height: coordinates.frame.height)
+                                .offset(x: x, y: coordinates.frame.minY).allowsHitTesting(false)
                         }
                     }
                 }
             }
-            .focusable()
+        }
+            .focusable().focused($focused)
+            .overlay(RoundedRectangle(cornerRadius: theme.controlRadius)
+                .stroke(focused ? theme.focus : .clear, lineWidth: 2))
             .accessibilityHint("Use Left and Right to inspect observations, Home or End for the range, and Return to select the inspected second.")
             .onKeyPress(.leftArrow) { inspect(step: -1) }
             .onKeyPress(.rightArrow) { inspect(step: 1) }
@@ -298,18 +298,4 @@ private struct ChartInspection: ViewModifier {
 
         return inspection.boundary(first: first, in: model.selection) ? .handled : .ignored
     }
-
-    private func cursorDate(_ selection: Selection) -> Date {
-        if let observation = selection.selected {
-            return Date(timeIntervalSince1970: Double(observation.wallNs) / 1e9)
-        }
-        return Date(timeIntervalSince1970: Double(selection.second))
-    }
-
-    private var contextDomain: ClosedRange<Date> {
-        let end = model.selection?.second ?? 0
-        let first = end >= 899 ? end - 899 : 0
-        return Date(timeIntervalSince1970: Double(first))...Date(timeIntervalSince1970: Double(end) + 1)
-    }
-
 }

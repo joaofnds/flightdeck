@@ -78,6 +78,7 @@ struct TimeSeriesStyle {
     var gradient: Bool? = nil
     var lineWidth: Double? = nil
     var fill: Double? = nil
+    var interpolation: TimeSeriesInterpolation = .monotone
 
     var isValid: Bool {
         let bounds = [minimum, maximum].compactMap { $0 }
@@ -158,7 +159,7 @@ struct TimeSeriesPlot: View {
         }
     }
 
-    static func frame(size: CGSize) -> CGRect {
+    nonisolated static func frame(size: CGSize) -> CGRect {
         CGRect(x: 50, y: 24, width: max(1, size.width - 115), height: max(1, size.height - 54))
     }
 
@@ -192,11 +193,12 @@ struct TimeSeriesPlot: View {
         guard let first = top.first else { return }
 
         let color = line.color
-        let path = smoothPath(top)
+        var path = Path()
+        style.interpolation.append(top, to: &path, moving: true)
         let opacity = line.fill ?? style.fill ?? 0.1
         if opacity > 0, !bottom.isEmpty {
             var area = path
-            appendSmooth(Array(bottom.reversed()), to: &area, moving: false)
+            style.interpolation.append(Array(bottom.reversed()), to: &area, moving: false)
             area.closeSubpath()
             if style.gradient != false, let highest = top.map(\.y).min(), let lowest = bottom.map(\.y).max() {
                 context.fill(area, with: .linearGradient(Gradient(colors: [color.opacity(opacity), color.opacity(opacity * 0.08)]), startPoint: CGPoint(x: 0, y: highest), endPoint: CGPoint(x: 0, y: max(highest + 1, lowest))))
@@ -206,36 +208,6 @@ struct TimeSeriesPlot: View {
         }
         context.stroke(path, with: .color(color), style: StrokeStyle(lineWidth: style.lineWidth ?? theme.chartStroke, dash: line.dashed == true ? [5, 4] : []))
         if top.count == 1 { context.fill(Path(ellipseIn: CGRect(x: first.x - 2, y: first.y - 2, width: 4, height: 4)), with: .color(color)) }
-    }
-
-    private func smoothPath(_ points: [CGPoint]) -> Path {
-        var path = Path()
-        appendSmooth(points, to: &path, moving: true)
-        return path
-    }
-
-    private func appendSmooth(_ points: [CGPoint], to path: inout Path, moving: Bool) {
-        guard let first = points.first else { return }
-
-        if moving { path.move(to: first) } else { path.addLine(to: first) }
-        for index in 1..<points.count {
-            let before = points[index - 1], after = points[index]
-            let width = after.x - before.x
-            guard width != 0 else { path.addLine(to: after); continue }
-
-            let slope = (after.y - before.y) / width
-            let oldSlope = index > 1 ? (before.y - points[index - 2].y) / (before.x - points[index - 2].x) : slope
-            let nextSlope = index + 1 < points.count ? (points[index + 1].y - after.y) / (points[index + 1].x - after.x) : slope
-            let firstSlope = slope * oldSlope > 0 ? 2 * slope * oldSlope / (slope + oldSlope) : 0
-            let lastSlope = slope * nextSlope > 0 ? 2 * slope * nextSlope / (slope + nextSlope) : 0
-            let firstControl = CGPoint(x: before.x + width / 3, y: before.y + firstSlope * width / 3)
-            let lastControl = CGPoint(x: after.x - width / 3, y: after.y - lastSlope * width / 3)
-            if firstControl.y.isFinite, lastControl.y.isFinite {
-                path.addCurve(to: after, control1: firstControl, control2: lastControl)
-            } else {
-                path.addLine(to: after)
-            }
-        }
     }
 
     private func xPosition(_ index: Int, plot: CGRect) -> Double {
@@ -253,5 +225,57 @@ struct TimeSeriesPlot: View {
 
     private func axis(_ value: Double) -> String {
         value.formatted(.number.notation(abs(value) >= 10000 ? .compactName : .automatic).precision(.fractionLength(0...1)))
+    }
+}
+
+enum TimeSeriesInterpolation {
+    case linear
+    case monotone
+
+    func append(_ points: [CGPoint], to path: inout Path, moving: Bool) {
+        guard let first = points.first else { return }
+
+        if moving { path.move(to: first) } else { path.addLine(to: first) }
+        for index in 1..<points.count {
+            let before = points[index - 1], after = points[index]
+            if self == .linear { path.addLine(to: after); continue }
+            let width = after.x - before.x
+            guard width != 0 else { path.addLine(to: after); continue }
+
+            let slope = (after.y - before.y) / width
+            let oldSlope = index > 1 ? (before.y - points[index - 2].y) / (before.x - points[index - 2].x) : slope
+            let nextSlope = index + 1 < points.count ? (points[index + 1].y - after.y) / (points[index + 1].x - after.x) : slope
+            let firstSlope = slope * oldSlope > 0 ? 2 * slope * oldSlope / (slope + oldSlope) : 0
+            let lastSlope = slope * nextSlope > 0 ? 2 * slope * nextSlope / (slope + nextSlope) : 0
+            let firstControl = CGPoint(x: before.x + width / 3, y: before.y + firstSlope * width / 3)
+            let lastControl = CGPoint(x: after.x - width / 3, y: after.y - lastSlope * width / 3)
+            if firstControl.y.isFinite, lastControl.y.isFinite {
+                path.addCurve(to: after, control1: firstControl, control2: lastControl)
+            } else {
+                path.addLine(to: after)
+            }
+        }
+    }
+}
+
+struct TimeSeriesCoordinates {
+    let domain: ClosedRange<Double>
+    let size: CGSize
+
+    var frame: CGRect { TimeSeriesPlot.frame(size: size) }
+
+    func time(at location: CGPoint) -> Double? {
+        guard location.x.isFinite, location.y.isFinite,
+              frame.contains(location) else { return nil }
+
+        return domain.lowerBound + (location.x - frame.minX) / frame.width
+            * (domain.upperBound - domain.lowerBound)
+    }
+
+    func position(at time: Double) -> Double? {
+        guard time.isFinite, domain.contains(time) else { return nil }
+
+        return frame.minX + (time - domain.lowerBound)
+            / (domain.upperBound - domain.lowerBound) * frame.width
     }
 }

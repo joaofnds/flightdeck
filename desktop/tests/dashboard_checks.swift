@@ -4,6 +4,7 @@ import SwiftUI
 
 @MainActor
 func runOverviewInspectionChecks() throws {
+    try reports_the_inspected_reading_to_accessibility()
     // Keyboard navigation must retain siblings that share a wall second.
     let data = Data(#"""
         {"value":[
@@ -181,6 +182,9 @@ private func checks_recorded_alternative_targets() throws {
 }
 
 func runDashboardChecks() {
+    preserves_default_curved_plot_geometry()
+    preserves_linear_plot_geometry()
+    maps_inspection_to_the_shared_plot_frame()
     checks_recorded_plot_boundaries()
     checks_recorded_plot_clock_boundaries()
     checks_recorded_plot_validation()
@@ -488,4 +492,78 @@ private func checks_unchanged_inspection_does_not_publish(snapshot: ReferenceSna
     model.inspectDiagnostic(report: 0)
     model.inspectDiagnostic(report: 0)
     precondition(changes == 3)
+}
+
+private func preserves_linear_plot_geometry() {
+    // Overview joins observations directly, without curving their recorded trajectory.
+    let points = [CGPoint(x: 0, y: 0), CGPoint(x: 1, y: 2), CGPoint(x: 2, y: 0)]
+    var expected = Path()
+    expected.move(to: points[0])
+    expected.addLine(to: points[1])
+    expected.addLine(to: points[2])
+    var actual = Path()
+
+    TimeSeriesInterpolation.linear.append(points, to: &actual, moving: true)
+
+    precondition(actual == expected)
+}
+
+private func maps_inspection_to_the_shared_plot_frame() {
+    // Cursor placement and input use the same margins and fractional wall times.
+    let coordinates = TimeSeriesCoordinates(domain: 100...1000, size: CGSize(width: 615, height: 254))
+
+    let middle = coordinates.position(at: 550.25)!
+    let time = coordinates.time(at: CGPoint(x: middle, y: 100))
+
+    precondition(abs(time! - 550.25) < 0.000001)
+    precondition(coordinates.time(at: CGPoint(x: 49, y: 100)) == nil)
+    precondition(coordinates.time(at: CGPoint(x: 100, y: 23)) == nil)
+    precondition(coordinates.position(at: 99) == nil)
+    precondition(coordinates.position(at: .infinity) == nil)
+    precondition(coordinates.position(at: 100) == 50)
+    precondition(coordinates.position(at: 1000) == 550)
+}
+
+private func preserves_default_curved_plot_geometry() {
+    // Existing Canvas users retain their monotone curve when no interpolation is specified.
+    let points = [CGPoint(x: 0, y: 0), CGPoint(x: 3, y: 6), CGPoint(x: 6, y: 0)]
+    let style = TimeSeriesStyle(unit: "%")
+    var expected = Path()
+    expected.move(to: points[0])
+    expected.addCurve(to: points[1], control1: CGPoint(x: 1, y: 2),
+                      control2: CGPoint(x: 2, y: 6))
+    expected.addCurve(to: points[2], control1: CGPoint(x: 4, y: 6),
+                      control2: CGPoint(x: 5, y: 2))
+    var actual = Path()
+
+    style.interpolation.append(points, to: &actual, moving: true)
+
+    precondition(actual == expected)
+}
+
+@MainActor
+private func reports_the_inspected_reading_to_accessibility() throws {
+    // The accessible value follows inspection, including an inspected empty second.
+    let data = Data(#"""
+        {"value":[
+          {"run":"run","boot":"boot","publication":1,"wall_ns":1000000000000,
+           "segment":1,"cpu_percent":10},
+          {"run":"run","boot":"boot","publication":2,"wall_ns":1001000000000,
+           "segment":1,"cpu_percent":80}]}
+        """#.utf8)
+    let points: [Metric] = try decodeRecordingResponse(data)
+    let selection = Selection(second: 1001, selected: nil, alternatives: [],
+        summary: points[1], trends: points, contextSeconds: 900)
+    let inspection = ChartInspectionState()
+    let readout: (Metric) -> String = { metricText($0.cpuPercent, unit: "%") }
+
+    precondition(inspection.reading(in: selection, readout: readout) == readout(points[1]))
+    precondition(inspection.boundary(first: true, in: selection))
+
+    precondition(inspection.reading(in: selection, readout: readout).hasSuffix(readout(points[0])))
+    inspection.hover(at: Date(timeIntervalSince1970: 999))
+    precondition(inspection.reading(in: selection, readout: readout)
+        .hasSuffix("No recorded observation"))
+    inspection.clear()
+    precondition(inspection.reading(in: selection, readout: readout) == readout(points[1]))
 }
