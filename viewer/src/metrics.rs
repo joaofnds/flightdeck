@@ -410,7 +410,7 @@ fn counter_delta(
     Ok(Some(sum))
 }
 
-fn number(value: u64) -> f64 {
+pub(crate) fn number(value: u64) -> f64 {
     let bytes = value.to_le_bytes();
     let low = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
     let high = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);

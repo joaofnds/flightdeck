@@ -1,5 +1,35 @@
 use super::*;
 
+macro_rules! unsigned_number_case {
+    ($name:ident, $value:expr, $expected:expr) => {
+        #[test]
+        fn $name() {
+            // Goal: unsigned counter conversion retains the floating-point range at word edges.
+            // Method: compare a boundary input with its independently specified f64 result.
+            let expected: f64 = $expected;
+
+            assert_eq!(number($value).to_bits(), expected.to_bits());
+        }
+    };
+}
+
+unsigned_number_case!(converts_unsigned_zero, 0, 0.0);
+unsigned_number_case!(
+    converts_unsigned_low_word_limit,
+    4_294_967_295,
+    4_294_967_295.0
+);
+unsigned_number_case!(
+    converts_unsigned_high_word_start,
+    4_294_967_296,
+    4_294_967_296.0
+);
+unsigned_number_case!(
+    converts_unsigned_counter_limit,
+    u64::MAX,
+    18_446_744_073_709_551_616.0
+);
+
 struct Fixture {
     tables: Tables,
     previous: Observation,

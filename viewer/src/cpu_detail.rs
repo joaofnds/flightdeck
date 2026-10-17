@@ -163,18 +163,11 @@ fn project_busy(interval: Interval<'_>) -> Result<Option<f64>> {
         return Ok(None);
     }
 
-    let percent = number(busy) / number(total) * 100.0;
+    let percent = crate::metrics::number(busy) / crate::metrics::number(total) * 100.0;
     assert!(percent.is_finite());
     assert!((0.0..=100.0).contains(&percent));
 
     Ok(Some(percent))
-}
-
-fn number(value: u64) -> f64 {
-    let bytes = value.to_le_bytes();
-    let low = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-    let high = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
-    f64::from(high) * 4_294_967_296.0 + f64::from(low)
 }
 
 #[cfg(test)]
