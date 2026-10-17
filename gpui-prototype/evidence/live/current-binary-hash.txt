@@ -1,0 +1,1 @@
+71e49724ddcf9bac6c62c454d9cb6e98ac0390353ced941a085fab8b4c0f04a4  gpui-prototype/target/release/flightdeck-gpui

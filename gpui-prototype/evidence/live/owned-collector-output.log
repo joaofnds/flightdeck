@@ -1,0 +1,14 @@
+identity ring bytes=1012654976 reader_limit_bytes=1073741824
+started in 151.2 ms of CPU
+identity warm-up observations=1397 measured=1037 refused=0 gone=1 unsupported_source_or_gate=359 changed=0 invalid=0 exhausted=0 gate_unavailable=359 unexpected_syscalls=0 dictionary_entries=670 dictionary_bytes=24368
+identity warm-up last_failure_pid=93627 creation_before=Ok(ProcessCreation { unique_id: 4338370, pid_version: 6590726 }) readiness=Err(Kernel { status: 5, name: 0 }) path=None creation_after=Ok(ProcessCreation { unique_id: 4338370, pid_version: 6590726 }) candidate=false dictionary=None
+{"mode":"live","route":"overview","elapsed_seconds":8.002378083,"updates":8,"renders":10,"read_ms":20.024,"selected":{"run":"964e0e15257b5c7fcee5d54524e99669","boot":"e913c387447048fb8a544ed2436d2e8c","publication":8,"run_tick":7,"wall_ns":1792272602660949000,"window_losses":null,"reader_losses":{"publications":0,"events":0,"unknown":false}},"error":null}
+whole run, ticks 1-8: collector CPU 2.47% of a core, 49% of the combined budget, 29.81 mW, 92% of instructions on Super cores; ticks late 3.4 ms on average, 10.0 ms at most, 0 slips
+  ms of CPU a second: processes 12.89, coalitions 3.72, events 0.10, scans 0.57, start reads 0.01, watches 0.03, exit reads 0.02, ioreport 6.53, smc 0.14, machine 0.08, interfaces 0.23, ring 0.27, unattributed 0.10
+  last tick read 1038 processes (358 refused, 0 gone), 694 coalitions, 18 CPUs, 35 interfaces; over these ticks 25 forks, 33 rescans (25 leading, 0 trailing, 8 listing), 25 starts (0 watches refused), 22 execs, exits seen 23 (15 read, 3 refused, 5 gone), found already exited 3 (2 read, 0 refused, 1 gone); 0 starts, 0 execs and 0 exits dropped from a full event list
+  processes started over the run 25, found 25, missed 0, 0 of them dropped from a full event list
+recording tail elapsed_ns=8015566583 collector_cpu_ns=197926501 persister_cpu_ns=13695916 combined_cpu_ns=211622417 combined_percent=2.640143
+recording cumulative collector_cpu_ns=363848583 persister_cpu_ns=13695916 current_footprint_bytes=2834984 lifetime_footprint_bytes_max=3359272
+identity tail observations=11185 measured=8305 refused=0 gone=8 unsupported_source_or_gate=2872 changed=0 invalid=0 exhausted=0 gate_unavailable=2872 unexpected_syscalls=0 dictionary_entries=670 dictionary_bytes=24368
+identity tail last_failure_pid=93627 creation_before=Ok(ProcessCreation { unique_id: 4338370, pid_version: 6590726 }) readiness=Err(Kernel { status: 5, name: 0 }) path=None creation_after=Ok(ProcessCreation { unique_id: 4338370, pid_version: 6590726 }) candidate=false dictionary=None
+recording drain elapsed_ns=1233945292 collector_cpu_ns=1098334 persister_cpu_ns=42350084 persister_total_cpu_ns=56046000 persister_status=0 persister_resident_bytes_max=50167808

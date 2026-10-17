@@ -99,7 +99,11 @@ impl Dashboard {
     }
 }
 
-fn hardware_stage(speeds: [Option<f32>; 2], elapsed: f32, animate: bool) -> impl IntoElement {
+pub(crate) fn hardware_stage(
+    speeds: [Option<f32>; 2],
+    elapsed: f32,
+    animate: bool,
+) -> impl IntoElement {
     div()
         .relative()
         .w(px(840.0))

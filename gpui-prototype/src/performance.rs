@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 use gpui::{Context, Window};
 
 pub struct Options {
+    pub source: Source,
     pub page: String,
     pub scrub: bool,
     pub animate: bool,
@@ -10,6 +11,14 @@ pub struct Options {
     pub range_minutes: u16,
     pub seconds: Option<u32>,
     mode: RunMode,
+}
+
+#[derive(Default)]
+pub struct Source {
+    pub reference: bool,
+    pub recording: Option<std::path::PathBuf>,
+    pub check: bool,
+    pub start_collector: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -22,6 +31,7 @@ enum RunMode {
 impl Options {
     pub fn parse() -> Result<Self, Box<dyn std::error::Error>> {
         let mut options = Self {
+            source: Source::default(),
             page: "overview".into(),
             scrub: false,
             animate: false,
@@ -31,21 +41,23 @@ impl Options {
             mode: RunMode::Interactive,
         };
         let arguments: Vec<_> = std::env::args().skip(1).collect();
-        if arguments.len() > 12 {
+        if arguments.len() > 20 {
             return Err("too many arguments".into());
         }
         let mut position = 0;
-        for _ in 0..12 {
+        for _ in 0..20 {
             if position == arguments.len() {
                 break;
             }
             position = options.parse_argument(&arguments, position)?;
         }
-        if options.seconds.is_some() {
-            if !options.scrub {
-                if !options.animate {
-                    if !options.smoke() {
-                        return Err("--seconds requires --scrub, --animate, or --smoke".into());
+        if options.source.reference {
+            if options.seconds.is_some() {
+                if !options.scrub {
+                    if !options.animate {
+                        if !options.smoke() {
+                            return Err("--seconds requires --scrub, --animate, or --smoke".into());
+                        }
                     }
                 }
             }
@@ -112,12 +124,13 @@ impl Options {
             }
             "--help" => {
                 println!(
-                    "flightdeck-gpui [--page ROUTE] [--scrub] [--animate] \
-                        [--hardware] [--smoke] [--minutes 15|60] [--seconds 1..300] [--check]"
+                    "flightdeck-gpui [--recording PATH] [--start-collector] [--page ROUTE]\n\
+                     [--live-check --seconds 5..300] [--reference [--scrub] [--animate]\n\
+                     [--hardware] [--smoke] [--minutes 15|60] [--seconds 1..300]] [--check]"
                 );
                 std::process::exit(0);
             }
-            _ => return Err(format!("unknown flag {flag}").into()),
+            _ => return self.source.parse_argument(flag, arguments, position),
         }
         Ok(position)
     }
@@ -130,6 +143,32 @@ impl Options {
         }
         self.mode = mode;
         Ok(())
+    }
+}
+
+impl Source {
+    fn parse_argument(
+        &mut self,
+        flag: &str,
+        arguments: &[String],
+        mut position: usize,
+    ) -> Result<usize, Box<dyn std::error::Error>> {
+        match flag {
+            "--reference" => self.reference = true,
+            "--live-check" => self.check = true,
+            "--start-collector" => self.start_collector = true,
+            "--recording" => {
+                self.recording = Some(
+                    arguments
+                        .get(position)
+                        .ok_or("--recording needs a path")?
+                        .into(),
+                );
+                position += 1;
+            }
+            _ => return Err(format!("unknown flag {flag}").into()),
+        }
+        Ok(position)
     }
 }
 

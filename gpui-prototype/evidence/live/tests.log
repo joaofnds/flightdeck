@@ -1,0 +1,56 @@
+   Compiling viewer v0.1.0 (/Users/joaofnds/code/flightdeck/viewer)
+   Compiling flightdeck-gpui v0.1.0 (/Users/joaofnds/code/flightdeck/gpui-prototype)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.40s
+     Running unittests src/main.rs (gpui-prototype/target/debug/deps/flightdeck_gpui-745d0050800e119d)
+
+running 48 tests
+test live_executables::tests::incomplete_hex_bytes_are_unavailable ... ok
+test live_executables::tests::non_hex_bytes_are_unavailable ... ok
+test live_executables::tests::oversized_executable_bytes_are_unavailable ... ok
+test live_notices::tests::zero_known_losses_do_not_raise_a_notice ... ok
+test charts::live_tests::a_two_point_dashed_run_keeps_measured_geometry ... ok
+test live_hardware::tests::fans_refuse_duplicate_channels_and_wrong_publication ... ok
+test live_hardware::tests::fans_refuse_invalid_values_and_channel ... ok
+test live_notices::tests::collection_losses_keep_exact_counts_and_unknown_state ... ok
+test live_notices::tests::an_inspected_retired_reader_keeps_its_own_loss_notice ... ok
+test live_projection::tests::clicking_the_selected_second_keeps_its_chosen_publication ... ok
+test live_hardware::tests::fans_refuse_invalid_schema ... ok
+test live_hardware::tests::fans_preserve_missing_speed ... ok
+test live_hardware::tests::fans_refuse_other_observation ... ok
+test live_projection::tests::app_cursor_matches_decimal_stamp_identity_to_its_selected_observation ... ok
+test live_executables::tests::groups_exact_bytes_instead_of_display_names ... ok
+test live_executables::tests::unavailable_names_have_a_distinct_filter ... ok
+test live_projection::tests::cursor_identifies_the_exact_selected_alternative_instead_of_the_latest_point ... ok
+test live_projection::tests::clicks_use_the_exact_nine_hundred_second_domain ... ok
+test live_projection::tests::missing_selected_second_keeps_context_but_has_no_current_readout ... ok
+test live_projection::tests::history_projection_reads_decimal_stamps_and_partial_measurements ... ok
+test live_projection::tests::quantities_follow_binary_memory_and_adaptive_power_units ... ok
+test live_projection::tests::energy_series_remain_independent_and_memory_categories_only_stack_in_overview ... ok
+test live_projection::tests::invalid_clocks_and_nonfinite_values_are_reported_instead_of_plotted ... ok
+test live_projection::tests::positions_use_wall_time_and_segments_include_run_identity ... ok
+test live_source::tests::decodes_non_utf8_app_key_bytes_without_changing_them ... ok
+test live_source::tests::keeps_the_same_observation_when_loss_metadata_changes ... ok
+test live_projection::tests::sends_are_mirrored_without_negating_readouts_or_errors ... ok
+test live_source::tests::matches_live_app_stamp_words_with_the_selected_hex_identity ... ok
+test live_source::tests::refuses_missing_observation_identities ... ok
+test live_source::tests::refuses_a_missing_observation_instead_of_selecting_a_sibling ... ok
+test live_projection::tests::shared_chart_domain_keeps_sent_traffic_negative_and_power_unstacked ... ok
+test live_source::tests::rejects_an_incomplete_app_key_byte ... ok
+test live_source::tests::rejects_app_keys_beyond_the_path_bound ... ok
+test live_source::tests::refuses_superseded_results_after_accepting_a_new_request ... ok
+test live_source::tests::rejects_app_payloads_from_another_publication ... ok
+test live_source::tests::rejects_non_hexadecimal_app_key_bytes ... ok
+test live_source::tests::resolves_the_exact_observation_among_same_second_siblings ... ok
+test live_source::tests::the_default_app_survives_a_new_first_row_and_an_empty_page ... ok
+test tests::clamps_inspection_after_the_last_cell ... ok
+test tests::clamps_inspection_before_the_first_cell ... ok
+test tests::gives_outgoing_traffic_room_below_zero ... ok
+test tests::keeps_installed_memory_independent_of_stacked_categories ... ok
+test live_executables::tests::groups_count_only_the_bounded_loaded_page ... ok
+test live_projection::tests::empty_or_unavailable_observations_never_fabricate_cpu_activity ... ok
+test tests::keeps_captured_missing_samples_unavailable ... ok
+test tests::loads_every_captured_destination_and_both_ranges ... ok
+test tests::keeps_secondary_units_out_of_the_primary_scale ... ok
+test tests::retains_app_totals_when_process_histories_were_not_captured ... ok
+
+test result: ok. 48 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s

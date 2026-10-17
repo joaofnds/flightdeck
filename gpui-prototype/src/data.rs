@@ -5,6 +5,7 @@ use serde::Deserialize;
 
 pub const SAMPLE_COUNT: usize = 121;
 pub const PANEL_LIMIT: usize = 128;
+pub const LIVE_SAMPLE_LIMIT: usize = 4096;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -43,6 +44,9 @@ pub struct Specification {
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Panel {
+    pub selected_index: Option<usize>,
+    pub positions: Option<Vec<f32>>,
+    pub segments: Option<Vec<u64>>,
     pub id: String,
     pub title: String,
     pub unit: String,

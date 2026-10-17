@@ -1,0 +1,4 @@
+Started owned collector 67893
+live first-frame viewport=Size { 1320px × 901px } scale=2
+persister sealed window=0 publications=1..10 loss=0 events_lost=0 seal_ns=109826041 staged_bytes=73260432
+persister finished footprint_bytes=30900800 footprint_bytes_max=30949952

@@ -83,7 +83,7 @@ From `gpui-prototype/`, run this while leaving the measured window exposed:
 
 ```sh
 mkdir -p measurements
-target/release/flightdeck-gpui > measurements/app.log 2>&1 &
+target/release/flightdeck-gpui --reference > measurements/app.log 2>&1 &
 measured_pid=$!
 sleep 20
 ../target/release/process_watch --pid "$measured_pid" --seconds 15 > measurements/idle.jsonl

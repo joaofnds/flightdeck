@@ -27,7 +27,7 @@ pub struct Inspection {
 
 impl Inspection {
     pub fn select_fraction(&self, fraction: f32) -> usize {
-        assert!(self.upper < crate::data::SAMPLE_COUNT);
+        assert!(self.upper < crate::data::LIVE_SAMPLE_LIMIT);
         assert!(self.lower <= self.upper);
         let count = self.upper - self.lower + 1;
         (self.lower..=self.upper)
@@ -53,8 +53,18 @@ pub fn plot(
                 "core-bars" | "pressure" => paint_bars(&panel, chart, inspection, &hidden, window),
                 _ => paint_lines(&panel, chart, inspection, &hidden, window),
             });
-            let fraction = number(inspection.selected - inspection.lower)
-                / number((inspection.upper - inspection.lower).max(1));
+            if panel.positions.is_some() {
+                if panel.selected_index.is_none() {
+                    return;
+                }
+            }
+            let fraction = panel.positions.as_ref().map_or_else(
+                || {
+                    number(inspection.selected - inspection.lower)
+                        / number((inspection.upper - inspection.lower).max(1))
+                },
+                |positions| positions[inspection.selected],
+            );
             let x = chart.origin.x + chart.size.width * fraction;
             window.paint_quad(fill(
                 Bounds::new(point(x, chart.origin.y), size(px(1.0), chart.size.height)),
@@ -116,7 +126,8 @@ fn paint_lines(
     window: &mut Window,
 ) {
     let (minimum, maximum) = domain(panel, inspection, hidden);
-    let mut previous = [0.0; crate::data::SAMPLE_COUNT];
+    assert!(inspection.upper < crate::data::LIVE_SAMPLE_LIMIT);
+    let mut previous = [0.0; crate::data::LIVE_SAMPLE_LIMIT];
     for line in &panel.lines {
         if hidden.contains(&line.name) {
             continue;
@@ -147,24 +158,33 @@ fn paint_lines(
             minimum: low,
             maximum: high,
             count: values.len(),
+            positions: panel.positions.as_deref(),
+            segments: panel.segments.as_deref(),
+            lower: inspection.lower,
         };
         paint_line_runs(line, panel, &values, &geometry, window);
     }
 }
 
-struct Geometry {
+struct Geometry<'a> {
     bounds: Bounds<Pixels>,
     minimum: f32,
     maximum: f32,
     count: usize,
+    positions: Option<&'a [f32]>,
+    segments: Option<&'a [u64]>,
+    lower: usize,
 }
 
-impl Geometry {
+impl Geometry<'_> {
     fn point(&self, index: usize, value: f32) -> gpui::Point<Pixels> {
         point(
             self.bounds.origin.x
                 + self.bounds.size.width
-                    * (number(index) / number(self.count.saturating_sub(1).max(1))),
+                    * self.positions.map_or_else(
+                        || number(index) / number(self.count.saturating_sub(1).max(1)),
+                        |positions| positions[self.lower + index],
+                    ),
             self.bounds.bottom()
                 - self.bounds.size.height
                     * ((value - self.minimum) / (self.maximum - self.minimum)),
@@ -176,13 +196,21 @@ fn paint_line_runs(
     line: &crate::data::Line,
     panel: &Panel,
     values: &[Option<(f32, f32)>],
-    geometry: &Geometry,
+    geometry: &Geometry<'_>,
     window: &mut Window,
 ) {
     let mut start = 0;
     for end in 0..=values.len() {
         if end < values.len() {
             if values[end].is_some() {
+                if end > start {
+                    if let Some(segments) = geometry.segments {
+                        if segments[geometry.lower + end] != segments[geometry.lower + end - 1] {
+                            paint_run(line, panel, values, start..end, geometry, window);
+                            start = end;
+                        }
+                    }
+                }
                 continue;
             }
         }
@@ -198,9 +226,19 @@ fn paint_run(
     panel: &Panel,
     values: &[Option<(f32, f32)>],
     range: std::ops::Range<usize>,
-    geometry: &Geometry,
+    geometry: &Geometry<'_>,
     window: &mut Window,
 ) {
+    if range.len() == 1 {
+        if let Some((value, _)) = values[range.start] {
+            let position = geometry.point(range.start, value);
+            window.paint_quad(fill(
+                Bounds::new(position - point(px(1.5), px(1.5)), size(px(3.0), px(3.0))),
+                rgb(color(&line.color)),
+            ));
+        }
+        return;
+    }
     let mut stroke = PathBuilder::stroke(px(1.5));
     let mut area = PathBuilder::fill();
     for index in range.clone() {
@@ -210,8 +248,17 @@ fn paint_run(
                 stroke.move_to(position);
                 area.move_to(position);
             } else {
-                if matches!((line.dashed, index % 4), (Some(true), 0 | 1)) {
-                    stroke.move_to(position);
+                if line.dashed == Some(true) {
+                    if let Some((previous, _)) = values[index - 1] {
+                        dashed_segments(
+                            geometry.point(index - 1, previous),
+                            position,
+                            |start, end| {
+                                stroke.move_to(start);
+                                stroke.line_to(end);
+                            },
+                        );
+                    }
                 } else {
                     stroke.line_to(position);
                 }
@@ -228,6 +275,36 @@ fn paint_run(
     let opacity = line.fill.or(panel.fill).unwrap_or(0.10);
     paint_path(area, alpha(color(&line.color), opacity), window);
     paint_path(stroke, rgb(color(&line.color)), window);
+}
+
+fn dashed_segments(
+    start: gpui::Point<Pixels>,
+    end: gpui::Point<Pixels>,
+    mut paint: impl FnMut(gpui::Point<Pixels>, gpui::Point<Pixels>),
+) {
+    let delta = end - start;
+    let distance = f32::from(delta.x).hypot(f32::from(delta.y));
+    if distance <= 0.0 {
+        return;
+    }
+    if !distance.is_finite() {
+        eprintln!("Nonfinite chart segment");
+        return;
+    }
+    if distance > 32_768.0 {
+        paint(start, end);
+        return;
+    }
+    for index in 0..4096 {
+        let offset = number(index) * 8.0;
+        if offset >= distance {
+            return;
+        }
+        paint(
+            start + delta * (offset / distance),
+            start + delta * ((offset + 5.0).min(distance) / distance),
+        );
+    }
 }
 
 pub fn domain(panel: &Panel, inspection: Inspection, hidden: &[String]) -> (f32, f32) {
@@ -411,4 +488,23 @@ pub fn alpha(value: u32, opacity: f32) -> gpui::Rgba {
     let mut color = rgb(value);
     color.a = opacity;
     color
+}
+
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+
+    #[test]
+    fn a_two_point_dashed_run_keeps_measured_geometry() {
+        // A short measured interval must paint, even before a third sample arrives.
+        let mut strokes = Vec::new();
+        dashed_segments(
+            point(px(0.0), px(0.0)),
+            point(px(2.0), px(0.0)),
+            |start, end| strokes.push((start, end)),
+        );
+        assert_eq!(strokes.len(), 1);
+        assert_eq!(strokes[0].0, point(px(0.0), px(0.0)));
+        assert_eq!(strokes[0].1, point(px(2.0), px(0.0)));
+    }
 }

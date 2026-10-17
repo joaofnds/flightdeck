@@ -1,0 +1,3 @@
+Started owned collector 70278
+persister sealed window=0 publications=1..7 loss=0 events_lost=0 seal_ns=84685042 staged_bytes=72443112
+persister finished footprint_bytes=24887848 footprint_bytes_max=24937000
