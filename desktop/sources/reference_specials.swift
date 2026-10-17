@@ -109,7 +109,7 @@ struct ReferenceCores: View {
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel(history ? "18 CPU core histories" : "CPU cores at the selected time")
                 .accessibilityValue(panel.lines.map { line in
-                    line.name + " " + referenceSpecialReading(sample(line, model.window.selected), unit: "%")
+                    line.name + " " + dashboardFixedReading(sample(line, model.window.selected), unit: "%")
                 }.joined(separator: "; "))
             Text(history ? "Green → yellow → red: 0–100% utilization. Missing readings remain gaps."
                          : "100% is one core. Selected captured sample.")
@@ -195,7 +195,7 @@ struct ReferenceUtilization: View {
                                     .frame(width: geometry.size.width * fraction)
                             }
                         }.frame(height: 7)
-                        Text(referenceSpecialReading(row.1, unit: "%", digits: 0))
+                        Text(dashboardFixedReading(row.1, unit: "%", digits: 0))
                             .font(theme.compactReadingFont).monospacedDigit()
                             .foregroundStyle(row.1.map { referenceThresholdColor($0, theme: theme) }
                                              ?? theme.muted)
@@ -354,20 +354,20 @@ func referenceQuantityValue(_ key: String, snapshot: ReferenceSnapshot?, selecte
         "batteryCycles": ("batteryHealth1", "", 0), "batteryFlow": ("batteryPower0", " W", 1)
     ]
     if let source = direct[key] {
-        return referenceSpecialReading(snapshot?.value(source.source, at: selected),
+        return dashboardFixedReading(snapshot?.value(source.source, at: selected),
                                        unit: source.unit, digits: source.digits)
     }
     if key.hasPrefix("mem") {
         let kinds = ["memApp": "app", "memWired": "wired", "memCompressed": "compressed",
                      "memCached": "cached", "memFree": "free"]
         let row = snapshot?.series["memory"]?.first { $0.labels["kind"] == kinds[key] }
-        return referenceSpecialReading(row.flatMap { sample($0.values, selected) }.map { $0 / 1_073_741_824 },
+        return dashboardFixedReading(row.flatMap { sample($0.values, selected) }.map { $0 / 1_073_741_824 },
                                        unit: " GiB")
     }
     if key == "fanChannel0" || key == "fanChannel1" {
         let channel = key == "fanChannel0" ? "0" : "1"
         let row = snapshot?.series["fans0"]?.first { $0.labels["fan"] == channel }
-        return referenceSpecialReading(row.flatMap { sample($0.values, selected) }, unit: " rpm", digits: 0)
+        return dashboardFixedReading(row.flatMap { sample($0.values, selected) }, unit: " rpm", digits: 0)
     }
     if key == "pressure" {
         return referenceState(snapshot?.value("pressure0", at: selected), states: ["Normal", "Warning", "Critical"])
@@ -518,22 +518,16 @@ private func sample(_ values: [Double?], _ index: Int) -> Double? {
     return value
 }
 
-private func referenceSpecialReading(_ value: Double?, unit: String, digits: Int = 1) -> String {
-    guard let value, value.isFinite else { return "Unavailable" }
-
-    return value.formatted(.number.precision(.fractionLength(digits))) + unit
-}
-
 private func referenceAppReading(_ value: Double, key: String) -> String {
     switch key {
     case "appNetwork", "appDisk":
         let magnitude = abs(value)
         let scale = magnitude >= 1e9 ? 1e9 : magnitude >= 1e6 ? 1e6 : magnitude >= 1e3 ? 1e3 : 1
         let unit = scale == 1e9 ? " GB/s" : scale == 1e6 ? " MB/s" : scale == 1e3 ? " kB/s" : " B/s"
-        return referenceSpecialReading(value / scale, unit: unit)
+        return dashboardFixedReading(value / scale, unit: unit)
     case "appMemory": return referenceAdaptiveReading(value / 1_073_741_824, unit: "GiB")
     case "appEnergy": return referenceAdaptiveReading(value, unit: "W")
-    default: return referenceSpecialReading(value, unit: "%")
+    default: return dashboardFixedReading(value, unit: "%")
     }
 }
 

@@ -44,3 +44,9 @@ struct DashboardQuantity: Equatable {
 func dashboardReading(_ value: Double?, unit: String, digits: Int? = nil) -> String {
     DashboardQuantity(value: value, unit: unit)?.text(digits: digits) ?? "Unavailable"
 }
+
+func dashboardFixedReading(_ value: Double?, unit: String, digits: Int = 1) -> String {
+    guard let value, value.isFinite else { return "Unavailable" }
+
+    return value.formatted(.number.precision(.fractionLength(digits))) + unit
+}

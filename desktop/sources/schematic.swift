@@ -100,7 +100,7 @@ struct MacBookSchematic: View {
             HStack {
                 Text(field.label).foregroundStyle(theme.muted)
                 Spacer()
-                Text(schematicReading(field.value(in: displayed), unit: field.unit,
+                Text(dashboardFixedReading(field.value(in: displayed), unit: field.unit,
                                       digits: field.digits))
                     .monospacedDigit()
             }
@@ -110,7 +110,7 @@ struct MacBookSchematic: View {
                 set: { overrides[field] = $0 }
             ), in: field.range, step: field.step)
             .accessibilityLabel(field.label + " QA override")
-            .accessibilityValue(schematicReading(field.value(in: displayed), unit: field.unit,
+            .accessibilityValue(dashboardFixedReading(field.value(in: displayed), unit: field.unit,
                                                  digits: field.digits))
         }
     }
@@ -283,24 +283,24 @@ private enum SchematicCallout: String, CaseIterable, Identifiable {
         case .fan0: return fanValues(readings.fan0)
         case .fan1: return fanValues(readings.fan1)
         case .cpu:
-            return (schematicReading(readings.cpuTemperature, unit: " °C"),
-                    "Utilization " + schematicReading(readings.cpuPercent, unit: "%"))
+            return (dashboardFixedReading(readings.cpuTemperature, unit: " °C"),
+                    "Utilization " + dashboardFixedReading(readings.cpuPercent, unit: "%"))
         case .gpu:
-            return (schematicReading(readings.gpuTemperature, unit: " °C"),
-                    "Utilization " + schematicReading(readings.gpuPercent, unit: "%"))
+            return (dashboardFixedReading(readings.gpuTemperature, unit: " °C"),
+                    "Utilization " + dashboardFixedReading(readings.gpuPercent, unit: "%"))
         case .memory:
-            let used = schematicReading(readings.memoryUsedGiB, unit: "")
-            let total = schematicReading(readings.memoryTotalGiB, unit: " GiB", digits: 0)
+            let used = dashboardFixedReading(readings.memoryUsedGiB, unit: "")
+            let total = dashboardFixedReading(readings.memoryTotalGiB, unit: " GiB", digits: 0)
             let available = readings.memoryUsedGiB?.isFinite == true
                 && readings.memoryTotalGiB?.isFinite == true
                 && (readings.memoryTotalGiB ?? 0) > 0
             return (available ? used + " / " + total : "Unavailable",
-                    "Peak " + schematicReading(readings.memoryTemperature, unit: " °C"))
+                    "Peak " + dashboardFixedReading(readings.memoryTemperature, unit: " °C"))
         case .battery:
             let watts = readings.batteryWatts
             let milliwatts = watts.map { $0 != 0 && abs($0) < 0.1 } ?? false
-            return (schematicReading(readings.batteryPercent, unit: "%"),
-                    "Power " + schematicReading(milliwatts ? watts.map { $0 * 1000 } : watts,
+            return (dashboardFixedReading(readings.batteryPercent, unit: "%"),
+                    "Power " + dashboardFixedReading(milliwatts ? watts.map { $0 * 1000 } : watts,
                                                 unit: milliwatts ? " mW" : " W"))
         }
     }
@@ -308,7 +308,7 @@ private enum SchematicCallout: String, CaseIterable, Identifiable {
     private func fanValues(_ rpm: Double?) -> (primary: String, secondary: String) {
         guard let rpm, rpm.isFinite, rpm >= 0 else { return ("Unavailable", "Unavailable") }
 
-        return (schematicReading(rpm, unit: " rpm", digits: 0), rpm == 0 ? "Stopped" : "Running")
+        return (dashboardFixedReading(rpm, unit: " rpm", digits: 0), rpm == 0 ? "Stopped" : "Running")
     }
 }
 
@@ -707,10 +707,4 @@ private func schematicBezier(start: CGPoint, first: CGPoint, second: CGPoint,
             + 3 * inverse * progress * progress * second.x + progress * progress * progress * end.x,
         y: inverse * inverse * inverse * start.y + 3 * inverse * inverse * progress * first.y
             + 3 * inverse * progress * progress * second.y + progress * progress * progress * end.y)
-}
-
-private func schematicReading(_ value: Double?, unit: String, digits: Int = 1) -> String {
-    guard let value, value.isFinite else { return "Unavailable" }
-
-    return value.formatted(.number.precision(.fractionLength(digits))) + unit
 }
