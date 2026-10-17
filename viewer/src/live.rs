@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use collector::recording::{Registry, identity_text};
-use collector::ring::{Found, FoundEvent, RingReader, RunIdentity, Tick};
+use collector::ring::{Found, FoundEvent, IdentityObservation, RingReader, RunIdentity, Tick};
 use duckdb::Connection;
 use persistence::{Error, Limits, Losses, NumberedEvent, Result, Window, WindowIdentity};
 use serde_json::{Value, json};
@@ -46,6 +46,7 @@ pub struct LiveSession {
 struct Source {
     reader: RingReader,
     tick: Tick,
+    identities: Vec<IdentityObservation>,
     identity: RunIdentity,
     losses: Losses,
     window: Option<u64>,
@@ -53,6 +54,22 @@ struct Source {
     pending_cursor: Option<u64>,
     pending_retention_limited: bool,
     pending_refresh_polls: usize,
+}
+
+struct ProjectionEvents {
+    events: Vec<(u64, u64, collector::tracker::Event)>,
+    identities: Vec<IdentityObservation>,
+}
+
+impl Source {
+    fn read_tick(&mut self) -> std::io::Result<Found> {
+        if self.reader.dictionary_capacity().is_some() {
+            self.reader
+                .read_identity_into(&mut self.tick, &mut self.identities)
+        } else {
+            self.reader.read_into(&mut self.tick)
+        }
+    }
 }
 
 struct LiveObservation {
@@ -135,7 +152,7 @@ impl LiveSession {
         for index in 0..self.sources.len() {
             for _attempt in 0..=OBSERVATIONS_MAX {
                 let source = &mut self.sources[index];
-                let found = source.reader.read_into(&mut source.tick);
+                let found = source.read_tick();
                 match found? {
                     Found::Nothing => break,
                     Found::Missed { first, end } => {
@@ -370,6 +387,7 @@ impl LiveSession {
             if run.identity.recording != recording {
                 return Err(Error::Bound("foreign live recording"));
             }
+
             if self
                 .sources
                 .iter()
@@ -377,34 +395,52 @@ impl LiveSession {
             {
                 continue;
             }
+
             let reader = match RingReader::open_generation(run.ring_name) {
                 Ok(reader) => reader,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(error) => return Err(error.into()),
             };
-            persistence::require_numeric_source(&reader)?;
+
             if reader.identity() != Some(run.identity) {
                 return Err(Error::Bound("changed live identity"));
             }
+
             if self.sources.len() == SOURCES_MAX {
                 return Err(Error::Bound("live sources"));
             }
+
             if reader.mapped_size_bytes() > 1024 * 1024 * 1024 {
                 return Err(Error::Bound("live mapping size"));
             }
-            let tick = persistence::tick_buffer(&reader.shape())?;
-            self.sources.push(Source {
-                reader,
-                tick,
-                identity: run.identity,
-                losses: Losses::default(),
-                window: None,
-                pending_windows: BTreeSet::new(),
-                pending_cursor: None,
-                pending_retention_limited: false,
-                pending_refresh_polls: 0,
-            });
+
+            self.poll_sources_insert(reader, run.identity)?;
         }
+
+        Ok(())
+    }
+
+    fn poll_sources_insert(&mut self, reader: RingReader, identity: RunIdentity) -> Result<()> {
+        let tick = persistence::tick_buffer(&reader.shape())?;
+        let identities = if reader.dictionary_capacity().is_some() {
+            Vec::with_capacity(tick.processes.capacity())
+        } else {
+            Vec::new()
+        };
+
+        self.sources.push(Source {
+            reader,
+            tick,
+            identities,
+            identity,
+            losses: Losses::default(),
+            window: None,
+            pending_windows: BTreeSet::new(),
+            pending_cursor: None,
+            pending_retention_limited: false,
+            pending_refresh_polls: 0,
+        });
+
         Ok(())
     }
 
@@ -600,9 +636,11 @@ impl LiveSession {
         }) {
             return Ok(None);
         }
+
         let Some(point) = self.points.iter().find(|point| same(point, selected)) else {
             return Ok(None);
         };
+
         let Some(source) = self
             .sources
             .iter()
@@ -610,7 +648,13 @@ impl LiveSession {
         else {
             return Ok(None);
         };
-        let mut independent = rehydrate_source(source, selected)?;
+
+        let mut independent = None;
+        rehydrate_source(source, selected, &mut independent)?;
+        let Some(mut independent) = independent else {
+            unreachable!("inspection source initialized before projection");
+        };
+
         let publication = selected["publication"]
             .as_u64()
             .ok_or(Error::Bound("selected publication"))?;
@@ -624,7 +668,9 @@ impl LiveSession {
         if current.bytes > CACHE_BYTES_MAX {
             return Err(Error::Bound("live observation bytes"));
         }
+
         current.point = point.clone();
+
         Ok(Some(current))
     }
 
@@ -734,33 +780,29 @@ fn identity_matches(identity: RunIdentity, observation: &Value) -> bool {
         && observation["boot"] == identity_text(identity.boot).to_string()
 }
 
-fn rehydrate_source(source: &Source, selected: &Value) -> Result<Source> {
-    let mut reader = RingReader::open_generation(source.reader.name())?;
-    persistence::require_numeric_source(&reader)?;
+fn rehydrate_source(
+    source: &Source,
+    selected: &Value,
+    output: &mut Option<Box<Source>>,
+) -> Result<()> {
+    assert!(output.is_none());
+
+    let reader = RingReader::open_generation(source.reader.name())?;
     if reader.identity() != Some(source.identity) {
         return Err(Error::Bound("changed inspection source identity"));
     }
-    let mut tick = persistence::tick_buffer(&reader.shape())?;
-    let publication = selected["publication"]
-        .as_u64()
-        .ok_or(Error::Bound("selected publication"))?;
-    reader.seek_publication(publication)?;
-    match reader.read_into(&mut tick)? {
-        Found::Publication {
-            publication: found, ..
-        } if found == publication => {}
-        _ => return Err(Error::Bound("unsealed publication no longer retained")),
-    }
-    if Some(tick.run_tick) != selected["run_tick"].as_u64() {
-        return Err(Error::Bound("changed inspection tick identity"));
-    }
-    if tick.times.map(|times| times.wall_ns) != selected["wall_ns"].as_u64() {
-        return Err(Error::Bound("changed inspection wall identity"));
-    }
+
+    let tick = persistence::tick_buffer(&reader.shape())?;
+    let identities = if reader.dictionary_capacity().is_some() {
+        Vec::with_capacity(tick.processes.capacity())
+    } else {
+        Vec::new()
+    };
     let losses = &selected["reader_losses"];
-    Ok(Source {
+    let independent = output.insert(Box::new(Source {
         reader,
         tick,
+        identities,
         identity: source.identity,
         losses: Losses {
             publications: losses["publications"]
@@ -778,7 +820,33 @@ fn rehydrate_source(source: &Source, selected: &Value) -> Result<Source> {
         pending_cursor: None,
         pending_retention_limited: false,
         pending_refresh_polls: 0,
-    })
+    }));
+
+    rehydrate_source_read(independent, selected)
+}
+
+fn rehydrate_source_read(source: &mut Source, selected: &Value) -> Result<()> {
+    let publication = selected["publication"]
+        .as_u64()
+        .ok_or(Error::Bound("selected publication"))?;
+
+    source.reader.seek_publication(publication)?;
+    match source.read_tick()? {
+        Found::Publication {
+            publication: found, ..
+        } if found == publication => {}
+        _ => return Err(Error::Bound("unsealed publication no longer retained")),
+    }
+
+    if Some(source.tick.run_tick) != selected["run_tick"].as_u64() {
+        return Err(Error::Bound("changed inspection tick identity"));
+    }
+
+    if source.tick.times.map(|times| times.wall_ns) != selected["wall_ns"].as_u64() {
+        return Err(Error::Bound("changed inspection wall identity"));
+    }
+
+    Ok(())
 }
 
 fn project_observation(
@@ -791,15 +859,9 @@ fn project_observation(
         source.losses.unknown = true;
         return Ok(None);
     };
-    let events = poll_events(source)?;
-    let numbered: Vec<_> = events
-        .iter()
-        .map(|(number, tick, event)| NumberedEvent {
-            number: *number,
-            tick: *tick,
-            event,
-        })
-        .collect();
+
+    operation.check()?;
+
     let mut window = Window::new(
         WindowIdentity {
             run: source.identity,
@@ -807,17 +869,9 @@ fn project_observation(
         },
         Limits::from_shape(&source.reader.shape())?,
     );
-    window.push_tick(
-        &persistence::Observation {
-            publication,
-            wall_ns: Some(times.wall_ns),
-            continuous_ns: Some(times.continuous_ns),
-            awake_ns: Some(times.awake_ns),
-        },
-        &source.tick,
-        &numbered,
-    )?;
-    let tables = poll_project(connection, operation, &window)?;
+    project_observation_stage(source, publication, &times, &mut window)?;
+
+    let tables = project_observation_tables(connection, operation, &window)?;
     let bytes = tables.values().map(table_bytes).sum();
     let observation = Observation {
         window: 0,
@@ -826,6 +880,7 @@ fn project_observation(
         wall: times.wall_ns,
         continuous: Some(times.continuous_ns),
     };
+
     Ok(Some(LiveObservation {
         identity: source.identity,
         observation,
@@ -834,6 +889,67 @@ fn project_observation(
         point: Value::Null,
         bytes,
     }))
+}
+
+fn project_observation_stage(
+    source: &mut Source,
+    publication: u64,
+    times: &collector::ring::ObservationTimes,
+    window: &mut Window,
+) -> Result<()> {
+    let count = source
+        .tick
+        .events
+        .end
+        .checked_sub(source.tick.events.start)
+        .ok_or(Error::Bound("live event range"))?;
+    let capacity = usize::try_from(count)
+        .map_err(|_| Error::Bound("live event range"))?
+        .min(collector::tracker::EVENTS_PER_TICK_MAX);
+
+    let mut events = ProjectionEvents {
+        events: Vec::with_capacity(capacity),
+        identities: if source.reader.dictionary_capacity().is_some() {
+            Vec::with_capacity(capacity)
+        } else {
+            Vec::new()
+        },
+    };
+
+    project_observation_stage_events(source, &mut events)?;
+
+    let numbered: Vec<_> = events
+        .events
+        .iter()
+        .map(|(number, tick, event)| NumberedEvent {
+            number: *number,
+            tick: *tick,
+            event,
+        })
+        .collect();
+    let observation = persistence::Observation {
+        publication,
+        wall_ns: Some(times.wall_ns),
+        continuous_ns: Some(times.continuous_ns),
+        awake_ns: Some(times.awake_ns),
+    };
+
+    if source.reader.dictionary_capacity().is_some() {
+        window.push_tick_with_identity(
+            &observation,
+            &source.tick,
+            &numbered,
+            &persistence::IdentitySource {
+                reader: &source.reader,
+                processes: &source.identities,
+                events: &events.identities,
+            },
+        )?;
+    } else {
+        window.push_tick(&observation, &source.tick, &numbered)?;
+    }
+
+    Ok(())
 }
 
 fn refresh_history_pending(sources: &mut [Source], history: &Session) {
@@ -953,20 +1069,33 @@ fn poll_observation_window(
     Ok(())
 }
 
-fn poll_events(source: &mut Source) -> Result<Vec<(u64, u64, collector::tracker::Event)>> {
-    let mut events = Vec::new();
+fn project_observation_stage_events(
+    source: &mut Source,
+    output: &mut ProjectionEvents,
+) -> Result<()> {
     if source.tick.events.is_empty() {
-        return Ok(events);
+        return Ok(());
     }
+
     source.reader.seek_event(source.tick.events.start)?;
+
     for _attempt in 0..=collector::tracker::EVENTS_PER_TICK_MAX {
         if source.reader.next_event() >= source.tick.events.end {
-            return Ok(events);
+            return Ok(());
         }
-        match source.reader.read_event()? {
+
+        let mut identity = IdentityObservation::EMPTY;
+        let found = if source.reader.dictionary_capacity().is_some() {
+            source.reader.read_event_identity(&mut identity)?
+        } else {
+            source.reader.read_event()?
+        };
+
+        match found {
             FoundEvent::Nothing => {
                 source.losses.unknown = true;
-                return Ok(events);
+
+                return Ok(());
             }
             FoundEvent::Missed { first, end } => {
                 source.losses.events += end.min(source.tick.events.end) - first;
@@ -976,10 +1105,15 @@ fn poll_events(source: &mut Source) -> Result<Vec<(u64, u64, collector::tracker:
                 tick,
                 event,
             } => {
-                events.push((number, tick, event));
+                output.events.push((number, tick, event));
+
+                if source.reader.dictionary_capacity().is_some() {
+                    output.identities.push(identity);
+                }
             }
         }
     }
+
     Err(Error::Bound("live event count"))
 }
 
@@ -1015,7 +1149,7 @@ fn identity_order(value: &Value) -> (Option<u64>, Option<&str>, Option<&str>, Op
     )
 }
 
-fn poll_project(
+fn project_observation_tables(
     connection: &Connection,
     operation: &Operation,
     window: &Window,
@@ -1023,13 +1157,26 @@ fn poll_project(
     let mut tables = BTreeMap::new();
     for (table, _, order) in persistence::schema::TABLES {
         let name = table.name();
-        connection.execute_batch(&format!("DELETE FROM {name}"))?;
+
+        if matches!(
+            table,
+            persistence::schema::Table::Processes | persistence::schema::Table::Events
+        ) {
+            let columns = persistence::table_columns(table, window);
+            connection.execute_batch(&format!(
+                "DROP TABLE IF EXISTS {name}; CREATE TABLE {name} ({columns})"
+            ))?;
+        } else {
+            connection.execute_batch(&format!("DELETE FROM {name}"))?;
+        }
+
         persistence::append(connection, table, window)?;
         let source = persistence::query::table_source(
             connection,
             table,
             persistence::query::TableSource::Staged,
         )?;
+
         tables.insert(
             name,
             data::query(
@@ -1040,6 +1187,7 @@ fn poll_project(
             )?,
         );
     }
+
     Ok(tables)
 }
 
@@ -1085,6 +1233,10 @@ fn point_observation(point: &Value) -> Result<Observation> {
         continuous: point["continuous_ns"].as_u64(),
     })
 }
+
+#[cfg(test)]
+#[path = "live_fixture.rs"]
+mod identity_fixture;
 
 #[cfg(test)]
 mod tests {
@@ -1328,5 +1480,105 @@ mod tests {
                 },
             )
             .unwrap();
+    }
+    #[test]
+    fn retries_captured_identity_after_cancellation_and_hands_the_same_pages_to_history() {
+        // Goal: canceled v4 decoding cannot lose a publication, event identity or seal handoff.
+        // Method: cancel after the reader advances, retry, then compare live and sealed rows.
+        let mut fixture = identity_fixture::Fixture::new();
+        let control = Arc::new(Cancellation::default());
+        let mut session = LiveSession::open_with(&fixture.root, control.clone(), 0).unwrap();
+        fixture.publish(1000);
+        let cancel = control.clone();
+        session.before_projection = Some(Box::new(move || cancel.cancel().unwrap()));
+
+        assert!(session.poll().is_err());
+        session.begin(control.epoch()).unwrap();
+        assert!(session.poll().unwrap());
+        session.select(1000, 0).unwrap();
+        let processes = session.page("processes", 0).unwrap();
+        let events = session.page("events", 0).unwrap();
+        fixture.seal();
+        session.poll().unwrap();
+
+        assert_eq!(processes["rows"][0][26], r"refused\xff");
+        assert_eq!(events["rows"][0][25], "700");
+        assert_eq!(events["rows"][0][27], r"departed\xfd");
+        assert_eq!(session.sources[0].reader.next_publication(), 2);
+        assert_eq!(session.sources[0].losses.publications, 0);
+        assert_eq!(session.sources[0].losses.events, 0);
+        let mut saved = Session::open(&fixture.root).unwrap();
+        saved.select(1000, 0).unwrap();
+        assert_eq!(
+            saved.page("processes", 0).unwrap()["rows"],
+            processes["rows"]
+        );
+        assert_eq!(saved.page("events", 0).unwrap()["rows"], events["rows"]);
+    }
+
+    #[test]
+    fn retries_identity_projection_after_interrupted_table_replacement() {
+        // Goal: a retry recreates tables dropped before a canceled schema replacement.
+        // Method: reproduce that intermediate database state before polling a real v4 tick.
+        let mut fixture = identity_fixture::Fixture::new();
+        let mut session = LiveSession::open(&fixture.root).unwrap();
+        session
+            .connection
+            .execute_batch("DROP TABLE processes; DROP TABLE events")
+            .unwrap();
+        fixture.publish(1000);
+
+        assert!(session.poll().unwrap());
+        session.select(1000, 0).unwrap();
+
+        assert_eq!(
+            session.page("processes", 0).unwrap()["rows"][0][26],
+            r"refused\xff"
+        );
+        assert_eq!(session.page("events", 0).unwrap()["rows"][0][25], "700");
+    }
+
+    #[test]
+    fn bounds_repeated_identity_projection_and_records_its_small_fixture_cost() {
+        // Goal: repeated identity projection keeps bounded cache and exact latest metadata.
+        // Method: project 100 two-process/one-event ticks and observe this test process.
+        let mut fixture = identity_fixture::Fixture::new();
+        let mut session = LiveSession::open(&fixture.root).unwrap();
+        let timebase = collector::clock::Timebase::read().unwrap();
+        let pid = i32::try_from(std::process::id()).unwrap();
+        let before = collector::processes::read_usage(timebase, pid)
+            .unwrap()
+            .unwrap();
+        let started = std::time::Instant::now();
+
+        for second in 1000..1100 {
+            fixture.publish(second);
+            assert!(session.poll().unwrap());
+        }
+        let elapsed_ns = started.elapsed().as_nanos();
+        let after = collector::processes::read_usage(timebase, pid)
+            .unwrap()
+            .unwrap();
+        let footprint = persistence::resources::Footprint::read().unwrap();
+        session.select(1099, 0).unwrap();
+
+        assert_eq!(session.catalog()["tail_ticks"], 100);
+        assert!(session.cache_bytes <= CACHE_BYTES_MAX);
+        assert_eq!(
+            session.page("processes", 0).unwrap()["rows"][0][26],
+            r"refused\xff"
+        );
+        assert_eq!(session.page("events", 0).unwrap()["rows"][0][25], "700");
+        println!(
+            "{}",
+            json!({"fixture_publications":100,"process_rows_per_tick":2,
+            "event_rows_per_tick":1,"elapsed_ns":elapsed_ns,
+            "process_cpu_ns":after.user_ns+after.system_ns-before.user_ns-before.system_ns,
+            "physical_footprint_bytes":footprint.current_bytes,
+            "process_lifetime_footprint_max_bytes":footprint.lifetime_bytes_max,
+            "retained_table_bytes":session.cache_bytes,
+            "source_identity_buffer_bytes":session.sources[0].identities.capacity()
+                *size_of::<IdentityObservation>()})
+        );
     }
 }

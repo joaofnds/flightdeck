@@ -4,6 +4,8 @@
 mod capture;
 #[path = "recording_check/compare.rs"]
 mod compare;
+#[path = "recording_check/identity_reference.rs"]
+mod identity_reference;
 #[path = "recording_check/rows.rs"]
 mod rows;
 

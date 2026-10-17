@@ -7,6 +7,8 @@ mod compare;
 #[cfg(test)]
 #[path = "encoder_fixture/mod.rs"]
 pub mod fixture;
+#[path = "../src/bin/recording_check/identity_reference.rs"]
+mod identity_reference;
 #[cfg(test)]
 #[path = "../src/bin/recording_check/rows.rs"]
 mod rows;
@@ -22,8 +24,8 @@ mod tests {
     use collector::recording::private;
     use collector::ring::{
         DictionaryCapacity, Found, FoundEvent, Identity, IdentityObservation, IdentityPublication,
-        IdentityUnavailable, ObservationTimes, Place, ProcessIdentity, Readings, RingReader,
-        RunIdentity, Shape, Tick, UsageAvailability, Writer,
+        IdentityUnavailable, ObservationTimes, Place, ProcessCreation, ProcessIdentity,
+        ProgramBytes, Readings, RingReader, RunIdentity, Shape, Tick, UsageAvailability, Writer,
     };
     use collector::tracker::{Event, Noticed};
     use persistence::{
@@ -39,7 +41,215 @@ mod tests {
     }
 
     #[test]
-    fn refuses_identity_sources_before_recording_a_numeric_only_reference() {
+    fn captures_ordinary_legacy_numeric_readings_and_events_before_sealing() {
+        // Goal: the ordinary v3 writer remains capturable with exact numeric/event fidelity.
+        // Method: complete a real ring, capture v1, stage its readings, seal and verify after exit.
+        let recording = Recording::new();
+        let store = Store::open(&recording.0).unwrap();
+        let identity = WindowIdentity {
+            run: RunIdentity {
+                recording: store.recording(),
+                run: Identity([31, 32]),
+                boot: Identity([41, 42]),
+            },
+            window: 0,
+        };
+        let shape = fixture::profile(false);
+        let place = Place {
+            lock_path: recording.0.join("legacy.lock"),
+            name_prefix: format!("/fdlegacycap{}", std::process::id()),
+        };
+        let mut writer = Writer::create_recording(&place, shape, &identity.run, 0).unwrap();
+        let mut source = frame(&shape, 0);
+        source.tick.events = 1..6;
+        publish_captured_legacy(&mut writer, &source);
+        writer.finish();
+        let mut reader = RingReader::open(&place.lock_path).unwrap();
+        assert_eq!(3, reader.source_layout_version());
+        let reference = recording.0.join("source.reference");
+
+        let captured = capture::run(&place.lock_path, &reference, 10);
+        let window = stage_captured_legacy(&mut reader, &identity, &shape);
+        commit_identity(&store, &window, |_| {});
+        drop(reader);
+        let name = writer.name().to_owned();
+        drop(writer);
+        collector::ring::unlink_generation(&name).unwrap();
+
+        captured.unwrap();
+        let source = fs::read_to_string(&reference).unwrap();
+        assert!(source.starts_with("flightdeck-reference-1 "));
+        assert_eq!(
+            40,
+            source
+                .lines()
+                .filter(|line| line.starts_with("processes "))
+                .count()
+        );
+        assert_eq!(
+            5,
+            source
+                .lines()
+                .filter(|line| line.starts_with("events "))
+                .count()
+        );
+        compare::run(&recording.0, &reference).unwrap();
+    }
+
+    fn publish_captured_legacy(writer: &mut Writer, source: &Frame) {
+        writer.publish_observed(
+            &Readings {
+                run_tick: source.tick.run_tick,
+                cpus: &source.tick.cpus,
+                memory: &source.tick.memory,
+                interfaces: &source.tick.interfaces,
+                ioreport: None,
+                smc: None,
+                processes: &source.tick.processes,
+                processes_refused: source.tick.processes_refused,
+                processes_gone: source.tick.processes_gone,
+                coalitions: &source.tick.coalitions,
+                events: &source.events,
+                dropped: source.tick.dropped,
+            },
+            source.tick.times.as_ref().unwrap(),
+        );
+    }
+
+    fn stage_captured_legacy(
+        reader: &mut RingReader,
+        identity: &WindowIdentity,
+        shape: &Shape,
+    ) -> Window {
+        let mut tick = persistence::tick_buffer(shape).unwrap();
+        assert!(matches!(
+            reader.read_into(&mut tick).unwrap(),
+            Found::Publication { publication: 1, .. }
+        ));
+        let mut events = Vec::with_capacity(5);
+        for _ in 0..5 {
+            let FoundEvent::Event { event, .. } = reader.read_event().unwrap() else {
+                panic!("legacy event missing");
+            };
+            events.push(event);
+        }
+        stage(
+            identity,
+            shape,
+            &[Frame {
+                publication: 1,
+                tick,
+                events,
+            }],
+        )
+    }
+
+    #[test]
+    fn refuses_independent_event_loss_while_both_publications_remain() {
+        // Goal: retained publications cannot hide loss from the independent event log.
+        // Method: put two tick events into a one-event v4 log retaining both publication slots.
+        let recording = Recording::new();
+        let store = Store::open(&recording.0).unwrap();
+        let identity = RunIdentity {
+            recording: store.recording(),
+            run: Identity([31, 32]),
+            boot: Identity([41, 42]),
+        };
+        let place = Place {
+            lock_path: recording.0.join("event-loss.lock"),
+            name_prefix: format!("/fdeventcap{}", std::process::id()),
+        };
+        let shape = Shape {
+            slot_count: 2,
+            event_capacity: 1,
+            ..fixture::profile(false)
+        };
+        let mut writer = Writer::create_with_identity(
+            &place,
+            shape,
+            DictionaryCapacity {
+                entries: 1,
+                arena_bytes: 32,
+            },
+            &identity,
+            0,
+        )
+        .unwrap();
+        publish_event_loss(&mut writer);
+        writer.finish();
+        assert_event_loss(&place, &shape);
+        let reference = recording.0.join("source.reference");
+
+        let result = capture::run(&place.lock_path, &reference, 10);
+        let name = writer.name().to_owned();
+        drop(writer);
+        collector::ring::unlink_generation(&name).unwrap();
+
+        assert!(matches!(
+            result,
+            Err(persistence::Error::Bound("reference missed events"))
+        ));
+        let source = fs::read_to_string(&reference).unwrap();
+        assert!(source.contains("begin 1 "));
+        assert!(!source.contains("complete "));
+    }
+
+    fn publish_event_loss(writer: &mut Writer) {
+        for index in 0..2 {
+            writer
+                .publish_with_identity(
+                    &Readings {
+                        run_tick: index,
+                        cpus: &[],
+                        memory: &collector::machine::Memory::default(),
+                        interfaces: &[],
+                        ioreport: None,
+                        smc: None,
+                        processes: &[],
+                        processes_refused: 0,
+                        processes_gone: 0,
+                        coalitions: &[],
+                        events: &[Event::Exec { pid: 9001 }],
+                        dropped: collector::ring::Dropped::default(),
+                    },
+                    Some(&ObservationTimes {
+                        wall_ns: 50_000_000_000 + index * 1_000_000_000,
+                        continuous_ns: index,
+                        awake_ns: index,
+                    }),
+                    &IdentityPublication {
+                        processes: &[],
+                        events: &[source_identity(9001, UsageAvailability::NotApplicable)],
+                    },
+                )
+                .unwrap();
+        }
+    }
+
+    fn assert_event_loss(place: &Place, shape: &Shape) {
+        let mut reader = RingReader::open(&place.lock_path).unwrap();
+        assert_eq!(4, reader.source_layout_version());
+        let mut tick = persistence::tick_buffer(shape).unwrap();
+        assert!(matches!(
+            reader.read_into(&mut tick).unwrap(),
+            Found::Publication { publication: 1, .. }
+        ));
+        assert_eq!(1..2, tick.events);
+        assert!(matches!(
+            reader.read_into(&mut tick).unwrap(),
+            Found::Publication { publication: 2, .. }
+        ));
+        assert_eq!(2..3, tick.events);
+        reader.seek_event(1).unwrap();
+        let mut identity = IdentityObservation::EMPTY;
+        assert!(matches!(
+            reader.read_event_identity(&mut identity).unwrap(),
+            FoundEvent::Missed { first: 1, end: 2 }
+        ));
+    }
+
+    #[test]
+    fn refuses_a_completed_source_without_publications() {
         // Goal: a successful fidelity reference cannot silently omit a v4 identity section.
         // Method: capture an orderly completed v4 source before creating any reference file.
         let recording = Recording::new();
@@ -72,9 +282,117 @@ mod tests {
         collector::ring::unlink_generation(writer.name()).unwrap();
         assert!(matches!(
             result,
-            Err(persistence::Error::Bound("identity source preservation"))
+            Err(persistence::Error::Bound(
+                "reference contains no publications"
+            ))
         ));
-        assert!(!reference.try_exists().unwrap());
+        assert!(
+            !fs::read_to_string(&reference)
+                .unwrap()
+                .contains("complete ")
+        );
+    }
+
+    #[test]
+    fn refuses_a_source_whose_initial_publication_was_overwritten() {
+        // Goal: a retained suffix cannot be mistaken for a complete captured source.
+        // Method: publish two ticks into one slot before opening the capture reader.
+        let recording = Recording::new();
+
+        let result = capture_empty_source(&recording, 1, 2, true);
+
+        assert!(matches!(
+            result,
+            Err(persistence::Error::Bound(
+                "capture opened after initial publications were overwritten"
+            ))
+        ));
+        assert!(!recording.0.join("source.reference").exists());
+    }
+
+    #[test]
+    fn refuses_a_source_without_orderly_completion() {
+        // Goal: timing out never leaves a successful-looking capture.
+        // Method: capture one publication from an unfinished source with a one-second budget.
+        let recording = Recording::new();
+
+        let result = capture_empty_source(&recording, 2, 1, false);
+
+        assert!(result.is_err());
+        assert!(
+            !fs::read_to_string(recording.0.join("source.reference"))
+                .unwrap()
+                .contains("complete ")
+        );
+    }
+
+    fn capture_empty_source(
+        recording: &Recording,
+        slots: u64,
+        publications: u64,
+        finish: bool,
+    ) -> persistence::Result<()> {
+        assert!(publications <= 2);
+        let store = Store::open(&recording.0).unwrap();
+        let place = Place {
+            lock_path: recording.0.join("ring.lock"),
+            name_prefix: format!("/fdfid{}", std::process::id()),
+        };
+        let identity = RunIdentity {
+            recording: store.recording(),
+            run: Identity([31, 32]),
+            boot: Identity([41, 42]),
+        };
+        let mut shape = fixture::profile(false);
+        shape.slot_count = slots;
+        let mut writer = Writer::create_with_identity(
+            &place,
+            shape,
+            DictionaryCapacity {
+                entries: 1,
+                arena_bytes: 32,
+            },
+            &identity,
+            1,
+        )
+        .unwrap();
+        for index in 0..publications {
+            writer
+                .publish_with_identity(
+                    &Readings {
+                        run_tick: index,
+                        cpus: &[],
+                        memory: &collector::machine::Memory::default(),
+                        interfaces: &[],
+                        ioreport: None,
+                        smc: None,
+                        processes: &[],
+                        processes_refused: 0,
+                        processes_gone: 0,
+                        coalitions: &[],
+                        events: &[],
+                        dropped: collector::ring::Dropped::default(),
+                    },
+                    Some(&ObservationTimes {
+                        wall_ns: 50_000_000_000,
+                        continuous_ns: index,
+                        awake_ns: index,
+                    }),
+                    &IdentityPublication {
+                        processes: &[],
+                        events: &[],
+                    },
+                )
+                .unwrap();
+        }
+        if finish {
+            writer.finish();
+        }
+        let result = capture::run(&place.lock_path, &recording.0.join("source.reference"), 1);
+        let name = writer.name().to_owned();
+        drop(writer);
+        collector::ring::unlink_generation(&name).unwrap();
+        result
     }
 
     #[test]
@@ -86,6 +404,27 @@ mod tests {
         recording.encode(&reference, |_| {});
 
         compare::run(&recording.0, &reference).unwrap();
+    }
+
+    #[test]
+    fn refuses_oversized_disk_text_and_blob_without_panicking() {
+        // Goal: untrusted disk cells cannot grow a reference row beyond its bound or abort.
+        // Method: seal oversized interface names of both storage types and compare them.
+        for kind in ["VARCHAR", "BLOB"] {
+            let recording = Recording::new();
+            let reference = recording.0.join("source.reference");
+            recording.encode(&reference, |directory| {
+                rewrite_table(
+                    directory,
+                    persistence::schema::Table::Interfaces,
+                    &format!("SELECT * REPLACE (repeat('a',20000)::{kind} AS name) FROM source"),
+                );
+            });
+
+            let result = compare::run(&recording.0, &reference);
+
+            assert!(matches!(result, Err(persistence::Error::Io(_))));
+        }
     }
 
     #[test]
@@ -105,7 +444,7 @@ mod tests {
         };
         let window = stage_identity(&recording, &reference, &identity);
 
-        commit_identity(&store, &window);
+        commit_identity(&store, &window, |_| {});
 
         compare::run(&recording.0, &reference).unwrap();
     }
@@ -143,6 +482,315 @@ mod tests {
                 "source and disk typed values differ"
             ))
         ));
+    }
+
+    #[test]
+    fn captures_exact_long_raw_identity_and_independent_event_metadata() {
+        // Goal: reference capability includes every observation and lossless bounded bytes.
+        // Method: compare captured source lines with independent literal protocol expectations.
+        let recording = Recording::new();
+        let reference = recording.0.join("source.reference");
+        recording.encode_identity(&reference, |_| {});
+        let source = fs::read_to_string(&reference).unwrap();
+        let name = format!("ff0a5c09{}", "78".repeat(4091));
+        let app = format!("2f{}2e617070", "79".repeat(4090));
+        let refused = format!(
+            "process_identity u1 i1{} u1 u0 u1 u18446744073709551615 \
+            i-2147483648 x{name} x{app}\n",
+            " n".repeat(19)
+        );
+        let gone = refused
+            .replacen("i1", "i2", 1)
+            .replacen("u0 u1", "u0 u2", 1);
+
+        compare::run(&recording.0, &reference).unwrap();
+
+        assert!(source.contains(&refused));
+        assert!(source.contains(&gone));
+        assert!(source.contains(
+            "event_identity u1 u1 i9001 u1 u0 u3 u18446744073709551615 \
+            i-2147483648 x6576656e74ff0a5c n\n"
+        ));
+        assert_eq!(
+            4,
+            source
+                .lines()
+                .filter(|line| line.starts_with("process_identity "))
+                .count()
+        );
+        assert_eq!(
+            5,
+            source
+                .lines()
+                .filter(|line| line.starts_with("event_identity "))
+                .count()
+        );
+    }
+
+    macro_rules! identity_mutations {
+        ($($name:ident, $table:expr, $selection:expr, $error:expr;)*) => {$(
+            #[test]
+            fn $name() {
+                // Goal: disk mutation cannot pass independent captured source fidelity.
+                // Method: change private encoded output, seal it, then compare after retirement.
+                let recording = Recording::new();
+                let reference = recording.0.join("source.reference");
+                recording.encode_identity(&reference, |directory| {
+                    rewrite_table(directory, $table, $selection);
+                });
+
+                let result = compare::run(&recording.0, &reference);
+
+                assert!(matches!(&result, Err(persistence::Error::Bound($error))), "{result:?}");
+            }
+        )*};
+    }
+
+    identity_mutations! {
+        detects_a_measured_counter_change_in_captured_v4, persistence::schema::Table::Processes,
+            "SELECT * REPLACE(user_ns+1 AS user_ns) FROM source",
+            "source and disk typed values differ";
+        detects_changed_raw_process_identity, persistence::schema::Table::Processes,
+            "SELECT * REPLACE('different'::BLOB AS executable_name) FROM source WHERE pid<3 \
+            UNION ALL SELECT * FROM source WHERE pid=3",
+            "source and disk typed values differ";
+        detects_changed_raw_app_identity, persistence::schema::Table::Processes,
+            "SELECT * REPLACE('/Other.app'::BLOB AS app_path) FROM source WHERE pid<3 \
+            UNION ALL SELECT * FROM source WHERE pid=3",
+            "source and disk typed values differ";
+        detects_changed_pid_version, persistence::schema::Table::Processes,
+            "SELECT * REPLACE(pid_version+1 AS pid_version) FROM source",
+            "source and disk typed values differ";
+        refuses_changed_usage_availability, persistence::schema::Table::Processes,
+            "SELECT * REPLACE(2::UTINYINT AS usage_availability) FROM source WHERE pid=1 \
+            UNION ALL SELECT * FROM source WHERE pid<>1",
+            "source and disk typed values differ";
+        detects_changed_creation_identity, persistence::schema::Table::Processes,
+            "SELECT * REPLACE(process_unique_id-1 AS process_unique_id) FROM source",
+            "source and disk typed values differ";
+        refuses_changed_identity_version, persistence::schema::Table::Processes,
+            "SELECT * REPLACE(9::UTINYINT AS identity_version) FROM source",
+            "process identity version";
+        refuses_changed_identity_availability, persistence::schema::Table::Processes,
+            "SELECT * REPLACE(6::UTINYINT AS identity_availability) FROM source",
+            "unavailable process executable";
+        refuses_invented_usage_for_identity_only_rows, persistence::schema::Table::Processes,
+            "SELECT * REPLACE(0::UBIGINT AS user_ns) FROM source",
+            "process usage payload";
+        detects_omitted_identity_only_observation, persistence::schema::Table::Processes,
+            "SELECT * FROM source WHERE pid<>1",
+            "source and disk typed values differ";
+        detects_extra_identity_only_observation, persistence::schema::Table::Processes,
+            "SELECT * FROM source UNION ALL SELECT * FROM source WHERE pid=1",
+            "source and disk typed values differ";
+        detects_changed_unavailable_event_identity_reason, persistence::schema::Table::Events,
+            "SELECT * REPLACE(1::UTINYINT AS identity_availability) FROM source WHERE event=2 \
+            UNION ALL SELECT * FROM source WHERE event<>2",
+            "source and disk typed values differ";
+        detects_omitted_independent_event_identity, persistence::schema::Table::Events,
+            "SELECT * FROM source WHERE event<>1",
+            "source and disk typed values differ";
+        detects_extra_independent_event_identity, persistence::schema::Table::Events,
+            "SELECT * FROM source UNION ALL SELECT * FROM source WHERE event=1",
+            "source and disk typed values differ";
+        detects_changed_independent_event_identity, persistence::schema::Table::Events,
+            "SELECT * REPLACE('event-other'::BLOB AS executable_name) FROM source WHERE event=1 \
+            UNION ALL SELECT * FROM source WHERE event<>1",
+            "source and disk typed values differ";
+    }
+
+    macro_rules! reference_mutations {
+        ($($name:ident, $before:expr, $after:expr, $error:expr;)*) => {$(
+            #[test]
+            fn $name() {
+                // Goal: unsupported or incomplete references cannot report fidelity.
+                // Method: change one captured reference element and run the real verifier.
+                let recording = Recording::new();
+                let reference = recording.0.join("source.reference");
+                recording.encode_identity(&reference, |_| {});
+                let source = fs::read_to_string(&reference).unwrap();
+                fs::write(&reference, source.replace($before, $after)).unwrap();
+
+                let result = compare::run(&recording.0, &reference);
+
+                assert!(matches!(result, Err(persistence::Error::Bound($error))));
+            }
+        )*};
+    }
+
+    reference_mutations! {
+        refuses_unknown_reference_version, "flightdeck-reference-2", "flightdeck-reference-9",
+            "reference version";
+        refuses_unknown_identity_capability, "identity-1", "identity-9",
+            "reference identity capability";
+        refuses_an_unterminated_reference_line, "complete 1\n", "complete 1",
+            "reference unterminated line";
+        refuses_truncated_reference_completion, "complete 1\n", "", "reference is incomplete";
+        refuses_identity_rows_in_a_numeric_only_reference,
+            "flightdeck-reference-2 identity-1", "flightdeck-reference-1", "reference row kind";
+        refuses_reference_publication_mismatch, "process_identity u1", "process_identity u2",
+            "reference row publication";
+
+    }
+
+    #[test]
+    fn refuses_completion_without_a_matching_source_tick_in_both_reference_versions() {
+        // Goal: an empty comparison cannot claim a captured publication was verified.
+        // Method: retain a real header/time but replace its data with a nonexistent publication.
+        for identity_capable in [true, false] {
+            let recording = Recording::new();
+            let reference = recording.0.join("source.reference");
+            recording.encode_identity(&reference, |_| {});
+            let source = fs::read_to_string(&reference).unwrap();
+            let header = source.lines().next().unwrap();
+            let header = if identity_capable {
+                header.to_owned()
+            } else {
+                header.replace(
+                    "flightdeck-reference-2 identity-1",
+                    "flightdeck-reference-1",
+                )
+            };
+            fs::write(
+                &reference,
+                format!("{header}\nbegin 18446744073709551615 50000000111\ncomplete 1\n"),
+            )
+            .unwrap();
+
+            let result = compare::run(&recording.0, &reference);
+
+            assert!(matches!(
+                result,
+                Err(persistence::Error::Bound("reference missing tick"))
+            ));
+        }
+    }
+
+    #[test]
+    fn refuses_a_publication_header_time_that_disagrees_with_its_tick() {
+        // Goal: reference discovery must use the time actually carried by its source tick.
+        // Method: change only the begin time within the same discoverable wall second.
+        let recording = Recording::new();
+        let reference = recording.0.join("source.reference");
+        recording.encode_identity(&reference, |_| {});
+        let source = fs::read_to_string(&reference).unwrap();
+        fs::write(
+            &reference,
+            source.replace("begin 1 50000000111", "begin 1 50000000112"),
+        )
+        .unwrap();
+
+        let result = compare::run(&recording.0, &reference);
+
+        assert!(matches!(
+            result,
+            Err(persistence::Error::Bound("reference tick time"))
+        ));
+    }
+
+    #[test]
+    fn detects_missing_identity_reference_rows() {
+        // Goal: a v2 header alone cannot imply identity fidelity.
+        // Method: remove captured identity rows while preserving all original numeric rows.
+        let recording = Recording::new();
+        let reference = recording.0.join("source.reference");
+        recording.encode_identity(&reference, |_| {});
+        let source = fs::read_to_string(&reference).unwrap();
+        let source = source
+            .lines()
+            .filter(|line| !line.starts_with("process_identity "))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        fs::write(&reference, source).unwrap();
+
+        let result = compare::run(&recording.0, &reference);
+
+        assert!(matches!(
+            result,
+            Err(persistence::Error::Bound("disk has extra rows"))
+        ));
+    }
+
+    #[test]
+    fn refuses_an_oversized_reference_line() {
+        // Goal: verification refuses oversized input before allocating an unbounded line.
+        // Method: replace a valid source header with a 32769-byte record.
+        let recording = Recording::new();
+        let reference = recording.0.join("source.reference");
+        recording.encode_identity(&reference, |_| {});
+        fs::write(&reference, "x".repeat(32_769)).unwrap();
+
+        let result = compare::run(&recording.0, &reference);
+
+        assert!(matches!(
+            result,
+            Err(persistence::Error::Bound("reference line limit"))
+        ));
+    }
+
+    #[test]
+    fn refuses_an_oversized_reference_file() {
+        // Goal: verification rejects disk input beyond its file bound before reading.
+        // Method: grow the existing reference sparsely past 8 GiB.
+        let recording = Recording::new();
+        let reference = recording.0.join("source.reference");
+        recording.encode_identity(&reference, |_| {});
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&reference)
+            .unwrap()
+            .set_len(8 * 1024 * 1024 * 1024 + 1)
+            .unwrap();
+
+        let result = compare::run(&recording.0, &reference);
+
+        assert!(matches!(
+            result,
+            Err(persistence::Error::Bound("reference exceeds 8 GiB"))
+        ));
+    }
+
+    #[test]
+    fn refuses_unknown_rows_in_an_identity_capable_reference() {
+        // Goal: an unsupported source record never implies complete identity fidelity.
+        // Method: add an unknown row to an otherwise captured and sealed reference.
+        let recording = Recording::new();
+        let reference = recording.0.join("source.reference");
+        recording.encode_identity(&reference, |_| {});
+        let source = fs::read_to_string(&reference).unwrap();
+        fs::write(
+            &reference,
+            source.replace("complete 1", "alien u1\ncomplete 1"),
+        )
+        .unwrap();
+
+        let result = compare::run(&recording.0, &reference);
+
+        assert!(matches!(
+            result,
+            Err(persistence::Error::Bound("reference row kind"))
+        ));
+    }
+
+    impl Recording {
+        fn encode_identity(
+            &self,
+            reference: &std::path::Path,
+            extend: impl FnOnce(&std::path::Path),
+        ) {
+            let store = Store::open(&self.0).unwrap();
+            let identity = WindowIdentity {
+                run: RunIdentity {
+                    recording: store.recording(),
+                    run: Identity([31, 32]),
+                    boot: Identity([41, 42]),
+                },
+                window: 0,
+            };
+            let window = stage_identity(self, reference, &identity);
+            commit_identity(&store, &window, extend);
+        }
     }
 
     impl Recording {
@@ -412,8 +1060,8 @@ mod tests {
             &place,
             shape,
             DictionaryCapacity {
-                entries: 1,
-                arena_bytes: 32,
+                entries: 2,
+                arena_bytes: 16_384,
             },
             &identity.run,
             0,
@@ -432,10 +1080,20 @@ mod tests {
         source.tick.events = 1..6;
         source.tick.ioreport_read = false;
         source.tick.smc_read = false;
-        source.tick.processes_refused = 0;
-        source.tick.processes_gone = 0;
+        source
+            .tick
+            .processes
+            .retain(|process| [0, 3].contains(&process.pid));
+        source.tick.processes_refused = 1;
+        source.tick.processes_gone = 1;
         stage_identity_publish(&mut writer, &source);
-        write_reference(reference, &identity.run, &[source]);
+        writer.finish();
+        capture::run(&place.lock_path, reference, 10).unwrap();
+        assert!(
+            fs::read_to_string(reference)
+                .unwrap()
+                .starts_with("flightdeck-reference-2 identity-1 ")
+        );
         let mut reader = RingReader::open(&place.lock_path).unwrap();
         let window = stage_identity_read(&mut reader, identity, &shape);
         drop(reader);
@@ -504,13 +1162,9 @@ mod tests {
     }
 
     fn stage_identity_publish(writer: &mut Writer, source: &Frame) {
-        let processes: Vec<_> = source
-            .tick
-            .processes
-            .iter()
-            .map(|process| source_identity(process.pid, UsageAvailability::Measured))
-            .collect();
-        let events: Vec<_> = source
+        let processes = stage_identity_publish_processes(writer);
+        let event_program = intern(writer, b"event\xff\n\\", None);
+        let mut events: Vec<_> = source
             .events
             .iter()
             .map(|event| match event {
@@ -529,6 +1183,7 @@ mod tests {
                 ),
             })
             .collect();
+        events[0] = readable(9001, UsageAvailability::NotApplicable, event_program);
         writer
             .publish_with_identity(
                 &Readings {
@@ -539,8 +1194,8 @@ mod tests {
                     ioreport: None,
                     smc: None,
                     processes: &source.tick.processes,
-                    processes_refused: 0,
-                    processes_gone: 0,
+                    processes_refused: 1,
+                    processes_gone: 1,
                     coalitions: &source.tick.coalitions,
                     events: &source.events,
                     dropped: source.tick.dropped,
@@ -554,6 +1209,66 @@ mod tests {
             .unwrap();
     }
 
+    fn stage_identity_publish_processes(writer: &mut Writer) -> Vec<IdentityObservation> {
+        let mut name = [b'x'; 4095];
+        name[..4].copy_from_slice(&[0xff, b'\n', b'\\', b'\t']);
+        let mut app = [b'y'; 4095];
+        app[0] = b'/';
+        app[4091..].copy_from_slice(b".app");
+        let process_program = intern(writer, &name, Some(&app));
+        let mut processes = vec![
+            readable(0, UsageAvailability::Measured, process_program),
+            readable(1, UsageAvailability::Refused, process_program),
+            readable(2, UsageAvailability::Gone, process_program),
+            source_identity(3, UsageAvailability::Measured),
+        ];
+        processes[3].identity = ProcessIdentity::Unavailable {
+            creation: Some(ProcessCreation {
+                unique_id: 99,
+                pid_version: 7,
+            }),
+            reason: IdentityUnavailable::Changed,
+        };
+
+        processes
+    }
+
+    fn intern(
+        writer: &mut Writer,
+        executable_name: &[u8],
+        app_path: Option<&[u8]>,
+    ) -> collector::ring::ProgramReference {
+        let mut program = None;
+        writer
+            .intern_program(
+                &ProgramBytes {
+                    executable_name,
+                    app_path,
+                },
+                &mut program,
+            )
+            .unwrap();
+        program.unwrap()
+    }
+
+    fn readable(
+        pid: i32,
+        usage: UsageAvailability,
+        program: collector::ring::ProgramReference,
+    ) -> IdentityObservation {
+        IdentityObservation {
+            pid,
+            usage,
+            identity: ProcessIdentity::Measured {
+                creation: ProcessCreation {
+                    unique_id: u64::MAX,
+                    pid_version: i32::MIN,
+                },
+                program,
+            },
+        }
+    }
+
     fn source_identity(pid: i32, usage: UsageAvailability) -> IdentityObservation {
         IdentityObservation {
             pid,
@@ -565,11 +1280,13 @@ mod tests {
         }
     }
 
-    fn commit_identity(store: &Store, window: &Window) {
+    fn commit_identity(store: &Store, window: &Window, extend: impl FnOnce(&std::path::Path)) {
         let Begin::Pending(pending) = store.begin(&window.identity).unwrap() else {
             panic!("fresh identity fixture was committed");
         };
-        let tables = Encoder.encode(window, pending.path()).unwrap();
+        let mut tables = Encoder.encode(window, pending.path()).unwrap();
+        extend(pending.path());
+        encode_row_counts(pending.path(), &mut tables);
         store
             .commit(
                 pending,

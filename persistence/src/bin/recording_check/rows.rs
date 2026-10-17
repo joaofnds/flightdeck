@@ -5,6 +5,15 @@ use collector::ring::Tick;
 use collector::tracker::{Event, Noticed};
 use persistence::Result;
 
+pub const REFERENCE_BYTES_MAX: u64 = 8 * 1024 * 1024 * 1024;
+pub const REFERENCE_LINES_MAX: u64 = 100_000_000;
+pub const REFERENCE_LINE_BYTES_MAX: u64 = 32_768;
+
+const _: () = {
+    assert!(REFERENCE_LINE_BYTES_MAX > 4 * 4095 + 1024);
+    assert!(REFERENCE_LINE_BYTES_MAX < REFERENCE_BYTES_MAX);
+};
+
 pub const TABLES: [(&str, &str); 10] = [
     ("ticks", "publication"),
     ("memory", "publication"),
@@ -19,11 +28,33 @@ pub const TABLES: [(&str, &str); 10] = [
 ];
 
 pub struct Row<'writer, W: Write> {
+    writer: RowWriter<'writer, W>,
+}
+
+struct RowWriter<'writer, W: Write> {
     writer: &'writer mut W,
+    bytes: u64,
+}
+
+impl<W: Write> Write for RowWriter<'_, W> {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let count = u64::try_from(buffer.len()).map_err(std::io::Error::other)?;
+        if count > REFERENCE_LINE_BYTES_MAX - self.bytes {
+            return Err(std::io::Error::other("reference disk row bound"));
+        }
+        self.writer.write_all(buffer)?;
+        self.bytes += count;
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.writer.flush()
+    }
 }
 
 impl<'writer, W: Write> Row<'writer, W> {
     pub fn new(writer: &'writer mut W, table: &str, publication: u64) -> Result<Self> {
+        let mut writer = RowWriter { writer, bytes: 0 };
         write!(writer, "{table} u{publication}")?;
         Ok(Self { writer })
     }
@@ -50,6 +81,14 @@ impl<'writer, W: Write> Row<'writer, W> {
         }
         Ok(())
     }
+    pub fn blob(&mut self, bytes: &[u8]) -> Result<()> {
+        write!(self.writer, " x")?;
+        for byte in bytes {
+            write!(self.writer, "{byte:02x}")?;
+        }
+
+        Ok(())
+    }
     pub fn null(&mut self) -> Result<()> {
         write!(self.writer, " n")?;
         Ok(())
@@ -66,7 +105,7 @@ impl<'writer, W: Write> Row<'writer, W> {
         }
         Ok(())
     }
-    pub fn end(self) -> Result<()> {
+    pub fn end(mut self) -> Result<()> {
         writeln!(self.writer)?;
         Ok(())
     }
@@ -201,16 +240,7 @@ fn processes(writer: &mut impl Write, publication: u64, tick: &Tick) -> Result<(
     for process in processes {
         let mut row = Row::new(writer, "processes", publication)?;
         row.signed(i64::from(process.pid))?;
-        usage(&mut row, Some(process.usage))?;
-        for value in [
-            process.task.threads,
-            process.task.faults,
-            process.task.context_switches,
-            process.task.mach_syscalls,
-            process.task.unix_syscalls,
-        ] {
-            row.signed(i64::from(value))?;
-        }
+        process_payload(&mut row, process)?;
         row.end()?;
     }
     let mut coalitions: Vec<_> = tick.coalitions.iter().collect();
@@ -231,6 +261,24 @@ fn processes(writer: &mut impl Write, publication: u64, tick: &Tick) -> Result<(
         ])?;
         row.end()?;
     }
+    Ok(())
+}
+
+pub fn process_payload<W: Write>(
+    row: &mut Row<'_, W>,
+    process: &collector::processes::Process,
+) -> Result<()> {
+    usage(row, Some(process.usage))?;
+    for value in [
+        process.task.threads,
+        process.task.faults,
+        process.task.context_switches,
+        process.task.mach_syscalls,
+        process.task.unix_syscalls,
+    ] {
+        row.signed(i64::from(value))?;
+    }
+
     Ok(())
 }
 
@@ -307,4 +355,29 @@ fn usage<W: Write>(row: &mut Row<'_, W>, value: Option<Usage>) -> Result<()> {
 
 fn bound() -> persistence::Error {
     persistence::Error::Bound("reference row count")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refuses_disk_bytes_before_growing_the_reserved_row_buffer() {
+        // Goal: neither text nor BLOB expansion allocates past the serialized row limit.
+        // Method: format each oversized cell into a buffer reserved to the exact bound.
+        for text in [true, false] {
+            let mut bytes = Vec::with_capacity(usize::try_from(REFERENCE_LINE_BYTES_MAX).unwrap());
+            let capacity = bytes.capacity();
+            let mut row = Row::new(&mut bytes, "interfaces", 1).unwrap();
+            let value = "a".repeat(20_000);
+            let result = if text {
+                row.text(&value)
+            } else {
+                row.blob(value.as_bytes())
+            };
+            assert!(result.is_err());
+            assert!(u64::try_from(bytes.len()).unwrap() <= REFERENCE_LINE_BYTES_MAX);
+            assert_eq!(bytes.capacity(), capacity);
+        }
+    }
 }

@@ -1,4 +1,7 @@
 #[cfg(test)]
+#[path = "../src/live_fixture.rs"]
+mod identity_fixture;
+#[cfg(test)]
 mod tests {
     use collector::machine::Memory;
     use collector::recording::{Registration, private};
@@ -250,17 +253,14 @@ mod tests {
     }
 
     #[test]
-    fn refuses_identity_sources_before_numeric_only_projection() {
-        // Goal: the legacy live projector must not claim it preserved a v4 observation.
-        // Method: open an empty identity source, including no occupied dictionary entries.
+    fn admits_an_empty_identity_source_for_preserving_projection() {
+        // Goal: empty v4 rings are admitted by the identity-preserving live projector.
+        // Method: open a registered identity source before it publishes any observations.
         let recording = Recording::identity_source();
 
         let result = LiveSession::open(&recording.root);
 
-        assert!(matches!(
-            result,
-            Err(persistence::Error::Bound("identity source preservation"))
-        ));
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -594,5 +594,218 @@ mod tests {
             &observation["run_tick"],
             &observation["wall_ns"],
         ]
+    }
+
+    fn assert_reader_losses_absent(catalog: &serde_json::Value, sources: usize) {
+        let losses = catalog["reader_losses"].as_array().unwrap();
+        assert_eq!(losses.len(), sources);
+        assert!(sources <= 2);
+        for source in losses.iter().take(2) {
+            assert_eq!(
+                source["losses"],
+                serde_json::json!({"publications": 0, "events": 0, "unknown": false})
+            );
+        }
+    }
+    #[test]
+    fn preserves_captured_process_and_independent_event_metadata_while_polling() {
+        // Goal: live pages preserve captured identity separately from unavailable usage.
+        // Method: poll two real v4 publications and inspect their normalized original/raw cells.
+        let mut fixture = super::identity_fixture::Fixture::new();
+        fixture.publish(1000);
+        let mut session = LiveSession::open(&fixture.root).unwrap();
+        session.select(1000, 0).unwrap();
+        let first = session.page("processes", 0).unwrap();
+        let events = session.page("events", 0).unwrap();
+
+        fixture.publish(1001);
+        assert!(session.poll().unwrap());
+        session.select(1001, 0).unwrap();
+        let next = session.page("processes", 0).unwrap();
+
+        assert_eq!(first["rows"].as_array().unwrap().len(), 2);
+        assert_eq!(first["rows"][0][1], "1");
+        assert!(
+            first["rows"][0].as_array().unwrap()[2..21]
+                .iter()
+                .all(serde_json::Value::is_null)
+        );
+        assert_eq!(first["rows"][0][21], "1");
+        assert_eq!(first["rows"][0][22], "0");
+        assert_eq!(first["rows"][0][23], "1");
+        assert_eq!(first["rows"][0][24], "1");
+        assert_eq!(first["rows"][0][25], "-1");
+        assert_eq!(first["rows"][0][26], r"refused\xff");
+        assert_eq!(first["rows"][0][27], r"/Apps/Outer\xfe.app");
+        assert_eq!(first["rows"][1][3], "9007199254740993");
+        assert_eq!(next["rows"][1][3], "9007199254740994");
+        assert_eq!(events["rows"][0][25], "700");
+        assert_eq!(events["rows"][0][26], "-70");
+        assert_eq!(events["rows"][0][27], r"departed\xfd");
+        assert_eq!(events["rows"][0][28], "/Old.app");
+        session.select(1000, 0).unwrap();
+        assert_eq!(session.page("processes", 0).unwrap(), first);
+    }
+
+    #[test]
+    fn preserves_identity_pages_once_across_live_and_sealed_overlap() {
+        // Goal: sealing and raw-row eviction do not duplicate or alter identity observations.
+        // Method: inspect live pages, seal, evict old rows by wall time, then select history.
+        let mut fixture = super::identity_fixture::Fixture::new();
+        fixture.publish(1000);
+        let mut session = LiveSession::open(&fixture.root).unwrap();
+        session.select(1000, 0).unwrap();
+        let processes = session.page("processes", 0).unwrap();
+        let events = session.page("events", 0).unwrap();
+        fixture.seal();
+        session.poll().unwrap();
+        fixture.publish(2001);
+        session.poll().unwrap();
+
+        let selected = session.select(1000, 0).unwrap();
+        let saved_processes = session.page("processes", 0).unwrap();
+        let saved_events = session.page("events", 0).unwrap();
+
+        assert_eq!(selected["alternatives"].as_array().unwrap().len(), 1);
+        assert_eq!(processes["columns"], saved_processes["columns"]);
+        assert_eq!(processes["rows"], saved_processes["rows"]);
+        assert_eq!(events["columns"], saved_events["columns"]);
+        assert_eq!(events["rows"], saved_events["rows"]);
+        assert_eq!(session.catalog()["windows"], 1);
+        assert_eq!(session.catalog()["tail_ticks"], 1);
+    }
+
+    #[test]
+    fn keeps_legacy_identity_absent_and_measured_usage_exact() {
+        // Goal: legacy live rows retain unsupported identity without changing measured values.
+        // Method: query the same process fixture through an ordinary registered v3 writer.
+        let mut fixture = super::identity_fixture::Fixture::new_mode(false, 2, None);
+        fixture.publish(1000);
+        let mut session = LiveSession::open(&fixture.root).unwrap();
+
+        session.select(1000, 0).unwrap();
+        let page = session.page("processes", 0).unwrap();
+
+        assert_eq!(page["rows"].as_array().unwrap().len(), 1);
+        assert_eq!(page["rows"][0][3], "9007199254740993");
+        assert!(page["rows"][0][21].is_null());
+        assert_eq!(page["rows"][0][22], "3");
+        assert_eq!(page["rows"][0][23], "0");
+        assert!(page["rows"][0][26].is_null());
+        assert!(page["rows"][0][27].is_null());
+    }
+
+    #[test]
+    fn rehydrates_captured_identity_after_real_eviction_without_disturbing_polling() {
+        // Goal: inspecting evicted v4 rows preserves metadata and subsequent polling.
+        // Method: exceed the raw cache while all publications remain in a 64-slot ring.
+        let mut fixture = super::identity_fixture::Fixture::new_mode(true, 12_000, None);
+        fixture.publish(1000);
+        let control = std::sync::Arc::new(viewer::Cancellation::default());
+        let mut session = LiveSession::open_with(&fixture.root, control.clone(), 0).unwrap();
+        let before = session.select(1000, 0).unwrap();
+        let first = session.page("processes", 0).unwrap();
+        let last = session.page("processes", 11_776).unwrap();
+        let events = session.page("events", 0).unwrap();
+        assert_eq!(first["rows"][0][26], r"refused\xff");
+        assert!(first["rows"][0][3].is_null());
+        assert_eq!(last["rows"].as_array().unwrap().last().unwrap()[1], "12000");
+        assert_eq!(events["rows"][0][25], "700");
+        assert_eq!(events["rows"][0][27], r"departed\xfd");
+        for second in 1001..=1031 {
+            fixture.publish(second);
+            assert!(session.poll().unwrap());
+        }
+        let catalog = session.catalog();
+        assert!(catalog["tail_ticks"].as_u64().unwrap() < 32);
+        assert_eq!(catalog["first_second"], 1000);
+        assert_eq!(catalog["latest_observation"]["publication"], 32);
+        assert_reader_losses_absent(&catalog, 1);
+
+        control.cancel().unwrap();
+        assert!(session.select(1000, 0).is_err());
+        session.begin(control.epoch()).unwrap();
+        let selected = session.select(1000, 0).unwrap();
+
+        assert_eq!(selected["selected"], before["selected"]);
+        assert_eq!(session.page("processes", 0).unwrap(), first);
+        assert_eq!(session.page("processes", 11_776).unwrap(), last);
+        assert_eq!(session.page("events", 0).unwrap(), events);
+        assert_eq!(
+            session.catalog()["latest_observation"],
+            catalog["latest_observation"]
+        );
+        assert_eq!(session.catalog()["reader_losses"], catalog["reader_losses"]);
+        assert!(!session.poll().unwrap());
+        fixture.publish(1032);
+        assert!(session.poll().unwrap());
+        assert_eq!(session.catalog()["latest_observation"]["publication"], 33);
+        assert_eq!(session.catalog()["reader_losses"], catalog["reader_losses"]);
+        assert_eq!(session.page("processes", 0).unwrap(), first);
+        assert_eq!(session.page("events", 0).unwrap(), events);
+        session.select(1032, 0).unwrap();
+        assert_eq!(
+            session.page("processes", 0).unwrap()["rows"][6][3],
+            "9007199254741025"
+        );
+        assert!(session.catalog()["tail_cache_bytes"].as_u64().unwrap() <= 128 * 1024 * 1024);
+        println!(
+            "{}",
+            serde_json::json!({"identity_observations_per_tick":12000, "publications":33,
+                "retained_tail_ticks_before_rehydration":catalog["tail_ticks"],
+                "retained_cache_bytes_before_rehydration":catalog["tail_cache_bytes"]})
+        );
+    }
+
+    #[test]
+    fn alternates_legacy_and_captured_sources_within_one_recording() {
+        // Goal: source discovery and polling preserve each source's optional identity schema.
+        // Method: alternate registered v4/v3 publications through one public live session.
+        let mut captured = super::identity_fixture::Fixture::new();
+        let mut legacy = super::identity_fixture::Fixture::new_mode(false, 2, Some(&captured));
+        let mut session = LiveSession::open(&captured.root).unwrap();
+
+        captured.publish(1000);
+        assert!(session.poll().unwrap());
+        session.select(1000, 0).unwrap();
+        let processes = session.page("processes", 0).unwrap();
+        let events = session.page("events", 0).unwrap();
+        legacy.publish(1001);
+        assert!(session.poll().unwrap());
+        session.select(1001, 0).unwrap();
+        let original = session.page("processes", 0).unwrap();
+        let original_events = session.page("events", 0).unwrap();
+        captured.publish(1002);
+        assert!(session.poll().unwrap());
+        session.select(1002, 0).unwrap();
+        let next = session.page("processes", 0).unwrap();
+        legacy.publish(1003);
+        assert!(session.poll().unwrap());
+        session.select(1003, 0).unwrap();
+        let latest = session.page("processes", 0).unwrap();
+
+        assert_eq!(processes["rows"][0][26], r"refused\xff");
+        assert!(processes["rows"][0][3].is_null());
+        assert_eq!(processes["rows"][1][3], "9007199254740993");
+        assert_eq!(events["rows"][0][25], "700");
+        assert_eq!(events["rows"][0][27], r"departed\xfd");
+        assert!(original["rows"][0][21].is_null());
+        assert_eq!(original["rows"][0][22], "3");
+        assert!(original["rows"][0][26].is_null());
+        assert!(original_events["rows"][0][22].is_null());
+        assert!(original_events["rows"][0][27].is_null());
+        assert_eq!(
+            next["rows"][0].as_array().unwrap()[1..],
+            processes["rows"][0].as_array().unwrap()[1..]
+        );
+        assert_eq!(next["rows"][1][3], "9007199254740994");
+        assert_eq!(latest["rows"][0][3], "9007199254740994");
+        assert!(latest["rows"][0][21].is_null());
+        assert_ne!(page_identity(&processes)[0], page_identity(&original)[0]);
+        assert_reader_losses_absent(&session.catalog(), 2);
+        assert!(!session.poll().unwrap());
+        session.select(1000, 0).unwrap();
+        assert_eq!(session.page("processes", 0).unwrap(), processes);
+        assert_eq!(session.page("events", 0).unwrap(), events);
     }
 }
