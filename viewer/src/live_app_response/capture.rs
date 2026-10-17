@@ -125,33 +125,10 @@ fn display(bytes: &[u8]) -> Result<String> {
     validate_bytes(bytes)?;
 
     let mut text = String::with_capacity(bytes.len() * 4);
-    for chunk in bytes.utf8_chunks() {
-        for character in chunk.valid().chars() {
-            match character {
-                '\\' => text.push_str("\\\\"),
-                character if character.is_control() => {
-                    let mut encoded = [0; 4];
-                    for byte in character.encode_utf8(&mut encoded).bytes() {
-                        display_escape(&mut text, byte);
-                    }
-                }
-                character => text.push(character),
-            }
-        }
-        for byte in chunk.invalid() {
-            display_escape(&mut text, *byte);
-        }
-    }
+    crate::byte_display::append(&mut text, bytes);
     assert!(text.len() <= bytes.len() * 4);
 
     Ok(text)
-}
-
-fn display_escape(text: &mut String, byte: u8) {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    text.push_str("\\x");
-    text.push(char::from(HEX[usize::from(byte >> 4)]));
-    text.push(char::from(HEX[usize::from(byte & 15)]));
 }
 
 fn key_view(key: &Key) -> AppKey<'_> {

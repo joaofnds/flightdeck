@@ -128,35 +128,10 @@ fn cell_bytes(value: &[u8]) -> Result<String> {
 
     let mut text = String::with_capacity(value.len());
 
-    for chunk in value.utf8_chunks() {
-        for character in chunk.valid().chars() {
-            match character {
-                '\\' => text.push_str("\\\\"),
-                character if character.is_control() => {
-                    let mut bytes = [0; 4];
-                    for byte in character.encode_utf8(&mut bytes).bytes() {
-                        cell_bytes_escape(&mut text, byte);
-                    }
-                }
-                character => text.push(character),
-            }
-        }
-
-        for byte in chunk.invalid() {
-            cell_bytes_escape(&mut text, *byte);
-        }
-    }
-
+    crate::byte_display::append(&mut text, value);
     assert!(text.len() <= value.len() * 4);
 
     Ok(text)
-}
-
-fn cell_bytes_escape(text: &mut String, byte: u8) {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    text.push_str("\\x");
-    text.push(char::from(HEX[usize::from(byte >> 4)]));
-    text.push(char::from(HEX[usize::from(byte & 15)]));
 }
 
 #[cfg(test)]
