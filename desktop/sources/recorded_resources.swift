@@ -56,7 +56,25 @@ struct RecordedMemoryData {
          line("Compressed", color: theme.memoryCompressedSeries, bytes: \.memoryCompressedBytes)]
     }
 
-    var swap: TimeSeriesLine { line("Swap used", color: theme.temperatureSeries, bytes: \.swapUsedBytes) }
+    var swap: TimeSeriesLine { line("Used", color: theme.swapUsedSeries, bytes: \.swapUsedBytes) }
+
+    var swapAllocated: TimeSeriesLine {
+        var allocated = line("Allocated", color: theme.swapAllocatedSeries, bytes: \.swapTotalBytes)
+
+        allocated.strokePattern = .dashed
+        allocated.fill = 0
+
+        return allocated
+    }
+
+    var paging: [TimeSeriesLine] {
+        [rate("Page-ins", color: theme.memoryPageinsSeries, pattern: .solid,
+              reading: \.memoryPageinsPerSecond),
+         rate("Compressed", color: theme.memoryCompressionsSeries,
+              pattern: .dashed, reading: \.memoryCompressionsPerSecond),
+         rate("Decompressed", color: theme.memoryDecompressionsSeries,
+              pattern: .dotted, reading: \.memoryDecompressionsPerSecond)]
+    }
 
     var pressureText: String {
         switch selection.summary?.pressure {
@@ -75,6 +93,13 @@ struct RecordedMemoryData {
                       bytes: KeyPath<Metric, UInt64?>) -> TimeSeriesLine {
         TimeSeriesLine(name: name, color: color,
             values: selection.trends.map { $0[keyPath: bytes].map { Double($0) / 1_073_741_824 } })
+    }
+
+    private func rate(_ name: String, color: Color,
+                      pattern: TimeSeriesStrokePattern,
+                      reading: KeyPath<Metric, Double?>) -> TimeSeriesLine {
+        TimeSeriesLine(name: name, color: color,
+            values: selection.trends.map { $0[keyPath: reading] }, strokePattern: pattern)
     }
 }
 
@@ -106,12 +131,13 @@ struct RecordedMemory: View {
                     summary("Installed", bytes: selection.summary?.memoryTotalBytes)
                     summary("Memory pressure", reading: data.pressureText, note: "macOS verdict")
                 }
+                categoryChart(data)
                 ViewThatFits(in: .horizontal) {
                     HStack(alignment: .top, spacing: theme.panelGap) {
-                        categoryChart(data).frame(minWidth: 330)
                         swapChart(data).frame(minWidth: 330)
+                        pagingChart(data).frame(minWidth: 330)
                     }
-                    VStack(spacing: theme.panelGap) { categoryChart(data); swapChart(data) }
+                    VStack(spacing: theme.panelGap) { swapChart(data); pagingChart(data) }
                 }
                 Text("Active, wired and compressed are the recorded VM categories. They are shown independently. Memory pressure is macOS’s verdict; compressed memory and swap can remain in use at normal pressure.")
                     .font(.callout).foregroundStyle(theme.muted)
@@ -151,10 +177,18 @@ struct RecordedMemory: View {
     }
 
     private func swapChart(_ data: RecordedMemoryData) -> some View {
-        RecordedResourceChart(title: "Swap", context: data.context, lines: [data.swap],
+        RecordedResourceChart(title: "Swap", context: data.context,
+            lines: [data.swap, data.swapAllocated],
             style: TimeSeriesStyle(unit: "GiB", fill: 0.1),
             inspectedID: $inspectedID, inspecting: $inspecting,
-            explanation: "Recorded bytes held in swap at each observation. This is an amount, not swap traffic per second.")
+            explanation: "Used is the amount held in swap. Allocated is the total swap space macOS has allocated. Both are amounts in GiB, not traffic rates.")
+    }
+
+    private func pagingChart(_ data: RecordedMemoryData) -> some View {
+        RecordedResourceChart(title: "Page-ins and compression", context: data.context,
+            lines: data.paging, style: TimeSeriesStyle(unit: "/s"),
+            inspectedID: $inspectedID, inspecting: $inspecting,
+            explanation: "Page-ins, compressions and decompressions per second over the measured interval. Unavailable intervals remain gaps. These are page counts, not bytes per second.")
     }
 }
 
@@ -217,8 +251,11 @@ struct RecordedResourceChart: View {
                     }
                 ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
                     HStack(spacing: 6) {
-                        RoundedRectangle(cornerRadius: 1).fill(line.color)
-                            .frame(width: 12, height: 3)
+                        Path { path in
+                            path.move(to: CGPoint(x: 0, y: 3))
+                            path.addLine(to: CGPoint(x: 32, y: 3))
+                        }.stroke(line.color, style: line.strokePattern.style(width: theme.chartStroke))
+                            .frame(width: 32, height: 6).accessibilityHidden(true)
                         Text(line.name)
                         Spacer()
                         Text(reading(line)).monospacedDigit().foregroundStyle(theme.muted)

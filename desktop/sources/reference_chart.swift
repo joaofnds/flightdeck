@@ -219,7 +219,8 @@ private struct ReferencePlot: View {
                     let index = lower + offset
                     return line.values.indices.contains(index) ? line.values[index] : nil
                 }, unit: line.unit, stack: line.stack, negative: line.negative,
-                dashed: line.dashed, axis: line.axis, fill: line.fill)
+                strokePattern: line.dashed == true ? .dashed : .solid,
+                axis: line.axis, fill: line.fill)
         }
         if let model = TimeSeriesModel(samples: samples, lines: values, domain: domain) {
             TimeSeriesPlot(model: model, style: TimeSeriesStyle(unit: panel.unit,

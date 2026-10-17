@@ -15,6 +15,11 @@ struct FlightdeckTheme {
     var memoryActiveSeries = Palette.blue
     var memoryWiredSeries = Palette.orange
     var memoryCompressedSeries = Palette.purple
+    var swapUsedSeries = Palette.purple
+    var swapAllocatedSeries = Color(red: 0.82, green: 0.82, blue: 0.87)
+    var memoryPageinsSeries = Palette.blue
+    var memoryCompressionsSeries = Palette.orange
+    var memoryDecompressionsSeries = Palette.purple
     var networkReceivedSeries = Palette.green
     var networkSentSeries = Palette.purple
     var systemPowerSeries = Palette.orange

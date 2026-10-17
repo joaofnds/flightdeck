@@ -13,9 +13,23 @@ struct TimeSeriesLine {
     var unit: String? = nil
     var stack: Bool? = nil
     var negative: Bool? = nil
-    var dashed: Bool? = nil
+    var strokePattern: TimeSeriesStrokePattern = .solid
     var axis: String? = nil
     var fill: Double? = nil
+}
+
+enum TimeSeriesStrokePattern: Equatable {
+    case solid
+    case dashed
+    case dotted
+
+    func style(width: CGFloat) -> StrokeStyle {
+        switch self {
+        case .solid: StrokeStyle(lineWidth: width)
+        case .dashed: StrokeStyle(lineWidth: width, dash: [5, 4])
+        case .dotted: StrokeStyle(lineWidth: width, lineCap: .round, dash: [1, 4])
+        }
+    }
 }
 
 struct TimeSeriesModel {
@@ -206,7 +220,8 @@ struct TimeSeriesPlot: View {
                 context.fill(area, with: .color(color.opacity(opacity)))
             }
         }
-        context.stroke(path, with: .color(color), style: StrokeStyle(lineWidth: style.lineWidth ?? theme.chartStroke, dash: line.dashed == true ? [5, 4] : []))
+        context.stroke(path, with: .color(color),
+            style: line.strokePattern.style(width: style.lineWidth ?? theme.chartStroke))
         if top.count == 1 { context.fill(Path(ellipseIn: CGRect(x: first.x - 2, y: first.y - 2, width: 4, height: 4)), with: .color(color)) }
     }
 

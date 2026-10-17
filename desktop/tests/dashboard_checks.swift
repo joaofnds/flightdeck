@@ -252,6 +252,8 @@ private func checks_recorded_plot_boundaries() {
 }
 
 func runRecordedMemoryChecks() throws {
+    try preserves_independent_swap_amounts_and_memory_rates()
+    try uses_independent_swap_and_rate_theme_roles()
     try runRecordedMemoryBoundaryChecks()
     try runRecordedMemoryThemeChecks()
     // Raw VM categories retain their meaning and missing samples remain unavailable.
@@ -283,6 +285,75 @@ func runRecordedMemoryChecks() throws {
     precondition(RecordedMemoryData(selection: gap, theme: FlightdeckTheme()).selectedID == nil)
     precondition(RecordedMemoryData(selection: gap, theme: FlightdeckTheme()).pressureText == "Unavailable")
     print("Recorded memory categories and missing-selection checks passed")
+}
+
+private func preserves_independent_swap_amounts_and_memory_rates() throws {
+    // Goal: live source amounts and per-second rates retain distinct values, zero and absence.
+    // Method: decode independent literals, then inspect the same shared plot and identity adapters.
+    let data = Data(#"""
+        {"value":[
+          {"run":"run","boot":"boot","publication":1,"wall_ns":1000000000000,
+           "segment":1,"swap_used_bytes":3221225472,"swap_total_bytes":11811160064,
+           "memory_pageins_per_second":13.25,"memory_compressions_per_second":29.5,
+           "memory_decompressions_per_second":7.125},
+          {"run":"run","boot":"boot","publication":2,"wall_ns":1001000000000,
+           "segment":1,"swap_used_bytes":0,"swap_total_bytes":0,
+           "memory_pageins_per_second":0,"memory_compressions_per_second":0,
+           "memory_decompressions_per_second":0},
+          {"run":"run","boot":"boot","publication":3,"wall_ns":1002000000000,
+           "segment":1,"swap_used_bytes":null,"swap_total_bytes":null,
+           "memory_pageins_per_second":null,"memory_compressions_per_second":null,
+           "memory_decompressions_per_second":null},
+          {"run":"run","boot":"boot","publication":4,"wall_ns":1003000000000,
+           "segment":1}]}
+        """#.utf8)
+    let points: [Metric] = try decodeRecordingResponse(data)
+    let observation = Observation(run: "run", boot: "boot", publication: 2, runTick: 1,
+        wallNs: 1_001_000_000_000, windowLosses: nil)
+    let selection = Selection(second: 1003, selected: observation, alternatives: [observation],
+        summary: points[1], trends: points, contextSeconds: 900)
+
+    let memory = RecordedMemoryData(selection: selection, theme: FlightdeckTheme())
+    let swap = memory.plot(lines: [memory.swap, memory.swapAllocated])
+    let rates = memory.plot(lines: memory.paging)
+
+    precondition(memory.swap.values == [3, 0, nil, nil])
+    precondition(memory.swapAllocated.values == [11, 0, nil, nil])
+    precondition(memory.swapAllocated.strokePattern == .dashed && memory.swapAllocated.fill == 0)
+    precondition(memory.paging.map(\.name) == ["Page-ins", "Compressed", "Decompressed"])
+    precondition(memory.paging.map(\.strokePattern) == [.solid, .dashed, .dotted])
+    precondition(memory.paging.map(\.values) == [
+        [13.25, 0, nil, nil], [29.5, 0, nil, nil], [7.125, 0, nil, nil]])
+    precondition(swap?.segments(line: 1) == [[0, 1]])
+    precondition(rates?.segments(line: 0) == [[0, 1]])
+    precondition(swap?.samples == rates?.samples)
+    precondition(memory.context.target(id: points[1].id)?.identity == observation.identity)
+    precondition(rates?.selectedTime(id: memory.selectedID!) == 1001)
+    precondition(memory.domain.upperBound - memory.domain.lowerBound == 900)
+    print("Memory swap used/allocated and three independent per-second rates retain zero and gaps")
+}
+
+private func uses_independent_swap_and_rate_theme_roles() throws {
+    // Goal: custom swap and rate colors remain independent from category and temperature colors.
+    // Method: replace every new role with a distinct color before projecting an empty selection.
+    let selection = Selection(second: 1000, selected: nil, alternatives: [], summary: nil,
+        trends: [], contextSeconds: 900)
+    var theme = FlightdeckTheme()
+    theme.swapUsedSeries = .pink
+    theme.swapAllocatedSeries = .cyan
+    theme.memoryPageinsSeries = .yellow
+    theme.memoryCompressionsSeries = .green
+    theme.memoryDecompressionsSeries = .mint
+    theme.memoryActiveSeries = .black
+    theme.memoryWiredSeries = .black
+    theme.memoryCompressedSeries = .black
+    theme.temperatureSeries = .black
+
+    let memory = RecordedMemoryData(selection: selection, theme: theme)
+
+    precondition([memory.swap.color, memory.swapAllocated.color] == [.pink, .cyan])
+    precondition(memory.paging.map(\.color) == [.yellow, .green, .mint])
+    print("Memory swap and rate projections use independently replaceable semantic theme roles")
 }
 
 func runRecordedMemoryThemeChecks() throws {
