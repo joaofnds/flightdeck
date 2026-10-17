@@ -19,6 +19,8 @@ struct RecordingStateChecks {
         if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--live-fixture" {
             try reads_the_latest_real_publication_after_rollback_and_repetition(
                 path: CommandLine.arguments[2])
+            try omits_unrequested_raw_pages_without_poisoning_later_queries(
+                path: CommandLine.arguments[2])
             return
         }
         precondition(CommandLine.arguments.count == 1, "Unknown native check arguments")
@@ -36,6 +38,13 @@ struct RecordingStateChecks {
         try distinguishes_publications_from_different_runs_and_boots()
         applies_native_table_selection_values_and_theme_changes()
         starts_live_without_building_a_poll_queue()
+        requests_live_chart_without_a_raw_page("Overview")
+        requests_live_chart_without_a_raw_page("Memory")
+        requests_live_chart_without_a_raw_page("GPU")
+        requests_live_chart_without_a_raw_page("Energy")
+        requests_live_chart_without_a_raw_page("Network")
+        retains_raw_pages_for_live_inspection_and_saved_sources()
+        opens_raw_readings_at_the_paused_chart_observation_without_polling()
         starts_live_once_across_repeated_window_appearances()
         cancels_failed_startup_polling_with_reference_visible_and_resumes_on_retry()
         preserves_visible_readings_when_a_live_poll_is_unchanged()
@@ -70,7 +79,7 @@ struct RecordingStateChecks {
         retains_exact_paused_identity_through_cpu_and_paging()
         chart_selection_requests_and_retains_exact_identity()
         unavailable_chart_identity_clears_readings_and_surfaces_error()
-        print("48 native recording state and table checks passed")
+        print("55 native recording state and table checks passed")
         try runReferenceDataChecks()
         runDashboardChecks()
         try runOverviewInspectionChecks()
@@ -789,6 +798,37 @@ struct RecordingStateChecks {
     }
 
     @MainActor
+    private static func omits_unrequested_raw_pages_without_poisoning_later_queries(
+        path: String
+    ) throws {
+        // Goal: chart requests omit raw rows and unchanged-source inspection still loads them.
+        // Method: alternate the real worker's projection on one retained live publication.
+        let reader = RecordingWorker()
+
+        let chart = try nativeRead(reader, request: rawPageRequest(path: path, includePage: false))
+
+        precondition(chart.page == nil, "Chart-only projection decoded an unrequested raw page")
+        precondition(chart.selection?.selected?.publication == 3)
+        let raw = try nativeRead(reader, request: rawPageRequest(path: path, includePage: true))
+        precondition(!raw.unchanged, "Raw inspection reused a chart-only cached projection")
+        precondition(raw.page?.name == "memory")
+        precondition(raw.page?.rows.first?[1] == "333")
+        precondition(raw.page?.observation.identity == chart.selection?.selected?.identity)
+        let restored = try nativeRead(reader,
+            request: rawPageRequest(path: path, includePage: false))
+        precondition(!restored.unchanged, "Chart projection retained cached raw rows")
+        precondition(restored.page == nil)
+        precondition(restored.selection?.selected?.identity == raw.selection?.selected?.identity)
+        print("Real RecordingWorker omits raw chart pages and refreshes changed projections")
+    }
+
+    private static func rawPageRequest(path: String, includePage: Bool) -> ReadRequest {
+        ReadRequest(path: path, second: nil, alternative: 0, table: 1, offset: 0,
+            refresh: false, machineOffsets: [:], includeMachine: false,
+            includePage: includePage, live: true, poll: true)
+    }
+
+    @MainActor
     private static func nativeRead(_ reader: RecordingWorker, request: ReadRequest) throws -> ReadResult {
         let completion = NativeReadCompletion()
         reader.read(request) { result in completion.complete(result) }
@@ -824,6 +864,83 @@ struct RecordingStateChecks {
                 losses: Losses(publications: 7, events: 3, unknown: true))])
         precondition(model.selection == nil)
         precondition(model.readerLossNotices == ["Live reader · run run: 7 missed publications, 3 missed events; additional loss is unknown."])
+    }
+
+    @MainActor
+    private static func opens_raw_readings_at_the_paused_chart_observation_without_polling() {
+        // Goal: explicit raw inspection loads the same paused publication without a timer.
+        // Method: complete a chart-only result, pause, then use the menu's model operation.
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+        let selected = Observation(run: "run-0", boot: "boot", publication: 9, runTick: 9,
+            wallNs: 17_000_000_000, windowLosses: nil)
+        let catalog = Catalog(path: "/recording", firstSecond: 17, lastSecond: 17,
+            windows: 0, unknownClockTicks: 0, tables: [], live: true,
+            latestObservation: selected)
+        let selection = Selection(second: 17, selected: selected, alternatives: [selected],
+            summary: nil, trends: [], contextSeconds: 900)
+        model.startLive()
+        reader.finishNext(result: ReadResult(catalog: catalog, selection: selection, page: nil,
+            machinePages: [:]))
+        drainMainQueue()
+        model.setLive(false)
+
+        model.enterRawReadings()
+
+        precondition(reader.readCount == 2, "Paused raw entry did not request its projection")
+        precondition(reader.latestRequest?.includePage == true)
+        precondition(reader.latestRequest?.target == selected.identity)
+        precondition(reader.latestRequest?.second == 17)
+        precondition(model.route == "Recorded readings")
+        precondition(!model.following)
+        reader.finishNext()
+        drainMainQueue()
+        precondition(model.page?.observation.identity == selected.identity)
+        precondition(model.selection?.selected?.identity == selected.identity)
+        precondition(!model.following)
+    }
+
+    @MainActor
+    private static func requests_live_chart_without_a_raw_page(_ route: String) {
+        // Goal: live chart destinations request readings without a hidden raw process page.
+        // Method: inspect the real model's request at its owned reader boundary.
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+        model.startLive()
+        reader.finishNext()
+        drainMainQueue()
+
+        model.route = route
+        model.pollLive()
+
+        precondition(reader.latestRequest?.includePage == false, route)
+        precondition(reader.latestRequest?.live == true, route)
+        precondition(reader.latestRequest?.second == nil, route)
+    }
+
+    @MainActor
+    private static func retains_raw_pages_for_live_inspection_and_saved_sources() {
+        // Goal: skipping chart-only rows preserves both live raw inspection and saved callers.
+        // Method: switch the real model's destination and source across completed reads.
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+        model.startLive()
+        reader.finishNext()
+        drainMainQueue()
+
+        model.route = "Recorded readings"
+        model.pollLive()
+
+        precondition(reader.latestRequest?.includePage == true)
+        reader.finishNext()
+        drainMainQueue()
+        model.enterProcesses()
+        precondition(reader.latestRequest?.includePage == true)
+        reader.finishNext()
+        drainMainQueue()
+        model.chooseRecording(path: "/saved")
+        precondition(reader.latestRequest?.includePage == true)
+        precondition(reader.latestRequest?.live == false)
     }
 
     @MainActor

@@ -119,6 +119,7 @@ struct Console: View {
             if let component = RecordedComponent(rawValue: title) { model.enterComponent(component) }
             else if title == "Apps" { model.enterApps() }
             else if title == "Memory" { model.enterMemory() }
+            else if title == "Recorded readings" { model.enterRawReadings() }
             else { model.route = title }
         } label: {
             Label(title, systemImage: icon).font(theme.navigationFont)
@@ -147,7 +148,7 @@ struct Console: View {
             Label("Last 15 minutes", systemImage: "clock").font(.callout).foregroundStyle(theme.muted)
             if model.isLiveSource {
                 Menu {
-                    Button("Inspect raw readings") { model.route = "Recorded readings" }
+                    Button("Inspect raw readings", action: model.enterRawReadings)
                 } label: {
                     Image(systemName: "ellipsis")
                 }.help("Metric options").accessibilityLabel("Metric options")

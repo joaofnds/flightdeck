@@ -175,6 +175,7 @@ struct ReadRequest: Sendable {
     let refresh: Bool
     let machineOffsets: [MachineSource: UInt64]
     let includeMachine: Bool
+    let includePage: Bool
     let live: Bool
     let poll: Bool
     let target: RecordedObservationIdentity?
@@ -182,7 +183,7 @@ struct ReadRequest: Sendable {
 
     init(path: String, second: UInt64?, alternative: UInt32, table: UInt32, offset: UInt64,
          refresh: Bool, machineOffsets: [MachineSource: UInt64], includeMachine: Bool,
-         live: Bool = false, poll: Bool = false, target: RecordedObservationIdentity? = nil,
+         includePage: Bool = true, live: Bool = false, poll: Bool = false, target: RecordedObservationIdentity? = nil,
          apps: LiveAppsRequest? = nil) {
         self.path = path
         self.second = second
@@ -192,6 +193,7 @@ struct ReadRequest: Sendable {
         self.refresh = refresh
         self.machineOffsets = machineOffsets
         self.includeMachine = includeMachine
+        self.includePage = includePage
         self.live = live
         self.poll = poll
         self.target = target
@@ -203,7 +205,7 @@ struct ReadRequest: Sendable {
             && alternative == other.alternative && target == other.target
             && table == other.table && offset == other.offset
             && machineOffsets == other.machineOffsets && includeMachine == other.includeMachine
-            && apps == other.apps
+            && includePage == other.includePage && apps == other.apps
     }
 }
 
@@ -335,7 +337,7 @@ final class RecordingWorker: RecordingReading, @unchecked Sendable {
             }
         }
         let page: TablePage?
-        if selection.selected == nil || request.apps != nil {
+        if selection.selected == nil || !request.includePage || request.apps != nil {
             page = nil
         } else {
             try prepare(session, epoch: epoch)
@@ -623,6 +625,7 @@ final class RecordingModel: ObservableObject {
             alternative: alternative, table: table, offset: requestedOffset,
             refresh: refresh || pending?.1.refresh == true,
             machineOffsets: machineOffsets, includeMachine: route == "CPU & processes",
+            includePage: !useLive || route == "CPU & processes" || route == "Recorded readings",
             live: useLive, poll: poll, target: following ? nil : requestedIdentity,
             apps: route == "Apps" ? LiveAppsRequest(key: appKey, appsOffset: appsOffset,
                 membersOffset: appMembersOffset) : nil)
@@ -739,6 +742,11 @@ final class RecordingModel: ObservableObject {
         page = nil
         machinePages.removeAll(keepingCapacity: true)
         row = nil
+        enqueue(refresh: false)
+    }
+
+    func enterRawReadings() {
+        route = "Recorded readings"
         enqueue(refresh: false)
     }
 
