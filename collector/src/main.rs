@@ -183,7 +183,7 @@ fn publish(ring: &mut Writer, collector: &Collector, tick: u64, times: Option<&O
         .as_ref()
         .map(|ioreport| IOReportReadings {
             gpu_energy_nj: ioreport.gpu_energy_nj(),
-            gpu: ioreport.gpu(),
+            gpu_active_ns: ioreport.gpu().active_ns(),
             cores: ioreport.cores(),
         });
     let smc = collector.smc.as_ref().map(|smc| SmcReadings {

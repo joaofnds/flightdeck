@@ -52,7 +52,7 @@ pub struct Dropped {
 
 pub struct IOReportReadings<'a> {
     pub gpu_energy_nj: u64,
-    pub gpu: &'a States,
+    pub gpu_active_ns: &'a [u64],
     pub cores: &'a [States],
 }
 
@@ -267,7 +267,7 @@ fn store_tick_counts(
     times: Option<&super::ObservationTimes>,
 ) {
     let (gpu_states, cores) = match &readings.ioreport {
-        Some(ioreport) => (ioreport.gpu.active_ns().len(), ioreport.cores.len()),
+        Some(ioreport) => (ioreport.gpu_active_ns.len(), ioreport.cores.len()),
         None => (0, 0),
     };
     let fans = readings.smc.as_ref().map_or(0, |smc| smc.fan_rpm.len());
@@ -321,7 +321,7 @@ fn store_tick_times(slot: &[AtomicU64], times: Option<&super::ObservationTimes>)
 
 fn store_tick_ioreport(slot: &[AtomicU64], layout: &Layout, ioreport: &IOReportReadings) {
     store(slot, SLOT_GPU_ENERGY_NJ, ioreport.gpu_energy_nj);
-    let gpu = ioreport.gpu.active_ns();
+    let gpu = ioreport.gpu_active_ns;
     let gpu_start = layout.gpu_states.start;
     assert!(gpu.len() <= layout.gpu_states.capacity);
     store_words(&slot[gpu_start..gpu_start + gpu.len()], gpu);
@@ -851,7 +851,7 @@ mod tests {
         let at_least_one = |count: usize| u64_from_usize(count.max(1));
         let (cores, states) = match &readings.ioreport {
             Some(ioreport) => {
-                let mut states = ioreport.gpu.active_ns().len();
+                let mut states = ioreport.gpu_active_ns.len();
                 for core in ioreport.cores {
                     states = states.max(core.active_ns().len());
                 }
@@ -1070,7 +1070,7 @@ mod tests {
             },
         ];
         let interfaces = [interface(1, "lo0"), interface(9, "utun1234567890ab")];
-        let gpu = States::with_active_ns(&[11, 12, 13]);
+        let gpu = [11, 12, 13];
         let cores = [
             States::with_active_ns(&[21, 22]),
             States::with_active_ns(&[31]),
@@ -1082,7 +1082,7 @@ mod tests {
             interfaces: &interfaces,
             ioreport: Some(IOReportReadings {
                 gpu_energy_nj: 99,
-                gpu: &gpu,
+                gpu_active_ns: &gpu,
                 cores: &cores,
             }),
             smc: Some(SmcReadings {
@@ -1143,12 +1143,12 @@ mod tests {
         // Method: load a tick with both sources into a tick that holds both, from a slot whose
         // tick read neither.
         let memory = Memory::default();
-        let gpu = States::with_active_ns(&[1]);
+        let gpu = [1];
         let cores = [States::with_active_ns(&[2])];
         let with_sources = Readings {
             ioreport: Some(IOReportReadings {
                 gpu_energy_nj: 5,
-                gpu: &gpu,
+                gpu_active_ns: &gpu,
                 cores: &cores,
             }),
             smc: Some(SmcReadings {
