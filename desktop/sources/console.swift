@@ -79,6 +79,11 @@ struct Console: View {
                                 ContentUnavailableView("No saved timestamps", systemImage: "clock.badge.questionmark",
                                     description: Text("Choose a recording with committed, timestamped ticks. Unknown-clock history cannot be assigned to a guessed second."))
                             } else {
+                                if let contextError = model.selection?.contextError {
+                                    Label("History refresh unavailable", systemImage: "exclamationmark.triangle")
+                                        .font(theme.compactReadingFont).foregroundStyle(theme.warning)
+                                        .help(contextError)
+                                }
                                 if let losses = model.selection?.selected?.windowLosses, losses.hasLosses {
                                     Label("This window reports \(losses.publications) lost publications and \(losses.events) lost events" + (losses.unknown ? "; additional loss is unknown." : "."), systemImage: "exclamationmark.triangle")
                                         .font(.callout).foregroundStyle(theme.warning)

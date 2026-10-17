@@ -14,12 +14,13 @@ use crate::data::{self, Table};
 use crate::live_app_history::{History, Target};
 use crate::live_app_response::{Detail, KeyKind, Page, Sample};
 use crate::live_apps::{Frame, Publication};
-use crate::session::{OBSERVATIONS_MAX, Observation, PAGE_ROWS};
+use crate::session::{ContextRange, OBSERVATIONS_MAX, Observation, PAGE_ROWS};
 use crate::{Cancellation, Session, metrics};
 
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
 const CACHE_BYTES_MAX: usize = 128 * 1024 * 1024;
 const SOURCES_MAX: usize = 2;
+const CONTEXT_BYTES_MAX: usize = 8 * 1024 * 1024;
 const PENDING_WINDOWS_MAX: usize = OBSERVATIONS_MAX;
 const WINDOW_MARKERS_PER_POLL_MAX: usize = 16;
 const HISTORY_REFRESH_POLLS_MAX: usize = 256;
@@ -33,6 +34,8 @@ const _: () = {
 pub struct LiveSession {
     root: PathBuf,
     history: Option<Session>,
+    history_error: Option<String>,
+    restored: Option<ScalarContext>,
     sources: Vec<Source>,
     observations: VecDeque<LiveObservation>,
     points: VecDeque<Value>,
@@ -45,6 +48,20 @@ pub struct LiveSession {
     cache_bytes: usize,
     #[cfg(test)]
     before_projection: Option<Box<dyn FnOnce()>>,
+    #[cfg(test)]
+    before_restore: Option<Box<dyn FnOnce()>>,
+}
+
+struct ScalarContext {
+    range: ContextRange,
+    points: Vec<Value>,
+}
+
+type PointIndex<'a> = BTreeMap<(Option<&'a str>, Option<&'a str>, Option<u64>), usize>;
+
+struct PointMerge<'a> {
+    live: &'a mut Value,
+    committed: &'a Value,
 }
 
 struct Source {
@@ -57,7 +74,6 @@ struct Source {
     window: Option<u64>,
     pending_windows: BTreeSet<u64>,
     pending_cursor: Option<u64>,
-    pending_retention_limited: bool,
     pending_refresh_polls: usize,
 }
 
@@ -117,6 +133,8 @@ impl LiveSession {
         let mut session = Self {
             root: root.to_owned(),
             history: None,
+            history_error: None,
+            restored: None,
             sources: Vec::with_capacity(SOURCES_MAX),
             observations: VecDeque::new(),
             points: VecDeque::new(),
@@ -129,8 +147,13 @@ impl LiveSession {
             cache_bytes: 0,
             #[cfg(test)]
             before_projection: None,
+            #[cfg(test)]
+            before_restore: None,
         };
-        session.refresh_history()?;
+        if let Err(error) = session.refresh_history() {
+            session.history_failure(error)?;
+        }
+
         session.poll()?;
         Ok(session)
     }
@@ -179,7 +202,11 @@ impl LiveSession {
                 self.operation.check()?;
             }
         }
-        self.poll_commits()?;
+
+        if let Err(error) = self.poll_commits() {
+            self.history_failure(error)?;
+        }
+
         Ok(changed)
     }
 
@@ -210,6 +237,7 @@ impl LiveSession {
             catalog["last_second"] = json!(last);
         }
         catalog["commit_discovery"] = catalog_commit_discovery(&self.sources);
+        catalog["history_error"] = json!(self.history_error);
         catalog["live"] = json!(true);
         catalog["tail_ticks"] = json!(self.observations.len());
         catalog["tail_cache_bytes"] = json!(self.cache_bytes);
@@ -283,7 +311,7 @@ impl LiveSession {
         Ok(response)
     }
 
-    /// Follows only points observed by this session, without querying committed history.
+    /// Restores committed context once, then follows live points without repeating its queries.
     pub fn follow_latest(&mut self) -> Result<Value> {
         self.selected = None;
         if let Some(inspected) = self.inspected.take() {
@@ -307,38 +335,154 @@ impl LiveSession {
             .ok_or(Error::Bound("latest live raw observation unavailable"))?;
         let second = current.observation.wall / NANOSECONDS_PER_SECOND;
         let selected = current.json();
-        let summary = metrics::public_point(&current.point)?;
+        let range = ContextRange {
+            first_ns: second.saturating_sub(899) * NANOSECONDS_PER_SECOND,
+            end_ns: second
+                .checked_add(1)
+                .and_then(|value| value.checked_mul(NANOSECONDS_PER_SECOND))
+                .ok_or(Error::Bound("context end"))?,
+        };
 
-        let mut trends = Vec::with_capacity(self.points.len());
-        let mut alternatives = Vec::new();
-        for point in &self.points {
-            self.operation.check()?;
-            let wall_second = point["wall_ns"]
-                .as_u64()
-                .ok_or(Error::Bound("point clock"))?
-                / NANOSECONDS_PER_SECOND;
-            if (second.saturating_sub(899)..=second).contains(&wall_second) {
-                trends.push(metrics::public_point(point)?);
-            }
-            if wall_second == second {
-                alternatives.push(point["observation"].clone());
-            }
+        if let Err(error) = self.follow_restore(range) {
+            self.history_failure(error)?;
         }
 
-        if trends.len() > OBSERVATIONS_MAX {
-            return Err(Error::Bound("context observations"));
-        }
+        let mut trends = Vec::new();
+        self.follow_trends(range, &mut trends)?;
+        let summary = trends
+            .iter()
+            .find(|point| same(point, &selected))
+            .ok_or(Error::Bound("selected context point"))?
+            .clone();
 
-        trends.sort_by(|left, right| identity_order(left).cmp(&identity_order(right)));
+        let mut alternatives = self
+            .points
+            .iter()
+            .filter(|point| {
+                point["wall_ns"]
+                    .as_u64()
+                    .map(|wall| wall / NANOSECONDS_PER_SECOND)
+                    == Some(second)
+            })
+            .map(|point| point["observation"].clone())
+            .collect::<Vec<_>>();
         alternatives.sort_by(|left, right| identity_order(left).cmp(&identity_order(right)));
-
         self.operation.check()?;
+
         let response = json!({"second": second, "selected": selected,
             "alternatives": alternatives, "summary": summary, "trends": trends,
-            "context_seconds": 900});
+            "context_seconds": 900, "context_error": self.history_error});
         self.selected = Some(selected);
 
         Ok(response)
+    }
+
+    fn follow_restore(&mut self, range: ContextRange) -> Result<()> {
+        let Some(history) = &self.history else {
+            return Ok(());
+        };
+
+        let history_end = history.catalog()["last_second"]
+            .as_u64()
+            .map(|second| {
+                second
+                    .checked_add(1)
+                    .and_then(|value| value.checked_mul(NANOSECONDS_PER_SECOND))
+                    .ok_or(Error::Bound("history context end"))
+            })
+            .transpose()?;
+
+        if self.history_error.is_none() {
+            if let Some(restored) = &self.restored {
+                if range.first_ns >= restored.range.first_ns {
+                    if history_end.is_none_or(|end| range.end_ns.min(end) <= restored.range.end_ns)
+                    {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
+        let mut points = Vec::new();
+        history.context(range, &mut points)?;
+        context_bytes(&points)?;
+        #[cfg(test)]
+        if let Some(barrier) = self.before_restore.take() {
+            barrier();
+        }
+
+        self.operation.check()?;
+        self.restored = Some(ScalarContext { range, points });
+        self.history_error = None;
+
+        Ok(())
+    }
+
+    fn follow_trends(&self, range: ContextRange, output: &mut Vec<Value>) -> Result<()> {
+        assert!(output.is_empty());
+
+        let mut positions = PointIndex::new();
+        self.follow_restored_points(range, output, &mut positions)?;
+        for point in &self.points {
+            self.operation.check()?;
+            if !context_contains(range, point)? {
+                continue;
+            }
+
+            let mut live = metrics::public_point(point)?;
+            let key = (
+                point["run"].as_str(),
+                point["boot"].as_str(),
+                point["publication"].as_u64(),
+            );
+            if let Some(index) = positions.get(&key) {
+                follow_merge_point(PointMerge {
+                    live: &mut live,
+                    committed: &output[*index],
+                })?;
+                output[*index] = live;
+            } else {
+                if output.len() == OBSERVATIONS_MAX {
+                    return Err(Error::Bound("context observations"));
+                }
+
+                positions.insert(key, output.len());
+                output.push(live);
+            }
+        }
+
+        output.sort_by(|left, right| identity_order(left).cmp(&identity_order(right)));
+        metrics::context_segments(output)?;
+
+        context_bytes(output)
+    }
+
+    fn follow_restored_points<'a>(
+        &'a self,
+        range: ContextRange,
+        output: &mut Vec<Value>,
+        positions: &mut PointIndex<'a>,
+    ) -> Result<()> {
+        let Some(restored) = &self.restored else {
+            return Ok(());
+        };
+
+        for point in &restored.points {
+            if context_contains(range, point)? {
+                let key = (
+                    point["run"].as_str(),
+                    point["boot"].as_str(),
+                    point["publication"].as_u64(),
+                );
+                if positions.insert(key, output.len()).is_some() {
+                    return Err(Error::Bound("duplicate committed context point"));
+                }
+
+                output.push(point.clone());
+            }
+        }
+
+        Ok(())
     }
 
     pub fn cpu_detail(&self) -> Result<Value> {
@@ -533,6 +677,14 @@ impl LiveSession {
                 self.cancellation.clone(),
                 self.operation.epoch(),
             )?;
+
+            if let Some(previous) = &self.history {
+                if previous.windows == history.windows {
+                    refresh_history_pending(&mut self.sources, previous);
+                    return Ok(());
+                }
+            }
+
             if let Some(selected) = &self.selected {
                 let second = selected["wall_ns"]
                     .as_u64()
@@ -549,9 +701,27 @@ impl LiveSession {
                     history.select(second, index)?;
                 }
             }
+
             refresh_history_pending(&mut self.sources, &history);
             self.history = Some(history);
+            self.restored = None;
         }
+
+        Ok(())
+    }
+
+    fn history_failure(&mut self, error: Error) -> Result<()> {
+        self.operation.check()?;
+        if let Error::Io(problem) = &error {
+            if problem.kind() == std::io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+
+        let message = error.to_string().chars().take(512).collect::<String>();
+        eprintln!("flightdeck history: {message}");
+        self.history_error = Some(message);
+
         Ok(())
     }
 
@@ -657,7 +827,6 @@ impl LiveSession {
             window: None,
             pending_windows: BTreeSet::new(),
             pending_cursor: None,
-            pending_retention_limited: false,
             pending_refresh_polls: 0,
         });
 
@@ -990,7 +1159,7 @@ impl LiveSession {
             return Err(Error::Bound("context observations"));
         }
         points.sort_by(|left, right| identity_order(left).cmp(&identity_order(right)));
-        select_segments(points)
+        metrics::context_segments(points)
     }
 
     fn select_observation(
@@ -1116,7 +1285,6 @@ fn rehydrate_source(
         window: None,
         pending_windows: BTreeSet::new(),
         pending_cursor: None,
-        pending_retention_limited: false,
         pending_refresh_polls: 0,
     }));
 
@@ -1299,8 +1467,7 @@ fn catalog_commit_discovery(sources: &[Source]) -> Value {
                 "tracked_windows_max": PENDING_WINDOWS_MAX,
                 "markers_per_poll_max": WINDOW_MARKERS_PER_POLL_MAX,
                 "seconds_before_tail_refresh_history": true,
-                "history_refresh_polls_max": source.pending_retention_limited
-                    .then_some(HISTORY_REFRESH_POLLS_MAX)
+                "history_refresh_polls_max": HISTORY_REFRESH_POLLS_MAX
             }))
             .collect::<Vec<_>>()
     )
@@ -1308,14 +1475,12 @@ fn catalog_commit_discovery(sources: &[Source]) -> Value {
 
 fn poll_commit_history_due(source: &mut Source) -> bool {
     assert!(source.pending_refresh_polls < HISTORY_REFRESH_POLLS_MAX);
-    if !source.pending_retention_limited {
-        return false;
-    }
     source.pending_refresh_polls += 1;
     if source.pending_refresh_polls == HISTORY_REFRESH_POLLS_MAX {
         source.pending_refresh_polls = 0;
         return true;
     }
+
     false
 }
 
@@ -1381,9 +1546,6 @@ fn poll_observation_window(
                 .pop_first()
                 .ok_or(Error::Bound("pending window eviction"))?;
             assert!(removed <= window);
-            // Selections before the tail refresh immediately; polling refreshes the catalog
-            // every 256 polls after overflow, so an evicted delayed commit is not forgotten.
-            source.pending_retention_limited = true;
         }
     }
     assert!(source.pending_windows.len() <= PENDING_WINDOWS_MAX);
@@ -1512,47 +1674,58 @@ fn project_observation_tables(
     Ok(tables)
 }
 
-fn select_segments(points: &mut [Value]) -> Result<()> {
-    assert!(points.len() <= OBSERVATIONS_MAX);
-    let mut segment = 0_u64;
-    for index in 0..points.len() {
-        let compatible = if let Some(previous) = index.checked_sub(1) {
-            if points[previous]["run"] == points[index]["run"] {
-                if points[previous]["boot"] == points[index]["boot"] {
-                    metrics::compatible(
-                        &point_observation(&points[previous])?,
-                        &point_observation(&points[index])?,
-                    )
-                } else {
-                    false
-                }
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-        if !compatible {
-            segment += 1;
-        }
-        points[index]["segment"] = json!(segment);
+fn context_contains(range: ContextRange, point: &Value) -> Result<bool> {
+    let wall = point["wall_ns"]
+        .as_u64()
+        .ok_or(Error::Bound("point clock"))?;
+    Ok((range.first_ns..range.end_ns).contains(&wall))
+}
+
+fn context_bytes(points: &[Value]) -> Result<()> {
+    if points.len() > OBSERVATIONS_MAX {
+        return Err(Error::Bound("context observations"));
     }
+
+    if serde_json::to_vec(points)
+        .map_err(std::io::Error::other)?
+        .len()
+        > CONTEXT_BYTES_MAX
+    {
+        return Err(Error::Bound("context bytes"));
+    }
+
     Ok(())
 }
 
-fn point_observation(point: &Value) -> Result<Observation> {
-    let required = |name| {
-        point[name]
-            .as_u64()
-            .ok_or(Error::Bound("context observation field"))
-    };
-    Ok(Observation {
-        window: 0,
-        publication: required("publication")?,
-        run_tick: required("run_tick")?,
-        wall: required("wall_ns")?,
-        continuous: point["continuous_ns"].as_u64(),
-    })
+fn follow_merge_point(merge: PointMerge<'_>) -> Result<()> {
+    let PointMerge { live, committed } = merge;
+    for name in [
+        "run",
+        "boot",
+        "publication",
+        "run_tick",
+        "wall_ns",
+        "continuous_ns",
+    ] {
+        if live[name] != committed[name] {
+            return Err(Error::Bound("changed committed point identity"));
+        }
+    }
+
+    let fields = live.as_object_mut().ok_or(Error::Bound("point shape"))?;
+    if fields.len() > 128 {
+        return Err(Error::Bound("point fields"));
+    }
+
+    for (name, value) in fields {
+        if value.is_null() {
+            if let Some(committed) = committed.get(name) {
+                *value = committed.clone();
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1581,15 +1754,8 @@ mod tests {
         fn new_with_cpu_capacity(cpu_capacity: u64) -> Self {
             assert!(cpu_capacity > 0);
             assert!(cpu_capacity <= 2);
-            let serial = NEXT.fetch_add(1, Ordering::Relaxed);
-            let root = std::env::temp_dir()
-                .join(format!("flightdeck-retry-{}-{serial}", std::process::id()));
-            private::create_private_dir(&root).unwrap();
-            let place = Place {
-                lock_path: root.join("ring.lock"),
-                name_prefix: format!("/fdretry{}x{serial}", std::process::id()),
-            };
-            let shape = Shape {
+
+            Self::new_with_shape(&Shape {
                 slot_count: 2,
                 cpu_capacity,
                 interface_capacity: 1,
@@ -1599,12 +1765,82 @@ mod tests {
                 process_capacity: 1,
                 coalition_capacity: 1,
                 event_capacity: 8,
+            })
+        }
+
+        fn new_with_shape(shape: &Shape) -> Self {
+            assert!(shape.slot_count <= 120);
+            assert!(shape.cpu_capacity <= 18);
+
+            let serial = NEXT.fetch_add(1, Ordering::Relaxed);
+            let root = std::env::temp_dir()
+                .join(format!("flightdeck-retry-{}-{serial}", std::process::id()));
+            private::create_private_dir(&root).unwrap();
+            let place = Place {
+                lock_path: root.join("ring.lock"),
+                name_prefix: format!("/fdretry{}x{serial}", std::process::id()),
             };
-            let (writer, registered) = Registration::start(&root, &place, shape, 0)
+            let (writer, registered) = Registration::start(&root, &place, *shape, 0)
                 .unwrap()
                 .into_parts();
             registered.unwrap();
+
             Self { root, writer }
+        }
+
+        fn new_following() -> Self {
+            Self::new_with_shape(&Shape {
+                slot_count: 120,
+                cpu_capacity: 18,
+                interface_capacity: 1,
+                core_capacity: 1,
+                state_capacity: 1,
+                fan_capacity: 1,
+                process_capacity: 1,
+                coalition_capacity: 1,
+                event_capacity: 8,
+            })
+        }
+
+        fn publish_following(&mut self, tick: u32) {
+            self.publish_following_wall(tick, 1000 + u64::from(tick));
+        }
+
+        fn publish_following_wall(&mut self, tick: u32, wall_second: u64) {
+            assert!((1..=901).contains(&tick));
+
+            let cpus = [collector::machine::CPUTicks {
+                user: tick * 20,
+                system: tick * 20,
+                nice: tick * 10,
+                idle: tick * 50,
+            }; 18];
+            let memory = collector::machine::Memory {
+                total_bytes: 48 * 1024 * 1024 * 1024,
+                active_bytes: u64::from(tick) * 1024 * 1024,
+                ..collector::machine::Memory::default()
+            };
+            self.writer.publish_observed(
+                &Readings {
+                    run_tick: u64::from(tick),
+                    cpus: &cpus,
+                    memory: &memory,
+                    interfaces: &[],
+                    ioreport: None,
+                    smc: None,
+                    processes: &[],
+                    processes_refused: 0,
+                    processes_gone: 0,
+                    coalitions: &[],
+                    events: &[],
+                    dropped: Dropped::default(),
+                },
+                &ObservationTimes {
+                    wall_ns: wall_second * NANOSECONDS_PER_SECOND,
+                    continuous_ns: u64::from(tick - 1) * NANOSECONDS_PER_SECOND,
+                    awake_ns: u64::from(tick - 1) * NANOSECONDS_PER_SECOND,
+                },
+            );
         }
 
         fn publish_cpu_activity(&mut self, tick: u32) {
@@ -1681,6 +1917,663 @@ mod tests {
         fn drop(&mut self) {
             collector::ring::unlink_generation(self.writer.name()).unwrap();
             std::fs::remove_dir_all(&self.root).unwrap();
+        }
+    }
+
+    #[test]
+    fn restores_fifteen_minutes_when_following_a_cold_or_reopened_live_source() {
+        // Goal: cold and reopened following includes all available last-900-second readings.
+        // Method: seal 840 genuine one-Hz publications and retain a 120-slot overlapping tail.
+        let mut fixture = RingFixture::new_with_shape(&Shape {
+            slot_count: 120,
+            cpu_capacity: 18,
+            interface_capacity: 1,
+            core_capacity: 1,
+            state_capacity: 1,
+            fan_capacity: 1,
+            process_capacity: 1,
+            coalition_capacity: 1,
+            event_capacity: 8,
+        });
+        follow_restoration_publish(&mut fixture);
+        let mut cold = Value::Null;
+        let mut reopened = Value::Null;
+
+        follow_restoration_read(&fixture.root, "cold", &mut cold);
+        follow_restoration_read(&fixture.root, "reopened", &mut reopened);
+
+        assert_eq!(cold, reopened);
+        follow_restoration_assert_window(&cold);
+        follow_restoration_assert_window(&reopened);
+    }
+
+    #[test]
+    fn following_reuses_restored_history_while_the_live_range_advances() {
+        // Goal: ordinary following advances without repeating committed-history queries.
+        // Method: advance a genuine source after caching one committed minute.
+        let mut fixture = RingFixture::new_following();
+        follow_restoration_short(&mut fixture);
+        let mut session = LiveSession::open(&fixture.root).unwrap();
+        session.follow_latest().unwrap();
+        let reads = session.history.as_ref().unwrap().source_reads.get();
+
+        fixture.publish_following(63);
+        session.poll().unwrap();
+        let response = session.follow_latest().unwrap();
+        let repeated = session.follow_latest().unwrap();
+
+        assert_eq!(response, repeated);
+        assert_eq!(response["selected"]["publication"], 63);
+        assert_eq!(session.history.as_ref().unwrap().source_reads.get(), reads);
+        assert_eq!(response["trends"].as_array().unwrap().len(), 63);
+    }
+
+    #[test]
+    fn following_rebuilds_an_empty_requested_range_after_clock_rollback() {
+        // Goal: clock rollback rebuilds coverage and caches an honestly empty historical range.
+        // Method: move live wall time before every committed tick, then follow twice.
+        let mut fixture = RingFixture::new_following();
+        follow_restoration_short(&mut fixture);
+        let mut session = LiveSession::open(&fixture.root).unwrap();
+        session.follow_latest().unwrap();
+
+        fixture.publish_following_wall(63, 500);
+        session.poll().unwrap();
+        let response = session.follow_latest().unwrap();
+        let reads = session.history.as_ref().unwrap().source_reads.get();
+        let repeated = session.follow_latest().unwrap();
+
+        assert_eq!(response, repeated);
+        assert_eq!(
+            response["selected"]["wall_ns"],
+            500 * NANOSECONDS_PER_SECOND
+        );
+        assert_eq!(response["trends"].as_array().unwrap().len(), 1);
+        assert_eq!(response["summary"]["cpu_percent"], Value::Null);
+        assert!(session.restored.as_ref().unwrap().points.is_empty());
+        assert_eq!(session.restored.as_ref().unwrap().range.first_ns, 0);
+        assert_eq!(
+            session.restored.as_ref().unwrap().range.end_ns,
+            501 * NANOSECONDS_PER_SECOND
+        );
+        assert_eq!(session.history.as_ref().unwrap().source_reads.get(), reads);
+    }
+
+    #[test]
+    fn following_keeps_a_missing_tick_as_a_segment_break() {
+        // Goal: restored and live points do not bridge a real scheduled gap.
+        // Method: omit run tick63 and compare the final two merged segments.
+        let mut fixture = RingFixture::new_following();
+        follow_restoration_short(&mut fixture);
+        let mut session = LiveSession::open(&fixture.root).unwrap();
+        fixture.publish_following(64);
+        session.poll().unwrap();
+
+        let response = session.follow_latest().unwrap();
+        let points = response["trends"].as_array().unwrap();
+
+        assert_eq!(response["selected"]["publication"], 63);
+        assert_eq!(response["selected"]["run_tick"], 64);
+        assert_eq!(response["summary"]["cpu_percent"], Value::Null);
+        assert!(
+            points[points.len() - 1]["segment"].as_u64().unwrap()
+                > points[points.len() - 2]["segment"].as_u64().unwrap()
+        );
+    }
+
+    #[test]
+    fn following_preserves_the_old_context_when_restoration_is_canceled() {
+        // Goal: a canceled public follow never installs partial restored context.
+        // Method: cancel rollback restoration, then retry through the next public generation.
+        let mut fixture = RingFixture::new_following();
+        follow_restoration_short(&mut fixture);
+        let control = Arc::new(Cancellation::default());
+        let mut session = LiveSession::open_with(&fixture.root, control.clone(), 0).unwrap();
+        session.follow_latest().unwrap();
+        let first = session.restored.as_ref().unwrap().range.first_ns;
+        let points = session.restored.as_ref().unwrap().points.clone();
+        fixture.publish_following_wall(63, 500);
+        session.poll().unwrap();
+        let cursor = session.sources[0].reader.next_publication();
+        let losses = session.sources[0].losses;
+        let cancel = control.clone();
+        session.before_restore = Some(Box::new(move || cancel.cancel().unwrap()));
+
+        let result = session.follow_latest();
+
+        assert!(matches!(result, Err(Error::Io(error))
+            if error.kind()==std::io::ErrorKind::Interrupted));
+        assert_eq!(session.restored.as_ref().unwrap().range.first_ns, first);
+        assert_eq!(session.restored.as_ref().unwrap().points, points);
+        assert_eq!(session.sources[0].reader.next_publication(), cursor);
+        assert_eq!(session.sources[0].losses, losses);
+        session.begin(control.epoch()).unwrap();
+        let response = session.follow_latest().unwrap();
+        assert_eq!(response["selected"]["publication"], 63);
+        assert_eq!(
+            response["selected"]["wall_ns"],
+            500 * NANOSECONDS_PER_SECOND
+        );
+        assert_eq!(response["trends"].as_array().unwrap().len(), 1);
+        assert_eq!(session.restored.as_ref().unwrap().range.first_ns, 0);
+        assert!(session.restored.as_ref().unwrap().points.is_empty());
+        let reads = session.history.as_ref().unwrap().source_reads.get();
+        assert_eq!(session.follow_latest().unwrap(), response);
+        assert_eq!(session.history.as_ref().unwrap().source_reads.get(), reads);
+    }
+
+    #[test]
+    fn following_retains_live_interval_values_when_a_commit_has_no_predecessor() {
+        // Goal: incomplete committed intervals cannot erase valid live metric fields.
+        // Method: commit only the second of two genuinely captured live CPU readings.
+        let mut fixture = RingFixture::new_with_cpu_capacity(2);
+        fixture.publish_cpu_activity(1);
+        let mut session = LiveSession::open(&fixture.root).unwrap();
+        fixture.publish_cpu_activity(2);
+        session.poll().unwrap();
+        let source = &session.sources[0];
+        let mut window = Window::new(
+            WindowIdentity {
+                run: source.identity,
+                window: 0,
+            },
+            Limits::from_shape(&source.reader.shape()).unwrap(),
+        );
+        cpu_detail_stage(&mut window, source, 2);
+        seal_window(&fixture.root, &window);
+        session.refresh_history().unwrap();
+
+        let response = session.follow_latest().unwrap();
+
+        assert_eq!(
+            session.restored.as_ref().unwrap().points[0]["cpu_percent"],
+            Value::Null
+        );
+        assert_eq!(response["summary"]["cpu_percent"], 50.0);
+        assert_eq!(response["trends"][1]["cpu_percent"], 50.0);
+    }
+
+    #[test]
+    fn context_rejects_more_than_4096_scalar_points() {
+        // Goal: the context budget refuses a result larger than the public observation bound.
+        // Method: measure 4097 individually tiny scalar values, whose bytes fit the other bound.
+        let points = vec![json!({"cpu_percent":0}); 4097];
+
+        let result = context_bytes(&points);
+
+        assert!(matches!(result, Err(Error::Bound("context observations"))));
+    }
+
+    #[test]
+    fn context_rejects_more_than_eight_mib_of_serialized_scalars() {
+        // Goal: a small point count cannot evade the separate serialized context byte bound.
+        // Method: encode one 8 MiB value, whose JSON framing exceeds the 8 MiB contract.
+        let points = vec![Value::String("x".repeat(8 * 1024 * 1024))];
+
+        let result = context_bytes(&points);
+
+        assert!(matches!(result, Err(Error::Bound("context bytes"))));
+    }
+
+    #[test]
+    fn following_retains_context_across_unchanged_catalog_refreshes() {
+        // Goal: catalog discovery must not repeat metric queries for unchanged manifests.
+        // Method: follow real history, poll beyond two refresh periods, and compare the response.
+        let mut fixture = RingFixture::new_following();
+        follow_restoration_short(&mut fixture);
+        let mut session = LiveSession::open(&fixture.root).unwrap();
+        let before = session.follow_latest().unwrap();
+        let reads = session.history.as_ref().unwrap().source_reads.get();
+        let cursor = session.sources[0].reader.next_publication();
+        let losses = session.sources[0].losses;
+
+        for _poll in 0..513 {
+            assert!(!session.poll().unwrap());
+        }
+        let after = session.follow_latest().unwrap();
+
+        assert_eq!(after, before);
+        assert_eq!(session.history.as_ref().unwrap().source_reads.get(), reads);
+        assert_eq!(session.sources[0].reader.next_publication(), cursor);
+        assert_eq!(session.sources[0].losses, losses);
+    }
+
+    #[test]
+    fn following_opens_live_when_initial_history_is_unreadable() {
+        // Goal: optional history cannot prevent a healthy live source from opening.
+        // Method: hide genuine sealed data before opening, then follow and read its memory page.
+        let mut fixture = RingFixture::new_following();
+        follow_restoration_short(&mut fixture);
+        std::fs::rename(fixture.root.join("data"), fixture.root.join("held-data")).unwrap();
+
+        let mut session = LiveSession::open(&fixture.root).unwrap();
+        let response = session.follow_latest().unwrap();
+
+        assert_eq!(response["selected"]["publication"], 62);
+        assert_eq!(response["summary"]["publication"], 62);
+        assert!(response["context_error"].is_string());
+        assert_eq!(
+            session.catalog()["history_error"],
+            response["context_error"]
+        );
+        assert_eq!(
+            session.page("memory", 0).unwrap()["observation"],
+            response["selected"]
+        );
+    }
+
+    #[test]
+    fn following_keeps_live_metrics_and_retries_an_unreadable_context() {
+        // Goal: failed historical restoration preserves usable live metrics and recovers publicly.
+        // Method: move real data aside, roll the clock back to force restoration, then restore it.
+        let mut fixture = RingFixture::new_following();
+        follow_restoration_short(&mut fixture);
+        let mut session = LiveSession::open(&fixture.root).unwrap();
+        session.follow_latest().unwrap();
+        let cached = session.restored.as_ref().unwrap().points.clone();
+        let data = fixture.root.join("data");
+        let held = fixture.root.join("held-data");
+        std::fs::rename(&data, &held).unwrap();
+        for _poll in 0..256 {
+            assert!(!session.poll().unwrap());
+        }
+        assert!(session.catalog()["history_error"].is_string());
+        assert_eq!(session.restored.as_ref().unwrap().points, cached);
+        fixture.publish_following_wall(63, 500);
+        assert!(session.poll().unwrap());
+        let cursor = session.sources[0].reader.next_publication();
+        let losses = session.sources[0].losses;
+
+        let degraded = session.follow_latest().unwrap();
+
+        assert_eq!(degraded["selected"]["publication"], 63);
+        assert_eq!(degraded["summary"]["publication"], 63);
+        assert_eq!(degraded["trends"].as_array().unwrap().len(), 1);
+        assert!(!degraded["context_error"].as_str().unwrap().is_empty());
+        assert!(degraded["context_error"].as_str().unwrap().chars().count() <= 512);
+        assert_eq!(
+            session.catalog()["history_error"],
+            degraded["context_error"]
+        );
+        assert_eq!(session.restored.as_ref().unwrap().points, cached);
+        assert_eq!(
+            session.page("memory", 0).unwrap()["observation"],
+            degraded["selected"]
+        );
+        std::fs::rename(&held, &data).unwrap();
+        let recovered = session.follow_latest().unwrap();
+        assert_eq!(recovered["selected"], degraded["selected"]);
+        assert!(recovered["context_error"].is_null());
+        assert!(session.catalog()["history_error"].is_null());
+        assert_eq!(session.sources[0].reader.next_publication(), cursor);
+        assert_eq!(session.sources[0].losses, losses);
+    }
+
+    #[test]
+    fn following_discovers_an_older_late_commit_outside_the_retained_ring() {
+        // Goal: a late minute absent from the cold ring restores the real historical gap.
+        // Method: withhold minute12, then seal it and poll256 times without another publication.
+        let mut fixture = RingFixture::new_following();
+        let mut missing = None;
+        follow_restoration_publish_omitting(&mut fixture, &mut missing);
+        let mut session = LiveSession::open(&fixture.root).unwrap();
+        let initial = session.follow_latest().unwrap();
+        assert_eq!(initial["trends"].as_array().unwrap().len(), 840);
+        assert!(!session.sources[0].pending_windows.contains(&12));
+        let cursor = session.sources[0].reader.next_publication();
+        let losses = session.sources[0].losses;
+        seal_window(&fixture.root, missing.as_ref().unwrap());
+
+        for _poll in 0..256 {
+            assert!(!session.poll().unwrap());
+        }
+        let response = session.follow_latest().unwrap();
+
+        assert_eq!(response["selected"], initial["selected"]);
+        assert_eq!(session.sources[0].reader.next_publication(), cursor);
+        assert_eq!(session.sources[0].losses, losses);
+        println!(
+            "{}",
+            json!({"phase":"older_late_commit",
+            "points":response["trends"].as_array().unwrap().len(),
+            "windows":session.catalog()["windows"],"cursor":cursor,"polls":256})
+        );
+        follow_restoration_assert_window(&response);
+        assert_eq!(response["trends"][719]["publication"], 721);
+        assert_eq!(response["trends"][719]["cpu_percent"], 50.0);
+        assert_eq!(response["trends"][779]["publication"], 781);
+        assert_eq!(response["trends"][779]["cpu_percent"], 50.0);
+    }
+
+    fn follow_restoration_publish_omitting(
+        fixture: &mut RingFixture,
+        missing: &mut Option<Window>,
+    ) {
+        assert!(missing.is_none());
+
+        let mut reader = RingReader::open_generation(fixture.writer.name()).unwrap();
+        let mut tick = persistence::tick_buffer(&reader.shape()).unwrap();
+        let identity = reader.identity().unwrap();
+        let limits = Limits::from_shape(&reader.shape()).unwrap();
+        for minute in 0..14 {
+            let mut window = Window::new(
+                WindowIdentity {
+                    run: identity,
+                    window: minute,
+                },
+                limits,
+            );
+            for offset in 1..=60 {
+                let publication = minute * 60 + offset;
+                fixture.publish_following(u32::try_from(publication).unwrap());
+                follow_restoration_stage(&mut reader, &mut tick, &mut window, publication);
+            }
+            if minute == 12 {
+                *missing = Some(window);
+            } else {
+                seal_window(&fixture.root, &window);
+            }
+        }
+        for publication in 841..=901 {
+            fixture.publish_following(publication);
+        }
+    }
+
+    fn follow_restoration_short(fixture: &mut RingFixture) {
+        let mut reader = RingReader::open_generation(fixture.writer.name()).unwrap();
+        let mut tick = persistence::tick_buffer(&reader.shape()).unwrap();
+        let mut window = Window::new(
+            WindowIdentity {
+                run: reader.identity().unwrap(),
+                window: 0,
+            },
+            Limits::from_shape(&reader.shape()).unwrap(),
+        );
+        for publication in 1..=60 {
+            fixture.publish_following(publication);
+            assert!(matches!(
+                reader.read_into(&mut tick).unwrap(),
+                Found::Publication { .. }
+            ));
+            let times = tick.times.unwrap();
+            window
+                .push_tick(
+                    &persistence::Observation {
+                        publication: u64::from(publication),
+                        wall_ns: Some(times.wall_ns),
+                        continuous_ns: Some(times.continuous_ns),
+                        awake_ns: Some(times.awake_ns),
+                    },
+                    &tick,
+                    &[],
+                )
+                .unwrap();
+        }
+        seal_window(&fixture.root, &window);
+        fixture.publish_following(61);
+        fixture.publish_following(62);
+    }
+
+    fn follow_restoration_publish(fixture: &mut RingFixture) {
+        let mut pending = None;
+        follow_restoration_publish_pending(fixture, &mut pending);
+    }
+
+    fn follow_restoration_publish_pending(fixture: &mut RingFixture, pending: &mut Option<Window>) {
+        follow_restoration_publish_observing(fixture, pending, |_fixture| {});
+    }
+
+    fn follow_restoration_publish_observing(
+        fixture: &mut RingFixture,
+        pending: &mut Option<Window>,
+        mut observe: impl FnMut(&RingFixture),
+    ) {
+        assert!(pending.is_none());
+        let mut reader = RingReader::open_generation(fixture.writer.name()).unwrap();
+        let mut tick = persistence::tick_buffer(&reader.shape()).unwrap();
+        let identity = reader.identity().unwrap();
+        let limits = Limits::from_shape(&reader.shape()).unwrap();
+        for minute in 0..14 {
+            let mut window = Window::new(
+                WindowIdentity {
+                    run: identity,
+                    window: minute,
+                },
+                limits,
+            );
+            for offset in 1..=60 {
+                let publication = minute * 60 + offset;
+                fixture.publish_following(u32::try_from(publication).unwrap());
+                observe(fixture);
+                follow_restoration_stage(&mut reader, &mut tick, &mut window, publication);
+            }
+            seal_window(&fixture.root, &window);
+        }
+        let window = pending.insert(Window::new(
+            WindowIdentity {
+                run: identity,
+                window: 14,
+            },
+            limits,
+        ));
+        for publication in 841..=900 {
+            fixture.publish_following(publication);
+            observe(fixture);
+            follow_restoration_stage(&mut reader, &mut tick, window, u64::from(publication));
+        }
+        fixture.publish_following(901);
+        observe(fixture);
+    }
+
+    fn follow_restoration_stage(
+        reader: &mut RingReader,
+        tick: &mut Tick,
+        window: &mut Window,
+        publication: u64,
+    ) {
+        assert_eq!(
+            reader.read_into(tick).unwrap(),
+            Found::Publication {
+                publication,
+                tick: publication
+            }
+        );
+        let times = tick.times.unwrap();
+        assert_eq!(
+            times.continuous_ns / (60 * NANOSECONDS_PER_SECOND),
+            window.identity.window
+        );
+        window
+            .push_tick(
+                &persistence::Observation {
+                    publication,
+                    wall_ns: Some(times.wall_ns),
+                    continuous_ns: Some(times.continuous_ns),
+                    awake_ns: Some(times.awake_ns),
+                },
+                tick,
+                &[],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn following_restores_a_late_commit_without_a_new_publication_and_measures_cost() {
+        // Goal: a late seal refreshes available context without a new tick or warm re-query.
+        // Method: measure a genuine 18-CPU cold session, warm reads and its fifteenth seal.
+        let mut fixture = RingFixture::new_following();
+        let mut pending = None;
+        follow_restoration_publish_pending(&mut fixture, &mut pending);
+        let mut session_slot = None;
+        follow_restoration_measure("cold_open", 0, || {
+            session_slot = Some(LiveSession::open(&fixture.root).unwrap());
+        });
+        let mut session = session_slot.take().unwrap();
+        follow_restoration_measure("cold_follow", 0, || {
+            let response = session.follow_latest().unwrap();
+            follow_restoration_assert_window(&response);
+        });
+        let reads = session.history.as_ref().unwrap().source_reads.get();
+        for sample in 0..20 {
+            follow_restoration_measure("warm_follow", sample, || {
+                let response = session.follow_latest().unwrap();
+                assert_eq!(response["trends"].as_array().unwrap().len(), 900);
+            });
+        }
+        assert_eq!(session.history.as_ref().unwrap().source_reads.get(), reads);
+        assert_eq!(session.restored.as_ref().unwrap().points.len(), 839);
+        let selected = session.selected.clone();
+        let cursor = session.sources[0].reader.next_publication();
+        seal_window(&fixture.root, pending.as_ref().unwrap());
+
+        follow_restoration_measure("post_commit_poll", 0, || {
+            assert!(!session.poll().unwrap());
+        });
+        assert!(session.restored.is_none());
+        follow_restoration_measure("post_commit_follow", 0, || {
+            let response = session.follow_latest().unwrap();
+            follow_restoration_assert_window(&response);
+        });
+
+        assert_eq!(session.selected, selected);
+        assert_eq!(session.sources[0].reader.next_publication(), cursor);
+        assert_eq!(session.restored.as_ref().unwrap().points.len(), 899);
+        let restored = session.restored.as_ref().unwrap();
+        println!(
+            "{}",
+            json!({"phase":"retained_scalar_context","points":restored.points.len(),
+            "serialized_bytes":serde_json::to_vec(&restored.points).unwrap().len(),
+            "coverage_first_ns":restored.range.first_ns,"coverage_end_ns":restored.range.end_ns})
+        );
+    }
+
+    #[test]
+    fn following_measures_the_full_warmed_live_context_with_committed_overlap() {
+        // Goal: measure warm merging after 901 genuine ticks have filled the live context.
+        // Method: poll each publication, retain 14 sealed minutes, then repeat 900-point follows.
+        let mut fixture = RingFixture::new_following();
+        let mut pending = None;
+        let mut live_slot: Option<LiveSession> = None;
+        follow_restoration_publish_observing(&mut fixture, &mut pending, |fixture| {
+            if let Some(live) = &mut live_slot {
+                live.poll().unwrap();
+            } else {
+                live_slot = Some(LiveSession::open(&fixture.root).unwrap());
+            }
+        });
+        let mut live = live_slot.take().unwrap();
+        assert_eq!(live.points.len(), 900);
+        assert_eq!(live.history.as_ref().unwrap().windows.len(), 14);
+        follow_restoration_measure("full_warm_first_follow", 0, || {
+            let response = live.follow_latest().unwrap();
+            follow_restoration_assert_window(&response);
+        });
+        let reads = live.history.as_ref().unwrap().source_reads.get();
+
+        for sample in 0..20 {
+            follow_restoration_measure("full_warm_follow", sample, || {
+                let response = live.follow_latest().unwrap();
+                assert_eq!(response["trends"].as_array().unwrap().len(), 900);
+            });
+        }
+
+        assert_eq!(live.history.as_ref().unwrap().source_reads.get(), reads);
+        println!(
+            "{}",
+            json!({"phase":"full_warm_context","live_points":live.points.len(),
+            "committed_points":live.restored.as_ref().unwrap().points.len(),
+            "historical_source_reads_before":reads,
+            "historical_source_reads_after":live.history.as_ref().unwrap().source_reads.get()})
+        );
+    }
+
+    fn follow_restoration_measure(phase: &str, sample: u32, work: impl FnOnce()) {
+        let timebase = collector::clock::Timebase::read().unwrap();
+        let pid = collector::processes::own_pid().unwrap();
+        let before = collector::processes::read_usage(timebase, pid)
+            .unwrap()
+            .unwrap();
+        let started = std::time::Instant::now();
+
+        work();
+
+        let wall_ns = started.elapsed().as_nanos();
+        let after = collector::processes::read_usage(timebase, pid)
+            .unwrap()
+            .unwrap();
+        let cpu_ns = (after.user_ns + after.system_ns) - (before.user_ns + before.system_ns);
+        println!(
+            "{}",
+            json!({"phase":phase,"sample":sample,"wall_ns":wall_ns,"cpu_ns":cpu_ns,
+            "resident_before_bytes":before.resident_bytes,
+            "resident_after_bytes":after.resident_bytes,
+            "footprint_before_bytes":before.footprint_bytes,
+            "footprint_after_bytes":after.footprint_bytes})
+        );
+    }
+
+    fn follow_restoration_read(root: &Path, phase: &str, output: &mut Value) {
+        let mut session = LiveSession::open(root).unwrap();
+        assert_eq!(session.sources.len(), 1);
+        assert_eq!(session.sources[0].reader.shape().slot_count, 120);
+        assert_eq!(session.sources[0].reader.shape().cpu_capacity, 18);
+        assert_eq!(session.catalog()["windows"], 14);
+        let cursor = session.sources[0].reader.next_publication();
+        let event_cursor = session.sources[0].reader.next_event();
+        let losses = session.sources[0].losses;
+
+        *output = session.follow_latest().unwrap();
+        let selected = session.selected.clone();
+        let repeated = session.follow_latest().unwrap();
+
+        assert_eq!(*output, repeated);
+        assert_eq!(session.selected, selected);
+        assert_eq!(session.selected.as_ref(), Some(&output["selected"]));
+        assert_eq!(session.sources[0].reader.next_publication(), cursor);
+        assert_eq!(session.sources[0].reader.next_event(), event_cursor);
+        assert_eq!(session.sources[0].losses, losses);
+        println!(
+            "{}",
+            json!({"phase":phase,"selected":output["selected"]["publication"],
+            "context_count":output["trends"].as_array().unwrap().len(),
+            "first_publication":output["trends"][0]["publication"],
+            "last_publication":output["trends"].as_array().unwrap().last().unwrap()["publication"],
+            "cursor":cursor,"event_cursor":event_cursor,
+            "reader_losses":{"publications":losses.publications,"events":losses.events,
+                "unknown":losses.unknown}})
+        );
+    }
+
+    fn follow_restoration_assert_window(response: &Value) {
+        let trends = response["trends"].as_array().unwrap();
+        let publications = trends
+            .iter()
+            .map(|point| point["publication"].as_u64().unwrap())
+            .collect::<Vec<_>>();
+        let expected = (2..=901_u64).collect::<Vec<_>>();
+
+        assert_eq!(response["selected"]["publication"], 901);
+        assert_eq!(response["selected"]["run_tick"], 901);
+        assert_eq!(
+            response["selected"]["wall_ns"],
+            1901 * NANOSECONDS_PER_SECOND
+        );
+        assert_eq!(response["context_seconds"], 900);
+        assert_eq!(publications.len(), 900);
+        assert_eq!(publications, expected);
+        assert_eq!(trends[0]["cpu_percent"], 50.0);
+        assert_eq!(trends[780]["publication"], 782);
+        assert_eq!(trends[780]["cpu_percent"], 50.0);
+        assert_eq!(trends[0]["memory_active_bytes"], 2 * 1024 * 1024);
+        assert_eq!(response["summary"]["cpu_percent"], 50.0);
+        for point in trends {
+            assert_eq!(point["run"], response["selected"]["run"]);
+            assert_eq!(point["boot"], response["selected"]["boot"]);
+            assert_eq!(point["run_tick"], point["publication"]);
+            assert_eq!(
+                point["wall_ns"].as_u64().unwrap(),
+                (1000 + point["publication"].as_u64().unwrap()) * NANOSECONDS_PER_SECOND
+            );
         }
     }
 

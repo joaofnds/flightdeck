@@ -38,6 +38,9 @@ struct RecordingStateChecks {
         runComputerInventoryChecks()
         try runSelectedCPUChecks()
         try runSelectedCPUPresentationChecks()
+        try decodes_history_failure_without_rejecting_the_live_selection()
+        try accepts_selection_from_a_source_without_history_diagnostics()
+        try decodes_history_status_for_native_poll_cache_invalidation()
         try installs_cpu_activity_when_entering_the_live_cpu_page()
         try clears_cpu_activity_before_a_new_selection_completes()
         try ignores_cpu_activity_from_a_superseded_completion()
@@ -136,6 +139,57 @@ struct RecordingStateChecks {
         try runRecordedComponentChecks()
         try runLiveCollectorChecks()
         try runLiveAppsChecks()
+    }
+
+    @MainActor
+    private static func decodes_history_failure_without_rejecting_the_live_selection() throws {
+        // Goal: historical unavailability is metadata rather than a failed live response.
+        // Method: install a healthy native selection with a separate historical diagnostic.
+        let selection = try historyFailureSelection()
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+        model.startLive()
+        let catalog = Catalog(path: "/recording", firstSecond: 17, lastSecond: 17, windows: 1,
+            unknownClockTicks: 0, tables: [], live: true, latestObservation: selection.selected,
+            historyError: selection.contextError)
+
+        reader.finishNext(result: ReadResult(catalog: catalog, selection: selection, page: nil,
+            machinePages: [:]))
+        drainMainQueue()
+
+        precondition(model.error == nil)
+        precondition(model.following)
+        precondition(model.selection?.selected?.publication == 9)
+        precondition(model.selection?.summary?.cpuPercent == 25)
+        precondition(model.selection?.trends.count == 1)
+        precondition(model.selection?.contextError == "Earlier window unreadable")
+    }
+
+    private static func historyFailureSelection() throws -> Selection {
+        let data = Data(#"{"value":{"second":17,"selected":{"run":"run-0","boot":"boot","publication":9,"run_tick":9,"wall_ns":17000000000},"alternatives":[{"run":"run-0","boot":"boot","publication":9,"run_tick":9,"wall_ns":17000000000}],"summary":{"run":"run-0","boot":"boot","publication":9,"wall_ns":17000000000,"segment":1,"cpu_percent":25},"trends":[{"run":"run-0","boot":"boot","publication":9,"wall_ns":17000000000,"segment":1,"cpu_percent":25}],"context_seconds":900,"context_error":"Earlier window unreadable"}}"#.utf8)
+
+        return try decodeRecordingResponse(data)
+    }
+
+    private static func accepts_selection_from_a_source_without_history_diagnostics() throws {
+        // Goal: sources without history diagnostics keep their existing selection contract.
+        // Method: decode the preceding successful native shape without the optional field.
+        let data = Data(#"{"value":{"second":17,"selected":null,"alternatives":[],"summary":null,"trends":[],"context_seconds":900}}"#.utf8)
+
+        let selection: Selection = try decodeRecordingResponse(data)
+
+        precondition(selection.second == 17)
+        precondition(selection.contextError == nil)
+    }
+
+    private static func decodes_history_status_for_native_poll_cache_invalidation() throws {
+        // Goal: poll caching observes historical status changes without requiring a new tick.
+        // Method: decode the producer's catalog diagnostic through the native response adapter.
+        let data = Data(#"{"value":{"path":"/recording","first_second":17,"last_second":17,"windows":1,"unknown_clock_ticks":0,"tables":[],"history_error":"Earlier window unreadable"}}"#.utf8)
+
+        let catalog: Catalog = try decodeRecordingResponse(data)
+
+        precondition(catalog.historyError == "Earlier window unreadable")
     }
 
     private static func preserves_selected_fan_channels_and_measured_zero() throws {

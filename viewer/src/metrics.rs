@@ -156,6 +156,49 @@ pub(crate) fn public_point(point: &Value) -> Result<Value> {
     Ok(value)
 }
 
+pub(crate) fn context_segments(points: &mut [Value]) -> Result<()> {
+    assert!(points.len() <= OBSERVATIONS_MAX);
+    let mut segment = 0_u64;
+    for index in 0..points.len() {
+        let compatible = if let Some(previous) = index.checked_sub(1) {
+            if points[previous]["run"] == points[index]["run"] {
+                if points[previous]["boot"] == points[index]["boot"] {
+                    compatible(
+                        &context_segments_observation(&points[previous])?,
+                        &context_segments_observation(&points[index])?,
+                    )
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if !compatible {
+            segment += 1;
+        }
+        points[index]["segment"] = json!(segment);
+    }
+    Ok(())
+}
+
+fn context_segments_observation(point: &Value) -> Result<Observation> {
+    let required = |name| {
+        point[name]
+            .as_u64()
+            .ok_or(Error::Bound("context observation field"))
+    };
+    Ok(Observation {
+        window: 0,
+        publication: required("publication")?,
+        run_tick: required("run_tick")?,
+        wall: required("wall_ns")?,
+        continuous: point["continuous_ns"].as_u64(),
+    })
+}
+
 fn point_interval(
     tables: &Tables,
     current: &Observation,

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -28,6 +28,14 @@ pub struct Session {
     unknown: u64,
     selected: Option<Observation>,
     operation: Operation,
+    #[cfg(test)]
+    pub(crate) source_reads: std::cell::Cell<u64>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ContextRange {
+    pub first_ns: u64,
+    pub end_ns: u64,
 }
 
 #[derive(Clone)]
@@ -90,6 +98,8 @@ impl Session {
             unknown: 0,
             selected: None,
             operation,
+            #[cfg(test)]
+            source_reads: std::cell::Cell::new(0),
         };
         session.operation.begin(epoch)?.run(|| session.extent())?;
         Ok(session)
@@ -142,7 +152,8 @@ impl Session {
                     .clone(),
             )
         };
-        let points = metrics::trends(self, &observations)?;
+        let mut points = Vec::new();
+        self.context_points(&observations, &mut points)?;
         let summary = chosen
             .as_ref()
             .and_then(|selected| {
@@ -163,6 +174,74 @@ impl Session {
             "selected": self.selected.as_ref().map(|value| value.json(self)),
             "alternatives": alternatives.iter().map(|value| value.json(self)).collect::<Vec<_>>(),
             "summary": summary, "trends": points, "context_seconds": 900}))
+    }
+
+    pub(crate) fn context(&self, range: ContextRange, output: &mut Vec<Value>) -> Result<()> {
+        assert!(range.first_ns < range.end_ns);
+        assert!(output.is_empty());
+
+        self.operation.attach(&self.connection)?;
+        self.operation.run(|| {
+            let observations = self.observations(range.first_ns, range.end_ns)?;
+            self.context_points(&observations, output)
+        })
+    }
+
+    fn context_points(&self, observations: &[Observation], output: &mut Vec<Value>) -> Result<()> {
+        assert!(observations.len() <= OBSERVATIONS_MAX);
+        assert!(output.is_empty());
+
+        let mut windows = BTreeMap::<usize, Vec<Observation>>::new();
+        for observation in observations {
+            windows
+                .entry(observation.window)
+                .or_default()
+                .push(observation.clone());
+        }
+
+        for batch in windows.values() {
+            self.operation.check()?;
+            self.context_batch_windows(batch)?;
+            output.append(&mut metrics::trends(self, batch)?);
+        }
+
+        output.sort_by(|left, right| {
+            (
+                left["wall_ns"].as_u64(),
+                left["run"].as_str(),
+                left["boot"].as_str(),
+                left["publication"].as_u64(),
+            )
+                .cmp(&(
+                    right["wall_ns"].as_u64(),
+                    right["run"].as_str(),
+                    right["boot"].as_str(),
+                    right["publication"].as_u64(),
+                ))
+        });
+
+        metrics::context_segments(output)
+    }
+
+    fn context_batch_windows(&self, observations: &[Observation]) -> Result<()> {
+        let mut windows = BTreeSet::new();
+        let publications = observations
+            .iter()
+            .map(|value| value.publication)
+            .collect::<BTreeSet<_>>();
+        for observation in observations {
+            windows.insert(observation.window);
+            if !publications.contains(&observation.publication.saturating_sub(1)) {
+                if let Some(previous) = self.predecessor(observation)? {
+                    windows.insert(previous.window);
+                }
+            }
+            if windows.len() > 2 {
+                return Err(Error::Bound("context batch windows"));
+            }
+        }
+
+        Ok(())
     }
 
     pub fn cpu_detail(&self) -> Result<Value> {
@@ -298,6 +377,8 @@ impl Session {
 
     pub(crate) fn source(&self, window: usize, name: &str) -> Result<String> {
         self.operation.check()?;
+        #[cfg(test)]
+        self.source_reads.set(self.source_reads.get() + 1);
         let (table, _, _) = persistence::schema::TABLES
             .iter()
             .find(|entry| entry.0.name() == name)

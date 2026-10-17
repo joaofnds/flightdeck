@@ -17,12 +17,13 @@ struct Catalog: Decodable, Equatable, Sendable {
     let latestObservation: Observation?
     let latestCollectorPid: UInt32?
     let readerLosses: [ReaderLosses]?
+    let historyError: String?
 
     init(path: String, firstSecond: UInt64?, lastSecond: UInt64?, windows: UInt64,
          unknownClockTicks: UInt64, tables: [String], live: Bool? = nil,
          tailTicks: UInt64? = nil, collectorCompleted: Bool? = nil,
          latestObservation: Observation? = nil, readerLosses: [ReaderLosses]? = nil,
-         latestCollectorPid: UInt32? = nil) {
+         latestCollectorPid: UInt32? = nil, historyError: String? = nil) {
         self.path = path
         self.firstSecond = firstSecond
         self.lastSecond = lastSecond
@@ -35,6 +36,7 @@ struct Catalog: Decodable, Equatable, Sendable {
         self.latestObservation = latestObservation
         self.latestCollectorPid = latestCollectorPid
         self.readerLosses = readerLosses
+        self.historyError = historyError
     }
 
 }
@@ -123,6 +125,18 @@ struct Selection: Decodable, Sendable {
     let summary: Metric?
     let trends: [Metric]
     let contextSeconds: UInt64
+    let contextError: String?
+
+    init(second: UInt64, selected: Observation?, alternatives: [Observation], summary: Metric?,
+         trends: [Metric], contextSeconds: UInt64, contextError: String? = nil) {
+        self.second = second
+        self.selected = selected
+        self.alternatives = alternatives
+        self.summary = summary
+        self.trends = trends
+        self.contextSeconds = contextSeconds
+        self.contextError = contextError
+    }
 }
 
 struct TablePage: Decodable, Sendable {
@@ -327,6 +341,7 @@ final class RecordingWorker: RecordingReading, @unchecked Sendable {
         }
         if !changed, let lastResult, lastRequest?.hasSameProjection(as: request) == true,
            lastResult.catalog.windows == catalog.windows,
+           lastResult.catalog.historyError == catalog.historyError,
            request.target == nil || lastResult.selection?.selected?.identity == request.target {
             return ReadResult(catalog: catalog, selection: lastResult.selection,
                 page: lastResult.page, machinePages: lastResult.machinePages, unchanged: true,
