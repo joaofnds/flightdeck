@@ -155,10 +155,10 @@ impl Element for HardwareStage {
 
     fn request_layout(
         &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
+        _global_element_id: Option<&GlobalElementId>,
+        _inspector_element_id: Option<&InspectorElementId>,
         window: &mut Window,
-        _: &mut App,
+        _context: &mut App,
     ) -> (LayoutId, ()) {
         let layout = window.request_measured_layout(Style::default(), |known, available, _, _| {
             let width = known
@@ -178,19 +178,19 @@ impl Element for HardwareStage {
 
     fn prepaint(
         &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        _: Bounds<Pixels>,
+        _global_element_id: Option<&GlobalElementId>,
+        _inspector_element_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
         (): &mut (),
-        _: &mut Window,
-        _: &mut App,
+        _window: &mut Window,
+        _context: &mut App,
     ) {
     }
 
     fn paint(
         &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
+        _global_element_id: Option<&GlobalElementId>,
+        _inspector_element_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         (): &mut (),
         (): &mut (),
