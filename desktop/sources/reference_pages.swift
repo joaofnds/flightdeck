@@ -6,13 +6,12 @@ func referenceAppHistory(snapshot: ReferenceSnapshot, key: String, range: Closed
     guard let metric = ReferenceAttribution.metrics.first(where: { $0.key == key }),
           let total = snapshot.totals[key] else { return [] }
 
-    let rows = (snapshot.series[key] ?? []).sorted { left, right in
-        func mean(_ values: [Double?]) -> Double {
-            let samples = range.compactMap { values[$0] }
-            return samples.isEmpty ? 0 : samples.reduce(0, +) / Double(samples.count)
-        }
-        return mean(left.values) > mean(right.values)
-    }.prefix(8)
+    let ranked = (snapshot.series[key] ?? []).map { row in
+        let samples = range.compactMap { row.values[$0] }
+        let mean = samples.isEmpty ? 0 : samples.reduce(0, +) / Double(samples.count)
+        return (row: row, mean: mean)
+    }
+    let rows = ranked.sorted { $0.mean > $1.mean }.prefix(8).map(\.row)
     let colors = ["#f2cc0c", "#5794f2", "#ff9830", "#f2495c", "#b877d9", "#37872d", "#e0b400", "#1f60c4"]
     let other = total.enumerated().map { index, value in
         value.map { max(0, $0 - rows.reduce(0) { $0 + ($1.values[index] ?? 0) }) * metric.scale }
