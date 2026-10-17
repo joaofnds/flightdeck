@@ -19,6 +19,7 @@ FlightdeckBytes fd_live_poll(FlightdeckSession *session);
 FlightdeckBytes fd_prepare(FlightdeckSession *session, uint64_t epoch);
 FlightdeckBytes fd_catalog(FlightdeckSession *session);
 FlightdeckBytes fd_select(FlightdeckSession *session, uint64_t second, uint32_t alternative);
+FlightdeckBytes fd_follow(FlightdeckSession *session);
 FlightdeckBytes fd_page(FlightdeckSession *session, uint32_t table, uint64_t offset);
 void fd_bytes_free(FlightdeckBytes bytes);
 void fd_close(FlightdeckSession *session);

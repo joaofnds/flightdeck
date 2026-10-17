@@ -1,4 +1,8 @@
+mod owner;
 mod stop;
+
+#[cfg(test)]
+mod owner_run_tests;
 
 use std::ffi::c_int;
 use std::io::{self, Write};
@@ -60,12 +64,13 @@ struct Options {
     rescan_interval: Duration,
     ring_name: String,
     recording: Option<PathBuf>,
+    parent_pid: Option<i32>,
 }
 
 fn options_from(arguments: &[String]) -> Result<Options, String> {
     let usage = || {
         "usage: collector [--seconds N] [--rescan-ms N] [--ring NAME] \
-        [--recording PATH]"
+        [--recording PATH] [--parent-pid PID]"
             .to_owned()
     };
     let mut options = Options {
@@ -73,6 +78,7 @@ fn options_from(arguments: &[String]) -> Result<Options, String> {
         rescan_interval: DEFAULT_RESCAN_INTERVAL,
         ring_name: DEFAULT_RING.to_owned(),
         recording: None,
+        parent_pid: None,
     };
 
     for pair in arguments.chunks(2) {
@@ -86,6 +92,9 @@ fn options_from(arguments: &[String]) -> Result<Options, String> {
             }
             [flag, ring] if flag == "--ring" => options.ring_name.clone_from(ring),
             [flag, path] if flag == "--recording" => options.recording = Some(PathBuf::from(path)),
+            [flag, parent] if flag == "--parent-pid" => {
+                options.parent_pid = Some(owner::parse_parent_pid(parent).map_err(|()| usage())?);
+            }
             _ => return Err(usage()),
         }
     }
@@ -96,6 +105,7 @@ fn options_from(arguments: &[String]) -> Result<Options, String> {
 }
 
 fn run(options: &Options) -> io::Result<()> {
+    let owner = owner::Owner::bind(options.parent_pid)?;
     run_set_qos_class_default()?;
     let _stop = stop::Stop::install()?;
 
@@ -119,11 +129,16 @@ fn run(options: &Options) -> io::Result<()> {
     // Tick 0 is the warm-up tick, which `Run::start` ran.
     assert!(tick > 0);
     loop {
-        let following = match run.tick(tick, &mut out) {
+        let result = run.tick(tick, &mut out);
+        let owner_departed = owner.departed();
+        let following = match result {
             Ok(following) => following,
             Err(error) => {
                 if error.kind() == io::ErrorKind::Interrupted {
                     if stop::Stop::requested() {
+                        return run.finish_recording(&mut out);
+                    }
+                    if owner_departed {
                         return run.finish_recording(&mut out);
                     }
                 }
@@ -138,6 +153,9 @@ fn run(options: &Options) -> io::Result<()> {
             return run_finish(&mut run, tick, first_marker_pid, &mut out);
         }
         if stop::Stop::requested() {
+            return run_finish(&mut run, tick, first_marker_pid, &mut out);
+        }
+        if owner_departed {
             return run_finish(&mut run, tick, first_marker_pid, &mut out);
         }
 
@@ -1560,6 +1578,101 @@ mod tests {
     }
 
     #[test]
+    fn accepts_an_explicit_parent_pid_for_an_app_owned_run() {
+        // Goal: app-launched collection can bind to its actual parent through an explicit flag.
+        // Method: parse an otherwise ordinary run with the highest permitted parent PID.
+        assert_eq!(
+            Some(99_999),
+            options_from(&arguments(&["--parent-pid", "99999"]))
+                .unwrap()
+                .parent_pid
+        );
+    }
+
+    macro_rules! parent_options {
+        ($($name:ident, $value:expr;)*) => {$(
+            #[test]
+            fn $name() {
+                // Goal: an invalid parent PID is a startup usage error, never an assertion.
+                // Method: parse one fixed invalid parent flag value through the real CLI parser.
+                assert!(options_from(&arguments(&["--parent-pid", $value])).is_err());
+            }
+        )*};
+    }
+
+    parent_options! {
+        rejects_a_zero_parent_pid, "0";
+        rejects_launchd_as_the_expected_parent, "1";
+        rejects_a_negative_parent_pid, "-2";
+        rejects_a_non_numeric_parent_pid, "parent";
+        rejects_a_parent_pid_past_the_kernel_bound, "100000";
+        rejects_a_parent_pid_past_i32, "2147483648";
+    }
+
+    #[test]
+    fn rejects_a_missing_parent_pid_value() {
+        // Goal: parent ownership requires the explicit numeric value after its flag.
+        // Method: parse the flag alone.
+        assert!(options_from(&arguments(&["--parent-pid"])).is_err());
+    }
+
+    #[test]
+    fn ordinary_collection_has_no_parent_binding() {
+        // Goal: external CLI collection remains independent of its original caller.
+        // Method: parse the default options and confirm no ownership was requested.
+        assert_eq!(None, options_from(&arguments(&[])).unwrap().parent_pid);
+    }
+
+    #[test]
+    fn rejects_a_wrong_parent_before_using_the_ring_or_sensors() {
+        // Goal: startup refuses ownership before expensive collection or invalid ring setup.
+        // Method: request this process as its own parent and an unusable ring name.
+        let own_pid = processes::own_pid().unwrap().to_string();
+        let options = options_from(&arguments(&[
+            "--parent-pid",
+            &own_pid,
+            "--ring",
+            "invalid/ring",
+        ]))
+        .unwrap();
+
+        let error = run(&options).unwrap_err();
+
+        assert_eq!(io::ErrorKind::InvalidInput, error.kind());
+        assert!(error.to_string().contains("actual parent PID"));
+    }
+
+    #[test]
+    fn binds_the_actual_parent_and_checks_it_without_allocating() {
+        // Goal: startup binding and collection-step parent checks use no Rust heap operations.
+        // Method: read the real parent and measure binding plus 1000000 scalar checks.
+        let parent = owner::parent_pid();
+        let timebase = Timebase::read().unwrap();
+        let pid = processes::own_pid().unwrap();
+        let before = processes::read_usage(timebase, pid).unwrap().unwrap();
+        let started = std::time::Instant::now();
+        let mut checks = 0;
+        let calls = allocator_calls_in(|| {
+            let bound = owner::Owner::bind(Some(parent)).unwrap();
+            let independent = owner::Owner::bind(None).unwrap();
+            for _attempt in 0..1_000_000 {
+                assert!(!bound.departed());
+                assert!(!independent.departed());
+                checks += 1;
+            }
+        });
+        let elapsed_ns = started.elapsed().as_nanos();
+        let after = processes::read_usage(timebase, pid).unwrap().unwrap();
+
+        assert_eq!(1_000_000, checks);
+        assert_eq!(0, calls);
+        eprintln!(
+            "parent checks={checks} wall_ns={elapsed_ns} rust_allocator_calls={calls} cpu_ns={}",
+            after.user_ns + after.system_ns - before.user_ns - before.system_ns
+        );
+    }
+
+    #[test]
     fn runs_for_the_seconds_given() {
         // Goal: --seconds sets how long a run lasts.
         // Method: parse --seconds 5.
@@ -1666,6 +1779,7 @@ mod tests {
                 rescan_interval: Duration::from_millis(20),
                 ring_name: DEFAULT_RING.to_owned(),
                 recording: None,
+                parent_pid: None,
             }),
             options_from(&arguments(&["--rescan-ms", "20", "--seconds", "5"]))
         );

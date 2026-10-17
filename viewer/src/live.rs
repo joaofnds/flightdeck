@@ -48,6 +48,7 @@ struct Source {
     tick: Tick,
     identities: Vec<IdentityObservation>,
     identity: RunIdentity,
+    collector_pid: u32,
     losses: Losses,
     window: Option<u64>,
     pending_windows: BTreeSet<u64>,
@@ -208,6 +209,7 @@ impl LiveSession {
         catalog["tail_cache_bytes_max"] = json!(CACHE_BYTES_MAX);
         catalog["latest_observation"] =
             json!(self.points.back().map(|point| &point["observation"]));
+        catalog["latest_collector_pid"] = json!(self.latest_collector_pid());
         catalog["collector_completed"] =
             json!(self.sources.iter().all(|source| source.reader.completed()));
         catalog["reader_losses"] = json!(
@@ -271,6 +273,64 @@ impl LiveSession {
                 .ok_or(Error::Bound("selected context point"))?
                 .clone();
         }
+        Ok(response)
+    }
+
+    /// Follows only points observed by this session, without querying committed history.
+    pub fn follow_latest(&mut self) -> Result<Value> {
+        self.selected = None;
+        if let Some(inspected) = self.inspected.take() {
+            self.cache_bytes -= inspected.bytes;
+        }
+
+        self.operation
+            .begin(self.operation.epoch())?
+            .run(|| self.follow_latest_inner())
+    }
+
+    fn follow_latest_inner(&mut self) -> Result<Value> {
+        let point = self
+            .points
+            .back()
+            .ok_or(Error::Bound("no live observation"))?;
+        let current = self
+            .observations
+            .iter()
+            .find(|observation| same(&observation.point, point))
+            .ok_or(Error::Bound("latest live raw observation unavailable"))?;
+        let second = current.observation.wall / NANOSECONDS_PER_SECOND;
+        let selected = current.json();
+        let summary = metrics::public_point(&current.point)?;
+
+        let mut trends = Vec::with_capacity(self.points.len());
+        let mut alternatives = Vec::new();
+        for point in &self.points {
+            self.operation.check()?;
+            let wall_second = point["wall_ns"]
+                .as_u64()
+                .ok_or(Error::Bound("point clock"))?
+                / NANOSECONDS_PER_SECOND;
+            if (second.saturating_sub(899)..=second).contains(&wall_second) {
+                trends.push(metrics::public_point(point)?);
+            }
+            if wall_second == second {
+                alternatives.push(point["observation"].clone());
+            }
+        }
+
+        if trends.len() > OBSERVATIONS_MAX {
+            return Err(Error::Bound("context observations"));
+        }
+
+        trends.sort_by(|left, right| identity_order(left).cmp(&identity_order(right)));
+        alternatives.sort_by(|left, right| identity_order(left).cmp(&identity_order(right)));
+
+        self.operation.check()?;
+        let response = json!({"second": second, "selected": selected,
+            "alternatives": alternatives, "summary": summary, "trends": trends,
+            "context_seconds": 900});
+        self.selected = Some(selected);
+
         Ok(response)
     }
 
@@ -402,7 +462,11 @@ impl LiveSession {
                 Err(error) => return Err(error.into()),
             };
 
-            if reader.identity() != Some(run.identity) {
+            let Some(identity) = reader.identity() else {
+                // Legacy recovery entries have no boot or clock identity to follow live.
+                continue;
+            };
+            if identity != run.identity {
                 return Err(Error::Bound("changed live identity"));
             }
 
@@ -414,13 +478,18 @@ impl LiveSession {
                 return Err(Error::Bound("live mapping size"));
             }
 
-            self.poll_sources_insert(reader, run.identity)?;
+            self.poll_sources_insert(reader, run.identity, run.collector_pid)?;
         }
 
         Ok(())
     }
 
-    fn poll_sources_insert(&mut self, reader: RingReader, identity: RunIdentity) -> Result<()> {
+    fn poll_sources_insert(
+        &mut self,
+        reader: RingReader,
+        identity: RunIdentity,
+        collector_pid: u32,
+    ) -> Result<()> {
         let tick = persistence::tick_buffer(&reader.shape())?;
         let identities = if reader.dictionary_capacity().is_some() {
             Vec::with_capacity(tick.processes.capacity())
@@ -433,6 +502,7 @@ impl LiveSession {
             tick,
             identities,
             identity,
+            collector_pid,
             losses: Losses::default(),
             window: None,
             pending_windows: BTreeSet::new(),
@@ -442,6 +512,15 @@ impl LiveSession {
         });
 
         Ok(())
+    }
+
+    fn latest_collector_pid(&self) -> Option<u32> {
+        let current = self.observations.back()?;
+
+        self.sources
+            .iter()
+            .find(|source| source.identity == current.identity)
+            .map(|source| source.collector_pid)
     }
 
     fn poll_publication(&mut self, index: usize, publication: u64) -> Result<bool> {
@@ -804,6 +883,7 @@ fn rehydrate_source(
         tick,
         identities,
         identity: source.identity,
+        collector_pid: source.collector_pid,
         losses: Losses {
             publications: losses["publications"]
                 .as_u64()
@@ -1372,6 +1452,60 @@ mod tests {
         assert_eq!(session.catalog()["latest_observation"]["publication"], 2);
         assert!(!session.poll().unwrap());
         assert!(session.cache_bytes <= CACHE_BYTES_MAX);
+    }
+
+    #[test]
+    fn following_requires_the_latest_raw_rows_instead_of_rehydrating_or_falling_back() {
+        // Goal: retained scalar points cannot silently substitute for missing latest raw rows.
+        // Method: remove the test's raw cache while keeping its real point and retained ring tick.
+        let mut fixture = RingFixture::new();
+        fixture.publish(1);
+        let mut session = LiveSession::open(&fixture.root).unwrap();
+        session.select(1001, 0).unwrap();
+        session.observations.clear();
+        session.cache_bytes = 0;
+        let cursor = session.sources[0].reader.next_publication();
+
+        let error = session.follow_latest().unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("latest live raw observation unavailable")
+        );
+        assert!(session.selected.is_none());
+        assert!(session.page("memory", 0).is_err());
+        assert_eq!(cursor, session.sources[0].reader.next_publication());
+        assert_eq!(session.catalog()["latest_observation"]["publication"], 1);
+    }
+
+    #[test]
+    fn following_releases_inspection_bytes_without_changing_poll_state() {
+        // Goal: following and table paging share latest identity with consistent cache accounting.
+        // Method: retain an older inspected observation, follow, and compare cursor/loss state.
+        let mut fixture = RingFixture::new();
+        fixture.publish(1);
+        fixture.publish(2);
+        let mut session = LiveSession::open(&fixture.root).unwrap();
+        session.select(1001, 0).unwrap();
+        let inspected = session.observations.pop_front().unwrap();
+        let expected_bytes = session.cache_bytes - inspected.bytes;
+        session.inspected = Some(inspected);
+        let cursor = session.sources[0].reader.next_publication();
+        let losses = session.catalog()["reader_losses"].clone();
+
+        let response = session.follow_latest().unwrap();
+
+        assert_eq!(response["selected"]["publication"], 2);
+        assert!(session.inspected.is_none());
+        assert_eq!(expected_bytes, session.cache_bytes);
+        assert_eq!(
+            session.page("memory", 0).unwrap()["observation"],
+            response["selected"]
+        );
+        assert_eq!(cursor, session.sources[0].reader.next_publication());
+        assert_eq!(session.catalog()["reader_losses"], losses);
+        assert!(!session.poll().unwrap());
     }
 
     #[test]

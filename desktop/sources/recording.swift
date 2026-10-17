@@ -15,12 +15,14 @@ struct Catalog: Decodable, Equatable, Sendable {
     let tailTicks: UInt64?
     let collectorCompleted: Bool?
     let latestObservation: Observation?
+    let latestCollectorPid: UInt32?
     let readerLosses: [ReaderLosses]?
 
     init(path: String, firstSecond: UInt64?, lastSecond: UInt64?, windows: UInt64,
          unknownClockTicks: UInt64, tables: [String], live: Bool? = nil,
          tailTicks: UInt64? = nil, collectorCompleted: Bool? = nil,
-         latestObservation: Observation? = nil, readerLosses: [ReaderLosses]? = nil) {
+         latestObservation: Observation? = nil, readerLosses: [ReaderLosses]? = nil,
+         latestCollectorPid: UInt32? = nil) {
         self.path = path
         self.firstSecond = firstSecond
         self.lastSecond = lastSecond
@@ -31,6 +33,7 @@ struct Catalog: Decodable, Equatable, Sendable {
         self.tailTicks = tailTicks
         self.collectorCompleted = collectorCompleted
         self.latestObservation = latestObservation
+        self.latestCollectorPid = latestCollectorPid
         self.readerLosses = readerLosses
     }
 
@@ -279,10 +282,14 @@ final class RecordingWorker: RecordingReading, @unchecked Sendable {
             return ReadResult(catalog: catalog, selection: nil, page: nil, machinePages: [:])
         }
         try prepare(session, epoch: epoch)
-        let target = request.target ?? (request.live && request.second == nil
-            ? catalog.latestObservation?.identity : nil)
-        var selection: Selection = try decode(fd_select(session, second,
-            target == nil ? request.alternative : 0))
+        let target = request.target
+        var selection: Selection
+        if request.live, request.second == nil, target == nil {
+            selection = try decode(fd_follow(session))
+        } else {
+            selection = try decode(fd_select(session, second,
+                target == nil ? request.alternative : 0))
+        }
         if let target {
             let alternative = try recordedAlternative(selection: selection, target: target)
             if selection.selected?.identity != target {
@@ -358,6 +365,7 @@ final class RecordingModel: ObservableObject {
     @Published var row: Int?
     private let reader: any RecordingReading
     private var useLive = false
+    private var startedLive = false
     private let pollingEnabled: Bool
     private let now: @MainActor () -> Date
     private var liveTimer: AnyCancellable?
@@ -382,6 +390,14 @@ final class RecordingModel: ObservableObject {
     }
 
     var liveAvailable: Bool { catalog != nil }
+    var isLiveSource: Bool { useLive }
+
+    func startLive() {
+        guard !startedLive else { return }
+
+        startedLive = true
+        setLive(true)
+    }
 
     var readerLossNotices: [String] {
         var losses = catalog?.readerLosses ?? []
@@ -399,13 +415,14 @@ final class RecordingModel: ObservableObject {
         guard useLive else { return "Recorded" }
         guard let catalog else { return "No live readings" }
         if catalog.collectorCompleted == true { return "Collector stopped" }
+        if !following { return "Paused" }
         let last = catalog.latestObservation.map { Double($0.wallNs) / 1e9 }
             ?? catalog.lastSecond.map(Double.init)
         guard let last else { return "No live readings" }
         let age = now().timeIntervalSince1970 - last
         if age < -3 { return "Clock changed" }
         if age > 3 { return "Waiting for collector" }
-        return following ? "Live" : "Paused"
+        return "Live"
     }
 
     func setLive(_ enabled: Bool) {

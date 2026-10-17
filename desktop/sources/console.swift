@@ -2,6 +2,7 @@ import SwiftUI
 
 struct Console: View {
     @EnvironmentObject private var model: RecordingModel
+    @EnvironmentObject private var collector: LiveCollectorSession
     @Environment(\.flightdeckTheme) private var theme
 
     var body: some View {
@@ -15,13 +16,17 @@ struct Console: View {
                 navigation("GPU", icon: "square.3.layers.3d")
                 navigation("Energy", icon: "bolt")
                 navigation("Network", icon: "network")
-                navigation("Recorded readings", icon: "chart.xyaxis.line")
+                if !model.isLiveSource || model.route == "Recorded readings" {
+                    navigation("Recorded readings", icon: "chart.xyaxis.line")
+                }
                 Spacer()
                 Divider()
                 Label(model.liveStatus, systemImage: model.following ? "dot.radiowaves.left.and.right" : "clock.arrow.circlepath")
                     .font(.caption).foregroundStyle(theme.muted).padding(.top, 10)
-                Button("Open recording…", action: model.open).buttonStyle(.plain).padding(.vertical, 8)
-                    .keyboardShortcut("o")
+                if !model.isLiveSource {
+                    Button("Open recording…", action: model.open).buttonStyle(.plain).padding(.vertical, 8)
+                        .keyboardShortcut("o")
+                }
             }.padding(theme.panelPadding).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 .background(theme.background)
                 .navigationSplitViewColumnWidth(min: 180, ideal: 200, max: 240)
@@ -35,11 +40,34 @@ struct Console: View {
                             Label(notice, systemImage: "exclamationmark.triangle")
                                 .font(.callout).foregroundStyle(theme.warning)
                         }
-                        if let error = model.error {
+                        if case .starting = collector.state, model.isLiveSource {
                             ContentUnavailableView {
-                                Label("Recording unavailable", systemImage: "externaldrive.badge.exclamationmark")
+                                Label("Starting live metrics", systemImage: "waveform.path.ecg")
+                            } description: {
+                                Text("Connecting to the collector. Readings appear as they arrive.")
+                            }
+                        } else if case .failed(let message) = collector.state, model.isLiveSource {
+                            ContentUnavailableView {
+                                Label("Live metrics unavailable", systemImage: "exclamationmark.triangle")
+                            } description: { Text(message) }
+                            actions: {
+                                Button("Retry") {
+                                    collector.retry()
+                                    model.setLive(true)
+                                }
+                            }
+                        } else if let error = model.error {
+                            ContentUnavailableView {
+                                Label(model.isLiveSource ? "Live metrics unavailable" : "Recording unavailable",
+                                    systemImage: "externaldrive.badge.exclamationmark")
                             } description: { Text(error) }
-                            actions: { Button("Choose a recording…", action: model.open) }
+                            actions: {
+                                if model.isLiveSource {
+                                    Button("Retry") { model.setLive(true) }
+                                } else {
+                                    Button("Choose a recording…", action: model.open)
+                                }
+                            }
                         } else if model.catalog?.lastSecond == nil, !model.busy {
                             ContentUnavailableView("No saved timestamps", systemImage: "clock.badge.questionmark",
                                 description: Text("Choose a recording with committed, timestamped ticks. Unknown-clock history cannot be assigned to a guessed second."))
@@ -53,7 +81,10 @@ struct Console: View {
                             if let component = RecordedComponent(rawValue: model.route) {
                                 RecordedComponentPane(component: component)
                             }
-                            RecordedReadings()
+                            if !model.isLiveSource || model.route == "CPU & processes"
+                                || model.route == "Recorded readings" {
+                                RecordedReadings()
+                            }
                             if model.route == "CPU & processes" { MachineContext() }
                         }
                     }.padding(theme.contentPadding)
@@ -99,29 +130,50 @@ struct Console: View {
                 .help("Follow the collector's newest shared-memory tick; pausing retains access to its unsealed tail.")
             Text(model.liveStatus).font(.caption).foregroundStyle(theme.muted)
             Label("Last 15 minutes", systemImage: "clock").font(.callout).foregroundStyle(theme.muted)
-            HStack {
-                Button { step(-1) } label: { Image(systemName: "chevron.left") }.help("Previous second")
-                TextField("Unix second", text: $model.secondText).frame(width: 110)
-                    .onSubmit { if let value = UInt64(model.secondText) { model.load(second: value) } }
-                    .accessibilityLabel("Recorded Unix second")
-                Button { step(1) } label: { Image(systemName: "chevron.right") }.help("Next second")
+            if model.isLiveSource {
+                Menu {
+                    Button("Inspect raw readings") { model.route = "Recorded readings" }
+                } label: {
+                    Image(systemName: "ellipsis")
+                }.help("Metric options").accessibilityLabel("Metric options")
+                    .disabled(model.selection?.selected == nil)
+            }
+            if !model.following, model.selection?.selected != nil {
+                HStack {
+                    Button { step(-1) } label: { Image(systemName: "chevron.left") }.help("Previous second")
+                    TextField("Unix second", text: $model.secondText).frame(width: 110)
+                        .onSubmit { if let value = UInt64(model.secondText) { model.load(second: value) } }
+                        .accessibilityLabel("Recorded Unix second")
+                    Button { step(1) } label: { Image(systemName: "chevron.right") }.help("Next second")
+                }
             }
             Button { model.load(refresh: true) }
-                label: { Image(systemName: "arrow.clockwise") }.help("Refresh committed history")
+                label: { Image(systemName: "arrow.clockwise") }
+                    .help(model.isLiveSource ? "Refresh live metrics" : "Refresh committed history")
                 .keyboardShortcut("r")
         }.padding(.horizontal, 24).padding(.vertical, 18)
     }
 
     private var footer: some View {
         HStack {
-            Text(model.path).lineLimit(1).truncationMode(.middle).textSelection(.enabled)
-            Spacer()
-            if let catalog = model.catalog {
-                Text("\(catalog.windows) sealed windows")
-                if let first = catalog.firstSecond, let last = catalog.lastSecond {
-                    Text("\(first.formatted(.number.grouping(.never)))…\(last.formatted(.number.grouping(.never))) UTC seconds")
+            if model.isLiveSource {
+                Text("Last 15 minutes")
+                Spacer()
+                if let observation = model.selection?.selected {
+                    Text("Updated " + Date(timeIntervalSince1970: Double(observation.wallNs) / 1e9)
+                        .formatted(.dateTime.hour().minute().second()))
+                        .monospacedDigit()
                 }
-                if catalog.unknownClockTicks > 0 { Text("\(catalog.unknownClockTicks) ticks without wall time") }
+            } else {
+                Text(model.path).lineLimit(1).truncationMode(.middle).textSelection(.enabled)
+                Spacer()
+                if let catalog = model.catalog {
+                    Text("\(catalog.windows) sealed windows")
+                    if let first = catalog.firstSecond, let last = catalog.lastSecond {
+                        Text("\(first.formatted(.number.grouping(.never)))…\(last.formatted(.number.grouping(.never))) UTC seconds")
+                    }
+                    if catalog.unknownClockTicks > 0 { Text("\(catalog.unknownClockTicks) ticks without wall time") }
+                }
             }
         }.font(.caption).foregroundStyle(theme.muted).padding(12)
             .background(theme.panel)

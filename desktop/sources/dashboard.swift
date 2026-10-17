@@ -38,7 +38,8 @@ struct Dashboard: View {
                           metric: \.socCelsius)
             }
             HStack(spacing: theme.contentPadding) {
-                Label("Saved recording", systemImage: "externaldrive")
+                Label(model.catalog?.live == true ? "Live metrics" : "Saved recording",
+                      systemImage: model.catalog?.live == true ? "waveform.path.ecg" : "externaldrive")
                 if let pressure = summary?.pressure {
                     Text("Memory pressure: " + ([0: "Normal", 1: "Warning", 2: "Critical"][pressure] ?? "Unknown"))
                 }

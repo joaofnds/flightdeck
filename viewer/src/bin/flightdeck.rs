@@ -1,4 +1,7 @@
 //! Opt-in macOS application build and launch, without a local hook or toolchain installer.
+#[path = "flightdeck/command.rs"]
+mod command;
+
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -150,6 +153,7 @@ fn check(root: &Path, archive: &Path) -> io::Result<()> {
                 "desktop/tests/recording_state.swift",
                 "desktop/tests/reference_data_checks.swift",
                 "desktop/tests/dashboard_checks.swift",
+                "desktop/tests/live_collector_checks.swift",
             ])
             .arg("-o")
             .arg(&executable)
@@ -179,6 +183,7 @@ fn build(root: &Path, archive: &Path) -> io::Result<PathBuf> {
     fs::create_dir_all(&executable)?;
     fs::write(app.join("Contents/Info.plist"), INFO)?;
     resources(root, &app)?;
+    helpers(&HelperPaths { root, app: &app })?;
     let mut compile = compiler(root, archive);
     compile
         .args(sources(root)?)
@@ -192,6 +197,75 @@ fn build(root: &Path, archive: &Path) -> io::Result<PathBuf> {
             .status()?,
     )?;
     Ok(app)
+}
+
+struct HelperPaths<'a> {
+    root: &'a Path,
+    app: &'a Path,
+}
+
+fn helpers(paths: &HelperPaths<'_>) -> io::Result<()> {
+    let deadline = command::Deadline::build();
+    let directory = paths.app.join("Contents/Helpers");
+
+    fs::create_dir_all(&directory)?;
+
+    for (package, name) in [("collector", "collector"), ("persistence", "persister")] {
+        let output = command::run(
+            cargo(paths.root).args([
+                "build",
+                "--locked",
+                "--release",
+                "-p",
+                package,
+                "--bin",
+                name,
+                "--message-format=json-render-diagnostics",
+            ]),
+            &deadline,
+        )?;
+        io::stderr().write_all(&output.stderr)?;
+        success(output.status)?;
+
+        let source = helper_executable(&output.stdout, name)?;
+        let destination = directory.join(name);
+        fs::copy(source, &destination)?;
+
+        let signed = command::run(
+            Command::new("codesign")
+                .args(["--force", "--sign", "-", "--timestamp=none"])
+                .arg(&destination),
+            &deadline,
+        )?;
+        io::stderr().write_all(&signed.stderr)?;
+        success(signed.status)?;
+    }
+
+    Ok(())
+}
+
+fn helper_executable(output: &[u8], name: &str) -> io::Result<PathBuf> {
+    if output.len() > 16 * 1024 * 1024 {
+        return Err(io::Error::other("cargo helper output bound"));
+    }
+
+    let mut executable = None;
+    for line in output
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+    {
+        let message: serde_json::Value = serde_json::from_slice(line).map_err(io::Error::other)?;
+
+        if message["reason"] == "compiler-artifact" {
+            if message["target"]["name"] == name {
+                if let Some(path) = message["executable"].as_str() {
+                    executable = Some(PathBuf::from(path));
+                }
+            }
+        }
+    }
+
+    executable.ok_or_else(|| io::Error::other("cargo returned no helper executable"))
 }
 
 fn sources(root: &Path) -> io::Result<Vec<PathBuf>> {

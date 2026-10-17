@@ -210,6 +210,20 @@ pub unsafe extern "C" fn fd_select(handle: *mut Handle, second: u64, alternative
 }
 
 /// # Safety
+/// `handle` must be a live session result, exclusively borrowed for this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fd_follow(handle: *mut Handle) -> Bytes {
+    let handle = unsafe { &mut *handle };
+    response(match &mut handle.session {
+        Ok(ViewedSession::Live(session)) => {
+            session.follow_latest().map_err(|error| error.to_string())
+        }
+        Ok(ViewedSession::Saved(_)) => Err("session has no live source".to_owned()),
+        Err(error) => Err(error.to_string()),
+    })
+}
+
+/// # Safety
 /// `handle` must be a live `fd_open` result, exclusively borrowed for this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fd_page(handle: *mut Handle, table: u32, offset: u64) -> Bytes {

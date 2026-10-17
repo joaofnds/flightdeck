@@ -97,6 +97,7 @@ final class ReferenceModel: ObservableObject {
 
 struct ApplicationConsole: View {
     @EnvironmentObject private var recording: RecordingModel
+    @EnvironmentObject private var collector: LiveCollectorSession
     @StateObject private var preview = ReferenceModel()
 
     var body: some View {
@@ -111,9 +112,18 @@ struct ApplicationConsole: View {
             ToolbarItem(placement: .primaryAction) {
                 Picker("Data source", selection: $recording.showsReference) {
                     Text("Captured prototype reference").tag(true)
-                    Text("Flightdeck recording").tag(false)
+                    Text(recording.isLiveSource ? "Live metrics" : "Saved recording").tag(false)
                 }.pickerStyle(.menu).frame(maxWidth: 260)
             }
+        }
+        .onChange(of: recording.catalog?.latestObservation) { _, observation in
+            guard recording.isLiveSource, recording.catalog?.live == true,
+                  let observation, let collectorPID = recording.catalog?.latestCollectorPid else {
+                return
+            }
+
+            collector.observe(identity: observation.identity, collectorPID: collectorPID,
+                collectorCompleted: recording.catalog?.collectorCompleted == true)
         }
     }
 }

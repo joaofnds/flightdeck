@@ -7,6 +7,7 @@ import SwiftUI
 struct RecordingStateChecks {
     @MainActor
     static func main() throws {
+        if try runLiveCollectorChild(arguments: CommandLine.arguments) { return }
         if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--live-fixture" {
             try reads_the_latest_real_publication_after_rollback_and_repetition(
                 path: CommandLine.arguments[2])
@@ -27,6 +28,8 @@ struct RecordingStateChecks {
         try distinguishes_publications_from_different_runs_and_boots()
         applies_native_table_selection_values_and_theme_changes()
         starts_live_without_building_a_poll_queue()
+        starts_live_once_across_repeated_window_appearances()
+        cancels_failed_startup_polling_with_reference_visible_and_resumes_on_retry()
         preserves_visible_readings_when_a_live_poll_is_unchanged()
         emits_no_changes_for_an_identical_background_poll()
         publishes_catalog_changes_without_replacing_the_selected_payload()
@@ -35,6 +38,7 @@ struct RecordingStateChecks {
         advances_visible_readings_after_a_changed_background_poll()
         retains_poll_errors_until_success_without_republishing_identical_failures()
         keeps_live_tail_access_when_following_is_paused()
+        keeps_paused_status_when_its_frozen_reading_ages()
         keeps_saved_recordings_on_the_existing_default_path()
         reports_a_stale_collector_using_the_injected_clock()
         freezes_a_pending_live_poll_when_following_is_paused()
@@ -52,12 +56,80 @@ struct RecordingStateChecks {
         retains_exact_paused_identity_through_cpu_and_paging()
         chart_selection_requests_and_retains_exact_identity()
         unavailable_chart_identity_clears_readings_and_surfaces_error()
-        print("39 native recording state and table checks passed")
+        print("42 native recording state and table checks passed")
         try runReferenceDataChecks()
         runDashboardChecks()
         try runOverviewInspectionChecks()
         try runRecordedMemoryChecks()
         try runRecordedComponentChecks()
+        try runLiveCollectorChecks()
+    }
+
+    @MainActor
+    private static func starts_live_once_across_repeated_window_appearances() {
+        // Reopening a window must not replace or duplicate the app's initial live request.
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+
+        model.startLive()
+        model.startLive()
+
+        precondition(model.following)
+        precondition(model.isLiveSource)
+        precondition(reader.readCount == 1)
+        precondition(reader.cancellations == 0)
+        precondition(reader.latestRequest?.live == true)
+        precondition(reader.latestRequest?.second == nil)
+        precondition(reader.latestRequest?.target == nil)
+    }
+
+    @MainActor
+    private static func cancels_failed_startup_polling_with_reference_visible_and_resumes_on_retry() {
+        // No mounted view may be necessary for failure to stop the actual model's read loop.
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+        var instant = 0.0
+        let session = LiveCollectorSession(process: ControlledLiveCollector(), pollingEnabled: false,
+            now: { instant }, onFailure: { if model.isLiveSource { model.cancel() } })
+        model.startLive()
+        session.start()
+        model.showsReference = true
+        instant = 20
+
+        session.step()
+        reader.finishNext()
+        drainMainQueue()
+        model.pollLive()
+
+        precondition(!model.following)
+        precondition(reader.cancellations == 1)
+        precondition(reader.readCount == 1)
+
+        session.retry()
+        model.setLive(true)
+
+        precondition(session.state == .starting)
+        precondition(model.following)
+        precondition(reader.readCount == 2)
+    }
+
+    @MainActor
+    private static func keeps_paused_status_when_its_frozen_reading_ages() {
+        // A frozen selected tick cannot establish that a still-running collector is stale.
+        let reader = ControlledRecordingReader()
+        var instant = Date(timeIntervalSince1970: 17)
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false,
+            now: { instant })
+        model.setLive(true)
+        reader.finishNext()
+        drainMainQueue()
+        model.setLive(false)
+
+        instant = Date(timeIntervalSince1970: 21)
+
+        precondition(model.liveStatus == "Paused")
+        precondition(model.selection?.second == 17)
+        precondition(model.isLiveSource)
     }
 
     @MainActor
@@ -491,6 +563,8 @@ struct RecordingStateChecks {
             throw RecordingError(message: "Worker chose the default alternative instead of publication 3")
         }
         precondition(response.selection?.alternatives.map(\.publication) == [2, 3])
+        precondition(response.selection?.contextSeconds == 900)
+        precondition(response.selection?.trends.count == 2)
         precondition(response.selection?.selected?.run == response.catalog.latestObservation?.run)
         precondition(response.selection?.selected?.boot == response.catalog.latestObservation?.boot)
         precondition(response.page?.observation.publication == 3)
@@ -499,6 +573,11 @@ struct RecordingStateChecks {
             "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0"]])
         let target = RecordedObservationIdentity(run: response.selection!.selected!.run,
             boot: response.selection!.selected!.boot, publication: 2)
+        let pinnedWithoutSecond = try nativeRead(reader, request: ReadRequest(path: path,
+            second: nil, alternative: 1, table: 1, offset: 0, refresh: false,
+            machineOffsets: [:], includeMachine: false, live: true, target: target))
+        precondition(pinnedWithoutSecond.selection?.selected?.identity == target)
+        precondition(pinnedWithoutSecond.page?.rows[0][1] == "222")
         let pinned = try nativeRead(reader, request: ReadRequest(path: path, second: 900,
             alternative: 1, table: 1, offset: 0, refresh: false, machineOffsets: [:],
             includeMachine: false, live: true, target: target))

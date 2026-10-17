@@ -88,12 +88,16 @@ mod tests {
         }
 
         fn seal(&self) {
+            self.seal_window(0);
+        }
+
+        fn seal_window(&self, window_index: u64) {
             let mut reader =
                 collector::ring::RingReader::open_generation(self.writer.name()).unwrap();
             let mut tick = persistence::tick_buffer(&reader.shape()).unwrap();
             let identity = persistence::WindowIdentity {
                 run: self.writer.identity().unwrap(),
-                window: 0,
+                window: window_index,
             };
             let mut window = persistence::Window::new(
                 identity,
@@ -105,8 +109,11 @@ mod tests {
                     collector::ring::Found::Missed { .. } => panic!("fixture source overwritten"),
                     collector::ring::Found::Publication { publication, .. } => {
                         let times = tick.times.unwrap();
-                        if times.continuous_ns >= 60_000_000_000 {
+                        if times.continuous_ns >= (window_index + 1) * 60_000_000_000 {
                             break;
+                        }
+                        if times.continuous_ns < window_index * 60_000_000_000 {
+                            continue;
                         }
                         window
                             .push_tick(
@@ -195,6 +202,68 @@ mod tests {
             self.elapsed += 1;
         }
 
+        fn publish_unavailable(&mut self, usage: collector::ring::UsageAvailability) {
+            let memory = Memory::default();
+            let observations = [collector::ring::IdentityObservation {
+                pid: 42,
+                usage,
+                identity: collector::ring::ProcessIdentity::Unavailable {
+                    creation: None,
+                    reason: collector::ring::IdentityUnavailable::Unsupported,
+                },
+            }];
+            self.writer
+                .publish_with_identity(
+                    &Readings {
+                        run_tick: 0,
+                        cpus: &[],
+                        memory: &memory,
+                        interfaces: &[],
+                        ioreport: None,
+                        smc: None,
+                        processes: &[],
+                        processes_refused: u32::from(
+                            usage == collector::ring::UsageAvailability::Refused,
+                        ),
+                        processes_gone: u32::from(
+                            usage == collector::ring::UsageAvailability::Gone,
+                        ),
+                        coalitions: &[],
+                        events: &[],
+                        dropped: Dropped::default(),
+                    },
+                    Some(&ObservationTimes {
+                        wall_ns: 1_000_000_000_000,
+                        continuous_ns: 1_000_000_000,
+                        awake_ns: 1_000_000_000,
+                    }),
+                    &collector::ring::IdentityPublication {
+                        processes: &observations,
+                        events: &[],
+                    },
+                )
+                .unwrap();
+        }
+
+        fn publish_without_clocks(&mut self) {
+            let memory = Memory::default();
+            self.writer.publish(&Readings {
+                run_tick: self.elapsed,
+                cpus: &[],
+                memory: &memory,
+                interfaces: &[],
+                ioreport: None,
+                smc: None,
+                processes: &[],
+                processes_refused: 0,
+                processes_gone: 0,
+                coalitions: &[],
+                events: &[],
+                dropped: Dropped::default(),
+            });
+            self.elapsed += 1;
+        }
+
         fn publish(&mut self, second: u64) {
             self.publish_events(second, &[]);
         }
@@ -249,6 +318,432 @@ mod tests {
             let name = self.writer.name().to_owned();
             collector::ring::unlink_generation(&name).unwrap();
             std::fs::remove_dir_all(&self.root).unwrap();
+        }
+    }
+
+    struct LegacyRing(Writer);
+
+    impl Drop for LegacyRing {
+        fn drop(&mut self) {
+            collector::ring::unlink_generation(self.0.name()).unwrap();
+        }
+    }
+
+    #[test]
+    fn follows_the_current_collector_after_an_identityless_legacy_ring() {
+        // Goal: unsupported old generations do not block current identified live readings.
+        // Method: register a real v2 predecessor through the collector's recovery boundary.
+        let mut recording = Recording::new();
+        let place = Place {
+            lock_path: recording.root.join("legacy.lock"),
+            name_prefix: format!(
+                "/fdlegacy{}x{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ),
+        };
+        let reader = collector::ring::RingReader::open_generation(recording.writer.name()).unwrap();
+        let legacy = LegacyRing(Writer::create(&place, reader.shape()).unwrap());
+        assert!(legacy.0.identity().is_none());
+        let current = recording.writer.identity().unwrap();
+        let mut registry = collector::recording::Registry::default();
+        registry
+            .capture_previous(&recording.root, &place, current.recording)
+            .unwrap();
+        registry
+            .add(
+                &recording.root,
+                collector::recording::RegisteredRun {
+                    identity: current,
+                    ring_name: recording.writer.name().to_owned(),
+                    collector_pid: std::process::id(),
+                },
+            )
+            .unwrap();
+        registry.write(&recording.root).unwrap();
+        recording.publish(1000);
+
+        let mut session = LiveSession::open(&recording.root).unwrap();
+        let response = session.follow_latest().unwrap();
+
+        assert_eq!(response["selected"]["publication"], 1);
+        assert_eq!(
+            response["selected"],
+            session.catalog()["latest_observation"]
+        );
+        assert_eq!(
+            session.catalog()["reader_losses"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(
+            session.page("memory", 0).unwrap()["observation"],
+            response["selected"]
+        );
+    }
+
+    #[test]
+    fn identifies_the_producer_of_the_latest_observed_live_run() {
+        // Goal: the app can distinguish its candidate from the source it actually follows.
+        // Method: publish through a registration owned by this process and inspect its catalog.
+        let mut recording = Recording::new();
+        recording.publish(1000);
+
+        let session = LiveSession::open(&recording.root).unwrap();
+
+        assert_eq!(
+            session.catalog()["latest_collector_pid"],
+            std::process::id()
+        );
+    }
+
+    #[test]
+    fn rejects_an_identified_ring_registered_as_a_different_run() {
+        // Goal: skipping an identityless predecessor never admits a mismatched current run.
+        // Method: retain the actual ring but replace its registered run identity.
+        let mut recording = Recording::new();
+        recording.publish(1000);
+        let mut registry = collector::recording::Registry::read(&recording.root).unwrap();
+        registry.runs[0].identity.run.0[0] ^= 1;
+        registry.write(&recording.root).unwrap();
+
+        let result = LiveSession::open(&recording.root);
+
+        assert!(matches!(
+            result,
+            Err(persistence::Error::Bound("changed live identity"))
+        ));
+    }
+
+    #[test]
+    fn follows_current_points_when_its_sealed_history_becomes_unreadable() {
+        // Goal: following current live readings does not require saved context to stay readable.
+        // Method: remove this fixture's saved data after opening history; retain current raw rows.
+        let mut recording = Recording::new();
+        recording.publish(1000);
+        recording.seal();
+        recording.publish(1001);
+        let mut session = LiveSession::open(&recording.root).unwrap();
+        assert_eq!(session.catalog()["windows"], 1);
+        std::fs::remove_dir_all(recording.root.join("data")).unwrap();
+        assert!(session.select(1000, 0).is_err());
+
+        let response = session.follow_latest().unwrap();
+
+        assert_eq!(response["second"], 1001);
+        assert_eq!(response["context_seconds"], 900);
+        assert_eq!(
+            response["selected"],
+            session.catalog()["latest_observation"]
+        );
+        assert_eq!(response["selected"]["publication"], 2);
+        assert_eq!(response["summary"]["publication"], 2);
+        assert_eq!(response["trends"].as_array().unwrap().len(), 2);
+        let page = session.page("memory", 0).unwrap();
+        assert_eq!(page["observation"], response["selected"]);
+        assert_eq!(page["rows"][0][1], "9007199254740994");
+    }
+
+    #[test]
+    fn follows_the_newest_publication_across_wall_ties_and_rollback() {
+        // Goal: latest identity follows arrival order rather than greatest wall second.
+        // Method: observe a rollback with two tied publications and then inspect the older sibling.
+        let mut recording = Recording::new();
+        recording.publish(1000);
+        recording.publish(900);
+        recording.publish(900);
+        let mut session = LiveSession::open(&recording.root).unwrap();
+
+        let response = session.follow_latest().unwrap();
+
+        assert_eq!(response["second"], 900);
+        assert_eq!(
+            response["selected"],
+            session.catalog()["latest_observation"]
+        );
+        assert_eq!(response["selected"]["publication"], 3);
+        assert_eq!(response["summary"]["publication"], 3);
+        assert_eq!(response["alternatives"][0]["publication"], 2);
+        assert_eq!(response["alternatives"][1]["publication"], 3);
+        assert_eq!(response["trends"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            session.page("memory", 0).unwrap()["rows"][0][1],
+            "9007199254740995"
+        );
+        let pinned = session.select(900, 0).unwrap();
+        assert_eq!(pinned["selected"]["publication"], 2);
+        assert_eq!(
+            session.page("memory", 0).unwrap()["rows"][0][1],
+            "9007199254740994"
+        );
+    }
+
+    #[test]
+    fn follows_only_observed_points_within_a_fixed_fifteen_minute_context() {
+        // Goal: warm-up, missing seconds and the 900-second boundary invent no observations.
+        // Method: observe sparse real publications through trim boundaries and inspect trends.
+        let mut recording = Recording::new();
+        let mut session = LiveSession::open(&recording.root).unwrap();
+        assert!(session.follow_latest().is_err());
+        recording.publish(1000);
+        session.poll().unwrap();
+        let warm = session.follow_latest().unwrap();
+        assert_eq!(warm["context_seconds"], 900);
+        assert_eq!(warm["trends"].as_array().unwrap().len(), 1);
+        for second in [1002, 1899, 1900] {
+            recording.publish(second);
+            session.poll().unwrap();
+        }
+
+        let response = session.follow_latest().unwrap();
+
+        let publications: Vec<_> = response["trends"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|point| point["publication"].as_u64().unwrap())
+            .collect();
+        assert_eq!(publications, [2, 3, 4]);
+        assert_eq!(response["context_seconds"], 900);
+        assert_eq!(response["second"], 1900);
+        assert_ne!(
+            response["trends"][0]["segment"],
+            response["trends"][1]["segment"]
+        );
+    }
+
+    #[test]
+    fn follows_the_exact_inclusive_time_window_independently_of_cache_trimming() {
+        // Goal: the 900-second follow context includes its lower bound and excludes both sides.
+        // Method: a future deque front retains an older outside point across a wall rollback.
+        let mut recording = Recording::new();
+        recording.publish(2000);
+        recording.publish(1000);
+        recording.publish(1001);
+        recording.publish(1900);
+        let mut session = LiveSession::open(&recording.root).unwrap();
+        let catalog = session.catalog();
+        assert_eq!(catalog["tail_ticks"], 4);
+        assert_eq!(catalog["first_second"], 1000);
+        assert_eq!(catalog["last_second"], 2000);
+
+        let response = session.follow_latest().unwrap();
+
+        let publications: Vec<_> = response["trends"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|point| point["publication"].as_u64().unwrap())
+            .collect();
+        assert_eq!(publications, [3, 4]);
+        assert_eq!(response["context_seconds"], 900);
+        assert_eq!(response["second"], 1900);
+        assert_eq!(response["selected"]["publication"], 4);
+        assert_eq!(response["trends"][0]["wall_ns"], 1_001_000_000_000_u64);
+    }
+
+    #[test]
+    fn rejects_a_canceled_follow_and_retries_only_after_beginning_the_new_epoch() {
+        // Goal: a stale follow produces neither a usable response nor an old page.
+        // Method: cancel a selected session, reject its epoch, then explicitly begin and retry.
+        let mut recording = Recording::new();
+        recording.publish(1000);
+        let control = std::sync::Arc::new(viewer::Cancellation::default());
+        let mut session = LiveSession::open_with(&recording.root, control.clone(), 0).unwrap();
+        session.follow_latest().unwrap();
+        control.cancel().unwrap();
+
+        assert!(session.follow_latest().is_err());
+        assert!(session.page("memory", 0).is_err());
+        assert!(session.begin(0).is_err());
+        session.begin(control.epoch()).unwrap();
+        let response = session.follow_latest().unwrap();
+
+        assert_eq!(
+            response["selected"],
+            session.catalog()["latest_observation"]
+        );
+        assert_eq!(
+            session.page("memory", 0).unwrap()["observation"],
+            response["selected"]
+        );
+        assert!(!session.poll().unwrap());
+    }
+
+    fn follows_unavailable_usage(usage: collector::ring::UsageAvailability, code: &str) {
+        let mut recording = Recording::identity_source();
+        recording.publish_unavailable(usage);
+        let mut session = LiveSession::open(&recording.root).unwrap();
+
+        let response = session.follow_latest().unwrap();
+        let page = session.page("processes", 0).unwrap();
+
+        assert_eq!(
+            response["selected"],
+            session.catalog()["latest_observation"]
+        );
+        assert_eq!(response["selected"]["publication"], 1);
+        assert_eq!(response["summary"]["publication"], 1);
+        assert_eq!(page["observation"], response["selected"]);
+        assert_eq!(page["rows"].as_array().unwrap().len(), 1);
+        assert_eq!(page["rows"][0][1], "42");
+        assert!(
+            page["rows"][0].as_array().unwrap()[2..21]
+                .iter()
+                .all(serde_json::Value::is_null)
+        );
+        assert_eq!(page["rows"][0][23], code);
+        assert_reader_losses_absent(&session.catalog(), 1);
+        assert!(!session.poll().unwrap());
+    }
+
+    #[test]
+    fn follows_the_latest_refused_usage_without_inventing_numeric_cells() {
+        // Goal: refusal is still a current observation, with unavailable numeric cells.
+        // Method: publish one real v4 refused observation and follow its public process page.
+        follows_unavailable_usage(collector::ring::UsageAvailability::Refused, "1");
+    }
+
+    #[test]
+    fn follows_the_latest_gone_usage_without_inventing_numeric_cells() {
+        // Goal: a departed process stays distinct from refusal and measured zero usage.
+        // Method: publish one real v4 gone observation and follow its public process page.
+        follows_unavailable_usage(collector::ring::UsageAvailability::Gone, "2");
+    }
+
+    #[test]
+    fn follows_exact_latest_rows_after_real_raw_cache_byte_pressure() {
+        // Goal: following survives byte eviction without changing reader progress or losses.
+        // Method: publish 12,000 process observations per tick beyond the 128 MiB cache bound.
+        let mut fixture = super::identity_fixture::Fixture::new_mode(true, 12_000, None);
+        fixture.publish(1000);
+        let mut session = LiveSession::open(&fixture.root).unwrap();
+        for second in 1001..=1031 {
+            fixture.publish(second);
+            assert!(session.poll().unwrap());
+        }
+        let before = session.catalog();
+        assert!(before["tail_ticks"].as_u64().unwrap() < 32);
+
+        let response = session.follow_latest().unwrap();
+        let first = session.page("processes", 0).unwrap();
+        let last = session.page("processes", 11_776).unwrap();
+
+        assert_eq!(response["selected"], before["latest_observation"]);
+        assert_eq!(response["selected"]["publication"], 32);
+        assert_eq!(response["summary"]["publication"], 32);
+        assert_eq!(first["observation"], response["selected"]);
+        assert_eq!(last["observation"], response["selected"]);
+        assert_eq!(first["rows"][0][26], r"refused\xff");
+        assert!(first["rows"][0][3].is_null());
+        assert_eq!(first["rows"][6][3], "9007199254741024");
+        assert_eq!(last["rows"].as_array().unwrap().last().unwrap()[1], "12000");
+        assert_eq!(session.catalog()["reader_losses"], before["reader_losses"]);
+        assert_reader_losses_absent(&session.catalog(), 1);
+        assert_eq!(
+            session.catalog()["tail_cache_bytes"],
+            before["tail_cache_bytes"]
+        );
+        assert!(before["tail_cache_bytes"].as_u64().unwrap() <= 128 * 1024 * 1024);
+        assert!(!session.poll().unwrap());
+        fixture.publish(1032);
+        assert!(session.poll().unwrap());
+        let advanced = session.follow_latest().unwrap();
+        assert_eq!(advanced["selected"]["publication"], 33);
+        assert_eq!(
+            session.page("processes", 0).unwrap()["rows"][6][3],
+            "9007199254741025"
+        );
+        assert_eq!(session.catalog()["reader_losses"], before["reader_losses"]);
+        assert!(!session.poll().unwrap());
+    }
+
+    #[test]
+    fn follows_the_last_valid_observation_when_the_source_latest_has_no_clocks() {
+        // Goal: an unplaceable publication invents no live point and reports unknown loss.
+        // Method: publish absent clocks through the public ring writer between observed ticks.
+        let mut recording = Recording::new();
+        recording.publish(1000);
+        let mut session = LiveSession::open(&recording.root).unwrap();
+        let previous = session.follow_latest().unwrap();
+        let previous_page = session.page("memory", 0).unwrap();
+        recording.publish_without_clocks();
+
+        assert!(!session.poll().unwrap());
+        let response = session.follow_latest().unwrap();
+
+        assert_eq!(response, previous);
+        assert_eq!(session.page("memory", 0).unwrap(), previous_page);
+        assert_eq!(
+            session.catalog()["reader_losses"][0]["losses"],
+            serde_json::json!({"publications":0,"events":0,"unknown":true})
+        );
+        assert!(!session.poll().unwrap());
+        recording.publish(1002);
+        assert!(session.poll().unwrap());
+        let advanced = session.follow_latest().unwrap();
+        assert_eq!(advanced["selected"]["publication"], 3);
+        assert_eq!(advanced["selected"]["reader_losses"]["unknown"], true);
+        assert_eq!(
+            session.page("memory", 0).unwrap()["rows"][0][1],
+            "9007199254740995"
+        );
+        assert!(!session.poll().unwrap());
+    }
+
+    #[test]
+    #[ignore = "opt-in actual populated live follow/select CPU and wall benchmark"]
+    fn benchmarks_follow_and_manual_select_on_the_same_populated_live_session() {
+        // Goal: measure actual follow and manual selection against the same cached live workload.
+        // Method: seed three real sealed windows, poll 120 more points, then time 24 reads each.
+        let mut recording = Recording::new();
+        for minute in 0..3 {
+            recording.elapsed = minute * 60;
+            recording.publish(1000 + minute * 60);
+            recording.publish(1001 + minute * 60);
+            recording.seal_window(minute);
+        }
+        let mut session = LiveSession::open(&recording.root).unwrap();
+        for second in 1122..1242 {
+            recording.publish(second);
+            session.poll().unwrap();
+        }
+        assert_eq!(session.catalog()["windows"], 3);
+        let followed = session.follow_latest().unwrap();
+        let selected = session.select(1241, 0).unwrap();
+        assert_eq!(followed["selected"], selected["selected"]);
+        assert_eq!(followed["trends"].as_array().unwrap().len(), 126);
+        let timebase = collector::clock::Timebase::read().unwrap();
+        let pid = i32::try_from(std::process::id()).unwrap();
+
+        for follow in [false, true] {
+            let before = collector::processes::read_usage(timebase, pid)
+                .unwrap()
+                .unwrap();
+            let started = std::time::Instant::now();
+            for _attempt in 0..24 {
+                let response = if follow {
+                    session.follow_latest()
+                } else {
+                    session.select(1241, 0)
+                }
+                .unwrap();
+                assert_eq!(response["selected"], followed["selected"]);
+                std::hint::black_box(response);
+            }
+            let elapsed_ns = started.elapsed().as_nanos();
+            let after = collector::processes::read_usage(timebase, pid)
+                .unwrap()
+                .unwrap();
+            let footprint = persistence::resources::Footprint::read().unwrap();
+            println!(
+                "{}",
+                serde_json::json!({"follow":follow,"iterations":24,
+                "sealed_windows":3,"observed_points":126,"wall_ns":elapsed_ns,
+                "process_cpu_ns":after.user_ns+after.system_ns-before.user_ns-before.system_ns,
+                "physical_footprint_bytes":footprint.current_bytes,
+                "lifetime_footprint_max_bytes":footprint.lifetime_bytes_max,
+                "live_cache_bytes":session.catalog()["tail_cache_bytes"]})
+            );
         }
     }
 
