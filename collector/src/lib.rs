@@ -7,6 +7,7 @@ pub mod ioreport;
 mod kernel;
 pub mod machine;
 pub mod processes;
+pub mod programs;
 pub mod recording;
 pub mod ring;
 pub mod schedule;

@@ -1,4 +1,5 @@
 //! Viewer-only recording interpretation. No collector calls this allocating adapter.
+pub mod apps;
 mod bridge;
 mod cancellation;
 mod data;
