@@ -579,16 +579,24 @@ private enum SchematicAirflow {
     static let routes = (0..<24).map { SchematicAirflowRoute(lane: $0, perimeter: perimeter) }
 
     private static func makePerimeter() -> [CGPoint] {
-        var points = [CGPoint(x: 109, y: 83), CGPoint(x: 292, y: 83),
-                      CGPoint(x: 292, y: 221)]
-        appendCurve(to: &points, end: CGPoint(x: 194, y: 319),
-                    first: CGPoint(x: 292, y: 277), second: CGPoint(x: 251, y: 319))
-        appendCurve(to: &points, end: CGPoint(x: 102, y: 227),
-                    first: CGPoint(x: 141, y: 319), second: CGPoint(x: 102, y: 281))
-        points.append(CGPoint(x: 102, y: 174))
-        appendCurve(to: &points, end: CGPoint(x: 123, y: 140),
-                    first: CGPoint(x: 102, y: 157), second: CGPoint(x: 110, y: 150))
-        points.append(CGPoint(x: 109, y: 140))
+        var points: [CGPoint] = []
+        housing.forEach { element in
+            switch element {
+            case .move(to: let point):
+                precondition(points.isEmpty)
+                points.append(point)
+            case .line(to: let point):
+                points.append(point)
+            case .curve(to: let end, control1: let first, control2: let second):
+                appendCurve(to: &points, end: end, first: first, second: second)
+            case .quadCurve:
+                preconditionFailure("The blower housing must use cubic curves.")
+            case .closeSubpath:
+                break
+            }
+        }
+        precondition(!points.isEmpty)
+
         return points
     }
 
