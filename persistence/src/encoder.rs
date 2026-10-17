@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use collector::processes::Usage;
+use duckdb::types::{ToSqlOutput, ValueRef};
 use duckdb::{Connection, params};
 
 use crate::schema::{TABLES, Table};
@@ -248,32 +250,21 @@ fn append_fans(appender: &mut duckdb::Appender<'_>, tick: &StagedTick) -> Result
 
 fn append_processes(appender: &mut duckdb::Appender<'_>, tick: &StagedTick) -> Result<()> {
     for process in &tick.processes {
-        let usage = process.usage;
-        let task = process.task;
-        appender.append_row(params![
-            tick.observation.publication,
-            process.pid,
-            usage.awake_ns_at_start,
-            usage.user_ns,
-            usage.system_ns,
-            usage.energy_nj,
-            usage.instructions,
-            usage.super_instructions,
-            usage.cycles,
-            usage.idle_wakeups,
-            usage.interrupt_wakeups,
-            usage.pageins,
-            usage.resident_bytes,
-            usage.footprint_bytes,
-            usage.disk_read_bytes,
-            usage.disk_written_bytes,
-            task.threads,
-            task.faults,
-            task.context_switches,
-            task.mach_syscalls,
-            task.unix_syscalls
-        ])?;
+        let mut row = [ValueRef::Null; 21];
+        row[0] = ValueRef::UBigInt(tick.observation.publication);
+        row[1] = ValueRef::Int(process.pid);
+        usage_fields(&process.usage, &mut row[2..16]);
+        row[16] = ValueRef::Int(process.task.threads);
+        row[17] = ValueRef::Int(process.task.faults);
+        row[18] = ValueRef::Int(process.task.context_switches);
+        row[19] = ValueRef::Int(process.task.mach_syscalls);
+        row[20] = ValueRef::Int(process.task.unix_syscalls);
+
+        appender.append_row(duckdb::appender_params_from_iter(
+            row.iter().copied().map(ToSqlOutput::Borrowed),
+        ))?;
     }
+
     Ok(())
 }
 
@@ -298,33 +289,43 @@ fn append_coalitions(appender: &mut duckdb::Appender<'_>, tick: &StagedTick) -> 
 
 fn append_events(appender: &mut duckdb::Appender<'_>, tick: &StagedTick) -> Result<()> {
     for event in &tick.events {
-        let usage = event.usage;
-        appender.append_row(params![
-            tick.observation.publication,
-            event.number,
-            event.tick,
-            event.pid,
-            event.kind,
-            event.coalition,
-            event.availability,
-            event.noticed,
-            usage.map(|value| value.awake_ns_at_start),
-            usage.map(|value| value.user_ns),
-            usage.map(|value| value.system_ns),
-            usage.map(|value| value.energy_nj),
-            usage.map(|value| value.instructions),
-            usage.map(|value| value.super_instructions),
-            usage.map(|value| value.cycles),
-            usage.map(|value| value.idle_wakeups),
-            usage.map(|value| value.interrupt_wakeups),
-            usage.map(|value| value.pageins),
-            usage.map(|value| value.resident_bytes),
-            usage.map(|value| value.footprint_bytes),
-            usage.map(|value| value.disk_read_bytes),
-            usage.map(|value| value.disk_written_bytes)
-        ])?;
+        let mut row = [ValueRef::Null; 22];
+        row[0] = ValueRef::UBigInt(tick.observation.publication);
+        row[1] = ValueRef::UBigInt(event.number);
+        row[2] = ValueRef::UBigInt(event.tick);
+        row[3] = ValueRef::Int(event.pid);
+        row[4] = ValueRef::UTinyInt(event.kind);
+        row[5] = event.coalition.map_or(ValueRef::Null, ValueRef::UBigInt);
+        row[6] = ValueRef::UTinyInt(event.availability);
+        row[7] = event.noticed.map_or(ValueRef::Null, ValueRef::UTinyInt);
+        if let Some(usage) = &event.usage {
+            usage_fields(usage, &mut row[8..22]);
+        }
+
+        appender.append_row(duckdb::appender_params_from_iter(
+            row.iter().copied().map(ToSqlOutput::Borrowed),
+        ))?;
     }
+
     Ok(())
+}
+
+pub(crate) fn usage_fields(usage: &Usage, fields: &mut [ValueRef<'_>]) {
+    assert_eq!(fields.len(), 14);
+    fields[0] = ValueRef::UBigInt(usage.awake_ns_at_start);
+    fields[1] = ValueRef::UBigInt(usage.user_ns);
+    fields[2] = ValueRef::UBigInt(usage.system_ns);
+    fields[3] = ValueRef::UBigInt(usage.energy_nj);
+    fields[4] = ValueRef::UBigInt(usage.instructions);
+    fields[5] = ValueRef::UBigInt(usage.super_instructions);
+    fields[6] = ValueRef::UBigInt(usage.cycles);
+    fields[7] = ValueRef::UBigInt(usage.idle_wakeups);
+    fields[8] = ValueRef::UBigInt(usage.interrupt_wakeups);
+    fields[9] = ValueRef::UBigInt(usage.pageins);
+    fields[10] = ValueRef::UBigInt(usage.resident_bytes);
+    fields[11] = ValueRef::UBigInt(usage.footprint_bytes);
+    fields[12] = ValueRef::UBigInt(usage.disk_read_bytes);
+    fields[13] = ValueRef::UBigInt(usage.disk_written_bytes);
 }
 
 /// The complete encoder-owned definition for this window's optional extensions.

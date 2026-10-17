@@ -1,6 +1,7 @@
 //! Typed optional columns share the original measured payload without numeric conversion.
 use duckdb::types::{ToSqlOutput, ValueRef};
 
+use crate::encoder::usage_fields;
 use crate::owned_identity::{OwnedIdentity, Programs};
 use crate::window::{IdentityRows, StagedTick};
 use crate::{Result, schema};
@@ -90,22 +91,4 @@ fn identity_fields<'program>(
         fields[5] = ValueRef::Blob(programs.name(index));
         fields[6] = programs.app(index).map_or(ValueRef::Null, ValueRef::Blob);
     }
-}
-
-fn usage_fields(usage: &collector::processes::Usage, fields: &mut [ValueRef<'_>]) {
-    assert_eq!(fields.len(), 14);
-    fields[0] = ValueRef::UBigInt(usage.awake_ns_at_start);
-    fields[1] = ValueRef::UBigInt(usage.user_ns);
-    fields[2] = ValueRef::UBigInt(usage.system_ns);
-    fields[3] = ValueRef::UBigInt(usage.energy_nj);
-    fields[4] = ValueRef::UBigInt(usage.instructions);
-    fields[5] = ValueRef::UBigInt(usage.super_instructions);
-    fields[6] = ValueRef::UBigInt(usage.cycles);
-    fields[7] = ValueRef::UBigInt(usage.idle_wakeups);
-    fields[8] = ValueRef::UBigInt(usage.interrupt_wakeups);
-    fields[9] = ValueRef::UBigInt(usage.pageins);
-    fields[10] = ValueRef::UBigInt(usage.resident_bytes);
-    fields[11] = ValueRef::UBigInt(usage.footprint_bytes);
-    fields[12] = ValueRef::UBigInt(usage.disk_read_bytes);
-    fields[13] = ValueRef::UBigInt(usage.disk_written_bytes);
 }
