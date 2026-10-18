@@ -61,8 +61,8 @@ pub(super) fn capture(
         .starts
         .sort_by_key(|start| (start.pid, start.creation.map(|creation| creation.unique_id)));
     capture_start_duplicates(&mut frame.starts);
-    capture_start_interruptions(&mut frame.starts, events);
     frame.execs.sort_by_key(|exec| (exec.pid, exec.number));
+    capture_start_interruptions(&mut frame.starts, &frame.execs);
 
     Ok(())
 }
@@ -245,32 +245,13 @@ fn capture_start_duplicates(starts: &mut [Start]) {
     }
 }
 
-fn capture_start_interruptions(starts: &mut [Start], events: &PublicationEvents<'_>) {
-    // The bounded temporary list avoids scanning all events once for every captured Start.
-    let count = events
-        .events
-        .iter()
-        .filter(|numbered| matches!(numbered.event, Event::Exec { .. }))
-        .count();
-    if count == 0 {
-        return;
-    }
-
-    let mut replacements = Vec::with_capacity(count);
-    for numbered in events.events {
-        if let Event::Exec { pid } = numbered.event {
-            replacements.push((*pid, numbered.number));
-        }
-    }
-    replacements.sort_unstable();
-    assert!(replacements.capacity() <= EVENTS_PER_TICK_MAX);
-
+fn capture_start_interruptions(starts: &mut [Start], execs: &[Exec]) {
     for start in starts {
         let index =
-            replacements.partition_point(|replacement| *replacement <= (start.pid, start.number));
-        if let Some((pid, number)) = replacements.get(index) {
-            if *pid == start.pid {
-                start.exec_number = Some(*number);
+            execs.partition_point(|exec| (exec.pid, exec.number) <= (start.pid, start.number));
+        if let Some(exec) = execs.get(index) {
+            if exec.pid == start.pid {
+                start.exec_number = Some(exec.number);
             }
         }
     }
