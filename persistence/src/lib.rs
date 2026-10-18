@@ -1,5 +1,6 @@
 //! Bounded, separate-process persistence of the collector's published measurements.
 mod battery;
+pub mod disks;
 mod encoder;
 mod identity;
 mod identity_encoder;

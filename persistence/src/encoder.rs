@@ -64,10 +64,13 @@ impl Encoder {
 
 pub fn append(connection: &Connection, table: Table, window: &Window) -> Result<()> {
     let mut appender = connection.appender(table.name())?;
-    let battery_captured = window.battery_captured();
+    let extensions = TickExtensions {
+        battery: window.battery_captured(),
+        disks: window.disks_captured(),
+    };
     for tick in &window.ticks {
         match table {
-            Table::Ticks => append_tick(&mut appender, tick, battery_captured)?,
+            Table::Ticks => append_tick(&mut appender, tick, &extensions)?,
             Table::Memory => append_memory(&mut appender, tick)?,
             Table::Cpus => append_cpus(&mut appender, tick)?,
             Table::Interfaces => append_interfaces(&mut appender, tick)?,
@@ -101,10 +104,15 @@ pub fn append(connection: &Connection, table: Table, window: &Window) -> Result<
     Ok(())
 }
 
+struct TickExtensions {
+    battery: bool,
+    disks: bool,
+}
+
 fn append_tick(
     appender: &mut duckdb::Appender<'_>,
     tick: &StagedTick,
-    battery_captured: bool,
+    extensions: &TickExtensions,
 ) -> Result<()> {
     let observation = tick.observation;
     let energy = tick.ioreport_read.then_some(tick.gpu_energy_nj);
@@ -120,7 +128,7 @@ fn append_tick(
     } else {
         0
     };
-    let mut row = [ValueRef::Null; 31];
+    let mut row = [ValueRef::Null; 32];
     row[0] = ValueRef::UBigInt(observation.publication);
     row[1] = ValueRef::UBigInt(tick.run_tick);
     row[2] = observation
@@ -146,12 +154,20 @@ fn append_tick(
     row[16] = ValueRef::UBigInt(tick.dropped.exits);
     row[17] = ValueRef::UInt(u32::try_from(states).map_err(|_| Error::Bound("gpu states"))?);
     row[18] = ValueRef::UInt(u32::try_from(cores).map_err(|_| Error::Bound("cores"))?);
-    let count = if battery_captured {
-        crate::battery::fields(tick.battery.as_ref(), &mut row[19..]);
+    let mut count = if extensions.battery {
+        crate::battery::fields(tick.battery.as_ref(), &mut row[19..31]);
         31
     } else {
         19
     };
+    let disks = tick.disks.as_ref().map(crate::disks::encode).transpose()?;
+    if extensions.disks {
+        row[count] = disks
+            .as_ref()
+            .map_or(ValueRef::Null, |text| ValueRef::Text(text.as_bytes()));
+        count += 1;
+    }
+
     appender.append_row(duckdb::appender_params_from_iter(
         row[..count].iter().copied().map(ToSqlOutput::Borrowed),
     ))?;
@@ -363,6 +379,12 @@ pub fn table_columns(table: Table, window: &Window) -> String {
                 columns.push(' ');
                 columns.push_str(kind);
             }
+        }
+    }
+
+    if window.disks_captured() {
+        if matches!(table, Table::Ticks) {
+            columns.push_str(", physical_disks VARCHAR");
         }
     }
 

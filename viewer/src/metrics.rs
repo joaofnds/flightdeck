@@ -135,6 +135,7 @@ pub(crate) fn point(
         "soc_celsius": ticks.number(tick, "soc_celsius")?, "fan_rpm": fan_rpm,
         "interval_unavailable": "Requires consecutive compatible counter samples"});
     value["battery"] = battery::point(ticks, tick, current.continuous)?;
+    value["storage"] = storage::point(tables, current, previous)?;
     for (name, column) in [
         ("memory_total_bytes", "total_bytes"),
         ("memory_free_bytes", "free_bytes"),
@@ -483,3 +484,4 @@ mod tests;
 mod encoding_tests;
 
 mod battery;
+mod storage;

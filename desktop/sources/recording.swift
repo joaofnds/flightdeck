@@ -116,6 +116,7 @@ struct Metric: Decodable, Identifiable, Sendable {
     let powerWatts: Double?
     let gpuWatts: Double?
     let battery: RecordedBatteryReading?
+    let storage: RecordedStorageReading?
     var identity: RecordedObservationIdentity {
         RecordedObservationIdentity(run: run, boot: boot, publication: publication)
     }
@@ -918,8 +919,8 @@ final class RecordingModel: ObservableObject {
         } else if title == "Memory" {
             enterMemory()
             if wasCatalogOnly { enqueue(refresh: false) }
-        } else if title == "Battery" {
-            route = "Battery"
+        } else if title == "Battery" || title == "Storage" {
+            route = title
             if wasCatalogOnly { enqueue(refresh: false) }
         } else if title == "Apps" { enterApps() }
         else if title == "Overview" { enterOverview() }

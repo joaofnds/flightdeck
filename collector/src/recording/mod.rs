@@ -45,6 +45,7 @@ enum RingLayout {
     Observed,
     Identity(crate::ring::DictionaryCapacity),
     Battery(crate::ring::DictionaryCapacity),
+    Disks(crate::ring::DictionaryCapacity),
 }
 
 impl StartedRecording {
@@ -54,6 +55,31 @@ impl StartedRecording {
 }
 
 impl Registration {
+    /// Reserves both optional sources within the existing live reader mapping bound.
+    pub fn start_with_disks(
+        root: &Path,
+        place: &Place,
+        shape: Shape,
+        capacity: crate::ring::DictionaryCapacity,
+        start_continuous_ns: u64,
+    ) -> io::Result<StartedRecording> {
+        let size_bytes = Writer::disks_size_bytes(shape, capacity)?;
+        if size_bytes > 1024 * 1024 * 1024 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("disk ring requires {size_bytes} bytes, above the 1073741824-byte limit"),
+            ));
+        }
+
+        Self::start_inner(
+            root,
+            place,
+            shape,
+            RingLayout::Disks(capacity),
+            start_continuous_ns,
+        )
+    }
+
     /// Registered identity sources must fit the live reader's existing mapping bound.
     pub fn start_with_identity(
         root: &Path,
@@ -170,6 +196,12 @@ impl Registration {
                 start_continuous_ns,
             )?,
             RingLayout::Battery(capacity) => locked.create_with_battery(
+                shape,
+                capacity,
+                registration.identity(),
+                start_continuous_ns,
+            )?,
+            RingLayout::Disks(capacity) => locked.create_with_disks(
                 shape,
                 capacity,
                 registration.identity(),

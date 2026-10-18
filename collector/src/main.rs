@@ -253,15 +253,15 @@ fn start_recording_ring(
         entries: 65_536,
         arena_bytes: 64 * 1024 * 1024,
     };
-    let size_bytes = Writer::battery_size_bytes(shape, capacity)?;
+    let size_bytes = Writer::disks_size_bytes(shape, capacity)?;
 
     writeln!(
         out,
-        "identity and battery ring bytes={size_bytes} reader_limit_bytes=1073741824"
+        "identity, battery and disks ring bytes={size_bytes} reader_limit_bytes=1073741824"
     )?;
 
     let (ring, registered) =
-        Registration::start_with_battery(root, place, shape, capacity, start_ns)?.into_parts();
+        Registration::start_with_disks(root, place, shape, capacity, start_ns)?.into_parts();
 
     match registered {
         Ok(()) => Ok((ring, true)),

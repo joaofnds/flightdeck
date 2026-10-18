@@ -63,6 +63,14 @@ impl Harness {
     }
 
     fn battery(collector: &Collector) -> Self {
+        Self::sources(collector, false)
+    }
+
+    fn disks(collector: &Collector) -> Self {
+        Self::sources(collector, true)
+    }
+
+    fn sources(collector: &Collector, disks: bool) -> Self {
         let number = NEXT.fetch_add(1, Ordering::Relaxed);
         let lock_path = std::env::temp_dir().join(format!(
             "fd-battery-publication-{}-{number}.lock",
@@ -89,7 +97,12 @@ impl Harness {
             run: Identity([3, number]),
             boot: Identity([4, 5]),
         };
-        let writer = Writer::create_with_battery(
+        let create = if disks {
+            Writer::create_with_disks
+        } else {
+            Writer::create_with_battery
+        };
+        let writer = create(
             &place,
             shape,
             DictionaryCapacity {
@@ -193,7 +206,8 @@ macro_rules! event_cases {
             let mut reader = RingReader::open_generation(harness.writer.name()).unwrap();
 
             publication.publish_readings(&mut harness.writer,
-                &readings(&memory, &[], &events), None, &[], None).unwrap();
+                &readings(&memory, &[], &events), None, &[],
+                &SupplementalReadings::default()).unwrap();
             let mut identity = IdentityObservation::EMPTY;
             let found = reader.read_event_identity(&mut identity).unwrap();
 
@@ -242,7 +256,7 @@ fn preserves_independent_numeric_values_when_process_identity_is_unavailable() {
             &readings(&memory, &[process()], &[]),
             None,
             &[identity],
-            None,
+            &SupplementalReadings::default(),
         )
         .unwrap();
     let found = reader
@@ -274,7 +288,7 @@ fn returns_publication_validation_errors_without_advancing_the_ring() {
             &readings(&memory, &[process()], &[]),
             None,
             &[],
-            None,
+            &SupplementalReadings::default(),
         )
         .unwrap_err();
 
@@ -406,4 +420,62 @@ fn battery_tick(shape: &Shape) -> Tick {
         processes: Vec::with_capacity(count(shape.process_capacity)),
         coalitions: Vec::with_capacity(count(shape.coalition_capacity)),
     })
+}
+
+#[test]
+fn publishes_each_disk_attempt_at_the_tick_start_and_clears_failed_acquisition() {
+    // Goal: the actual producer publishes acquired disk counters and the following failure.
+    // Method: inject the source at the OS boundary, collect real ticks, and decode a real tail.
+    use collector::disks::{DiskSnapshot, DiskSource, Disks, ScanState};
+    struct StubDisks;
+    impl DiskSource for StubDisks {
+        fn read_into(
+            &mut self,
+            now_ns: u64,
+            snapshot: &mut DiskSnapshot,
+        ) -> Result<(), collector::disks::Error> {
+            if now_ns == 2 {
+                return Err(collector::disks::Error::Native(-71));
+            }
+            snapshot.source_continuous_ns = now_ns;
+            snapshot.state = ScanState::Complete;
+            snapshot.count = 1;
+            snapshot.records[0].driver_id = 5;
+            snapshot.records[0].media_id = 7;
+            snapshot.records[0].name[..5].copy_from_slice(b"disk0");
+            snapshot.records[0].read_bytes = Some(u64::MAX);
+            Ok(())
+        }
+    }
+    let mut collector = Collector::new(Timebase::read().unwrap(), Duration::ZERO).unwrap();
+    collector.smc = None;
+    collector.ioreport = None;
+    collector.battery = None;
+    collector.disks = Some(Disks::from_source(Box::new(StubDisks)));
+    let mut harness = Harness::disks(&collector);
+    let mut publication = Publication::new(&harness.writer).unwrap();
+    let mut reader = RingReader::open_generation(harness.writer.name()).unwrap();
+    let mut tick = battery_tick(&reader.shape());
+    let mut times = ObservationTimes {
+        wall_ns: 100,
+        continuous_ns: 1,
+        awake_ns: 1,
+    };
+
+    publish_battery_tick(&mut publication, &mut harness, &mut collector, &times, 0);
+    reader.read_into(&mut tick).unwrap();
+
+    let first = tick.disks.unwrap();
+    assert_eq!(first.source_continuous_ns, 1);
+    assert_eq!(first.records[0].read_bytes, Some(u64::MAX));
+    times.continuous_ns = 2;
+    publish_battery_tick(&mut publication, &mut harness, &mut collector, &times, 1);
+    reader.read_into(&mut tick).unwrap();
+    assert_eq!(
+        tick.disks,
+        Some(DiskSnapshot {
+            source_continuous_ns: 2,
+            ..DiskSnapshot::default()
+        })
+    );
 }

@@ -36,6 +36,10 @@ struct FlightdeckTheme {
     var networkSentPacketsSeries = Palette.purple
     var networkReceiveErrorsSeries = Palette.red
     var networkSendErrorsSeries = Palette.orange
+    var storageReadSeries = Color(red: 0.95, green: 0.80, blue: 0.05)
+    var storageWriteSeries = Palette.orange
+    var storageReadErrorsSeries = Palette.red
+    var storageWriteErrorsSeries = Palette.orange
     var systemPowerSeries = Palette.orange
     var batteryChargeSeries = Palette.green
     var batteryFlowSeries = Palette.orange

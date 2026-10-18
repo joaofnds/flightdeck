@@ -66,6 +66,7 @@ pub struct SmcReadings<'a> {
 #[derive(Debug, PartialEq)]
 pub struct Tick {
     pub battery: Option<crate::battery::BatteryReading>,
+    pub disks: Option<crate::disks::DiskSnapshot>,
     pub times: Option<super::ObservationTimes>,
     pub run_tick: u64,
     pub cpus: Vec<CPUTicks>,
@@ -99,6 +100,7 @@ impl Tick {
     pub fn from_buffers(buffers: super::TickBuffers) -> Self {
         Self {
             battery: None,
+            disks: None,
             times: None,
             run_tick: 0,
             cpus: buffers.cpus,
@@ -151,6 +153,7 @@ impl Tick {
         let state_capacity = layout.gpu_states.capacity;
         Self {
             battery: None,
+            disks: None,
             times: None,
             run_tick: 0,
             cpus: Vec::with_capacity(layout.cpus.capacity),

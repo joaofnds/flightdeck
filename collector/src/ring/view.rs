@@ -80,6 +80,11 @@ impl RingReader {
         self.opened.layout.battery.is_some()
     }
 
+    #[must_use]
+    pub fn disks_supported(&self) -> bool {
+        self.opened.layout.disks.is_some()
+    }
+
     /// Opens the current ring without allocating reading storage.
     pub fn open(lock_path: &Path) -> io::Result<Self> {
         Ok(Self {

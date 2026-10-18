@@ -634,6 +634,7 @@ pub(super) fn open_ring(name: &str) -> io::Result<(Mapping, Layout)> {
     };
 
     let layout = open_ring_battery(&object, layout, size_bytes)?;
+    let layout = open_ring_disks(&object, layout, size_bytes)?;
     let mapping = Mapping::new(&object, layout.word_count(), PROT_READ)?;
 
     Ok((mapping, layout))
@@ -663,6 +664,39 @@ fn open_ring_battery(
         super::battery::BatteryLayout::admit(header, start, layout.shape.slot_count, size_bytes)
             .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?,
     );
+    Ok(layout)
+}
+
+fn open_ring_disks(object: &OwnedFd, mut layout: Layout, size_bytes: usize) -> io::Result<Layout> {
+    if layout.battery.is_none() {
+        return Ok(layout);
+    }
+
+    let start = layout.word_count();
+    let available = size_bytes / size_of::<u64>() - start;
+    if available == 0 {
+        return Ok(layout);
+    }
+
+    let count = available.min(super::disks::HEADER_WORDS);
+    let probe = Mapping::new(object, start + count, PROT_READ)?;
+    let header = &probe.words()[start..];
+    if header[0].load(Ordering::Relaxed) != super::disks::MAGIC {
+        return Ok(layout);
+    }
+
+    layout.disks = Some(
+        super::disks::DisksLayout::admit(
+            header,
+            layout.shape.slot_count,
+            &super::disks::DisksExtents {
+                start_words: start,
+                size_bytes,
+            },
+        )
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?,
+    );
+
     Ok(layout)
 }
 

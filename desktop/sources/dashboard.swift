@@ -24,6 +24,7 @@ struct Dashboard: View {
                 memoryPanel
                 gpuActivityPanel
                 networkPanel
+                storagePanel
                 linePanel("System power", value: summary?.powerWatts, unit: "W", color: theme.systemPowerSeries,
                           explanation: "Recorded SMC system-power reading. Unread source remains unavailable.",
                           metric: \.powerWatts)
@@ -99,6 +100,34 @@ struct Dashboard: View {
             }
             chartReading("Active time", value: summary?.gpuActivePercent,
                 unit: "%", color: theme.gpuActivitySeries)
+        }
+    }
+
+    private var storagePanel: some View {
+        Panel(title: "Disk throughput", explanation: "Bytes transferred per second across physical block devices. Writes are mirrored below zero. Disk images are excluded; incomplete device intervals remain unavailable.") {
+            if let selection = model.selection {
+                let data = RecordedStorageData(context: RecordedChartContext(selection: selection),
+                    theme: theme)
+                plot(context: data.context, lines: data.throughput,
+                    style: TimeSeriesStyle(unit: "MB/s", fill: 0.1)) { point in
+                    "Read " + dashboardReading(point.storage?.rates.readBps.map {
+                        $0 / 1_000_000
+                    }, unit: "MB/s") + " · Write " + dashboardReading(point.storage?.rates.writeBps.map {
+                        $0 / 1_000_000
+                    }, unit: "MB/s")
+                }
+                HStack(spacing: theme.fieldGap) {
+                    Text("Read").foregroundStyle(theme.storageReadSeries)
+                    Text(dashboardReading(data.selected?.rates.readBps.map {
+                        $0 / 1_000_000
+                    }, unit: "MB/s"))
+                    Spacer()
+                    Text("Write").foregroundStyle(theme.storageWriteSeries)
+                    Text(dashboardReading(data.selected?.rates.writeBps.map {
+                        $0 / 1_000_000
+                    }, unit: "MB/s"))
+                }.font(.caption).monospacedDigit()
+            }
         }
     }
 

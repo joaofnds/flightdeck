@@ -17,6 +17,7 @@ struct Console: View {
                 navigation("Memory", icon: "memorychip")
                 navigation("GPU", icon: "square.3.layers.3d")
                 navigation("Energy", icon: "bolt")
+                navigation("Storage", icon: "internaldrive")
                 navigation("Network", icon: "network")
                 navigation("Battery", icon: "battery.75percent")
                 Divider().padding(.vertical, theme.panelGap)
@@ -95,6 +96,7 @@ struct Console: View {
                                 if model.route == "Overview" { Dashboard() }
                                 if model.route == "Memory" { RecordedMemory() }
                                 if model.route == "Battery" { RecordedBattery() }
+                                if model.route == "Storage" { RecordedStorage() }
                                 if let component = RecordedComponent(rawValue: model.route) {
                                     RecordedComponentPane(component: component)
                                 }

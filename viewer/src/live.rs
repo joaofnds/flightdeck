@@ -17,6 +17,9 @@ use crate::live_apps::{Frame, Publication};
 use crate::session::{ContextRange, OBSERVATIONS_MAX, Observation, PAGE_ROWS};
 use crate::{Cancellation, Session, metrics};
 
+#[path = "live_storage_merge.rs"]
+mod storage_merge;
+
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
 const CACHE_BYTES_MAX: usize = 128 * 1024 * 1024;
 const SOURCES_MAX: usize = 2;
@@ -1826,6 +1829,15 @@ fn follow_merge_point(merge: PointMerge<'_>) -> Result<()> {
         }
     }
 
+    if let Some(storage) = live.get_mut("storage") {
+        if let Some(committed) = committed.get("storage") {
+            storage_merge::point(PointMerge {
+                live: storage,
+                committed,
+            })?;
+        }
+    }
+
     Ok(())
 }
 
@@ -1848,6 +1860,11 @@ mod tests {
     mod fan_history_tests {
         use super::*;
         include!("live_fan_tests.rs");
+    }
+
+    mod storage_tests {
+        use super::*;
+        include!("live_storage_tests.rs");
     }
 
     mod battery_tests {

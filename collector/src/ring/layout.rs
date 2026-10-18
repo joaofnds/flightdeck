@@ -146,6 +146,7 @@ const SHAPE_FIELD_MAX: u64 = 1 << 24;
 #[derive(Debug, Clone)]
 pub(super) struct Layout {
     pub(super) battery: Option<super::battery::BatteryLayout>,
+    pub(super) disks: Option<super::disks::DisksLayout>,
     pub(super) version: u64,
     pub(super) shape: Shape,
     pub(super) slot_words: usize,
@@ -245,6 +246,19 @@ impl Layout {
         Some(layout)
     }
 
+    pub(super) fn identity_disks(
+        shape: Shape,
+        capacity: super::DictionaryCapacity,
+    ) -> Option<Self> {
+        let mut layout = Self::identity_battery(shape, capacity)?;
+        layout.disks = Some(super::disks::DisksLayout::plan(
+            layout.word_count(),
+            shape.slot_count,
+        )?);
+
+        Some(layout)
+    }
+
     fn planned(shape: Shape, version: u64, capacity: super::DictionaryCapacity) -> Option<Self> {
         if !(LAYOUT_VERSION_LEGACY..=LAYOUT_VERSION_IDENTITY).contains(&version) {
             return None;
@@ -282,10 +296,7 @@ impl Layout {
             header: HEADER_WORDS,
             event: EVENT_WORDS,
         };
-        if version == LAYOUT_VERSION_IDENTITY {
-            widths.header = HEADER_WORDS_IDENTITY;
-            widths.event = EVENT_WORDS_IDENTITY;
-        }
+        planned_widths(version, &mut widths);
         planned_size(shape, capacity, &widths)?;
 
         let events_start = widths.header + usize_from(shape.slot_count) * widths.slot;
@@ -297,6 +308,7 @@ impl Layout {
 
         Some(Self {
             battery: None,
+            disks: None,
             version,
             shape,
             slot_words: widths.slot,
@@ -317,6 +329,10 @@ impl Layout {
     }
 
     pub(super) fn word_count(&self) -> usize {
+        if let Some(disks) = &self.disks {
+            return disks.word_count();
+        }
+
         match &self.battery {
             Some(battery) => battery.word_count(),
             None => self.base_word_count(),
@@ -377,6 +393,13 @@ struct PlannedWords {
     slot: usize,
     header: usize,
     event: usize,
+}
+
+fn planned_widths(version: u64, widths: &mut PlannedWords) {
+    if version == LAYOUT_VERSION_IDENTITY {
+        widths.header = HEADER_WORDS_IDENTITY;
+        widths.event = EVENT_WORDS_IDENTITY;
+    }
 }
 
 fn planned_size(

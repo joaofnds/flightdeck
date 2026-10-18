@@ -3,6 +3,7 @@ pub mod clock;
 pub mod coalitions;
 pub mod collector;
 pub mod cost;
+pub mod disks;
 pub mod interfaces;
 pub mod ioreport;
 mod kernel;

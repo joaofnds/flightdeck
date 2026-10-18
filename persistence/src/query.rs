@@ -42,7 +42,8 @@ pub fn table_source(
     }
 
     if matches!(table, Table::Ticks) {
-        return crate::battery::normalize(connection, &source);
+        let source = crate::battery::normalize(connection, &source)?;
+        return crate::disks::normalize(connection, &source);
     }
 
     Ok(source)

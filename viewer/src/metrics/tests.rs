@@ -1,6 +1,7 @@
 use super::*;
 
 mod battery_tests;
+mod storage_tests;
 
 macro_rules! unsigned_number_case {
     ($name:ident, $value:expr, $expected:expr) => {
@@ -588,7 +589,7 @@ fn preserves_independent_memory_and_network_counter_availability() {
     assert_eq!(value["network_tx_bps"], 512.0);
 }
 
-const POINT_FIELDS: [&str; 40] = [
+const POINT_FIELDS: [&str; 41] = [
     "battery",
     "boot",
     "continuous_ns",
@@ -624,6 +625,7 @@ const POINT_FIELDS: [&str; 40] = [
     "run_tick",
     "segment",
     "soc_celsius",
+    "storage",
     "swap_in_bytes_per_second",
     "swap_out_bytes_per_second",
     "swap_total_bytes",

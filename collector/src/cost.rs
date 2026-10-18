@@ -22,10 +22,11 @@ pub enum Source {
     /// Publishing each tick to the ring.
     Ring,
     Battery,
+    Disks,
 }
 
 impl Source {
-    pub const ALL: [Source; 13] = [
+    pub const ALL: [Source; 14] = [
         Source::Processes,
         Source::Coalitions,
         Source::Events,
@@ -39,6 +40,7 @@ impl Source {
         Source::Interfaces,
         Source::Ring,
         Source::Battery,
+        Source::Disks,
     ];
 
     #[must_use]
@@ -57,6 +59,7 @@ impl Source {
             Source::Smc => "smc",
             Source::Ring => "ring",
             Source::Battery => "battery",
+            Source::Disks => "disks",
         }
     }
 
@@ -77,6 +80,7 @@ impl Source {
             Source::Smc => 10,
             Source::Ring => 11,
             Source::Battery => 12,
+            Source::Disks => 13,
         }
     }
 }

@@ -9,6 +9,7 @@
 //! event, and each slot names the events of its tick.
 
 mod battery;
+mod disks;
 mod event;
 mod identity;
 mod layout;
@@ -242,6 +243,23 @@ impl<'place> LockedPlace<'place> {
         )
     }
 
+    pub(crate) fn create_with_disks(
+        self,
+        shape: Shape,
+        capacity: DictionaryCapacity,
+        identity: &RunIdentity,
+        start_continuous_ns: u64,
+    ) -> io::Result<Writer> {
+        let layout = Layout::identity_disks(shape, capacity)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+
+        Writer::create_layout(
+            self,
+            layout,
+            WriterOrigin::Identified(identity, start_continuous_ns),
+        )
+    }
+
     pub(crate) fn create_unregistered(self, shape: Shape, start_ns: u64) -> io::Result<Writer> {
         Writer::create_inner(self, shape, WriterOrigin::Unregistered(start_ns))
     }
@@ -252,6 +270,13 @@ enum WriterOrigin<'identity> {
     Legacy,
     Identified(&'identity RunIdentity, u64),
     Unregistered(u64),
+}
+
+/// Optional source snapshots share the publication sequence of the original tick.
+#[derive(Default)]
+pub struct SupplementalReadings<'a> {
+    pub battery: Option<&'a crate::battery::BatteryReading>,
+    pub disks: Option<&'a crate::disks::DiskSnapshot>,
 }
 
 impl Writer {
@@ -307,6 +332,22 @@ impl Writer {
         )
     }
 
+    /// Creates the unchanged identity/Battery prefix followed by bounded disk slots.
+    pub fn create_with_disks(
+        place: &Place,
+        shape: Shape,
+        capacity: DictionaryCapacity,
+        identity: &RunIdentity,
+        start_continuous_ns: u64,
+    ) -> io::Result<Self> {
+        LockedPlace::acquire(place)?.create_with_disks(
+            shape,
+            capacity,
+            identity,
+            start_continuous_ns,
+        )
+    }
+
     /// Exact reserved mapping size, planned before creating or touching the ring.
     pub fn identity_size_bytes(shape: Shape, capacity: DictionaryCapacity) -> io::Result<u64> {
         let layout = Layout::identity(shape, capacity)
@@ -323,10 +364,22 @@ impl Writer {
         Ok(u64_from_usize(layout.size_bytes()))
     }
 
+    pub fn disks_size_bytes(shape: Shape, capacity: DictionaryCapacity) -> io::Result<u64> {
+        let layout = Layout::identity_disks(shape, capacity)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+
+        Ok(u64_from_usize(layout.size_bytes()))
+    }
+
     /// Whether startup reserved the optional battery records for this writer.
     #[must_use]
     pub fn battery_supported(&self) -> bool {
         self.layout.battery.is_some()
+    }
+
+    #[must_use]
+    pub fn disks_supported(&self) -> bool {
+        self.layout.disks.is_some()
     }
 
     /// Interns retained bytes without allocation. Known keys survive dictionary exhaustion.
@@ -364,7 +417,12 @@ impl Writer {
             self.reference_owner,
         )?;
 
-        self.publish_inner(readings, times, Some(identities), None);
+        self.publish_inner(
+            readings,
+            times,
+            Some(identities),
+            &SupplementalReadings::default(),
+        );
 
         Ok(())
     }
@@ -388,7 +446,43 @@ impl Writer {
             self.reference_owner,
         )?;
 
-        self.publish_inner(readings, times, Some(identities), battery);
+        self.publish_inner(
+            readings,
+            times,
+            Some(identities),
+            &SupplementalReadings {
+                battery,
+                disks: None,
+            },
+        );
+        Ok(())
+    }
+
+    /// Validates every disk before advancing the tick and event publication sequences.
+    pub fn publish_with_disks(
+        &mut self,
+        readings: &Readings,
+        times: Option<&ObservationTimes>,
+        identities: &IdentityPublication,
+        supplemental: &SupplementalReadings,
+    ) -> io::Result<()> {
+        if self.layout.disks.is_none() {
+            return Err(io::Error::from(io::ErrorKind::Unsupported));
+        }
+
+        if let Some(disks) = supplemental.disks {
+            crate::disks::encoding::validate(disks)
+                .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+        }
+        identity::validate_publication(
+            self.mapping.words(),
+            &self.layout,
+            readings,
+            identities,
+            self.reference_owner,
+        )?;
+        self.publish_inner(readings, times, Some(identities), supplemental);
+
         Ok(())
     }
 
@@ -504,9 +598,7 @@ impl Writer {
         };
         store_header(mapping.words(), &layout, &header);
         store_origin(mapping.words(), &origin);
-        if let Some(battery) = &layout.battery {
-            battery.store_header(mapping.words());
-        }
+        store_supplemental_headers(mapping.words(), &layout);
 
         create_name(&lock, &created.name).inspect_err(|_| create_unlink(&created.name))?;
         // Only once the lock file names the new ring, so a reader that reads the lock file from
@@ -539,12 +631,17 @@ impl Writer {
     /// slot holds one, and its events in the log, overwriting the oldest events once every
     /// record holds one. An identity writer uses `publish_with_identity` instead.
     pub fn publish(&mut self, readings: &Readings) {
-        self.publish_inner(readings, None, None, None);
+        self.publish_inner(readings, None, None, &SupplementalReadings::default());
     }
 
     /// Publishes measured clocks in the default v3 layout.
     pub fn publish_observed(&mut self, readings: &Readings, times: &ObservationTimes) {
-        self.publish_inner(readings, Some(times), None, None);
+        self.publish_inner(
+            readings,
+            Some(times),
+            None,
+            &SupplementalReadings::default(),
+        );
     }
 
     fn publish_inner(
@@ -552,7 +649,7 @@ impl Writer {
         readings: &Readings,
         times: Option<&ObservationTimes>,
         identities: Option<&IdentityPublication>,
-        battery: Option<&crate::battery::BatteryReading>,
+        supplemental: &SupplementalReadings,
     ) {
         assert_eq!(identities.is_some(), self.dictionary.is_some());
         // A tick's events fit in the log, so a reader can read every one of them.
@@ -589,7 +686,10 @@ impl Writer {
             identity::store_processes(slot, &self.layout, identities.processes);
         }
         if let Some(layout) = &self.layout.battery {
-            battery::store(&words[layout.record(publication)], battery);
+            battery::store(&words[layout.record(publication)], supplemental.battery);
+        }
+        if let Some(layout) = &self.layout.disks {
+            disks::store(&words[layout.record(publication)], supplemental.disks);
         }
         slot[SLOT_SEQUENCE].store(2 * publication, Ordering::Release);
 
@@ -778,7 +878,7 @@ impl Opened {
                         return false;
                     }
                 }
-                true
+                load_disks(words, &self.layout, publication, tick)
             },
             || match &self.layout.battery {
                 Some(layout) => battery::load(&words[layout.record(publication)]),
@@ -820,6 +920,24 @@ impl Opened {
                 end: number + 1,
             }),
         }
+    }
+}
+
+fn store_supplemental_headers(words: &[AtomicU64], layout: &Layout) {
+    if let Some(battery) = &layout.battery {
+        battery.store_header(words);
+    }
+    if let Some(disks) = &layout.disks {
+        disks.store_header(words);
+    }
+}
+
+fn load_disks(words: &[AtomicU64], layout: &Layout, publication: u64, tick: &mut Tick) -> bool {
+    if let Some(layout) = &layout.disks {
+        disks::load(&words[layout.record(publication)], &mut tick.disks).is_ok()
+    } else {
+        tick.disks = None;
+        true
     }
 }
 
@@ -1377,3 +1495,6 @@ mod tests {
 
 #[cfg(test)]
 mod battery_tests;
+
+#[cfg(test)]
+mod disks_tests;

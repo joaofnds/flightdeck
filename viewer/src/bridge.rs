@@ -388,8 +388,17 @@ fn response(result: Result<Value, String>) -> Bytes {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    pub(crate) fn response_value(value: Value) -> Value {
+        let bytes = response(Ok(value));
+        let decoded = serde_json::from_slice::<Value>(unsafe {
+            std::slice::from_raw_parts(bytes.pointer, bytes.length)
+        });
+        unsafe { fd_bytes_free(bytes) };
+        decoded.unwrap()
+    }
 
     #[test]
     fn refuses_an_envelope_one_byte_over_the_literal_eight_mib_limit() {
