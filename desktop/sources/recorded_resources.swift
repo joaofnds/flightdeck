@@ -246,6 +246,7 @@ struct RecordedResourceChart: View {
                             .onContinuousHover { phase in
                                 switch phase {
                                 case .active(let location):
+                                    guard !model.busy else { return }
                                     inspecting = true
                                     inspectedID = sample(at: location, size: geometry.size)?.id
                                 case .ended: inspectedID = nil; inspecting = false
