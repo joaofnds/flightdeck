@@ -207,27 +207,8 @@ fn read_app(source: &Value, metrics: &mut [Ranking; 3]) -> Result<(), String> {
 }
 
 fn read_app_identity(source: &Value) -> Result<App, String> {
-    let kind = source["key"]["kind"]
-        .as_str()
-        .ok_or("Missing ranking App kind")?;
-    if !matches!(kind, "bundle" | "executable") {
-        return Err("Invalid ranking App kind".into());
-    }
-
-    let bytes = source["key"]["bytes_hex"]
-        .as_str()
-        .ok_or("Missing ranking App bytes")?;
-    if bytes.len() > PROGRAM_BYTES_MAX * 2 {
-        return Err("Ranking App key exceeds the captured path bound".into());
-    }
-
-    if !bytes.len().is_multiple_of(2) {
-        return Err("Ranking App key contains an incomplete byte".into());
-    }
-
-    if !bytes.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err("Ranking App key contains invalid hexadecimal bytes".into());
-    }
+    let key = crate::live_source::app_key_from_json(source)
+        .map_err(|error| format!("Ranking: {error}"))?;
 
     let name = source["display_name"]
         .as_str()
@@ -237,10 +218,7 @@ fn read_app_identity(source: &Value) -> Result<App, String> {
     }
 
     Ok(App {
-        key: AppKey {
-            kind: kind.into(),
-            bytes_hex: bytes.to_ascii_lowercase(),
-        },
+        key,
         name: name.into(),
     })
 }
@@ -367,6 +345,15 @@ impl Metric {
 fn count(value: &Value) -> Result<u32, String> {
     let value = value.as_u64().ok_or("Missing ranking count")?;
     u32::try_from(value).map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+
+    crate::live_source::app_key_tests::captured_app_key_tests!(|source| {
+        read_app_identity(source).map(|app| app.key)
+    });
 }
 
 #[cfg(test)]

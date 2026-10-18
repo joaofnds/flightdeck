@@ -511,28 +511,7 @@ pub fn exact_json(value: &Value) -> impl IntoElement {
 }
 
 fn app_key(app: &Value) -> Result<AppKey, String> {
-    let kind = app["key"]["kind"]
-        .as_str()
-        .ok_or("App key kind unavailable")?;
-    if !matches!(kind, "bundle" | "executable") {
-        return Err("Invalid App key kind".into());
-    }
-    let bytes_hex = app["key"]["bytes_hex"]
-        .as_str()
-        .ok_or("App key bytes unavailable")?;
-    if bytes_hex.len() > 8190 {
-        return Err("App key exceeds the captured path bound".into());
-    }
-    if !bytes_hex.len().is_multiple_of(2) {
-        return Err("App key has an incomplete byte".into());
-    }
-    if !bytes_hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err("App key has invalid hexadecimal bytes".into());
-    }
-    Ok(AppKey {
-        kind: kind.into(),
-        bytes_hex: bytes_hex.to_ascii_lowercase(),
-    })
+    crate::live_source::app_key_from_json(app)
 }
 
 fn value_rate(value: &Value, unit: &str) -> String {
@@ -627,6 +606,8 @@ fn unavailable(message: &str) -> AnyElement {
 mod selection_tests {
     use super::*;
     use serde_json::json;
+
+    crate::live_source::app_key_tests::captured_app_key_tests!(app_key);
 
     #[test]
     fn changing_apps_hides_previous_details_until_the_requested_app_arrives() {
