@@ -7,6 +7,17 @@ use super::LiveDashboard;
 use crate::live_source::{Snapshot, Update, Worker};
 
 #[gpui::test]
+fn hovering_history_keeps_the_cursor_within_the_plot(cx: &mut TestAppContext) {
+    // Inspect the actual painted cursor after dispatching through the rendered history chart.
+    let mut harness = InputHarness::setup(cx);
+
+    harness.driver.hover_previous_second();
+
+    harness.driver.assert_energy_cursor_tracks_plot();
+    harness.teardown();
+}
+
+#[gpui::test]
 fn hovering_a_repeated_second_shows_the_observation_requested_by_click(cx: &mut TestAppContext) {
     // Hover and click the same repeated second, reading the headline from GPUI's rendered frame.
     let mut harness = InputHarness::setup(cx);
@@ -250,6 +261,43 @@ impl InputDriver {
         let position = self.previous_second_position();
         self.context
             .simulate_mouse_move(position, None, Modifiers::none());
+    }
+
+    fn assert_energy_cursor_tracks_plot(&mut self) {
+        let bounds = self.context.debug_bounds("live-energy-plot").unwrap();
+        let plot = crate::charts::plot_bounds(bounds);
+        let x = plot.left() + plot.size.width * (898.0 / 900.0);
+
+        let (expected, cursor) = self.context.update(|window, _| {
+            let expected = gpui::Bounds::new(
+                gpui::point(x, plot.top()),
+                gpui::size(gpui::px(1.0), plot.size.height),
+            )
+            .scale(window.scale_factor());
+            let cursor = window
+                .painted_quads()
+                .into_iter()
+                .find(|quad| {
+                    if quad.bounds.size != expected.size {
+                        return false;
+                    }
+
+                    (quad.bounds.left() - expected.left()).as_f32().abs() <= 1.0
+                })
+                .map(|quad| quad.bounds);
+
+            (expected, cursor)
+        });
+        let cursor = cursor.expect("The hovered history must paint its inspection cursor");
+
+        assert!(
+            (cursor.top() - expected.top()).as_f32().abs() <= 1.0,
+            "Cursor {cursor:?} must start at the plot {expected:?}"
+        );
+        assert!(
+            (cursor.bottom() - expected.bottom()).as_f32().abs() <= 1.0,
+            "Cursor must end at the plot, above its timestamp and legend"
+        );
     }
 
     fn click_previous_second(&mut self) {

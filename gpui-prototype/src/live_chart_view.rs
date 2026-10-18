@@ -465,6 +465,8 @@ fn chart_cursor(fraction: Option<f32>) -> impl IntoElement {
         },
     )
     .absolute()
+    .top_0()
+    .left_0()
     .size_full()
 }
 
