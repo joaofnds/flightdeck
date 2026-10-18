@@ -23,6 +23,7 @@ pub struct Frame {
     wall_ns: Option<u64>,
     members: Vec<Member>,
     starts: Vec<Start>,
+    execs: Vec<Exec>,
     exits: Vec<Exit>,
     arena: Vec<u8>,
     pub usage_refused: u32,
@@ -51,6 +52,13 @@ struct Start {
     program: std::result::Result<ProgramSpan, IdentityUnavailable>,
     ambiguous: bool,
     exec_number: Option<u64>,
+}
+
+struct Exec {
+    number: u64,
+    pid: i32,
+    creation: Option<ProcessCreation>,
+    program: std::result::Result<ProgramSpan, IdentityUnavailable>,
 }
 
 pub struct PublicationEvents<'source> {
@@ -126,6 +134,7 @@ impl Frame {
             wall_ns: source.tick.times.map(|times| times.wall_ns),
             members: Vec::with_capacity(count),
             starts: Vec::new(),
+            execs: Vec::new(),
             exits: Vec::new(),
             arena: Vec::with_capacity(capture::program_bytes(source, source.identities)?),
             usage_refused: source.tick.processes_refused,
@@ -155,11 +164,12 @@ impl Frame {
         size_of::<Self>()
             + self.members.capacity() * size_of::<Member>()
             + self.starts.capacity() * size_of::<Start>()
+            + self.execs.capacity() * size_of::<Exec>()
             + self.exits.capacity() * size_of::<Exit>()
             + self.arena.capacity()
     }
 
-    /// Owns Start program bytes and final usage before the event/dictionary buffers are reused.
+    /// Owns Start/Exec program bytes and final usage before event/dictionary buffers are reused.
     pub fn capture_exits(
         &mut self,
         source: &Publication<'_>,

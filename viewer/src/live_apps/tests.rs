@@ -100,8 +100,152 @@ fn refuses_start_program_bytes_beyond_the_existing_frame_budget() {
 
     assert!(matches!(
         result,
-        Err(Error::Bound("live App Start byte bound"))
+        Err(Error::Bound("live App program byte bound"))
     ));
+}
+
+#[test]
+fn charges_the_maximum_captured_exec_population_to_the_live_frame() {
+    // Goal: every owned Exec identity and program byte is charged to the live cache.
+    // Method: capture the full event bound through a real ring and inspect owned frame bytes.
+    let count = collector::tracker::EVENTS_PER_TICK_MAX;
+    let shape = collector::ring::Shape {
+        event_capacity: u64::try_from(count).unwrap(),
+        ..fixture::SHAPE
+    };
+    let mut fixture = None;
+    Fixture::initialize_with_shape(&mut fixture, true, &shape);
+    let fixture = fixture.as_mut().unwrap();
+    fixture.publish_execs(count, b"child");
+    let mut frame = None;
+
+    fixture.capture_events(&mut frame).unwrap();
+    let frame = frame.as_ref().unwrap();
+
+    assert_eq!(
+        frame.bytes(),
+        size_of::<Frame>() + count * size_of::<super::Exec>() + count * 5
+    );
+    assert_eq!(frame.execs.len(), count);
+    assert_eq!(frame.arena.len(), count * 5);
+    eprintln!(
+        "exec_bytes={} count={} frame_bytes={} transient_bound={}",
+        size_of::<super::Exec>(),
+        count,
+        frame.bytes(),
+        super::TRANSIENT_VIEW_BYTES_MAX
+    );
+}
+
+#[test]
+fn refuses_exec_program_bytes_beyond_the_existing_frame_budget() {
+    // Goal: Exec program metadata shares the existing 32 MiB per-frame program-byte bound.
+    // Method: publish 8195 Exec observations of one valid 4095-byte basename through a real ring.
+    let shape = collector::ring::Shape {
+        event_capacity: 8195,
+        ..fixture::SHAPE
+    };
+    let mut fixture = None;
+    Fixture::initialize_with_shape(&mut fixture, true, &shape);
+    let fixture = fixture.as_mut().unwrap();
+    fixture.publish_execs(8195, &[b'x'; 4095]);
+    let mut frame = None;
+
+    let result = fixture.capture_events(&mut frame);
+
+    assert!(matches!(
+        result,
+        Err(Error::Bound("live App program byte bound"))
+    ));
+}
+
+#[test]
+fn retains_final_process_gauges_when_the_matching_exec_program_is_refused() {
+    // Goal: unavailable App bytes cannot erase a creation-associated final numeric observation.
+    // Method: capture Refused Exec metadata plus verified final usage from a real ring.
+    let shape = collector::ring::Shape {
+        event_capacity: 2,
+        ..fixture::SHAPE
+    };
+    let mut fixture = None;
+    Fixture::initialize_with_shape(&mut fixture, true, &shape);
+    let fixture = fixture.as_mut().unwrap();
+    fixture.publish_unavailable_exec_exit();
+    let mut frame = None;
+
+    fixture.capture_events(&mut frame).unwrap();
+    frame
+        .as_ref()
+        .unwrap()
+        .with_aggregate(None, |totals| {
+            assert!(totals.apps.is_empty());
+            assert_eq!(totals.ungrouped_members, 1);
+            assert_eq!(
+                totals.processes,
+                [apps::ProcessTotals {
+                    pid: 7,
+                    creation: Some(collector::ring::ProcessCreation {
+                        unique_id: 700,
+                        pid_version: 1
+                    }),
+                    app: None,
+                    executable_name: None,
+                    program_unavailable: Some(collector::ring::IdentityUnavailable::Refused),
+                    cpu_ns: apps::Amount::Unavailable(apps::Unavailable::Interval),
+                    energy_nj: apps::Amount::Unavailable(apps::Unavailable::Interval),
+                    app_attribution: None,
+                    resident_bytes_last: Some(104_857_600),
+                    footprint_bytes_last: Some(110_000_000),
+                    state: apps::ProcessState::ExitedVerified,
+                }]
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn accepts_exec_metadata_at_the_combined_program_population_bound() {
+    // Goal: the shared population limit admits its last valid scheduled-plus-Exec slot.
+    // Method: capture 23,999 identity-only members and one Exec, retire the source, then aggregate.
+    let mut frame = None;
+
+    capture_members_and_exec(23_999, &mut frame).unwrap();
+    frame
+        .as_ref()
+        .unwrap()
+        .with_aggregate(None, |totals| {
+            assert_eq!(totals.processes.len(), 23_999);
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn refuses_exec_metadata_past_the_combined_program_population_bound() {
+    // Goal: one Exec cannot exceed the shared bound beside the largest scheduled population.
+    // Method: capture 24,000 short identity-only members plus one Exec below other limits.
+    let mut frame = None;
+
+    let result = capture_members_and_exec(24_000, &mut frame);
+
+    assert!(matches!(
+        result,
+        Err(Error::Bound("live App program interval bound"))
+    ));
+}
+
+fn capture_members_and_exec(count: u32, frame: &mut Option<Box<Frame>>) -> super::Result<()> {
+    let shape = collector::ring::Shape {
+        process_capacity: u64::from(count),
+        ..fixture::SHAPE
+    };
+    let mut fixture = None;
+    Fixture::initialize_with_shape(&mut fixture, true, &shape);
+    let fixture = fixture.as_mut().unwrap();
+    fixture.publish_refused_members_and_exec(count, b"child");
+
+    fixture.capture_events(frame)
 }
 
 #[test]

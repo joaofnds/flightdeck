@@ -179,6 +179,9 @@ fn publish_started_exit(fixture: &mut Fixture) {
 #[path = "apps/starts.rs"]
 mod starts;
 
+#[path = "apps/execs.rs"]
+mod execs;
+
 macro_rules! unassociated_exit {
     ($name:ident, $scenario:expr) => {
         #[test]

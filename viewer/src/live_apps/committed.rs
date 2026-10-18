@@ -381,6 +381,7 @@ fn committed_frame(endpoint: &Endpoint, size: FrameSize) -> Box<Frame> {
         wall_ns: endpoint.wall_ns,
         members: Vec::with_capacity(size.count),
         starts: Vec::new(),
+        execs: Vec::new(),
         exits: Vec::new(),
         arena: Vec::with_capacity(size.bytes),
         usage_refused: endpoint.usage_refused,

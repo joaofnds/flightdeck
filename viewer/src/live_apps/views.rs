@@ -15,9 +15,11 @@ pub(super) fn with_aggregate(
         with_aggregate_observations(previous, &previous_programs, &mut previous_observations);
     }
 
-    let mut selected_programs = Vec::with_capacity(selected.members.len() + selected.starts.len());
+    let mut selected_programs =
+        Vec::with_capacity(selected.members.len() + selected.starts.len() + selected.execs.len());
     with_aggregate_programs(selected, &mut selected_programs);
     with_aggregate_start_programs(selected, &mut selected_programs);
+    with_aggregate_exec_programs(selected, &mut selected_programs);
     let count = selected.members.len() + selected.exits.len();
     let mut selected_observations =
         Vec::with_capacity(count.min(crate::apps::PROCESS_INTERVALS_MAX));
@@ -87,6 +89,15 @@ fn with_aggregate_start_programs<'frame>(
 ) {
     for start in &frame.starts {
         output.push(with_aggregate_program(frame, &start.program));
+    }
+}
+
+fn with_aggregate_exec_programs<'frame>(
+    frame: &'frame Frame,
+    output: &mut Vec<Option<ProgramBytes<'frame>>>,
+) {
+    for exec in &frame.execs {
+        output.push(with_aggregate_program(frame, &exec.program));
     }
 }
 
@@ -194,8 +205,13 @@ fn with_aggregate_exits<'frame>(
             continue;
         }
 
-        let program =
-            if let Some(index) = with_aggregate_index(previous, exit.pid, exit.creation.as_ref()) {
+        let previous_index = with_aggregate_index(previous, exit.pid, exit.creation.as_ref());
+        let program = if let Some(program) =
+            with_aggregate_executed_exit(selected, exit, programs, previous_index.is_some())
+        {
+            program
+        } else {
+            if let Some(index) = previous_index {
                 if exit.creation == previous[index].creation {
                     previous[index].program
                 } else {
@@ -206,7 +222,8 @@ fn with_aggregate_exits<'frame>(
                     continue;
                 };
                 program
-            };
+            }
+        };
         let mut observation = with_aggregate_exit_observation(selected, exit, program);
 
         if let Some(index) =
@@ -231,6 +248,43 @@ fn with_aggregate_exits<'frame>(
     });
 
     Ok(())
+}
+
+fn with_aggregate_executed_exit<'frame>(
+    selected: &'frame Frame,
+    exit: &Exit,
+    programs: &'frame [Option<ProgramBytes<'frame>>],
+    previous_known: bool,
+) -> Option<std::result::Result<&'frame ProgramBytes<'frame>, IdentityUnavailable>> {
+    let creation = exit.creation?;
+    let end = selected
+        .execs
+        .partition_point(|exec| (exec.pid, exec.number) < (exit.pid, exit.number));
+    let index = end.checked_sub(1)?;
+    let exec = &selected.execs[index];
+    if exec.pid != exit.pid {
+        return None;
+    }
+
+    if exec.creation != Some(creation) {
+        if let Some(program) = with_aggregate_started_exit(selected, exit, programs) {
+            return Some(program);
+        }
+        if previous_known {
+            return Some(Err(IdentityUnavailable::Changed));
+        }
+        return None;
+    }
+
+    let offset = selected.members.len() + selected.starts.len() + index;
+
+    Some(match &programs[offset] {
+        Some(program) => Ok(program),
+        None => match exec.program {
+            Err(reason) => Err(reason),
+            Ok(_) => unreachable!("captured Exec program span has a program view"),
+        },
+    })
 }
 
 fn with_aggregate_started_exit<'frame>(

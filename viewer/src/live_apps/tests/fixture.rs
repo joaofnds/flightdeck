@@ -183,6 +183,28 @@ impl Fixture {
     }
 
     pub fn publish_refused_members(&mut self, count: u32, name: &[u8]) {
+        self.publish_refused_events(count, name, &[], &[]);
+    }
+
+    pub fn publish_refused_members_and_exec(&mut self, count: u32, name: &[u8]) {
+        self.publish_refused_events(
+            count,
+            name,
+            &[collector::tracker::Event::Exec { pid: 1 }],
+            &[IdentityObservation {
+                pid: 1,
+                ..IdentityObservation::EMPTY
+            }],
+        );
+    }
+
+    fn publish_refused_events(
+        &mut self,
+        count: u32,
+        name: &[u8],
+        events: &[collector::tracker::Event],
+        event_identities: &[IdentityObservation],
+    ) {
         let writer = self.writer.as_mut().unwrap();
         let mut program = None;
         writer
@@ -220,7 +242,7 @@ impl Fixture {
                     processes_refused: count,
                     processes_gone: 0,
                     coalitions: &[],
-                    events: &[],
+                    events,
                     dropped: Dropped::default(),
                 },
                 Some(&ObservationTimes {
@@ -230,10 +252,47 @@ impl Fixture {
                 }),
                 &IdentityPublication {
                     processes: &identities,
-                    events: &[],
+                    events: event_identities,
                 },
             )
             .unwrap();
+    }
+
+    pub fn publish_unavailable_exec_exit(&mut self) {
+        let mut last = Vec::with_capacity(1);
+        process(0, 1, &mut last);
+        let creation = ProcessCreation {
+            unique_id: 700,
+            pid_version: 1,
+        };
+        self.publish_events(
+            &[
+                collector::tracker::Event::Exec { pid: 7 },
+                collector::tracker::Event::Exit {
+                    pid: 7,
+                    last: Ok(last[0].usage),
+                    noticed: collector::tracker::Noticed::OnExit,
+                },
+            ],
+            &[
+                IdentityObservation {
+                    pid: 7,
+                    usage: UsageAvailability::NotApplicable,
+                    identity: ProcessIdentity::Unavailable {
+                        creation: Some(creation),
+                        reason: collector::ring::IdentityUnavailable::Refused,
+                    },
+                },
+                IdentityObservation {
+                    pid: 7,
+                    usage: UsageAvailability::Measured,
+                    identity: ProcessIdentity::Unavailable {
+                        creation: Some(creation),
+                        reason: collector::ring::IdentityUnavailable::Unsupported,
+                    },
+                },
+            ],
+        );
     }
 
     pub fn publish_exits(&mut self, count: usize) {
@@ -262,6 +321,22 @@ impl Fixture {
     }
 
     pub fn publish_starts(&mut self, count: usize, name: &[u8]) {
+        self.publish_program_events(count, name, |pid| collector::tracker::Event::Start {
+            pid,
+            coalition: None,
+        });
+    }
+
+    pub fn publish_execs(&mut self, count: usize, name: &[u8]) {
+        self.publish_program_events(count, name, |pid| collector::tracker::Event::Exec { pid });
+    }
+
+    fn publish_program_events(
+        &mut self,
+        count: usize,
+        name: &[u8],
+        event: fn(i32) -> collector::tracker::Event,
+    ) {
         let writer = self.writer.as_mut().unwrap();
         let mut program = None;
         writer
@@ -275,10 +350,7 @@ impl Fixture {
             .unwrap();
         let program = program.unwrap();
         let events: Vec<_> = (1..=count)
-            .map(|pid| collector::tracker::Event::Start {
-                pid: i32::try_from(pid).unwrap(),
-                coalition: None,
-            })
+            .map(|pid| event(i32::try_from(pid).unwrap()))
             .collect();
         let identities: Vec<_> = (1..=count)
             .map(|pid| IdentityObservation {

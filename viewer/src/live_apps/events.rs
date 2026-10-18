@@ -1,7 +1,7 @@
 use collector::processes::Unreadable;
 use collector::tracker::{EVENTS_PER_TICK_MAX, Event};
 
-use super::{Error, Exit, Frame, Publication, PublicationEvents, Result, Start, Unavailable};
+use super::{Error, Exec, Exit, Frame, Publication, PublicationEvents, Result, Start, Unavailable};
 
 pub(super) fn capture(
     frame: &mut Frame,
@@ -10,6 +10,7 @@ pub(super) fn capture(
 ) -> Result<()> {
     frame.exits.clear();
     frame.starts.clear();
+    frame.execs.clear();
     let scheduled_bytes = frame
         .members
         .iter()
@@ -50,7 +51,7 @@ pub(super) fn capture(
         .count();
 
     frame.exits.reserve_exact(count);
-    capture_starts_reserve(frame, source, events)?;
+    capture_programs_reserve(frame, source, events)?;
     capture_events(frame, source, events)?;
     frame
         .exits
@@ -61,6 +62,7 @@ pub(super) fn capture(
         .sort_by_key(|start| (start.pid, start.creation.map(|creation| creation.unique_id)));
     capture_start_duplicates(&mut frame.starts);
     capture_start_interruptions(&mut frame.starts, events);
+    frame.execs.sort_by_key(|exec| (exec.pid, exec.number));
 
     Ok(())
 }
@@ -91,32 +93,38 @@ fn capture_validate(source: &Publication<'_>, events: &PublicationEvents<'_>) ->
     Ok(())
 }
 
-fn capture_starts_reserve(
+fn capture_programs_reserve(
     frame: &mut Frame,
     source: &Publication<'_>,
     events: &PublicationEvents<'_>,
 ) -> Result<()> {
-    let mut count = 0;
+    let mut starts = 0;
+    let mut execs = 0;
     let mut size = frame.arena.len();
     for (numbered, identity) in events.events.iter().zip(events.identities) {
-        if matches!(numbered.event, Event::Start { .. }) {
-            count += 1;
+        if matches!(numbered.event, Event::Start { .. } | Event::Exec { .. }) {
+            if matches!(numbered.event, Event::Start { .. }) {
+                starts += 1;
+            } else {
+                execs += 1;
+            }
             size = size
                 .checked_add(super::capture::program_bytes(
                     source,
                     std::slice::from_ref(identity),
                 )?)
-                .ok_or(Error::Bound("live App Start byte bound"))?;
+                .ok_or(Error::Bound("live App program byte bound"))?;
             if size > super::PROGRAM_FRAME_BYTES_MAX {
-                return Err(Error::Bound("live App Start byte bound"));
+                return Err(Error::Bound("live App program byte bound"));
             }
         }
     }
-    if frame.members.len() + count > crate::apps::PROCESS_INTERVALS_MAX {
-        return Err(Error::Bound("live App Start interval bound"));
+    if frame.members.len() + starts + execs > crate::apps::PROCESS_INTERVALS_MAX {
+        return Err(Error::Bound("live App program interval bound"));
     }
 
-    frame.starts.reserve_exact(count);
+    frame.starts.reserve_exact(starts);
+    frame.execs.reserve_exact(execs);
     frame.arena.reserve_exact(size - frame.arena.len());
 
     Ok(())
@@ -148,9 +156,43 @@ fn capture_events(
         if let Event::Start { pid, .. } = numbered.event {
             capture_start(frame, source, identity, numbered.number, *pid)?;
         }
+        if let Event::Exec { pid } = numbered.event {
+            capture_exec(frame, source, identity, numbered.number, *pid)?;
+        }
     }
 
     Ok(())
+}
+
+fn capture_exec(
+    frame: &mut Frame,
+    source: &Publication<'_>,
+    identity: &collector::ring::IdentityObservation,
+    number: u64,
+    pid: i32,
+) -> Result<()> {
+    if identity.pid != pid {
+        return Err(Error::Bound("live App Exec PID association"));
+    }
+
+    if identity.usage != collector::ring::UsageAvailability::NotApplicable {
+        return Err(Error::Bound("live App Exec usage availability"));
+    }
+
+    frame.execs.push(Exec {
+        number,
+        pid,
+        creation: identity.creation().copied(),
+        program: Err(super::IdentityUnavailable::Unsupported),
+    });
+    let exec = frame.execs.last_mut().unwrap_or_else(|| unreachable!());
+
+    super::capture::member_program(
+        source,
+        &identity.identity,
+        &mut frame.arena,
+        &mut exec.program,
+    )
 }
 
 fn capture_start(
