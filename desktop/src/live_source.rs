@@ -615,15 +615,10 @@ pub(crate) fn identity_validate(observed: &Value, selected: &Value) -> Result<()
 }
 
 pub(crate) fn identity_signature(value: &Value) -> Result<(String, String, u64), String> {
+    let publication = identity_publication(value)?;
     let stamp = match value.get("stamp") {
         Some(stamp) => stamp,
         None => value,
-    };
-    let publication = match &stamp["publication"] {
-        Value::String(text) => text.parse::<u64>().map_err(|error| error.to_string())?,
-        value => value
-            .as_u64()
-            .ok_or_else(|| "Missing observation publication".to_owned())?,
     };
 
     Ok((
@@ -631,6 +626,20 @@ pub(crate) fn identity_signature(value: &Value) -> Result<(String, String, u64),
         identity_text(&stamp["boot"])?,
         publication,
     ))
+}
+
+pub(crate) fn identity_publication(value: &Value) -> Result<u64, String> {
+    let stamp = match value.get("stamp") {
+        Some(stamp) => stamp,
+        None => value,
+    };
+
+    match &stamp["publication"] {
+        Value::String(text) => text.parse::<u64>().map_err(|error| error.to_string()),
+        value => value
+            .as_u64()
+            .ok_or_else(|| "Missing observation publication".to_owned()),
+    }
 }
 
 fn identity_text(value: &Value) -> Result<String, String> {

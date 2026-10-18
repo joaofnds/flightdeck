@@ -41,6 +41,8 @@ mod replay_dashboard;
 mod summary;
 
 #[cfg(test)]
+mod allocation_tests;
+#[cfg(test)]
 mod tests;
 
 use std::process::ExitCode;

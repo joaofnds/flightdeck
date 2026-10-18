@@ -15,6 +15,10 @@ use crate::live_dashboard::LiveDashboard;
 use crate::live_presentation::clock;
 use crate::live_source::Snapshot;
 
+#[cfg(test)]
+#[path = "live_hover_cost_tests.rs"]
+mod cost_tests;
+
 impl LiveDashboard {
     pub fn live_chart(&self, panel: &Rc<Panel>, cx: &mut Context<Self>) -> impl IntoElement {
         let upper = panel

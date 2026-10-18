@@ -3,7 +3,11 @@ use std::collections::BTreeMap;
 use serde_json::{Value, json};
 
 use crate::live_dashboard::LiveDashboard;
-use crate::live_source::{Snapshot, identity_signature};
+use crate::live_source::{Snapshot, identity_publication, identity_signature};
+
+#[cfg(test)]
+#[path = "live_identity_tests.rs"]
+mod identity_tests;
 
 #[path = "live_hover_controller.rs"]
 mod controller;
@@ -68,6 +72,14 @@ impl Target {
 
     pub fn matches(&self, observation: &Value) -> bool {
         self.identity.as_ref().is_some_and(|identity| {
+            match (
+                identity_publication(identity),
+                identity_publication(observation),
+            ) {
+                (Ok(first), Ok(second)) if first == second => {}
+                _ => return false,
+            }
+
             match (
                 identity_signature(identity),
                 identity_signature(observation),
