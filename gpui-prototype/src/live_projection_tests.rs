@@ -167,25 +167,6 @@ fn missing_selected_second_keeps_context_but_has_no_current_readout() {
 }
 
 #[test]
-fn shared_chart_domain_keeps_sent_traffic_negative_and_power_unstacked() {
-    // Goal: chart rendering interprets projection metadata without summing independent power.
-    // Method: run shared axis-domain calculations against projected directional and power data.
-    let inspection = crate::charts::Inspection {
-        lower: 0,
-        selected: 1,
-        upper: 2,
-    };
-    let network = panels("network", &selection(), None).unwrap();
-    let (minimum, maximum) = crate::charts::domain(&network[0], inspection, &[]);
-    assert!((minimum + 1.0).abs() < f32::EPSILON);
-    assert!((maximum - 2.16).abs() < 0.000_001);
-    let energy = panels("energy", &selection(), None).unwrap();
-    let (minimum, maximum) = crate::charts::domain(&energy[0], inspection, &[]);
-    assert!(minimum.abs() < f32::EPSILON);
-    assert!((maximum - 8.64).abs() < 0.000_001);
-}
-
-#[test]
 fn invalid_clocks_and_nonfinite_values_are_reported_instead_of_plotted() {
     // Goal: corrupt input cannot place samples outside the plot or create nonfinite geometry.
     // Method: move an observation beyond the domain, then substitute a nonfinite string reading.
@@ -225,4 +206,91 @@ fn app_cursor_matches_decimal_stamp_identity_to_its_selected_observation() {
     ]});
     let apps = panels("apps", &selection(), Some(&history)).unwrap();
     assert_eq!(apps[0].selected_index, Some(0));
+}
+
+#[test]
+fn uppercase_hexadecimal_identities_match_selected_points() {
+    // Goal: hexadecimal case cannot move the cursor or merge distinct unsigned identities.
+    // Method: project matching upper/lowercase runs beside one differing in its highest bit.
+    let mut selection = selection();
+    selection["trends"][0]["run"] = json!("7fffffffffffffffabcdef0123456789");
+    selection["trends"][1]["run"] = json!("FFFFFFFFFFFFFFFFABCDEF0123456789");
+    selection["trends"][2]["run"] = json!("ffffffffffffffffabcdef0123456789");
+    selection["selected"]["run"] = json!("FFFFFFFFFFFFFFFFABCDEF0123456789");
+
+    let cpu = panels("cpu", &selection, None).unwrap();
+
+    assert_eq!(cpu[0].selected_index, Some(2));
+    assert_eq!(cpu[0].segments.as_ref().unwrap(), &[0, 1, 1]);
+}
+
+#[test]
+fn unsigned_decimal_identities_preserve_distinct_segments() {
+    // Goal: exact unsigned App stamps retain their selected point and distinct collector runs.
+    // Method: project a maximum decimal word with numeric low words differing by one.
+    let first = json!({"wall_ns": "1000000000000", "stamp": {
+        "run": ["18446744073709551615", 3], "boot": [3, 4], "publication": "1"}});
+    let second = json!({"wall_ns": "1000500000000", "stamp": {
+        "run": ["18446744073709551615", 4], "boot": [3, 4], "publication": "2"}});
+    let history = json!({"selected": {"run": "FFFFFFFFFFFFFFFF0000000000000003",
+        "boot": "00000000000000030000000000000004", "publication": 1}, "points": [
+        {"observation": first, "segment": "1", "cpu_percent_one_core": 10},
+        {"observation": second, "segment": "1", "cpu_percent_one_core": 20}]});
+
+    let apps = panels("apps", &selection(), Some(&history)).unwrap();
+
+    assert_eq!(apps[0].selected_index, Some(0));
+    assert_eq!(apps[0].segments.as_ref().unwrap(), &[0, 1]);
+}
+
+#[test]
+fn mixed_identity_encodings_keep_the_selected_point_and_segment() {
+    // Goal: representation and hexadecimal case cannot split a collector run or move its cursor.
+    // Method: select a hexadecimal identity matching an App's decimal words.
+    let observation = json!({"wall_ns": "1000000000000", "stamp": {
+        "run": ["18446744073709551615", "12379813738877118345"],
+        "boot": ["3", "4"], "publication": "1"}});
+    let history = json!({"selected": {"run": "FFFFFFFFFFFFFFFFABCDEF0123456789",
+        "boot": "00000000000000030000000000000004", "publication": 1},
+        "points": [{"observation": observation, "segment": "1",
+            "cpu_percent_one_core": "-0.0"}]});
+
+    let apps = panels("apps", &selection(), Some(&history)).unwrap();
+
+    assert_eq!(apps[0].selected_index, Some(0));
+    assert_eq!(apps[0].segments.as_ref().unwrap(), &[0]);
+    assert_eq!(
+        apps[0].lines[0].values[0].unwrap().to_bits(),
+        (-0.0_f32).to_bits()
+    );
+}
+
+#[test]
+fn negative_run_identity_words_reject_the_projection() {
+    // Goal: a negative word cannot wrap into a valid unsigned observation identity.
+    // Method: put a negative decimal run word in an actual scalar point.
+    let mut selection = selection();
+    selection["trends"][1]["run"] = json!(["-1", "2"]);
+
+    assert!(panels("cpu", &selection, None).is_err());
+}
+
+#[test]
+fn overflowing_boot_identity_words_reject_the_projection() {
+    // Goal: values beyond a fixed unsigned word cannot alias an existing identity.
+    // Method: exceed u64 by one in an actual scalar point's decimal boot identity.
+    let mut selection = selection();
+    selection["trends"][1]["boot"] = json!(["18446744073709551616", "2"]);
+
+    assert!(panels("cpu", &selection, None).is_err());
+}
+
+#[test]
+fn non_ascii_run_identities_reject_the_projection() {
+    // Goal: malformed run identities produce a projection error rather than a panic.
+    // Method: put a 32-byte non-ASCII run crossing its midpoint in an actual scalar point.
+    let mut selection = selection();
+    selection["trends"][1]["run"] = json!("000000000000000é000000000000000");
+
+    assert!(panels("cpu", &selection, None).is_err());
 }

@@ -5,7 +5,9 @@ use serde::Deserialize;
 
 pub const SAMPLE_COUNT: usize = 121;
 pub const PANEL_LIMIT: usize = 128;
-pub const LIVE_SAMPLE_LIMIT: usize = 4096;
+#[path = "panel_data.rs"]
+mod panel_data;
+pub use panel_data::{LIVE_SAMPLE_LIMIT, Line, Panel};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -39,44 +41,6 @@ pub struct Catalog {
 pub struct Specification {
     pub name: String,
     pub value: String,
-}
-
-#[derive(Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Panel {
-    pub selected_index: Option<usize>,
-    pub positions: Option<Vec<f32>>,
-    pub segments: Option<Vec<u64>>,
-    pub id: String,
-    pub title: String,
-    pub unit: String,
-    pub kind: String,
-    pub lines: Vec<Line>,
-    pub minimum: Option<f32>,
-    pub maximum: Option<f32>,
-    pub stack: Option<bool>,
-    pub fill: Option<f32>,
-    pub caption: Option<String>,
-    pub help: Option<String>,
-    pub source: Option<String>,
-    pub quantities: Option<Vec<Vec<String>>>,
-    pub states: Option<Vec<String>>,
-    pub table_headings: Option<Vec<String>>,
-    pub table_rows: Option<Vec<Vec<String>>>,
-}
-
-#[derive(Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Line {
-    pub name: String,
-    pub color: String,
-    pub values: Vec<Option<f32>>,
-    pub stack: Option<bool>,
-    pub negative: Option<bool>,
-    pub dashed: Option<bool>,
-    pub axis: Option<String>,
-    pub unit: Option<String>,
-    pub fill: Option<f32>,
 }
 
 impl Capture {

@@ -518,6 +518,31 @@ mod live_tests {
     use super::*;
 
     #[test]
+    fn shared_chart_domain_keeps_sent_traffic_negative_and_power_unstacked() {
+        // Goal: chart rendering interprets projection metadata without summing independent power.
+        // Method: calculate domains from one actual projection with directional and power data.
+        let selection = serde_json::json!({"second": 1000, "selected": null, "trends": [{
+            "run": "00000000000000010000000000000002",
+            "boot": "00000000000000030000000000000004", "publication": 1, "segment": 1,
+            "wall_ns": 1_000_000_000_000_u64, "network_rx_bps": 2048,
+            "network_tx_bps": 1024, "power_watts": 8.0, "gpu_watts": 2.0}]});
+        let inspection = Inspection {
+            lower: 0,
+            selected: 0,
+            upper: 0,
+        };
+
+        let network = crate::live_projection::panels("network", &selection, None).unwrap();
+        let (minimum, maximum) = domain(&network[0], inspection, &[]);
+        assert!((minimum + 1.0).abs() < f32::EPSILON);
+        assert!((maximum - 2.16).abs() < 0.000_001);
+        let energy = crate::live_projection::panels("energy", &selection, None).unwrap();
+        let (minimum, maximum) = domain(&energy[0], inspection, &[]);
+        assert!(minimum.abs() < f32::EPSILON);
+        assert!((maximum - 8.64).abs() < 0.000_001);
+    }
+
+    #[test]
     fn a_two_point_dashed_run_keeps_measured_geometry() {
         // A short measured interval must paint, even before a third sample arrives.
         let mut strokes = Vec::new();

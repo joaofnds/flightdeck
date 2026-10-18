@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
+use num_traits::ToPrimitive;
 use serde_json::Value;
 
 use crate::data::{Line, Panel};
@@ -9,6 +10,7 @@ const OBSERVATIONS_MAX: usize = 4096;
 const GIBIBYTE: f32 = 1_073_741_824.0;
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
 
+#[must_use]
 pub fn inspection_identity(selection: &Value, second: u64) -> Option<Value> {
     if selection["second"].as_u64() == Some(second) {
         if !selection["selected"].is_null() {
@@ -60,6 +62,7 @@ pub fn panels(
     Ok(result)
 }
 
+#[must_use]
 pub fn quantity(summary: &Value, key: &str, unit: &str, divisor: f32) -> String {
     if !divisor.is_finite() {
         return "Unavailable".to_owned();
@@ -77,6 +80,7 @@ pub fn quantity(summary: &Value, key: &str, unit: &str, divisor: f32) -> String 
     }
 }
 
+#[must_use]
 pub fn sample_second(selection: &Value, fraction: f32) -> Option<u64> {
     if !fraction.is_finite() {
         return None;
@@ -149,9 +153,8 @@ impl Domain {
         let remainder =
             u32::try_from(wall_ns % NANOSECONDS_PER_SECOND).map_err(|error| error.to_string())?;
         let fraction = remainder
-            .to_string()
-            .parse::<f32>()
-            .map_err(|error| error.to_string())?
+            .to_f32()
+            .ok_or("Live chart fractional second exceeds f32")?
             / 1_000_000_000.0;
         Ok((f32::from(seconds) + fraction) / f32::from(self.span))
     }
@@ -189,7 +192,8 @@ fn coordinates(
         let next = u64::try_from(identities.len()).map_err(|error| error.to_string())?;
         segments.push(*identities.entry(key).or_insert(next));
         if let Some(target) = &target {
-            if observation_signature(observation)? == *target {
+            let observed = (key.0, key.1, integer(&stamp["publication"])?);
+            if observed == *target {
                 if selected_index.is_some() {
                     return Err("Duplicate selected live chart observation".to_owned());
                 }
@@ -204,7 +208,7 @@ fn coordinates(
     })
 }
 
-fn observation_signature(value: &Value) -> Result<(String, String, u64), String> {
+fn observation_signature(value: &Value) -> Result<([u64; 2], [u64; 2], u64), String> {
     let stamp = match value.get("stamp") {
         Some(stamp) => stamp,
         None => value,
@@ -216,11 +220,14 @@ fn observation_signature(value: &Value) -> Result<(String, String, u64), String>
     ))
 }
 
-fn identity(value: &Value) -> Result<String, String> {
+fn identity(value: &Value) -> Result<[u64; 2], String> {
     if let Some(text) = value.as_str() {
         if text.len() == 32 {
             if text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-                return Ok(text.to_ascii_lowercase());
+                return Ok([
+                    u64::from_str_radix(&text[..16], 16).map_err(|error| error.to_string())?,
+                    u64::from_str_radix(&text[16..], 16).map_err(|error| error.to_string())?,
+                ]);
             }
         }
         return Err("Invalid live chart identity".to_owned());
@@ -229,11 +236,7 @@ fn identity(value: &Value) -> Result<String, String> {
     if words.len() != 2 {
         return Err("Invalid live chart identity word count".to_owned());
     }
-    Ok(format!(
-        "{:016x}{:016x}",
-        integer(&words[0])?,
-        integer(&words[1])?
-    ))
+    Ok([integer(&words[0])?, integer(&words[1])?])
 }
 
 fn integer(value: &Value) -> Result<u64, String> {
@@ -271,17 +274,23 @@ fn scalar(value: &Value) -> Result<Option<f32>, String> {
         return Ok(None);
     }
     let text = match value {
-        Value::String(text) => text.clone(),
+        Value::String(text) => return scalar_text(text),
         Value::Number(value) => value.to_string(),
         _ => return Err("Invalid live chart quantity".to_owned()),
     };
+    scalar_text(&text)
+}
+
+fn scalar_text(text: &str) -> Result<Option<f32>, String> {
     if text.len() > 64 {
         return Err("Live chart quantity exceeds its bound".to_owned());
     }
+
     let value = text.parse::<f32>().map_err(|error| error.to_string())?;
     if !value.is_finite() {
         return Err("Nonfinite live chart quantity".to_owned());
     }
+
     Ok(Some(value))
 }
 
