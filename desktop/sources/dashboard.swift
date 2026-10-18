@@ -5,6 +5,7 @@ struct Dashboard: View {
     @Environment(\.flightdeckTheme) private var theme
     @StateObject private var inspection = ChartInspectionState()
     @StateObject private var schematicPreview = SchematicPreviewState()
+    @State private var chartColumnCount = 3
 
     private var points: [Metric] { model.selection?.trends ?? [] }
     private var summary: Metric? { model.selection?.summary }
@@ -16,18 +17,19 @@ struct Dashboard: View {
                     .foregroundStyle(theme.muted)
             }
             summaryMetrics
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 460), alignment: .leading)],
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: theme.panelGap,
+                          alignment: .leading), count: chartColumnCount),
                       alignment: .leading, spacing: theme.panelGap) {
                 linePanel("CPU activity", value: summary?.cpuPercent, unit: "%", color: theme.cpuSeries,
                           explanation: "Busy ticks across all recorded logical CPUs divided by total CPU ticks. Requires consecutive compatible observations.",
                           domain: 0...100, metric: \.cpuPercent)
-                memoryPanel
                 gpuActivityPanel
-                networkPanel
-                storagePanel
+                memoryPanel
                 linePanel("System power", value: summary?.powerWatts, unit: "W", color: theme.systemPowerSeries,
                           explanation: "Recorded SMC system-power reading. Unread source remains unavailable.",
                           metric: \.powerWatts)
+                storagePanel
+                networkPanel
                 linePanel("SoC temperature", value: summary?.socCelsius, unit: "°C", color: theme.temperatureSeries,
                           explanation: "Recorded SoC sensor reading. This does not identify separate CPU/GPU sensor positions.",
                           metric: \.socCelsius)
@@ -42,6 +44,13 @@ struct Dashboard: View {
         .onChange(of: model.schematicPreviewSource, initial: true) { _, source in
             schematicPreview.observeSource(source)
         }
+        .onGeometryChange(for: Int.self) { [gap = theme.panelGap] geometry in
+            let minimumWidth: CGFloat = 320
+            if geometry.size.width >= 3 * minimumWidth + 2 * gap { return 3 }
+            if geometry.size.width >= 2 * minimumWidth + gap { return 2 }
+
+            return 1
+        } action: { chartColumnCount = $0 }
     }
 
     private var summaryMetrics: some View {
@@ -53,14 +62,28 @@ struct Dashboard: View {
                 action: { model.navigate(to: "GPU") })
             MetricSummary(title: "Memory pressure", reading: summary?.pressure.flatMap {
                 MemoryPressureState(rawValue: $0)?.label
-            } ?? "Unavailable", note: "macOS verdict", action: { model.navigate(to: "Memory") })
+            } ?? "Unavailable", note: "macOS verdict", color: memoryPressureColor,
+                action: { model.navigate(to: "Memory") })
             MetricSummary(title: "System power", reading: dashboardReading(summary?.powerWatts, unit: "W"),
                 note: "Whole-machine sensor", color: theme.systemPowerSeries,
                 action: { model.navigate(to: "Energy") })
+            MetricSummary(title: "Disk read", reading: dashboardReading(summary?.storage?.rates.readBps.map {
+                $0 / 1_000_000
+            }, unit: "MB/s"), note: "Physical devices", color: theme.storageReadSeries,
+                action: { model.navigate(to: "Storage") })
             MetricSummary(title: "Receive", reading: dashboardReading(summary?.networkRxBps.map {
                 $0 / 1_000_000
             }, unit: "MB/s"), note: "External interfaces", color: theme.networkReceivedSeries,
                 action: { model.navigate(to: "Network") })
+        }
+    }
+
+    private var memoryPressureColor: Color? {
+        switch summary?.pressure.flatMap({ MemoryPressureState(rawValue: $0) }) {
+        case .normal: theme.memoryPressureNormal
+        case .warning: theme.memoryPressureWarning
+        case .critical: theme.memoryPressureCritical
+        case nil: nil
         }
     }
 
@@ -135,20 +158,24 @@ struct Dashboard: View {
         Panel(title: "Memory", explanation: "Recorded active, wired and compressed memory in GiB. These are source categories; cached/free memory remains available in the recorded-memory table.") {
             if let selection = model.selection {
                 let memory = RecordedMemoryData(selection: selection, theme: theme)
-                plot(context: memory.context, lines: memory.categories,
+                let installed = TimeSeriesLine(name: "Installed", color: theme.muted,
+                    values: points.map { $0.memoryTotalBytes.map { Double($0) / 1_073_741_824 } },
+                    unit: "GiB", stack: false, strokePattern: .dashed, fill: 0)
+                plot(context: memory.context, lines: memory.categories + [installed],
                      style: TimeSeriesStyle(unit: "GiB", stack: true, gradient: false,
-                         fill: 1, interpolation: .linear)) { point in
+                         fill: 0.18, interpolation: .linear)) { point in
                     metricText(point.memoryActiveBytes.map { Double($0) / 1_073_741_824 },
                                unit: "GiB active")
                 }
-                HStack(spacing: theme.fieldGap) {
-                    ForEach(Array(memory.categories.enumerated()), id: \.offset) { _, line in
-                        HStack(spacing: 6) {
-                            Circle().fill(line.color).frame(width: 6, height: 6)
-                            Text(line.name).foregroundStyle(theme.muted)
+                VStack(alignment: .leading, spacing: theme.fieldGap / 2) {
+                    HStack(spacing: theme.fieldGap) {
+                        ForEach(Array(memory.categories.enumerated()), id: \.offset) { _, line in
+                            HStack(spacing: 6) {
+                                Circle().fill(line.color).frame(width: 6, height: 6)
+                                Text(line.name).foregroundStyle(theme.muted)
+                            }
                         }
                     }
-                    Spacer(minLength: 0)
                     Text(dashboardReading(summary?.memoryTotalBytes.map {
                         Double($0) / 1_073_741_824
                     }, unit: "GiB installed"))
@@ -164,11 +191,9 @@ struct Dashboard: View {
             if let selection = model.selection {
                 let line = TimeSeriesLine(name: title, color: color,
                     values: points.map { $0[keyPath: metric].map { $0 / scale } })
-                let upper = domain?.upperBound ?? max(1,
-                    line.values.compactMap { $0 }.max().map { $0 * 1.1 } ?? 1)
                 plot(context: RecordedChartContext(selection: selection), lines: [line],
                      style: TimeSeriesStyle(unit: unit, minimum: domain?.lowerBound ?? 0,
-                         maximum: upper, fill: 0, interpolation: .linear)) { point in
+                         maximum: domain?.upperBound, fill: 0, interpolation: .linear)) { point in
                     metricText(point[keyPath: metric].map { $0 / scale }, unit: unit)
                 }
             }

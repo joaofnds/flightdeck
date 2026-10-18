@@ -5,6 +5,14 @@ import SwiftUI
 
 @MainActor
 func runOverviewInspectionChecks() throws {
+    try paints_the_installed_capacity_in_the_actual_overview()
+    try paints_translucent_memory_in_the_actual_overview()
+    scales_small_power_without_rounding_it_to_zero()
+    labels_fixed_cpu_capacity_in_twenty_percent_steps()
+    labels_installed_memory_in_binary_steps()
+    preserves_zero_in_mirrored_traffic_scales()
+    retains_explicit_gpu_capacity_above_one_hundred_percent()
+    gives_empty_charts_a_finite_scale()
     try expands_the_actual_overview_for_gpu_activity_above_nominal_capacity()
     try paints_gpu_activity_in_the_actual_overview()
     try reads_gpu_activity_in_the_actual_overview()
@@ -60,6 +68,135 @@ func runOverviewInspectionChecks() throws {
     precondition(inspection.date(in: selection) == nil)
     precondition(inspection.target(in: selection) == nil)
     print("Overview keyboard inspection preserves repeated-second identities and empty hover")
+}
+
+private func scales_small_power_without_rounding_it_to_zero() {
+    // Goal: milliwatt App histories remain visible instead of sharing a one-watt range.
+    // Method: scale a 1.4 mW peak and compare its nonzero tick with the zero label.
+    let axis = TimeSeriesAxis(range: 0...0.0014, unit: "W", minimum: 0)
+
+    precondition(abs(axis.domain.upperBound - 0.0015) < 1e-15)
+    precondition(axis.unit == "mW")
+    precondition(axis.label(0.0005) == 0.5.formatted(.number))
+    precondition(axis.ticks.count <= 8)
+}
+
+private func labels_fixed_cpu_capacity_in_twenty_percent_steps() {
+    // Goal: a fixed CPU scale stays at 100% with simple, evenly spaced labels.
+    // Method: supply partial activity with the explicit capacity bounds.
+    let axis = TimeSeriesAxis(range: 0...37.5, unit: "%", minimum: 0, maximum: 100)
+
+    precondition(axis.domain == 0...100)
+    precondition(axis.ticks == [0, 20, 40, 60, 80, 100])
+}
+
+private func labels_installed_memory_in_binary_steps() {
+    // Goal: the installed-memory reference fits a readable 48 GiB scale.
+    // Method: scale that capacity without a caller-supplied upper bound.
+    let axis = TimeSeriesAxis(range: 0...48, unit: "GiB")
+
+    precondition(axis.domain == 0...48)
+    precondition(axis.ticks == [0, 16, 32, 48])
+    precondition(axis.unit == "GiB")
+}
+
+private func preserves_zero_in_mirrored_traffic_scales() {
+    // Goal: upload and download remain on opposite sides of a labeled zero.
+    // Method: scale unequal positive and negative traffic peaks.
+    let axis = TimeSeriesAxis(range: -7000...6800, unit: "KiB/s")
+
+    precondition(axis.domain == -10_000...10_000)
+    precondition(axis.ticks == [-10_000, -5000, 0, 5000, 10_000])
+}
+
+private func retains_explicit_gpu_capacity_above_one_hundred_percent() {
+    // Goal: measured GPU values above nominal capacity remain within explicit bounds.
+    // Method: pass the existing expanded GPU range through the rendered-axis model.
+    let axis = TimeSeriesAxis(range: 0...150, unit: "%", minimum: 0, maximum: 150)
+
+    precondition(axis.domain == 0...150)
+    precondition(axis.ticks == [0, 50, 100, 150])
+}
+
+private func gives_empty_charts_a_finite_scale() {
+    // Goal: an empty or all-zero chart retains a nondegenerate scale.
+    // Method: scale the same zero extent produced by an unavailable series.
+    let axis = TimeSeriesAxis(range: 0...0, unit: "W")
+
+    precondition(axis.domain == 0...1)
+    precondition(axis.ticks.first == 0)
+    precondition(axis.ticks.last == 1)
+    precondition(axis.ticks.allSatisfy(\.isFinite))
+}
+
+@MainActor
+private func paints_the_installed_capacity_in_the_actual_overview() throws {
+    // Goal: the installed-capacity line paints inside the actual memory plot.
+    // Method: count its neutral pixels above the nonzero category stack, away from labels.
+    let image = try overviewMemoryImage()
+    let reference = NSColor(FlightdeckTheme().muted).usingColorSpace(.sRGB)!
+
+    let count = overviewMemoryPixels(image, rows: 180..<220) { color in
+        abs(color.redComponent - reference.redComponent)
+            + abs(color.greenComponent - reference.greenComponent)
+            + abs(color.blueComponent - reference.blueComponent) < 0.14
+    }
+
+    precondition(count > 30, "Overview omitted its installed-memory reference: \(count) pixels")
+}
+
+@MainActor
+private func paints_translucent_memory_in_the_actual_overview() throws {
+    // Goal: category interiors remain translucent instead of hiding the panel behind them.
+    // Method: paint Active white and inspect only its interior, away from lines and labels.
+    let image = try overviewMemoryImage()
+
+    let count = overviewMemoryPixels(image, rows: 315..<330) { color in
+        let brightness = (color.redComponent + color.greenComponent + color.blueComponent) / 3
+
+        return brightness > 0.18 && brightness < 0.7
+    }
+
+    precondition(count > 100, "Overview memory lost its translucent interior: \(count) pixels")
+}
+
+@MainActor
+private func overviewMemoryImage() throws -> NSBitmapImageRep {
+    let values: [[String: Any]] = [1_000_000_000_000, 1_899_000_000_000].enumerated().map {
+        ["run": "memory", "boot": "boot", "publication": $0.offset + 1,
+         "wall_ns": $0.element, "segment": 1, "memory_total_bytes": 51_539_607_552,
+         "memory_active_bytes": 8_589_934_592, "memory_wired_bytes": 4_294_967_296,
+         "memory_compressed_bytes": 4_294_967_296]
+    }
+    let points: [Metric] = try decodeRecordingResponse(
+        JSONSerialization.data(withJSONObject: ["value": values]))
+    let selected = Observation(run: "memory", boot: "boot", publication: 2, runTick: 2,
+        wallNs: 1_899_000_000_000, windowLosses: nil)
+    let model = RecordingModel(path: "/unused", pollingEnabled: false)
+    model.selection = Selection(second: 1899, selected: selected, alternatives: [selected],
+        summary: points[1], trends: points, contextSeconds: 900)
+    var theme = FlightdeckTheme()
+    theme.memoryActiveSeries = .white
+
+    return scalarPanelImage(Dashboard(), model: model, theme: theme, height: 1800)
+}
+
+private func overviewMemoryPixels(_ image: NSBitmapImageRep, rows: Range<Int>,
+                                  matching: (NSColor) -> Bool) -> Int {
+    precondition(image.pixelsWide == 1080)
+    precondition(image.pixelsHigh == 1800)
+    var count = 0
+    for row in rows {
+        for column in 820..<960 {
+            guard let color = image.colorAt(x: column, y: row)?.usingColorSpace(.sRGB) else {
+                preconditionFailure("The memory plot has no RGB pixel")
+            }
+
+            if matching(color) { count += 1 }
+        }
+    }
+
+    return count
 }
 
 private func uses_only_selected_schematic_sources() throws {

@@ -33,6 +33,7 @@ struct MetricSummary: View {
                 }
             }
             Text(reading).font(theme.metricFont).monospacedDigit()
+                .foregroundStyle(color ?? theme.text)
                 .lineLimit(1).minimumScaleFactor(0.65)
             Text(note).font(.caption).foregroundStyle(theme.muted).lineLimit(1)
         }

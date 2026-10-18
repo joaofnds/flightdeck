@@ -127,19 +127,18 @@ struct TimeSeriesPlot: View {
         if style.isValid {
             Canvas { context, size in
                 let plot = Self.frame(size: size)
-                let domains = domains()
-                for row in 0...4 {
-                    let y = plot.minY + Double(row) / 4 * plot.height
+                let axes = axes()
+                let left = axes["left"] ?? TimeSeriesAxis(range: 0...1, unit: style.unit)
+                for number in left.ticks {
+                    let y = yPosition(number, domain: left.domain, plot: plot)
                     var grid = Path(); grid.move(to: CGPoint(x: plot.minX, y: y)); grid.addLine(to: CGPoint(x: plot.maxX, y: y))
                     context.stroke(grid, with: .color(theme.border.opacity(0.65)), lineWidth: 0.5)
-                    let domain = domains["left"] ?? 0...1
-                    let number = domain.upperBound - Double(row) / 4 * (domain.upperBound - domain.lowerBound)
-                    context.draw(Text(axis(number)).font(theme.chartAxisFont).foregroundColor(theme.muted), at: CGPoint(x: 42, y: y), anchor: .trailing)
+                    context.draw(Text(left.label(number)).font(theme.chartAxisFont).foregroundColor(theme.muted), at: CGPoint(x: 42, y: y), anchor: .trailing)
                 }
                 var positive = Array(repeating: 0.0, count: model.samples.count)
                 var negative = positive
                 for (lineIndex, line) in lines.enumerated() {
-                    let domain = domains[line.axis ?? "left"] ?? 0...1
+                    let domain = axes[line.axis ?? "left"]?.domain ?? 0...1
                     for segment in model.segments(line: lineIndex) {
                         var top: [CGPoint] = [], bottom: [CGPoint] = []
                         for index in segment {
@@ -168,10 +167,10 @@ struct TimeSeriesPlot: View {
                             at: CGPoint(x: plot.minX + Double(offset) / 2 * plot.width, y: plot.maxY + 18))
                     }
                 }
-                context.draw(Text(style.unit).font(theme.chartAxisFont).foregroundColor(theme.muted), at: CGPoint(x: 0, y: 0), anchor: .topLeading)
+                context.draw(Text(left.unit).font(theme.chartAxisFont).foregroundColor(theme.muted), at: CGPoint(x: 0, y: 0), anchor: .topLeading)
                 for (offset, key) in ["right1", "right2"].enumerated() {
-                    if let domain = domains[key], let line = lines.first(where: { $0.axis == key }) {
-                        context.draw(Text("\(axis(domain.upperBound)) \(line.unit ?? style.unit)").font(theme.chartSecondaryAxisFont).foregroundColor(line.color),
+                    if let axis = axes[key], let line = lines.first(where: { $0.axis == key }) {
+                        context.draw(Text("\(axis.label(axis.domain.upperBound)) \(axis.unit)").font(theme.chartSecondaryAxisFont).foregroundColor(line.color),
                             at: CGPoint(x: plot.maxX + 5, y: plot.minY + Double(offset) * 15), anchor: .topLeading)
                     }
                 }
@@ -185,7 +184,7 @@ struct TimeSeriesPlot: View {
         CGRect(x: 50, y: 24, width: max(1, size.width - 115), height: max(1, size.height - 54))
     }
 
-    private func domains() -> [String: ClosedRange<Double>] {
+    private func axes() -> [String: TimeSeriesAxis] {
         var ranges: [String: (Double, Double)] = [:]
         for line in lines {
             let key = line.axis ?? "left"
@@ -204,11 +203,16 @@ struct TimeSeriesPlot: View {
                     max(ranges["left"]?.1 ?? 0, values.filter { $0 > 0 }.reduce(0, +)))
             }
         }
-        let lower = style.minimum ?? min(0, ranges["left"]?.0 ?? 0)
-        let upper = max(max(lower + 1, lower.nextUp),
-            style.maximum ?? max(1, (ranges["left"]?.1 ?? 0) * 1.08))
-        return ranges.mapValues { low, high in min(0, low)...max(1, high * 1.08) }
-            .merging(["left": lower...upper]) { _, new in new }
+        var result: [String: TimeSeriesAxis] = [:]
+        for (key, range) in ranges {
+            let unit = lines.first { ($0.axis ?? "left") == key }?.unit ?? style.unit
+            result[key] = TimeSeriesAxis(range: range.0...range.1, unit: unit)
+        }
+        let range = ranges["left"] ?? (0, 0)
+        result["left"] = TimeSeriesAxis(range: range.0...range.1, unit: style.unit,
+            minimum: style.minimum, maximum: style.maximum)
+
+        return result
     }
 
     private func drawSegment(context: inout GraphicsContext, top: [CGPoint], bottom: [CGPoint], line: TimeSeriesLine) {
@@ -244,10 +248,6 @@ struct TimeSeriesPlot: View {
 
     private func yPosition(_ value: Double, domain: ClosedRange<Double>, plot: CGRect) -> Double {
         plot.maxY - (value - domain.lowerBound) / (domain.upperBound - domain.lowerBound) * plot.height
-    }
-
-    private func axis(_ value: Double) -> String {
-        value.formatted(.number.notation(abs(value) >= 10000 ? .compactName : .automatic).precision(.fractionLength(0...1)))
     }
 }
 
