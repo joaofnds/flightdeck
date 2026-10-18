@@ -16,7 +16,7 @@ jobs:
     env:
       # Pinned, so that a newer clippy never refuses code that passed before. Move it forward
       # in a commit of its own, together with the fixes the newer lints ask for.
-      RUSTUP_TOOLCHAIN: 1.95.0
+      RUSTUP_TOOLCHAIN: 1.98.0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -66,7 +66,7 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 30
     env:
-      RUSTUP_TOOLCHAIN: 1.95.0
+      RUSTUP_TOOLCHAIN: 1.98.0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

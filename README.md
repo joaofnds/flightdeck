@@ -61,7 +61,7 @@ The reference contains private readings too.
 
 ## Native desktop app
 
-With Xcode's command-line tools and Rust 1.95.0 installed, build the GPUI application:
+With Xcode's command-line tools and Rust 1.98.0 installed, build the GPUI application:
 
 ```sh
 cargo build --locked --release -p collector -p persistence --bin collector --bin persister

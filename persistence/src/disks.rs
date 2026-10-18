@@ -38,9 +38,9 @@ pub fn decode(text: &str, snapshot: &mut DiskSnapshot) -> Result<()> {
     }
 
     let mut words = [0; encoding::WORDS_MAX];
-    for (index, chunk) in text.as_bytes().chunks_exact(16).enumerate() {
+    for (index, chunk) in text.as_bytes().as_chunks::<16>().0.iter().enumerate() {
         let mut bytes = [0; 8];
-        for (byte, pair) in bytes.iter_mut().zip(chunk.chunks_exact(2)) {
+        for (byte, pair) in bytes.iter_mut().zip(chunk.as_chunks::<2>().0) {
             *byte = decode_digit(pair[0])? * 16 + decode_digit(pair[1])?;
         }
         words[index] = u64::from_le_bytes(bytes);

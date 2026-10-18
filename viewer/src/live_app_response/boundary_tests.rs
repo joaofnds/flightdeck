@@ -247,7 +247,9 @@ fn preserves_generated_captured_names_through_the_wire_encoding() {
 fn decode_hex(encoded: &str) -> Vec<u8> {
     encoded
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             let text = std::str::from_utf8(pair).unwrap();
             u8::from_str_radix(text, 16).unwrap()
