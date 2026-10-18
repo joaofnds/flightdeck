@@ -51,7 +51,7 @@ impl Row {
 
     fn owns_plot(&self, source: &str) -> bool {
         match self {
-            Self::Charts(panels) => panels.iter().take(2).any(|panel| panel.id == source),
+            Self::Charts(panels) => panels.iter().take(3).any(|panel| panel.id == source),
             Self::CPUHistory => source == "cpu-history-plot",
             _ => false,
         }
@@ -136,12 +136,16 @@ impl LiveDashboard {
             return;
         }
 
+        let previous_columns = self.reading_chart_columns();
         self.viewport_size = size;
         self.row_heights.borrow_mut().clear();
         if let Some(preview) = &mut self.preview {
             preview.layout = None;
             preview.header_height = None;
             preview.retarget_geometry = preview.origin == Origin::Pointer;
+        }
+        if previous_columns != self.reading_chart_columns() {
+            self.rebuild();
         }
     }
 

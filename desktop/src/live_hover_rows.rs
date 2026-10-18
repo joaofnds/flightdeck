@@ -3,6 +3,19 @@ use serde_json::Value;
 use crate::live_dashboard::{LiveDashboard, Row};
 
 impl LiveDashboard {
+    pub(crate) fn reading_chart_columns(&self) -> usize {
+        if self.viewport_size.width < gpui::px(640.0) {
+            return 1;
+        }
+        if self.request.route == "overview" {
+            if self.viewport_size.width >= gpui::px(1100.0) {
+                return 3;
+            }
+        }
+
+        2
+    }
+
     pub(crate) fn reading_rows(&self) -> Vec<Row> {
         if self.request.route == "self" {
             return vec![Row::Diagnostics];
@@ -27,7 +40,7 @@ impl LiveDashboard {
             rows.push(Row::CPUHistory);
             rows.push(Row::CPUActivity);
         }
-        for panels in self.panels.chunks(2) {
+        for panels in self.panels.chunks(self.reading_chart_columns()) {
             rows.push(Row::Charts(panels.to_vec()));
         }
         if self.request.route == "storage" {
@@ -100,7 +113,7 @@ impl LiveDashboard {
             rows.push(Row::Process(index));
         }
         rows.push(Row::Heading("Selected app · last 15 minutes".into()));
-        for panels in self.panels.chunks(2) {
+        for panels in self.panels.chunks(self.reading_chart_columns()) {
             rows.push(Row::Charts(panels.to_vec()));
         }
         assert!(rows.len() <= 2048);

@@ -6,6 +6,8 @@ use serde_json::{Value, json};
 use super::LiveDashboard;
 use crate::live_source::{Snapshot, Update, Worker};
 
+#[path = "live_layout_input_tests.rs"]
+mod layout;
 #[path = "live_resource_input_tests.rs"]
 mod resource;
 #[path = "live_source_mode_input_tests.rs"]
@@ -105,11 +107,11 @@ fn widening_the_window_recomputes_the_timestamp_beneath_a_stationary_pointer(
     let plot = harness.driver.plot_bounds("live-cpu-plot");
     assert!(plot.contains(&pointer));
     assert_eq!(plot.left(), gpui::px(253.0));
-    assert_eq!(plot.size.width, gpui::px(663.0));
+    assert_eq!(plot.size.width, gpui::px(407.5));
     assert_eq!(harness.driver.pointer_position(), pointer);
     assert_eq!(
         harness.driver.chart_accessibility_reading("live-cpu").0,
-        Some(863)
+        Some(851)
     );
     assert!(harness.driver.cursor_is_visible("live-cpu-plot"));
     assert!(harness.driver.reading_is_visible("Unavailable"));
@@ -814,8 +816,12 @@ impl InputDriver {
     }
 
     fn assert_cursor_tracks_previous_second(&mut self, selector: &'static str) {
+        self.assert_cursor_tracks_fraction(selector, 898.0 / 900.0);
+    }
+
+    fn assert_cursor_tracks_fraction(&mut self, selector: &'static str, fraction: f32) {
         let plot = self.plot_bounds(selector);
-        let x = plot.left() + plot.size.width * (898.0 / 900.0);
+        let x = plot.left() + plot.size.width * fraction;
 
         let (expected, cursor) = self.context.update(|window, _| {
             let expected = gpui::Bounds::new(

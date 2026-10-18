@@ -85,10 +85,13 @@ impl LiveDashboard {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
+                    .gap(px(12.0))
                     .justify_between()
                     .items_center()
                     .child(
                         div()
+                            .debug_selector(|| "reading-title".into())
                             .text_size(px(23.0))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .child(title),
@@ -160,7 +163,12 @@ impl LiveDashboard {
     }
 
     fn header_controls(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let controls = self.native_header_controls(cx);
+        let controls = self
+            .native_header_controls(cx)
+            .debug_selector(|| "reading-controls".into())
+            .flex_wrap()
+            .min_w_0()
+            .max_w_full();
 
         match self.request.route.as_str() {
             "self" => controls.child(control("Refresh").on_click(cx.listener(|this, _, _, cx| {
