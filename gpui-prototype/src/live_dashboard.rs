@@ -149,7 +149,8 @@ impl LiveDashboard {
                     "elapsed_seconds":self.started.elapsed().as_secs_f64(),
                     "updates":self.updates,"renders":self.renders,
                     "read_ms":self.snapshot.as_ref().map(|snapshot| snapshot.read_ms),
-                    "tail_cache_bytes":self.snapshot.as_ref().map(|s| &s.catalog["tail_cache_bytes"]),
+                    "tail_cache_bytes":self.snapshot.as_ref()
+                        .map(|snapshot| &snapshot.catalog["tail_cache_bytes"]),
                     "tail_ticks":self.snapshot.as_ref().map(|s| &s.catalog["tail_ticks"]),
                     "scalar_points":self.snapshot.as_ref()
                         .and_then(|s| s.selection["trends"].as_array()).map(Vec::len),
