@@ -19,6 +19,13 @@ pub struct EnergyRate {
     pub elapsed_ns: u64,
 }
 
+/// Exact interval bytes and its continuous-time denominator for disk throughput.
+#[derive(Clone, Copy)]
+pub struct BytesRate {
+    pub bytes: u64,
+    pub elapsed_ns: u64,
+}
+
 struct Endpoints<T> {
     previous: T,
     selected: T,
@@ -36,6 +43,10 @@ const _: () = {
     assert!(size_of::<Amount>() <= 16);
     assert!(size_of::<CpuRate>() <= 16);
     assert!(size_of::<EnergyRate>() <= 16);
+    assert!(size_of::<BytesRate>() <= 16);
+    assert!(size_of::<Subtotal>() <= 24);
+    assert!(size_of::<AppTotals>() <= 184);
+    assert!(size_of::<ProcessTotals<'_>>() <= 184);
     assert!(size_of::<ProcessCreation>() <= 16);
 };
 
@@ -60,6 +71,10 @@ pub struct AppTotals {
     pub live_members: u32,
     pub cpu_ns: Subtotal,
     pub energy_nj: Subtotal,
+    pub disk_read_bytes: Subtotal,
+    pub disk_written_bytes: Subtotal,
+    /// Sum of members with both directional deltas measured, not two partial App subtotals.
+    pub disk_io_bytes: Subtotal,
     pub resident_bytes: Subtotal,
     pub footprint_bytes: Subtotal,
     /// Completeness of membership only; metric availability is carried by each subtotal.
@@ -105,6 +120,9 @@ pub struct ProcessTotals<'bytes> {
     pub program_unavailable: Option<IdentityUnavailable>,
     pub cpu_ns: Amount,
     pub energy_nj: Amount,
+    pub disk_read_bytes: Amount,
+    pub disk_written_bytes: Amount,
+    pub disk_io_bytes: Amount,
     pub app_attribution: Option<Unavailable>,
     pub resident_bytes_last: Option<u64>,
     pub footprint_bytes_last: Option<u64>,
@@ -234,6 +252,9 @@ impl<'bytes> Aggregate<'bytes> {
             program_unavailable,
             cpu_ns: Amount::Unavailable(Unavailable::Baseline),
             energy_nj: Amount::Unavailable(Unavailable::Baseline),
+            disk_read_bytes: Amount::Unavailable(Unavailable::Baseline),
+            disk_written_bytes: Amount::Unavailable(Unavailable::Baseline),
+            disk_io_bytes: Amount::Unavailable(Unavailable::Baseline),
             app_attribution: None,
             resident_bytes_last: last_gauge(process, |usage| usage.resident_bytes),
             footprint_bytes_last: last_gauge(process, |usage| usage.footprint_bytes),
@@ -251,6 +272,7 @@ impl<'bytes> Aggregate<'bytes> {
             totals
                 .energy_nj
                 .add(attributed(output.energy_nj, output.app_attribution));
+            compute_process_disk(totals, output);
             if selected.state == ProcessState::Live {
                 totals.live_members += 1;
                 totals
@@ -265,6 +287,19 @@ impl<'bytes> Aggregate<'bytes> {
             self.membership_complete = false;
         }
     }
+}
+
+fn compute_process_disk(totals: &mut AppTotals, process: &ProcessTotals<'_>) {
+    totals
+        .disk_read_bytes
+        .add(attributed(process.disk_read_bytes, process.app_attribution));
+    totals.disk_written_bytes.add(attributed(
+        process.disk_written_bytes,
+        process.app_attribution,
+    ));
+    totals
+        .disk_io_bytes
+        .add(attributed(process.disk_io_bytes, process.app_attribution));
 }
 
 impl Subtotal {
@@ -422,6 +457,7 @@ fn deltas(interval: &Interval, process: &ProcessInterval, output: &mut ProcessTo
         if start_matches(interval, process) {
             output.cpu_ns = cpu_delta(now, None);
             output.energy_nj = Amount::Known(now.energy_nj);
+            deltas_disk(now, None, output);
             deltas_start(process, output);
         } else {
             deltas_unavailable(output, Unavailable::Baseline);
@@ -450,6 +486,9 @@ fn deltas_start(process: &ProcessInterval, output: &mut ProcessTotals) {
 fn deltas_unavailable(output: &mut ProcessTotals, reason: Unavailable) {
     output.cpu_ns = Amount::Unavailable(reason);
     output.energy_nj = Amount::Unavailable(reason);
+    output.disk_read_bytes = Amount::Unavailable(reason);
+    output.disk_written_bytes = Amount::Unavailable(reason);
+    output.disk_io_bytes = Amount::Unavailable(reason);
 }
 
 fn deltas_usage(endpoints: &Endpoints<&Usage>, output: &mut ProcessTotals) {
@@ -466,6 +505,32 @@ fn deltas_usage(endpoints: &Endpoints<&Usage>, output: &mut ProcessTotals) {
         Amount::Unavailable(Unavailable::CounterReset),
         Amount::Known,
     );
+    deltas_disk(now, Some(before), output);
+}
+
+fn deltas_disk(now: &Usage, before: Option<&Usage>, output: &mut ProcessTotals<'_>) {
+    output.disk_read_bytes = now
+        .disk_read_bytes
+        .checked_sub(before.map_or(0, |usage| usage.disk_read_bytes))
+        .map_or(
+            Amount::Unavailable(Unavailable::CounterReset),
+            Amount::Known,
+        );
+    output.disk_written_bytes = now
+        .disk_written_bytes
+        .checked_sub(before.map_or(0, |usage| usage.disk_written_bytes))
+        .map_or(
+            Amount::Unavailable(Unavailable::CounterReset),
+            Amount::Known,
+        );
+    output.disk_io_bytes = match (output.disk_read_bytes, output.disk_written_bytes) {
+        (Amount::Known(read), Amount::Known(written)) => read
+            .checked_add(written)
+            .map_or(Amount::Unavailable(Unavailable::Overflow), Amount::Known),
+        (Amount::Unavailable(reason), _) | (_, Amount::Unavailable(reason)) => {
+            Amount::Unavailable(reason)
+        }
+    };
 }
 
 fn cpu_delta(now: &Usage, before: Option<&Usage>) -> Amount {
@@ -597,6 +662,15 @@ pub fn energy_watts(rate: EnergyRate) -> Option<f64> {
     Some(number(rate.energy_nj) / number(rate.elapsed_ns))
 }
 
+#[must_use]
+pub fn bytes_per_second(rate: BytesRate) -> Option<f64> {
+    if rate.elapsed_ns == 0 {
+        return None;
+    }
+
+    Some(number(rate.bytes) / number(rate.elapsed_ns) * 1_000_000_000.0)
+}
+
 fn number(value: u64) -> f64 {
     let upper = u32::try_from(value >> 32).unwrap_or_else(|_| unreachable!());
     let lower = u32::try_from(value & u64::from(u32::MAX)).unwrap_or_else(|_| unreachable!());
@@ -605,6 +679,8 @@ fn number(value: u64) -> f64 {
 
 #[cfg(test)]
 mod boundary_tests;
+#[cfg(test)]
+mod disk_tests;
 #[cfg(test)]
 mod fixture_tests;
 #[cfg(test)]

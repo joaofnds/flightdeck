@@ -174,6 +174,42 @@ fn charges_all_retained_string_and_vector_capacities() {
 }
 
 #[test]
+fn keeps_disk_layouts_inside_the_unchanged_sample_and_response_budgets() {
+    // Goal: layout growth remains explicit without widening either fixed eight-MiB budget.
+    // Method: admit the full short-name population and serialize its first bounded member page.
+    let sample = fixture::populated(24_000, b"small").unwrap();
+
+    let page = sample
+        .app_detail(&Detail {
+            selected: &sample.selected,
+            app_index: 0,
+            page: Page {
+                offset: 0,
+                limit: 512,
+            },
+        })
+        .unwrap();
+
+    println!(
+        "{}",
+        serde_json::json!({
+            "aggregate_app_bytes":size_of::<crate::apps::AppTotals>(),
+            "aggregate_process_bytes":size_of::<crate::apps::ProcessTotals<'_>>(),
+            "owned_app_bytes":size_of::<super::App>(),
+            "owned_process_bytes":size_of::<super::Process>(),
+            "sample_bytes":sample.bytes(), "sample_budget":SAMPLE_BYTES_MAX,
+            "response_budget":super::RESPONSE_BYTES_MAX
+        })
+    );
+
+    assert_eq!(SAMPLE_BYTES_MAX, 8_388_608);
+    assert_eq!(super::RESPONSE_BYTES_MAX, 8_388_608);
+    assert!(sample.bytes() <= SAMPLE_BYTES_MAX);
+    assert_eq!(page["page"]["total"], 24_000);
+    assert_eq!(page["processes"].as_array().unwrap().len(), 512);
+}
+
+#[test]
 fn preserves_generated_captured_names_through_the_wire_encoding() {
     // Goal: reversible bytes and escaped displays cannot collapse distinct generated names.
     // Method: round-trip 128 deterministic valid basenames containing arbitrary nonzero bytes.

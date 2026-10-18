@@ -145,6 +145,130 @@ fn keeps_coverage_and_full_unsigned_amounts_exact_after_compaction() {
 }
 
 #[test]
+fn preserves_independent_disk_coverage_and_amounts_after_compaction() {
+    // Goal: compaction keeps exact disk sums and independent directional/combined coverage.
+    // Method: serialize an overflowed read, measured-zero write and unavailable joint total.
+    let history = History::new();
+    let keys = [(KeyKind::Executable, b"disk".as_slice())];
+    let mut point = point(&history, 1, &keys);
+    let read = Measure {
+        known: u64::MAX,
+        measured_members: 1,
+        unavailable_members: 1,
+        overflowed: true,
+    };
+    let written = Measure {
+        known: 0,
+        measured_members: 2,
+        unavailable_members: 0,
+        overflowed: false,
+    };
+    let combined = Measure {
+        known: 0,
+        measured_members: 0,
+        unavailable_members: 2,
+        overflowed: false,
+    };
+    point.apps[0].members = 2;
+    point.apps[0].disk_read_bytes = CompactMeasure::capture(&read);
+    point.apps[0].disk_written_bytes = CompactMeasure::capture(&written);
+    point.apps[0].disk_io_bytes = CompactMeasure::capture(&combined);
+
+    let value = point.json(&Target {
+        kind: KeyKind::Executable,
+        bytes: b"disk",
+    });
+
+    assert_eq!(value["disk_read_bytes"], read.json());
+    assert_eq!(value["disk_written_bytes"], written.json());
+    assert_eq!(value["disk_io_bytes"], combined.json());
+    assert_eq!(value["disk_read_bps"], Value::Null);
+    assert_eq!(value["disk_written_bps"], 0.0);
+    assert_eq!(value["disk_io_bps"], Value::Null);
+}
+
+macro_rules! compact_measure_round_trip {
+    ($name:ident, $known:expr, $measured:expr, $unavailable:expr, $overflowed:expr) => {
+        #[test]
+        fn $name() {
+            // Goal: preserve amounts and independent coverage states in compact history.
+            // Method: compare the compact output with the original public Measure contract.
+            let source = Measure {
+                known: $known,
+                measured_members: $measured,
+                unavailable_members: $unavailable,
+                overflowed: $overflowed,
+            };
+
+            let compact = CompactMeasure::capture(&source);
+
+            assert_eq!(compact.json(), source.json());
+            assert_eq!(compact.measured(), source.measured());
+        }
+    };
+}
+
+compact_measure_round_trip!(preserves_empty_coverage_after_compaction, 0, 0, 0, false);
+compact_measure_round_trip!(preserves_measured_zero_after_compaction, 0, 1, 0, false);
+compact_measure_round_trip!(
+    preserves_maximum_measured_count_after_compaction,
+    u64::MAX,
+    24_000,
+    0,
+    false
+);
+compact_measure_round_trip!(
+    preserves_maximum_unavailable_count_after_compaction,
+    0,
+    0,
+    24_000,
+    false
+);
+compact_measure_round_trip!(
+    preserves_mixed_coverage_above_float_precision_after_compaction,
+    9_007_199_254_740_993,
+    11_999,
+    12_001,
+    false
+);
+compact_measure_round_trip!(
+    preserves_amount_byte_order_after_compaction,
+    0x0123_4567_89ab_cdef,
+    1,
+    1,
+    false
+);
+compact_measure_round_trip!(
+    preserves_maximum_amount_with_overflow_after_compaction,
+    u64::MAX,
+    24_000,
+    0,
+    true
+);
+compact_measure_round_trip!(
+    preserves_overflow_without_measured_members_after_compaction,
+    0,
+    0,
+    24_000,
+    true
+);
+
+#[test]
+fn bounds_app_history_layout_with_all_seven_exact_measures() {
+    // Goal: preserve fifteen minutes for ordinary App populations within the fixed cache budget.
+    // Method: guard the actual compiler layouts that Point::bytes charges per App and observation.
+    assert!(size_of::<CompactMeasure>() <= 12);
+    assert!(align_of::<CompactMeasure>() <= align_of::<u32>());
+    assert!(size_of::<App>() <= 96);
+    eprintln!(
+        "compact App history layout: {}",
+        json!({"measure_bytes": size_of::<CompactMeasure>(), "app_bytes": size_of::<App>(),
+            "point_bytes": size_of::<Point>(),
+            "trace_point_bytes": size_of::<super::super::TracePoint>()})
+    );
+}
+
+#[test]
 fn shares_keys_across_runs_without_changing_observation_identity_or_metrics() {
     // An immutable raw key can be shared while each point retains its own run and values.
     let mut history = History::new();
@@ -205,6 +329,9 @@ fn point(history: &History, publication: u64, keys: &[(KeyKind, &[u8])]) -> Box<
             membership_complete: false,
             cpu_ns: measure(),
             energy_nj: measure(),
+            disk_read_bytes: measure(),
+            disk_written_bytes: measure(),
+            disk_io_bytes: measure(),
             resident_bytes: measure(),
             footprint_bytes: measure(),
         })

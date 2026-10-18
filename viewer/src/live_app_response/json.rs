@@ -98,6 +98,12 @@ fn app(value: &App, index: usize, elapsed_ns: Option<u64>) -> Value {
         "members": value.members, "live_members": value.live_members,
         "membership_complete": value.membership_complete,
         "cpu_ns": measure(&value.cpu_ns), "energy_nj": measure(&value.energy_nj),
+        "disk_read_bytes": measure(&value.disk_read_bytes),
+        "disk_written_bytes": measure(&value.disk_written_bytes),
+        "disk_io_bytes": measure(&value.disk_io_bytes),
+        "disk_read_bps": disk_rate(value.disk_read_bytes.measured(), elapsed_ns),
+        "disk_written_bps": disk_rate(value.disk_written_bytes.measured(), elapsed_ns),
+        "disk_io_bps": disk_rate(value.disk_io_bytes.measured(), elapsed_ns),
         "resident_bytes": measure(&value.resident_bytes),
         "footprint_bytes": measure(&value.footprint_bytes),
         "cpu_percent_one_core": value.cpu_ns.measured().and_then(|cpu_ns| {
@@ -122,6 +128,12 @@ fn process(value: &Process, elapsed_ns: Option<u64>) -> Value {
         })),
         "program_unavailable": value.program_unavailable.map(identity_reason),
         "cpu_ns": amount(value.cpu_ns), "energy_nj": amount(value.energy_nj),
+        "disk_read_bytes": amount(value.disk_read_bytes),
+        "disk_written_bytes": amount(value.disk_written_bytes),
+        "disk_io_bytes": amount(value.disk_io_bytes),
+        "disk_read_bps": disk_rate(known(value.disk_read_bytes), elapsed_ns),
+        "disk_written_bps": disk_rate(known(value.disk_written_bytes), elapsed_ns),
+        "disk_io_bps": disk_rate(known(value.disk_io_bytes), elapsed_ns),
         "resident_bytes": amount(value.resident_bytes),
         "footprint_bytes": amount(value.footprint_bytes),
         "app_attribution": value.app_attribution.map(reason),
@@ -137,6 +149,13 @@ fn process(value: &Process, elapsed_ns: Option<u64>) -> Value {
         "energy_watts": known(value.energy_nj).and_then(|energy_nj| {
             apps::energy_watts(apps::EnergyRate { energy_nj, elapsed_ns: elapsed_ns? })
         }),
+    })
+}
+
+fn disk_rate(bytes: Option<u64>, elapsed_ns: Option<u64>) -> Option<f64> {
+    apps::bytes_per_second(apps::BytesRate {
+        bytes: bytes?,
+        elapsed_ns: elapsed_ns?,
     })
 }
 

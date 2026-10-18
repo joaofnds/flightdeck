@@ -26,6 +26,42 @@ fn preserves_known_subtotals_and_uncertain_membership() {
 pub(super) mod fixture;
 
 #[test]
+fn keeps_partial_disk_rates_and_joint_coverage_on_the_wire() {
+    // Goal: a refused process cannot erase measured I/O or become a measured zero.
+    // Method: serialize the known member's read/write/combined amounts beside one refusal.
+    let sample = fixture::sample(fixture::Scenario::Refused);
+
+    let detail = sample
+        .app_detail(&Detail {
+            selected: &sample.selected,
+            app_index: 0,
+            page: Page {
+                offset: 0,
+                limit: 512,
+            },
+        })
+        .unwrap();
+
+    assert_eq!(
+        detail["app"]["disk_io_bytes"],
+        serde_json::json!({
+            "known":"1200000000", "measured_members":1,
+            "unavailable_members":1, "overflowed":false
+        })
+    );
+    assert_eq!(detail["app"]["disk_read_bps"], 200_000_000.0);
+    assert_eq!(detail["app"]["disk_written_bps"], 1_000_000_000.0);
+    assert_eq!(detail["app"]["disk_io_bps"], 1_200_000_000.0);
+    assert_eq!(
+        detail["processes"][1]["disk_io_bytes"],
+        serde_json::json!({
+            "known":null, "unavailable":"refused"
+        })
+    );
+    assert_eq!(detail["processes"][1]["disk_io_bps"], Value::Null);
+}
+
+#[test]
 fn preserves_process_identity_and_exact_byte_keys_in_detail() {
     // Goal: detail cannot lose creation precision or identify an App by its display text.
     // Method: compare one selected process and its enclosing App against fixed wire literals.
@@ -118,6 +154,11 @@ macro_rules! missing_rates {
             assert_eq!(detail["app"]["cpu_percent_one_core"], Value::Null);
             assert_eq!(detail["app"]["resident_bytes"]["known"], "157286400");
             assert_eq!(detail["app"]["membership_complete"], false);
+            assert_eq!(detail["processes"][0]["disk_read_bytes"], serde_json::json!({
+                "known":null, "unavailable":$reason
+            }));
+            assert_eq!(detail["processes"][0]["disk_written_bps"], Value::Null);
+            assert_eq!(detail["app"]["disk_io_bps"], Value::Null);
         }
     }
 }
@@ -153,6 +194,13 @@ fn retains_process_usage_but_withholds_app_attribution_across_exec() {
     assert_eq!(detail["processes"][0]["app_attribution"], "exec");
     assert_eq!(detail["app"]["cpu_ns"]["measured_members"], 0);
     assert_eq!(detail["app"]["cpu_percent_one_core"], Value::Null);
+    assert_eq!(
+        detail["processes"][0]["disk_io_bytes"]["known"],
+        "1200000000"
+    );
+    assert_eq!(detail["processes"][0]["disk_io_bps"], 1_200_000_000.0);
+    assert_eq!(detail["app"]["disk_io_bytes"]["measured_members"], 0);
+    assert_eq!(detail["app"]["disk_io_bps"], Value::Null);
 }
 
 #[test]

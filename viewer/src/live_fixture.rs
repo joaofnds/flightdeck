@@ -28,6 +28,8 @@ pub struct Fixture {
     pub root: PathBuf,
     pub writer: Writer,
     elapsed: u64,
+    continuous_step_ns: u64,
+    awake_step_ns: u64,
     usage_override: Option<Usage>,
     identity: bool,
     process_capacity: u64,
@@ -68,15 +70,19 @@ impl Fixture {
         if identity {
             Self::new_mode_identity(&root, &shape, serial, &mut writer);
         }
-        Self {
+        let mut fixture = Self {
             root,
             writer,
             elapsed: 0,
+            continuous_step_ns: 0,
+            awake_step_ns: 0,
             usage_override: None,
             identity,
             process_capacity,
             owns_root: true,
-        }
+        };
+        fixture.set_clock_intervals(1_000_000_000, 1_000_000_000);
+        fixture
     }
 
     fn new_mode_identity(root: &std::path::Path, shape: &Shape, serial: u64, writer: &mut Writer) {
@@ -136,15 +142,19 @@ impl Fixture {
         .write(&self.root)
         .unwrap();
 
-        Self {
+        let mut fixture = Self {
             root: self.root.clone(),
             writer,
             elapsed: 0,
+            continuous_step_ns: 0,
+            awake_step_ns: 0,
             usage_override: None,
             identity: false,
             process_capacity: 2,
             owns_root: false,
-        }
+        };
+        fixture.set_clock_intervals(1_000_000_000, 1_000_000_000);
+        fixture
     }
 
     fn intern(&mut self, name: &[u8], app: &[u8]) -> ProgramReference {
@@ -176,6 +186,14 @@ impl Fixture {
 
     pub fn publish_with_system_rows(&mut self, second: u64) {
         self.publish_with_usage(second, &measured_process(self.elapsed).usage);
+    }
+
+    pub fn set_clock_intervals(&mut self, continuous_ns: u64, awake_ns: u64) {
+        assert_eq!(self.elapsed, 0);
+        assert!(continuous_ns > 0);
+        assert!(awake_ns > 0);
+        self.continuous_step_ns = continuous_ns;
+        self.awake_step_ns = awake_ns;
     }
 
     pub fn publish_with_usage(&mut self, second: u64, usage: &Usage) {
@@ -234,8 +252,8 @@ impl Fixture {
         };
         let times = ObservationTimes {
             wall_ns: second * 1_000_000_000,
-            continuous_ns: self.elapsed * 1_000_000_000,
-            awake_ns: self.elapsed * 1_000_000_000,
+            continuous_ns: self.elapsed * self.continuous_step_ns,
+            awake_ns: self.elapsed * self.awake_step_ns,
         };
         if self.identity {
             self.publish_identity(&mut readings, &times);

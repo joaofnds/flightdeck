@@ -162,8 +162,8 @@ pub(crate) fn usage(cpu: u64, energy: u64, resident: u64) -> Usage {
         pageins: 0,
         resident_bytes: resident,
         footprint_bytes: resident,
-        disk_read_bytes: 0,
-        disk_written_bytes: 0,
+        disk_read_bytes: cpu,
+        disk_written_bytes: energy,
     }
 }
 
@@ -209,6 +209,9 @@ pub fn populated(count: usize, name: &[u8]) -> persistence::Result<Box<Sample>> 
             program_unavailable: None,
             cpu_ns: apps::Amount::Unavailable(apps::Unavailable::Baseline),
             energy_nj: apps::Amount::Unavailable(apps::Unavailable::Baseline),
+            disk_read_bytes: apps::Amount::Unavailable(apps::Unavailable::Baseline),
+            disk_written_bytes: apps::Amount::Unavailable(apps::Unavailable::Baseline),
+            disk_io_bytes: apps::Amount::Unavailable(apps::Unavailable::Baseline),
             app_attribution: None,
             resident_bytes_last: Some(0),
             footprint_bytes_last: Some(0),

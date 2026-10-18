@@ -47,6 +47,9 @@ struct App {
     membership_complete: bool,
     cpu_ns: CompactMeasure,
     energy_nj: CompactMeasure,
+    disk_read_bytes: CompactMeasure,
+    disk_written_bytes: CompactMeasure,
+    disk_io_bytes: CompactMeasure,
     resident_bytes: CompactMeasure,
     footprint_bytes: CompactMeasure,
 }
@@ -178,6 +181,9 @@ impl Point {
                 membership_complete: app.membership_complete,
                 cpu_ns: CompactMeasure::capture(&app.cpu_ns),
                 energy_nj: CompactMeasure::capture(&app.energy_nj),
+                disk_read_bytes: CompactMeasure::capture(&app.disk_read_bytes),
+                disk_written_bytes: CompactMeasure::capture(&app.disk_written_bytes),
+                disk_io_bytes: CompactMeasure::capture(&app.disk_io_bytes),
                 resident_bytes: CompactMeasure::capture(&app.resident_bytes),
                 footprint_bytes: CompactMeasure::capture(&app.footprint_bytes),
             });

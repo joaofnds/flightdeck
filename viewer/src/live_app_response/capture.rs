@@ -47,6 +47,9 @@ pub(super) fn apps(aggregate: &apps::Aggregate<'_>, output: &mut Vec<App>) -> Re
             membership_complete: totals.membership_complete,
             cpu_ns: measure(&totals.cpu_ns),
             energy_nj: measure(&totals.energy_nj),
+            disk_read_bytes: measure(&totals.disk_read_bytes),
+            disk_written_bytes: measure(&totals.disk_written_bytes),
+            disk_io_bytes: measure(&totals.disk_io_bytes),
             resident_bytes: measure(&totals.resident_bytes),
             footprint_bytes: measure(&totals.footprint_bytes),
         });
@@ -82,6 +85,9 @@ pub(super) fn processes(
             program_unavailable: process.program_unavailable,
             cpu_ns: process.cpu_ns,
             energy_nj: process.energy_nj,
+            disk_read_bytes: process.disk_read_bytes,
+            disk_written_bytes: process.disk_written_bytes,
+            disk_io_bytes: process.disk_io_bytes,
             app_attribution: process.app_attribution,
             resident_bytes: process.resident_bytes_last.map_or(
                 apps::Amount::Unavailable(apps::Unavailable::Unknown),

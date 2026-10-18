@@ -10,7 +10,7 @@ use collector::ring::{
     RunIdentity, Shape, Tick, UsageAvailability, Writer,
 };
 
-use super::{Page, Sample};
+use super::{Detail, Page, Sample};
 use crate::live_apps::{Frame, Publication};
 
 #[test]
@@ -41,6 +41,111 @@ fn owns_ring_facts_after_source_and_frames_are_retired() {
     assert_eq!(result["apps"][0]["resident_bytes"]["known"], "104857600");
     assert_eq!(result["apps"][0]["membership_complete"], false);
     assert_eq!(result["apps"][0]["key"]["bytes_hex"], "2f412e617070");
+}
+
+#[test]
+fn owns_exact_disk_deltas_and_rates_after_the_ring_is_retired() {
+    // Goal: cumulative counters above float precision retain exact interval disk amounts.
+    // Method: retire two real identity-ring publications, then inspect owned App/process JSON.
+    let mut fixture = Fixture::new();
+    let previous = fixture.frame(1);
+    let selected = fixture.frame(2);
+    let mut sample = None;
+    Sample::capture(&selected, Some(&previous), &mut sample).unwrap();
+    drop(selected);
+    drop(previous);
+    drop(fixture);
+    let sample = sample.unwrap();
+
+    let page = sample
+        .apps_page(Page {
+            offset: 0,
+            limit: 512,
+        })
+        .unwrap();
+    let detail = sample
+        .app_detail(&Detail {
+            selected: &sample.selected,
+            app_index: 0,
+            page: Page {
+                offset: 0,
+                limit: 512,
+            },
+        })
+        .unwrap();
+
+    assert_eq!(
+        page["apps"][0]["disk_read_bytes"],
+        serde_json::json!({
+            "known":"4096", "measured_members":1, "unavailable_members":0, "overflowed":false
+        })
+    );
+    assert_eq!(detail["app"], page["apps"][0]);
+    assert_eq!(detail["app"]["disk_written_bytes"]["known"], "1024");
+    assert_eq!(detail["app"]["disk_io_bytes"]["known"], "5120");
+    assert_eq!(detail["app"]["disk_read_bps"], 4096.0);
+    assert_eq!(detail["app"]["disk_written_bps"], 1024.0);
+    assert_eq!(detail["app"]["disk_io_bps"], 5120.0);
+    assert_eq!(
+        detail["processes"][0]["disk_read_bytes"],
+        serde_json::json!({
+            "known":"4096", "unavailable":null
+        })
+    );
+    assert_eq!(
+        detail["processes"][0]["disk_written_bytes"]["known"],
+        "1024"
+    );
+    assert_eq!(detail["processes"][0]["disk_io_bytes"]["known"], "5120");
+    assert_eq!(detail["processes"][0]["disk_read_bps"], 4096.0);
+    assert_eq!(detail["processes"][0]["disk_written_bps"], 1024.0);
+    assert_eq!(detail["processes"][0]["disk_io_bps"], 5120.0);
+}
+
+#[test]
+fn retains_a_full_rolling_disk_history_from_real_ring_publications() {
+    // Goal: compact disk history retains exactly the latest 900 elapsed seconds after rollover.
+    // Method: capture 901 actual identity publications, retire sources and serialize the trace.
+    let mut fixture = Fixture::new();
+    let mut previous = None;
+    let mut sample = None;
+    let mut history = crate::live_app_history::History::new();
+    for second in 1..=901 {
+        let selected = fixture.frame(second);
+        Sample::capture(&selected, previous.as_deref(), &mut sample).unwrap();
+        let mut point = None;
+        history.capture(sample.as_deref().unwrap(), 0, &mut point);
+        let first = (1_800_000_000 + second).saturating_sub(899) * 1_000_000_000;
+        history.push(point.unwrap(), first);
+        previous = Some(selected);
+    }
+    let selected = sample.unwrap().selected;
+    drop(previous);
+    drop(fixture);
+    let cancellation = std::sync::Arc::new(crate::Cancellation::default());
+    let operation = cancellation.operation(0).unwrap();
+
+    let response = history
+        .response(
+            &selected,
+            &crate::live_app_history::Target {
+                kind: super::KeyKind::Bundle,
+                bytes: b"/A.app",
+            },
+            &operation,
+        )
+        .unwrap();
+
+    let points = response["points"].as_array().unwrap();
+    assert_eq!(points.len(), 900);
+    assert_eq!(points[0]["observation"]["stamp"]["publication"], "2");
+    assert_eq!(points[899]["observation"]["stamp"]["publication"], "901");
+    assert_eq!(points[0]["disk_io_bytes"]["known"], "5120");
+    assert_eq!(points[899]["disk_read_bps"], 4096.0);
+    assert_eq!(points[899]["disk_written_bps"], 1024.0);
+    assert_eq!(points[899]["disk_io_bps"], 5120.0);
+    assert_eq!(response["coverage"]["retention_limited"], false);
+    assert_eq!(response["coverage"]["cache_bytes_max"], 67_108_864);
 }
 
 struct Fixture {
@@ -147,7 +252,7 @@ impl Fixture {
                     dropped: Dropped::default(),
                 },
                 Some(&ObservationTimes {
-                    wall_ns: 1_800_000_000_000_000_000 + second,
+                    wall_ns: 1_800_000_000_000_000_000 + second * 1_000_000_000,
                     continuous_ns: second * 1_000_000_000,
                     awake_ns: second * 1_000_000_000,
                 }),
@@ -196,13 +301,13 @@ impl Drop for Fixture {
 }
 
 fn frame_process(second: u64) -> Process {
+    let mut usage =
+        super::tests::fixture::usage(200_000_000 * second, 1_000_000_000 * second, 104_857_600);
+    usage.disk_read_bytes = 9_007_199_254_740_993 + second * 4096;
+    usage.disk_written_bytes = 9_007_199_254_741_993 + second * 1024;
     Process {
         pid: 42,
-        usage: super::tests::fixture::usage(
-            200_000_000 * second,
-            1_000_000_000 * second,
-            104_857_600,
-        ),
+        usage,
         task: Task {
             threads: 1,
             faults: 0,

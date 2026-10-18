@@ -164,6 +164,18 @@ macro_rules! unavailable_interval {
                 result.processes[0].energy_nj,
                 Amount::Unavailable(Unavailable::Interval)
             );
+            assert_eq!(
+                result.processes[0].disk_read_bytes,
+                Amount::Unavailable(Unavailable::Interval)
+            );
+            assert_eq!(
+                result.processes[0].disk_written_bytes,
+                Amount::Unavailable(Unavailable::Interval)
+            );
+            assert_eq!(
+                result.processes[0].disk_io_bytes,
+                Amount::Unavailable(Unavailable::Interval)
+            );
         }
     };
 }
@@ -340,6 +352,18 @@ fn first_seen_existing_process_has_gauges_without_an_invented_rate_baseline() {
         Amount::Unavailable(Unavailable::Baseline)
     );
     assert_eq!(result.processes[0].resident_bytes_last, Some(800));
+    assert_eq!(
+        result.processes[0].disk_read_bytes,
+        Amount::Unavailable(Unavailable::Baseline)
+    );
+    assert_eq!(
+        result.processes[0].disk_written_bytes,
+        Amount::Unavailable(Unavailable::Baseline)
+    );
+    assert_eq!(
+        result.processes[0].disk_io_bytes,
+        Amount::Unavailable(Unavailable::Baseline)
+    );
 }
 
 #[test]

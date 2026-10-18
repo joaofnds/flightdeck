@@ -13,17 +13,21 @@ pub(super) struct HistoryKey {
 
 #[derive(Clone, Copy)]
 pub(super) struct CompactMeasure {
-    known: u64,
-    measured_members: u16,
-    unavailable_members: u16,
-    overflowed: bool,
+    // Bytes keep the exact amount without imposing eight-byte alignment on every measure.
+    known: [u8; 8],
+    coverage: u32,
 }
 
+const MEMBERS_BITS: u32 = 15;
+const MEMBERS_MASK: u32 = (1 << MEMBERS_BITS) - 1;
+const OVERFLOWED: u32 = 1 << (2 * MEMBERS_BITS);
+
 const _: () = {
-    assert!(crate::apps::PROCESS_INTERVALS_MAX < 65_536);
+    assert!(crate::apps::PROCESS_INTERVALS_MAX < 1 << MEMBERS_BITS);
     assert!(align_of::<HistoryKey>() <= align_of::<usize>());
-    assert!(size_of::<CompactMeasure>() <= 16);
-    assert!(size_of::<App>() <= 80);
+    assert!(align_of::<CompactMeasure>() <= align_of::<u32>());
+    assert!(size_of::<CompactMeasure>() <= 12);
+    assert!(size_of::<App>() <= 96);
 };
 
 impl HistoryKey {
@@ -39,20 +43,24 @@ impl HistoryKey {
 
 impl CompactMeasure {
     pub(super) fn capture(source: &Measure) -> Self {
+        // Each count fits fifteen bits under the validated process population bound.
+        let measured_members = u32::from(count(source.measured_members));
+        let unavailable_members = u32::from(count(source.unavailable_members));
+
         Self {
-            known: source.known,
-            measured_members: count(source.measured_members),
-            unavailable_members: count(source.unavailable_members),
-            overflowed: source.overflowed,
+            known: source.known.to_le_bytes(),
+            coverage: measured_members
+                | (unavailable_members << MEMBERS_BITS)
+                | (u32::from(source.overflowed) * OVERFLOWED),
         }
     }
 
     fn measure(self) -> Measure {
         Measure {
-            known: self.known,
-            measured_members: u32::from(self.measured_members),
-            unavailable_members: u32::from(self.unavailable_members),
-            overflowed: self.overflowed,
+            known: u64::from_le_bytes(self.known),
+            measured_members: self.coverage & MEMBERS_MASK,
+            unavailable_members: (self.coverage >> MEMBERS_BITS) & MEMBERS_MASK,
+            overflowed: self.coverage & OVERFLOWED != 0,
         }
     }
 

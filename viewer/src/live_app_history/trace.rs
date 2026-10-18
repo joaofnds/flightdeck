@@ -18,12 +18,15 @@ struct Totals {
     membership_complete: bool,
     cpu_ns: CompactMeasure,
     energy_nj: CompactMeasure,
+    disk_read_bytes: CompactMeasure,
+    disk_written_bytes: CompactMeasure,
+    disk_io_bytes: CompactMeasure,
     resident_bytes: CompactMeasure,
     footprint_bytes: CompactMeasure,
 }
 
 const _: () = {
-    assert!(size_of::<TracePoint>() <= 224);
+    assert!(size_of::<TracePoint>() <= 272);
 };
 
 impl TracePoint {
@@ -43,6 +46,9 @@ impl TracePoint {
                     membership_complete: app.membership_complete,
                     cpu_ns: capture_subtotal(&app.cpu_ns),
                     energy_nj: capture_subtotal(&app.energy_nj),
+                    disk_read_bytes: capture_subtotal(&app.disk_read_bytes),
+                    disk_written_bytes: capture_subtotal(&app.disk_written_bytes),
+                    disk_io_bytes: capture_subtotal(&app.disk_io_bytes),
                     resident_bytes: capture_subtotal(&app.resident_bytes),
                     footprint_bytes: capture_subtotal(&app.footprint_bytes),
                 });
@@ -79,6 +85,9 @@ impl TracePoint {
                 membership_complete: app.membership_complete,
                 cpu_ns: app.cpu_ns,
                 energy_nj: app.energy_nj,
+                disk_read_bytes: app.disk_read_bytes,
+                disk_written_bytes: app.disk_written_bytes,
+                disk_io_bytes: app.disk_io_bytes,
                 resident_bytes: app.resident_bytes,
                 footprint_bytes: app.footprint_bytes,
             }),
@@ -100,7 +109,9 @@ impl TracePoint {
             "elapsed_ns": self.elapsed_ns.map(|value| value.to_string()),
             "members": null, "membership_complete": false,
             "cpu_ns": null, "energy_nj": null, "resident_bytes": null, "footprint_bytes": null,
-            "cpu_percent_one_core": null, "energy_joules": null, "energy_watts": null});
+            "cpu_percent_one_core": null, "energy_joules": null, "energy_watts": null,
+            "disk_read_bytes": null, "disk_written_bytes": null, "disk_io_bytes": null,
+            "disk_read_bps": null, "disk_written_bps": null, "disk_io_bps": null});
 
         if let Some(app) = &self.totals {
             point["members"] = json!(app.members);
@@ -122,9 +133,26 @@ impl TracePoint {
                     elapsed_ns: self.elapsed_ns?,
                 })
             }));
+            self.json_disk(app, &mut point);
         }
 
         point
+    }
+
+    fn json_disk(&self, app: &Totals, point: &mut Value) {
+        point["disk_read_bytes"] = app.disk_read_bytes.json();
+        point["disk_written_bytes"] = app.disk_written_bytes.json();
+        point["disk_io_bytes"] = app.disk_io_bytes.json();
+        point["disk_read_bps"] = json!(self.json_disk_rate(app.disk_read_bytes));
+        point["disk_written_bps"] = json!(self.json_disk_rate(app.disk_written_bytes));
+        point["disk_io_bps"] = json!(self.json_disk_rate(app.disk_io_bytes));
+    }
+
+    fn json_disk_rate(&self, amount: CompactMeasure) -> Option<f64> {
+        apps::bytes_per_second(apps::BytesRate {
+            bytes: amount.measured()?,
+            elapsed_ns: self.elapsed_ns?,
+        })
     }
 }
 

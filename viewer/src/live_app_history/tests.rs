@@ -109,6 +109,19 @@ fn emits_a_gap_when_an_app_is_absent_in_an_observed_publication() {
         serde_json::Value::Null
     );
     assert_eq!(response["points"][2]["resident_bytes"]["known"], "42");
+    assert_eq!(response["points"][1]["source_available"], true);
+    assert_eq!(
+        response["points"][1]["disk_read_bytes"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        response["points"][1]["disk_written_bps"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        response["points"][1]["disk_io_bps"],
+        serde_json::Value::Null
+    );
 }
 
 #[test]
@@ -150,6 +163,9 @@ pub(super) fn point(publication: u64, app_count: usize) -> Box<Point> {
             membership_complete: false,
             cpu_ns: measure(),
             energy_nj: measure(),
+            disk_read_bytes: measure(),
+            disk_written_bytes: measure(),
+            disk_io_bytes: measure(),
             resident_bytes: measure(),
             footprint_bytes: measure(),
         })

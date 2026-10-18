@@ -14,15 +14,14 @@ fn measures_twelve_thousand_processes_across_two_hundred_fifty_six_apps() {
     let paths: Vec<_> = (0..256)
         .map(|index| format!("/Applications/Fixture {index}.app"))
         .collect();
-    let programs: Vec<_> = paths
-        .iter()
-        .map(|path| ProgramBytes {
-            executable_name: b"helper",
-            app_path: Some(path.as_bytes()),
-        })
-        .collect();
-    let before_usage = usage(9_007_199_254_740_993, 9_007_199_254_741_993, 1000);
-    let selected_usage = usage(9_007_199_254_741_093, 9_007_199_254_742_193, 2000);
+    let programs =
+        measures_twelve_thousand_processes_across_two_hundred_fifty_six_apps_programs(&paths);
+    let mut before_usage = usage(9_007_199_254_740_993, 9_007_199_254_741_993, 1000);
+    before_usage.disk_read_bytes = 9_007_199_254_740_993;
+    before_usage.disk_written_bytes = 9_007_199_254_741_993;
+    let mut selected_usage = usage(9_007_199_254_741_093, 9_007_199_254_742_193, 2000);
+    selected_usage.disk_read_bytes = before_usage.disk_read_bytes + 4096;
+    selected_usage.disk_written_bytes = before_usage.disk_written_bytes + 1024;
     let mut before = Vec::with_capacity(12_000);
     let mut selected = Vec::with_capacity(12_000);
     for index in 0..12_000 {
@@ -35,15 +34,9 @@ fn measures_twelve_thousand_processes_across_two_hundred_fifty_six_apps() {
         current.creation.as_mut().unwrap().unique_id = u64::try_from(index + 1).unwrap();
         selected.push(current);
     }
-    let spans: Vec<_> = before
-        .iter()
-        .zip(&selected)
-        .map(|(previous, selected)| ProcessInterval {
-            previous: Some(previous),
-            selected,
-            start: None,
-        })
-        .collect();
+    let spans = measures_twelve_thousand_processes_across_two_hundred_fifty_six_apps_intervals(
+        &before, &selected,
+    );
     let mut result = tests::aggregate();
     let timebase = Timebase::read().unwrap();
     let pid = i32::try_from(std::process::id()).unwrap();
@@ -77,6 +70,33 @@ fn measures_twelve_thousand_processes_across_two_hundred_fifty_six_apps() {
     );
 }
 
+fn measures_twelve_thousand_processes_across_two_hundred_fifty_six_apps_programs(
+    paths: &[String],
+) -> Vec<ProgramBytes<'_>> {
+    paths
+        .iter()
+        .map(|path| ProgramBytes {
+            executable_name: b"helper",
+            app_path: Some(path.as_bytes()),
+        })
+        .collect()
+}
+
+fn measures_twelve_thousand_processes_across_two_hundred_fifty_six_apps_intervals<'a>(
+    before: &'a [Box<ProcessObservation<'a>>],
+    selected: &'a [Box<ProcessObservation<'a>>],
+) -> Vec<ProcessInterval<'a>> {
+    before
+        .iter()
+        .zip(selected)
+        .map(|(previous, selected)| ProcessInterval {
+            previous: Some(previous),
+            selected,
+            start: None,
+        })
+        .collect()
+}
+
 struct CostObservation {
     elapsed_ns: u64,
     process_cpu_ns: u64,
@@ -96,6 +116,9 @@ fn report(paths: &[String], result: &Aggregate, cost: &CostObservation) {
             "physical_footprint_after_bytes": cost.footprint_after_bytes,
             "physical_footprint_lifetime_max_bytes": cost.footprint_lifetime_max_bytes,
             "process_result_capacity": result.processes.capacity(),
+            "process_result_size": size_of::<ProcessTotals<'_>>(),
+            "app_result_size": size_of::<AppTotals>(),
+            "disk_read_delta_per_process": 4096, "disk_written_delta_per_process": 1024,
         })
     );
 }

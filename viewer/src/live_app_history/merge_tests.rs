@@ -22,6 +22,12 @@ fn prefers_the_entire_live_point_without_summing_the_saved_overlap() {
     assert_eq!(response["points"][0]["cpu_ns"]["known"], "42");
     assert_eq!(response["points"][0]["elapsed_ns"], "1000000000");
     assert_eq!(response["points"][0]["cpu_percent_one_core"], 0.000_004_2);
+    assert_eq!(response["points"][0]["disk_read_bytes"]["known"], "42");
+    assert_eq!(response["points"][0]["disk_written_bytes"]["known"], "42");
+    assert_eq!(response["points"][0]["disk_io_bytes"]["known"], "42");
+    assert_eq!(response["points"][0]["disk_read_bps"], 42.0);
+    assert_eq!(response["points"][0]["disk_written_bps"], 42.0);
+    assert_eq!(response["points"][0]["disk_io_bps"], 42.0);
 }
 
 #[test]
@@ -201,6 +207,9 @@ fn emits_a_null_gap_for_a_known_context_observation_without_app_facts() {
 
     assert_eq!(response["points"].as_array().unwrap().len(), 1);
     assert_eq!(response["points"][0]["source_available"], false);
+    assert_eq!(response["points"][0]["disk_read_bytes"], Value::Null);
+    assert_eq!(response["points"][0]["disk_written_bps"], Value::Null);
+    assert_eq!(response["points"][0]["disk_io_bps"], Value::Null);
     assert_eq!(response["points"][0]["members"], Value::Null);
     assert_eq!(response["coverage"]["retention_limited"], true);
 }
@@ -272,6 +281,9 @@ fn trace(publication: u64, amount: u64) -> TracePoint {
         membership_complete: false,
         cpu_ns: measure,
         energy_nj: measure,
+        disk_read_bytes: measure,
+        disk_written_bytes: measure,
+        disk_io_bytes: measure,
         resident_bytes: measure,
         footprint_bytes: measure,
     };

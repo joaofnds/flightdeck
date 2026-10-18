@@ -4,7 +4,7 @@ use super::*;
 macro_rules! measured_interval {
     (
         $name:ident, $elapsed:expr, $cpu:expr, $energy:expr,
-        $percent:expr, $watts:expr, $joules:expr
+        $percent:expr, $watts:expr, $joules:expr, $read:expr, $written:expr, $combined:expr
     ) => {
         #[test]
         fn $name() {
@@ -15,8 +15,12 @@ macro_rules! measured_interval {
             interval.previous.awake_ns = Some(10_000_000_000);
             interval.selected.awake_ns = Some(10_100_000_000);
             let program = program(b"/Applications/A.app");
-            let before_usage = usage(10, 20, 100);
-            let selected_usage = usage(10 + $cpu, 20 + $energy, 200);
+            let mut before_usage = usage(10, 20, 100);
+            before_usage.disk_read_bytes = 9_007_199_254_740_993;
+            before_usage.disk_written_bytes = 9_007_199_254_741_993;
+            let mut selected_usage = usage(10 + $cpu, 20 + $energy, 200);
+            selected_usage.disk_read_bytes = before_usage.disk_read_bytes + 4096;
+            selected_usage.disk_written_bytes = before_usage.disk_written_bytes + 1024;
             let before = observation(&interval.previous, &program, &before_usage);
             let selected = observation(&interval.selected, &program, &selected_usage);
             let mut result = aggregate();
@@ -49,8 +53,21 @@ macro_rules! measured_interval {
                 Some($watts)
             );
             assert!((energy_joules(app.energy_nj.known) - $joules).abs() < f64::EPSILON);
+            assert_eq!(
+                disk_rates(app, result.elapsed_ns.unwrap()),
+                [Some($read), Some($written), Some($combined)]
+            );
         }
     };
+}
+
+fn disk_rates(app: &AppTotals, elapsed_ns: u64) -> [Option<f64>; 3] {
+    [
+        app.disk_read_bytes.known,
+        app.disk_written_bytes.known,
+        app.disk_io_bytes.known,
+    ]
+    .map(|bytes| bytes_per_second(BytesRate { bytes, elapsed_ns }))
 }
 measured_interval!(
     uses_two_seconds_for_rates,
@@ -59,7 +76,10 @@ measured_interval!(
     3_000_000_000,
     25.0,
     1.5,
-    3.0
+    3.0,
+    2048.0,
+    512.0,
+    2560.0
 );
 measured_interval!(
     uses_subsecond_elapsed_for_rates,
@@ -68,7 +88,10 @@ measured_interval!(
     500_000_000,
     50.0,
     2.0,
-    0.5
+    0.5,
+    16384.0,
+    4096.0,
+    20480.0
 );
 
 macro_rules! source_birth_boundary {
