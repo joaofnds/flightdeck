@@ -195,11 +195,11 @@ impl Observations {
         let age = self.latest_at.map(|latest| time.now.duration_since(latest));
         let initial_wait = self
             .first_at
-            .map_or(time.now, |first| first)
+            .unwrap_or(time.now)
             .duration_since(time.started);
         let gap = self
             .longest_gap
-            .max(age.map_or(Duration::ZERO, |age| age))
+            .max(age.unwrap_or(Duration::ZERO))
             .max(initial_wait);
         json!({"mode": "live_soak", "event": event,
             "elapsed_seconds": time.now.duration_since(time.started).as_secs_f64(),

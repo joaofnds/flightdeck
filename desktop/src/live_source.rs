@@ -749,7 +749,7 @@ fn app_key_bytes(text: &str) -> Result<Vec<u8>, String> {
         return Err("Live App key has an incomplete hexadecimal byte".to_owned());
     }
     let mut bytes = Vec::with_capacity(text.len() / 2);
-    for pair in text.as_bytes().chunks_exact(2) {
+    for pair in text.as_bytes().as_chunks::<2>().0 {
         let high = char::from(pair[0]).to_digit(16);
         let low = char::from(pair[1]).to_digit(16);
         match (high, low) {
