@@ -77,6 +77,7 @@ impl LiveDashboard {
             if let Some(error) = &preview.failure {
                 return Err(format!("App totals unavailable: {error}"));
             }
+
             if !preview.complete {
                 return Err("Loading exact App totals".into());
             }
@@ -195,6 +196,7 @@ impl LiveDashboard {
 fn ranking_heading(metric: Metric) -> gpui::Div {
     let selector = format!("ranking-help:{}", metric.title());
     let help = metric_help(metric);
+
     div()
         .flex()
         .items_center()
@@ -290,6 +292,7 @@ fn ranking_fraction(entry: &Entry, maximum: u64) -> f32 {
     let maximum = maximum
         .to_f64()
         .unwrap_or_else(|| unreachable!("u64 fits f64"));
+
     (value / maximum)
         .to_f32()
         .unwrap_or_else(|| unreachable!("fraction fits f32"))
