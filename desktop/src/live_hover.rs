@@ -113,9 +113,10 @@ impl Preview {
                 history: None,
                 cpu_detail: None,
                 cpu_history: None,
+                rankings: None,
                 read_ms: 0.0,
             }),
-            complete: if matches!(request.route.as_str(), "cpu" | "apps" | "raw") {
+            complete: if matches!(request.route.as_str(), "overview" | "cpu" | "apps" | "raw") {
                 target.matches(&snapshot.selection["selected"])
             } else {
                 true

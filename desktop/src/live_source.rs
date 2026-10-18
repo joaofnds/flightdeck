@@ -45,6 +45,7 @@ pub struct Snapshot {
     pub history: Option<Value>,
     pub cpu_detail: Option<crate::live_cpu::CPUActivity>,
     pub cpu_history: Option<Arc<crate::live_cpu_history::CPUHistory>>,
+    pub rankings: Option<Arc<crate::live_rankings::Rankings>>,
     pub read_ms: f64,
 }
 
@@ -355,6 +356,7 @@ fn reader_snapshot(
         history: None,
         cpu_detail: None,
         cpu_history: None,
+        rankings: None,
         read_ms: 0.0,
     });
     reader_payload(session, &mut command.request, &mut snapshot)?;
@@ -384,6 +386,7 @@ fn reader_computer(reader: &mut Reader, command: &Command) -> Option<Box<Snapsho
         history: None,
         cpu_detail: None,
         cpu_history: None,
+        rankings: None,
         read_ms: 0.0,
     }))
 }
@@ -472,6 +475,12 @@ fn reader_payload(
     }
     if request.route == "apps" {
         reader_apps(session, request, snapshot)?;
+    }
+    if request.route == "overview" {
+        snapshot.rankings = Some(Arc::new(crate::live_rankings::read(
+            &snapshot.selection["selected"],
+            |offset| session.apps_page(offset).map_err(|error| error.to_string()),
+        )));
     }
     if request.route == "cpu" {
         let detail = session.cpu_detail().map_err(|error| error.to_string())?;

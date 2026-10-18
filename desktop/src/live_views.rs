@@ -279,6 +279,7 @@ impl LiveDashboard {
             Row::CPUActivity => self.cpu_activity().into_any_element(),
             Row::CPUHistory => self.cpu_history_panel(cx).into_any_element(),
             Row::OverviewStatus => self.overview_status(cx).into_any_element(),
+            Row::Rankings(metrics) => self.app_rankings(metrics, cx),
             Row::AppSelector => self.app_selector(cx).into_any_element(),
             Row::AppSummary => self.app_summary().into_any_element(),
             Row::AppColumns(kind) => {

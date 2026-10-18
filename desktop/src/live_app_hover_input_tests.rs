@@ -346,6 +346,7 @@ impl AppEpoch {
                 "context_seconds":900,"points":points})),
             cpu_detail: None,
             cpu_history: None,
+            rankings: None,
             read_ms: 0.0,
         })
     }

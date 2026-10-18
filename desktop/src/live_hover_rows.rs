@@ -53,6 +53,9 @@ impl LiveDashboard {
         }
         if self.request.route == "overview" {
             rows.push(Row::OverviewStatus);
+            for metrics in [0, 1, 2].chunks(self.reading_chart_columns()) {
+                rows.push(Row::Rankings(metrics.to_vec()));
+            }
             if self.snapshot.is_some() {
                 rows.push(Row::Hardware);
             }

@@ -59,11 +59,11 @@ fn probe_routes(probe: &mut Probe) -> Result<Value, String> {
         if route == "overview" {
             initial = Some(snapshot);
         } else {
-            routes.insert(route.to_owned(), probe_route_report(&snapshot));
+            routes.insert(route.to_owned(), probe_route_report(&snapshot)?);
         }
     }
     let initial = initial.ok_or_else(|| "Probe has no initial observation".to_owned())?;
-    routes.insert("overview".to_owned(), probe_route_report(&initial));
+    routes.insert("overview".to_owned(), probe_route_report(&initial)?);
     let workflows = workflows::run(probe)?;
     let pagination = probe_pagination(probe)?;
     let latest = probe_overlapping(probe)?;
@@ -183,8 +183,38 @@ fn probe_validate(snapshot: &Snapshot, route: &str) -> Result<(), String> {
     if route == "apps" {
         probe_apps(snapshot)?;
     }
+    if route == "overview" {
+        rankings_report(snapshot)?;
+    }
 
     Ok(())
+}
+
+fn rankings_report(snapshot: &Snapshot) -> Result<Value, String> {
+    let rankings = snapshot
+        .rankings
+        .as_deref()
+        .ok_or("Overview App rankings payload is missing")?;
+    let rankings = match rankings {
+        crate::live_rankings::Rankings::Ready(rankings) => rankings,
+        crate::live_rankings::Rankings::Unavailable(error) => {
+            return Err(format!("Overview App rankings unavailable: {error}"));
+        }
+    };
+    crate::live_source::identity_validate(&rankings.selected, &snapshot.selection["selected"])?;
+    for metric in &rankings.metrics {
+        if metric.entries.len() > crate::live_rankings::RANKS_MAX {
+            return Err("Overview App ranking exceeds ten entries".into());
+        }
+    }
+
+    Ok(json!({"app_count": rankings.app_count,
+        "membership_complete": rankings.membership_complete,
+        "ungrouped_members": rankings.ungrouped_members,
+        "metrics": rankings.metrics.iter().map(|metric| json!({
+            "metric": metric.metric.title(), "entries": metric.entries.len(),
+            "unavailable": metric.unavailable, "overflowed": metric.overflowed,
+            "partial": metric.partial})).collect::<Vec<_>>()}))
 }
 
 fn probe_flat_identity(observed: &Value, selected: &Value) -> Result<(), String> {
@@ -392,15 +422,20 @@ fn probe_missing_validate(missing: &Snapshot) -> Result<(), String> {
     Ok(())
 }
 
-fn probe_route_report(snapshot: &Snapshot) -> Value {
-    json!({
+fn probe_route_report(snapshot: &Snapshot) -> Result<Value, String> {
+    let rankings = match snapshot.rankings {
+        Some(_) => Some(rankings_report(snapshot)?),
+        None => None,
+    };
+    Ok(json!({
         "generation": snapshot.generation,
         "selected": snapshot.selection["selected"],
         "pages": snapshot.pages.keys().collect::<Vec<_>>(),
         "app_count": snapshot.apps.as_ref().map(|apps| &apps["app_count"]),
+        "overview_rankings": rankings,
         "logical_cpu_count": snapshot.cpu_detail.as_ref().map(|activity| activity.cpus.len()),
         "cpu_interval_available": snapshot.cpu_detail.as_ref()
             .map(|activity| activity.interval_available),
         "read_ms": snapshot.read_ms
-    })
+    }))
 }

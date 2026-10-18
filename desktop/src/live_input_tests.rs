@@ -8,6 +8,8 @@ use crate::live_source::{Snapshot, Update, Worker};
 
 #[path = "live_layout_input_tests.rs"]
 mod layout;
+#[path = "live_rankings_input_tests.rs"]
+mod rankings;
 #[path = "live_resource_input_tests.rs"]
 mod resource;
 #[path = "live_source_mode_input_tests.rs"]
@@ -1005,6 +1007,7 @@ fn accepted_snapshot(generation: u64) -> Box<Snapshot> {
         history: None,
         cpu_detail: None,
         cpu_history: None,
+        rankings: None,
         read_ms: 0.0,
     })
 }

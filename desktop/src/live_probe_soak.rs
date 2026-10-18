@@ -140,13 +140,16 @@ fn run_snapshot(snapshot: &Snapshot) -> Result<Value, String> {
         }
     }
     let coverage = workflows::history_coverage(&snapshot.selection, "trends", false)?;
+    let rankings = super::rankings_report(snapshot)?;
     let selected = &snapshot.selection["selected"];
-    Ok(json!({"read_ms": snapshot.read_ms, "selected": selected,
+    Ok(
+        json!({"read_ms": snapshot.read_ms, "selected": selected, "rankings": rankings,
         "selected_run_tick": selected["run_tick"], "scalar_history": coverage,
         "tail_ticks": snapshot.catalog["tail_ticks"],
         "tail_cache_bytes": snapshot.catalog["tail_cache_bytes"],
         "tail_cache_bytes_max": snapshot.catalog["tail_cache_bytes_max"],
-        "collector_completed": snapshot.catalog["collector_completed"]}))
+        "collector_completed": snapshot.catalog["collector_completed"]}),
+    )
 }
 
 impl Observations {
@@ -369,6 +372,13 @@ mod tests {
     }
 
     fn snapshot(selected: &Value) -> Snapshot {
+        let rankings = crate::live_rankings::read(selected, |_| {
+            Ok(json!({
+                "selected": selected, "apps": [], "membership_complete": true,
+                "ungrouped_members": 0, "app_count": 0,
+                "page": {"offset": 0, "limit": 512, "total": 0, "next_offset": null}
+            }))
+        });
         Snapshot {
             generation: 1,
             catalog: json!({"tail_ticks": 1, "tail_cache_bytes": 1024,
@@ -380,6 +390,7 @@ mod tests {
             history: None,
             cpu_detail: None,
             cpu_history: None,
+            rankings: Some(std::sync::Arc::new(rankings)),
             read_ms: 5.0,
         }
     }

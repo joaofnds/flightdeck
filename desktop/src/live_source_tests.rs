@@ -5,6 +5,8 @@ mod cpu_history;
 
 #[path = "live_source_hover_tests.rs"]
 mod hover;
+#[path = "live_rankings_source_tests.rs"]
+mod rankings;
 
 #[test]
 fn an_empty_recording_reports_absence_without_requiring_a_live_ring() {

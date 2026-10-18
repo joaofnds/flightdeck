@@ -21,6 +21,7 @@ impl Row {
             Self::StorageDevice(_, key) => key.clone(),
             Self::Diagnostics => "diagnostics".into(),
             Self::OverviewStatus => "overview-status".into(),
+            Self::Rankings(metrics) => format!("rankings-{}", metrics[0]),
             Self::AppSelector => "app-selector".into(),
             Self::AppSummary => "app-summary".into(),
             Self::AppColumns(kind) => format!("app-columns-{kind}"),

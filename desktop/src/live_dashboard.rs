@@ -72,6 +72,7 @@ pub enum Row {
     StorageDevice(usize, String),
     Diagnostics,
     OverviewStatus,
+    Rankings(Vec<usize>),
     AppSelector,
     AppSummary,
     AppColumns(&'static str),
@@ -564,6 +565,7 @@ mod selection_tests {
             history: None,
             cpu_detail: None,
             cpu_history: None,
+            rankings: None,
             read_ms: 0.0,
         }));
         dashboard.expanded = Some(("ticks".into(), 0));

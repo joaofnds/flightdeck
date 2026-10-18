@@ -258,6 +258,7 @@ mod tests {
             history: None,
             cpu_detail: None,
             cpu_history: None,
+            rankings: None,
             read_ms: 0.0,
         }
     }

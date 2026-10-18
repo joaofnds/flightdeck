@@ -559,7 +559,7 @@ impl LiveDashboard {
     }
 }
 
-struct ChartHelp(String);
+pub(crate) struct ChartHelp(pub(crate) String);
 
 struct KeyboardSelection {
     pending: Option<u64>,
@@ -654,7 +654,9 @@ fn cursor_fraction(panel: &Panel, snapshot: &Snapshot, hover: Option<u64>) -> Op
 
 impl Render for ChartHelp {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let text = self.0.clone();
         div()
+            .debug_selector(move || text.clone())
             .w(px(320.0))
             .p(px(12.0))
             .rounded(px(6.0))
@@ -816,6 +818,7 @@ mod tests {
             history: None,
             cpu_detail: None,
             cpu_history: None,
+            rankings: None,
             read_ms: 0.0,
         }
     }
