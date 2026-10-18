@@ -258,6 +258,49 @@ impl Fixture {
             })
             .collect();
 
+        self.publish_events(&events, &identities);
+    }
+
+    pub fn publish_starts(&mut self, count: usize, name: &[u8]) {
+        let writer = self.writer.as_mut().unwrap();
+        let mut program = None;
+        writer
+            .intern_program(
+                &ProgramBytes {
+                    executable_name: name,
+                    app_path: None,
+                },
+                &mut program,
+            )
+            .unwrap();
+        let program = program.unwrap();
+        let events: Vec<_> = (1..=count)
+            .map(|pid| collector::tracker::Event::Start {
+                pid: i32::try_from(pid).unwrap(),
+                coalition: None,
+            })
+            .collect();
+        let identities: Vec<_> = (1..=count)
+            .map(|pid| IdentityObservation {
+                pid: i32::try_from(pid).unwrap(),
+                usage: UsageAvailability::NotApplicable,
+                identity: ProcessIdentity::Measured {
+                    creation: ProcessCreation {
+                        unique_id: u64::try_from(pid).unwrap(),
+                        pid_version: 1,
+                    },
+                    program,
+                },
+            })
+            .collect();
+        self.publish_events(&events, &identities);
+    }
+
+    fn publish_events(
+        &mut self,
+        events: &[collector::tracker::Event],
+        identities: &[IdentityObservation],
+    ) {
         self.writer
             .as_mut()
             .unwrap()
@@ -273,7 +316,7 @@ impl Fixture {
                     processes_refused: 0,
                     processes_gone: 0,
                     coalitions: &[],
-                    events: &events,
+                    events,
                     dropped: Dropped::default(),
                 },
                 Some(&ObservationTimes {
@@ -283,7 +326,7 @@ impl Fixture {
                 }),
                 &IdentityPublication {
                     processes: &[],
-                    events: &identities,
+                    events: identities,
                 },
             )
             .unwrap();
@@ -315,6 +358,50 @@ impl Fixture {
             output,
         )
         .unwrap();
+    }
+
+    pub fn capture_events(&mut self, output: &mut Option<Box<Frame>>) -> persistence::Result<()> {
+        let publication = self.read();
+        let count = usize::try_from(self.tick.events.end - self.tick.events.start).unwrap();
+        assert!(count <= collector::tracker::EVENTS_PER_TICK_MAX);
+        let reader = self.reader.as_mut().unwrap();
+        let mut events = Vec::with_capacity(count);
+        let mut identities = Vec::with_capacity(count);
+        for _attempt in 0..count {
+            let mut identity = IdentityObservation::EMPTY;
+            let collector::ring::FoundEvent::Event {
+                number,
+                tick,
+                event,
+            } = reader.read_event_identity(&mut identity).unwrap()
+            else {
+                panic!("event missing");
+            };
+            events.push((number, tick, event));
+            identities.push(identity);
+        }
+        let numbered: Vec<_> = events
+            .iter()
+            .map(|(number, tick, event)| persistence::NumberedEvent {
+                number: *number,
+                tick: *tick,
+                event,
+            })
+            .collect();
+        let source = Publication {
+            reader,
+            tick: &self.tick,
+            identities: &self.identities,
+            publication,
+        };
+        Frame::capture(&source, output)?;
+        output.as_mut().unwrap().capture_exits(
+            &source,
+            &super::super::PublicationEvents {
+                events: &numbered,
+                identities: &identities,
+            },
+        )
     }
 
     pub fn finish(&mut self) {

@@ -11,7 +11,9 @@ use crate::kernel::{EPERM, ESRCH, Timespec};
 use crate::processes::{self, Unreadable, Usage};
 use crate::programs::{ExitAcquisition, acquire_exit};
 use crate::push_without_growing;
-use crate::ring::{IdentityUnavailable, ProcessCreation};
+use crate::ring::{
+    IdentityObservation, IdentityUnavailable, ProcessCreation, ProcessIdentity, Writer,
+};
 
 #[derive(Debug, PartialEq)]
 pub enum Event {
@@ -44,6 +46,7 @@ pub struct EventIdentity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventCreation {
     NotApplicable,
+    Start(ProcessIdentity),
     Exit(Result<ProcessCreation, IdentityUnavailable>),
 }
 
@@ -62,8 +65,9 @@ pub struct ExitFailure {
 }
 
 const _: () = {
-    assert!(size_of::<EventObservation>() <= size_of::<Event>() + 32);
-    assert!(size_of::<EventIdentity>() <= 32);
+    assert!(size_of::<EventObservation>() == 232);
+    assert!(size_of::<EventIdentity>() == 104);
+    assert!(size_of::<EventObservation>() == size_of::<Event>() + size_of::<EventIdentity>());
 };
 
 impl From<Event> for EventObservation {
@@ -169,6 +173,11 @@ pub struct Tracker {
     /// after a call that returned an error. That call left the lists and the kqueue part-way
     /// through a change, so no call follows it.
     failed: bool,
+}
+
+struct StartCapture<'a> {
+    identities: &'a mut crate::programs::sweep::Sweep,
+    writer: &'a mut Writer,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -380,7 +389,7 @@ impl Tracker {
             counts: Counts::default(),
             failed: false,
         };
-        tracker.rescan(&mut Meter::default())?;
+        tracker.rescan(&mut Meter::default(), None)?;
 
         assert_eq!(1, tracker.scans);
         assert!(tracker.timers.is_empty());
@@ -391,6 +400,29 @@ impl Tracker {
     }
 
     pub fn follow_until(&mut self, deadline_ticks: u64, meter: &mut Meter) -> io::Result<()> {
+        self.follow_until_inner(deadline_ticks, meter, None)
+    }
+
+    pub fn follow_until_with_identity(
+        &mut self,
+        deadline_ticks: u64,
+        meter: &mut Meter,
+        identities: &mut crate::programs::sweep::Sweep,
+        writer: &mut Writer,
+    ) -> io::Result<()> {
+        self.follow_until_inner(
+            deadline_ticks,
+            meter,
+            Some(&mut StartCapture { identities, writer }),
+        )
+    }
+
+    fn follow_until_inner(
+        &mut self,
+        deadline_ticks: u64,
+        meter: &mut Meter,
+        mut capture: Option<&mut StartCapture<'_>>,
+    ) -> io::Result<()> {
         assert!(!self.failed, "a call to the tracker failed before");
         assert!(self.timers.len() < TIMER_COUNT_MAX);
         self.failed = true;
@@ -416,7 +448,7 @@ impl Tracker {
 
             match self.throttle.step(clock::now()) {
                 Step::Rescan(cause) => {
-                    self.rescan(meter)?;
+                    self.rescan(meter, capture.as_deref_mut())?;
                     match cause {
                         Cause::Leading => self.counts.leading_rescans += 1,
                         Cause::Trailing => self.counts.trailing_rescans += 1,
@@ -443,6 +475,15 @@ impl Tracker {
     }
 
     pub fn observe(&mut self, listing: &[i32], meter: &mut Meter) -> io::Result<()> {
+        self.observe_inner(listing, meter, None)
+    }
+
+    fn observe_inner(
+        &mut self,
+        listing: &[i32],
+        meter: &mut Meter,
+        capture: Option<&mut StartCapture<'_>>,
+    ) -> io::Result<()> {
         assert!(!self.failed, "a call to the tracker failed before");
         self.failed = true;
 
@@ -452,7 +493,7 @@ impl Tracker {
         })?;
         self.throttle.rescanned(clock::now());
         self.counts.listing_rescans += 1;
-        self.read_starts(meter)?;
+        self.read_starts(meter, capture)?;
         self.submit_watches(meter)?;
 
         assert!(self.starts.is_empty());
@@ -461,6 +502,20 @@ impl Tracker {
         assert_eq!(self.scans, 1 + self.counts.rescans());
         self.failed = false;
         Ok(())
+    }
+
+    pub fn observe_with_identity(
+        &mut self,
+        listing: &[i32],
+        meter: &mut Meter,
+        identities: &mut crate::programs::sweep::Sweep,
+        writer: &mut Writer,
+    ) -> io::Result<()> {
+        self.observe_inner(
+            listing,
+            meter,
+            Some(&mut StartCapture { identities, writer }),
+        )
     }
 
     pub fn drain_observations(&mut self) -> std::vec::Drain<'_, EventObservation> {
@@ -495,7 +550,11 @@ impl Tracker {
         &self.listing
     }
 
-    fn rescan(&mut self, meter: &mut Meter) -> io::Result<()> {
+    fn rescan(
+        &mut self,
+        meter: &mut Meter,
+        capture: Option<&mut StartCapture<'_>>,
+    ) -> io::Result<()> {
         let scans = self.scans;
         let capacity = self.listing.capacity();
         let mut listing = std::mem::take(&mut self.listing);
@@ -509,7 +568,7 @@ impl Tracker {
         assert_eq!(scans + 1, self.scans);
         self.throttle.rescanned(clock::now());
 
-        self.read_starts(meter)?;
+        self.read_starts(meter, capture)?;
         self.submit_watches(meter)
     }
 
@@ -574,7 +633,11 @@ impl Tracker {
         Ok(())
     }
 
-    fn read_starts(&mut self, meter: &mut Meter) -> io::Result<()> {
+    fn read_starts(
+        &mut self,
+        meter: &mut Meter,
+        mut capture: Option<&mut StartCapture<'_>>,
+    ) -> io::Result<()> {
         if self.starts.is_empty() {
             return Ok(());
         }
@@ -582,10 +645,11 @@ impl Tracker {
         meter.measure(Source::StartReads, || {
             for pid in self.starts.drain(..) {
                 assert!(pid >= 0);
-                let start = Event::Start {
+                let mut start = EventObservation::from(Event::Start {
                     pid,
-                    coalition: coalitions::coalition_of(pid)?,
-                };
+                    coalition: None,
+                });
+                read_start(&mut start, capture.as_deref_mut())?;
                 record(&mut self.events, &mut self.counts, start);
             }
 
@@ -842,7 +906,14 @@ fn record(
 
 fn record_assert_alignment(observation: &EventObservation) {
     let pid = match &observation.event {
-        Event::Start { pid, .. } | Event::Exec { pid } => {
+        Event::Start { pid, .. } => {
+            assert!(matches!(
+                observation.identity.creation,
+                EventCreation::NotApplicable | EventCreation::Start(_)
+            ));
+            *pid
+        }
+        Event::Exec { pid } => {
             assert_eq!(observation.identity.creation, EventCreation::NotApplicable);
             *pid
         }
@@ -855,6 +926,41 @@ fn record_assert_alignment(observation: &EventObservation) {
         }
     };
     assert_eq!(observation.identity.pid, pid);
+}
+
+fn read_start(
+    observation: &mut EventObservation,
+    capture: Option<&mut StartCapture<'_>>,
+) -> io::Result<()> {
+    let pid = observation.identity.pid;
+    assert!(matches!(observation.event, Event::Start { .. }));
+
+    if let Some(capture) = capture {
+        let mut identity = IdentityObservation {
+            pid,
+            ..IdentityObservation::EMPTY
+        };
+        let mut coalition = None;
+        capture
+            .identities
+            .capture(&mut identity, capture.writer, || {
+                coalition = Some(coalitions::coalition_of(pid));
+            });
+        let coalition = match coalition {
+            Some(coalition) => coalition?,
+            None => unreachable!("acquisition always reads the coalition once"),
+        };
+
+        observation.event = Event::Start { pid, coalition };
+        observation.identity.creation = EventCreation::Start(identity.identity);
+    } else {
+        observation.event = Event::Start {
+            pid,
+            coalition: coalitions::coalition_of(pid)?,
+        };
+    }
+
+    Ok(())
 }
 
 /// The index of `pid` in a table of `known_count` pids. A pid the table cannot hold is an
@@ -946,6 +1052,7 @@ fn follow_until_timer(ident: usize, deadline_ticks: u64) -> io::Result<Kevent> {
 
 #[cfg(test)]
 mod tests {
+    mod start_tests;
     use super::*;
     use crate::clock;
     use crate::cost::Snapshot;
@@ -1716,11 +1823,15 @@ mod tests {
         let event = size_of::<Event>();
         let metadata = size_of::<EventIdentity>();
 
-        assert!(envelope <= event + 32);
-        assert!(metadata <= 32);
         eprintln!(
             "event_bytes={event} envelope_bytes={envelope} metadata_bytes={metadata} \
             added_startup_bytes={}",
+            (envelope - event + metadata) * EVENTS_PER_TICK_MAX
+        );
+        assert_eq!(232, envelope);
+        assert_eq!(104, metadata);
+        assert_eq!(
+            3_407_872,
             (envelope - event + metadata) * EVENTS_PER_TICK_MAX
         );
     }

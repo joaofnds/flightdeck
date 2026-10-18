@@ -50,6 +50,61 @@ mod fixture;
 use fixture::{Change, Fixture};
 
 #[test]
+fn charges_the_maximum_captured_start_population_to_the_live_frame() {
+    // Goal: owned Start identities and bytes stay charged to the existing observation cache.
+    // Method: capture all 16384 Starts referencing one five-byte program in a real v4 ring.
+    let count = collector::tracker::EVENTS_PER_TICK_MAX;
+    let shape = collector::ring::Shape {
+        event_capacity: u64::try_from(count).unwrap(),
+        ..fixture::SHAPE
+    };
+    let mut fixture = None;
+    Fixture::initialize_with_shape(&mut fixture, true, &shape);
+    let fixture = fixture.as_mut().unwrap();
+    fixture.publish_starts(count, b"child");
+    let mut frame = None;
+
+    fixture.capture_events(&mut frame).unwrap();
+    let frame = frame.as_ref().unwrap();
+
+    assert_eq!(
+        frame.bytes(),
+        size_of::<Frame>() + count * size_of::<super::Start>() + count * 5
+    );
+    assert_eq!(frame.starts.len(), count);
+    assert_eq!(frame.arena.len(), count * 5);
+    eprintln!(
+        "start_bytes={} count={} frame_bytes={} transient_bound={}",
+        size_of::<super::Start>(),
+        count,
+        frame.bytes(),
+        super::TRANSIENT_VIEW_BYTES_MAX
+    );
+}
+
+#[test]
+fn refuses_start_program_bytes_beyond_the_existing_frame_budget() {
+    // Goal: event-only metadata cannot bypass the shared 32 MiB frame program-byte bound.
+    // Method: publish 8195 Starts referencing a valid 4095-byte executable basename.
+    let shape = collector::ring::Shape {
+        event_capacity: 8195,
+        ..fixture::SHAPE
+    };
+    let mut fixture = None;
+    Fixture::initialize_with_shape(&mut fixture, true, &shape);
+    let fixture = fixture.as_mut().unwrap();
+    fixture.publish_starts(8195, &[b'x'; 4095]);
+    let mut frame = None;
+
+    let result = fixture.capture_events(&mut frame);
+
+    assert!(matches!(
+        result,
+        Err(Error::Bound("live App Start byte bound"))
+    ));
+}
+
+#[test]
 fn charges_the_maximum_captured_exit_population_to_the_live_frame() {
     // Goal: publication-owned exits remain inside their explicit event and live-cache charge.
     // Method: capture all 16384 real v4 event identities, then compare their added owned bytes.

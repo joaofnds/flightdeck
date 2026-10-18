@@ -22,6 +22,7 @@ pub struct Frame {
     run_tick: u64,
     wall_ns: Option<u64>,
     members: Vec<Member>,
+    starts: Vec<Start>,
     exits: Vec<Exit>,
     arena: Vec<u8>,
     pub usage_refused: u32,
@@ -36,10 +37,20 @@ struct Member {
 }
 
 struct Exit {
+    number: u64,
     pid: i32,
     creation: Option<ProcessCreation>,
     usage: std::result::Result<Usage, Unavailable>,
     ambiguous: bool,
+}
+
+struct Start {
+    number: u64,
+    pid: i32,
+    creation: Option<ProcessCreation>,
+    program: std::result::Result<ProgramSpan, IdentityUnavailable>,
+    ambiguous: bool,
+    exec_number: Option<u64>,
 }
 
 pub struct PublicationEvents<'source> {
@@ -94,8 +105,9 @@ impl Frame {
             run_tick: source.tick.run_tick,
             wall_ns: source.tick.times.map(|times| times.wall_ns),
             members: Vec::with_capacity(count),
+            starts: Vec::new(),
             exits: Vec::new(),
-            arena: Vec::with_capacity(capture::program_bytes(source)?),
+            arena: Vec::with_capacity(capture::program_bytes(source, source.identities)?),
             usage_refused: source.tick.processes_refused,
             usage_gone: source.tick.processes_gone,
         });
@@ -122,11 +134,12 @@ impl Frame {
     pub fn bytes(&self) -> usize {
         size_of::<Self>()
             + self.members.capacity() * size_of::<Member>()
+            + self.starts.capacity() * size_of::<Start>()
             + self.exits.capacity() * size_of::<Exit>()
             + self.arena.capacity()
     }
 
-    /// Copies final usage and source creation before the publication's event buffers are reused.
+    /// Owns Start program bytes and final usage before the event/dictionary buffers are reused.
     pub fn capture_exits(
         &mut self,
         source: &Publication<'_>,

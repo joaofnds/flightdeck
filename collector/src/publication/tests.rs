@@ -264,6 +264,310 @@ const EXIT_CREATION: collector::ring::ProcessCreation = collector::ring::Process
     pid_version: 8,
 };
 
+#[test]
+fn publishes_the_program_captured_at_start_discovery() {
+    // Goal: captured Start program survives the producer boundary with no numeric birth baseline.
+    // Method: intern fixed bytes, publish source metadata, and decode the retained v4 event.
+    let mut harness = Harness::new();
+    let mut publication = Publication::new(&harness.writer).unwrap();
+    let mut bytes = None;
+    collector::programs::split_program(b"/A.app/bin/x", &mut bytes).unwrap();
+    let mut program = None;
+    harness
+        .writer
+        .intern_program(&bytes.unwrap(), &mut program)
+        .unwrap();
+    let event = Event::Start {
+        pid: 4,
+        coalition: Some(71),
+    };
+    let source = EventIdentity {
+        pid: 4,
+        creation: EventCreation::Start(ProcessIdentity::Measured {
+            creation: EXIT_CREATION,
+            program: program.unwrap(),
+        }),
+    };
+    let memory = collector::machine::Memory::default();
+    let mut reader = RingReader::open_generation(harness.writer.name()).unwrap();
+
+    publication
+        .publish_readings(
+            &mut harness.writer,
+            &readings(&memory, &[], &[event]),
+            None,
+            &[],
+            &[source],
+            &SupplementalReadings::default(),
+        )
+        .unwrap();
+    let mut identity = IdentityObservation::EMPTY;
+    let found = reader.read_event_identity(&mut identity).unwrap();
+
+    assert_eq!(
+        FoundEvent::Event {
+            number: 1,
+            tick: 7,
+            event: Event::Start {
+                pid: 4,
+                coalition: Some(71)
+            }
+        },
+        found
+    );
+    assert_eq!(UsageAvailability::NotApplicable, identity.usage);
+    assert_eq!(Some(&EXIT_CREATION), identity.creation());
+    assert_eq!(
+        collector::ring::IdentityAvailability::Measured,
+        identity.availability()
+    );
+    assert_start_program(&reader, &identity);
+}
+
+fn assert_start_program(reader: &RingReader, identity: &IdentityObservation) {
+    let mut executable = [0; collector::ring::PROGRAM_PATH_BYTES_MAX];
+    let mut app = [0; collector::ring::PROGRAM_PATH_BYTES_MAX];
+    let (executable_length, app_length) = reader
+        .copy_program(
+            identity.program().unwrap(),
+            &mut collector::ring::ProgramBuffers {
+                executable_name: &mut executable,
+                app_path: &mut app,
+            },
+        )
+        .unwrap();
+    assert_eq!(b"x", &executable[..executable_length]);
+    assert_eq!(b"/A.app", &app[..app_length]);
+}
+
+#[test]
+fn publishes_scheduled_start_identity_from_collection() {
+    // Goal: scheduled discovery publishes the owned process's captured creation and program.
+    // Method: create the child after Collector, read without waiting, publish, reap, and decode.
+    let mut collector = Collector::new(Timebase::read().unwrap(), Duration::ZERO).unwrap();
+    collector.smc = None;
+    collector.ioreport = None;
+    collector.battery = None;
+    collector.disks = None;
+    let mut harness = Harness::sources(&collector, false);
+    let mut publication = Publication::new(&harness.writer).unwrap();
+    let mut child = HeldChild::new();
+    let pid = child.0.id().cast_signed();
+    let mut expected = Err(collector::programs::CreationError::NotRead);
+    collector::programs::read_creation(pid, false, &mut expected);
+    let expected = expected.unwrap();
+    let mut program = None;
+    publishes_scheduled_start_identity_from_collection_capture(
+        pid,
+        &mut harness.writer,
+        &mut program,
+    );
+    let mut meter = Meter::default();
+
+    publication
+        .read(&mut collector, &mut meter, &mut harness.writer, None)
+        .unwrap();
+    assert!(collector.event_identities().contains(&EventIdentity {
+        pid,
+        creation: EventCreation::Start(ProcessIdentity::Measured {
+            creation: expected,
+            program: program.unwrap(),
+        }),
+    }));
+    publication
+        .publish(&mut harness.writer, &collector, 7, None)
+        .unwrap();
+    child.release();
+    let mut reader = RingReader::open_generation(harness.writer.name()).unwrap();
+    let mut identity = IdentityObservation::EMPTY;
+    publishes_scheduled_start_identity_from_collection_read(&mut reader, pid, &mut identity);
+
+    assert_eq!(Some(&expected), identity.creation());
+    assert_eq!(UsageAvailability::NotApplicable, identity.usage);
+    assert_eq!(
+        collector::ring::IdentityAvailability::Measured,
+        identity.availability(),
+        "{identity:?}"
+    );
+    publishes_scheduled_start_identity_from_collection_program(&reader, &identity);
+    eprintln!(
+        "scheduled producer Start pid={pid} independent_creation={expected:?} \
+        recorded={identity:?}"
+    );
+}
+
+fn publishes_scheduled_start_identity_from_collection_capture(
+    pid: i32,
+    writer: &mut Writer,
+    program: &mut Option<collector::ring::ProgramReference>,
+) {
+    let mut scratch = [0; 4096];
+    let length = collector::programs::read_path(pid, &mut scratch).unwrap();
+    let mut bytes = None;
+    collector::programs::split_program(&scratch[..length], &mut bytes).unwrap();
+    writer.intern_program(&bytes.unwrap(), program).unwrap();
+}
+
+fn publishes_scheduled_start_identity_from_collection_read(
+    reader: &mut RingReader,
+    pid: i32,
+    identity: &mut IdentityObservation,
+) {
+    for _attempt in 0..EVENTS_PER_TICK_MAX {
+        match reader.read_event_identity(identity).unwrap() {
+            FoundEvent::Event {
+                tick,
+                event: Event::Start { pid: found, .. },
+                ..
+            } => {
+                if found == pid {
+                    assert_eq!(7, tick);
+                    return;
+                }
+            }
+            FoundEvent::Event { .. } => {}
+            FoundEvent::Nothing => panic!("missing scheduled Start for owned pid={pid}"),
+            FoundEvent::Missed { .. } => panic!("scheduled Start was overwritten"),
+        }
+    }
+
+    panic!("scheduled Start exceeded the event bound");
+}
+
+fn publishes_scheduled_start_identity_from_collection_program(
+    reader: &RingReader,
+    identity: &IdentityObservation,
+) {
+    let mut executable = [0; collector::ring::PROGRAM_PATH_BYTES_MAX];
+    let mut app = [0; collector::ring::PROGRAM_PATH_BYTES_MAX];
+    let (executable_length, app_length) = reader
+        .copy_program(
+            identity.program().unwrap(),
+            &mut collector::ring::ProgramBuffers {
+                executable_name: &mut executable,
+                app_path: &mut app,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(b"cat", &executable[..executable_length]);
+    assert_eq!(b"", &app[..app_length]);
+}
+
+#[test]
+fn reports_wait_capture_diagnostics_before_the_scheduled_sweep_resets_them() {
+    // Goal: a scheduled read never erases diagnostics from identity acquisition during waiting.
+    // Method: discover an owned child through Publication, read a tick, and check report counts.
+    let timebase = Timebase::read().unwrap();
+    let mut collector = Collector::new(timebase, Duration::ZERO).unwrap();
+    collector.smc = None;
+    collector.ioreport = None;
+    collector.battery = None;
+    collector.disks = None;
+    let mut harness = Harness::sources(&collector, false);
+    let mut publication = Publication::new(&harness.writer).unwrap();
+    let mut child = HeldChild::new();
+    let mut meter = Meter::default();
+    let deadline = collector::clock::now() + timebase.ticks(10_000_000).unwrap();
+
+    publication
+        .wait_until(&mut collector, deadline, &mut meter, &mut harness.writer)
+        .unwrap();
+    let waited = diagnostic_count(collector.identities.diagnostics());
+    publication
+        .read(&mut collector, &mut meter, &mut harness.writer, None)
+        .unwrap();
+    let scheduled = diagnostic_count(collector.identities.diagnostics());
+    let mut output = Vec::new();
+    publication
+        .report(&harness.writer, "test", &mut output)
+        .unwrap();
+    child.release();
+
+    assert!(waited > 0);
+    assert!(scheduled > 0);
+    let output = String::from_utf8(output).unwrap();
+    assert!(
+        output.contains(&format!("observations={} ", waited + scheduled)),
+        "{output}"
+    );
+}
+
+fn diagnostic_count(diagnostics: &collector::programs::sweep::Diagnostics) -> u64 {
+    diagnostics.measured
+        + diagnostics.refused
+        + diagnostics.gone
+        + diagnostics.unsupported
+        + diagnostics.changed
+        + diagnostics.invalid
+        + diagnostics.exhausted
+}
+
+struct HeldChild(std::process::Child);
+
+impl HeldChild {
+    fn new() -> Self {
+        Self(
+            std::process::Command::new("/bin/cat")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        )
+    }
+
+    fn release(&mut self) {
+        drop(self.0.stdin.take());
+        assert!(self.0.wait().unwrap().success());
+    }
+}
+
+impl Drop for HeldChild {
+    fn drop(&mut self) {
+        drop(self.0.stdin.take());
+        if let Err(error) = self.0.wait() {
+            eprintln!("owned report child cleanup: {error}");
+        }
+    }
+}
+
+macro_rules! start_source_cases {
+    ($($name:ident, $reason:expr;)*) => {$(
+        #[test]
+        fn $name() {
+            // Goal: unavailable discovery metadata remains explicit beside an ordinary Start.
+            // Method: publish one source failure through a real ring and decode its event.
+            let mut harness = Harness::new();
+            let mut publication = Publication::new(&harness.writer).unwrap();
+            let source = EventIdentity { pid: 4, creation: EventCreation::Start(
+                ProcessIdentity::Unavailable { creation: Some(EXIT_CREATION), reason: $reason }) };
+            let memory = collector::machine::Memory::default();
+            let mut reader = RingReader::open_generation(harness.writer.name()).unwrap();
+
+            publication.publish_readings(&mut harness.writer,
+                &readings(&memory, &[], &[Event::Start { pid: 4, coalition: Some(71) }]),
+                None, &[], &[source], &SupplementalReadings::default()).unwrap();
+            let mut identity = IdentityObservation::EMPTY;
+            let found = reader.read_event_identity(&mut identity).unwrap();
+
+            assert_eq!(FoundEvent::Event { number: 1, tick: 7,
+                event: Event::Start { pid: 4, coalition: Some(71) } }, found);
+            assert_eq!(IdentityObservation { pid: 4, usage: UsageAvailability::NotApplicable,
+                identity: ProcessIdentity::Unavailable { creation: Some(EXIT_CREATION),
+                    reason: $reason } }, identity);
+        }
+    )*};
+}
+
+start_source_cases! {
+    preserves_refused_start_program, IdentityUnavailable::Refused;
+    preserves_gone_start_program, IdentityUnavailable::Gone;
+    preserves_unsupported_start_program, IdentityUnavailable::Unsupported;
+    preserves_changed_start_program, IdentityUnavailable::Changed;
+    preserves_invalid_start_program, IdentityUnavailable::Invalid;
+    preserves_exhausted_start_program, IdentityUnavailable::Exhausted;
+}
+
 exit_source_cases! {
     preserves_source_verified_exit_creation, Ok(EXIT_CREATION), Ok(usage()),
         UsageAvailability::Measured, Some(EXIT_CREATION), IdentityUnavailable::Unsupported;

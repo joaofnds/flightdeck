@@ -1,7 +1,7 @@
 use collector::processes::Unreadable;
 use collector::tracker::{EVENTS_PER_TICK_MAX, Event};
 
-use super::{Error, Exit, Frame, Publication, PublicationEvents, Result, Unavailable};
+use super::{Error, Exit, Frame, Publication, PublicationEvents, Result, Start, Unavailable};
 
 pub(super) fn capture(
     frame: &mut Frame,
@@ -9,6 +9,17 @@ pub(super) fn capture(
     events: &PublicationEvents<'_>,
 ) -> Result<()> {
     frame.exits.clear();
+    frame.starts.clear();
+    let scheduled_bytes = frame
+        .members
+        .iter()
+        .filter_map(|member| match member.program {
+            Ok(span) => Some(span.end),
+            Err(_) => None,
+        })
+        .max()
+        .unwrap_or_default();
+    frame.arena.truncate(scheduled_bytes);
     super::validate(source)?;
     if source.reader.identity().as_ref() != Some(&frame.identity) {
         return Err(Error::Bound("live App exit run association"));
@@ -39,11 +50,17 @@ pub(super) fn capture(
         .count();
 
     frame.exits.reserve_exact(count);
-    capture_events(frame, events)?;
+    capture_starts_reserve(frame, source, events)?;
+    capture_events(frame, source, events)?;
     frame
         .exits
         .sort_by_key(|exit| (exit.pid, exit.creation.map(|creation| creation.unique_id)));
     capture_duplicates(&mut frame.exits);
+    frame
+        .starts
+        .sort_by_key(|start| (start.pid, start.creation.map(|creation| creation.unique_id)));
+    capture_start_duplicates(&mut frame.starts);
+    capture_start_interruptions(&mut frame.starts, events);
 
     Ok(())
 }
@@ -74,7 +91,42 @@ fn capture_validate(source: &Publication<'_>, events: &PublicationEvents<'_>) ->
     Ok(())
 }
 
-fn capture_events(frame: &mut Frame, events: &PublicationEvents<'_>) -> Result<()> {
+fn capture_starts_reserve(
+    frame: &mut Frame,
+    source: &Publication<'_>,
+    events: &PublicationEvents<'_>,
+) -> Result<()> {
+    let mut count = 0;
+    let mut size = frame.arena.len();
+    for (numbered, identity) in events.events.iter().zip(events.identities) {
+        if matches!(numbered.event, Event::Start { .. }) {
+            count += 1;
+            size = size
+                .checked_add(super::capture::program_bytes(
+                    source,
+                    std::slice::from_ref(identity),
+                )?)
+                .ok_or(Error::Bound("live App Start byte bound"))?;
+            if size > super::PROGRAM_FRAME_BYTES_MAX {
+                return Err(Error::Bound("live App Start byte bound"));
+            }
+        }
+    }
+    if frame.members.len() + count > crate::apps::PROCESS_INTERVALS_MAX {
+        return Err(Error::Bound("live App Start interval bound"));
+    }
+
+    frame.starts.reserve_exact(count);
+    frame.arena.reserve_exact(size - frame.arena.len());
+
+    Ok(())
+}
+
+fn capture_events(
+    frame: &mut Frame,
+    source: &Publication<'_>,
+    events: &PublicationEvents<'_>,
+) -> Result<()> {
     for (numbered, identity) in events.events.iter().zip(events.identities) {
         if let Event::Exit { pid, last, .. } = numbered.event {
             if *pid != identity.pid {
@@ -82,6 +134,7 @@ fn capture_events(frame: &mut Frame, events: &PublicationEvents<'_>) -> Result<(
             }
 
             frame.exits.push(Exit {
+                number: numbered.number,
                 pid: *pid,
                 creation: identity.creation().copied(),
                 usage: match last {
@@ -92,9 +145,93 @@ fn capture_events(frame: &mut Frame, events: &PublicationEvents<'_>) -> Result<(
                 ambiguous: false,
             });
         }
+        if let Event::Start { pid, .. } = numbered.event {
+            capture_start(frame, source, identity, numbered.number, *pid)?;
+        }
     }
 
     Ok(())
+}
+
+fn capture_start(
+    frame: &mut Frame,
+    source: &Publication<'_>,
+    identity: &collector::ring::IdentityObservation,
+    number: u64,
+    pid: i32,
+) -> Result<()> {
+    if identity.pid != pid {
+        return Err(Error::Bound("live App Start PID association"));
+    }
+
+    if identity.usage != collector::ring::UsageAvailability::NotApplicable {
+        return Err(Error::Bound("live App Start usage availability"));
+    }
+
+    frame.starts.push(Start {
+        number,
+        pid,
+        creation: identity.creation().copied(),
+        program: Err(super::IdentityUnavailable::Unsupported),
+        ambiguous: false,
+        exec_number: None,
+    });
+    let start = frame.starts.last_mut().unwrap_or_else(|| unreachable!());
+
+    super::capture::member_program(
+        source,
+        &identity.identity,
+        &mut frame.arena,
+        &mut start.program,
+    )
+}
+
+fn capture_start_duplicates(starts: &mut [Start]) {
+    for index in 1..starts.len() {
+        let (before, after) = starts.split_at_mut(index);
+        let previous = &mut before[index - 1];
+        let selected = &mut after[0];
+
+        if previous.pid == selected.pid {
+            if previous.creation.map(|creation| creation.unique_id)
+                == selected.creation.map(|creation| creation.unique_id)
+            {
+                previous.ambiguous = true;
+                selected.ambiguous = true;
+            }
+        }
+    }
+}
+
+fn capture_start_interruptions(starts: &mut [Start], events: &PublicationEvents<'_>) {
+    // The bounded temporary list avoids scanning all events once for every captured Start.
+    let count = events
+        .events
+        .iter()
+        .filter(|numbered| matches!(numbered.event, Event::Exec { .. }))
+        .count();
+    if count == 0 {
+        return;
+    }
+
+    let mut replacements = Vec::with_capacity(count);
+    for numbered in events.events {
+        if let Event::Exec { pid } = numbered.event {
+            replacements.push((*pid, numbered.number));
+        }
+    }
+    replacements.sort_unstable();
+    assert!(replacements.capacity() <= EVENTS_PER_TICK_MAX);
+
+    for start in starts {
+        let index =
+            replacements.partition_point(|replacement| *replacement <= (start.pid, start.number));
+        if let Some((pid, number)) = replacements.get(index) {
+            if *pid == start.pid {
+                start.exec_number = Some(*number);
+            }
+        }
+    }
 }
 
 fn capture_duplicates(exits: &mut [Exit]) {

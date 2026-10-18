@@ -7,36 +7,29 @@ pub(super) fn with_aggregate(
     consume: impl FnOnce(&Aggregate<'_>) -> Result<()>,
 ) -> Result<()> {
     let previous = previous.unwrap_or(selected);
-    let mut previous_programs = Vec::with_capacity(previous.members.len());
-    with_aggregate_programs(previous, &mut previous_programs);
-    let mut previous_observations = Vec::with_capacity(previous.members.len());
-    with_aggregate_observations(previous, &previous_programs, &mut previous_observations);
     let compatible = with_aggregate_compatible(previous, selected);
+    let mut previous_programs = Vec::with_capacity(previous.members.len());
+    let mut previous_observations = Vec::with_capacity(previous.members.len());
+    if compatible {
+        with_aggregate_programs(previous, &mut previous_programs);
+        with_aggregate_observations(previous, &previous_programs, &mut previous_observations);
+    }
 
-    let mut selected_programs = Vec::with_capacity(selected.members.len());
+    let mut selected_programs = Vec::with_capacity(selected.members.len() + selected.starts.len());
     with_aggregate_programs(selected, &mut selected_programs);
-    let count = selected.members.len() + previous.members.len().min(selected.exits.len());
+    with_aggregate_start_programs(selected, &mut selected_programs);
+    let count = selected.members.len() + selected.exits.len();
     let mut selected_observations =
         Vec::with_capacity(count.min(crate::apps::PROCESS_INTERVALS_MAX));
     with_aggregate_observations(selected, &selected_programs, &mut selected_observations);
-    if compatible {
-        with_aggregate_exits(selected, &previous_observations, &mut selected_observations)?;
-    }
+    with_aggregate_exits(
+        selected,
+        &previous_observations,
+        &selected_programs,
+        &mut selected_observations,
+    )?;
 
-    let mut processes = Vec::with_capacity(selected_observations.len());
-    for observation in &selected_observations {
-        let previous = if compatible {
-            with_aggregate_predecessor(&previous_observations, observation)
-                .map(|index| &previous_observations[index])
-        } else {
-            None
-        };
-        processes.push(ProcessInterval {
-            previous,
-            selected: observation,
-            start: None,
-        });
-    }
+    let processes = with_aggregate_intervals(&previous_observations, &selected_observations);
 
     let interval = Interval {
         previous: previous.stamp,
@@ -61,22 +54,56 @@ pub(super) fn with_aggregate(
     consume(aggregate)
 }
 
+fn with_aggregate_intervals<'frame>(
+    previous: &'frame [ProcessObservation<'frame>],
+    selected: &'frame [ProcessObservation<'frame>],
+) -> Vec<ProcessInterval<'frame>> {
+    let mut processes = Vec::with_capacity(selected.len());
+    for observation in selected {
+        let previous =
+            with_aggregate_predecessor(previous, observation).map(|index| &previous[index]);
+        processes.push(ProcessInterval {
+            previous,
+            selected: observation,
+            start: None,
+        });
+    }
+
+    processes
+}
+
 fn with_aggregate_programs<'frame>(
     frame: &'frame Frame,
     output: &mut Vec<Option<ProgramBytes<'frame>>>,
 ) {
     for member in &frame.members {
-        output.push(match member.program {
-            Ok(span) => Some(ProgramBytes {
-                executable_name: &frame.arena[span.start..span.name_end],
-                app_path: if span.name_end < span.end {
-                    Some(&frame.arena[span.name_end..span.end])
-                } else {
-                    None
-                },
-            }),
-            Err(_) => None,
-        });
+        output.push(with_aggregate_program(frame, &member.program));
+    }
+}
+
+fn with_aggregate_start_programs<'frame>(
+    frame: &'frame Frame,
+    output: &mut Vec<Option<ProgramBytes<'frame>>>,
+) {
+    for start in &frame.starts {
+        output.push(with_aggregate_program(frame, &start.program));
+    }
+}
+
+fn with_aggregate_program<'frame>(
+    frame: &'frame Frame,
+    program: &std::result::Result<super::ProgramSpan, IdentityUnavailable>,
+) -> Option<ProgramBytes<'frame>> {
+    match program {
+        Ok(span) => Some(ProgramBytes {
+            executable_name: &frame.arena[span.start..span.name_end],
+            app_path: if span.name_end < span.end {
+                Some(&frame.arena[span.name_end..span.end])
+            } else {
+                None
+            },
+        }),
+        Err(_) => None,
     }
 }
 
@@ -157,6 +184,7 @@ fn with_aggregate_index(
 fn with_aggregate_exits<'frame>(
     selected: &'frame Frame,
     previous: &[ProcessObservation<'frame>],
+    programs: &'frame [Option<ProgramBytes<'frame>>],
     output: &mut Vec<ProcessObservation<'frame>>,
 ) -> Result<()> {
     let scheduled_count = output.len();
@@ -166,11 +194,20 @@ fn with_aggregate_exits<'frame>(
             continue;
         }
 
-        let Some(index) = with_aggregate_index(previous, exit.pid, exit.creation.as_ref()) else {
-            continue;
-        };
-
-        let mut observation = with_aggregate_exit_observation(selected, exit, &previous[index]);
+        let program =
+            if let Some(index) = with_aggregate_index(previous, exit.pid, exit.creation.as_ref()) {
+                if exit.creation == previous[index].creation {
+                    previous[index].program
+                } else {
+                    Err(IdentityUnavailable::Changed)
+                }
+            } else {
+                let Some(program) = with_aggregate_started_exit(selected, exit, programs) else {
+                    continue;
+                };
+                program
+            };
+        let mut observation = with_aggregate_exit_observation(selected, exit, program);
 
         if let Some(index) =
             with_aggregate_index(&output[..scheduled_count], exit.pid, exit.creation.as_ref())
@@ -196,17 +233,52 @@ fn with_aggregate_exits<'frame>(
     Ok(())
 }
 
+fn with_aggregate_started_exit<'frame>(
+    selected: &'frame Frame,
+    exit: &Exit,
+    programs: &'frame [Option<ProgramBytes<'frame>>],
+) -> Option<std::result::Result<&'frame ProgramBytes<'frame>, IdentityUnavailable>> {
+    let creation = exit.creation?;
+    let Ok(index) = selected
+        .starts
+        .binary_search_by_key(&(exit.pid, Some(creation.unique_id)), |start| {
+            (start.pid, start.creation.map(|creation| creation.unique_id))
+        })
+    else {
+        return None;
+    };
+
+    let start = &selected.starts[index];
+    if start.ambiguous {
+        return None;
+    }
+
+    if start.number >= exit.number {
+        return None;
+    }
+
+    if start.exec_number.is_some_and(|number| number < exit.number) {
+        return None;
+    }
+
+    if start.creation != exit.creation {
+        return None;
+    }
+
+    Some(match &programs[selected.members.len() + index] {
+        Some(program) => Ok(program),
+        None => match start.program {
+            Err(reason) => Err(reason),
+            Ok(_) => unreachable!("captured Start program span has a program view"),
+        },
+    })
+}
+
 fn with_aggregate_exit_observation<'frame>(
     selected: &'frame Frame,
     exit: &'frame Exit,
-    previous: &ProcessObservation<'frame>,
+    program: std::result::Result<&'frame ProgramBytes<'frame>, IdentityUnavailable>,
 ) -> ProcessObservation<'frame> {
-    let program = if exit.creation == previous.creation {
-        previous.program
-    } else {
-        Err(IdentityUnavailable::Changed)
-    };
-
     ProcessObservation {
         stamp: selected.stamp,
         pid: exit.pid,

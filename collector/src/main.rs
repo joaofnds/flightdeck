@@ -651,7 +651,7 @@ impl Run {
 
         start_report(out, &meter, timebase)?;
 
-        collector.wait_until(schedule.deadline(0), &mut meter)?;
+        publication.wait_until(&mut collector, schedule.deadline(0), &mut meter, &mut ring)?;
         let observed = observation_or_unavailable(recording::observation_times(timebase), out)?;
         publication.read(&mut collector, &mut meter, &mut ring, observed.as_ref())?;
         meter.measure(Source::Ring, || {
@@ -707,7 +707,12 @@ impl Run {
         assert!(tick >= self.first_tick);
 
         let deadline = self.schedule.deadline(tick);
-        self.collector.wait_until(deadline, &mut self.meter)?;
+        self.publication.wait_until(
+            &mut self.collector,
+            deadline,
+            &mut self.meter,
+            &mut self.ring,
+        )?;
         let late_ticks = clock::now().saturating_sub(deadline);
         let late = Duration::from_nanos(self.timebase.nanoseconds(late_ticks)?);
         let observed = observation_or_unavailable(observe(self.timebase), out)?;

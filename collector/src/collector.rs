@@ -140,6 +140,18 @@ impl Collector {
         self.tracker.follow_until(deadline, meter)
     }
 
+    /// Uses the publishing writer at discovery; no later PID lookup can recover this path.
+    pub fn wait_until_with_identity(
+        &mut self,
+        deadline: u64,
+        meter: &mut Meter,
+        writer: &mut Writer,
+    ) -> io::Result<()> {
+        self.identities.clear();
+        self.tracker
+            .follow_until_with_identity(deadline, meter, &mut self.identities, writer)
+    }
+
     pub fn read(&mut self, meter: &mut Meter) -> io::Result<()> {
         self.read_inner(meter, None)
     }
@@ -175,12 +187,12 @@ impl Collector {
     }
 
     /// Acquires scheduled identities through the exact writer that will publish them.
-    /// Event identities remain separate and are not acquired by this call.
+    /// New listing discoveries capture Start metadata through the same writer.
     pub fn read_with_identity(&mut self, meter: &mut Meter, writer: &mut Writer) -> io::Result<()> {
         self.read_inner(meter, Some(writer))
     }
 
-    fn read_inner(&mut self, meter: &mut Meter, writer: Option<&mut Writer>) -> io::Result<()> {
+    fn read_inner(&mut self, meter: &mut Meter, mut writer: Option<&mut Writer>) -> io::Result<()> {
         // A tick fills the lists that `new` sized and never grows them.
         let listing_capacity = self.listing.capacity();
         let events_capacity = self.events.capacity();
@@ -194,8 +206,19 @@ impl Collector {
             meter.measure(Source::Smc, || smc.read())?;
         }
 
-        meter.measure(Source::Processes, || self.read_processes(writer))?;
-        self.tracker.observe(&self.listing, meter)?;
+        meter.measure(Source::Processes, || {
+            self.read_processes(writer.as_deref_mut())
+        })?;
+        if let Some(writer) = writer {
+            self.tracker.observe_with_identity(
+                &self.listing,
+                meter,
+                &mut self.identities,
+                writer,
+            )?;
+        } else {
+            self.tracker.observe(&self.listing, meter)?;
+        }
         meter.measure(Source::Events, || {
             self.events.clear();
             self.event_identities.clear();

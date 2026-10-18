@@ -73,6 +73,26 @@ impl Sweep {
         })
     }
 
+    /// Acquires at discovery, before the caller loses the readable process path.
+    pub fn capture(
+        &mut self,
+        observation: &mut IdentityObservation,
+        writer: &mut Writer,
+        reading: impl FnOnce(),
+    ) {
+        let mut acquired = Acquisition::EMPTY;
+        acquire(
+            observation.pid,
+            false,
+            &mut self.scratch,
+            &mut acquired,
+            reading,
+        );
+
+        self.diagnostics.readiness_unavailable += u64::from(acquired.readiness.is_err());
+        self.observe(observation, &mut acquired, writer);
+    }
+
     fn run_with(
         &mut self,
         numeric: &mut processes::Sweep,

@@ -5,11 +5,14 @@ use collector::ring::{
 use super::{Error, Frame, Member, PROGRAM_FRAME_BYTES_MAX, ProgramSpan, Publication, Result};
 use crate::apps::Unavailable;
 
-pub(super) fn program_bytes(source: &Publication<'_>) -> Result<usize> {
+pub(super) fn program_bytes(
+    source: &Publication<'_>,
+    identities: &[collector::ring::IdentityObservation],
+) -> Result<usize> {
     let mut size = 0_usize;
     let mut executable_name = [0; PROGRAM_PATH_BYTES_MAX];
     let mut app_path = [0; PROGRAM_PATH_BYTES_MAX];
-    for identity in source.identities {
+    for identity in identities {
         if let Some(program) = identity.program() {
             let (name, app) = source.reader.copy_program(
                 program,
@@ -91,7 +94,7 @@ pub(super) fn members(source: &Publication<'_>, frame: &mut Frame) -> Result<()>
     Ok(())
 }
 
-fn member_program(
+pub(super) fn member_program(
     source: &Publication<'_>,
     identity: &ProcessIdentity,
     arena: &mut Vec<u8>,

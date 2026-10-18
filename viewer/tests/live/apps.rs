@@ -114,6 +114,71 @@ fn publish_exit(fixture: &mut Fixture) {
     ExitScenario::default().publish(fixture);
 }
 
+#[test]
+fn retains_an_app_that_starts_and_exits_between_scheduled_samples() {
+    // Goal: captured Start identity retains an event-only exited App without inventing a rate.
+    // Method: publish no scheduled members, then a measured Start and creation-verified Exit.
+    let mut fixture = Fixture::new();
+    publish_empty(&mut fixture);
+    let mut session = LiveSession::open(&fixture.root).unwrap();
+    publish_started_exit(&mut fixture);
+
+    session.poll().unwrap();
+    session.follow_latest().unwrap();
+    let page = session.apps_page(0).unwrap();
+
+    assert_eq!(page["process_count"], 1);
+    let detail = session
+        .app_detail(
+            viewer::live_app_response::KeyKind::Bundle,
+            b"/Applications/A.app",
+            0,
+        )
+        .unwrap();
+    assert_eq!(detail["app"]["members"], 1);
+    assert_eq!(detail["app"]["live_members"], 0);
+    assert_eq!(detail["app"]["resident_bytes"]["known"], "0");
+    assert_eq!(
+        detail["app"]["cpu_percent_one_core"],
+        serde_json::Value::Null
+    );
+    assert_eq!(detail["app"]["energy_joules"], serde_json::Value::Null);
+    assert_eq!(detail["processes"][0]["state"], "exited_verified");
+    assert_eq!(
+        detail["processes"][0]["resident_bytes"]["known"],
+        "104857600"
+    );
+    assert_eq!(
+        detail["processes"][0]["cpu_percent_one_core"],
+        serde_json::Value::Null
+    );
+}
+
+fn publish_empty(fixture: &mut Fixture) {
+    fixture
+        .writer
+        .publish_with_identity(
+            &readings(&[], &Memory::default(), 1),
+            Some(&ObservationTimes {
+                wall_ns: 1_001_000_000_000,
+                continuous_ns: 1_000_000_000,
+                awake_ns: 1_000_000_000,
+            }),
+            &IdentityPublication {
+                processes: &[],
+                events: &[],
+            },
+        )
+        .unwrap();
+}
+
+fn publish_started_exit(fixture: &mut Fixture) {
+    starts::StartedExit::default().publish(fixture);
+}
+
+#[path = "apps/starts.rs"]
+mod starts;
+
 macro_rules! unassociated_exit {
     ($name:ident, $scenario:expr) => {
         #[test]

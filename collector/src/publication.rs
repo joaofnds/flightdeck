@@ -60,6 +60,24 @@ impl Publication {
         }
     }
 
+    pub(crate) fn wait_until(
+        &mut self,
+        collector: &mut Collector,
+        deadline: u64,
+        meter: &mut Meter,
+        ring: &mut Writer,
+    ) -> io::Result<()> {
+        if self.identity_enabled {
+            collector.wait_until_with_identity(deadline, meter, ring)?;
+
+            self.report.add(collector.identities.diagnostics());
+
+            Ok(())
+        } else {
+            collector.wait_until(deadline, meter)
+        }
+    }
+
     pub(crate) fn publish(
         &mut self,
         ring: &mut Writer,
@@ -171,7 +189,15 @@ impl Publication {
 
         for (event, source) in events.iter().zip(identities) {
             let (pid, usage, identity) = match event {
-                Event::Start { pid, .. } | Event::Exec { pid } => {
+                Event::Start { pid, .. } => {
+                    let identity = match source.creation {
+                        EventCreation::Start(identity) => identity,
+                        EventCreation::NotApplicable => IdentityObservation::EMPTY.identity,
+                        EventCreation::Exit(_) => unreachable!("Start carries no Exit metadata"),
+                    };
+                    (*pid, UsageAvailability::NotApplicable, identity)
+                }
+                Event::Exec { pid } => {
                     assert_eq!(source.creation, EventCreation::NotApplicable);
                     (
                         *pid,
