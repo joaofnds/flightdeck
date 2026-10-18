@@ -151,6 +151,14 @@ struct Selection: Decodable, Sendable {
     }
 }
 
+struct SelectionHeader: Decodable {
+    let second: UInt64
+    let selected: Observation?
+    let alternatives: [Observation]
+    let contextSeconds: UInt64
+    let contextError: String?
+}
+
 struct TablePage: Decodable, Sendable {
     let name: String
     let columns: [String]
@@ -396,16 +404,17 @@ final class RecordingWorker: RecordingReading, @unchecked Sendable {
         let target = request.target
         var selection: Selection
         if request.live, request.second == nil, target == nil {
-            selection = try decode(fd_follow(session))
+            selection = try decodeSelection(fd_follow(session), includeMetrics: request.apps == nil)
         } else {
-            selection = try decode(fd_select(session, second,
-                target == nil ? request.alternative : 0))
+            selection = try decodeSelection(fd_select(session, second,
+                target == nil ? request.alternative : 0), includeMetrics: request.apps == nil)
         }
         if let target {
             let alternative = try recordedAlternative(selection: selection, target: target)
             if selection.selected?.identity != target {
                 try prepare(session, epoch: epoch)
-                selection = try decode(fd_select(session, second, alternative))
+                selection = try decodeSelection(fd_select(session, second, alternative),
+                    includeMetrics: request.apps == nil)
             }
             guard selection.selected?.identity == target else {
                 throw RecordingError(message: "The requested observation is no longer available.")
@@ -572,6 +581,16 @@ final class RecordingWorker: RecordingReading, @unchecked Sendable {
 
             return try decode(fd_app_detail(session, &input, offset))
         }
+    }
+
+    private func decodeSelection(_ bytes: FlightdeckBytes, includeMetrics: Bool) throws -> Selection {
+        if includeMetrics { return try decode(bytes) }
+
+        let header: SelectionHeader = try decode(bytes)
+
+        return Selection(second: header.second, selected: header.selected,
+            alternatives: header.alternatives, summary: nil, trends: [],
+            contextSeconds: header.contextSeconds, contextError: header.contextError)
     }
 
     private func decode<T: Decodable>(_ bytes: FlightdeckBytes) throws -> T {
@@ -911,17 +930,20 @@ final class RecordingModel: ObservableObject {
         enqueue(refresh: false)
     }
 
+    func enterMetrics(_ title: String) {
+        let needsMetrics = route == "Apps" || readsCatalogOnly
+        route = title
+
+        if needsMetrics { enqueue(refresh: false) }
+    }
+
     func navigate(to title: String) {
-        let wasCatalogOnly = readsCatalogOnly
         if let component = RecordedComponent(rawValue: title) {
             enterComponent(component)
-            if wasCatalogOnly, component != .cpu { enqueue(refresh: false) }
         } else if title == "Memory" {
             enterMemory()
-            if wasCatalogOnly { enqueue(refresh: false) }
         } else if title == "Battery" || title == "Storage" {
-            route = title
-            if wasCatalogOnly { enqueue(refresh: false) }
+            enterMetrics(title)
         } else if title == "Apps" { enterApps() }
         else if title == "Overview" { enterOverview() }
         else if title == "Recorded readings" { enterRawReadings() }

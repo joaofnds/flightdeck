@@ -109,7 +109,7 @@ struct RecordedMemoryData {
 
 @MainActor
 extension RecordingModel {
-    func enterMemory() { route = "Memory" }
+    func enterMemory() { enterMetrics("Memory") }
 }
 
 struct RecordedMemory: View {

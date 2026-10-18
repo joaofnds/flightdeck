@@ -14,6 +14,7 @@ struct RecordingStateChecks {
         }
         if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--live-apps-fixture" {
             try reads_live_apps_through_the_real_worker(path: CommandLine.arguments[2])
+            try restores_machine_metrics_between_app_projections(path: CommandLine.arguments[2])
             return
         }
         if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--live-fixture" {
@@ -24,6 +25,8 @@ struct RecordingStateChecks {
             try reads_selected_fans_through_the_real_worker(path: CommandLine.arguments[2])
             try polls_catalog_without_reusing_or_decoding_a_metric_projection(
                 path: CommandLine.arguments[2])
+            try reselects_reduced_app_metadata_at_a_repeated_second(path: CommandLine.arguments[2])
+            try preserves_app_history_diagnostics_through_the_worker(path: CommandLine.arguments[2])
             return
         }
         if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--live-cpu-fixture" {
@@ -51,6 +54,8 @@ struct RecordingStateChecks {
         try decodes_history_failure_without_rejecting_the_live_selection()
         try accepts_selection_from_a_source_without_history_diagnostics()
         try decodes_history_status_for_native_poll_cache_invalidation()
+        try preserves_app_selection_metadata_without_machine_metrics()
+        rejects_app_selection_envelope_errors()
         try pages_cpu_history_without_stopping_the_live_window()
         try preserves_current_cpu_readings_when_history_is_unavailable()
         try clears_and_rejects_superseded_cpu_history()
@@ -137,6 +142,18 @@ struct RecordingStateChecks {
         entering_memory_retains_the_selected_live_publication()
         self_monitoring_uses_catalog_polls_and_restores_metric_reads()
         entering_apps_retains_the_selected_live_publication()
+        try restores_metrics_after_paused_apps("Memory", enter: { $0.navigate(to: "Memory") })
+        try restores_metrics_after_paused_apps("GPU", enter: { $0.navigate(to: "GPU") })
+        try restores_metrics_after_paused_apps("Energy", enter: { $0.navigate(to: "Energy") })
+        try restores_metrics_after_paused_apps("Network", enter: { $0.navigate(to: "Network") })
+        try restores_metrics_after_paused_apps("Battery", enter: { $0.navigate(to: "Battery") })
+        try restores_metrics_after_paused_apps("Storage", enter: { $0.navigate(to: "Storage") })
+        try restores_metrics_after_paused_apps("Memory", enter: { $0.enterMemory() })
+        try restores_metrics_after_paused_apps("GPU", enter: { $0.enterComponent(.gpu) })
+        try restores_metrics_after_paused_apps("Energy", enter: { $0.enterComponent(.energy) })
+        try restores_metrics_after_paused_apps("Network", enter: { $0.enterComponent(.network) })
+        try rejects_pending_app_metrics_after_leaving_apps()
+        try restores_metrics_while_following_apps()
         try installs_completed_live_app_metrics_and_history()
         try ignores_superseded_app_metrics_after_the_selected_key_changes()
         try adopts_effective_app_pages_for_the_next_live_poll()
@@ -187,9 +204,155 @@ struct RecordingStateChecks {
     }
 
     private static func historyFailureSelection() throws -> Selection {
-        let data = Data(#"{"value":{"second":17,"selected":{"run":"run-0","boot":"boot","publication":9,"run_tick":9,"wall_ns":17000000000},"alternatives":[{"run":"run-0","boot":"boot","publication":9,"run_tick":9,"wall_ns":17000000000}],"summary":{"run":"run-0","boot":"boot","publication":9,"wall_ns":17000000000,"segment":1,"cpu_percent":25},"trends":[{"run":"run-0","boot":"boot","publication":9,"wall_ns":17000000000,"segment":1,"cpu_percent":25}],"context_seconds":900,"context_error":"Earlier window unreadable"}}"#.utf8)
+        let data = Data(#"{"value":{"second":17,"selected":{"run":"run-0","boot":"boot","publication":9,"run_tick":9,"wall_ns":17000000000,"window_losses":{"publications":0,"events":0,"unknown":false}},"alternatives":[{"run":"run-0","boot":"boot","publication":9,"run_tick":9,"wall_ns":17000000000}],"summary":{"run":"run-0","boot":"boot","publication":9,"wall_ns":17000000000,"segment":1,"cpu_percent":25},"trends":[{"run":"run-0","boot":"boot","publication":9,"wall_ns":17000000000,"segment":1,"cpu_percent":25}],"context_seconds":900,"context_error":"Earlier window unreadable"}}"#.utf8)
 
         return try decodeRecordingResponse(data)
+    }
+
+    private static func preserves_app_selection_metadata_without_machine_metrics() throws {
+        // Goal: the reduced App selection preserves exact identity, clocks, losses and diagnostics.
+        // Method: decode the wire header with wide counters and both source and reader losses.
+        let data = Data(#"""
+            {"value":{"second":17,"selected":{"run":"run","boot":"boot",
+            "publication":9007199254740993,"run_tick":9007199254740995,"wall_ns":17000000001,
+            "window_losses":{"publications":2,"events":3,"unknown":true},
+            "reader_losses":{"publications":4,"events":5,"unknown":false}},
+            "alternatives":[],"context_seconds":900,"context_error":"History unavailable"}}
+            """#.utf8)
+        let expected = Observation(run: "run", boot: "boot", publication: 9_007_199_254_740_993,
+            runTick: 9_007_199_254_740_995, wallNs: 17_000_000_001,
+            windowLosses: Losses(publications: 2, events: 3, unknown: true),
+            readerLosses: Losses(publications: 4, events: 5, unknown: false))
+
+        let header: SelectionHeader = try decodeRecordingResponse(data)
+
+        precondition(header.second == 17)
+        precondition(header.selected == expected)
+        precondition(header.alternatives.isEmpty)
+        precondition(header.contextSeconds == 900)
+        precondition(header.contextError == "History unavailable")
+    }
+
+    private static func rejects_app_selection_envelope_errors() {
+        // Goal: reduced decoding cannot replace a source error with a plausible selection.
+        // Method: supply the wire error envelope at the actual native decoding boundary.
+        let data = Data(#"{"error":"Source refused"}"#.utf8)
+
+        let result = Result { () throws -> SelectionHeader in try decodeRecordingResponse(data) }
+
+        guard case .failure(let error) = result, let failure = error as? RecordingError else {
+            preconditionFailure("An App selection envelope error was accepted")
+        }
+
+        precondition(failure.message == "Source refused")
+    }
+
+    @MainActor
+    private static func restores_metrics_after_paused_apps(
+        _ title: String, enter: (RecordingModel) -> Void
+    ) throws {
+        // Goal: leaving Apps restores the destination's metrics at the exact paused observation.
+        // Method: enter through sidebar and direct actions with polling disabled at the reader port.
+        let (model, reader) = pausedAppsModel()
+        let selected = model.selection?.selected
+        let full = try historyFailureSelection()
+
+        enter(model)
+
+        precondition(model.route == title)
+        precondition(!model.following)
+        precondition(reader.readCount == 3, title)
+        precondition(reader.latestRequest?.apps == nil, title)
+        precondition(reader.latestRequest?.catalogOnly == false, title)
+        precondition(reader.latestRequest?.target == selected?.identity, title)
+        guard let catalog = model.catalog else { preconditionFailure("Missing App catalog") }
+
+        reader.finishNext(result: ReadResult(catalog: catalog, selection: full, page: nil,
+            machinePages: [:]))
+        drainMainQueue()
+
+        precondition(model.selection?.selected == selected)
+        precondition(model.selection?.summary?.cpuPercent == 25, title)
+        precondition(model.selection?.trends.count == 1, title)
+        precondition(!model.following)
+    }
+
+    @MainActor
+    private static func rejects_pending_app_metrics_after_leaving_apps() throws {
+        // Goal: a canceled App response cannot replace a scalar destination's selection.
+        // Method: deliver an old response carrying a new notice before its queued replacement.
+        let (model, reader) = pausedAppsModel()
+        guard let selected = model.selection, let catalog = model.catalog else {
+            preconditionFailure("Missing paused App observation")
+        }
+        let stale = Selection(second: selected.second, selected: selected.selected,
+            alternatives: selected.alternatives, summary: nil, trends: [],
+            contextSeconds: selected.contextSeconds, contextError: "Stale App response")
+        model.enterApps()
+
+        model.navigate(to: "Memory")
+        reader.finishNext(result: ReadResult(catalog: catalog, selection: stale, page: nil,
+            machinePages: [:]))
+        drainMainQueue()
+
+        precondition(model.selection?.contextError == nil)
+        precondition(model.route == "Memory")
+        precondition(reader.readCount == 4)
+        precondition(reader.latestRequest?.apps == nil)
+        precondition(reader.latestRequest?.target == selected.selected?.identity)
+        let full = try historyFailureSelection()
+
+        reader.finishNext(result: ReadResult(catalog: catalog, selection: full, page: nil,
+            machinePages: [:]))
+        drainMainQueue()
+
+        precondition(model.selection?.selected == selected.selected)
+        precondition(model.selection?.summary?.cpuPercent == 25)
+        precondition(model.selection?.trends.count == 1)
+        precondition(!model.following)
+    }
+
+    @MainActor
+    private static func pausedAppsModel() -> (RecordingModel, ControlledRecordingReader) {
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+        model.startLive()
+        reader.finishNext()
+        drainMainQueue()
+        model.enterApps()
+        reader.finishNext()
+        drainMainQueue()
+        model.setLive(false)
+
+        return (model, reader)
+    }
+
+    @MainActor
+    private static func restores_metrics_while_following_apps() throws {
+        // Goal: hydrating a scalar pane from Apps keeps live following enabled.
+        // Method: resume the paused App source with polling disabled, then enter Memory.
+        let (model, reader) = pausedAppsModel()
+        model.setLive(true)
+        reader.finishNext()
+        drainMainQueue()
+        let full = try historyFailureSelection()
+        guard let catalog = model.catalog else { preconditionFailure("Missing App catalog") }
+
+        model.navigate(to: "Memory")
+
+        precondition(model.following)
+        precondition(reader.readCount == 4)
+        precondition(reader.latestRequest?.apps == nil)
+        precondition(reader.latestRequest?.target == nil)
+        precondition(reader.latestRequest?.second == nil)
+        reader.finishNext(result: ReadResult(catalog: catalog, selection: full, page: nil,
+            machinePages: [:]))
+        drainMainQueue()
+
+        precondition(model.route == "Memory")
+        precondition(model.selection?.summary?.cpuPercent == 25)
+        precondition(model.selection?.trends.count == 1)
+        precondition(model.following)
     }
 
     private static func accepts_selection_from_a_source_without_history_diagnostics() throws {
@@ -1971,6 +2134,65 @@ struct RecordingStateChecks {
         ReadRequest(path: path, second: nil, alternative: 0, table: 1, offset: 0,
             refresh: false, machineOffsets: [:], includeMachine: false,
             includePage: includePage, live: true, poll: true)
+    }
+
+    @MainActor
+    private static func reselects_reduced_app_metadata_at_a_repeated_second(path: String) throws {
+        // Goal: exact App selection preserves reduced metadata after resolving a sibling tick.
+        // Method: target publication 3 when the real source defaults to publication 2 at second 900.
+        let reader = RecordingWorker()
+        let apps = LiveAppsRequest(key: nil, appsOffset: 0, membersOffset: 0)
+        let followed = try nativeRead(reader, request: ReadRequest(path: path, second: nil,
+            alternative: 0, table: 1, offset: 0, refresh: false, machineOffsets: [:],
+            includeMachine: false, includePage: false, live: true, apps: apps))
+        guard let latest = followed.selection?.selected else {
+            throw RecordingError(message: "Repeated App fixture has no latest observation")
+        }
+        let target = RecordedObservationIdentity(run: latest.run, boot: latest.boot, publication: 3)
+
+        let pinned = try nativeRead(reader, request: ReadRequest(path: path, second: 900,
+            alternative: 0, table: 1, offset: 0, refresh: false, machineOffsets: [:],
+            includeMachine: false, includePage: false, live: true, target: target, apps: apps))
+
+        precondition(latest.publication == 3)
+        precondition(pinned.selection?.selected?.identity == target)
+        precondition(pinned.selection?.alternatives.map(\.publication) == [2, 3])
+        precondition(pinned.selection?.second == 900)
+        precondition(pinned.selection?.contextSeconds == 900)
+        precondition(pinned.selection?.summary == nil)
+        precondition(pinned.selection?.trends.isEmpty == true)
+        print("Real worker reselects reduced App metadata at a repeated wall second")
+    }
+
+    @MainActor
+    private static func preserves_app_history_diagnostics_through_the_worker(path: String) throws {
+        // Goal: reduced App conversion retains an actual source history failure and context length.
+        // Method: add one invalid commit name inside the owned fixture, then follow its healthy ring.
+        let commits = URL(fileURLWithPath: path).appendingPathComponent("commits")
+        precondition(!FileManager.default.fileExists(atPath: commits.path))
+        try FileManager.default.createDirectory(at: commits, withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700])
+        defer {
+            do { try FileManager.default.removeItem(at: commits) }
+            catch { preconditionFailure("Cannot remove owned history fixture: \(error)") }
+        }
+        try FileManager.default.createDirectory(
+            at: commits.appendingPathComponent("invalid-app-history"),
+            withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let reader = RecordingWorker()
+        let apps = LiveAppsRequest(key: nil, appsOffset: 0, membersOffset: 0)
+
+        let response = try nativeRead(reader, request: ReadRequest(path: path, second: nil,
+            alternative: 0, table: 1, offset: 0, refresh: false, machineOffsets: [:],
+            includeMachine: false, includePage: false, live: true, apps: apps))
+
+        precondition(response.catalog.historyError?.isEmpty == false)
+        precondition(response.selection?.contextError == response.catalog.historyError)
+        precondition(response.selection?.contextSeconds == 900)
+        precondition(response.selection?.selected?.publication == 3)
+        precondition(response.selection?.summary == nil)
+        precondition(response.selection?.trends.isEmpty == true)
+        print("Real worker preserves App context length and source history diagnostic")
     }
 
     @MainActor

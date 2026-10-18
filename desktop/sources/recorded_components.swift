@@ -62,7 +62,7 @@ struct RecordedComponentData {
 extension RecordingModel {
     func enterComponent(_ component: RecordedComponent) {
         if component == .cpu { enterProcesses() }
-        else { route = component.rawValue }
+        else { enterMetrics(component.rawValue) }
     }
 }
 

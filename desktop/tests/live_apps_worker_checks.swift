@@ -33,6 +33,48 @@ func reads_live_apps_through_the_real_worker(path: String) throws {
 }
 
 @MainActor
+func restores_machine_metrics_between_app_projections(path: String) throws {
+    // Goal: App selection omits unused metrics without poisoning a paused scalar projection.
+    // Method: query Apps, full metrics, then Apps at one exact publication without new source data.
+    let harness = LiveAppsWorkerHarness(path: path)
+    let latest = try harness.driver.follow(poll: false)
+    let reference = try liveAppsWorkerValue(latest.catalog.latestObservation,
+        "App projection fixture has no latest observation")
+
+    try liveAppsWorkerRequire(latest.selection?.summary == nil,
+        "Following Apps decoded an unused whole-machine summary")
+    try liveAppsWorkerRequire(latest.selection?.trends.isEmpty == true,
+        "Following Apps decoded unused whole-machine history")
+    let apps = try harness.driver.pin(publication: 2, second: 1001, reference: reference)
+
+    try liveAppsWorkerRequire(apps.selection?.summary == nil,
+        "App selection decoded an unused whole-machine summary")
+    try liveAppsWorkerRequire(apps.selection?.trends.isEmpty == true,
+        "App selection decoded unused whole-machine history")
+    let metrics = try harness.driver.pin(publication: 2, second: 1001,
+        reference: reference, key: nil)
+
+    try liveAppsWorkerRequire(metrics.selection?.selected == apps.selection?.selected,
+        "Returning to metrics changed the paused observation")
+    try liveAppsWorkerRequire(metrics.selection?.summary != nil,
+        "App cache omitted the requested whole-machine summary")
+    try liveAppsWorkerRequire(metrics.selection?.trends.isEmpty == false,
+        "App cache omitted the requested whole-machine history")
+    try liveAppsWorkerRequire(metrics.apps == nil, "Metric projection retained App detail")
+    let restored = try harness.driver.pin(publication: 2, second: 1001, reference: reference)
+
+    try liveAppsWorkerRequire(restored.selection?.selected == apps.selection?.selected,
+        "Returning to Apps changed the paused observation")
+    try liveAppsWorkerRequire(restored.selection?.summary == nil,
+        "Returning to Apps retained the full metric projection")
+    try liveAppsWorkerRequire(restored.selection?.trends.isEmpty == true,
+        "Returning to Apps retained full metric history")
+    try checks_pinned_app_quantities(restored)
+    try checks_exact_app_history(restored)
+    print("Real worker restores exact whole-machine metrics between reduced App projections")
+}
+
+@MainActor
 func reads_live_apps_paging_through_the_real_worker(path: String) throws {
     // Goal: following and manual selection recover when retained pages exceed a smaller population.
     // Method: pin page 512 of 513 Apps/members, then request the 511-row observation with those offsets.
@@ -218,7 +260,7 @@ private final class LiveAppsWorkerDriver {
     }
 
     func pin(publication: UInt64, second: UInt64, reference: Observation,
-             key: LiveAppKeyIdentity = LiveAppsWorkerDriver.key,
+             key: LiveAppKeyIdentity? = LiveAppsWorkerDriver.key,
              appsOffset: UInt32 = 0, membersOffset: UInt32 = 0) throws -> ReadResult {
         let identity = RecordedObservationIdentity(run: reference.run, boot: reference.boot,
             publication: publication)
@@ -228,12 +270,14 @@ private final class LiveAppsWorkerDriver {
     }
 
     private func read(second: UInt64?, target: RecordedObservationIdentity?, poll: Bool,
-                      key: LiveAppKeyIdentity, appsOffset: UInt32,
+                      key: LiveAppKeyIdentity?, appsOffset: UInt32,
                       membersOffset: UInt32) throws -> ReadResult {
         let completion = LiveAppsWorkerCompletion()
         worker.read(ReadRequest(path: path, second: second, alternative: 0, table: 1, offset: 0,
-            refresh: false, machineOffsets: [:], includeMachine: false, live: true, poll: poll,
-            target: target, apps: LiveAppsRequest(key: key, appsOffset: appsOffset, membersOffset: membersOffset))) {
+            refresh: false, machineOffsets: [:], includeMachine: false, includePage: false,
+            live: true, poll: poll, target: target,
+            apps: key.map { LiveAppsRequest(key: $0, appsOffset: appsOffset,
+                membersOffset: membersOffset) })) {
             completion.complete($0)
         }
         guard completion.ready.wait(timeout: .now() + 5) == .success else {
