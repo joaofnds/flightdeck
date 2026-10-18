@@ -5,13 +5,15 @@ use std::time::{Duration, Instant};
 
 use collector::recording::discovery::Selection;
 use collector::ring::{Identity, RunIdentity};
-use duckdb::types::ValueRef;
+use persistence::engine::{Engine, InterruptHandle, Row as QueryRow};
 use persistence::layout::{self, DirectoryNames, Kind, WindowLocation};
-use persistence::schema::Table;
 use persistence::{Error, Manifest, Result, read_committed};
+use polars::prelude::AnyValue;
 
-use super::identity_reference;
 use super::rows::{self, Row, TABLES};
+
+#[path = "compare/cursor.rs"]
+mod cursor;
 
 struct Reference {
     identity: RunIdentity,
@@ -25,6 +27,11 @@ struct Reference {
     wall_ns: u64,
 }
 
+struct ComparisonTable<'table> {
+    label: &'table str,
+    order: &'table str,
+}
+
 pub fn run(root: &Path, reference: &Path) -> Result<()> {
     persistence::query::validate_root(root)?;
     collector::recording::private::verify_directory(root)?;
@@ -35,12 +42,7 @@ pub fn run(root: &Path, reference: &Path) -> Result<()> {
         return Err(Error::Bound("no committed source windows discovered"));
     }
 
-    let connection = duckdb::Connection::open_in_memory()?;
-    connection.execute_batch(
-        "SET threads=1; SET memory_limit='512MiB'; \
-        SET max_temp_directory_size='0B'; SET autoinstall_known_extensions=false; \
-        SET autoload_known_extensions=false;",
-    )?;
+    let connection = Engine::new();
     let (cancel, cancellation) = std::sync::mpsc::sync_channel::<()>(0);
     let interrupt = connection.interrupt_handle();
     let watchdog = std::thread::Builder::new()
@@ -58,7 +60,7 @@ pub fn run(root: &Path, reference: &Path) -> Result<()> {
 
 fn watch_deadline(
     cancellation: &std::sync::mpsc::Receiver<()>,
-    interrupt: &duckdb::InterruptHandle,
+    interrupt: &InterruptHandle,
     deadline: Instant,
 ) -> Result<()> {
     match cancellation.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
@@ -66,9 +68,9 @@ fn watch_deadline(
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
     }
 
-    // DuckDB clears interruption at query startup. Keep expiry effective across that boundary.
+    // A query can start after expiry, so interrupt again until completion or the retry bound.
     for _attempt in 0..10_000 {
-        interrupt.interrupt();
+        interrupt.interrupt()?;
         match cancellation.recv_timeout(Duration::from_millis(1)) {
             Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
@@ -79,7 +81,7 @@ fn watch_deadline(
 }
 
 fn run_comparison(
-    connection: &duckdb::Connection,
+    connection: &Engine,
     root: &Path,
     reference: &Path,
     manifests: &[Manifest],
@@ -87,14 +89,34 @@ fn run_comparison(
 ) -> Result<()> {
     let mut rows = 0_u64;
     for (table, order) in TABLES {
-        rows += compare_table(connection, root, reference, manifests, source, table, order)?;
+        rows += compare_table(
+            connection,
+            root,
+            reference,
+            manifests,
+            source,
+            &ComparisonTable {
+                label: table,
+                order,
+            },
+        )?;
     }
     if source.identity_capable {
         for (table, order) in [
             ("process_identity", "publication,pid"),
             ("event_identity", "publication,event"),
         ] {
-            rows += compare_table(connection, root, reference, manifests, source, table, order)?;
+            rows += compare_table(
+                connection,
+                root,
+                reference,
+                manifests,
+                source,
+                &ComparisonTable {
+                    label: table,
+                    order,
+                },
+            )?;
         }
     }
     check_deadline(source.deadline)?;
@@ -369,7 +391,32 @@ fn discover(root: &Path, source: &Reference) -> Result<Vec<Manifest>> {
             })
         })
     })?;
+    discover_order(&mut manifests, &source.identity)?;
     Ok(manifests)
+}
+
+fn discover_order(manifests: &mut [Manifest], identity: &RunIdentity) -> Result<()> {
+    if manifests.len() > 128 {
+        return Err(bound("reference window count"));
+    }
+    manifests.sort_by_key(|manifest| manifest.publication_first);
+    let mut previous_end = None;
+    for manifest in manifests {
+        if manifest.identity.run != *identity {
+            return Err(bound("reference window run"));
+        }
+        if manifest.publication_first >= manifest.publication_end {
+            return Err(bound("reference window publication range"));
+        }
+        if let Some(end) = previous_end {
+            if manifest.publication_first < end {
+                return Err(bound("reference overlapping publication ranges"));
+            }
+        }
+        previous_end = Some(manifest.publication_end);
+    }
+
+    Ok(())
 }
 
 fn visit(path: &Path, entry: impl FnMut(&str) -> Result<()>) -> Result<()> {
@@ -377,39 +424,25 @@ fn visit(path: &Path, entry: impl FnMut(&str) -> Result<()>) -> Result<()> {
 }
 
 fn compare_table(
-    connection: &duckdb::Connection,
+    connection: &Engine,
     root: &Path,
     reference: &Path,
     manifests: &[Manifest],
     source: &Reference,
-    table: &str,
-    order: &str,
+    table: &ComparisonTable<'_>,
 ) -> Result<u64> {
     check_deadline(source.deadline)?;
-    let schema_name = match table {
-        "process_identity" => "processes",
-        "event_identity" => "events",
-        _ => table,
-    };
-    let (schema, _, _) = persistence::schema::TABLES
-        .iter()
-        .find(|entry| entry.0.name() == schema_name)
-        .ok_or(bound("reference table"))?;
-    let projection =
-        compare_table_source(connection, root, manifests, *schema, table, source.deadline)?;
-    let sql = format!(
-        "SELECT * FROM ({projection}) WHERE publication>={} \
-        AND publication<={} ORDER BY {order} LIMIT 100000001",
-        source.first, source.newest
-    );
-    check_deadline(source.deadline)?;
-    let mut statement = connection.prepare(&sql)?;
-    check_deadline(source.deadline)?;
-    let mut actual = statement.query([])?;
-    let columns = actual
-        .as_ref()
-        .ok_or(bound("missing executed statement"))?
-        .column_count();
+    let mut actual = cursor::Cursor::new(connection, root, manifests, source, table)?;
+
+    compare_table_rows(&mut actual, reference, source, table.label)
+}
+
+fn compare_table_rows(
+    actual: &mut cursor::Cursor<'_>,
+    reference: &Path,
+    source: &Reference,
+    table: &str,
+) -> Result<u64> {
     let mut expected = BufReader::new(File::open(reference)?);
     let mut line = String::with_capacity(32_769);
     let mut count = 0_u64;
@@ -424,10 +457,11 @@ fn compare_table(
             continue;
         }
 
-        let row = actual
-            .next()?
-            .ok_or(bound("disk has fewer rows than source reference"))?;
-        compare_table_row(row, columns, table, &line)?;
+        let Some((row, columns)) = actual.next()? else {
+            return Err(bound("disk has fewer rows than source reference"));
+        };
+
+        compare_table_row(&row, columns, table, &line)?;
         count += 1;
     }
     if count == 100_000_000 {
@@ -443,12 +477,12 @@ fn compare_table(
     Ok(count)
 }
 
-fn compare_table_row(row: &duckdb::Row<'_>, columns: usize, table: &str, line: &str) -> Result<()> {
+fn compare_table_row(row: &QueryRow<'_>, columns: usize, table: &str, line: &str) -> Result<()> {
     let mut bytes = Vec::with_capacity(32_768);
     let publication: u64 = row.get(0)?;
     let mut target = Row::new(&mut bytes, table, publication)?;
     for column in 1..columns {
-        value(&mut target, row.get_ref(column)?)?;
+        value(&mut target, row.value(column)?)?;
     }
     target.end()?;
     assert!(bytes.len() <= 32_768);
@@ -464,60 +498,23 @@ fn compare_table_row(row: &duckdb::Row<'_>, columns: usize, table: &str, line: &
     Ok(())
 }
 
-fn compare_table_source(
-    connection: &duckdb::Connection,
-    root: &Path,
-    manifests: &[Manifest],
-    table: Table,
-    label: &str,
-    deadline: Instant,
-) -> Result<String> {
-    assert!(manifests.len() <= 128);
-    let columns = match label {
-        "process_identity" => identity_reference::PROCESS_COLUMNS.to_owned(),
-        "event_identity" => identity_reference::EVENT_COLUMNS.to_owned(),
-        _ => table.columns().collect::<Vec<_>>().join(","),
-    };
-    let mut sources = Vec::with_capacity(manifests.len());
-
-    for manifest in manifests {
-        check_deadline(deadline)?;
-        let path = root
-            .join(&manifest.data_directory)
-            .join(format!("{}.parquet", table.name()));
-        let source = persistence::query::table_source(
-            connection,
-            table,
-            persistence::query::TableSource::Parquet(&path),
-        )?;
-        let measured = if label == "processes" {
-            " WHERE usage_availability=0".to_owned()
-        } else {
-            String::new()
-        };
-        sources.push(format!("SELECT {columns} FROM {source}{measured}"));
-    }
-
-    Ok(sources.join(" UNION ALL "))
-}
-
-fn value(target: &mut Row<'_, Vec<u8>>, value: ValueRef<'_>) -> Result<()> {
+fn value(target: &mut Row<'_, Vec<u8>>, value: AnyValue<'_>) -> Result<()> {
     match value {
-        ValueRef::Null => target.null(),
-        ValueRef::Boolean(value) => target.boolean(value),
-        ValueRef::TinyInt(value) => target.signed(i64::from(value)),
-        ValueRef::SmallInt(value) => target.signed(i64::from(value)),
-        ValueRef::Int(value) => target.signed(i64::from(value)),
-        ValueRef::BigInt(value) => target.signed(value),
-        ValueRef::UTinyInt(value) => target.unsigned(u64::from(value)),
-        ValueRef::USmallInt(value) => target.unsigned(u64::from(value)),
-        ValueRef::UInt(value) => target.unsigned(u64::from(value)),
-        ValueRef::UBigInt(value) => target.unsigned(value),
-        ValueRef::Float(value) => target.float(value),
-        ValueRef::Blob(value) => target.blob(value),
-        ValueRef::Text(value) => {
-            target.text(std::str::from_utf8(value).map_err(|_| bound("disk text encoding"))?)
-        }
+        AnyValue::Null => target.null(),
+        AnyValue::Boolean(value) => target.boolean(value),
+        AnyValue::Int8(value) => target.signed(i64::from(value)),
+        AnyValue::Int16(value) => target.signed(i64::from(value)),
+        AnyValue::Int32(value) => target.signed(i64::from(value)),
+        AnyValue::Int64(value) => target.signed(value),
+        AnyValue::UInt8(value) => target.unsigned(u64::from(value)),
+        AnyValue::UInt16(value) => target.unsigned(u64::from(value)),
+        AnyValue::UInt32(value) => target.unsigned(u64::from(value)),
+        AnyValue::UInt64(value) => target.unsigned(value),
+        AnyValue::Float32(value) => target.float(value),
+        AnyValue::Binary(value) => target.blob(value),
+        AnyValue::BinaryOwned(value) => target.blob(&value),
+        AnyValue::String(value) => target.text(value),
+        AnyValue::StringOwned(value) => target.text(value.as_str()),
         _ => Err(bound("unexpected disk column type")),
     }
 }
@@ -537,60 +534,94 @@ fn check_deadline(deadline: Instant) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::mpsc::{self, RecvTimeoutError};
+    use std::sync::mpsc;
 
     #[test]
-    fn expired_watchdog_survives_query_startup_and_interrupts_execution() {
-        // Goal: expiry between preparation and execution remains effective after startup.
-        // Method: expire a real connection, confirm its watcher stays alive, then run work.
-        let (ready, handle) = mpsc::sync_channel(1);
-        let (proceed, permitted) = mpsc::sync_channel(1);
-        let (finished, result) = mpsc::sync_channel(1);
-        let worker = std::thread::spawn(move || {
-            let connection = duckdb::Connection::open_in_memory().unwrap();
-            let mut statement = connection
-                .prepare("SELECT count(*) FROM range(1000000000000) t(i) WHERE i % 7 = 0")
-                .unwrap();
-            ready.send(connection.interrupt_handle()).unwrap();
-            permitted.recv_timeout(Duration::from_secs(5)).unwrap();
-            let result = statement.query_row([], |row| row.get::<_, i64>(0));
-            finished.send(result).unwrap();
-        });
-        let interrupt = handle.recv_timeout(Duration::from_secs(5)).unwrap();
-        let (cancel, cancellation) = mpsc::sync_channel(0);
-        let (stopped, completion) = mpsc::sync_channel(1);
-        let watcher_interrupt = interrupt.clone();
-        let watcher = std::thread::spawn(move || {
-            let result = watch_deadline(&cancellation, &watcher_interrupt, Instant::now());
-            stopped.send(result).unwrap();
-        });
-
-        assert!(matches!(
-            completion.recv_timeout(Duration::from_millis(50)),
-            Err(RecvTimeoutError::Timeout)
-        ));
-        proceed.send(()).unwrap();
-        let outcome = result.recv_timeout(Duration::from_secs(5));
-        if outcome.is_err() {
-            interrupt.interrupt();
-        }
-        drop(cancel);
-        completion
-            .recv_timeout(Duration::from_secs(5))
-            .unwrap()
+    fn scalar_text_and_binary_match_exact_reference_bytes() {
+        // Goal: native scalar storage preserves text and BLOB reference serialization.
+        // Method: compare SQL literals, including zero and non-UTF-8 bytes, to a fixed reference.
+        let connection = Engine::new();
+        let frame = connection
+            .query(
+                "SELECT 7 AS publication, 'helper' AS name, \
+                B'0000000011111111' AS path",
+            )
             .unwrap();
-        watcher.join().unwrap();
-        worker.join().unwrap();
+        assert_eq!(frame.height(), 1);
+        assert_eq!(frame.width(), 3);
+        let row = QueryRow::new(&frame, 0).unwrap();
+        assert!(matches!(row.value(1).unwrap(), AnyValue::StringOwned(_)));
+        assert!(matches!(row.value(2).unwrap(), AnyValue::BinaryOwned(_)));
 
-        let error = outcome
-            .unwrap()
-            .unwrap_err()
-            .to_string()
-            .to_ascii_lowercase();
-        assert!(error.contains("interrupt"), "unexpected error: {error}");
+        compare_table_row(
+            &row,
+            frame.width(),
+            "process_identity",
+            "process_identity u7 s68656c706572 x00ff\n",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn expired_watchdog_interrupts_a_query_that_outlasts_the_deadline() {
+        // Goal: after expiry, the watchdog alone stops comparison work that is still running.
+        // Method: collect native work lasting past an expired watcher, then reuse the engine.
+        let engine = Engine::new();
+        let interrupt = engine.interrupt_handle();
+        let (cancel, cancellation) = mpsc::sync_channel(0);
+        let watcher =
+            std::thread::spawn(move || watch_deadline(&cancellation, &interrupt, Instant::now()));
+
+        let outcome = engine.collect(outlasting_plan());
+        drop(cancel);
+        let stopped = watcher.join().unwrap();
+
+        stopped.unwrap();
         assert!(matches!(
-            check_deadline(Instant::now()),
-            Err(Error::Bound("reference verification time bound"))
+            outcome,
+            Err(Error::Engine(polars::error::PolarsError::ComputeError(message)))
+                if message.as_ref() == "query interrupted"
         ));
+        let frame = engine.query("SELECT 42").unwrap();
+        assert_eq!(QueryRow::new(&frame, 0).unwrap().get::<i32>(0).unwrap(), 42);
+    }
+
+    fn outlasting_plan() -> polars::prelude::LazyFrame {
+        // The first part stands for native work lasting 250 ms; the second part starts a new
+        // executor, which observes the interruption that the watcher delivered meanwhile.
+        use polars::prelude::{
+            AllowedOptimizations, Column, DataFrame, IntoLazy, UnionArgs, col, concat, lit,
+        };
+        let first = DataFrame::new(1, vec![Column::new("value".into(), [11u64])])
+            .unwrap()
+            .lazy()
+            .map(
+                |frame| {
+                    std::thread::sleep(Duration::from_millis(250));
+                    Ok(frame)
+                },
+                AllowedOptimizations::empty(),
+                None,
+                Some("outlasting_comparison_work"),
+            );
+        let second = DataFrame::new(1, vec![Column::new("value".into(), [17u64])])
+            .unwrap()
+            .lazy()
+            .select([(col("value") + lit(1u64)).alias("value")]);
+
+        concat(
+            [first, second],
+            UnionArgs {
+                parallel: false,
+                rechunk: false,
+                to_supertypes: false,
+                diagonal: false,
+                strict: true,
+                from_partitioned_ds: false,
+                maintain_order: true,
+            },
+        )
+        .unwrap()
+        .without_optimizations()
     }
 }

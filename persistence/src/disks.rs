@@ -1,6 +1,7 @@
 //! One bounded optional tick cell using the collector's exact physical-disk word codec.
+use crate::engine::{Engine, Row};
 use collector::disks::{DiskSnapshot, encoding};
-use duckdb::{Connection, types::ValueRef};
+use polars::prelude::{AnyValue, DataType};
 
 use crate::{Error, Result};
 
@@ -62,38 +63,20 @@ fn decode_digit(byte: u8) -> Result<u8> {
     }
 }
 
-pub(crate) fn normalize(connection: &Connection, source: &str) -> Result<String> {
-    let mut statement = connection.prepare(&format!("DESCRIBE SELECT * FROM {source}"))?;
-    let mut rows = statement.query([])?;
+pub(crate) fn normalize(connection: &Engine, source: &str) -> Result<String> {
+    let schema = connection.schema(source)?;
+    if schema.len() > 32 {
+        return Err(Error::Bound("tick column count"));
+    }
+
     let mut present = false;
-    for count in 0..=32 {
-        let Some(row) = rows.next()? else {
-            if present {
-                normalize_validate(connection, source)?;
-                return Ok(source.to_owned());
-            }
-
-            if count == 32 {
-                return Err(Error::Bound("normalized tick column count"));
-            }
-
-            return Ok(format!("(SELECT *, NULL::VARCHAR {FIELD} FROM {source})"));
-        };
-
-        if count == 32 {
-            return Err(Error::Bound("tick column count"));
-        }
-
-        let ValueRef::Text(name) = row.get_ref(0)? else {
-            return Err(Error::Bound("tick column metadata"));
-        };
-
-        if name.eq_ignore_ascii_case(FIELD.as_bytes()) {
-            if name != FIELD.as_bytes() {
+    for (name, data_type) in schema.iter() {
+        if name.eq_ignore_ascii_case(FIELD) {
+            if name.as_str() != FIELD {
                 return Err(Error::Bound("physical disk field spelling"));
             }
 
-            if row.get_ref(1)? != ValueRef::Text(b"VARCHAR") {
+            if *data_type != DataType::String {
                 return Err(Error::Bound("physical disk storage type"));
             }
 
@@ -101,38 +84,42 @@ pub(crate) fn normalize(connection: &Connection, source: &str) -> Result<String>
         }
     }
 
-    Err(Error::Bound("tick column count"))
-}
-
-fn normalize_validate(connection: &Connection, source: &str) -> Result<()> {
-    let mut statement = connection.prepare(&format!(
-        "SELECT {FIELD}, publication FROM {source} LIMIT 62"
-    ))?;
-    let mut rows = statement.query([])?;
-    let mut snapshot = DiskSnapshot::default();
-    for index in 0..=61 {
-        let Some(row) = rows.next()? else {
-            return Ok(());
-        };
-
-        if index == 61 {
-            return Err(Error::Bound("physical disk tick rows"));
-        }
-
-        match row.get_ref(0)? {
-            ValueRef::Null => {}
-            ValueRef::Text(text) => {
-                if row.get::<_, Option<u64>>(1)?.is_none() {
-                    return Err(Error::Bound("physical disk observation"));
-                }
-
-                let text = std::str::from_utf8(text)
-                    .map_err(|_| Error::Bound("physical disk text encoding"))?;
-                decode(text, &mut snapshot)?;
-            }
-            _ => return Err(Error::Bound("physical disk storage value")),
-        }
+    if present {
+        normalize_validate(connection, source)?;
+        return Ok(source.to_owned());
     }
 
-    Err(Error::Bound("physical disk tick rows"))
+    if schema.len() == 32 {
+        return Err(Error::Bound("normalized tick column count"));
+    }
+
+    Ok(format!("(SELECT *, NULL::VARCHAR {FIELD} FROM {source})"))
+}
+
+fn normalize_validate(connection: &Engine, source: &str) -> Result<()> {
+    let frame = connection.query(&format!(
+        "SELECT {FIELD}, publication FROM {source} LIMIT 62"
+    ))?;
+    if frame.height() > 61 {
+        return Err(Error::Bound("physical disk tick rows"));
+    }
+
+    let mut snapshot = DiskSnapshot::default();
+    for index in 0..frame.height() {
+        let row = Row::new(&frame, index)?;
+        let value = row.value(0)?;
+        let text = match &value {
+            AnyValue::Null => continue,
+            AnyValue::String(text) => *text,
+            AnyValue::StringOwned(text) => text.as_str(),
+            _ => return Err(Error::Bound("physical disk storage value")),
+        };
+        if row.get::<Option<u64>>(1)?.is_none() {
+            return Err(Error::Bound("physical disk observation"));
+        }
+
+        decode(text, &mut snapshot)?;
+    }
+
+    Ok(())
 }

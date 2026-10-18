@@ -1,14 +1,27 @@
 use super::*;
 
-fn event(connection: &Connection) {
-    connection
-        .execute_batch(
-            "INSERT INTO events (publication, event, run_tick, pid, kind, availability, noticed, \
-        identity_version, identity_availability, usage_availability, process_unique_id, \
-        pid_version, executable_name, app_path) VALUES (1,10,0,7,2,3,0,1,0,3,700,2, \
-        from_hex('776f726b6572ff'), from_hex('2f422e617070'))",
-        )
-        .unwrap();
+fn event(connection: &Engine) {
+    use AnyValue::{Binary, Int32, UInt64};
+    fixture::insert(
+        connection,
+        "events",
+        &[
+            ("publication", UInt64(1)),
+            ("event", UInt64(10)),
+            ("run_tick", UInt64(0)),
+            ("pid", Int32(7)),
+            ("kind", UInt64(2)),
+            ("availability", UInt64(3)),
+            ("noticed", UInt64(0)),
+            ("identity_version", UInt64(1)),
+            ("identity_availability", UInt64(0)),
+            ("usage_availability", UInt64(3)),
+            ("process_unique_id", UInt64(700)),
+            ("pid_version", Int32(2)),
+            ("executable_name", Binary(b"worker\xff")),
+            ("app_path", Binary(b"/B.app")),
+        ],
+    );
 }
 
 fn selected() -> Endpoint {
@@ -18,7 +31,7 @@ fn selected() -> Endpoint {
     selected
 }
 
-fn capture(connection: &Connection, selected: &Endpoint) -> Result<Box<Frame>> {
+fn capture(connection: &Engine, selected: &Endpoint) -> Result<Box<Frame>> {
     let operation = Arc::new(crate::Cancellation::default())
         .operation(0)
         .unwrap();
@@ -35,7 +48,7 @@ fn capture(connection: &Connection, selected: &Endpoint) -> Result<Box<Frame>> {
 #[test]
 fn owns_exec_program_bytes_after_the_query_and_source_are_released() {
     // Goal: committed events retain original bytes and exact creation after query release.
-    // Method: decode one Exec with non-UTF-8 bytes, drop DuckDB, and inspect the owned frame.
+    // Method: decode one Exec with non-UTF-8 bytes, drop Polars, and inspect the owned frame.
     let connection = connection();
     event(&connection);
 
@@ -60,7 +73,7 @@ macro_rules! malformed_event {
             // Method: alter one field of a real typed event row and require explicit refusal.
             let connection = connection();
             event(&connection);
-            connection.execute_batch($mutation).unwrap();
+            ($mutation)(&connection);
 
             let result = capture(&connection, &selected());
 
@@ -71,47 +84,58 @@ macro_rules! malformed_event {
 
 malformed_event!(
     rejects_an_event_from_another_tick,
-    "UPDATE events SET run_tick=1",
+    |connection| fixture::replace(connection, "events", &[("run_tick", AnyValue::UInt64(1))]),
     "committed App event tick"
 );
 malformed_event!(
     rejects_an_event_before_the_recorded_range,
-    "UPDATE events SET event=9",
+    |connection| fixture::replace(connection, "events", &[("event", AnyValue::UInt64(9))]),
     "committed App event order"
 );
 malformed_event!(
     rejects_an_event_at_the_exclusive_recorded_end,
-    "UPDATE events SET event=11",
+    |connection| fixture::replace(connection, "events", &[("event", AnyValue::UInt64(11))]),
     "committed App event range"
 );
 malformed_event!(
     rejects_duplicate_event_numbers,
-    "INSERT INTO events SELECT * FROM events",
+    |connection| fixture::duplicate(connection, "events", 1),
     "committed App event order"
 );
 malformed_event!(
     rejects_an_unknown_event_kind,
-    "UPDATE events SET kind=4",
+    |connection| fixture::replace(connection, "events", &[("kind", AnyValue::UInt64(4))]),
     "committed App row kind"
 );
 malformed_event!(
     does_not_treat_a_zero_event_kind_as_a_scheduled_member,
-    "UPDATE events SET kind=0",
+    |connection| fixture::replace(connection, "events", &[("kind", AnyValue::UInt64(0))]),
     "committed App row kind"
 );
 malformed_event!(
     rejects_numeric_usage_on_an_exec,
-    "UPDATE events SET usage_availability=0",
+    |connection| fixture::replace(
+        connection,
+        "events",
+        &[("usage_availability", AnyValue::UInt64(0))]
+    ),
     "committed App event program usage"
 );
 malformed_event!(
     rejects_numeric_usage_on_a_start,
-    "UPDATE events SET kind=1,usage_availability=0",
+    |connection| fixture::replace(
+        connection,
+        "events",
+        &[
+            ("kind", AnyValue::UInt64(1)),
+            ("usage_availability", AnyValue::UInt64(0))
+        ]
+    ),
     "committed App event program usage"
 );
 malformed_event!(
     rejects_not_applicable_exit_usage,
-    "UPDATE events SET kind=3",
+    |connection| fixture::replace(connection, "events", &[("kind", AnyValue::UInt64(3))]),
     "committed App usage availability"
 );
 
@@ -121,12 +145,10 @@ fn retains_event_gaps_without_inventing_missing_members() {
     // Method: decode two Execs separated by one lost number in the recorded interval.
     let connection = connection();
     event(&connection);
-    connection
-        .execute_batch(
-            "INSERT INTO events SELECT * REPLACE (12::UBIGINT AS event) \
-        FROM events",
-        )
+    let addition = connection
+        .query("SELECT * REPLACE (12::UBIGINT AS event) FROM events")
         .unwrap();
+    fixture::append(&connection, "events", &addition);
     let mut selected = selected();
     selected.events_end = 13;
 
@@ -149,12 +171,7 @@ fn rejects_more_than_the_retained_event_bound_before_decoding() {
     // Method: select 16385 typed event rows with distinct retained numbers.
     let connection = connection();
     event(&connection);
-    connection
-        .execute_batch(
-            "INSERT INTO events SELECT events.* REPLACE (number AS event) \
-        FROM events CROSS JOIN range(11,16395) entries(number)",
-        )
-        .unwrap();
+    fixture::append_events(&connection, 16395);
     let mut selected = selected();
     selected.events_end = 16395;
 
@@ -188,12 +205,7 @@ fn accepts_the_exact_retained_event_bound() {
     // Method: decode 16384 typed Exec rows and retain their independent event numbers.
     let connection = connection();
     event(&connection);
-    connection
-        .execute_batch(
-            "INSERT INTO events SELECT events.* REPLACE (number AS event) \
-        FROM events CROSS JOIN range(11,16394) entries(number)",
-        )
-        .unwrap();
+    fixture::append_events(&connection, 16394);
     let mut selected = selected();
     selected.events_end = 16394;
 

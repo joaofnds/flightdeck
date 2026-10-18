@@ -61,6 +61,7 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
+    persistence::engine::initialize_process()?;
     diagnostics::initialize()?;
     if std::env::args().nth(1).as_deref() == Some("--bundle") {
         return bundle::create();

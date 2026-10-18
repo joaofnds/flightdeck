@@ -1,94 +1,168 @@
-//! Typed optional columns share the original measured payload without numeric conversion.
-use duckdb::types::{ToSqlOutput, ValueRef};
+//! Typed process and event columns retain measured payloads and original identity bytes.
+use polars::prelude::*;
 
-use crate::encoder::usage_fields;
+use crate::encoder::{columns, usage_columns};
 use crate::owned_identity::{OwnedIdentity, Programs};
-use crate::window::{IdentityRows, StagedTick};
-use crate::{Result, schema};
+use crate::window::{EventRecord, StagedTick};
+use crate::{Result, Window, schema};
 
-pub(crate) fn append_processes(
-    appender: &mut duckdb::Appender<'_>,
-    tick: &StagedTick,
-    identities: &IdentityRows,
-    programs: &Programs,
-) -> Result<()> {
-    let mut measured = 0;
-    for identity in &identities.processes {
-        let mut row = [ValueRef::Null; 28];
-        row[0] = ValueRef::UBigInt(tick.observation.publication);
-        row[1] = ValueRef::Int(identity.pid);
-        if identity.usage == schema::availability::MEASURED {
-            let process = &tick.processes[measured];
-            assert_eq!(process.pid, identity.pid);
-            usage_fields(&process.usage, &mut row[2..16]);
-            row[16] = ValueRef::Int(process.task.threads);
-            row[17] = ValueRef::Int(process.task.faults);
-            row[18] = ValueRef::Int(process.task.context_switches);
-            row[19] = ValueRef::Int(process.task.mach_syscalls);
-            row[20] = ValueRef::Int(process.task.unix_syscalls);
-            measured += 1;
-        }
-        identity_fields(identity, programs, &mut row[21..]);
-
-        appender.append_row(duckdb::appender_params_from_iter(
-            row.iter().copied().map(ToSqlOutput::Borrowed),
-        ))?;
-    }
-
-    assert_eq!(measured, tick.processes.len());
-
-    Ok(())
+struct ProcessRow<'window> {
+    tick: &'window StagedTick,
+    pid: i32,
+    process: Option<&'window collector::processes::Process>,
+    identity: Option<&'window OwnedIdentity>,
 }
 
-pub(crate) fn append_events(
-    appender: &mut duckdb::Appender<'_>,
-    tick: &StagedTick,
-    identities: &IdentityRows,
-    programs: &Programs,
-) -> Result<()> {
-    assert_eq!(tick.events.len(), identities.events.len());
-
-    for (event, identity) in tick.events.iter().zip(&identities.events) {
-        assert_eq!(event.pid, identity.pid);
-        assert_eq!(event.availability, identity.usage);
-
-        let mut row = [ValueRef::Null; 29];
-        row[0] = ValueRef::UBigInt(tick.observation.publication);
-        row[1] = ValueRef::UBigInt(event.number);
-        row[2] = ValueRef::UBigInt(event.tick);
-        row[3] = ValueRef::Int(event.pid);
-        row[4] = ValueRef::UTinyInt(event.kind);
-        row[5] = event.coalition.map_or(ValueRef::Null, ValueRef::UBigInt);
-        row[6] = ValueRef::UTinyInt(event.availability);
-        row[7] = event.noticed.map_or(ValueRef::Null, ValueRef::UTinyInt);
-        if let Some(usage) = &event.usage {
-            usage_fields(usage, &mut row[8..22]);
-        }
-        identity_fields(identity, programs, &mut row[22..]);
-
-        appender.append_row(duckdb::appender_params_from_iter(
-            row.iter().copied().map(ToSqlOutput::Borrowed),
-        ))?;
-    }
-
-    Ok(())
+struct EventRow<'window> {
+    tick: &'window StagedTick,
+    event: &'window EventRecord,
+    identity: Option<&'window OwnedIdentity>,
 }
 
-fn identity_fields<'program>(
-    identity: &OwnedIdentity,
-    programs: &'program Programs,
-    fields: &mut [ValueRef<'program>],
-) {
-    assert_eq!(fields.len(), 7);
-    fields[0] = ValueRef::UTinyInt(schema::IDENTITY_VERSION);
-    fields[1] = ValueRef::UTinyInt(identity.availability);
-    fields[2] = ValueRef::UTinyInt(identity.usage);
-    if let Some(creation) = identity.creation {
-        fields[3] = ValueRef::UBigInt(creation.unique_id);
-        fields[4] = ValueRef::Int(creation.pid_version);
+pub(crate) fn processes(window: &Window) -> Result<DataFrame> {
+    let rows = processes_rows(window);
+    let mut columns = columns!(rows;
+        "publication" => |row| row.tick.observation.publication,
+        "pid" => |row| row.pid,
+    );
+    columns.extend(usage_columns(&rows, |row| {
+        row.process.map(|value| &value.usage)
+    }));
+    columns.extend(columns!(rows;
+        "threads" => |row| row.process.map(|value| value.task.threads),
+        "faults" => |row| row.process.map(|value| value.task.faults),
+        "context_switches" => |row| row.process.map(|value| value.task.context_switches),
+        "mach_syscalls" => |row| row.process.map(|value| value.task.mach_syscalls),
+        "unix_syscalls" => |row| row.process.map(|value| value.task.unix_syscalls),
+    ));
+    if let Some(programs) = window.programs.as_deref() {
+        columns.extend(identity_columns(&rows, programs, |row| row.identity));
     }
-    if let Some(index) = identity.program {
-        fields[5] = ValueRef::Blob(programs.name(index));
-        fields[6] = programs.app(index).map_or(ValueRef::Null, ValueRef::Blob);
+
+    Ok(DataFrame::new(rows.len(), columns)?)
+}
+
+fn processes_rows(window: &Window) -> Vec<ProcessRow<'_>> {
+    let count = window
+        .ticks
+        .iter()
+        .map(|tick| {
+            tick.identities
+                .as_ref()
+                .map_or(tick.processes.len(), |value| value.processes.len())
+        })
+        .sum();
+    let mut rows = Vec::with_capacity(count);
+    for tick in &window.ticks {
+        if let Some(identities) = &tick.identities {
+            assert!(window.programs.is_some());
+            let mut measured = 0;
+            for identity in &identities.processes {
+                let process = if identity.usage == schema::availability::MEASURED {
+                    let process = &tick.processes[measured];
+                    assert_eq!(process.pid, identity.pid);
+                    measured += 1;
+                    Some(process)
+                } else {
+                    None
+                };
+                rows.push(ProcessRow {
+                    tick,
+                    pid: identity.pid,
+                    process,
+                    identity: Some(identity),
+                });
+            }
+            assert_eq!(measured, tick.processes.len());
+        } else {
+            assert!(window.programs.is_none());
+            for process in &tick.processes {
+                rows.push(ProcessRow {
+                    tick,
+                    pid: process.pid,
+                    process: Some(process),
+                    identity: None,
+                });
+            }
+        }
     }
+    assert_eq!(rows.len(), count);
+
+    rows
+}
+
+pub(crate) fn events(window: &Window) -> Result<DataFrame> {
+    let rows = events_rows(window);
+    let mut columns = columns!(rows;
+        "publication" => |row| row.tick.observation.publication,
+        "event" => |row| row.event.number,
+        "run_tick" => |row| row.event.tick,
+        "pid" => |row| row.event.pid,
+        "kind" => |row| row.event.kind,
+        "coalition" => |row| row.event.coalition,
+        "availability" => |row| row.event.availability,
+        "noticed" => |row| row.event.noticed,
+    );
+    columns.extend(usage_columns(&rows, |row| row.event.usage.as_ref()));
+    if let Some(programs) = window.programs.as_deref() {
+        columns.extend(identity_columns(&rows, programs, |row| row.identity));
+    }
+
+    Ok(DataFrame::new(rows.len(), columns)?)
+}
+
+fn events_rows(window: &Window) -> Vec<EventRow<'_>> {
+    let count = window.ticks.iter().map(|tick| tick.events.len()).sum();
+    let mut rows = Vec::with_capacity(count);
+    for tick in &window.ticks {
+        if let Some(identities) = &tick.identities {
+            assert!(window.programs.is_some());
+            assert_eq!(tick.events.len(), identities.events.len());
+            for (event, identity) in tick.events.iter().zip(&identities.events) {
+                assert_eq!(event.pid, identity.pid);
+                assert_eq!(event.availability, identity.usage);
+                rows.push(EventRow {
+                    tick,
+                    event,
+                    identity: Some(identity),
+                });
+            }
+        } else {
+            assert!(window.programs.is_none());
+            for event in &tick.events {
+                rows.push(EventRow {
+                    tick,
+                    event,
+                    identity: None,
+                });
+            }
+        }
+    }
+    assert_eq!(rows.len(), count);
+
+    rows
+}
+
+fn identity_columns<'window, Row>(
+    rows: &[Row],
+    programs: &Programs,
+    identity: impl Fn(&Row) -> Option<&'window OwnedIdentity>,
+) -> Vec<Column> {
+    columns!(rows;
+        "identity_version" => |_| schema::IDENTITY_VERSION,
+        "identity_availability" => |row| identity(row).map(|value| value.availability),
+        "usage_availability" => |row| identity(row).map(|value| value.usage),
+        "process_unique_id" => |row| {
+            identity(row).and_then(|value| value.creation.map(|creation| creation.unique_id))
+        },
+        "pid_version" => |row| {
+            identity(row).and_then(|value| value.creation.map(|creation| creation.pid_version))
+        },
+        "executable_name" => |row| {
+            identity(row).and_then(|value| value.program.map(|index| programs.name(index)))
+        },
+        "app_path" => |row| {
+            identity(row).and_then(|value| value.program.and_then(|index| programs.app(index)))
+        },
+    )
 }

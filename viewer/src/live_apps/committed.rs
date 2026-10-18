@@ -1,6 +1,9 @@
 //! Typed committed endpoints feed the same owned aggregate as live publications.
 use collector::processes::Usage;
-use duckdb::{Connection, Row, types::ValueRef};
+use persistence::engine::{Engine, FromCell, Row};
+use polars::prelude::{
+    AnyValue, DataFrame, DataType, LazyFrame, SortMultipleOptions, col, len, lit,
+};
 
 use super::{
     Frame, IdentityUnavailable, Member, ProcessCreation, ProgramBytes, ProgramSpan, RunIdentity,
@@ -68,6 +71,24 @@ struct Batch<'source> {
     publications: &'source str,
 }
 
+struct BatchRows {
+    frame: DataFrame,
+    index: usize,
+}
+
+impl BatchRows {
+    fn next(&mut self) -> Result<Option<Row<'_>>> {
+        if self.index == self.frame.height() {
+            return Ok(None);
+        }
+
+        let index = self.index;
+        self.index += 1;
+
+        Ok(Some(Row::new(&self.frame, index)?))
+    }
+}
+
 pub(crate) const ENDPOINTS_MAX: usize = 61;
 const BATCH_COLUMNS: usize = 26;
 const ROW_LOGICAL_BYTES: usize = BATCH_COLUMNS * size_of::<Option<u64>>();
@@ -125,7 +146,7 @@ impl FrameSize {
 impl Frame {
     pub(crate) fn committed(
         endpoint: &Endpoint,
-        connection: &Connection,
+        connection: &Engine,
         source: &str,
         operation: &Operation,
         output: &mut Option<Box<Self>>,
@@ -153,12 +174,12 @@ impl Frame {
     /// Source is normalized immutable process/event data. Callbacks perform no SQL here.
     pub(crate) fn committed_many(
         endpoints: &[Endpoint],
-        connection: &Connection,
+        connection: &Engine,
         source: &str,
         operation: &Operation,
         mut consume: impl FnMut(Box<Self>) -> Result<()>,
     ) -> Result<()> {
-        operation.check()?;
+        operation.attach(connection)?;
         if endpoints.is_empty() {
             return Ok(());
         }
@@ -178,7 +199,7 @@ impl Frame {
 fn committed_many_chunks(
     batch: &Batch<'_>,
     sizes: &[PublicationSize],
-    connection: &Connection,
+    connection: &Engine,
     operation: &Operation,
     consume: &mut impl FnMut(Box<Frame>) -> Result<()>,
 ) -> Result<()> {
@@ -308,24 +329,13 @@ fn committed_many_publications(endpoints: &[Endpoint]) -> Result<String> {
 
 fn committed_many_sizes(
     batch: &Batch<'_>,
-    connection: &Connection,
+    connection: &Engine,
     operation: &Operation,
     output: &mut Vec<PublicationSize>,
 ) -> Result<()> {
-    let limit = batch.endpoints.len() + 1;
-    let mut statement = connection.prepare(&format!(
-        "SELECT publication, count(*), coalesce(sum(coalesce(octet_length(executable_name), 0) + \
-        coalesce(octet_length(app_path), 0)), 0)::UBIGINT, \
-        count(*) FILTER (WHERE app_origin=0), \
-        count(*) FILTER (WHERE app_origin=1 AND app_kind=1), \
-        count(*) FILTER (WHERE app_origin=1 AND app_kind=2), \
-        count(*) FILTER (WHERE app_origin=1 AND app_kind=3) FROM {source} \
-        WHERE publication IN ({publications}) GROUP BY publication \
-        ORDER BY publication LIMIT {limit}",
-        source = batch.source,
-        publications = batch.publications,
-    ))?;
-    let mut rows = statement.query([])?;
+    let plan = committed_many_sizes_plan(batch, connection)?;
+    let frame = connection.collect(plan)?;
+    let mut rows = BatchRows { frame, index: 0 };
     for index in 0..=batch.endpoints.len() {
         operation.check()?;
         let Some(row) = rows.next()? else {
@@ -336,7 +346,7 @@ fn committed_many_sizes(
             return Err(Error::Bound("committed App batch size rows"));
         }
 
-        let publication = required(row, 0)?;
+        let publication = required(&row, 0)?;
         if batch
             .endpoints
             .binary_search_by_key(&publication, |endpoint| endpoint.stamp.publication)
@@ -353,13 +363,13 @@ fn committed_many_sizes(
         }
 
         let size = FrameSize {
-            count: usize::try_from(required::<u64>(row, 1)?)
+            count: usize::try_from(required::<u64>(&row, 1)?)
                 .map_err(|_| Error::Bound("committed App count"))?,
-            members: committed_many_sizes_count(row, 3)?,
-            starts: committed_many_sizes_count(row, 4)?,
-            execs: committed_many_sizes_count(row, 5)?,
-            exits: committed_many_sizes_count(row, 6)?,
-            bytes: usize::try_from(required::<u64>(row, 2)?)
+            members: committed_many_sizes_count(&row, 3)?,
+            starts: committed_many_sizes_count(&row, 4)?,
+            execs: committed_many_sizes_count(&row, 5)?,
+            exits: committed_many_sizes_count(&row, 6)?,
+            bytes: usize::try_from(required::<u64>(&row, 2)?)
                 .map_err(|_| Error::Bound("committed App bytes"))?,
         };
         size.validate()?;
@@ -370,14 +380,68 @@ fn committed_many_sizes(
     Err(Error::Bound("committed App batch size rows"))
 }
 
+fn committed_many_sizes_plan(batch: &Batch<'_>, connection: &Engine) -> Result<LazyFrame> {
+    let plan = connection.plan(&format!(
+        "SELECT * FROM {source} WHERE publication IN ({publications})",
+        source = batch.source,
+        publications = batch.publications,
+    ))?;
+
+    let program_bytes = |name| {
+        col(name)
+            .binary()
+            .size_bytes()
+            .fill_null(lit(0_u32))
+            .cast(DataType::UInt64)
+    };
+    let event_count = |kind| {
+        col("app_origin")
+            .eq(lit(1_u8))
+            .and(col("app_kind").eq(lit(kind)))
+            .cast(DataType::UInt64)
+            .sum()
+    };
+
+    let limit = u32::try_from(batch.endpoints.len() + 1)
+        .map_err(|_| Error::Bound("committed App batch endpoints"))?;
+
+    Ok(plan
+        .group_by([col("publication")])
+        .agg([
+            len().cast(DataType::UInt64).alias("count"),
+            (program_bytes("executable_name") + program_bytes("app_path"))
+                .sum()
+                .alias("bytes"),
+            col("app_origin")
+                .eq(lit(0_u8))
+                .cast(DataType::UInt64)
+                .sum()
+                .alias("members"),
+            event_count(1_u8).alias("starts"),
+            event_count(2_u8).alias("execs"),
+            event_count(3_u8).alias("exits"),
+        ])
+        .sort(
+            ["publication"],
+            SortMultipleOptions {
+                descending: vec![false],
+                nulls_last: vec![false],
+                multithreaded: false,
+                maintain_order: true,
+                limit: None,
+            },
+        )
+        .limit(limit))
+}
+
 fn committed_many_rows(
     batch: &Batch<'_>,
     sizes: &[PublicationSize],
-    connection: &Connection,
+    connection: &Engine,
     operation: &Operation,
     consume: &mut impl FnMut(Box<Frame>) -> Result<()>,
 ) -> Result<()> {
-    // This accounts requested logical cells and BLOBs, not DuckDB overhead or physical memory.
+    // This accounts requested logical cells and captured bytes, excluding engine overhead.
     let size = committed_many_query_size(batch.endpoints, sizes)?;
     assert!(
         size.rows
@@ -385,14 +449,14 @@ fn committed_many_rows(
                 * (apps::PROCESS_INTERVALS_MAX + collector::tracker::EVENTS_PER_TICK_MAX)
     );
     let limit = size.rows + 1;
-    let mut statement = connection.prepare(&format!(
+    let frame = connection.query(&format!(
         "SELECT {PROCESS_COLUMNS}, publication, app_origin, app_event, app_kind, app_tick \
         FROM {source} WHERE publication IN ({publications}) \
         ORDER BY publication, app_origin, app_event, pid LIMIT {limit}",
         source = batch.source,
         publications = batch.publications,
     ))?;
-    let mut rows = statement.query([])?;
+    let mut rows = BatchRows { frame, index: 0 };
     for endpoint in batch.endpoints {
         operation.check()?;
         let size = committed_many_size(endpoint.stamp.publication, sizes);
@@ -406,12 +470,12 @@ fn committed_many_rows(
         return Err(Error::Bound("committed App batch changed row count"));
     }
 
-    // Returning releases Rows and its owning Statement/result before the next group is prepared.
+    // Returning releases the native frame before the next group is collected.
     operation.check()
 }
 
 fn committed_many_members(
-    rows: &mut duckdb::Rows<'_>,
+    rows: &mut BatchRows,
     frame: &mut Frame,
     endpoint: &Endpoint,
     size: &FrameSize,
@@ -423,13 +487,13 @@ fn committed_many_members(
         let row = rows
             .next()?
             .ok_or(Error::Bound("committed App batch changed row count"))?;
-        if required::<u64>(row, 21)? != frame.stamp.publication {
+        if required::<u64>(&row, 21)? != frame.stamp.publication {
             return Err(Error::Bound("committed App batch row association"));
         }
 
-        match required::<u8>(row, 22)? {
-            0 => committed_member(row, frame)?,
-            1 => committed_event(row, frame, endpoint, &mut next)?,
+        match required::<u8>(&row, 22)? {
+            0 => committed_member(&row, frame)?,
+            1 => committed_event(&row, frame, endpoint, &mut next)?,
             _ => return Err(Error::Bound("committed App row origin")),
         }
     }
@@ -570,8 +634,8 @@ fn committed_event_program(row: &Row<'_>) -> Result<()> {
     Ok(())
 }
 
-fn required<T: duckdb::types::FromSql>(row: &Row<'_>, index: usize) -> Result<T> {
-    row.get::<_, Option<T>>(index)?
+fn required<T: FromCell>(row: &Row<'_>, index: usize) -> Result<T> {
+    row.get::<Option<T>>(index)?
         .ok_or(Error::Bound("missing committed App field"))
 }
 
@@ -605,13 +669,18 @@ fn committed_program(
         return Ok(Err(reason));
     }
 
-    let ValueRef::Blob(name) = row.get_ref(4)? else {
-        return Err(Error::Bound("committed App executable bytes"));
+    let executable = row.value(4)?;
+    let name = match &executable {
+        AnyValue::Binary(bytes) => *bytes,
+        AnyValue::BinaryOwned(bytes) => bytes.as_slice(),
+        _ => return Err(Error::Bound("committed App executable bytes")),
     };
 
-    let app_path = match row.get_ref(5)? {
-        ValueRef::Null => None,
-        ValueRef::Blob(bytes) => Some(bytes),
+    let app = row.value(5)?;
+    let app_path = match &app {
+        AnyValue::Null => None,
+        AnyValue::Binary(bytes) => Some(*bytes),
+        AnyValue::BinaryOwned(bytes) => Some(bytes.as_slice()),
         _ => return Err(Error::Bound("committed App path bytes")),
     };
     let app_bytes = app_path.map_or(0, <[u8]>::len);

@@ -1,7 +1,11 @@
 #[cfg(test)]
+mod query_support;
+
+#[cfg(test)]
 mod tests {
+    use super::query_support::table_source;
     use duckdb::Connection;
-    use persistence::query::{TableSource, table_source};
+    use persistence::query::TableSource;
     use persistence::schema::{TABLES, Table};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -711,7 +715,7 @@ mod tests {
         }
 
         fn write(&self, connection: &Connection, name: &str) {
-            let path = persistence::query::parquet_source(&self.path(name)).unwrap();
+            let path = persistence::query::parquet_literal(&self.path(name)).unwrap();
             connection
                 .execute_batch(&format!(
                     "COPY processes TO '{path}' (FORMAT PARQUET, COMPRESSION ZSTD)"

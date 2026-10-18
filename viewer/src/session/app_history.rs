@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 use super::{ContextRange, NS, OBSERVATIONS_MAX, Session, WINDOWS_MAX};
 use crate::live_app_history::{Target, TracePoint};
@@ -19,7 +20,7 @@ pub(super) struct Cache {
 
 struct Restore {
     readings: BTreeMap<Key, Reading>,
-    sources: BTreeMap<(usize, Source), String>,
+    sources: BTreeMap<(usize, Source), SourceQuery>,
     source_bytes: usize,
     plotted: usize,
 }
@@ -29,6 +30,40 @@ struct Projection<'target> {
     points: &'target mut Vec<TracePoint>,
     previous: Option<Box<Frame>>,
     reading: Option<Reading>,
+}
+
+struct SourceQuery {
+    sql: String,
+    files: Vec<SourceFile>,
+}
+
+struct SourceFile {
+    path: PathBuf,
+    alias: String,
+}
+
+impl SourceQuery {
+    fn refresh(&self, connection: &persistence::engine::Engine) -> Result<()> {
+        assert!(self.files.len() <= 2);
+        for file in &self.files {
+            if connection.parquet_source(&file.path)? != file.alias {
+                return Err(Error::Bound("changed committed App history source"));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn bytes(&self) -> usize {
+        size_of::<Self>()
+            + self.sql.capacity()
+            + self.files.capacity() * size_of::<SourceFile>()
+            + self
+                .files
+                .iter()
+                .map(|file| file.path.capacity() + file.alias.capacity())
+                .sum::<usize>()
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -311,30 +346,25 @@ impl Session {
         assert!(output.is_empty());
         let source = self.app_history_source(restore, window, Source::Ticks)?;
         let limit = maximum + 1;
-        let mut statement = self.connection.prepare(&format!(
+        let frame = self.connection.query(&format!(
             "SELECT publication, run_tick, wall_ns, continuous_ns, awake_ns, processes_refused, \
             processes_gone, events_first, events_end FROM {source} \
             WHERE {predicate} ORDER BY publication LIMIT {limit}"
         ))?;
-        let mut rows = statement.query([])?;
-        for index in 0..=maximum {
+        if frame.height() > maximum {
+            return Err(Error::Bound("committed App history tick rows"));
+        }
+        for index in 0..frame.height() {
             self.operation.check()?;
-            let Some(row) = rows.next()? else {
-                return Ok(());
-            };
-
-            if index == maximum {
-                return Err(Error::Bound("committed App history tick rows"));
-            }
-
+            let row = persistence::engine::Row::new(&frame, index)?;
             output.push(app_history_reading(
-                row,
+                &row,
                 window,
                 &self.windows[window].identity.run,
             )?);
         }
 
-        Err(Error::Bound("committed App history tick rows"))
+        Ok(())
     }
 
     fn app_history_source<'restore>(
@@ -349,21 +379,11 @@ impl Session {
                 return Err(Error::Bound("committed App history sources"));
             }
 
-            let source = match kind {
-                Source::Ticks => self.source(window, "ticks")?,
-                Source::Apps => {
-                    let processes = self.source(window, "processes")?;
-                    let events = self.source(window, "events")?;
-                    crate::live_apps::committed::Sources {
-                        processes: &processes,
-                        events: &events,
-                    }
-                    .query()
-                }
-            };
+            let source = self.app_history_source_capture(window, kind)?;
+
             restore.source_bytes = restore
                 .source_bytes
-                .checked_add(source.capacity())
+                .checked_add(source.bytes())
                 .ok_or(Error::Bound("committed App history source bytes"))?;
             if restore.source_bytes > SOURCE_BYTES_MAX {
                 return Err(Error::Bound("committed App history source bytes"));
@@ -372,11 +392,49 @@ impl Session {
             restore.sources.insert(key, source);
         }
 
-        restore
+        let source = restore
             .sources
             .get(&key)
-            .map(String::as_str)
-            .ok_or(Error::Bound("committed App history source output"))
+            .ok_or(Error::Bound("committed App history source output"))?;
+
+        // A long history can retain SQL after the engine's bounded scan cache evicts its aliases.
+        source.refresh(&self.connection)?;
+
+        Ok(&source.sql)
+    }
+
+    fn app_history_source_capture(&self, window: usize, kind: Source) -> Result<SourceQuery> {
+        let sql = match kind {
+            Source::Ticks => self.source(window, "ticks")?,
+            Source::Apps => {
+                let processes = self.source(window, "processes")?;
+                let events = self.source(window, "events")?;
+
+                crate::live_apps::committed::Sources {
+                    processes: &processes,
+                    events: &events,
+                }
+                .query()
+            }
+        };
+
+        let names: &[&str] = match kind {
+            Source::Ticks => &["ticks"],
+            Source::Apps => &["processes", "events"],
+        };
+
+        let mut files = Vec::with_capacity(names.len());
+        for name in names {
+            let path = self
+                .root
+                .join(&self.windows[window].data_directory)
+                .join(format!("{name}.parquet"));
+            let alias = self.connection.parquet_source(&path)?;
+
+            files.push(SourceFile { path, alias });
+        }
+
+        Ok(SourceQuery { sql, files })
     }
 
     fn app_history_points(
@@ -594,7 +652,11 @@ fn app_history_capture(
     Ok(())
 }
 
-fn app_history_reading(row: &duckdb::Row<'_>, window: usize, run: &RunIdentity) -> Result<Reading> {
+fn app_history_reading(
+    row: &persistence::engine::Row<'_>,
+    window: usize,
+    run: &RunIdentity,
+) -> Result<Reading> {
     Ok(Reading {
         window,
         observation: Observation {
@@ -603,27 +665,27 @@ fn app_history_reading(row: &duckdb::Row<'_>, window: usize, run: &RunIdentity) 
                 boot: run.boot.0,
                 run: run.run.0,
                 publication: row
-                    .get::<_, Option<u64>>(0)?
+                    .get::<Option<u64>>(0)?
                     .ok_or(Error::Bound("committed App history publication"))?,
                 continuous_ns: row.get(3)?,
                 awake_ns: row.get(4)?,
             },
             run_tick: row
-                .get::<_, Option<u64>>(1)?
+                .get::<Option<u64>>(1)?
                 .ok_or(Error::Bound("committed App history run tick"))?,
             wall_ns: row.get(2)?,
         },
         refused: row
-            .get::<_, Option<u32>>(5)?
+            .get::<Option<u32>>(5)?
             .ok_or(Error::Bound("committed App history refused count"))?,
         gone: row
-            .get::<_, Option<u32>>(6)?
+            .get::<Option<u32>>(6)?
             .ok_or(Error::Bound("committed App history gone count"))?,
         events_first: row
-            .get::<_, Option<u64>>(7)?
+            .get::<Option<u64>>(7)?
             .ok_or(Error::Bound("committed App history event range"))?,
         events_end: row
-            .get::<_, Option<u64>>(8)?
+            .get::<Option<u64>>(8)?
             .ok_or(Error::Bound("committed App history event range"))?,
         plotted: false,
     })
@@ -631,3 +693,55 @@ fn app_history_reading(row: &duckdb::Row<'_>, window: usize, run: &RunIdentity) 
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod source_cache_tests {
+    use super::*;
+    use crate::live::identity_fixture::Fixture;
+
+    #[test]
+    fn rebinds_retained_app_sql_after_unrelated_sources_evict_its_native_relations() {
+        // Goal: a long history can reuse normalized SQL after the bounded engine cache turns.
+        // Method: evict a real App source pair, then reuse its Restore entry without normalizing.
+        let mut fixture = Fixture::new();
+        fixture.publish_with_system_rows(1001);
+        fixture.publish_with_system_rows(1002);
+        fixture.seal();
+        let session = Session::open(&fixture.root).unwrap();
+        let mut restore = Restore {
+            readings: BTreeMap::new(),
+            sources: BTreeMap::new(),
+            source_bytes: 0,
+            plotted: 0,
+        };
+        let original = session
+            .app_history_source(&mut restore, 0, Source::Apps)
+            .unwrap()
+            .to_owned();
+        let sql = format!("SELECT * FROM {original} ORDER BY publication,pid");
+        let expected = session.connection.query(&sql).unwrap();
+        let reads = session.source_reads.get();
+        let path = fixture
+            .root
+            .join(&session.windows[0].data_directory)
+            .join("processes.parquet");
+        for index in 0..persistence::engine::PARQUET_SOURCES_MAX {
+            let copied = fixture.root.join(format!("query-source-{index}.parquet"));
+            std::fs::copy(&path, &copied).unwrap();
+            session.connection.parquet_source(&copied).unwrap();
+        }
+        assert!(session.connection.query(&sql).is_err());
+
+        let rebound = session
+            .app_history_source(&mut restore, 0, Source::Apps)
+            .unwrap();
+        let restored = session
+            .connection
+            .query(&format!("SELECT * FROM {rebound} ORDER BY publication,pid"))
+            .unwrap();
+
+        assert_eq!(rebound, original);
+        assert_eq!(session.source_reads.get(), reads);
+        assert_eq!(restored, expected);
+    }
+}

@@ -3,13 +3,14 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
+use persistence::engine::{Engine, InterruptHandle};
 use persistence::{Error, Result};
 
 /// Independent from the serial session owner, so a superseding request can interrupt it.
 #[derive(Default)]
 pub struct Cancellation {
     epoch: AtomicU64,
-    interrupt: Mutex<Option<Arc<duckdb::InterruptHandle>>>,
+    interrupt: Mutex<Option<Arc<InterruptHandle>>>,
     wake: Condvar,
 }
 
@@ -52,7 +53,7 @@ impl Cancellation {
             .lock()
             .map_err(|error| io::Error::other(error.to_string()))?;
         if let Some(handle) = &*handle {
-            handle.interrupt();
+            handle.interrupt()?;
         }
         self.wake.notify_all();
         Ok(())
@@ -97,8 +98,8 @@ impl Operation {
             .interrupt
             .lock()
             .map_err(|error| poisoned(&error))?;
-        // DuckDB clears an interrupt at query startup. Keep a single cancellation durable
-        // across that boundary; no polling thread survives a completed viewing operation.
+        // Keep cancellation effective while a native query is being installed. Polars can
+        // finish a kernel after cancellation, so run also checks the epoch before returning.
         for _attempt in 0..10_000 {
             if finished.load(Ordering::Acquire) {
                 return Ok(());
@@ -111,7 +112,7 @@ impl Operation {
                     .map_err(|error| poisoned(&error))?;
             } else {
                 if let Some(interrupt) = &*handle {
-                    interrupt.interrupt();
+                    interrupt.interrupt()?;
                 }
                 let (next, _) = self
                     .cancellation
@@ -139,7 +140,7 @@ impl Operation {
         self.epoch
     }
 
-    pub fn attach(&self, connection: &duckdb::Connection) -> Result<()> {
+    pub fn attach(&self, connection: &Engine) -> Result<()> {
         let mut handle = self
             .cancellation
             .interrupt
@@ -157,49 +158,180 @@ fn poisoned<T>(error: &std::sync::PoisonError<T>) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::Cancellation;
+    use polars::prelude::{DataFrame, LazyFrame};
     use std::sync::{Arc, mpsc};
     use std::time::Duration;
 
     #[test]
-    fn one_cancellation_survives_engine_startup_for_prepared_and_count_queries() {
-        // Goal: a single supersession stays effective when DuckDB clears its startup flag.
-        // Method: cancel after preparation/checkpoint, then release real engine execution.
-        for prepared in [true, false] {
-            let cancellation = Arc::new(Cancellation::default());
-            let control = Arc::clone(&cancellation);
-            let (started, ready) = mpsc::sync_channel(1);
-            let (proceed, permitted) = mpsc::sync_channel(1);
-            let (finished, result) = mpsc::sync_channel(1);
-            let worker = std::thread::spawn(move || {
-                let connection = crate::data::connection().unwrap();
-                let operation = control.operation(0).unwrap();
-                operation.attach(&connection).unwrap();
-                let sql = "SELECT count(*) FROM range(1000000000000000000) t(i) WHERE i % 7 = 0";
-                let outcome = operation.run(|| {
-                    let mut statement = connection.prepare(sql)?;
-                    operation.check()?;
-                    started.send(()).unwrap();
-                    permitted.recv_timeout(Duration::from_secs(5)).unwrap();
-                    if prepared {
-                        statement.query_row([], |row| row.get::<_, i64>(0))?;
-                    } else {
-                        connection.query_row(sql, [], |row| row.get::<_, i64>(0))?;
-                    }
-                    Ok(())
-                });
-                let answer: i32 = connection
-                    .query_row("SELECT 42", [], |row| row.get(0))
-                    .unwrap();
-                let error = outcome.unwrap_err().to_string().to_ascii_lowercase();
-                finished.send((error, answer)).unwrap();
+    fn one_cancellation_survives_native_query_startup() {
+        // Goal: a cancellation landing before a native query starts still interrupts that query.
+        // Method: cancel once before collecting native work lasting 250 ms, then reuse the engine.
+        let cancellation = Arc::new(Cancellation::default());
+        let control = Arc::clone(&cancellation);
+        let (started, ready) = mpsc::sync_channel(1);
+        let (proceed, permitted) = mpsc::sync_channel(1);
+        let (finished, result) = mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            let connection = crate::data::connection();
+            let operation = control.operation(0).unwrap();
+            operation.attach(&connection).unwrap();
+            let mut native = false;
+
+            let outcome = operation.run(|| {
+                started.send(()).unwrap();
+                permitted.recv_timeout(Duration::from_secs(5)).unwrap();
+                let plan = interruptible_plan(|| std::thread::sleep(Duration::from_millis(250)));
+                native = interrupted_natively(&connection.collect(plan));
+                Ok(())
             });
-            ready.recv_timeout(Duration::from_secs(5)).unwrap();
-            cancellation.cancel().unwrap();
-            proceed.send(()).unwrap();
-            let (error, answer) = result.recv_timeout(Duration::from_secs(5)).unwrap();
-            assert!(error.contains("interrupt"), "unexpected error: {error}");
-            assert_eq!(answer, 42);
-            worker.join().unwrap();
-        }
+
+            finished
+                .send((superseded(&outcome), native, answer(&connection)))
+                .unwrap();
+        });
+        ready.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        cancellation.cancel().unwrap();
+        proceed.send(()).unwrap();
+
+        let outcome = result.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(outcome, (true, true, 42));
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn refuses_a_superseded_answer_after_native_execution_finishes() {
+        // Goal: a kernel finishing before cancellation cannot bypass the result epoch check.
+        // Method: pause after real native execution, cancel once, then release result return.
+        let cancellation = Arc::new(Cancellation::default());
+        let control = Arc::clone(&cancellation);
+        let (started, ready) = mpsc::sync_channel(1);
+        let (proceed, permitted) = mpsc::sync_channel(1);
+        let (finished, result) = mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            let connection = crate::data::connection();
+            let operation = control.operation(0).unwrap();
+            operation.attach(&connection).unwrap();
+
+            let outcome = operation.run(|| {
+                connection.query("SELECT 42")?;
+                started.send(()).unwrap();
+                permitted.recv_timeout(Duration::from_secs(5)).unwrap();
+                Ok(())
+            });
+
+            finished
+                .send((superseded(&outcome), answer(&connection)))
+                .unwrap();
+        });
+        ready.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        cancellation.cancel().unwrap();
+        proceed.send(()).unwrap();
+
+        assert_eq!(
+            result.recv_timeout(Duration::from_secs(5)).unwrap(),
+            (true, 42)
+        );
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn interrupts_a_superseded_native_query_that_has_started() {
+        // Goal: cancelling during native execution interrupts the query and returns no answer.
+        // Method: gate native execution, cancel once inside it, then release the gate.
+        let cancellation = Arc::new(Cancellation::default());
+        let control = Arc::clone(&cancellation);
+        let (started, ready) = mpsc::sync_channel(1);
+        let (proceed, permitted) = mpsc::sync_channel(1);
+        let (finished, result) = mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            let connection = crate::data::connection();
+            let operation = control.operation(0).unwrap();
+            operation.attach(&connection).unwrap();
+            let mut native = false;
+            let permitted = std::sync::Mutex::new(permitted);
+            let plan = interruptible_plan(move || {
+                started.send(()).unwrap();
+                let permitted = permitted.lock().unwrap();
+                permitted.recv_timeout(Duration::from_secs(5)).unwrap();
+            });
+
+            let outcome = operation.run(|| {
+                native = interrupted_natively(&connection.collect(plan));
+                Ok(())
+            });
+
+            finished.send((superseded(&outcome), native)).unwrap();
+        });
+        ready.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        cancellation.cancel().unwrap();
+        proceed.send(()).unwrap();
+
+        assert_eq!(
+            result.recv_timeout(Duration::from_secs(5)).unwrap(),
+            (true, true)
+        );
+        worker.join().unwrap();
+    }
+
+    fn superseded(outcome: &persistence::Result<()>) -> bool {
+        matches!(outcome,
+            Err(persistence::Error::Io(error))
+            if error.kind() == std::io::ErrorKind::Interrupted)
+    }
+
+    fn interrupted_natively(outcome: &persistence::Result<DataFrame>) -> bool {
+        matches!(outcome,
+            Err(persistence::Error::Engine(polars::error::PolarsError::ComputeError(message)))
+            if message.as_ref() == "query interrupted")
+    }
+
+    fn answer(connection: &persistence::engine::Engine) -> i32 {
+        let answer = connection.query("SELECT 42").unwrap();
+        persistence::engine::Row::new(&answer, 0)
+            .unwrap()
+            .get(0)
+            .unwrap()
+    }
+
+    fn interruptible_plan(gate: impl Fn() + Send + Sync + 'static) -> LazyFrame {
+        // The gate runs inside native execution. The second part starts a new executor,
+        // which observes an interruption delivered while the gate held execution.
+        use polars::prelude::{
+            AllowedOptimizations, Column, IntoLazy, UnionArgs, col, concat, lit,
+        };
+        let first = DataFrame::new(1, vec![Column::new("value".into(), [11u64])])
+            .unwrap()
+            .lazy()
+            .map(
+                move |frame| {
+                    gate();
+                    Ok(frame)
+                },
+                AllowedOptimizations::empty(),
+                None,
+                Some("cancellation_gate"),
+            );
+        let second = DataFrame::new(1, vec![Column::new("value".into(), [17u64])])
+            .unwrap()
+            .lazy()
+            .select([(col("value") + lit(1u64)).alias("value")]);
+
+        concat(
+            [first, second],
+            UnionArgs {
+                parallel: false,
+                rechunk: false,
+                to_supertypes: false,
+                diagonal: false,
+                strict: true,
+                from_partitioned_ds: false,
+                maintain_order: true,
+            },
+        )
+        .unwrap()
+        .without_optimizations()
     }
 }

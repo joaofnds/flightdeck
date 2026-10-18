@@ -1,4 +1,7 @@
 #[cfg(test)]
+mod query_support;
+
+#[cfg(test)]
 mod tests {
     use collector::machine::Memory;
     use collector::processes::{Process, Task, Usage};
@@ -382,7 +385,7 @@ mod tests {
         Encoder.encode(window, &pending).unwrap();
         let connection = duckdb::Connection::open_in_memory().unwrap();
         let source = |table| {
-            persistence::query::table_source(
+            super::query_support::table_source(
                 &connection,
                 table,
                 persistence::query::TableSource::Parquet(

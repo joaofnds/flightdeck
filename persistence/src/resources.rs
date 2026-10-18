@@ -1,4 +1,4 @@
-//! Whole-process native allocation observation, independent of `DuckDB`'s buffer manager.
+//! Whole-process native allocation observation, since the query engine sets no memory quota.
 mod native;
 use std::io;
 use std::sync::Arc;

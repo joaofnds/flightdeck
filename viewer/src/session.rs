@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use collector::recording::{identity_text, private};
-use duckdb::Connection;
+use persistence::engine::{Engine, Row};
 use persistence::layout::{self, Kind};
 use persistence::{Error, Manifest, Result, read_committed};
 use serde_json::{Value, json};
@@ -22,7 +22,7 @@ const NS: u64 = 1_000_000_000;
 pub struct Session {
     root: PathBuf,
     pub(crate) windows: Vec<Manifest>,
-    connection: Connection,
+    connection: Engine,
     first: Option<u64>,
     last: Option<u64>,
     unknown: u64,
@@ -98,7 +98,7 @@ impl Session {
         collector::recording::read_identity(root)?;
         let mut windows = Vec::new();
         discover(root, &mut windows, &operation)?;
-        let connection = data::connection()?;
+        let connection = data::connection();
         operation.attach(&connection)?;
         let mut session = Self {
             root: root.to_owned(),
@@ -379,11 +379,10 @@ impl Session {
         }
         let source = self.source(selected.window, name)?;
         let publication = selected.publication;
-        let total: u64 = self.connection.query_row(
-            &format!("SELECT count(*) FROM {source} WHERE publication={publication}"),
-            [],
-            |row| row.get(0),
-        )?;
+        let count = self.connection.query(&format!(
+            "SELECT count(*) FROM {source} WHERE publication={publication}"
+        ))?;
+        let total: u64 = Row::new(&count, 0)?.get(0)?;
         if offset > total {
             return Err(Error::Bound("page past end"));
         }

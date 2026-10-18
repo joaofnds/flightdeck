@@ -919,8 +919,8 @@ mod tests {
         let connection = duckdb::Connection::open_in_memory_with_flags(config).unwrap();
         let original = directory.join(format!("{}.parquet", table.name()));
         let extended = directory.join("extended.parquet");
-        let source = persistence::query::parquet_source(&original).unwrap();
-        let target = persistence::query::parquet_source(&extended).unwrap();
+        let source = persistence::query::parquet_literal(&original).unwrap();
+        let target = persistence::query::parquet_literal(&extended).unwrap();
 
         connection
             .execute_batch(&format!(

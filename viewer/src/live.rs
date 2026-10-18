@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use collector::recording::{Registry, identity_text};
 use collector::ring::{Found, FoundEvent, IdentityObservation, RingReader, RunIdentity, Tick};
-use duckdb::Connection;
+use persistence::engine::Engine;
 use persistence::{Error, Limits, Losses, NumberedEvent, Result, Window, WindowIdentity};
 use serde_json::{Value, json};
 
@@ -43,7 +43,7 @@ pub struct LiveSession {
     observations: VecDeque<LiveObservation>,
     points: VecDeque<Value>,
     app_history: History,
-    connection: Connection,
+    connection: Engine,
     operation: Operation,
     cancellation: Arc<Cancellation>,
     selected: Option<Value>,
@@ -130,11 +130,8 @@ impl LiveSession {
         collector::recording::private::verify_directory(root)?;
         collector::recording::read_identity(root)?;
         let operation = cancellation.clone().operation(epoch)?;
-        let connection = data::connection()?;
+        let connection = data::connection();
         operation.attach(&connection)?;
-        for (table, columns, _) in persistence::schema::TABLES {
-            connection.execute_batch(&format!("CREATE TABLE {} ({columns})", table.name()))?;
-        }
         let mut session = Self {
             root: root.to_owned(),
             history: None,
@@ -1500,7 +1497,7 @@ fn rehydrate_source_try_read(source: &mut Source, selected: &Value) -> Result<bo
 fn project_observation(
     source: &mut Source,
     publication: u64,
-    connection: &Connection,
+    connection: &Engine,
     operation: &Operation,
 ) -> Result<Option<LiveObservation>> {
     let Some(times) = source.tick.times else {
@@ -1846,7 +1843,7 @@ fn identity_order(value: &Value) -> (Option<u64>, Option<&str>, Option<&str>, Op
 }
 
 fn project_observation_tables(
-    connection: &Connection,
+    connection: &Engine,
     operation: &Operation,
     window: &Window,
 ) -> Result<BTreeMap<&'static str, Table>> {
@@ -1854,21 +1851,7 @@ fn project_observation_tables(
     for (table, _, order) in persistence::schema::TABLES {
         let name = table.name();
 
-        if matches!(
-            table,
-            persistence::schema::Table::Ticks
-                | persistence::schema::Table::Processes
-                | persistence::schema::Table::Events
-        ) {
-            let columns = persistence::table_columns(table, window);
-            connection.execute_batch(&format!(
-                "DROP TABLE IF EXISTS {name}; CREATE TABLE {name} ({columns})"
-            ))?;
-        } else {
-            connection.execute_batch(&format!("DELETE FROM {name}"))?;
-        }
-
-        persistence::append(connection, table, window)?;
+        connection.register(name, persistence::frame(table, window)?)?;
         let source = persistence::query::table_source(
             connection,
             table,
@@ -3522,10 +3505,8 @@ mod tests {
         // Method: reproduce that intermediate database state before polling a real v4 tick.
         let mut fixture = identity_fixture::Fixture::new();
         let mut session = LiveSession::open(&fixture.root).unwrap();
-        session
-            .connection
-            .execute_batch("DROP TABLE processes; DROP TABLE events")
-            .unwrap();
+        session.connection.unregister("processes").unwrap();
+        session.connection.unregister("events").unwrap();
         fixture.publish(1000);
 
         assert!(session.poll().unwrap());

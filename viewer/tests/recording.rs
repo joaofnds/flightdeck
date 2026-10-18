@@ -38,9 +38,9 @@ mod tests {
             let config = duckdb::Config::default().threads(1).unwrap();
             let connection = duckdb::Connection::open_in_memory_with_flags(config).unwrap();
             let source =
-                persistence::query::parquet_source(&directory.join("processes.parquet")).unwrap();
+                persistence::query::parquet_literal(&directory.join("processes.parquet")).unwrap();
             let target =
-                persistence::query::parquet_source(&directory.join("captured.parquet")).unwrap();
+                persistence::query::parquet_literal(&directory.join("captured.parquet")).unwrap();
             let version = self.version;
             connection
                 .execute_batch(&format!(

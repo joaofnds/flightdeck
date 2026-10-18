@@ -1,10 +1,17 @@
 #[cfg(test)]
+#[path = "query_support/append.rs"]
+mod append_support;
+#[cfg(test)]
+mod query_support;
+
+#[cfg(test)]
 mod tests {
+    use super::query_support::table_source;
     use collector::battery::BatteryReading;
     use collector::ring::{Identity, RunIdentity, Shape};
     use duckdb::Connection;
     use duckdb::types::Value;
-    use persistence::query::{TableSource, table_source};
+    use persistence::query::TableSource;
     use persistence::schema::{BATTERY_FIELDS, TABLES, Table};
     use persistence::{Encoder, Limits, Observation, Window, WindowIdentity};
     use std::path::PathBuf;
@@ -250,7 +257,7 @@ mod tests {
             .execute_batch("ALTER TABLE ticks ALTER COLUMN battery_charging TYPE UTINYINT")
             .unwrap();
         let path = directory.0.join("ticks.parquet");
-        let escaped = persistence::query::parquet_source(&path).unwrap();
+        let escaped = persistence::query::parquet_literal(&path).unwrap();
         connection
             .execute_batch(&format!("COPY ticks TO '{escaped}' (FORMAT PARQUET)"))
             .unwrap();
@@ -314,7 +321,7 @@ mod tests {
                 persistence::table_columns(Table::Ticks, &window)
             ))
             .unwrap();
-        persistence::append(&connection, Table::Ticks, &window).unwrap();
+        super::append_support::append(&connection, Table::Ticks, &window);
 
         let tables = Encoder.encode(&window, &directory.0).unwrap();
         let staged = table_source(&connection, Table::Ticks, TableSource::Staged).unwrap();

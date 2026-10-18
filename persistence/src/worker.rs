@@ -828,7 +828,7 @@ mod tests {
             })
             .unwrap()
             .unwrap();
-        let connection = duckdb::Connection::open_in_memory().unwrap();
+        let connection = crate::engine::Engine::new();
         let path = root
             .0
             .join(&manifest.data_directory)
@@ -839,25 +839,22 @@ mod tests {
             crate::query::TableSource::Parquet(&path),
         )
         .unwrap();
-        let row: (i32, u64, i32, Vec<u8>, Option<u64>, u8) = connection
-            .query_row(
-                &format!(
-                    "SELECT pid,process_unique_id,pid_version,executable_name, \
-                    resident_bytes,usage_availability FROM {source}"
-                ),
-                [],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                    ))
-                },
-            )
+        let frame = connection
+            .query(&format!(
+                "SELECT pid,process_unique_id,pid_version,executable_name, \
+                resident_bytes,usage_availability FROM {source}"
+            ))
             .unwrap();
+        assert_eq!(frame.height(), 1);
+        let row = crate::engine::Row::new(&frame, 0).unwrap();
+        let row: (i32, u64, i32, Vec<u8>, Option<u64>, u8) = (
+            row.get(0).unwrap(),
+            row.get(1).unwrap(),
+            row.get(2).unwrap(),
+            row.get(3).unwrap(),
+            row.get(4).unwrap(),
+            row.get(5).unwrap(),
+        );
 
         assert_eq!(
             (41, u64::MAX, i32::MIN, b"worker\xff".to_vec(), None, 1),
@@ -867,23 +864,27 @@ mod tests {
         assert_saved_identity_event(&connection, &event_path);
     }
 
-    fn assert_saved_identity_event(connection: &duckdb::Connection, path: &Path) {
+    fn assert_saved_identity_event(connection: &crate::engine::Engine, path: &Path) {
         let events = crate::query::table_source(
             connection,
             crate::schema::Table::Events,
             crate::query::TableSource::Parquet(path),
         )
         .unwrap();
-        let event: (u64, i32, Vec<u8>, u8) = connection
-            .query_row(
-                &format!(
-                    "SELECT process_unique_id,pid_version,executable_name, \
-                    usage_availability FROM {events}"
-                ),
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
+        let frame = connection
+            .query(&format!(
+                "SELECT process_unique_id,pid_version,executable_name, \
+                usage_availability FROM {events}"
+            ))
             .unwrap();
+        assert_eq!(frame.height(), 1);
+        let row = crate::engine::Row::new(&frame, 0).unwrap();
+        let event: (u64, i32, Vec<u8>, u8) = (
+            row.get(0).unwrap(),
+            row.get(1).unwrap(),
+            row.get(2).unwrap(),
+            row.get(3).unwrap(),
+        );
 
         assert_eq!((u64::MAX, i32::MIN, b"worker\xff".to_vec(), 3), event);
     }

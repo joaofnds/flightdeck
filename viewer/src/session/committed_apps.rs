@@ -4,6 +4,7 @@ use crate::live_app_response::{Observation, SAMPLE_BYTES_MAX, Sample};
 use crate::live_apps::{Frame, committed::Endpoint};
 use collector::recording::identity_text;
 use collector::ring::Identity;
+use persistence::engine::Row;
 use persistence::{Error, Result};
 use serde_json::Value;
 
@@ -163,15 +164,18 @@ impl Session {
         publication: u64,
     ) -> Result<Option<Endpoint>> {
         let source = self.source(window, "ticks")?;
-        let mut statement = self.connection.prepare(&format!(
+        let frame = self.connection.query(&format!(
             "SELECT run_tick, wall_ns, continuous_ns, awake_ns, processes_refused, \
             processes_gone, events_first, events_end FROM {source} \
             WHERE publication={publication} LIMIT 2"
         ))?;
-        let mut rows = statement.query([])?;
-        let Some(row) = rows.next()? else {
+        if frame.height() == 0 {
             return Ok(None);
-        };
+        }
+        if frame.height() > 1 {
+            return Err(Error::Bound("duplicate committed App tick"));
+        }
+        let row = Row::new(&frame, 0)?;
 
         let identity = self.windows[window].identity.run;
         let endpoint = Endpoint {
@@ -184,22 +188,18 @@ impl Session {
                 awake_ns: row.get(3)?,
             },
             run_tick: row
-                .get::<_, Option<u64>>(0)?
+                .get::<Option<u64>>(0)?
                 .ok_or(Error::Bound("committed App run tick"))?,
             wall_ns: row.get(1)?,
-            events_first: with_app_sample_endpoint_event_bound(row, 6)?,
-            events_end: with_app_sample_endpoint_event_bound(row, 7)?,
+            events_first: with_app_sample_endpoint_event_bound(&row, 6)?,
+            events_end: with_app_sample_endpoint_event_bound(&row, 7)?,
             usage_refused: row
-                .get::<_, Option<u32>>(4)?
+                .get::<Option<u32>>(4)?
                 .ok_or(Error::Bound("committed App refused count"))?,
             usage_gone: row
-                .get::<_, Option<u32>>(5)?
+                .get::<Option<u32>>(5)?
                 .ok_or(Error::Bound("committed App gone count"))?,
         };
-
-        if rows.next()?.is_some() {
-            return Err(Error::Bound("duplicate committed App tick"));
-        }
 
         self.operation.check()?;
 
@@ -239,8 +239,8 @@ impl Session {
     }
 }
 
-fn with_app_sample_endpoint_event_bound(row: &duckdb::Row<'_>, index: usize) -> Result<u64> {
-    row.get::<_, Option<u64>>(index)?
+fn with_app_sample_endpoint_event_bound(row: &Row<'_>, index: usize) -> Result<u64> {
+    row.get::<Option<u64>>(index)?
         .ok_or(Error::Bound("committed App event range"))
 }
 

@@ -25,52 +25,67 @@ fn endpoint() -> Endpoint {
     }
 }
 
-fn connection() -> Connection {
-    let connection = crate::data::connection().unwrap();
-    let columns = persistence::schema::TABLES[7].1;
-    connection
-        .execute_batch(&format!("CREATE TABLE processes ({columns})"))
-        .unwrap();
-    for (name, kind) in persistence::schema::IDENTITY_FIELDS {
-        connection
-            .execute_batch(&format!("ALTER TABLE processes ADD COLUMN {name} {kind}"))
-            .unwrap();
-    }
-    let columns = persistence::schema::TABLES[9].1;
-    connection
-        .execute_batch(&format!("CREATE TABLE events ({columns})"))
-        .unwrap();
-    for (name, kind) in persistence::schema::IDENTITY_FIELDS {
-        connection
-            .execute_batch(&format!("ALTER TABLE events ADD COLUMN {name} {kind}"))
-            .unwrap();
-    }
-    let source = Sources {
-        processes: "processes",
-        events: "events",
-    }
-    .query();
-    connection
-        .execute_batch(&format!("CREATE VIEW app_rows AS SELECT * FROM {source}"))
-        .unwrap();
+#[path = "fixture.rs"]
+mod fixture;
 
+fn connection() -> Engine {
+    let connection = crate::data::connection();
+    for index in [7, 9] {
+        let (table, columns, _) = persistence::schema::TABLES[index];
+        let extension = persistence::schema::IDENTITY_FIELDS
+            .map(|(name, kind)| format!("{name} {kind}"))
+            .join(",");
+        connection
+            .query(&format!(
+                "CREATE TABLE {} ({columns},{extension})",
+                table.name()
+            ))
+            .unwrap();
+    }
+    fixture::refresh(&connection);
     connection
 }
 
-fn measured(connection: &Connection) {
+fn measured(connection: &Engine) {
     measured_at(connection, 1);
 }
 
-fn measured_at(connection: &Connection, publication: u64) {
-    connection
-        .execute_batch(&format!(
-            "INSERT INTO processes VALUES ({publication}, 7, 9, \
-        9007199254740993, 9007199254740995, \
-        9007199254740997, 1, 2, 3, 4, 5, 6, 9007199254740999, 8, 9, 10, \
-        1, 2, 3, 4, 5, 1, 0, 0, 9007199254741001, -7, from_hex('61ff5c'), \
-        from_hex('2f412e617070'))"
-        ))
-        .unwrap();
+fn measured_at(connection: &Engine, publication: u64) {
+    use AnyValue::{Binary, Int32, UInt64};
+    fixture::insert(
+        connection,
+        "processes",
+        &[
+            ("publication", UInt64(publication)),
+            ("pid", Int32(7)),
+            ("awake_ns_at_start", UInt64(9)),
+            ("user_ns", UInt64(9_007_199_254_740_993)),
+            ("system_ns", UInt64(9_007_199_254_740_995)),
+            ("energy_nj", UInt64(9_007_199_254_740_997)),
+            ("instructions", UInt64(1)),
+            ("super_instructions", UInt64(2)),
+            ("cycles", UInt64(3)),
+            ("idle_wakeups", UInt64(4)),
+            ("interrupt_wakeups", UInt64(5)),
+            ("pageins", UInt64(6)),
+            ("resident_bytes", UInt64(9_007_199_254_740_999)),
+            ("footprint_bytes", UInt64(8)),
+            ("disk_read_bytes", UInt64(9)),
+            ("disk_written_bytes", UInt64(10)),
+            ("threads", Int32(1)),
+            ("faults", Int32(2)),
+            ("context_switches", Int32(3)),
+            ("mach_syscalls", Int32(4)),
+            ("unix_syscalls", Int32(5)),
+            ("identity_version", UInt64(1)),
+            ("identity_availability", UInt64(0)),
+            ("usage_availability", UInt64(0)),
+            ("process_unique_id", UInt64(9_007_199_254_741_001)),
+            ("pid_version", Int32(-7)),
+            ("executable_name", Binary(b"a\xff\\")),
+            ("app_path", Binary(b"/A.app")),
+        ],
+    );
 }
 
 #[test]
@@ -259,9 +274,7 @@ fn refuses_an_oversized_process_group_in_the_batch_preflight() {
     // Method: create 24,001 small rows and require refusal before any callback.
     let connection = connection();
     measured(&connection);
-    connection
-        .execute_batch("INSERT INTO processes SELECT processes.* FROM processes, range(24000)")
-        .unwrap();
+    fixture::duplicate(&connection, "processes", 24_000);
     let operation = Arc::new(crate::Cancellation::default())
         .operation(0)
         .unwrap();
@@ -391,20 +404,41 @@ fn rejects_logical_size_arithmetic_that_cannot_be_represented() {
     ));
 }
 
-fn dense_publication(connection: &Connection, publication: u64, count: u32) {
+fn dense_publication(connection: &Engine, publication: u64, count: u32) {
     assert!(count > 0);
     assert!(count <= 24_000);
     measured_at(connection, publication);
-    let end = u64::from(count) + 1;
-    connection
-        .execute_batch(&format!(
-            "UPDATE processes SET pid=1, process_unique_id=1, resident_bytes=11 \
-        WHERE publication={publication}; \
-        INSERT INTO processes SELECT processes.* REPLACE \
-        (i::INTEGER AS pid, i::UBIGINT AS process_unique_id) \
-        FROM processes CROSS JOIN range(2, {end}) generated(i) WHERE publication={publication}"
+    let mut group = connection
+        .query(&format!(
+            "SELECT * FROM processes WHERE publication={publication}"
+        ))
+        .unwrap()
+        .new_from_index(0, usize::try_from(count).unwrap());
+    let pids: Vec<_> = (1..=count).map(|pid| i32::try_from(pid).unwrap()).collect();
+    let creations: Vec<_> = (1..=count).map(u64::from).collect();
+    group
+        .with_column(polars::prelude::Column::new("pid".into(), pids))
+        .unwrap();
+    group
+        .with_column(polars::prelude::Column::new(
+            "process_unique_id".into(),
+            creations,
         ))
         .unwrap();
+    group
+        .with_column(polars::prelude::Column::new(
+            "resident_bytes".into(),
+            vec![11_u64; usize::try_from(count).unwrap()],
+        ))
+        .unwrap();
+    let mut other = connection
+        .query(&format!(
+            "SELECT * FROM processes WHERE publication<>{publication}"
+        ))
+        .unwrap();
+    other.vstack_mut(&group).unwrap();
+    connection.register("processes", other).unwrap();
+    fixture::refresh(connection);
 }
 
 #[test]
@@ -414,9 +448,14 @@ fn preserves_adjacent_totals_across_an_actual_normal_query_group_boundary() {
     let connection = connection();
     dense_publication(&connection, 1, 12_000);
     dense_publication(&connection, 2, 12_000);
-    connection
-        .execute_batch("UPDATE processes SET user_ns=user_ns+1 WHERE publication=2")
+    let changed = connection
+        .query(
+            "SELECT * REPLACE (user_ns + CASE WHEN publication=2 THEN 1 ELSE 0 END AS user_ns) \
+        FROM processes",
+        )
         .unwrap();
+    connection.register("processes", changed).unwrap();
+    fixture::refresh(&connection);
     let mut endpoints = [endpoint(), endpoint()];
     endpoints[1].stamp.publication = 2;
     endpoints[1].run_tick = 1;
@@ -475,7 +514,7 @@ fn delivers_two_oversized_valid_endpoints_as_separate_singletons() {
 #[test]
 fn owns_raw_program_bytes_and_exact_integers_above_double_precision() {
     // Goal: committed adaptation preserves typed counters, creations and unescaped byte keys.
-    // Method: capture literal UBIGINT/BLOB rows, drop DuckDB, and inspect owned endpoint facts.
+    // Method: capture typed integer/binary rows, drop Polars, and inspect owned endpoint facts.
     let connection = connection();
     measured(&connection);
     let operation = Arc::new(crate::Cancellation::default())
@@ -519,13 +558,20 @@ fn retains_identity_only_refusal_without_fabricating_numeric_usage() {
     // Goal: an identity-only scheduled member retains its bytes and unavailable usage.
     // Method: capture a refusal with a wholly NULL original payload and inspect the member.
     let connection = connection();
-    connection
-        .execute_batch(
-            "INSERT INTO processes (publication, pid, identity_version, identity_availability, \
-        usage_availability, process_unique_id, pid_version, executable_name) \
-        VALUES (1, 1, 1, 0, 1, 11, -1, from_hex('72656675736564'))",
-        )
-        .unwrap();
+    fixture::insert(
+        &connection,
+        "processes",
+        &[
+            ("publication", AnyValue::UInt64(1)),
+            ("pid", AnyValue::Int32(1)),
+            ("identity_version", AnyValue::UInt64(1)),
+            ("identity_availability", AnyValue::UInt64(0)),
+            ("usage_availability", AnyValue::UInt64(1)),
+            ("process_unique_id", AnyValue::UInt64(11)),
+            ("pid_version", AnyValue::Int32(-1)),
+            ("executable_name", AnyValue::Binary(b"refused")),
+        ],
+    );
     let operation = Arc::new(crate::Cancellation::default())
         .operation(0)
         .unwrap();

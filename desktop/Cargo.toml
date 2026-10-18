@@ -7,8 +7,13 @@ publish = false
 # Keep UI dependencies in a separate lockfile from the recording workspace.
 [workspace]
 
+[patch.crates-io.hashbrown]
+git = "https://github.com/pola-rs/hashbrown"
+rev = "d76a6f81abd8f388676aff15068236a8d21c7e1a"
+
 [dependencies]
 collector = { path = "../collector" }
+persistence = { path = "../persistence" }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 viewer = { path = "../viewer" }
@@ -17,9 +22,6 @@ libc = "0.2"
 log = "0.4"
 image = "=0.25.10"
 num-traits = "0.2"
-
-[dev-dependencies]
-persistence = { path = "../persistence" }
 
 [dev-dependencies.gpui]
 git = "https://github.com/zed-industries/zed"
@@ -37,6 +39,10 @@ git = "https://github.com/zed-industries/zed"
 rev = "56934ec0560bce8929025497411de7f5322fb6ca"
 default-features = false
 features = ["font-kit", "runtime_shaders"]
+
+# Keep the native query engine's debug unwind tables within Mach-O limits.
+[profile.dev.package."*"]
+opt-level = 1
 
 [profile.release]
 overflow-checks = true

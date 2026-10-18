@@ -33,6 +33,7 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
+    persistence::engine::initialize_process()?;
     let arguments: Vec<_> = std::env::args().skip(1).collect();
     if !matches!(arguments.len(), 4 | 6) {
         return Err(io::Error::other("--recording PATH --iterations N [--second N]").into());

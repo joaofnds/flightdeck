@@ -3,10 +3,11 @@
 use std::io;
 use std::path::Path;
 
+use crate::engine::{Engine, Row};
 use crate::layout::{self, DirectoryNames, Kind, WindowLocation};
 use crate::schema::Table;
 use collector::recording::discovery::Selection;
-use duckdb::Connection;
+use polars::prelude::DataType;
 
 use crate::{Manifest, Result, read_committed};
 
@@ -26,27 +27,30 @@ pub enum TableSource<'a> {
 /// Legacy process/event sources gain typed unavailable metadata; counters remain unchanged.
 /// Extended sources scan at most 1,048,577 rows, rejecting more than 1,048,576.
 /// Battery tick validation scans at most 62 rows, rejecting more than 61.
-/// Callers own the connection's memory/time bounds and must not mutate a validated source.
-pub fn table_source(
-    connection: &Connection,
-    table: Table,
-    source: TableSource<'_>,
-) -> Result<String> {
-    let source = match source {
-        TableSource::Parquet(path) => format!("read_parquet('{}')", parquet_source(path)?),
-        TableSource::Staged => table.name().to_owned(),
-    };
+/// A saved source is validated once while the engine retains its registration, so saved
+/// files must not change after they are first read.
+pub fn table_source(connection: &Engine, table: Table, source: TableSource<'_>) -> Result<String> {
+    match source {
+        TableSource::Parquet(path) => {
+            connection.parquet_relation(path, table.name(), |connection, source| {
+                table_source_normalize(connection, table, source)
+            })
+        }
+        TableSource::Staged => table_source_normalize(connection, table, table.name()),
+    }
+}
 
+fn table_source_normalize(connection: &Engine, table: Table, source: &str) -> Result<String> {
     if matches!(table, Table::Processes | Table::Events) {
-        return crate::identity::normalize(connection, table, &source);
+        return crate::identity::normalize(connection, table, source);
     }
 
     if matches!(table, Table::Ticks) {
-        let source = crate::battery::normalize(connection, &source)?;
+        let source = crate::battery::normalize(connection, source)?;
         return crate::disks::normalize(connection, &source);
     }
 
-    Ok(source)
+    Ok(source.to_owned())
 }
 
 /// Errors preserve incomplete enumeration rather than returning a complete empty answer.
@@ -107,8 +111,8 @@ pub fn validate_root(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Produces one literal SQL path after rejecting the engine's glob metacharacters.
-pub fn parquet_source(path: &Path) -> Result<String> {
+/// Escapes one path as the body of an SQL string literal, refusing what `validate_root` refuses.
+pub fn parquet_literal(path: &Path) -> Result<String> {
     validate_root(path)?;
     let text = path
         .to_str()
@@ -121,12 +125,7 @@ fn visit_names(path: &Path, mut visit: impl FnMut(&str) -> Result<()>) -> Result
 }
 
 fn query_window(root: &Path, manifest: &Manifest, second: u64) -> Result<Vec<(i32, u64)>> {
-    let connection = Connection::open_in_memory()?;
-    connection.execute_batch(
-        "SET autoinstall_known_extensions=false; \
-        SET autoload_known_extensions=false; SET threads=1; SET memory_limit='256MB'; \
-        SET max_temp_directory_size='0B';",
-    )?;
+    let connection = Engine::new();
     let directory = root.join(&manifest.data_directory);
     let source = |table: Table| {
         table_source(
@@ -135,12 +134,14 @@ fn query_window(root: &Path, manifest: &Manifest, second: u64) -> Result<Vec<(i3
             TableSource::Parquet(&directory.join(format!("{}.parquet", table.name()))),
         )
     };
+
     let first = second
         .checked_mul(1_000_000_000)
         .ok_or(crate::Error::Bound("query time"))?;
     let end = first
         .checked_add(1_000_000_000)
         .ok_or(crate::Error::Bound("query time"))?;
+
     let exit = crate::schema::event_kind::EXIT;
     let measured = crate::schema::availability::MEASURED;
     let sql = format!(
@@ -158,8 +159,31 @@ fn query_window(root: &Path, manifest: &Manifest, second: u64) -> Result<Vec<(i3
         source(Table::Processes)?,
         source(Table::Events)?
     );
-    let mut statement = connection.prepare(&sql)?;
-    let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
-    rows.collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(crate::Error::Engine)
+
+    let frame = connection.query(&sql)?;
+
+    let mut processes = Vec::with_capacity(frame.height());
+    for index in 0..frame.height() {
+        let row = Row::new(&frame, index)?;
+        processes.push((row.get(0)?, row.get(1)?));
+    }
+
+    Ok(processes)
+}
+
+pub(crate) fn storage_type(data_type: &DataType) -> Result<&'static str> {
+    match data_type {
+        DataType::UInt8 => Ok("UTINYINT"),
+        DataType::UInt16 => Ok("USMALLINT"),
+        DataType::UInt32 => Ok("UINTEGER"),
+        DataType::UInt64 => Ok("UBIGINT"),
+        DataType::Int32 => Ok("INTEGER"),
+        DataType::Int64 => Ok("BIGINT"),
+        DataType::Float32 => Ok("FLOAT"),
+        DataType::Float64 => Ok("DOUBLE"),
+        DataType::Boolean => Ok("BOOLEAN"),
+        DataType::String => Ok("VARCHAR"),
+        DataType::Binary => Ok("BLOB"),
+        _ => Err(crate::Error::Bound("recording storage type")),
+    }
 }

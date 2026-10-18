@@ -7,9 +7,11 @@ mod tests {
     use super::fixture;
 
     use collector::processes::Unreadable;
+    use collector::ring::{DictionaryCapacity, Place, RingReader, Writer};
     use collector::tracker::{Event, Noticed};
     use persistence::resources::{Footprint, WORKING_BYTES_MAX, Watchdog};
-    use persistence::{Encoder, Limits, Observation, Window};
+    use persistence::schema::{BATTERY_FIELDS, IDENTITY_FIELDS, TABLES, Table};
+    use persistence::{Encoder, IdentitySource, Limits, Observation, Window};
     use std::io::Write;
     use std::os::unix::fs::DirBuilderExt;
     use std::path::PathBuf;
@@ -158,6 +160,206 @@ mod tests {
             .unwrap();
 
         window
+    }
+
+    #[test]
+    fn preserves_exact_saved_schema_with_empty_measurement_tables() {
+        // Goal: persisted column names, positions and widths remain stable even without rows.
+        // Method: independently describe every Parquet table, including the empty fan table.
+        let directory = Directory::new();
+        let window = unavailable_window();
+
+        Encoder.encode(&window, &directory.0).unwrap();
+
+        assert_eq!(count(&directory, "fans", "true"), 0);
+        assert_saved_schema(&directory, SavedSchema::Original);
+    }
+
+    #[test]
+    fn preserves_exact_saved_schema_for_all_captured_extensions() {
+        // Goal: optional fields retain their complete ordered storage contract alongside base data.
+        // Method: capture all extensions, including empty identity tables, then inspect real files.
+        let directory = Directory::new();
+        let window = extended_window(&directory);
+
+        Encoder.encode(&window, &directory.0).unwrap();
+
+        assert_saved_schema(&directory, SavedSchema::Extended);
+    }
+
+    #[derive(Clone, Copy)]
+    enum SavedSchema {
+        Original,
+        Extended,
+    }
+
+    fn assert_saved_schema(directory: &Directory, schema: SavedSchema) {
+        let connection = duckdb::Connection::open_in_memory().unwrap();
+        for (table, definition, _) in TABLES {
+            let mut expected = definition
+                .split(',')
+                .map(|column| column.trim().split_once(' ').unwrap())
+                .collect::<Vec<_>>();
+            if matches!(schema, SavedSchema::Extended) {
+                match table {
+                    Table::Ticks => {
+                        expected.extend(BATTERY_FIELDS);
+                        expected.push(("physical_disks", "VARCHAR"));
+                    }
+                    Table::Processes | Table::Events => expected.extend(IDENTITY_FIELDS),
+                    _ => {}
+                }
+            }
+            let expected = expected
+                .into_iter()
+                .map(|(name, kind)| (name.to_owned(), kind.to_owned()))
+                .collect::<Vec<_>>();
+            let path = directory.0.join(format!("{}.parquet", table.name()));
+            let path = persistence::query::parquet_literal(&path).unwrap();
+            let actual = connection
+                .prepare(&format!(
+                    "DESCRIBE SELECT * FROM read_parquet('{path}', hive_partitioning=false)"
+                ))
+                .unwrap()
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+
+            assert_eq!(actual, expected, "saved schema for {}", table.name());
+        }
+    }
+
+    fn extended_window(directory: &Directory) -> Window {
+        let mut shape = fixture::profile(false);
+        shape.slot_count = 2;
+        shape.event_capacity = 2;
+        let mut tick = fixture::tick(&shape);
+        tick.processes.clear();
+        tick.processes_refused = 0;
+        tick.processes_gone = 0;
+        tick.battery = Some(collector::battery::BatteryReading {
+            source_continuous_ns: 1,
+            current_ma: Some(i64::MIN),
+            ..collector::battery::BatteryReading::default()
+        });
+        tick.disks = Some(collector::disks::DiskSnapshot::default());
+        let mut window = Window::new(
+            fixture::window(false).identity,
+            Limits::from_shape(&shape).unwrap(),
+        );
+        let place = Place {
+            lock_path: directory.0.join("identity.lock"),
+            name_prefix: "fdencschema".into(),
+        };
+        let writer = Writer::create_with_identity(
+            &place,
+            shape,
+            DictionaryCapacity {
+                entries: 1,
+                arena_bytes: 4096,
+            },
+            &window.identity.run,
+            0,
+        )
+        .unwrap();
+        let reader = RingReader::open(&place.lock_path).unwrap();
+        window
+            .push_tick_with_identity(
+                &Observation {
+                    publication: 1,
+                    wall_ns: Some(1),
+                    continuous_ns: Some(1),
+                    awake_ns: Some(1),
+                },
+                &tick,
+                &[],
+                &IdentitySource {
+                    reader: &reader,
+                    processes: &[],
+                    events: &[],
+                },
+            )
+            .unwrap();
+        drop(reader);
+        let name = writer.name().to_owned();
+        drop(writer);
+        collector::ring::unlink_generation(&name).unwrap();
+
+        window
+    }
+
+    #[test]
+    fn refuses_to_replace_an_existing_table_file() {
+        // Goal: encoding cannot overwrite a table already present in the private directory.
+        // Method: reserve its first output name and verify both the error and original bytes.
+        let directory = Directory::new();
+        let window = unavailable_window();
+        let path = directory.0.join("ticks.parquet");
+        std::fs::write(&path, b"reserved table").unwrap();
+
+        let result = Encoder.encode(&window, &directory.0);
+
+        assert!(matches!(
+            result,
+            Err(persistence::Error::Bound("existing table"))
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), b"reserved table");
+    }
+
+    #[test]
+    fn writes_bounded_zstd_row_groups_without_bloom_filters() {
+        // Goal: native encoding preserves bounded row groups and the recording compression policy.
+        // Method: independently inspect Parquet metadata for a table crossing one group boundary.
+        let directory = Directory::new();
+        let mut shape = fixture::profile(false);
+        shape.process_capacity = 300;
+        let tick = fixture::tick(&shape);
+        let mut window = Window::new(
+            fixture::window(false).identity,
+            Limits::from_shape(&shape).unwrap(),
+        );
+        for publication in 1..=61 {
+            window
+                .push_tick(
+                    &Observation {
+                        publication,
+                        wall_ns: Some(publication),
+                        continuous_ns: Some(publication),
+                        awake_ns: Some(publication),
+                    },
+                    &tick,
+                    &[],
+                )
+                .unwrap();
+        }
+
+        Encoder.encode(&window, &directory.0).unwrap();
+
+        let connection = duckdb::Connection::open_in_memory().unwrap();
+        let path = directory.0.join("processes.parquet");
+        let groups = connection
+            .prepare(
+                "SELECT max(row_group_num_rows) FROM parquet_metadata(?) \
+                GROUP BY row_group_id ORDER BY row_group_id",
+            )
+            .unwrap()
+            .query_map([path.to_str().unwrap()], |row| row.get::<_, u64>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let incompatible: u64 = connection
+            .query_row(
+                "SELECT count(*) FROM parquet_metadata(?) \
+                WHERE compression!='ZSTD' OR bloom_filter_offset IS NOT NULL",
+                [path.to_str().unwrap()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(groups, [16_384, 1916]);
+        assert_eq!(incompatible, 0);
     }
 
     fn count(directory: &Directory, table: &str, condition: &str) -> u64 {
@@ -428,6 +630,7 @@ mod tests {
         assert_eq!(count(&directory, "processes", "true"), 732_000);
         assert_eq!(count(&directory, "coalitions", "true"), 1_731_424);
         assert_eq!(count(&directory, "events", "true"), 999_424);
+        assert_saved_schema(&directory, SavedSchema::Original);
     }
 
     fn growth_windows(leak: bool) {

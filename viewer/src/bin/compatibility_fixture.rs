@@ -50,6 +50,7 @@ struct Options {
 }
 
 fn run() -> Result<()> {
+    persistence::engine::initialize_process()?;
     let mut arguments = Vec::with_capacity(7);
     for argument in std::env::args_os().skip(1).take(7) {
         let argument = argument

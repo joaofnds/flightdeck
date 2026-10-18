@@ -2,10 +2,12 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    // The engine creates temporary files only inside the private recording worker.
-    unsafe extern "C" {
-        fn umask(mask: u16) -> u16;
+    if let Err(error) = persistence::engine::initialize_process() {
+        eprintln!("persister startup: {error}");
+        return ExitCode::FAILURE;
     }
+
+    // Every file the persister creates, recording windows included, is private to its user.
     unsafe {
         umask(0o077);
     }
@@ -27,6 +29,10 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+unsafe extern "C" {
+    fn umask(mask: u16) -> u16;
 }
 
 fn options(words: &[String]) -> Result<(PathBuf, u64), String> {

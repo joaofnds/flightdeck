@@ -58,17 +58,16 @@ impl Recording {
     }
 
     fn project(&self) -> Tables {
-        let connection = crate::data::connection().unwrap();
+        let connection = crate::data::connection();
         let control = Arc::new(crate::Cancellation::default());
         let operation = control.operation(0).unwrap();
         let mut tables = Tables::new();
-        for (kind, columns, order) in persistence::schema::TABLES {
+        for (kind, _, order) in persistence::schema::TABLES {
             let name = kind.name();
             if TABLE_NAMES.contains(&name) {
                 connection
-                    .execute_batch(&format!("CREATE TABLE {name} ({columns})"))
+                    .register(name, persistence::frame(kind, &self.window).unwrap())
                     .unwrap();
-                persistence::append(&connection, kind, &self.window).unwrap();
                 let table = crate::data::query(
                     &connection,
                     &format!("SELECT * FROM {name} ORDER BY {order}"),
@@ -237,19 +236,41 @@ fn keeps_the_unsealed_encoder_projection_equal_to_saved_resource_scalars() {
 fn refuses_an_admitted_empty_fan_source_without_its_rpm_column() {
     // Goal: an empty malformed saved fan source never becomes measured fanless.
     // Method: admit a two-column empty Parquet before pinning it, then select publicly.
+    use polars::polars_utils::compression::ZstdLevel;
+    use polars::prelude::{
+        Column, DataFrame, ParquetCompression, ParquetWriter, StatisticsOptions,
+    };
+
     let recording = Recording::new();
     recording.seal_with(|pending| {
         let fans = pending.join("fans.parquet");
         assert!(fans.is_file());
         std::fs::remove_file(&fans).unwrap();
-        let path = persistence::query::parquet_source(&fans).unwrap();
-        crate::data::connection()
-            .unwrap()
-            .execute_batch(&format!(
-                "CREATE TABLE fans (publication UBIGINT, fan UTINYINT); COPY fans \
-             TO '{path}' (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 3, \
-             ROW_GROUP_SIZE 16384, WRITE_BLOOM_FILTER false)"
-            ))
+        let mut frame = DataFrame::new(
+            0,
+            vec![
+                Column::new("publication".into(), Vec::<u64>::new()),
+                Column::new("fan".into(), Vec::<u8>::new()),
+            ],
+        )
+        .unwrap();
+        ParquetWriter::new(std::fs::File::create(&fans).unwrap())
+            .with_compression(ParquetCompression::Zstd(Some(
+                ZstdLevel::try_new(3).unwrap(),
+            )))
+            .with_statistics(StatisticsOptions {
+                min_value: true,
+                max_value: true,
+                distinct_count: false,
+                null_count: true,
+                binary_statistics_truncate_length: None,
+            })
+            .with_row_group_size(Some(16_384))
+            .with_data_page_size(None)
+            .set_parallel(false)
+            .with_key_value_metadata(None)
+            .with_context_info(None)
+            .finish(&mut frame)
             .unwrap();
     });
     let mut session = Session::open(&recording.root).unwrap();

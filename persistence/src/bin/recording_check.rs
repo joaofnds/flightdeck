@@ -21,6 +21,7 @@ fn main() {
 }
 
 fn run() -> Result<()> {
+    persistence::engine::initialize_process()?;
     let arguments: Vec<String> = std::env::args().collect();
     let mode = arguments
         .get(1)

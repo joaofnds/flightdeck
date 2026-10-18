@@ -681,13 +681,10 @@ read a user init file and failed, outside the timed engines. Those limitations d
 change the returned answers, and the complete production resource checks below remain
 separate from the format experiment.
 
-The planned viewer joins history with the live tail in one query. DuckDB's Rust crate scans
-Arrow record batches held in the same process (`ArrowVTab`, behind the `vtab-arrow`
-feature), so the viewer copies the unsealed ticks out of the ring into Arrow batches
-and queries them together with the sealed files. The ring could hold Arrow IPC batches
-instead of fixed records, which saves that copy and costs the writer the Arrow
-encoding every tick. Neither is measured. The DuckDB command line opens the sealed
-files but sees only what is sealed.
+The viewer copies bounded unsealed observations out of the ring into typed Polars
+DataFrames and queries each frame on its own, apart from the immutable Parquet sources. The collector keeps
+its fixed-record ring format and does not run the query engine. The experiment above
+compared storage formats, not this viewer.
 
 ## Security
 
@@ -776,21 +773,54 @@ missing an entry, and on a case whose crate no member depends on.
 
 ### serde_json
 
-- Used: The viewer-only Rust adapter projects recording data into bounded JSON values for the Rust desktop client and diagnostic tools. Raw database cells remain decimal strings or NULL, preserving stored integers without floating-point conversion. The crate is pinned to =1.0.154 and was already in DuckDB's transitive graph.
-- Performance: Requests use 512-row pages and at most 4096 contextual observations. The former C ABI's serialized 8 MiB envelope is retired; Rust callers consume values directly. Whole-client allocation, query latency and footprint still require measurement. Another JSON encoder would duplicate escaping and integer correctness work.
+- Used: The viewer-only Rust adapter projects recording data into bounded JSON values for the Rust desktop client and diagnostic tools. Raw query cells remain decimal strings or NULL, preserving stored integers without floating-point conversion. The crate is pinned to =1.0.154, the version polars-core, polars-io, polars-utils and Polars' object-store dependency also use.
+- Performance: Requests use 512-row pages and at most 4096 contextual observations. Rust callers consume values directly. Whole-client allocation, query latency and footprint still require measurement. Another JSON encoder would duplicate escaping and integer correctness work.
 - Maintenance: Keep Cargo.lock and check wide integers, NULL and refused reads through the Rust projection. This reuses serde, serde_core, itoa, memchr and zmij already present in the engine graph. Recheck bounds and the serde_json changelog on upgrades.
 
 
 ### duckdb
 
-- Used: Persistence and viewer-only queries use duckdb =1.10506.0 with default features disabled and the parquet feature (which includes bundled DuckDB 1.5.6), through typed appenders, bounded in-memory tables and immutable Parquet COPY. Arrow is an unconditional transitive dependency. Neither the collector nor shared allocation-constrained code calls the engine. Extensions are bundled; runtime extension installation and autoloading are disabled.
-- Performance: On the M5 Pro, macOS 27.0.1, 2026-10-15, a 10,080-window/953-process synthetic week used 566.30 seconds native build CPU and 7,232,847,872 allocated bytes in Parquet, against 687.43 seconds/34,470,232,064 bytes for per-minute DuckDB and 655.41 seconds/7,924,731,904 bytes for DuckLake. Parquet's original week-query median was 1.611054 seconds first and 0.763221 repeat; DuckLake was 1.558944/0.706168. Both the original and ranked 54-answer families matched an independent Rust oracle. These are engine prototypes, not the combined collector-plus-persister budget or a cold-cache comparison. Implementing equivalent typed column encoding, Zstandard and query execution here would not credibly match the measured engine with comparable maintenance cost. The complete-schema Rust feed and physical-footprint measurements below are the implementation gate.
-- Maintenance: Pin the Rust crate exactly and keep Cargo.lock, including its bundled native engine and Arrow graph. The build graph also compiles ureq, rustls, ring, webpki-roots, tar, zip and flate2; bundled mode compiles out the download branch, but those crates still add supply-chain surface. The normal dependency graph also includes comfy-table and crossterm. Recheck either graph with `cargo tree --locked --offline -p persistence -e normal,build -i CRATE`. This adds a C++ build and native allocation observation; the 512 MiB DuckDB buffer limit does not bound whole-process memory. For persistence, a separate worker, 2 GiB physical-footprint watchdog and bounded one-window staging contain the engine; failures retain unacknowledged source and let collection continue. Immutable Parquet avoids a mutable catalog and extensions needed by DuckLake. Viewer queries use a separate bounded request path with no extension downloads or disk spill, explicit result limits and visible refusal on overflow. The persistence watchdog does not bound viewer memory. Measure whole-viewer footprint and query latency on the native slice. Revalidate the typed schema, native resource checks and build time when upgrading. Sources: https://github.com/duckdb/duckdb-rs/releases/tag/v1.10506.0 and https://raw.githubusercontent.com/duckdb/duckdb-rs/v1.10506.0/crates/duckdb/Cargo.toml .
+- Used: Persistence and viewer tests use duckdb =1.10506.0 with default features disabled and the parquet feature, which includes bundled DuckDB 1.5.6. It writes independent legacy and malformed Parquet fixtures and reads native Polars output as a second engine. Production dependencies and recording queries use Polars. Arrow remains a transitive test dependency.
+- Performance: On the M5 Pro, macOS 27.0.1, 2026-10-15, a 10,080-window/953-process synthetic week used 566.30 seconds native build CPU and 7,232,847,872 allocated bytes in Parquet, against 687.43 seconds/34,470,232,064 bytes for per-minute DuckDB and 655.41 seconds/7,924,731,904 bytes for DuckLake. Parquet's original week-query median was 1.611054 seconds first and 0.763221 repeat; DuckLake was 1.558944/0.706168. Both the original and ranked 54-answer families matched an independent Rust oracle. These are engine prototypes, not the combined collector-plus-persister budget or a cold-cache comparison. These measurements chose Parquet as the saved format. Implementing typed column encoding, Zstandard and query execution here would not credibly match a maintained engine at comparable cost. The Viewer query measurements section compares DuckDB with the Polars engine Flightdeck uses.
+- Maintenance: Keep its exact pin and lockfile for repeatable compatibility tests. The test build retains bundled C++, Arrow and its build-time HTTP/archive dependencies. Inspect the production graph with `cargo tree --locked -p persistence -e normal,build` and the test graph, which adds DuckDB's build-time HTTP and archive crates, with `cargo tree --locked -p persistence -e normal,build,dev`. The Persistence measurements section below measured the DuckDB encoder. Sources: https://github.com/duckdb/duckdb-rs/releases/tag/v1.10506.0 and https://raw.githubusercontent.com/duckdb/duckdb-rs/v1.10506.0/crates/duckdb/Cargo.toml .
 
+### polars
+
+- Used: Persistence constructs typed DataFrames and writes sorted, immutable Parquet tables of schema version 1; the viewer runs bounded native SQL plans over saved files and staged frames. The source is pinned to the Python Polars 2.0.0 release commit `22a147de3d2bb2e44b97338a2510816c7105c9f2`, whose Rust workspace version is 0.55.1. The published Rust crate 0.55.2 is a different release. Default features are disabled; Flightdeck selects lazy execution, SQL, Parquet and narrow unsigned integers. The collector does not depend on Polars.
+- Performance: A prototype on Rust Polars 0.55.2 returned the same typed answers as DuckDB on representative snapshot, context and process-history scans, including wide counters and binary paths. Implementing its columnar optimizer, SIMD kernels, Parquet decoding and Zstandard encoding here would add substantial maintenance work. The Viewer query measurements section compares the 2.0 release with DuckDB through the viewer's public calls.
+- Maintenance: Keep the exact release commit, `Cargo.lock` and `desktop/Cargo.lock`. The release also requires its upstream `hashbrown` patch at `d76a6f81abd8f388676aff15068236a8d21c7e1a`; downstream workspace roots must repeat that Cargo patch. Its SQL crate enables a broad set of expression features, and the Parquet graph includes asynchronous I/O, HTTP/TLS and object-store support even though Flightdeck uses local files and synchronous application code. Execution uses the in-memory engine with cooperative cancellation. Each viewer request records the cancellation epoch it started under and refuses its result once a newer request has advanced the epoch, even if a kernel finishes after cancellation. Row limits on the frames copied from the ring, and result and cache limits, bound logical work, but Polars supplies no replacement for DuckDB's buffer-manager quota. The persister retains its separate process and physical-footprint watchdog. Application startup defaults both native worker pools to one thread through a same-PID re-exec before engine or UI initialization; a `sample` profile of the viewer benchmark worker still showed four `tokio-rt-worker` threads besides those pools, and each viewer request runs a short-lived cancellation watcher thread. Explicit positive settings from 1 through 64 are preserved; other values return an error. Library callers choose their own startup policy. Resource measurements must record effective settings and the observed native pool size. Recheck types, ordering, query cancellation, memory and compiler support on upgrades. Sources: [2.0 release](https://github.com/pola-rs/polars/releases/tag/py-2.0.0), [release dependency pins](https://github.com/pola-rs/polars/blob/22a147de3d2bb2e44b97338a2510816c7105c9f2/Cargo.toml).
+
+
+### base64
+
+- Used: Before the native reader opens a saved file, Flightdeck checks its metadata against fixed bounds. This decodes the embedded Arrow schema so Flightdeck can check its IPC envelope before the pinned native reader converts it. Version =0.22.1 already belongs to the Polars Parquet graph; default features are disabled and only allocation support is requested.
+- Performance: The existing 4 MiB footer bound limits this metadata decode. Admission checks the two native envelope forms before schema inference, avoiding a second handwritten Base64 implementation.
+- Maintenance: Retain malformed short-envelope regressions alongside valid native and legacy metadata cases. Recheck the guard against the pinned Parquet reader on upgrades.
+
+### polars-arrow-format
+
+- Used: The saved-file checks examine embedded Arrow IPC schemas through native borrowed generated accessors before Polars converts their types. Version =0.2.1 already belongs to the selected native graph; default features are disabled and only IPC support is requested.
+- Performance: Admission limits fields, metadata entries and the aggregate bytes a native conversion may copy, including repeated references to a shared FlatBuffer string. It rejects unsupported nested, dictionary and extension types without recursively unpacking a schema. A separate IPC parser would duplicate the format's offset and tag validation.
+- Maintenance: Keep this version aligned with polars-arrow. Retain abort-child regressions for unsupported native type tags, exact scalar-width compatibility, and shared-string amplification when upgrading. These metadata bounds do not establish an allocator quota for native value decoding.
+
+### polars-parquet
+
+- Used: The saved-file checks read native Parquet footer and page metadata before the native reader opens the file. This crate uses the same exact Polars release commit as the encoder and viewer, with default features disabled. It is already part of Polars' Parquet dependency graph.
+- Performance: Admission checks page headers and seeks past compressed bodies before value decoding. It limits declared file, footer, page, row and expanded sizes; these checks are admission estimates, not an allocator quota. Reimplementing Parquet metadata conversion would duplicate the decoder's format handling.
+- Maintenance: Keep its revision aligned with polars. Exercise malformed lengths, offsets and allocation declarations through the bounded Thrift wrapper before upgrading. Runtime value decoding remains the native engine's responsibility.
+
+### polars-parquet-format
+
+- Used: The saved-file checks wrap this generated Thrift protocol and metadata reader with container, allocation and nesting limits. Version =0.1.0 is already a transitive dependency of the pinned Polars release; default features are disabled.
+- Performance: The wrapper rejects oversized container declarations before the generated reader reserves their elements, without decoding compressed values. A separate parser would duplicate both the Parquet schema and compact Thrift encoding.
+- Maintenance: Keep the direct version aligned with polars-parquet. Recheck generated collection allocation and field-identifier handling on upgrades, retaining regressions for oversized metadata and malformed field deltas.
 
 ## Persistence measurements
 
-The implementation observations in this section were measured on 2026-10-15.
+The implementation observations in this section were measured on 2026-10-15, against the
+DuckDB encoder. The figures have not been recorded again for the Polars encoder, whose
+capacity profile, growth bound and deliberate native leak remain encoder test gates.
+
 The complete-schema encoder uses ten typed Parquet tables: ticks, memory, CPUs,
 interfaces, GPU states, core states, fans, processes, coalitions and raw numbered events.
 Child rows key back to their publication; the immutable window metadata identifies the
@@ -836,9 +866,9 @@ writes in a pending directory, exited with status 74, and left no canonical comm
 A guarded blocked operation exits with status 75 after its deadline. Immediate native
 exit avoids running C/C++ cleanup concurrently with the engine.
 
-The encoder configures one thread before opening each engine connection. Opening with
-defaults started seventeen extra workers on this Mac before a later SQL setting removed
-them. The default configuration also exceeded the growth bound once in three runs
+The DuckDB encoder configured one thread before opening each engine connection. Opening
+with defaults started seventeen extra workers on this Mac before a later SQL setting
+removed them. The default configuration also exceeded the growth bound once in three runs
 (13,975,552 bytes); the growth checks passed in all three preconfigured comparisons.
 One comparison suite also hit a temporary-directory name collision, since fixed with
 an atomic ordinal. The original spike's
@@ -846,13 +876,66 @@ cause remains unsettled. A malloc cache-release probe released no bytes and was 
 added. The final uninstrumented nine-test encoder suite passed with the figures above;
 the growth assertion and deliberate native leak remain regression gates.
 
-Recheck with `cargo +1.95.0 test --locked -p persistence --test encoder -- --nocapture`.
-The full test uses explicit capacities rather than the host's smaller
-live shape. Source-to-staging byte and row bounds refuse excess input before copying;
-encoder connections close after each window. Raw build and resource output is retained
+Those runs used `cargo +1.95.0 test --locked -p persistence --test encoder -- --nocapture`,
+which now runs the Polars encoder's tests and so cannot reproduce these figures. The full
+test used explicit capacities rather than the host's smaller live shape. Source-to-staging
+byte and row bounds refused excess input before copying, and the DuckDB encoder closed its
+connection after each window. Raw build and resource output is retained
 in `backlog/evidence/TASK-19/build/review-fixes/encoder-verified.log` on this Mac,
 alongside the failed and comparison runs. This private board evidence is git-ignored
 and absent from a clone. Earlier encoder observations remain under `build/encoder`.
+
+## Viewer query measurements
+
+The viewer's query path was measured on the M5 Pro (48 GiB, macOS 27.0.1) on 2026-10-19,
+comparing the DuckDB viewer at commit 68416989 with the Polars 2.0 viewer. Both workers
+compile the same benchmark source with Rust 1.98.0, release optimization, overflow checks
+and `panic = "abort"`. DuckDB runs with one thread, as the application configured it.
+Polars runs under the application's startup policy, which sets its compute and async pools
+to one thread each, and the Polars worker reports the compute pool size it observed.
+
+Each operation selects one second of a frozen recording with its 15-minute context, then
+reads the first page of all ten tables, through the viewer's public `Session` calls. The
+two engines return identical answers, compared field by field with no normalization.
+Seven independent fresh processes run per engine, alternating which engine goes first,
+and each runs two warmups and five measured operations over a warm file cache. Results
+are medians of the seven process medians. Peak footprint is the median of each
+process's lifetime maximum. The host's one-minute load average read 4.2, 3.7 and 3.1 at
+the start, middle and end of the runs, with a browser and an unrelated test run active.
+
+| | DuckDB | Polars 2.0 |
+|---|---|---|
+| Wall time per operation | 460 ms | 268 ms |
+| Process CPU per operation | 459 ms | 272 ms |
+| Peak physical footprint | 51.4 MB | 50.6 MB |
+| Footprint after seven operations | 38 to 60 MB | 28 or 51 MB |
+| Opening the recording | 405 ms | 397 ms |
+
+Polars took less time and less CPU in every one of the seven pairs, by 38% to 43%. Every
+process reached about 51 MB of peak footprint by the end of its first operation, which
+includes opening the recording, and the records do not separate the two. Afterwards no
+Polars peak rose by more than 0.5 MB, and two DuckDB peaks rose to 60 MB. DuckDB's current
+footprint grew on every operation in all seven processes, by 1.1 to 6.2 MB a step, for
+example from 29 to 43 MB, while Polars grew by at most 0.3 MB a step after its first
+operation. In three Polars processes the footprint fell by about 22 MB after the first or
+second operation and stayed near 28 MB, while the other four stayed near 51 MB. These
+records do not show what memory was released or when, and seven operations do not show
+where DuckDB's growth stops.
+
+The Polars viewer builds, once per saved file, the validated SQL that maps the file's
+columns onto its table, and reuses it while the engine keeps the file registered. Against a
+Polars build without that reuse, the final build took 15% less time (267 against 314 ms)
+and 15% less CPU (270 against 320 ms), with per-pair reductions of 6% to 17% and peak
+footprints within 3% of each other. The two builds also differ outside that reuse, so this
+neither isolates nor bounds its effect. Profiling the selection attributed about a third of
+the main thread's samples to re-validating each window's saved commitment once per table
+read, which the DuckDB viewer also did.
+
+These are repeated warm-cache viewer operations. They do not measure cold start from
+disk, encoding, collector throughput or desktop presentation. The trials and raw
+per-process records are kept under `target/polars_migration/` on this Mac
+(`trials_final_duckdb`, `trials_final_v4polars`, and the Final section of
+`reproduce.txt`); that directory is git-ignored and absent from a clone.
 
 ## Next measurements
 

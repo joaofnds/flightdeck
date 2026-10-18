@@ -57,7 +57,7 @@ snake_case too, which nothing checks.
   The separate persister, and library code and dependencies used only by persistence,
   may allocate within a fixed working-memory bound for encoding and compressing its
   windows outside the collection loop. The viewer's UI frameworks, viewer-only
-  presentation adapter and DuckDB query execution may allocate during viewing within
+  presentation adapter and Polars query execution may allocate during viewing within
   explicit operation, result and cache bounds. Collector code, dependencies it runs,
   and all library code outside these exceptions stay startup-allocated, whichever
   binary calls them.

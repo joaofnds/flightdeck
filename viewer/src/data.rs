@@ -1,6 +1,7 @@
 use crate::cancellation::Operation;
-use duckdb::{Connection, types::ValueRef};
+use persistence::engine::Engine;
 use persistence::{Error, Result};
+use polars::prelude::{AnyValue, DataFrame};
 
 pub(crate) const ROWS_MAX: usize = 1_048_576;
 const CELL_BYTES_MAX: usize = 4096;
@@ -42,83 +43,104 @@ impl Table {
     }
 }
 
-pub(crate) fn connection() -> Result<Connection> {
-    let config = duckdb::Config::default().threads(1)?;
-    let connection = Connection::open_in_memory_with_flags(config)?;
-    connection.execute_batch(
-        "SET memory_limit='256MiB'; SET max_temp_directory_size='0B'; \
-        SET autoinstall_known_extensions=false; SET autoload_known_extensions=false;",
-    )?;
-    Ok(connection)
+pub(crate) fn connection() -> Engine {
+    Engine::new()
 }
 
 pub(crate) fn query(
-    connection: &Connection,
+    connection: &Engine,
     sql: &str,
     maximum: usize,
     operation: &Operation,
 ) -> Result<Table> {
     assert!(maximum <= ROWS_MAX);
+    operation.attach(connection)?;
+
+    let frame = query_frame(connection, sql, maximum, operation)?;
     operation.check()?;
-    let mut statement = connection.prepare(sql)?;
-    let mut cursor = statement.query([])?;
-    let columns = cursor
-        .as_ref()
-        .ok_or(Error::Bound("query statement"))?
-        .column_names();
+
+    let columns: Vec<_> = frame
+        .columns()
+        .iter()
+        .map(|column| column.name().to_string())
+        .collect();
     if columns.len() > 32 {
         return Err(Error::Bound("column count"));
     }
+
     let mut rows = Vec::new();
     let mut bytes = 0;
-    for _index in 0..=maximum {
+    if frame.height() > maximum {
+        return Err(Error::Bound("query row limit"));
+    }
+
+    for index in 0..frame.height() {
         operation.check()?;
-        let Some(row) = cursor.next()? else {
-            return Ok(Table { columns, rows });
-        };
-        if rows.len() == maximum {
-            return Err(Error::Bound("query row limit"));
-        }
+
         let mut values = Vec::with_capacity(columns.len());
         for (column, name) in columns.iter().enumerate() {
-            let value = cell(row.get_ref(column)?, name)?;
+            let value = cell(frame.columns()[column].get(index)?, name)?;
             bytes += value.as_ref().map_or(0, String::len);
             if bytes > 32 * 1024 * 1024 {
                 return Err(Error::Bound("query text bytes"));
             }
+
             values.push(value);
         }
         rows.push(values);
     }
-    Err(Error::Bound("query row limit"))
+
+    Ok(Table { columns, rows })
 }
 
-fn cell(value: ValueRef<'_>, column: &str) -> Result<Option<String>> {
+fn query_frame(
+    connection: &Engine,
+    sql: &str,
+    maximum: usize,
+    operation: &Operation,
+) -> Result<DataFrame> {
+    assert!(maximum <= ROWS_MAX);
+    let mut plan = connection.plan(sql)?;
+    if plan.collect_schema()?.len() > 32 {
+        return Err(Error::Bound("column count"));
+    }
+
+    let count = u32::try_from(maximum + 1).map_err(|_| Error::Bound("query row limit"))?;
+    operation.check()?;
+
+    connection.collect(plan.limit(count))
+}
+
+fn cell(value: AnyValue<'_>, column: &str) -> Result<Option<String>> {
     let text = match value {
-        ValueRef::Null => return Ok(None),
-        ValueRef::Boolean(value) => value.to_string(),
-        ValueRef::TinyInt(value) => value.to_string(),
-        ValueRef::SmallInt(value) => value.to_string(),
-        ValueRef::Int(value) => value.to_string(),
-        ValueRef::BigInt(value) => value.to_string(),
-        ValueRef::UTinyInt(value) => value.to_string(),
-        ValueRef::USmallInt(value) => value.to_string(),
-        ValueRef::UInt(value) => value.to_string(),
-        ValueRef::UBigInt(value) => value.to_string(),
-        ValueRef::Blob(value) if matches!(column, "executable_name" | "app_path") => {
+        AnyValue::Null => return Ok(None),
+        AnyValue::Boolean(value) => value.to_string(),
+        AnyValue::Int8(value) => value.to_string(),
+        AnyValue::Int16(value) => value.to_string(),
+        AnyValue::Int32(value) => value.to_string(),
+        AnyValue::Int64(value) => value.to_string(),
+        AnyValue::Int128(value) => value.to_string(),
+        AnyValue::UInt8(value) => value.to_string(),
+        AnyValue::UInt16(value) => value.to_string(),
+        AnyValue::UInt32(value) => value.to_string(),
+        AnyValue::UInt64(value) => value.to_string(),
+        AnyValue::Binary(value) if matches!(column, "executable_name" | "app_path") => {
             return Ok(Some(cell_bytes(value)?));
         }
-        ValueRef::Text(value) => std::str::from_utf8(value)
-            .map_err(|_| Error::Bound("text encoding"))?
-            .to_owned(),
-        ValueRef::Float(value) if value.is_finite() => value.to_string(),
-        ValueRef::Double(value) if value.is_finite() => value.to_string(),
-        ValueRef::Float(_) | ValueRef::Double(_) if column == "rpm" => return Ok(None),
+        AnyValue::BinaryOwned(value) if matches!(column, "executable_name" | "app_path") => {
+            return Ok(Some(cell_bytes(&value)?));
+        }
+        AnyValue::String(value) => value.to_owned(),
+        AnyValue::StringOwned(value) => value.to_string(),
+        AnyValue::Float32(value) if value.is_finite() => value.to_string(),
+        AnyValue::Float64(value) if value.is_finite() => value.to_string(),
+        AnyValue::Float32(_) | AnyValue::Float64(_) if column == "rpm" => return Ok(None),
         _ => return Err(Error::Bound("unsupported or nonfinite cell")),
     };
     if text.len() > CELL_BYTES_MAX {
         return Err(Error::Bound("cell bytes"));
     }
+
     Ok(Some(text))
 }
 
@@ -140,6 +162,29 @@ mod tests {
     use super::{Table, connection, query};
     use crate::Cancellation;
     use std::sync::Arc;
+
+    #[test]
+    fn keeps_maximum_unsigned_counters_exact_and_unavailable_values_empty() {
+        // Goal: native materialization preserves every counter bit and its unavailable state.
+        // Method: project UInt64::MAX and NULL through the same table adapter used by pages.
+        use polars::prelude::{Column, DataFrame};
+        let connection = connection();
+        let values = vec![Some(u64::MAX), None];
+        connection
+            .register(
+                "counters",
+                DataFrame::new(2, vec![Column::new("counter".into(), values)]).unwrap(),
+            )
+            .unwrap();
+        let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+
+        let result = query(&connection, "SELECT counter FROM counters", 2, &operation).unwrap();
+
+        assert_eq!(
+            result.rows,
+            vec![vec![Some(u64::MAX.to_string())], vec![None]]
+        );
+    }
 
     #[test]
     fn displays_captured_bytes_without_merging_invalid_and_literal_escape_names() {
@@ -184,7 +229,7 @@ mod tests {
     fn preserves_a_nullable_app_path() {
         // Goal: outside-bundle processes remain distinct from an empty or invented App path.
         // Method: query a typed NULL through the same bounded presentation adapter.
-        let connection = connection().unwrap();
+        let connection = connection();
         let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
 
         let result = query(&connection, "SELECT NULL::BLOB app_path", 1, &operation).unwrap();
@@ -196,7 +241,7 @@ mod tests {
     fn refuses_unrelated_blob_columns() {
         // Goal: captured path handling does not make arbitrary binary readings printable.
         // Method: query a BLOB under an unrelated column name.
-        let connection = connection().unwrap();
+        let connection = connection();
         let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
 
         let result = query(&connection, "SELECT 'abc'::BLOB unrelated", 1, &operation);
@@ -211,12 +256,12 @@ mod tests {
     fn keeps_the_ordinary_text_cell_limit() {
         // Goal: the narrowly bounded path adapter does not expand every text cell's budget.
         // Method: query ordinary text one byte beyond its original bound.
-        let connection = connection().unwrap();
+        let connection = connection();
         let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
 
         let result = query(
             &connection,
-            "SELECT repeat('a',4097) ordinary",
+            &format!("SELECT '{}' ordinary", "a".repeat(4097)),
             1,
             &operation,
         );
@@ -228,9 +273,12 @@ mod tests {
     }
 
     fn captured(bytes: &[u8]) -> persistence::Result<Table> {
-        let connection = connection()?;
-        connection.execute_batch("CREATE TABLE captured(executable_name BLOB)")?;
-        connection.execute("INSERT INTO captured VALUES(?)", duckdb::params![bytes])?;
+        use polars::prelude::{Column, DataFrame};
+        let connection = connection();
+        connection.register(
+            "captured",
+            DataFrame::new(1, vec![Column::new("executable_name".into(), &[bytes])])?,
+        )?;
         let operation = Arc::new(Cancellation::default()).operation(0)?;
         query(
             &connection,
@@ -246,7 +294,7 @@ mod tests {
             fn $name() {
                 // Goal: fan-specific gap handling cannot admit other nonfinite readings.
                 // Method: query a nonfinite value under an unrelated source column.
-                let connection = connection().unwrap();
+                let connection = connection();
                 let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
 
                 let result = query(&connection, $sql, 1, &operation);
@@ -272,7 +320,7 @@ mod tests {
     fn keeps_a_nonfinite_double_rpm_cell_nullable() {
         // Goal: floating width does not change the nullable invalid fan gauge contract.
         // Method: query a nonfinite double through the real bounded table adapter.
-        let connection = connection().unwrap();
+        let connection = connection();
         let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
 
         let result = query(&connection, "SELECT 'Infinity'::DOUBLE rpm", 1, &operation).unwrap();

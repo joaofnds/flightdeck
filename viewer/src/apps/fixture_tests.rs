@@ -9,7 +9,7 @@ use collector::ring::{
     ObservationTimes, Place, ProcessIdentity, RingReader, RunIdentity, Shape, UsageAvailability,
     Writer,
 };
-use duckdb::Connection;
+use persistence::engine::{Engine, Row};
 use persistence::{
     Begin, Encoder, Limits, Losses, Manifest, Store, TimeBounds, Window, WindowIdentity,
 };
@@ -59,7 +59,7 @@ fn reopens_real_v4_publications_after_writer_exit_and_aggregates_original_captur
     let mut fixture = Fixture::new();
     fixture.record();
     let manifest = fixture.manifest.as_ref().unwrap();
-    let connection = crate::data::connection().unwrap();
+    let connection = crate::data::connection();
     let mut records = Vec::with_capacity(10);
     fixture.read(&connection, &mut records);
     let mut clocks = Vec::with_capacity(2);
@@ -286,7 +286,7 @@ impl Fixture {
         );
     }
 
-    fn read(&self, connection: &Connection, output: &mut Vec<Recorded>) {
+    fn read(&self, connection: &Engine, output: &mut Vec<Recorded>) {
         let path = self.table("processes");
         let source = persistence::query::table_source(
             connection,
@@ -294,16 +294,16 @@ impl Fixture {
             persistence::query::TableSource::Parquet(&path),
         )
         .unwrap();
-        let mut statement = connection
-            .prepare(&format!(
+        let frame = connection
+            .query(&format!(
                 "SELECT publication,pid,process_unique_id,pid_version,executable_name,app_path,\
              user_ns,system_ns,energy_nj,resident_bytes,footprint_bytes,awake_ns_at_start \
              FROM {source} ORDER BY publication,pid",
             ))
             .unwrap();
-        let mut cursor = statement.query([]).unwrap();
-        for _index in 0..10 {
-            let row = cursor.next().unwrap().unwrap();
+        assert_eq!(frame.height(), 10);
+        for index in 0..10 {
+            let row = Row::new(&frame, index).unwrap();
             let mut usage = usage(
                 row.get(6).unwrap(),
                 row.get(8).unwrap(),
@@ -324,22 +324,20 @@ impl Fixture {
                 usage: *usage,
             });
         }
-        assert!(cursor.next().unwrap().is_none());
     }
 
-    fn clocks(&self, connection: &Connection, output: &mut Vec<(u64, u64)>) {
-        let mut statement = connection
-            .prepare(&format!(
+    fn clocks(&self, connection: &Engine, output: &mut Vec<(u64, u64)>) {
+        let frame = connection
+            .query(&format!(
                 "SELECT continuous_ns,awake_ns FROM read_parquet('{}') ORDER BY publication",
                 self.table("ticks").to_str().unwrap(),
             ))
             .unwrap();
-        let mut cursor = statement.query([]).unwrap();
-        for _index in 0..2 {
-            let row = cursor.next().unwrap().unwrap();
+        assert_eq!(frame.height(), 2);
+        for index in 0..2 {
+            let row = Row::new(&frame, index).unwrap();
             output.push((row.get(0).unwrap(), row.get(1).unwrap()));
         }
-        assert!(cursor.next().unwrap().is_none());
     }
 
     fn table(&self, name: &str) -> PathBuf {

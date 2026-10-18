@@ -1,8 +1,15 @@
 #[cfg(test)]
+#[path = "query_support/append.rs"]
+mod append_support;
+#[cfg(test)]
+mod query_support;
+
+#[cfg(test)]
 mod tests {
+    use super::query_support::table_source;
     use collector::disks::{DISKS_MAX, DiskReading, DiskSnapshot, ScanState};
     use duckdb::Connection;
-    use persistence::query::{TableSource, table_source};
+    use persistence::query::TableSource;
     use persistence::schema::{BATTERY_FIELDS, TABLES, Table};
 
     #[test]
@@ -279,7 +286,7 @@ mod tests {
                 persistence::table_columns(Table::Ticks, &window)
             ))
             .unwrap();
-        persistence::append(&connection, Table::Ticks, &window).unwrap();
+        super::append_support::append(&connection, Table::Ticks, &window);
 
         let tables = persistence::Encoder.encode(&window, &directory.0).unwrap();
         let staged = table_source(&connection, Table::Ticks, TableSource::Staged).unwrap();
@@ -328,7 +335,7 @@ mod tests {
         connection
             .execute_batch(&format!("CREATE TABLE ticks ({columns})"))
             .unwrap();
-        persistence::append(&connection, Table::Ticks, &window).unwrap();
+        super::append_support::append(&connection, Table::Ticks, &window);
         let source = table_source(&connection, Table::Ticks, TableSource::Staged).unwrap();
 
         assert_eq!(columns, format!("{}, physical_disks VARCHAR", TABLES[0].1));

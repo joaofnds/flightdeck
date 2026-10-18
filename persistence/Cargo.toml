@@ -9,7 +9,14 @@ name = "persister"
 path = "src/main.rs"
 
 [dependencies]
+base64 = { version = "=0.22.1", default-features = false, features = ["alloc"] }
 collector = { path = "../collector" }
+polars = { workspace = true }
+polars-arrow-format = { version = "=0.2.1", default-features = false, features = ["ipc"] }
+polars-parquet = { workspace = true }
+polars-parquet-format = { version = "=0.1.0", default-features = false }
+
+[dev-dependencies]
 duckdb = { version = "=1.10506.0", default-features = false, features = ["parquet"] }
 
 [lints]

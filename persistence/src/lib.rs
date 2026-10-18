@@ -2,6 +2,7 @@
 mod battery;
 pub mod disks;
 mod encoder;
+pub mod engine;
 mod identity;
 mod identity_encoder;
 pub mod layout;
@@ -21,7 +22,7 @@ pub use metadata::{Losses, Manifest, TimeBounds};
 pub use reader::{require_numeric_source, tick_buffer};
 pub use store::{Begin, CommitBoundary, PendingWindow, Store, ownership_contended, read_committed};
 
-pub use encoder::{Encoder, TableManifest, append, table_columns};
+pub use encoder::{Encoder, TableManifest, frame, table_columns};
 pub use schema::SCHEMA_VERSION;
 pub use window::{Limits, NumberedEvent, Observation, Window, WindowIdentity};
 
@@ -30,7 +31,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug)]
 pub enum Error {
     Bound(&'static str),
-    Engine(duckdb::Error),
+    Engine(polars::error::PolarsError),
     Io(std::io::Error),
 }
 
@@ -44,8 +45,8 @@ impl std::fmt::Display for Error {
     }
 }
 impl std::error::Error for Error {}
-impl From<duckdb::Error> for Error {
-    fn from(error: duckdb::Error) -> Self {
+impl From<polars::error::PolarsError> for Error {
+    fn from(error: polars::error::PolarsError) -> Self {
         Self::Engine(error)
     }
 }

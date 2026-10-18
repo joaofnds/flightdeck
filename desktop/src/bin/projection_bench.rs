@@ -91,6 +91,7 @@ fn unsigned_publication(value: &Value) -> bool {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
+    persistence::engine::initialize_process()?;
     let arguments: Vec<_> = std::env::args_os().skip(1).take(9).collect();
     if arguments
         .first()
