@@ -593,6 +593,25 @@ fn pressure_cells(
     points: &[Value],
     coordinates: &Coordinates,
 ) -> Result<(), String> {
+    timeline_cells(panel, domain, points, coordinates, pressure_state)?;
+    panel.states = Some(vec!["Normal".into(), "Warning".into(), "Critical".into()]);
+    panel.help = Some(
+        "macOS memory pressure by observed second. The chosen same-second \
+        publication takes priority; otherwise the latest reading is shown. Blank means \
+        unavailable or unrecognized, including gaps."
+            .to_owned(),
+    );
+
+    Ok(())
+}
+
+fn timeline_cells(
+    panel: &mut Panel,
+    domain: &Domain,
+    points: &[Value],
+    coordinates: &Coordinates,
+    state: impl Fn(Option<f32>) -> Option<f32>,
+) -> Result<(), String> {
     let span = usize::from(domain.span);
     let mut cells = vec![None; span];
     let mut selected = None;
@@ -602,7 +621,7 @@ fn pressure_cells(
         let cell = usize::try_from(second - domain.first).map_err(|error| error.to_string())?;
         assert!(cell < span);
         if Some(cell) != selected {
-            cells[cell] = pressure_state(panel.lines[0].values[index]);
+            cells[cell] = state(panel.lines[0].values[index]);
         }
         if Some(index) == coordinates.selected_index {
             selected = Some(cell);
@@ -618,14 +637,6 @@ fn pressure_cells(
     );
     panel.segments = None;
     panel.selected_index = selected;
-    panel.states = Some(vec!["Normal".into(), "Warning".into(), "Critical".into()]);
-    panel.help = Some(
-        "macOS memory pressure by observed second. The chosen same-second \
-        publication takes priority; otherwise the latest reading is shown. Blank means \
-        unavailable or unrecognized, including gaps."
-            .to_owned(),
-    );
-
     Ok(())
 }
 

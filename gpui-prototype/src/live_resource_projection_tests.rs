@@ -50,6 +50,14 @@ fn battery_projects_charge_signed_flow_and_binary_charging_history() {
     );
     assert_eq!(projected[2].lines[0].values[899], Some(0.0));
     assert_eq!(projected[2].selected_index, Some(899));
+    assert_eq!(
+        projected[2].help.as_deref(),
+        Some(
+            "Battery-controller charging state by observed second. The chosen \
+            same-second publication takes priority; otherwise the latest reading is shown. \
+            Blank means unavailable or unobserved. This state does not imply external power."
+        )
+    );
 }
 
 #[test]

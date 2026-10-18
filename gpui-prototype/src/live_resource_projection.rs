@@ -65,7 +65,7 @@ pub(super) fn charging_cells(
     points: &[Value],
     coordinates: &Coordinates,
 ) -> Result<(), String> {
-    super::pressure_cells(panel, domain, points, coordinates)?;
+    super::timeline_cells(panel, domain, points, coordinates, |value| value)?;
     panel.states = Some(vec!["Not charging".into(), "Charging".into()]);
     panel.help = Some(
         "Battery-controller charging state by observed second. The chosen \

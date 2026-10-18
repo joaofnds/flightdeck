@@ -391,6 +391,14 @@ fn pressure_timeline_uses_exact_selected_alternatives_and_blanks_unknown_states(
         pressure.states.as_ref().unwrap(),
         &["Normal", "Warning", "Critical"]
     );
+    assert_eq!(
+        pressure.help.as_deref(),
+        Some(
+            "macOS memory pressure by observed second. The chosen same-second \
+            publication takes priority; otherwise the latest reading is shown. Blank means \
+            unavailable or unrecognized, including gaps."
+        )
+    );
 }
 
 #[test]
