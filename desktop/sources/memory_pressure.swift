@@ -63,7 +63,7 @@ struct RecordedMemoryPressure: View {
         HStack(spacing: theme.fieldGap) {
             ForEach(MemoryPressureState.allCases, id: \.rawValue) { state in
                 HStack(spacing: theme.fieldGap / 2) {
-                    Rectangle().fill(stateColor(state)).frame(width: 9, height: 9)
+                    Rectangle().fill(theme.memoryPressureColor(state)).frame(width: 9, height: 9)
                         .accessibilityHidden(true)
                     Text(state.label)
                 }
@@ -92,14 +92,6 @@ struct RecordedMemoryPressure: View {
         return "\(mode): \(state) · \(date)"
     }
 
-    private func stateColor(_ state: MemoryPressureState) -> Color {
-        switch state {
-        case .normal: theme.memoryPressureNormal
-        case .warning: theme.memoryPressureWarning
-        case .critical: theme.memoryPressureCritical
-        }
-    }
-
     private func draw(context: inout GraphicsContext, size: CGSize,
                        timeline: MemoryPressureTimeline) {
         let frame = RecordedStatePlotLayout.frame(size: size)
@@ -107,7 +99,7 @@ struct RecordedMemoryPressure: View {
 
         context.fill(Path(frame), with: .color(theme.background))
 
-        let palette = MemoryPressureState.allCases.map { stateColor($0) }
+        let palette = MemoryPressureState.allCases.map { theme.memoryPressureColor($0) }
         var paths = Array(repeating: Path(), count: palette.count)
 
         for (cell, index) in timeline.cells.enumerated() {
@@ -181,6 +173,16 @@ enum MemoryPressureState: UInt64, CaseIterable {
         case .normal: "Normal"
         case .warning: "Warning"
         case .critical: "Critical"
+        }
+    }
+}
+
+extension FlightdeckTheme {
+    func memoryPressureColor(_ state: MemoryPressureState) -> Color {
+        switch state {
+        case .normal: memoryPressureNormal
+        case .warning: memoryPressureWarning
+        case .critical: memoryPressureCritical
         }
     }
 }

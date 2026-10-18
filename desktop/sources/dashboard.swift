@@ -79,12 +79,8 @@ struct Dashboard: View {
     }
 
     private var memoryPressureColor: Color? {
-        switch summary?.pressure.flatMap({ MemoryPressureState(rawValue: $0) }) {
-        case .normal: theme.memoryPressureNormal
-        case .warning: theme.memoryPressureWarning
-        case .critical: theme.memoryPressureCritical
-        case nil: nil
-        }
+        summary?.pressure.flatMap { MemoryPressureState(rawValue: $0) }
+            .map { theme.memoryPressureColor($0) }
     }
 
     private var networkPanel: some View {
