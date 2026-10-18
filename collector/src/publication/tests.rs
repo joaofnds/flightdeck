@@ -283,7 +283,7 @@ fn publishes_the_program_captured_at_start_discovery() {
     };
     let source = EventIdentity {
         pid: 4,
-        creation: EventCreation::Start(ProcessIdentity::Measured {
+        creation: EventCreation::Program(ProcessIdentity::Measured {
             creation: EXIT_CREATION,
             program: program.unwrap(),
         }),
@@ -324,6 +324,58 @@ fn publishes_the_program_captured_at_start_discovery() {
     assert_start_program(&reader, &identity);
 }
 
+#[test]
+fn publishes_the_program_captured_at_exec_notice() {
+    // Goal: Exec program metadata reaches the existing ring without claiming numeric usage.
+    // Method: publish fixed source identity, then inspect the actual event and raw dictionary.
+    let mut harness = Harness::new();
+    let mut publication = Publication::new(&harness.writer).unwrap();
+    let mut bytes = None;
+    collector::programs::split_program(b"/A.app/bin/x", &mut bytes).unwrap();
+    let mut program = None;
+    harness
+        .writer
+        .intern_program(&bytes.unwrap(), &mut program)
+        .unwrap();
+    let source = EventIdentity {
+        pid: 4,
+        creation: EventCreation::Program(ProcessIdentity::Measured {
+            creation: EXIT_CREATION,
+            program: program.unwrap(),
+        }),
+    };
+    let memory = collector::machine::Memory::default();
+    let mut reader = RingReader::open_generation(harness.writer.name()).unwrap();
+    publication
+        .publish_readings(
+            &mut harness.writer,
+            &readings(&memory, &[], &[Event::Exec { pid: 4 }]),
+            None,
+            &[],
+            &[source],
+            &SupplementalReadings::default(),
+        )
+        .unwrap();
+    let mut identity = IdentityObservation::EMPTY;
+    let found = reader.read_event_identity(&mut identity).unwrap();
+
+    assert_eq!(
+        FoundEvent::Event {
+            number: 1,
+            tick: 7,
+            event: Event::Exec { pid: 4 }
+        },
+        found
+    );
+    assert_eq!(UsageAvailability::NotApplicable, identity.usage);
+    assert_eq!(Some(&EXIT_CREATION), identity.creation());
+    assert_eq!(
+        collector::ring::IdentityAvailability::Measured,
+        identity.availability()
+    );
+    assert_start_program(&reader, &identity);
+}
+
 fn assert_start_program(reader: &RingReader, identity: &IdentityObservation) {
     let mut executable = [0; collector::ring::PROGRAM_PATH_BYTES_MAX];
     let mut app = [0; collector::ring::PROGRAM_PATH_BYTES_MAX];
@@ -338,6 +390,55 @@ fn assert_start_program(reader: &RingReader, identity: &IdentityObservation) {
         .unwrap();
     assert_eq!(b"x", &executable[..executable_length]);
     assert_eq!(b"/A.app", &app[..app_length]);
+}
+
+#[test]
+fn preserves_an_unassociated_exec_without_a_replacement_creation() {
+    // Goal: rejected source association never writes a replacement creation into an older event.
+    // Method: publish unavailable Exec metadata through a real ring and decode the public row.
+    let mut harness = Harness::new();
+    let mut publication = Publication::new(&harness.writer).unwrap();
+    let source = EventIdentity {
+        pid: 4,
+        creation: EventCreation::Program(ProcessIdentity::Unavailable {
+            creation: None,
+            reason: IdentityUnavailable::Changed,
+        }),
+    };
+    let memory = collector::machine::Memory::default();
+    let mut reader = RingReader::open_generation(harness.writer.name()).unwrap();
+    publication
+        .publish_readings(
+            &mut harness.writer,
+            &readings(&memory, &[], &[Event::Exec { pid: 4 }]),
+            None,
+            &[],
+            &[source],
+            &SupplementalReadings::default(),
+        )
+        .unwrap();
+    let mut identity = IdentityObservation::EMPTY;
+    let found = reader.read_event_identity(&mut identity).unwrap();
+
+    assert_eq!(
+        FoundEvent::Event {
+            number: 1,
+            tick: 7,
+            event: Event::Exec { pid: 4 }
+        },
+        found
+    );
+    assert_eq!(
+        IdentityObservation {
+            pid: 4,
+            usage: UsageAvailability::NotApplicable,
+            identity: ProcessIdentity::Unavailable {
+                creation: None,
+                reason: IdentityUnavailable::Changed
+            },
+        },
+        identity
+    );
 }
 
 #[test]
@@ -369,7 +470,7 @@ fn publishes_scheduled_start_identity_from_collection() {
         .unwrap();
     assert!(collector.event_identities().contains(&EventIdentity {
         pid,
-        creation: EventCreation::Start(ProcessIdentity::Measured {
+        creation: EventCreation::Program(ProcessIdentity::Measured {
             creation: expected,
             program: program.unwrap(),
         }),
@@ -493,6 +594,64 @@ fn reports_wait_capture_diagnostics_before_the_scheduled_sweep_resets_them() {
     );
 }
 
+#[test]
+fn reports_watch_reads_from_the_actual_scheduled_collector_path() {
+    // Goal: scheduled producer reporting consumes the tracker's actual watch diagnostics.
+    // Method: read once through Publication and require its cumulative native read counts.
+    let mut collector = Collector::new(Timebase::read().unwrap(), Duration::ZERO).unwrap();
+    collector.smc = None;
+    collector.ioreport = None;
+    collector.battery = None;
+    collector.disks = None;
+    let mut harness = Harness::sources(&collector, false);
+    let mut publication = Publication::new(&harness.writer).unwrap();
+
+    publication
+        .read(
+            &mut collector,
+            &mut Meter::default(),
+            &mut harness.writer,
+            None,
+        )
+        .unwrap();
+    let source = collector.tracker.watch_diagnostics();
+    let mut output = Vec::new();
+    publication
+        .report(&harness.writer, "test", &mut output)
+        .unwrap();
+
+    assert!(source.reads > 0);
+    assert!(String::from_utf8(output).unwrap().contains(&format!(
+        "watch identity test reads_total={} unavailable_total={}",
+        source.reads, source.unavailable,
+    )));
+}
+
+#[test]
+fn reports_the_raw_watch_identity_failure_from_bounded_storage() {
+    // Goal: a failed watch syscall appears in producer output instead of remaining private.
+    // Method: seed fixed source diagnostics and inspect the real periodic report.
+    let harness = Harness::new();
+    let mut publication = Publication::new(&harness.writer).unwrap();
+    publication.watch_diagnostics = WatchDiagnostics {
+        reads: 2,
+        unavailable: 1,
+        last_failure: Some(collector::tracker::WatchFailure {
+            pid: 4321,
+            error: collector::programs::CreationError::Syscall(14),
+        }),
+    };
+    let mut output = Vec::new();
+
+    publication
+        .report(&harness.writer, "test", &mut output)
+        .unwrap();
+
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("watch identity test reads_total=2 unavailable_total=1"));
+    assert!(output.contains("watch identity test last_failure_pid=4321 error=Syscall(14)"));
+}
+
 fn diagnostic_count(diagnostics: &collector::programs::sweep::Diagnostics) -> u64 {
     diagnostics.measured
         + diagnostics.refused
@@ -539,7 +698,7 @@ macro_rules! start_source_cases {
             // Method: publish one source failure through a real ring and decode its event.
             let mut harness = Harness::new();
             let mut publication = Publication::new(&harness.writer).unwrap();
-            let source = EventIdentity { pid: 4, creation: EventCreation::Start(
+            let source = EventIdentity { pid: 4, creation: EventCreation::Program(
                 ProcessIdentity::Unavailable { creation: Some(EXIT_CREATION), reason: $reason }) };
             let memory = collector::machine::Memory::default();
             let mut reader = RingReader::open_generation(harness.writer.name()).unwrap();

@@ -15,6 +15,8 @@ use crate::ring::{
     IdentityObservation, IdentityUnavailable, ProcessCreation, ProcessIdentity, Writer,
 };
 
+mod watches;
+
 #[derive(Debug, PartialEq)]
 pub enum Event {
     Start {
@@ -46,7 +48,9 @@ pub struct EventIdentity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventCreation {
     NotApplicable,
-    Start(ProcessIdentity),
+    /// The program observed while handling Start or Exec, not an exact exec target or time.
+    /// An Exec observation is associated with the watched process creation before publication.
+    Program(ProcessIdentity),
     Exit(Result<ProcessCreation, IdentityUnavailable>),
 }
 
@@ -64,10 +68,25 @@ pub struct ExitFailure {
     pub acquisition: ExitAcquisition,
 }
 
+#[derive(Debug, Default)]
+pub struct WatchDiagnostics {
+    pub reads: u64,
+    pub unavailable: u64,
+    pub last_failure: Option<WatchFailure>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct WatchFailure {
+    pub pid: i32,
+    pub error: crate::programs::CreationError,
+}
+
 const _: () = {
     assert!(size_of::<EventObservation>() == 232);
     assert!(size_of::<EventIdentity>() == 104);
     assert!(size_of::<EventObservation>() == size_of::<Event>() + size_of::<EventIdentity>());
+    assert!(size_of::<WatchFailure>() <= 16);
+    assert!(size_of::<WatchDiagnostics>() == 32);
 };
 
 impl From<Event> for EventObservation {
@@ -158,6 +177,8 @@ pub struct Tracker {
     timebase: Timebase,
     listing: Vec<i32>,
     known: Vec<Known>,
+    watch_generation: u64,
+    watch_diagnostics: WatchDiagnostics,
     reuse_candidates: Vec<(i32, usize)>,
     scans: u64,
     throttle: Throttle,
@@ -175,7 +196,7 @@ pub struct Tracker {
     failed: bool,
 }
 
-struct StartCapture<'a> {
+struct ProgramCapture<'a> {
     identities: &'a mut crate::programs::sweep::Sweep,
     writer: &'a mut Writer,
 }
@@ -183,6 +204,7 @@ struct StartCapture<'a> {
 #[derive(Clone, Copy, Default)]
 struct Known {
     listed_in: u64,
+    watch: watches::Watch,
     exited: bool,
 }
 
@@ -376,6 +398,8 @@ impl Tracker {
             timebase,
             listing,
             known: vec![Known::default(); known_count],
+            watch_generation: 0,
+            watch_diagnostics: WatchDiagnostics::default(),
             reuse_candidates: Vec::with_capacity(capacity),
             scans: 0,
             throttle: Throttle::new(timebase.ticks(interval_ns)?),
@@ -413,7 +437,7 @@ impl Tracker {
         self.follow_until_inner(
             deadline_ticks,
             meter,
-            Some(&mut StartCapture { identities, writer }),
+            Some(&mut ProgramCapture { identities, writer }),
         )
     }
 
@@ -421,7 +445,7 @@ impl Tracker {
         &mut self,
         deadline_ticks: u64,
         meter: &mut Meter,
-        mut capture: Option<&mut StartCapture<'_>>,
+        mut capture: Option<&mut ProgramCapture<'_>>,
     ) -> io::Result<()> {
         assert!(!self.failed, "a call to the tracker failed before");
         assert!(self.timers.len() < TIMER_COUNT_MAX);
@@ -432,17 +456,25 @@ impl Tracker {
         );
 
         loop {
-            let woke = meter.measure(Source::Events, || {
+            let first = self.events.len();
+            let (woke, count) = meter.measure(Source::Events, || {
                 let count = self.follow_until_wait()?;
-                follow_until_handle(
+                let woke = follow_until_handle(
                     &self.eventlist[..count],
                     &mut self.events,
                     &mut self.counts,
                     &mut self.exits,
-                )
+                )?;
+                io::Result::Ok((woke, count))
             })?;
             assert!(self.timers.is_empty());
 
+            self.follow_until_read_execs(
+                first..self.events.len(),
+                count,
+                meter,
+                capture.as_deref_mut(),
+            )?;
             self.read_exits(meter)?;
             self.throttle.woke(woke);
 
@@ -482,7 +514,7 @@ impl Tracker {
         &mut self,
         listing: &[i32],
         meter: &mut Meter,
-        capture: Option<&mut StartCapture<'_>>,
+        capture: Option<&mut ProgramCapture<'_>>,
     ) -> io::Result<()> {
         assert!(!self.failed, "a call to the tracker failed before");
         self.failed = true;
@@ -514,7 +546,7 @@ impl Tracker {
         self.observe_inner(
             listing,
             meter,
-            Some(&mut StartCapture { identities, writer }),
+            Some(&mut ProgramCapture { identities, writer }),
         )
     }
 
@@ -536,6 +568,11 @@ impl Tracker {
         &self.exit_diagnostics
     }
 
+    #[must_use]
+    pub fn watch_diagnostics(&self) -> &WatchDiagnostics {
+        &self.watch_diagnostics
+    }
+
     /// What the tracker has counted since it started.
     #[must_use]
     pub fn counts(&self) -> Counts {
@@ -553,7 +590,7 @@ impl Tracker {
     fn rescan(
         &mut self,
         meter: &mut Meter,
-        capture: Option<&mut StartCapture<'_>>,
+        capture: Option<&mut ProgramCapture<'_>>,
     ) -> io::Result<()> {
         let scans = self.scans;
         let capacity = self.listing.capacity();
@@ -633,10 +670,41 @@ impl Tracker {
         Ok(())
     }
 
+    fn follow_until_read_execs(
+        &mut self,
+        retained: std::ops::Range<usize>,
+        returned: usize,
+        meter: &mut Meter,
+        capture: Option<&mut ProgramCapture<'_>>,
+    ) -> io::Result<()> {
+        assert!(retained.end <= self.events.len());
+        assert!(retained.len() <= EVENTS_PER_WAIT_MAX);
+        assert!(returned <= EVENTS_PER_WAIT_MAX);
+        let Some(capture) = capture else {
+            return Ok(());
+        };
+
+        if !self.events[retained.clone()]
+            .iter()
+            .any(|observation| matches!(observation.event, Event::Exec { .. }))
+        {
+            return Ok(());
+        }
+
+        meter.measure(Source::ExecReads, || {
+            follow_until_read_execs_capture(
+                &mut self.events[retained],
+                &self.eventlist[..returned],
+                &self.known,
+                capture,
+            )
+        })
+    }
+
     fn read_starts(
         &mut self,
         meter: &mut Meter,
-        mut capture: Option<&mut StartCapture<'_>>,
+        mut capture: Option<&mut ProgramCapture<'_>>,
     ) -> io::Result<()> {
         if self.starts.is_empty() {
             return Ok(());
@@ -671,6 +739,7 @@ impl Tracker {
             for (pid, noticed) in self.exits.drain(..) {
                 let index = known_index(pid, self.known.len())?;
                 self.known[index].exited = true;
+                self.known[index].watch.active = false;
                 let mut acquired = ExitAcquisition::EMPTY;
                 let mut last = None;
 
@@ -727,12 +796,17 @@ impl Tracker {
 
         assert!(self.exits.is_empty());
         meter.measure(Source::Watches, || {
+            self.submit_watches_prepare()?;
+            if self.changes.is_empty() {
+                return Ok(());
+            }
             let receipts = self.submit_watches_register()?;
             submit_watches_receipts(
                 &self.eventlist[..receipts],
                 &mut self.counts,
                 &mut self.exits,
-            )
+            )?;
+            self.submit_watches_verify(receipts)
         })?;
         self.read_exits(meter)?;
 
@@ -807,6 +881,67 @@ impl Tracker {
     }
 }
 
+fn follow_until_read_execs_capture(
+    observations: &mut [EventObservation],
+    notices: &[Kevent],
+    known: &[Known],
+    capture: &mut ProgramCapture<'_>,
+) -> io::Result<()> {
+    assert!(observations.len() <= notices.len());
+    assert!(notices.len() <= EVENTS_PER_WAIT_MAX);
+    let mut notices = notices.iter().filter(|event| {
+        if event.filter == EVFILT_PROC {
+            event.fflags & NOTE_EXEC != 0
+        } else {
+            false
+        }
+    });
+    for observation in observations {
+        assert!(matches!(observation.event, Event::Exec { .. }));
+        let Some(notice) = notices.next() else {
+            unreachable!("each retained Exec came from this wait's notice prefix");
+        };
+
+        assert_eq!(observation.identity.pid, pid_of(notice.ident)?);
+        assert_eq!(observation.identity.creation, EventCreation::NotApplicable);
+        let watched = watches::notice_creation(known, notice)?;
+        let mut identity = IdentityObservation {
+            pid: observation.identity.pid,
+            ..IdentityObservation::EMPTY
+        };
+        if watched.is_some() {
+            capture
+                .identities
+                .capture(&mut identity, capture.writer, || {});
+        }
+        exec_identity(watched, &mut identity.identity);
+        observation.identity.creation = EventCreation::Program(identity.identity);
+    }
+
+    Ok(())
+}
+
+fn exec_identity(watched: Option<u64>, identity: &mut ProcessIdentity) {
+    let creation = match &*identity {
+        ProcessIdentity::Measured { creation, .. } => Some(*creation),
+        ProcessIdentity::Unavailable { creation, .. } => *creation,
+    };
+    if let Some(watched) = watched {
+        if let Some(creation) = creation {
+            if creation.unique_id == watched {
+                return;
+            }
+        } else {
+            return;
+        }
+    }
+
+    *identity = ProcessIdentity::Unavailable {
+        creation: None,
+        reason: IdentityUnavailable::Changed,
+    };
+}
+
 /// Handles the events one wait returned in its `eventlist`: records each exec among the tick's
 /// `events`, queues each exit among the `exits` to read, counts each fork, and returns what the
 /// wait woke for. An event that reports an error is that error.
@@ -832,6 +967,12 @@ fn follow_until_handle(
                 wake.rescan_timer_fired = true;
             }
         } else {
+            if event.filter != EVFILT_PROC {
+                return Err(io::Error::other(
+                    "kevent returned an unregistered process filter",
+                ));
+            }
+
             let pid = pid_of(event.ident)?;
             if event.fflags & NOTE_EXEC != 0 {
                 record(events, counts, Event::Exec { pid });
@@ -906,15 +1047,11 @@ fn record(
 
 fn record_assert_alignment(observation: &EventObservation) {
     let pid = match &observation.event {
-        Event::Start { pid, .. } => {
+        Event::Start { pid, .. } | Event::Exec { pid } => {
             assert!(matches!(
                 observation.identity.creation,
-                EventCreation::NotApplicable | EventCreation::Start(_)
+                EventCreation::NotApplicable | EventCreation::Program(_)
             ));
-            *pid
-        }
-        Event::Exec { pid } => {
-            assert_eq!(observation.identity.creation, EventCreation::NotApplicable);
             *pid
         }
         Event::Exit { pid, .. } => {
@@ -930,7 +1067,7 @@ fn record_assert_alignment(observation: &EventObservation) {
 
 fn read_start(
     observation: &mut EventObservation,
-    capture: Option<&mut StartCapture<'_>>,
+    capture: Option<&mut ProgramCapture<'_>>,
 ) -> io::Result<()> {
     let pid = observation.identity.pid;
     assert!(matches!(observation.event, Event::Start { .. }));
@@ -952,7 +1089,7 @@ fn read_start(
         };
 
         observation.event = Event::Start { pid, coalition };
-        observation.identity.creation = EventCreation::Start(identity.identity);
+        observation.identity.creation = EventCreation::Program(identity.identity);
     } else {
         observation.event = Event::Start {
             pid,
@@ -1052,7 +1189,7 @@ fn follow_until_timer(ident: usize, deadline_ticks: u64) -> io::Result<Kevent> {
 
 #[cfg(test)]
 mod tests {
-    mod start_tests;
+    pub(super) mod start_tests;
     use super::*;
     use crate::clock;
     use crate::cost::Snapshot;
@@ -1599,6 +1736,7 @@ mod tests {
         // watch the tracker builds is one kqueue takes, so only a test registers one.
         let mut tracker = tracker(INTERVAL);
         tracker.changes.clear();
+        tracker.known[1].watch.active = false;
         tracker
             .changes
             .push(Kevent::new(1, -99, EV_ADD | EV_RECEIPT, 0, 0));

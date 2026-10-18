@@ -99,7 +99,7 @@ fn preserves_the_start_and_coalition_when_its_new_program_exhausts_the_dictionar
     assert_eq!(0, allocations);
     assert_eq!(Event::Start { pid, coalition }, observation.event);
     assert_eq!(
-        EventCreation::Start(ProcessIdentity::Unavailable {
+        EventCreation::Program(ProcessIdentity::Unavailable {
             creation: Some(creation.unwrap()),
             reason: IdentityUnavailable::Exhausted,
         }),
@@ -149,7 +149,7 @@ fn preserves_a_known_start_reference_after_the_dictionary_is_full() {
         Err(crate::ring::IdentityAvailability::Exhausted),
         exhaustion
     );
-    let EventCreation::Start(ProcessIdentity::Measured { program, .. }) =
+    let EventCreation::Program(ProcessIdentity::Measured { program, .. }) =
         observation.identity.creation
     else {
         panic!("missing known program");
@@ -235,7 +235,7 @@ fn retains_discovered_program_after_the_child_has_exited_without_allocating() {
 
     assert_eq!(0, allocations);
     assert_eq!(
-        EventCreation::Start(ProcessIdentity::Measured {
+        EventCreation::Program(ProcessIdentity::Measured {
             creation: expected,
             program: program.unwrap(),
         }),
@@ -277,7 +277,7 @@ fn captures_program_during_the_wait_that_discovers_a_start() {
 
     assert!(matches!(
         observation.identity.creation,
-        EventCreation::Start(ProcessIdentity::Measured { .. })
+        EventCreation::Program(ProcessIdentity::Measured { .. })
     ));
     assert!(cost.ms_per_second(Source::StartReads) > 0.0);
     assert!(sweep.observations().is_empty());
@@ -304,4 +304,320 @@ fn wait_for_start(
     }
 
     panic!("no Start for owned pid={pid}");
+}
+
+#[test]
+fn captures_the_program_during_the_wait_that_observes_exec() {
+    // Goal: a watched Exec retains readable program metadata before the process exits.
+    // Method: hold Bash after startup, exec cat on demand, and inspect the real notice.
+    use std::io::Write;
+
+    let mut tracker = tests::tracker(Duration::from_hours(1));
+    let mut harness = Harness::with_entries(256);
+    let mut sweep = Sweep::new(4);
+    let mut meter = Meter::default();
+    let timebase = Timebase::read().unwrap();
+    let before = crate::cost::Snapshot::take(&meter, timebase).unwrap();
+    let mut child = exec_child();
+    let pid = child.0.id().cast_signed();
+    tracker
+        .observe_with_identity(&[pid], &mut meter, &mut sweep, &mut harness.writer)
+        .unwrap();
+    tracker.drain_observations().for_each(drop);
+    child
+        .0
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"continue\n")
+        .unwrap();
+    let mut observation = None;
+    let allocations = crate::recording::discovery::tests::allocator_calls_in(|| {
+        observation = Some(wait_for_exec(
+            &mut tracker,
+            &mut meter,
+            &mut sweep,
+            &mut harness.writer,
+            pid,
+        ));
+    });
+    let observation = observation.unwrap();
+    let mut expected = Err(programs::CreationError::NotRead);
+    programs::read_creation(pid, false, &mut expected);
+    tests::release(&mut child.0);
+    child.0.wait().unwrap();
+
+    assert_eq!(Event::Exec { pid }, observation.event);
+    let EventCreation::Program(ProcessIdentity::Measured { creation, program }) =
+        observation.identity.creation
+    else {
+        panic!("missing captured Exec program: {:?}", observation.identity);
+    };
+    assert_eq!(expected.unwrap(), creation);
+    assert_eq!(0, allocations);
+    let mut bytes = None;
+    programs::split_program(b"/bin/cat", &mut bytes).unwrap();
+    let mut expected_program = None;
+    harness
+        .writer
+        .intern_program(&bytes.unwrap(), &mut expected_program)
+        .unwrap();
+    assert_eq!(Some(program), expected_program);
+    let cost = crate::cost::Snapshot::take(&meter, timebase)
+        .unwrap()
+        .cost_since(&before)
+        .unwrap();
+    assert!(cost.ms_per_second(Source::ExecReads) > 0.0);
+    eprintln!("retained Exec pid={pid} identity={creation:?} rust_heap_calls={allocations}");
+}
+
+fn exec_child() -> tests::ExitChild {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+
+    let mut child = tests::ExitChild(
+        Command::new("/bin/bash")
+            .args([
+                "--noprofile",
+                "--norc",
+                "-c",
+                "printf R; read -r line; exec /bin/cat",
+            ])
+            .env_remove("BASH_ENV")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap(),
+    );
+    let mut stdout = child.0.stdout.take().unwrap();
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let ready = std::thread::spawn(move || {
+        let mut bytes = [0];
+        sender
+            .send(stdout.read_exact(&mut bytes).map(|()| bytes))
+            .unwrap();
+    });
+    let result = receiver.recv_timeout(Duration::from_secs(5));
+    if result.is_err() {
+        child.0.kill().unwrap();
+    }
+    ready.join().unwrap();
+    assert_eq!([b'R'], result.unwrap().unwrap());
+
+    child
+}
+
+fn wait_for_exec(
+    tracker: &mut Tracker,
+    meter: &mut Meter,
+    sweep: &mut Sweep,
+    writer: &mut Writer,
+    pid: i32,
+) -> EventObservation {
+    for _attempt in 0..tests::STEPS_MAX {
+        let deadline = clock::now() + tracker.timebase.ticks(tests::STEP_MS * 1_000_000).unwrap();
+        tracker
+            .follow_until_with_identity(deadline, meter, sweep, writer)
+            .unwrap();
+        for observation in tracker.drain_observations() {
+            if matches!(observation.event, Event::Exec { pid: found } if found == pid) {
+                return observation;
+            }
+        }
+    }
+
+    panic!("no Exec for owned pid={pid}");
+}
+
+#[test]
+fn preserves_a_queued_exec_registration_across_a_temporarily_missing_listing() {
+    // Goal: a transient listing omission never relabels a knote's already queued Exec.
+    // Method: exec an owned child, omit/reintroduce its PID before draining, and retain its token.
+    use std::io::Write;
+
+    let mut tracker = tests::tracker(Duration::from_hours(1));
+    let mut harness = Harness::with_entries(256);
+    let mut sweep = Sweep::new(4);
+    let mut meter = Meter::default();
+    let mut child = exec_child();
+    let pid = child.0.id().cast_signed();
+    tracker
+        .observe_with_identity(&[pid], &mut meter, &mut sweep, &mut harness.writer)
+        .unwrap();
+    assert_eq!(1, tracker.changes.len());
+    let registration = tracker.changes[0].udata;
+    let mut before = Err(programs::CreationError::NotRead);
+    programs::read_creation(pid, false, &mut before);
+    tracker.drain_observations().for_each(drop);
+    child
+        .0
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"continue\n")
+        .unwrap();
+    wait_for_exec_version(pid, before.unwrap());
+
+    tracker.observe(&[], &mut meter).unwrap();
+    tracker.observe(&[pid], &mut meter).unwrap();
+    assert!(tracker.changes.is_empty());
+    tracker.drain_observations().for_each(drop);
+    let observation = wait_for_exec(
+        &mut tracker,
+        &mut meter,
+        &mut sweep,
+        &mut harness.writer,
+        pid,
+    );
+    tests::release(&mut child.0);
+    child.0.wait().unwrap();
+
+    assert!(!registration.is_null());
+    assert!(matches!(
+        observation.identity.creation,
+        EventCreation::Program(ProcessIdentity::Measured { .. })
+    ));
+}
+
+fn wait_for_exec_version(pid: i32, before: ProcessCreation) {
+    for _attempt in 0..tests::STEPS_MAX {
+        let mut current = Err(programs::CreationError::NotRead);
+        programs::read_creation(pid, false, &mut current);
+        let current = current.unwrap();
+        assert_eq!(before.unique_id, current.unique_id);
+        if before.pid_version != current.pid_version {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(tests::STEP_MS));
+    }
+
+    panic!("no Exec version change for owned pid={pid}");
+}
+
+pub(in crate::tracker) fn captured_exec_after_watch_change(
+    change: impl FnOnce(&mut Tracker, i32),
+) -> EventObservation {
+    use std::io::Write;
+
+    let mut tracker = tests::tracker(Duration::from_hours(1));
+    let mut harness = Harness::with_entries(256);
+    let mut sweep = Sweep::new(4);
+    let mut meter = Meter::default();
+    let mut child = exec_child();
+    let pid = child.0.id().cast_signed();
+    tracker
+        .observe_with_identity(&[pid], &mut meter, &mut sweep, &mut harness.writer)
+        .unwrap();
+    tracker.drain_observations().for_each(drop);
+    change(&mut tracker, pid);
+    child
+        .0
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"continue\n")
+        .unwrap();
+    let observation = wait_for_exec(
+        &mut tracker,
+        &mut meter,
+        &mut sweep,
+        &mut harness.writer,
+        pid,
+    );
+    tests::release(&mut child.0);
+    child.0.wait().unwrap();
+
+    observation
+}
+
+#[test]
+fn accepts_an_exec_between_watch_installation_and_identity_verification() {
+    // Goal: installation verification binds the process even if its image changes meanwhile.
+    // Method: install an owned Bash watch, let it exec cat, then verify and drain its notice.
+    use std::io::Write;
+
+    let mut tracker = tests::tracker(Duration::from_hours(1));
+    let mut harness = Harness::with_entries(256);
+    let mut sweep = Sweep::new(4);
+    let mut meter = Meter::default();
+    let mut child = exec_child();
+    let pid = child.0.id().cast_signed();
+    let mut before = Err(programs::CreationError::NotRead);
+    programs::read_creation(pid, false, &mut before);
+    tracker.compare(&[pid]).unwrap();
+    tracker.counts.listing_rescans += 1;
+    tracker.throttle.rescanned(clock::now());
+    tracker.read_starts(&mut meter, None).unwrap();
+    tracker.submit_watches_prepare().unwrap();
+    let receipts = tracker.submit_watches_register().unwrap();
+    child
+        .0
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"continue\n")
+        .unwrap();
+    wait_for_exec_version(pid, before.unwrap());
+    tracker.submit_watches_verify(receipts).unwrap();
+    tracker.drain_observations().for_each(drop);
+
+    let observation = wait_for_exec(
+        &mut tracker,
+        &mut meter,
+        &mut sweep,
+        &mut harness.writer,
+        pid,
+    );
+    tests::release(&mut child.0);
+    child.0.wait().unwrap();
+
+    assert!(matches!(
+        observation.identity.creation,
+        EventCreation::Program(ProcessIdentity::Measured { .. })
+    ));
+}
+
+#[test]
+fn retains_numeric_exec_when_the_process_is_reaped_before_handling() {
+    // Goal: a queued Exec survives a vanished process without inventing executable metadata.
+    // Method: exec and reap an owned child before following the already-installed watch.
+    use std::io::Write;
+
+    let mut tracker = tests::tracker(Duration::from_hours(1));
+    let mut harness = Harness::with_entries(256);
+    let mut sweep = Sweep::new(4);
+    let mut meter = Meter::default();
+    let mut child = exec_child();
+    let pid = child.0.id().cast_signed();
+    tracker
+        .observe_with_identity(&[pid], &mut meter, &mut sweep, &mut harness.writer)
+        .unwrap();
+    tracker.drain_observations().for_each(drop);
+    child
+        .0
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"continue\n")
+        .unwrap();
+    tests::release(&mut child.0);
+    assert!(child.0.wait().unwrap().success());
+
+    let observation = wait_for_exec(
+        &mut tracker,
+        &mut meter,
+        &mut sweep,
+        &mut harness.writer,
+        pid,
+    );
+
+    assert_eq!(Event::Exec { pid }, observation.event);
+    assert_eq!(
+        EventCreation::Program(ProcessIdentity::Unavailable {
+            creation: None,
+            reason: IdentityUnavailable::Gone,
+        }),
+        observation.identity.creation
+    );
 }

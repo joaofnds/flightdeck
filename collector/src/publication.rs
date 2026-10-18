@@ -9,7 +9,9 @@ use collector::ring::{
     ObservationTimes, ProcessIdentity, Readings, SmcReadings, SupplementalReadings,
     UsageAvailability, Writer,
 };
-use collector::tracker::{EVENTS_PER_TICK_MAX, Event, EventCreation, EventIdentity};
+use collector::tracker::{
+    EVENTS_PER_TICK_MAX, Event, EventCreation, EventIdentity, WatchDiagnostics,
+};
 
 pub(crate) struct Publication {
     identity_enabled: bool,
@@ -17,6 +19,7 @@ pub(crate) struct Publication {
     disks_enabled: bool,
     events: Vec<IdentityObservation>,
     report: IdentityReport,
+    watch_diagnostics: WatchDiagnostics,
 }
 
 impl Publication {
@@ -29,6 +32,7 @@ impl Publication {
             disks_enabled: ring.disks_supported(),
             events: Vec::with_capacity(EVENTS_PER_TICK_MAX),
             report: IdentityReport::default(),
+            watch_diagnostics: WatchDiagnostics::default(),
         })
     }
 
@@ -53,11 +57,12 @@ impl Publication {
         if self.identity_enabled {
             collector.read_with_identity(meter, ring)?;
             self.report.add(collector.identities.diagnostics());
-
-            Ok(())
         } else {
-            collector.read(meter)
+            collector.read(meter)?;
         }
+        self.remember_watch_diagnostics(collector.tracker.watch_diagnostics());
+
+        Ok(())
     }
 
     pub(crate) fn wait_until(
@@ -71,11 +76,12 @@ impl Publication {
             collector.wait_until_with_identity(deadline, meter, ring)?;
 
             self.report.add(collector.identities.diagnostics());
-
-            Ok(())
         } else {
-            collector.wait_until(deadline, meter)
+            collector.wait_until(deadline, meter)?;
         }
+        self.remember_watch_diagnostics(collector.tracker.watch_diagnostics());
+
+        Ok(())
     }
 
     pub(crate) fn publish(
@@ -177,7 +183,27 @@ impl Publication {
         label: &'static str,
         out: &mut impl Write,
     ) -> io::Result<()> {
-        self.report.report(ring, label, out)
+        self.report.report(ring, label, out)?;
+        writeln!(
+            out,
+            "watch identity {label} reads_total={} unavailable_total={}",
+            self.watch_diagnostics.reads, self.watch_diagnostics.unavailable
+        )?;
+        if let Some(failure) = &self.watch_diagnostics.last_failure {
+            writeln!(
+                out,
+                "watch identity {label} last_failure_pid={} error={:?}",
+                failure.pid, failure.error
+            )?;
+        }
+
+        Ok(())
+    }
+
+    fn remember_watch_diagnostics(&mut self, source: &WatchDiagnostics) {
+        self.watch_diagnostics.reads = source.reads;
+        self.watch_diagnostics.unavailable = source.unavailable;
+        self.watch_diagnostics.last_failure = source.last_failure;
     }
 
     fn fill_events(&mut self, events: &[Event], identities: &[EventIdentity]) {
@@ -189,24 +215,13 @@ impl Publication {
 
         for (event, source) in events.iter().zip(identities) {
             let (pid, usage, identity) = match event {
-                Event::Start { pid, .. } => {
+                Event::Start { pid, .. } | Event::Exec { pid } => {
                     let identity = match source.creation {
-                        EventCreation::Start(identity) => identity,
+                        EventCreation::Program(identity) => identity,
                         EventCreation::NotApplicable => IdentityObservation::EMPTY.identity,
-                        EventCreation::Exit(_) => unreachable!("Start carries no Exit metadata"),
+                        EventCreation::Exit(_) => unreachable!("program notice carries no Exit"),
                     };
                     (*pid, UsageAvailability::NotApplicable, identity)
-                }
-                Event::Exec { pid } => {
-                    assert_eq!(source.creation, EventCreation::NotApplicable);
-                    (
-                        *pid,
-                        UsageAvailability::NotApplicable,
-                        ProcessIdentity::Unavailable {
-                            creation: None,
-                            reason: IdentityUnavailable::Unsupported,
-                        },
-                    )
                 }
                 Event::Exit { pid, last, .. } => {
                     let EventCreation::Exit(creation) = source.creation else {
