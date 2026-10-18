@@ -19,6 +19,9 @@ func runLiveAppsChecks() throws {
     try round_trips_generated_exact_counters()
     preserves_exact_history_selection_when_wall_times_repeat()
     try renders_exact_process_identities_and_readings_in_fixed_native_rows()
+    try labels_exited_processes_and_clears_the_label_for_live_rows()
+    try keeps_distinct_creations_when_an_exited_pid_is_reused()
+    try refuses_duplicate_process_creations_across_exec_versions()
     try renders_group_subtotal_coverage_in_native_cells()
     try distinguishes_native_measured_zero_from_absent_identity_and_readings()
     try activates_only_known_group_buttons_without_update_callbacks()
@@ -26,7 +29,7 @@ func runLiveAppsChecks() throws {
     try applies_native_live_table_theme_without_enabling_row_selection()
     renders_overflowed_group_subtotals_as_unavailable()
     try renders_the_loaded_process_bound_and_clears_an_empty_page()
-    print("22 live App native checks passed")
+    print("25 live App native checks passed")
 }
 
 private func preserves_exact_live_app_counters_above_double_precision() throws {
@@ -328,6 +331,88 @@ private func preserves_exact_history_selection_when_wall_times_repeat() {
     precondition(value == 90, "Repeated-time selection read \(String(describing: value))")
 }
 
+
+@MainActor
+private func keeps_distinct_creations_when_an_exited_pid_is_reused() throws {
+    // Goal: one interval can contain an exited process and the new creation reusing its PID.
+    // Method: decode a detail page with distinct creation IDs at PID42 and realize both rows.
+    let detail = try liveAppsNativeTableDetail(liveAppsReusedPIDDetailData())
+    let fixture = LiveAppsNativeTableFixture(data: .processes(detail.processes))
+
+    precondition(detail.app.members == 3)
+    precondition(detail.app.liveMembers == 2)
+    precondition(fixture.displayedField(row: 0, column: 0).accessibilityValue() == "42 Exited")
+    precondition(fixture.displayedField(row: 1, column: 0).accessibilityValue() == "42")
+    precondition(fixture.displayedField(row: 0, column: 1).stringValue == "9007199254740993")
+    precondition(fixture.displayedField(row: 1, column: 1).stringValue == "9007199254740994")
+}
+
+private func liveAppsReusedPIDDetailData() throws -> Data {
+    guard var object = try JSONSerialization.jsonObject(with: LiveAppsFixture.detail)
+        as? [String: Any], var processes = object["processes"] as? [[String: Any]],
+        var app = object["app"] as? [String: Any] else { throw LiveAppDataError.invalidPage }
+
+    processes[0]["state"] = "exited_verified"
+    processes[1]["pid"] = 42
+    object["processes"] = processes
+    app["live_members"] = 2
+    app["resident_bytes"] = ["known": "52428800", "measured_members": 1,
+        "unavailable_members": 1, "overflowed": false]
+    app["footprint_bytes"] = ["known": "55000000", "measured_members": 1,
+        "unavailable_members": 1, "overflowed": false]
+    object["app"] = app
+
+    return try JSONSerialization.data(withJSONObject: object)
+}
+
+private func refuses_duplicate_process_creations_across_exec_versions() throws {
+    // Goal: exec cannot turn one process creation into two detail-page members.
+    // Method: retain a reused PID but replace its creation ID with the first row's ID.
+    let data = try liveAppsReusedPIDDetailData()
+    guard var object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+          var processes = object["processes"] as? [[String: Any]] else {
+        throw LiveAppDataError.invalidPage
+    }
+
+    processes[1]["creation"] = ["unique_id": "9007199254740993", "pid_version": 2]
+    object["processes"] = processes
+    let decoder = JSONDecoder()
+    decoder.keyDecodingStrategy = .convertFromSnakeCase
+    let bytes = try JSONSerialization.data(withJSONObject: object)
+
+    let result = Result { try decoder.decode(LiveAppDetailPage.self, from: bytes) }
+
+    precondition(isLiveAppFailure(result, expected: .invalidPage))
+}
+
+@MainActor
+private func labels_exited_processes_and_clears_the_label_for_live_rows() throws {
+    // Goal: a final memory gauge cannot be mistaken for a currently running process.
+    // Method: decode a captured exit, realize its native row, then reuse it for a live reading.
+    let live = try liveAppsNativeTableDetail().processes[0]
+    guard let object = try JSONSerialization.jsonObject(with: LiveAppsFixture.detail)
+        as? [String: Any], let rows = object["processes"] as? [[String: Any]],
+        var process = rows.first else { throw LiveAppDataError.invalidPage }
+
+    process["state"] = "exited_verified"
+    let decoder = JSONDecoder()
+    decoder.keyDecodingStrategy = .convertFromSnakeCase
+    let exited = try decoder.decode(LiveAppProcess.self,
+        from: JSONSerialization.data(withJSONObject: process))
+    let fixture = LiveAppsNativeTableFixture(data: .processes([exited]))
+
+    precondition(fixture.displayedField(row: 0, column: 0).accessibilityValue() == "42 Exited")
+    precondition(fixture.displayedField(row: 0, column: 0).toolTip
+        == "Historical process; its last memory readings are excluded from current App totals.")
+    precondition(fixture.displayedField(row: 0, column: 5).stringValue == "100 MiB")
+
+    fixture.coordinator.apply(fixture.table, data: .processes([live]),
+        theme: FlightdeckTheme(), onSelect: nil)
+    fixture.table.layoutSubtreeIfNeeded()
+
+    precondition(fixture.displayedField(row: 0, column: 0).accessibilityValue() == "42")
+    precondition(fixture.displayedField(row: 0, column: 0).toolTip == nil)
+}
 
 @MainActor
 private func renders_exact_process_identities_and_readings_in_fixed_native_rows() throws {

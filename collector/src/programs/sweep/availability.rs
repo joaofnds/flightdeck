@@ -1,6 +1,6 @@
 use crate::ring::{IdentityAvailability, IdentityUnavailable, ProcessCreation};
 
-use super::super::{Acquisition, CreationError, PathError};
+use super::super::{Acquisition, CreationError, PathError, creation_reason};
 
 pub(super) fn stable_creation(acquired: &Acquisition) -> Option<ProcessCreation> {
     if let (Ok(before), Ok(after)) = (acquired.creation_before, acquired.creation_after) {
@@ -33,17 +33,6 @@ pub(super) fn failure_reason(acquired: &Acquisition) -> IdentityUnavailable {
     match acquired.path {
         Some(Err(error)) => path_reason(error),
         _ => IdentityUnavailable::Invalid,
-    }
-}
-
-fn creation_reason(error: CreationError) -> IdentityUnavailable {
-    match error {
-        CreationError::Refused(_) => IdentityUnavailable::Refused,
-        CreationError::Gone(_) => IdentityUnavailable::Gone,
-        CreationError::Unsupported(_) | CreationError::Syscall(_) => {
-            IdentityUnavailable::Unsupported
-        }
-        CreationError::Size(_) | CreationError::NotRead => IdentityUnavailable::Invalid,
     }
 }
 

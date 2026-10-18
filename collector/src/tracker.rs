@@ -9,7 +9,9 @@ use crate::coalitions;
 use crate::cost::{Meter, Source};
 use crate::kernel::{EPERM, ESRCH, Timespec};
 use crate::processes::{self, Unreadable, Usage};
+use crate::programs::{ExitAcquisition, acquire_exit};
 use crate::push_without_growing;
+use crate::ring::{IdentityUnavailable, ProcessCreation};
 
 #[derive(Debug, PartialEq)]
 pub enum Event {
@@ -25,6 +27,60 @@ pub enum Event {
         last: Result<Usage, Unreadable>,
         noticed: Noticed,
     },
+}
+
+#[derive(Debug, PartialEq)]
+pub struct EventObservation {
+    pub event: Event,
+    pub identity: EventIdentity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EventIdentity {
+    pub pid: i32,
+    pub creation: EventCreation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventCreation {
+    NotApplicable,
+    Exit(Result<ProcessCreation, IdentityUnavailable>),
+}
+
+#[derive(Debug, Default)]
+pub struct ExitDiagnostics {
+    pub attempted: u64,
+    pub verified: u64,
+    pub unavailable: u64,
+    pub last_failure: Option<ExitFailure>,
+}
+
+#[derive(Debug)]
+pub struct ExitFailure {
+    pub pid: i32,
+    pub acquisition: ExitAcquisition,
+}
+
+const _: () = {
+    assert!(size_of::<EventObservation>() <= size_of::<Event>() + 32);
+    assert!(size_of::<EventIdentity>() <= 32);
+};
+
+impl From<Event> for EventObservation {
+    fn from(event: Event) -> Self {
+        let (pid, creation) = match &event {
+            Event::Start { pid, .. } | Event::Exec { pid } => (*pid, EventCreation::NotApplicable),
+            Event::Exit { pid, .. } => (
+                *pid,
+                EventCreation::Exit(Err(IdentityUnavailable::Unsupported)),
+            ),
+        };
+
+        Self {
+            event,
+            identity: EventIdentity { pid, creation },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,7 +162,8 @@ pub struct Tracker {
     eventlist: Vec<Kevent>,
     starts: Vec<i32>,
     exits: Vec<(i32, Noticed)>,
-    events: Vec<Event>,
+    events: Vec<EventObservation>,
+    exit_diagnostics: ExitDiagnostics,
     counts: Counts,
     /// Set for the length of every call that can fail and cleared as it succeeds, so it holds
     /// after a call that returned an error. That call left the lists and the kqueue part-way
@@ -319,6 +376,7 @@ impl Tracker {
             starts: Vec::with_capacity(capacity),
             exits: Vec::with_capacity(capacity),
             events: Vec::with_capacity(limits.events_per_tick_max),
+            exit_diagnostics: ExitDiagnostics::default(),
             counts: Counts::default(),
             failed: false,
         };
@@ -405,11 +463,22 @@ impl Tracker {
         Ok(())
     }
 
-    pub fn drain_events(&mut self) -> std::vec::Drain<'_, Event> {
+    pub fn drain_observations(&mut self) -> std::vec::Drain<'_, EventObservation> {
         assert!(!self.failed, "a call to the tracker failed before");
         assert!(self.starts.is_empty());
         assert!(self.exits.is_empty());
         self.events.drain(..)
+    }
+
+    /// Numeric-only probes keep their existing boundary without retaining identity copies.
+    pub fn drain_events(&mut self) -> impl ExactSizeIterator<Item = Event> + '_ {
+        self.drain_observations()
+            .map(|observation| observation.event)
+    }
+
+    #[must_use]
+    pub fn exit_diagnostics(&self) -> &ExitDiagnostics {
+        &self.exit_diagnostics
     }
 
     /// What the tracker has counted since it started.
@@ -538,11 +607,45 @@ impl Tracker {
             for (pid, noticed) in self.exits.drain(..) {
                 let index = known_index(pid, self.known.len())?;
                 self.known[index].exited = true;
-                let exit = Event::Exit {
-                    pid,
-                    last: processes::read_usage(self.timebase, pid)?,
-                    noticed,
+                let mut acquired = ExitAcquisition::EMPTY;
+                let mut last = None;
+
+                acquire_exit(pid, &mut acquired, || {
+                    let mut exited = false;
+                    let reading = processes::read_exit_usage(self.timebase, pid, &mut exited);
+                    let witness = match &reading {
+                        Ok(Ok(_)) => Some(exited),
+                        Ok(Err(_)) | Err(_) => None,
+                    };
+                    last = Some(reading);
+                    witness
+                });
+
+                let last = match last {
+                    Some(last) => last?,
+                    None => unreachable!("acquire_exit always reads numeric data once"),
                 };
+
+                let creation = acquired.creation();
+                self.exit_diagnostics.attempted += 1;
+                if creation.is_ok() {
+                    self.exit_diagnostics.verified += 1;
+                } else {
+                    self.exit_diagnostics.unavailable += 1;
+                    self.exit_diagnostics.last_failure = Some(ExitFailure {
+                        pid,
+                        acquisition: acquired,
+                    });
+                }
+
+                let exit = EventObservation {
+                    event: Event::Exit { pid, last, noticed },
+                    identity: EventIdentity {
+                        pid,
+                        creation: EventCreation::Exit(creation),
+                    },
+                };
+
                 record(&mut self.events, &mut self.counts, exit);
             }
 
@@ -645,7 +748,7 @@ impl Tracker {
 /// wait woke for. An event that reports an error is that error.
 fn follow_until_handle(
     eventlist: &[Kevent],
-    events: &mut Vec<Event>,
+    events: &mut Vec<EventObservation>,
     counts: &mut Counts,
     exits: &mut Vec<(i32, Noticed)>,
 ) -> io::Result<Wake> {
@@ -716,19 +819,42 @@ fn submit_watches_receipts(
 
 /// Keeps `event` among the tick's `events` while they have room for it, and otherwise
 /// counts it among the dropped events of its kind, so the list never grows.
-fn record(events: &mut Vec<Event>, counts: &mut Counts, event: Event) {
+fn record(
+    events: &mut Vec<EventObservation>,
+    counts: &mut Counts,
+    observation: impl Into<EventObservation>,
+) {
     let capacity = events.capacity();
     assert!(capacity > 0);
 
+    let observation = observation.into();
+    record_assert_alignment(&observation);
     if events.len() < capacity {
-        events.push(event);
+        events.push(observation);
     } else {
-        match event {
+        match observation.event {
             Event::Start { .. } => counts.dropped_starts += 1,
             Event::Exec { .. } => counts.dropped_execs += 1,
             Event::Exit { .. } => counts.dropped_exits += 1,
         }
     }
+}
+
+fn record_assert_alignment(observation: &EventObservation) {
+    let pid = match &observation.event {
+        Event::Start { pid, .. } | Event::Exec { pid } => {
+            assert_eq!(observation.identity.creation, EventCreation::NotApplicable);
+            *pid
+        }
+        Event::Exit { pid, .. } => {
+            assert!(matches!(
+                observation.identity.creation,
+                EventCreation::Exit(_)
+            ));
+            *pid
+        }
+    };
+    assert_eq!(observation.identity.pid, pid);
 }
 
 /// The index of `pid` in a table of `known_count` pids. A pid the table cannot hold is an
@@ -889,8 +1015,8 @@ mod tests {
     }
 
     /// A tick's event list with room for one event, which it already holds.
-    fn full_event_list() -> Vec<Event> {
-        vec![Event::Exec { pid: 1 }]
+    fn full_event_list() -> Vec<EventObservation> {
+        vec![Event::Exec { pid: 1 }.into()]
     }
 
     #[test]
@@ -959,15 +1085,25 @@ mod tests {
         let capacity = events.capacity();
         let mut counts = Counts::default();
 
-        let exit = Event::Exit {
-            pid: 2,
-            last: Err(Unreadable::Gone),
-            noticed: Noticed::OnExit,
+        let exit = EventObservation {
+            event: Event::Exit {
+                pid: 2,
+                last: Err(Unreadable::Gone),
+                noticed: Noticed::OnExit,
+            },
+            identity: EventIdentity {
+                pid: 2,
+                creation: EventCreation::Exit(Ok(ProcessCreation {
+                    unique_id: 71,
+                    pid_version: 9,
+                })),
+            },
         };
         record(&mut events, &mut counts, exit);
 
         assert_eq!(1, events.len());
         assert_eq!(capacity, events.capacity());
+        assert_eq!(EventCreation::NotApplicable, events[0].identity.creation);
         let dropped = Counts {
             dropped_exits: 1,
             ..Counts::default()
@@ -1091,7 +1227,7 @@ mod tests {
     /// What handling one wait's events left behind.
     struct Handled {
         wake: io::Result<Wake>,
-        events: Vec<Event>,
+        events: Vec<EventObservation>,
         counts: Counts,
         exits: Vec<(i32, Noticed)>,
     }
@@ -1221,7 +1357,13 @@ mod tests {
         let handled = handle(&[process_event(7, NOTE_EXEC)]);
 
         assert!(
-            matches!(handled.events[..], [Event::Exec { pid: 7 }]),
+            matches!(
+                handled.events[..],
+                [EventObservation {
+                    event: Event::Exec { pid: 7 },
+                    ..
+                }]
+            ),
             "{:?}",
             handled.events
         );
@@ -1502,6 +1644,88 @@ mod tests {
     }
 
     #[test]
+    fn retains_owned_exit_creation_in_the_same_admitted_source_observation() {
+        // Goal: actual tracker output binds final counters to the owned child's creation.
+        // Method: hold a watched child, read its creation, release it, and inspect the envelope.
+        let mut tracker = tracker(INTERVAL);
+        let mut child = ExitChild(spawn_held("/bin/cat", &[]));
+        let pid = child.0.id().cast_signed();
+        follow_to_event(&mut tracker, &mut Meter::default(), Awaited::Start(pid));
+        let mut expected = Err(crate::programs::CreationError::NotRead);
+        crate::programs::read_creation(pid, false, &mut expected);
+        let expected = expected.unwrap();
+
+        release(&mut child.0);
+        let exited = follow_to_exit_observation(&mut tracker, pid);
+        child.0.wait().unwrap();
+
+        assert_eq!(
+            EventIdentity {
+                pid,
+                creation: EventCreation::Exit(Ok(expected))
+            },
+            exited.identity
+        );
+        assert!(matches!(exited.event, Event::Exit { last: Ok(_), .. }));
+        let diagnostics = tracker.exit_diagnostics();
+        assert!(diagnostics.verified > 0);
+        assert_eq!(
+            diagnostics.attempted,
+            diagnostics.verified + diagnostics.unavailable
+        );
+        eprintln!("actual tracker pid={pid} envelope={exited:?}");
+    }
+
+    fn follow_to_exit_observation(tracker: &mut Tracker, pid: i32) -> EventObservation {
+        for _attempt in 0..STEPS_MAX {
+            follow_for(tracker, &mut Meter::default(), STEP_MS);
+            for observation in tracker.drain_observations() {
+                if matches!(observation.event, Event::Exit { pid: found, .. } if found == pid) {
+                    return observation;
+                }
+            }
+        }
+
+        panic!("no exit source observation for owned pid={pid}");
+    }
+
+    struct ExitChild(std::process::Child);
+
+    impl Drop for ExitChild {
+        fn drop(&mut self) {
+            match self.0.try_wait() {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    if let Err(error) = self.0.kill() {
+                        eprintln!("owned exit child cleanup kill: {error}");
+                    }
+                    if let Err(error) = self.0.wait() {
+                        eprintln!("owned exit child cleanup wait: {error}");
+                    }
+                }
+                Err(error) => eprintln!("owned exit child cleanup status: {error}"),
+            }
+        }
+    }
+
+    #[test]
+    fn bounds_the_added_source_event_storage() {
+        // Goal: source-only identity storage remains startup-bounded and wire widths unchanged.
+        // Method: inspect actual Rust widths and report the two reserved event-buffer deltas.
+        let envelope = size_of::<EventObservation>();
+        let event = size_of::<Event>();
+        let metadata = size_of::<EventIdentity>();
+
+        assert!(envelope <= event + 32);
+        assert!(metadata <= 32);
+        eprintln!(
+            "event_bytes={event} envelope_bytes={envelope} metadata_bytes={metadata} \
+            added_startup_bytes={}",
+            (envelope - event + metadata) * EVENTS_PER_TICK_MAX
+        );
+    }
+
+    #[test]
     fn reports_a_watched_process_replacing_its_program() {
         // Goal: a watched process that replaces its program is reported as an exec under its pid.
         // Method: hold a shell child on its stdin until the tracker reports its start, which
@@ -1628,7 +1852,7 @@ mod tests {
         let mut child = processes::child_that_has_exited();
         let listing = current_listing();
         tracker.observe(&listing, &mut Meter::default()).unwrap();
-        tracker.drain_events();
+        drop(tracker.drain_events());
 
         tracker.observe(&listing, &mut Meter::default()).unwrap();
         child.wait().unwrap();
@@ -1691,7 +1915,7 @@ mod tests {
         let mut child = processes::child_that_has_exited();
         let mut listing = current_listing();
         tracker.observe(&listing, &mut Meter::default()).unwrap();
-        tracker.drain_events();
+        drop(tracker.drain_events());
         let pid = child.id().cast_signed();
         listing.push(pid);
 
@@ -2015,7 +2239,7 @@ mod tests {
         let mut tracker = tracker(INTERVAL);
         let listing = current_listing();
         tracker.observe(&listing, &mut Meter::default()).unwrap();
-        tracker.drain_events();
+        drop(tracker.drain_events());
 
         tracker.observe(&listing, &mut Meter::default()).unwrap();
 

@@ -195,7 +195,7 @@ struct LiveAppsTableData: Equatable {
 
     static func processes(_ processes: [LiveAppProcess]) -> Self {
         precondition(processes.count <= 512)
-        let columns = [LiveAppsTableColumn(title: "PID", minimum: 60, ideal: 70),
+        let columns = [LiveAppsTableColumn(title: "PID", minimum: 100, ideal: 110),
             LiveAppsTableColumn(title: "Creation ID", minimum: 165, ideal: 180),
             LiveAppsTableColumn(title: "PID version", minimum: 75, ideal: 90),
             LiveAppsTableColumn(title: "Executable", minimum: 150, ideal: 200)]
@@ -203,7 +203,10 @@ struct LiveAppsTableData: Equatable {
                 LiveAppsTableColumn(title: $0, minimum: 140, ideal: 180)
             }
         let rows = processes.map { process in
-            LiveAppsTableRow(cells: [LiveAppsTableCell(value: String(process.pid)),
+            LiveAppsTableRow(cells: [LiveAppsTableCell(value: String(process.pid),
+                annotation: process.state == .live ? "" : "Exited",
+                help: process.state == .live ? nil
+                    : "Historical process; its last memory readings are excluded from current App totals."),
                 LiveAppsTableCell(value: process.creation.map { String($0.uniqueId.value) }
                     ?? "Unavailable"),
                 LiveAppsTableCell(value: process.creation.map { String($0.pidVersion) }

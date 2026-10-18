@@ -125,3 +125,53 @@ const _: () = {
 unsafe extern "C" {
     fn waitid(idtype: u32, id: u32, information: *mut Siginfo, options: c_int) -> c_int;
 }
+
+#[test]
+fn associates_actual_final_usage_with_owned_zombie_creation_without_allocating() {
+    // Goal: final zombie usage has verified creation despite unavailable path and readiness.
+    // Method: own a child, wait without reaping, and count heap calls around native bracketing.
+    let timebase = crate::clock::Timebase::read().unwrap();
+    let mut child = OwnedChild {
+        child: Command::new("/bin/sleep").arg("30").spawn().unwrap(),
+    };
+    let pid = i32::try_from(child.child.id()).unwrap();
+    let mut expected = Err(CreationError::NotRead);
+    read_creation(pid, false, &mut expected);
+    let expected = expected.unwrap();
+    let mut alive = super::ExitAcquisition::EMPTY;
+    super::acquire_exit(pid, &mut alive, || {
+        let mut exited = true;
+        crate::processes::read_exit_usage(timebase, pid, &mut exited)
+            .unwrap()
+            .unwrap();
+        Some(exited)
+    });
+    assert_eq!(Some(false), alive.exited);
+    assert_eq!(
+        Err(crate::ring::IdentityUnavailable::Changed),
+        alive.creation()
+    );
+    child.child.kill().unwrap();
+    wait_exited_unreaped(child.child.id());
+    let mut acquired = super::ExitAcquisition::EMPTY;
+    let mut numeric = None;
+
+    let allocations = crate::recording::discovery::tests::allocator_calls_in(|| {
+        super::acquire_exit(pid, &mut acquired, || {
+            let mut exited = false;
+            numeric = Some(crate::processes::read_exit_usage(
+                timebase,
+                pid,
+                &mut exited,
+            ));
+            Some(exited)
+        });
+    });
+
+    assert_eq!(0, allocations);
+    assert_eq!(Ok(expected), acquired.creation());
+    let usage = numeric.unwrap().unwrap().unwrap();
+    assert!(usage.awake_ns_at_start > 0);
+    eprintln!("owned final pid={pid} creation={expected:?} usage={usage:?} heap={allocations}");
+    assert!(!child.child.wait().unwrap().success());
+}

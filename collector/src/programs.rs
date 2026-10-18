@@ -1,11 +1,15 @@
-//! Bounded acquisition primitives; callers do not publish these observations as identity yet.
+//! Bounded acquisition primitives; callers publish only verified source observations.
+use crate::ring::IdentityUnavailable;
+
 mod acquisition;
+mod exit;
 mod native;
 mod path;
 mod readiness;
 pub mod sweep;
 
 pub use acquisition::{Acquisition, acquire};
+pub use exit::{ExitAcquisition, acquire_exit};
 pub use native::{read_creation, read_path};
 pub use path::{PathError, split_program};
 pub use readiness::{Readiness, ReadinessError, acquire_readiness};
@@ -27,6 +31,17 @@ pub enum CreationError {
     Unsupported(i32),
     Syscall(i32),
     Size(i32),
+}
+
+fn creation_reason(error: CreationError) -> IdentityUnavailable {
+    match error {
+        CreationError::Refused(_) => IdentityUnavailable::Refused,
+        CreationError::Gone(_) => IdentityUnavailable::Gone,
+        CreationError::Unsupported(_) | CreationError::Syscall(_) => {
+            IdentityUnavailable::Unsupported
+        }
+        CreationError::Size(_) | CreationError::NotRead => IdentityUnavailable::Invalid,
+    }
 }
 
 #[cfg(test)]

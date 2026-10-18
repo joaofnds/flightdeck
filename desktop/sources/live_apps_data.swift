@@ -159,6 +159,11 @@ enum LiveAppProcessState: String, Decodable, Sendable {
     case exitedUnverified = "exited_unverified"
 }
 
+struct LiveAppProcessRowIdentity: Hashable, Sendable {
+    let pid: Int32
+    let uniqueId: UInt64?
+}
+
 struct LiveAppProcess: Decodable, Sendable {
     let pid: Int32
     let creation: LiveAppCreation?
@@ -174,6 +179,10 @@ struct LiveAppProcess: Decodable, Sendable {
     let cpuPercentOneCore: Double?
     let energyJoules: Double?
     let energyWatts: Double?
+
+    var identity: LiveAppProcessRowIdentity {
+        LiveAppProcessRowIdentity(pid: pid, uniqueId: creation?.uniqueId.value)
+    }
 }
 
 struct LiveAppHeader: Decodable, Equatable, Sendable {
@@ -251,7 +260,7 @@ struct LiveAppDetailPage: Decodable, Sendable {
         try page.validate(rows: processes.count)
         try app.validate()
         guard app.appIndex < header.appCount, page.total == app.members,
-              Set(processes.map(\.pid)).count == processes.count,
+              Set(processes.map(\.identity)).count == processes.count,
               processes.allSatisfy({ $0.pid > 0 && $0.appIndex == app.appIndex }) else {
             throw LiveAppDataError.invalidPage
         }

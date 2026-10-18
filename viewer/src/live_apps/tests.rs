@@ -50,6 +50,76 @@ mod fixture;
 use fixture::{Change, Fixture};
 
 #[test]
+fn charges_the_maximum_captured_exit_population_to_the_live_frame() {
+    // Goal: publication-owned exits remain inside their explicit event and live-cache charge.
+    // Method: capture all 16384 real v4 event identities, then compare their added owned bytes.
+    let count = collector::tracker::EVENTS_PER_TICK_MAX;
+    let shape = collector::ring::Shape {
+        event_capacity: u64::try_from(count).unwrap(),
+        ..fixture::SHAPE
+    };
+    let mut fixture = None;
+    Fixture::initialize_with_shape(&mut fixture, true, &shape);
+    let fixture = fixture.as_mut().unwrap();
+    fixture.publish_exits(count);
+    let publication = fixture.read();
+    let reader = fixture.reader.as_mut().unwrap();
+    let mut events = Vec::with_capacity(count);
+    let mut identities = Vec::with_capacity(count);
+    for _attempt in 0..count {
+        let mut identity = collector::ring::IdentityObservation::EMPTY;
+        let collector::ring::FoundEvent::Event {
+            number,
+            tick,
+            event,
+        } = reader.read_event_identity(&mut identity).unwrap()
+        else {
+            panic!("event missing")
+        };
+        events.push((number, tick, event));
+        identities.push(identity);
+    }
+    let numbered: Vec<_> = events
+        .iter()
+        .map(|(number, tick, event)| persistence::NumberedEvent {
+            number: *number,
+            tick: *tick,
+            event,
+        })
+        .collect();
+    let source = Publication {
+        reader,
+        tick: &fixture.tick,
+        identities: &fixture.identities,
+        publication,
+    };
+    let mut frame = None;
+    Frame::capture(&source, &mut frame).unwrap();
+    let frame = frame.as_mut().unwrap();
+    let before = frame.bytes();
+
+    frame
+        .capture_exits(
+            &source,
+            &super::PublicationEvents {
+                events: &numbered,
+                identities: &identities,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(frame.bytes() - before, count * size_of::<super::Exit>());
+    eprintln!(
+        "exit_bytes={} exit_count={} exit_charge={} frame_bytes={} transient_bound={}",
+        size_of::<super::Exit>(),
+        count,
+        frame.bytes() - before,
+        frame.bytes(),
+        super::TRANSIENT_VIEW_BYTES_MAX
+    );
+}
+
+#[test]
 fn keeps_invalid_utf8_and_literal_backslash_program_keys_separate() {
     // Goal: live copying preserves byte identity before display escaping.
     // Method: capture two outside-bundle executables whose escaped names could collide.

@@ -13,7 +13,7 @@ use crate::cancellation::Operation;
 use crate::data::{self, Table};
 use crate::live_app_history::{History, Target};
 use crate::live_app_response::{Detail, KeyKind, Page, Sample};
-use crate::live_apps::{Frame, Publication};
+use crate::live_apps::{Frame, Publication, PublicationEvents};
 use crate::session::{ContextRange, OBSERVATIONS_MAX, Observation, PAGE_ROWS};
 use crate::{Cancellation, Session, metrics};
 
@@ -1448,7 +1448,7 @@ fn project_observation(
         },
         &mut app_frame,
     )?;
-    let app_frame = app_frame
+    let mut app_frame = app_frame
         .unwrap_or_else(|| unreachable!("successful App frame capture initializes its output"));
 
     let mut window = Window::new(
@@ -1458,7 +1458,7 @@ fn project_observation(
         },
         Limits::from_shape(&source.reader.shape())?,
     );
-    project_observation_stage(source, publication, &times, &mut window)?;
+    project_observation_stage(source, publication, &times, &mut window, &mut app_frame)?;
 
     let tables = project_observation_tables(connection, operation, &window)?;
     let bytes = tables.values().map(table_bytes).sum::<usize>() + app_frame.bytes();
@@ -1487,6 +1487,7 @@ fn project_observation_stage(
     publication: u64,
     times: &collector::ring::ObservationTimes,
     window: &mut Window,
+    app_frame: &mut Frame,
 ) -> Result<()> {
     let count = source
         .tick
@@ -1518,6 +1519,15 @@ fn project_observation_stage(
             event,
         })
         .collect();
+
+    project_observation_stage_capture(
+        source,
+        publication,
+        app_frame,
+        &numbered,
+        &events.identities,
+    )?;
+
     let observation = persistence::Observation {
         publication,
         wall_ns: Some(times.wall_ns),
@@ -1541,6 +1551,27 @@ fn project_observation_stage(
     }
 
     Ok(())
+}
+
+fn project_observation_stage_capture(
+    source: &Source,
+    publication: u64,
+    app_frame: &mut Frame,
+    numbered: &[NumberedEvent<'_>],
+    identities: &[IdentityObservation],
+) -> Result<()> {
+    app_frame.capture_exits(
+        &Publication {
+            reader: &source.reader,
+            tick: &source.tick,
+            identities: &source.identities,
+            publication,
+        },
+        &PublicationEvents {
+            events: numbered,
+            identities,
+        },
+    )
 }
 
 fn refresh_history_pending(sources: &mut [Source], history: &Session) {

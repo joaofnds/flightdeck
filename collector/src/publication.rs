@@ -9,7 +9,7 @@ use collector::ring::{
     ObservationTimes, ProcessIdentity, Readings, SmcReadings, SupplementalReadings,
     UsageAvailability, Writer,
 };
-use collector::tracker::{EVENTS_PER_TICK_MAX, Event};
+use collector::tracker::{EVENTS_PER_TICK_MAX, Event, EventCreation, EventIdentity};
 
 pub(crate) struct Publication {
     identity_enabled: bool,
@@ -112,6 +112,7 @@ impl Publication {
             &readings,
             times,
             collector.identities.observations(),
+            collector.event_identities(),
             &SupplementalReadings { battery, disks },
         )
     }
@@ -122,10 +123,11 @@ impl Publication {
         readings: &Readings,
         times: Option<&ObservationTimes>,
         processes: &[IdentityObservation],
+        event_identities: &[EventIdentity],
         supplemental: &SupplementalReadings,
     ) -> io::Result<()> {
         if self.identity_enabled {
-            self.fill_events(readings.events);
+            self.fill_events(readings.events, event_identities);
             let identities = IdentityPublication {
                 processes,
                 events: &self.events,
@@ -160,37 +162,56 @@ impl Publication {
         self.report.report(ring, label, out)
     }
 
-    fn fill_events(&mut self, events: &[Event]) {
+    fn fill_events(&mut self, events: &[Event], identities: &[EventIdentity]) {
         assert!(events.len() <= EVENTS_PER_TICK_MAX);
+        assert_eq!(events.len(), identities.len());
         assert!(self.events.capacity() >= EVENTS_PER_TICK_MAX);
 
         self.events.clear();
 
-        for event in events {
-            let (pid, usage) = match event {
+        for (event, source) in events.iter().zip(identities) {
+            let (pid, usage, identity) = match event {
                 Event::Start { pid, .. } | Event::Exec { pid } => {
-                    (*pid, UsageAvailability::NotApplicable)
+                    assert_eq!(source.creation, EventCreation::NotApplicable);
+                    (
+                        *pid,
+                        UsageAvailability::NotApplicable,
+                        ProcessIdentity::Unavailable {
+                            creation: None,
+                            reason: IdentityUnavailable::Unsupported,
+                        },
+                    )
                 }
-                Event::Exit { pid, last, .. } => (
-                    *pid,
-                    match last {
-                        Ok(_) => UsageAvailability::Measured,
-                        Err(collector::processes::Unreadable::Refused) => {
-                            UsageAvailability::Refused
-                        }
-                        Err(collector::processes::Unreadable::Gone) => UsageAvailability::Gone,
-                    },
-                ),
+                Event::Exit { pid, last, .. } => {
+                    let EventCreation::Exit(creation) = source.creation else {
+                        unreachable!("exit source metadata accompanies only an exit");
+                    };
+
+                    let (creation, reason) = match creation {
+                        Ok(creation) => (Some(creation), IdentityUnavailable::Unsupported),
+                        Err(reason) => (None, reason),
+                    };
+
+                    (
+                        *pid,
+                        match last {
+                            Ok(_) => UsageAvailability::Measured,
+                            Err(collector::processes::Unreadable::Refused) => {
+                                UsageAvailability::Refused
+                            }
+                            Err(collector::processes::Unreadable::Gone) => UsageAvailability::Gone,
+                        },
+                        ProcessIdentity::Unavailable { creation, reason },
+                    )
+                }
             };
+            assert_eq!(source.pid, pid);
 
             assert!(self.events.len() < self.events.capacity());
             self.events.push(IdentityObservation {
                 pid,
                 usage,
-                identity: ProcessIdentity::Unavailable {
-                    creation: None,
-                    reason: IdentityUnavailable::Unsupported,
-                },
+                identity,
             });
         }
 

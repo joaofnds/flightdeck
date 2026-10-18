@@ -34,13 +34,6 @@ struct LiveAppInstances: View {
     }
 }
 
-struct LiveAppProcessRowIdentity: Hashable {
-    let pid: Int32
-    let uniqueId: UInt64?
-}
-
 extension LiveAppProcess: Identifiable {
-    var id: LiveAppProcessRowIdentity {
-        LiveAppProcessRowIdentity(pid: pid, uniqueId: creation?.uniqueId.value)
-    }
+    var id: LiveAppProcessRowIdentity { identity }
 }

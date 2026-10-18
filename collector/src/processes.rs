@@ -347,8 +347,18 @@ pub fn read(timebase: Timebase, pid: i32) -> io::Result<Result<Process, Unreadab
 }
 
 pub fn read_usage(timebase: Timebase, pid: i32) -> io::Result<Result<Usage, Unreadable>> {
+    read_exit_usage(timebase, pid, &mut false)
+}
+
+/// Exit status comes from the same native sample as the returned counters.
+pub fn read_exit_usage(
+    timebase: Timebase,
+    pid: i32,
+    exited: &mut bool,
+) -> io::Result<Result<Usage, Unreadable>> {
     assert!(pid >= 0);
     assert!(pid <= PID_MAX);
+    *exited = false;
 
     let mut usage = std::mem::MaybeUninit::<RusageInfoV6>::zeroed();
     let returned = unsafe { proc_pid_rusage(pid, RUSAGE_INFO_V6, usage.as_mut_ptr().cast()) };
@@ -357,6 +367,9 @@ pub fn read_usage(timebase: Timebase, pid: i32) -> io::Result<Result<Usage, Unre
     }
 
     let usage = unsafe { usage.assume_init_ref() };
+
+    *exited = usage.proc_exit_abstime != 0;
+
     Ok(Ok(Usage {
         awake_ns_at_start: timebase.nanoseconds(usage.proc_start_abstime)?,
         user_ns: timebase.nanoseconds(usage.user_time)?,

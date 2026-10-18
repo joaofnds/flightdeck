@@ -4,7 +4,7 @@ use collector::ring::{
     IdentityObservation, IdentityUnavailable, ProcessCreation, ProgramBytes, RingReader,
     RunIdentity, Tick,
 };
-use persistence::{Error, Result};
+use persistence::{Error, NumberedEvent, Result};
 
 use crate::apps::{self, Stamp, Unavailable};
 
@@ -22,6 +22,7 @@ pub struct Frame {
     run_tick: u64,
     wall_ns: Option<u64>,
     members: Vec<Member>,
+    exits: Vec<Exit>,
     arena: Vec<u8>,
     pub usage_refused: u32,
     pub usage_gone: u32,
@@ -32,6 +33,18 @@ struct Member {
     creation: Option<ProcessCreation>,
     program: std::result::Result<ProgramSpan, IdentityUnavailable>,
     usage: std::result::Result<Usage, Unavailable>,
+}
+
+struct Exit {
+    pid: i32,
+    creation: Option<ProcessCreation>,
+    usage: std::result::Result<Usage, Unavailable>,
+    ambiguous: bool,
+}
+
+pub struct PublicationEvents<'source> {
+    pub events: &'source [NumberedEvent<'source>],
+    pub identities: &'source [IdentityObservation],
 }
 
 #[derive(Clone, Copy)]
@@ -81,6 +94,7 @@ impl Frame {
             run_tick: source.tick.run_tick,
             wall_ns: source.tick.times.map(|times| times.wall_ns),
             members: Vec::with_capacity(count),
+            exits: Vec::new(),
             arena: Vec::with_capacity(capture::program_bytes(source)?),
             usage_refused: source.tick.processes_refused,
             usage_gone: source.tick.processes_gone,
@@ -106,7 +120,19 @@ impl Frame {
     /// Charges owned vector capacities and the frame itself to the live observation cache.
     #[must_use]
     pub fn bytes(&self) -> usize {
-        size_of::<Self>() + self.members.capacity() * size_of::<Member>() + self.arena.capacity()
+        size_of::<Self>()
+            + self.members.capacity() * size_of::<Member>()
+            + self.exits.capacity() * size_of::<Exit>()
+            + self.arena.capacity()
+    }
+
+    /// Copies final usage and source creation before the publication's event buffers are reused.
+    pub fn capture_exits(
+        &mut self,
+        source: &Publication<'_>,
+        events: &PublicationEvents<'_>,
+    ) -> Result<()> {
+        events::capture(self, source, events)
     }
 
     #[must_use]
@@ -135,7 +161,7 @@ impl Frame {
     }
 
     /// Builds bounded transient views, consumed before their backing frames can change.
-    /// Events cannot currently prove creation/final-exit association, so membership is uncertain.
+    /// Start/Exec identity is not complete, so interval membership remains uncertain.
     pub fn with_aggregate(
         &self,
         previous: Option<&Self>,
@@ -177,6 +203,7 @@ fn validate(source: &Publication<'_>) -> Result<()> {
 }
 
 mod capture;
+mod events;
 #[cfg(test)]
 mod tests;
 mod views;

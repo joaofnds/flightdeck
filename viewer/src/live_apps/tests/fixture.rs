@@ -236,6 +236,59 @@ impl Fixture {
             .unwrap();
     }
 
+    pub fn publish_exits(&mut self, count: usize) {
+        let events: Vec<_> = (1..=count)
+            .map(|pid| collector::tracker::Event::Exit {
+                pid: i32::try_from(pid).unwrap(),
+                last: Err(collector::processes::Unreadable::Gone),
+                noticed: collector::tracker::Noticed::OnExit,
+            })
+            .collect();
+        let identities: Vec<_> = (1..=count)
+            .map(|pid| IdentityObservation {
+                pid: i32::try_from(pid).unwrap(),
+                usage: UsageAvailability::Gone,
+                identity: ProcessIdentity::Unavailable {
+                    creation: Some(ProcessCreation {
+                        unique_id: u64::try_from(pid).unwrap(),
+                        pid_version: 1,
+                    }),
+                    reason: collector::ring::IdentityUnavailable::Unsupported,
+                },
+            })
+            .collect();
+
+        self.writer
+            .as_mut()
+            .unwrap()
+            .publish_with_identity(
+                &collector::ring::Readings {
+                    run_tick: 0,
+                    cpus: &[],
+                    memory: &Memory::default(),
+                    interfaces: &[],
+                    ioreport: None,
+                    smc: None,
+                    processes: &[],
+                    processes_refused: 0,
+                    processes_gone: 0,
+                    coalitions: &[],
+                    events: &events,
+                    dropped: Dropped::default(),
+                },
+                Some(&ObservationTimes {
+                    wall_ns: 1,
+                    continuous_ns: 1,
+                    awake_ns: 1,
+                }),
+                &IdentityPublication {
+                    processes: &[],
+                    events: &identities,
+                },
+            )
+            .unwrap();
+    }
+
     pub fn read(&mut self) -> u64 {
         let reader = self.reader.as_mut().unwrap();
         let found = if self.identity {

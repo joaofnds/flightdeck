@@ -14,7 +14,7 @@ use crate::programs;
 use crate::push_without_growing;
 use crate::ring::Writer;
 use crate::smc::{FANS_MAX, Smc};
-use crate::tracker::{Counts, EVENTS_PER_TICK_MAX, Event, Limits, Tracker};
+use crate::tracker::{Counts, EVENTS_PER_TICK_MAX, Event, EventIdentity, Limits, Tracker};
 
 pub struct Collector {
     timebase: Timebase,
@@ -32,6 +32,7 @@ pub struct Collector {
     pub identities: programs::sweep::Sweep,
     pub coalitions: Coalitions,
     events: Vec<Event>,
+    event_identities: Vec<EventIdentity>,
     /// What the tracker had counted when the previous tick was read.
     counts_previous: Counts,
     /// What the tracker counted in the last tick.
@@ -83,6 +84,7 @@ impl Collector {
             coalitions: Coalitions::new(timebase, coalition_limit),
             // The tracker holds at most this many events a tick, so a tick's events fit.
             events: Vec::with_capacity(limits.events_per_tick_max),
+            event_identities: Vec::with_capacity(limits.events_per_tick_max),
             counts_previous: Counts::default(),
             counts_tick: Counts::default(),
             cpu_limit,
@@ -104,6 +106,14 @@ impl Collector {
         assert!(self.events.capacity() >= EVENTS_PER_TICK_MAX);
 
         &self.events
+    }
+
+    #[must_use]
+    pub fn event_identities(&self) -> &[EventIdentity] {
+        assert_eq!(self.event_identities.len(), self.events.len());
+        assert!(self.event_identities.capacity() >= EVENTS_PER_TICK_MAX);
+
+        &self.event_identities
     }
 
     /// What the tracker counted in the last tick, such as the events it dropped.
@@ -188,11 +198,14 @@ impl Collector {
         self.tracker.observe(&self.listing, meter)?;
         meter.measure(Source::Events, || {
             self.events.clear();
-            let drained = self.tracker.drain_events();
+            self.event_identities.clear();
+            let drained = self.tracker.drain_observations();
             // `new` gave the tracker and these events one limit, so a tick's events fit.
             assert!(drained.len() <= self.events.capacity());
-            for event in drained {
-                push_without_growing(&mut self.events, event);
+            assert!(drained.len() <= self.event_identities.capacity());
+            for observation in drained {
+                push_without_growing(&mut self.events, observation.event);
+                push_without_growing(&mut self.event_identities, observation.identity);
             }
             Ok(())
         })?;

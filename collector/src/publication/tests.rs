@@ -207,6 +207,7 @@ macro_rules! event_cases {
 
             publication.publish_readings(&mut harness.writer,
                 &readings(&memory, &[], &events), None, &[],
+                &[collector::tracker::EventObservation::from($event).identity],
                 &SupplementalReadings::default()).unwrap();
             let mut identity = IdentityObservation::EMPTY;
             let found = reader.read_event_identity(&mut identity).unwrap();
@@ -229,6 +230,55 @@ event_cases! {
         last: Err(Unreadable::Refused), noticed: Noticed::OnExit }, UsageAvailability::Refused;
     preserves_gone_final_usage_without_identity, Event::Exit { pid: 4,
         last: Err(Unreadable::Gone), noticed: Noticed::AlreadyExited }, UsageAvailability::Gone;
+}
+
+macro_rules! exit_source_cases {
+    ($($name:ident, $creation:expr, $last:expr, $usage:expr, $expected:expr, $reason:expr;)*) => {$(
+        #[test]
+        fn $name() {
+            // Goal: publication preserves source exit association and independent numeric status.
+            // Method: publish fixed source metadata and read the real v4 event identity back.
+            let mut harness = Harness::new();
+            let mut publication = Publication::new(&harness.writer).unwrap();
+            let event = Event::Exit { pid: 4, last: $last, noticed: Noticed::OnExit };
+            let source = EventIdentity { pid: 4, creation: EventCreation::Exit($creation) };
+            let memory = collector::machine::Memory::default();
+            let mut reader = RingReader::open_generation(harness.writer.name()).unwrap();
+
+            publication.publish_readings(&mut harness.writer,
+                &readings(&memory, &[], &[event]), None, &[], &[source],
+                &SupplementalReadings::default()).unwrap();
+            let mut identity = IdentityObservation::EMPTY;
+            let found = reader.read_event_identity(&mut identity).unwrap();
+
+            assert_eq!(found, FoundEvent::Event { number: 1, tick: 7,
+                event: Event::Exit { pid: 4, last: $last, noticed: Noticed::OnExit } });
+            assert_eq!(identity, IdentityObservation { pid: 4, usage: $usage,
+                identity: ProcessIdentity::Unavailable { creation: $expected, reason: $reason } });
+        }
+    )*};
+}
+
+const EXIT_CREATION: collector::ring::ProcessCreation = collector::ring::ProcessCreation {
+    unique_id: 93,
+    pid_version: 8,
+};
+
+exit_source_cases! {
+    preserves_source_verified_exit_creation, Ok(EXIT_CREATION), Ok(usage()),
+        UsageAvailability::Measured, Some(EXIT_CREATION), IdentityUnavailable::Unsupported;
+    preserves_refused_exit_creation, Err(IdentityUnavailable::Refused), Ok(usage()),
+        UsageAvailability::Measured, None, IdentityUnavailable::Refused;
+    preserves_gone_exit_creation, Err(IdentityUnavailable::Gone), Ok(usage()),
+        UsageAvailability::Measured, None, IdentityUnavailable::Gone;
+    preserves_changed_exit_creation, Err(IdentityUnavailable::Changed), Ok(usage()),
+        UsageAvailability::Measured, None, IdentityUnavailable::Changed;
+    preserves_refused_final_usage_and_unavailable_exit_witness,
+        Err(IdentityUnavailable::Unsupported), Err(Unreadable::Refused),
+        UsageAvailability::Refused, None, IdentityUnavailable::Unsupported;
+    preserves_gone_final_usage_and_unavailable_exit_witness,
+        Err(IdentityUnavailable::Unsupported), Err(Unreadable::Gone),
+        UsageAvailability::Gone, None, IdentityUnavailable::Unsupported;
 }
 
 #[test]
@@ -256,6 +306,7 @@ fn preserves_independent_numeric_values_when_process_identity_is_unavailable() {
             &readings(&memory, &[process()], &[]),
             None,
             &[identity],
+            &[],
             &SupplementalReadings::default(),
         )
         .unwrap();
@@ -287,6 +338,7 @@ fn returns_publication_validation_errors_without_advancing_the_ring() {
             &mut harness.writer,
             &readings(&memory, &[process()], &[]),
             None,
+            &[],
             &[],
             &SupplementalReadings::default(),
         )
