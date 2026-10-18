@@ -287,11 +287,11 @@ struct RecordedResourceChart: View {
                         Text(reading(line)).monospacedDigit().foregroundStyle(theme.muted)
                     }.font(.caption)
                 }
-                if let index = readoutIndex {
-                    Text(context.selection.trends[index].date,
-                         format: .dateTime.hour().minute().second())
-                        .font(.caption).foregroundStyle(theme.muted)
-                }
+                // Hover must not move the charts when an inspected observation becomes a gap.
+                Text(readoutIndex.map {
+                    context.selection.trends[$0].date.formatted(.dateTime.hour().minute().second())
+                } ?? "No observation")
+                    .font(.caption).foregroundStyle(theme.muted).lineLimit(1)
             } else {
                 Text("Chart readings exceed the display bounds.").foregroundStyle(theme.muted)
             }
