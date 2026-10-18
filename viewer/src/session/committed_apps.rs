@@ -1,0 +1,303 @@
+use super::{Session, WINDOWS_MAX};
+use crate::apps::Stamp;
+use crate::live_app_response::{Observation, SAMPLE_BYTES_MAX, Sample};
+use crate::live_apps::{Frame, committed::Endpoint};
+use collector::recording::identity_text;
+use collector::ring::Identity;
+use persistence::{Error, Result};
+use serde_json::Value;
+
+pub(super) struct Cache {
+    window: usize,
+    predecessor_window: Option<usize>,
+    sample: Box<Sample>,
+}
+
+// Sample::bytes includes its box payload; Cache retains only fixed metadata and a box pointer.
+const CACHE_BYTES_MAX: usize = SAMPLE_BYTES_MAX + size_of::<Cache>();
+
+impl Session {
+    pub(crate) fn with_app_sample(
+        &self,
+        selected: &Value,
+        consume: impl FnOnce(&Sample) -> Result<Value>,
+    ) -> Result<Value> {
+        let result = self.operation.attach(&self.connection).and_then(|()| {
+            self.operation.run(|| {
+                self.operation.check()?;
+                let mut cache = self.app_sample_cache.borrow_mut();
+                let hit = cache
+                    .as_ref()
+                    .is_some_and(|cache| with_app_sample_matches(selected, &cache.sample.selected));
+
+                if hit {
+                    let current = cache.as_ref().ok_or(Error::Bound("committed App cache"))?;
+                    let valid = self.with_app_sample_validate(current);
+                    if let Err(error) = valid {
+                        *cache = None;
+                        return Err(error);
+                    }
+                } else {
+                    *cache = None;
+                    let restored = self.with_app_sample_restore(selected)?;
+                    #[cfg(test)]
+                    if let Some(checkpoint) = self.before_app_sample_install.borrow_mut().take() {
+                        checkpoint();
+                    }
+                    self.operation.check()?;
+                    *cache = Some(restored);
+                }
+
+                self.operation.check()?;
+                let sample = &cache
+                    .as_ref()
+                    .ok_or(Error::Bound("committed App cache output"))?
+                    .sample;
+
+                consume(sample)
+            })
+        });
+
+        if result.is_err() {
+            *self.app_sample_cache.borrow_mut() = None;
+        }
+
+        result
+    }
+
+    fn with_app_sample_validate(&self, cache: &Cache) -> Result<()> {
+        self.validate_commitment(cache.window)?;
+        if let Some(window) = cache.predecessor_window {
+            self.validate_commitment(window)?;
+        }
+
+        self.operation.check()
+    }
+
+    fn with_app_sample_restore(&self, selected: &Value) -> Result<Cache> {
+        let publication = selected["publication"]
+            .as_u64()
+            .ok_or(Error::Bound("committed App selection publication"))?;
+        let window = self
+            .with_app_sample_window(selected, publication)?
+            .ok_or(Error::Bound(
+                "committed App selected commitment unavailable",
+            ))?;
+        let endpoint = self
+            .with_app_sample_endpoint(window, publication)?
+            .ok_or(Error::Bound("committed App selected tick unavailable"))?;
+
+        with_app_sample_selection(selected, &endpoint)?;
+        let mut current = None;
+        self.with_app_sample_frame(window, &endpoint, &mut current)?;
+
+        let predecessor_window = if let Some(previous) = publication.checked_sub(1) {
+            self.with_app_sample_window(selected, previous)?
+        } else {
+            None
+        };
+        let mut previous = None;
+        if let Some(window) = predecessor_window {
+            if let Some(publication) = publication.checked_sub(1) {
+                if let Some(endpoint) = self.with_app_sample_endpoint(window, publication)? {
+                    if with_app_sample_predecessor(&endpoint, current.as_deref()) {
+                        self.with_app_sample_frame(window, &endpoint, &mut previous)?;
+                    }
+                }
+            }
+        }
+
+        let mut sample = None;
+        Sample::capture(
+            current
+                .as_deref()
+                .ok_or(Error::Bound("committed App frame output"))?,
+            previous.as_deref(),
+            &mut sample,
+        )?;
+
+        let sample = sample.ok_or(Error::Bound("committed App sample output"))?;
+        assert!(sample.bytes() <= SAMPLE_BYTES_MAX);
+        assert!(sample.bytes() + size_of::<Cache>() <= CACHE_BYTES_MAX);
+
+        Ok(Cache {
+            window,
+            predecessor_window,
+            sample,
+        })
+    }
+
+    fn with_app_sample_window(&self, selected: &Value, publication: u64) -> Result<Option<usize>> {
+        assert!(self.windows.len() <= WINDOWS_MAX);
+
+        let mut found = None;
+        for (index, manifest) in self.windows.iter().enumerate() {
+            self.operation.check()?;
+            if selected["run"] != identity_text(manifest.identity.run.run).to_string() {
+                continue;
+            }
+
+            if selected["boot"] != identity_text(manifest.identity.run.boot).to_string() {
+                continue;
+            }
+
+            if (manifest.publication_first..manifest.publication_end).contains(&publication) {
+                if found.replace(index).is_some() {
+                    return Err(Error::Bound("duplicate committed App commitment"));
+                }
+            }
+        }
+
+        Ok(found)
+    }
+
+    fn with_app_sample_endpoint(
+        &self,
+        window: usize,
+        publication: u64,
+    ) -> Result<Option<Endpoint>> {
+        let source = self.source(window, "ticks")?;
+        let mut statement = self.connection.prepare(&format!(
+            "SELECT run_tick, wall_ns, continuous_ns, awake_ns, processes_refused, \
+            processes_gone FROM {source} WHERE publication={publication} LIMIT 2"
+        ))?;
+        let mut rows = statement.query([])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+
+        let identity = self.windows[window].identity.run;
+        let endpoint = Endpoint {
+            identity,
+            stamp: Stamp {
+                boot: identity.boot.0,
+                run: identity.run.0,
+                publication,
+                continuous_ns: row.get(2)?,
+                awake_ns: row.get(3)?,
+            },
+            run_tick: row
+                .get::<_, Option<u64>>(0)?
+                .ok_or(Error::Bound("committed App run tick"))?,
+            wall_ns: row.get(1)?,
+            usage_refused: row
+                .get::<_, Option<u32>>(4)?
+                .ok_or(Error::Bound("committed App refused count"))?,
+            usage_gone: row
+                .get::<_, Option<u32>>(5)?
+                .ok_or(Error::Bound("committed App gone count"))?,
+        };
+
+        if rows.next()?.is_some() {
+            return Err(Error::Bound("duplicate committed App tick"));
+        }
+
+        self.operation.check()?;
+
+        Ok(Some(endpoint))
+    }
+
+    fn with_app_sample_frame(
+        &self,
+        window: usize,
+        endpoint: &Endpoint,
+        output: &mut Option<Box<Frame>>,
+    ) -> Result<()> {
+        let source = self.source(window, "processes")?;
+        Frame::committed(endpoint, &self.connection, &source, &self.operation, output)
+    }
+}
+
+fn with_app_sample_matches(selected: &Value, observation: &Observation) -> bool {
+    if selected["run"] != identity_text(Identity(observation.stamp.run)).to_string() {
+        return false;
+    }
+
+    if selected["boot"] != identity_text(Identity(observation.stamp.boot)).to_string() {
+        return false;
+    }
+
+    if selected["publication"].as_u64() != Some(observation.stamp.publication) {
+        return false;
+    }
+
+    if selected["run_tick"].as_u64() != Some(observation.run_tick) {
+        return false;
+    }
+
+    if selected["wall_ns"].as_u64() != observation.wall_ns {
+        return false;
+    }
+
+    for (field, expected) in [
+        ("continuous_ns", observation.stamp.continuous_ns),
+        ("awake_ns", observation.stamp.awake_ns),
+    ] {
+        if let Some(value) = selected.get(field) {
+            if value.as_u64() != expected {
+                return false;
+            }
+        }
+    }
+
+    true
+}
+
+fn with_app_sample_selection(selected: &Value, endpoint: &Endpoint) -> Result<()> {
+    if selected["run_tick"].as_u64() != Some(endpoint.run_tick) {
+        return Err(Error::Bound("committed App selected run tick"));
+    }
+
+    let wall = selected["wall_ns"]
+        .as_u64()
+        .ok_or(Error::Bound("committed App selected wall time"))?;
+    if endpoint.wall_ns != Some(wall) {
+        return Err(Error::Bound("committed App selected wall time"));
+    }
+
+    for (field, expected) in [
+        ("continuous_ns", endpoint.stamp.continuous_ns),
+        ("awake_ns", endpoint.stamp.awake_ns),
+    ] {
+        if let Some(value) = selected.get(field) {
+            if value.as_u64() != expected {
+                return Err(Error::Bound("committed App selected clock"));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn with_app_sample_predecessor(previous: &Endpoint, selected: Option<&Frame>) -> bool {
+    let Some(selected) = selected else {
+        return false;
+    };
+
+    if previous.run_tick.checked_add(1) != Some(selected.run_tick()) {
+        return false;
+    }
+
+    if previous.wall_ns.is_none() {
+        return false;
+    }
+
+    let (Some(before), Some(after)) =
+        (previous.stamp.continuous_ns, selected.stamp().continuous_ns)
+    else {
+        return false;
+    };
+
+    if before >= after {
+        return false;
+    }
+
+    let (Some(before), Some(after)) = (previous.stamp.awake_ns, selected.stamp().awake_ns) else {
+        return false;
+    };
+
+    before <= after
+}
+
+#[cfg(test)]
+mod tests;

@@ -28,6 +28,7 @@ pub struct Fixture {
     pub root: PathBuf,
     pub writer: Writer,
     elapsed: u64,
+    usage_override: Option<Usage>,
     identity: bool,
     process_capacity: u64,
     owns_root: bool,
@@ -71,6 +72,7 @@ impl Fixture {
             root,
             writer,
             elapsed: 0,
+            usage_override: None,
             identity,
             process_capacity,
             owns_root: true,
@@ -138,6 +140,7 @@ impl Fixture {
             root: self.root.clone(),
             writer,
             elapsed: 0,
+            usage_override: None,
             identity: false,
             process_capacity: 2,
             owns_root: false,
@@ -159,14 +162,67 @@ impl Fixture {
     }
 
     pub fn publish(&mut self, second: u64) {
-        let process = measured_process(self.elapsed);
+        self.publish_sources(second, &[], &[]);
+    }
+
+    pub fn start_at_run_tick(&mut self, run_tick: u64) {
+        assert_eq!(self.elapsed, 0);
+        self.skip_run_ticks(run_tick);
+    }
+
+    pub fn skip_run_ticks(&mut self, count: u64) {
+        self.elapsed = self.elapsed.checked_add(count).unwrap();
+    }
+
+    pub fn publish_with_system_rows(&mut self, second: u64) {
+        self.publish_with_usage(second, &measured_process(self.elapsed).usage);
+    }
+
+    pub fn publish_with_usage(&mut self, second: u64, usage: &Usage) {
+        assert!(self.usage_override.is_none());
+        self.usage_override = Some(*usage);
+        let elapsed = u32::try_from(self.elapsed).unwrap();
+        let cpus = [collector::machine::CPUTicks {
+            user: elapsed,
+            system: 0,
+            nice: 0,
+            idle: elapsed,
+        }];
+        let mut name = [0; 16];
+        name[..3].copy_from_slice(b"en0");
+        let interfaces = [collector::interfaces::Interface {
+            index: 1,
+            name: collector::interfaces::Name::from_bytes(name, 3).unwrap(),
+            received_bytes: 0,
+            sent_bytes: 0,
+            received_packets: 0,
+            sent_packets: 0,
+            receive_errors: 0,
+            send_errors: 0,
+            receive_drops: 0,
+        }];
+
+        self.publish_sources(second, &cpus, &interfaces);
+        assert!(self.usage_override.is_none());
+    }
+
+    fn publish_sources(
+        &mut self,
+        second: u64,
+        cpus: &[collector::machine::CPUTicks],
+        interfaces: &[collector::interfaces::Interface],
+    ) {
+        let mut process = measured_process(self.elapsed);
+        if let Some(usage) = self.usage_override.take() {
+            process.usage = usage;
+        }
         let events = [Event::Exec { pid: 7 }];
         let memory = Memory::default();
         let mut readings = Readings {
             run_tick: self.elapsed,
-            cpus: &[],
+            cpus,
             memory: &memory,
-            interfaces: &[],
+            interfaces,
             ioreport: None,
             smc: None,
             processes: std::slice::from_ref(&process),
@@ -234,8 +290,21 @@ impl Fixture {
     }
 
     pub fn seal(&self) {
+        self.seal_with_observations(&[]);
+    }
+
+    pub fn seal_minute(&self, minute: u64) {
+        self.seal_window(Some(minute), &[]);
+    }
+
+    pub fn seal_with_observations(&self, observations: &[persistence::Observation]) {
+        assert!(observations.len() <= 8);
+        self.seal_window(None, observations);
+    }
+
+    fn seal_window(&self, minute: Option<u64>, observations: &[persistence::Observation]) {
         let mut reader = RingReader::open_generation(self.writer.name()).unwrap();
-        let window = self.seal_read(&mut reader);
+        let window = self.seal_read(&mut reader, minute, observations);
         drop(reader);
         let store = persistence::Store::open(&self.root).unwrap();
         let persistence::Begin::Pending(pending) = store.begin(&window.identity).unwrap() else {
@@ -248,12 +317,12 @@ impl Fixture {
         let events = window.event_range();
         let first = window
             .observations()
-            .map(|value| value.wall_ns.unwrap())
+            .filter_map(|value| value.wall_ns)
             .min()
             .unwrap();
         let last = window
             .observations()
-            .map(|value| value.wall_ns.unwrap())
+            .filter_map(|value| value.wall_ns)
             .max()
             .unwrap();
         store
@@ -279,16 +348,15 @@ impl Fixture {
             .unwrap();
     }
 
-    fn seal_read(&self, reader: &mut RingReader) -> persistence::Window {
+    fn seal_read(
+        &self,
+        reader: &mut RingReader,
+        minute: Option<u64>,
+        observations: &[persistence::Observation],
+    ) -> persistence::Window {
         let mut tick = persistence::tick_buffer(&SHAPE).unwrap();
         let mut identities = Vec::with_capacity(2);
-        let mut window = persistence::Window::new(
-            persistence::WindowIdentity {
-                run: self.writer.identity().unwrap(),
-                window: 0,
-            },
-            persistence::Limits::from_shape(&SHAPE).unwrap(),
-        );
+        let mut window = self.seal_read_window(minute);
         for _index in 0..8 {
             let found = if self.identity {
                 reader.read_identity_into(&mut tick, &mut identities)
@@ -310,13 +378,13 @@ impl Fixture {
             else {
                 panic!("event missing");
             };
-            let times = tick.times.unwrap();
-            let observation = persistence::Observation {
-                publication,
-                wall_ns: Some(times.wall_ns),
-                continuous_ns: Some(times.continuous_ns),
-                awake_ns: Some(times.awake_ns),
-            };
+            assert_eq!(run_tick, tick.run_tick);
+            if let Some(minute) = minute {
+                if tick.run_tick / 60 != minute {
+                    continue;
+                }
+            }
+            let observation = seal_read_observation(&tick, publication, observations);
             let events = [persistence::NumberedEvent {
                 number,
                 tick: run_tick,
@@ -340,6 +408,45 @@ impl Fixture {
             }
         }
         window
+    }
+
+    fn seal_read_window(&self, minute: Option<u64>) -> persistence::Window {
+        let window = minute.unwrap_or_default();
+        persistence::Window::new(
+            persistence::WindowIdentity {
+                run: self.writer.identity().unwrap(),
+                window,
+            },
+            persistence::Limits::from_shape(&SHAPE).unwrap(),
+        )
+    }
+}
+
+fn seal_read_observation(
+    tick: &collector::ring::Tick,
+    publication: u64,
+    observations: &[persistence::Observation],
+) -> persistence::Observation {
+    assert!(observations.len() <= 8);
+    assert!(
+        observations
+            .iter()
+            .filter(|value| value.publication == publication)
+            .count()
+            <= 1
+    );
+    if let Some(observation) = observations
+        .iter()
+        .find(|value| value.publication == publication)
+    {
+        return *observation;
+    }
+    let times = tick.times.unwrap();
+    persistence::Observation {
+        publication,
+        wall_ns: Some(times.wall_ns),
+        continuous_ns: Some(times.continuous_ns),
+        awake_ns: Some(times.awake_ns),
     }
 }
 

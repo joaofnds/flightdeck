@@ -2,6 +2,9 @@
 #[path = "live/apps.rs"]
 mod app_checks;
 #[cfg(test)]
+#[path = "live/committed_apps.rs"]
+mod committed_app_checks;
+#[cfg(test)]
 #[path = "../src/live_fixture.rs"]
 mod identity_fixture;
 #[cfg(test)]

@@ -29,11 +29,15 @@ pub struct Session {
     selected: Option<Observation>,
     selected_context: Vec<crate::cpu_history_sample::Identity>,
     pub(crate) cpu_history_cache: Option<crate::cpu_history::Cache>,
+    // Separate from LiveSession's raw cache, bounded to one 8 MiB owned Sample.
+    app_sample_cache: std::cell::RefCell<Option<committed_apps::Cache>>,
     operation: Operation,
     #[cfg(test)]
     pub(crate) source_reads: std::cell::Cell<u64>,
     #[cfg(test)]
     pub(crate) before_cpu_history_install: Option<Box<dyn FnOnce()>>,
+    #[cfg(test)]
+    before_app_sample_install: std::cell::RefCell<Option<Box<dyn FnOnce()>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -103,11 +107,14 @@ impl Session {
             selected: None,
             selected_context: Vec::new(),
             cpu_history_cache: None,
+            app_sample_cache: std::cell::RefCell::new(None),
             operation,
             #[cfg(test)]
             source_reads: std::cell::Cell::new(0),
             #[cfg(test)]
             before_cpu_history_install: None,
+            #[cfg(test)]
+            before_app_sample_install: std::cell::RefCell::new(None),
         };
         session.operation.begin(epoch)?.run(|| session.extent())?;
         Ok(session)
@@ -116,6 +123,7 @@ impl Session {
     pub fn begin(&mut self, epoch: u64) -> Result<()> {
         if self.operation.epoch() != epoch {
             self.selected = None;
+            self.app_sample_cache.get_mut().take();
         }
         self.operation = self.operation.begin(epoch)?;
         self.operation.attach(&self.connection)
@@ -137,6 +145,7 @@ impl Session {
 
     fn select_inner(&mut self, second: u64, alternative: usize) -> Result<Value> {
         self.selected = None;
+        self.app_sample_cache.get_mut().take();
         self.operation.check()?;
         let end = second
             .checked_add(1)
@@ -394,12 +403,8 @@ impl Session {
             .iter()
             .find(|entry| entry.0.name() == name)
             .ok_or(Error::Bound("table name"))?;
+        self.validate_commitment(window)?;
         let manifest = &self.windows[window];
-        // Revalidate the pinned commitment before opening any path through the engine.
-        let marker = layout::WindowKey::from(&manifest.identity).marker(&self.root);
-        if read_committed(&self.root, &marker)? != *manifest {
-            return Err(Error::Bound("changed commitment"));
-        }
         let path = self
             .root
             .join(&manifest.data_directory)
@@ -409,6 +414,18 @@ impl Session {
             *table,
             persistence::query::TableSource::Parquet(&path),
         )
+    }
+
+    fn validate_commitment(&self, window: usize) -> Result<()> {
+        self.operation.check()?;
+
+        let manifest = &self.windows[window];
+        let marker = layout::WindowKey::from(&manifest.identity).marker(&self.root);
+        if read_committed(&self.root, &marker)? != *manifest {
+            return Err(Error::Bound("changed commitment"));
+        }
+
+        Ok(())
     }
 
     pub(crate) fn table(&self, window: usize, name: &str) -> Result<Table> {
@@ -556,3 +573,5 @@ fn discover(root: &Path, windows: &mut Vec<Manifest>, operation: &Operation) -> 
 
 #[path = "cpu_history_saved.rs"]
 mod cpu_history_saved;
+
+mod committed_apps;

@@ -2,7 +2,9 @@ use collector::ring::{
     IdentityUnavailable, PROGRAM_PATH_BYTES_MAX, ProcessIdentity, ProgramBuffers, UsageAvailability,
 };
 
-use super::{Error, Frame, Member, PROGRAM_FRAME_BYTES_MAX, ProgramSpan, Publication, Result};
+use super::{
+    Error, Frame, Member, PROGRAM_FRAME_BYTES_MAX, ProgramBytes, ProgramSpan, Publication, Result,
+};
 use crate::apps::Unavailable;
 
 pub(super) fn program_bytes(
@@ -111,18 +113,21 @@ pub(super) fn member_program(
                     app_path: &mut app_path,
                 },
             )?;
-            let start = arena.len();
-            if start + name + app > arena.capacity() {
+            if arena.len() + name + app > arena.capacity() {
                 return Err(Error::Bound("live App changed byte size"));
             }
-            arena.extend_from_slice(&executable_name[..name]);
-            let name_end = arena.len();
-            arena.extend_from_slice(&app_path[..app]);
-            *output = Ok(ProgramSpan {
-                start,
-                name_end,
-                end: arena.len(),
-            });
+
+            *output = Ok(ProgramSpan::capture(
+                arena,
+                &ProgramBytes {
+                    executable_name: &executable_name[..name],
+                    app_path: if app == 0 {
+                        None
+                    } else {
+                        Some(&app_path[..app])
+                    },
+                },
+            ));
         }
         ProcessIdentity::Unavailable { reason, .. } => *output = Err(*reason),
     }

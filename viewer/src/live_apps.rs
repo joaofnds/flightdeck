@@ -65,6 +65,26 @@ struct ProgramSpan {
     end: usize,
 }
 
+impl ProgramSpan {
+    fn capture(arena: &mut Vec<u8>, program: &ProgramBytes<'_>) -> Self {
+        let app_path = program.app_path.unwrap_or_default();
+        let spare = arena.capacity() - arena.len();
+        assert!(program.executable_name.len() <= spare);
+        assert!(app_path.len() <= spare - program.executable_name.len());
+
+        let start = arena.len();
+        arena.extend_from_slice(program.executable_name);
+        let name_end = arena.len();
+        arena.extend_from_slice(app_path);
+
+        Self {
+            start,
+            name_end,
+            end: arena.len(),
+        }
+    }
+}
+
 /// All references must come from the same successful read of this exact reader handle.
 /// Capture before reusing its tick/identity buffers or advancing its publication cursor.
 pub struct Publication<'source> {
@@ -216,6 +236,7 @@ fn validate(source: &Publication<'_>) -> Result<()> {
 }
 
 mod capture;
+pub(crate) mod committed;
 mod events;
 #[cfg(test)]
 mod tests;

@@ -667,49 +667,54 @@ impl LiveSession {
 
     pub fn apps_page(&self, offset: u32) -> Result<Value> {
         self.operation.run(|| {
-            self.selected_apps()?.apps_page(Page {
-                offset,
-                limit: crate::live_app_response::PAGE_ROWS_MAX,
+            self.with_selected_apps(|sample| {
+                sample.apps_page(Page {
+                    offset,
+                    limit: crate::live_app_response::PAGE_ROWS_MAX,
+                })
             })
         })
     }
 
     pub fn app_history(&self, kind: KeyKind, bytes: &[u8]) -> Result<Value> {
         self.operation.run(|| {
-            self.app_history.response(
-                &self.selected_apps()?.selected,
-                &Target { kind, bytes },
-                &self.operation,
-            )
+            self.with_selected_apps(|sample| {
+                self.app_history.response(
+                    &sample.selected,
+                    &Target { kind, bytes },
+                    &self.operation,
+                )
+            })
         })
     }
 
     pub fn app_detail(&self, kind: KeyKind, bytes: &[u8], offset: u32) -> Result<Value> {
         self.operation.run(|| {
-            let sample = self.selected_apps()?;
-            let index = sample.apps().iter().position(|app| {
-                if app.key.kind == kind {
-                    app.key.bytes == bytes
-                } else {
-                    false
-                }
-            });
-            let Some(index) = index else {
-                return Ok(Value::Null);
-            };
+            self.with_selected_apps(|sample| {
+                let index = sample.apps().iter().position(|app| {
+                    if app.key.kind == kind {
+                        app.key.bytes == bytes
+                    } else {
+                        false
+                    }
+                });
+                let Some(index) = index else {
+                    return Ok(Value::Null);
+                };
 
-            sample.app_detail(&Detail {
-                selected: &sample.selected,
-                app_index: u32::try_from(index).map_err(|_| Error::Bound("live App index"))?,
-                page: Page {
-                    offset,
-                    limit: crate::live_app_response::PAGE_ROWS_MAX,
-                },
+                sample.app_detail(&Detail {
+                    selected: &sample.selected,
+                    app_index: u32::try_from(index).map_err(|_| Error::Bound("live App index"))?,
+                    page: Page {
+                        offset,
+                        limit: crate::live_app_response::PAGE_ROWS_MAX,
+                    },
+                })
             })
         })
     }
 
-    fn selected_apps(&self) -> Result<&Sample> {
+    fn with_selected_apps(&self, consume: impl FnOnce(&Sample) -> Result<Value>) -> Result<Value> {
         let selected = self
             .selected
             .as_ref()
@@ -718,13 +723,21 @@ impl LiveSession {
             .inspected
             .iter()
             .chain(self.observations.iter())
-            .find(|observation| same(&observation.json(), selected))
-            .ok_or(Error::Bound("live App raw observation unavailable"))?;
+            .find(|observation| same(&observation.json(), selected));
 
-        current
-            .app_sample
-            .as_deref()
-            .ok_or(Error::Bound("live App aggregate unavailable"))
+        if let Some(current) = current {
+            let sample = current
+                .app_sample
+                .as_deref()
+                .ok_or(Error::Bound("live App aggregate unavailable"))?;
+
+            consume(sample)
+        } else {
+            self.history
+                .as_ref()
+                .ok_or(Error::Bound("live App raw observation unavailable"))?
+                .with_app_sample(selected, consume)
+        }
     }
 
     fn select_refresh_due(&self, second: u64) -> bool {
@@ -1874,7 +1887,7 @@ fn follow_merge_point(merge: PointMerge<'_>) -> Result<()> {
 
 #[cfg(test)]
 #[path = "live_fixture.rs"]
-mod identity_fixture;
+pub(crate) mod identity_fixture;
 
 #[cfg(test)]
 mod tests {
