@@ -137,7 +137,7 @@ fn run(options: &Options) -> io::Result<()> {
 /// ended, fails with the collector's failure, else with followprobe's.
 fn run_minute(options: &Options, followprobe: &Path, reports: &Reports) -> io::Result<()> {
     // The two programs write to reports of their own, so neither's output lands in the other's.
-    assert!(reports.collector.path != reports.followprobe.path);
+    assert_ne!(reports.collector.path, reports.followprobe.path);
     assert!(followprobe.ends_with("followprobe"));
 
     let mut collector = StartedProcess::start(
@@ -237,7 +237,7 @@ fn run_write_conditions_stdout(program: &'static str, arguments: &[&str]) -> io:
 
     let output = OutputFile::create("output")?;
     let errors = OutputFile::create("errors")?;
-    assert!(output.path != errors.path);
+    assert_ne!(output.path, errors.path);
     let mut process = StartedProcess::start(
         program,
         Command::new(program)
