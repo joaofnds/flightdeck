@@ -11,6 +11,81 @@ use super::SealedRecording;
 use crate::live_rankings::Rankings;
 
 #[test]
+fn real_saved_energy_rankings_reach_later_pages_at_the_exact_sibling() {
+    // Read the actual Energy route from 600 sealed Apps after its source ring retires.
+    let recording = SealedRecording::with_ranked_apps();
+    let mut request = SealedRecording::request();
+    request.route = "energy".into();
+    request.second = Some(1001);
+    request.identity = Some(json!({"run":"00000000000000010000000000000002",
+        "boot":"00000000000000030000000000000004","publication":2}));
+
+    let snapshot = recording.read(request).unwrap();
+
+    assert!(snapshot.rankings.is_some());
+    let Rankings::Ready(rankings) = snapshot.rankings.as_deref().unwrap() else {
+        panic!("{:?}", snapshot.rankings);
+    };
+    crate::live_source::identity_validate(&rankings.selected, &snapshot.selection["selected"])
+        .unwrap();
+    assert_eq!(snapshot.selection["second"], 1001);
+    assert_eq!(rankings.selected["publication"], 2);
+    assert_eq!(rankings.app_count, 600);
+    assert_eq!(rankings.metrics[2].entries[0].app.name, "App00600");
+    assert_eq!(rankings.metrics[2].entries[0].amount, 600_000);
+}
+
+#[test]
+fn real_saved_cpu_rankings_reach_later_pages_at_the_exact_sibling() {
+    // Read the actual CPU route from 600 sealed Apps after its source ring retires.
+    let recording = SealedRecording::with_ranked_apps();
+    let mut request = SealedRecording::request();
+    request.route = "cpu".into();
+    request.second = Some(1001);
+    request.identity = Some(json!({"run":"00000000000000010000000000000002",
+        "boot":"00000000000000030000000000000004","publication":2}));
+
+    let snapshot = recording.read(request).unwrap();
+
+    assert!(snapshot.rankings.is_some());
+    let Rankings::Ready(rankings) = snapshot.rankings.as_deref().unwrap() else {
+        panic!("{:?}", snapshot.rankings);
+    };
+    crate::live_source::identity_validate(&rankings.selected, &snapshot.selection["selected"])
+        .unwrap();
+    assert_eq!(snapshot.selection["second"], 1001);
+    assert_eq!(rankings.selected["publication"], 2);
+    assert_eq!(rankings.app_count, 600);
+    assert_eq!(rankings.metrics[0].entries[0].app.name, "App00600");
+    assert_eq!(rankings.metrics[0].entries[0].amount, 600);
+}
+
+#[test]
+fn real_saved_memory_rankings_reach_later_pages_at_the_exact_sibling() {
+    // Read the actual Memory route from 600 sealed Apps after its source ring retires.
+    let recording = SealedRecording::with_ranked_apps();
+    let mut request = SealedRecording::request();
+    request.route = "memory".into();
+    request.second = Some(1001);
+    request.identity = Some(json!({"run":"00000000000000010000000000000002",
+        "boot":"00000000000000030000000000000004","publication":2}));
+
+    let snapshot = recording.read(request).unwrap();
+
+    assert!(snapshot.rankings.is_some());
+    let Rankings::Ready(rankings) = snapshot.rankings.as_deref().unwrap() else {
+        panic!("{:?}", snapshot.rankings);
+    };
+    crate::live_source::identity_validate(&rankings.selected, &snapshot.selection["selected"])
+        .unwrap();
+    assert_eq!(snapshot.selection["second"], 1001);
+    assert_eq!(rankings.selected["publication"], 2);
+    assert_eq!(rankings.app_count, 600);
+    assert_eq!(rankings.metrics[1].entries[0].app.name, "App00600");
+    assert_eq!(rankings.metrics[1].entries[0].amount, 1_228_800);
+}
+
+#[test]
 fn real_saved_app_rankings_reach_later_pages_and_preserve_the_exact_sibling() {
     // Read 600 captured App identities through the real worker after their source ring retires.
     let recording = SealedRecording::with_ranked_apps();

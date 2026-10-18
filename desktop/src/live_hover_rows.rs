@@ -43,6 +43,12 @@ impl LiveDashboard {
         for panels in self.panels.chunks(self.reading_chart_columns()) {
             rows.push(Row::Charts(panels.to_vec()));
         }
+        match self.request.route.as_str() {
+            "cpu" => rows.push(Row::Rankings(vec![0])),
+            "memory" => rows.push(Row::Rankings(vec![1])),
+            "energy" => rows.push(Row::Rankings(vec![2])),
+            _ => {}
+        }
         if self.request.route == "storage" {
             rows.push(Row::Rankings(vec![3]));
             for index in 0..self.resource_device_count() {

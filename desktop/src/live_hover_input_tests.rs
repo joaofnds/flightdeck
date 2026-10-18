@@ -44,7 +44,11 @@ fn historical_memory_inspection_updates_every_quantity_and_the_header_mode(
     harness.driver.hover(Epoch::Historical);
 
     harness.driver.assert_historical_memory_visible();
-    assert!(harness.driver.text_is_visible("Hover preview"));
+    assert!(
+        harness
+            .driver
+            .text_is_visible("Hover preview · Loading exact details")
+    );
     let copied = harness.driver.copy_json();
     assert_eq!(copied["second"], 999);
     assert_eq!(copied["observation"]["publication"], 2);

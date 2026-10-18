@@ -505,7 +505,10 @@ fn reader_payload(
     if request.route == "apps" {
         reader_apps(session, request, snapshot)?;
     }
-    if matches!(request.route.as_str(), "overview" | "storage") {
+    if matches!(
+        request.route.as_str(),
+        "overview" | "storage" | "cpu" | "memory" | "energy"
+    ) {
         snapshot.rankings = Some(Arc::new(crate::live_rankings::read(
             &snapshot.selection["selected"],
             |offset| session.apps_page(offset).map_err(|error| error.to_string()),

@@ -8,6 +8,328 @@ use super::{InputDriver, InputHarness, PlotExit, accepted_snapshot};
 use crate::live_source::{Snapshot, Update};
 
 #[gpui::test]
+fn memory_hover_worker_failure_keeps_the_historical_scalar_without_current_app_links(
+    cx: &mut TestAppContext,
+) {
+    // Fail the exact Memory worker generation, inspect its resident scalar, then leave.
+    let mut harness = InputHarness::setup_route(cx, "memory");
+    harness.driver.seed_route_rankings();
+    harness.driver.hover_previous_second_on("live-memory-plot");
+
+    harness.driver.fail_ranked_preview();
+
+    assert!(harness.driver.reading_is_visible("2.0 GiB active"));
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("App totals unavailable: Ranking read failed")
+    );
+    assert!(!harness.driver.reading_is_visible("6.0 GiB active"));
+    assert!(
+        !harness
+            .driver
+            .reading_is_visible("ranking:Resident memory:Current:1.0 GiB")
+    );
+    assert!(
+        !harness
+            .driver
+            .reading_is_visible("ranking:Resident memory:Historical:512.0 MiB")
+    );
+
+    harness
+        .driver
+        .leave_plot("live-memory-plot", PlotExit::Sidebar);
+
+    assert!(harness.driver.reading_is_visible("6.0 GiB active"));
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("ranking:Resident memory:Current:1.0 GiB")
+    );
+    assert!(!harness.driver.reading_is_visible("2.0 GiB active"));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn energy_hover_gap_clears_historical_readings_without_borrowing_the_current_app(
+    cx: &mut TestAppContext,
+) {
+    // Move from exact historical Energy readings into a true gap, then return to committed data.
+    let mut harness = InputHarness::setup_route(cx, "energy");
+    harness.driver.seed_route_rankings();
+    harness.driver.hover_previous_second_on("live-energy-plot");
+    harness.driver.complete_route_ranked_preview();
+    assert!(harness.driver.reading_is_visible("3.0 W"));
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("ranking:Process power:Historical:250.0 mW")
+    );
+    let gap = harness
+        .driver
+        .second_position("live-energy-plot", 897.5 / 900.0);
+
+    harness.driver.hover_position(gap);
+    harness.driver.finish_missing_ranked_preview();
+
+    let (second, reading) = harness.driver.chart_accessibility_reading("live-energy");
+    assert_eq!(second, Some(998));
+    assert!(reading.ends_with("Unavailable"));
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("App totals unavailable at this observation")
+    );
+    assert!(!harness.driver.reading_is_visible("9.0 W"));
+    assert!(!harness.driver.reading_is_visible("3.0 W"));
+    assert!(
+        !harness
+            .driver
+            .reading_is_visible("ranking:Process power:Current:500.0 mW")
+    );
+    assert!(
+        !harness
+            .driver
+            .reading_is_visible("ranking:Process power:Historical:250.0 mW")
+    );
+
+    harness
+        .driver
+        .leave_plot("live-energy-plot", PlotExit::Sidebar);
+
+    assert!(harness.driver.reading_is_visible("9.0 W"));
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("ranking:Process power:Current:500.0 mW")
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn historical_memory_app_mouse_activation_preserves_identity_and_resets_offsets(
+    cx: &mut TestAppContext,
+) {
+    // Select history through the installed chart keys, then click its resident App rank.
+    let mut harness = InputHarness::setup_route(cx, "memory");
+    harness.driver.seed_route_rankings();
+    harness
+        .driver
+        .inspect_ranked_history_with_keyboard_on("live-memory-plot");
+    harness.driver.complete_route_ranked_selection();
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("ranking:Resident memory:Historical:512.0 MiB")
+    );
+    harness.driver.seed_stale_ranked_offsets();
+
+    harness
+        .driver
+        .click_ranked_app("ranking:Resident memory:Historical:512.0 MiB");
+
+    harness.driver.assert_ranked_app_request(999, 1, "42");
+    harness.driver.assert_ranked_offsets_reset();
+    harness.teardown();
+}
+
+#[gpui::test]
+fn historical_energy_app_keyboard_activation_preserves_identity_and_resets_offsets(
+    cx: &mut TestAppContext,
+) {
+    // Focus the historical power App row with the right mouse button, then activate with Enter.
+    let mut harness = InputHarness::setup_route(cx, "energy");
+    harness.driver.seed_route_rankings();
+    harness
+        .driver
+        .inspect_ranked_history_with_keyboard_on("live-energy-plot");
+    harness.driver.complete_route_ranked_selection();
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("ranking:Process power:Historical:250.0 mW")
+    );
+    harness.driver.seed_stale_ranked_offsets();
+
+    harness
+        .driver
+        .activate_ranked_app_with_keyboard("ranking:Process power:Historical:250.0 mW");
+
+    harness.driver.assert_ranked_app_request(999, 1, "42");
+    harness.driver.assert_ranked_offsets_reset();
+    harness.teardown();
+}
+
+#[gpui::test]
+fn memory_hover_loads_exact_app_rankings_and_restores_the_committed_reading(
+    cx: &mut TestAppContext,
+) {
+    // Hover the installed Memory chart, deliver its exact response, then leave the plot.
+    let mut harness = InputHarness::setup_route(cx, "memory");
+    harness.driver.seed_route_rankings();
+    assert!(harness.driver.reading_is_visible("6.0 GiB active"));
+
+    harness.driver.hover_previous_second_on("live-memory-plot");
+
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("Hover preview · Loading exact details")
+    );
+    assert!(harness.driver.reading_is_visible("2.0 GiB active"));
+    assert!(!harness.driver.reading_is_visible("6.0 GiB active"));
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("Loading exact App totals")
+    );
+    assert!(
+        !harness
+            .driver
+            .reading_is_visible("ranking:Resident memory:Current:1.0 GiB")
+    );
+
+    harness.driver.complete_route_ranked_preview();
+
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("ranking:Resident memory:Historical:512.0 MiB")
+    );
+    assert!(harness.driver.reading_is_visible("2.0 GiB active"));
+    assert!(
+        !harness
+            .driver
+            .reading_is_visible("ranking:Resident memory:Current:1.0 GiB")
+    );
+    assert_eq!(harness.driver.requested_publication(), Some(2));
+
+    harness
+        .driver
+        .leave_plot("live-memory-plot", PlotExit::Sidebar);
+
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("ranking:Resident memory:Current:1.0 GiB")
+    );
+    assert!(harness.driver.reading_is_visible("6.0 GiB active"));
+    assert!(
+        !harness
+            .driver
+            .reading_is_visible("ranking:Resident memory:Historical:512.0 MiB")
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn energy_hover_loads_exact_app_rankings_and_restores_the_committed_reading(
+    cx: &mut TestAppContext,
+) {
+    // Hover the installed Energy chart, deliver its exact response, then leave the plot.
+    let mut harness = InputHarness::setup_route(cx, "energy");
+    harness.driver.seed_route_rankings();
+    assert!(harness.driver.reading_is_visible("9.0 W"));
+
+    harness.driver.hover_previous_second_on("live-energy-plot");
+
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("Hover preview · Loading exact details")
+    );
+    assert!(harness.driver.reading_is_visible("3.0 W"));
+    assert!(!harness.driver.reading_is_visible("9.0 W"));
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("Loading exact App totals")
+    );
+    assert!(
+        !harness
+            .driver
+            .reading_is_visible("ranking:Process power:Current:500.0 mW")
+    );
+
+    harness.driver.complete_route_ranked_preview();
+
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("ranking:Process power:Historical:250.0 mW")
+    );
+    assert!(harness.driver.reading_is_visible("3.0 W"));
+    assert!(
+        !harness
+            .driver
+            .reading_is_visible("ranking:Process power:Current:500.0 mW")
+    );
+    assert_eq!(harness.driver.requested_publication(), Some(2));
+
+    harness
+        .driver
+        .leave_plot("live-energy-plot", PlotExit::Sidebar);
+
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("ranking:Process power:Current:500.0 mW")
+    );
+    assert!(harness.driver.reading_is_visible("9.0 W"));
+    assert!(
+        !harness
+            .driver
+            .reading_is_visible("ranking:Process power:Historical:250.0 mW")
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn energy_rankings_show_the_selected_app_power(cx: &mut TestAppContext) {
+    // Read the installed Energy card using the existing exact selected-App ranking fixture.
+    let mut harness = InputHarness::setup_route(cx, "energy");
+
+    harness.driver.seed_ranked_overview();
+
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("ranking:Process power:Current:500.0 mW")
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn cpu_rankings_show_the_selected_app_cpu(cx: &mut TestAppContext) {
+    // Read the installed CPU card without replacing its production row composition.
+    let mut harness = InputHarness::setup_route(cx, "cpu");
+
+    harness.driver.seed_ranked_overview();
+
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("ranking:CPU:Current:80.0 %")
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn memory_rankings_show_the_selected_app_resident_memory(cx: &mut TestAppContext) {
+    // Read the resident gauge card on Memory, separate from the machine memory summary.
+    let mut harness = InputHarness::setup_route(cx, "memory");
+
+    harness.driver.seed_ranked_overview();
+
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("ranking:Resident memory:Current:1.0 GiB")
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
 fn overview_rankings_show_current_measurements_and_explicit_source_limits(cx: &mut TestAppContext) {
     // Read real production rank nodes after providing one exact shared-response page.
     let mut harness = InputHarness::setup_route(cx, "overview");
@@ -485,4 +807,126 @@ fn ranked_payload(
         &snapshot.selection["selected"],
         |_| Ok(page.clone()),
     ))
+}
+
+impl InputDriver {
+    fn seed_route_rankings(&mut self) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            let mut snapshot = route_ranked_snapshot(dashboard.generation);
+            snapshot.rankings = Some(route_ranked_payload(&snapshot, RouteReading::Current));
+            dashboard.accept(snapshot);
+            assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
+            cx.notify();
+        });
+        self.context
+            .simulate_resize(gpui::size(px(1320.0), px(3500.0)));
+        self.context.run_until_parked();
+    }
+
+    fn complete_route_ranked_preview(&mut self) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            dashboard.preview_tick_at(Instant::now(), cx);
+            let preview = dashboard.preview.as_ref().unwrap();
+            let mut snapshot = route_ranked_snapshot(preview.generation.unwrap());
+            snapshot.selection["second"] = json!(999);
+            snapshot.selection["selected"] = preview.target.identity.clone().unwrap();
+            snapshot.selection["summary"] = snapshot.selection["trends"][0].clone();
+            snapshot.selection["trends"]
+                .as_array_mut()
+                .unwrap()
+                .truncate(1);
+            assert_eq!(
+                snapshot.selection["summary"],
+                preview.reading.selection["summary"]
+            );
+            snapshot.rankings = Some(route_ranked_payload(&snapshot, RouteReading::Historical));
+            assert!(dashboard.preview_receive(Update::Ready(snapshot)));
+            cx.notify();
+        });
+        self.context.run_until_parked();
+    }
+}
+
+fn route_ranked_snapshot(generation: u64) -> Box<Snapshot> {
+    let mut snapshot = accepted_snapshot(generation);
+    snapshot.selection["trends"][0]["memory_active_bytes"] = json!(2_147_483_648_u64);
+    snapshot.selection["trends"][0]["power_watts"] = json!(3.0);
+    snapshot.selection["trends"][1]["memory_active_bytes"] = json!(6_442_450_944_u64);
+    snapshot.selection["trends"][1]["power_watts"] = json!(9.0);
+    snapshot.selection["summary"] = snapshot.selection["trends"][1].clone();
+
+    snapshot
+}
+
+#[derive(Clone, Copy)]
+enum RouteReading {
+    Current,
+    Historical,
+}
+
+fn route_ranked_payload(
+    snapshot: &Snapshot,
+    reading: RouteReading,
+) -> Arc<crate::live_rankings::Rankings> {
+    let (name, key, cpu, resident_bytes, energy_nj, power_watts) = match reading {
+        RouteReading::Current => ("Current", "41", 80, 1_073_741_824, 500_000_000, 0.5),
+        RouteReading::Historical => ("Historical", "42", 20, 536_870_912, 250_000_000, 0.25),
+    };
+    let mut result = ranked_payload(snapshot, name, key, cpu);
+    let crate::live_rankings::Rankings::Ready(rankings) = Arc::get_mut(&mut result).unwrap() else {
+        panic!("Route fixture requires measured App rankings");
+    };
+    rankings.metrics[1].entries[0].amount = resident_bytes;
+    rankings.metrics[2].entries[0].amount = energy_nj;
+    rankings.metrics[2].entries[0].rate = Some(power_watts);
+
+    result
+}
+
+impl InputDriver {
+    fn complete_route_ranked_selection(&mut self) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            let mut snapshot = route_ranked_snapshot(dashboard.generation);
+            snapshot.selection["second"] = json!(999);
+            snapshot.selection["selected"] = dashboard.request.identity.clone().unwrap();
+            snapshot.selection["summary"] = snapshot.selection["trends"][0].clone();
+            snapshot.selection["trends"]
+                .as_array_mut()
+                .unwrap()
+                .truncate(1);
+            snapshot.rankings = Some(route_ranked_payload(&snapshot, RouteReading::Historical));
+            dashboard.accept(snapshot);
+            assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
+            cx.notify();
+        });
+        self.context.run_until_parked();
+    }
+
+    fn seed_stale_ranked_offsets(&mut self) {
+        self.view.update(&mut self.context, |dashboard, _| {
+            dashboard.request.offset = 512;
+            dashboard.request.apps_offset = 512;
+            dashboard.request.members_offset = 512;
+        });
+    }
+
+    fn assert_ranked_offsets_reset(&self) {
+        self.view.read_with(&self.context, |dashboard, _| {
+            assert_eq!(dashboard.request.offset, 0);
+            assert_eq!(dashboard.request.apps_offset, 0);
+            assert_eq!(dashboard.request.members_offset, 0);
+        });
+    }
+
+    fn activate_ranked_app_with_keyboard(&mut self, selector: &'static str) {
+        let bounds = self.context.debug_bounds(selector).expect(selector);
+        self.context
+            .simulate_mouse_down(bounds.center(), MouseButton::Right, Modifiers::none());
+        self.context
+            .simulate_mouse_up(bounds.center(), MouseButton::Right, Modifiers::none());
+        self.context.run_until_parked();
+        assert!(self.reading_is_visible(selector));
+        self.press("enter");
+        self.context.run_until_parked();
+    }
 }
