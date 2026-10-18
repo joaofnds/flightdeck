@@ -99,6 +99,8 @@ struct Metric: Decodable, Identifiable, Sendable {
     let memoryCompressedBytes: UInt64?
     let swapUsedBytes: UInt64?
     let swapTotalBytes: UInt64?
+    let swapInBytesPerSecond: Double?
+    let swapOutBytesPerSecond: Double?
     let memoryPageinsPerSecond: Double?
     let memoryCompressionsPerSecond: Double?
     let memoryDecompressionsPerSecond: Double?

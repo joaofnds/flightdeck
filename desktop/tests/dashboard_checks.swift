@@ -1,9 +1,18 @@
+import AppKit
 import Combine
 import Foundation
 import SwiftUI
 
 @MainActor
 func runOverviewInspectionChecks() throws {
+    try expands_the_actual_overview_for_gpu_activity_above_nominal_capacity()
+    try paints_gpu_activity_in_the_actual_overview()
+    try reads_gpu_activity_in_the_actual_overview()
+    try paints_gpu_activity_in_the_actual_gpu_pane()
+    try paints_soc_temperature_in_the_actual_energy_pane()
+    try separates_gpu_power_in_the_actual_energy_pane()
+    try separates_system_power_in_the_actual_energy_pane()
+    print("Actual Overview and GPU activity, Energy power panels and SoC history render checks passed")
     try uses_only_selected_schematic_sources()
     try reports_the_inspected_reading_to_accessibility()
     // Keyboard navigation must retain siblings that share a wall second.
@@ -122,6 +131,8 @@ private func refuses_schematic_sibling(_ selection: Selection,
 }
 
 func runRecordedComponentChecks() throws {
+    try preserves_soc_temperature_values_units_and_exact_selection()
+    try uses_independent_gpu_activity_and_temperature_roles()
     try checks_recorded_component_projections()
     try checks_recorded_network_packet_and_error_projections()
     try expands_gpu_activity_for_measured_values_above_nominal_capacity()
@@ -784,4 +795,264 @@ private func reports_the_inspected_reading_to_accessibility() throws {
         .hasSuffix("No recorded observation"))
     inspection.clear()
     precondition(inspection.reading(in: selection, readout: readout) == readout(points[1]))
+}
+
+@MainActor
+private func paints_soc_temperature_in_the_actual_energy_pane() throws {
+    // Goal: Energy paints the acquired SoC sensor with the temperature role.
+    // Method: replace only that role while rendering the actual Energy destination.
+    let selection = try scalarPanelSelection(gpuPercent: 37.5)
+    let model = RecordingModel(path: "/unused", pollingEnabled: false)
+    model.selection = selection
+    let ordinary = FlightdeckTheme()
+    var changed = ordinary
+    changed.temperatureSeries = .white
+
+    let baseline = scalarPanelImage(RecordedComponentPane(component: .energy),
+        model: model, theme: ordinary, height: 700)
+    let recolored = scalarPanelImage(RecordedComponentPane(component: .energy),
+        model: model, theme: changed, height: 700)
+
+    precondition(scalarPanelPixelDifferences(baseline, recolored) > 300,
+        "The actual Energy pane did not paint its SoC temperature history")
+}
+
+@MainActor
+private func scalarPanelImage<Content: View>(_ content: Content, model: RecordingModel,
+                                            theme: FlightdeckTheme,
+                                            height: CGFloat) -> NSBitmapImageRep {
+    let renderer = ImageRenderer(content: content.environmentObject(model)
+        .environment(\.flightdeckTheme, theme).foregroundStyle(theme.text)
+        .frame(width: 1080, height: height, alignment: .top)
+        .background(theme.background).preferredColorScheme(.dark))
+    renderer.scale = 1
+    guard let image = renderer.cgImage else { preconditionFailure("The scalar pane did not render") }
+
+    return NSBitmapImageRep(cgImage: image)
+}
+
+private func scalarPanelPixelDifferences(_ first: NSBitmapImageRep,
+                                         _ second: NSBitmapImageRep,
+                                         rows: Range<Int>? = nil,
+                                         columns: Range<Int> = 0..<1080) -> Int {
+    precondition(first.pixelsWide == 1080)
+    precondition(second.pixelsWide == first.pixelsWide)
+    precondition(second.pixelsHigh == first.pixelsHigh)
+    precondition((1...2200).contains(first.pixelsHigh))
+    var differences = 0
+    let comparedRows = rows ?? 0..<first.pixelsHigh
+    precondition(comparedRows.lowerBound >= 0)
+    precondition(comparedRows.upperBound <= first.pixelsHigh)
+    precondition(columns.lowerBound >= 0)
+    precondition(columns.upperBound <= first.pixelsWide)
+    for y in comparedRows {
+        for x in columns {
+            guard let source = first.colorAt(x: x, y: y)?.usingColorSpace(.sRGB),
+                  let target = second.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else {
+                preconditionFailure("The rendered scalar panel has no RGB pixel")
+            }
+
+            let distance = abs(source.redComponent - target.redComponent)
+                + abs(source.greenComponent - target.greenComponent)
+                + abs(source.blueComponent - target.blueComponent)
+            if distance > 0.06 { differences += 1 }
+        }
+    }
+
+    return differences
+}
+
+private func scalarPanelSelection(gpuPercent: Double) throws -> Selection {
+    let values: [[String: Any]] = [
+        ["run": "scalar", "boot": "boot", "publication": 1,
+         "wall_ns": 1_000_000_000_000, "segment": 1, "gpu_active_percent": gpuPercent,
+         "gpu_watts": 2, "power_watts": 12, "soc_celsius": 45],
+        ["run": "scalar", "boot": "boot", "publication": 2,
+         "wall_ns": 1_899_000_000_000, "segment": 1, "gpu_active_percent": gpuPercent,
+         "gpu_watts": 2, "power_watts": 12, "soc_celsius": 65]]
+    let points: [Metric] = try decodeRecordingResponse(
+        JSONSerialization.data(withJSONObject: ["value": values]))
+    let selected = Observation(run: "scalar", boot: "boot", publication: 2, runTick: 2,
+        wallNs: 1_899_000_000_000, windowLosses: nil)
+
+    return Selection(second: 1899, selected: selected, alternatives: [selected],
+        summary: points[1], trends: points, contextSeconds: 900)
+}
+
+@MainActor
+private func paints_gpu_activity_in_the_actual_overview() throws {
+    // Goal: Overview paints GPU activity with its independent semantic role.
+    // Method: recolor only activity while rendering the actual Overview destination.
+    let model = RecordingModel(path: "/unused", pollingEnabled: false)
+    model.selection = try scalarPanelSelection(gpuPercent: 37.5)
+    let ordinary = FlightdeckTheme()
+    var changed = ordinary
+    changed.gpuActivitySeries = .white
+
+    let baseline = scalarPanelImage(Dashboard(), model: model, theme: ordinary, height: 1800)
+    let recolored = scalarPanelImage(Dashboard(), model: model, theme: changed, height: 1800)
+
+    precondition(scalarPanelPixelDifferences(baseline, recolored) > 300,
+        "The actual Overview did not paint GPU activity with its semantic role")
+}
+
+@MainActor
+private func reads_gpu_activity_in_the_actual_overview() throws {
+    // Goal: Overview reads activity rather than the independent GPU power field.
+    // Method: vary only activity and compare the grid above the schematic.
+    let model = RecordingModel(path: "/unused", pollingEnabled: false)
+    model.selection = try scalarPanelSelection(gpuPercent: 10)
+    let low = scalarPanelImage(Dashboard(), model: model, theme: FlightdeckTheme(), height: 1800)
+    model.selection = try scalarPanelSelection(gpuPercent: 80)
+
+    let high = scalarPanelImage(Dashboard(), model: model, theme: FlightdeckTheme(), height: 1800)
+
+    precondition(scalarPanelPixelDifferences(low, high, rows: 0..<700) > 500,
+        "The actual Overview ignored changed GPU activity while GPU power stayed constant")
+}
+
+@MainActor
+private func paints_gpu_activity_in_the_actual_gpu_pane() throws {
+    // Goal: GPU activity uses its own role while GPU power keeps its independent color.
+    // Method: replace only activity while rendering the actual GPU destination.
+    let model = RecordingModel(path: "/unused", pollingEnabled: false)
+    model.selection = try scalarPanelSelection(gpuPercent: 37.5)
+    let ordinary = FlightdeckTheme()
+    var changed = ordinary
+    changed.gpuActivitySeries = .white
+
+    let baseline = scalarPanelImage(RecordedComponentPane(component: .gpu),
+        model: model, theme: ordinary, height: 700)
+    let recolored = scalarPanelImage(RecordedComponentPane(component: .gpu),
+        model: model, theme: changed, height: 700)
+
+    precondition(scalarPanelPixelDifferences(baseline, recolored) > 300,
+        "The actual GPU pane did not paint activity with its semantic role")
+}
+
+private func preserves_soc_temperature_values_units_and_exact_selection() throws {
+    // Goal: the single acquired sensor retains Celsius, zero and unavailable readings.
+    // Method: decode literal sensor readings and a repeated-second alternative.
+    let data = Data(#"""
+        {"value":[
+          {"run":"run","boot":"boot","publication":1,"wall_ns":1000000000000,
+           "segment":1,"soc_celsius":48.25,"power_watts":12},
+          {"run":"run","boot":"boot","publication":2,"wall_ns":1001000000000,
+           "segment":1,"soc_celsius":0,"power_watts":13},
+          {"run":"run","boot":"boot","publication":3,"wall_ns":1002000000000,
+           "segment":1,"soc_celsius":null},
+          {"run":"run","boot":"boot","publication":4,"wall_ns":1003000000000,
+           "segment":1},
+          {"run":"other","boot":"other","publication":1,"wall_ns":1003000000000,
+           "segment":2,"soc_celsius":71.5}]}
+        """#.utf8)
+    let points: [Metric] = try decodeRecordingResponse(data)
+    let selected = Observation(run: "run", boot: "boot", publication: 4, runTick: 4,
+        wallNs: 1_003_000_000_000, windowLosses: nil)
+    let selection = Selection(second: 1003, selected: selected, alternatives: [selected],
+        summary: points[3], trends: points, contextSeconds: 900)
+
+    let component = RecordedComponentData(context: RecordedChartContext(selection: selection),
+        theme: FlightdeckTheme())
+    let temperature = component.context.plot(lines: [component.socTemperature])
+    let power = component.context.plot(lines: component.energy)
+
+    precondition(component.socTemperature.values == [48.25, 0, nil, nil, 71.5])
+    precondition(component.socTemperature.name == "SoC temperature")
+    precondition(component.socTemperature.unit == "°C")
+    precondition(component.socTemperature.negative != true)
+    precondition(dashboardReading(component.socTemperature.values[1], unit: "°C") == "0 °C")
+    precondition(dashboardReading(component.socTemperature.values[2], unit: "°C") == "Unavailable")
+    precondition(temperature?.samples == power?.samples)
+    precondition(temperature?.segments(line: 0) == [[0, 1], [4]])
+    precondition(component.context.domain == 104...1004)
+    precondition(component.context.selectedID == points[3].id)
+    precondition(component.context.target(id: points[4].id) == RecordedSelectionTarget(second: 1003,
+        identity: points[4].identity))
+    precondition(component.energy.map(\.values) == [[12, 13, nil, nil, nil],
+        [nil, nil, nil, nil, nil]])
+}
+
+private func uses_independent_gpu_activity_and_temperature_roles() throws {
+    // Goal: activity, power and temperature remain independently replaceable.
+    // Method: give each semantic role a distinct color before projecting real scalar data.
+    let selection = try scalarPanelSelection(gpuPercent: 37.5)
+    var theme = FlightdeckTheme()
+    theme.gpuActivitySeries = .pink
+    theme.gpuPowerSeries = .cyan
+    theme.temperatureSeries = .yellow
+
+    let data = RecordedComponentData(context: RecordedChartContext(selection: selection), theme: theme)
+
+    precondition(data.gpuActivity.color == .pink)
+    precondition(data.gpuPower.color == .cyan)
+    precondition(data.socTemperature.color == .yellow)
+    precondition(data.gpuActivity.unit == "%")
+    precondition(data.gpuPower.unit == "W")
+}
+
+@MainActor
+private func separates_gpu_power_in_the_actual_energy_pane() throws {
+    // Goal: Energy paints GPU power only in its dedicated right-hand panel.
+    // Method: recolor only GPU power and inspect both halves of the actual power row.
+    let model = RecordingModel(path: "/unused", pollingEnabled: false)
+    model.selection = try scalarPanelSelection(gpuPercent: 37.5)
+    let ordinary = FlightdeckTheme()
+    var changed = ordinary
+    changed.gpuPowerSeries = .white
+
+    let baseline = scalarPanelImage(RecordedComponentPane(component: .energy),
+        model: model, theme: ordinary, height: 700)
+    let recolored = scalarPanelImage(RecordedComponentPane(component: .energy),
+        model: model, theme: changed, height: 700)
+
+    precondition(scalarPanelPixelDifferences(baseline, recolored,
+        rows: 0..<320, columns: 0..<500) == 0,
+        "Energy painted GPU power inside the System power panel")
+    precondition(scalarPanelPixelDifferences(baseline, recolored,
+        rows: 0..<320, columns: 580..<1080) > 300,
+        "Energy omitted GPU power from its dedicated panel")
+}
+
+@MainActor
+private func separates_system_power_in_the_actual_energy_pane() throws {
+    // Goal: Energy paints system power only in its dedicated left-hand panel.
+    // Method: recolor only system power and inspect both halves of the actual power row.
+    let model = RecordingModel(path: "/unused", pollingEnabled: false)
+    model.selection = try scalarPanelSelection(gpuPercent: 37.5)
+    let ordinary = FlightdeckTheme()
+    var changed = ordinary
+    changed.systemPowerSeries = .white
+
+    let baseline = scalarPanelImage(RecordedComponentPane(component: .energy),
+        model: model, theme: ordinary, height: 700)
+    let recolored = scalarPanelImage(RecordedComponentPane(component: .energy),
+        model: model, theme: changed, height: 700)
+
+    precondition(scalarPanelPixelDifferences(baseline, recolored,
+        rows: 0..<320, columns: 580..<1080) == 0,
+        "Energy painted system power inside the GPU power panel")
+    precondition(scalarPanelPixelDifferences(baseline, recolored,
+        rows: 0..<320, columns: 0..<500) > 300,
+        "Energy omitted system power from its dedicated panel")
+}
+
+@MainActor
+private func expands_the_actual_overview_for_gpu_activity_above_nominal_capacity() throws {
+    // Goal: the actual Overview keeps measured activity above 100% inside its plot.
+    // Method: recolor a constant 150% line and inspect only the GPU chart's plot rectangle.
+    let model = RecordingModel(path: "/unused", pollingEnabled: false)
+    model.selection = try scalarPanelSelection(gpuPercent: 150)
+    let ordinary = FlightdeckTheme()
+    var changed = ordinary
+    changed.gpuActivitySeries = .white
+
+    let baseline = scalarPanelImage(Dashboard(), model: model, theme: ordinary, height: 1800)
+    let recolored = scalarPanelImage(Dashboard(), model: model, theme: changed, height: 1800)
+    let plotPixels = scalarPanelPixelDifferences(baseline, recolored,
+        rows: 440..<620, columns: 100..<450)
+
+    precondition(plotPixels > 300,
+        "Overview clipped measured 150% GPU activity outside its plot: \(plotPixels) role pixels")
+    print("Overview 150% GPU activity paints \(plotPixels) role pixels inside its plot rectangle")
 }

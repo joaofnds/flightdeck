@@ -43,6 +43,7 @@ struct RecordingStateChecks {
         try runCPUHistoryChecks()
         try runCPUHistoryPanelChecks()
         try runMemoryPressureChecks()
+        try runMemorySwapChecks()
         try decodes_history_failure_without_rejecting_the_live_selection()
         try accepts_selection_from_a_source_without_history_diagnostics()
         try decodes_history_status_for_native_poll_cache_invalidation()

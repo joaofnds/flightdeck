@@ -20,9 +20,7 @@ struct Dashboard: View {
                           explanation: "Busy ticks across all recorded logical CPUs divided by total CPU ticks. Requires consecutive compatible observations.",
                           domain: 0...100, metric: \.cpuPercent)
                 memoryPanel
-                linePanel("GPU power", value: summary?.gpuWatts, unit: "W", color: theme.gpuPowerSeries,
-                          explanation: "Difference in recorded GPU energy divided by the actual continuous elapsed interval. Requires consecutive compatible observations and available IOReport at both ends.",
-                          metric: \.gpuWatts)
+                gpuActivityPanel
                 linePanel("External interfaces · received", value: summary?.networkRxBps.map { $0 / 1024 },
                           unit: "KiB/s", color: theme.networkReceivedSeries,
                           explanation: "Sum of recorded non-loopback interfaces. VPN and tunnel traffic can be counted more than once. Counter deltas use actual continuous elapsed time.",
@@ -59,6 +57,24 @@ struct Dashboard: View {
         }
         .onChange(of: model.schematicPreviewSource, initial: true) { _, source in
             schematicPreview.observeSource(source)
+        }
+    }
+
+    private var gpuActivityPanel: some View {
+        Panel(title: "GPU activity",
+              explanation: "Time in recorded active GPU states divided by the measured continuous interval. Requires compatible observations and complete matching active states.") {
+            Text(metricText(summary?.gpuActivePercent, unit: "%"))
+                .font(theme.metricFont).monospacedDigit()
+            if let selection = model.selection {
+                let data = RecordedComponentData(context: RecordedChartContext(selection: selection),
+                    theme: theme)
+                plot(context: data.context, lines: [data.gpuActivity],
+                    style: TimeSeriesStyle(unit: "%", minimum: 0,
+                        maximum: data.gpuActivityStyle.maximum, fill: 0,
+                        interpolation: .linear)) { point in
+                    metricText(point.gpuActivePercent, unit: "%")
+                }
+            }
         }
     }
 

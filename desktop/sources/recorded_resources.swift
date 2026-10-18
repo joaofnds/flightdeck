@@ -67,6 +67,14 @@ struct RecordedMemoryData {
         return allocated
     }
 
+    var swapTraffic: [TimeSeriesLine] {
+        [TimeSeriesLine(name: "Read from swap", color: theme.swapReadSeries,
+            values: selection.trends.map { $0.swapInBytesPerSecond.map { $0 / 1_000_000 } }),
+         TimeSeriesLine(name: "Write to swap", color: theme.swapWriteSeries,
+            values: selection.trends.map { $0.swapOutBytesPerSecond.map { $0 / 1_000_000 } },
+            negative: true)]
+    }
+
     var paging: [TimeSeriesLine] {
         [rate("Page-ins", color: theme.memoryPageinsSeries, pattern: .solid,
               reading: \.memoryPageinsPerSecond),
@@ -134,6 +142,7 @@ struct RecordedMemory: View {
                     }
                     VStack(spacing: theme.panelGap) { categoryChart(data); pressureChart(data) }
                 }
+                Self.swapTrafficChart(data, inspectedID: $inspectedID, inspecting: $inspecting)
                 ViewThatFits(in: .horizontal) {
                     HStack(alignment: .top, spacing: theme.panelGap) {
                         swapChart(data).frame(minWidth: 330)
@@ -191,11 +200,20 @@ struct RecordedMemory: View {
             explanation: "Used is the amount held in swap. Allocated is the total swap space macOS has allocated. Both are amounts in GiB, not traffic rates.")
     }
 
+    static func swapTrafficChart(_ data: RecordedMemoryData,
+                                 inspectedID: Binding<String?>,
+                                 inspecting: Binding<Bool>) -> RecordedResourceChart {
+        RecordedResourceChart(title: "Swap traffic", context: data.context,
+            lines: data.swapTraffic, style: TimeSeriesStyle(unit: "MB/s"),
+            inspectedID: inspectedID, inspecting: inspecting,
+            explanation: "Read from swap and write to swap in decimal MB/s over the measured interval. Writes mirror below zero; both readouts stay nonnegative. Missing or reset intervals remain gaps.")
+    }
+
     private func pagingChart(_ data: RecordedMemoryData) -> some View {
         RecordedResourceChart(title: "Page-ins and compression", context: data.context,
             lines: data.paging, style: TimeSeriesStyle(unit: "/s"),
             inspectedID: $inspectedID, inspecting: $inspecting,
-            explanation: "Page-ins, compressions and decompressions per second over the measured interval. Unavailable intervals remain gaps. These are page counts, not bytes per second.")
+            explanation: "Page-ins, compressions and decompressions per second over the measured interval. Unavailable intervals remain gaps. These are page counts, not bytes per second. Paged-out byte rates are unavailable: the source supplies page counts without a recorded page size for conversion.")
     }
 }
 
@@ -287,7 +305,7 @@ struct RecordedResourceChart: View {
         }
     }
 
-    private func reading(_ line: TimeSeriesLine) -> String {
+    func reading(_ line: TimeSeriesLine) -> String {
         dashboardReading(readoutIndex.flatMap { line.values[$0] }, unit: line.unit ?? style.unit)
     }
 

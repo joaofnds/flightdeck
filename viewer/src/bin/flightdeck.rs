@@ -158,6 +158,7 @@ fn check(root: &Path, archive: &Path) -> io::Result<()> {
                 "desktop/tests/cpu_history_checks.swift",
                 "desktop/tests/cpu_history_panel_checks.swift",
                 "desktop/tests/memory_pressure_checks.swift",
+                "desktop/tests/memory_swap_checks.swift",
                 "desktop/tests/live_collector_checks.swift",
                 "desktop/tests/live_apps_checks.swift",
                 "desktop/tests/live_apps_worker_checks.swift",

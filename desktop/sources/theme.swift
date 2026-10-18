@@ -15,12 +15,15 @@ struct FlightdeckTheme {
     var cpuActivityModerate = Color(red: 0.95, green: 0.80, blue: 0.05)
     var cpuActivityHigh = Palette.orange
     var cpuActivityPeak = Palette.red
+    var gpuActivitySeries = Palette.purple
     var gpuPowerSeries = Palette.purple
     var memoryActiveSeries = Palette.blue
     var memoryWiredSeries = Palette.orange
     var memoryCompressedSeries = Palette.purple
     var swapUsedSeries = Palette.purple
     var swapAllocatedSeries = Color(red: 0.82, green: 0.82, blue: 0.87)
+    var swapReadSeries = Palette.purple
+    var swapWriteSeries = Palette.orange
     var memoryPageinsSeries = Palette.blue
     var memoryCompressionsSeries = Palette.orange
     var memoryDecompressionsSeries = Palette.purple

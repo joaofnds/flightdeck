@@ -13,7 +13,7 @@ struct RecordedComponentData {
 
     var cpu: TimeSeriesLine { line("CPU activity", unit: "%", color: theme.cpuSeries, metric: \.cpuPercent) }
     var gpuActivity: TimeSeriesLine {
-        line("GPU activity", unit: "%", color: theme.gpuPowerSeries, metric: \.gpuActivePercent)
+        line("GPU activity", unit: "%", color: theme.gpuActivitySeries, metric: \.gpuActivePercent)
     }
     var gpuActivityStyle: TimeSeriesStyle {
         let maximum = gpuActivity.values.compactMap { $0 }.filter(\.isFinite).max() ?? 100
@@ -23,8 +23,12 @@ struct RecordedComponentData {
     var gpuPower: TimeSeriesLine {
         line("GPU power", unit: "W", color: theme.gpuPowerSeries, metric: \.gpuWatts)
     }
-    var energy: [TimeSeriesLine] {
-        [line("System power", unit: "W", color: theme.systemPowerSeries, metric: \.powerWatts), gpuPower]
+    var systemPower: TimeSeriesLine {
+        line("System power", unit: "W", color: theme.systemPowerSeries, metric: \.powerWatts)
+    }
+    var energy: [TimeSeriesLine] { [systemPower, gpuPower] }
+    var socTemperature: TimeSeriesLine {
+        line("SoC temperature", unit: "°C", color: theme.temperatureSeries, metric: \.socCelsius)
     }
     var network: [TimeSeriesLine] {
         [line("Received", unit: "KiB/s", color: theme.networkReceivedSeries,
@@ -95,9 +99,16 @@ struct RecordedComponentPane: View {
                         VStack(spacing: theme.panelGap) { gpuActivity(data); gpuPower(data) }
                     }
                 case .energy:
-                    chart("Recorded power", data: data, lines: data.energy,
-                        style: TimeSeriesStyle(unit: "W", fill: 0.1),
-                        explanation: "System power is the recorded SMC reading. GPU power uses recorded energy over its measured interval. The two series are independent and are not added together.")
+                    ViewThatFits(in: .horizontal) {
+                        HStack(alignment: .top, spacing: theme.panelGap) {
+                            systemPower(data).frame(minWidth: 330)
+                            gpuPower(data).frame(minWidth: 330)
+                        }
+                        VStack(spacing: theme.panelGap) { systemPower(data); gpuPower(data) }
+                    }
+                    chart("SoC temperature", data: data, lines: [data.socTemperature],
+                        style: TimeSeriesStyle(unit: "°C", fill: 0.1),
+                        explanation: "Recorded single SoC sensor reading. This does not identify separate CPU or GPU sensor positions, or a sensor-group average or maximum.")
                 case .network:
                     chart("External interfaces", data: data, lines: data.network,
                         style: TimeSeriesStyle(unit: "KiB/s", fill: 0.1),
@@ -146,6 +157,12 @@ struct RecordedComponentPane: View {
         chart("GPU power", data: data, lines: [data.gpuPower],
             style: TimeSeriesStyle(unit: "W", fill: 0.1),
             explanation: "Recorded GPU energy change divided by the measured continuous interval.")
+    }
+
+    private func systemPower(_ data: RecordedComponentData) -> some View {
+        chart("System power", data: data, lines: [data.systemPower],
+            style: TimeSeriesStyle(unit: "W", fill: 0.1),
+            explanation: "Recorded SMC system-power reading. This does not attribute power to CPU, GPU or apps.")
     }
 
     private func networkPackets(_ data: RecordedComponentData) -> some View {
