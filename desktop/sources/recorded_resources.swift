@@ -150,6 +150,7 @@ struct RecordedMemory: View {
                     }
                     VStack(spacing: theme.panelGap) { swapChart(data); pagingChart(data) }
                 }
+                RecordedMemoryQuantities(selection: selection)
                 Text("Active, wired and compressed are the recorded VM categories. They are shown independently. Memory pressure is macOS’s verdict; compressed memory and swap can remain in use at normal pressure.")
                     .font(.callout).foregroundStyle(theme.muted)
             } else {

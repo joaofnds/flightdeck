@@ -94,9 +94,15 @@ struct Metric: Decodable, Identifiable, Sendable {
     let networkRxErrorsPerSecond: Double?
     let networkTxErrorsPerSecond: Double?
     let memoryTotalBytes: UInt64?
+    let memoryFreeBytes: UInt64?
     let memoryActiveBytes: UInt64?
+    let memoryInactiveBytes: UInt64?
+    let memorySpeculativeBytes: UInt64?
     let memoryWiredBytes: UInt64?
     let memoryCompressedBytes: UInt64?
+    let memoryAnonymousBytes: UInt64?
+    let memoryFileBackedBytes: UInt64?
+    let memoryPurgeableBytes: UInt64?
     let swapUsedBytes: UInt64?
     let swapTotalBytes: UInt64?
     let swapInBytesPerSecond: Double?
