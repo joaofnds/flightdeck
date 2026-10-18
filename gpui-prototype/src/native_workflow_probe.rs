@@ -28,7 +28,14 @@ pub fn run(root: PathBuf, deadline: Instant) -> Result<Value, String> {
     dashboard.request.second = second;
     dashboard.request.identity = Some(selected.clone());
     dashboard.request.offset = 512;
-    dashboard.hover_second = dashboard.request.second;
+    dashboard.chart_hover =
+        dashboard
+            .request
+            .second
+            .map(|second| crate::live_dashboard::ChartHover {
+                source: "recording-switch-probe".into(),
+                second,
+            });
     dashboard.expanded = Some(("ticks".into(), 1));
     dashboard.begin_recording(root);
     wait_switch(&mut dashboard, deadline)?;
@@ -162,7 +169,7 @@ fn report(dashboard: &mut LiveDashboard, initial: &Value) -> Result<Value, Strin
         return Err("Native recording switch retained the previous row".into());
     }
 
-    if dashboard.hover_second.is_some() {
+    if dashboard.chart_hover.is_some() {
         return Err("Native recording switch retained previous row or hover state".into());
     }
 

@@ -17,6 +17,12 @@ pub const PANEL: u32 = 0x0018_1b1f;
 pub const PURPLE: u32 = 0x00b8_77d9;
 pub const RED: u32 = 0x00f2_495c;
 pub const TEXT: u32 = 0x00cc_ccdc;
+pub const PLOT_INSETS: gpui::Edges<Pixels> = gpui::Edges {
+    top: px(8.0),
+    right: px(10.0),
+    bottom: px(20.0),
+    left: px(40.0),
+};
 
 #[derive(Clone, Copy)]
 pub struct Inspection {
@@ -101,10 +107,13 @@ fn plot_cursor(
 
 pub fn plot_bounds(bounds: Bounds<Pixels>) -> Bounds<Pixels> {
     Bounds::new(
-        point(bounds.origin.x + px(40.0), bounds.origin.y + px(8.0)),
+        point(
+            bounds.origin.x + PLOT_INSETS.left,
+            bounds.origin.y + PLOT_INSETS.top,
+        ),
         size(
-            (bounds.size.width - px(50.0)).max(px(1.0)),
-            (bounds.size.height - px(28.0)).max(px(1.0)),
+            (bounds.size.width - (PLOT_INSETS.left + PLOT_INSETS.right)).max(px(1.0)),
+            (bounds.size.height - (PLOT_INSETS.top + PLOT_INSETS.bottom)).max(px(1.0)),
         ),
     )
 }

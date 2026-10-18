@@ -18,14 +18,258 @@ fn hovering_history_keeps_the_cursor_within_the_plot(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn inspection_cursor_is_hidden_before_any_plot_hover(cx: &mut TestAppContext) {
+    // Read the composed frame before input so an accepted selection cannot imply a hover.
+    let mut harness = InputHarness::setup(cx);
+
+    assert!(!harness.driver.energy_cursor_is_visible());
+    harness.teardown();
+}
+
+#[gpui::test]
+fn moving_directly_from_the_first_plot_keeps_both_cursors_synchronized(cx: &mut TestAppContext) {
+    // Deliver one move across sibling plots, then inspect the settled scene without more input.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.seed_repeated_second();
+    harness.driver.hover_selected_second_on("live-energy-plot");
+    assert!(harness.driver.reading_is_visible("8.0 W"));
+
+    harness
+        .driver
+        .hover_previous_second_on("live-soc-temperature-plot");
+
+    assert!(harness.driver.reading_is_visible("90.0 W"));
+    assert!(harness.driver.reading_is_visible("60.0 °C"));
+    harness.driver.assert_cursors_track_previous_second();
+    assert!(harness.driver.cursor_is_visible("live-energy-plot"));
+    assert!(
+        harness
+            .driver
+            .cursor_is_visible("live-soc-temperature-plot")
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn moving_directly_from_the_second_plot_keeps_both_cursors_synchronized(cx: &mut TestAppContext) {
+    // Reverse the sibling transition because event-listener order differs from the forward move.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.seed_repeated_second();
+    harness
+        .driver
+        .hover_selected_second_on("live-soc-temperature-plot");
+    assert!(harness.driver.reading_is_visible("8.0 W"));
+
+    harness.driver.hover_previous_second_on("live-energy-plot");
+
+    assert!(harness.driver.reading_is_visible("90.0 W"));
+    assert!(harness.driver.reading_is_visible("60.0 °C"));
+    harness.driver.assert_cursors_track_previous_second();
+    assert!(harness.driver.cursor_is_visible("live-energy-plot"));
+    assert!(
+        harness
+            .driver
+            .cursor_is_visible("live-soc-temperature-plot")
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn scrolling_a_plot_away_from_a_stationary_pointer_hides_both_cursors(cx: &mut TestAppContext) {
+    // A wheel event moves only layout: the pointer leaves the plot but stays inside its wrapper.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.make_scrollable();
+    let plot = harness.driver.plot_bounds("live-energy-plot");
+    let pointer = gpui::point(plot.center().x, plot.bottom() - gpui::px(1.0));
+    harness.driver.hover_position(pointer);
+    assert!(harness.driver.cursor_is_visible("live-energy-plot"));
+    assert!(
+        harness
+            .driver
+            .cursor_is_visible("live-soc-temperature-plot")
+    );
+
+    harness.driver.scroll_at(pointer, -2.0);
+
+    let moved = harness.driver.plot_bounds("live-energy-plot");
+    assert_eq!(moved.bottom(), plot.bottom() - gpui::px(2.0));
+    assert!(!moved.contains(&pointer));
+    assert!(
+        harness
+            .driver
+            .chart_bounds("live-energy-plot")
+            .contains(&pointer)
+    );
+    assert_eq!(harness.driver.pointer_position(), pointer);
+    assert!(!harness.driver.cursor_is_visible("live-energy-plot"));
+    assert!(
+        !harness
+            .driver
+            .cursor_is_visible("live-soc-temperature-plot")
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn moving_above_the_plot_hides_both_inspection_cursors(cx: &mut TestAppContext) {
+    // Leave the top edge after positively establishing synchronized cursors.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.hover_previous_second();
+    harness.driver.assert_cursors_visible();
+
+    harness.driver.leave_plot("live-energy-plot", PlotExit::Top);
+
+    harness.driver.assert_cursors_hidden();
+    harness.teardown();
+}
+
+#[gpui::test]
+fn moving_below_the_plot_hides_both_inspection_cursors(cx: &mut TestAppContext) {
+    // Leave the bottom edge while remaining in the larger chart wrapper.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.hover_previous_second();
+    harness.driver.assert_cursors_visible();
+
+    harness
+        .driver
+        .leave_plot("live-energy-plot", PlotExit::Bottom);
+
+    harness.driver.assert_cursors_hidden();
+    harness.teardown();
+}
+
+#[gpui::test]
+fn moving_left_of_the_plot_hides_both_inspection_cursors(cx: &mut TestAppContext) {
+    // Leave the actual plot through its label margin.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.hover_previous_second();
+    harness.driver.assert_cursors_visible();
+
+    harness
+        .driver
+        .leave_plot("live-energy-plot", PlotExit::Left);
+
+    harness.driver.assert_cursors_hidden();
+    harness.teardown();
+}
+
+#[gpui::test]
+fn moving_right_of_the_plot_hides_both_inspection_cursors(cx: &mut TestAppContext) {
+    // Leave the actual plot through its right margin.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.hover_previous_second();
+    harness.driver.assert_cursors_visible();
+
+    harness
+        .driver
+        .leave_plot("live-energy-plot", PlotExit::Right);
+
+    harness.driver.assert_cursors_hidden();
+    harness.teardown();
+}
+
+#[gpui::test]
+fn moving_onto_timestamps_hides_both_inspection_cursors(cx: &mut TestAppContext) {
+    // Timestamp labels stay outside graph hover even within the same panel.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.hover_previous_second();
+    harness.driver.assert_cursors_visible();
+
+    harness
+        .driver
+        .leave_plot("live-energy-plot", PlotExit::Timestamp);
+
+    harness.driver.assert_cursors_hidden();
+    harness.teardown();
+}
+
+#[gpui::test]
+fn moving_onto_the_legend_hides_both_inspection_cursors(cx: &mut TestAppContext) {
+    // A legend remains outside graph hover even within the same panel.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.hover_previous_second();
+    harness.driver.assert_cursors_visible();
+
+    harness
+        .driver
+        .leave_plot("live-energy-plot", PlotExit::Legend);
+
+    harness.driver.assert_cursors_hidden();
+    harness.teardown();
+}
+
+#[gpui::test]
+fn moving_onto_the_sidebar_hides_both_inspection_cursors(cx: &mut TestAppContext) {
+    // Sidebar movement clears both synchronized cursors.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.hover_previous_second();
+    harness.driver.assert_cursors_visible();
+
+    harness
+        .driver
+        .leave_plot("live-energy-plot", PlotExit::Sidebar);
+
+    harness.driver.assert_cursors_hidden();
+    harness.teardown();
+}
+
+#[gpui::test]
+fn leaving_the_second_plot_restores_selected_readings_and_hides_both_cursors(
+    cx: &mut TestAppContext,
+) {
+    // Clear the destination hover after a direct move and restore both accepted readouts.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.seed_repeated_second();
+    harness.driver.hover_selected_second_on("live-energy-plot");
+    harness
+        .driver
+        .hover_previous_second_on("live-soc-temperature-plot");
+    assert!(harness.driver.reading_is_visible("90.0 W"));
+    assert!(harness.driver.reading_is_visible("60.0 °C"));
+
+    harness
+        .driver
+        .leave_plot("live-soc-temperature-plot", PlotExit::Bottom);
+
+    harness.driver.assert_cursors_hidden();
+    assert!(harness.driver.reading_is_visible("8.0 W"));
+    assert!(harness.driver.reading_is_visible("40.0 °C"));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn scrolling_the_plot_back_under_the_pointer_restores_synchronized_hover(cx: &mut TestAppContext) {
+    // Reverse layout movement so reentry cannot depend on another pointer event.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.seed_repeated_second();
+    harness.driver.make_scrollable();
+    let plot = harness.driver.plot_bounds("live-energy-plot");
+    let previous = harness.driver.previous_second_position();
+    let pointer = gpui::point(previous.x, plot.bottom() - gpui::px(1.0));
+    harness.driver.hover_position(pointer);
+    harness.driver.scroll_at(pointer, -2.0);
+    harness.driver.assert_cursors_hidden();
+    assert!(harness.driver.reading_is_visible("8.0 W"));
+
+    harness.driver.scroll_at(pointer, 2.0);
+
+    assert_eq!(harness.driver.pointer_position(), pointer);
+    assert_eq!(harness.driver.plot_bounds("live-energy-plot"), plot);
+    harness.driver.assert_cursors_visible();
+    assert!(harness.driver.reading_is_visible("90.0 W"));
+    assert!(harness.driver.reading_is_visible("60.0 °C"));
+    harness.teardown();
+}
+
+#[gpui::test]
 fn hovering_a_repeated_second_shows_the_observation_requested_by_click(cx: &mut TestAppContext) {
     // Hover and click the same repeated second, reading the headline from GPUI's rendered frame.
     let mut harness = InputHarness::setup(cx);
     harness.driver.seed_repeated_second();
 
     harness.driver.hover_previous_second();
-    let latest_reading_visible = harness.driver.energy_reading_is_visible("90.0 W");
-    let previous_reading_visible = harness.driver.energy_reading_is_visible("10.0 W");
+    let latest_reading_visible = harness.driver.reading_is_visible("90.0 W");
+    let previous_reading_visible = harness.driver.reading_is_visible("10.0 W");
     harness.driver.click_previous_second();
 
     assert!(
@@ -198,6 +442,17 @@ struct InputDriver {
     context: VisualTestContext,
 }
 
+#[derive(Clone, Copy)]
+enum PlotExit {
+    Top,
+    Bottom,
+    Left,
+    Right,
+    Timestamp,
+    Legend,
+    Sidebar,
+}
+
 impl InputDriver {
     fn seed_repeated_second(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
@@ -206,12 +461,15 @@ impl InputDriver {
             previous["wall_ns"] = json!(999_100_000_000_u64);
             previous["publication"] = json!(2);
             previous["power_watts"] = json!(10);
+            previous["soc_celsius"] = json!(20);
             let mut latest = previous.clone();
             latest["wall_ns"] = json!(999_750_000_000_u64);
             latest["publication"] = json!(3);
             latest["power_watts"] = json!(90);
+            latest["soc_celsius"] = json!(60);
             let mut selected = snapshot.selection["trends"][1].clone();
             selected["publication"] = json!(4);
+            selected["soc_celsius"] = json!(40);
             snapshot.selection["selected"]["publication"] = json!(4);
             snapshot.selection["trends"] = json!([previous, latest, selected]);
 
@@ -249,23 +507,124 @@ impl InputDriver {
     }
 
     fn previous_second_position(&mut self) -> gpui::Point<gpui::Pixels> {
-        let bounds = self.context.debug_bounds("live-energy-plot").unwrap();
-        let plot = crate::charts::plot_bounds(bounds);
-        gpui::point(
-            plot.left() + plot.size.width * (898.5 / 900.0),
-            plot.center().y,
-        )
+        self.second_position("live-energy-plot", 898.5 / 900.0)
+    }
+
+    fn second_position(
+        &mut self,
+        selector: &'static str,
+        fraction: f32,
+    ) -> gpui::Point<gpui::Pixels> {
+        let plot = self.plot_bounds(selector);
+        gpui::point(plot.left() + plot.size.width * fraction, plot.center().y)
+    }
+
+    fn hover_selected_second_on(&mut self, selector: &'static str) {
+        let position = self.second_position(selector, 899.5 / 900.0);
+        self.hover_position(position);
+    }
+
+    fn hover_previous_second_on(&mut self, selector: &'static str) {
+        let position = self.second_position(selector, 898.5 / 900.0);
+        self.hover_position(position);
     }
 
     fn hover_previous_second(&mut self) {
         let position = self.previous_second_position();
+        self.hover_position(position);
+    }
+
+    fn hover_position(&mut self, position: gpui::Point<gpui::Pixels>) {
         self.context
             .simulate_mouse_move(position, None, Modifiers::none());
     }
 
-    fn assert_energy_cursor_tracks_plot(&mut self) {
-        let bounds = self.context.debug_bounds("live-energy-plot").unwrap();
+    fn leave_plot(&mut self, selector: &'static str, exit: PlotExit) {
+        let bounds = self.chart_bounds(selector);
         let plot = crate::charts::plot_bounds(bounds);
+        let position = match exit {
+            PlotExit::Top => gpui::point(plot.center().x, plot.top() - gpui::px(1.0)),
+            PlotExit::Bottom => gpui::point(plot.center().x, plot.bottom() + gpui::px(1.0)),
+            PlotExit::Left => gpui::point(plot.left() - gpui::px(1.0), plot.center().y),
+            PlotExit::Right => gpui::point(plot.right() + gpui::px(1.0), plot.center().y),
+            PlotExit::Timestamp => gpui::point(plot.center().x, bounds.bottom() + gpui::px(10.0)),
+            PlotExit::Legend => gpui::point(plot.center().x, bounds.bottom() + gpui::px(40.0)),
+            PlotExit::Sidebar => gpui::point(gpui::px(20.0), plot.center().y),
+        };
+        self.hover_position(position);
+    }
+
+    fn energy_cursor_is_visible(&mut self) -> bool {
+        self.cursor_is_visible("live-energy-plot")
+    }
+
+    fn chart_bounds(&mut self, selector: &'static str) -> gpui::Bounds<gpui::Pixels> {
+        self.context.debug_bounds(selector).unwrap()
+    }
+
+    fn plot_bounds(&mut self, selector: &'static str) -> gpui::Bounds<gpui::Pixels> {
+        crate::charts::plot_bounds(self.chart_bounds(selector))
+    }
+
+    fn make_scrollable(&mut self) {
+        self.context
+            .simulate_resize(gpui::size(gpui::px(1200.0), gpui::px(650.0)));
+        self.context.run_until_parked();
+    }
+
+    fn scroll_at(&mut self, position: gpui::Point<gpui::Pixels>, delta_y: f32) {
+        self.context.simulate_event(gpui::ScrollWheelEvent {
+            position,
+            delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.0), gpui::px(delta_y))),
+            modifiers: Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+    }
+
+    fn pointer_position(&mut self) -> gpui::Point<gpui::Pixels> {
+        self.context.update(|window, _| window.mouse_position())
+    }
+
+    fn cursor_is_visible(&mut self, selector: &'static str) -> bool {
+        let plot = self.plot_bounds(selector);
+        self.context.update(|window, _| {
+            let expected =
+                gpui::Bounds::new(plot.origin, gpui::size(gpui::px(1.0), plot.size.height))
+                    .scale(window.scale_factor());
+            let right = plot.right().scale(window.scale_factor());
+            window.painted_quads().into_iter().any(|quad| {
+                if quad.bounds.size != expected.size {
+                    return false;
+                }
+                if (quad.bounds.top() - expected.top()).as_f32().abs() > 1.0 {
+                    return false;
+                }
+                (expected.left() - expected.size.width..=right).contains(&quad.bounds.left())
+            })
+        })
+    }
+
+    fn assert_energy_cursor_tracks_plot(&mut self) {
+        self.assert_cursor_tracks_previous_second("live-energy-plot");
+    }
+
+    fn assert_cursors_track_previous_second(&mut self) {
+        self.assert_cursor_tracks_previous_second("live-energy-plot");
+        self.assert_cursor_tracks_previous_second("live-soc-temperature-plot");
+    }
+
+    fn assert_cursors_visible(&mut self) {
+        assert!(self.cursor_is_visible("live-energy-plot"));
+        assert!(self.cursor_is_visible("live-soc-temperature-plot"));
+    }
+
+    fn assert_cursors_hidden(&mut self) {
+        assert!(!self.cursor_is_visible("live-energy-plot"));
+        assert!(!self.cursor_is_visible("live-soc-temperature-plot"));
+    }
+
+    fn assert_cursor_tracks_previous_second(&mut self, selector: &'static str) {
+        let plot = self.plot_bounds(selector);
         let x = plot.left() + plot.size.width * (898.0 / 900.0);
 
         let (expected, cursor) = self.context.update(|window, _| {
@@ -279,6 +638,10 @@ impl InputDriver {
                 .into_iter()
                 .find(|quad| {
                     if quad.bounds.size != expected.size {
+                        return false;
+                    }
+
+                    if (quad.bounds.top() - expected.top()).as_f32().abs() > 1.0 {
                         return false;
                     }
 
@@ -305,7 +668,7 @@ impl InputDriver {
         self.context.simulate_click(position, Modifiers::none());
     }
 
-    fn energy_reading_is_visible(&mut self, reading: &'static str) -> bool {
+    fn reading_is_visible(&mut self, reading: &'static str) -> bool {
         self.context.debug_bounds(reading).is_some()
     }
 

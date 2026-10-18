@@ -11,7 +11,7 @@ use serde_json::Value;
 use crate::charts::{self, GRID, Inspection, MUTED, PANEL};
 use crate::dashboard::control;
 use crate::data::{Panel, reading};
-use crate::live_dashboard::LiveDashboard;
+use crate::live_dashboard::{ChartHover, LiveDashboard};
 use crate::live_presentation::clock;
 use crate::live_source::Snapshot;
 
@@ -21,10 +21,13 @@ impl LiveDashboard {
             .lines
             .first()
             .map_or(0, |line| line.values.len().saturating_sub(1));
-        let index = self
-            .snapshot
-            .as_deref()
-            .and_then(|snapshot| inspection_index(panel, snapshot, self.hover_second));
+        let index = self.snapshot.as_deref().and_then(|snapshot| {
+            inspection_index(
+                panel,
+                snapshot,
+                self.chart_hover.as_ref().map(|hover| hover.second),
+            )
+        });
         let inspection = Inspection {
             lower: 0,
             selected: index.or(panel.selected_index).unwrap_or(upper),
@@ -35,10 +38,13 @@ impl LiveDashboard {
         let measured = Rc::new(Cell::new(Bounds::default()));
         let plot =
             charts::plot_without_cursor(Rc::clone(panel), inspection, hidden, Rc::clone(&measured));
-        let cursor = self
-            .snapshot
-            .as_deref()
-            .and_then(|snapshot| cursor_fraction(panel, snapshot, self.hover_second));
+        let cursor = self.snapshot.as_deref().and_then(|snapshot| {
+            cursor_fraction(
+                panel,
+                snapshot,
+                self.chart_hover.as_ref().map(|hover| hover.second),
+            )
+        });
         let chart = self.chart_events(
             div()
                 .relative()
@@ -138,39 +144,19 @@ impl LiveDashboard {
         panel: &Panel,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let click_bounds = Rc::clone(&measured);
+        let hover = Self::chart_hover_target(panel, Rc::clone(&measured), cx);
         let chart = self.chart_accessibility(chart, panel, cx);
         chart
             .focusable()
             .tab_stop(true)
             .focus(|style| style.bg(rgb(0x20_30_41)))
             .on_key_down(cx.listener(Self::chart_keyboard))
-            .on_mouse_move(
-                cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {
-                    let second = this.snapshot.as_ref().and_then(|snapshot| {
-                        let rect = charts::plot_bounds(measured.get());
-                        let fraction = f32::from(event.position.x - rect.origin.x)
-                            / f32::from(rect.size.width);
-                        crate::live_projection::sample_second(&snapshot.selection, fraction)
-                    });
-                    if this.hover_second != second {
-                        this.hover_second = second;
-                        cx.notify();
-                    }
-                }),
-            )
-            .on_hover(cx.listener(|this, hovered, _, cx| {
-                if !hovered {
-                    if this.hover_second.take().is_some() {
-                        cx.notify();
-                    }
-                }
-            }))
+            .child(hover)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
                     let second = this.snapshot.as_ref().and_then(|snapshot| {
-                        let rect = charts::plot_bounds(click_bounds.get());
+                        let rect = charts::plot_bounds(measured.get());
                         let fraction = f32::from(event.position.x - rect.origin.x)
                             / f32::from(rect.size.width);
                         crate::live_projection::sample_second(&snapshot.selection, fraction)
@@ -182,6 +168,74 @@ impl LiveDashboard {
                     }
                 }),
             )
+    }
+
+    fn chart_hover_target(
+        panel: &Panel,
+        measured: Rc<Cell<Bounds<gpui::Pixels>>>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let source = SharedString::from(panel.id.clone());
+        let move_source = source.clone();
+        let move_bounds = Rc::clone(&measured);
+        div()
+            .id("plot-hover")
+            .absolute()
+            .top(charts::PLOT_INSETS.top)
+            .right(charts::PLOT_INSETS.right)
+            .bottom(charts::PLOT_INSETS.bottom)
+            .left(charts::PLOT_INSETS.left)
+            .min_w(px(1.0))
+            .min_h(px(1.0))
+            .on_mouse_move(
+                cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {
+                    let second = chart_hover_second(
+                        this.snapshot.as_deref(),
+                        move_bounds.get(),
+                        event.position,
+                    );
+                    this.chart_hover_update(&move_source, second, cx);
+                }),
+            )
+            .on_hover(cx.listener(move |this, hovered, window, cx| {
+                let second = if *hovered {
+                    chart_hover_second(
+                        this.snapshot.as_deref(),
+                        measured.get(),
+                        window.mouse_position(),
+                    )
+                } else {
+                    None
+                };
+                this.chart_hover_update(&source, second, cx);
+            }))
+    }
+
+    fn chart_hover_update(
+        &mut self,
+        source: &SharedString,
+        second: Option<u64>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(second) = second {
+            let changed = self.chart_hover.as_ref().map(|hover| hover.second) != Some(second);
+            self.chart_hover = Some(ChartHover {
+                source: source.clone(),
+                second,
+            });
+            if changed {
+                cx.notify();
+            }
+        } else {
+            if self
+                .chart_hover
+                .as_ref()
+                .is_some_and(|hover| &hover.source == source)
+            {
+                self.chart_hover = None;
+                cx.notify();
+            }
+        }
     }
 
     fn chart_accessibility(
@@ -361,7 +415,11 @@ impl LiveDashboard {
                 .h(px(18.0))
                 .text_size(px(10.0))
                 .text_color(rgb(MUTED))
-                .children(self.hover_second.map(|second| clock(second, true))),
+                .children(
+                    self.chart_hover
+                        .as_ref()
+                        .map(|hover| clock(hover.second, true)),
+                ),
         )
     }
 
@@ -450,6 +508,20 @@ fn keyboard_second(selection: &KeyboardSelection, delta: i64, catalog: &Value) -
     Some(next)
 }
 
+fn chart_hover_second(
+    snapshot: Option<&Snapshot>,
+    bounds: Bounds<gpui::Pixels>,
+    position: gpui::Point<gpui::Pixels>,
+) -> Option<u64> {
+    let rect = charts::plot_bounds(bounds);
+    if !rect.contains(&position) {
+        return None;
+    }
+
+    let fraction = f32::from(position.x - rect.origin.x) / f32::from(rect.size.width);
+    crate::live_projection::sample_second(&snapshot?.selection, fraction)
+}
+
 fn chart_cursor(fraction: Option<f32>) -> impl IntoElement {
     canvas(
         |_, _, _| (),
@@ -471,10 +543,10 @@ fn chart_cursor(fraction: Option<f32>) -> impl IntoElement {
 }
 
 fn cursor_fraction(panel: &Panel, snapshot: &Snapshot, hover: Option<u64>) -> Option<f32> {
-    if let Some(index) = inspection_index(panel, snapshot, hover) {
+    let second = hover?;
+    if let Some(index) = inspection_index(panel, snapshot, Some(second)) {
         return panel.positions.as_ref()?.get(index).copied();
     }
-    let second = hover?;
     let selected = snapshot.selection["second"].as_u64()?;
     let first = selected.saturating_sub(899);
     let end = selected.checked_add(1)?;

@@ -43,7 +43,7 @@ pub struct LiveDashboard {
     pub renders: u64,
     pub animate: bool,
     pub reveal_hardware: bool,
-    pub hover_second: Option<u64>,
+    pub chart_hover: Option<ChartHover>,
     pub app_picker_open: bool,
     pub cpu_inspection: Option<crate::live_cpu_history::CPUInspection>,
     pub cpu_history_focus: Option<gpui::FocusHandle>,
@@ -51,6 +51,11 @@ pub struct LiveDashboard {
     pub(crate) inspection_focus: Option<gpui::FocusHandle>,
     list: ListState,
     last_status: String,
+}
+
+pub struct ChartHover {
+    pub source: gpui::SharedString,
+    pub second: u64,
 }
 
 pub enum Row {
@@ -105,7 +110,7 @@ impl LiveDashboard {
             renders: 0,
             animate: false,
             reveal_hardware: false,
-            hover_second: None,
+            chart_hover: None,
             app_picker_open: false,
             cpu_inspection: None,
             cpu_history_focus: None,
@@ -261,13 +266,13 @@ impl LiveDashboard {
         self.panels.clear();
         self.executables.clear();
         self.expanded = None;
-        self.hover_second = None;
+        self.chart_hover = None;
         self.cpu_inspection = None;
         self.rebuild();
     }
 
     pub fn navigate(&mut self, route: &str, cx: &mut Context<Self>) {
-        self.hover_second = None;
+        self.chart_hover = None;
         self.request.route = route.into();
         self.request.offset = 0;
         self.request.members_offset = 0;

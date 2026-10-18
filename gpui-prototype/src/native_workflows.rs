@@ -471,7 +471,7 @@ impl LiveDashboard {
             self.executable = None;
             self.executables.clear();
             self.hidden.clear();
-            self.hover_second = None;
+            self.chart_hover = None;
             self.app_picker_open = false;
             self.cpu_inspection = None;
             self.native.alternative_page = 0;
