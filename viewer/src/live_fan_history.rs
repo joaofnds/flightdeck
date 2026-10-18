@@ -1,18 +1,10 @@
-use std::collections::BTreeMap;
-
 use collector::smc::FANS_MAX;
 use persistence::{Error, Result};
 use serde_json::Value;
 
 use crate::data::Table;
 
-pub(crate) fn capture(tables: &BTreeMap<&str, Table>, point: &mut Value) -> Result<()> {
-    let publication = point["publication"]
-        .as_u64()
-        .ok_or(Error::Bound("fan point publication"))?;
-    let ticks = tables.get("ticks").ok_or(Error::Bound("fan tick table"))?;
-    let fans = tables.get("fans").ok_or(Error::Bound("fan table"))?;
-
+pub(crate) fn capture(ticks: &Table, fans: Option<&Table>, publication: u64) -> Result<Value> {
     if ticks.rows.len() != 1 {
         return Err(Error::Bound("fan tick rows"));
     }
@@ -21,33 +13,40 @@ pub(crate) fn capture(tables: &BTreeMap<&str, Table>, point: &mut Value) -> Resu
         return Err(Error::Bound("fan tick publication"));
     }
 
-    if fans.rows.len() > usize::from(FANS_MAX) {
-        return Err(Error::Bound("fan channels"));
+    if let Some(fans) = fans {
+        source(fans)?;
+        if fans.rows.len() > usize::from(FANS_MAX) {
+            return Err(Error::Bound("fan channels"));
+        }
     }
 
-    let rpm = match ticks.field(&ticks.rows[0], "smc_read")? {
+    match ticks.field(&ticks.rows[0], "smc_read")? {
         Some("true") => {
-            let mut channels = Vec::with_capacity(fans.rows.len());
+            let mut channels = Vec::with_capacity(fans.map_or(0, |fans| fans.rows.len()));
 
-            capture_channels(fans, publication, &mut channels)?;
+            if let Some(fans) = fans {
+                capture_channels(fans, publication, &mut channels)?;
+            }
 
-            Value::Array(channels)
+            Ok(Value::Array(channels))
         }
         Some("false") => {
-            if !fans.rows.is_empty() {
+            if fans.is_some_and(|fans| !fans.rows.is_empty()) {
                 return Err(Error::Bound("unread fan rows"));
             }
 
-            Value::Null
+            Ok(Value::Null)
         }
-        _ => return Err(Error::Bound("fan SMC availability")),
-    };
+        _ => Err(Error::Bound("fan SMC availability")),
+    }
+}
 
-    point
-        .as_object_mut()
-        .ok_or(Error::Bound("fan point shape"))?
-        .insert("fan_rpm".to_owned(), rpm);
-
+pub(crate) fn source(fans: &Table) -> Result<()> {
+    for column in ["publication", "fan", "rpm"] {
+        if !fans.columns.iter().any(|name| name == column) {
+            return Err(Error::Bound("missing schema column"));
+        }
+    }
     Ok(())
 }
 

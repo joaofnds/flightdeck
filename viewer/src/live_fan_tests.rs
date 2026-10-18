@@ -80,7 +80,7 @@ fn fan_publish(fixture: &mut RingFixture, sample: &FanSample<'_>) {
 
 #[test]
 fn keeps_acquired_fan_history_when_exact_committed_points_overlap() {
-    // Goal: sealing retains live-only fan arrays in following, selection, and its summary.
+    // Goal: sealing retains measured fan arrays in following, selection, and its summary.
     // Method: acquire two real fan publications, commit them, then select the exact second.
     let mut fixture = RingFixture::new_with_shape(&FAN_SHAPE);
     fan_publish(
@@ -108,6 +108,8 @@ fn keeps_acquired_fan_history_when_exact_committed_points_overlap() {
     let committed = saved.select(1001, 0).unwrap();
     assert_eq!(committed["trends"].as_array().unwrap().len(), 2);
     assert_eq!(committed["summary"]["publication"], 2);
+    assert_eq!(committed["summary"]["fan_rpm"], json!([0.0, 2345.0]));
+    assert_eq!(committed["trends"][0]["fan_rpm"], json!([1234.0, 0.0]));
 
     let selected = session.select(1001, 0).unwrap();
     let following = session.follow_latest().unwrap();
@@ -136,6 +138,10 @@ fn fan_seal(fixture: &RingFixture) {
 }
 
 fn fan_seal_with(fixture: &RingFixture, seal: &FanSeal) {
+    fan_seal_into(fixture, seal, &fixture.root);
+}
+
+fn fan_seal_into(fixture: &RingFixture, seal: &FanSeal, root: &Path) {
     let mut reader = RingReader::open_generation(fixture.writer.name()).unwrap();
     let mut tick = persistence::tick_buffer(&reader.shape()).unwrap();
     let mut window = Window::new(
@@ -167,7 +173,7 @@ fn fan_seal_with(fixture: &RingFixture, seal: &FanSeal) {
         }
     }
 
-    seal_window(&fixture.root, &window);
+    seal_window(root, &window);
 }
 
 macro_rules! fan_availability {
@@ -175,7 +181,7 @@ macro_rules! fan_availability {
         #[test]
         fn $name() {
             // Goal: fan availability preserves the difference between zero, gap, and no fans.
-            // Method: follow one real publication with the stated SMC channel readings.
+            // Method: select and reopen a genuinely sealed publication beside its live copy.
             let mut fixture = RingFixture::new_with_shape(&FAN_SHAPE);
             fan_publish(
                 &mut fixture,
@@ -188,13 +194,32 @@ macro_rules! fan_availability {
             let mut session = LiveSession::open(&fixture.root).unwrap();
 
             let response = session.follow_latest().unwrap();
+            fan_seal(&fixture);
+            let mut saved = Session::open(&fixture.root).unwrap();
+            let selected = saved.select(1000, 0).unwrap();
+            let mut reopened = LiveSession::open(&fixture.root).unwrap();
+            let restored = reopened.follow_latest().unwrap();
 
             assert_eq!(response["summary"]["fan_rpm"], $expected);
             assert_eq!(response["trends"][0]["fan_rpm"], $expected);
+            assert_eq!(selected["summary"]["fan_rpm"], $expected);
+            assert_eq!(selected["trends"][0]["fan_rpm"], $expected);
+            assert_eq!(restored["summary"]["fan_rpm"], $expected);
+            assert_eq!(restored["trends"][0]["fan_rpm"], $expected);
         }
     };
 }
 fan_availability!(keeps_unread_smc_as_a_gap, None, Value::Null);
+fan_availability!(
+    keeps_nan_channel_as_a_gap,
+    Some(&[f32::NAN, 0.0]),
+    json!([null, 0.0])
+);
+fan_availability!(
+    keeps_infinite_channel_as_a_gap,
+    Some(&[f32::INFINITY, 0.0]),
+    json!([null, 0.0])
+);
 fan_availability!(
     keeps_measured_fanless_as_an_empty_array,
     Some(&[]),
@@ -363,12 +388,22 @@ fn keeps_different_run_alternatives_separate_without_copying_fan_readings() {
     let mut session = LiveSession::open(&fixture.root).unwrap();
     let mut other = fixture.writer.identity().unwrap();
     other.run = collector::ring::Identity([17, 19]);
-    fan_seal_with(
-        &fixture,
+    let mut other_fixture = RingFixture::new_with_shape(&FAN_SHAPE);
+    fan_publish(
+        &mut other_fixture,
+        &FanSample {
+            tick: 1,
+            second: 1000,
+            channels: Some(&[2345.0, 0.0]),
+        },
+    );
+    fan_seal_into(
+        &other_fixture,
         &FanSeal {
             run: other,
             wall_offset_ns: 0,
         },
+        &fixture.root,
     );
     session.refresh_history().unwrap();
 
@@ -385,7 +420,7 @@ fn keeps_different_run_alternatives_separate_without_copying_fan_readings() {
         .iter()
         .find(|point| point["run"] != saved["run"])
         .unwrap();
-    assert_eq!(saved.get("fan_rpm"), Some(&Value::Null));
+    assert_eq!(saved["fan_rpm"], json!([2345.0, 0.0]));
     assert_eq!(live["fan_rpm"], json!([1234.0]));
 }
 
@@ -408,7 +443,12 @@ fn measures_bounded_fan_projection_and_retained_json_cost() {
     let mut point = response["summary"].clone();
     let start = std::time::Instant::now();
     for _sample in 0..10_000 {
-        crate::live_fan_history::capture(&source.tables, &mut point).unwrap();
+        point["fan_rpm"] = crate::live_fan_history::capture(
+            &source.tables["ticks"],
+            Some(&source.tables["fans"]),
+            source.observation.publication,
+        )
+        .unwrap();
         std::hint::black_box(&point);
     }
     let projection_ns = start.elapsed().as_nanos();
@@ -575,4 +615,31 @@ fn assert_fan_publication(session: &mut LiveSession, expected: &FanExpectation) 
         session.catalog()["latest_observation"]["publication"],
         expected.publication
     );
+}
+
+#[test]
+fn reports_missing_saved_fan_source_while_retaining_live_readings() {
+    // Goal: a missing saved fan source stays a visible history error, not measured fanless.
+    // Method: hide only the genuine fan parquet, follow, then restore and retry the context.
+    let mut fixture = RingFixture::new_following();
+    follow_restoration_short(&mut fixture);
+    let saved = Session::open(&fixture.root).unwrap();
+    let fans = fixture
+        .root
+        .join(&saved.windows[0].data_directory)
+        .join("fans.parquet");
+    let held = fixture.root.join("held-fans.parquet");
+    let mut session = LiveSession::open(&fixture.root).unwrap();
+    std::fs::rename(&fans, &held).unwrap();
+
+    let degraded = session.follow_latest().unwrap();
+
+    assert!(degraded["context_error"].is_string());
+    assert_eq!(degraded["summary"]["fan_rpm"], json!([62.0, 0.0]));
+    assert!(session.restored.is_none());
+    std::fs::rename(&held, &fans).unwrap();
+    let recovered = session.follow_latest().unwrap();
+    assert!(recovered["context_error"].is_null());
+    assert_eq!(recovered["trends"][0]["fan_rpm"], json!([1.0, 0.0]));
+    assert_eq!(recovered["selected"], degraded["selected"]);
 }

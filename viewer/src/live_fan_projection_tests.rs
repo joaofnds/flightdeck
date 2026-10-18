@@ -1,5 +1,6 @@
 use super::*;
 use serde_json::json;
+use std::collections::BTreeMap;
 
 fn initialize(tables: &mut BTreeMap<&'static str, Table>) {
     tables.insert(
@@ -29,6 +30,14 @@ fn initialize(tables: &mut BTreeMap<&'static str, Table>) {
     );
 }
 
+fn project(tables: &BTreeMap<&str, Table>, point: &mut Value) -> Result<()> {
+    let ticks = tables.get("ticks").unwrap();
+    let fans = tables.get("fans").unwrap();
+    let value = capture(ticks, Some(fans), point["publication"].as_u64().unwrap())?;
+    point["fan_rpm"] = value;
+    Ok(())
+}
+
 macro_rules! inconsistent_projection {
     ($name:ident, $change:expr, $reason:literal) => {
         #[test]
@@ -40,7 +49,7 @@ macro_rules! inconsistent_projection {
             $change(&mut tables);
             let mut point = json!({"publication":7});
 
-            let result = capture(&tables, &mut point);
+            let result = project(&tables, &mut point);
 
             assert!(matches!(result, Err(Error::Bound($reason))), "{result:?}");
             assert!(point.get("fan_rpm").is_none());
@@ -125,7 +134,7 @@ fn keeps_a_nullable_channel_as_a_gap() {
     tables.get_mut("fans").unwrap().rows[0][2] = None;
     let mut point = json!({"publication":7});
 
-    capture(&tables, &mut point).unwrap();
+    project(&tables, &mut point).unwrap();
 
     assert_eq!(point["fan_rpm"], json!([null, 2000.0]));
 }
@@ -141,7 +150,7 @@ macro_rules! nonfinite_projection {
             tables.get_mut("fans").unwrap().rows[0][2] = Some($rpm.to_owned());
             let mut point = json!({"publication":7});
 
-            capture(&tables, &mut point).unwrap();
+            project(&tables, &mut point).unwrap();
 
             assert_eq!(point["fan_rpm"], json!([null, 2000.0]));
         }

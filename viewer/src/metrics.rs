@@ -7,7 +7,14 @@ use crate::data::Table;
 use crate::session::{OBSERVATIONS_MAX, Observation, Session, partition};
 
 type ObservationKey = ([u64; 2], [u64; 2], u64);
-pub(crate) const TABLE_NAMES: [&str; 5] = ["ticks", "memory", "cpus", "interfaces", "gpu_states"];
+pub(crate) const TABLE_NAMES: [&str; 6] = [
+    "ticks",
+    "memory",
+    "cpus",
+    "interfaces",
+    "gpu_states",
+    "fans",
+];
 const MEMORY_RATES: [(&str, &str); 6] = [
     ("memory_pageins_per_second", "pageins"),
     ("memory_pageouts_per_second", "pageouts"),
@@ -54,6 +61,9 @@ pub(crate) fn trends(session: &Session, observations: &[Observation]) -> Result<
                 tables.entry((observation.window, name))
             {
                 let table = session.table(observation.window, name)?;
+                if name == "fans" {
+                    crate::live_fan_history::source(&table)?;
+                }
                 cells += table.rows.len() * table.columns.len();
                 if cells > 2_000_000 {
                     return Err(Error::Bound("context cells"));
@@ -111,13 +121,18 @@ pub(crate) fn point(
 ) -> Result<Value> {
     let ticks = get(tables, current, "ticks")?;
     let tick = only(ticks)?;
+    let fans = tables
+        .get(&(current.window, "fans"))
+        .ok_or(Error::Bound("missing required recorded fan source"))?
+        .get(&current.publication);
+    let fan_rpm = crate::live_fan_history::capture(ticks, fans, current.publication)?;
     let memory = get(tables, current, "memory")?;
     let row = only(memory)?;
     let mut value = json!({"wall_ns": current.wall, "publication": current.publication,
         "run_tick": current.run_tick, "continuous_ns": current.continuous,
         "segment": segment, "cpu_percent": null, "gpu_active_percent": null, "gpu_watts": null,
         "power_watts": ticks.number(tick, "power_watts")?,
-        "soc_celsius": ticks.number(tick, "soc_celsius")?, "fan_rpm": null,
+        "soc_celsius": ticks.number(tick, "soc_celsius")?, "fan_rpm": fan_rpm,
         "interval_unavailable": "Requires consecutive compatible counter samples"});
     for (name, column) in [
         ("memory_total_bytes", "total_bytes"),

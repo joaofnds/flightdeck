@@ -412,10 +412,15 @@ impl Session {
     }
 
     pub(crate) fn table(&self, window: usize, name: &str) -> Result<Table> {
+        let order = if name == "fans" {
+            "publication, fan"
+        } else {
+            "publication"
+        };
         data::query(
             &self.connection,
             &format!(
-                "SELECT * FROM {} ORDER BY publication",
+                "SELECT * FROM {} ORDER BY {order}",
                 self.source(window, name)?
             ),
             data::ROWS_MAX,

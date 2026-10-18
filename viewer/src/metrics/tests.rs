@@ -39,6 +39,8 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let mut tables = Tables::new();
+        let fans = table(&["publication", "fan", "rpm"], &[]);
+        tables.insert((0, "fans"), partition(&fans).unwrap());
         for publication in 1..=2 {
             let current = publication == 2;
             tables
@@ -138,11 +140,13 @@ fn ticks(current: bool) -> Table {
             "soc_celsius",
             "ioreport_read",
             "gpu_state_count",
+            "publication",
+            "smc_read",
         ],
         &[if current {
-            &["5000000000", "0", "45", "true", "2"]
+            &["5000000000", "0", "45", "true", "2", "2", "true"]
         } else {
-            &["1000000000", "0", "45", "true", "2"]
+            &["1000000000", "0", "45", "true", "2", "1", "true"]
         }],
     )
 }
@@ -781,4 +785,80 @@ fn preserves_measured_network_zeroes_without_traffic() {
     fixture.row("interfaces", 2).rows = fixture.row("interfaces", 1).rows.clone();
 
     assert_eq!(network_rates(&fixture.point()), json!([0.0, 0.0, 0.0, 0.0]));
+}
+
+#[test]
+fn refuses_a_missing_fan_source_in_common_projection() {
+    // Goal: a missing source cannot turn into a measured empty array or an unread gap.
+    // Method: remove the loaded source map from an otherwise complete scalar observation.
+    let mut fixture = Fixture::new();
+    assert!(fixture.tables.remove(&(0, "fans")).is_some());
+
+    let result = point(&fixture.tables, &fixture.current, None, 1);
+
+    assert!(matches!(
+        result,
+        Err(Error::Bound("missing required recorded fan source"))
+    ));
+}
+
+macro_rules! malformed_common_fan {
+    ($name:ident, $change:expr, $reason:literal) => {
+        #[test]
+        fn $name() {
+            // Goal: common scalar projection refuses malformed fan associations.
+            // Method: corrupt one fact of a measured, complete two-channel source.
+            let mut fixture = Fixture::new();
+            set(fixture.row("ticks", 2), 0, "smc_read", Some("true"));
+            fixture.tables.get_mut(&(0, "fans")).unwrap().insert(
+                2,
+                table(
+                    &["publication", "fan", "rpm"],
+                    &[&["2", "0", "12"], &["2", "1", "0"]],
+                ),
+            );
+            $change(&mut fixture);
+
+            let result = point(&fixture.tables, &fixture.current, None, 1);
+
+            assert!(matches!(result, Err(Error::Bound($reason))), "{result:?}");
+        }
+    };
+}
+malformed_common_fan!(
+    refuses_a_changed_fan_publication_in_common_projection,
+    |fixture: &mut Fixture| set(fixture.row("fans", 2), 0, "publication", Some("3")),
+    "fan row publication"
+);
+malformed_common_fan!(
+    refuses_duplicate_fan_channels_in_common_projection,
+    |fixture: &mut Fixture| set(fixture.row("fans", 2), 1, "fan", Some("0")),
+    "fan channel order"
+);
+malformed_common_fan!(
+    refuses_missing_fan_columns_in_common_projection,
+    |fixture: &mut Fixture| fixture.row("fans", 2).columns.clear(),
+    "missing schema column"
+);
+malformed_common_fan!(
+    refuses_too_many_fan_channels_in_common_projection,
+    |fixture: &mut Fixture| fixture.row("fans", 2).rows.resize(11, vec![None; 3]),
+    "fan channels"
+);
+
+#[test]
+fn retains_nullable_fan_channels_in_common_projection() {
+    // Goal: SQL NULL remains a channel gap beside stopped zero in common scalar projection.
+    // Method: project a real-shaped nullable fan table through the same point builder.
+    let mut fixture = Fixture::new();
+    set(fixture.row("ticks", 2), 0, "smc_read", Some("true"));
+    fixture.tables.get_mut(&(0, "fans")).unwrap().insert(
+        2,
+        table(
+            &["publication", "fan", "rpm"],
+            &[&["2", "0", "NULL"], &["2", "1", "0"]],
+        ),
+    );
+
+    assert_eq!(fixture.point()["fan_rpm"], json!([null, 0.0]));
 }

@@ -977,7 +977,6 @@ impl LiveSession {
             previous.map(|observation| &observation.observation),
             segment,
         )?;
-        crate::live_fan_history::capture(&current.tables, &mut current.point)?;
         current.point["run"] = json!(identity_text(current.identity.run).to_string());
         current.point["boot"] = json!(identity_text(current.identity.boot).to_string());
         current.point["observation"] = current.json();
@@ -1854,6 +1853,7 @@ mod tests {
     struct RingFixture {
         root: PathBuf,
         writer: Writer,
+        following_fans: u16,
     }
 
     impl RingFixture {
@@ -1895,21 +1895,32 @@ mod tests {
                 .into_parts();
             registered.unwrap();
 
-            Self { root, writer }
+            Self {
+                root,
+                writer,
+                following_fans: 2,
+            }
         }
 
         fn new_following() -> Self {
-            Self::new_with_shape(&Shape {
+            Self::new_following_fans(2)
+        }
+
+        fn new_following_fans(following_fans: u16) -> Self {
+            assert!((2..=10).contains(&following_fans));
+            let mut fixture = Self::new_with_shape(&Shape {
                 slot_count: 120,
                 cpu_capacity: 18,
                 interface_capacity: 1,
                 core_capacity: 1,
                 state_capacity: 1,
-                fan_capacity: 1,
+                fan_capacity: u64::from(following_fans),
                 process_capacity: 1,
                 coalition_capacity: 1,
                 event_capacity: 8,
-            })
+            });
+            fixture.following_fans = following_fans;
+            fixture
         }
 
         fn publish_following(&mut self, tick: u32) {
@@ -1930,6 +1941,13 @@ mod tests {
                 active_bytes: u64::from(tick) * 1024 * 1024,
                 ..collector::machine::Memory::default()
             };
+            let fan_rpm: Vec<f32> = (0..self.following_fans)
+                .map(|channel| match channel {
+                    0 => f32::from(u16::try_from(tick).unwrap()),
+                    1 => 0.0,
+                    _ => 1000.0 + f32::from(channel) * 17.0,
+                })
+                .collect();
             self.writer.publish_observed(
                 &Readings {
                     run_tick: u64::from(tick),
@@ -1937,7 +1955,11 @@ mod tests {
                     memory: &memory,
                     interfaces: &[],
                     ioreport: None,
-                    smc: None,
+                    smc: Some(collector::ring::SmcReadings {
+                        power_watts: 5.0,
+                        soc_celsius: 40.0,
+                        fan_rpm: &fan_rpm,
+                    }),
                     processes: &[],
                     processes_refused: 0,
                     processes_gone: 0,
@@ -2034,17 +2056,7 @@ mod tests {
     fn restores_fifteen_minutes_when_following_a_cold_or_reopened_live_source() {
         // Goal: cold and reopened following includes all available last-900-second readings.
         // Method: seal 840 genuine one-Hz publications and retain a 120-slot overlapping tail.
-        let mut fixture = RingFixture::new_with_shape(&Shape {
-            slot_count: 120,
-            cpu_capacity: 18,
-            interface_capacity: 1,
-            core_capacity: 1,
-            state_capacity: 1,
-            fan_capacity: 1,
-            process_capacity: 1,
-            coalition_capacity: 1,
-            event_capacity: 8,
-        });
+        let mut fixture = RingFixture::new_following();
         follow_restoration_publish(&mut fixture);
         let mut cold = Value::Null;
         let mut reopened = Value::Null;
@@ -2053,8 +2065,19 @@ mod tests {
         follow_restoration_read(&fixture.root, "reopened", &mut reopened);
 
         assert_eq!(cold, reopened);
+        assert_eq!(cold["trends"][0]["fan_rpm"], json!([2.0, 0.0]));
+        assert_eq!(cold["trends"][700]["fan_rpm"], json!([702.0, 0.0]));
+        assert_eq!(cold["summary"]["fan_rpm"], json!([901.0, 0.0]));
         follow_restoration_assert_window(&cold);
         follow_restoration_assert_window(&reopened);
+        let mut session = LiveSession::open(&fixture.root).unwrap();
+        let selected = session.select(1002, 0).unwrap();
+        assert_eq!(selected["selected"]["publication"], 2);
+        assert_eq!(selected["summary"]["fan_rpm"], json!([2.0, 0.0]));
+        assert_eq!(
+            session.follow_latest().unwrap()["summary"]["fan_rpm"],
+            json!([901.0, 0.0])
+        );
     }
 
     #[test]
@@ -2142,6 +2165,7 @@ mod tests {
         session.follow_latest().unwrap();
         let first = session.restored.as_ref().unwrap().range.first_ns;
         let points = session.restored.as_ref().unwrap().points.clone();
+        assert_eq!(points[0]["fan_rpm"], json!([1.0, 0.0]));
         fixture.publish_following_wall(63, 500);
         session.poll().unwrap();
         let cursor = session.sources[0].reader.next_publication();
@@ -2160,6 +2184,7 @@ mod tests {
         session.begin(control.epoch()).unwrap();
         let response = session.follow_latest().unwrap();
         assert_eq!(response["selected"]["publication"], 63);
+        assert_eq!(response["summary"]["fan_rpm"], json!([63.0, 0.0]));
         assert_eq!(
             response["selected"]["wall_ns"],
             500 * NANOSECONDS_PER_SECOND
@@ -2351,8 +2376,10 @@ mod tests {
         follow_restoration_assert_window(&response);
         assert_eq!(response["trends"][719]["publication"], 721);
         assert_eq!(response["trends"][719]["cpu_percent"], 50.0);
+        assert_eq!(response["trends"][719]["fan_rpm"], json!([721.0, 0.0]));
         assert_eq!(response["trends"][779]["publication"], 781);
         assert_eq!(response["trends"][779]["cpu_percent"], 50.0);
+        assert_eq!(response["trends"][779]["fan_rpm"], json!([781.0, 0.0]));
     }
 
     fn follow_restoration_publish_omitting(
@@ -2511,7 +2538,18 @@ mod tests {
     fn following_restores_a_late_commit_without_a_new_publication_and_measures_cost() {
         // Goal: a late seal refreshes available context without a new tick or warm re-query.
         // Method: measure a genuine 18-CPU cold session, warm reads and its fifteenth seal.
-        let mut fixture = RingFixture::new_following();
+        follow_restoration_measure_fans(2);
+    }
+
+    #[test]
+    fn following_measures_ten_channel_restoration_cost() {
+        // Goal: measure the same restoration paths at the largest acquired fan count.
+        // Method: replay the genuine eighteen-CPU fixture with ten distinct channels.
+        follow_restoration_measure_fans(10);
+    }
+
+    fn follow_restoration_measure_fans(fan_count: u16) {
+        let mut fixture = RingFixture::new_following_fans(fan_count);
         let mut pending = None;
         follow_restoration_publish_pending(&mut fixture, &mut pending);
         let mut session_slot = None;
@@ -2524,6 +2562,7 @@ mod tests {
             follow_restoration_assert_window(&response);
         });
         let reads = session.history.as_ref().unwrap().source_reads.get();
+        follow_restoration_measure_context(&session, "cold_context", fan_count);
         for sample in 0..20 {
             follow_restoration_measure("warm_follow", sample, || {
                 let response = session.follow_latest().unwrap();
@@ -2531,6 +2570,7 @@ mod tests {
             });
         }
         assert_eq!(session.history.as_ref().unwrap().source_reads.get(), reads);
+        follow_restoration_measure_context(&session, "warm_context", fan_count);
         assert_eq!(session.restored.as_ref().unwrap().points.len(), 839);
         let selected = session.selected.clone();
         let cursor = session.sources[0].reader.next_publication();
@@ -2548,6 +2588,7 @@ mod tests {
         assert_eq!(session.selected, selected);
         assert_eq!(session.sources[0].reader.next_publication(), cursor);
         assert_eq!(session.restored.as_ref().unwrap().points.len(), 899);
+        follow_restoration_measure_context(&session, "late_context", fan_count);
         let restored = session.restored.as_ref().unwrap();
         println!(
             "{}",
@@ -2594,6 +2635,17 @@ mod tests {
             "committed_points":live.restored.as_ref().unwrap().points.len(),
             "historical_source_reads_before":reads,
             "historical_source_reads_after":live.history.as_ref().unwrap().source_reads.get()})
+        );
+    }
+
+    fn follow_restoration_measure_context(session: &LiveSession, phase: &str, fan_count: u16) {
+        let restored = session.restored.as_ref().unwrap();
+        println!(
+            "{}",
+            json!({"phase":phase,"fan_count":fan_count,
+                "source_reads":session.history.as_ref().unwrap().source_reads.get(),
+                "serialized_bytes":serde_json::to_vec(&restored.points).unwrap().len(),
+                "points":restored.points.len(),"oldest_fan_rpm":restored.points[0]["fan_rpm"]})
         );
     }
 

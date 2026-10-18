@@ -2,7 +2,7 @@ use super::*;
 use collector::machine::{CPUTicks, Memory};
 use collector::ring::{Identity, RunIdentity, Shape, Tick, TickBuffers};
 use persistence::{Begin, Encoder, Limits, Store, Window, WindowIdentity};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -83,12 +83,17 @@ impl Recording {
     }
 
     fn seal(&self) {
+        self.seal_with(|_pending| {});
+    }
+
+    fn seal_with(&self, adjust: impl FnOnce(&Path)) {
         let store = Store::open(&self.root).unwrap();
         let identity = self.window.identity;
         let Begin::Pending(pending) = store.begin(&identity).unwrap() else {
             panic!("fixture already sealed");
         };
         let tables = Encoder.encode(&self.window, pending.path()).unwrap();
+        adjust(pending.path());
         store
             .commit(
                 pending,
@@ -205,6 +210,7 @@ fn keeps_the_unsealed_encoder_projection_equal_to_saved_resource_scalars() {
 
     assert_eq!(public_point(&unsealed).unwrap(), expected);
     assert_eq!(response["summary"], expected);
+    assert_eq!(response["summary"]["fan_rpm"], json!([]));
     assert_eq!(response["summary"]["gpu_active_percent"], 40.0);
     assert_eq!(response["summary"]["gpu_watts"], 2.0);
     assert_eq!(response["summary"]["memory_pageins_per_second"], 3.0);
@@ -224,5 +230,47 @@ fn keeps_the_unsealed_encoder_projection_equal_to_saved_resource_scalars() {
             "summary",
             "trends"
         ]
+    );
+}
+
+#[test]
+fn refuses_an_admitted_empty_fan_source_without_its_rpm_column() {
+    // Goal: an empty malformed saved fan source never becomes measured fanless.
+    // Method: admit a two-column empty Parquet before pinning it, then select publicly.
+    let recording = Recording::new();
+    recording.seal_with(|pending| {
+        let fans = pending.join("fans.parquet");
+        assert!(fans.is_file());
+        std::fs::remove_file(&fans).unwrap();
+        let path = persistence::query::parquet_source(&fans).unwrap();
+        crate::data::connection()
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TABLE fans (publication UBIGINT, fan UTINYINT); COPY fans \
+             TO '{path}' (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 3, \
+             ROW_GROUP_SIZE 16384, WRITE_BLOOM_FILTER false)"
+            ))
+            .unwrap();
+    });
+    let mut session = Session::open(&recording.root).unwrap();
+    let fans = session.table(0, "fans").unwrap();
+    assert_eq!(fans.columns, ["publication", "fan"]);
+    assert!(fans.rows.is_empty());
+    let ticks = session.table(0, "ticks").unwrap();
+    assert_eq!(ticks.rows.len(), 2);
+    assert_eq!(
+        ticks.field(&ticks.rows[0], "smc_read").unwrap(),
+        Some("true")
+    );
+    assert_eq!(
+        ticks.field(&ticks.rows[1], "smc_read").unwrap(),
+        Some("true")
+    );
+
+    let result = session.select(1001, 0);
+
+    assert!(
+        matches!(result, Err(Error::Bound("missing schema column"))),
+        "{result:?}"
     );
 }

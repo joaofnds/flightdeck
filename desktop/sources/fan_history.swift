@@ -85,7 +85,7 @@ struct RecordedFanHistory: View {
     @Binding var inspectedID: String?
     @Binding var inspecting: Bool
 
-    static let explanation = "Fan history fills as live readings arrive. Earlier saved-only observations have no fan history. Values are SMC channel gauges; channel numbers do not identify CPU, GPU, left or right fan positions. Missing or invalid readings remain gaps."
+    static let explanation = "Available fan readings from the last fifteen minutes. Values are SMC channel gauges; channel numbers do not identify CPU, GPU, left or right fan positions. Missing or invalid readings remain gaps."
 
     var body: some View {
         if let data = FanHistoryData(context: context, theme: theme) {
