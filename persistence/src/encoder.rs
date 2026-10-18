@@ -64,9 +64,10 @@ impl Encoder {
 
 pub fn append(connection: &Connection, table: Table, window: &Window) -> Result<()> {
     let mut appender = connection.appender(table.name())?;
+    let battery_captured = window.battery_captured();
     for tick in &window.ticks {
         match table {
-            Table::Ticks => append_tick(&mut appender, tick)?,
+            Table::Ticks => append_tick(&mut appender, tick, battery_captured)?,
             Table::Memory => append_memory(&mut appender, tick)?,
             Table::Cpus => append_cpus(&mut appender, tick)?,
             Table::Interfaces => append_interfaces(&mut appender, tick)?,
@@ -100,7 +101,11 @@ pub fn append(connection: &Connection, table: Table, window: &Window) -> Result<
     Ok(())
 }
 
-fn append_tick(appender: &mut duckdb::Appender<'_>, tick: &StagedTick) -> Result<()> {
+fn append_tick(
+    appender: &mut duckdb::Appender<'_>,
+    tick: &StagedTick,
+    battery_captured: bool,
+) -> Result<()> {
     let observation = tick.observation;
     let energy = tick.ioreport_read.then_some(tick.gpu_energy_nj);
     let power = tick.smc_read.then_some(tick.power_watts);
@@ -115,27 +120,41 @@ fn append_tick(appender: &mut duckdb::Appender<'_>, tick: &StagedTick) -> Result
     } else {
         0
     };
-    appender.append_row(params![
-        observation.publication,
-        tick.run_tick,
-        observation.wall_ns,
-        observation.continuous_ns,
-        observation.awake_ns,
-        tick.ioreport_read,
-        tick.smc_read,
-        energy,
-        power,
-        temperature,
-        tick.processes_refused,
-        tick.processes_gone,
-        tick.events_first,
-        tick.events_end,
-        tick.dropped.starts,
-        tick.dropped.execs,
-        tick.dropped.exits,
-        u32::try_from(states).map_err(|_| Error::Bound("gpu states"))?,
-        u32::try_from(cores).map_err(|_| Error::Bound("cores"))?
-    ])?;
+    let mut row = [ValueRef::Null; 31];
+    row[0] = ValueRef::UBigInt(observation.publication);
+    row[1] = ValueRef::UBigInt(tick.run_tick);
+    row[2] = observation
+        .wall_ns
+        .map_or(ValueRef::Null, ValueRef::UBigInt);
+    row[3] = observation
+        .continuous_ns
+        .map_or(ValueRef::Null, ValueRef::UBigInt);
+    row[4] = observation
+        .awake_ns
+        .map_or(ValueRef::Null, ValueRef::UBigInt);
+    row[5] = ValueRef::Boolean(tick.ioreport_read);
+    row[6] = ValueRef::Boolean(tick.smc_read);
+    row[7] = energy.map_or(ValueRef::Null, ValueRef::UBigInt);
+    row[8] = power.map_or(ValueRef::Null, ValueRef::Float);
+    row[9] = temperature.map_or(ValueRef::Null, ValueRef::Float);
+    row[10] = ValueRef::UInt(tick.processes_refused);
+    row[11] = ValueRef::UInt(tick.processes_gone);
+    row[12] = ValueRef::UBigInt(tick.events_first);
+    row[13] = ValueRef::UBigInt(tick.events_end);
+    row[14] = ValueRef::UBigInt(tick.dropped.starts);
+    row[15] = ValueRef::UBigInt(tick.dropped.execs);
+    row[16] = ValueRef::UBigInt(tick.dropped.exits);
+    row[17] = ValueRef::UInt(u32::try_from(states).map_err(|_| Error::Bound("gpu states"))?);
+    row[18] = ValueRef::UInt(u32::try_from(cores).map_err(|_| Error::Bound("cores"))?);
+    let count = if battery_captured {
+        crate::battery::fields(tick.battery.as_ref(), &mut row[19..]);
+        31
+    } else {
+        19
+    };
+    appender.append_row(duckdb::appender_params_from_iter(
+        row[..count].iter().copied().map(ToSqlOutput::Borrowed),
+    ))?;
     Ok(())
 }
 
@@ -336,6 +355,17 @@ pub fn table_columns(table: Table, window: &Window) -> String {
     };
 
     let mut columns = (*columns).to_owned();
+    if window.battery_captured() {
+        if matches!(table, Table::Ticks) {
+            for (name, kind) in crate::schema::BATTERY_FIELDS {
+                columns.push_str(", ");
+                columns.push_str(name);
+                columns.push(' ');
+                columns.push_str(kind);
+            }
+        }
+    }
+
     if window.programs.is_some() {
         if matches!(table, Table::Processes | Table::Events) {
             for (name, kind) in crate::schema::IDENTITY_FIELDS {

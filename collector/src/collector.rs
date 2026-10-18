@@ -1,6 +1,7 @@
 use std::io;
 use std::time::Duration;
 
+use crate::battery::Battery;
 use crate::clock::Timebase;
 use crate::coalitions::{self, Coalitions};
 use crate::cost::{Meter, Source};
@@ -24,6 +25,7 @@ pub struct Collector {
     pub ioreport: Option<IOReport>,
     /// `None` where the SMC failed to open, as on a Mac with no SMC.
     pub smc: Option<Smc>,
+    pub battery: Option<Battery>,
     pub processes: Sweep,
     pub identities: programs::sweep::Sweep,
     pub coalitions: Coalitions,
@@ -72,6 +74,7 @@ impl Collector {
             interfaces: Interfaces::default(),
             ioreport: new_source("IOReport", IOReport::open(timebase, cpu_limit)),
             smc: new_source("SMC", Smc::open()),
+            battery: new_battery(),
             processes: Sweep::new(limits.process_limit),
             identities: programs::sweep::Sweep::new(limits.process_limit),
             coalitions: Coalitions::new(timebase, coalition_limit),
@@ -126,6 +129,21 @@ impl Collector {
 
     pub fn read(&mut self, meter: &mut Meter) -> io::Result<()> {
         self.read_inner(meter, None)
+    }
+
+    /// Uses the tick's observation clock, taken before any source acquisition begins.
+    pub fn read_battery(&mut self, continuous_ns: u64, meter: &mut Meter) -> io::Result<()> {
+        if let Some(battery) = &mut self.battery {
+            meter.measure(Source::Battery, || {
+                if let Err(error) = battery.refresh(continuous_ns) {
+                    eprintln!("collector: battery read failed: {error:?}");
+                }
+
+                Ok(())
+            })?;
+        }
+
+        Ok(())
     }
 
     /// Acquires scheduled identities through the exact writer that will publish them.
@@ -190,6 +208,16 @@ impl Collector {
         } else {
             self.identities.clear();
             self.processes.run(self.timebase, &self.listing)
+        }
+    }
+}
+
+fn new_battery() -> Option<Battery> {
+    match Battery::open() {
+        Ok(battery) => Some(battery),
+        Err(error) => {
+            eprintln!("collector: battery open failed: {error:?}");
+            None
         }
     }
 }

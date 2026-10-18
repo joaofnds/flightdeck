@@ -2,6 +2,7 @@ use std::io::{self, Write};
 
 use crate::identity_report::IdentityReport;
 
+use collector::battery::BatteryReading;
 use collector::collector::Collector;
 use collector::cost::Meter;
 use collector::ring::{
@@ -12,6 +13,7 @@ use collector::tracker::{EVENTS_PER_TICK_MAX, Event};
 
 pub(crate) struct Publication {
     identity_enabled: bool,
+    battery_enabled: bool,
     events: Vec<IdentityObservation>,
     report: IdentityReport,
 }
@@ -22,6 +24,7 @@ impl Publication {
 
         Ok(Self {
             identity_enabled,
+            battery_enabled: ring.battery_supported(),
             events: Vec::with_capacity(EVENTS_PER_TICK_MAX),
             report: IdentityReport::default(),
         })
@@ -32,7 +35,14 @@ impl Publication {
         collector: &mut Collector,
         meter: &mut Meter,
         ring: &mut Writer,
+        times: Option<&ObservationTimes>,
     ) -> io::Result<()> {
+        if self.battery_enabled {
+            if let Some(times) = times {
+                collector.read_battery(times.continuous_ns, meter)?;
+            }
+        }
+
         if self.identity_enabled {
             collector.read_with_identity(meter, ring)?;
             self.report.add(collector.identities.diagnostics());
@@ -83,7 +93,16 @@ impl Publication {
             },
         };
 
-        self.publish_readings(ring, &readings, times, collector.identities.observations())
+        let battery =
+            times.and_then(|times| collector.battery.as_ref()?.reading(times.continuous_ns));
+
+        self.publish_readings(
+            ring,
+            &readings,
+            times,
+            collector.identities.observations(),
+            battery,
+        )
     }
 
     fn publish_readings(
@@ -92,17 +111,20 @@ impl Publication {
         readings: &Readings,
         times: Option<&ObservationTimes>,
         processes: &[IdentityObservation],
+        battery: Option<&BatteryReading>,
     ) -> io::Result<()> {
         if self.identity_enabled {
             self.fill_events(readings.events);
-            ring.publish_with_identity(
-                readings,
-                times,
-                &IdentityPublication {
-                    processes,
-                    events: &self.events,
-                },
-            )
+            let identities = IdentityPublication {
+                processes,
+                events: &self.events,
+            };
+
+            if self.battery_enabled {
+                ring.publish_with_battery(readings, times, &identities, battery)
+            } else {
+                ring.publish_with_identity(readings, times, &identities)
+            }
         } else {
             if let Some(times) = times {
                 ring.publish_observed(readings, times);

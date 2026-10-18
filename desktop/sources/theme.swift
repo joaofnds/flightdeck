@@ -37,6 +37,11 @@ struct FlightdeckTheme {
     var networkReceiveErrorsSeries = Palette.red
     var networkSendErrorsSeries = Palette.orange
     var systemPowerSeries = Palette.orange
+    var batteryChargeSeries = Palette.green
+    var batteryFlowSeries = Palette.orange
+    var batteryHealth = Palette.green
+    var batteryCharging = Palette.green
+    var batteryNotCharging = Palette.purple
     var temperatureSeries = Palette.red
     var fanSeries = [
         Palette.blue, Palette.orange, Palette.purple, Palette.green, Palette.red,

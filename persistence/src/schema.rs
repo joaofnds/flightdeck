@@ -4,6 +4,26 @@
 //! Memory pressure: normal=0, warning=1, critical=2. These stored codes are versioned.
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// Optional tick columns retain raw battery units without changing schema-1 tables or seals.
+/// Every extended row carries the version, including rows with no captured reading.
+pub const BATTERY_VERSION: u8 = 1;
+pub(crate) const BATTERY_ROWS_MAX: u64 = 61;
+pub const BATTERY_FIELDS: [(&str, &str); 12] = [
+    ("battery_version", "UTINYINT"),
+    ("battery_source_continuous_ns", "UBIGINT"),
+    ("battery_charge_current", "UBIGINT"),
+    ("battery_charge_maximum", "UBIGINT"),
+    ("battery_full_charge_capacity", "UBIGINT"),
+    ("battery_design_capacity", "UBIGINT"),
+    ("battery_cycle_count", "UBIGINT"),
+    ("battery_charging", "BOOLEAN"),
+    ("battery_external_power", "BOOLEAN"),
+    ("battery_voltage_mv", "UBIGINT"),
+    ("battery_current_ma", "BIGINT"),
+    ("battery_adapter_watts", "UBIGINT"),
+];
+const _: () = assert!(19 + BATTERY_FIELDS.len() <= 32);
+
 /// Optional process/event columns; the original schema-1 tables and seal remain unchanged.
 /// A complete extension uses this version on every row. Absent columns mean legacy data.
 pub const IDENTITY_VERSION: u8 = 1;

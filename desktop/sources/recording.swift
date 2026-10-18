@@ -115,6 +115,7 @@ struct Metric: Decodable, Identifiable, Sendable {
     let fanRpm: FanRPMReadings?
     let powerWatts: Double?
     let gpuWatts: Double?
+    let battery: RecordedBatteryReading?
     var identity: RecordedObservationIdentity {
         RecordedObservationIdentity(run: run, boot: boot, publication: publication)
     }
@@ -916,6 +917,9 @@ final class RecordingModel: ObservableObject {
             if wasCatalogOnly, component != .cpu { enqueue(refresh: false) }
         } else if title == "Memory" {
             enterMemory()
+            if wasCatalogOnly { enqueue(refresh: false) }
+        } else if title == "Battery" {
+            route = "Battery"
             if wasCatalogOnly { enqueue(refresh: false) }
         } else if title == "Apps" { enterApps() }
         else if title == "Overview" { enterOverview() }

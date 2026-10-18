@@ -8,6 +8,7 @@
 //! overwrites no other tick's. Each record of the log is a seqlock of its own, numbered by
 //! event, and each slot names the events of its tick.
 
+mod battery;
 mod event;
 mod identity;
 mod layout;
@@ -224,6 +225,23 @@ impl<'place> LockedPlace<'place> {
         )
     }
 
+    pub(crate) fn create_with_battery(
+        self,
+        shape: Shape,
+        capacity: DictionaryCapacity,
+        identity: &RunIdentity,
+        start_continuous_ns: u64,
+    ) -> io::Result<Writer> {
+        let layout = Layout::identity_battery(shape, capacity)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+
+        Writer::create_layout(
+            self,
+            layout,
+            WriterOrigin::Identified(identity, start_continuous_ns),
+        )
+    }
+
     pub(crate) fn create_unregistered(self, shape: Shape, start_ns: u64) -> io::Result<Writer> {
         Writer::create_inner(self, shape, WriterOrigin::Unregistered(start_ns))
     }
@@ -273,12 +291,42 @@ impl Writer {
         )
     }
 
+    /// Creates a V4 identity ring with the optional version-one battery tail.
+    pub fn create_with_battery(
+        place: &Place,
+        shape: Shape,
+        capacity: DictionaryCapacity,
+        identity: &RunIdentity,
+        start_continuous_ns: u64,
+    ) -> io::Result<Self> {
+        LockedPlace::acquire(place)?.create_with_battery(
+            shape,
+            capacity,
+            identity,
+            start_continuous_ns,
+        )
+    }
+
     /// Exact reserved mapping size, planned before creating or touching the ring.
     pub fn identity_size_bytes(shape: Shape, capacity: DictionaryCapacity) -> io::Result<u64> {
         let layout = Layout::identity(shape, capacity)
             .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
 
         Ok(u64_from_usize(layout.size_bytes()))
+    }
+
+    /// Exact startup reservation, including the optional battery header and every slot.
+    pub fn battery_size_bytes(shape: Shape, capacity: DictionaryCapacity) -> io::Result<u64> {
+        let layout = Layout::identity_battery(shape, capacity)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+
+        Ok(u64_from_usize(layout.size_bytes()))
+    }
+
+    /// Whether startup reserved the optional battery records for this writer.
+    #[must_use]
+    pub fn battery_supported(&self) -> bool {
+        self.layout.battery.is_some()
     }
 
     /// Interns retained bytes without allocation. Known keys survive dictionary exhaustion.
@@ -316,8 +364,31 @@ impl Writer {
             self.reference_owner,
         )?;
 
-        self.publish_inner(readings, times, Some(identities));
+        self.publish_inner(readings, times, Some(identities), None);
 
+        Ok(())
+    }
+
+    /// Publishes the battery cache under the same sequence as the numeric and identity rows.
+    pub fn publish_with_battery(
+        &mut self,
+        readings: &Readings,
+        times: Option<&ObservationTimes>,
+        identities: &IdentityPublication,
+        battery: Option<&crate::battery::BatteryReading>,
+    ) -> io::Result<()> {
+        if self.layout.battery.is_none() {
+            return Err(io::Error::from(io::ErrorKind::Unsupported));
+        }
+        identity::validate_publication(
+            self.mapping.words(),
+            &self.layout,
+            readings,
+            identities,
+            self.reference_owner,
+        )?;
+
+        self.publish_inner(readings, times, Some(identities), battery);
         Ok(())
     }
 
@@ -433,6 +504,9 @@ impl Writer {
         };
         store_header(mapping.words(), &layout, &header);
         store_origin(mapping.words(), &origin);
+        if let Some(battery) = &layout.battery {
+            battery.store_header(mapping.words());
+        }
 
         create_name(&lock, &created.name).inspect_err(|_| create_unlink(&created.name))?;
         // Only once the lock file names the new ring, so a reader that reads the lock file from
@@ -465,12 +539,12 @@ impl Writer {
     /// slot holds one, and its events in the log, overwriting the oldest events once every
     /// record holds one. An identity writer uses `publish_with_identity` instead.
     pub fn publish(&mut self, readings: &Readings) {
-        self.publish_inner(readings, None, None);
+        self.publish_inner(readings, None, None, None);
     }
 
     /// Publishes measured clocks in the default v3 layout.
     pub fn publish_observed(&mut self, readings: &Readings, times: &ObservationTimes) {
-        self.publish_inner(readings, Some(times), None);
+        self.publish_inner(readings, Some(times), None, None);
     }
 
     fn publish_inner(
@@ -478,6 +552,7 @@ impl Writer {
         readings: &Readings,
         times: Option<&ObservationTimes>,
         identities: Option<&IdentityPublication>,
+        battery: Option<&crate::battery::BatteryReading>,
     ) {
         assert_eq!(identities.is_some(), self.dictionary.is_some());
         // A tick's events fit in the log, so a reader can read every one of them.
@@ -512,6 +587,9 @@ impl Writer {
         );
         if let Some(identities) = identities {
             identity::store_processes(slot, &self.layout, identities.processes);
+        }
+        if let Some(layout) = &self.layout.battery {
+            battery::store(&words[layout.record(publication)], battery);
         }
         slot[SLOT_SEQUENCE].store(2 * publication, Ordering::Release);
 
@@ -676,28 +754,37 @@ impl Opened {
             Step::Read(publication) => publication,
         };
         let slot = &words[self.layout.slot(publication)];
-        let loaded = read_finished(slot, SLOT_SEQUENCE, publication, || {
-            if !load_tick(slot, &self.layout, tick) {
-                return None;
-            }
-            if let Some(identities) = identities.as_mut() {
-                if identity::load_processes(
-                    &identity::IdentityRecord {
-                        words,
-                        record: slot,
-                    },
-                    &self.layout,
-                    tick,
-                    identities,
-                    self.reference_owner,
-                )
-                .is_err()
-                {
-                    return None;
+        let loaded = read_tick(
+            slot,
+            publication,
+            tick,
+            |tick| {
+                if !load_tick(slot, &self.layout, tick) {
+                    return false;
                 }
-            }
-            Some(())
-        })?;
+                if let Some(identities) = identities.as_mut() {
+                    if identity::load_processes(
+                        &identity::IdentityRecord {
+                            words,
+                            record: slot,
+                        },
+                        &self.layout,
+                        tick,
+                        identities,
+                        self.reference_owner,
+                    )
+                    .is_err()
+                    {
+                        return false;
+                    }
+                }
+                true
+            },
+            || match &self.layout.battery {
+                Some(layout) => battery::load(&words[layout.record(publication)]),
+                None => Ok(None),
+            },
+        )?;
         if loaded.is_some() {
             Ok(Found::Publication {
                 publication,
@@ -734,6 +821,26 @@ impl Opened {
             }),
         }
     }
+}
+
+/// Loads the base and optional battery before the publication's final sequence check.
+fn read_tick(
+    slot: &[AtomicU64],
+    publication: u64,
+    tick: &mut Tick,
+    load_base: impl FnOnce(&mut Tick) -> bool,
+    load_battery: impl FnOnce() -> Result<Option<crate::battery::BatteryReading>, io::ErrorKind>,
+) -> io::Result<Option<()>> {
+    read_finished(slot, SLOT_SEQUENCE, publication, || {
+        if !load_base(tick) {
+            return None;
+        }
+        tick.battery = match load_battery() {
+            Ok(reading) => reading,
+            Err(_) => return None,
+        };
+        Some(())
+    })
 }
 
 impl Reader {
@@ -1267,3 +1374,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod battery_tests;

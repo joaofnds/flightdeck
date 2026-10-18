@@ -1,3 +1,4 @@
+pub mod battery;
 pub mod clock;
 pub mod coalitions;
 pub mod collector;

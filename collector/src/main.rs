@@ -253,15 +253,15 @@ fn start_recording_ring(
         entries: 65_536,
         arena_bytes: 64 * 1024 * 1024,
     };
-    let size_bytes = Writer::identity_size_bytes(shape, capacity)?;
+    let size_bytes = Writer::battery_size_bytes(shape, capacity)?;
 
     writeln!(
         out,
-        "identity ring bytes={size_bytes} reader_limit_bytes=1073741824"
+        "identity and battery ring bytes={size_bytes} reader_limit_bytes=1073741824"
     )?;
 
     let (ring, registered) =
-        Registration::start_with_identity(root, place, shape, capacity, start_ns)?.into_parts();
+        Registration::start_with_battery(root, place, shape, capacity, start_ns)?.into_parts();
 
     match registered {
         Ok(()) => Ok((ring, true)),
@@ -653,7 +653,7 @@ impl Run {
 
         collector.wait_until(schedule.deadline(0), &mut meter)?;
         let observed = observation_or_unavailable(recording::observation_times(timebase), out)?;
-        publication.read(&mut collector, &mut meter, &mut ring)?;
+        publication.read(&mut collector, &mut meter, &mut ring, observed.as_ref())?;
         meter.measure(Source::Ring, || {
             publication.publish(&mut ring, &collector, 0, observed.as_ref())
         })?;
@@ -711,8 +711,12 @@ impl Run {
         let late_ticks = clock::now().saturating_sub(deadline);
         let late = Duration::from_nanos(self.timebase.nanoseconds(late_ticks)?);
         let observed = observation_or_unavailable(observe(self.timebase), out)?;
-        self.publication
-            .read(&mut self.collector, &mut self.meter, &mut self.ring)?;
+        self.publication.read(
+            &mut self.collector,
+            &mut self.meter,
+            &mut self.ring,
+            observed.as_ref(),
+        )?;
         self.meter.measure(Source::Ring, || {
             self.publication
                 .publish(&mut self.ring, &self.collector, tick, observed.as_ref())

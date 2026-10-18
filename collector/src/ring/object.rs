@@ -633,9 +633,37 @@ pub(super) fn open_ring(name: &str) -> io::Result<(Mapping, Layout)> {
         open_layout(extended_header.words(), size_bytes)?
     };
 
+    let layout = open_ring_battery(&object, layout, size_bytes)?;
     let mapping = Mapping::new(&object, layout.word_count(), PROT_READ)?;
 
     Ok((mapping, layout))
+}
+
+fn open_ring_battery(
+    object: &OwnedFd,
+    mut layout: Layout,
+    size_bytes: usize,
+) -> io::Result<Layout> {
+    if layout.version != super::layout::LAYOUT_VERSION_IDENTITY {
+        return Ok(layout);
+    }
+    let start = layout.base_word_count();
+    let available = size_bytes / size_of::<u64>() - start;
+    if available == 0 {
+        return Ok(layout);
+    }
+    // Old objects have page-rounded zero padding, which is not an extension marker.
+    let count = available.min(super::battery::HEADER_WORDS);
+    let probe = Mapping::new(object, start + count, PROT_READ)?;
+    let header = &probe.words()[start..];
+    if header[0].load(Ordering::Relaxed) != super::battery::MAGIC {
+        return Ok(layout);
+    }
+    layout.battery = Some(
+        super::battery::BatteryLayout::admit(header, start, layout.shape.slot_count, size_bytes)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?,
+    );
+    Ok(layout)
 }
 
 /// Removes an explicitly accounted-for generation, including an unreadable old layout.

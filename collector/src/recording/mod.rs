@@ -40,6 +40,13 @@ pub struct StartedRecording {
     registered: io::Result<()>,
 }
 
+#[derive(Clone, Copy)]
+enum RingLayout {
+    Observed,
+    Identity(crate::ring::DictionaryCapacity),
+    Battery(crate::ring::DictionaryCapacity),
+}
+
 impl StartedRecording {
     pub fn into_parts(self) -> (Writer, io::Result<()>) {
         (self.writer, self.registered)
@@ -65,7 +72,40 @@ impl Registration {
             ));
         }
 
-        Self::start_inner(root, place, shape, Some(capacity), start_continuous_ns)
+        Self::start_inner(
+            root,
+            place,
+            shape,
+            RingLayout::Identity(capacity),
+            start_continuous_ns,
+        )
+    }
+
+    /// Battery extends the identity ring without changing its original layout or seal.
+    pub fn start_with_battery(
+        root: &Path,
+        place: &Place,
+        shape: Shape,
+        capacity: crate::ring::DictionaryCapacity,
+        start_continuous_ns: u64,
+    ) -> io::Result<StartedRecording> {
+        let size_bytes = Writer::battery_size_bytes(shape, capacity)?;
+        if size_bytes > 1024 * 1024 * 1024 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "battery ring requires {size_bytes} bytes, above the 1073741824-byte limit"
+                ),
+            ));
+        }
+
+        Self::start_inner(
+            root,
+            place,
+            shape,
+            RingLayout::Battery(capacity),
+            start_continuous_ns,
+        )
     }
 
     /// Creates and registers one source in the required startup order.
@@ -75,14 +115,20 @@ impl Registration {
         shape: Shape,
         start_continuous_ns: u64,
     ) -> io::Result<StartedRecording> {
-        Self::start_inner(root, place, shape, None, start_continuous_ns)
+        Self::start_inner(
+            root,
+            place,
+            shape,
+            RingLayout::Observed,
+            start_continuous_ns,
+        )
     }
 
     fn start_inner(
         root: &Path,
         place: &Place,
         shape: Shape,
-        capacity: Option<crate::ring::DictionaryCapacity>,
+        layout: RingLayout,
         start_continuous_ns: u64,
     ) -> io::Result<StartedRecording> {
         let locked = LockedPlace::acquire(place)?;
@@ -116,15 +162,22 @@ impl Registration {
             }
         };
 
-        let mut writer = if let Some(capacity) = capacity {
-            locked.create_with_identity(
+        let mut writer = match layout {
+            RingLayout::Identity(capacity) => locked.create_with_identity(
                 shape,
                 capacity,
                 registration.identity(),
                 start_continuous_ns,
-            )?
-        } else {
-            locked.create_recording(shape, registration.identity(), start_continuous_ns)?
+            )?,
+            RingLayout::Battery(capacity) => locked.create_with_battery(
+                shape,
+                capacity,
+                registration.identity(),
+                start_continuous_ns,
+            )?,
+            RingLayout::Observed => {
+                locked.create_recording(shape, registration.identity(), start_continuous_ns)?
+            }
         };
 
         writer.retain_recording_ownership(ownership);

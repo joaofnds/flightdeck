@@ -18,6 +18,7 @@ struct Console: View {
                 navigation("GPU", icon: "square.3.layers.3d")
                 navigation("Energy", icon: "bolt")
                 navigation("Network", icon: "network")
+                navigation("Battery", icon: "battery.75percent")
                 Divider().padding(.vertical, theme.panelGap)
                 navigation("Computer", icon: "laptopcomputer")
                 navigation("Self-monitoring", icon: "waveform.path.ecg")
@@ -93,6 +94,7 @@ struct Console: View {
                                 }
                                 if model.route == "Overview" { Dashboard() }
                                 if model.route == "Memory" { RecordedMemory() }
+                                if model.route == "Battery" { RecordedBattery() }
                                 if let component = RecordedComponent(rawValue: model.route) {
                                     RecordedComponentPane(component: component)
                                 }

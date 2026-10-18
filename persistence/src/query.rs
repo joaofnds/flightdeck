@@ -22,9 +22,10 @@ pub enum TableSource<'a> {
     Staged,
 }
 
-/// Validates the optional identity extension before exposing its columns to queries.
+/// Validates optional identity and battery columns before exposing them to queries.
 /// Legacy process/event sources gain typed unavailable metadata; counters remain unchanged.
 /// Extended sources scan at most 1,048,577 rows, rejecting more than 1,048,576.
+/// Battery tick validation scans at most 62 rows, rejecting more than 61.
 /// Callers own the connection's memory/time bounds and must not mutate a validated source.
 pub fn table_source(
     connection: &Connection,
@@ -38,6 +39,10 @@ pub fn table_source(
 
     if matches!(table, Table::Processes | Table::Events) {
         return crate::identity::normalize(connection, table, &source);
+    }
+
+    if matches!(table, Table::Ticks) {
+        return crate::battery::normalize(connection, &source);
     }
 
     Ok(source)

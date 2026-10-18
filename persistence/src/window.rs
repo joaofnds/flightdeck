@@ -56,6 +56,7 @@ pub struct Window {
 }
 
 pub(crate) struct StagedTick {
+    pub battery: Option<collector::battery::BatteryReading>,
     pub observation: Observation,
     pub run_tick: u64,
     pub memory: Memory,
@@ -146,6 +147,10 @@ impl Window {
     #[must_use]
     pub fn tick_count(&self) -> u64 {
         collector::u64_from_usize(self.ticks.len())
+    }
+
+    pub(crate) fn battery_captured(&self) -> bool {
+        self.ticks.iter().any(|tick| tick.battery.is_some())
     }
 
     #[must_use]
@@ -414,6 +419,7 @@ impl StagedTick {
             cores.push(tick.core_active_ns(index).to_vec());
         }
         Self {
+            battery: tick.battery,
             observation: *observation,
             run_tick: tick.run_tick,
             memory: tick.memory,

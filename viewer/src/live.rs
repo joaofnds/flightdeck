@@ -1742,7 +1742,9 @@ fn project_observation_tables(
 
         if matches!(
             table,
-            persistence::schema::Table::Processes | persistence::schema::Table::Events
+            persistence::schema::Table::Ticks
+                | persistence::schema::Table::Processes
+                | persistence::schema::Table::Events
         ) {
             let columns = persistence::table_columns(table, window);
             connection.execute_batch(&format!(
@@ -1846,6 +1848,11 @@ mod tests {
     mod fan_history_tests {
         use super::*;
         include!("live_fan_tests.rs");
+    }
+
+    mod battery_tests {
+        use super::*;
+        include!("live_battery_tests.rs");
     }
 
     static NEXT: AtomicU64 = AtomicU64::new(0);

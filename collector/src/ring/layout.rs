@@ -145,6 +145,7 @@ const SHAPE_FIELD_MAX: u64 = 1 << 24;
 /// Where each part of a ring lies.
 #[derive(Debug, Clone)]
 pub(super) struct Layout {
+    pub(super) battery: Option<super::battery::BatteryLayout>,
     pub(super) version: u64,
     pub(super) shape: Shape,
     pub(super) slot_words: usize,
@@ -232,6 +233,18 @@ impl Layout {
         Self::planned(shape, LAYOUT_VERSION_IDENTITY, capacity)
     }
 
+    pub(super) fn identity_battery(
+        shape: Shape,
+        capacity: super::DictionaryCapacity,
+    ) -> Option<Self> {
+        let mut layout = Self::identity(shape, capacity)?;
+        layout.battery = Some(super::battery::BatteryLayout::plan(
+            layout.base_word_count(),
+            shape.slot_count,
+        )?);
+        Some(layout)
+    }
+
     fn planned(shape: Shape, version: u64, capacity: super::DictionaryCapacity) -> Option<Self> {
         if !(LAYOUT_VERSION_LEGACY..=LAYOUT_VERSION_IDENTITY).contains(&version) {
             return None;
@@ -273,7 +286,6 @@ impl Layout {
             widths.header = HEADER_WORDS_IDENTITY;
             widths.event = EVENT_WORDS_IDENTITY;
         }
-
         planned_size(shape, capacity, &widths)?;
 
         let events_start = widths.header + usize_from(shape.slot_count) * widths.slot;
@@ -284,6 +296,7 @@ impl Layout {
         };
 
         Some(Self {
+            battery: None,
             version,
             shape,
             slot_words: widths.slot,
@@ -304,6 +317,13 @@ impl Layout {
     }
 
     pub(super) fn word_count(&self) -> usize {
+        match &self.battery {
+            Some(battery) => battery.word_count(),
+            None => self.base_word_count(),
+        }
+    }
+
+    pub(super) fn base_word_count(&self) -> usize {
         self.arena_start + self.arena_bytes / 8
     }
 

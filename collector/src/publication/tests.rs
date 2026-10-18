@@ -1,6 +1,9 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
+use collector::battery::{Battery, BatteryReading, BatterySource, Error, READ_INTERVAL_NS};
+use collector::clock::Timebase;
 use collector::processes::{Process, Task, Unreadable, Usage};
 use collector::ring::{
     DictionaryCapacity, Found, FoundEvent, Identity, Place, RingReader, RunIdentity, Shape, Tick,
@@ -53,6 +56,48 @@ impl Harness {
             },
             &identity,
             1,
+        )
+        .unwrap();
+
+        Self { writer, lock_path }
+    }
+
+    fn battery(collector: &Collector) -> Self {
+        let number = NEXT.fetch_add(1, Ordering::Relaxed);
+        let lock_path = std::env::temp_dir().join(format!(
+            "fd-battery-publication-{}-{number}.lock",
+            std::process::id()
+        ));
+        let place = Place {
+            lock_path: lock_path.clone(),
+            name_prefix: format!("/fdbp{}.{number}.", std::process::id()),
+        };
+        let capacity = collector.capacities();
+        let shape = Shape {
+            slot_count: 2,
+            cpu_capacity: collector::u64_from_usize(capacity.cpus),
+            interface_capacity: collector::u64_from_usize(capacity.interfaces),
+            core_capacity: collector::u64_from_usize(capacity.cores),
+            state_capacity: collector::u64_from_usize(capacity.states),
+            fan_capacity: collector::u64_from_usize(capacity.fans),
+            process_capacity: collector::u64_from_usize(capacity.processes),
+            coalition_capacity: collector::u64_from_usize(capacity.coalitions),
+            event_capacity: 2 * collector::u64_from_usize(capacity.events),
+        };
+        let identity = RunIdentity {
+            recording: Identity([1, 2]),
+            run: Identity([3, number]),
+            boot: Identity([4, 5]),
+        };
+        let writer = Writer::create_with_battery(
+            &place,
+            shape,
+            DictionaryCapacity {
+                entries: 256,
+                arena_bytes: 65_536,
+            },
+            &identity,
+            0,
         )
         .unwrap();
 
@@ -148,7 +193,7 @@ macro_rules! event_cases {
             let mut reader = RingReader::open_generation(harness.writer.name()).unwrap();
 
             publication.publish_readings(&mut harness.writer,
-                &readings(&memory, &[], &events), None, &[]).unwrap();
+                &readings(&memory, &[], &events), None, &[], None).unwrap();
             let mut identity = IdentityObservation::EMPTY;
             let found = reader.read_event_identity(&mut identity).unwrap();
 
@@ -197,6 +242,7 @@ fn preserves_independent_numeric_values_when_process_identity_is_unavailable() {
             &readings(&memory, &[process()], &[]),
             None,
             &[identity],
+            None,
         )
         .unwrap();
     let found = reader
@@ -228,6 +274,7 @@ fn returns_publication_validation_errors_without_advancing_the_ring() {
             &readings(&memory, &[process()], &[]),
             None,
             &[],
+            None,
         )
         .unwrap_err();
 
@@ -239,4 +286,124 @@ fn returns_publication_validation_errors_without_advancing_the_ring() {
             .unwrap(),
         0
     );
+}
+
+const BATTERY: BatteryReading = BatteryReading {
+    source_continuous_ns: 0,
+    charge_current: Some(0),
+    charge_maximum: Some(100),
+    full_charge_capacity: Some(9000),
+    design_capacity: Some(8000),
+    cycle_count: Some(11),
+    charging: Some(false),
+    external_power: Some(true),
+    voltage_mv: Some(12000),
+    current_ma: Some(-250),
+    adapter_watts: None,
+};
+
+struct StubBattery;
+
+impl BatterySource for StubBattery {
+    fn read_into(&mut self, now_ns: u64, reading: &mut BatteryReading) -> Result<bool, Error> {
+        if now_ns >= READ_INTERVAL_NS {
+            return Err(Error::Native(-1));
+        }
+
+        *reading = BATTERY;
+        reading.source_continuous_ns = now_ns;
+
+        Ok(true)
+    }
+}
+
+#[test]
+fn publishes_acquired_and_held_battery_until_the_scheduled_refresh_fails() {
+    // Goal: the collector acquisition path publishes real source time and clears failed refreshes.
+    // Method: use real OS collection with an injected battery and decode three public ring records.
+    let mut collector = Collector::new(Timebase::read().unwrap(), Duration::ZERO).unwrap();
+    collector.smc = None;
+    collector.ioreport = None;
+    collector.battery = Some(Battery::from_source(Box::new(StubBattery)));
+    let mut harness = Harness::battery(&collector);
+    let mut publication = Publication::new(&harness.writer).unwrap();
+    let mut reader = RingReader::open_generation(harness.writer.name()).unwrap();
+    let mut tick = battery_tick(&reader.shape());
+    let mut times = ObservationTimes {
+        wall_ns: 100,
+        continuous_ns: 0,
+        awake_ns: 0,
+    };
+
+    publish_battery_tick(&mut publication, &mut harness, &mut collector, &times, 0);
+    let first = reader.read_into(&mut tick).unwrap();
+
+    assert_eq!(
+        first,
+        Found::Publication {
+            publication: 1,
+            tick: 0
+        }
+    );
+    assert_eq!(tick.battery, Some(BATTERY));
+    assert_eq!(tick.times, Some(times));
+    times.continuous_ns = READ_INTERVAL_NS - 1;
+    times.awake_ns = READ_INTERVAL_NS - 1;
+    publish_battery_tick(&mut publication, &mut harness, &mut collector, &times, 1);
+    let held = reader.read_into(&mut tick).unwrap();
+    assert_eq!(
+        held,
+        Found::Publication {
+            publication: 2,
+            tick: 1
+        }
+    );
+    assert_eq!(tick.battery, Some(BATTERY));
+    times.continuous_ns = READ_INTERVAL_NS;
+    times.awake_ns = READ_INTERVAL_NS;
+    publish_battery_tick(&mut publication, &mut harness, &mut collector, &times, 2);
+    let failed = reader.read_into(&mut tick).unwrap();
+    assert_eq!(
+        failed,
+        Found::Publication {
+            publication: 3,
+            tick: 2
+        }
+    );
+    assert_eq!(tick.battery, None);
+}
+
+fn publish_battery_tick(
+    publication: &mut Publication,
+    harness: &mut Harness,
+    collector: &mut Collector,
+    times: &ObservationTimes,
+    run_tick: u64,
+) {
+    publication
+        .read(
+            collector,
+            &mut Meter::default(),
+            &mut harness.writer,
+            Some(times),
+        )
+        .unwrap();
+    publication
+        .publish(&mut harness.writer, collector, run_tick, Some(times))
+        .unwrap();
+}
+
+fn battery_tick(shape: &Shape) -> Tick {
+    let count = |value| usize::try_from(value).unwrap();
+    Tick::from_buffers(TickBuffers {
+        cpus: Vec::with_capacity(count(shape.cpu_capacity)),
+        interfaces: Vec::with_capacity(count(shape.interface_capacity)),
+        gpu_active_ns: Vec::with_capacity(count(shape.state_capacity)),
+        core_active_ns: vec![0; count(shape.core_capacity * shape.state_capacity)],
+        core_state_counts: Vec::with_capacity(count(shape.core_capacity)),
+        state_capacity: count(shape.state_capacity),
+        fan_rpm: Vec::with_capacity(count(shape.fan_capacity)),
+        processes: Vec::with_capacity(count(shape.process_capacity)),
+        coalitions: Vec::with_capacity(count(shape.coalition_capacity)),
+    })
 }

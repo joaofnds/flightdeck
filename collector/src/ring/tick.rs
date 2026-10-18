@@ -65,6 +65,7 @@ pub struct SmcReadings<'a> {
 /// A tick as a reader loads it, in lists with room taken once for all the ring's shape holds.
 #[derive(Debug, PartialEq)]
 pub struct Tick {
+    pub battery: Option<crate::battery::BatteryReading>,
     pub times: Option<super::ObservationTimes>,
     pub run_tick: u64,
     pub cpus: Vec<CPUTicks>,
@@ -97,6 +98,7 @@ impl Tick {
     #[must_use]
     pub fn from_buffers(buffers: super::TickBuffers) -> Self {
         Self {
+            battery: None,
             times: None,
             run_tick: 0,
             cpus: buffers.cpus,
@@ -148,6 +150,7 @@ impl Tick {
     pub(super) fn new(layout: &Layout) -> Self {
         let state_capacity = layout.gpu_states.capacity;
         Self {
+            battery: None,
             times: None,
             run_tick: 0,
             cpus: Vec::with_capacity(layout.cpus.capacity),

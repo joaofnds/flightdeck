@@ -127,7 +127,7 @@ struct FanSeal {
     wall_offset_ns: u64,
 }
 
-fn fan_seal(fixture: &RingFixture) {
+pub(super) fn fan_seal(fixture: &RingFixture) {
     fan_seal_with(
         fixture,
         &FanSeal {
