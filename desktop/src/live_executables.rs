@@ -15,6 +15,9 @@ pub struct Executable {
     pub energy_nj: Subtotal,
     pub resident_bytes: Subtotal,
     pub footprint_bytes: Subtotal,
+    pub disk_read_bytes: Subtotal,
+    pub disk_written_bytes: Subtotal,
+    pub disk_io_bytes: Subtotal,
     elapsed_ns: Option<u64>,
 }
 
@@ -59,6 +62,9 @@ pub fn groups(detail: Option<&Value>) -> Result<Vec<Executable>, String> {
             energy_nj: Subtotal::default(),
             resident_bytes: Subtotal::default(),
             footprint_bytes: Subtotal::default(),
+            disk_read_bytes: Subtotal::default(),
+            disk_written_bytes: Subtotal::default(),
+            disk_io_bytes: Subtotal::default(),
             elapsed_ns,
         });
         groups_add(group, process)?;
@@ -117,7 +123,7 @@ impl Subtotal {
 }
 
 impl Executable {
-    fn metrics(&self) -> [String; 5] {
+    fn metrics(&self) -> [String; 6] {
         let cpu = self.cpu_ns.value().and_then(|cpu_ns| {
             viewer::apps::cpu_percent_one_core(viewer::apps::CpuRate {
                 cpu_ns,
@@ -140,14 +146,33 @@ impl Executable {
                 &self.energy_nj,
                 "J",
             ),
+            self.disk_rate(),
         ]
+    }
+
+    fn disk_rate(&self) -> String {
+        let rate = self.disk_io_bytes.value().and_then(|bytes| {
+            viewer::apps::bytes_per_second(viewer::apps::BytesRate {
+                bytes,
+                elapsed_ns: self.elapsed_ns?,
+            })
+        });
+        let reading = crate::live_app_views::disk_rate(rate);
+        if self.disk_io_bytes.unavailable > 0 {
+            return format!("{reading} *");
+        }
+
+        reading
     }
 
     pub(crate) fn json(&self) -> Value {
         json!({"executable_bytes":self.key, "instances":self.instances,
             "scope":"loaded process page only", "cpu_ns":self.cpu_ns.json(),
             "energy_nj":self.energy_nj.json(), "resident_bytes":self.resident_bytes.json(),
-            "footprint_bytes":self.footprint_bytes.json()})
+            "footprint_bytes":self.footprint_bytes.json(),
+            "disk_read_bytes":self.disk_read_bytes.json(),
+            "disk_written_bytes":self.disk_written_bytes.json(),
+            "disk_io_bytes":self.disk_io_bytes.json()})
     }
 }
 
@@ -164,6 +189,9 @@ impl LiveDashboard {
         let expanded = self
             .reading_expanded()
             .is_some_and(|(kind, row)| kind == "executables" && *row == index);
+        let metrics = group.metrics();
+        let disk_selector = format!("executable-disk:{}:{}", group.key, metrics[5]);
+
         let mut row = div()
             .id(SharedString::from(format!("executable-{index}")))
             .accessibility_id(format!("flightdeck.executable.{}", group.key))
@@ -174,6 +202,11 @@ impl LiveDashboard {
             ))
             .aria_selected(selected)
             .aria_expanded(expanded)
+            .min_w_0()
+            .max_w_full()
+            .overflow_x_scroll()
+            .restrict_scroll_to_axis()
+            .track_scroll(&self.app_table_scroll)
             .border_b_1()
             .border_color(rgb(GRID))
             .cursor_pointer()
@@ -195,7 +228,8 @@ impl LiveDashboard {
             .child(app_cells(
                 group.name.clone(),
                 group.instances.to_string(),
-                group.metrics(),
+                metrics,
+                &disk_selector,
             ));
         if expanded {
             row = row.child(exact_json(&group.json()));
@@ -209,9 +243,19 @@ fn groups_add(group: &mut Executable, process: &Value) -> Result<(), String> {
     if process["app_attribution"].is_null() {
         group.cpu_ns.add(amount(&process["cpu_ns"])?);
         group.energy_nj.add(amount(&process["energy_nj"])?);
+        group
+            .disk_read_bytes
+            .add(amount(&process["disk_read_bytes"])?);
+        group
+            .disk_written_bytes
+            .add(amount(&process["disk_written_bytes"])?);
+        group.disk_io_bytes.add(amount(&process["disk_io_bytes"])?);
     } else {
         group.cpu_ns.add(None);
         group.energy_nj.add(None);
+        group.disk_read_bytes.add(None);
+        group.disk_written_bytes.add(None);
+        group.disk_io_bytes.add(None);
     }
     match process["state"].as_str() {
         Some("live") => {
@@ -301,7 +345,10 @@ mod tests {
             "app_attribution":null, "cpu_ns":{"known":"4","unavailable":null},
             "energy_nj":{"known":"8","unavailable":null},
             "resident_bytes":{"known":"16","unavailable":null},
-            "footprint_bytes":{"known":"32","unavailable":null}})
+            "footprint_bytes":{"known":"32","unavailable":null},
+            "disk_read_bytes":{"known":null,"unavailable":"interval"},
+            "disk_written_bytes":{"known":null,"unavailable":"interval"},
+            "disk_io_bytes":{"known":null,"unavailable":"interval"}})
     }
 
     #[test]
@@ -403,6 +450,63 @@ mod tests {
         assert_eq!(groups[0].resident_bytes.known, 16);
         assert_eq!(groups[0].footprint_bytes.known, 32);
         assert_eq!(groups[0].cpu_ns.known, 8);
+    }
+
+    #[test]
+    fn keeps_disk_directions_separate_from_the_jointly_measured_population() {
+        // Group disjoint read/write populations and retain an unavailable combined interval.
+        let mut read = process("61");
+        read["disk_read_bytes"] = json!({"known":"5","unavailable":null});
+        let mut written = process("61");
+        written["disk_written_bytes"] = json!({"known":"7","unavailable":null});
+        let detail = json!({"processes":[read,written],"elapsed_ns":"1000000000"});
+
+        let groups = groups(Some(&detail)).unwrap();
+
+        assert_eq!(groups[0].disk_read_bytes.value(), Some(5));
+        assert_eq!(groups[0].disk_written_bytes.value(), Some(7));
+        assert_eq!(groups[0].disk_io_bytes.value(), None);
+        assert_eq!(groups[0].disk_io_bytes.unavailable, 2);
+        assert_eq!(groups[0].disk_rate(), "Unavailable *");
+    }
+
+    #[test]
+    fn suppresses_an_overflowed_disk_total_without_losing_valid_directions() {
+        // Overflow only the combined subtotal while preserving exact independent directions.
+        let mut maximum = process("61");
+        maximum["disk_read_bytes"] = json!({"known":u64::MAX.to_string(),"unavailable":null});
+        maximum["disk_written_bytes"] = json!({"known":"0","unavailable":null});
+        maximum["disk_io_bytes"] = maximum["disk_read_bytes"].clone();
+        let mut extra = process("61");
+        extra["disk_read_bytes"] = json!({"known":"0","unavailable":null});
+        extra["disk_written_bytes"] = json!({"known":"1","unavailable":null});
+        extra["disk_io_bytes"] = extra["disk_written_bytes"].clone();
+        let detail = json!({"processes":[maximum,extra],"elapsed_ns":"1000000000"});
+
+        let groups = groups(Some(&detail)).unwrap();
+
+        assert_eq!(groups[0].disk_read_bytes.value(), Some(u64::MAX));
+        assert_eq!(groups[0].disk_written_bytes.value(), Some(1));
+        assert!(groups[0].disk_io_bytes.overflowed);
+        assert_eq!(groups[0].disk_io_bytes.value(), None);
+        assert_eq!(groups[0].disk_rate(), "Unavailable *");
+    }
+
+    #[test]
+    fn retains_a_verified_exit_disk_interval_without_adding_its_memory() {
+        // A final verified interval remains attributable after its memory gauge expires.
+        let mut exited = process("61");
+        exited["state"] = json!("exited_verified");
+        exited["disk_read_bytes"] = json!({"known":"3000","unavailable":null});
+        exited["disk_written_bytes"] = json!({"known":"1000","unavailable":null});
+        exited["disk_io_bytes"] = json!({"known":"4000","unavailable":null});
+        let detail = json!({"processes":[exited],"elapsed_ns":"2000000000"});
+
+        let groups = groups(Some(&detail)).unwrap();
+
+        assert_eq!(groups[0].resident_bytes.value(), None);
+        assert_eq!(groups[0].disk_io_bytes.value(), Some(4000));
+        assert_eq!(groups[0].disk_rate(), "2.0 kB/s");
     }
 
     #[test]

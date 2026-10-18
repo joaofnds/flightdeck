@@ -32,6 +32,34 @@ fn real_saved_app_rankings_reach_later_pages_and_preserve_the_exact_sibling() {
     assert_eq!(rankings.metrics[0].entries[0].amount, 600);
     assert_eq!(rankings.metrics[1].entries[0].amount, 1_228_800);
     assert_eq!(rankings.metrics[2].entries[0].amount, 600_000);
+    assert_eq!(rankings.metrics[3].entries[0].app.name, "App00600");
+    assert_eq!(rankings.metrics[3].entries[0].amount, 900_000_000);
+    assert_eq!(rankings.metrics[3].entries[0].rate, Some(900_000_000.0));
+}
+
+#[test]
+fn real_saved_storage_rankings_reach_later_pages_at_the_exact_sibling() {
+    // The actual Storage request must hydrate its disk ranks through the worker, not a UI seed.
+    let recording = SealedRecording::with_ranked_apps();
+    let mut request = SealedRecording::request();
+    request.route = "storage".into();
+    request.second = Some(1001);
+    request.identity = Some(json!({"run":"00000000000000010000000000000002",
+        "boot":"00000000000000030000000000000004","publication":2}));
+
+    let snapshot = recording.read(request).unwrap();
+
+    let Rankings::Ready(rankings) = snapshot.rankings.as_deref().unwrap() else {
+        panic!("{:?}", snapshot.rankings);
+    };
+    crate::live_source::identity_validate(&rankings.selected, &snapshot.selection["selected"])
+        .unwrap();
+    assert_eq!(snapshot.selection["second"], 1001);
+    assert_eq!(rankings.selected["publication"], 2);
+    assert_eq!(rankings.app_count, 600);
+    assert_eq!(rankings.metrics[3].entries[0].app.name, "App00600");
+    assert_eq!(rankings.metrics[3].entries[0].amount, 900_000_000);
+    assert_eq!(rankings.metrics[3].entries[0].rate, Some(900_000_000.0));
 }
 
 #[test]
@@ -160,6 +188,8 @@ impl SealedRecording {
             process.usage.user_ns = pid * publication;
             process.usage.energy_nj = pid * publication * 1000;
             process.usage.resident_bytes = pid * publication * 1024;
+            process.usage.disk_read_bytes = pid * publication * 1_000_000;
+            process.usage.disk_written_bytes = pid * publication * 500_000;
         }
         let times = ObservationTimes {
             wall_ns: match publication {

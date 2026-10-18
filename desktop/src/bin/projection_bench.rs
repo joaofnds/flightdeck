@@ -1,3 +1,5 @@
+#[path = "projection_bench/app.rs"]
+mod app;
 #[path = "../charts.rs"]
 pub mod charts;
 #[path = "../panel_data.rs"]
@@ -92,7 +94,14 @@ fn unsigned_publication(value: &Value) -> bool {
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     persistence::engine::initialize_process()?;
-    let arguments: Vec<_> = std::env::args_os().skip(1).take(9).collect();
+    let arguments: Vec<_> = std::env::args_os().skip(1).take(13).collect();
+    if matches!(
+        arguments.first().and_then(|value| value.to_str()),
+        Some("--capture-app" | "--app-input")
+    ) {
+        return app::run(&arguments);
+    }
+
     if arguments
         .first()
         .is_some_and(|value| value == "--paint-input")

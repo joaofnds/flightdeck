@@ -6,6 +6,9 @@ use serde_json::{Value, json};
 use crate::live_dashboard::LiveDashboard;
 use crate::live_source::{AppKey, Snapshot, Update, Worker};
 
+#[path = "live_app_disk_input_tests.rs"]
+mod disk;
+
 #[gpui::test]
 fn hovering_an_app_replaces_current_details_with_the_exact_historical_page(
     cx: &mut TestAppContext,
@@ -112,6 +115,71 @@ struct AppHoverHarness {
     driver: AppHoverDriver,
 }
 
+macro_rules! vertical_table_wheel_case {
+    ($name:ident, $row:pat, $selector:literal) => {
+        #[gpui::test]
+        fn $name(cx: &mut TestAppContext) {
+            // Keep horizontal columns fixed while real vertical input scrolls the outer view.
+            let mut harness = AppHoverHarness::setup(cx);
+
+            harness
+                .driver
+                .vertical_wheel_keeps_table_columns(|row| matches!(row, $row), $selector);
+
+            harness.teardown();
+        }
+    };
+}
+
+vertical_table_wheel_case!(
+    vertical_wheel_over_process_keeps_columns_and_scrolls_outer_view,
+    crate::live_dashboard::Row::Process(0),
+    "process-disk:10:Unavailable"
+);
+vertical_table_wheel_case!(
+    vertical_wheel_over_heading_keeps_columns_and_scrolls_outer_view,
+    crate::live_dashboard::Row::AppColumns("processes"),
+    "app-column:processes:Disk I/O"
+);
+vertical_table_wheel_case!(
+    vertical_wheel_over_app_picker_keeps_columns_and_scrolls_outer_view,
+    crate::live_dashboard::Row::App(0),
+    "app-disk:bundle:41:Unavailable *"
+);
+vertical_table_wheel_case!(
+    vertical_wheel_over_executable_keeps_columns_and_scrolls_outer_view,
+    crate::live_dashboard::Row::Executable(0),
+    "executable-disk:hex:61:Unavailable *"
+);
+
+#[gpui::test]
+fn scrolling_a_process_keeps_its_disk_column_aligned_with_the_heading(cx: &mut TestAppContext) {
+    // Scroll a narrow table through real wheel input and compare the displayed column positions.
+    let mut harness = AppHoverHarness::setup(cx);
+    harness.driver.scroll_process_horizontally();
+
+    let heading = harness
+        .driver
+        .context
+        .debug_bounds("app-column:processes:Disk I/O")
+        .unwrap();
+    let reading = harness
+        .driver
+        .context
+        .debug_bounds("process-disk:10:Unavailable")
+        .unwrap();
+    assert_eq!(reading.left(), heading.left());
+    assert_eq!(reading.size.width, heading.size.width);
+    assert!(reading.right() <= gpui::px(640.0));
+    let next = harness
+        .driver
+        .context
+        .debug_bounds("process-disk:11:Unavailable")
+        .unwrap();
+    assert_eq!(next.left(), heading.left());
+    harness.teardown();
+}
+
 #[gpui::test]
 fn leaving_history_restores_the_expanded_process_without_moving_the_graph(cx: &mut TestAppContext) {
     // Expand a real process disclosure, then restore it across preview while scrolled mid-view.
@@ -200,6 +268,79 @@ struct AppHoverDriver {
 }
 
 impl AppHoverDriver {
+    fn vertical_wheel_keeps_table_columns(
+        &mut self,
+        target: fn(&crate::live_dashboard::Row) -> bool,
+        selector: &'static str,
+    ) {
+        self.context
+            .simulate_resize(gpui::size(gpui::px(640.0), gpui::px(900.0)));
+        self.context.run_until_parked();
+        let index = self.view.update(&mut self.context, |dashboard, cx| {
+            let index = dashboard.rows.iter().position(target).unwrap();
+            dashboard.list.scroll_to(gpui::ListOffset {
+                item_ix: index.saturating_sub(2),
+                offset_in_item: gpui::px(0.0),
+            });
+            cx.notify();
+            index
+        });
+        self.context.run_until_parked();
+        let before = self.context.debug_bounds(selector).unwrap();
+        let row = self.view.read_with(&self.context, |dashboard, _| {
+            dashboard.list.bounds_for_item(index).unwrap()
+        });
+        let offset = self.view.read_with(&self.context, |dashboard, _| {
+            dashboard.list.scroll_px_offset_for_scrollbar()
+        });
+        let viewport = self.view.read_with(&self.context, |dashboard, _| {
+            dashboard.list.viewport_bounds()
+        });
+        assert!(viewport.contains(&row.center()));
+        self.context.simulate_event(gpui::ScrollWheelEvent {
+            position: row.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.0), gpui::px(-48.0))),
+            modifiers: Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        self.context.run_until_parked();
+        let after = self.context.debug_bounds(selector).unwrap();
+        let moved = self.view.read_with(&self.context, |dashboard, _| {
+            dashboard.list.bounds_for_item(index).unwrap()
+        });
+        let scrolled = self.view.read_with(&self.context, |dashboard, _| {
+            dashboard.list.scroll_px_offset_for_scrollbar()
+        });
+        eprintln!(
+            "QA_VERTICAL_WHEEL selector={selector} viewport={viewport:?} \
+             row_before={row:?} row_after={moved:?} column_before={before:?} \
+             column_after={after:?} outer_before={offset:?} outer_after={scrolled:?}"
+        );
+        assert_eq!(
+            after.left(),
+            before.left(),
+            "Vertical wheel shifted {selector}"
+        );
+        assert!(
+            moved.top() < row.top(),
+            "Vertical wheel did not scroll the outer view"
+        );
+    }
+
+    fn scroll_process_horizontally(&mut self) {
+        self.context
+            .simulate_resize(gpui::size(gpui::px(640.0), gpui::px(2400.0)));
+        self.context.run_until_parked();
+        let row = self.context.debug_bounds("process-0").unwrap();
+        self.context.simulate_event(gpui::ScrollWheelEvent {
+            position: row.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(-1000.0), gpui::px(0.0))),
+            modifiers: Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        self.context.run_until_parked();
+    }
+
     fn expand_last_process(&mut self) {
         let row = self.context.debug_bounds("process-2").unwrap();
         self.context.simulate_click(row.center(), Modifiers::none());
@@ -269,7 +410,7 @@ impl AppHoverDriver {
             .simulate_resize(gpui::size(gpui::px(1536.0), gpui::px(900.0)));
         self.context.run_until_parked();
         self.context.simulate_event(gpui::ScrollWheelEvent {
-            position: gpui::point(gpui::px(1000.0), gpui::px(700.0)),
+            position: gpui::point(gpui::px(185.0), gpui::px(700.0)),
             delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.0), gpui::px(-700.0))),
             modifiers: Modifiers::none(),
             touch_phase: gpui::TouchPhase::Moved,
@@ -300,7 +441,7 @@ impl AppHoverDriver {
     }
 
     fn last_chart_is_visible(&mut self) -> bool {
-        self.context.debug_bounds("live-app-power-plot").is_some()
+        self.context.debug_bounds("live-app-disk-plot").is_some()
     }
 
     fn chart_bounds(&mut self) -> gpui::Bounds<gpui::Pixels> {
@@ -362,7 +503,14 @@ impl AppEpoch {
             "membership_complete":true,"cpu_percent_one_core":cpu,
             "energy_watts":energy,"energy_joules":energy,
             "cpu_ns":measure("130000000"),"energy_nj":measure("4000000000"),
-            "resident_bytes":measure(memory),"footprint_bytes":measure(memory)})
+            "resident_bytes":measure(memory),"footprint_bytes":measure(memory),
+            "disk_read_bytes":{"known":"0","measured_members":0,
+                "unavailable_members":members,"overflowed":false},
+            "disk_written_bytes":{"known":"0","measured_members":0,
+                "unavailable_members":members,"overflowed":false},
+            "disk_io_bytes":{"known":"0","measured_members":0,
+                "unavailable_members":members,"overflowed":false},
+            "disk_read_bps":null,"disk_written_bps":null,"disk_io_bps":null})
     }
 
     fn history_point(self) -> Value {
@@ -425,5 +573,9 @@ fn process(name: &str, bytes: &str, pid: u32) -> Value {
         "cpu_ns":{"known":"600000000","unavailable":null},
         "energy_nj":{"known":"2000000000","unavailable":null},
         "resident_bytes":{"known":"67108864","unavailable":null},
-        "footprint_bytes":{"known":"134217728","unavailable":null}})
+        "footprint_bytes":{"known":"134217728","unavailable":null},
+        "disk_read_bytes":{"known":null,"unavailable":"interval"},
+        "disk_written_bytes":{"known":null,"unavailable":"interval"},
+        "disk_io_bytes":{"known":null,"unavailable":"interval"},
+        "disk_read_bps":null,"disk_written_bps":null,"disk_io_bps":null})
 }

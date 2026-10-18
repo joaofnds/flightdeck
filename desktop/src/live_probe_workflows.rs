@@ -168,8 +168,20 @@ fn run_apps_endpoint(history: &Value, detail: &Value) -> Result<(), String> {
                 "cpu_percent_one_core",
                 "energy_joules",
                 "energy_watts",
+                "disk_read_bytes",
+                "disk_written_bytes",
+                "disk_io_bytes",
+                "disk_read_bps",
+                "disk_written_bps",
+                "disk_io_bps",
             ] {
-                if point[field] != detail["app"][field] {
+                let observed = point
+                    .get(field)
+                    .ok_or_else(|| format!("Selected App history endpoint lacks {field}"))?;
+                let expected = detail["app"]
+                    .get(field)
+                    .ok_or_else(|| format!("Selected App detail lacks {field}"))?;
+                if observed != expected {
                     return Err(format!("Selected App history endpoint differs in {field}"));
                 }
             }
@@ -313,11 +325,7 @@ mod tests {
     #[test]
     fn accepts_the_exact_app_history_endpoint_with_matching_measurements() {
         // Matching wire values at the selected publication form one consistent App reading.
-        let app = json!({"members": 2, "membership_complete": true,
-            "cpu_ns": {"known": "100", "measured_members": 2, "unavailable_members": 0,
-                "overflowed": false},
-            "cpu_percent_one_core": 0.00001, "energy_nj": null, "energy_joules": null,
-            "energy_watts": null, "resident_bytes": null, "footprint_bytes": null});
+        let app = disk_app();
         let mut point = app.clone();
         point["observation"] = observation(903, 4);
         let history = json!({"selected": observation(903, 4), "points": [point]});
@@ -327,80 +335,173 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    macro_rules! disk_endpoint_cases {
+        ($mismatch:ident, $missing:ident, $field:literal) => {
+            #[test]
+            fn $mismatch() {
+                // A directional or jointly measured field must agree at the selected observation.
+                let app = disk_app();
+                let mut point = app.clone();
+                point["observation"] = observation(903, 4);
+                point[$field] = serde_json::Value::Null;
+                let history = json!({"selected":observation(903, 4), "points":[point]});
+
+                let result = run_apps_endpoint(&history, &json!({"app":app}));
+
+                assert_eq!(
+                    result.unwrap_err(),
+                    format!("Selected App history endpoint differs in {}", $field)
+                );
+            }
+
+            #[test]
+            fn $missing() {
+                // Jointly missing fields cannot prove that the disk contract was exercised.
+                let mut app = disk_app();
+                assert!(app.as_object_mut().unwrap().remove($field).is_some());
+                let mut point = app.clone();
+                point["observation"] = observation(903, 4);
+                let history = json!({"selected":observation(903, 4), "points":[point]});
+
+                assert!(run_apps_endpoint(&history, &json!({"app":app})).is_err());
+            }
+        };
+    }
+
+    disk_endpoint_cases!(
+        rejects_read_amount_mismatch,
+        rejects_missing_read_amount,
+        "disk_read_bytes"
+    );
+    disk_endpoint_cases!(
+        rejects_written_amount_mismatch,
+        rejects_missing_written_amount,
+        "disk_written_bytes"
+    );
+    disk_endpoint_cases!(
+        rejects_joint_amount_mismatch,
+        rejects_missing_joint_amount,
+        "disk_io_bytes"
+    );
+    disk_endpoint_cases!(
+        rejects_read_rate_mismatch,
+        rejects_missing_read_rate,
+        "disk_read_bps"
+    );
+    disk_endpoint_cases!(
+        rejects_written_rate_mismatch,
+        rejects_missing_written_rate,
+        "disk_written_bps"
+    );
+    disk_endpoint_cases!(
+        rejects_joint_rate_mismatch,
+        rejects_missing_joint_rate,
+        "disk_io_bps"
+    );
+
+    fn disk_app() -> serde_json::Value {
+        let measure = |known: u64| {
+            json!({"known":known.to_string(), "measured_members":2,
+                "unavailable_members":0, "overflowed":false})
+        };
+        json!({"members":2, "membership_complete":true, "cpu_ns":measure(100),
+            "cpu_percent_one_core":0.00001, "energy_nj":null, "energy_joules":null,
+            "energy_watts":null, "resident_bytes":null, "footprint_bytes":null,
+            "disk_read_bytes":measure(4096), "disk_written_bytes":measure(1024),
+            "disk_io_bytes":measure(5120), "disk_read_bps":2048.0,
+            "disk_written_bps":512.0, "disk_io_bps":2560.0})
+    }
+
     #[test]
     fn rejects_app_history_from_a_different_selected_observation() {
         // A nearby point with equal App values cannot stand in for the selected publication.
-        let history = json!({"selected": observation(903, 4), "points": [
-            {"observation": observation(902, 3), "members": 2}]});
-        let detail = json!({"app": {"members": 2}});
+        let app = disk_app();
+        let mut point = app.clone();
+        point["observation"] = observation(902, 3);
+        let history = json!({"selected": observation(903, 4), "points": [point]});
 
-        assert!(run_apps_endpoint(&history, &detail).is_err());
+        assert_eq!(
+            run_apps_endpoint(&history, &json!({"app":app})).unwrap_err(),
+            "Selected App history has no exact selected observation"
+        );
     }
 
     #[test]
     fn rejects_app_history_with_different_selected_measurements() {
         // Matching observation stamps cannot conceal a mismatched App aggregate.
-        let history = json!({"selected": observation(903, 4), "points": [
-            {"observation": observation(903, 4), "members": 1}]});
-        let detail = json!({"app": {"members": 2}});
+        let app = disk_app();
+        let mut point = app.clone();
+        point["observation"] = observation(903, 4);
+        point["members"] = json!(1);
+        let history = json!({"selected": observation(903, 4), "points": [point]});
 
-        assert!(run_apps_endpoint(&history, &detail).is_err());
+        assert_eq!(
+            run_apps_endpoint(&history, &json!({"app":app})).unwrap_err(),
+            "Selected App history endpoint differs in members"
+        );
     }
 
     #[test]
     fn rejects_app_history_with_a_different_cpu_aggregate() {
         // Equal identity and membership cannot conceal a different captured CPU subtotal.
-        let history = json!({"selected": observation(903, 4), "points": [{
-            "observation": observation(903, 4), "members": 2,
-            "cpu_ns": {"known": "100", "measured_members": 2, "unavailable_members": 0,
-                "overflowed": false}}]});
-        let detail = json!({"app": {"members": 2,
-            "cpu_ns": {"known": "101", "measured_members": 2, "unavailable_members": 0,
-                "overflowed": false}}});
+        let app = disk_app();
+        let mut point = app.clone();
+        point["observation"] = observation(903, 4);
+        point["cpu_ns"]["known"] = json!("101");
+        let history = json!({"selected": observation(903, 4), "points": [point]});
 
-        assert!(run_apps_endpoint(&history, &detail).is_err());
+        assert_eq!(
+            run_apps_endpoint(&history, &json!({"app":app})).unwrap_err(),
+            "Selected App history endpoint differs in cpu_ns"
+        );
     }
 
     #[test]
     fn rejects_app_history_with_a_different_energy_aggregate() {
         // The energy subtotal must agree even when the captured identity and members agree.
-        let history = json!({"selected": observation(903, 4), "points": [{
-            "observation": observation(903, 4), "members": 2,
-            "energy_nj": {"known": "200", "measured_members": 2, "unavailable_members": 0,
-                "overflowed": false}}]});
-        let detail = json!({"app": {"members": 2,
-            "energy_nj": {"known": "201", "measured_members": 2, "unavailable_members": 0,
-                "overflowed": false}}});
+        let app = disk_app();
+        let mut point = app.clone();
+        point["observation"] = observation(903, 4);
+        point["energy_nj"] = json!({"known":"201","measured_members":2,
+            "unavailable_members":0,"overflowed":false});
+        let history = json!({"selected": observation(903, 4), "points": [point]});
 
-        assert!(run_apps_endpoint(&history, &detail).is_err());
+        assert_eq!(
+            run_apps_endpoint(&history, &json!({"app":app})).unwrap_err(),
+            "Selected App history endpoint differs in energy_nj"
+        );
     }
 
     #[test]
     fn rejects_app_history_with_a_different_resident_memory_aggregate() {
         // A different resident-memory subtotal must fail without relying on member mismatch.
-        let history = json!({"selected": observation(903, 4), "points": [{
-            "observation": observation(903, 4), "members": 2,
-            "resident_bytes": {"known": "1024", "measured_members": 2,
-                "unavailable_members": 0, "overflowed": false}}]});
-        let detail = json!({"app": {"members": 2,
-            "resident_bytes": {"known": "2048", "measured_members": 2,
-                "unavailable_members": 0, "overflowed": false}}});
+        let app = disk_app();
+        let mut point = app.clone();
+        point["observation"] = observation(903, 4);
+        point["resident_bytes"] = json!({"known":"2048","measured_members":2,
+            "unavailable_members":0,"overflowed":false});
+        let history = json!({"selected": observation(903, 4), "points": [point]});
 
-        assert!(run_apps_endpoint(&history, &detail).is_err());
+        assert_eq!(
+            run_apps_endpoint(&history, &json!({"app":app})).unwrap_err(),
+            "Selected App history endpoint differs in resident_bytes"
+        );
     }
 
     #[test]
     fn rejects_app_history_with_a_different_footprint_aggregate() {
         // Footprint must agree independently of resident memory and membership.
-        let history = json!({"selected": observation(903, 4), "points": [{
-            "observation": observation(903, 4), "members": 2,
-            "footprint_bytes": {"known": "4096", "measured_members": 2,
-                "unavailable_members": 0, "overflowed": false}}]});
-        let detail = json!({"app": {"members": 2,
-            "footprint_bytes": {"known": "8192", "measured_members": 2,
-                "unavailable_members": 0, "overflowed": false}}});
+        let app = disk_app();
+        let mut point = app.clone();
+        point["observation"] = observation(903, 4);
+        point["footprint_bytes"] = json!({"known":"8192","measured_members":2,
+            "unavailable_members":0,"overflowed":false});
+        let history = json!({"selected": observation(903, 4), "points": [point]});
 
-        assert!(run_apps_endpoint(&history, &detail).is_err());
+        assert_eq!(
+            run_apps_endpoint(&history, &json!({"app":app})).unwrap_err(),
+            "Selected App history endpoint differs in footprint_bytes"
+        );
     }
 
     #[test]

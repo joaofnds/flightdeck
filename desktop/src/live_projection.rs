@@ -831,6 +831,17 @@ fn network() -> Vec<Specification> {
 }
 
 fn app_specifications() -> Vec<Specification> {
+    let mut disk = specification(
+        "live-app-disk",
+        "Disk I/O",
+        "MB/s",
+        vec![
+            reading("disk_read_bps", "Read", "#73bf69", 1_000_000.0),
+            reading("disk_written_bps", "Write", "#5794f2", 1_000_000.0),
+        ],
+    );
+    disk.help = "Process-attributed read and write rates for each selected observation interval. \
+        Unavailable intervals remain gaps. These are separate from device-driver throughput.";
     vec![
         specification(
             "live-app-cpu",
@@ -856,6 +867,7 @@ fn app_specifications() -> Vec<Specification> {
             "W",
             vec![reading("energy_watts", "Average power", "#ff9830", 1.0)],
         ),
+        disk,
     ]
 }
 
@@ -866,3 +878,7 @@ mod tests;
 #[cfg(test)]
 #[path = "live_resource_projection_tests.rs"]
 mod resource_tests;
+
+#[cfg(test)]
+#[path = "live_app_disk_history_tests.rs"]
+mod app_disk_history_tests;

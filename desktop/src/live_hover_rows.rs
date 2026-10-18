@@ -44,6 +44,7 @@ impl LiveDashboard {
             rows.push(Row::Charts(panels.to_vec()));
         }
         if self.request.route == "storage" {
+            rows.push(Row::Rankings(vec![3]));
             for index in 0..self.resource_device_count() {
                 rows.push(Row::StorageDevice(
                     index,

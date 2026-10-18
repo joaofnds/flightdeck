@@ -18,6 +18,7 @@ fn rankings_include_the_largest_apps_beyond_the_first_page() {
     assert_eq!(result.metrics[0].entries[9].amount, 590);
     assert_eq!(result.metrics[1].entries[0].amount, 599);
     assert_eq!(result.metrics[2].entries[0].amount, 599);
+    assert_eq!(result.metrics[3].entries[0].amount, 599);
 }
 
 #[test]
@@ -32,8 +33,51 @@ fn ranking_ties_use_captured_app_keys_instead_of_names_or_page_order() {
 
     let result = read_one(&[first, second]);
 
-    assert_eq!(result.metrics[0].entries[0].app.name, "Z");
-    assert_eq!(result.metrics[0].entries[1].app.name, "A");
+    for ranking in &result.metrics {
+        assert_eq!(ranking.entries[0].app.name, "Z");
+        assert_eq!(ranking.entries[1].app.name, "A");
+    }
+}
+
+#[test]
+fn disk_ranking_preserves_exact_totals_above_float_precision() {
+    // Equal displayed rates cannot erase a one-byte difference in the joint measured population.
+    let mut first = app(1);
+    first["disk_io_bytes"]["known"] = json!("9007199254740992");
+    let mut second = app(2);
+    second["disk_io_bytes"]["known"] = json!("9007199254740993");
+    second["disk_io_bps"] = first["disk_io_bps"].clone();
+
+    let result = read_one(&[first, second]);
+
+    assert_eq!(result.metrics[3].entries[0].amount, 9_007_199_254_740_993);
+    assert_eq!(result.metrics[3].entries[1].amount, 9_007_199_254_740_992);
+}
+
+#[test]
+fn disk_ranking_keeps_zero_partial_unavailable_and_overflow_separate() {
+    // Rank only jointly measured subtotals, independently of directional or other metric coverage.
+    let zero = app(0);
+    let mut overflow = app(1);
+    overflow["disk_io_bytes"]["overflowed"] = json!(true);
+    let mut unavailable = app(2);
+    unavailable["disk_io_bytes"]["measured_members"] = json!(0);
+    unavailable["disk_io_bps"] = Value::Null;
+    let mut partial = app(3);
+    partial["disk_io_bytes"]["unavailable_members"] = json!(2);
+
+    let result = read_one(&[zero, overflow, unavailable, partial]);
+
+    let disk = &result.metrics[3];
+    assert_eq!(disk.overflowed, 1);
+    assert_eq!(disk.unavailable, 1);
+    assert_eq!(disk.partial, 1);
+    assert_eq!(disk.entries.len(), 2);
+    assert_eq!(disk.entries[0].amount, 3);
+    assert_eq!(disk.entries[0].unavailable_members, 2);
+    assert_eq!(disk.entries[1].amount, 0);
+    assert_eq!(disk.entries[1].rate, Some(0.0));
+    assert_eq!(result.metrics[0].entries.len(), 4);
 }
 
 #[test]
@@ -82,6 +126,7 @@ fn an_unavailable_rate_cannot_be_ranked_as_a_measured_zero() {
     let mut first = app(0);
     first["cpu_percent_one_core"] = Value::Null;
     first["energy_watts"] = Value::Null;
+    first["disk_io_bps"] = Value::Null;
 
     let result = read_one(&[first]);
 
@@ -89,6 +134,8 @@ fn an_unavailable_rate_cannot_be_ranked_as_a_measured_zero() {
     assert_eq!(result.metrics[0].unavailable, 1);
     assert!(result.metrics[2].entries.is_empty());
     assert_eq!(result.metrics[1].entries[0].amount, 0);
+    assert!(result.metrics[3].entries.is_empty());
+    assert_eq!(result.metrics[3].unavailable, 1);
 }
 
 #[test]
@@ -126,7 +173,7 @@ fn a_cancelled_page_read_stops_before_any_more_pages_are_requested() {
 }
 
 #[test]
-fn the_full_source_bound_reads_forty_seven_pages_and_retains_only_thirty_entries() {
+fn the_full_source_bound_reads_forty_seven_pages_and_retains_only_forty_entries() {
     // Measure the bounded synthetic JSON pager plus fold, without native UI or acquisition.
     let source = Pages::new(24_000);
     let mut calls = 0;
@@ -148,9 +195,10 @@ fn the_full_source_bound_reads_forty_seven_pages_and_retains_only_thirty_entries
             .iter()
             .map(|metric| metric.entries.len())
             .sum::<usize>(),
-        30
+        40
     );
     assert_eq!(result.metrics[0].entries[0].amount, 23_999);
+    assert_eq!(result.metrics[3].entries[0].amount, 23_999);
     eprintln!(
         "ranking synthetic pager+fold: pages={calls}, allocation_calls={}, bytes={}",
         allocations.calls, allocations.bytes
@@ -222,7 +270,7 @@ fn read_one(apps: &[Value]) -> TopApps {
         "ungrouped_members":0,"app_count":count,"apps":apps,
         "page":{"offset":0,"limit":512,"total":count,"next_offset":null}});
     match read(&selected(), |_| Ok(page.clone())) {
-        Rankings::Ready(result) => result,
+        Rankings::Ready(result) => *result,
         Rankings::Unavailable(error) => panic!("{error}"),
     }
 }
@@ -258,5 +306,10 @@ fn app(amount: u32) -> Value {
         "key":{"kind":"executable","bytes_hex":format!("{amount:08x}")},
         "members":1,"membership_complete":true,
         "cpu_ns":measure,"resident_bytes":measure,"energy_nj":measure,
+        "disk_read_bytes":measure,"disk_io_bytes":measure,
+        "disk_written_bytes":{"known":"0","measured_members":1,
+            "unavailable_members":0,"overflowed":false},
+        "disk_read_bps":f64::from(amount),"disk_written_bps":0.0,
+        "disk_io_bps":f64::from(amount),
         "cpu_percent_one_core":f64::from(amount),"energy_watts":f64::from(amount)})
 }

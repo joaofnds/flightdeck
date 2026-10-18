@@ -2,7 +2,7 @@ use gpui::{AnyElement, Context, IntoElement, SharedString, div, prelude::*, px, 
 use num_traits::ToPrimitive;
 
 use super::{Entry, Metric, Ranking, Rankings, TopApps};
-use crate::charts::{BLUE, GREEN, GRID, MUTED, ORANGE, PANEL};
+use crate::charts::{BLUE, GREEN, GRID, MUTED, ORANGE, PANEL, YELLOW};
 use crate::dashboard::control;
 use crate::live_chart_view::ChartHelp;
 use crate::live_dashboard::LiveDashboard;
@@ -24,7 +24,7 @@ impl LiveDashboard {
     }
 
     fn app_ranking(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
-        let metric = [Metric::Cpu, Metric::Resident, Metric::Power][index];
+        let metric = [Metric::Cpu, Metric::Resident, Metric::Power, Metric::Disk][index];
         let mut card = div()
             .flex_1()
             .min_w_0()
@@ -60,9 +60,7 @@ impl LiveDashboard {
             )));
 
         if index == 0 {
-            card = card.child(notice(
-                "App network, disk and GPU readings are unavailable.",
-            ));
+            card = card.child(notice("App network and GPU readings are unavailable."));
         }
 
         card.into_any_element()
@@ -303,6 +301,7 @@ fn metric_color(metric: Metric) -> u32 {
         Metric::Cpu => BLUE,
         Metric::Resident => GREEN,
         Metric::Power => ORANGE,
+        Metric::Disk => YELLOW,
     }
 }
 
@@ -319,6 +318,11 @@ fn metric_help(metric: Metric) -> &'static str {
         Metric::Power => {
             "Recorded process energy divided by the captured continuous interval. \
             It is separate from GPU power and whole-machine power."
+        }
+        Metric::Disk => {
+            "Process-attributed read plus written bytes over the selected observation interval. \
+            Only jointly measured members contribute; known subtotals exclude unavailable members. \
+            Separate from physical-device driver throughput."
         }
     }
 }
@@ -348,6 +352,7 @@ fn value(metric: Metric, entry: &Entry) -> String {
             Some(value) => crate::live_projection::quantity_text(value, "W"),
             None => "Unavailable".into(),
         },
+        Metric::Disk => crate::live_app_views::disk_rate(entry.rate),
     };
     if entry.unavailable_members > 0 {
         return format!("{value} known");

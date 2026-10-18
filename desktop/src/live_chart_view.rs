@@ -109,8 +109,13 @@ impl LiveDashboard {
     }
 
     fn chart_headline(&self, panel: &Panel, index: Option<usize>) -> impl IntoElement {
-        let reading = self.chart_reading(panel, index);
+        let reading = if panel.id == "live-app-disk" {
+            self.chart_disk_headline(panel, index)
+        } else {
+            self.chart_reading(panel, index)
+        };
         let mut headline = div()
+            .debug_selector(|| format!("chart-reading:{}:{reading}", panel.id))
             .flex()
             .items_baseline()
             .justify_between()
@@ -118,7 +123,11 @@ impl LiveDashboard {
             .child(
                 div()
                     .debug_selector(|| reading.clone())
-                    .text_size(px(25.0))
+                    .text_size(px(if panel.id == "live-app-disk" {
+                        18.0
+                    } else {
+                        25.0
+                    }))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .child(reading),
             );
@@ -151,6 +160,14 @@ impl LiveDashboard {
     }
 
     fn chart_reading(&self, panel: &Panel, index: Option<usize>) -> String {
+        if panel.id == "live-app-disk" {
+            return format!(
+                "Read {}; Write {}",
+                self.chart_line_reading(panel, 0, index),
+                self.chart_line_reading(panel, 1, index)
+            );
+        }
+
         if panel.id == "live-battery-charging" {
             let charging = self.reading_snapshot().and_then(|snapshot| {
                 snapshot.selection["summary"]["battery"]["charging"].as_bool()
@@ -172,6 +189,66 @@ impl LiveDashboard {
         }
 
         chart_reading(panel, index)
+    }
+
+    fn chart_line_reading(&self, panel: &Panel, line: usize, index: Option<usize>) -> String {
+        let value = chart_line_value(panel, line, index);
+        let reading = line_reading(panel, value, &panel.unit);
+        if panel.id != "live-app-disk" {
+            return reading;
+        }
+
+        if value.is_none() {
+            return reading;
+        }
+
+        let Some((measured, unavailable)) = self.chart_disk_counts(line, index) else {
+            return format!("{reading} · coverage unavailable");
+        };
+
+        if unavailable == 0 {
+            return reading;
+        }
+
+        format!("{reading} · known subtotal · {measured} measured · {unavailable} unavailable")
+    }
+
+    fn chart_disk_headline(&self, panel: &Panel, index: Option<usize>) -> String {
+        format!(
+            "Read {} · Write {}",
+            self.chart_disk_headline_line(panel, 0, index),
+            self.chart_disk_headline_line(panel, 1, index)
+        )
+    }
+
+    fn chart_disk_headline_line(&self, panel: &Panel, line: usize, index: Option<usize>) -> String {
+        let value = chart_line_value(panel, line, index);
+        let reading = line_reading(panel, value, &panel.unit);
+        if value.is_none() {
+            return reading;
+        }
+
+        let Some((_, unavailable)) = self.chart_disk_counts(line, index) else {
+            return format!("{reading} · coverage unavailable");
+        };
+
+        if unavailable > 0 {
+            return format!("{reading} *");
+        }
+
+        reading
+    }
+
+    fn chart_disk_counts(&self, line: usize, index: Option<usize>) -> Option<(u64, u64)> {
+        assert!(line < 2);
+        let field = ["disk_read_bytes", "disk_written_bytes"][line];
+        // Panels retain the accepted history while exact preview details load.
+        let measure = &self.snapshot.as_ref()?.history.as_ref()?["points"].get(index?)?[field];
+
+        Some((
+            measure["measured_members"].as_u64()?,
+            measure["unavailable_members"].as_u64()?,
+        ))
     }
 
     fn chart_events(
@@ -515,15 +592,17 @@ impl LiveDashboard {
         }
 
         let mut legends = div().flex().flex_wrap().gap_x(px(12.0)).text_size(px(11.0));
-        for line in panel.lines.iter().take(16) {
+        for (line_index, line) in panel.lines.iter().take(16).enumerate() {
             let key = format!("{}\t{}", panel.id, line.name);
-            let value = index.and_then(|index| line.values.get(index).copied().flatten());
+            let reading = self.chart_line_reading(panel, line_index, index);
             legends = legends.child(
                 div()
                     .id(SharedString::from(key.clone()))
+                    .debug_selector(|| format!("chart-legend:{}:{}:{reading}", panel.id, line.name))
                     .accessibility_id(format!("flightdeck.legend.{}.{}", panel.id, line.name))
                     .role(gpui::Role::Switch)
                     .aria_label(format!("{}: {}", panel.title, line.name))
+                    .aria_description(reading.clone())
                     .aria_toggled(if self.hidden.contains(&key) {
                         gpui::Toggled::False
                     } else {
@@ -540,11 +619,7 @@ impl LiveDashboard {
                         1.0
                     })
                     .text_color(rgb(charts::color(&line.color)))
-                    .child(format!(
-                        "━ {}  {}",
-                        line.name,
-                        line_reading(panel, value, &panel.unit)
-                    ))
+                    .child(format!("━ {}  {}", line.name, reading))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(index) = this.hidden.iter().position(|value| *value == key) {
                             this.hidden.remove(index);
@@ -691,8 +766,15 @@ fn chart_reading(panel: &Panel, index: Option<usize>) -> String {
     line_reading(panel, value, unit)
 }
 
+fn chart_line_value(panel: &Panel, line: usize, index: Option<usize>) -> Option<f32> {
+    panel
+        .lines
+        .get(line)
+        .and_then(|line| index.and_then(|index| line.values.get(index).copied().flatten()))
+}
+
 fn line_reading(panel: &Panel, value: Option<f32>, unit: &str) -> String {
-    if ["live-storage-", "live-battery-"]
+    if ["live-storage-", "live-battery-", "live-app-disk"]
         .iter()
         .any(|prefix| panel.id.starts_with(prefix))
     {

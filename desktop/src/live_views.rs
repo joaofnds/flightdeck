@@ -283,7 +283,8 @@ impl LiveDashboard {
             Row::AppSelector => self.app_selector(cx).into_any_element(),
             Row::AppSummary => self.app_summary().into_any_element(),
             Row::AppColumns(kind) => {
-                crate::live_app_views::app_table_columns(kind).into_any_element()
+                crate::live_app_views::app_table_columns(kind, &self.app_table_scroll)
+                    .into_any_element()
             }
             Row::Charts(panels) => div()
                 .flex()

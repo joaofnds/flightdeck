@@ -1,4 +1,5 @@
 use gpui::{AnyElement, Context, IntoElement, SharedString, div, prelude::*, px, rgb};
+use num_traits::ToPrimitive;
 use serde_json::Value;
 
 use crate::charts::{BLUE, GRID, MUTED, PANEL};
@@ -96,7 +97,7 @@ impl LiveDashboard {
                 div()
                     .text_size(px(11.0))
                     .text_color(rgb(MUTED))
-                    .child("CPU, memory and energy from the selected observation"),
+                    .child("CPU, memory, disk and energy from the selected observation"),
             )
     }
 
@@ -182,7 +183,7 @@ impl LiveDashboard {
                     .text_color(rgb(MUTED))
                     .child(format!(
                         "{loaded} of {} processes loaded · group subtotals cover this page. \
-                    * marks partial coverage; exec-crossing CPU and energy are unavailable.",
+                    * marks partial coverage; exec-crossing CPU, disk and energy are unavailable.",
                         text(&app["members"])
                     )),
             )
@@ -198,6 +199,9 @@ impl LiveDashboard {
             Err(error) => return unavailable(&error),
         };
         let selected = self.request.app.as_ref() == Some(&key);
+        let metrics = app_metrics(app);
+        let disk_selector = format!("app-disk:{}:{}:{}", key.kind, key.bytes_hex, metrics[5]);
+
         div()
             .id(SharedString::from(format!("app-choice-{index}")))
             .accessibility_id(format!("flightdeck.app.{}.{}", key.kind, key.bytes_hex))
@@ -209,6 +213,11 @@ impl LiveDashboard {
                 value_rate(&app["cpu_percent_one_core"], "%")
             ))
             .aria_selected(selected)
+            .min_w_0()
+            .max_w_full()
+            .overflow_x_scroll()
+            .restrict_scroll_to_axis()
+            .track_scroll(&self.app_table_scroll)
             .border_b_1()
             .border_color(rgb(GRID))
             .cursor_pointer()
@@ -230,13 +239,8 @@ impl LiveDashboard {
             .child(app_cells(
                 text(&app["display_name"]),
                 text(&app["members"]),
-                [
-                    value_rate(&app["cpu_percent_one_core"], "%"),
-                    measure_memory(&app["resident_bytes"]),
-                    measure_memory(&app["footprint_bytes"]),
-                    value_rate(&app["energy_watts"], "W"),
-                    value_rate(&app["energy_joules"], "J"),
-                ],
+                metrics,
+                &disk_selector,
             ))
             .into_any_element()
     }
@@ -252,6 +256,9 @@ impl LiveDashboard {
         let expanded = self
             .reading_expanded()
             .is_some_and(|(kind, row)| kind == "app_processes" && *row == index);
+        let metrics = process_metrics(process);
+        let disk_selector = format!("process-disk:{}:{}", text(&process["pid"]), metrics[5]);
+
         let mut row = div()
             .id(SharedString::from(format!("process-{index}")))
             .debug_selector(|| format!("process-{index}"))
@@ -268,6 +275,11 @@ impl LiveDashboard {
                 value_rate(&process["cpu_percent_one_core"], "%")
             ))
             .aria_expanded(expanded)
+            .min_w_0()
+            .max_w_full()
+            .overflow_x_scroll()
+            .restrict_scroll_to_axis()
+            .track_scroll(&self.app_table_scroll)
             .border_b_1()
             .border_color(rgb(GRID))
             .cursor_pointer()
@@ -287,13 +299,8 @@ impl LiveDashboard {
             .child(app_cells(
                 text(&process["executable_name"]["display"]),
                 text(&process["pid"]),
-                [
-                    value_rate(&process["cpu_percent_one_core"], "%"),
-                    amount_memory(&process["resident_bytes"]),
-                    amount_memory(&process["footprint_bytes"]),
-                    value_rate(&process["energy_watts"], "W"),
-                    value_rate(&process["energy_joules"], "J"),
-                ],
+                metrics,
+                &disk_selector,
             ));
         if expanded {
             row = row.child(exact_json(process));
@@ -335,7 +342,7 @@ pub fn selected_detail<'a>(
 }
 
 fn app_summary_tiles(app: &Value) -> gpui::Div {
-    let mut tiles = div().flex().gap(px(10.0));
+    let mut tiles = div().flex().flex_wrap().gap(px(10.0));
     for tile in [
         SummaryTile {
             label: "CPU",
@@ -361,6 +368,13 @@ fn app_summary_tiles(app: &Value) -> gpui::Div {
             note: "Selected observation interval",
             reading: measure_rate(app, "energy_watts", "energy_nj", "W"),
         },
+        SummaryTile {
+            label: "Disk I/O",
+            field: "disk_io_bytes",
+            note: "Selected observation interval · process attribution. \
+                Separate from device throughput.",
+            reading: measure_disk_rate(app),
+        },
     ] {
         tiles = tiles.child(app_summary_tile(app, tile));
     }
@@ -368,9 +382,14 @@ fn app_summary_tiles(app: &Value) -> gpui::Div {
 }
 
 fn app_summary_tile(app: &Value, tile: SummaryTile) -> impl IntoElement {
+    let selector = format!("app-summary:{}:{}", tile.field, tile.reading);
+
     div()
         .flex_1()
-        .min_w_0()
+        .flex_basis(px(180.0))
+        .min_w(px(160.0))
+        .max_w_full()
+        .debug_selector(move || selector.clone())
         .p(px(12.0))
         .rounded(px(8.0))
         .bg(rgb(PANEL))
@@ -399,30 +418,45 @@ fn app_summary_tile(app: &Value, tile: SummaryTile) -> impl IntoElement {
         )
 }
 
-pub fn app_table_columns(kind: &str) -> impl IntoElement {
+pub fn app_table_columns(kind: &str, scroll: &gpui::ScrollHandle) -> impl IntoElement {
     let name = if kind == "apps" { "App" } else { "Executable" };
     let count = match kind {
         "apps" => "Members",
         "executables" => "Instances",
         _ => "PID",
     };
-    app_cells(
-        name.into(),
-        count.into(),
-        [
-            "CPU %".into(),
-            "Resident".into(),
-            "Footprint".into(),
-            "Power".into(),
-            "Energy".into(),
-        ],
-    )
-    .bg(rgb(0x1a_22_2f))
-    .text_color(rgb(MUTED))
+    div()
+        .id(SharedString::from(format!("app-columns-{kind}")))
+        .min_w_0()
+        .max_w_full()
+        .overflow_x_scroll()
+        .restrict_scroll_to_axis()
+        .track_scroll(scroll)
+        .child(app_cells(
+            name.into(),
+            count.into(),
+            [
+                "CPU %".into(),
+                "Resident".into(),
+                "Footprint".into(),
+                "Power".into(),
+                "Energy".into(),
+                "Disk I/O".into(),
+            ],
+            &format!("app-column:{kind}:Disk I/O"),
+        ))
+        .bg(rgb(0x1a_22_2f))
+        .text_color(rgb(MUTED))
 }
 
-pub fn app_cells(name: String, count: String, metrics: [String; 5]) -> gpui::Div {
+pub fn app_cells(
+    name: String,
+    count: String,
+    metrics: [String; 6],
+    disk_selector: &str,
+) -> gpui::Div {
     let mut row = div()
+        .min_w(px(120.0 + 65.0 + 6.0 * 100.0 + 7.0 * 8.0 + 16.0))
         .h(px(26.0))
         .px(px(8.0))
         .flex()
@@ -445,10 +479,16 @@ pub fn app_cells(name: String, count: String, metrics: [String; 5]) -> gpui::Div
                 .truncate()
                 .child(count),
         );
-    for metric in metrics {
+    for (index, metric) in metrics.into_iter().enumerate() {
         row = row.child(
             div()
-                .debug_selector(|| metric.clone())
+                .debug_selector(|| {
+                    if index == 5 {
+                        disk_selector.to_owned()
+                    } else {
+                        metric.clone()
+                    }
+                })
                 .w(px(100.0))
                 .flex_shrink_0()
                 .text_right()
@@ -522,6 +562,101 @@ fn value_rate(value: &Value, unit: &str) -> String {
         Some(value) => rate(Some(value), unit),
         None => "Invalid reading".into(),
     }
+}
+
+pub fn disk_rate(value: Option<f64>) -> String {
+    let Some(value) = value else {
+        return "Unavailable".into();
+    };
+
+    if !value.is_finite() {
+        return "Unavailable".into();
+    }
+
+    if value < 0.0 {
+        return "Invalid reading".into();
+    }
+
+    match (value / 1_000_000.0).to_f32() {
+        Some(value) => crate::live_projection::quantity_text(value, "MB/s"),
+        None => "Unavailable".into(),
+    }
+}
+
+fn value_disk_rate(value: &Value) -> String {
+    if value.is_null() {
+        return "Unavailable".into();
+    }
+
+    match value.as_f64() {
+        Some(value) => disk_rate(Some(value)),
+        None => "Invalid reading".into(),
+    }
+}
+
+fn measure_disk_rate(app: &Value) -> String {
+    let measure = &app["disk_io_bytes"];
+    let reading = match measure_value(measure) {
+        Ok(Some(_)) => value_disk_rate(&app["disk_io_bps"]),
+        Ok(None) => "Unavailable".into(),
+        Err(error) => return error,
+    };
+    let Some(unavailable) = measure["unavailable_members"].as_u64() else {
+        return "Missing unavailable coverage".into();
+    };
+
+    if unavailable > 0 {
+        return format!("{reading} *");
+    }
+
+    reading
+}
+
+fn amount_disk_rate(process: &Value) -> String {
+    let amount = &process["disk_io_bytes"];
+    if !amount.is_object() {
+        return "Missing disk amount".into();
+    }
+
+    match decimal(&amount["known"]) {
+        Ok(Some(_)) => {
+            if !amount["unavailable"].is_null() {
+                return "Invalid disk amount".into();
+            }
+
+            value_disk_rate(&process["disk_io_bps"])
+        }
+        Ok(None) => {
+            if amount["unavailable"].as_str().is_none() {
+                return "Missing disk availability".into();
+            }
+
+            "Unavailable".into()
+        }
+        Err(error) => error,
+    }
+}
+
+fn app_metrics(app: &Value) -> [String; 6] {
+    [
+        value_rate(&app["cpu_percent_one_core"], "%"),
+        measure_memory(&app["resident_bytes"]),
+        measure_memory(&app["footprint_bytes"]),
+        value_rate(&app["energy_watts"], "W"),
+        value_rate(&app["energy_joules"], "J"),
+        measure_disk_rate(app),
+    ]
+}
+
+fn process_metrics(process: &Value) -> [String; 6] {
+    [
+        value_rate(&process["cpu_percent_one_core"], "%"),
+        amount_memory(&process["resident_bytes"]),
+        amount_memory(&process["footprint_bytes"]),
+        value_rate(&process["energy_watts"], "W"),
+        value_rate(&process["energy_joules"], "J"),
+        amount_disk_rate(process),
+    ]
 }
 
 fn measure_rate(app: &Value, field: &str, measure: &str, unit: &str) -> String {

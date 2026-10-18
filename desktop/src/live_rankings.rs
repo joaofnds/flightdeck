@@ -23,7 +23,7 @@ const _: () = {
 
 #[derive(Debug)]
 pub enum Rankings {
-    Ready(TopApps),
+    Ready(Box<TopApps>),
     Unavailable(String),
 }
 
@@ -33,7 +33,7 @@ pub struct TopApps {
     pub app_count: u32,
     pub membership_complete: bool,
     pub ungrouped_members: u32,
-    pub metrics: [Ranking; 3],
+    pub metrics: [Ranking; 4],
 }
 
 #[derive(Debug)]
@@ -50,6 +50,7 @@ pub enum Metric {
     Cpu,
     Resident,
     Power,
+    Disk,
 }
 
 #[derive(Debug)]
@@ -86,15 +87,15 @@ pub fn read(selected: &Value, page: impl FnMut(u32) -> Result<Value, String>) ->
 fn read_pages(
     selected: &Value,
     mut page: impl FnMut(u32) -> Result<Value, String>,
-) -> Result<TopApps, String> {
+) -> Result<Box<TopApps>, String> {
     let (run, boot, publication) = identity_signature(selected)?;
-    let mut result = TopApps {
+    let mut result = Box::new(TopApps {
         selected: json!({"run":run,"boot":boot,"publication":publication}),
         app_count: 0,
         membership_complete: false,
         ungrouped_members: 0,
-        metrics: [Metric::Cpu, Metric::Resident, Metric::Power].map(Ranking::new),
-    };
+        metrics: [Metric::Cpu, Metric::Resident, Metric::Power, Metric::Disk].map(Ranking::new),
+    });
 
     for index in 0..PAGES_MAX {
         let offset = index * PAGE_ROWS;
@@ -175,7 +176,7 @@ fn read_header(source: &Value, offset: u32, result: &mut TopApps) -> Result<(), 
     Ok(())
 }
 
-fn read_app(source: &Value, metrics: &mut [Ranking; 3]) -> Result<(), String> {
+fn read_app(source: &Value, metrics: &mut [Ranking; 4]) -> Result<(), String> {
     let mut app = None;
     for ranking in metrics {
         let Some(reading) = ranking.read_measure(source)? else {
@@ -308,6 +309,7 @@ impl Metric {
             Self::Cpu => "CPU",
             Self::Resident => "Resident memory",
             Self::Power => "Process power",
+            Self::Disk => "Disk I/O",
         }
     }
 
@@ -316,6 +318,7 @@ impl Metric {
             Self::Cpu => "cpu_ns",
             Self::Resident => "resident_bytes",
             Self::Power => "energy_nj",
+            Self::Disk => "disk_io_bytes",
         }
     }
 
@@ -323,6 +326,7 @@ impl Metric {
         let key = match self {
             Self::Cpu => "cpu_percent_one_core",
             Self::Power => "energy_watts",
+            Self::Disk => "disk_io_bps",
             Self::Resident => return Ok(None),
         };
         if source[key].is_null() {

@@ -116,7 +116,10 @@ impl Preview {
                 rankings: None,
                 read_ms: 0.0,
             }),
-            complete: if matches!(request.route.as_str(), "overview" | "cpu" | "apps" | "raw") {
+            complete: if matches!(
+                request.route.as_str(),
+                "overview" | "cpu" | "apps" | "raw" | "storage"
+            ) {
                 target.matches(&snapshot.selection["selected"])
             } else {
                 true

@@ -31,7 +31,7 @@ fn overview_rankings_show_current_measurements_and_explicit_source_limits(cx: &m
     assert!(
         harness
             .driver
-            .reading_is_visible("App network, disk and GPU readings are unavailable.")
+            .reading_is_visible("App network and GPU readings are unavailable.")
     );
     harness.teardown();
 }
@@ -336,7 +336,7 @@ impl InputDriver {
         self.context.run_until_parked();
     }
 
-    fn complete_ranked_preview(&mut self) {
+    pub(super) fn complete_ranked_preview(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
             dashboard.preview_tick_at(Instant::now(), cx);
             let preview = dashboard.preview.as_ref().unwrap();
@@ -350,7 +350,7 @@ impl InputDriver {
         self.context.run_until_parked();
     }
 
-    fn complete_unavailable_ranked_preview(&mut self) {
+    pub(super) fn complete_unavailable_ranked_preview(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
             dashboard.preview_tick_at(Instant::now(), cx);
             let preview = dashboard.preview.as_ref().unwrap();
@@ -368,7 +368,7 @@ impl InputDriver {
         self.context.run_until_parked();
     }
 
-    fn fail_ranked_preview(&mut self) {
+    pub(super) fn fail_ranked_preview(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
             dashboard.preview_tick_at(Instant::now(), cx);
             assert!(dashboard.preview_receive(Update::Failed {
@@ -380,7 +380,7 @@ impl InputDriver {
         self.context.run_until_parked();
     }
 
-    fn finish_missing_ranked_preview(&mut self) {
+    pub(super) fn finish_missing_ranked_preview(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
             dashboard.preview_tick_at(Instant::now(), cx);
         });
@@ -402,7 +402,11 @@ impl InputDriver {
     }
 
     fn inspect_ranked_history_with_keyboard(&mut self) {
-        let bounds = self.chart_bounds("live-cpu-plot");
+        self.inspect_ranked_history_with_keyboard_on("live-cpu-plot");
+    }
+
+    pub(super) fn inspect_ranked_history_with_keyboard_on(&mut self, selector: &'static str) {
+        let bounds = self.chart_bounds(selector);
         self.context
             .simulate_mouse_down(bounds.center(), MouseButton::Right, Modifiers::none());
         self.context
@@ -412,7 +416,7 @@ impl InputDriver {
         assert_eq!(self.requested_publication(), Some(1));
     }
 
-    fn complete_ranked_selection(&mut self) {
+    pub(super) fn complete_ranked_selection(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = accepted_snapshot(dashboard.generation);
             snapshot.selection["second"] = json!(999);
@@ -430,14 +434,14 @@ impl InputDriver {
         self.context.run_until_parked();
     }
 
-    fn click_ranked_app(&mut self, selector: &'static str) {
+    pub(super) fn click_ranked_app(&mut self, selector: &'static str) {
         let bounds = self.context.debug_bounds(selector).expect(selector);
         self.context
             .simulate_click(bounds.center(), Modifiers::none());
         self.context.run_until_parked();
     }
 
-    fn assert_ranked_app_request(&self, second: u64, publication: u64, key: &str) {
+    pub(super) fn assert_ranked_app_request(&self, second: u64, publication: u64, key: &str) {
         let mut identity = accepted_snapshot(0).selection["selected"].clone();
         identity["publication"] = json!(publication);
         let expected = crate::live_hover::Target::exact(second, &identity).unwrap();
@@ -467,6 +471,10 @@ fn ranked_payload(
         "unavailable_members":0,"overflowed":false});
     let app = json!({"display_name":name,"key":{"kind":"bundle","bytes_hex":key},
         "cpu_ns":measure,"energy_nj":measure,
+        "disk_read_bytes":measure,"disk_io_bytes":measure,
+        "disk_written_bytes":{"known":"0","measured_members":1,
+            "unavailable_members":0,"overflowed":false},
+        "disk_read_bps":cpu,"disk_written_bps":0.0,"disk_io_bps":cpu,
         "resident_bytes":{"known":"1073741824","measured_members":1,
             "unavailable_members":0,"overflowed":false},
         "cpu_percent_one_core":cpu,"energy_watts":0.5});

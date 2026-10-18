@@ -200,11 +200,13 @@ fn history_projection_reads_decimal_stamps_and_partial_measurements() {
             "unavailable_members": 3, "overflowed": false}, "energy_watts": "0.25"}
     ]});
     let apps = panels("apps", &selection(), Some(&history)).unwrap();
-    assert_eq!(apps.len(), 4);
+    assert_eq!(apps.len(), 5);
     assert_eq!(apps[0].lines[0].values, [None]);
     assert_eq!(apps[1].lines[0].values, [Some(0.5)]);
     assert_eq!(apps[2].lines[0].values, [None]);
     assert_eq!(apps[3].lines[0].values, [Some(0.25)]);
+    assert_eq!(apps[4].lines[0].values, [None]);
+    assert_eq!(apps[4].lines[1].values, [None]);
 }
 
 #[test]
