@@ -4,7 +4,8 @@
 
 The client opens live and sealed recordings through the shared reader. It supports
 exact observation selection, paged raw/process/App data, logical-CPU histories,
-Memory quantities and pressure, Energy/SoC/fan histories, GPU, Network and Computer.
+Memory quantities and pressure, Energy/SoC/fan histories, GPU, Network, Storage,
+Battery, Computer and Self-monitoring.
 The [README](README.md) gives the self-contained bundle build and launch commands.
 
 Current checks use real encoded sealed recordings and GPUI's in-process TestPlatform.
@@ -12,6 +13,43 @@ The latter dispatches rendered chart input, installed actions and Cmd-O, includi
 pending/failed selection recovery. It does not exercise native macOS event delivery
 or inspect screen pixels. Saved-recording fixtures distinguish final same-second
 publications and preserve an explicitly chosen earlier observation.
+
+The Rust 1.95.0 integrated check passed 431 test executions, formatting and strict
+all-target clippy. Resource tests exercise historical summaries, device membership,
+missing observations, same-second battery states, Copy and restored live values
+through production GPUI nodes. Source tests exercise accepted, failed and cancelled
+Open actions, Recorded labels, one-response recorded requests, paused diagnostic
+updates, return to live following after Open and attached-producer stop/stall recovery.
+
+A packaged real-data probe read all twelve routes in 50.26 seconds, accepting 39
+snapshots. Pause held its exact observation, resume advanced, missing selections
+remained empty and reopening preserved readable data. Scalar context and the two
+selected App histories each covered 900 observed seconds. These selected histories
+do not establish complete history for every App. Reader metadata explicitly
+reported one missed publication and zero missed events, with unknown false.
+The probe attached read-only to the existing Swift-owned collector; it started or
+stopped no producer. Its app SHA-256 was
+`525dc924ccb4a7b794dc1a7463007ab8d05ea2506be51ddfa0e95e9857925d4c`.
+Local source hashes, test logs, packaged executable identities and the raw probe
+are under ignored `target/rest-application/`.
+
+The delivered app SHA-256 is
+`03517e429a3b0c8fbb1a2e136c7cfaa4d83140f3dc98c3d1d013ae19f733cd57`.
+It separates shared timeline bucketing from pressure-specific metadata. Exact
+state, selected-publication, gap and complete help tests pass before and after
+that refactor; its full 431-test suite, strict lint/formatting and tidy pass.
+The bundle's executable/helper bytes match the release inputs and resources validate.
+The preceding probe and resource-window observations identify their own binary.
+
+On the probe binary, Battery and Storage each ran for twenty seconds with 900
+scalar history points and no application error. They accepted 18 and 19 updates,
+respectively; their canvas callbacks reported populated source points and positive
+clipped bounds in an active 1320 × 900 point window at scale 2. These are app-owned
+paint and data observations, without independent pixel or native input verification.
+
+The app build includes the native thread's frozen viewer candidate. Its input
+manifest identifies those bytes independently of Git HEAD; this is a local app
+verification, without a claim that the whole shared workspace passed its release gates.
 
 An actual relocated bundle started its own collector and persister, read all nine
 routes, stopped them and reopened their sealed output. An abrupt-parent-departure
@@ -32,14 +70,21 @@ Computer access rejected the Flightdeck GPUI app after user authorization. These
 steps require an outside observation; no shell screenshot, accessibility automation
 or alternate input tool substitutes for that denied access.
 
-1. Launch the rebuilt bundle. Check readable labels, navigation and populated charts
-   at the normal and a narrower window size. Inspect CPU history, all Memory rows,
-   pressure, fan gaps and unavailable sources against the selected observation.
+1. From the repository root, run `open 'gpui-prototype/target/Flightdeck GPUI.app'`.
+   The default source is `~/Library/Application Support/Flightdeck/flightdeck.recording`.
+   Check readable labels, all twelve destinations and populated charts at the normal
+   and a narrower window size. Inspect CPU history, all Memory rows, pressure, fan
+   gaps, Storage devices, Battery details and unavailable sources against the selected observation.
 2. Use File → Open Recording and Cmd-O. Cancel once, open a sealed recording, then
    try an invalid folder. Confirm cancellation/failure preserves the old recording.
-3. Hover and click a chart, inspect a same-second alternative, use repeated arrows
-   during loading, then Resume live. Check that the displayed and selected values
-   agree and pending readings do not show the previous observation.
+3. Hover a plot on Overview, Memory, CPU, Apps, Storage and Battery. Check that the
+   cursor stays within its plot and the header, headline, legends, quantities,
+   device membership, details, schematic and Copy agree on the hovered observation.
+   Move directly to another plot, then into its title, legend, gutters and outside
+   the window; the cursor must disappear outside plots. Scroll or resize while
+   hovering and inspect an absent second: unrelated live readings must not replace
+   missing historical values. Click a chart, inspect a same-second alternative, use
+   repeated arrows during loading, then Resume live and confirm current values return.
 4. Enter an exact Unix second and a local time. Exercise IME composition, selection
    and replacement. Copy a reading, raw row and App/process detail; inspect the
    system clipboard for exact identities, counter strings and nulls.

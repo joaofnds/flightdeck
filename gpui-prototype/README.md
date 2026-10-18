@@ -22,8 +22,9 @@ no toolchain or hooks.
 Default launch uses `~/Library/Application Support/Flightdeck/flightdeck.recording`.
 It attaches to an advancing existing collector or starts its own when collection
 is absent. Initial Computer-only entry defers automatic collection until a
-recording route is opened. A recording supplied with `--recording PATH` opens in
-attach/read-only mode; add `--start-collector` to collect into that root. The
+recording route is opened. A recording supplied with `--recording PATH` opens as
+Recorded and reads on navigation or Refresh, without idle polling. Add
+`--start-collector` to collect into that root and follow Live readings. The
 following commands run from `gpui-prototype/`:
 
 ```sh
@@ -33,8 +34,11 @@ target/release/flightdeck-gpui --recording /path/to/session.recording --live-che
 target/release/flightdeck-gpui --recording /path/to/session.recording --live-soak --seconds 900
 ```
 
+The Live control in a Recorded window follows new readings from that recording
+through the existing reader. It does not start a collector or acquire shutdown ownership.
+
 Timed interactive live windows accept `--seconds 1..1800`. Run
-`target/release/flightdeck-gpui --recording /path/to/session.recording --seconds 900`
+`target/release/flightdeck-gpui --seconds 900`
 to observe a full fifteen-minute history interval in the window, or use `1800` to
 observe a second interval. Captured reference windows and `--live-check` retain
 their 300-second maximum.
@@ -64,16 +68,21 @@ backend includes AccessKit and avoids resolving unused platform backends. It use
 Xcode's separate Metal compiler component. Startup measurements include that cost;
 steady-state measurements begin after warmup. No toolchain or hooks are installed.
 
-Live mode follows Swift's Overview, CPU & processes, Apps, Memory, GPU, Energy,
-Network, Computer and Recorded readings destinations. Click a chart to pause at a
+Live mode follows Swift's Overview, CPU & processes, Apps, Memory, GPU, Storage,
+Energy, Network, Battery, Computer, Self-monitoring and Recorded readings
+destinations. Click a chart to pause at a
 second; use time arrows, same-second publication choices, and Resume live. Expand
 raw rows to read exact stored values, page through raw/App/process results, and
 select an App to inspect its observed histories and process instances. Executable
 groups filter the loaded process page; All process groups clears that filter. Computer
-reads current host inventory on entry and Refresh. The schematic is below Overview.
+reads current host inventory on entry and Refresh. Self-monitoring separates the
+latest producer's metadata from the selected observation and reports reader losses,
+saved windows and cache accounting. Refresh updates that metadata even while the
+reading selection is paused. The schematic is below Overview.
 
 Hovering a plot temporarily shows that exact observation across the page, including
-Memory quantities, CPU and App details, the schematic and Copy. Leaving the plot
+Memory quantities, CPU and App details, Storage/Battery summaries, the schematic
+and Copy. Leaving the plot
 restores the live or paused selection. Missing readings stay unavailable; details
 that need storage show a loading state while the existing reader fetches them.
 Charts retain their time range and position during inspection. Historical detail
@@ -108,12 +117,21 @@ rows. Live queries run on a dedicated worker with capacity-one request/result
 mailboxes, cancellation generations, 512-row pages and the backend's bounded cache.
 A 250 ms main-thread timer takes completed results. During collector discovery and
 startup it also reads bounded registration/ring-header metadata for the configured
-root; it does no database query or tick/event copying. These startup mappings are
-dropped on readiness or stop. The metadata syscalls have bounded input sizes but
+root; it does no database query or tick/event copying. Automatic attachment keeps
+monitoring that producer and surfaces stopped or stalled collection through Retry,
+without taking shutdown ownership. The metadata syscalls have bounded input sizes but
 cannot preempt a slow filesystem. Recording queries stay on the worker.
-Paused inspection stops worker polling. Live context holds at most 4096 points over
-900 seconds, uses actual wall-clock spacing and splits lines by run, boot and segment.
+Paused observation pages stop worker polling; live Self-monitoring continues
+updating connection metadata while preserving the selected identity. Live context
+holds at most 4096 points over 900 seconds, uses actual wall-clock spacing and splits
+lines by run, boot and segment.
 Null readings stay gaps. Captured histories retain their 121 samples.
+
+Storage shows physical-device throughput, operations, mean I/O time and errors,
+with bounded device cards and explicit partial or unavailable scans. Mirrored
+writes retain positive inspected values. Battery shows charge, signed power flow,
+observed charging states and the selected controller details. Resource summaries,
+device cards and Copy follow graph hover, including missing observations.
 
 The live CPU view includes selected logical-CPU intervals, 20-segment meters and
 900-second logical-CPU history, paged 32 CPUs at a time. History preserves actual
@@ -207,6 +225,22 @@ measure CPU paint work, not display presentation.
 
 The report retains raw-log paths and
 descriptive median/minimum/maximum statistics; it does not supply confidence intervals.
+
+Allocation experiments accept a frozen 900-point real recording selection. From
+`gpui-prototype/`, use fresh output filenames for each invocation:
+
+```sh
+cargo +1.95.0 build --release --locked --bin projection_bench
+target/release/projection_bench --capture /path/to/session.recording --output target/selection.json
+target/release/projection_bench --input target/selection.json --route memory \
+  --iterations 20 --output target/memory-bits.json
+target/release/projection_bench --paint-input target/memory-bits.json \
+  --iterations 20 --output target/prepared-bits.json
+```
+
+The capture requires 900 saved scalar points. Compare frozen binaries using the
+same input and byte-identical output transcripts. Paint counters cover production
+line preparation, excluding path construction, GPU work and pixels.
 
 The 240 cached rotor orientations preserve the existing artwork through GPUI image
 primitives. Their CPU pixels occupy 41,533,440 bytes, plus chassis pixels and GPU

@@ -2,7 +2,8 @@
 
 The isolated GPUI client now includes live and sealed recording workflows,
 logical-CPU history, complete selected Memory quantities, pressure and swap
-traffic, SoC/fan history, recording context and same-second observation choices.
+traffic, SoC/fan history, Storage, Battery, Self-monitoring, recording context and
+same-second observation choices.
 It packages its own collector and persister and shares Swift's recording format.
 The [README](README.md) gives build and launch commands;
 [LIVE.md](LIVE.md) records runtime verification and the native acceptance checklist.
@@ -12,7 +13,59 @@ captured Overview inspection used less CPU and more memory than the Swift baseli
 different chart layouts and unverified presentation prevent a framework ranking.
 No matched visible live comparison or native pixel/input verification is claimed.
 
-## Completion checks
+## Current application checks
+
+The integrated client passed 431 test executions, formatting, strict all-target
+clippy, font-backend checks and the Swift captured replay typecheck under Rust
+1.95.0. Release app and helper builds used unchanged, hashed source inputs. Packaged
+executables matched the built bytes and passed resource validation.
+
+A read-only probe against the existing Swift-owned collector accepted 39 snapshots
+across all twelve routes in 50.26 seconds. It checked advancing observations, exact
+pause/resume, absent-second recovery, pagination, selected App/CPU details and
+recording reopening. Its scalar and two selected App histories each covered 900
+observed seconds; one missed publication remained visible in reader metadata.
+This is backend verification, without native picker, clipboard, input or pixel proof.
+The probe's app SHA-256 is
+`525dc924ccb4a7b794dc1a7463007ab8d05ea2506be51ddfa0e95e9857925d4c`;
+its raw output and exact-input checks are under ignored `target/rest-application/`.
+
+Storage and Battery summaries, device membership and Copy follow the hovered
+observation, with explicit unavailable values and restored selection on exit.
+Recorded sources retain reader-session App histories while avoiding idle polling;
+navigation and Refresh still query the existing reader. Automatic live attachment
+reports a stopped or stalled producer through Retry without acquiring shutdown
+ownership. An explicit Live control follows the opened recording through the same
+reader. Self-monitoring labels the producer and selected positions separately;
+its live catalog can advance while the inspected observation remains paused.
+
+The input manifest includes the native thread's frozen viewer candidate, whose
+bytes are identified separately from Git HEAD. These checks do not certify the
+whole shared workspace's release state.
+
+The delivered app is
+`03517e429a3b0c8fbb1a2e136c7cfaa4d83140f3dc98c3d1d013ae19f733cd57`.
+It has separate passing exact-input checks after a behavior-preserving extraction
+of categorical timeline bucketing, including full state/help characterization.
+The twelve-route runtime probe above identifies the preceding build separately.
+
+## Chart preparation allocation experiment
+
+A frozen 900-point Memory input contains four line panels and ten series. Reusing
+one scratch vector per panel reduced Rust allocation calls during production line
+preparation from 10 to 4 and requested bytes from 108,000 to 43,200, both by 60%.
+Three unchanged controls and two treatments each used twenty repetitions. Prepared
+floating-point bits, geometry, gaps, positions, segments and flags matched byte for
+byte across all five transcripts. Hidden-series, one-point and mixed
+stack/negative/gap cases also preserved their prepared output.
+
+The counter excludes fixture decoding, result serialization and projection. This
+experiment measures allocation requests before path construction; it does not
+measure resident memory, GPU work, presented pixels or application speed. Timing
+ranges overlapped on the shared machine. The input, binaries, source copies and
+raw measurements remain under ignored `target/paint-scratch.QdAA61/`.
+
+## Historical completion checks
 
 The integrated client checks passed 334 test executions, strict all-target clippy
 and formatting under Rust 1.95.0. The root workspace passed 1,206 tests with four
@@ -43,7 +96,7 @@ Local checkpoint evidence is retained under ignored `target/completion-*`,
 `target/lifecycle-final-*` and `target/projection-allocation/`. The original
 historical evidence links below remain committed and portable.
 
-## Sustained current CPU history
+## Historical sustained CPU history
 
 A 920-second optimized CPU window accepted 926 updates and invoked its root view
 render 929 times. Its final snapshot held 900 scalar points and 900 CPU-history
