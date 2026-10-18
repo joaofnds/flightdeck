@@ -13,6 +13,11 @@ pub(super) struct Cache {
     sample: Box<Sample>,
 }
 
+struct FrameSource {
+    window: usize,
+    query: String,
+}
+
 // Sample::bytes includes its box payload; Cache retains only fixed metadata and a box pointer.
 const CACHE_BYTES_MAX: usize = SAMPLE_BYTES_MAX + size_of::<Cache>();
 
@@ -89,7 +94,8 @@ impl Session {
 
         with_app_sample_selection(selected, &endpoint)?;
         let mut current = None;
-        self.with_app_sample_frame(window, &endpoint, &mut current)?;
+        let mut source = None;
+        self.with_app_sample_frame(window, &endpoint, &mut source, &mut current)?;
 
         let predecessor_window = if let Some(previous) = publication.checked_sub(1) {
             self.with_app_sample_window(selected, previous)?
@@ -101,7 +107,7 @@ impl Session {
             if let Some(publication) = publication.checked_sub(1) {
                 if let Some(endpoint) = self.with_app_sample_endpoint(window, publication)? {
                     if with_app_sample_predecessor(&endpoint, current.as_deref()) {
-                        self.with_app_sample_frame(window, &endpoint, &mut previous)?;
+                        self.with_app_sample_frame(window, &endpoint, &mut source, &mut previous)?;
                     }
                 }
             }
@@ -159,7 +165,8 @@ impl Session {
         let source = self.source(window, "ticks")?;
         let mut statement = self.connection.prepare(&format!(
             "SELECT run_tick, wall_ns, continuous_ns, awake_ns, processes_refused, \
-            processes_gone FROM {source} WHERE publication={publication} LIMIT 2"
+            processes_gone, events_first, events_end FROM {source} \
+            WHERE publication={publication} LIMIT 2"
         ))?;
         let mut rows = statement.query([])?;
         let Some(row) = rows.next()? else {
@@ -180,6 +187,8 @@ impl Session {
                 .get::<_, Option<u64>>(0)?
                 .ok_or(Error::Bound("committed App run tick"))?,
             wall_ns: row.get(1)?,
+            events_first: with_app_sample_endpoint_event_bound(row, 6)?,
+            events_end: with_app_sample_endpoint_event_bound(row, 7)?,
             usage_refused: row
                 .get::<_, Option<u32>>(4)?
                 .ok_or(Error::Bound("committed App refused count"))?,
@@ -201,11 +210,38 @@ impl Session {
         &self,
         window: usize,
         endpoint: &Endpoint,
+        source: &mut Option<FrameSource>,
         output: &mut Option<Box<Frame>>,
     ) -> Result<()> {
-        let source = self.source(window, "processes")?;
-        Frame::committed(endpoint, &self.connection, &source, &self.operation, output)
+        if source.as_ref().is_none_or(|source| source.window != window) {
+            let processes = self.source(window, "processes")?;
+            let events = self.source(window, "events")?;
+            *source = Some(FrameSource {
+                window,
+                query: crate::live_apps::committed::Sources {
+                    processes: &processes,
+                    events: &events,
+                }
+                .query(),
+            });
+        }
+
+        let source = source
+            .as_ref()
+            .ok_or(Error::Bound("committed App source"))?;
+        Frame::committed(
+            endpoint,
+            &self.connection,
+            &source.query,
+            &self.operation,
+            output,
+        )
     }
+}
+
+fn with_app_sample_endpoint_event_bound(row: &duckdb::Row<'_>, index: usize) -> Result<u64> {
+    row.get::<_, Option<u64>>(index)?
+        .ok_or(Error::Bound("committed App event range"))
 }
 
 fn with_app_sample_matches(selected: &Value, observation: &Observation) -> bool {

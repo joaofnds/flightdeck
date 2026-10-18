@@ -11,6 +11,44 @@ fn page(sample: &Sample) -> Result<Value> {
 }
 
 #[test]
+fn normalizes_processes_and_events_once_for_a_same_window_pair() {
+    // Goal: one selected/predecessor pair cannot rescan the same immutable identity sources.
+    // Method: count two tick sources plus one process/event source pair in a cold restore.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(1001);
+    fixture.publish_with_system_rows(1002);
+    fixture.seal();
+    let mut session = Session::open(&fixture.root).unwrap();
+    let selected = session.select(1002, 0).unwrap()["selected"].clone();
+    let before = session.source_reads.get();
+
+    let restored = session.with_app_sample(&selected, page).unwrap();
+
+    assert_eq!(session.source_reads.get() - before, 4);
+    assert_eq!(restored["apps"][0]["cpu_ns"]["known"], "1");
+}
+
+#[test]
+fn normalizes_each_distinct_window_for_a_cross_window_pair() {
+    // Goal: reusing a source never projects predecessor rows from the selected window.
+    // Method: seal consecutive ticks in separate windows and count both normalized pairs.
+    let mut fixture = Fixture::new();
+    fixture.start_at_run_tick(59);
+    fixture.publish_with_system_rows(1001);
+    fixture.publish_with_system_rows(1002);
+    fixture.seal_minute(0);
+    fixture.seal_minute(1);
+    let mut session = Session::open(&fixture.root).unwrap();
+    let selected = session.select(1002, 0).unwrap()["selected"].clone();
+    let before = session.source_reads.get();
+
+    let restored = session.with_app_sample(&selected, page).unwrap();
+
+    assert_eq!(session.source_reads.get() - before, 6);
+    assert_eq!(restored["apps"][0]["cpu_ns"]["known"], "1");
+}
+
+#[test]
 fn restores_exact_selection_lazily_and_reuses_one_owned_sample() {
     // Goal: saved App queries use the explicit selected identity and reuse their projection.
     // Method: select a different scalar second, then read the earlier App twice from disk.

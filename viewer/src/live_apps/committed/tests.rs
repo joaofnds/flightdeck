@@ -20,6 +20,8 @@ fn endpoint() -> Endpoint {
         wall_ns: Some(1_001_000_000_000),
         usage_refused: 0,
         usage_gone: 0,
+        events_first: 0,
+        events_end: 0,
     }
 }
 
@@ -34,6 +36,24 @@ fn connection() -> Connection {
             .execute_batch(&format!("ALTER TABLE processes ADD COLUMN {name} {kind}"))
             .unwrap();
     }
+    let columns = persistence::schema::TABLES[9].1;
+    connection
+        .execute_batch(&format!("CREATE TABLE events ({columns})"))
+        .unwrap();
+    for (name, kind) in persistence::schema::IDENTITY_FIELDS {
+        connection
+            .execute_batch(&format!("ALTER TABLE events ADD COLUMN {name} {kind}"))
+            .unwrap();
+    }
+    let source = Sources {
+        processes: "processes",
+        events: "events",
+    }
+    .query();
+    connection
+        .execute_batch(&format!("CREATE VIEW app_rows AS SELECT * FROM {source}"))
+        .unwrap();
+
     connection
 }
 
@@ -69,7 +89,7 @@ fn decodes_requested_committed_frames_with_an_empty_middle_publication() {
     endpoints[2].stamp.publication = 3;
     let mut actual = Vec::new();
 
-    Frame::committed_many(&endpoints, &connection, "processes", &operation, |frame| {
+    Frame::committed_many(&endpoints, &connection, "app_rows", &operation, |frame| {
         actual.push((
             frame.stamp.publication,
             frame.process_count(),
@@ -107,7 +127,7 @@ fn rejects_duplicate_pid_rows_before_delivering_a_batch_endpoint() {
     let result = Frame::committed_many(
         &[endpoint()],
         &connection,
-        "processes",
+        "app_rows",
         &operation,
         |_frame| {
             callbacks += 1;
@@ -135,7 +155,7 @@ fn rejects_repeated_endpoint_publications_in_a_batch_request() {
     let result = Frame::committed_many(
         &[endpoint(), endpoint()],
         &connection,
-        "processes",
+        "app_rows",
         &operation,
         |_frame| {
             callbacks += 1;
@@ -167,11 +187,10 @@ fn rejects_a_batch_larger_than_one_window_before_delivering_endpoints() {
         .collect();
     let mut callbacks = 0;
 
-    let result =
-        Frame::committed_many(&endpoints, &connection, "processes", &operation, |_frame| {
-            callbacks += 1;
-            Ok(())
-        });
+    let result = Frame::committed_many(&endpoints, &connection, "app_rows", &operation, |_frame| {
+        callbacks += 1;
+        Ok(())
+    });
 
     assert!(matches!(
         result,
@@ -198,7 +217,7 @@ fn delivers_all_sixty_one_empty_endpoints_at_the_window_bound() {
     let mut callbacks = 0;
     let mut members = 0;
 
-    Frame::committed_many(&endpoints, &connection, "processes", &operation, |frame| {
+    Frame::committed_many(&endpoints, &connection, "app_rows", &operation, |frame| {
         callbacks += 1;
         members += frame.process_count();
         Ok(())
@@ -222,12 +241,11 @@ fn cancels_a_batch_before_delivering_the_next_endpoint() {
     endpoints[1].stamp.publication = 2;
     let mut callbacks = 0;
 
-    let result =
-        Frame::committed_many(&endpoints, &connection, "processes", &operation, |_frame| {
-            callbacks += 1;
-            cancellation.cancel()?;
-            Ok(())
-        });
+    let result = Frame::committed_many(&endpoints, &connection, "app_rows", &operation, |_frame| {
+        callbacks += 1;
+        cancellation.cancel()?;
+        Ok(())
+    });
 
     assert!(
         matches!(result, Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted)
@@ -252,7 +270,7 @@ fn refuses_an_oversized_process_group_in_the_batch_preflight() {
     let result = Frame::committed_many(
         &[endpoint()],
         &connection,
-        "processes",
+        "app_rows",
         &operation,
         |_frame| {
             callbacks += 1;
@@ -280,6 +298,10 @@ macro_rules! chunk_boundary {
                     publication: 1,
                     size: FrameSize {
                         count: 1000,
+                        members: 1000,
+                        starts: 0,
+                        execs: 0,
+                        exits: 0,
                         bytes: 4_000_000,
                     },
                 },
@@ -287,6 +309,10 @@ macro_rules! chunk_boundary {
                     publication: 2,
                     size: FrameSize {
                         count: 1000,
+                        members: 1000,
+                        starts: 0,
+                        execs: 0,
+                        exits: 0,
                         bytes: $bytes,
                     },
                 },
@@ -301,17 +327,17 @@ macro_rules! chunk_boundary {
 
 chunk_boundary!(
     packs_a_normal_group_one_byte_below_the_logical_target,
-    3_676_065,
+    3_548_001,
     2
 );
 chunk_boundary!(
     packs_a_normal_group_exactly_at_the_logical_target,
-    3_676_066,
+    3_548_002,
     2
 );
 chunk_boundary!(
     splits_a_normal_group_one_byte_above_the_logical_target,
-    3_676_067,
+    3_548_003,
     1
 );
 
@@ -319,9 +345,9 @@ chunk_boundary!(
 fn ties_the_logical_row_charge_to_the_selected_columns_and_extra_row_reserve() {
     // Goal: changing the numeric projection cannot silently loosen its logical accounting.
     // Method: count the shared SELECT fields plus publication and verify the sentinel formula.
-    assert_eq!(PROCESS_COLUMNS.split(',').count() + 1, BATCH_COLUMNS);
-    assert_eq!(ROW_LOGICAL_BYTES, 352);
-    assert_eq!(SENTINEL_LOGICAL_BYTES, 8_542);
+    assert_eq!(PROCESS_COLUMNS.split(',').count() + 5, BATCH_COLUMNS);
+    assert_eq!(ROW_LOGICAL_BYTES, 416);
+    assert_eq!(SENTINEL_LOGICAL_BYTES, 8_606);
     assert_eq!(BATCH_LOGICAL_BYTES_MAX, 8_388_608);
 }
 
@@ -335,7 +361,7 @@ fn delivers_no_endpoint_for_an_empty_batch_request() {
         .unwrap();
     let mut callbacks = 0;
 
-    Frame::committed_many(&[], &connection, "processes", &operation, |_frame| {
+    Frame::committed_many(&[], &connection, "app_rows", &operation, |_frame| {
         callbacks += 1;
         Ok(())
     })
@@ -350,6 +376,10 @@ fn rejects_logical_size_arithmetic_that_cannot_be_represented() {
     // Method: supply an impossible in-memory row count to its checked byte calculation.
     let size = FrameSize {
         count: usize::MAX,
+        members: 0,
+        starts: 0,
+        execs: 0,
+        exits: 0,
         bytes: 1,
     };
 
@@ -402,7 +432,7 @@ fn preserves_adjacent_totals_across_an_actual_normal_query_group_boundary() {
     let mut previous = None;
     let mut restored = None;
 
-    Frame::committed_many(&endpoints, &connection, "processes", &operation, |frame| {
+    Frame::committed_many(&endpoints, &connection, "app_rows", &operation, |frame| {
         restored = Some(
             crate::live_app_history::TracePoint::capture(&frame, previous.as_deref(), &target)?
                 .json(0),
@@ -433,7 +463,7 @@ fn delivers_two_oversized_valid_endpoints_as_separate_singletons() {
         .unwrap();
     let mut actual = Vec::new();
 
-    Frame::committed_many(&endpoints, &connection, "processes", &operation, |frame| {
+    Frame::committed_many(&endpoints, &connection, "app_rows", &operation, |frame| {
         actual.push((frame.stamp().publication, frame.process_count()));
         Ok(())
     })
@@ -453,14 +483,7 @@ fn owns_raw_program_bytes_and_exact_integers_above_double_precision() {
         .unwrap();
     let mut frame = None;
 
-    Frame::committed(
-        &endpoint(),
-        &connection,
-        "processes",
-        &operation,
-        &mut frame,
-    )
-    .unwrap();
+    Frame::committed(&endpoint(), &connection, "app_rows", &operation, &mut frame).unwrap();
     drop(connection);
     let frame = frame.unwrap();
 
@@ -508,14 +531,7 @@ fn retains_identity_only_refusal_without_fabricating_numeric_usage() {
         .unwrap();
     let mut frame = None;
 
-    Frame::committed(
-        &endpoint(),
-        &connection,
-        "processes",
-        &operation,
-        &mut frame,
-    )
-    .unwrap();
+    Frame::committed(&endpoint(), &connection, "app_rows", &operation, &mut frame).unwrap();
 
     let frame = frame.unwrap();
     assert!(matches!(frame.members[0].usage, Err(Unavailable::Refused)));
@@ -535,13 +551,7 @@ fn rejects_duplicate_pid_associations_without_installing_a_partial_frame() {
         .unwrap();
     let mut frame = None;
 
-    let result = Frame::committed(
-        &endpoint(),
-        &connection,
-        "processes",
-        &operation,
-        &mut frame,
-    );
+    let result = Frame::committed(&endpoint(), &connection, "app_rows", &operation, &mut frame);
 
     assert!(matches!(
         result,
@@ -549,3 +559,6 @@ fn rejects_duplicate_pid_associations_without_installing_a_partial_frame() {
     ));
     assert!(frame.is_none());
 }
+
+#[path = "event_tests.rs"]
+mod event_tests;

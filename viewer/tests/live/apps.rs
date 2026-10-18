@@ -1146,7 +1146,12 @@ fn publish_at(fixture: &mut Fixture, moment: &Moment) {
 fn readings<'a>(processes: &'a [Process], memory: &'a Memory, run_tick: u64) -> Readings<'a> {
     Readings {
         run_tick,
-        cpus: &[],
+        cpus: &[collector::machine::CPUTicks {
+            user: 1,
+            system: 0,
+            nice: 0,
+            idle: 1,
+        }],
         memory,
         interfaces: &[],
         ioreport: None,

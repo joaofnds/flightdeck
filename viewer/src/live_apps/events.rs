@@ -53,18 +53,24 @@ pub(super) fn capture(
     frame.exits.reserve_exact(count);
     capture_programs_reserve(frame, source, events)?;
     capture_events(frame, source, events)?;
+    finish(frame);
+
+    Ok(())
+}
+
+pub(super) fn finish(frame: &mut Frame) {
     frame
         .exits
         .sort_by_key(|exit| (exit.pid, exit.creation.map(|creation| creation.unique_id)));
     capture_duplicates(&mut frame.exits);
+
     frame
         .starts
         .sort_by_key(|start| (start.pid, start.creation.map(|creation| creation.unique_id)));
     capture_start_duplicates(&mut frame.starts);
+
     frame.execs.sort_by_key(|exec| (exec.pid, exec.number));
     capture_start_interruptions(&mut frame.starts, &frame.execs);
-
-    Ok(())
 }
 
 fn capture_validate(source: &Publication<'_>, events: &PublicationEvents<'_>) -> Result<()> {

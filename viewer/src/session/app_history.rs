@@ -45,13 +45,15 @@ struct Reading {
     observation: Observation,
     refused: u32,
     gone: u32,
+    events_first: u64,
+    events_end: u64,
     plotted: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Source {
     Ticks,
-    Processes,
+    Apps,
 }
 
 const TICKS_PER_WINDOW_MAX: usize = crate::live_apps::committed::ENDPOINTS_MAX;
@@ -311,7 +313,8 @@ impl Session {
         let limit = maximum + 1;
         let mut statement = self.connection.prepare(&format!(
             "SELECT publication, run_tick, wall_ns, continuous_ns, awake_ns, processes_refused, \
-            processes_gone FROM {source} WHERE {predicate} ORDER BY publication LIMIT {limit}"
+            processes_gone, events_first, events_end FROM {source} \
+            WHERE {predicate} ORDER BY publication LIMIT {limit}"
         ))?;
         let mut rows = statement.query([])?;
         for index in 0..=maximum {
@@ -346,11 +349,18 @@ impl Session {
                 return Err(Error::Bound("committed App history sources"));
             }
 
-            let name = match kind {
-                Source::Ticks => "ticks",
-                Source::Processes => "processes",
+            let source = match kind {
+                Source::Ticks => self.source(window, "ticks")?,
+                Source::Apps => {
+                    let processes = self.source(window, "processes")?;
+                    let events = self.source(window, "events")?;
+                    crate::live_apps::committed::Sources {
+                        processes: &processes,
+                        events: &events,
+                    }
+                    .query()
+                }
             };
-            let source = self.source(window, name)?;
             restore.source_bytes = restore
                 .source_bytes
                 .checked_add(source.capacity())
@@ -418,7 +428,7 @@ impl Session {
             .first()
             .ok_or(Error::Bound("committed App history empty batch"))?;
         let endpoints: Vec<_> = readings.iter().map(Reading::endpoint).collect();
-        let source = self.app_history_source(restore, first.window, Source::Processes)?;
+        let source = self.app_history_source(restore, first.window, Source::Apps)?;
         let mut index = 0;
         Frame::committed_many(
             &endpoints,
@@ -514,6 +524,8 @@ impl Reading {
             wall_ns: self.observation.wall_ns,
             usage_refused: self.refused,
             usage_gone: self.gone,
+            events_first: self.events_first,
+            events_end: self.events_end,
         }
     }
 
@@ -607,6 +619,12 @@ fn app_history_reading(row: &duckdb::Row<'_>, window: usize, run: &RunIdentity) 
         gone: row
             .get::<_, Option<u32>>(6)?
             .ok_or(Error::Bound("committed App history gone count"))?,
+        events_first: row
+            .get::<_, Option<u64>>(7)?
+            .ok_or(Error::Bound("committed App history event range"))?,
+        events_end: row
+            .get::<_, Option<u64>>(8)?
+            .ok_or(Error::Bound("committed App history event range"))?,
         plotted: false,
     })
 }

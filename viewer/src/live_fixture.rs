@@ -369,27 +369,21 @@ impl Fixture {
                 Found::Missed { .. } => panic!("fixture source overwritten"),
                 Found::Publication { publication, .. } => publication,
             };
-            let mut identity = IdentityObservation::EMPTY;
-            let FoundEvent::Event {
-                number,
-                tick: run_tick,
-                event,
-            } = reader.read_event_identity(&mut identity).unwrap()
-            else {
-                panic!("event missing");
-            };
-            assert_eq!(run_tick, tick.run_tick);
+            let (events_owned, event_identities) = seal_read_events(reader, &tick);
             if let Some(minute) = minute {
                 if tick.run_tick / 60 != minute {
                     continue;
                 }
             }
             let observation = seal_read_observation(&tick, publication, observations);
-            let events = [persistence::NumberedEvent {
-                number,
-                tick: run_tick,
-                event: &event,
-            }];
+            let events: Vec<_> = events_owned
+                .iter()
+                .map(|(number, event)| persistence::NumberedEvent {
+                    number: *number,
+                    tick: tick.run_tick,
+                    event,
+                })
+                .collect();
             if self.identity {
                 window
                     .push_tick_with_identity(
@@ -399,7 +393,7 @@ impl Fixture {
                         &persistence::IdentitySource {
                             reader,
                             processes: &identities,
-                            events: &[identity],
+                            events: &event_identities,
                         },
                     )
                     .unwrap();
@@ -420,6 +414,33 @@ impl Fixture {
             persistence::Limits::from_shape(&SHAPE).unwrap(),
         )
     }
+}
+
+fn seal_read_events(
+    reader: &mut RingReader,
+    tick: &collector::ring::Tick,
+) -> (Vec<(u64, Event)>, Vec<IdentityObservation>) {
+    let count = usize::try_from(tick.events.end - tick.events.start).unwrap();
+    assert!(count <= 32);
+    let mut events = Vec::with_capacity(count);
+    let mut identities = Vec::with_capacity(count);
+    for expected in tick.events.clone() {
+        let mut identity = IdentityObservation::EMPTY;
+        let FoundEvent::Event {
+            number,
+            tick: run_tick,
+            event,
+        } = reader.read_event_identity(&mut identity).unwrap()
+        else {
+            panic!("event missing");
+        };
+        assert_eq!(number, expected);
+        assert_eq!(run_tick, tick.run_tick);
+        events.push((number, event));
+        identities.push(identity);
+    }
+
+    (events, identities)
 }
 
 fn seal_read_observation(

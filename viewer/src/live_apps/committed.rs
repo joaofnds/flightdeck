@@ -16,6 +16,8 @@ pub(crate) struct Endpoint {
     pub wall_ns: Option<u64>,
     pub usage_refused: u32,
     pub usage_gone: u32,
+    pub events_first: u64,
+    pub events_end: u64,
 }
 
 const PROCESS_COLUMNS: &str = "pid, process_unique_id, pid_version, identity_availability, \
@@ -23,9 +25,35 @@ const PROCESS_COLUMNS: &str = "pid, process_unique_id, pid_version, identity_ava
     energy_nj, instructions, super_instructions, cycles, idle_wakeups, interrupt_wakeups, \
     pageins, resident_bytes, footprint_bytes, disk_read_bytes, disk_written_bytes";
 
-#[derive(Clone, Copy)]
+pub(crate) struct Sources<'source> {
+    pub processes: &'source str,
+    pub events: &'source str,
+}
+
+impl Sources<'_> {
+    pub(crate) fn query(&self) -> String {
+        format!(
+            "(SELECT {PROCESS_COLUMNS}, publication, 0::UTINYINT app_origin, \
+            NULL::UBIGINT app_event, NULL::UTINYINT app_kind, NULL::UBIGINT app_tick \
+            FROM {processes} UNION ALL SELECT pid, process_unique_id, pid_version, \
+            identity_availability, CASE WHEN kind=3 THEN NULL ELSE executable_name END, \
+            CASE WHEN kind=3 THEN NULL ELSE app_path END, usage_availability, \
+            awake_ns_at_start, user_ns, system_ns, energy_nj, instructions, super_instructions, \
+            cycles, idle_wakeups, interrupt_wakeups, pageins, resident_bytes, footprint_bytes, \
+            disk_read_bytes, disk_written_bytes, publication, 1::UTINYINT app_origin, \
+            event app_event, kind app_kind, run_tick app_tick FROM {events})",
+            processes = self.processes,
+            events = self.events,
+        )
+    }
+}
+
 struct FrameSize {
     count: usize,
+    members: usize,
+    starts: usize,
+    execs: usize,
+    exits: usize,
     bytes: usize,
 }
 
@@ -41,13 +69,13 @@ struct Batch<'source> {
 }
 
 pub(crate) const ENDPOINTS_MAX: usize = 61;
-const BATCH_COLUMNS: usize = 22;
+const BATCH_COLUMNS: usize = 26;
 const ROW_LOGICAL_BYTES: usize = BATCH_COLUMNS * size_of::<Option<u64>>();
 const SENTINEL_LOGICAL_BYTES: usize =
     ROW_LOGICAL_BYTES + 2 * collector::ring::PROGRAM_PATH_BYTES_MAX;
 const BATCH_LOGICAL_BYTES_MAX: usize = 8 * 1024 * 1024;
 const SINGLETON_LOGICAL_BYTES_MAX: usize = super::PROGRAM_FRAME_BYTES_MAX
-    + apps::PROCESS_INTERVALS_MAX * ROW_LOGICAL_BYTES
+    + (apps::PROCESS_INTERVALS_MAX + collector::tracker::EVENTS_PER_TICK_MAX) * ROW_LOGICAL_BYTES
     + SENTINEL_LOGICAL_BYTES;
 
 struct QuerySize {
@@ -61,16 +89,29 @@ const _: () = {
 };
 
 impl FrameSize {
-    fn logical_bytes(self) -> Result<usize> {
+    fn logical_bytes(&self) -> Result<usize> {
         self.count
             .checked_mul(ROW_LOGICAL_BYTES)
             .and_then(|fixed| fixed.checked_add(self.bytes))
             .ok_or(Error::Bound("committed App batch logical bytes"))
     }
 
-    fn validate(self) -> Result<()> {
-        if self.count > apps::PROCESS_INTERVALS_MAX {
+    fn validate(&self) -> Result<()> {
+        let maximum = apps::PROCESS_INTERVALS_MAX + collector::tracker::EVENTS_PER_TICK_MAX;
+        if self.count > maximum {
+            return Err(Error::Bound("committed App row bound"));
+        }
+
+        if self.members + self.starts + self.execs > apps::PROCESS_INTERVALS_MAX {
             return Err(Error::Bound("committed App process bound"));
+        }
+
+        if self.starts + self.execs + self.exits > collector::tracker::EVENTS_PER_TICK_MAX {
+            return Err(Error::Bound("committed App event bound"));
+        }
+
+        if self.count != self.members + self.starts + self.execs + self.exits {
+            return Err(Error::Bound("committed App row kind"));
         }
 
         if self.bytes > super::PROGRAM_FRAME_BYTES_MAX {
@@ -90,34 +131,26 @@ impl Frame {
         output: &mut Option<Box<Self>>,
     ) -> Result<()> {
         *output = None;
-        operation.check()?;
-        assert_eq!(endpoint.stamp.boot, endpoint.identity.boot.0);
-        assert_eq!(endpoint.stamp.run, endpoint.identity.run.0);
 
-        let publication = endpoint.stamp.publication;
-        let (count, bytes): (u64, u64) = connection.query_row(
-            &format!(
-                "SELECT count(*), coalesce(sum(coalesce(octet_length(executable_name), 0) + \
-                coalesce(octet_length(app_path), 0)), 0)::UBIGINT \
-                FROM {source} WHERE publication={publication}"
-            ),
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        let count = usize::try_from(count).map_err(|_| Error::Bound("committed App count"))?;
-        let bytes = usize::try_from(bytes).map_err(|_| Error::Bound("committed App bytes"))?;
+        let result = Self::committed_many(
+            std::slice::from_ref(endpoint),
+            connection,
+            source,
+            operation,
+            |frame| {
+                *output = Some(frame);
+                Ok(())
+            },
+        );
 
-        let size = FrameSize { count, bytes };
-        size.validate()?;
-        let mut frame = committed_frame(endpoint, size);
-        committed_members(connection, source, operation, &mut frame)?;
-        committed_finish(&frame, size)?;
-        *output = Some(frame);
+        if result.is_err() {
+            *output = None;
+        }
 
-        Ok(())
+        result
     }
 
-    /// Source is normalized immutable process data. Callbacks perform no SQL on this connection.
+    /// Source is normalized immutable process/event data. Callbacks perform no SQL here.
     pub(crate) fn committed_many(
         endpoints: &[Endpoint],
         connection: &Connection,
@@ -196,10 +229,17 @@ fn committed_many_chunk_count(endpoints: &[Endpoint], sizes: &[PublicationSize])
     Ok(count)
 }
 
-fn committed_many_size(publication: u64, sizes: &[PublicationSize]) -> FrameSize {
+fn committed_many_size(publication: u64, sizes: &[PublicationSize]) -> &FrameSize {
     match sizes.binary_search_by_key(&publication, |entry| entry.publication) {
-        Ok(index) => sizes[index].size,
-        Err(_) => FrameSize { count: 0, bytes: 0 },
+        Ok(index) => &sizes[index].size,
+        Err(_) => &FrameSize {
+            count: 0,
+            members: 0,
+            starts: 0,
+            execs: 0,
+            exits: 0,
+            bytes: 0,
+        },
     }
 }
 
@@ -255,6 +295,10 @@ fn committed_many_publications(endpoints: &[Endpoint]) -> Result<String> {
             return Err(Error::Bound("committed App batch publication order"));
         }
 
+        if endpoint.events_first > endpoint.events_end {
+            return Err(Error::Bound("committed App event range"));
+        }
+
         previous = Some(endpoint.stamp.publication);
         publications.push(endpoint.stamp.publication.to_string());
     }
@@ -271,7 +315,11 @@ fn committed_many_sizes(
     let limit = batch.endpoints.len() + 1;
     let mut statement = connection.prepare(&format!(
         "SELECT publication, count(*), coalesce(sum(coalesce(octet_length(executable_name), 0) + \
-        coalesce(octet_length(app_path), 0)), 0)::UBIGINT FROM {source} \
+        coalesce(octet_length(app_path), 0)), 0)::UBIGINT, \
+        count(*) FILTER (WHERE app_origin=0), \
+        count(*) FILTER (WHERE app_origin=1 AND app_kind=1), \
+        count(*) FILTER (WHERE app_origin=1 AND app_kind=2), \
+        count(*) FILTER (WHERE app_origin=1 AND app_kind=3) FROM {source} \
         WHERE publication IN ({publications}) GROUP BY publication \
         ORDER BY publication LIMIT {limit}",
         source = batch.source,
@@ -307,10 +355,15 @@ fn committed_many_sizes(
         let size = FrameSize {
             count: usize::try_from(required::<u64>(row, 1)?)
                 .map_err(|_| Error::Bound("committed App count"))?,
+            members: committed_many_sizes_count(row, 3)?,
+            starts: committed_many_sizes_count(row, 4)?,
+            execs: committed_many_sizes_count(row, 5)?,
+            exits: committed_many_sizes_count(row, 6)?,
             bytes: usize::try_from(required::<u64>(row, 2)?)
                 .map_err(|_| Error::Bound("committed App bytes"))?,
         };
         size.validate()?;
+
         output.push(PublicationSize { publication, size });
     }
 
@@ -326,11 +379,16 @@ fn committed_many_rows(
 ) -> Result<()> {
     // This accounts requested logical cells and BLOBs, not DuckDB overhead or physical memory.
     let size = committed_many_query_size(batch.endpoints, sizes)?;
-    assert!(size.rows <= ENDPOINTS_MAX * apps::PROCESS_INTERVALS_MAX);
+    assert!(
+        size.rows
+            <= ENDPOINTS_MAX
+                * (apps::PROCESS_INTERVALS_MAX + collector::tracker::EVENTS_PER_TICK_MAX)
+    );
     let limit = size.rows + 1;
     let mut statement = connection.prepare(&format!(
-        "SELECT {PROCESS_COLUMNS}, publication FROM {source} WHERE publication IN ({publications}) \
-        ORDER BY publication, pid LIMIT {limit}",
+        "SELECT {PROCESS_COLUMNS}, publication, app_origin, app_event, app_kind, app_tick \
+        FROM {source} WHERE publication IN ({publications}) \
+        ORDER BY publication, app_origin, app_event, pid LIMIT {limit}",
         source = batch.source,
         publications = batch.publications,
     ))?;
@@ -339,7 +397,7 @@ fn committed_many_rows(
         operation.check()?;
         let size = committed_many_size(endpoint.stamp.publication, sizes);
         let mut frame = committed_frame(endpoint, size);
-        committed_many_members(&mut rows, &mut frame, size, operation)?;
+        committed_many_members(&mut rows, &mut frame, endpoint, size, operation)?;
         committed_finish(&frame, size)?;
         operation.check()?;
         consume(frame)?;
@@ -355,9 +413,11 @@ fn committed_many_rows(
 fn committed_many_members(
     rows: &mut duckdb::Rows<'_>,
     frame: &mut Frame,
-    size: FrameSize,
+    endpoint: &Endpoint,
+    size: &FrameSize,
     operation: &Operation,
 ) -> Result<()> {
+    let mut next = endpoint.events_first;
     for _index in 0..size.count {
         operation.check()?;
         let row = rows
@@ -367,30 +427,42 @@ fn committed_many_members(
             return Err(Error::Bound("committed App batch row association"));
         }
 
-        committed_member(row, frame)?;
+        match required::<u8>(row, 22)? {
+            0 => committed_member(row, frame)?,
+            1 => committed_event(row, frame, endpoint, &mut next)?,
+            _ => return Err(Error::Bound("committed App row origin")),
+        }
     }
+
+    super::events::finish(frame);
 
     Ok(())
 }
 
-fn committed_frame(endpoint: &Endpoint, size: FrameSize) -> Box<Frame> {
+fn committed_frame(endpoint: &Endpoint, size: &FrameSize) -> Box<Frame> {
     Box::new(Frame {
         identity: endpoint.identity,
         stamp: endpoint.stamp,
         run_tick: endpoint.run_tick,
         wall_ns: endpoint.wall_ns,
-        members: Vec::with_capacity(size.count),
-        starts: Vec::new(),
-        execs: Vec::new(),
-        exits: Vec::new(),
+        members: Vec::with_capacity(size.members),
+        starts: Vec::with_capacity(size.starts),
+        execs: Vec::with_capacity(size.execs),
+        exits: Vec::with_capacity(size.exits),
         arena: Vec::with_capacity(size.bytes),
         usage_refused: endpoint.usage_refused,
         usage_gone: endpoint.usage_gone,
     })
 }
 
-fn committed_finish(frame: &Frame, size: FrameSize) -> Result<()> {
-    if frame.members.len() != size.count {
+fn committed_finish(frame: &Frame, size: &FrameSize) -> Result<()> {
+    if (
+        frame.members.len(),
+        frame.starts.len(),
+        frame.execs.len(),
+        frame.exits.len(),
+    ) != (size.members, size.starts, size.execs, size.exits)
+    {
         return Err(Error::Bound("committed App changed row count"));
     }
 
@@ -401,35 +473,6 @@ fn committed_finish(frame: &Frame, size: FrameSize) -> Result<()> {
     assert!(frame.arena.len() <= super::PROGRAM_FRAME_BYTES_MAX);
 
     Ok(())
-}
-
-fn committed_members(
-    connection: &Connection,
-    source: &str,
-    operation: &Operation,
-    frame: &mut Frame,
-) -> Result<()> {
-    let publication = frame.stamp.publication;
-    let limit = apps::PROCESS_INTERVALS_MAX + 1;
-    let mut statement = connection.prepare(&format!(
-        "SELECT {PROCESS_COLUMNS} \
-        FROM {source} WHERE publication={publication} ORDER BY pid LIMIT {limit}"
-    ))?;
-    let mut rows = statement.query([])?;
-    for index in 0..=apps::PROCESS_INTERVALS_MAX {
-        operation.check()?;
-        let Some(row) = rows.next()? else {
-            return Ok(());
-        };
-
-        if index == frame.members.capacity() {
-            return Err(Error::Bound("committed App process bound"));
-        }
-
-        committed_member(row, frame)?;
-    }
-
-    Err(Error::Bound("committed App process bound"))
 }
 
 fn committed_member(row: &Row<'_>, frame: &mut Frame) -> Result<()> {
@@ -444,6 +487,85 @@ fn committed_member(row: &Row<'_>, frame: &mut Frame) -> Result<()> {
         program: committed_program(row, &mut frame.arena)?,
         usage: committed_usage(row)?,
     });
+
+    Ok(())
+}
+
+fn committed_many_sizes_count(row: &Row<'_>, index: usize) -> Result<usize> {
+    let count = required::<u64>(row, index)?;
+    let maximum = apps::PROCESS_INTERVALS_MAX + collector::tracker::EVENTS_PER_TICK_MAX;
+    let count = usize::try_from(count).map_err(|_| Error::Bound("committed App count"))?;
+    if count > maximum {
+        return Err(Error::Bound("committed App count"));
+    }
+
+    Ok(count)
+}
+
+fn committed_event(
+    row: &Row<'_>,
+    frame: &mut Frame,
+    endpoint: &Endpoint,
+    next: &mut u64,
+) -> Result<()> {
+    let number = required::<u64>(row, 23)?;
+    if number < *next {
+        return Err(Error::Bound("committed App event order"));
+    }
+
+    if number >= endpoint.events_end {
+        return Err(Error::Bound("committed App event range"));
+    }
+
+    if required::<u64>(row, 25)? != endpoint.run_tick {
+        return Err(Error::Bound("committed App event tick"));
+    }
+
+    *next = number
+        .checked_add(1)
+        .ok_or(Error::Bound("committed App event number"))?;
+
+    let pid = required(row, 0)?;
+    let creation = committed_creation(row)?;
+
+    match required::<u8>(row, 24)? {
+        1 => {
+            committed_event_program(row)?;
+            frame.starts.push(super::Start {
+                number,
+                pid,
+                creation,
+                program: committed_program(row, &mut frame.arena)?,
+                ambiguous: false,
+                exec_number: None,
+            });
+        }
+        2 => {
+            committed_event_program(row)?;
+            frame.execs.push(super::Exec {
+                number,
+                pid,
+                creation,
+                program: committed_program(row, &mut frame.arena)?,
+            });
+        }
+        3 => frame.exits.push(super::Exit {
+            number,
+            pid,
+            creation,
+            usage: committed_usage(row)?,
+            ambiguous: false,
+        }),
+        _ => return Err(Error::Bound("committed App event kind")),
+    }
+
+    Ok(())
+}
+
+fn committed_event_program(row: &Row<'_>) -> Result<()> {
+    if required::<u8>(row, 6)? != 3 {
+        return Err(Error::Bound("committed App event program usage"));
+    }
 
     Ok(())
 }

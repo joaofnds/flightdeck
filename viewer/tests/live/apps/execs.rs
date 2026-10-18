@@ -1,6 +1,43 @@
 use super::*;
 
 #[test]
+fn keeps_exec_exit_membership_when_selected_from_committed_history() {
+    // Goal: a last-15-minute selection keeps event-only Apps after live data retirement.
+    // Method: seal the real Exec/Exit fixture and compare fresh selected detail with live output.
+    let mut fixture = Fixture::new();
+    publish_empty(&mut fixture);
+    let mut live = LiveSession::open(&fixture.root).unwrap();
+    Scenario::default().publish(&mut fixture);
+    live.poll().unwrap();
+    live.follow_latest().unwrap();
+    let kind = viewer::live_app_response::KeyKind::Bundle;
+    let key = b"/Applications/B.app";
+    let expected = live.app_detail(kind, key, 0).unwrap();
+    fixture.seal();
+    collector::recording::Registry {
+        runs: Vec::new(),
+        evictions: 0,
+    }
+    .write(&fixture.root)
+    .unwrap();
+    let mut cold = LiveSession::open(&fixture.root).unwrap();
+
+    cold.select(1002, 0).unwrap();
+    let page = cold.apps_page(0).unwrap();
+    assert_eq!(page["process_count"], 1);
+    let detail = cold.app_detail(kind, key, 0).unwrap();
+    let history = cold.app_history(kind, key).unwrap();
+
+    assert_eq!(detail, expected);
+    let points = history["points"].as_array().unwrap();
+    assert_eq!(points.len(), 2);
+    assert_eq!(points[1]["observation"], detail["selected"]);
+    assert_eq!(points[1]["members"], 1);
+    assert_eq!(points[1]["resident_bytes"], detail["app"]["resident_bytes"]);
+    assert_eq!(points[1]["cpu_ns"], detail["app"]["cpu_ns"]);
+}
+
+#[test]
 fn retains_an_app_observed_at_exec_before_its_verified_exit() {
     // Goal: an event-only process keeps its observed App without inventing interval rates.
     // Method: publish captured Exec/Exit identity in a real ring and read the live App response.
@@ -319,6 +356,171 @@ unjoined_exec!(
         ..Scenario::default()
     }
 );
+
+macro_rules! committed_attribution {
+    ($name:ident, $scenario:expr, $key:expr, $apps:expr, $ungrouped:expr) => {
+        #[test]
+        fn $name() {
+            // Goal: committed event attribution follows the same captured facts as live output.
+            // Method: seal the real scenario and compare the reopened selected App detail.
+            let scenario = $scenario;
+            let mut fixture = Fixture::new();
+            publish(&mut fixture, 1);
+            let mut live = LiveSession::open(&fixture.root).unwrap();
+            scenario.publish(&mut fixture);
+            live.poll().unwrap();
+            live.follow_latest().unwrap();
+            let kind = viewer::live_app_response::KeyKind::Bundle;
+            let expected = live.app_detail(kind, $key, 0).unwrap();
+            let expected_page = live.apps_page(0).unwrap();
+            fixture.seal();
+            collector::recording::Registry {
+                runs: Vec::new(),
+                evictions: 0,
+            }
+            .write(&fixture.root)
+            .unwrap();
+            let mut cold = LiveSession::open(&fixture.root).unwrap();
+
+            cold.select(1002, 0).unwrap();
+            let page = cold.apps_page(0).unwrap();
+            assert_eq!(page["process_count"], 1);
+            assert_eq!(page["app_count"], $apps);
+            assert_eq!(page["ungrouped_members"], $ungrouped);
+            assert_eq!(page["membership_complete"], false);
+            assert_eq!(page, expected_page);
+            let detail = cold.app_detail(kind, $key, 0).unwrap();
+            let history = cold.app_history(kind, $key).unwrap();
+
+            assert_eq!(detail, expected);
+            let points = history["points"].as_array().unwrap();
+            assert_eq!(points.len(), 2);
+            assert_eq!(points[1]["members"], detail["app"]["members"]);
+            assert_eq!(points[1]["cpu_ns"], detail["app"]["cpu_ns"]);
+            assert_eq!(points[1]["energy_nj"], detail["app"]["energy_nj"]);
+            assert_eq!(points[1]["resident_bytes"], detail["app"]["resident_bytes"]);
+        }
+    };
+}
+
+committed_attribution!(
+    restores_captured_start_exit_app_facts,
+    Scenario {
+        order: &[Kind::Start, Kind::StartExit],
+        ..Scenario::default()
+    },
+    b"/Applications/D.app",
+    1,
+    0
+);
+committed_attribution!(
+    restores_the_latest_compatible_exec_before_exit,
+    Scenario {
+        order: &[Kind::Exec, Kind::NextExec, Kind::Exit],
+        exit_creation: ProcessCreation {
+            unique_id: 700,
+            pid_version: 3
+        },
+        ..Scenario::default()
+    },
+    b"/Applications/C.app",
+    1,
+    0
+);
+committed_attribution!(
+    keeps_refused_exec_identity_unattributed_after_reopen,
+    Scenario {
+        order: &[Kind::RefusedExec, Kind::Exit],
+        ..Scenario::default()
+    },
+    b"/Applications/A.app",
+    0,
+    1
+);
+committed_attribution!(
+    keeps_an_unassociated_exec_from_reusing_the_previous_app_after_reopen,
+    Scenario {
+        order: &[Kind::Exec, Kind::UnassociatedExec, Kind::Exit],
+        ..Scenario::default()
+    },
+    b"/Applications/A.app",
+    0,
+    1
+);
+committed_attribution!(
+    restores_scheduled_predecessor_verified_exit_usage,
+    Scenario {
+        order: &[Kind::Exit],
+        exit_creation: ProcessCreation {
+            unique_id: 700,
+            pid_version: 1
+        },
+        ..Scenario::default()
+    },
+    b"/Applications/A.app",
+    1,
+    0
+);
+
+committed_attribution!(
+    keeps_refused_exec_over_equal_version_predecessor_bytes_after_reopen,
+    Scenario {
+        order: &[Kind::RefusedExec, Kind::Exit],
+        exec_creation: ProcessCreation {
+            unique_id: 700,
+            pid_version: 1
+        },
+        exit_creation: ProcessCreation {
+            unique_id: 700,
+            pid_version: 1
+        },
+        ..Scenario::default()
+    },
+    b"/Applications/A.app",
+    0,
+    1
+);
+
+#[test]
+fn keeps_duplicate_exit_evidence_ambiguous_after_reopen() {
+    // Goal: duplicate exit witnesses cannot manufacture a second endpoint or fail App reads.
+    // Method: seal distinct duplicate Exit events and require the independent helper subtotal.
+    let mut fixture = Fixture::new();
+    publish(&mut fixture, 1);
+    let mut live = LiveSession::open(&fixture.root).unwrap();
+    ExitScenario {
+        duplicate: true,
+        ..ExitScenario::default()
+    }
+    .publish(&mut fixture);
+    live.poll().unwrap();
+    live.follow_latest().unwrap();
+    let expected = live.apps_page(0).unwrap();
+    fixture.seal();
+    collector::recording::Registry {
+        runs: Vec::new(),
+        evictions: 0,
+    }
+    .write(&fixture.root)
+    .unwrap();
+    let mut cold = LiveSession::open(&fixture.root).unwrap();
+
+    cold.select(1002, 0).unwrap();
+    let page = cold.apps_page(0).unwrap();
+    let history = cold
+        .app_history(
+            viewer::live_app_response::KeyKind::Bundle,
+            b"/Applications/A.app",
+        )
+        .unwrap();
+
+    assert_eq!(page["process_count"], 1);
+    assert_eq!(page["apps"][0]["cpu_percent_one_core"], 30.0);
+    assert_eq!(page["membership_complete"], false);
+    assert_eq!(page, expected);
+    assert_eq!(history["points"][1]["members"], 1);
+    assert_eq!(history["points"][1]["cpu_percent_one_core"], 30.0);
+}
 
 struct Scenario {
     exec_creation: ProcessCreation,

@@ -81,7 +81,7 @@ fn normalizes_each_window_once_and_reuses_the_trace_while_the_live_end_advances(
         .with_app_history(&selected, &target, points)
         .unwrap();
 
-    assert_eq!(reads, 2);
+    assert_eq!(reads, 3);
     assert_eq!(session.source_reads.get(), reads);
     assert_eq!(repeated, restored);
     assert!(session.app_history_cache.borrow().as_ref().unwrap().bytes() <= CACHE_BYTES_MAX);
@@ -117,7 +117,7 @@ fn replaces_the_target_with_its_exact_non_utf8_byte_key() {
     assert_eq!(restored[1]["cpu_ns"]["measured_members"], 0);
     assert_eq!(restored[1]["cpu_ns"]["unavailable_members"], 1);
     assert_eq!(restored[1]["resident_bytes"]["measured_members"], 0);
-    assert_eq!(session.source_reads.get(), 4);
+    assert_eq!(session.source_reads.get(), 6);
     assert_eq!(
         session.app_history_cache.borrow().as_ref().unwrap().key,
         refused.bytes
@@ -151,7 +151,7 @@ fn restores_a_compatible_predecessor_across_committed_minutes() {
     assert_eq!(restored.as_array().unwrap().len(), 2);
     assert_eq!(restored[1]["elapsed_ns"], "1000000000");
     assert_eq!(restored[1]["cpu_ns"]["known"], "1");
-    assert_eq!(session.source_reads.get(), 4);
+    assert_eq!(session.source_reads.get(), 6);
 }
 
 #[test]
@@ -177,7 +177,7 @@ fn reads_the_exact_predecessor_outside_the_plotted_wall_range() {
     assert_eq!(restored[0]["observation"], selected.json());
     assert_eq!(restored[0]["elapsed_ns"], "1000000000");
     assert_eq!(restored[0]["cpu_ns"]["known"], "1");
-    assert_eq!(session.source_reads.get(), 2);
+    assert_eq!(session.source_reads.get(), 3);
 }
 
 #[test]
