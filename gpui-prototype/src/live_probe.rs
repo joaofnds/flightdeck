@@ -23,12 +23,13 @@ pub fn run(root: PathBuf, seconds: u32) -> Result<(), String> {
     }
     let started = Instant::now();
     let mut probe = Probe {
-        worker: Worker::start(root).map_err(|error| error.to_string())?,
+        worker: Worker::start(root.clone()).map_err(|error| error.to_string())?,
         deadline: started + Duration::from_secs(u64::from(seconds)),
         snapshots: 0,
     };
     let mut report = probe_routes(&mut probe)?;
     probe.worker.stop();
+    report["native_workflows"] = crate::native_workflows::verify_live(root, probe.deadline)?;
     report["elapsed_ms"] = json!(started.elapsed().as_secs_f64() * 1000.0);
     println!("{report}");
 

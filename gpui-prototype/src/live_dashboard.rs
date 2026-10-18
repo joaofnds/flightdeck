@@ -46,6 +46,7 @@ pub struct LiveDashboard {
     pub reveal_hardware: bool,
     pub hover_second: Option<u64>,
     pub app_picker_open: bool,
+    pub native: crate::native_workflows::NativeControls,
     list: ListState,
     last_status: String,
 }
@@ -102,6 +103,7 @@ impl LiveDashboard {
             reveal_hardware: false,
             hover_second: None,
             app_picker_open: false,
+            native: crate::native_workflows::NativeControls::default(),
             list: ListState::new(0, ListAlignment::Top, px(100.0)),
             last_status: String::new(),
         };
@@ -114,6 +116,7 @@ impl LiveDashboard {
     }
 
     pub fn tick(&mut self, cx: &mut Context<Self>) {
+        self.native_tick(cx);
         match self.worker.take() {
             Ok(Some(Update::Ready(snapshot))) => {
                 if snapshot.generation == self.generation {
@@ -162,7 +165,7 @@ impl LiveDashboard {
         }
     }
 
-    fn accept(&mut self, snapshot: Box<Snapshot>) {
+    pub(crate) fn accept(&mut self, snapshot: Box<Snapshot>) {
         if let Err(error) = self.accept_offsets(&snapshot) {
             self.error = Some(error);
             return;
@@ -360,7 +363,9 @@ impl LiveDashboard {
         }
         if self.request.route == "overview" {
             self.rows.push(Row::OverviewStatus);
-            self.rows.push(Row::Hardware);
+            if self.snapshot.is_some() {
+                self.rows.push(Row::Hardware);
+            }
         }
         if let Some(snapshot) = &self.snapshot {
             for (name, page) in &snapshot.pages {
@@ -450,6 +455,10 @@ impl Render for LiveDashboard {
         .flex_1()
         .min_h_0();
         div()
+            .id("flightdeck-live")
+            .role(gpui::Role::Application)
+            .accessibility_id("flightdeck.live")
+            .aria_label("Flightdeck system monitor")
             .size_full()
             .flex()
             .flex_col()
@@ -483,6 +492,7 @@ impl Render for LiveDashboard {
                             .flex_1()
                             .min_w_0()
                             .child(self.header(cx))
+                            .child(self.native_notice())
                             .children(self.error.as_ref().map(|error| {
                                 div()
                                     .px(px(24.0))

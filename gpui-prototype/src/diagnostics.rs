@@ -12,6 +12,10 @@ pub fn initialize() -> Result<(), String> {
     Ok(())
 }
 
+pub fn application() -> gpui::Application {
+    gpui::Application::with_platform(std::rc::Rc::new(gpui_macos::MacPlatform::new(false)))
+}
+
 pub fn verify_text_backend(system: &gpui::TextSystem) -> Result<(), String> {
     let font = system.resolve_font(&gpui::font(".SystemUIFont"));
     let wide = system

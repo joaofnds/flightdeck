@@ -191,6 +191,7 @@ impl Dashboard {
                     .rounded(px(5.0))
                     .cursor_pointer()
                     .focusable()
+                    .tab_stop(true)
                     .focus(|style| style.bg(rgb(0x32_46_61)))
                     .bg(rgb(if self.route == *route {
                         0x1c_2b_40
@@ -436,6 +437,7 @@ impl Dashboard {
                     .py(px(7.0))
                     .cursor_pointer()
                     .focusable()
+                    .tab_stop(true)
                     .focus(|style| style.bg(rgb(0x32_46_61)))
                     .hover(|style| style.bg(rgb(GRID)))
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -494,6 +496,7 @@ impl Dashboard {
                             .border_color(rgb(GRID))
                             .cursor_pointer()
                             .focusable()
+                            .tab_stop(true)
                             .focus(|style| style.bg(rgb(0x32_46_61)))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.process = Some(process_name.clone());
@@ -796,12 +799,15 @@ fn flush(pending: &mut Vec<Rc<Panel>>, rows: &mut Vec<Row>) {
 pub fn control(label: &str) -> gpui::Stateful<gpui::Div> {
     div()
         .id(SharedString::from(label.to_owned()))
+        .role(gpui::Role::Button)
+        .aria_label(label.to_owned())
         .px(px(9.0))
         .py(px(7.0))
         .rounded(px(5.0))
         .bg(rgb(0x22_25_2b))
         .cursor_pointer()
         .focusable()
+        .tab_stop(true)
         .focus(|style| style.bg(rgb(0x32_46_61)))
         .hover(|style| style.bg(rgb(0x2c_2f_35)))
         .child(label.to_owned())
@@ -825,9 +831,9 @@ pub fn keyboard_navigation(event: &gpui::KeyDownEvent, window: &mut Window, cx: 
         return;
     }
     if modifiers.shift {
-        window.focus_prev();
+        window.focus_prev(cx);
     } else {
-        window.focus_next();
+        window.focus_next(cx);
     }
     window.prevent_default();
     cx.stop_propagation();

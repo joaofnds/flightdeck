@@ -30,11 +30,16 @@ impl LiveDashboard {
             sidebar = sidebar.child(
                 div()
                     .id(route)
+                    .accessibility_id(format!("flightdeck.navigation.{route}"))
+                    .role(gpui::Role::Button)
+                    .aria_label(title)
+                    .aria_selected(self.request.route == route)
                     .px(px(12.0))
                     .py(px(11.0))
                     .rounded(px(5.0))
                     .cursor_pointer()
                     .focusable()
+                    .tab_stop(true)
                     .focus(|style| style.bg(rgb(0x32_46_61)))
                     .bg(rgb(if self.request.route == route {
                         0x1c_2b_40
@@ -120,7 +125,7 @@ impl LiveDashboard {
     }
 
     fn header_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut controls = div().flex().gap(px(6.0)).items_center();
+        let mut controls = self.native_header_controls(cx);
         if self.request.route == "computer" {
             controls =
                 controls.child(control("Refresh").on_click(cx.listener(|this, _, _, cx| {
@@ -128,6 +133,7 @@ impl LiveDashboard {
                     cx.notify();
                 })));
         } else {
+            controls = controls.children(self.native.input.clone());
             controls = controls.child(
                 div()
                     .text_size(px(12.0))
@@ -139,13 +145,7 @@ impl LiveDashboard {
                 for (label, delta) in [("‹", -1_i64), ("›", 1)] {
                     controls = controls.child(control(label).on_click(cx.listener(
                         move |this, _, _, cx| {
-                            if let Some(second) = this
-                                .snapshot
-                                .as_ref()
-                                .and_then(|snapshot| snapshot.selection["second"].as_u64())
-                            {
-                                this.inspect(second.saturating_add_signed(delta), cx);
-                            }
+                            this.chart_step(delta, cx);
                         },
                     )));
                 }

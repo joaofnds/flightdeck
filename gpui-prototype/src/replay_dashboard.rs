@@ -18,13 +18,11 @@ pub fn start(entity: &Entity<Dashboard>, cx: &mut App) -> Result<(), String> {
     let weak = entity.downgrade();
     let application = cx.to_async();
     let timer = Timer::with_interval(Duration::from_secs_f64(1.0 / 30.0), move || {
-        if let Err(error) = application.update(|cx| {
+        application.update(|cx| {
             if let Err(error) = weak.update(cx, Dashboard::replay_tick) {
                 eprintln!("Replay view update: {error}");
             }
-        }) {
-            eprintln!("Replay application update: {error}");
-        }
+        });
     })?;
     entity.update(cx, |dashboard, _| dashboard.replay_timer = Some(timer));
     Ok(())

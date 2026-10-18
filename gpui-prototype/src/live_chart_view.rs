@@ -1,3 +1,4 @@
+use num_traits::ToPrimitive;
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -38,7 +39,7 @@ impl LiveDashboard {
             .snapshot
             .as_deref()
             .and_then(|snapshot| cursor_fraction(panel, snapshot, self.hover_second));
-        let chart = Self::chart_events(
+        let chart = self.chart_events(
             div()
                 .relative()
                 .h(px(190.0))
@@ -96,15 +97,17 @@ impl LiveDashboard {
     }
 
     fn chart_events(
+        &self,
         chart: gpui::Div,
         measured: Rc<Cell<Bounds<gpui::Pixels>>>,
         panel: &Panel,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let click_bounds = Rc::clone(&measured);
+        let chart = self.chart_accessibility(chart, panel, cx);
         chart
-            .id(SharedString::from(format!("{}-plot", panel.id)))
             .focusable()
+            .tab_stop(true)
             .focus(|style| style.bg(rgb(0x20_30_41)))
             .on_key_down(cx.listener(Self::chart_keyboard))
             .on_mouse_move(
@@ -144,6 +147,67 @@ impl LiveDashboard {
             )
     }
 
+    fn chart_accessibility(
+        &self,
+        chart: gpui::Div,
+        panel: &Panel,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let second = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.selection["second"].as_u64());
+        let first = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.catalog["first_second"].as_u64());
+        let last = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.catalog["last_second"].as_u64());
+        chart
+            .id(SharedString::from(format!("{}-plot", panel.id)))
+            .accessibility_id(format!("flightdeck.chart.{}", panel.id))
+            .role(gpui::Role::Slider)
+            .aria_label(format!("{} history inspection", panel.title))
+            .aria_description(
+                "Left and right inspect adjacent seconds; unavailable readings are gaps",
+            )
+            .when_some(second.and_then(|value| value.to_f64()), |chart, value| {
+                chart.aria_numeric_value(value).aria_numeric_value_step(1.0)
+            })
+            .when_some(first.and_then(|value| value.to_f64()), |chart, value| {
+                chart.aria_min_numeric_value(value)
+            })
+            .when_some(last.and_then(|value| value.to_f64()), |chart, value| {
+                chart.aria_max_numeric_value(value)
+            })
+            .on_a11y_action(gpui::AccessibleAction::Increment, {
+                let entity = cx.entity().downgrade();
+                move |_, _, cx| {
+                    if let Err(error) = entity.update(cx, |this, cx| this.chart_step(1, cx)) {
+                        eprintln!("Chart accessibility action: {error}");
+                    }
+                }
+            })
+            .on_a11y_action(gpui::AccessibleAction::Decrement, {
+                let entity = cx.entity().downgrade();
+                move |_, _, cx| {
+                    if let Err(error) = entity.update(cx, |this, cx| this.chart_step(-1, cx)) {
+                        eprintln!("Chart accessibility action: {error}");
+                    }
+                }
+            })
+            .aria_value(format!(
+                "{}; {}",
+                second.map_or_else(
+                    || "Waiting".into(),
+                    |second| format!("{}; Unix second {second}", clock(second, true))
+                ),
+                chart_reading(panel, panel.selected_index)
+            ))
+    }
+
     fn chart_keyboard(
         &mut self,
         event: &gpui::KeyDownEvent,
@@ -153,9 +217,18 @@ impl LiveDashboard {
         let Some(delta) = crate::dashboard::keyboard_step(event) else {
             return;
         };
+
+        self.chart_step(delta, cx);
+
+        window.prevent_default();
+        cx.stop_propagation();
+    }
+
+    pub(crate) fn chart_step(&mut self, delta: i64, cx: &mut Context<Self>) {
         let Some(snapshot) = &self.snapshot else {
             return;
         };
+
         let selection = KeyboardSelection {
             pending: self.request.second,
             accepted: snapshot.selection["second"].as_u64(),
@@ -163,11 +236,10 @@ impl LiveDashboard {
         let Some(next) = keyboard_second(&selection, delta, &snapshot.catalog) else {
             return;
         };
+
         if Some(next) != selection.pending.or(selection.accepted) {
             self.inspect(next, cx);
         }
-        window.prevent_default();
-        cx.stop_propagation();
     }
 
     fn chart_heading(panel: &Panel) -> impl IntoElement {
@@ -260,8 +332,17 @@ impl LiveDashboard {
             legends = legends.child(
                 div()
                     .id(SharedString::from(key.clone()))
+                    .accessibility_id(format!("flightdeck.legend.{}.{}", panel.id, line.name))
+                    .role(gpui::Role::Switch)
+                    .aria_label(format!("{}: {}", panel.title, line.name))
+                    .aria_toggled(if self.hidden.contains(&key) {
+                        gpui::Toggled::False
+                    } else {
+                        gpui::Toggled::True
+                    })
                     .cursor_pointer()
                     .focusable()
+                    .tab_stop(true)
                     .focus(|style| style.bg(rgb(0x32_46_61)))
                     .py(px(4.0))
                     .opacity(if self.hidden.contains(&key) {

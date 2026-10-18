@@ -143,7 +143,7 @@ impl Executable {
         ]
     }
 
-    fn json(&self) -> Value {
+    pub(crate) fn json(&self) -> Value {
         json!({"executable_bytes":self.key, "instances":self.instances,
             "scope":"loaded process page only", "cpu_ns":self.cpu_ns.json(),
             "energy_nj":self.energy_nj.json(), "resident_bytes":self.resident_bytes.json(),
@@ -167,10 +167,19 @@ impl LiveDashboard {
             .is_some_and(|(kind, row)| kind == "executables" && *row == index);
         let mut row = div()
             .id(SharedString::from(format!("executable-{index}")))
+            .accessibility_id(format!("flightdeck.executable.{}", group.key))
+            .role(gpui::Role::Button)
+            .aria_label(format!(
+                "{}; {} instances; loaded process page subtotal",
+                group.name, group.instances
+            ))
+            .aria_selected(selected)
+            .aria_expanded(expanded)
             .border_b_1()
             .border_color(rgb(GRID))
             .cursor_pointer()
             .focusable()
+            .tab_stop(true)
             .focus(|style| style.bg(rgb(0x32_46_61)))
             .bg(rgb(if selected { 0x20_30_41 } else { 0x14_19_24 }))
             .hover(|style| style.bg(rgb(0x20_29_36)))

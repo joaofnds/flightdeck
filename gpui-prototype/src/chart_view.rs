@@ -65,6 +65,7 @@ impl Dashboard {
         chart
             .id(SharedString::from(format!("{}-plot", panel.id)))
             .focusable()
+            .tab_stop(true)
             .focus(|style| style.bg(rgb(0x20_30_41)))
             .on_key_down(
                 cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
@@ -253,6 +254,7 @@ impl Dashboard {
                     .id(SharedString::from(format!("{}-{name}", panel.id)))
                     .cursor_pointer()
                     .focusable()
+                    .tab_stop(true)
                     .focus(|style| style.bg(rgb(0x32_46_61)))
                     .py(px(5.0))
                     .opacity(opacity)

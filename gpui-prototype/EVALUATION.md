@@ -20,7 +20,42 @@ points afterward. This verifies the backend configuration and metrics. Pixel
 fidelity remains unverified: computer access was rejected again after the user
 explicitly approved native-app testing.
 
-## Current implementation
+## Migration pilot
+
+The isolated pilot pins GPUI and its macOS backend to upstream revision
+`56934ec0560bce8929025497411de7f5322fb6ca`, including the macOS accessibility adapter.
+It adds a native recording picker, bounded time input with composition support,
+JSON copy controls, application menus and accessible chart/row controls. Headless
+real-recording probes exercise Overview, CPU, selected App and recording switching.
+Actual picker, clipboard, IME, VoiceOver and pixel behavior still need interactive
+verification; the computer-use tool rejected access despite user authorization.
+
+A confirmed startup cost came from Overview painting the schematic while its first
+recording query was loading, then scrolling it out of view when charts arrived.
+Deferring that row until the first snapshot avoids initializing the artwork cache.
+Two same-binary 90-second control/treatment pairs reduced the 20–60-second footprint
+median from 543.791 to 419.174 MiB and from 557.362 to 437.166 MiB. Each pair ended
+with equal update counts, scalar points and accounted tail-cache bytes. These
+controls used GPUI 0.2.2 to isolate the row change; they do not measure the upstream
+port's independent contribution.
+
+A combined upstream/native-control checkpoint ran for five minutes. Its windowed
+footprint median during observer seconds 180–240 was 477.885 MiB, versus 213.799 MiB
+for the headless worker run. Footprints still rose over the observation period,
+ending near 589 and 340 MiB respectively. These separate runs on a shared machine
+do not establish allocation ownership, a memory plateau or a framework speed ratio.
+The checkpoint preceded review corrections to recording switching and text input;
+its frozen binary hash is
+`cf8fd7ea50a1139434e9e6e46df67eca1fc97ea4f7b19d49888ee371f6fdd697`.
+Raw pilot logs and disposable probes remain under ignored `target/`; they are local
+reproduction material, unlike the committed historical evidence linked below.
+
+The pilot supports continued GPUI evaluation. Replacing Swift still requires native
+interaction/accessibility checks, an explained memory-growth curve, full required
+live-history coverage and repeated matched visible-rendering measurements.
+The older captured measurements below describe the pre-pilot implementation.
+
+## Pre-pilot implementation
 
 Live mode reads the actual recording through `viewer::LiveSession` on a bounded
 worker. It includes selected logical-CPU intervals, compact App/process tables,

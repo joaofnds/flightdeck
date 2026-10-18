@@ -201,10 +201,20 @@ impl LiveDashboard {
         let selected = self.request.app.as_ref() == Some(&key);
         div()
             .id(SharedString::from(format!("app-choice-{index}")))
+            .accessibility_id(format!("flightdeck.app.{}.{}", key.kind, key.bytes_hex))
+            .role(gpui::Role::Button)
+            .aria_label(format!(
+                "{}; {} members; CPU {}",
+                text(&app["display_name"]),
+                text(&app["members"]),
+                value_rate(&app["cpu_percent_one_core"], "%")
+            ))
+            .aria_selected(selected)
             .border_b_1()
             .border_color(rgb(GRID))
             .cursor_pointer()
             .focusable()
+            .tab_stop(true)
             .focus(|style| style.bg(rgb(0x32_46_61)))
             .bg(rgb(if selected { 0x20_30_41 } else { 0x14_19_24 }))
             .hover(|style| style.bg(rgb(0x20_29_36)))
@@ -247,10 +257,24 @@ impl LiveDashboard {
             .is_some_and(|(kind, row)| kind == "app_processes" && *row == index);
         let mut row = div()
             .id(SharedString::from(format!("process-{index}")))
+            .accessibility_id(format!(
+                "flightdeck.process.{}.{}",
+                text(&process["pid"]),
+                text(&process["creation"]["unique_id"])
+            ))
+            .role(gpui::Role::Button)
+            .aria_label(format!(
+                "{}; PID {}; CPU {}",
+                text(&process["executable_name"]["display"]),
+                text(&process["pid"]),
+                value_rate(&process["cpu_percent_one_core"], "%")
+            ))
+            .aria_expanded(expanded)
             .border_b_1()
             .border_color(rgb(GRID))
             .cursor_pointer()
             .focusable()
+            .tab_stop(true)
             .focus(|style| style.bg(rgb(0x32_46_61)))
             .hover(|style| style.bg(rgb(0x20_29_36)))
             .on_click(cx.listener(move |this, _, _, cx| {

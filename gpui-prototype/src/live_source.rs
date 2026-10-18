@@ -155,10 +155,7 @@ impl Worker {
     }
 
     pub fn stop(&mut self) {
-        self.shared.stopped.store(true, Ordering::Release);
-        if let Err(error) = self.shared.cancellation.cancel() {
-            eprintln!("flightdeck GPUI reader cancellation: {error}");
-        }
+        self.signal_stop();
         if let Some(worker) = self.thread.take() {
             // Cancellation interrupts queries; never let a blocked filesystem stall the UI exit.
             for _attempt in 0..80 {
@@ -171,6 +168,18 @@ impl Worker {
                 thread::sleep(Duration::from_millis(25));
             }
             eprintln!("flightdeck GPUI reader did not stop within two seconds");
+        }
+    }
+
+    pub fn retire(mut self) -> Option<JoinHandle<()>> {
+        self.signal_stop();
+        self.thread.take()
+    }
+
+    fn signal_stop(&self) {
+        self.shared.stopped.store(true, Ordering::Release);
+        if let Err(error) = self.shared.cancellation.cancel() {
+            eprintln!("flightdeck GPUI reader cancellation: {error}");
         }
     }
 }

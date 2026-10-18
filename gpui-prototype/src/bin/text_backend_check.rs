@@ -19,6 +19,6 @@ fn run() -> Result<(), String> {
         return Err("Use --check".into());
     }
     diagnostics::initialize()?;
-    let application = gpui::Application::new();
+    let application = diagnostics::application();
     diagnostics::verify_text_backend(&application.text_system())
 }

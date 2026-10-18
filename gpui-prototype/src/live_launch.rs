@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::rc::Rc;
 
-use gpui::{App, AppContext as _, Application, Bounds, WindowBounds, WindowOptions, px, size};
+use gpui::{App, AppContext as _, Bounds, WindowBounds, WindowOptions, px, size};
 
 use crate::live_dashboard::{LiveDashboard, ROUTES};
 use crate::live_source::Worker;
@@ -42,10 +42,11 @@ pub fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
         None
     };
     let worker = Worker::start(root)?;
-    let application = Application::new();
+    let application = crate::diagnostics::application();
     crate::diagnostics::verify_text_backend(&application.text_system())?;
     application.run(move |cx: &mut App| {
-        cx.on_window_closed(|cx| {
+        crate::native_workflows::install_application_actions(cx);
+        cx.on_window_closed(|cx, _window_id| {
             if cx.windows().is_empty() {
                 cx.quit();
             }
@@ -73,22 +74,22 @@ pub fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn create_dashboard(worker: Worker, options: Options, cx: &mut App) -> gpui::Entity<LiveDashboard> {
+    let input = cx.new(crate::native_input::TimeInput::new);
     let entity = cx.new(|_| {
         let mut dashboard = LiveDashboard::new(worker, options.page, options.seconds);
         dashboard.animate = true;
         dashboard.reveal_hardware = options.hardware;
+        dashboard.native.input = Some(input);
         dashboard
     });
     let weak = entity.downgrade();
     let application = cx.to_async();
     let timer = Timer::start(move || {
-        if let Err(error) = application.update(|cx| {
+        application.update(|cx| {
             if let Err(error) = weak.update(cx, LiveDashboard::tick) {
                 eprintln!("Live view update: {error}");
             }
-        }) {
-            eprintln!("Live application update: {error}");
-        }
+        });
     });
     entity.update(cx, |dashboard, _| match timer {
         Ok(timer) => dashboard.timer = Some(timer),

@@ -24,6 +24,9 @@ mod live_source;
 mod live_tables;
 mod live_timer;
 mod live_views;
+mod native_input;
+mod native_text;
+mod native_workflows;
 mod performance;
 mod render_evidence;
 mod replay;
@@ -35,7 +38,7 @@ mod tests;
 
 use std::process::ExitCode;
 
-use gpui::{App, AppContext as _, Application, Bounds, WindowBounds, WindowOptions, px, size};
+use gpui::{App, AppContext as _, Bounds, WindowBounds, WindowOptions, px, size};
 
 fn main() -> ExitCode {
     match run() {
@@ -88,7 +91,7 @@ fn run_reference(options: performance::Options) -> Result<(), Box<dyn std::error
         );
         return Ok(());
     }
-    let application = Application::new();
+    let application = diagnostics::application();
     diagnostics::verify_text_backend(&application.text_system())?;
     application.run(move |cx: &mut App| {
         run_reference_window(capture, catalog, options, replay, cx);
@@ -103,7 +106,7 @@ fn run_reference_window(
     replay: Option<replay::Replay>,
     cx: &mut App,
 ) {
-    cx.on_window_closed(|cx| {
+    cx.on_window_closed(|cx, _window_id| {
         if cx.windows().is_empty() {
             cx.quit();
         }

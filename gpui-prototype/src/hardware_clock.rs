@@ -19,13 +19,11 @@ pub fn install<T: 'static>(
             return;
         };
         if state.needs_frame() {
-            if let Err(error) = application.update(|cx| {
+            application.update(|cx| {
                 if let Err(error) = view.update(cx, |_, cx| cx.notify()) {
                     eprintln!("Hardware view update: {error}");
                 }
-            }) {
-                eprintln!("Hardware application update: {error}");
-            }
+            });
         } else {
             if let Some(timer) = state.clock.borrow().as_ref() {
                 timer.set_running(false);

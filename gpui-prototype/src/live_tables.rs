@@ -103,10 +103,23 @@ impl LiveDashboard {
         let table = name.to_owned();
         let mut content = div()
             .id(SharedString::from(format!("raw-{name}-{index}")))
+            .accessibility_id(format!("flightdeck.recorded-row.{name}.{index}"))
+            .role(gpui::Role::Button)
+            .aria_label(format!(
+                "{name}, row {}; {}",
+                index + 1,
+                row.iter()
+                    .take(COLUMNS_MAX)
+                    .map(raw_text)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+            .aria_expanded(expanded)
             .border_b_1()
             .border_color(rgb(GRID))
             .cursor_pointer()
             .focusable()
+            .tab_stop(true)
             .focus(|style| style.bg(rgb(0x32_46_61)))
             .hover(|style| style.bg(rgb(0x20_29_36)))
             .on_click(cx.listener(move |this, _, _, cx| {

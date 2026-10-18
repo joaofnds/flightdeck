@@ -16,16 +16,14 @@ pub fn start_deadline(
     let view = entity.downgrade();
     let application = cx.to_async();
     let timer = crate::live_timer::Timer::with_interval(remaining, move || {
-        if let Err(error) = application.update(|cx| {
+        application.update(|cx| {
             if let Err(error) = view.update(cx, |dashboard, cx| {
                 dashboard.performance.report();
                 cx.quit();
             }) {
                 eprintln!("Timed view shutdown: {error}");
             }
-        }) {
-            eprintln!("Timed application shutdown: {error}");
-        }
+        });
     })?;
     entity.update(cx, |dashboard, _| {
         dashboard.performance.deadline_timer = Some(timer);

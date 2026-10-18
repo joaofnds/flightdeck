@@ -20,12 +20,15 @@ through Swift, or explicitly start a collector owned by this prototype:
 ```sh
 target/release/flightdeck-gpui --start-collector
 target/release/flightdeck-gpui --recording /path/to/session.recording
-target/release/flightdeck-gpui --recording /path/to/session.recording --live-check --seconds 30
+target/release/flightdeck-gpui --recording /path/to/session.recording --live-check --seconds 60
 target/release/flightdeck-gpui --recording /path/to/session.recording --live-soak --seconds 900
 ```
 
 `--live-check` exercises live routes, selection identity, CPU intervals and App history
-endpoints. It reports scalar and App history coverage separately. `--live-soak` runs
+endpoints. It also rejects an invalid recording from Computer, reads the original
+observation again, then reopens the actual recording and checks serialized copy
+content. It reports scalar and App history coverage separately; these model probes
+do not exercise the native picker, system clipboard, IME or VoiceOver. `--live-soak` runs
 the same Overview worker headless for 5–1800 seconds (default 900), reporting distinct
 publications, observation gaps, errors and cache accounting. It stops/drops the worker,
 then waits five seconds before exiting; this does not prove a blocked worker joined.
@@ -37,7 +40,9 @@ collector can own a ring. The app sends SIGTERM only to the collector it
 started; attaching to another collector does not give it shutdown ownership.
 Build the root workspace's release `collector` and `persister` first to use this
 option. `--bundle` copies those helpers when they exist.
-Xcode and its command-line tools are required. The pinned GPUI 0.2.2 uses
+Xcode and its command-line tools are required. GPUI and its macOS backend are pinned
+to upstream revision `56934ec0560bce8929025497411de7f5322fb6ca`. The direct macOS
+backend includes AccessKit and avoids resolving unused platform backends. It uses
 `runtime_shaders`, which compiles Metal shaders during startup instead of requiring
 Xcode's separate Metal compiler component. Startup measurements include that cost;
 steady-state measurements begin after warmup. No toolchain or hooks are installed.
@@ -49,6 +54,14 @@ raw rows to read exact stored values, page through raw/App/process results, and
 select an App to inspect its observed histories and process instances. Executable
 groups filter the loaded process page; All process groups clears that filter. Computer
 reads current host inventory on entry and Refresh. The schematic is below Overview.
+
+Open recording uses the native folder picker. Current readings remain available
+until the chosen recording produces its first snapshot; cancellation or a failed
+read keeps the current recording. Opening from Computer validates the recording
+through Overview and lands there on success. Time entry accepts a Unix second or local
+`HH:MM:SS` within the loaded history; Enter inspects that second. Copy reading copies
+the selected observation, expanded raw row or selected App details as JSON, preserving
+exact counter strings and nulls. Native menus support closing the window and quitting.
 
 The eleven captured destinations retain sample scrubbing, legend toggles, app and
 process selection, help and the captured schematic:
@@ -75,9 +88,14 @@ and overflow states. The schematic uses the shared chassis and rotor assets,
 anchored callouts, illustrative airflow and explicit QA simulation. Its 30 Hz clock
 suspends while inactive or offscreen. The macOS text backend is enabled and checked
 at startup; the earlier blank-text builds are unsuitable performance baselines.
+Overview defers the schematic until its first real snapshot, avoiding artwork
+initialization while the charts are still loading.
 
-Saved queries, full native accessibility, every diagnostic detail and exact web
-chart smoothing remain outside this prototype. App histories contain observations
+Live controls expose accessibility roles, labels, stable identifiers and chart-step
+actions through the macOS adapter. VoiceOver, native input and pixel verification
+still require an interactive check; API integration alone does not establish parity.
+Saved queries, every diagnostic detail and exact web chart smoothing remain outside
+this prototype. App histories contain observations
 seen by the reader session. Missing sensors stay unavailable. Captured Overview
 follows the web design's three-column panels; live Overview follows Swift's
 two-column panels. These are different workloads and must be measured separately.
@@ -149,7 +167,7 @@ measure CPU paint work, not display presentation.
 The report retains raw-log paths and
 descriptive median/minimum/maximum statistics; it does not supply confidence intervals.
 
-The 240 cached rotor orientations preserve the artwork with GPUI 0.2.2's image
+The 240 cached rotor orientations preserve the existing artwork through GPUI image
 primitives. Their CPU pixels occupy 41,533,440 bytes, plus chassis pixels and GPU
 atlas storage. Generation is timed on first schematic paint. This cost belongs
 in the prototype's memory and startup results.

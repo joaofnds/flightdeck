@@ -403,6 +403,7 @@ fn paint_assembly(
     );
     if let Err(error) = window.paint_image(
         stage,
+        stage,
         px(0.0).into(),
         Arc::clone(&artwork.chassis),
         0,
@@ -419,6 +420,7 @@ fn paint_assembly(
         );
         let phase = rotor_phase(motion[index].turns) + index * 120;
         if let Err(error) = window.paint_image(
+            rotor,
             rotor,
             px(0.0).into(),
             Arc::clone(&artwork.rotors[phase]),
@@ -683,7 +685,14 @@ fn paint_label(
         if !callout.left() {
             origin.x += px(layout.label_width) - line.width;
         }
-        if let Err(error) = line.paint(origin, px(height + 5.0), window, cx) {
+        if let Err(error) = line.paint(
+            origin,
+            px(height + 5.0),
+            gpui::TextAlign::Left,
+            None,
+            window,
+            cx,
+        ) {
             eprintln!("Painting schematic label: {error}");
         }
     }
@@ -771,9 +780,14 @@ fn paint_text(
     window: &mut Window,
     cx: &mut App,
 ) {
-    if let Err(error) =
-        shape_text(text, height, color, window).paint(origin, px(height + 5.0), window, cx)
-    {
+    if let Err(error) = shape_text(text, height, color, window).paint(
+        origin,
+        px(height + 5.0),
+        gpui::TextAlign::Left,
+        None,
+        window,
+        cx,
+    ) {
         eprintln!("Painting schematic error: {error}");
     }
 }

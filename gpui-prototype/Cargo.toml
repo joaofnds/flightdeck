@@ -18,7 +18,13 @@ image = "=0.25.10"
 num-traits = "0.2"
 
 [dependencies.gpui]
-version = "=0.2.2"
+git = "https://github.com/zed-industries/zed"
+rev = "56934ec0560bce8929025497411de7f5322fb6ca"
+default-features = false
+
+[dependencies.gpui_macos]
+git = "https://github.com/zed-industries/zed"
+rev = "56934ec0560bce8929025497411de7f5322fb6ca"
 default-features = false
 features = ["font-kit", "runtime_shaders"]
 
