@@ -8,6 +8,8 @@ use crate::live_source::{Snapshot, Update, Worker};
 
 #[path = "live_disk_input_tests.rs"]
 mod disk_attribution;
+#[path = "live_hardware_input_tests.rs"]
+mod hardware;
 #[path = "live_layout_input_tests.rs"]
 mod layout;
 #[path = "live_rankings_input_tests.rs"]
