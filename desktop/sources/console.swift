@@ -20,6 +20,7 @@ struct Console: View {
                 navigation("Network", icon: "network")
                 Divider().padding(.vertical, theme.panelGap)
                 navigation("Computer", icon: "laptopcomputer")
+                navigation("Self-monitoring", icon: "waveform.path.ecg")
                 if !model.isLiveSource || model.route == "Recorded readings" {
                     navigation("Recorded readings", icon: "chart.xyaxis.line")
                 }
@@ -42,6 +43,8 @@ struct Console: View {
                     VStack(alignment: .leading, spacing: theme.sectionGap) {
                         if model.route == "Computer" {
                             ComputerPane()
+                        } else if model.route == "Self-monitoring" {
+                            SelfMonitoringPane()
                         } else {
                             ForEach(model.readerLossNotices, id: \.self) { notice in
                                 Label(notice, systemImage: "exclamationmark.triangle")
@@ -166,7 +169,9 @@ struct Console: View {
         HStack(spacing: 14) {
             VStack(alignment: .leading, spacing: 5) {
                 Text(model.route).font(theme.titleFont)
-                if let second = model.selection?.second {
+                if let second = model.route == "Self-monitoring"
+                    ? model.catalog?.latestObservation.map({ $0.wallNs / 1_000_000_000 })
+                    : model.selection?.second {
                     Text(Date(timeIntervalSince1970: Double(second)), format: .dateTime
                         .year().month().day().hour().minute().second().timeZone())
                         .font(.callout).foregroundStyle(theme.muted)
@@ -177,8 +182,10 @@ struct Console: View {
             Button(model.following ? "Pause live" : "Live") { model.setLive(!model.following) }
                 .help("Follow the collector's newest shared-memory tick; pausing retains access to its unsealed tail.")
             Text(model.liveStatus).font(.caption).foregroundStyle(theme.muted)
-            Label("Last 15 minutes", systemImage: "clock").font(.callout).foregroundStyle(theme.muted)
-            if model.isLiveSource {
+            if model.route != "Self-monitoring" {
+                Label("Last 15 minutes", systemImage: "clock").font(.callout).foregroundStyle(theme.muted)
+            }
+            if model.isLiveSource, model.route != "Self-monitoring" {
                 Menu {
                     Button("Inspect raw readings", action: model.enterRawReadings)
                 } label: {
@@ -186,7 +193,7 @@ struct Console: View {
                 }.help("Metric options").accessibilityLabel("Metric options")
                     .disabled(model.selection?.selected == nil)
             }
-            if !model.following, model.selection?.selected != nil {
+            if !model.following, model.selection?.selected != nil, model.route != "Self-monitoring" {
                 HStack {
                     Button { step(-1) } label: { Image(systemName: "chevron.left") }.help("Previous second")
                     TextField("Unix second", text: $model.secondText).frame(width: 110)
@@ -195,7 +202,10 @@ struct Console: View {
                     Button { step(1) } label: { Image(systemName: "chevron.right") }.help("Next second")
                 }
             }
-            Button { model.load(refresh: true) }
+            Button {
+                if model.route == "Self-monitoring" { model.refreshDiagnostics() }
+                else { model.load(refresh: true) }
+            }
                 label: { Image(systemName: "arrow.clockwise") }
                     .help(model.isLiveSource ? "Refresh live metrics" : "Refresh committed history")
                 .keyboardShortcut("r")
@@ -212,9 +222,10 @@ struct Console: View {
                         .monospacedDigit()
                 }
             } else if model.isLiveSource {
-                Text("Last 15 minutes")
+                Text(model.route == "Self-monitoring" ? "Reader diagnostics" : "Last 15 minutes")
                 Spacer()
-                if let observation = model.selection?.selected {
+                if let observation = model.route == "Self-monitoring"
+                    ? model.catalog?.latestObservation : model.selection?.selected {
                     Text("Updated " + Date(timeIntervalSince1970: Double(observation.wallNs) / 1e9)
                         .formatted(.dateTime.hour().minute().second()))
                         .monospacedDigit()

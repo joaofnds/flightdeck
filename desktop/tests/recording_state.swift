@@ -128,6 +128,7 @@ struct RecordingStateChecks {
         reports_reader_losses_without_a_selected_tick()
         opening_a_recording_exits_captured_reference_mode()
         entering_memory_retains_the_selected_live_publication()
+        self_monitoring_uses_catalog_polls_and_restores_metric_reads()
         entering_apps_retains_the_selected_live_publication()
         try installs_completed_live_app_metrics_and_history()
         try ignores_superseded_app_metrics_after_the_selected_key_changes()
@@ -150,6 +151,7 @@ struct RecordingStateChecks {
         try runRecordedMemoryChecks()
         try runRecordedComponentChecks()
         try runLiveCollectorChecks()
+        runSelfMonitoringChecks()
         try runLiveAppsChecks()
     }
 
@@ -1790,6 +1792,44 @@ struct RecordingStateChecks {
         precondition(reader.latestRequest?.target == nil)
         reader.finishNext()
         drainMainQueue()
+    }
+
+    @MainActor
+    private static func self_monitoring_uses_catalog_polls_and_restores_metric_reads() {
+        // Diagnostics ingest metadata without hidden chart projection; leaving them reloads charts.
+        let reader = ControlledRecordingReader()
+        let model = RecordingModel(path: "/recording", reader: reader, pollingEnabled: false)
+        model.startLive()
+        reader.finishNext()
+        drainMainQueue()
+        let selected = model.selection?.selected?.identity
+
+        model.navigate(to: "Self-monitoring")
+        model.pollLive()
+
+        precondition(reader.latestRequest?.catalogOnly == true)
+        reader.finishNext(unchanged: true)
+        drainMainQueue()
+        precondition(model.selection?.selected?.identity == selected)
+
+        model.setLive(false)
+        model.refreshDiagnostics()
+
+        precondition(reader.latestRequest?.catalogOnly == true)
+        precondition(reader.latestRequest?.target == selected)
+        precondition(model.selection?.selected?.identity == selected)
+        reader.finishNext(unchanged: true)
+        drainMainQueue()
+        precondition(model.selection?.selected?.identity == selected)
+        precondition(!model.following)
+        model.navigate(to: "Memory")
+
+        precondition(reader.latestRequest?.catalogOnly == false)
+        precondition(reader.latestRequest?.target == selected)
+        reader.finishNext()
+        drainMainQueue()
+        precondition(model.route == "Memory")
+        precondition(model.selection?.selected?.identity == selected)
     }
 
     @MainActor

@@ -638,6 +638,7 @@ final class RecordingModel: ObservableObject {
 
     var liveAvailable: Bool { catalog != nil }
     var isLiveSource: Bool { useLive }
+    private var readsCatalogOnly: Bool { route == "Computer" || route == "Self-monitoring" }
 
     func startLive() {
         guard !startedLive else { return }
@@ -717,6 +718,8 @@ final class RecordingModel: ObservableObject {
         enqueue(refresh: false, poll: true)
     }
 
+    func refreshDiagnostics() { enqueue(refresh: true) }
+
     func load(second: UInt64? = nil, alternative: UInt32? = nil, offset: UInt64 = 0,
               refresh: Bool = false) {
         if let second {
@@ -768,7 +771,7 @@ final class RecordingModel: ObservableObject {
             includeFans: route == "Overview" && !showsReference,
             live: useLive, poll: poll, target: following ? nil : requestedIdentity,
             apps: route == "Apps" ? LiveAppsRequest(key: appKey, appsOffset: appsOffset,
-                membersOffset: appMembersOffset) : nil, catalogOnly: route == "Computer",
+                membersOffset: appMembersOffset) : nil, catalogOnly: readsCatalogOnly,
             includeCPUDetail: route == "CPU & processes" && !showsReference,
             cpuHistoryOffset: route == "CPU & processes" && !showsReference ? cpuHistoryOffset : nil)
         if reading { pending = (generation, request) }
@@ -907,13 +910,13 @@ final class RecordingModel: ObservableObject {
     }
 
     func navigate(to title: String) {
-        let wasComputer = route == "Computer"
+        let wasCatalogOnly = readsCatalogOnly
         if let component = RecordedComponent(rawValue: title) {
             enterComponent(component)
-            if wasComputer, component != .cpu { enqueue(refresh: false) }
+            if wasCatalogOnly, component != .cpu { enqueue(refresh: false) }
         } else if title == "Memory" {
             enterMemory()
-            if wasComputer { enqueue(refresh: false) }
+            if wasCatalogOnly { enqueue(refresh: false) }
         } else if title == "Apps" { enterApps() }
         else if title == "Overview" { enterOverview() }
         else if title == "Recorded readings" { enterRawReadings() }

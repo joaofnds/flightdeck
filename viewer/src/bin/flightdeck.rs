@@ -162,6 +162,7 @@ fn check(root: &Path, archive: &Path) -> io::Result<()> {
                 "desktop/tests/memory_quantities_checks.swift",
                 "desktop/tests/fan_history_checks.swift",
                 "desktop/tests/live_collector_checks.swift",
+                "desktop/tests/self_monitoring_checks.swift",
                 "desktop/tests/live_apps_checks.swift",
                 "desktop/tests/live_apps_worker_checks.swift",
             ])
