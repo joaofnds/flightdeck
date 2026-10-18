@@ -6,6 +6,8 @@ use serde_json::Value;
 use crate::apps::{self, Amount, AppKey, ProcessCreation, ProcessState, Stamp, Unavailable};
 use crate::live_apps::Frame;
 
+pub(crate) use json::bounded;
+
 pub const SAMPLE_BYTES_MAX: usize = 8 * 1024 * 1024;
 pub const RESPONSE_BYTES_MAX: usize = 8 * 1024 * 1024;
 pub const PAGE_ROWS_MAX: u32 = 512;

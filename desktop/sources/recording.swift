@@ -388,6 +388,7 @@ final class RecordingWorker: RecordingReading, @unchecked Sendable {
            lastResult.catalog.windows == catalog.windows,
            lastResult.catalog.historyError == catalog.historyError,
            lastResult.cpuHistory?.notice == nil,
+           lastResult.apps?.history?.restorationError == nil,
            request.target == nil || lastResult.selection?.selected?.identity == request.target {
             return ReadResult(catalog: catalog, selection: lastResult.selection,
                 page: lastResult.page, machinePages: lastResult.machinePages, unchanged: true,

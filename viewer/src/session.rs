@@ -31,6 +31,7 @@ pub struct Session {
     pub(crate) cpu_history_cache: Option<crate::cpu_history::Cache>,
     // Separate from LiveSession's raw cache, bounded to one 8 MiB owned Sample.
     app_sample_cache: std::cell::RefCell<Option<committed_apps::Cache>>,
+    app_history_cache: std::cell::RefCell<Option<app_history::Cache>>,
     operation: Operation,
     #[cfg(test)]
     pub(crate) source_reads: std::cell::Cell<u64>,
@@ -38,6 +39,8 @@ pub struct Session {
     pub(crate) before_cpu_history_install: Option<Box<dyn FnOnce()>>,
     #[cfg(test)]
     before_app_sample_install: std::cell::RefCell<Option<Box<dyn FnOnce()>>>,
+    #[cfg(test)]
+    before_app_history_install: std::cell::RefCell<Option<Box<dyn FnOnce()>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -108,6 +111,7 @@ impl Session {
             selected_context: Vec::new(),
             cpu_history_cache: None,
             app_sample_cache: std::cell::RefCell::new(None),
+            app_history_cache: std::cell::RefCell::new(None),
             operation,
             #[cfg(test)]
             source_reads: std::cell::Cell::new(0),
@@ -115,6 +119,8 @@ impl Session {
             before_cpu_history_install: None,
             #[cfg(test)]
             before_app_sample_install: std::cell::RefCell::new(None),
+            #[cfg(test)]
+            before_app_history_install: std::cell::RefCell::new(None),
         };
         session.operation.begin(epoch)?.run(|| session.extent())?;
         Ok(session)
@@ -124,6 +130,7 @@ impl Session {
         if self.operation.epoch() != epoch {
             self.selected = None;
             self.app_sample_cache.get_mut().take();
+            self.app_history_cache.get_mut().take();
         }
         self.operation = self.operation.begin(epoch)?;
         self.operation.attach(&self.connection)
@@ -574,4 +581,5 @@ fn discover(root: &Path, windows: &mut Vec<Manifest>, operation: &Operation) -> 
 #[path = "cpu_history_saved.rs"]
 mod cpu_history_saved;
 
+mod app_history;
 mod committed_apps;

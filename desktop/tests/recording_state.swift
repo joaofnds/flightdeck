@@ -37,6 +37,7 @@ struct RecordingStateChecks {
         if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--live-cpu-delayed-fixture" {
             try recovers_selected_cpu_activity_after_a_delayed_commit(path: CommandLine.arguments[2])
             try retries_cpu_history_after_a_committed_source_recovers(path: CommandLine.arguments[2])
+            try retries_app_history_after_a_committed_source_recovers(path: CommandLine.arguments[2])
             return
         }
         precondition(CommandLine.arguments.count == 1, "Unknown native check arguments")
@@ -945,6 +946,46 @@ struct RecordingStateChecks {
         let cached = try nativeRead(reader, request: request)
         precondition(cached.unchanged)
         print("Real worker retries CPU history source failures without moving live selection")
+    }
+
+    @MainActor
+    private static func retries_app_history_after_a_committed_source_recovers(path: String) throws {
+        // Goal: a saved App-history warning retries without a new publication or selection change.
+        // Method: switch a real worker from CPU to App history while its fixture data is withheld.
+        let reader = RecordingWorker()
+        let warm = try nativeRead(reader, request: cpuWorkerRequest(path: path, include: true))
+        let request = ReadRequest(path: path, second: nil, alternative: 0, table: 1, offset: 0,
+            refresh: false, machineOffsets: [:], includeMachine: false, includePage: false,
+            live: true, poll: true, apps: LiveAppsRequest(
+                key: LiveAppKeyIdentity(kind: .executable, bytes: Data("unattributed".utf8)),
+                appsOffset: 0, membersOffset: 0))
+        let root = URL(fileURLWithPath: path, isDirectory: true)
+        let data = root.appendingPathComponent("data", isDirectory: true)
+        let held = root.appendingPathComponent("held-app-history", isDirectory: true)
+        try FileManager.default.moveItem(at: data, to: held)
+        defer {
+            if FileManager.default.fileExists(atPath: held.path) {
+                do { try FileManager.default.moveItem(at: held, to: data) }
+                catch { preconditionFailure("Could not restore App fixture data: \(error)") }
+            }
+        }
+
+        for _ in 0..<3 {
+            let failed = try nativeRead(reader, request: request)
+            precondition(!failed.unchanged, "App history failure suppressed its next retry")
+            precondition(failed.apps?.history?.restorationError?.isEmpty == false)
+            precondition(failed.selection?.selected == warm.selection?.selected)
+            precondition(failed.apps?.history?.selected == failed.apps?.list.header.selected)
+            precondition(failed.catalog.historyError == warm.catalog.historyError)
+        }
+        try FileManager.default.moveItem(at: held, to: data)
+        let recovered = try nativeRead(reader, request: request)
+        precondition(!recovered.unchanged)
+        precondition(recovered.apps?.history?.restorationError == nil)
+        precondition(recovered.selection?.selected == warm.selection?.selected)
+        let cached = try nativeRead(reader, request: request)
+        precondition(cached.unchanged)
+        print("Real worker retries App history source failures without a new publication")
     }
 
     @MainActor

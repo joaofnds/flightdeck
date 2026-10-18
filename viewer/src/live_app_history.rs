@@ -11,7 +11,11 @@ use crate::live_app_response::{KeyKind, Observation, Sample};
 use crate::session::OBSERVATIONS_MAX;
 
 mod compact;
+mod merge;
+pub(crate) use merge::Merge;
+mod trace;
 use compact::{CompactMeasure, HistoryKey, count};
+pub(crate) use trace::TracePoint;
 
 const BYTES_MAX: usize = 64 * 1024 * 1024;
 const _: () = {
@@ -138,12 +142,15 @@ impl History {
         let points: Vec<_> = points.into_iter().map(|point| point.json(target)).collect();
         operation.check()?;
 
-        Ok(
+        let response = crate::live_app_response::bounded(
             json!({"selected": selected.json(), "context_seconds": 900, "points": points,
             "coverage": {"retention_limited": self.retention_limited,
                 "observations_retained": self.points.len(), "cache_bytes": self.bytes,
                 "cache_bytes_max": BYTES_MAX}}),
-        )
+        )?;
+        operation.check()?;
+
+        Ok(response)
     }
 }
 
@@ -196,7 +203,7 @@ impl Point {
             .sum()
     }
 
-    fn json(&self, target: &Target<'_>) -> Value {
+    fn trace(&self, target: &Target<'_>) -> TracePoint {
         let target = key(target.kind, target.bytes);
         let app = match self
             .apps
@@ -205,35 +212,12 @@ impl Point {
             Ok(index) => Some(&self.apps[index]),
             Err(_) => None,
         };
-        let mut point = json!({"observation": self.observation.json(),
-            "segment": self.segment.to_string(),
-            "elapsed_ns": self.elapsed_ns.map(|value| value.to_string()),
-            "members": null, "membership_complete": false,
-            "cpu_ns": null, "energy_nj": null, "resident_bytes": null, "footprint_bytes": null,
-            "cpu_percent_one_core": null, "energy_joules": null, "energy_watts": null});
-        if let Some(app) = app {
-            point["members"] = json!(app.members);
-            point["membership_complete"] = json!(app.membership_complete);
-            point["cpu_ns"] = app.cpu_ns.json();
-            point["energy_nj"] = app.energy_nj.json();
-            point["resident_bytes"] = app.resident_bytes.json();
-            point["footprint_bytes"] = app.footprint_bytes.json();
-            point["cpu_percent_one_core"] = json!(app.cpu_ns.measured().and_then(|cpu_ns| {
-                apps::cpu_percent_one_core(apps::CpuRate {
-                    cpu_ns,
-                    elapsed_ns: self.elapsed_ns?,
-                })
-            }));
-            point["energy_joules"] = json!(app.energy_nj.measured().map(apps::energy_joules));
-            point["energy_watts"] = json!(app.energy_nj.measured().and_then(|energy_nj| {
-                apps::energy_watts(apps::EnergyRate {
-                    energy_nj,
-                    elapsed_ns: self.elapsed_ns?,
-                })
-            }));
-        }
 
-        point
+        TracePoint::from_live(&self.observation, self.elapsed_ns, app)
+    }
+
+    fn json(&self, target: &Target<'_>) -> Value {
+        self.trace(target).json(self.segment)
     }
 }
 
@@ -246,3 +230,6 @@ fn key(kind: KeyKind, bytes: &[u8]) -> AppKey<'_> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod merge_tests;

@@ -42,6 +42,71 @@ fn reads_captured_app_totals_without_a_registered_live_source() {
 }
 
 #[test]
+fn restores_app_history_without_a_registered_live_source() {
+    // Goal: a cold client fills the rolling App trace from exact committed observations.
+    // Method: retire two real publications and compare the final trace point with App detail.
+    let fixture = commit_and_retire(Fixture::new());
+    let mut session = LiveSession::open(&fixture.root).unwrap();
+
+    session.select(1002, 0).unwrap();
+    let history = session
+        .app_history(
+            viewer::live_app_response::KeyKind::Bundle,
+            b"/Apps/Current.app",
+        )
+        .unwrap();
+    let detail = session
+        .app_detail(
+            viewer::live_app_response::KeyKind::Bundle,
+            b"/Apps/Current.app",
+            0,
+        )
+        .unwrap();
+
+    let points = history["points"].as_array().unwrap();
+    assert_eq!(points.len(), 2);
+    assert_eq!(points[0]["observation"]["stamp"]["publication"], "1");
+    assert_eq!(points[0]["cpu_percent_one_core"], serde_json::Value::Null);
+    assert_eq!(points[1]["observation"], history["selected"]);
+    assert_eq!(points[1]["cpu_ns"]["known"], "1");
+    assert_eq!(points[1]["resident_bytes"]["known"], "11");
+    assert_eq!(points[1]["cpu_ns"], detail["app"]["cpu_ns"]);
+    assert_eq!(points[1]["energy_nj"], detail["app"]["energy_nj"]);
+}
+
+#[test]
+fn keeps_live_app_readings_when_committed_history_becomes_unreadable() {
+    // Goal: losing optional saved history cannot blank independently retained live readings.
+    // Method: warm the saved trace, withhold its real data directory, then recover it.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(1001);
+    fixture.publish_with_system_rows(1002);
+    fixture.seal();
+    let mut session = LiveSession::open(&fixture.root).unwrap();
+    session.follow_latest().unwrap();
+    let kind = viewer::live_app_response::KeyKind::Bundle;
+    let key = b"/Apps/Current.app";
+    let before = session.app_history(kind, key).unwrap();
+    let data = persistence::layout::base(&fixture.root, persistence::layout::Kind::Data);
+    let withheld = fixture.root.join("withheld-data");
+    std::fs::rename(&data, &withheld).unwrap();
+
+    let history = session.app_history(kind, key).unwrap();
+    let detail = session.app_detail(kind, key, 0).unwrap();
+
+    assert_eq!(history["points"], before["points"]);
+    assert_eq!(history["selected"], before["selected"]);
+    assert_eq!(history["points"][1]["cpu_ns"]["known"], "1");
+    assert_eq!(detail["app"]["resident_bytes"]["known"], "11");
+    assert!(history["restoration_error"].as_str().unwrap().len() <= 2048);
+    assert!(!history["restoration_error"].as_str().unwrap().is_empty());
+    std::fs::rename(&withheld, &data).unwrap();
+    let recovered = session.app_history(kind, key).unwrap();
+    assert_eq!(recovered["points"], before["points"]);
+    assert!(recovered["restoration_error"].is_null());
+}
+
+#[test]
 fn preserves_refused_members_and_raw_app_bytes_in_committed_observations() {
     // Goal: cold App identity preserves byte keys and keeps refused quantities unavailable.
     // Method: reopen a sealed member with non-UTF-8 App/program bytes and refused usage.
@@ -178,6 +243,17 @@ fn sums_positive_committed_user_system_and_energy_intervals() {
             0,
         )
         .unwrap();
+
+    let history = session
+        .app_history(
+            viewer::live_app_response::KeyKind::Bundle,
+            b"/Apps/Current.app",
+        )
+        .unwrap();
+    assert_eq!(history["points"][1]["cpu_percent_one_core"], 50.0);
+    assert_eq!(history["points"][1]["energy_nj"]["known"], "3000000000");
+    assert_eq!(history["points"][1]["energy_joules"], 3.0);
+    assert_eq!(history["points"][1]["energy_watts"], 3.0);
 
     assert_eq!(detail["elapsed_ns"], "1000000000");
     assert_eq!(detail["app"]["cpu_ns"]["known"], "500000000");

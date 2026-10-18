@@ -29,7 +29,29 @@ func runLiveAppsChecks() throws {
     try applies_native_live_table_theme_without_enabling_row_selection()
     renders_overflowed_group_subtotals_as_unavailable()
     try renders_the_loaded_process_bound_and_clears_an_empty_page()
-    print("25 live App native checks passed")
+    try keeps_available_app_charts_with_a_bounded_history_warning()
+    print("26 live App native checks passed")
+}
+
+@MainActor
+private func keeps_available_app_charts_with_a_bounded_history_warning() throws {
+    // Goal: optional saved-history failure leaves current native charts visible with a warning.
+    // Method: decode a maximum-width diagnostic and reject empty or oversized messages.
+    let message = String(repeating: "温", count: 512)
+    let read = try LiveAppsFixture.read(restorationError: message)
+    guard let key = read.key, let payload = read.history,
+          let view = payload.view(key: key, theme: FlightdeckTheme()) else {
+        preconditionFailure("Available App history was discarded")
+    }
+
+    precondition(payload.restorationError == message)
+    precondition(view.coverage.contains("Earlier App history unavailable: " + message))
+    precondition(view.cpu?.lines[0].values == [50])
+    precondition(view.power?.lines[0].values == [3])
+    for invalid in ["", String(repeating: "x", count: 513)] {
+        let result = Result { try LiveAppsFixture.read(restorationError: invalid) }
+        precondition(isLiveAppFailure(result, expected: .invalidText))
+    }
 }
 
 private func preserves_exact_live_app_counters_above_double_precision() throws {
@@ -43,7 +65,7 @@ private func preserves_exact_live_app_counters_above_double_precision() throws {
 }
 
 enum LiveAppsFixture {
-    static func read(otherApp: Bool = false) throws -> LiveAppsRead {
+    static func read(otherApp: Bool = false, restorationError: String? = nil) throws -> LiveAppsRead {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         let text = String(decoding: detail, as: UTF8.self)
@@ -59,7 +81,7 @@ enum LiveAppsFixture {
         object["page"] = ["offset": 0, "limit": 512, "total": 1, "next_offset": NSNull()]
         let list = try decoder.decode(LiveAppListPage.self,
             from: JSONSerialization.data(withJSONObject: object))
-        let history: [String: Any] = ["selected": selected, "context_seconds": 900,
+        var history: [String: Any] = ["selected": selected, "context_seconds": 900,
             "points": [["observation": selected, "segment": "0", "elapsed_ns": "1000000000",
                 "members": 3, "membership_complete": false,
                 "cpu_ns": ["known": "500000000", "measured_members": 2,
@@ -73,6 +95,8 @@ enum LiveAppsFixture {
                 "cpu_percent_one_core": 50, "energy_joules": 3, "energy_watts": 3]],
             "coverage": ["retention_limited": false, "observations_retained": 1,
                 "cache_bytes": 4096, "cache_bytes_max": 33_554_432]]
+
+        if let restorationError { history["restoration_error"] = restorationError }
 
         return LiveAppsRead(key: detail.app.key.identity, list: list, detail: detail,
             history: try decoder.decode(LiveAppHistoryPayload.self,

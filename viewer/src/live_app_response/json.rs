@@ -219,7 +219,7 @@ fn page_json(page: Page, end: usize, count: usize) -> Value {
         "next_offset": if end < count { Some(end) } else { None } })
 }
 
-fn bounded(value: Value) -> Result<Value> {
+pub(crate) fn bounded(value: Value) -> Result<Value> {
     let mut output = Envelope { bytes: 0 };
     serde_json::to_writer(&mut output, &value)
         .map_err(|_| Error::Bound("live App response bytes"))?;

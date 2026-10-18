@@ -24,13 +24,20 @@ struct LiveAppHistoryPayload: Decodable, Sendable {
     let contextSeconds: UInt32
     let points: [LiveAppHistoryPoint]
     let coverage: LiveAppHistoryCoverage
-    private enum CodingKeys: String, CodingKey { case selected, contextSeconds, points, coverage }
+    let restorationError: String?
+    private enum CodingKeys: String, CodingKey {
+        case selected, contextSeconds, points, coverage, restorationError
+    }
 
     init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         selected = try container.decode(LiveAppObservation.self, forKey: .selected)
         contextSeconds = try container.decode(UInt32.self, forKey: .contextSeconds)
         coverage = try container.decode(LiveAppHistoryCoverage.self, forKey: .coverage)
+        restorationError = try container.decodeIfPresent(String.self, forKey: .restorationError)
+        if let message = restorationError {
+            guard !message.isEmpty, message.count <= 512 else { throw LiveAppDataError.invalidText }
+        }
         var input = try container.nestedUnkeyedContainer(forKey: .points)
         var points: [LiveAppHistoryPoint] = []
         points.reserveCapacity(min(TimeSeriesModel.observationsMax, input.count ?? 0))
@@ -76,8 +83,10 @@ struct LiveAppHistoryPayload: Decodable, Sendable {
         let labels = [domain.lowerBound, domain.lowerBound + 450, domain.upperBound].map {
             Date(timeIntervalSince1970: $0).formatted(.dateTime.hour().minute().second())
         }
-        let coverageText = "\(points.count) captured App observations · membership coverage is uncertain"
-            + (coverage.retentionLimited ? " · history was shortened by its cache limit" : "")
+        let captured = points.filter { $0.sourceAvailable != false }.count
+        let coverageText = "\(captured) captured App observations · membership coverage is uncertain"
+            + (coverage.retentionLimited ? " · some App history is unavailable" : "")
+            + (restorationError.map { " · Earlier App history unavailable: " + $0 } ?? "")
 
         return LiveAppHistoryView(key: key,
             cpu: model("CPU", samples: samples, domain: domain, color: theme.cpuSeries,
@@ -106,6 +115,7 @@ struct LiveAppHistoryPoint: Decodable, Sendable {
     let elapsedNs: LiveAppCounter?
     let members: UInt32?
     let membershipComplete: Bool
+    let sourceAvailable: Bool?
     let cpuNs: LiveAppMeasure?
     let energyNj: LiveAppMeasure?
     let residentBytes: LiveAppMeasure?

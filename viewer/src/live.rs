@@ -678,14 +678,68 @@ impl LiveSession {
 
     pub fn app_history(&self, kind: KeyKind, bytes: &[u8]) -> Result<Value> {
         self.operation.run(|| {
+            let mut selected = None;
             self.with_selected_apps(|sample| {
-                self.app_history.response(
-                    &sample.selected,
-                    &Target { kind, bytes },
-                    &self.operation,
-                )
-            })
+                selected = Some(sample.selected);
+                Ok(Value::Null)
+            })?;
+
+            let selected = selected.ok_or(Error::Bound("App history selection"))?;
+            let target = Target { kind, bytes };
+
+            if let Some(history) = &self.history {
+                let mut restored = false;
+                let result = history.with_app_history(&selected, &target, |saved| {
+                    restored = true;
+                    self.app_history
+                        .response_merged(&crate::live_app_history::Merge {
+                            selected: &selected,
+                            target: &target,
+                            saved,
+                            context: &self.selected_context,
+                            operation: &self.operation,
+                        })
+                });
+                match result {
+                    Err(error) if !restored => self.app_history_degraded(&selected, &target, error),
+                    result => result,
+                }
+            } else {
+                self.app_history
+                    .response(&selected, &target, &self.operation)
+            }
         })
+    }
+
+    fn app_history_degraded(
+        &self,
+        selected: &crate::live_app_response::Observation,
+        target: &Target<'_>,
+        error: Error,
+    ) -> Result<Value> {
+        self.operation.check()?;
+        match &error {
+            Error::Bound(_) => return Err(error),
+            Error::Io(problem) if problem.kind() == std::io::ErrorKind::Interrupted => {
+                return Err(error);
+            }
+            Error::Io(_) | Error::Engine(_) => {}
+        }
+        let mut response = self
+            .app_history
+            .response_merged(&crate::live_app_history::Merge {
+                selected,
+                target,
+                saved: &[],
+                context: &self.selected_context,
+                operation: &self.operation,
+            })?;
+        response["restoration_error"] =
+            json!(error.to_string().chars().take(512).collect::<String>());
+        let response = crate::live_app_response::bounded(response)?;
+        self.operation.check()?;
+
+        Ok(response)
     }
 
     pub fn app_detail(&self, kind: KeyKind, bytes: &[u8], offset: u32) -> Result<Value> {
@@ -3270,6 +3324,76 @@ mod tests {
             )
             .unwrap();
     }
+    #[test]
+    fn keeps_null_context_gaps_when_optional_app_history_is_unreadable() {
+        // Goal: missing saved facts remain explicit gaps beside independently available detail.
+        // Method: discard compact facts after selection and withhold the committed data.
+        let mut fixture = identity_fixture::Fixture::new();
+        fixture.publish_with_system_rows(1001);
+        fixture.publish_with_system_rows(1002);
+        fixture.seal();
+        let mut session = LiveSession::open(&fixture.root).unwrap();
+        session.follow_latest().unwrap();
+        session.app_history = History::new();
+        let data = persistence::layout::base(&fixture.root, persistence::layout::Kind::Data);
+        let withheld = fixture.root.join("withheld-data");
+        std::fs::rename(&data, &withheld).unwrap();
+
+        let history = session
+            .app_history(KeyKind::Bundle, b"/Apps/Current.app")
+            .unwrap();
+        let detail = session
+            .app_detail(KeyKind::Bundle, b"/Apps/Current.app", 0)
+            .unwrap();
+
+        assert_eq!(history["points"].as_array().unwrap().len(), 2);
+        assert_eq!(history["points"][0]["source_available"], false);
+        assert_eq!(history["points"][1]["resident_bytes"], Value::Null);
+        assert_eq!(history["coverage"]["retention_limited"], true);
+        assert!(history["restoration_error"].is_string());
+        assert_eq!(detail["app"]["resident_bytes"]["known"], "11");
+        std::fs::rename(&withheld, &data).unwrap();
+    }
+
+    #[test]
+    fn refuses_structural_and_canceled_app_history_instead_of_degrading_it() {
+        // Goal: degraded history cannot conceal conflicting identity or superseded work.
+        // Method: submit structural/interruption errors at the fallback and cancel a public call.
+        let mut fixture = identity_fixture::Fixture::new();
+        fixture.publish_with_system_rows(1001);
+        let control = Arc::new(Cancellation::default());
+        let mut session = LiveSession::open_with(&fixture.root, control.clone(), 0).unwrap();
+        session.follow_latest().unwrap();
+        session
+            .with_selected_apps(|sample| {
+                let target = Target {
+                    kind: KeyKind::Bundle,
+                    bytes: b"/Apps/Current.app",
+                };
+                let structural = session.app_history_degraded(
+                    &sample.selected,
+                    &target,
+                    Error::Bound("conflicting App history observation"),
+                );
+                assert!(matches!(structural, Err(Error::Bound(_))));
+                let canceled = session.app_history_degraded(
+                    &sample.selected,
+                    &target,
+                    std::io::Error::from(std::io::ErrorKind::Interrupted).into(),
+                );
+                assert!(matches!(canceled, Err(Error::Io(problem))
+                if problem.kind() == std::io::ErrorKind::Interrupted));
+                Ok(Value::Null)
+            })
+            .unwrap();
+        control.cancel().unwrap();
+
+        let result = session.app_history(KeyKind::Bundle, b"/Apps/Current.app");
+
+        assert!(matches!(result, Err(Error::Io(problem))
+            if problem.kind() == std::io::ErrorKind::Interrupted));
+    }
+
     #[test]
     fn retries_captured_identity_after_cancellation_and_hands_the_same_pages_to_history() {
         // Goal: canceled v4 decoding cannot lose a publication, event identity or seal handoff.

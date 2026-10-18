@@ -269,7 +269,7 @@ fn with_app_sample_selection(selected: &Value, endpoint: &Endpoint) -> Result<()
     Ok(())
 }
 
-fn with_app_sample_predecessor(previous: &Endpoint, selected: Option<&Frame>) -> bool {
+pub(super) fn with_app_sample_predecessor(previous: &Endpoint, selected: Option<&Frame>) -> bool {
     let Some(selected) = selected else {
         return false;
     };

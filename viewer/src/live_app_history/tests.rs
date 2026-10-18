@@ -134,7 +134,7 @@ fn refuses_app_history_after_its_operation_is_canceled() {
         if error.kind() == std::io::ErrorKind::Interrupted));
 }
 
-fn point(publication: u64, app_count: usize) -> Box<Point> {
+pub(super) fn point(publication: u64, app_count: usize) -> Box<Point> {
     let apps = (0..app_count)
         .map(|index| App {
             key: capture_key(
