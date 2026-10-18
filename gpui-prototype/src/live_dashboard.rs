@@ -8,15 +8,18 @@ use gpui::{
     Context, ListAlignment, ListOffset, ListState, Render, Window, div, list, prelude::*, px, rgb,
 };
 
-pub const ROUTES: [(&str, &str); 9] = [
+pub const ROUTES: [(&str, &str); 12] = [
     ("overview", "Overview"),
     ("cpu", "CPU & processes"),
     ("apps", "Apps"),
     ("memory", "Memory"),
     ("gpu", "GPU"),
+    ("storage", "Storage"),
     ("energy", "Energy"),
     ("network", "Network"),
+    ("battery", "Battery"),
     ("computer", "Computer"),
+    ("self", "Self-monitoring"),
     ("raw", "Recorded readings"),
 ];
 
@@ -56,6 +59,7 @@ pub struct LiveDashboard {
     pub(crate) inspection_focus: Option<gpui::FocusHandle>,
     pub(crate) list: ListState,
     last_status: String,
+    rendered_source: Option<crate::live_source_mode::SourceMode>,
 }
 
 pub struct ChartHover {
@@ -64,6 +68,9 @@ pub struct ChartHover {
 
 pub enum Row {
     Summary,
+    ResourceSummary,
+    StorageDevice(usize, String),
+    Diagnostics,
     OverviewStatus,
     AppSelector,
     AppSummary,
@@ -129,6 +136,7 @@ impl LiveDashboard {
             inspection_focus: None,
             list: ListState::new(0, ListAlignment::Top, px(100.0)),
             last_status: String::new(),
+            rendered_source: None,
         };
         if dashboard.request.route == "computer" {
             dashboard.inventory = crate::live_inventory::rows();
@@ -295,6 +303,14 @@ impl LiveDashboard {
     }
 
     pub fn navigate(&mut self, route: &str, cx: &mut Context<Self>) {
+        if !matches!(self.request.route.as_str(), "computer" | "self") {
+            self.native.diagnostic_selected = self
+                .context_snapshot()
+                .map_or(serde_json::Value::Null, |snapshot| {
+                    snapshot.selection["selected"].clone()
+                });
+        }
+
         self.chart_hover = None;
         self.preview = None;
         self.request.route = route.into();
@@ -364,6 +380,14 @@ impl LiveDashboard {
 
             return "No live readings".into();
         };
+        if self.native.source == crate::live_source_mode::SourceMode::Recorded {
+            return "Recorded".into();
+        }
+
+        if self.request.route == "self" {
+            return "Reader connected".into();
+        }
+
         if snapshot.catalog["collector_completed"].as_bool() == Some(true) {
             return "Collector stopped".into();
         }
@@ -423,6 +447,26 @@ impl LiveDashboard {
             .min_h_0()
             .child(body)
     }
+
+    fn render_brandbar(&self) -> impl IntoElement {
+        let status = self.status();
+
+        div()
+            .h(px(48.0))
+            .px(px(24.0))
+            .flex()
+            .items_center()
+            .justify_between()
+            .border_b_1()
+            .border_color(rgb(GRID))
+            .child("◉  FLIGHTDECK")
+            .child(
+                div()
+                    .debug_selector(|| format!("source-status:{status}"))
+                    .text_color(rgb(MUTED))
+                    .child(status),
+            )
+    }
 }
 
 #[cfg(test)]
@@ -431,6 +475,11 @@ mod input_tests;
 
 impl Render for LiveDashboard {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.rendered_source != Some(self.native.source) {
+            window.set_window_title(self.native.source.title());
+            self.rendered_source = Some(self.native.source);
+        }
+
         self.reading_viewport(window.viewport_size());
         self.install_cpu_focus(window, cx);
         self.hardware_state.begin_frame();
@@ -460,18 +509,7 @@ impl Render for LiveDashboard {
             .font_family(".AppleSystemUIFont")
             .text_size(px(13.0))
             .on_key_down(crate::dashboard::keyboard_navigation)
-            .child(
-                div()
-                    .h(px(48.0))
-                    .px(px(24.0))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .border_b_1()
-                    .border_color(rgb(GRID))
-                    .child("◉  FLIGHTDECK")
-                    .child(div().text_color(rgb(MUTED)).child(self.status())),
-            )
+            .child(self.render_brandbar())
             .child(
                 div()
                     .flex()

@@ -92,10 +92,71 @@ fn attached_collection_survives_navigation_to_computer() {
     policy.step(Duration::ZERO, &existing(1));
     policy.step(Duration::from_secs(1), &existing(2));
 
-    let action = policy.step(Duration::from_mins(15), &Source::default());
+    let mut source = existing(3);
+    source.recording_route = false;
+    let action = policy.step(Duration::from_secs(2), &source);
 
     assert_eq!(action, Action::None);
     assert_eq!(policy.state, State::Attached);
+}
+
+#[test]
+fn retrying_a_stalled_shared_collector_never_competes_with_its_living_producer() {
+    // Goal: explicit recovery still discovers a living producer before considering a spawn.
+    // Method: stall after attachment, retry, and keep that PID alive through rediscovery.
+    let mut policy = Policy::new(Mode::Auto);
+    policy.step(Duration::ZERO, &existing(1));
+    policy.step(Duration::from_secs(1), &existing(2));
+    policy.step(DISCOVERY_LIMIT + Duration::from_secs(1), &existing(2));
+
+    policy.retry();
+    let first = policy.step(Duration::from_secs(22), &existing(2));
+    let expired = policy.step(Duration::from_secs(42), &existing(2));
+
+    assert_eq!(first, Action::None);
+    assert_eq!(expired, Action::None);
+    assert_eq!(policy.state, State::Failed);
+    assert_eq!(policy.owned_pid, None);
+    assert!(policy.can_retry());
+}
+
+#[test]
+fn retrying_a_dead_shared_collector_can_resume_owned_recording() {
+    // Goal: a stopped shared source becomes recoverable only after an explicit request.
+    // Method: lose the producer after attachment, then retry discovery of the ready store.
+    let mut policy = Policy::new(Mode::Auto);
+    policy.step(Duration::ZERO, &existing(1));
+    policy.step(Duration::from_secs(1), &existing(2));
+    let stopped = Source {
+        recording_route: true,
+        recording: RecordingStatus::Ready,
+        ..Source::default()
+    };
+    let lost = policy.step(Duration::from_secs(2), &stopped);
+    assert_eq!(lost, Action::None);
+    assert!(policy.can_retry());
+
+    policy.retry();
+    let resumed = policy.step(Duration::from_secs(3), &stopped);
+
+    assert_eq!(resumed, Action::Spawn);
+    assert_eq!(policy.state, State::Starting);
+}
+
+#[test]
+fn explicit_attachment_stays_read_only_after_its_producer_stops() {
+    // Goal: inspecting an explicit path never grants recording-start authority.
+    // Method: lose an Attach source, attempt retry, and observe no ownership or spawn.
+    let mut policy = Policy::new(Mode::Attach);
+    policy.step(DISCOVERY_LIMIT, &Source::default());
+
+    policy.retry();
+    let action = policy.step(DISCOVERY_LIMIT * 2, &Source::default());
+
+    assert_eq!(action, Action::None);
+    assert_eq!(policy.state, State::Attached);
+    assert!(!policy.can_retry());
+    assert!(!policy.needs_health(true));
 }
 
 #[test]

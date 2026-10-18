@@ -1,9 +1,15 @@
+#[path = "../charts.rs"]
+pub mod charts;
 #[path = "../panel_data.rs"]
 pub mod data;
 #[path = "../live_projection.rs"]
 pub mod live_projection;
+#[path = "projection_bench/paint.rs"]
+mod paint;
 #[path = "projection_bench/mod.rs"]
 mod projection_bench;
+#[path = "../render_evidence.rs"]
+pub mod render_evidence;
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -86,6 +92,12 @@ fn unsigned_publication(value: &Value) -> bool {
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let arguments: Vec<_> = std::env::args_os().skip(1).take(9).collect();
+    if arguments
+        .first()
+        .is_some_and(|value| value == "--paint-input")
+    {
+        return paint::run(&arguments);
+    }
     if arguments.len() != 8 {
         if arguments.len() == 4 {
             if arguments[0] == "--capture" {
@@ -190,6 +202,10 @@ fn measure(
 }
 
 fn read(path: &Path, route: &str) -> io::Result<Selection> {
+    Selection::parse(read_value(path)?, route)
+}
+
+fn read_value(path: &Path) -> io::Result<Value> {
     const BYTES_MAX: u64 = 16 * 1024 * 1024;
     let mut bytes = Vec::new();
 
@@ -200,9 +216,7 @@ fn read(path: &Path, route: &str) -> io::Result<Selection> {
         return Err(io::Error::other("Projection input exceeds 16 MiB"));
     }
 
-    let value = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
-
-    Selection::parse(value, route)
+    serde_json::from_slice(&bytes).map_err(io::Error::other)
 }
 
 fn write(path: &Path, value: &Value) -> io::Result<()> {

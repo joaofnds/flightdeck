@@ -586,6 +586,10 @@ fn opening_a_recording_with_an_unpresentable_result_preserves_the_current_record
     assert_eq!(dashboard.request, previous_request);
     assert_eq!(dashboard.generation, previous_generation);
     assert_eq!(
+        dashboard.native.source,
+        crate::live_source_mode::SourceMode::Live
+    );
+    assert_eq!(
         dashboard.snapshot.as_ref().unwrap().selection["selected"]["publication"],
         7
     );
@@ -596,6 +600,77 @@ fn opening_a_recording_with_an_unpresentable_result_preserves_the_current_record
             .as_ref()
             .unwrap()
             .starts_with("Recording unchanged:")
+    );
+}
+
+#[test]
+fn a_saved_source_becomes_recorded_only_when_its_open_commits() {
+    // Goal: source presentation changes atomically with an accepted recording, never before.
+    // Method: deliver a valid candidate through the same update port used by its reader.
+    let mut dashboard = dashboard("overview");
+    dashboard.snapshot = Some(snapshot());
+    dashboard.begin_recording(missing_recording());
+    let mut ready = snapshot();
+    ready.generation = dashboard.native.candidate.as_ref().unwrap().generation;
+    ready.pages.get_mut("ticks").unwrap()["offset"] = json!(0);
+    assert_eq!(
+        dashboard.native.source,
+        crate::live_source_mode::SourceMode::Live
+    );
+
+    assert!(dashboard.recording_receive(crate::live_source::Update::Ready(ready)));
+
+    assert_eq!(
+        dashboard.native.source,
+        crate::live_source_mode::SourceMode::Recorded
+    );
+    assert_eq!(dashboard.native.source.following_label(true), "Latest");
+    assert_eq!(
+        dashboard.native.source.sidebar(),
+        "Recorded system readings"
+    );
+    assert_eq!(
+        dashboard.native.source.title(),
+        "Flightdeck GPUI · Recorded"
+    );
+}
+
+#[test]
+fn canceling_an_open_keeps_the_current_source_mode() {
+    // Goal: cancel cannot relabel retained live readings as an opened saved recording.
+    // Method: cancel a pending candidate and inspect the still-current source presentation.
+    let mut dashboard = dashboard("overview");
+    dashboard.begin_recording(missing_recording());
+
+    dashboard.cancel_recording("Recording unchanged");
+
+    assert_eq!(
+        dashboard.native.source,
+        crate::live_source_mode::SourceMode::Live
+    );
+    assert_eq!(dashboard.native.source.following_label(true), "Live");
+}
+
+#[test]
+fn diagnostic_copy_keeps_current_catalog_and_the_committed_inspection_identity() {
+    // Goal: copying diagnostics explains the source without pretending its catalog is selected.
+    // Method: serialize distinct current and inspected observations with an exact large counter.
+    let mut current = snapshot();
+    current.selection = serde_json::Value::Null;
+    current.catalog = json!({"path":"/recording", "latest_observation":{"publication":9},
+        "tail_cache_bytes":9_007_199_254_740_993_u64});
+    let mut request = fresh_request("self");
+    request.second = Some(1000);
+    request.identity = Some(json!({"publication":7}));
+    let selected = json!({"publication":7});
+
+    let text = super::diagnostic_copy(Some(&current), &request, &selected).unwrap();
+
+    let copied: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        copied,
+        json!({"catalog":current.catalog,"selected":selected,
+        "requested_second":1000,"requested_identity":{"publication":7}})
     );
 }
 

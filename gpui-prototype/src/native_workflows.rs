@@ -10,6 +10,7 @@ use serde_json::Value;
 
 use crate::live_dashboard::LiveDashboard;
 use crate::live_source::{Request, Snapshot, Update, Worker};
+use crate::live_source_mode::SourceMode;
 use crate::native_input::TimeInput;
 
 gpui::actions!(flightdeck_native, [Quit, CloseWindow, OpenRecording]);
@@ -20,9 +21,11 @@ pub fn create_dashboard(
     seconds: Option<u32>,
     cx: &mut gpui::App,
 ) -> Entity<LiveDashboard> {
+    let source = worker.mode();
     let input = gpui::AppContext::new(cx, TimeInput::new);
     let entity = gpui::AppContext::new(cx, |_| {
         let mut dashboard = LiveDashboard::new(worker, route, seconds);
+        dashboard.native.source = source;
         dashboard.native.input = Some(input);
         dashboard
     });
@@ -88,6 +91,8 @@ pub struct NativeControls {
     candidate: Option<Candidate>,
     retirement: Option<RetiringReader>,
     pub notice: Option<String>,
+    pub source: SourceMode,
+    pub diagnostic_selected: Value,
 }
 
 struct Candidate {
@@ -215,7 +220,27 @@ impl LiveDashboard {
                 },
             )));
         }
+        if self.native.source == crate::live_source_mode::SourceMode::Recorded {
+            controls = controls.child(
+                control("Live")
+                    .debug_selector(|| "source-live".into())
+                    .accessibility_id("flightdeck.source.live")
+                    .aria_label("Follow live readings from this recording")
+                    .on_click(cx.listener(|this, _, _, cx| this.follow_live(cx))),
+            );
+        }
         controls
+    }
+
+    fn follow_live(&mut self, cx: &mut Context<Self>) {
+        self.worker.follow_live();
+        self.native.source = crate::live_source_mode::SourceMode::Live;
+        if self.request.second.is_some() {
+            self.pause(cx);
+        } else {
+            self.submit();
+            cx.notify();
+        }
     }
 
     fn native_open_control(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -369,7 +394,7 @@ impl LiveDashboard {
 
     pub fn begin_recording(&mut self, path: PathBuf) {
         assert!(!self.native.busy());
-        match Worker::start(path) {
+        match Worker::start_recorded(path) {
             Ok(mut worker) => {
                 let route = if self.request.route == "computer" {
                     "overview"
@@ -466,6 +491,8 @@ impl LiveDashboard {
             };
 
         if let Some(candidate) = self.native.candidate.take() {
+            self.native.source = candidate.worker.mode();
+            self.native.diagnostic_selected = Value::Null;
             let old = std::mem::replace(&mut self.worker, candidate.worker);
             self.generation = candidate.generation;
             self.expanded = None;
@@ -518,11 +545,20 @@ impl LiveDashboard {
     }
 
     pub fn copy_reading(&mut self, cx: &mut Context<Self>) {
-        match selected_copy(
-            self.reading_snapshot(),
-            self.reading_request(),
-            self.reading_expanded(),
-        ) {
+        let result = if self.request.route == "self" {
+            diagnostic_copy(
+                self.snapshot.as_deref(),
+                &self.request,
+                &self.native.diagnostic_selected,
+            )
+        } else {
+            selected_copy(
+                self.reading_snapshot(),
+                self.reading_request(),
+                self.reading_expanded(),
+            )
+        };
+        match result {
             Ok(text) => {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
                 self.native.notice = Some("Selected reading copied".into());
@@ -531,6 +567,17 @@ impl LiveDashboard {
         }
         cx.notify();
     }
+}
+
+fn diagnostic_copy(
+    snapshot: Option<&Snapshot>,
+    request: &Request,
+    selected: &Value,
+) -> Result<String, String> {
+    let snapshot = snapshot.ok_or("Reader diagnostics are unavailable")?;
+    bounded_json(&serde_json::json!({"catalog":snapshot.catalog,
+        "selected":selected,"requested_second":request.second,
+        "requested_identity":request.identity}))
 }
 
 fn fresh_request(route: &str) -> Request {

@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use crate::live_source_mode::SourceMode;
 use serde_json::Value;
 use viewer::live_app_response::KeyKind;
 use viewer::{Cancellation, LiveSession};
@@ -12,6 +13,7 @@ use viewer::{Cancellation, LiveSession};
 pub struct Worker {
     shared: Arc<Shared>,
     thread: Option<JoinHandle<()>>,
+    mode: SourceMode,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -66,6 +68,7 @@ struct Mailbox {
 struct Command {
     generation: u64,
     epoch: u64,
+    mode: SourceMode,
     request: Request,
 }
 
@@ -90,6 +93,22 @@ const _: () = {
 
 impl Worker {
     pub fn start(root: PathBuf) -> std::io::Result<Self> {
+        Self::start_mode(root, SourceMode::Live)
+    }
+
+    pub fn start_recorded(root: PathBuf) -> std::io::Result<Self> {
+        Self::start_mode(root, SourceMode::Recorded)
+    }
+
+    pub fn mode(&self) -> SourceMode {
+        self.mode
+    }
+
+    pub fn follow_live(&mut self) {
+        self.mode = SourceMode::Live;
+    }
+
+    fn start_mode(root: PathBuf, mode: SourceMode) -> std::io::Result<Self> {
         let shared = Arc::new(Shared {
             mailbox: Mutex::new(Mailbox {
                 generation: 0,
@@ -108,6 +127,7 @@ impl Worker {
         Ok(Self {
             shared,
             thread: Some(thread),
+            mode,
         })
     }
 
@@ -134,6 +154,7 @@ impl Worker {
         mailbox.request = Some(Command {
             generation,
             epoch: self.shared.cancellation.epoch(),
+            mode: self.mode,
             request,
         });
 
@@ -282,12 +303,19 @@ fn reader_snapshot(
     shared: &Shared,
 ) -> Result<Option<Box<Snapshot>>, String> {
     let started = Instant::now();
+    if command.mode == SourceMode::Recorded {
+        if reader.last_generation == command.generation {
+            return Ok(None);
+        }
+    }
     if command.request.route == "computer" {
         return Ok(reader_computer(reader, command));
     }
     if command.request.second.is_some() {
-        if reader.last_generation == command.generation {
-            return Ok(None);
+        if command.request.route != "self" {
+            if reader.last_generation == command.generation {
+                return Ok(None);
+            }
         }
     }
     if reader.session.is_none() {
@@ -303,7 +331,11 @@ fn reader_snapshot(
     session
         .begin(command.epoch)
         .map_err(|error| error.to_string())?;
-    if command.request.second.is_none() {
+    let poll = match command.request.route.as_str() {
+        "self" => true,
+        _ => command.request.second.is_none(),
+    };
+    if poll {
         session.poll().map_err(|error| error.to_string())?;
     }
     let catalog = session.catalog();
@@ -357,7 +389,7 @@ fn reader_computer(reader: &mut Reader, command: &Command) -> Option<Box<Snapsho
 }
 
 fn reader_selection(session: &mut LiveSession, request: &Request) -> Result<Value, String> {
-    if request.route == "computer" {
+    if matches!(request.route.as_str(), "computer" | "self") {
         return Ok(Value::Null);
     }
     let selection = match request.second {
@@ -695,7 +727,18 @@ fn request_validate(request: &Request) -> Result<(), String> {
 
     if !matches!(
         request.route.as_str(),
-        "overview" | "cpu" | "apps" | "memory" | "gpu" | "energy" | "network" | "computer" | "raw"
+        "overview"
+            | "cpu"
+            | "apps"
+            | "memory"
+            | "gpu"
+            | "energy"
+            | "network"
+            | "storage"
+            | "battery"
+            | "computer"
+            | "self"
+            | "raw"
     ) {
         return Err("Unknown live route".to_owned());
     }

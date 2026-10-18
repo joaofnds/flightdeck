@@ -76,7 +76,7 @@ fn energy_series_remain_independent_and_memory_categories_only_stack_in_overview
     assert_eq!(energy[0].lines[1].values[1], Some(2.0));
     assert_eq!(energy[0].stack, Some(false));
     let overview = panels("overview", &selection, None).unwrap();
-    assert_eq!(overview.len(), 7);
+    assert_eq!(overview.len(), 8);
     assert_eq!(overview[1].stack, Some(true));
     let memory = panels("memory", &selection, None).unwrap();
     assert_eq!(memory.len(), 5);
@@ -84,6 +84,23 @@ fn energy_series_remain_independent_and_memory_categories_only_stack_in_overview
     assert_eq!(memory[0].lines[0].values[1], Some(1.0));
     assert_eq!(memory[0].lines[1].values[1], None);
     assert_eq!(memory[2].lines[1].dashed, Some(true));
+}
+
+#[test]
+fn overview_includes_gpu_activity_history_with_independent_missing_observations() {
+    // The default history must expose source GPU activity and preserve its missing observations.
+    let mut selection = selection();
+    selection["trends"][1]["gpu_active_percent"] = json!(37.5);
+
+    let overview = panels("overview", &selection, None).unwrap();
+
+    let activity = overview
+        .iter()
+        .find(|panel| panel.id == "live-gpu-activity")
+        .unwrap();
+    assert_eq!(activity.lines[0].values, [None, Some(37.5), None]);
+    assert_eq!(activity.selected_index, Some(2));
+    assert_eq!(activity.unit, "%");
 }
 
 #[test]

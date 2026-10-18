@@ -6,6 +6,11 @@ use serde_json::{Value, json};
 use super::LiveDashboard;
 use crate::live_source::{Snapshot, Update, Worker};
 
+#[path = "live_resource_input_tests.rs"]
+mod resource;
+#[path = "live_source_mode_input_tests.rs"]
+mod source_mode;
+
 #[gpui::test]
 fn hovering_history_keeps_the_cursor_within_the_plot(cx: &mut TestAppContext) {
     // Inspect the actual painted cursor after dispatching through the rendered history chart.

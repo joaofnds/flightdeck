@@ -6,6 +6,9 @@ use serde_json::Value;
 
 use crate::data::{Line, Panel};
 
+#[path = "live_resource_projection.rs"]
+mod resource_projection;
+
 const OBSERVATIONS_MAX: usize = 4096;
 const GIBIBYTE: f32 = 1_073_741_824.0;
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
@@ -54,16 +57,23 @@ pub fn panels(
     }
     let domain = Domain::read(selection)?;
     let coordinates = coordinates(points, &domain, route == "apps", &source["selected"])?;
-    let mut result = Vec::with_capacity(7);
+    let mut result = Vec::with_capacity(8);
     for specification in specifications(route, points)? {
         let mut panel = panel(&specification, points, &coordinates)?;
         if specification.id == "live-memory-pressure" {
             pressure_cells(&mut panel, &domain, points, &coordinates)?;
         }
+        if specification.id == "live-battery-charging" {
+            resource_projection::charging_cells(&mut panel, &domain, points, &coordinates)?;
+        }
 
         result.push(Rc::new(panel));
     }
-    assert!(result.len() <= 7);
+    if route == "overview" {
+        assert!(result.len() <= 8);
+    } else {
+        assert!(result.len() <= 7);
+    }
     Ok(result)
 }
 
@@ -137,6 +147,7 @@ struct Reading {
     negative: bool,
     dashed: bool,
     channel: Option<usize>,
+    resource: Option<&'static str>,
 }
 
 impl Domain {
@@ -300,7 +311,7 @@ fn scalar_text(text: &str) -> Result<Option<f32>, String> {
     Ok(Some(value))
 }
 
-fn quantity_text(value: f32, unit: &str) -> String {
+pub(crate) fn quantity_text(value: f32, unit: &str) -> String {
     if !value.is_finite() {
         return "Unavailable".to_owned();
     }
@@ -313,11 +324,39 @@ fn quantity_text(value: f32, unit: &str) -> String {
         "% of one core" | "% of interval" => (value, "%"),
         _ => (value, unit),
     };
+    if value != 0.0 {
+        if value.abs() < 1.0 {
+            let number = quantity_text_small(value);
+            return if unit.is_empty() {
+                number
+            } else {
+                format!("{number} {unit}")
+            };
+        }
+    }
     if unit.is_empty() {
         format!("{value:.1}")
     } else {
         format!("{value:.1} {unit}")
     }
+}
+
+fn quantity_text_small(value: f32) -> String {
+    assert!(value.is_finite());
+    assert!(value != 0.0);
+    assert!(value.abs() < 1.0);
+    let mut magnitude = value.abs();
+    for precision in 2..14_usize {
+        if magnitude >= 1.0 {
+            return format!("{value:.precision$}")
+                .trim_end_matches('0')
+                .trim_end_matches('.')
+                .to_owned();
+        }
+        magnitude *= 10.0;
+    }
+
+    format!("{value:.2e}")
 }
 
 fn panel(
@@ -329,11 +368,14 @@ fn panel(
     for reading in &specification.lines {
         let mut values = Vec::with_capacity(points.len());
         for point in points {
+            let source = reading.resource.map_or(point, |resource| &point[resource]);
             let value = match reading.channel {
-                Some(channel) => &point[reading.key][channel],
-                None => &point[reading.key],
+                Some(channel) => &source[reading.key][channel],
+                None => &source[reading.key],
             };
-            values.push(number(value)?.map(|value| value / reading.divisor));
+            values.push(
+                resource_projection::value(reading, value)?.map(|value| value / reading.divisor),
+            );
         }
         lines.push(Line {
             name: reading.name.to_owned(),
@@ -412,6 +454,7 @@ fn reading(key: &'static str, name: &'static str, color: &'static str, divisor: 
         negative: false,
         dashed: false,
         channel: None,
+        resource: None,
     }
 }
 
@@ -449,27 +492,30 @@ fn gpu_power() -> Specification {
     )
 }
 
+fn gpu_activity() -> Specification {
+    specification(
+        "live-gpu-activity",
+        "GPU activity",
+        "%",
+        vec![reading(
+            "gpu_active_percent",
+            "GPU activity",
+            "#b877d9",
+            1.0,
+        )],
+    )
+}
+
 fn specifications(route: &str, points: &[Value]) -> Result<Vec<Specification>, String> {
     Ok(match route {
         "overview" => overview(),
         "cpu" => vec![cpu()],
         "memory" => memory_specifications(),
-        "gpu" => vec![
-            specification(
-                "live-gpu-activity",
-                "GPU activity",
-                "%",
-                vec![reading(
-                    "gpu_active_percent",
-                    "GPU activity",
-                    "#b877d9",
-                    1.0,
-                )],
-            ),
-            gpu_power(),
-        ],
+        "gpu" => vec![gpu_activity(), gpu_power()],
         "energy" => energy(points)?,
         "network" => network(),
+        "storage" => resource_projection::storage(),
+        "battery" => resource_projection::battery(),
         "apps" => app_specifications(),
         _ => Vec::new(),
     })
@@ -598,7 +644,8 @@ fn overview() -> Vec<Specification> {
     let mut result = vec![
         cpu(),
         memory,
-        gpu_power(),
+        gpu_activity(),
+        resource_projection::throughput(),
         specification(
             "live-received",
             "External interfaces · received",
@@ -796,3 +843,7 @@ fn app_specifications() -> Vec<Specification> {
 #[cfg(test)]
 #[path = "live_projection_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "live_resource_projection_tests.rs"]
+mod resource_tests;

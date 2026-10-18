@@ -131,6 +131,46 @@ fn a_missing_ring_with_a_live_pid_stays_unknown_until_its_fixed_deadline() {
     assert_eq!(session.owned_pid(), None);
 }
 
+#[test]
+fn a_completed_shared_collector_offers_recovery_without_taking_ownership() {
+    // Goal: a shared producer stopping after attachment exposes an explicit recovery action.
+    // Method: complete its real registered ring after two advancing observations.
+    let mut recording = Recording::new();
+    let mut session = recording.session(Mode::Auto);
+    recording.publish();
+    session.tick(true);
+    recording.publish();
+    session.tick(true);
+    recording.writer.as_mut().unwrap().finish();
+
+    session.tick(true);
+
+    assert!(session.status().unwrap().1);
+    assert_eq!(session.owned_pid(), None);
+    session.begin_stop();
+    assert!(session.finished());
+}
+
+#[test]
+fn a_stalled_shared_collector_offers_recovery_even_while_on_computer() {
+    // Goal: shared health is independent of the displayed route and selected observation.
+    // Method: keep a real registered producer alive without publishing through the deadline.
+    let mut recording = Recording::new();
+    let mut session = recording.session(Mode::Auto);
+    recording.publish();
+    session.tick(true);
+    recording.publish();
+    session.tick(true);
+    session.0.started = Instant::now()
+        .checked_sub(policy::DISCOVERY_LIMIT + Duration::from_secs(1))
+        .unwrap();
+
+    session.tick(false);
+
+    assert!(session.status().unwrap().1);
+    assert_eq!(session.owned_pid(), None);
+}
+
 struct Recording {
     root: PathBuf,
     writer: Option<Writer>,

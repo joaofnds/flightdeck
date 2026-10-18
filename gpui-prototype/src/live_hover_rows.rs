@@ -4,6 +4,10 @@ use crate::live_dashboard::{LiveDashboard, Row};
 
 impl LiveDashboard {
     pub(crate) fn reading_rows(&self) -> Vec<Row> {
+        if self.request.route == "self" {
+            return vec![Row::Diagnostics];
+        }
+
         if self.request.route == "computer" {
             return vec![Row::Inventory];
         }
@@ -16,12 +20,23 @@ impl LiveDashboard {
         if self.request.route == "memory" {
             rows.push(Row::Summary);
         }
+        if matches!(self.request.route.as_str(), "storage" | "battery") {
+            rows.push(Row::ResourceSummary);
+        }
         if self.request.route == "cpu" {
             rows.push(Row::CPUHistory);
             rows.push(Row::CPUActivity);
         }
         for panels in self.panels.chunks(2) {
             rows.push(Row::Charts(panels.to_vec()));
+        }
+        if self.request.route == "storage" {
+            for index in 0..self.resource_device_count() {
+                rows.push(Row::StorageDevice(
+                    index,
+                    self.resource_device_layout_key(index),
+                ));
+            }
         }
         if self.request.route == "overview" {
             rows.push(Row::OverviewStatus);

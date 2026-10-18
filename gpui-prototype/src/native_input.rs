@@ -177,6 +177,7 @@ impl Render for TimeInput {
         let entity = cx.entity();
         div()
             .id("inspection-time")
+            .debug_selector(|| "inspection-time".into())
             .accessibility_id("flightdeck.inspection-time")
             .role(gpui::Role::TextInput)
             .aria_label("Inspect recording time")

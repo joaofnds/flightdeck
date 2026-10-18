@@ -91,6 +91,7 @@ impl Policy {
         match self.state {
             State::Discovering => self.discover(now, source),
             State::Starting => self.starting(now, source),
+            State::Attached => self.attached(now, source),
             State::Stopping => {
                 if self.expired(now, SHUTDOWN_LIMIT) {
                     self.failure = Some("Collector exceeded its 125-second saving deadline".into());
@@ -143,6 +144,7 @@ impl Policy {
         if source.producer_alive {
             if self.advanced(source.observation.as_ref()) {
                 self.state = State::Attached;
+                self.since = Some(now);
             }
 
             return Action::None;
@@ -156,6 +158,30 @@ impl Policy {
         if source.recording == RecordingStatus::Ready {
             self.state = State::Starting;
             return Action::Spawn;
+        }
+
+        Action::None
+    }
+
+    fn attached(&mut self, now: Duration, source: &Source) -> Action {
+        if self.mode != Mode::Auto {
+            return Action::None;
+        }
+
+        if !source.producer_alive {
+            self.fail("Shared collector stopped; retry to resume recording");
+            return Action::None;
+        }
+
+        if self.advanced(source.observation.as_ref()) {
+            self.since = Some(now);
+        } else {
+            if self.expired(now, DISCOVERY_LIMIT) {
+                self.fail(
+                    "Shared collector readings did not advance within 20 seconds; \
+                     retry to reconnect",
+                );
+            }
         }
 
         Action::None
@@ -277,6 +303,10 @@ impl Policy {
     pub fn needs_health(&self, recording_route: bool) -> bool {
         if self.state == State::Starting {
             return true;
+        }
+
+        if self.state == State::Attached {
+            return self.mode == Mode::Auto;
         }
 
         if self.state != State::Discovering {

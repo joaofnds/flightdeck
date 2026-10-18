@@ -21,6 +21,99 @@ fn an_empty_recording_reports_absence_without_requiring_a_live_ring() {
 }
 
 #[test]
+fn reader_diagnostics_returns_catalog_without_reading_a_selected_gap() {
+    // Goal: diagnostics remains available without projecting a historical selection or trends.
+    // Method: use a real sealed store while the committed inspection points into a gap.
+    let recording = SealedRecording::new();
+    let mut request = SealedRecording::request();
+    request.route = "self".into();
+    request.second = Some(1001);
+
+    let snapshot = recording.read(request).unwrap();
+
+    assert_eq!(snapshot.catalog["last_second"], 1002);
+    assert!(snapshot.selection.is_null());
+    assert!(snapshot.pages.is_empty());
+    assert!(snapshot.cpu_detail.is_none());
+    assert!(snapshot.cpu_history.is_none());
+}
+
+#[test]
+fn a_delivered_saved_source_does_not_poll_its_recording_while_idle() {
+    // Goal: opening saved readings performs no idle data-source work after delivery.
+    // Method: make the real store invalid after a successful request and step again.
+    let recording = SealedRecording::new();
+    let mut reader = SnapshotReader::new();
+    assert!(reader.read(&recording).unwrap().is_some());
+    std::fs::write(recording.root.join("identity"), b"invalid").unwrap();
+
+    let idle = reader.read(&recording);
+
+    assert!(idle.unwrap().is_none());
+}
+
+#[test]
+fn a_new_saved_request_revalidates_the_source_after_idle() {
+    // Goal: an explicit refresh can report a store that became unreadable after opening.
+    // Method: invalidate the real identity and submit the next requested generation.
+    let recording = SealedRecording::new();
+    let mut reader = SnapshotReader::new();
+    assert!(reader.read(&recording).unwrap().is_some());
+    std::fs::write(recording.root.join("identity"), b"invalid").unwrap();
+    reader.command.generation += 1;
+
+    let refreshed = reader.read(&recording);
+
+    assert!(refreshed.is_err());
+}
+
+struct SnapshotReader {
+    reader: super::Reader,
+    command: super::Command,
+    shared: Shared,
+}
+
+impl SnapshotReader {
+    fn new() -> Self {
+        Self {
+            reader: super::Reader {
+                session: None,
+                last_catalog: None,
+                last_generation: 0,
+                retry_after: std::time::Instant::now(),
+            },
+            command: super::Command {
+                generation: 1,
+                epoch: 0,
+                mode: crate::live_source_mode::SourceMode::Recorded,
+                request: SealedRecording::request(),
+            },
+            shared: Shared {
+                mailbox: Mutex::new(Mailbox {
+                    generation: 1,
+                    request: None,
+                    output: None,
+                }),
+                stopped: AtomicBool::new(false),
+                cancellation: Arc::new(Cancellation::default()),
+            },
+        }
+    }
+
+    fn read(
+        &mut self,
+        recording: &SealedRecording,
+    ) -> Result<Option<Box<super::Snapshot>>, String> {
+        super::reader_snapshot(
+            &mut self.reader,
+            &recording.root,
+            &mut self.command,
+            &self.shared,
+        )
+    }
+}
+
+#[test]
 fn corrupt_saved_history_is_reported_instead_of_becoming_an_empty_recording() {
     // Goal: an unreadable commitment cannot masquerade as valid no-data history.
     // Method: corrupt only this fixture's saved seal and read through the normal worker.
@@ -404,6 +497,7 @@ fn refuses_superseded_results_after_accepting_a_new_request() {
             cancellation: Arc::new(Cancellation::default()),
         }),
         thread: None,
+        mode: crate::live_source_mode::SourceMode::Live,
     };
     let request = Request {
         route: "overview".to_owned(),

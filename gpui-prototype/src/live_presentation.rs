@@ -86,6 +86,7 @@ impl LiveDashboard {
             .is_some_and(|snapshot| snapshot.selection["selected"].is_null());
         div().h(px(16.0)).children(missing.then(|| {
             div()
+                .debug_selector(|| "missing-observation".into())
                 .text_color(rgb(ORANGE))
                 .child("No recorded observation at this second")
         }))

@@ -80,7 +80,7 @@ fn record(size: usize) {
 }
 
 pub fn bits(panels: &[Rc<Panel>]) -> Value {
-    assert!(panels.len() <= 7);
+    assert!(panels.len() <= 8);
     json!(
         panels
             .iter()
@@ -109,4 +109,35 @@ fn line_bits(line: &Line) -> Value {
         "values": line.values.iter().map(|value| value.map(f32::to_bits)).collect::<Vec<_>>(),
         "stack": line.stack, "negative": line.negative, "dashed": line.dashed,
         "axis": line.axis, "unit": line.unit, "fill": line.fill.map(f32::to_bits)})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_overview_input_retains_all_panels_in_its_benchmark_transcript() {
+        // Encode a real projection with the full Overview workload and exact GPU reading bits.
+        let run = "00000000000000010000000000000002";
+        let boot = "00000000000000030000000000000004";
+        let selection = json!({"second":1000,"selected":{"publication":1,"run":run,
+            "boot":boot},"trends":[{"wall_ns":1_000_000_000_000_u64,"publication":1,
+                "run":run,"boot":boot,"segment":0,"gpu_active_percent":37.5}]});
+        let panels = crate::live_projection::panels("overview", &selection, None).unwrap();
+
+        let transcript = bits(&panels);
+
+        let panels = transcript.as_array().unwrap();
+        assert_eq!(panels.len(), 8);
+        let activity = panels
+            .iter()
+            .find(|panel| panel["id"] == "live-gpu-activity")
+            .unwrap();
+        assert_eq!(activity["lines"][0]["values"][0], 37.5_f32.to_bits());
+        assert!(
+            panels
+                .iter()
+                .any(|panel| panel["id"] == "live-storage-throughput")
+        );
+    }
 }

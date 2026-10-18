@@ -70,7 +70,14 @@ pub fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
 
     let root = recording(&options)?;
     let collector = collector_session(&root, &options)?;
-    let worker = Worker::start(root)?;
+    let worker = match (
+        options.source.recording.is_some(),
+        options.source.start_collector,
+    ) {
+        (true, false) => Worker::start_recorded(root)?,
+        _ => Worker::start(root)?,
+    };
+    let title = worker.mode().title();
     let application = crate::diagnostics::application();
     crate::diagnostics::verify_text_backend(&application.text_system())?;
     application.run(move |cx: &mut App| {
@@ -85,7 +92,7 @@ pub fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
         let window = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(gpui::TitlebarOptions {
-                title: Some("Flightdeck GPUI · Live".into()),
+                title: Some(title.into()),
                 ..Default::default()
             }),
             ..Default::default()

@@ -42,20 +42,17 @@ struct Probe {
     snapshots: u32,
 }
 
-const ROUTES: [&str; 9] = [
-    "overview", "cpu", "memory", "gpu", "energy", "network", "apps", "raw", "computer",
-];
 const WAIT_STEPS_MAX: u32 = 1200;
 const WAIT_INTERVAL: Duration = Duration::from_millis(250);
 const _: () = {
     assert!(WAIT_STEPS_MAX == 300 * 4);
-    assert!(ROUTES.len() == 9);
+    assert!(crate::live_dashboard::ROUTES.len() == 12);
 };
 
 fn probe_routes(probe: &mut Probe) -> Result<Value, String> {
     let mut routes = BTreeMap::new();
     let mut initial = None;
-    for route in ROUTES {
+    for (route, _) in crate::live_dashboard::ROUTES {
         let request = probe_request(route);
         let snapshot = probe_read(probe, &request)?;
         probe_validate(&snapshot, route)?;
@@ -144,12 +141,12 @@ fn probe_wait(probe: &mut Probe, generation: u64) -> Result<Box<Snapshot>, Strin
 fn probe_validate(snapshot: &Snapshot, route: &str) -> Result<(), String> {
     let panels =
         crate::live_projection::panels(route, &snapshot.selection, snapshot.history.as_ref())?;
-    if panels.len() > 7 {
+    if panels.len() > 8 {
         return Err("Live projection exceeds its panel bound".to_owned());
     }
-    if route == "computer" {
+    if matches!(route, "computer" | "self") {
         if !snapshot.selection.is_null() {
-            return Err("Computer route unexpectedly queried a selection".to_owned());
+            return Err("Metadata route unexpectedly queried a selection".to_owned());
         }
     } else {
         if snapshot.selection["selected"].is_null() {

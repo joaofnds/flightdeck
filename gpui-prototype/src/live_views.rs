@@ -34,6 +34,7 @@ impl LiveDashboard {
             sidebar = sidebar.child(
                 div()
                     .id(route)
+                    .debug_selector(move || format!("navigation:{route}"))
                     .accessibility_id(format!("flightdeck.navigation.{route}"))
                     .role(gpui::Role::Button)
                     .aria_label(title)
@@ -65,7 +66,8 @@ impl LiveDashboard {
                 .p(px(10.0))
                 .text_size(px(10.0))
                 .text_color(rgb(MUTED))
-                .child("Live system readings"),
+                .debug_selector(|| format!("source-sidebar:{}", self.native.source.sidebar()))
+                .child(self.native.source.sidebar()),
         )
     }
 
@@ -74,15 +76,7 @@ impl LiveDashboard {
             .iter()
             .find(|(route, _)| *route == self.request.route)
             .map_or("Flightdeck", |(_, title)| *title);
-        let selected = self.reading_snapshot().map_or_else(
-            || {
-                self.request.second.map_or_else(
-                    || "Waiting for readings".into(),
-                    |second| format!("Requested Unix second {second}"),
-                )
-            },
-            |snapshot| crate::live_presentation::selected_clock(&snapshot.selection),
-        );
+        let selected = self.header_selected();
         let mut header = div()
             .px(px(24.0))
             .py(px(16.0))
@@ -106,10 +100,10 @@ impl LiveDashboard {
                     .mt(px(8.0))
                     .text_size(px(11.0))
                     .text_color(rgb(MUTED))
-                    .child(self.reading_header(&selected)),
+                    .child(selected),
             );
-        header = header.child(self.missing_reading());
-        if self.request.route != "computer" {
+        if !matches!(self.request.route.as_str(), "computer" | "self") {
+            header = header.child(self.missing_reading());
             header = self.header_recording_context(header);
             header = self.header_alternatives(header, cx);
         }
@@ -120,6 +114,24 @@ impl LiveDashboard {
             header = header.child(self.app_paging(cx));
         }
         self.header_geometry(header)
+    }
+
+    fn header_selected(&self) -> gpui::Div {
+        if self.request.route == "self" {
+            return div().child("Reader diagnostics · independent of chart inspection");
+        }
+
+        let selected = self.reading_snapshot().map_or_else(
+            || {
+                self.request.second.map_or_else(
+                    || "Waiting for readings".into(),
+                    |second| format!("Requested Unix second {second}"),
+                )
+            },
+            |snapshot| crate::live_presentation::selected_clock(&snapshot.selection),
+        );
+
+        self.reading_header(&selected)
     }
 
     fn header_geometry(&self, header: gpui::Div) -> impl IntoElement {
@@ -147,46 +159,59 @@ impl LiveDashboard {
             )
     }
 
-    fn header_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut controls = self.native_header_controls(cx);
-        if self.request.route == "computer" {
-            controls =
+    fn header_controls(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let controls = self.native_header_controls(cx);
+
+        match self.request.route.as_str() {
+            "self" => controls.child(control("Refresh").on_click(cx.listener(|this, _, _, cx| {
+                this.submit();
+                cx.notify();
+            }))),
+            "computer" => {
                 controls.child(control("Refresh").on_click(cx.listener(|this, _, _, cx| {
                     this.inventory = crate::live_inventory::rows();
                     cx.notify();
-                })));
-        } else {
-            controls = controls.children(self.native.input.clone());
-            controls = controls.child(
-                div()
-                    .text_size(px(12.0))
-                    .text_color(rgb(MUTED))
-                    .mr(px(10.0))
-                    .child("Last 15 minutes"),
-            );
-            if self.request.second.is_some() {
-                for (label, delta) in [("‹", -1_i64), ("›", 1)] {
-                    controls = controls.child(control(label).on_click(cx.listener(
-                        move |this, _, _, cx| {
-                            this.chart_step(delta, cx);
-                        },
-                    )));
-                }
+                })))
             }
-            controls = controls.child(
-                control(if self.request.second.is_some() {
-                    "Live"
-                } else {
-                    "Pause live"
-                })
-                .on_click(cx.listener(|this, _, _, cx| this.pause(cx))),
-            );
-            controls = controls.child(control("↻").on_click(cx.listener(|this, _, _, cx| {
+            _ => self.header_history_controls(controls, cx),
+        }
+    }
+
+    fn header_history_controls(
+        &self,
+        mut controls: gpui::Div,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        controls = controls.children(self.native.input.clone()).child(
+            div()
+                .text_size(px(12.0))
+                .text_color(rgb(MUTED))
+                .mr(px(10.0))
+                .child("Last 15 minutes"),
+        );
+        if self.request.second.is_some() {
+            for (label, delta) in [("‹", -1_i64), ("›", 1)] {
+                controls = controls.child(
+                    control(label)
+                        .on_click(cx.listener(move |this, _, _, cx| this.chart_step(delta, cx))),
+                );
+            }
+        }
+        let label = self
+            .native
+            .source
+            .following_label(self.request.second.is_some());
+
+        controls
+            .child(
+                control(label)
+                    .debug_selector(|| format!("source-follow:{label}"))
+                    .on_click(cx.listener(|this, _, _, cx| this.pause(cx))),
+            )
+            .child(control("↻").on_click(cx.listener(|this, _, _, cx| {
                 this.submit();
                 cx.notify();
-            })));
-        }
-        controls
+            })))
     }
 
     pub fn row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
@@ -203,7 +228,10 @@ impl LiveDashboard {
         let measured = Rc::clone(&self.row_heights);
         let measured_key = key.clone();
         let height = self.reading_row_height(&self.rows[index]);
-        let scroll_reserved = matches!(&self.rows[index], Row::AppSummary | Row::CPUActivity);
+        let scroll_reserved = matches!(
+            &self.rows[index],
+            Row::AppSummary | Row::CPUActivity | Row::ResourceSummary | Row::StorageDevice(_, _)
+        );
         div()
             .id(gpui::SharedString::from(key))
             .relative()
@@ -237,6 +265,9 @@ impl LiveDashboard {
     fn row_content(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
         match &self.rows[index] {
             Row::Summary => self.summary().into_any_element(),
+            Row::ResourceSummary => self.resource_summary(),
+            Row::StorageDevice(index, _) => self.resource_device(*index),
+            Row::Diagnostics => self.self_monitoring().into_any_element(),
             Row::CPUActivity => self.cpu_activity().into_any_element(),
             Row::CPUHistory => self.cpu_history_panel(cx).into_any_element(),
             Row::OverviewStatus => self.overview_status(cx).into_any_element(),

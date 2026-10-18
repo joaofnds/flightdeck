@@ -147,6 +147,19 @@ impl LiveDashboard {
     }
 
     fn chart_reading(&self, panel: &Panel, index: Option<usize>) -> String {
+        if panel.id == "live-battery-charging" {
+            let charging = self.reading_snapshot().and_then(|snapshot| {
+                snapshot.selection["summary"]["battery"]["charging"].as_bool()
+            });
+
+            return match charging {
+                Some(true) => "Charging",
+                Some(false) => "Not charging",
+                None => "Unavailable",
+            }
+            .into();
+        }
+
         if panel.id == "live-memory-pressure" {
             let summary = self
                 .reading_snapshot()
@@ -493,8 +506,8 @@ impl LiveDashboard {
         index: Option<usize>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        if panel.id == "live-memory-pressure" {
-            return pressure_legend();
+        if panel.states.is_some() {
+            return state_legend(panel);
         }
 
         let mut legends = div().flex().flex_wrap().gap_x(px(12.0)).text_size(px(11.0));
@@ -523,7 +536,11 @@ impl LiveDashboard {
                         1.0
                     })
                     .text_color(rgb(charts::color(&line.color)))
-                    .child(format!("━ {}  {}", line.name, reading(value, &panel.unit)))
+                    .child(format!(
+                        "━ {}  {}",
+                        line.name,
+                        line_reading(panel, value, &panel.unit)
+                    ))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(index) = this.hidden.iter().position(|value| *value == key) {
                             this.hidden.remove(index);
@@ -577,7 +594,7 @@ fn target_index(
     target: &crate::live_hover::Target,
 ) -> Option<usize> {
     target.identity.as_ref()?;
-    if panel.id == "live-memory-pressure" {
+    if panel.kind == "timeline" {
         return inspection_index(panel, snapshot, Some(target.second));
     }
     let points = if panel.id.starts_with("live-app-") {
@@ -665,20 +682,42 @@ fn chart_reading(panel: &Panel, index: Option<usize>) -> String {
     } else {
         &panel.unit
     };
+    line_reading(panel, value, unit)
+}
+
+fn line_reading(panel: &Panel, value: Option<f32>, unit: &str) -> String {
+    if ["live-storage-", "live-battery-"]
+        .iter()
+        .any(|prefix| panel.id.starts_with(prefix))
+    {
+        return value.map_or_else(
+            || "Unavailable".into(),
+            |value| crate::live_projection::quantity_text(value, unit),
+        );
+    }
+
     reading(value, unit)
 }
 
-fn pressure_legend() -> gpui::Div {
+fn state_legend(panel: &Panel) -> gpui::Div {
     let mut legend = div().flex().flex_wrap().gap_x(px(12.0)).text_size(px(11.0));
-    for (label, color) in [
-        ("Normal", charts::GREEN),
-        ("Warning", charts::ORANGE),
-        ("Critical", charts::RED),
-    ] {
-        legend = legend.child(div().text_color(rgb(color)).child(format!("■ {label}")));
+    if let Some(states) = &panel.states {
+        for (index, label) in states.iter().take(16).enumerate() {
+            legend = legend.child(
+                div()
+                    .debug_selector(|| format!("state-legend:{label}"))
+                    .text_color(rgb(charts::timeline_color(panel, charts::number(index))))
+                    .child(format!("■ {label}")),
+            );
+        }
     }
 
-    legend.child(div().text_color(rgb(MUTED)).child("Blank: unavailable"))
+    legend.child(
+        div()
+            .debug_selector(|| "state-legend:Blank: unavailable".into())
+            .text_color(rgb(MUTED))
+            .child("Blank: unavailable"),
+    )
 }
 
 fn axis_reading(value: f32) -> String {
@@ -702,7 +741,7 @@ fn inspection_index(panel: &Panel, snapshot: &Snapshot, second: Option<u64>) -> 
         return panel.selected_index;
     }
 
-    if panel.id == "live-memory-pressure" {
+    if panel.kind == "timeline" {
         let first = snapshot.selection["second"].as_u64()?.saturating_sub(899);
         let Ok(offset) = usize::try_from(second.checked_sub(first)?) else {
             return None;
