@@ -13,6 +13,119 @@ captured Overview inspection used less CPU and more memory than the Swift baseli
 different chart layouts and unverified presentation prevent a framework ranking.
 No matched visible live comparison or native pixel/input verification is claimed.
 
+## Framework decision: continue with GPUI
+
+Accepted on 2026-10-18: continue building Flightdeck with GPUI and assess whether
+the existing implementation can deliver the desired application. Responsiveness
+remains a priority. Slint is a credible alternative to reconsider if a concrete
+product requirement or continuing development cost makes GPUI a poor fit. There
+is no decision to build a Slint prototype now. Existing native acceptance and
+release-verification gaps remain open.
+
+The comparison considered [Slint 1.18.1][slint-release] and Flightdeck's
+[pinned GPUI revision](Cargo.toml),
+`56934ec0560bce8929025497411de7f5322fb6ca`. The findings below come from source and
+documentation research; no matched Slint/Flightdeck runtime comparison was run.
+
+### Performance and resource use
+
+Slint compiles its UI to native code and uses [lazy property bindings][slint-reactivity].
+Reducing repeated calculations when only a small part of a page changes is a
+plausible CPU advantage. Its size in Flightdeck is unmeasured. Neither negligible
+resource savings nor worse responsiveness than GPUI has been established.
+
+For this macOS application, Slint with [Skia/WGPU using Metal][slint-renderers] is
+a relevant configuration. Source inspection of 1.18.1 shows that the
+[WGPU surface supplies a back-buffer age of zero][slint-wgpu]; the
+[Skia renderer consequently treats the window as dirty][slint-dirty-region], even
+if partial rendering is enabled. Lazy property evaluation therefore does not
+establish a GPU partial-repaint or battery-life advantage for that path. Slint's
+separate software renderer has feature limitations, including transforms, so its
+embedded footprint is not a representative baseline for the complete dashboard.
+
+One concrete implementation cost is the [rotor cache](src/hardware.rs): 240
+orientations of 208-by-208 RGBA images occupy 41,533,440 bytes, or 39.6 MiB of CPU
+pixels, before chassis pixels and GPU storage. Slint's [image transforms][slint-transforms]
+could avoid those copies. This is an opportunity to compare implementations, not
+proof that improving the GPUI representation would require a framework migration.
+A UI port retaining `viewer::LiveSession` would also retain the collector,
+persister, recording format, query engine and history/cache costs.
+
+A [self-reported macOS toolkit comparison][toolkit-comparison] found lower CPU
+time and peak RSS for Slint/FemtoVG than GPUI 0.2.2, alongside worse p99 scrolling
+frame times. Its visible report links neither implementations nor raw logs. It
+uses synthetic lists, a different Slint renderer and a different GPUI revision.
+It supplies a benchmark lead, not a Flightdeck performance estimate. The
+historical Swift comparisons below also cannot rank GPUI against Slint, and the
+font-disabled builds remain invalid baselines.
+
+### Documentation, libraries and support
+
+Slint makes an explicit [stable 1.x API commitment][slint-project] and provides a
+[guide, tutorial, language/API references and editor tooling][slint-docs], including
+live preview. GPUI's [upstream README][gpui-project] warns of frequent pre-1.0
+breaking changes and recommends learning through Zed's source and Discord. Our
+assessment is that Slint offers the more mature public toolkit experience for an
+outside application team. This assessment concerns maintenance and onboarding;
+it is not a comparative reliability measurement.
+
+Slint has standard widgets, an in-repository Material 3 set and
+[third-party component libraries][slint-libraries]. GPUI has
+[GPUI Kit][gpui-kit], which advertises 75+ components and primitives, including
+tables, charts, docking and editors. Those facilities are relevant to Flightdeck;
+library availability does not establish a general Slint advantage. Kit's
+[installation guidance][gpui-kit-install] ties its APIs to a matching published
+GPUI snapshot, so compatibility with Flightdeck's Git pin needs checking before
+adoption. Both frameworks can use ordinary Rust backend libraries.
+
+Slint publishes [community and commercial support options][slint-support]. Paid
+technical support can matter when a framework defect blocks delivery, but it
+does not establish faster free community responses. Slint's
+[vendor-documented deployments][slint-showcase] include audio products and EV
+chargers. GPUI powers Zed, and [Zed documents Longbridge Pro's use][gpui-longbridge]
+of GPUI and its component library. These are substantial production uses on both
+sides; they do not establish comparative defect rates, community support quality
+or which framework is more reliable for Flightdeck's macOS workload.
+
+### When to reconsider
+
+Reconsider Slint when a required native workflow, accessibility behavior or UI
+capability is blocked, when framework upgrades and workarounds impose a sustained
+maintenance cost, or when profiling attributes a material resource or latency
+problem to the UI. Slint's stability and support could justify a switch even
+without a CPU or memory win if the maintenance benefit outweighs the porting cost
+and it meets the responsiveness requirements.
+
+If reconsideration warrants a pilot, start with Overview, CPU history and the
+schematic using the same Rust backend. Compare optimized, identified binaries
+with identical recordings, history lengths, window dimensions, display scale,
+visible content and update/input patterns. Repeat in alternating order across
+idle, live updates, scrubbing, animation and inactive-window behavior. Measure CPU,
+physical footprint separately from RSS, wakeups and energy. The existing
+[`process_watch`](../viewer/src/bin/process_watch.rs) supplies process counters;
+GPU work, presented-frame timing and input latency need complementary
+instrumentation, such as [Metal System Trace][metal-tools] for GPU activity.
+Such a pilot decides whether to investigate a broader migration; it cannot certify
+unported workflows or the whole application's migration cost.
+
+[slint-release]: https://github.com/slint-ui/slint/releases/tag/v1.18.1
+[slint-reactivity]: https://docs.slint.dev/latest/docs/slint/guide/language/concepts/reactivity/
+[slint-renderers]: https://docs.slint.dev/latest/docs/slint/guide/backends-and-renderers/backends_and_renderers/
+[slint-wgpu]: https://github.com/slint-ui/slint/blob/v1.18.1/internal/renderers/skia/wgpu_30_surface.rs#L416
+[slint-dirty-region]: https://github.com/slint-ui/slint/blob/v1.18.1/internal/renderers/skia/lib.rs#L777-L788
+[slint-transforms]: https://docs.slint.dev/latest/docs/slint/reference/common/#transforms
+[toolkit-comparison]: https://github.com/zed-industries/zed/discussions/63832
+[slint-project]: https://github.com/slint-ui/slint#why-slint
+[slint-docs]: https://docs.slint.dev/latest/docs/slint/
+[gpui-project]: https://github.com/zed-industries/zed/blob/56934ec0560bce8929025497411de7f5322fb6ca/crates/gpui/README.md
+[slint-libraries]: https://docs.slint.dev/latest/docs/slint/guide/development/third-party-libraries/
+[gpui-kit]: https://github.com/longbridge/gpui-kit
+[gpui-kit-install]: https://gpui-kit.com/docs/installation/#why-the-dependency-is-named-gpui-pre
+[slint-support]: https://slint.dev/pricing#support
+[slint-showcase]: https://slint.dev/showcase
+[gpui-longbridge]: https://zed.dev/blog/community-champion-jason-lee
+[metal-tools]: https://developer.apple.com/metal/tools/
+
 ## Current application checks
 
 The integrated client passed 431 test executions, formatting, strict all-target
