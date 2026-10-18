@@ -240,7 +240,7 @@ fn observation_signature(value: &Value) -> Result<([u64; 2], [u64; 2], u64), Str
     ))
 }
 
-fn identity(value: &Value) -> Result<[u64; 2], String> {
+pub(crate) fn identity(value: &Value) -> Result<[u64; 2], String> {
     if let Some(text) = value.as_str() {
         if text.len() == 32 {
             if text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -259,7 +259,7 @@ fn identity(value: &Value) -> Result<[u64; 2], String> {
     Ok([integer(&words[0])?, integer(&words[1])?])
 }
 
-fn integer(value: &Value) -> Result<u64, String> {
+pub(crate) fn integer(value: &Value) -> Result<u64, String> {
     match value {
         Value::String(text) => {
             if text.len() > 20 {

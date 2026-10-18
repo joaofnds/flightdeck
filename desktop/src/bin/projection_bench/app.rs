@@ -315,20 +315,7 @@ fn identity_matches(input: &IdentityMatch<'_>) -> io::Result<bool> {
 }
 
 fn identity(value: &Value) -> io::Result<[u64; 2]> {
-    if let Some(text) = value.as_str() {
-        if text.len() == 32 {
-            if text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-                return Ok([
-                    u64::from_str_radix(&text[..16], 16).map_err(io::Error::other)?,
-                    u64::from_str_radix(&text[16..], 16).map_err(io::Error::other)?,
-                ]);
-            }
-        }
-
-        return Err(io::Error::other("Invalid App observation identity text"));
-    }
-
-    identity_words(value)
+    crate::live_projection::identity(value).map_err(io::Error::other)
 }
 
 fn identity_words(value: &Value) -> io::Result<[u64; 2]> {
@@ -345,19 +332,7 @@ fn identity_words(value: &Value) -> io::Result<[u64; 2]> {
 }
 
 fn integer(value: &Value) -> io::Result<u64> {
-    if let Some(text) = value.as_str() {
-        if text.len() > 20 {
-            return Err(io::Error::other(
-                "App observation integer exceeds its bound",
-            ));
-        }
-
-        return text.parse().map_err(io::Error::other);
-    }
-
-    value
-        .as_u64()
-        .ok_or_else(|| io::Error::other("Missing App observation integer"))
+    crate::live_projection::integer(value).map_err(io::Error::other)
 }
 
 #[cfg(test)]
