@@ -1,6 +1,144 @@
 use super::*;
 
 #[test]
+fn blocks_prior_app_bytes_after_ambiguous_current_starts() {
+    // Goal: newer ambiguous Start evidence cannot silently restore an older App name.
+    // Method: retain prior Start D, then capture duplicate current Starts before verified Exit.
+    let mut fixture = Fixture::new();
+    Scenario {
+        order: &[Kind::Start],
+        ..Scenario::default()
+    }
+    .publish_at(&mut fixture, 1);
+    let mut live = LiveSession::open(&fixture.root).unwrap();
+    Scenario {
+        order: &[Kind::Start, Kind::Start, Kind::StartExit],
+        ..Scenario::default()
+    }
+    .publish_at(&mut fixture, 2);
+    live.poll().unwrap();
+    live.follow_latest().unwrap();
+
+    let page = live.apps_page(0).unwrap();
+
+    assert_eq!(page["app_count"], 0);
+    assert_eq!(page["process_count"], 1);
+    assert_eq!(page["ungrouped_members"], 1);
+    fixture.seal();
+    collector::recording::Registry {
+        runs: Vec::new(),
+        evictions: 0,
+    }
+    .write(&fixture.root)
+    .unwrap();
+    let mut cold = LiveSession::open(&fixture.root).unwrap();
+    cold.select(1002, 0).unwrap();
+    assert_eq!(cold.apps_page(0).unwrap(), page);
+}
+
+#[test]
+fn retains_a_start_only_app_at_its_next_publication_exit() {
+    // Goal: adjacent Start and Exit facts survive live source retirement without a rate baseline.
+    // Method: publish the real ring pair, seal it and select from a fresh reader.
+    let mut fixture = Fixture::new();
+    Scenario {
+        order: &[Kind::Start],
+        ..Scenario::default()
+    }
+    .publish_at(&mut fixture, 1);
+    let mut live = LiveSession::open(&fixture.root).unwrap();
+    Scenario {
+        order: &[Kind::StartExit],
+        ..Scenario::default()
+    }
+    .publish_at(&mut fixture, 2);
+    live.poll().unwrap();
+    live.follow_latest().unwrap();
+    let kind = viewer::live_app_response::KeyKind::Bundle;
+    let key = b"/Applications/D.app";
+    let detail = live.app_detail(kind, key, 0).unwrap();
+    fixture.seal();
+    collector::recording::Registry {
+        runs: Vec::new(),
+        evictions: 0,
+    }
+    .write(&fixture.root)
+    .unwrap();
+    let mut cold = LiveSession::open(&fixture.root).unwrap();
+
+    cold.select(1002, 0).unwrap();
+    let restored = cold.app_detail(kind, key, 0).unwrap();
+
+    assert_eq!(cold.apps_page(0).unwrap()["process_count"], 1);
+    assert_eq!(restored, detail);
+    assert_eq!(restored["app"]["members"], 1);
+    assert_eq!(restored["app"]["live_members"], 0);
+    assert_eq!(restored["app"]["resident_bytes"]["known"], "0");
+    assert_eq!(
+        restored["app"]["cpu_percent_one_core"],
+        serde_json::Value::Null
+    );
+    assert_eq!(restored["app"]["energy_joules"], serde_json::Value::Null);
+}
+
+#[test]
+fn retains_an_event_only_app_from_the_adjacent_publication_after_reopen() {
+    // Goal: an observed Exec remains attributable at the next publication's verified Exit.
+    // Method: compare live and sealed selection after two event-only ring publications.
+    let mut fixture = Fixture::new();
+    Scenario {
+        order: &[Kind::Exec],
+        ..Scenario::default()
+    }
+    .publish_at(&mut fixture, 1);
+    let mut live = LiveSession::open(&fixture.root).unwrap();
+    Scenario {
+        order: &[Kind::Exit],
+        ..Scenario::default()
+    }
+    .publish_at(&mut fixture, 2);
+    live.poll().unwrap();
+    live.follow_latest().unwrap();
+
+    let page = live.apps_page(0).unwrap();
+
+    assert_eq!(page["process_count"], 1);
+    assert_eq!(page["app_count"], 1);
+    let kind = viewer::live_app_response::KeyKind::Bundle;
+    let key = b"/Applications/B.app";
+    let detail = live.app_detail(kind, key, 0).unwrap();
+    assert_eq!(detail["app"]["members"], 1);
+    assert_eq!(detail["app"]["live_members"], 0);
+    assert_eq!(detail["app"]["resident_bytes"]["known"], "0");
+    assert_eq!(
+        detail["app"]["cpu_percent_one_core"],
+        serde_json::Value::Null
+    );
+    assert_eq!(detail["app"]["energy_joules"], serde_json::Value::Null);
+    assert_eq!(
+        detail["processes"][0]["resident_bytes"]["known"],
+        "104857600"
+    );
+    fixture.seal();
+    collector::recording::Registry {
+        runs: Vec::new(),
+        evictions: 0,
+    }
+    .write(&fixture.root)
+    .unwrap();
+    let mut cold = LiveSession::open(&fixture.root).unwrap();
+    cold.select(1002, 0).unwrap();
+    assert_eq!(cold.app_detail(kind, key, 0).unwrap(), detail);
+    let history = cold.app_history(kind, key).unwrap();
+    assert_eq!(history["points"][1]["members"], 1);
+    assert_eq!(
+        history["points"][1]["resident_bytes"],
+        detail["app"]["resident_bytes"]
+    );
+    assert_eq!(history["points"][1]["cpu_ns"], detail["app"]["cpu_ns"]);
+}
+
+#[test]
 fn keeps_exec_exit_membership_when_selected_from_committed_history() {
     // Goal: a last-15-minute selection keeps event-only Apps after live data retirement.
     // Method: seal the real Exec/Exit fixture and compare fresh selected detail with live output.
@@ -559,6 +697,10 @@ impl Default for Scenario {
 
 impl Scenario {
     fn publish(&self, fixture: &mut Fixture) {
+        self.publish_at(fixture, 2);
+    }
+
+    fn publish_at(&self, fixture: &mut Fixture, publication: u64) {
         let events: Vec<_> = self.order.iter().copied().map(Self::event).collect();
         let identities: Vec<_> = self
             .order
@@ -584,7 +726,7 @@ impl Scenario {
                 fixture, 1, &creation,
             ));
         }
-        let mut selected = readings(&processes, &memory, 2);
+        let mut selected = readings(&processes, &memory, publication);
         selected.events = &events;
 
         fixture
@@ -592,9 +734,9 @@ impl Scenario {
             .publish_with_identity(
                 &selected,
                 Some(&ObservationTimes {
-                    wall_ns: 1_002_000_000_000,
-                    continuous_ns: 2_000_000_000,
-                    awake_ns: 2_000_000_000,
+                    wall_ns: (1000 + publication) * 1_000_000_000,
+                    continuous_ns: publication * 1_000_000_000,
+                    awake_ns: publication * 1_000_000_000,
                 }),
                 &IdentityPublication {
                     processes: &process_identities,

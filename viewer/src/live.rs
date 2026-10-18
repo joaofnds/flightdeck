@@ -1279,6 +1279,11 @@ impl LiveSession {
                     },
                     &mut previous_frame,
                 )?;
+                if let Some(frame) = previous_frame.as_deref_mut() {
+                    project_observation_capture_events(source, publication, frame, |_, _, _| {
+                        Ok(())
+                    })?;
+                }
             }
         }
 
@@ -1556,6 +1561,44 @@ fn project_observation_stage(
     window: &mut Window,
     app_frame: &mut Frame,
 ) -> Result<()> {
+    let observation = persistence::Observation {
+        publication,
+        wall_ns: Some(times.wall_ns),
+        continuous_ns: Some(times.continuous_ns),
+        awake_ns: Some(times.awake_ns),
+    };
+
+    project_observation_capture_events(
+        source,
+        publication,
+        app_frame,
+        |source, events, numbered| {
+            if source.reader.dictionary_capacity().is_some() {
+                window.push_tick_with_identity(
+                    &observation,
+                    &source.tick,
+                    numbered,
+                    &persistence::IdentitySource {
+                        reader: &source.reader,
+                        processes: &source.identities,
+                        events: &events.identities,
+                    },
+                )?;
+            } else {
+                window.push_tick(&observation, &source.tick, numbered)?;
+            }
+
+            Ok(())
+        },
+    )
+}
+
+fn project_observation_capture_events(
+    source: &mut Source,
+    publication: u64,
+    frame: &mut Frame,
+    consume: impl FnOnce(&Source, &ProjectionEvents, &[NumberedEvent<'_>]) -> Result<()>,
+) -> Result<()> {
     let count = source
         .tick
         .events
@@ -1565,7 +1608,6 @@ fn project_observation_stage(
     let capacity = usize::try_from(count)
         .map_err(|_| Error::Bound("live event range"))?
         .min(collector::tracker::EVENTS_PER_TICK_MAX);
-
     let mut events = ProjectionEvents {
         events: Vec::with_capacity(capacity),
         identities: if source.reader.dictionary_capacity().is_some() {
@@ -1576,7 +1618,6 @@ fn project_observation_stage(
     };
 
     project_observation_stage_events(source, &mut events)?;
-
     let numbered: Vec<_> = events
         .events
         .iter()
@@ -1587,37 +1628,9 @@ fn project_observation_stage(
         })
         .collect();
 
-    project_observation_stage_capture(
-        source,
-        publication,
-        app_frame,
-        &numbered,
-        &events.identities,
-    )?;
+    project_observation_stage_capture(source, publication, frame, &numbered, &events.identities)?;
 
-    let observation = persistence::Observation {
-        publication,
-        wall_ns: Some(times.wall_ns),
-        continuous_ns: Some(times.continuous_ns),
-        awake_ns: Some(times.awake_ns),
-    };
-
-    if source.reader.dictionary_capacity().is_some() {
-        window.push_tick_with_identity(
-            &observation,
-            &source.tick,
-            &numbered,
-            &persistence::IdentitySource {
-                reader: &source.reader,
-                processes: &source.identities,
-                events: &events.identities,
-            },
-        )?;
-    } else {
-        window.push_tick(&observation, &source.tick, &numbered)?;
-    }
-
-    Ok(())
+    consume(source, &events, &numbered)
 }
 
 fn project_observation_stage_capture(
@@ -1968,6 +1981,11 @@ mod tests {
     mod battery_tests {
         use super::*;
         include!("live_battery_tests.rs");
+    }
+
+    mod app_event_tests {
+        use super::*;
+        include!("live_app_event_tests.rs");
     }
 
     static NEXT: AtomicU64 = AtomicU64::new(0);
