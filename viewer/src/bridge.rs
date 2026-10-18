@@ -371,7 +371,12 @@ pub unsafe extern "C" fn fd_bytes_free(bytes: Bytes) {
 
 fn response(result: Result<Value, String>) -> Bytes {
     let envelope = match result {
-        Ok(value) => json!({"value": value, "error": null}),
+        Ok(value) => {
+            let mut envelope = json!({"error": null});
+            envelope["value"] = value;
+
+            envelope
+        }
         Err(error) => json!({"value": null, "error": error}),
     };
     let mut bytes = envelope.to_string().into_bytes();
@@ -390,6 +395,27 @@ fn response(result: Result<Value, String>) -> Bytes {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn wraps_a_full_context_without_cloning_each_owned_element() {
+        // Goal: ABI envelope construction does not allocate a copy of every owned element.
+        // Method: encode 900 heap strings, count calls only during response, then decode it.
+        let elements: Vec<Value> = (0..900)
+            .map(|index| Value::String(format!("reading-{index}")))
+            .collect();
+        let payload = Value::Array(elements);
+        let expected = json!({"value":payload,"error":null});
+
+        let (bytes, calls) = crate::allocation_tests::allocations_in(|| response(Ok(payload)));
+        let decoded = serde_json::from_slice::<Value>(unsafe {
+            std::slice::from_raw_parts(bytes.pointer, bytes.length)
+        });
+        unsafe { fd_bytes_free(bytes) };
+
+        assert_eq!(decoded.unwrap(), expected);
+        assert!(calls <= 128, "owned response made {calls} allocations");
+        eprintln!("owned ABI response: 900 elements, {calls} allocation calls");
+    }
 
     pub(crate) fn response_value(value: Value) -> Value {
         let bytes = response(Ok(value));
