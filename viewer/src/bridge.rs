@@ -386,3 +386,50 @@ fn response(result: Result<Value, String>) -> Bytes {
     std::mem::forget(bytes);
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refuses_an_envelope_one_byte_over_the_literal_eight_mib_limit() {
+        // Goal: oversized results return an explicit error instead of an oversized ABI buffer.
+        // Method: pass a string whose full JSON envelope exceeds the literal cap by one byte.
+        let value = Value::String("x".repeat(8 * 1024 * 1024 - 24));
+
+        let bytes = response(Ok(value));
+        let decoded = serde_json::from_slice::<Value>(unsafe {
+            std::slice::from_raw_parts(bytes.pointer, bytes.length)
+        });
+        unsafe { fd_bytes_free(bytes) };
+
+        assert_eq!(
+            decoded.unwrap(),
+            json!({
+                "value":null, "error":"response exceeds 8 MiB"
+            })
+        );
+    }
+
+    #[test]
+    fn delivers_an_envelope_at_the_literal_eight_mib_limit() {
+        // Goal: the response guard permits a valid result exactly at its byte boundary.
+        // Method: decode and free the actual ABI buffer for an exactly fitting JSON envelope.
+        let value = Value::String("x".repeat(8 * 1024 * 1024 - 25));
+
+        let bytes = response(Ok(value));
+        let length = bytes.length;
+        let decoded = serde_json::from_slice::<Value>(unsafe {
+            std::slice::from_raw_parts(bytes.pointer, bytes.length)
+        });
+        unsafe { fd_bytes_free(bytes) };
+
+        let decoded = decoded.unwrap();
+        assert_eq!(length, 8 * 1024 * 1024);
+        assert!(decoded["error"].is_null());
+        assert_eq!(
+            decoded["value"].as_str().unwrap().len(),
+            8 * 1024 * 1024 - 25
+        );
+    }
+}

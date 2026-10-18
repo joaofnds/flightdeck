@@ -18,16 +18,24 @@ struct TimeSeriesLine {
     var fill: Double? = nil
 }
 
-enum TimeSeriesStrokePattern: Equatable {
+enum TimeSeriesStrokePattern: Equatable, Sendable {
     case solid
     case dashed
     case dotted
+    case custom([CGFloat])
 
     func style(width: CGFloat) -> StrokeStyle {
         switch self {
-        case .solid: StrokeStyle(lineWidth: width)
-        case .dashed: StrokeStyle(lineWidth: width, dash: [5, 4])
-        case .dotted: StrokeStyle(lineWidth: width, lineCap: .round, dash: [1, 4])
+        case .solid: return StrokeStyle(lineWidth: width)
+        case .dashed: return StrokeStyle(lineWidth: width, dash: [5, 4])
+        case .dotted: return StrokeStyle(lineWidth: width, lineCap: .round, dash: [1, 4])
+        case let .custom(dash):
+            precondition(dash.count <= 8)
+            precondition(dash.isEmpty == false)
+            precondition(dash.allSatisfy { $0.isFinite })
+            precondition(dash.allSatisfy { $0 > 0 })
+
+            return StrokeStyle(lineWidth: width, dash: dash)
         }
     }
 }

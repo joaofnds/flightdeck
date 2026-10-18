@@ -113,6 +113,7 @@ fn cell(value: ValueRef<'_>, column: &str) -> Result<Option<String>> {
             .to_owned(),
         ValueRef::Float(value) if value.is_finite() => value.to_string(),
         ValueRef::Double(value) if value.is_finite() => value.to_string(),
+        ValueRef::Float(_) | ValueRef::Double(_) if column == "rpm" => return Ok(None),
         _ => return Err(Error::Bound("unsupported or nonfinite cell")),
     };
     if text.len() > CELL_BYTES_MAX {
@@ -237,5 +238,45 @@ mod tests {
             1,
             &operation,
         )
+    }
+
+    macro_rules! nonfinite_query_refusal {
+        ($name:ident, $sql:literal) => {
+            #[test]
+            fn $name() {
+                // Goal: fan-specific gap handling cannot admit other nonfinite readings.
+                // Method: query a nonfinite value under an unrelated source column.
+                let connection = connection().unwrap();
+                let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+
+                let result = query(&connection, $sql, 1, &operation);
+
+                assert!(matches!(
+                    result,
+                    Err(persistence::Error::Bound("unsupported or nonfinite cell"))
+                ));
+            }
+        };
+    }
+    nonfinite_query_refusal!(refuses_nan_power, "SELECT 'NaN'::FLOAT power_watts");
+    nonfinite_query_refusal!(
+        refuses_infinite_temperature,
+        "SELECT 'Infinity'::DOUBLE soc_celsius"
+    );
+    nonfinite_query_refusal!(
+        refuses_nonfinite_unrelated_columns,
+        "SELECT 'NaN'::DOUBLE unrelated"
+    );
+
+    #[test]
+    fn keeps_a_nonfinite_double_rpm_cell_nullable() {
+        // Goal: floating width does not change the nullable invalid fan gauge contract.
+        // Method: query a nonfinite double through the real bounded table adapter.
+        let connection = connection().unwrap();
+        let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+
+        let result = query(&connection, "SELECT 'Infinity'::DOUBLE rpm", 1, &operation).unwrap();
+
+        assert_eq!(result.rows, vec![vec![None]]);
     }
 }

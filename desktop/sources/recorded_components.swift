@@ -109,6 +109,8 @@ struct RecordedComponentPane: View {
                     chart("SoC temperature", data: data, lines: [data.socTemperature],
                         style: TimeSeriesStyle(unit: "°C", fill: 0.1),
                         explanation: "Recorded single SoC sensor reading. This does not identify separate CPU or GPU sensor positions, or a sensor-group average or maximum.")
+                    RecordedFanHistory(context: data.context,
+                        inspectedID: $inspectedID, inspecting: $inspecting)
                 case .network:
                     chart("External interfaces", data: data, lines: data.network,
                         style: TimeSeriesStyle(unit: "KiB/s", fill: 0.1),

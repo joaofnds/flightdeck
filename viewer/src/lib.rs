@@ -11,6 +11,7 @@ mod live;
 mod live_app_history;
 pub mod live_app_response;
 pub mod live_apps;
+mod live_fan_history;
 mod metrics;
 mod session;
 

@@ -117,7 +117,7 @@ pub(crate) fn point(
         "run_tick": current.run_tick, "continuous_ns": current.continuous,
         "segment": segment, "cpu_percent": null, "gpu_active_percent": null, "gpu_watts": null,
         "power_watts": ticks.number(tick, "power_watts")?,
-        "soc_celsius": ticks.number(tick, "soc_celsius")?,
+        "soc_celsius": ticks.number(tick, "soc_celsius")?, "fan_rpm": null,
         "interval_unavailable": "Requires consecutive compatible counter samples"});
     for (name, column) in [
         ("memory_total_bytes", "total_bytes"),

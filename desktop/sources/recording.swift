@@ -112,6 +112,7 @@ struct Metric: Decodable, Identifiable, Sendable {
     let memoryDecompressionsPerSecond: Double?
     let pressure: UInt64?
     let socCelsius: Double?
+    let fanRpm: FanRPMReadings?
     let powerWatts: Double?
     let gpuWatts: Double?
     var identity: RecordedObservationIdentity {

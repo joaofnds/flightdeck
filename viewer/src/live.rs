@@ -977,6 +977,7 @@ impl LiveSession {
             previous.map(|observation| &observation.observation),
             segment,
         )?;
+        crate::live_fan_history::capture(&current.tables, &mut current.point)?;
         current.point["run"] = json!(identity_text(current.identity.run).to_string());
         current.point["boot"] = json!(identity_text(current.identity.boot).to_string());
         current.point["observation"] = current.json();
@@ -1230,22 +1231,35 @@ impl LiveSession {
         let points = response["trends"]
             .as_array_mut()
             .ok_or(Error::Bound("trends shape"))?;
+
         for point in &self.points {
             let current = point["wall_ns"]
                 .as_u64()
                 .ok_or(Error::Bound("point clock"))?
                 / NANOSECONDS_PER_SECOND;
+
             if (second.saturating_sub(899)..=second).contains(&current) {
-                if !points.iter().any(|existing| same(existing, point)) {
-                    points.push(metrics::public_point(point)?);
+                let mut live = metrics::public_point(point)?;
+                if let Some(index) = points.iter().position(|existing| same(existing, point)) {
+                    follow_merge_point(PointMerge {
+                        live: &mut live,
+                        committed: &points[index],
+                    })?;
+                    points[index] = live;
+                } else {
+                    if points.len() == OBSERVATIONS_MAX {
+                        return Err(Error::Bound("context observations"));
+                    }
+
+                    points.push(live);
                 }
             }
         }
-        if points.len() > OBSERVATIONS_MAX {
-            return Err(Error::Bound("context observations"));
-        }
+
         points.sort_by(|left, right| identity_order(left).cmp(&identity_order(right)));
-        metrics::context_segments(points)
+        metrics::context_segments(points)?;
+
+        context_bytes(points)
     }
 
     fn select_observation(
@@ -1828,6 +1842,11 @@ mod tests {
     mod cpu_history_tests {
         use super::*;
         include!("cpu_history_live_tests.rs");
+    }
+
+    mod fan_history_tests {
+        use super::*;
+        include!("live_fan_tests.rs");
     }
 
     static NEXT: AtomicU64 = AtomicU64::new(0);

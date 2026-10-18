@@ -38,6 +38,14 @@ struct FlightdeckTheme {
     var networkSendErrorsSeries = Palette.orange
     var systemPowerSeries = Palette.orange
     var temperatureSeries = Palette.red
+    var fanSeries = [
+        Palette.blue, Palette.orange, Palette.purple, Palette.green, Palette.red,
+        Color(red: 0.95, green: 0.80, blue: 0.05),
+        Color(red: 0.54, green: 0.72, blue: 1.0),
+        Color(red: 0.79, green: 0.58, blue: 0.90),
+        Color(red: 0.22, green: 0.53, blue: 0.18),
+        Color(red: 0.76, green: 0.36, blue: 0.09)
+    ]
     var airflowCool = Palette.blue
     var airflowWarm = Color(red: 0.95, green: 0.80, blue: 0.05)
     var airflowHot = Palette.red

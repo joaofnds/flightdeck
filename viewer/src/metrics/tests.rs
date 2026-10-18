@@ -582,10 +582,11 @@ fn preserves_independent_memory_and_network_counter_availability() {
     assert_eq!(value["network_tx_bps"], 512.0);
 }
 
-const POINT_FIELDS: [&str; 38] = [
+const POINT_FIELDS: [&str; 39] = [
     "boot",
     "continuous_ns",
     "cpu_percent",
+    "fan_rpm",
     "gpu_active_percent",
     "gpu_watts",
     "interval_unavailable",
@@ -635,6 +636,7 @@ fn widest_point() -> Value {
             };
         }
     }
+    point["fan_rpm"] = json!(vec![0.000_012_345_678_901_234_568; 10]);
     assert_eq!(point["cpu_percent"].to_string().len(), 23);
     point["power_watts"] = json!(-0.000_012_345_678_901_234_568);
     assert_eq!(point["power_watts"].to_string().len(), 24);
@@ -657,8 +659,8 @@ fn selection_envelope(point: &Value, identity: &Value, count: usize) -> Value {
 
 #[test]
 fn measures_scalar_selection_response_sizes_at_both_context_limits() {
-    // Goal: every nullable numeric field, identity and loss variant fits the bridge cap.
-    // Method: copy the select/envelope assembly using production point/public projection.
+    // Goal: widest scalar envelopes expose both the supported and refused byte-bound cases.
+    // Method: retain every field and ten widest fan gauges at both context count limits.
     let internal = widest_point();
     let point = public_point(&internal).unwrap();
     let fields = point.as_object().unwrap();
@@ -698,7 +700,8 @@ fn measures_scalar_selection_response_sizes_at_both_context_limits() {
             "{}",
             json!({"observations": count, "response_bytes": bytes,
             "saved_response_bytes": saved_bytes, "before_response_bytes": before_bytes,
-            "removed_bytes": before_bytes - bytes, "headroom_bytes": 8 * 1024 * 1024 - bytes,
+            "removed_bytes": before_bytes - bytes,
+            "headroom_bytes": (8_usize * 1024 * 1024).checked_sub(bytes),
             "serialize_ns": start.elapsed().as_nanos(), "bridge_bytes_max": 8 * 1024 * 1024,
             "point_fields": point.as_object().unwrap().len(),
             "reader_loss_object_bytes": identity["reader_losses"].to_string().len(),
@@ -706,7 +709,8 @@ fn measures_scalar_selection_response_sizes_at_both_context_limits() {
             "live_alternative_bytes": identity.to_string().len(),
             "saved_alternative_bytes": saved_identity.to_string().len()})
         );
-        assert!(bytes <= 8 * 1024 * 1024);
+        assert_eq!(bytes <= 8 * 1024 * 1024, count == 900);
+        assert_eq!(saved_bytes <= 8 * 1024 * 1024, count == 900);
         assert!(saved_bytes <= bytes);
     }
 }
