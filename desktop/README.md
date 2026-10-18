@@ -154,9 +154,11 @@ actions through the macOS adapter. VoiceOver, native input and pixel verificatio
 still require an interactive check; API integration alone does not establish parity.
 Saved queries, every diagnostic detail and exact web chart smoothing remain outside
 this implementation. App histories contain observations
-seen by the reader session. Missing sensors stay unavailable. Captured Overview
-follows the web design's three-column panels; live Overview uses
-two-column panels. These are different workloads and must be measured separately.
+seen by the reader session. Missing sensors stay unavailable. Live Overview uses
+three chart columns from 1100 points wide, two from 640, and one below 640. Other
+live chart pages use two columns from 640 and one below it. Header controls wrap
+inside narrow content. Overview includes categorical memory-pressure history.
+Captured and live pages have different panel/data workloads and must be measured separately.
 
 ## Measurement contract
 

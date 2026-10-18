@@ -17,6 +17,31 @@ pending/failed selection recovery. It does not exercise native macOS event deliv
 or inspect screen pixels. Saved-recording fixtures distinguish final same-second
 publications and preserve an explicitly chosen earlier observation.
 
+The responsive-chart increment passes 432 desktop test executions, strict all-target
+Clippy, formatting and tidy. Production TestPlatform nodes check Overview's 3/2/1
+columns at the 1100/640-point boundaries, header control bounds, retained selection
+and coherent stationary-pointer inspection through regrouping. Overview now includes
+the existing pressure timeline, preserving gaps and the selected same-second publication.
+
+Three production hover lookups over 900 synthetic observations reduced allocation
+requests from 10,800 to 12 for the earliest target, preserving the returned indexes.
+Requested bytes fell from 345,600 to 384. An absent target fell from 10,800 requests
+to zero. These counters exclude fixture setup, rendering and application latency.
+The packaged increment's executable SHA-256 is
+`7bf4bd16fee30afc16a71c5674b6329667b9cc96ac977bf8e76f2fad0fae5aa4`.
+Local commands, raw measurements and independent reviews are retained under ignored
+`target/resume-*` and `target/hover-*`. Native acceptance below remains open.
+
+That package's read-only worker probe accepted 39 snapshots across all twelve routes
+in 38.1 seconds while the isolated collector advanced. Exact pause, advancing resume,
+missing-reading recovery and recording reopen passed. Its 900-second scalar context
+contained 617 observed seconds and 283 missing seconds across a collection stop/restart;
+the selected bundle and executable histories preserved those same gaps. The preceding
+source completed after 755 samples, so neither run establishes an uninterrupted
+900-sample live acceptance. A separate frozen saved selection contains 900 real points.
+
+## Pre-promotion verification
+
 The Rust 1.95.0 integrated check passed 431 test executions, formatting and strict
 all-target clippy. Resource tests exercise historical summaries, device membership,
 missing observations, same-second battery states, Copy and restored live values
@@ -36,7 +61,7 @@ stopped no producer. Its app SHA-256 was
 Local source hashes, test logs, packaged executable identities and the raw probe
 are under ignored `target/rest-application/`.
 
-The delivered app SHA-256 is
+That delivered app's SHA-256 was
 `03517e429a3b0c8fbb1a2e136c7cfaa4d83140f3dc98c3d1d013ae19f733cd57`.
 It separates shared timeline bucketing from pressure-specific metadata. Exact
 state, selected-publication, gap and complete help tests pass before and after

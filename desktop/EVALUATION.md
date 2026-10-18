@@ -130,7 +130,10 @@ unported workflows or the whole application's migration cost.
 [gpui-longbridge]: https://zed.dev/blog/community-champion-jason-lee
 [metal-tools]: https://developer.apple.com/metal/tools/
 
-## Current application checks
+## Pre-promotion application checks
+
+This section identifies the earlier isolated client. [LIVE.md](LIVE.md) records the
+canonical desktop client's subsequent checks and package identities.
 
 The integrated client passed 431 test executions, formatting, strict all-target
 clippy, font-backend checks and the Swift captured replay typecheck under Rust
@@ -160,7 +163,7 @@ The input manifest includes the native thread's frozen viewer candidate, whose
 bytes are identified separately from Git HEAD. These checks do not certify the
 whole shared workspace's release state.
 
-The delivered app is
+The delivered app at that checkpoint was
 `03517e429a3b0c8fbb1a2e136c7cfaa4d83140f3dc98c3d1d013ae19f733cd57`.
 It has separate passing exact-input checks after a behavior-preserving extraction
 of categorical timeline bucketing, including full state/help characterization.
@@ -372,9 +375,9 @@ presentation, compositor occlusion, GPU completion or input latency.
 Captured GPUI follows the approved web layout with three-column Overview panels;
 the Swift captured views use two columns. Their action traces can match while the
 visible chart work differs. Resource results describe these implementations and
-must not be presented as an isolated framework speed ranking. The live Overview
-uses Swift's two-column arrangement, but an equivalent repeated live comparison
-has not yet been established.
+must not be presented as an isolated framework speed ranking. At the time of these
+measurements, live Overview used Swift's two-column arrangement. The current
+GPUI client has responsive columns; this historical comparison does not measure them.
 
 The initial five-second-warmup idle pilot includes substantial transient work and
 is not a steady-state estimate. A separate sixty-second quiet GPUI launch rendered
