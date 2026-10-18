@@ -77,12 +77,8 @@ struct RecordedMemoryData {
     }
 
     var pressureText: String {
-        switch selection.summary?.pressure {
-        case 0: "Normal"
-        case 1: "Warning"
-        case 2: "Critical"
-        default: "Unavailable"
-        }
+        selection.summary?.pressure.flatMap { MemoryPressureState(rawValue: $0) }?.label
+            ?? "Unavailable"
     }
 
     var domain: ClosedRange<Double> { context.domain }
@@ -131,7 +127,13 @@ struct RecordedMemory: View {
                     summary("Installed", bytes: selection.summary?.memoryTotalBytes)
                     summary("Memory pressure", reading: data.pressureText, note: "macOS verdict")
                 }
-                categoryChart(data)
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .top, spacing: theme.panelGap) {
+                        categoryChart(data).frame(minWidth: 330)
+                        pressureChart(data).frame(minWidth: 330)
+                    }
+                    VStack(spacing: theme.panelGap) { categoryChart(data); pressureChart(data) }
+                }
                 ViewThatFits(in: .horizontal) {
                     HStack(alignment: .top, spacing: theme.panelGap) {
                         swapChart(data).frame(minWidth: 330)
@@ -174,6 +176,11 @@ struct RecordedMemory: View {
         RecordedResourceChart(title: "Recorded memory categories", context: data.context,
             lines: data.categories, style: TimeSeriesStyle(unit: "GiB", fill: 0.1), inspectedID: $inspectedID, inspecting: $inspecting,
             explanation: "Independent active, wired and compressed VM readings from this recording. These source categories are not app memory or a computed memory-used total.")
+    }
+
+    private func pressureChart(_ data: RecordedMemoryData) -> some View {
+        RecordedMemoryPressure(selection: data.selection, inspectedID: $inspectedID,
+            inspecting: $inspecting, busy: model.busy, onSelect: model.select)
     }
 
     private func swapChart(_ data: RecordedMemoryData) -> some View {

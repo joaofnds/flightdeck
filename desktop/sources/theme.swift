@@ -24,6 +24,9 @@ struct FlightdeckTheme {
     var memoryPageinsSeries = Palette.blue
     var memoryCompressionsSeries = Palette.orange
     var memoryDecompressionsSeries = Palette.purple
+    var memoryPressureNormal = Palette.green
+    var memoryPressureWarning = Color(red: 0.95, green: 0.80, blue: 0.05)
+    var memoryPressureCritical = Palette.red
     var networkReceivedSeries = Palette.green
     var networkSentSeries = Palette.purple
     var networkReceivedPacketsSeries = Palette.green
