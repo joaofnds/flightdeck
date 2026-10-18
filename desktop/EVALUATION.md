@@ -4,6 +4,9 @@ The GPUI desktop client now includes live and sealed recording workflows,
 logical-CPU history, complete selected Memory quantities, pressure and swap
 traffic, SoC/fan history, Storage, Battery, Self-monitoring, recording context and
 same-second observation choices.
+Overview adds exact-observation top-ten App rankings for CPU, resident memory and
+process power, with proportional bars and drilldown. Charts reflow across three,
+two and one columns while preserving inspection.
 It packages its own collector and persister and uses the shared Rust recording format.
 The [README](README.md) gives build and launch commands;
 [LIVE.md](LIVE.md) records runtime verification and the native acceptance checklist.
@@ -17,14 +20,21 @@ Historical measurements below retain the paths and binary identities used at the
 time. The canonical client now lives in `desktop/`; the Swift client, C bridge and
 comparison executables have been retired. Their sources remain in Git history.
 
-## Framework decision: continue with GPUI
+## Desktop implementation: GPUI
 
-Accepted on 2026-10-18: continue building Flightdeck with GPUI and assess whether
-the existing implementation can deliver the desired application. Responsiveness
-remains a priority. Slint is a credible alternative to reconsider if a concrete
-product requirement or continuing development cost makes GPUI a poor fit. There
-is no decision to build a Slint prototype now. Existing native acceptance and
-release-verification gaps remain open.
+Accepted on 2026-10-18: GPUI is Flightdeck's sole desktop implementation. The Swift
+client, bridge and integration were retired in `ec06e00`; Git history retains them.
+The work is to complete this application and measure its responsiveness, rather
+than maintain a fallback client. Native acceptance and sustained responsiveness
+remain open. The earlier Slint research below records an alternative for a future
+concrete requirement or maintenance problem; it does not authorize another pilot.
+
+The current ranking package passed 489 desktop test executions and a read-only
+39-snapshot check across all twelve routes. Scalar and two selected App histories
+each covered 900 unique seconds without gaps. The package and input identities,
+the subsequent collection-restart gap and measurement limits are in
+[LIVE.md](LIVE.md). These checks do not establish native input latency or screen
+presentation, and they predate the separately ongoing Polars backend migration.
 
 The comparison considered [Slint 1.18.1][slint-release] and Flightdeck's
 [pinned GPUI revision](Cargo.toml),

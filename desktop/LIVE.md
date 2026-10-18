@@ -1,6 +1,7 @@
 # Live client verification
 
-Historical hashes and measurement paths below identify pre-promotion builds.
+Each verification section identifies its own binary and workload. Historical
+sections below identify pre-promotion builds.
 Current build and launch commands are in [README.md](README.md).
 
 ## Current app
@@ -17,28 +18,67 @@ pending/failed selection recovery. It does not exercise native macOS event deliv
 or inspect screen pixels. Saved-recording fixtures distinguish final same-second
 publications and preserve an explicitly chosen earlier observation.
 
-The responsive-chart increment passes 432 desktop test executions, strict all-target
-Clippy, formatting and tidy. Production TestPlatform nodes check Overview's 3/2/1
+The current ranking increment passes 489 desktop test executions: 442 application,
+36 projection benchmark and 11 replay tests. Strict all-target Clippy, formatting
+and tidy pass. Production TestPlatform nodes check Overview's 3/2/1
 columns at the 1100/640-point boundaries, header control bounds, retained selection
 and coherent stationary-pointer inspection through regrouping. Overview now includes
 the existing pressure timeline, preserving gaps and the selected same-second publication.
+
+Overview ranks CPU, resident memory and process power over all captured Apps, with
+exact integer ordering, proportional bars, metric help and selected-observation
+drilldown. Tests cover leaders after the first 512-row page, measured zero, partial
+and unavailable measurements, overflow, incomplete membership and deterministic ties.
+Installed-input checks preserve the full run/boot/publication and App key through
+hover, loading, failure, click and keyboard activation. The scan has a 24,000-App,
+47-page bound and retains at most ten entries per metric.
 
 Three production hover lookups over 900 synthetic observations reduced allocation
 requests from 10,800 to 12 for the earliest target, preserving the returned indexes.
 Requested bytes fell from 345,600 to 384. An absent target fell from 10,800 requests
 to zero. These counters exclude fixture setup, rendering and application latency.
 The packaged increment's executable SHA-256 is
-`7bf4bd16fee30afc16a71c5674b6329667b9cc96ac977bf8e76f2fad0fae5aa4`.
+`ff871c2451fc7cd8d5caf19c08c1543445fe3c739230e456e02d1da3905d4eb6`.
 Local commands, raw measurements and independent reviews are retained under ignored
-`target/resume-*` and `target/hover-*`. Native acceptance below remains open.
+`target/rankings-*`, `target/resume-*` and `target/hover-*`. Its source-input manifests
+were identical before and after the final release build. The app and packaged helper
+bytes matched their release inputs and bundle validation passed. This artifact uses
+the backend before the separately ongoing Polars migration; these results do not
+validate that migration. Native acceptance below remains open.
+The package and its checks used Rust 1.95.0; current build instructions use the
+migration's Rust 1.98.0 prerequisite.
 
 That package's read-only worker probe accepted 39 snapshots across all twelve routes
-in 38.1 seconds while the isolated collector advanced. Exact pause, advancing resume,
-missing-reading recovery and recording reopen passed. Its 900-second scalar context
-contained 617 observed seconds and 283 missing seconds across a collection stop/restart;
-the selected bundle and executable histories preserved those same gaps. The preceding
-source completed after 755 samples, so neither run establishes an uninterrupted
-900-sample live acceptance. A separate frozen saved selection contains 900 real points.
+in 50.953 seconds while the isolated collector advanced. Its initial Overview read
+took 3.479 seconds and ranked 476 Apps, with three ten-entry lists and explicit
+incomplete membership. Exact pause, advancing resume, missing-reading recovery,
+pagination and recording reopen passed. Scalar context and the two selected bundle
+and executable histories each covered 900 unique seconds without gaps. Reader
+metadata retained two missed publications and zero missed events, unknown false.
+These are reader/model checks, not native picker, clipboard, IME or VoiceOver checks.
+
+The earlier responsive-chart package, SHA-256
+`7bf4bd16fee30afc16a71c5674b6329667b9cc96ac977bf8e76f2fad0fae5aa4`,
+first observed 617 of 900 seconds across a source stop/restart. Its subsequent
+300-second read-only soak accepted 300 updates, 296 distinct delivered observations
+and no reader failures. It ended with 900 unique history seconds and no context gaps;
+the reported missed publication remained recoverable in history. The source had
+already been running before that observation, so the 300 seconds alone did not
+collect a complete fifteen-minute interval.
+
+After installing the current package, its owned collector restarted on the same
+recording. A 15-second read-only soak accepted 13 distinct advancing updates without
+errors. Its history showed 858 of 900 seconds, retaining the 42-second collection
+gap from the restart. A later full context must age that gap out or preserve it;
+the pre-restart complete-history result does not apply to this window.
+
+An earlier ranking binary, SHA-256
+`91933cb25fff88af59bcab3538a0afb1bf3837ef4d958d06bc5d2c1d60096fdf`,
+ran a warm headless worker observation over 30.189 seconds at 5.606% of one core.
+Physical footprint moved from 278,234,936 to 297,387,880 bytes, with sampled maximum
+305,235,816 bytes. That binary predates the final bar/help and parsing changes.
+The run excludes a window and rendering; it establishes neither current whole-app
+cost, a memory plateau, an improvement nor a framework ranking.
 
 ## Pre-promotion verification
 

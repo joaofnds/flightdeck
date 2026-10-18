@@ -6,8 +6,8 @@ reference remains available with `--reference`. The UI has its own Cargo workspa
 and lockfile; the recording backend is a local path dependency.
 
 ```sh
-cargo +1.95.0 build --release --locked -p collector -p persistence --bin collector --bin persister
-cargo +1.95.0 build --release --locked --manifest-path desktop/Cargo.toml --bin flightdeck
+cargo +1.98.0 build --release --locked -p collector -p persistence --bin collector --bin persister
+cargo +1.98.0 build --release --locked --manifest-path desktop/Cargo.toml --bin flightdeck
 desktop/target/release/flightdeck --bundle
 'desktop/target/Flightdeck.app/Contents/MacOS/flightdeck' --bundle --check
 open 'desktop/target/Flightdeck.app'
@@ -15,7 +15,7 @@ open 'desktop/target/Flightdeck.app'
 
 Run those commands from the repository root. The bundle contains the app, required
 collector and persister executables, and artwork; missing helpers fail packaging.
-It can be moved outside the checkout. Rust 1.95.0 matches CI; these commands install
+It can be moved outside the checkout. Rust 1.98.0 matches CI; these commands install
 no toolchain or hooks.
 
 Default launch uses `~/Library/Application Support/Flightdeck/flightdeck.recording`.
@@ -141,6 +141,13 @@ fan histories, preserving stopped zero readings and missing channels. Recording
 context includes known extent, saved-window counts, source errors and paged
 same-second alternatives with full run/boot/publication identities.
 
+Overview ranks the top ten captured Apps by CPU, resident memory and process power.
+Bars show each value relative to the leading App; help explains the measured quantity.
+Rankings scan all captured Apps through bounded pages, retaining ten entries per
+metric. Zero, partially measured totals, overflow and incomplete membership remain
+explicit. Hover inspection loads rankings for the exact observation or shows its
+loading/error state. Selecting a rank opens that App at the displayed observation.
+
 App tables include measured executable subtotals with explicit unavailable
 and overflow states. The schematic uses the shared chassis and rotor assets,
 anchored callouts, illustrative airflow and explicit QA simulation. Its 30 Hz clock
@@ -192,7 +199,7 @@ Allocation experiments accept a frozen 900-point real recording selection. From
 `desktop/`, use fresh output filenames for each invocation:
 
 ```sh
-cargo +1.95.0 build --release --locked --bin projection_bench
+cargo +1.98.0 build --release --locked --bin projection_bench
 target/release/projection_bench --capture /path/to/session.recording --output target/selection.json
 target/release/projection_bench --input target/selection.json --route memory \
   --iterations 20 --output target/memory-bits.json
