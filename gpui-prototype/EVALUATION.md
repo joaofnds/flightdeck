@@ -55,6 +55,39 @@ interaction/accessibility checks, an explained memory-growth curve, full require
 live-history coverage and repeated matched visible-rendering measurements.
 The older captured measurements below describe the pre-pilot implementation.
 
+## Sustained live retention
+
+A follow-up 900-second diagnostic window accepted 898 updates and 900 scalar
+points without an application error. Independent App and CPU history ledgers
+increased from 121 to 900 entries, holding 900 in their last two samples. Their
+final charged sizes were 32.7 and 1.23 MiB, below separate 64 MiB budgets.
+The live staging engine reported approximately 83–87 MiB. These counters exclude
+other allocations and cannot establish a whole-process bound or complete history
+for every App. The raw 128 MiB tail budget held about 68–69 observations while
+scalar context covered 900 seconds.
+
+A fresh unprofiled 900-second window accepted 897 updates and 900 scalar points
+without an application error. Its concurrent reader saw 898 distinct publications
+with zero reported reader failures; both retained an explicit one-publication loss
+count in their selected record. During estimated process ages 780–870 seconds,
+physical-footprint medians were 551.081 MiB for the window and
+426.885 MiB for the reader. This single shared-machine pair, with other
+apps and local build activity, does not isolate rendering cost or establish a
+plateau. Visibility was not independently verified. Worker-disposal samples are
+excluded. The frozen binary SHA-256 is
+`6c9912bd9a3a1b3b11b0826fcb5c062639f9ed655ae4ecd3df46a4faab958fea`.
+
+Allocation-stack probes identify substantial shared query/table and DuckDB costs.
+Window diagnostics also show graphics allocations. Their intrusive tools and
+shared-machine activity prevent attributing the complete footprint or confirming
+a leak. A Game Memory profiler attach failed and supplied no usable attribution.
+Renderer atlas/buffer accounting, followed by a controlled complete draw-path pool
+experiment if needed, is the next discriminating probe. No speculative memory fix
+was applied. Native interaction checks and matched visible Swift comparisons
+remain open; this evidence supports continued evaluation while keeping Swift.
+Raw follow-up logs and copied diagnostic source remain private under ignored
+`target/continue-*` and `target/growth-ledger-source/`.
+
 ## Pre-pilot implementation
 
 Live mode reads the actual recording through `viewer::LiveSession` on a bounded
@@ -177,6 +210,6 @@ gives build/run commands; use a fresh output directory for each run.
 ## Remaining evidence
 
 Native pixel and input verification is blocked by the computer-use tool rejection.
-The user has already authorized it. Full live-history retention, GPU presentation
+The user has already authorized it. Complete per-App live-history coverage, GPU presentation
 timing, actual input latency and a matched live Swift run remain open. Successful
 model replay and unit tests do not close those gaps.
