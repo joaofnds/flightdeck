@@ -5,6 +5,15 @@ import SwiftUI
 
 @MainActor
 func runOverviewInspectionChecks() throws {
+    try reads_the_inspected_observation_in_overview_summaries()
+    try reads_schematic_fans_and_battery_from_the_inspected_observation()
+    preserves_the_active_graph_when_another_graph_exits()
+    keeps_the_pointer_at_its_screen_position_when_the_plot_changes()
+    clears_the_pointer_when_scrolling_moves_the_plot_away()
+    coalesces_pointer_motion_within_one_recorded_second()
+    try keeps_missing_inspections_empty_until_the_preview_ends()
+    try preserves_inspection_when_the_live_collector_changes_runs()
+    retargets_the_pointer_through_the_mounted_chart_modifier()
     try paints_the_installed_capacity_in_the_actual_overview()
     try paints_translucent_memory_in_the_actual_overview()
     scales_small_power_without_rounding_it_to_zero()
@@ -68,6 +77,238 @@ func runOverviewInspectionChecks() throws {
     precondition(inspection.date(in: selection) == nil)
     precondition(inspection.target(in: selection) == nil)
     print("Overview keyboard inspection preserves repeated-second identities and empty hover")
+}
+
+@MainActor
+private func reads_the_inspected_observation_in_overview_summaries() throws {
+    // Goal: hovering an earlier observation changes the actual summary tiles too.
+    // Method: compare only summary-row pixels while keeping the live selection fixed.
+    let data = Data(#"""
+        {"value":[
+          {"run":"hover","boot":"boot","publication":1,"wall_ns":1000000000000,
+           "segment":1,"cpu_percent":10,"pressure":2,"power_watts":5,
+           "fan_rpm":[0,1456],
+           "storage":{"state":"complete","devices":[],"read_bps":1000000,"write_bps":2000000}},
+          {"run":"hover","boot":"boot","publication":2,"wall_ns":1001000000000,
+           "segment":1,"cpu_percent":80,"pressure":0,"power_watts":50,
+           "fan_rpm":[5000,6000],
+           "storage":{"state":"complete","devices":[],"read_bps":8000000,"write_bps":9000000}}]}
+        """#.utf8)
+    let points: [Metric] = try decodeRecordingResponse(data)
+    let selected = Observation(run: "hover", boot: "boot", publication: 2, runTick: 2,
+        wallNs: 1_001_000_000_000, windowLosses: nil)
+    let model = RecordingModel(path: "/unused", pollingEnabled: false)
+    model.selection = Selection(second: 1001, selected: selected, alternatives: [selected],
+        summary: points[1], trends: points, contextSeconds: 900)
+    let inspection = ChartInspectionState()
+    let baseline = scalarPanelImage(Dashboard(inspection: inspection),
+        model: model, theme: FlightdeckTheme(), height: 1800)
+
+    inspection.hover(at: Date(timeIntervalSince1970: 1000))
+    let inspected = scalarPanelImage(Dashboard(inspection: inspection),
+        model: model, theme: FlightdeckTheme(), height: 1800)
+
+    let changed = scalarPanelPixelDifferences(baseline, inspected, rows: 0..<110)
+    precondition(changed > 100,
+        "Overview kept current summaries while inspecting an earlier observation: \(changed) pixels")
+    precondition(model.selection?.selected?.identity == selected.identity)
+    precondition(scalarPanelPixelDifferences(baseline, inspected, rows: 1000..<1700) > 100,
+        "Overview kept current schematic readings during inspection")
+    precondition(scalarPanelPixelDifferences(baseline, inspected,
+        rows: 690..<715, columns: 380..<700) > 20,
+        "Overview kept current disk footers during inspection")
+}
+
+@MainActor
+private func preserves_inspection_when_the_live_collector_changes_runs() throws {
+    // Goal: a new collector run in the same recording does not end pointer inspection.
+    // Method: keep the Dashboard mounted while replacing its selected run.
+    let point: Metric = try decodeRecordingResponse(Data(#"""
+        {"value":{"run":"first","boot":"boot","publication":1,"wall_ns":1000000000000,
+         "segment":1,"cpu_percent":10}}
+        """#.utf8))
+    let first = Observation(run: "first", boot: "boot", publication: 1, runTick: 1,
+        wallNs: point.wallNs, windowLosses: nil)
+    let next = Observation(run: "next", boot: "boot", publication: 1, runTick: 1,
+        wallNs: point.wallNs, windowLosses: nil)
+    let model = RecordingModel(path: "/unused", pollingEnabled: false)
+    model.selection = Selection(second: 1000, selected: first, alternatives: [first],
+        summary: point, trends: [point], contextSeconds: 900)
+    let inspection = ChartInspectionState()
+    let renderer = ImageRenderer(content: Dashboard(inspection: inspection)
+        .environmentObject(model).frame(width: 1080, height: 1800))
+    precondition(renderer.cgImage != nil)
+    inspection.hover(at: Date(timeIntervalSince1970: 999))
+    precondition(renderer.cgImage != nil)
+
+    model.selection = Selection(second: 1000, selected: next, alternatives: [next],
+        summary: nil, trends: [point], contextSeconds: 900)
+    renderer.content = Dashboard(inspection: inspection)
+        .environmentObject(model).frame(width: 1080, height: 1800)
+    precondition(renderer.cgImage != nil)
+
+    precondition(inspection.date(in: model.selection) == Date(timeIntervalSince1970: 999),
+        "A live collector run change erased the mounted Overview's inspection")
+}
+
+@MainActor
+private func retargets_the_pointer_through_the_mounted_chart_modifier() {
+    // Goal: plot geometry changes reach inspection through the actual view callbacks.
+    // Method: resize a mounted modifier while its screen-space pointer stays fixed.
+    let model = RecordingModel(path: "/unused", pollingEnabled: false)
+    let inspection = ChartInspectionState()
+    let owner = UUID()
+    let content = Color.clear.modifier(ChartInspection(inspection: inspection,
+        domain: 1000...1900, readout: { _ in "Unavailable" }, owner: owner))
+        .environmentObject(model)
+    let renderer = ImageRenderer(content: content.frame(width: 415, height: 200))
+    precondition(renderer.cgImage != nil)
+    inspection.hover(at: CGPoint(x: 200, y: 50),
+        in: CGRect(x: 0, y: 0, width: 415, height: 200), domain: 1000...1900, owner: owner)
+    precondition(renderer.cgImage != nil)
+
+    renderer.content = content.frame(width: 715, height: 200)
+    precondition(renderer.cgImage != nil)
+
+    precondition(inspection.date(in: nil) == Date(timeIntervalSince1970: 1225),
+        "The mounted chart did not retarget inspection after resizing")
+    renderer.content = Color.clear.modifier(ChartInspection(inspection: inspection,
+        domain: 1001...1901, readout: { _ in "Unavailable" }, owner: owner))
+        .environmentObject(model).frame(width: 715, height: 200)
+    precondition(renderer.cgImage != nil)
+    precondition(inspection.date(in: nil) == Date(timeIntervalSince1970: 1226),
+        "The mounted chart did not retarget inspection after a live-domain advance")
+}
+
+@MainActor
+private func reads_schematic_fans_and_battery_from_the_inspected_observation() throws {
+    // Goal: the schematic uses the hovered publication without joining current fan data.
+    // Method: inspect a metric with different readings from the selected fan page.
+    let data = Data(#"""
+        {"value":[
+          {"run":"hover","boot":"boot","publication":1,"wall_ns":1000000000000,
+           "segment":1,"cpu_percent":10,"gpu_active_percent":20,
+           "fan_rpm":[0,1456],"memory_total_bytes":51539607552,
+           "battery":{"source_continuous_ns":0,"age_seconds":0,
+             "charge_percent":40,"power_watts":-8}},
+          {"run":"hover","boot":"boot","publication":2,"wall_ns":1001000000000,
+           "segment":1,"cpu_percent":80,"fan_rpm":[5000,6000]}]}
+        """#.utf8)
+    let points: [Metric] = try decodeRecordingResponse(data)
+    let observation = Observation(run: "hover", boot: "boot", publication: 2, runTick: 2,
+        wallNs: 1_001_000_000_000, windowLosses: nil)
+    let selection = Selection(second: 1001, selected: observation, alternatives: [observation],
+        summary: points[1], trends: points, contextSeconds: 900)
+    let currentFans = SelectedFanReadings(observation: observation, fan0: 5000, fan1: 6000)
+    let inspection = ChartInspectionState()
+
+    inspection.hover(at: Date(timeIntervalSince1970: 1000))
+    let readings = inspection.schematic(in: selection, fans: currentFans)
+
+    precondition(readings.cpuPercent == 10)
+    precondition(readings.gpuPercent == 20)
+    precondition(readings.fan0 == 0)
+    precondition(readings.fan1 == 1456)
+    precondition(readings.memoryTotalGiB == 48)
+    precondition(readings.batteryPercent == 40)
+    precondition(readings.batteryWatts == -8)
+    precondition(readings.cpuTemperature == nil)
+    precondition(readings.gpuTemperature == nil)
+}
+
+@MainActor
+private func preserves_the_active_graph_when_another_graph_exits() {
+    // Goal: a late exit from the previous plot cannot erase the next plot's preview.
+    // Method: enter two plots, then deliver the first plot's exit last.
+    let inspection = ChartInspectionState()
+    let first = UUID()
+    let second = UUID()
+    let frame = CGRect(x: 0, y: 0, width: 400, height: 200)
+    inspection.hover(at: CGPoint(x: 100, y: 50), in: frame, domain: 1000...1900, owner: first)
+    inspection.hover(at: CGPoint(x: 200, y: 50), in: frame, domain: 1000...1900, owner: second)
+    let expected = inspection.date(in: nil)
+
+    inspection.clear(owner: first)
+
+    precondition(expected != nil)
+    precondition(inspection.date(in: nil) == expected,
+        "An inactive graph cleared another graph's inspection")
+}
+
+@MainActor
+private func keeps_the_pointer_at_its_screen_position_when_the_plot_changes() {
+    // Goal: inspection follows the time beneath a stationary pointer as live charts move.
+    // Method: change the domain, then resize the same plot around that screen position.
+    let inspection = ChartInspectionState()
+    let owner = UUID()
+    let frame = CGRect(x: 0, y: 0, width: 415, height: 200)
+    inspection.hover(at: CGPoint(x: 200, y: 50), in: frame, domain: 1000...1900, owner: owner)
+    precondition(inspection.date(in: nil) == Date(timeIntervalSince1970: 1450))
+
+    inspection.retarget(in: frame, domain: 1001...1901, owner: owner)
+
+    precondition(inspection.date(in: nil) == Date(timeIntervalSince1970: 1451))
+    inspection.retarget(in: CGRect(x: 0, y: 0, width: 715, height: 200),
+        domain: 1001...1901, owner: owner)
+    precondition(inspection.date(in: nil) == Date(timeIntervalSince1970: 1226))
+}
+
+@MainActor
+private func clears_the_pointer_when_scrolling_moves_the_plot_away() {
+    // Goal: a plot no longer under the pointer cannot keep historical page readings active.
+    // Method: retain the pointer, then move the plot's global frame beyond it.
+    let inspection = ChartInspectionState()
+    let owner = UUID()
+    let frame = CGRect(x: 0, y: 0, width: 415, height: 200)
+    inspection.hover(at: CGPoint(x: 200, y: 50), in: frame, domain: 1000...1900, owner: owner)
+
+    inspection.retarget(in: frame.offsetBy(dx: 0, dy: 100), domain: 1000...1900, owner: owner)
+
+    precondition(inspection.date(in: nil) == nil)
+}
+
+@MainActor
+private func coalesces_pointer_motion_within_one_recorded_second() {
+    // Goal: subsecond pointer motion does not repeatedly invalidate all Overview charts.
+    // Method: observe publications while moving within one cell and then across its edge.
+    let inspection = ChartInspectionState()
+    let owner = UUID()
+    var changes = 0
+    let subscription = inspection.objectWillChange.sink { changes += 1 }
+    let frame = CGRect(x: 0, y: 0, width: 1015, height: 200)
+
+    inspection.hover(at: CGPoint(x: 200.1, y: 50), in: frame, domain: 1000...1900, owner: owner)
+    inspection.hover(at: CGPoint(x: 200.2, y: 50), in: frame, domain: 1000...1900, owner: owner)
+    inspection.hover(at: CGPoint(x: 201.1, y: 50), in: frame, domain: 1000...1900, owner: owner)
+
+    precondition(changes == 2, "Subsecond pointer motion republished the whole page: \(changes)")
+    withExtendedLifetime(subscription) {}
+}
+
+@MainActor
+private func keeps_missing_inspections_empty_until_the_preview_ends() throws {
+    // Goal: an empty inspected second never falls back to current values or current fans.
+    // Method: inspect a gap in a nonempty selection, then clear the preview.
+    let point: Metric = try decodeRecordingResponse(Data(#"""
+        {"value":{"run":"run","boot":"boot","publication":1,"wall_ns":1000000000000,
+         "segment":1,"cpu_percent":80,"fan_rpm":[5000,6000]}}
+        """#.utf8))
+    let observation = Observation(run: "run", boot: "boot", publication: 1, runTick: 1,
+        wallNs: point.wallNs, windowLosses: nil)
+    let selection = Selection(second: 1000, selected: observation, alternatives: [observation],
+        summary: point, trends: [point], contextSeconds: 900)
+    let inspection = ChartInspectionState()
+
+    inspection.hover(at: Date(timeIntervalSince1970: 999))
+
+    precondition(inspection.summary(in: selection) == nil)
+    precondition(inspection.schematic(in: selection, fans: nil).cpuPercent == nil)
+    precondition(inspection.schematic(in: selection, fans: nil).fan0 == nil)
+    precondition(inspection.reading(in: selection, readout: { "\($0.cpuPercent!)" })
+        .hasSuffix("No recorded observation"))
+    inspection.clear()
+    precondition(inspection.summary(in: selection)?.id == point.id)
+    precondition(inspection.date(in: selection) == nil)
 }
 
 private func scales_small_power_without_rounding_it_to_zero() {

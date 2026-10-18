@@ -6,11 +6,7 @@ func schematicReadings(selection: Selection?, fans: SelectedFanReadings?) -> Sch
     var readings = SchematicReadings()
     if let summary = selection?.summary, summary.identity == selected.identity,
        summary.wallNs == selected.wallNs {
-        readings.cpuPercent = summary.cpuPercent
-        readings.gpuPercent = summary.gpuActivePercent
-        readings.memoryTotalGiB = summary.memoryTotalBytes.map { Double($0) / 1_073_741_824 }
-        readings.batteryPercent = summary.battery?.chargePercent
-        readings.batteryWatts = summary.battery?.powerWatts
+        readings = schematicSummaryReadings(summary)
     }
     if let fans, fans.observation.identity == selected.identity,
        fans.observation.runTick == selected.runTick, fans.observation.wallNs == selected.wallNs {
@@ -19,6 +15,12 @@ func schematicReadings(selection: Selection?, fans: SelectedFanReadings?) -> Sch
     }
 
     return readings
+}
+
+func schematicSummaryReadings(_ summary: Metric) -> SchematicReadings {
+    SchematicReadings(cpuPercent: summary.cpuPercent, gpuPercent: summary.gpuActivePercent,
+        memoryTotalGiB: summary.memoryTotalBytes.map { Double($0) / 1_073_741_824 },
+        batteryPercent: summary.battery?.chargePercent, batteryWatts: summary.battery?.powerWatts)
 }
 
 @MainActor

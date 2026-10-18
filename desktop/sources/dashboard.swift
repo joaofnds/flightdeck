@@ -3,12 +3,16 @@ import SwiftUI
 struct Dashboard: View {
     @EnvironmentObject private var model: RecordingModel
     @Environment(\.flightdeckTheme) private var theme
-    @StateObject private var inspection = ChartInspectionState()
+    @StateObject private var inspection: ChartInspectionState
     @StateObject private var schematicPreview = SchematicPreviewState()
     @State private var chartColumnCount = 3
 
     private var points: [Metric] { model.selection?.trends ?? [] }
-    private var summary: Metric? { model.selection?.summary }
+    private var summary: Metric? { inspection.summary(in: model.selection) }
+
+    init(inspection: ChartInspectionState = ChartInspectionState()) {
+        _inspection = StateObject(wrappedValue: inspection)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: theme.sectionGap) {
@@ -36,7 +40,7 @@ struct Dashboard: View {
             }
             VStack(alignment: .leading, spacing: theme.fieldGap) {
                 Text("Inside your Mac").font(.title3.weight(.semibold))
-                MacBookSchematic(readings: schematicReadings(selection: model.selection,
+                MacBookSchematic(readings: inspection.schematic(in: model.selection,
                     fans: model.fans), preview: schematicPreview)
                     .help("Illustration: 16-inch MacBook Pro. Fan channel sides are unverified.")
             }
@@ -44,6 +48,8 @@ struct Dashboard: View {
         .onChange(of: model.schematicPreviewSource, initial: true) { _, source in
             schematicPreview.observeSource(source)
         }
+        .onChange(of: model.path) { _, _ in inspection.clear() }
+        .onChange(of: model.isLiveSource) { _, _ in inspection.clear() }
         .onGeometryChange(for: Int.self) { [gap = theme.panelGap] geometry in
             let minimumWidth: CGFloat = 320
             if geometry.size.width >= 3 * minimumWidth + 2 * gap { return 3 }
@@ -137,12 +143,12 @@ struct Dashboard: View {
                 }
                 HStack(spacing: theme.fieldGap) {
                     Text("Read").foregroundStyle(theme.storageReadSeries)
-                    Text(dashboardReading(data.selected?.rates.readBps.map {
+                    Text(dashboardReading(summary?.storage?.rates.readBps.map {
                         $0 / 1_000_000
                     }, unit: "MB/s"))
                     Spacer()
                     Text("Write").foregroundStyle(theme.storageWriteSeries)
-                    Text(dashboardReading(data.selected?.rates.writeBps.map {
+                    Text(dashboardReading(summary?.storage?.rates.writeBps.map {
                         $0 / 1_000_000
                     }, unit: "MB/s"))
                 }.font(.caption).monospacedDigit()
@@ -216,9 +222,7 @@ struct Dashboard: View {
                     + (context.domain.upperBound - context.domain.lowerBound) * Double(offset) / 2)
                     .formatted(.dateTime.hour().minute())
             }
-            let selectedTime = context.selection.selected.map { Double($0.wallNs) / 1e9 }
-                ?? Double(context.selection.second)
-            TimeSeriesPlot(model: plot, style: style, selectedTime: selectedTime, labels: labels)
+            TimeSeriesPlot(model: plot, style: style, selectedTime: nil, labels: labels)
                 .frame(height: theme.chartHeight)
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel(lines.map(\.name).joined(separator: ", "))
@@ -234,10 +238,35 @@ struct Dashboard: View {
 @MainActor
 final class ChartInspectionState: ObservableObject {
     @Published private var value: Position?
+    private var pointer: Pointer?
 
-    private enum Position {
+    private enum Position: Equatable {
         case pointer(Date)
         case observation(String)
+    }
+
+    private struct Pointer {
+        let owner: UUID
+        let location: CGPoint
+    }
+
+    func summary(in selection: Selection?) -> Metric? {
+        guard value != nil else { return selection?.summary }
+
+        return point(in: selection)
+    }
+
+    func schematic(in selection: Selection?, fans: SelectedFanReadings?) -> SchematicReadings {
+        guard value != nil else { return schematicReadings(selection: selection, fans: fans) }
+        guard let point = point(in: selection) else { return SchematicReadings() }
+
+        var readings = schematicSummaryReadings(point)
+        if let channels = point.fanRpm?.values {
+            readings.fan0 = channels.first ?? nil
+            readings.fan1 = channels.count > 1 ? channels[1] : nil
+        }
+
+        return readings
     }
 
     func date(in selection: Selection?) -> Date? {
@@ -274,16 +303,50 @@ final class ChartInspectionState: ObservableObject {
     }
 
     func reading(in selection: Selection?, readout: (Metric) -> String) -> String {
-        guard let date = date(in: selection) else {
+        guard value != nil else {
             return selection?.summary.map(readout) ?? "Unavailable"
         }
+        guard let date = date(in: selection) else { return "No recorded observation" }
 
         let reading = point(in: selection).map(readout) ?? "No recorded observation"
         return date.formatted(.dateTime.hour().minute().second()) + ", " + reading
     }
 
-    func hover(at date: Date?) { value = date.map(Position.pointer) }
-    func clear() { value = nil }
+    func hover(at date: Date?) {
+        pointer = nil
+        setPosition(date.map(Position.pointer))
+    }
+
+    func clear() {
+        pointer = nil
+        setPosition(nil)
+    }
+
+    func hover(at location: CGPoint, in frame: CGRect, domain: ClosedRange<Double>, owner: UUID) {
+        pointer = Pointer(owner: owner, location: location)
+        retarget(in: frame, domain: domain, owner: owner)
+    }
+
+    func retarget(in frame: CGRect, domain: ClosedRange<Double>, owner: UUID) {
+        guard let pointer, pointer.owner == owner else { return }
+
+        let local = CGPoint(x: pointer.location.x - frame.minX,
+            y: pointer.location.y - frame.minY)
+        let coordinates = TimeSeriesCoordinates(domain: domain, size: frame.size)
+        guard let seconds = coordinates.time(at: local) else { clear(); return }
+
+        setPosition(.pointer(Date(timeIntervalSince1970: floor(seconds))))
+    }
+
+    func clear(owner: UUID) {
+        guard pointer?.owner == owner else { return }
+
+        clear()
+    }
+
+    private func setPosition(_ position: Position?) {
+        if value != position { value = position }
+    }
 
     func move(step: Int, in selection: Selection?) -> Bool {
         guard let points = selection?.trends, !points.isEmpty else { return false }
@@ -291,7 +354,8 @@ final class ChartInspectionState: ObservableObject {
         let index = point(in: selection).flatMap { point in
             points.firstIndex { $0.id == point.id }
         } ?? points.count - 1
-        value = .observation(points[min(points.count - 1, max(0, index + step))].id)
+        pointer = nil
+        setPosition(.observation(points[min(points.count - 1, max(0, index + step))].id))
         return true
     }
 
@@ -300,12 +364,13 @@ final class ChartInspectionState: ObservableObject {
             return false
         }
 
-        value = .observation(point.id)
+        pointer = nil
+        setPosition(.observation(point.id))
         return true
     }
 }
 
-private struct ChartInspection: ViewModifier {
+struct ChartInspection: ViewModifier {
     @EnvironmentObject private var model: RecordingModel
     @Environment(\.flightdeckTheme) private var theme
 
@@ -313,11 +378,21 @@ private struct ChartInspection: ViewModifier {
     let domain: ClosedRange<Double>
     let readout: (Metric) -> String
     @FocusState private var focused: Bool
+    @State private var owner = UUID()
+
+    init(inspection: ChartInspectionState, domain: ClosedRange<Double>,
+         readout: @escaping (Metric) -> String, owner: UUID = UUID()) {
+        self.inspection = inspection
+        self.domain = domain
+        self.readout = readout
+        _owner = State(initialValue: owner)
+    }
 
     func body(content: Content) -> some View {
         content.overlay {
             GeometryReader { geometry in
                 let coordinates = TimeSeriesCoordinates(domain: domain, size: geometry.size)
+                let frame = geometry.frame(in: .global)
                 ZStack(alignment: .topLeading) {
                     Color.clear.contentShape(Rectangle())
                         .onTapGesture { location in
@@ -340,10 +415,10 @@ private struct ChartInspection: ViewModifier {
                             switch phase {
                             case .active(let location):
                                 guard !model.busy else { return }
-                                inspection.hover(at: coordinates.time(at: location).map {
-                                    Date(timeIntervalSince1970: $0)
-                                })
-                            case .ended: inspection.clear()
+                                inspection.hover(at: CGPoint(x: frame.minX + location.x,
+                                    y: frame.minY + location.y), in: frame, domain: domain,
+                                    owner: owner)
+                            case .ended: inspection.clear(owner: owner)
                             }
                         }
                     if let date = inspection.date(in: model.selection) {
@@ -366,6 +441,12 @@ private struct ChartInspection: ViewModifier {
                         }
                     }
                 }
+                .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
+                    inspection.retarget(in: frame, domain: domain, owner: owner)
+                }
+                .onChange(of: domain) { _, _ in
+                    inspection.retarget(in: frame, domain: domain, owner: owner)
+                }
             }
         }
             .focusable().focused($focused)
@@ -376,6 +457,10 @@ private struct ChartInspection: ViewModifier {
             .onKeyPress(.rightArrow) { inspect(step: 1) }
             .onKeyPress(.home) { inspectBoundary(first: true) }
             .onKeyPress(.end) { inspectBoundary(first: false) }
+            .onKeyPress(.escape) {
+                inspection.clear()
+                return .handled
+            }
             .onKeyPress(.return) {
                 guard !model.busy, let target = inspection.target(in: model.selection) else {
                     return .ignored
@@ -385,7 +470,7 @@ private struct ChartInspection: ViewModifier {
                 model.select(target)
                 return .handled
             }
-            .onChange(of: model.selection?.second) { _, _ in inspection.clear() }
+            .onDisappear { inspection.clear(owner: owner) }
     }
 
     private var inspectedPoint: Metric? {
