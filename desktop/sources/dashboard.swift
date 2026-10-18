@@ -15,20 +15,15 @@ struct Dashboard: View {
                 Label("No recorded tick at this second", systemImage: "clock.badge.questionmark")
                     .foregroundStyle(theme.muted)
             }
-            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: theme.panelGap) {
+            summaryMetrics
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 460), alignment: .leading)],
+                      alignment: .leading, spacing: theme.panelGap) {
                 linePanel("CPU activity", value: summary?.cpuPercent, unit: "%", color: theme.cpuSeries,
                           explanation: "Busy ticks across all recorded logical CPUs divided by total CPU ticks. Requires consecutive compatible observations.",
                           domain: 0...100, metric: \.cpuPercent)
                 memoryPanel
                 gpuActivityPanel
-                linePanel("External interfaces · received", value: summary?.networkRxBps.map { $0 / 1024 },
-                          unit: "KiB/s", color: theme.networkReceivedSeries,
-                          explanation: "Sum of recorded non-loopback interfaces. VPN and tunnel traffic can be counted more than once. Counter deltas use actual continuous elapsed time.",
-                          metric: \.networkRxBps, scale: 1024)
-                linePanel("External interfaces · sent", value: summary?.networkTxBps.map { $0 / 1024 },
-                          unit: "KiB/s", color: theme.networkSentSeries,
-                          explanation: "Sum of sent-byte deltas across an unchanged set of recorded non-loopback interfaces.",
-                          metric: \.networkTxBps, scale: 1024)
+                networkPanel
                 linePanel("System power", value: summary?.powerWatts, unit: "W", color: theme.systemPowerSeries,
                           explanation: "Recorded SMC system-power reading. Unread source remains unavailable.",
                           metric: \.powerWatts)
@@ -36,23 +31,11 @@ struct Dashboard: View {
                           explanation: "Recorded SoC sensor reading. This does not identify separate CPU/GPU sensor positions.",
                           metric: \.socCelsius)
             }
-            HStack(spacing: theme.contentPadding) {
-                Label(model.catalog?.live == true ? "Live metrics" : "Saved recording",
-                      systemImage: model.catalog?.live == true ? "waveform.path.ecg" : "externaldrive")
-                if let pressure = summary?.pressure {
-                    Text("Memory pressure: " + ([0: "Normal", 1: "Warning", 2: "Critical"][pressure] ?? "Unknown"))
-                }
-                if let swap = summary?.swapUsedBytes {
-                    Text("Swap: " + ByteCountFormatter.string(fromByteCount: Int64(clamping: swap), countStyle: .binary))
-                }
-                Spacer()
-                Button("Inspect processes →", action: model.enterProcesses)
-            }.font(.callout).foregroundStyle(theme.muted)
             VStack(alignment: .leading, spacing: theme.fieldGap) {
+                Text("Inside your Mac").font(.title3.weight(.semibold))
                 MacBookSchematic(readings: schematicReadings(selection: model.selection,
                     fans: model.fans), preview: schematicPreview)
-                Text("Illustration: 16-inch MacBook Pro. Fan channel sides are unverified.")
-                    .font(theme.compactReadingFont).foregroundStyle(theme.muted)
+                    .help("Illustration: 16-inch MacBook Pro. Fan channel sides are unverified.")
             }
         }
         .onChange(of: model.schematicPreviewSource, initial: true) { _, source in
@@ -60,11 +43,50 @@ struct Dashboard: View {
         }
     }
 
+    private var summaryMetrics: some View {
+        MetricSummaryGrid {
+            MetricSummary(title: "CPU", reading: dashboardReading(summary?.cpuPercent, unit: "%"),
+                note: "All logical CPUs", color: theme.cpuSeries, action: model.enterProcesses)
+            MetricSummary(title: "GPU", reading: dashboardReading(summary?.gpuActivePercent, unit: "%"),
+                note: "Active time", color: theme.gpuActivitySeries,
+                action: { model.navigate(to: "GPU") })
+            MetricSummary(title: "Memory pressure", reading: summary?.pressure.flatMap {
+                MemoryPressureState(rawValue: $0)?.label
+            } ?? "Unavailable", note: "macOS verdict", action: { model.navigate(to: "Memory") })
+            MetricSummary(title: "System power", reading: dashboardReading(summary?.powerWatts, unit: "W"),
+                note: "Whole-machine sensor", color: theme.systemPowerSeries,
+                action: { model.navigate(to: "Energy") })
+            MetricSummary(title: "Receive", reading: dashboardReading(summary?.networkRxBps.map {
+                $0 / 1_000_000
+            }, unit: "MB/s"), note: "External interfaces", color: theme.networkReceivedSeries,
+                action: { model.navigate(to: "Network") })
+        }
+    }
+
+    private var networkPanel: some View {
+        Panel(title: "Network traffic", explanation: "Rates across recorded non-loopback interfaces. Sent traffic is mirrored below zero. VPN and tunnel traffic can be counted more than once.") {
+            if let selection = model.selection {
+                let data = RecordedComponentData(context: RecordedChartContext(selection: selection),
+                    theme: theme)
+                plot(context: data.context, lines: data.network,
+                    style: TimeSeriesStyle(unit: "KiB/s", fill: 0.1)) { point in
+                    "Received " + dashboardReading(point.networkRxBps.map { $0 / 1024 }, unit: "KiB/s")
+                        + " · Sent " + dashboardReading(point.networkTxBps.map { $0 / 1024 }, unit: "KiB/s")
+                }
+                HStack(spacing: theme.panelGap) {
+                    Label("Received", systemImage: "arrow.down").foregroundStyle(theme.networkReceivedSeries)
+                    Spacer()
+                    Text(dashboardReading(summary?.networkRxBps.map { $0 / 1024 }, unit: "KiB/s"))
+                    Label("Sent", systemImage: "arrow.up").foregroundStyle(theme.networkSentSeries)
+                    Text(dashboardReading(summary?.networkTxBps.map { $0 / 1024 }, unit: "KiB/s"))
+                }.font(.caption).monospacedDigit()
+            }
+        }
+    }
+
     private var gpuActivityPanel: some View {
         Panel(title: "GPU activity",
               explanation: "Time in recorded active GPU states divided by the measured continuous interval. Requires compatible observations and complete matching active states.") {
-            Text(metricText(summary?.gpuActivePercent, unit: "%"))
-                .font(theme.metricFont).monospacedDigit()
             if let selection = model.selection {
                 let data = RecordedComponentData(context: RecordedChartContext(selection: selection),
                     theme: theme)
@@ -75,20 +97,13 @@ struct Dashboard: View {
                     metricText(point.gpuActivePercent, unit: "%")
                 }
             }
+            chartReading("Active time", value: summary?.gpuActivePercent,
+                unit: "%", color: theme.gpuActivitySeries)
         }
     }
 
     private var memoryPanel: some View {
         Panel(title: "Memory", explanation: "Recorded active, wired and compressed memory in GiB. These are source categories; cached/free memory remains available in the recorded-memory table.") {
-            HStack(alignment: .firstTextBaseline) {
-                Text(metricText(summary?.memoryActiveBytes.map { Double($0) / 1_073_741_824 }, unit: "GiB active"))
-                    .font(theme.metricFont).monospacedDigit()
-                Spacer()
-                if let total = summary?.memoryTotalBytes {
-                    Text(metricText(Double(total) / 1_073_741_824, unit: "GiB installed", digits: 0))
-                        .font(.caption).foregroundStyle(theme.muted)
-                }
-            }
             if let selection = model.selection {
                 let memory = RecordedMemoryData(selection: selection, theme: theme)
                 plot(context: memory.context, lines: memory.categories,
@@ -97,13 +112,17 @@ struct Dashboard: View {
                     metricText(point.memoryActiveBytes.map { Double($0) / 1_073_741_824 },
                                unit: "GiB active")
                 }
-                HStack(spacing: theme.panelGap) {
+                HStack(spacing: theme.fieldGap) {
                     ForEach(Array(memory.categories.enumerated()), id: \.offset) { _, line in
                         HStack(spacing: 6) {
                             Circle().fill(line.color).frame(width: 6, height: 6)
                             Text(line.name).foregroundStyle(theme.muted)
                         }
                     }
+                    Spacer(minLength: 0)
+                    Text(dashboardReading(summary?.memoryTotalBytes.map {
+                        Double($0) / 1_073_741_824
+                    }, unit: "GiB installed"))
                 }.font(.caption)
             }
         }
@@ -113,8 +132,6 @@ struct Dashboard: View {
                            explanation: String, domain: ClosedRange<Double>? = nil,
                            metric: KeyPath<Metric, Double?>, scale: Double = 1) -> some View {
         Panel(title: title, explanation: explanation) {
-            Text(metricText(value, unit: unit)).font(theme.metricFont)
-                .monospacedDigit()
             if let selection = model.selection {
                 let line = TimeSeriesLine(name: title, color: color,
                     values: points.map { $0[keyPath: metric].map { $0 / scale } })
@@ -126,7 +143,18 @@ struct Dashboard: View {
                     metricText(point[keyPath: metric].map { $0 / scale }, unit: unit)
                 }
             }
+            chartReading(title, value: value, unit: unit, color: color)
         }
+    }
+
+    private func chartReading(_ title: String, value: Double?, unit: String,
+                              color: Color) -> some View {
+        HStack(spacing: 6) {
+            Circle().fill(color).frame(width: 6, height: 6).accessibilityHidden(true)
+            Text(title).foregroundStyle(theme.muted)
+            Spacer()
+            Text(dashboardReading(value, unit: unit)).monospacedDigit()
+        }.font(.caption)
     }
 
     @ViewBuilder

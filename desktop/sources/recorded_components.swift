@@ -82,6 +82,7 @@ struct RecordedComponentPane: View {
                     Label("No recorded tick at this second", systemImage: "clock.badge.questionmark")
                         .foregroundStyle(theme.muted)
                 }
+                ComponentSummary(component: component, metric: selection.summary)
                 switch component {
                 case .cpu:
                     chart("CPU activity", data: data, lines: [data.cpu], style: activityStyle,

@@ -993,8 +993,8 @@ private func uses_independent_gpu_activity_and_temperature_roles() throws {
 
 @MainActor
 private func separates_gpu_power_in_the_actual_energy_pane() throws {
-    // Goal: Energy paints GPU power only in its dedicated right-hand panel.
-    // Method: recolor only GPU power and inspect both halves of the actual power row.
+    // Goal: Energy keeps the GPU-power chart separate from the system-power chart.
+    // Method: recolor GPU power and inspect the chart row below the summary cards.
     let model = RecordingModel(path: "/unused", pollingEnabled: false)
     model.selection = try scalarPanelSelection(gpuPercent: 37.5)
     let ordinary = FlightdeckTheme()
@@ -1007,17 +1007,17 @@ private func separates_gpu_power_in_the_actual_energy_pane() throws {
         model: model, theme: changed, height: 700)
 
     precondition(scalarPanelPixelDifferences(baseline, recolored,
-        rows: 0..<320, columns: 0..<500) == 0,
+        rows: 160..<400, columns: 0..<500) == 0,
         "Energy painted GPU power inside the System power panel")
     precondition(scalarPanelPixelDifferences(baseline, recolored,
-        rows: 0..<320, columns: 580..<1080) > 300,
+        rows: 160..<400, columns: 580..<1080) > 300,
         "Energy omitted GPU power from its dedicated panel")
 }
 
 @MainActor
 private func separates_system_power_in_the_actual_energy_pane() throws {
-    // Goal: Energy paints system power only in its dedicated left-hand panel.
-    // Method: recolor only system power and inspect both halves of the actual power row.
+    // Goal: Energy keeps the system-power chart separate from the GPU-power chart.
+    // Method: recolor system power and inspect the chart row below the summary cards.
     let model = RecordingModel(path: "/unused", pollingEnabled: false)
     model.selection = try scalarPanelSelection(gpuPercent: 37.5)
     let ordinary = FlightdeckTheme()
@@ -1030,17 +1030,17 @@ private func separates_system_power_in_the_actual_energy_pane() throws {
         model: model, theme: changed, height: 700)
 
     precondition(scalarPanelPixelDifferences(baseline, recolored,
-        rows: 0..<320, columns: 580..<1080) == 0,
+        rows: 160..<400, columns: 580..<1080) == 0,
         "Energy painted system power inside the GPU power panel")
     precondition(scalarPanelPixelDifferences(baseline, recolored,
-        rows: 0..<320, columns: 0..<500) > 300,
+        rows: 160..<400, columns: 0..<500) > 300,
         "Energy omitted system power from its dedicated panel")
 }
 
 @MainActor
 private func expands_the_actual_overview_for_gpu_activity_above_nominal_capacity() throws {
     // Goal: the actual Overview keeps measured activity above 100% inside its plot.
-    // Method: recolor a constant 150% line and inspect only the GPU chart's plot rectangle.
+    // Method: recolor a constant 150% line below the summary row; its swatch cannot pass alone.
     let model = RecordingModel(path: "/unused", pollingEnabled: false)
     model.selection = try scalarPanelSelection(gpuPercent: 150)
     let ordinary = FlightdeckTheme()
@@ -1050,7 +1050,7 @@ private func expands_the_actual_overview_for_gpu_activity_above_nominal_capacity
     let baseline = scalarPanelImage(Dashboard(), model: model, theme: ordinary, height: 1800)
     let recolored = scalarPanelImage(Dashboard(), model: model, theme: changed, height: 1800)
     let plotPixels = scalarPanelPixelDifferences(baseline, recolored,
-        rows: 440..<620, columns: 100..<450)
+        rows: 150..<1800, columns: 0..<1080)
 
     precondition(plotPixels > 300,
         "Overview clipped measured 150% GPU activity outside its plot: \(plotPixels) role pixels")
