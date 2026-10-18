@@ -379,6 +379,7 @@ mod tests {
             detail: None,
             history: None,
             cpu_detail: None,
+            cpu_history: None,
             read_ms: 5.0,
         }
     }

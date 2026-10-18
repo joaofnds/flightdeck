@@ -6,6 +6,9 @@ use crate::dashboard::control;
 use crate::live_dashboard::{LiveDashboard, ROUTES, Row};
 use crate::live_projection::quantity;
 
+#[path = "live_recording_context_view.rs"]
+mod recording_context_view;
+
 impl LiveDashboard {
     pub fn navigation(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut sidebar = div()
@@ -71,7 +74,12 @@ impl LiveDashboard {
             .find(|(route, _)| *route == self.request.route)
             .map_or("Flightdeck", |(_, title)| *title);
         let selected = self.snapshot.as_ref().map_or_else(
-            || "Waiting for readings".into(),
+            || {
+                self.request.second.map_or_else(
+                    || "Waiting for readings".into(),
+                    |second| format!("Requested Unix second {second}"),
+                )
+            },
             |snapshot| crate::live_presentation::selected_clock(&snapshot.selection),
         );
         let mut header = div()
@@ -100,20 +108,9 @@ impl LiveDashboard {
                     .child(format!("{selected} · {}", self.status())),
             );
         header = header.child(self.missing_reading());
-        if self.request.route == "raw" {
+        if self.request.route != "computer" {
+            header = self.header_recording_context(header);
             header = self.header_alternatives(header, cx);
-        }
-        if let Some(snapshot) = &self.snapshot {
-            header = header.children(
-                crate::live_notices::losses(&snapshot.catalog, &snapshot.selection)
-                    .into_iter()
-                    .map(|notice| {
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(rgb(crate::charts::ORANGE))
-                            .child(notice)
-                    }),
-            );
         }
         if self.request.route == "raw" {
             header = header.child(self.table_picker(cx));
@@ -166,40 +163,6 @@ impl LiveDashboard {
         controls
     }
 
-    fn header_alternatives(&self, header: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
-        let Some(snapshot) = &self.snapshot else {
-            return header;
-        };
-        let Some(alternatives) = snapshot.selection["alternatives"].as_array() else {
-            return header;
-        };
-        if alternatives.len() < 2 {
-            return header;
-        }
-        let mut choices = div().flex().flex_wrap().gap(px(5.0)).mt(px(6.0));
-        for identity in alternatives.iter().take(64) {
-            let identity = identity.clone();
-            let label = format!("Publication {}", text(&identity["publication"]));
-            choices =
-                choices.child(control(&label).on_click(cx.listener(move |this, _, _, cx| {
-                    if let Some(second) = this
-                        .snapshot
-                        .as_ref()
-                        .and_then(|snapshot| snapshot.selection["second"].as_u64())
-                    {
-                        this.request.second = Some(second);
-                        this.request.identity = Some(identity.clone());
-                        this.request.offset = 0;
-                        this.request.apps_offset = 0;
-                        this.request.members_offset = 0;
-                        this.submit();
-                        cx.notify();
-                    }
-                })));
-        }
-        header.child(choices)
-    }
-
     pub fn row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
         let compact = matches!(
             &self.rows[index],
@@ -208,6 +171,7 @@ impl LiveDashboard {
         let content = match &self.rows[index] {
             Row::Summary => self.summary().into_any_element(),
             Row::CPUActivity => self.cpu_activity().into_any_element(),
+            Row::CPUHistory => self.cpu_history_panel(cx).into_any_element(),
             Row::OverviewStatus => self.overview_status(cx).into_any_element(),
             Row::AppSelector => self.app_selector(cx).into_any_element(),
             Row::AppSummary => self.app_summary().into_any_element(),
@@ -279,6 +243,44 @@ impl LiveDashboard {
                 "Memory pressure: {}",
                 pressure(&summary["pressure"]),
             )))
+            .children((self.request.route == "memory").then(|| self.memory_quantities()))
+    }
+
+    fn memory_quantities(&self) -> impl IntoElement {
+        let selection = self
+            .snapshot
+            .as_ref()
+            .map_or(&Value::Null, |snapshot| &snapshot.selection);
+        let mut values = div().flex().flex_wrap().gap(px(12.0));
+
+        for row in crate::live_memory::quantities(selection) {
+            values = values.child(
+                div()
+                    .min_w(px(220.0))
+                    .flex_1()
+                    .flex()
+                    .justify_between()
+                    .gap(px(12.0))
+                    .child(div().text_color(rgb(MUTED)).child(row.name))
+                    .child(row.reading),
+            );
+        }
+
+        div()
+            .mt(px(16.0))
+            .p(px(18.0))
+            .rounded(px(7.0))
+            .border_1()
+            .border_color(rgb(GRID))
+            .bg(rgb(PANEL))
+            .child(div().text_size(px(15.0)).child("All memory quantities"))
+            .child(div().mt(px(12.0)).text_size(px(12.0)).child(values))
+            .child(
+                div().mt(px(12.0)).text_size(px(11.0)).text_color(rgb(MUTED)).child(
+                    "Independent VM categories overlap and are not an additive used-memory total. \
+                    Speculative is included in Free.",
+                ),
+            )
     }
 
     fn computer(&self) -> impl IntoElement {

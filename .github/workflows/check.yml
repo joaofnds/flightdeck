@@ -92,3 +92,43 @@ jobs:
           cargo run --locked --manifest-path gpui-prototype/Cargo.toml
           --bin native_replay_build -- --typecheck
           --output gpui-prototype/target/native-replay-ci
+      - run: cargo build --locked --release -p collector -p persistence --bin collector --bin persister
+      - run: >-
+          cargo build --locked --release --manifest-path gpui-prototype/Cargo.toml
+          --bin flightdeck-gpui
+      - name: Record executable identities before packaging
+        run: >-
+          shasum -a 256 gpui-prototype/target/release/flightdeck-gpui
+          target/release/collector target/release/persister
+          > gpui-prototype/target/bundle-built.sha256
+      - run: gpui-prototype/target/release/flightdeck-gpui --bundle
+      - run: '"gpui-prototype/target/Flightdeck GPUI.app/Contents/MacOS/flightdeck-gpui" --bundle --check'
+      - name: Verify packaged executable identities
+        run: |
+          shasum -a 256 \
+            "gpui-prototype/target/Flightdeck GPUI.app/Contents/MacOS/flightdeck-gpui" \
+            "gpui-prototype/target/Flightdeck GPUI.app/Contents/Helpers/collector" \
+            "gpui-prototype/target/Flightdeck GPUI.app/Contents/Helpers/persister" \
+            > gpui-prototype/target/bundle-packaged.sha256
+          cat gpui-prototype/target/bundle-built.sha256 gpui-prototype/target/bundle-packaged.sha256
+          cut -c 1-64 gpui-prototype/target/bundle-built.sha256 \
+            > gpui-prototype/target/bundle-built-digests.sha256
+          cut -c 1-64 gpui-prototype/target/bundle-packaged.sha256 \
+            > gpui-prototype/target/bundle-packaged-digests.sha256
+          diff -u gpui-prototype/target/bundle-built-digests.sha256 \
+            gpui-prototype/target/bundle-packaged-digests.sha256
+      - name: Reject changed packaged helper bytes
+        run: |
+          cp -R "gpui-prototype/target/Flightdeck GPUI.app" \
+            "gpui-prototype/target/Flightdeck GPUI tampered.app"
+          printf changed >> \
+            "gpui-prototype/target/Flightdeck GPUI tampered.app/Contents/Helpers/collector"
+          shasum -a 256 \
+            "gpui-prototype/target/Flightdeck GPUI tampered.app/Contents/MacOS/flightdeck-gpui" \
+            "gpui-prototype/target/Flightdeck GPUI tampered.app/Contents/Helpers/collector" \
+            "gpui-prototype/target/Flightdeck GPUI tampered.app/Contents/Helpers/persister" \
+            > gpui-prototype/target/bundle-tampered.sha256
+          cut -c 1-64 gpui-prototype/target/bundle-tampered.sha256 \
+            > gpui-prototype/target/bundle-tampered-digests.sha256
+          ! diff -u gpui-prototype/target/bundle-built-digests.sha256 \
+            gpui-prototype/target/bundle-tampered-digests.sha256

@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::task::{Context as PollContext, Poll, Waker};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use gpui::{ClipboardItem, Context, Entity};
 use serde_json::Value;
@@ -11,14 +12,34 @@ use crate::live_dashboard::LiveDashboard;
 use crate::live_source::{Request, Snapshot, Update, Worker};
 use crate::native_input::TimeInput;
 
-gpui::actions!(flightdeck_native, [Quit, CloseWindow]);
+gpui::actions!(flightdeck_native, [Quit, CloseWindow, OpenRecording]);
+
+pub fn create_dashboard(
+    worker: Worker,
+    route: String,
+    seconds: Option<u32>,
+    cx: &mut gpui::App,
+) -> Entity<LiveDashboard> {
+    let input = gpui::AppContext::new(cx, TimeInput::new);
+    let entity = gpui::AppContext::new(cx, |_| {
+        let mut dashboard = LiveDashboard::new(worker, route, seconds);
+        dashboard.native.input = Some(input);
+        dashboard
+    });
+
+    install_application_actions(cx);
+    install_live_actions(&entity, cx);
+
+    entity
+}
 
 pub fn install_application_actions(cx: &mut gpui::App) {
     cx.bind_keys([
         gpui::KeyBinding::new("cmd-q", Quit, None),
         gpui::KeyBinding::new("cmd-w", CloseWindow, None),
+        gpui::KeyBinding::new("cmd-o", OpenRecording, None),
     ]);
-    cx.on_action(|_: &Quit, cx| cx.quit());
+    cx.on_action(|_: &Quit, cx| crate::live_launch::request_quit(cx));
     cx.on_action(|_: &CloseWindow, cx| {
         if let Some(window) = cx.active_window() {
             if let Err(error) = window.update(cx, |_, window, _| window.remove_window()) {
@@ -26,15 +47,35 @@ pub fn install_application_actions(cx: &mut gpui::App) {
             }
         }
     });
-    cx.set_menus(vec![gpui::Menu {
-        name: "Flightdeck".into(),
-        disabled: false,
-        items: vec![
-            gpui::MenuItem::action("Close Window", CloseWindow),
-            gpui::MenuItem::separator(),
-            gpui::MenuItem::action("Quit Flightdeck", Quit),
-        ],
-    }]);
+    cx.set_menus(application_menus());
+}
+
+fn application_menus() -> Vec<gpui::Menu> {
+    vec![
+        gpui::Menu {
+            name: "Flightdeck".into(),
+            disabled: false,
+            items: vec![
+                gpui::MenuItem::action("Close Window", CloseWindow),
+                gpui::MenuItem::separator(),
+                gpui::MenuItem::action("Quit Flightdeck", Quit),
+            ],
+        },
+        gpui::Menu {
+            name: "File".into(),
+            disabled: false,
+            items: vec![gpui::MenuItem::action("Open Recording…", OpenRecording)],
+        },
+    ]
+}
+
+pub fn install_live_actions(entity: &Entity<LiveDashboard>, cx: &mut gpui::App) {
+    let view = entity.downgrade();
+    cx.on_action(move |_: &OpenRecording, cx| {
+        if let Err(error) = view.update(cx, LiveDashboard::open_recording) {
+            eprintln!("Open recording action: {error}");
+        }
+    });
 }
 
 type PromptPoll = Box<dyn FnMut() -> Poll<Result<Option<Vec<PathBuf>>, String>>>;
@@ -42,9 +83,10 @@ type PromptPoll = Box<dyn FnMut() -> Poll<Result<Option<Vec<PathBuf>>, String>>>
 #[derive(Default)]
 pub struct NativeControls {
     pub input: Option<Entity<TimeInput>>,
+    pub alternative_page: u16,
     prompt: Option<PromptPoll>,
     candidate: Option<Candidate>,
-    retirement: Option<JoinHandle<()>>,
+    retirement: Option<RetiringReader>,
     pub notice: Option<String>,
 }
 
@@ -54,6 +96,18 @@ struct Candidate {
     generation: u64,
     started: std::time::Instant,
 }
+
+struct RetiringReader {
+    thread: JoinHandle<()>,
+    started: Instant,
+    delayed: bool,
+}
+
+const RETIREMENT_GRACE: Duration = Duration::from_secs(5);
+const RETIREMENT_WAITING: &str =
+    "Finishing recording cleanup. Open will become available when it finishes.";
+const RETIREMENT_DELAYED: &str = "Recording cleanup is taking longer. You can keep using \
+    this recording. Close and reopen Flightdeck to open another recording.";
 
 impl NativeControls {
     pub fn busy(&self) -> bool {
@@ -76,22 +130,61 @@ impl NativeControls {
         false
     }
 
-    fn retire(&mut self, worker: Worker) {
+    fn retire(&mut self, thread: Option<JoinHandle<()>>, now: Instant) {
         assert!(self.retirement.is_none());
-        self.retirement = worker.retire();
+
+        self.retirement = thread.map(|thread| RetiringReader {
+            thread,
+            started: now,
+            delayed: false,
+        });
+    }
+
+    pub fn retirement_status(&self) -> Option<&'static str> {
+        self.retirement.as_ref().map(|retirement| {
+            if retirement.delayed {
+                RETIREMENT_DELAYED
+            } else {
+                RETIREMENT_WAITING
+            }
+        })
     }
 
     pub fn poll_retirement(&mut self) -> Result<bool, String> {
-        if let Some(thread) = &self.retirement {
-            if thread.is_finished() {
-                if let Some(thread) = self.retirement.take() {
-                    thread
+        self.poll_retirement_at(Instant::now())
+    }
+
+    fn poll_retirement_at(&mut self, now: Instant) -> Result<bool, String> {
+        if let Some(retirement) = &mut self.retirement {
+            if retirement.thread.is_finished() {
+                if let Some(retirement) = self.retirement.take() {
+                    retirement
+                        .thread
                         .join()
                         .map_err(|_| "Reader retirement panicked".to_owned())?;
+
+                    if matches!(
+                        self.notice.as_deref(),
+                        Some(RETIREMENT_WAITING | RETIREMENT_DELAYED)
+                    ) {
+                        self.notice = None;
+                    }
+
+                    return Ok(true);
+                }
+
+                unreachable!("A finished retirement owns its join handle");
+            }
+
+            if !retirement.delayed {
+                if now.saturating_duration_since(retirement.started) >= RETIREMENT_GRACE {
+                    retirement.delayed = true;
+
                     return Ok(true);
                 }
             }
         }
+
         Ok(false)
     }
 }
@@ -104,14 +197,7 @@ impl LiveDashboard {
             .flex()
             .gap(px(6.0))
             .items_center()
-            .child(
-                control("Open…")
-                    .accessibility_id("flightdeck.open-recording")
-                    .aria_label("Open recording folder")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.open_recording(cx);
-                    })),
-            )
+            .child(self.native_open_control(cx))
             .child(
                 control("Copy")
                     .accessibility_id("flightdeck.copy-reading")
@@ -131,9 +217,33 @@ impl LiveDashboard {
         controls
     }
 
-    pub fn native_notice(&self) -> impl gpui::IntoElement {
+    fn native_open_control(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         use gpui::prelude::*;
-        gpui::div().children(self.native.notice.as_ref().map(|notice| {
+        if let Some(status) = self.native.retirement_status() {
+            return gpui::div()
+                .id("open-recording-waiting")
+                .debug_selector(|| "open-recording-waiting".into())
+                .role(gpui::Role::Status)
+                .aria_label("Open recording unavailable")
+                .aria_description(status)
+                .px(gpui::px(9.0))
+                .py(gpui::px(7.0))
+                .text_color(gpui::rgb(crate::charts::MUTED))
+                .child("Open unavailable")
+                .into_any_element();
+        }
+
+        crate::dashboard::control("Open…")
+            .debug_selector(|| "open-recording-available".into())
+            .accessibility_id("flightdeck.open-recording")
+            .aria_label("Open recording folder")
+            .on_click(cx.listener(|this, _, _, cx| this.open_recording(cx)))
+            .into_any_element()
+    }
+
+    pub fn native_notice(&self, cx: &mut Context<Self>) -> impl gpui::IntoElement {
+        use gpui::prelude::*;
+        let mut notices = gpui::div().children(self.native.notice.as_ref().map(|notice| {
             gpui::div()
                 .id("native-notice")
                 .role(gpui::Role::Status)
@@ -143,11 +253,54 @@ impl LiveDashboard {
                 .py(gpui::px(4.0))
                 .text_color(gpui::rgb(crate::charts::MUTED))
                 .child(notice.clone())
-        }))
+        }));
+        if let Some(status) = self.native.retirement_status() {
+            notices = notices.child(
+                gpui::div()
+                    .id("reader-retirement-status")
+                    .debug_selector(|| status.into())
+                    .role(gpui::Role::Status)
+                    .aria_label(status)
+                    .px(gpui::px(24.0))
+                    .py(gpui::px(4.0))
+                    .text_color(gpui::rgb(crate::charts::MUTED))
+                    .child(status),
+            );
+        }
+        if let Some((status, retry)) = crate::live_launch::collector_status(cx) {
+            let mut collector = gpui::div()
+                .id("collector-status")
+                .role(gpui::Role::Status)
+                .accessibility_id("flightdeck.collector-status")
+                .aria_label(status.clone())
+                .px(gpui::px(24.0))
+                .py(gpui::px(4.0))
+                .flex()
+                .gap(gpui::px(12.0))
+                .text_color(gpui::rgb(crate::charts::MUTED))
+                .child(status);
+            if retry {
+                collector = collector.child(
+                    crate::dashboard::control("Retry recording")
+                        .accessibility_id("flightdeck.retry-collector")
+                        .on_click(cx.listener(|_, _, _, cx| {
+                            crate::live_launch::retry_collector(cx);
+                        })),
+                );
+            }
+            notices = notices.child(collector);
+        }
+        notices
     }
 
     pub fn open_recording(&mut self, cx: &mut Context<Self>) {
         if self.native.busy() {
+            self.native.notice = Some(if let Some(status) = self.native.retirement_status() {
+                status.into()
+            } else {
+                "A recording is already opening. Finish or cancel it before opening another.".into()
+            });
+            cx.notify();
             return;
         }
 
@@ -236,7 +389,7 @@ impl LiveDashboard {
                     }
                     Err(error) => {
                         self.native.notice = Some(error);
-                        self.native.retire(worker);
+                        self.native.retire(worker.retire(), Instant::now());
                     }
                 }
             }
@@ -256,65 +409,92 @@ impl LiveDashboard {
         };
 
         let result = candidate.worker.take();
-        let expected = candidate.generation;
         let timed_out = candidate.started.elapsed() >= std::time::Duration::from_secs(30);
-
         match result {
-            Ok(Some(Update::Ready(snapshot))) if snapshot.generation == expected => {
-                self.accept_recording(snapshot);
-                true
-            }
-            Ok(Some(Update::Failed {
-                generation,
-                message,
-            })) if generation == expected => {
-                self.cancel_recording(&format!("Recording unchanged: {message}"));
-                true
+            Ok(Some(update)) => {
+                if self.recording_receive(update) {
+                    return true;
+                }
             }
             Err(error) => {
                 self.cancel_recording(&format!("Recording unchanged: {error}"));
-                true
+                return true;
             }
-            _ => {
-                if timed_out {
-                    self.cancel_recording("Recording unchanged: open exceeded 30 seconds");
-                }
-                timed_out
-            }
+            Ok(None) => {}
         }
+        if timed_out {
+            self.cancel_recording("Recording unchanged: open exceeded 30 seconds");
+        }
+
+        timed_out
+    }
+
+    pub(crate) fn recording_receive(&mut self, update: Update) -> bool {
+        let Some(candidate) = &self.native.candidate else {
+            return false;
+        };
+        let expected = candidate.generation;
+
+        match update {
+            Update::Ready(snapshot) if snapshot.generation == expected => {
+                self.accept_recording(snapshot);
+            }
+            Update::Failed {
+                generation,
+                message,
+            } if generation == expected => {
+                self.cancel_recording(&format!("Recording unchanged: {message}"));
+            }
+            _ => return false,
+        }
+
+        true
     }
 
     fn accept_recording(&mut self, snapshot: Box<Snapshot>) {
+        let Some(candidate) = &self.native.candidate else {
+            return;
+        };
+        let presentation =
+            match crate::live_acceptance::Presentation::prepare(&candidate.request, snapshot) {
+                Ok(presentation) => presentation,
+                Err(error) => {
+                    self.cancel_recording(&format!("Recording unchanged: {error}"));
+                    return;
+                }
+            };
+
         if let Some(candidate) = self.native.candidate.take() {
             let old = std::mem::replace(&mut self.worker, candidate.worker);
-            self.request = candidate.request;
             self.generation = candidate.generation;
-            self.snapshot = None;
-            self.panels.clear();
             self.expanded = None;
             self.executable = None;
             self.executables.clear();
             self.hidden.clear();
             self.hover_second = None;
             self.app_picker_open = false;
-            self.accept(snapshot);
+            self.cpu_inspection = None;
+            self.native.alternative_page = 0;
+
+            self.accept_presentation(presentation);
+
             self.native.notice = Some("Recording opened".into());
-            self.native.retire(old);
+            self.native.retire(old.retire(), Instant::now());
         }
     }
 
     pub fn cancel_recording(&mut self, notice: &str) {
         self.native.prompt = None;
         if let Some(candidate) = self.native.candidate.take() {
-            self.native.retire(candidate.worker);
+            self.native
+                .retire(candidate.worker.retire(), Instant::now());
         }
         self.native.notice = Some(notice.to_owned());
     }
 
     pub fn inspect_text(&mut self, text: &str, cx: &mut Context<Self>) {
         let seconds = self
-            .snapshot
-            .as_ref()
+            .context_snapshot()
             .and_then(|snapshot| snapshot.selection["trends"].as_array())
             .map_or_else(Vec::new, |points| {
                 points
@@ -361,6 +541,7 @@ fn fresh_request(route: &str) -> Request {
         app: None,
         apps_offset: 0,
         members_offset: 0,
+        cpu_offset: 0,
     }
 }
 

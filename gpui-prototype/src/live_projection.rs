@@ -21,7 +21,7 @@ pub fn inspection_identity(selection: &Value, second: u64) -> Option<Value> {
         .as_array()?
         .iter()
         .take(OBSERVATIONS_MAX)
-        .find(|point| {
+        .rfind(|point| {
             point["wall_ns"]
                 .as_u64()
                 .is_some_and(|wall| wall / NANOSECONDS_PER_SECOND == second)
@@ -55,8 +55,13 @@ pub fn panels(
     let domain = Domain::read(selection)?;
     let coordinates = coordinates(points, &domain, route == "apps", &source["selected"])?;
     let mut result = Vec::with_capacity(7);
-    for specification in specifications(route) {
-        result.push(Rc::new(panel(&specification, points, &coordinates)?));
+    for specification in specifications(route, points)? {
+        let mut panel = panel(&specification, points, &coordinates)?;
+        if specification.id == "live-memory-pressure" {
+            pressure_cells(&mut panel, &domain, points, &coordinates)?;
+        }
+
+        result.push(Rc::new(panel));
     }
     assert!(result.len() <= 7);
     Ok(result)
@@ -131,6 +136,7 @@ struct Reading {
     divisor: f32,
     negative: bool,
     dashed: bool,
+    channel: Option<usize>,
 }
 
 impl Domain {
@@ -323,7 +329,11 @@ fn panel(
     for reading in &specification.lines {
         let mut values = Vec::with_capacity(points.len());
         for point in points {
-            values.push(number(&point[reading.key])?.map(|value| value / reading.divisor));
+            let value = match reading.channel {
+                Some(channel) => &point[reading.key][channel],
+                None => &point[reading.key],
+            };
+            values.push(number(value)?.map(|value| value / reading.divisor));
         }
         lines.push(Line {
             name: reading.name.to_owned(),
@@ -401,6 +411,7 @@ fn reading(key: &'static str, name: &'static str, color: &'static str, divisor: 
         divisor,
         negative: false,
         dashed: false,
+        channel: None,
     }
 }
 
@@ -438,8 +449,8 @@ fn gpu_power() -> Specification {
     )
 }
 
-fn specifications(route: &str) -> Vec<Specification> {
-    match route {
+fn specifications(route: &str, points: &[Value]) -> Result<Vec<Specification>, String> {
+    Ok(match route {
         "overview" => overview(),
         "cpu" => vec![cpu()],
         "memory" => memory_specifications(),
@@ -457,7 +468,16 @@ fn specifications(route: &str) -> Vec<Specification> {
             ),
             gpu_power(),
         ],
-        "energy" => vec![specification(
+        "energy" => energy(points)?,
+        "network" => network(),
+        "apps" => app_specifications(),
+        _ => Vec::new(),
+    })
+}
+
+fn energy(points: &[Value]) -> Result<Vec<Specification>, String> {
+    Ok(vec![
+        specification(
             "live-energy",
             "Recorded power",
             "W",
@@ -465,10 +485,108 @@ fn specifications(route: &str) -> Vec<Specification> {
                 reading("power_watts", "System power", "#ff9830", 1.0),
                 reading("gpu_watts", "GPU power", "#b877d9", 1.0),
             ],
-        )],
-        "network" => network(),
-        "apps" => app_specifications(),
-        _ => Vec::new(),
+        ),
+        specification(
+            "live-soc-temperature",
+            "SoC temperature",
+            "°C",
+            vec![reading("soc_celsius", "SoC temperature", "#f2495c", 1.0)],
+        ),
+        fan_specification(points)?,
+    ])
+}
+
+fn fan_specification(points: &[Value]) -> Result<Specification, String> {
+    const CHANNELS: [(&str, &str); 10] = [
+        ("Fan 0", "#5794f2"),
+        ("Fan 1", "#ff9830"),
+        ("Fan 2", "#b877d9"),
+        ("Fan 3", "#73bf69"),
+        ("Fan 4", "#f2495c"),
+        ("Fan 5", "#f2cc0c"),
+        ("Fan 6", "#56b9c3"),
+        ("Fan 7", "#f28eb9"),
+        ("Fan 8", "#d1d1de"),
+        ("Fan 9", "#9d8bd2"),
+    ];
+    let mut channels = 0;
+
+    for point in points {
+        if !point["fan_rpm"].is_null() {
+            let values = point["fan_rpm"]
+                .as_array()
+                .ok_or("Invalid fan channel array")?;
+            if values.len() > CHANNELS.len() {
+                return Err("Fan history exceeds ten channels".into());
+            }
+
+            channels = channels.max(values.len());
+        }
+    }
+
+    let mut lines = Vec::with_capacity(channels);
+    for (channel, (name, color)) in CHANNELS.into_iter().take(channels).enumerate() {
+        let mut line = reading("fan_rpm", name, color, 1.0);
+        line.channel = Some(channel);
+        line.dashed = channel % 2 == 1;
+        lines.push(line);
+    }
+
+    let mut specification = specification("live-fans", "Fan speed", "RPM", lines);
+    specification.fill = 0.0;
+    specification.help = "SMC channels retain their numeric indices, without physical-side \
+        attribution. Zero means measured stopped; unavailable channels remain gaps. \
+        Channel count can change between observations.";
+
+    Ok(specification)
+}
+
+fn pressure_cells(
+    panel: &mut Panel,
+    domain: &Domain,
+    points: &[Value],
+    coordinates: &Coordinates,
+) -> Result<(), String> {
+    let span = usize::from(domain.span);
+    let mut cells = vec![None; span];
+    let mut selected = None;
+
+    for (index, point) in points.iter().enumerate() {
+        let second = integer(&point["wall_ns"])? / NANOSECONDS_PER_SECOND;
+        let cell = usize::try_from(second - domain.first).map_err(|error| error.to_string())?;
+        assert!(cell < span);
+        if Some(cell) != selected {
+            cells[cell] = pressure_state(panel.lines[0].values[index]);
+        }
+        if Some(index) == coordinates.selected_index {
+            selected = Some(cell);
+        }
+    }
+
+    "timeline".clone_into(&mut panel.kind);
+    panel.lines[0].values = cells;
+    panel.positions = Some(
+        (0..domain.span)
+            .map(|cell| (f32::from(cell) + 0.5) / f32::from(domain.span))
+            .collect(),
+    );
+    panel.segments = None;
+    panel.selected_index = selected;
+    panel.states = Some(vec!["Normal".into(), "Warning".into(), "Critical".into()]);
+    panel.help = Some(
+        "macOS memory pressure by observed second. The chosen same-second \
+        publication takes priority; otherwise the latest reading is shown. Blank means \
+        unavailable or unrecognized, including gaps."
+            .to_owned(),
+    );
+
+    Ok(())
+}
+
+fn pressure_state(value: Option<f32>) -> Option<f32> {
+    match value {
+        Some(0.0 | 1.0 | 2.0) => value,
+        _ => None,
     }
 }
 
@@ -515,8 +633,36 @@ fn overview() -> Vec<Specification> {
 }
 
 fn memory_specifications() -> Vec<Specification> {
+    vec![
+        memory(),
+        specification(
+            "live-memory-pressure",
+            "Memory pressure",
+            "",
+            vec![reading("pressure", "Memory pressure", "#73bf69", 1.0)],
+        ),
+        memory_swap(),
+        memory_paging(),
+        memory_swap_flow(),
+    ]
+}
+
+fn memory_swap() -> Specification {
     let mut allocated = reading("swap_total_bytes", "Allocated", "#d1d1de", GIBIBYTE);
     allocated.dashed = true;
+
+    specification(
+        "live-swap",
+        "Swap",
+        "GiB",
+        vec![
+            reading("swap_used_bytes", "Used", "#b877d9", GIBIBYTE),
+            allocated,
+        ],
+    )
+}
+
+fn memory_paging() -> Specification {
     let mut compressions = reading(
         "memory_compressions_per_second",
         "Compressed",
@@ -531,28 +677,42 @@ fn memory_specifications() -> Vec<Specification> {
         1.0,
     );
     decompressions.dashed = true;
-    vec![
-        memory(),
-        specification(
-            "live-swap",
-            "Swap",
-            "GiB",
-            vec![
-                reading("swap_used_bytes", "Used", "#b877d9", GIBIBYTE),
-                allocated,
-            ],
-        ),
-        specification(
-            "live-paging",
-            "Page-ins and compression",
-            "/s",
-            vec![
-                reading("memory_pageins_per_second", "Page-ins", "#5794f2", 1.0),
-                compressions,
-                decompressions,
-            ],
-        ),
-    ]
+
+    specification(
+        "live-paging",
+        "Page-ins and compression",
+        "/s",
+        vec![
+            reading("memory_pageins_per_second", "Page-ins", "#5794f2", 1.0),
+            compressions,
+            decompressions,
+        ],
+    )
+}
+
+fn memory_swap_flow() -> Specification {
+    let mut swap_out = reading(
+        "swap_out_bytes_per_second",
+        "Swap-out",
+        "#b877d9",
+        1_048_576.0,
+    );
+    swap_out.negative = true;
+
+    specification(
+        "live-swap-flow",
+        "Swap traffic",
+        "MiB/s",
+        vec![
+            reading(
+                "swap_in_bytes_per_second",
+                "Swap-in",
+                "#5794f2",
+                1_048_576.0,
+            ),
+            swap_out,
+        ],
+    )
 }
 
 fn network() -> Vec<Specification> {

@@ -9,7 +9,6 @@ use serde_json::Value;
 use crate::charts::{GRID, MUTED, TEXT};
 use crate::data::Panel;
 use crate::live_source::{Request, Snapshot, Update, Worker};
-use crate::live_timer::Timer;
 
 pub const ROUTES: [(&str, &str); 9] = [
     ("overview", "Overview"),
@@ -27,6 +26,7 @@ pub struct LiveDashboard {
     pub worker: Worker,
     pub request: Request,
     pub snapshot: Option<Box<Snapshot>>,
+    pending_snapshot: Option<Box<Snapshot>>,
     pub panels: Vec<Rc<Panel>>,
     pub generation: u64,
     pub error: Option<String>,
@@ -36,7 +36,6 @@ pub struct LiveDashboard {
     pub executable: Option<String>,
     pub inventory: Vec<(String, String)>,
     pub hidden: Vec<String>,
-    pub timer: Option<Timer>,
     pub hardware_state: Rc<crate::hardware_motion::HardwareState>,
     pub started: Instant,
     pub seconds: Option<u32>,
@@ -46,7 +45,10 @@ pub struct LiveDashboard {
     pub reveal_hardware: bool,
     pub hover_second: Option<u64>,
     pub app_picker_open: bool,
+    pub cpu_inspection: Option<crate::live_cpu_history::CPUInspection>,
+    pub cpu_history_focus: Option<gpui::FocusHandle>,
     pub native: crate::native_workflows::NativeControls,
+    pub(crate) inspection_focus: Option<gpui::FocusHandle>,
     list: ListState,
     last_status: String,
 }
@@ -58,6 +60,7 @@ pub enum Row {
     AppSummary,
     AppColumns(&'static str),
     CPUActivity,
+    CPUHistory,
     Charts(Vec<Rc<Panel>>),
     Heading(String),
     Hardware,
@@ -82,8 +85,10 @@ impl LiveDashboard {
                 app: None,
                 apps_offset: 0,
                 members_offset: 0,
+                cpu_offset: 0,
             },
             snapshot: None,
+            pending_snapshot: None,
             panels: Vec::with_capacity(8),
             generation: 0,
             error: None,
@@ -93,7 +98,6 @@ impl LiveDashboard {
             executable: None,
             inventory: Vec::with_capacity(16),
             hidden: Vec::with_capacity(64),
-            timer: None,
             hardware_state: Rc::new(crate::hardware_motion::HardwareState::new()),
             started: Instant::now(),
             seconds,
@@ -103,7 +107,10 @@ impl LiveDashboard {
             reveal_hardware: false,
             hover_second: None,
             app_picker_open: false,
+            cpu_inspection: None,
+            cpu_history_focus: None,
             native: crate::native_workflows::NativeControls::default(),
+            inspection_focus: None,
             list: ListState::new(0, ListAlignment::Top, px(100.0)),
             last_status: String::new(),
         };
@@ -118,23 +125,14 @@ impl LiveDashboard {
     pub fn tick(&mut self, cx: &mut Context<Self>) {
         self.native_tick(cx);
         match self.worker.take() {
-            Ok(Some(Update::Ready(snapshot))) => {
-                if snapshot.generation == self.generation {
-                    self.accept(snapshot);
-                    cx.notify();
-                }
-            }
-            Ok(Some(Update::Failed {
-                generation,
-                message,
-            })) => {
-                if generation == self.generation {
-                    self.error = Some(message);
+            Ok(Some(update)) => {
+                if self.receive(update) {
                     cx.notify();
                 }
             }
             Ok(None) => {}
             Err(error) => {
+                self.clear_presentation();
                 self.error = Some(error);
                 cx.notify();
             }
@@ -146,6 +144,7 @@ impl LiveDashboard {
         }
         if let Some(seconds) = self.seconds {
             if self.started.elapsed() >= Duration::from_secs(u64::from(seconds)) {
+                self.seconds = None;
                 println!(
                     "{}",
                     serde_json::json!({"mode":"live", "route":self.request.route,
@@ -157,43 +156,71 @@ impl LiveDashboard {
                     "tail_ticks":self.snapshot.as_ref().map(|s| &s.catalog["tail_ticks"]),
                     "scalar_points":self.snapshot.as_ref()
                         .and_then(|s| s.selection["trends"].as_array()).map(Vec::len),
+                    "cpu_history":self.snapshot.as_ref()
+                        .and_then(|snapshot| snapshot.cpu_history.as_ref())
+                        .map(|history| serde_json::json!({"rows":history.cpus().len(),
+                            "total":history.total(),"observations":history.observation_count()})),
                     "selected":self.snapshot.as_ref().map(|s| &s.selection["selected"]),
                     "error":self.error})
                 );
-                cx.quit();
+                crate::live_launch::request_quit(cx);
             }
         }
     }
 
+    fn receive(&mut self, update: Update) -> bool {
+        match update {
+            Update::Ready(snapshot) => {
+                if snapshot.generation != self.generation {
+                    return false;
+                }
+
+                self.accept(snapshot);
+            }
+            Update::Failed {
+                generation,
+                message,
+            } => {
+                if generation != self.generation {
+                    return false;
+                }
+
+                self.clear_presentation();
+                self.error = Some(message);
+            }
+        }
+
+        true
+    }
+
     pub(crate) fn accept(&mut self, snapshot: Box<Snapshot>) {
-        if let Err(error) = self.accept_offsets(&snapshot) {
-            self.error = Some(error);
-            return;
-        }
-        let groups = match crate::live_executables::groups(snapshot.detail.as_ref()) {
-            Ok(groups) => groups,
+        match crate::live_acceptance::Presentation::prepare(&self.request, snapshot) {
+            Ok(presentation) => self.accept_presentation(presentation),
             Err(error) => {
+                self.clear_presentation();
                 self.error = Some(error);
-                return;
-            }
-        };
-        match crate::live_projection::panels(
-            &self.request.route,
-            &snapshot.selection,
-            snapshot.history.as_ref(),
-        ) {
-            Ok(panels) => {
-                self.panels = panels;
-                self.error = None;
-            }
-            Err(error) => {
-                self.error = Some(error);
-                return;
             }
         }
+    }
+
+    pub(crate) fn accept_presentation(
+        &mut self,
+        presentation: Box<crate::live_acceptance::Presentation>,
+    ) {
+        if presentation.selection_changed(self.context_snapshot()) {
+            self.expanded = None;
+            self.native.alternative_page = 0;
+            self.cpu_inspection = None;
+        }
+
+        self.request = presentation.request;
+        self.panels = presentation.panels;
+        self.executables = presentation.executables;
+        self.snapshot = Some(presentation.snapshot);
+        self.pending_snapshot = None;
+        self.error = None;
         self.updates += 1;
-        self.executables = groups;
-        self.snapshot = Some(snapshot);
+
         self.rebuild();
         if self.reveal_hardware {
             if let Some(index) = self
@@ -210,53 +237,33 @@ impl LiveDashboard {
         }
     }
 
-    fn accept_offsets(&mut self, snapshot: &Snapshot) -> Result<(), String> {
-        let table = if self.request.route == "cpu" {
-            "processes"
-        } else {
-            &self.request.table
-        };
-        if let Some(page) = snapshot.pages.get(table) {
-            self.request.offset = page["offset"].as_u64().ok_or("Missing raw page offset")?;
-        }
-        if let Some(apps) = &snapshot.apps {
-            self.request.apps_offset = u32::try_from(
-                apps["page"]["offset"]
-                    .as_u64()
-                    .ok_or("Missing Apps page offset")?,
-            )
-            .map_err(|error| error.to_string())?;
-        }
-        if let Some(detail) = &snapshot.detail {
-            if !detail.is_null() {
-                if self.request.app.is_none() {
-                    self.request.app = Some(crate::live_source::AppKey {
-                        kind: detail["app"]["key"]["kind"]
-                            .as_str()
-                            .ok_or("Missing selected App kind")?
-                            .into(),
-                        bytes_hex: detail["app"]["key"]["bytes_hex"]
-                            .as_str()
-                            .ok_or("Missing selected App bytes")?
-                            .into(),
-                    });
-                }
-                self.request.members_offset = u32::try_from(
-                    detail["page"]["offset"]
-                        .as_u64()
-                        .ok_or("Missing process page offset")?,
-                )
-                .map_err(|error| error.to_string())?;
-            }
-        }
-        Ok(())
-    }
-
     pub fn submit(&mut self) {
+        self.native.alternative_page = 0;
+        self.clear_presentation();
+        self.error = None;
+        self.generation = 0;
         match self.worker.request(self.request.clone()) {
             Ok(generation) => self.generation = generation,
             Err(error) => self.error = Some(error),
         }
+    }
+
+    pub(crate) fn context_snapshot(&self) -> Option<&Snapshot> {
+        self.snapshot
+            .as_deref()
+            .or(self.pending_snapshot.as_deref())
+    }
+
+    fn clear_presentation(&mut self) {
+        if let Some(snapshot) = self.snapshot.take() {
+            self.pending_snapshot = Some(snapshot);
+        }
+        self.panels.clear();
+        self.executables.clear();
+        self.expanded = None;
+        self.hover_second = None;
+        self.cpu_inspection = None;
+        self.rebuild();
     }
 
     pub fn navigate(&mut self, route: &str, cx: &mut Context<Self>) {
@@ -264,7 +271,9 @@ impl LiveDashboard {
         self.request.route = route.into();
         self.request.offset = 0;
         self.request.members_offset = 0;
+        self.request.cpu_offset = 0;
         self.snapshot = None;
+        self.pending_snapshot = None;
         self.expanded = None;
         self.panels.clear();
         self.rows.clear();
@@ -282,32 +291,48 @@ impl LiveDashboard {
             self.request.second = None;
             self.request.identity = None;
         } else {
-            if let Some(snapshot) = &self.snapshot {
-                self.request.second = snapshot.selection["second"].as_u64();
-                self.request.identity = Some(snapshot.selection["selected"].clone());
+            if let Some(snapshot) = self.context_snapshot() {
+                let second = snapshot.selection["second"].as_u64();
+                let identity = snapshot.selection["selected"].clone();
+                self.request.second = second;
+                self.request.identity = if identity.is_null() {
+                    None
+                } else {
+                    Some(identity)
+                };
             }
         }
         self.request.offset = 0;
         self.request.apps_offset = 0;
         self.request.members_offset = 0;
+        self.request.cpu_offset = 0;
         self.submit();
         cx.notify();
     }
 
     pub fn inspect(&mut self, second: u64, cx: &mut Context<Self>) {
         self.request.second = Some(second);
-        self.request.identity = self.snapshot.as_ref().and_then(|snapshot| {
+        self.request.identity = self.context_snapshot().and_then(|snapshot| {
             crate::live_projection::inspection_identity(&snapshot.selection, second)
         });
         self.request.offset = 0;
         self.request.apps_offset = 0;
         self.request.members_offset = 0;
+        self.request.cpu_offset = 0;
         self.submit();
         cx.notify();
     }
 
     pub fn status(&self) -> String {
         let Some(snapshot) = &self.snapshot else {
+            if self.error.is_some() {
+                return "Reading unavailable".into();
+            }
+
+            if self.pending_snapshot.is_some() {
+                return "Reading selection".into();
+            }
+
             return "No live readings".into();
         };
         if snapshot.catalog["collector_completed"].as_bool() == Some(true) {
@@ -356,6 +381,7 @@ impl LiveDashboard {
             self.rows.push(Row::Summary);
         }
         if self.request.route == "cpu" {
+            self.rows.push(Row::CPUHistory);
             self.rows.push(Row::CPUActivity);
         }
         for panels in self.panels.chunks(2) {
@@ -427,6 +453,34 @@ impl LiveDashboard {
             self.rows.push(Row::Charts(panels.to_vec()));
         }
     }
+
+    fn inspection_body(&mut self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        let focus = self
+            .inspection_focus
+            .get_or_insert_with(|| cx.focus_handle())
+            .clone();
+        let body = list(
+            self.list.clone(),
+            cx.processor(|this, index: usize, _, cx| this.row(index, cx)),
+        )
+        .flex_1()
+        .min_h_0();
+
+        div()
+            .id("flightdeck-inspection")
+            .role(gpui::Role::Group)
+            .aria_label("History inspection")
+            .aria_description("Left and right inspect adjacent seconds while readings load")
+            .track_focus(&focus)
+            .tab_stop(false)
+            .focus(|style| style.bg(rgb(0x18_20_2b)))
+            .on_key_down(cx.listener(Self::inspection_keyboard))
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .child(body)
+    }
 }
 
 fn array_len(value: Option<&Value>, key: &str) -> usize {
@@ -435,8 +489,15 @@ fn array_len(value: Option<&Value>, key: &str) -> usize {
         .map_or(0, |rows| rows.len().min(512))
 }
 
+#[cfg(test)]
+#[path = "live_input_tests.rs"]
+mod input_tests;
+
 impl Render for LiveDashboard {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.cpu_history_focus.is_none() {
+            self.cpu_history_focus = Some(cx.focus_handle());
+        }
         self.hardware_state.begin_frame();
         self.renders += 1;
         if self.renders == 1 {
@@ -448,12 +509,9 @@ impl Render for LiveDashboard {
                 );
             });
         }
-        let body = list(
-            self.list.clone(),
-            cx.processor(|this, index: usize, _, cx| this.row(index, cx)),
-        )
-        .flex_1()
-        .min_h_0();
+
+        let body = self.inspection_body(cx);
+
         div()
             .id("flightdeck-live")
             .role(gpui::Role::Application)
@@ -492,7 +550,7 @@ impl Render for LiveDashboard {
                             .flex_1()
                             .min_w_0()
                             .child(self.header(cx))
-                            .child(self.native_notice())
+                            .child(self.native_notice(cx))
                             .children(self.error.as_ref().map(|error| {
                                 div()
                                     .px(px(24.0))
@@ -503,5 +561,211 @@ impl Render for LiveDashboard {
                             .child(body),
                     ),
             )
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+    use serde_json::json;
+    use std::collections::BTreeMap;
+
+    fn dashboard() -> LiveDashboard {
+        let root = std::env::temp_dir().join(format!(
+            "flightdeck-gpui-missing-selection-{}",
+            std::process::id()
+        ));
+        let mut dashboard = LiveDashboard::new(Worker::start(root).unwrap(), "raw".into(), None);
+        dashboard.snapshot = Some(Box::new(Snapshot {
+            generation: dashboard.generation,
+            catalog: json!({"first_second":1000,"last_second":1002}),
+            selection: json!({"second":1000,"selected":{"publication":1},
+                "summary":{"memory_total_bytes":4096},"trends":[]}),
+            pages: BTreeMap::from([(
+                "ticks".into(),
+                json!({"offset":0,"total":1,"rows":[["1"]],
+                    "columns":["publication"]}),
+            )]),
+            apps: None,
+            detail: None,
+            history: None,
+            cpu_detail: None,
+            cpu_history: None,
+            read_ms: 0.0,
+        }));
+        dashboard.expanded = Some(("ticks".into(), 0));
+        dashboard.rebuild();
+        dashboard
+    }
+
+    #[test]
+    fn changing_the_second_hides_the_previous_reading_before_the_worker_returns() {
+        // Goal: selecting B cannot present or copy A while the new read is pending.
+        // Method: submit a missing second through a dashboard retaining an expanded A row.
+        let mut dashboard = dashboard();
+        dashboard.request.second = Some(1001);
+
+        dashboard.submit();
+
+        assert!(dashboard.snapshot.is_none());
+        assert!(dashboard.expanded.is_none());
+        assert!(dashboard.rows.is_empty());
+        assert!(
+            crate::native_workflows::selected_copy(
+                dashboard.snapshot.as_deref(),
+                &dashboard.request,
+                dashboard.expanded.as_ref()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_failed_selection_keeps_the_previous_reading_hidden() {
+        // Goal: a failed B read cannot restore A's presented data.
+        // Method: deliver a current-generation worker failure after selecting B.
+        let mut dashboard = dashboard();
+        dashboard.request.second = Some(1001);
+        dashboard.submit();
+        let failed = dashboard.generation;
+
+        assert!(dashboard.receive(Update::Failed {
+            generation: failed,
+            message: "Recording read failed".into(),
+        }));
+
+        assert!(dashboard.snapshot.is_none());
+        assert!(dashboard.rows.is_empty());
+        assert_eq!(dashboard.error.as_deref(), Some("Recording read failed"));
+        assert_eq!(dashboard.status(), "Reading unavailable");
+    }
+
+    #[test]
+    fn superseded_results_cannot_repopulate_a_pending_selection() {
+        // Goal: a late A completion cannot replace requested B.
+        // Method: submit B and deliver the retained A snapshot through result handling.
+        let mut dashboard = dashboard();
+        let old = dashboard.snapshot.take().unwrap();
+        dashboard.request.second = Some(1002);
+        dashboard.submit();
+
+        let accepted = dashboard.receive(Update::Ready(old));
+
+        assert!(!accepted);
+        assert!(dashboard.snapshot.is_none());
+    }
+
+    #[test]
+    fn a_rejected_request_cannot_accept_a_previous_worker_result() {
+        // Goal: local validation failure cannot reopen an old generation's presentation.
+        // Method: reject an incomplete identity, then deliver the preceding valid result.
+        let mut dashboard = dashboard();
+        let old = dashboard.snapshot.take().unwrap();
+        dashboard.request.identity = Some(json!({"publication":1}));
+        dashboard.submit();
+        assert!(dashboard.error.is_some());
+
+        let accepted = dashboard.receive(Update::Ready(old));
+
+        assert!(!accepted);
+        assert!(dashboard.snapshot.is_none());
+    }
+
+    #[test]
+    fn a_missing_second_replaces_the_pending_reading_with_explicit_absence() {
+        // Goal: a successful gap selection is distinct from pending work and old readings.
+        // Method: receive a current-generation empty observation after selecting a gap.
+        let mut dashboard = dashboard();
+        let mut missing = dashboard.snapshot.take().unwrap();
+        dashboard.request.second = Some(1001);
+        dashboard.submit();
+        missing.generation = dashboard.generation;
+        missing.selection = json!({"second":1001,"selected":null,
+            "summary":null,"trends":[]});
+        missing.pages.clear();
+
+        assert!(dashboard.receive(Update::Ready(missing)));
+
+        let selection = &dashboard.snapshot.as_ref().unwrap().selection;
+        assert_eq!(selection["second"], 1001);
+        assert!(selection["selected"].is_null());
+        assert!(dashboard.pending_snapshot.is_none());
+        assert!(dashboard.error.is_none());
+    }
+
+    #[test]
+    fn queued_inputs_keep_context_without_exposing_its_previous_reading() {
+        // Goal: rapid keyboard input can use old bounds without presenting stale data.
+        // Method: supersede an accepted snapshot twice before a worker result arrives.
+        let mut dashboard = dashboard();
+        dashboard.request.second = Some(1001);
+        dashboard.submit();
+        dashboard.request.second = Some(1002);
+
+        dashboard.submit();
+
+        assert!(dashboard.snapshot.is_none());
+        assert_eq!(
+            dashboard.context_snapshot().unwrap().selection["second"],
+            1000
+        );
+        assert_eq!(dashboard.request.second, Some(1002));
+    }
+
+    #[test]
+    fn an_advancing_observation_clears_expanded_row_details() {
+        // Goal: a reused row index cannot silently disclose another process after a live update.
+        // Method: accept a same-second sibling publication with a different row at index zero.
+        let mut next = dashboard().snapshot.take().unwrap();
+        let mut dashboard = dashboard();
+        next.selection["selected"]["publication"] = json!(2);
+        next.pages.get_mut("ticks").unwrap()["rows"] = json!([["2"]]);
+
+        dashboard.accept(next);
+
+        assert!(dashboard.expanded.is_none());
+        assert_eq!(
+            dashboard.snapshot.as_ref().unwrap().selection["selected"]["publication"],
+            2
+        );
+    }
+
+    #[test]
+    fn rereading_the_same_observation_preserves_expanded_details() {
+        // Goal: automatic polling of an immutable paused observation keeps its disclosure open.
+        // Method: accept another result for the same identity and unchanged table row.
+        let next = dashboard().snapshot.take().unwrap();
+        let mut dashboard = dashboard();
+
+        dashboard.accept(next);
+
+        assert_eq!(dashboard.expanded, Some(("ticks".into(), 0)));
+    }
+
+    #[test]
+    fn an_advancing_observation_resets_the_alternatives_page() {
+        // Goal: a live update cannot carry a page from a different set of alternatives.
+        // Method: accept a sibling publication after opening a later alternatives page.
+        let mut next = dashboard().snapshot.take().unwrap();
+        let mut dashboard = dashboard();
+        dashboard.native.alternative_page = 5;
+        next.selection["selected"]["publication"] = json!(2);
+
+        dashboard.accept(next);
+
+        assert_eq!(dashboard.native.alternative_page, 0);
+    }
+
+    #[test]
+    fn rereading_the_same_observation_preserves_the_alternatives_page() {
+        // Goal: polling an immutable observation does not force its selector back to page one.
+        // Method: accept the same identity after opening a later alternatives page.
+        let next = dashboard().snapshot.take().unwrap();
+        let mut dashboard = dashboard();
+        dashboard.native.alternative_page = 5;
+
+        dashboard.accept(next);
+
+        assert_eq!(dashboard.native.alternative_page, 5);
     }
 }

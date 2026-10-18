@@ -399,6 +399,12 @@ fn paint_timeline(
         let count = view.upper - view.lower + 1;
         for index in view.lower..=view.upper {
             let value = line.values.get(index).copied().flatten();
+            if panel.id == "live-memory-pressure" {
+                if value.is_none() {
+                    continue;
+                }
+            }
+
             let tint = match value {
                 Some(0.0) => GREEN,
                 Some(1.0) => ORANGE,

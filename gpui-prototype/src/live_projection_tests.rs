@@ -79,11 +79,11 @@ fn energy_series_remain_independent_and_memory_categories_only_stack_in_overview
     assert_eq!(overview.len(), 7);
     assert_eq!(overview[1].stack, Some(true));
     let memory = panels("memory", &selection, None).unwrap();
-    assert_eq!(memory.len(), 3);
+    assert_eq!(memory.len(), 5);
     assert_eq!(memory[0].stack, Some(false));
     assert_eq!(memory[0].lines[0].values[1], Some(1.0));
     assert_eq!(memory[0].lines[1].values[1], None);
-    assert_eq!(memory[1].lines[1].dashed, Some(true));
+    assert_eq!(memory[2].lines[1].dashed, Some(true));
 }
 
 #[test]
@@ -293,4 +293,99 @@ fn non_ascii_run_identities_reject_the_projection() {
     selection["trends"][1]["run"] = json!("000000000000000é000000000000000");
 
     assert!(panels("cpu", &selection, None).is_err());
+}
+
+#[test]
+fn energy_exposes_temperature_and_channel_indexed_fan_history() {
+    // Goal: Energy retains source channel identities, stopped zero and independent missingness.
+    // Method: project three ticks with partial, unavailable and absent fan channel arrays.
+    let mut selection = selection();
+    selection["trends"][0]["fan_rpm"] = json!([0.0, null]);
+    selection["trends"][1]["fan_rpm"] = Value::Null;
+    selection["trends"][2]["fan_rpm"] = json!([1200.0]);
+    selection["trends"][1]["soc_celsius"] = json!(42.5);
+
+    let energy = panels("energy", &selection, None).unwrap();
+
+    assert_eq!(energy.len(), 3);
+    assert_eq!(energy[1].title, "SoC temperature");
+    assert_eq!(energy[1].lines[0].values, [None, Some(42.5), None]);
+    assert_eq!(energy[2].unit, "RPM");
+    assert_eq!(energy[2].lines[0].name, "Fan 0");
+    assert_eq!(energy[2].lines[0].values, [Some(0.0), None, Some(1200.0)]);
+    assert_eq!(energy[2].lines[1].name, "Fan 1");
+    assert_eq!(energy[2].lines[1].values, [None, None, None]);
+}
+
+#[test]
+fn energy_rejects_fan_arrays_beyond_the_recording_bound() {
+    // Goal: an oversized channel array cannot create unbounded series or lose channels silently.
+    // Method: supply eleven channels where the recording permits at most ten.
+    let mut selection = selection();
+    selection["trends"][1]["fan_rpm"] = json!(vec![0; 11]);
+
+    assert!(panels("energy", &selection, None).is_err());
+}
+
+#[test]
+fn memory_exposes_mirrored_swap_flow_without_negating_quantities() {
+    // Goal: disk swap traffic retains direction and independent missingness.
+    // Method: compare source bytes converted to MiB/s and outgoing plot metadata.
+    let mut selection = selection();
+    selection["trends"][1]["swap_in_bytes_per_second"] = json!(1_048_576);
+    selection["trends"][1]["swap_out_bytes_per_second"] = json!(2_097_152);
+
+    let memory = panels("memory", &selection, None).unwrap();
+    let swap = memory
+        .iter()
+        .find(|panel| panel.id == "live-swap-flow")
+        .unwrap();
+
+    assert_eq!(swap.unit, "MiB/s");
+    assert_eq!(swap.lines[0].values, [None, Some(1.0), None]);
+    assert_eq!(swap.lines[1].values, [None, Some(2.0), None]);
+    assert_eq!(swap.lines[0].negative, Some(false));
+    assert_eq!(swap.lines[1].negative, Some(true));
+}
+
+#[test]
+fn pressure_timeline_uses_exact_selected_alternatives_and_blanks_unknown_states() {
+    // Goal: repeated seconds retain the chosen state while unobserved and future codes stay blank.
+    // Method: select the earlier of two same-second observations and add an unknown state.
+    let mut selection = selection();
+    selection["trends"][0]["pressure"] = json!(8);
+    selection["trends"][1]["wall_ns"] = json!(1_000_100_000_000_u64);
+    selection["trends"][1]["pressure"] = json!(1);
+    selection["trends"][2]["pressure"] = json!(2);
+    selection["selected"] = selection["trends"][1].clone();
+
+    let memory = panels("memory", &selection, None).unwrap();
+    let pressure = memory
+        .iter()
+        .find(|panel| panel.id == "live-memory-pressure")
+        .unwrap();
+
+    assert_eq!(pressure.kind, "timeline");
+    assert_eq!(pressure.lines[0].values.len(), 900);
+    assert!(pressure.lines[0].values[..899].iter().all(Option::is_none));
+    assert_eq!(pressure.lines[0].values[899], Some(1.0));
+    assert_eq!(pressure.selected_index, Some(899));
+    assert_eq!(
+        pressure.states.as_ref().unwrap(),
+        &["Normal", "Warning", "Critical"]
+    );
+}
+
+#[test]
+fn inspecting_another_repeated_second_selects_its_latest_observation() {
+    // Goal: clicking a pressure cell selects the same latest observation that its state shows.
+    // Method: retain two ordered observations in a second other than the selected gap.
+    let mut selection = selection();
+    selection["selected"] = Value::Null;
+    selection["trends"][1]["wall_ns"] = json!(999_100_000_000_u64);
+    selection["trends"][2]["wall_ns"] = json!(999_750_000_000_u64);
+
+    let identity = inspection_identity(&selection, 999).unwrap();
+
+    assert_eq!(identity["publication"], 3);
 }

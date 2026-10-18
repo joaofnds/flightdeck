@@ -24,6 +24,7 @@ pub struct Request {
     pub app: Option<AppKey>,
     pub apps_offset: u32,
     pub members_offset: u32,
+    pub cpu_offset: u32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -41,6 +42,7 @@ pub struct Snapshot {
     pub detail: Option<Value>,
     pub history: Option<Value>,
     pub cpu_detail: Option<crate::live_cpu::CPUActivity>,
+    pub cpu_history: Option<Arc<crate::live_cpu_history::CPUHistory>>,
     pub read_ms: f64,
 }
 
@@ -320,6 +322,7 @@ fn reader_snapshot(
         detail: None,
         history: None,
         cpu_detail: None,
+        cpu_history: None,
         read_ms: 0.0,
     });
     reader_payload(session, &mut command.request, &mut snapshot)?;
@@ -348,6 +351,7 @@ fn reader_computer(reader: &mut Reader, command: &Command) -> Option<Box<Snapsho
         detail: None,
         history: None,
         cpu_detail: None,
+        cpu_history: None,
         read_ms: 0.0,
     }))
 }
@@ -357,10 +361,9 @@ fn reader_selection(session: &mut LiveSession, request: &Request) -> Result<Valu
         return Ok(Value::Null);
     }
     let selection = match request.second {
-        Some(second) => session.select(second, 0),
-        None => session.follow_latest(),
-    }
-    .map_err(|error| error.to_string())?;
+        Some(second) => session.select(second, 0).map_err(|error| error.to_string()),
+        None => reader_latest(session),
+    }?;
     if let Some(identity) = &request.identity {
         if let Some(second) = request.second {
             let index = selection_alternative(&selection, identity)?;
@@ -375,8 +378,44 @@ fn reader_selection(session: &mut LiveSession, request: &Request) -> Result<Valu
     Ok(selection)
 }
 
+fn reader_latest(session: &mut LiveSession) -> Result<Value, String> {
+    let catalog = session.catalog();
+    if !catalog["latest_observation"].is_null() {
+        return session.follow_latest().map_err(|error| error.to_string());
+    }
+
+    if let Some(second) = catalog["last_second"].as_u64() {
+        let first = session
+            .select(second, 0)
+            .map_err(|error| error.to_string())?;
+        let alternatives = first["alternatives"]
+            .as_array()
+            .ok_or("Saved observation alternatives unavailable")?;
+        if alternatives.len() > ALTERNATIVES_MAX {
+            return Err("Saved observation alternatives exceed 4096".into());
+        }
+
+        if alternatives.len() <= 1 {
+            return Ok(first);
+        }
+
+        return session
+            .select(second, alternatives.len() - 1)
+            .map_err(|error| error.to_string());
+    }
+
+    if let Some(error) = catalog["history_error"].as_str() {
+        return Err(format!("Saved recording history unavailable: {error}"));
+    }
+
+    Ok(
+        serde_json::json!({"second":null, "selected":null, "alternatives":[],
+        "summary":null, "trends":[], "context_seconds":900}),
+    )
+}
+
 fn reader_payload(
-    session: &LiveSession,
+    session: &mut LiveSession,
     request: &mut Request,
     snapshot: &mut Snapshot,
 ) -> Result<(), String> {
@@ -408,7 +447,34 @@ fn reader_payload(
             detail,
             &snapshot.selection["selected"],
         )?);
+        reader_cpu_history(session, request, snapshot)?;
     }
+
+    Ok(())
+}
+
+fn reader_cpu_history(
+    session: &mut LiveSession,
+    request: &mut Request,
+    snapshot: &mut Snapshot,
+) -> Result<(), String> {
+    let total = snapshot
+        .cpu_detail
+        .as_ref()
+        .ok_or("Missing selected CPU detail")?
+        .cpus
+        .len();
+    let offset = usize::try_from(request.cpu_offset).map_err(|error| error.to_string())?;
+    if offset >= total {
+        request.cpu_offset = 0;
+    }
+    let payload = session
+        .cpu_history(request.cpu_offset)
+        .map_err(|error| error.to_string())?;
+    snapshot.cpu_history = Some(Arc::new(crate::live_cpu_history::CPUHistory::decode(
+        payload,
+        &snapshot.selection,
+    )?));
 
     Ok(())
 }
@@ -619,6 +685,14 @@ fn app_key_bytes(text: &str) -> Result<Vec<u8>, String> {
 }
 
 fn request_validate(request: &Request) -> Result<(), String> {
+    if !request.cpu_offset.is_multiple_of(32) {
+        return Err("Logical CPU history offset must be a page of 32".into());
+    }
+
+    if request.cpu_offset >= 1024 {
+        return Err("Logical CPU history offset exceeds the CPU domain".into());
+    }
+
     if !matches!(
         request.route.as_str(),
         "overview" | "cpu" | "apps" | "memory" | "gpu" | "energy" | "network" | "computer" | "raw"

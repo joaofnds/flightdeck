@@ -42,13 +42,23 @@ impl LiveDashboard {
         let chart = self.chart_events(
             div()
                 .relative()
-                .h(px(190.0))
+                .h(px(if panel.kind == "timeline" {
+                    100.0
+                } else {
+                    190.0
+                }))
                 .child(plot)
                 .child(chart_cursor(cursor)),
             measured,
             panel,
             cx,
         );
+        let chart = if panel.kind == "timeline" {
+            chart.into_any_element()
+        } else {
+            Self::chart_ticks(chart, domain).into_any_element()
+        };
+
         div()
             .flex_1()
             .min_w_0()
@@ -59,12 +69,36 @@ impl LiveDashboard {
             .p(px(18.0))
             .child(Self::chart_heading(panel))
             .child(self.chart_headline(panel, index))
-            .child(Self::chart_ticks(chart, domain))
+            .child(chart)
             .child(self.chart_times())
             .child(self.chart_legends(panel, index, cx))
+            .child(self.chart_source_state(panel))
+    }
+
+    fn chart_source_state(&self, panel: &Panel) -> gpui::Div {
+        let mut notice = div().text_size(px(11.0)).text_color(rgb(MUTED));
+        if panel.id != "live-fans" {
+            return notice;
+        }
+
+        let summary = self
+            .snapshot
+            .as_ref()
+            .map(|snapshot| &snapshot.selection["summary"]);
+        let text = match summary.map(|summary| &summary["fan_rpm"]) {
+            Some(Value::Array(channels)) if channels.is_empty() => {
+                "No fan channels reported by SMC at this observation."
+            }
+            Some(Value::Array(_)) => "SMC channel indices; physical positions are unreported.",
+            _ => "Fan source unavailable at this observation.",
+        };
+        notice = notice.child(text);
+
+        notice
     }
 
     fn chart_headline(&self, panel: &Panel, index: Option<usize>) -> impl IntoElement {
+        let reading = chart_reading(panel, index);
         let mut headline = div()
             .flex()
             .items_baseline()
@@ -72,9 +106,10 @@ impl LiveDashboard {
             .mt(px(12.0))
             .child(
                 div()
+                    .debug_selector(|| reading.clone())
                     .text_size(px(25.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child(chart_reading(panel, index)),
+                    .child(reading),
             );
         if panel.stack == Some(true) {
             let summary = self
@@ -133,7 +168,7 @@ impl LiveDashboard {
             }))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
                     let second = this.snapshot.as_ref().and_then(|snapshot| {
                         let rect = charts::plot_bounds(click_bounds.get());
                         let fraction = f32::from(event.position.x - rect.origin.x)
@@ -142,6 +177,8 @@ impl LiveDashboard {
                     });
                     if let Some(second) = second {
                         this.inspect(second, cx);
+                        this.focus_inspection(window, cx);
+                        window.prevent_default();
                     }
                 }),
             )
@@ -167,6 +204,7 @@ impl LiveDashboard {
             .and_then(|snapshot| snapshot.catalog["last_second"].as_u64());
         chart
             .id(SharedString::from(format!("{}-plot", panel.id)))
+            .debug_selector(|| format!("{}-plot", panel.id))
             .accessibility_id(format!("flightdeck.chart.{}", panel.id))
             .role(gpui::Role::Slider)
             .aria_label(format!("{} history inspection", panel.title))
@@ -219,13 +257,36 @@ impl LiveDashboard {
         };
 
         self.chart_step(delta, cx);
+        self.focus_inspection(window, cx);
 
         window.prevent_default();
         cx.stop_propagation();
     }
 
+    pub(crate) fn focus_inspection(&self, window: &mut Window, cx: &mut Context<Self>) {
+        assert!(self.inspection_focus.is_some());
+        if let Some(focus) = &self.inspection_focus {
+            window.focus(focus, cx);
+        }
+    }
+
+    pub(crate) fn inspection_keyboard(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .inspection_focus
+            .as_ref()
+            .is_some_and(|focus| focus.is_focused(window))
+        {
+            self.chart_keyboard(event, window, cx);
+        }
+    }
+
     pub(crate) fn chart_step(&mut self, delta: i64, cx: &mut Context<Self>) {
-        let Some(snapshot) = &self.snapshot else {
+        let Some(snapshot) = self.context_snapshot() else {
             return;
         };
 
@@ -325,6 +386,10 @@ impl LiveDashboard {
         index: Option<usize>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        if panel.id == "live-memory-pressure" {
+            return pressure_legend();
+        }
+
         let mut legends = div().flex().flex_wrap().gap_x(px(12.0)).text_size(px(11.0));
         for line in panel.lines.iter().take(16) {
             let key = format!("{}\t{}", panel.id, line.name);
@@ -444,12 +509,33 @@ fn chart_reading(panel: &Panel, index: Option<usize>) -> String {
         .lines
         .first()
         .and_then(|line| index.and_then(|index| line.values.get(index).copied().flatten()));
+    if let Some(states) = &panel.states {
+        return states
+            .iter()
+            .enumerate()
+            .find(|(index, _)| value == Some(charts::number(*index)))
+            .map_or_else(|| "Unavailable".to_owned(), |(_, state)| state.clone());
+    }
+
     let unit = if panel.id == "live-memory" {
         "GiB active"
     } else {
         &panel.unit
     };
     reading(value, unit)
+}
+
+fn pressure_legend() -> gpui::Div {
+    let mut legend = div().flex().flex_wrap().gap_x(px(12.0)).text_size(px(11.0));
+    for (label, color) in [
+        ("Normal", charts::GREEN),
+        ("Warning", charts::ORANGE),
+        ("Critical", charts::RED),
+    ] {
+        legend = legend.child(div().text_color(rgb(color)).child(format!("■ {label}")));
+    }
+
+    legend.child(div().text_color(rgb(MUTED)).child("Blank: unavailable"))
 }
 
 fn axis_reading(value: f32) -> String {
@@ -472,6 +558,15 @@ fn inspection_index(panel: &Panel, snapshot: &Snapshot, second: Option<u64>) -> 
     if snapshot.selection["second"].as_u64() == Some(second) {
         return panel.selected_index;
     }
+
+    if panel.id == "live-memory-pressure" {
+        let first = snapshot.selection["second"].as_u64()?.saturating_sub(899);
+        let Ok(offset) = usize::try_from(second.checked_sub(first)?) else {
+            return None;
+        };
+        return (offset < panel.lines.first()?.values.len()).then_some(offset);
+    }
+
     let points = if panel.id.starts_with("live-app-") {
         snapshot.history.as_ref()?["points"].as_array()?
     } else {
@@ -480,7 +575,7 @@ fn inspection_index(panel: &Panel, snapshot: &Snapshot, second: Option<u64>) -> 
     points
         .iter()
         .take(crate::data::LIVE_SAMPLE_LIMIT)
-        .position(|point| {
+        .rposition(|point| {
             let stamp = point.get("observation").unwrap_or(point);
             wall_second(&stamp["wall_ns"]) == Some(second)
         })
@@ -534,6 +629,7 @@ mod tests {
             detail: None,
             history: None,
             cpu_detail: None,
+            cpu_history: None,
             read_ms: 0.0,
         }
     }

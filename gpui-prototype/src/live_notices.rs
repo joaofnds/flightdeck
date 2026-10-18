@@ -1,7 +1,10 @@
 use serde_json::Value;
 
+#[path = "live_recording_context.rs"]
+pub mod recording_context;
+
 pub fn losses(catalog: &Value, selection: &Value) -> Vec<String> {
-    let mut notices = Vec::with_capacity(4);
+    let mut notices = Vec::with_capacity(7);
     if let Some(readers) = catalog["reader_losses"].as_array() {
         for reader in readers.iter().take(2) {
             if let Some(message) = notice("Live reader", &reader["losses"]) {
@@ -23,8 +26,33 @@ pub fn losses(catalog: &Value, selection: &Value) -> Vec<String> {
     if let Some(message) = notice("Selected recording window", &selected["window_losses"]) {
         notices.push(message);
     }
-    assert!(notices.len() <= 4);
+    diagnostics(catalog, selection, &mut notices);
+    assert!(notices.len() <= 7);
+
     notices
+}
+
+fn diagnostics(catalog: &Value, selection: &Value, notices: &mut Vec<String>) {
+    assert!(notices.len() <= 4);
+    for (label, error) in [
+        ("Recording history unavailable", &catalog["history_error"]),
+        (
+            "Selected history context unavailable",
+            &selection["context_error"],
+        ),
+    ] {
+        if let Some(error) = error.as_str() {
+            notices.push(format!(
+                "{label}: {}",
+                recording_context::bounded(error, 512)
+            ));
+        }
+    }
+    if let Some(count) = catalog["unknown_clock_ticks"].as_u64() {
+        if count > 0 {
+            notices.push(format!("{count} recorded ticks have no wall time"));
+        }
+    }
 }
 
 fn notice(label: &str, losses: &Value) -> Option<String> {
@@ -57,6 +85,49 @@ fn notice(label: &str, losses: &Value) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn degraded_history_remains_distinct_from_missing_readings() {
+        // Goal: unreadable history remains visible while live readings are healthy.
+        // Method: supply independent catalog and selection context failures.
+        let catalog = json!({"history_error": "Saved window unavailable"});
+        let selection = json!({"context_error": "Earlier context unavailable"});
+
+        let messages = losses(&catalog, &selection);
+
+        assert!(messages.iter().any(|message| message ==
+            "Recording history unavailable: Saved window unavailable"));
+        assert!(messages.iter().any(|message| message
+            == "Selected history context unavailable: Earlier context unavailable"));
+    }
+
+    #[test]
+    fn clockless_ticks_are_reported_without_inventing_an_extent() {
+        // Goal: clockless recorded ticks must not look like a healthy empty recording.
+        // Method: retain exact unknown-clock counts above f64's precise integer range.
+        let catalog = json!({"unknown_clock_ticks": 9_007_199_254_740_993_u64});
+
+        let messages = losses(&catalog, &Value::Null);
+
+        assert!(
+            messages
+                .iter()
+                .any(|message| message == "9007199254740993 recorded ticks have no wall time")
+        );
+    }
+
+    #[test]
+    fn history_error_display_is_bounded_without_splitting_utf8() {
+        // Goal: a source error cannot create an unbounded header message.
+        // Method: format a long multibyte history error through the displayed notice API.
+        let catalog = json!({"history_error": "é".repeat(600)});
+
+        let messages = losses(&catalog, &Value::Null);
+
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].ends_with('…'));
+        assert!(messages[0].chars().count() <= 550);
+    }
 
     #[test]
     fn collection_losses_keep_exact_counts_and_unknown_state() {

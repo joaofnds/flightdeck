@@ -1,5 +1,233 @@
 use serde_json::json;
 
+#[path = "live_cpu_history_source_tests.rs"]
+mod cpu_history;
+
+#[test]
+fn an_empty_recording_reports_absence_without_requiring_a_live_ring() {
+    // Goal: a valid recording with no saved ticks opens without a fabricated observation.
+    // Method: create the real empty store and read it through the normal worker.
+    let recording = SealedRecording::empty();
+
+    let snapshot = recording.read(SealedRecording::request()).unwrap();
+
+    assert!(snapshot.selection["second"].is_null());
+    assert!(snapshot.selection["selected"].is_null());
+    assert_eq!(snapshot.selection["trends"], json!([]));
+    assert!(snapshot.pages.is_empty());
+}
+
+#[test]
+fn corrupt_saved_history_is_reported_instead_of_becoming_an_empty_recording() {
+    // Goal: an unreadable commitment cannot masquerade as valid no-data history.
+    // Method: corrupt only this fixture's saved seal and read through the normal worker.
+    let recording = SealedRecording::new();
+    let seal = recording
+        .root
+        .join("commits/00000000000000010000000000000002")
+        .join("00000000000000000000/00000000000000000000.seal");
+    assert!(!std::fs::read(&seal).unwrap().is_empty());
+    std::fs::write(seal, b"corrupt").unwrap();
+
+    let result = recording.read(SealedRecording::request());
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn a_sealed_recording_opens_at_its_latest_saved_observation_without_a_live_ring() {
+    // Goal: latest selects the final sibling of the last second without a live collector.
+    // Method: request Overview through its worker using a real sealed-only recording.
+    let recording = SealedRecording::new();
+
+    let result = recording.read(SealedRecording::request());
+
+    assert!(result.is_ok(), "{}", result.err().unwrap());
+    let snapshot = result.unwrap();
+    assert_eq!(snapshot.selection["second"], 1002);
+    assert_eq!(snapshot.selection["selected"]["publication"], 3);
+    assert_eq!(snapshot.selection["summary"]["memory_total_bytes"], 12_288);
+    assert_eq!(
+        snapshot.pages["fans"]["observation"],
+        snapshot.selection["selected"]
+    );
+}
+
+#[test]
+fn a_sealed_recording_keeps_an_explicit_same_second_observation() {
+    // Goal: exact inspection can choose an earlier sibling after latest chooses the last.
+    // Method: select the earlier literal identity through the real recording worker.
+    let recording = SealedRecording::new();
+    let mut request = SealedRecording::request();
+    request.second = Some(1002);
+    request.identity = Some(json!({"run":"00000000000000010000000000000002",
+        "boot":"00000000000000030000000000000004", "publication":2}));
+
+    let snapshot = recording.read(request).unwrap();
+
+    assert_eq!(snapshot.selection["selected"]["publication"], 2);
+    assert_eq!(snapshot.selection["summary"]["memory_total_bytes"], 8192);
+    assert_eq!(
+        snapshot.selection["alternatives"].as_array().unwrap().len(),
+        2
+    );
+}
+
+#[test]
+fn a_sealed_recording_leaves_a_missing_second_empty() {
+    // Goal: a saved gap never borrows either neighboring measured observation.
+    // Method: request the unrecorded second between two real encoded ticks.
+    let recording = SealedRecording::new();
+    let mut request = SealedRecording::request();
+    request.second = Some(1001);
+
+    let snapshot = recording.read(request).unwrap();
+
+    assert_eq!(snapshot.selection["second"], 1001);
+    assert!(snapshot.selection["selected"].is_null());
+    assert!(snapshot.selection["summary"].is_null());
+    assert!(snapshot.pages.is_empty());
+}
+
+struct SealedRecording {
+    root: std::path::PathBuf,
+}
+
+impl SealedRecording {
+    fn empty() -> Self {
+        let token =
+            collector::recording::identity_text(collector::recording::random_identity().unwrap());
+        let root = std::env::temp_dir().join(format!("flightdeck-gpui-sealed-{token}"));
+        let recording = Self { root };
+        let store = persistence::Store::open(&recording.root).unwrap();
+        drop(store);
+
+        recording
+    }
+
+    fn new() -> Self {
+        let recording = Self::empty();
+        let store = persistence::Store::open(&recording.root).unwrap();
+        let identity = persistence::WindowIdentity {
+            run: collector::ring::RunIdentity {
+                recording: store.recording(),
+                run: collector::ring::Identity([1, 2]),
+                boot: collector::ring::Identity([3, 4]),
+            },
+            window: 0,
+        };
+        let mut window = Self::window(identity);
+        Self::append(&mut window, 1, 1000);
+        Self::append(&mut window, 2, 1002);
+        Self::append(&mut window, 3, 1002);
+        Self::commit(&store, identity, &window);
+        drop(store);
+
+        recording
+    }
+
+    fn window(identity: persistence::WindowIdentity) -> persistence::Window {
+        persistence::Window::new(
+            identity,
+            persistence::Limits::from_shape(&Self::shape()).unwrap(),
+        )
+    }
+
+    fn shape() -> collector::ring::Shape {
+        collector::ring::Shape {
+            slot_count: 4,
+            cpu_capacity: 1,
+            interface_capacity: 1,
+            core_capacity: 1,
+            state_capacity: 1,
+            fan_capacity: 1,
+            process_capacity: 1,
+            coalition_capacity: 1,
+            event_capacity: 1,
+        }
+    }
+
+    fn append(window: &mut persistence::Window, publication: u64, second: u64) {
+        let mut tick = persistence::tick_buffer(&Self::shape()).unwrap();
+        tick.run_tick = publication - 1;
+        tick.memory.total_bytes = 4096 * publication;
+        let observation = persistence::Observation {
+            publication,
+            wall_ns: Some(second * 1_000_000_000),
+            continuous_ns: Some(publication * 1_000_000_000),
+            awake_ns: Some(publication * 1_000_000_000),
+        };
+        window.push_tick(&observation, &tick, &[]).unwrap();
+    }
+
+    fn commit(
+        store: &persistence::Store,
+        identity: persistence::WindowIdentity,
+        window: &persistence::Window,
+    ) {
+        let persistence::Begin::Pending(pending) = store.begin(&identity).unwrap() else {
+            panic!("Fixture window already committed");
+        };
+        let tables = persistence::Encoder.encode(window, pending.path()).unwrap();
+        let publications = window.publication_range();
+        let events = window.event_range();
+        store
+            .commit(
+                pending,
+                persistence::Manifest {
+                    identity,
+                    publication_first: publications.start,
+                    publication_end: publications.end,
+                    events_first: events.start,
+                    events_end: events.end,
+                    wall_ns: None,
+                    continuous_ns: None,
+                    awake_ns: None,
+                    losses: persistence::Losses::default(),
+                    data_directory: String::new(),
+                    tables,
+                },
+            )
+            .unwrap();
+    }
+
+    fn request() -> Request {
+        Request {
+            route: "overview".into(),
+            second: None,
+            identity: None,
+            table: "ticks".into(),
+            offset: 0,
+            cpu_offset: 0,
+            app: None,
+            apps_offset: 0,
+            members_offset: 0,
+        }
+    }
+
+    fn read(&self, request: Request) -> Result<Box<super::Snapshot>, String> {
+        let mut worker = Worker::start(self.root.clone()).unwrap();
+        let generation = worker.request(request)?;
+        for _attempt in 0..1000 {
+            match worker.take()? {
+                Some(Update::Ready(snapshot)) if snapshot.generation == generation => {
+                    return Ok(snapshot);
+                }
+                Some(Update::Failed { message, .. }) => return Err(message),
+                _ => std::thread::sleep(std::time::Duration::from_millis(5)),
+            }
+        }
+
+        Err("Fixture reader exceeded five seconds".into())
+    }
+}
+
+impl Drop for SealedRecording {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.root).unwrap();
+    }
+}
+
 #[test]
 fn the_default_app_survives_a_new_first_row_and_an_empty_page() {
     // App history must keep its original target as the loaded list changes.
@@ -9,6 +237,7 @@ fn the_default_app_survives_a_new_first_row_and_an_empty_page() {
         identity: None,
         table: "ticks".into(),
         offset: 0,
+        cpu_offset: 0,
         app: None,
         apps_offset: 0,
         members_offset: 0,
@@ -179,6 +408,7 @@ fn refuses_superseded_results_after_accepting_a_new_request() {
         identity: None,
         table: "ticks".to_owned(),
         offset: 0,
+        cpu_offset: 0,
         app: None,
         apps_offset: 0,
         members_offset: 0,

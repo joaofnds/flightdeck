@@ -98,6 +98,7 @@ fn probe_request(route: &str) -> Request {
         identity: None,
         table: "processes".to_owned(),
         offset: 0,
+        cpu_offset: 0,
         app: None,
         apps_offset: 0,
         members_offset: 0,

@@ -328,4 +328,24 @@ mod tests {
             1_700_000_001
         );
     }
+
+    #[test]
+    fn ambiguous_clock_entry_requires_an_exact_unix_second() {
+        // Equal local clocks on separate days cannot silently choose one observation.
+        let first = 1_700_000_001;
+        let following = first + 86_400;
+        let local = crate::live_presentation::clock(first, true);
+        assert_eq!(local, crate::live_presentation::clock(following, true));
+
+        let ambiguous = inspection_second(&local, &[first, following]);
+
+        assert_eq!(
+            ambiguous,
+            Err("This clock time is ambiguous; enter its Unix second".into())
+        );
+        assert_eq!(
+            inspection_second(&following.to_string(), &[first, following]).unwrap(),
+            following
+        );
+    }
 }

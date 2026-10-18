@@ -8,14 +8,17 @@ mod hardware;
 mod hardware_clock;
 mod hardware_layout;
 mod hardware_motion;
+mod live_acceptance;
 mod live_app_views;
 mod live_chart_view;
 mod live_cpu;
+mod live_cpu_history;
 mod live_dashboard;
 mod live_executables;
 mod live_hardware;
 mod live_inventory;
 mod live_launch;
+mod live_memory;
 mod live_notices;
 mod live_presentation;
 mod live_probe;
@@ -38,7 +41,7 @@ mod tests;
 
 use std::process::ExitCode;
 
-use gpui::{App, AppContext as _, Bounds, WindowBounds, WindowOptions, px, size};
+use gpui::{App, Bounds, WindowBounds, WindowOptions, px, size};
 
 fn main() -> ExitCode {
     match run() {
@@ -127,7 +130,7 @@ fn run_reference_window(
         ..Default::default()
     };
     match cx.open_window(options_window, move |_, cx| {
-        let entity = cx.new(|_| {
+        let entity = gpui::AppContext::new(cx, |_| {
             dashboard::Dashboard::new(
                 capture,
                 catalog,

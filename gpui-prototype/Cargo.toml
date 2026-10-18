@@ -8,6 +8,7 @@ publish = false
 [workspace]
 
 [dependencies]
+collector = { path = "../collector" }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 viewer = { path = "../viewer" }
@@ -16,6 +17,15 @@ libc = "0.2"
 log = "0.4"
 image = "=0.25.10"
 num-traits = "0.2"
+
+[dev-dependencies]
+persistence = { path = "../persistence" }
+
+[dev-dependencies.gpui]
+git = "https://github.com/zed-industries/zed"
+rev = "56934ec0560bce8929025497411de7f5322fb6ca"
+default-features = false
+features = ["test-support"]
 
 [dependencies.gpui]
 git = "https://github.com/zed-industries/zed"
