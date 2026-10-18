@@ -1,21 +1,30 @@
-# Flightdeck GPUI experiment
+# Flightdeck GPUI
 
-A separate Rust/GPUI prototype with live readings from the same Rust `LiveSession`
+A separate Rust/GPUI client with live readings from the same Rust `LiveSession`
 backend as Swift. Its visual reference is the approved web prototype v30. The
 captured reference remains available with `--reference`. The Cargo workspace,
 lockfile, resources and build output stay in this folder; the backend is a local
-path dependency. This experiment does not change the Swift app or recording format.
+path dependency. The client shares the existing recording format with Swift.
 
 ```sh
-cd gpui-prototype
-cargo build --release --locked --bin flightdeck-gpui
-cargo run --release --locked --bin flightdeck-gpui -- --bundle
-open 'target/Flightdeck GPUI.app'
+cargo +1.95.0 build --release --locked -p collector -p persistence --bin collector --bin persister
+cargo +1.95.0 build --release --locked --manifest-path gpui-prototype/Cargo.toml --bin flightdeck-gpui
+gpui-prototype/target/release/flightdeck-gpui --bundle
+'gpui-prototype/target/Flightdeck GPUI.app/Contents/MacOS/flightdeck-gpui' --bundle --check
+open 'gpui-prototype/target/Flightdeck GPUI.app'
 ```
 
-The default launch attaches to the recording at
-`~/Library/Application Support/Flightdeck/flightdeck.recording`. Run the collector
-through Swift, or explicitly start a collector owned by this prototype:
+Run those commands from the repository root. The bundle contains the app, required
+collector and persister executables, and artwork; missing helpers fail packaging.
+It can be moved outside the checkout. Rust 1.95.0 matches CI; these commands install
+no toolchain or hooks.
+
+Default launch uses `~/Library/Application Support/Flightdeck/flightdeck.recording`.
+It attaches to an advancing existing collector or starts its own when collection
+is absent. Initial Computer-only entry defers automatic collection until a
+recording route is opened. A recording supplied with `--recording PATH` opens in
+attach/read-only mode; add `--start-collector` to collect into that root. The
+following commands run from `gpui-prototype/`:
 
 ```sh
 target/release/flightdeck-gpui --start-collector
@@ -42,10 +51,12 @@ Neither mode opens a window or measures rendering performance.
 
 `--start-collector` writes new observations. The default recording uses the shared
 `flightdeck` ring; an explicit `--recording PATH` starts an isolated ring. Only one
-collector can own a ring. The app sends SIGTERM only to the collector it
-started; attaching to another collector does not give it shutdown ownership.
-Build the root workspace's release `collector` and `persister` first to use this
-option. `--bundle` copies those helpers when they exist.
+collector can own a ring. Startup and child-exit failures appear with a Retry
+control. The app sends signals only to the collector it started; attaching to
+another collector does not give it shutdown ownership. Closing the final window
+or quitting stops owned collection and waits for its final save. The save budget
+is 125 seconds, followed by a two-second forced-exit budget. Background collection
+after closing the app is a separate product feature.
 Xcode and its command-line tools are required. GPUI and its macOS backend are pinned
 to upstream revision `56934ec0560bce8929025497411de7f5322fb6ca`. The direct macOS
 backend includes AccessKit and avoids resolving unused platform backends. It uses
@@ -64,7 +75,11 @@ reads current host inventory on entry and Refresh. The schematic is below Overvi
 Open recording uses the native folder picker. Current readings remain available
 until the chosen recording produces its first snapshot; cancellation or a failed
 read keeps the current recording. Opening from Computer validates the recording
-through Overview and lands there on success. Time entry accepts a Unix second or local
+through Overview and lands there on success. Open waits while a previous reader
+finishes. After five seconds it explains how to recover by reopening the app;
+the current recording remains usable, and Open returns automatically if cleanup
+finishes. This retains at most one retiring reader instead of starting more workers.
+Time entry accepts a Unix second or local
 `HH:MM:SS` within the loaded history; Enter inspects that second. Copy reading copies
 the selected observation, expanded raw row or selected App details as JSON, preserving
 exact counter strings and nulls. Native menus support closing the window and quitting.
@@ -83,13 +98,25 @@ target/release/flightdeck-gpui --reference --hardware --animate --seconds 20
 Rendering uses GPUI's Metal backend, canvas paths and a virtualized list of panel
 rows. Live queries run on a dedicated worker with capacity-one request/result
 mailboxes, cancellation generations, 512-row pages and the backend's bounded cache.
-A 250 ms main-thread timer takes completed results; it does no recording I/O.
+A 250 ms main-thread timer takes completed results. During collector discovery and
+startup it also reads bounded registration/ring-header metadata for the configured
+root; it does no database query or tick/event copying. These startup mappings are
+dropped on readiness or stop. The metadata syscalls have bounded input sizes but
+cannot preempt a slow filesystem. Recording queries stay on the worker.
 Paused inspection stops worker polling. Live context holds at most 4096 points over
 900 seconds, uses actual wall-clock spacing and splits lines by run, boot and segment.
 Null readings stay gaps. Captured histories retain their 121 samples.
 
-The live CPU view includes the same logical-CPU intervals and 20-segment meters as
-Swift. App tables include measured executable subtotals with explicit unavailable
+The live CPU view includes selected logical-CPU intervals, 20-segment meters and
+900-second logical-CPU history, paged 32 CPUs at a time. History preserves actual
+predecessor intervals, gaps and exact observations; the labels identify logical
+scheduler CPUs. Memory shows all twelve selected VM/swap quantities, categorical
+pressure and swap traffic. Energy includes available SoC temperature and indexed
+fan histories, preserving stopped zero readings and missing channels. Recording
+context includes known extent, saved-window counts, source errors and paged
+same-second alternatives with full run/boot/publication identities.
+
+App tables include measured executable subtotals with explicit unavailable
 and overflow states. The schematic uses the shared chassis and rotor assets,
 anchored callouts, illustrative airflow and explicit QA simulation. Its 30 Hz clock
 suspends while inactive or offscreen. The macOS text backend is enabled and checked
@@ -101,7 +128,7 @@ Live controls expose accessibility roles, labels, stable identifiers and chart-s
 actions through the macOS adapter. VoiceOver, native input and pixel verification
 still require an interactive check; API integration alone does not establish parity.
 Saved queries, every diagnostic detail and exact web chart smoothing remain outside
-this prototype. App histories contain observations
+this implementation. App histories contain observations
 seen by the reader session. Missing sensors stay unavailable. Captured Overview
 follows the web design's three-column panels; live Overview follows Swift's
 two-column panels. These are different workloads and must be measured separately.
@@ -182,7 +209,7 @@ inactive or outside the painted viewport. Its visible control can pause it.
 
 [First measurements and their limits](PERFORMANCE.md) include the raw process
 observations, render summaries and binary hashes.
-[Live verification and parity limits](LIVE.md) cover the shared backend prototype.
+[Live verification and parity limits](LIVE.md) cover the shared backend client.
 [Current evaluation](EVALUATION.md) records the font fix, repeated measurements,
 implementation differences and remaining verification gaps.
 

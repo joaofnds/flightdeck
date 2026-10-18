@@ -1,4 +1,56 @@
-# Live prototype verification
+# Live client verification
+
+## Current app
+
+The client opens live and sealed recordings through the shared reader. It supports
+exact observation selection, paged raw/process/App data, logical-CPU histories,
+Memory quantities and pressure, Energy/SoC/fan histories, GPU, Network and Computer.
+The [README](README.md) gives the self-contained bundle build and launch commands.
+
+Current checks use real encoded sealed recordings and GPUI's in-process TestPlatform.
+The latter dispatches rendered chart input, installed actions and Cmd-O, including
+pending/failed selection recovery. It does not exercise native macOS event delivery
+or inspect screen pixels. Saved-recording fixtures distinguish final same-second
+publications and preserve an explicitly chosen earlier observation.
+
+An actual relocated bundle started its own collector and persister, read all nine
+routes, stopped them and reopened their sealed output. An abrupt-parent-departure
+probe reproduced a persister diagnostic-pipe abort. Private unlinked append files
+removed that failure: the supervised retest observed both helpers leave and reopened
+the final recording with producer completion true. Exit statuses after reparenting
+were unavailable. A separate in-process regression exercises the final termination
+observer; actual Dock Quit remains in the checklist below.
+
+Local raw artifacts are under ignored `target/completion-*` and
+`target/parent-departure-*`. They identify the exact binary and source snapshots;
+they are reproduction material on the development Mac, not portable CI fixtures.
+The historical observations below retain their original binary limitations.
+
+## Native acceptance checklist
+
+Computer access rejected the Flightdeck GPUI app after user authorization. These
+steps require an outside observation; no shell screenshot, accessibility automation
+or alternate input tool substitutes for that denied access.
+
+1. Launch the rebuilt bundle. Check readable labels, navigation and populated charts
+   at the normal and a narrower window size. Inspect CPU history, all Memory rows,
+   pressure, fan gaps and unavailable sources against the selected observation.
+2. Use File → Open Recording and Cmd-O. Cancel once, open a sealed recording, then
+   try an invalid folder. Confirm cancellation/failure preserves the old recording.
+3. Hover and click a chart, inspect a same-second alternative, use repeated arrows
+   during loading, then Resume live. Check that the displayed and selected values
+   agree and pending readings do not show the previous observation.
+4. Enter an exact Unix second and a local time. Exercise IME composition, selection
+   and replacement. Copy a reading, raw row and App/process detail; inspect the
+   system clipboard for exact identities, counter strings and nulls.
+5. Use Tab/Shift-Tab and VoiceOver through navigation, time input, charts, CPU rows
+   and observation choices. Check labels, focus and actions without pointer input.
+6. With an isolated owned recording, test the app's Quit command, last-window close
+   and Dock Quit. Confirm final save and helper exit. Repeat while attaching to an
+   independently running collector and confirm that producer continues.
+
+Successful TestPlatform dispatch and command-line lifecycle probes establish their
+own paths only. They do not close this native event, accessibility or pixel checklist.
 
 **Historical run limitation:** the 2026-10-17 binary used GPUI's no-op text backend.
 Its backend observations below remain useful, but successful render callbacks did
@@ -83,7 +135,7 @@ resident size ended at 499.1 MiB. Its [raw samples](evidence/live/process-watch-
 still show growth, so neither run establishes settled memory use. Memory retention
 needs a longer profile before interpreting the prototype's steady-state cost.
 
-## Parity and limits
+## Historical parity and limits
 
 Live mode implements Overview, CPU & processes, Apps, Memory, GPU, Energy, Network,
 Computer and Recorded readings. Memory categories stack only on Overview; dedicated
@@ -97,7 +149,7 @@ page. CPU activity uses the selected observation's validated logical-CPU interva
 The schematic uses the shared rotor artwork, callouts and illustrative airflow at
 30 Hz. Native accessibility and exact chart smoothing remain incomplete.
 
-## Review dispositions
+## Historical review dispositions
 
 Independent Codex reviews covered Spec, Architecture, Style, Security, Testing and
 Refactoring; no axes were skipped. Reviewers read Tiger Style and their axis
@@ -113,9 +165,9 @@ pressure states and missing Memory tiles; CPU process paging; hidden collection
 losses; false advancement from loss metadata; compound formatting guards; hidden
 executable filters; and malformed executable inputs combined in one test. Added
 regression checks exercise the affected pure/worker behaviors and live pagination.
-That historical round covered counts/filtering; the current code also implements
+That historical round covered counts/filtering; its later code also implemented
 measured subgroup subtotals and selected logical-CPU intervals. Those additions
-require fresh runtime and performance evidence.
+needed fresh runtime and performance evidence at that checkpoint.
 
 No security defect or additional structural refactoring was identified. The
 after-task pass retained the independent live/captured paths and single reader

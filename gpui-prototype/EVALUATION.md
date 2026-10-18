@@ -1,10 +1,83 @@
-# GPUI prototype evaluation
+# GPUI implementation and measurements
 
-The current evidence does not support ruling GPUI out on CPU performance.
-In repeated captured Overview inspection, this GPUI implementation used less CPU
-and more memory than the Swift baseline. Different chart layouts prevent treating
-that result as a framework ranking. Live ingestion works, but matched live
-performance and native visual verification remain open.
+The isolated GPUI client now includes live and sealed recording workflows,
+logical-CPU history, complete selected Memory quantities, pressure and swap
+traffic, SoC/fan history, recording context and same-second observation choices.
+It packages its own collector and persister and shares Swift's recording format.
+The [README](README.md) gives build and launch commands;
+[LIVE.md](LIVE.md) records runtime verification and the native acceptance checklist.
+
+The measurements below identify specific implementations and workloads. Historical
+captured Overview inspection used less CPU and more memory than the Swift baseline;
+different chart layouts and unverified presentation prevent a framework ranking.
+No matched visible live comparison or native pixel/input verification is claimed.
+
+## Completion checks
+
+The integrated client checks passed 334 test executions, strict all-target clippy
+and formatting under Rust 1.95.0. The root workspace passed 1,206 tests with four
+ignored, formatting, strict lint and the Swift `--check` build/runtime fixtures.
+Text-backend checks and the captured Swift replay typecheck also passed. The final
+client count includes failed-open message preservation, delayed cleanup recovery,
+installed Open actions and rendered unavailable/restored controls.
+
+An optimized relocated bundle with SHA-256
+`17ac2f5cb6b1ee7e2081aa8c56e783651473dee029bfec7dd6c9e56c36f40cec`
+started its own collector/persister, observed advancing registered ring headers,
+and saved publications 1 through 12 with reported publication/event loss zero.
+The app observed collector exit zero and persister wait status zero. Both helpers
+left; disk-only reopening succeeded with producer completion true. An earlier
+supervised abrupt-parent test reproduced and corrected a diagnostic-pipe abort.
+The final platform-quit observer has a TestPlatform regression; actual Dock Quit
+remains an outside native check.
+
+A deterministic projection experiment used the same 900-point input, full panel
+output and floating-point output bits over twenty repetitions. It removed 4,502
+allocation requests and 123,540 requested bytes per projection on each tested
+route. Overview fell from 12,720 to 8,218 requests and from 387,621 to 264,081
+requested bytes. This measures Rust allocation requests, not resident memory or
+whole-app speed. The optimization is committed as `7f7f1bc`; later source-ready
+Memory/Energy features change the whole workload.
+
+Local checkpoint evidence is retained under ignored `target/completion-*`,
+`target/lifecycle-final-*` and `target/projection-allocation/`. The original
+historical evidence links below remain committed and portable.
+
+## Sustained current CPU history
+
+A 920-second optimized CPU window accepted 926 updates and invoked its root view
+render 929 times. Its final snapshot held 900 scalar points and 900 CPU-history
+observations for all 18 logical CPUs, with `error:null`. Its selected reader metadata
+reported one publication lost and zero events lost, with unknown false. The final
+raw cache charge was 132,876,976 bytes for 68 observations, below its 128 MiB budget.
+Independent histories retain more observations than that detailed raw cache.
+
+After five seconds of warmup, two sequential process observers covered 903.407
+actual seconds. CPU averaged 7.39% of one core. Physical footprint moved from
+435.50 to 368.58 MiB, with sampled range 279.52–474.27 MiB; RSS moved from 544.17
+to 658.19 MiB. Both observers and the app exited zero. These measures do not
+establish a memory plateau or a leak. Source-level cache budgets do not bound
+the whole process, which also includes query engines and framework resources.
+
+The measured binary was `17ac2f5c…`, identified in full above, before the final
+retirement-notice correction. It was not overwritten during the run. The delivered
+binary is `27212e936f578b506da200e0c48ee733945e3af0961e688166ef784913662842`
+and has separate final runtime checks: 36 snapshots across all nine routes,
+pause/resume and absent-second recovery, source reopening, and a 20-second CPU
+window with 19 updates, 22 root renders and 900 observations for all 18 CPUs.
+That window's final error was null; its scalar context also held 900 points.
+The selected App-history probes retain the reader session's available observations,
+not a claim of complete saved history for every App. Logs, source manifests and
+the calculation are under `target/completion-cpu-sustained/`; final packaging/checks are under
+`target/completion-delivery/`.
+
+Native work, local builds/tests and ordinary host activity continued. The native
+owner also reported QA-window activations. Render calls do not establish screen
+presentation, and no uninterrupted foreground visibility was observed. This is
+an absolute real-data history/resource run, with the separate producer excluded
+from app CPU, rather than a Swift comparison or a framework speed result.
+
+## Historical font correction
 
 The first prototype accidentally disabled GPUI 0.2.2's macOS font backend.
 `default-features = false` without `font-kit` selects `NoopTextSystem`; its glyph
@@ -20,7 +93,7 @@ points afterward. This verifies the backend configuration and metrics. Pixel
 fidelity remains unverified: computer access was rejected again after the user
 explicitly approved native-app testing.
 
-## Migration pilot
+## Historical migration pilot
 
 The isolated pilot pins GPUI and its macOS backend to upstream revision
 `56934ec0560bce8929025497411de7f5322fb6ca`, including the macOS accessibility adapter.
@@ -50,12 +123,12 @@ its frozen binary hash is
 Raw pilot logs and disposable probes remain under ignored `target/`; they are local
 reproduction material, unlike the committed historical evidence linked below.
 
-The pilot supports continued GPUI evaluation. Replacing Swift still requires native
-interaction/accessibility checks, an explained memory-growth curve, full required
-live-history coverage and repeated matched visible-rendering measurements.
+This checkpoint preceded the current full-build work. Native
+interaction/accessibility checks and repeated matched visible-rendering measurements
+were not established by it.
 The older captured measurements below describe the pre-pilot implementation.
 
-## Sustained live retention
+## Historical sustained live retention
 
 A follow-up 900-second diagnostic window accepted 898 updates and 900 scalar
 points without an application error. Independent App and CPU history ledgers
@@ -81,10 +154,10 @@ Allocation-stack probes identify substantial shared query/table and DuckDB costs
 Window diagnostics also show graphics allocations. Their intrusive tools and
 shared-machine activity prevent attributing the complete footprint or confirming
 a leak. A Game Memory profiler attach failed and supplied no usable attribution.
-Renderer atlas/buffer accounting, followed by a controlled complete draw-path pool
-experiment if needed, is the next discriminating probe. No speculative memory fix
-was applied. Native interaction checks and matched visible Swift comparisons
-remain open; this evidence supports continued evaluation while keeping Swift.
+Renderer atlas/buffer accounting and a controlled complete draw-path pool experiment
+were proposed conditional probes. No speculative memory fix was applied.
+Native interaction checks and matched visible Swift comparisons
+remain open in that historical evidence.
 Raw follow-up logs and copied diagnostic source remain private under ignored
 `target/continue-*` and `target/growth-ledger-source/`.
 
