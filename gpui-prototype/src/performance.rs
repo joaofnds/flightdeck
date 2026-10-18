@@ -124,10 +124,32 @@ impl Options {
                 return Err("--live-soak cannot use --check or --smoke");
             }
         }
+
         if let Some(seconds) = self.seconds {
+            if self.interactive_live() {
+                if !(1..=1800).contains(&seconds) {
+                    return Err("Live window seconds must be 1..1800");
+                }
+
+                return Ok(());
+            }
+
             return validate_duration(seconds, self.source.probe == ProbeMode::Soak);
         }
+
         Ok(())
+    }
+
+    fn interactive_live(&self) -> bool {
+        if self.source.reference {
+            return false;
+        }
+
+        if self.source.probe != ProbeMode::None {
+            return false;
+        }
+
+        self.mode == RunMode::Interactive
     }
 
     fn validate_replay(&self) -> Result<(), &'static str> {
@@ -202,7 +224,8 @@ impl Options {
             "--help" => {
                 println!(
                     "flightdeck-gpui [--recording PATH] [--start-collector] [--page ROUTE]\n\
-                     [--live-check --seconds 5..300] [--reference [--scrub] [--animate]\n\
+                     [--seconds 1..1800] [--live-check --seconds 5..300]\n\
+                     [--reference [--scrub] [--animate]\n\
                      [--hardware] [--smoke] [--minutes 15|60] [--seconds 1..300]\n\
                      [--replay ACTIONS.json]] [--check]"
                 );
@@ -419,12 +442,162 @@ mod tests {
     }
 
     #[test]
-    fn retains_the_normal_timed_window_limit() {
-        // Extending soak duration does not accidentally extend interactive test windows.
+    fn retains_the_captured_timed_window_limit() {
+        // A longer live observation must not change the captured reference workload's limit.
         let valid = ["--reference", "--seconds", "300"].map(str::to_owned);
         let invalid = ["--reference", "--seconds", "301"].map(str::to_owned);
 
         assert!(Options::parse_arguments(&valid).is_ok());
         assert!(Options::parse_arguments(&invalid).is_err());
+    }
+
+    #[test]
+    fn permits_a_live_window_to_observe_the_full_fifteen_minute_history() {
+        // The real CLI must permit an uninterrupted observation across the retention interval.
+        let arguments = ["--seconds", "900"].map(str::to_owned);
+
+        let options = Options::parse_arguments(&arguments).unwrap();
+
+        assert_eq!(options.seconds, Some(900));
+    }
+
+    #[test]
+    fn permits_a_thirty_minute_live_window_for_a_second_retention_interval() {
+        // Two history intervals let the observer separate retained context from continued growth.
+        let arguments = ["--seconds", "1800", "--page", "overview"].map(str::to_owned);
+
+        let options = Options::parse_arguments(&arguments).unwrap();
+
+        assert_eq!(options.seconds, Some(1800));
+    }
+
+    #[test]
+    fn rejects_a_zero_second_live_window() {
+        // The actual parser rejects the adjacent invalid live duration.
+        let arguments = ["--seconds", "0"].map(str::to_owned);
+
+        assert!(Options::parse_arguments(&arguments).is_err());
+    }
+
+    #[test]
+    fn rejects_a_live_window_beyond_thirty_minutes() {
+        // The actual parser rejects the adjacent invalid live duration.
+        let arguments = ["--seconds", "1801"].map(str::to_owned);
+
+        assert!(Options::parse_arguments(&arguments).is_err());
+    }
+
+    #[test]
+    fn permits_a_one_second_live_window_for_a_bounded_startup_control() {
+        // Short interactive controls keep their existing minimum while sustained runs grow.
+        let arguments = ["--seconds", "1"].map(str::to_owned);
+
+        let options = Options::parse_arguments(&arguments).unwrap();
+
+        assert_eq!(options.seconds, Some(1));
+    }
+
+    #[test]
+    fn rejects_301_seconds_when_reference_comes_before_duration() {
+        // The actual parser retains the constrained mode's upper boundary in this order.
+        let arguments = ["--reference", "--seconds", "301"].map(str::to_owned);
+
+        assert!(Options::parse_arguments(&arguments).is_err());
+    }
+
+    #[test]
+    fn rejects_301_seconds_when_reference_comes_after_duration() {
+        // The actual parser retains the constrained mode's upper boundary in this order.
+        let arguments = ["--seconds", "301", "--reference"].map(str::to_owned);
+
+        assert!(Options::parse_arguments(&arguments).is_err());
+    }
+
+    #[test]
+    fn accepts_one_second_in_reference_mode() {
+        // The actual parser preserves the constrained mode's shortest timed observation.
+        let arguments = ["--reference", "--seconds", "1"].map(str::to_owned);
+
+        let options = Options::parse_arguments(&arguments).unwrap();
+
+        assert_eq!(options.seconds, Some(1));
+    }
+
+    #[test]
+    fn rejects_301_seconds_when_live_check_comes_before_duration() {
+        // The actual parser retains the constrained mode's upper boundary in this order.
+        let arguments = ["--live-check", "--seconds", "301"].map(str::to_owned);
+
+        assert!(Options::parse_arguments(&arguments).is_err());
+    }
+
+    #[test]
+    fn rejects_301_seconds_when_live_check_comes_after_duration() {
+        // The actual parser retains the constrained mode's upper boundary in this order.
+        let arguments = ["--seconds", "301", "--live-check"].map(str::to_owned);
+
+        assert!(Options::parse_arguments(&arguments).is_err());
+    }
+
+    #[test]
+    fn accepts_one_second_in_live_check_mode() {
+        // The actual parser preserves the constrained mode's shortest timed observation.
+        let arguments = ["--live-check", "--seconds", "1"].map(str::to_owned);
+
+        let options = Options::parse_arguments(&arguments).unwrap();
+
+        assert_eq!(options.seconds, Some(1));
+    }
+
+    #[test]
+    fn rejects_301_seconds_when_check_comes_before_duration() {
+        // The actual parser retains the constrained mode's upper boundary in this order.
+        let arguments = ["--check", "--seconds", "301"].map(str::to_owned);
+
+        assert!(Options::parse_arguments(&arguments).is_err());
+    }
+
+    #[test]
+    fn rejects_301_seconds_when_check_comes_after_duration() {
+        // The actual parser retains the constrained mode's upper boundary in this order.
+        let arguments = ["--seconds", "301", "--check"].map(str::to_owned);
+
+        assert!(Options::parse_arguments(&arguments).is_err());
+    }
+
+    #[test]
+    fn accepts_one_second_in_check_mode() {
+        // The actual parser preserves the constrained mode's shortest timed observation.
+        let arguments = ["--check", "--seconds", "1"].map(str::to_owned);
+
+        let options = Options::parse_arguments(&arguments).unwrap();
+
+        assert_eq!(options.seconds, Some(1));
+    }
+
+    #[test]
+    fn rejects_301_seconds_when_smoke_comes_before_duration() {
+        // The actual parser retains the constrained mode's upper boundary in this order.
+        let arguments = ["--smoke", "--seconds", "301"].map(str::to_owned);
+
+        assert!(Options::parse_arguments(&arguments).is_err());
+    }
+
+    #[test]
+    fn rejects_301_seconds_when_smoke_comes_after_duration() {
+        // The actual parser retains the constrained mode's upper boundary in this order.
+        let arguments = ["--seconds", "301", "--smoke"].map(str::to_owned);
+
+        assert!(Options::parse_arguments(&arguments).is_err());
+    }
+
+    #[test]
+    fn accepts_one_second_in_smoke_mode() {
+        // The actual parser preserves the constrained mode's shortest timed observation.
+        let arguments = ["--smoke", "--seconds", "1"].map(str::to_owned);
+
+        let options = Options::parse_arguments(&arguments).unwrap();
+
+        assert_eq!(options.seconds, Some(1));
     }
 }

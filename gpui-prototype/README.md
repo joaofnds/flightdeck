@@ -24,6 +24,12 @@ target/release/flightdeck-gpui --recording /path/to/session.recording --live-che
 target/release/flightdeck-gpui --recording /path/to/session.recording --live-soak --seconds 900
 ```
 
+Timed interactive live windows accept `--seconds 1..1800`. Run
+`target/release/flightdeck-gpui --recording /path/to/session.recording --seconds 900`
+to observe a full fifteen-minute history interval in the window, or use `1800` to
+observe a second interval. Captured reference windows and `--live-check` retain
+their 300-second maximum.
+
 `--live-check` exercises live routes, selection identity, CPU intervals and App history
 endpoints. It also rejects an invalid recording from Computer, reads the original
 observation again, then reopens the actual recording and checks serialized copy
