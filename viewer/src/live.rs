@@ -2128,10 +2128,14 @@ mod tests {
                     ..collector::machine::CPUTicks::default()
                 },
             ];
+            self.publish_cpu_readings(tick, &cpus);
+        }
+
+        fn publish_cpu_readings(&mut self, tick: u32, cpus: &[collector::machine::CPUTicks]) {
             self.writer.publish_observed(
                 &Readings {
                     run_tick: u64::from(tick),
-                    cpus: &cpus,
+                    cpus,
                     memory: &collector::machine::Memory::default(),
                     interfaces: &[],
                     ioreport: None,
@@ -3064,6 +3068,71 @@ mod tests {
         let history = session.history.as_ref().unwrap();
         refresh_history_pending(&mut session.sources, history);
         assert!(!session.sources[0].pending_windows.contains(&0));
+    }
+
+    #[test]
+    fn preserves_zero_full_and_independent_cpu_intervals_while_following() {
+        // Goal: exact pinned CPU readings survive repeated queries and return to following.
+        // Method: publish genuine zero/full and 25/75 intervals through the real ring.
+        use collector::machine::CPUTicks;
+
+        let mut fixture = RingFixture::new_with_cpu_capacity(2);
+        fixture.publish_cpu_activity(1);
+        let mut session = LiveSession::open(&fixture.root).unwrap();
+        fixture.publish_cpu_readings(
+            2,
+            &[
+                CPUTicks {
+                    user: 25,
+                    idle: 175,
+                    ..CPUTicks::default()
+                },
+                CPUTicks {
+                    user: 175,
+                    idle: 25,
+                    ..CPUTicks::default()
+                },
+            ],
+        );
+        session.poll().unwrap();
+        fixture.publish_cpu_readings(
+            3,
+            &[
+                CPUTicks {
+                    user: 50,
+                    idle: 250,
+                    ..CPUTicks::default()
+                },
+                CPUTicks {
+                    user: 250,
+                    idle: 50,
+                    ..CPUTicks::default()
+                },
+            ],
+        );
+        session.poll().unwrap();
+        session.select(1002, 0).unwrap();
+
+        let pinned = session.cpu_detail().unwrap();
+        let repeated = session.cpu_detail().unwrap();
+        session.follow_latest().unwrap();
+        let latest = session.cpu_detail().unwrap();
+
+        assert_eq!(pinned, repeated);
+        assert_eq!(pinned["observation"]["publication"], 2);
+        assert_eq!(
+            pinned["cpus"],
+            json!([
+                {"cpu":0,"busy_percent":0.0}, {"cpu":1,"busy_percent":100.0}
+            ])
+        );
+        assert_eq!(latest["observation"]["publication"], 3);
+        assert_eq!(
+            latest["cpus"],
+            json!([
+                {"cpu":0,"busy_percent":25.0}, {"cpu":1,"busy_percent":75.0}
+            ])
+        );
     }
 
     #[test]

@@ -1,8 +1,5 @@
 //! Viewer-only recording interpretation. No collector calls this allocating adapter.
-#[cfg(test)]
-mod allocation_tests;
 pub mod apps;
-mod bridge;
 mod byte_display;
 mod cancellation;
 mod cpu_detail;

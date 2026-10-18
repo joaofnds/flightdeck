@@ -1,0 +1,830 @@
+use std::path::PathBuf;
+use std::rc::Rc;
+use std::sync::{Arc, OnceLock};
+use std::time::Instant;
+
+use gpui::{
+    App, AvailableSpace, Bounds, Element, ElementId, GlobalElementId, Hsla, InspectorElementId,
+    IntoElement, LayoutId, PathBuilder, Pixels, Point, RenderImage, Style, TextRun, Window, div,
+    fill, font, point, prelude::*, px, rgb, size,
+};
+use image::{Frame, Rgba, RgbaImage};
+
+use crate::charts::{BLUE, GREEN, GRID, MUTED, ORANGE, PANEL, PURPLE, RED, TEXT};
+use crate::dashboard::{Dashboard, control};
+use crate::data::{reading, state};
+use crate::hardware_layout::{CALLOUTS, Callout, Layout};
+use crate::hardware_motion::{
+    FanFrame, HardwareState, HardwareVisibility, Vector, contains, particle, perimeter,
+};
+
+#[derive(Default)]
+pub struct Readings {
+    pub temperatures: [Option<f32>; 3],
+    pub speeds: [Option<f32>; 2],
+    pub utilization: [Option<f32>; 2],
+    pub memory: [Option<f32>; 2],
+    pub battery: [Option<f32>; 2],
+    pub thermal: String,
+}
+
+impl Dashboard {
+    pub fn hardware(&self, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        let selected = self.inspection.selected;
+        let value = |key| self.capture.value(key, selected);
+        let readings = Readings {
+            temperatures: [
+                value("temperatures0"),
+                value("temperatures1"),
+                value("temperatures3"),
+            ],
+            speeds: [
+                self.capture.fan("0", selected),
+                self.capture.fan("1", selected),
+            ],
+            utilization: [value("cpu0"), value("gpu0")],
+            memory: [
+                value("memoryUsed0").map(|value| value / 1_073_741_824.0),
+                value("installed").map(|value| value / 1_073_741_824.0),
+            ],
+            battery: [value("battery0"), value("batteryPower0")],
+            thermal: state(value("thermal0"), true).into(),
+        };
+        div()
+            .p(px(16.0))
+            .rounded(px(12.0))
+            .border_1()
+            .border_color(rgb(GRID))
+            .bg(rgb(PANEL))
+            .child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .items_center()
+                    .child(if self.hardware_state.qa.get() {
+                        "Readings · Simulated".to_owned()
+                    } else {
+                        format!("Thermal state · {}", readings.thermal)
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(8.0))
+                            .child(
+                                control(if self.animate {
+                                    "Pause animation"
+                                } else {
+                                    "Animate fans"
+                                })
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.animate = !this.animate;
+                                        cx.notify();
+                                    },
+                                )),
+                            )
+                            .child(control("QA: 3000 rpm / 80°C").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    this.hardware_state.qa.set(!this.hardware_state.qa.get());
+                                    cx.notify();
+                                },
+                            ))),
+                    ),
+            )
+            .child(hardware_stage(
+                readings,
+                Rc::clone(&self.hardware_state),
+                self.animate,
+            ))
+            .child(hardware_caption(self.hardware_state.qa.get()))
+    }
+}
+
+pub fn hardware_caption(qa: bool) -> impl IntoElement {
+    let scope = if qa {
+        "QA simulated fans / CPU / GPU temperatures; charts keep source data. "
+    } else {
+        ""
+    };
+    div()
+        .text_size(px(11.0))
+        .text_color(rgb(MUTED))
+        .child(format!(
+            "{scope}{}",
+            concat!(
+                "MacBook Pro 16-inch assembly illustration; bottom cover removed, hinge at top. ",
+                "Airflow is illustrative; fan channel sides are unverified."
+            )
+        ))
+}
+
+pub fn hardware_stage(
+    readings: Readings,
+    state: Rc<HardwareState>,
+    animate: bool,
+) -> HardwareStage {
+    HardwareStage {
+        readings,
+        state,
+        animate,
+    }
+}
+
+pub struct HardwareStage {
+    readings: Readings,
+    state: Rc<HardwareState>,
+    animate: bool,
+}
+
+impl IntoElement for HardwareStage {
+    type Element = Self;
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for HardwareStage {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _global_element_id: Option<&GlobalElementId>,
+        _inspector_element_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        _context: &mut App,
+    ) -> (LayoutId, ()) {
+        let layout = window.request_measured_layout(Style::default(), |known, available, _, _| {
+            let width = known
+                .width
+                .map_or_else(
+                    || match available.width {
+                        AvailableSpace::Definite(width) => f32::from(width),
+                        AvailableSpace::MinContent | AvailableSpace::MaxContent => 850.0,
+                    },
+                    f32::from,
+                )
+                .max(1.0);
+            size(px(width), px(Layout::new(width).height))
+        });
+        (layout, ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _global_element_id: Option<&GlobalElementId>,
+        _inspector_element_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        (): &mut (),
+        _window: &mut Window,
+        _context: &mut App,
+    ) {
+    }
+
+    fn paint(
+        &mut self,
+        _global_element_id: Option<&GlobalElementId>,
+        _inspector_element_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        (): &mut (),
+        (): &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let visibility = hardware_visibility(bounds, window);
+        let visible = visibility.diagram_visible;
+        let enabled = if visibility.visible() {
+            if self.animate {
+                window.is_window_active()
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if self.state.qa.get() {
+            self.readings.temperatures[0] = Some(80.0);
+            self.readings.temperatures[1] = Some(80.0);
+            self.readings.speeds = [Some(3000.0); 2];
+        }
+        if !visible {
+            self.state.frame(self.readings.speeds, false);
+            self.state.acknowledge_visibility(&visibility);
+            return;
+        }
+        let artwork = artwork();
+        let motion = self.state.frame(self.readings.speeds, enabled);
+        self.state.acknowledge_visibility(&visibility);
+        let layout = Layout::new(f32::from(bounds.size.width).max(1.0));
+        match artwork {
+            Ok(artwork) => {
+                paint_assembly(bounds, &layout, &self.readings, &motion, artwork, window);
+            }
+            Err(error) => paint_text(error, bounds.origin, 12.0, rgb(ORANGE).into(), window, cx),
+        }
+        paint_callouts(
+            bounds,
+            &layout,
+            &self.readings,
+            self.state.qa.get(),
+            window,
+            cx,
+        );
+    }
+}
+
+fn hardware_visibility(bounds: Bounds<Pixels>, window: &Window) -> HardwareVisibility {
+    let diagram = bounds.intersect(&window.content_mask().bounds);
+    let layout = Layout::new(f32::from(bounds.size.width).max(1.0));
+    let stage = bounds_for(
+        bounds,
+        layout.point(Vector::new(0.0, 0.0)),
+        Vector::new(840.0 * layout.scale, 600.0 * layout.scale),
+    );
+    let clipped = stage.intersect(&window.content_mask().bounds);
+    HardwareVisibility {
+        clipped: [
+            f32::from(clipped.size.width).max(0.0),
+            f32::from(clipped.size.height).max(0.0),
+        ],
+        stage: [f32::from(stage.size.width), f32::from(stage.size.height)],
+        diagram_visible: if diagram.size.width > px(0.0) {
+            diagram.size.height > px(0.0)
+        } else {
+            false
+        },
+        window_active: window.is_window_active(),
+    }
+}
+
+struct Artwork {
+    chassis: Arc<RenderImage>,
+    rotors: Vec<Arc<RenderImage>>,
+}
+
+fn artwork() -> &'static Result<Artwork, String> {
+    static ARTWORK: OnceLock<Result<Artwork, String>> = OnceLock::new();
+    ARTWORK.get_or_init(artwork_load)
+}
+
+fn artwork_load() -> Result<Artwork, String> {
+    let started = Instant::now();
+    let chassis = image::open(artwork_path("schematic_chassis.png"))
+        .map_err(|error| format!("Schematic chassis unavailable: {error}"))?
+        .into_rgba8();
+    let rotor = image::open(artwork_path("schematic_rotor.png"))
+        .map_err(|error| format!("Schematic rotor unavailable: {error}"))?
+        .into_rgba8();
+    if chassis.dimensions() != (2520, 1800) {
+        return Err("Schematic chassis dimensions changed".into());
+    }
+    if rotor.dimensions() != (312, 312) {
+        return Err("Schematic rotor dimensions changed".into());
+    }
+    let rotor = image::imageops::resize(&rotor, 208, 208, image::imageops::FilterType::Lanczos3);
+    let mut rotors = Vec::with_capacity(240);
+    for mirrored in [false, true] {
+        for phase in 0..120_u16 {
+            rotors.push(render_image(rotor_orientation(&rotor, phase, mirrored)));
+        }
+    }
+    eprintln!(
+        "schematic artwork cache: {} ms; rotor CPU bytes=41533440; orientations=240",
+        started.elapsed().as_millis()
+    );
+    Ok(Artwork {
+        chassis: render_image(chassis),
+        rotors,
+    })
+}
+
+fn artwork_path(name: &str) -> PathBuf {
+    match std::env::current_exe() {
+        Ok(executable) => {
+            if let Some(parent) = executable.parent() {
+                if parent.file_name().is_some_and(|name| name == "MacOS") {
+                    let bundled = parent.join("../Resources").join(name);
+                    if bundled.is_file() {
+                        return bundled;
+                    }
+                    eprintln!(
+                        "Schematic bundle resource unavailable: {}",
+                        bundled.display()
+                    );
+                }
+            }
+        }
+        Err(error) => eprintln!("Locating schematic executable: {error}"),
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("resources")
+        .join(name)
+}
+
+fn render_image(mut buffer: RgbaImage) -> Arc<RenderImage> {
+    for pixel in buffer.pixels_mut() {
+        pixel.0.swap(0, 2);
+    }
+    Arc::new(RenderImage::new(vec![Frame::new(buffer)]))
+}
+
+fn rotor_orientation(source: &RgbaImage, phase: u16, mirrored: bool) -> RgbaImage {
+    assert!(phase < 120);
+    let angle = f32::from(phase) * std::f32::consts::TAU / 120.0;
+    let (sine, cosine) = angle.sin_cos();
+    let mut target = RgbaImage::new(208, 208);
+    for y in 0..208_u16 {
+        for x in 0..208_u16 {
+            let relative_x = if mirrored {
+                103.5 - f32::from(x)
+            } else {
+                f32::from(x) - 103.5
+            };
+            let relative_y = f32::from(y) - 103.5;
+            let source_x = relative_x * cosine - relative_y * sine + 103.5;
+            let source_y = relative_x * sine + relative_y * cosine + 103.5;
+            target.put_pixel(
+                u32::from(x),
+                u32::from(y),
+                rotor_sample(source, source_x, source_y),
+            );
+        }
+    }
+    target
+}
+
+fn rotor_sample(source: &RgbaImage, x: f32, y: f32) -> Rgba<u8> {
+    if !(0.0..=207.0).contains(&x) {
+        return Rgba([0; 4]);
+    }
+    if !(0.0..=207.0).contains(&y) {
+        return Rgba([0; 4]);
+    }
+    // The checks prove finite, nonnegative coordinates within the 208-pixel buffer.
+    let column = unsafe { x.to_int_unchecked::<u32>() };
+    let row = unsafe { y.to_int_unchecked::<u32>() };
+    let horizontal = x.fract();
+    let vertical = y.fract();
+    let mut result = [0_u8; 4];
+    for (channel, target) in result.iter_mut().enumerate() {
+        let first = f32::from(source.get_pixel(column, row)[channel]) * (1.0 - horizontal)
+            + f32::from(source.get_pixel((column + 1).min(207), row)[channel]) * horizontal;
+        let second = f32::from(source.get_pixel(column, (row + 1).min(207))[channel])
+            * (1.0 - horizontal)
+            + f32::from(source.get_pixel((column + 1).min(207), (row + 1).min(207))[channel])
+                * horizontal;
+        let value = (first * (1.0 - vertical) + second * vertical)
+            .round()
+            .clamp(0.0, 255.0);
+        // Finite bilinear weights and clamping establish the u8 conversion's complete range.
+        *target = unsafe { value.to_int_unchecked::<u8>() };
+    }
+    Rgba(result)
+}
+
+fn paint_assembly(
+    bounds: Bounds<Pixels>,
+    layout: &Layout,
+    readings: &Readings,
+    motion: &[FanFrame; 2],
+    artwork: &Artwork,
+    window: &mut Window,
+) {
+    let stage = bounds_for(
+        bounds,
+        layout.point(Vector::new(0.0, 0.0)),
+        Vector::new(840.0 * layout.scale, 600.0 * layout.scale),
+    );
+    if let Err(error) = window.paint_image(
+        stage,
+        stage,
+        px(0.0).into(),
+        Arc::clone(&artwork.chassis),
+        0,
+        false,
+    ) {
+        eprintln!("Painting schematic chassis: {error}");
+    }
+    for (index, callout) in [Callout::Fan0, Callout::Fan1].into_iter().enumerate() {
+        let center = callout.anchor();
+        let rotor = bounds_for(
+            bounds,
+            layout.point(Vector::new(center.x - 52.0, center.y - 52.0)),
+            Vector::new(104.0 * layout.scale, 104.0 * layout.scale),
+        );
+        let phase = rotor_phase(motion[index].turns) + index * 120;
+        if let Err(error) = window.paint_image(
+            rotor,
+            rotor,
+            px(0.0).into(),
+            Arc::clone(&artwork.rotors[phase]),
+            0,
+            false,
+        ) {
+            eprintln!("Painting schematic rotor: {error}");
+        }
+        if readings.speeds[index].is_some_and(|speed| speed > 0.0) {
+            paint_airflow(
+                bounds,
+                layout,
+                index == 1,
+                &motion[index].distances,
+                readings.temperatures[index],
+                window,
+            );
+        }
+    }
+}
+
+fn rotor_phase(turns: f32) -> usize {
+    let fraction = turns.fract();
+    usize::from(
+        (0..120_u16)
+            .find(|phase| fraction < f32::from(phase + 1) / 120.0)
+            .unwrap_or(119),
+    )
+}
+
+fn bounds_for(bounds: Bounds<Pixels>, origin: Vector, extent: Vector) -> Bounds<Pixels> {
+    Bounds::new(
+        point(
+            bounds.origin.x + px(origin.x),
+            bounds.origin.y + px(origin.y),
+        ),
+        size(px(extent.x), px(extent.y)),
+    )
+}
+
+fn paint_airflow(
+    bounds: Bounds<Pixels>,
+    layout: &Layout,
+    mirrored: bool,
+    distances: &[f32; 24],
+    temperature: Option<f32>,
+    window: &mut Window,
+) {
+    let tint = airflow_color(temperature);
+    let mut boundary = PathBuilder::fill();
+    boundary.style =
+        gpui::PathStyle::Fill(gpui::FillOptions::default().with_fill_rule(gpui::FillRule::NonZero));
+    let mut housing = perimeter().to_vec();
+    housing.push(Vector::new(109.0, 83.0));
+    airflow_contour(&mut boundary, &housing, bounds, layout, mirrored);
+    airflow_contour(
+        &mut boundary,
+        &[
+            Vector::new(112.0, 33.0),
+            Vector::new(289.0, 33.0),
+            Vector::new(289.0, 84.0),
+            Vector::new(112.0, 84.0),
+        ],
+        bounds,
+        layout,
+        mirrored,
+    );
+    let hole: Vec<_> = (0..32_u16)
+        .map(|step| {
+            let angle = -f32::from(step) * std::f32::consts::TAU / 32.0;
+            Vector::new(183.0 + angle.cos() * 29.0, 221.0 + angle.sin() * 29.0)
+        })
+        .collect();
+    airflow_contour(&mut boundary, &hole, bounds, layout, mirrored);
+    match boundary.build() {
+        Ok(path) => paint_airflow_wash(&path, bounds, layout, tint, window),
+        Err(error) => eprintln!("Painting airflow housing: {error}"),
+    }
+    for lane in 0..24_u16 {
+        for phase in 0..4_u16 {
+            let particle = particle(lane, phase, distances[usize::from(lane)]);
+            if contains(particle.position) {
+                let center = airflow_point(particle.position, bounds, layout, mirrored);
+                let radius = particle.radius * layout.scale;
+                let rect = Bounds::new(
+                    center - point(px(radius), px(radius)),
+                    size(px(radius * 2.0), px(radius * 2.0)),
+                );
+                window.paint_quad(
+                    fill(rect, tint.opacity(particle.opacity)).corner_radii(px(radius)),
+                );
+            }
+        }
+    }
+}
+
+fn paint_airflow_wash(
+    path: &gpui::Path<Pixels>,
+    bounds: Bounds<Pixels>,
+    layout: &Layout,
+    tint: Hsla,
+    window: &mut Window,
+) {
+    // Two clipped gradients reproduce four color stops using GPUI's two-stop primitive.
+    for (first, end, stops) in [
+        (33.0, 310.42, [(0.0, 0.0), (0.08, 0.11)]),
+        (310.42, 319.0, [(0.97, 0.11), (1.0, 0.0)]),
+    ] {
+        let origin = layout.point(Vector::new(0.0, first));
+        let extent = Vector::new(840.0 * layout.scale, (end - first) * layout.scale);
+        let mask = gpui::ContentMask {
+            bounds: bounds_for(bounds, origin, extent),
+        };
+        let background = gpui::linear_gradient(
+            180.0,
+            gpui::linear_color_stop(tint.opacity(stops[0].1), stops[0].0),
+            gpui::linear_color_stop(tint.opacity(stops[1].1), stops[1].0),
+        );
+        window.with_content_mask(Some(mask), |window| {
+            window.paint_path(path.clone(), background);
+        });
+    }
+}
+
+fn airflow_contour(
+    path: &mut PathBuilder,
+    points: &[Vector],
+    bounds: Bounds<Pixels>,
+    layout: &Layout,
+    mirrored: bool,
+) {
+    assert!(points.len() <= 102);
+    for (index, position) in points.iter().enumerate() {
+        let position = airflow_point(*position, bounds, layout, mirrored);
+        if index == 0 {
+            path.move_to(position);
+        } else {
+            path.line_to(position);
+        }
+    }
+    path.close();
+}
+
+fn airflow_point(
+    mut position: Vector,
+    bounds: Bounds<Pixels>,
+    layout: &Layout,
+    mirrored: bool,
+) -> Point<Pixels> {
+    if mirrored {
+        position.x = 840.0 - position.x;
+    }
+    let position = layout.point(position);
+    point(
+        bounds.origin.x + px(position.x),
+        bounds.origin.y + px(position.y),
+    )
+}
+
+fn airflow_color(temperature: Option<f32>) -> Hsla {
+    let Some(temperature) = temperature.filter(|value| value.is_finite()) else {
+        return rgb(MUTED).into();
+    };
+    let cool = rgb(BLUE);
+    let warm = rgb(0x00f2_cc0d);
+    let hot = rgb(RED);
+    let (first, second, fraction) = if temperature < 70.0 {
+        (cool, warm, ((temperature - 50.0) / 20.0).clamp(0.0, 1.0))
+    } else {
+        (warm, hot, ((temperature - 70.0) / 20.0).clamp(0.0, 1.0))
+    };
+    gpui::Rgba {
+        r: first.r + (second.r - first.r) * fraction,
+        g: first.g + (second.g - first.g) * fraction,
+        b: first.b + (second.b - first.b) * fraction,
+        a: 1.0,
+    }
+    .into()
+}
+
+fn paint_callouts(
+    bounds: Bounds<Pixels>,
+    layout: &Layout,
+    readings: &Readings,
+    qa: bool,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    for callout in CALLOUTS {
+        let tint = match callout {
+            Callout::Gpu => PURPLE,
+            Callout::Memory => GREEN,
+            Callout::Battery => ORANGE,
+            _ => BLUE,
+        };
+        let leader = layout.leader(callout);
+        let mut path = PathBuilder::stroke(px(1.0));
+        for (index, position) in leader.iter().enumerate() {
+            let position = point(
+                bounds.origin.x + px(position.x),
+                bounds.origin.y + px(position.y),
+            );
+            if index == 0 {
+                path.move_to(position);
+            } else {
+                path.line_to(position);
+            }
+        }
+        match path.build() {
+            Ok(path) => window.paint_path(path, Hsla::from(rgb(tint)).opacity(0.65)),
+            Err(error) => eprintln!("Painting schematic leader: {error}"),
+        }
+        let anchor = bounds_for(
+            bounds,
+            Vector::new(leader[0].x - 2.0, leader[0].y - 2.0),
+            Vector::new(4.0, 4.0),
+        );
+        window.paint_quad(fill(anchor, rgb(tint)).corner_radii(px(2.0)));
+        paint_label(bounds, layout, callout, readings, qa, window, cx);
+    }
+}
+
+fn paint_label(
+    bounds: Bounds<Pixels>,
+    layout: &Layout,
+    callout: Callout,
+    readings: &Readings,
+    qa: bool,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let (primary, secondary) = label_values(callout, readings);
+    let mut title = callout.title().to_owned();
+    if qa {
+        if matches!(
+            callout,
+            Callout::Cpu | Callout::Gpu | Callout::Fan0 | Callout::Fan1
+        ) {
+            title.push_str(" · QA");
+        }
+    }
+    let origin = layout.label(callout);
+    for (index, (text, offset, height, color)) in [
+        (title, 0.0, 11.0, MUTED),
+        (primary, 18.0, 20.0, TEXT),
+        (secondary, 48.0, 11.0, MUTED),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut origin = point(
+            bounds.origin.x + px(origin.x),
+            bounds.origin.y + px(origin.y + offset),
+        );
+        let mut line = shape_text(&text, height, rgb(color).into(), window);
+        if index == 1 {
+            if line.width > px(layout.label_width) {
+                let factor = (layout.label_width / f32::from(line.width)).max(0.65);
+                line = shape_text(&text, height * factor, rgb(color).into(), window);
+            }
+        }
+        if !callout.left() {
+            origin.x += px(layout.label_width) - line.width;
+        }
+        if let Err(error) = line.paint(
+            origin,
+            px(height + 5.0),
+            gpui::TextAlign::Left,
+            None,
+            window,
+            cx,
+        ) {
+            eprintln!("Painting schematic label: {error}");
+        }
+    }
+}
+
+fn label_values(callout: Callout, readings: &Readings) -> (String, String) {
+    match callout {
+        Callout::Fan0 | Callout::Fan1 => {
+            let index = usize::from(matches!(callout, Callout::Fan1));
+            let speed = readings.speeds[index];
+            (
+                reading(speed, "rpm"),
+                match speed {
+                    Some(0.0) => "Stopped",
+                    Some(_) => "Running",
+                    None => "Unavailable",
+                }
+                .into(),
+            )
+        }
+        Callout::Cpu | Callout::Gpu => {
+            let index = usize::from(matches!(callout, Callout::Gpu));
+            if readings.temperatures[index].is_some() {
+                (
+                    reading(readings.temperatures[index], "°C"),
+                    format!("Utilization {}", reading(readings.utilization[index], "%")),
+                )
+            } else {
+                (
+                    reading(readings.utilization[index], "%"),
+                    "Temperature unavailable".into(),
+                )
+            }
+        }
+        Callout::Memory => {
+            let primary = if readings.memory[0].is_some() {
+                format!(
+                    "{} / {}",
+                    reading(readings.memory[0], ""),
+                    reading(readings.memory[1], "GiB")
+                )
+            } else {
+                if readings.memory[1].is_some() {
+                    format!("{} installed", reading(readings.memory[1], "GiB"))
+                } else {
+                    "Unavailable".into()
+                }
+            };
+            (
+                primary,
+                match readings.temperatures[2] {
+                    Some(value) => format!("Peak {value:.1} °C"),
+                    None => "Temperature unavailable".into(),
+                },
+            )
+        }
+        Callout::Battery => (
+            reading(readings.battery[0], "%"),
+            format!("Power {}", reading(readings.battery[1], "W")),
+        ),
+    }
+}
+
+fn shape_text(text: &str, height: f32, color: Hsla, window: &Window) -> gpui::ShapedLine {
+    window.text_system().shape_line(
+        text.to_owned().into(),
+        px(height),
+        &[TextRun {
+            len: text.len(),
+            font: font(".SystemUIFont"),
+            color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        }],
+        None,
+    )
+}
+
+fn paint_text(
+    text: &str,
+    origin: Point<Pixels>,
+    height: f32,
+    color: Hsla,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if let Err(error) = shape_text(text, height, color, window).paint(
+        origin,
+        px(height + 5.0),
+        gpui::TextAlign::Left,
+        None,
+        window,
+        cx,
+    ) {
+        eprintln!("Painting schematic error: {error}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rotor_cache_keeps_the_artwork_and_mirrors_the_right_fan() {
+        // Compare zero-angle output pixel-for-pixel with the source and its exact reflection.
+        let source = RgbaImage::from_fn(208, 208, |x, y| {
+            Rgba([u8::try_from(x).unwrap(), u8::try_from(y).unwrap(), 100, 255])
+        });
+        assert_eq!(rotor_orientation(&source, 0, false), source);
+        assert_eq!(
+            rotor_orientation(&source, 0, true),
+            image::imageops::flip_horizontal(&source)
+        );
+        assert_eq!(rotor_sample(&source, f32::NAN, 0.0), Rgba([0; 4]));
+        assert_eq!(rotor_sample(&source, -1.0, 0.0), Rgba([0; 4]));
+        assert_eq!(rotor_phase(0.0), 0);
+        assert_eq!(rotor_phase(1.0), 0);
+        assert_eq!(rotor_phase(0.999), 119);
+    }
+
+    #[test]
+    fn quarter_turn_moves_asymmetric_pixels_and_mirrors_the_right_fan() {
+        // A negative quarter-turn maps target (120,80) to source (127,120) around (103.5,103.5).
+        // Reflecting the right fan maps target (120,80) to source (127,87) instead.
+        let source = RgbaImage::from_fn(208, 208, |x, y| {
+            Rgba([u8::try_from(x).unwrap(), u8::try_from(y).unwrap(), 100, 255])
+        });
+        let left = rotor_orientation(&source, 30, false);
+        let right = rotor_orientation(&source, 30, true);
+        assert_eq!(*left.get_pixel(120, 80), Rgba([127, 120, 100, 255]));
+        assert_eq!(*right.get_pixel(120, 80), Rgba([127, 87, 100, 255]));
+        assert_eq!(*right.get_pixel(87, 80), Rgba([127, 120, 100, 255]));
+    }
+}

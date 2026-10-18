@@ -61,11 +61,8 @@ jobs:
           --skip smc::tests::reads_the_temperature_of_a_soc_sensor
           --skip smc::tests::refuses_a_float_key_the_smc_holds_as_another_type
           --skip smc::tests::refuses_a_key_read_as_a_type_it_does_not_hold
-      # Opt-in locally; CI compiles and links the same SwiftUI app contributors can launch.
-      - run: cargo run --locked -p viewer --bin flightdeck -- --check
-
-  gpui-prototype:
-    # Keep the experiment's dependencies and lockfile outside the recording workspace.
+  desktop:
+    # Build the GPUI desktop client with its separate UI dependency lockfile.
     runs-on: macos-26
     timeout-minutes: 30
     env:
@@ -77,58 +74,54 @@ jobs:
       - run: >-
           rustup toolchain install "$RUSTUP_TOOLCHAIN"
           --profile minimal --component rustfmt,clippy --no-self-update
-      - run: cargo fmt --manifest-path gpui-prototype/Cargo.toml --check
+      - run: cargo fmt --manifest-path desktop/Cargo.toml --check
       - run: >-
-          cargo clippy --locked --manifest-path gpui-prototype/Cargo.toml
+          cargo clippy --locked --manifest-path desktop/Cargo.toml
           --all-targets -- --deny warnings
-      - run: cargo test --locked --manifest-path gpui-prototype/Cargo.toml
+      - run: cargo test --locked --manifest-path desktop/Cargo.toml
       - run: >-
-          cargo run --locked --manifest-path gpui-prototype/Cargo.toml
-          --bin flightdeck-gpui -- --check
+          cargo run --locked --manifest-path desktop/Cargo.toml
+          --bin flightdeck -- --check
       - run: >-
-          cargo run --locked --manifest-path gpui-prototype/Cargo.toml
+          cargo run --locked --manifest-path desktop/Cargo.toml
           --bin text_backend_check -- --check
-      - run: >-
-          cargo run --locked --manifest-path gpui-prototype/Cargo.toml
-          --bin native_replay_build -- --typecheck
-          --output gpui-prototype/target/native-replay-ci
       - run: cargo build --locked --release -p collector -p persistence --bin collector --bin persister
       - run: >-
-          cargo build --locked --release --manifest-path gpui-prototype/Cargo.toml
-          --bin flightdeck-gpui
+          cargo build --locked --release --manifest-path desktop/Cargo.toml
+          --bin flightdeck
       - name: Record executable identities before packaging
         run: >-
-          shasum -a 256 gpui-prototype/target/release/flightdeck-gpui
+          shasum -a 256 desktop/target/release/flightdeck
           target/release/collector target/release/persister
-          > gpui-prototype/target/bundle-built.sha256
-      - run: gpui-prototype/target/release/flightdeck-gpui --bundle
-      - run: '"gpui-prototype/target/Flightdeck GPUI.app/Contents/MacOS/flightdeck-gpui" --bundle --check'
+          > desktop/target/bundle-built.sha256
+      - run: desktop/target/release/flightdeck --bundle
+      - run: '"desktop/target/Flightdeck.app/Contents/MacOS/flightdeck" --bundle --check'
       - name: Verify packaged executable identities
         run: |
           shasum -a 256 \
-            "gpui-prototype/target/Flightdeck GPUI.app/Contents/MacOS/flightdeck-gpui" \
-            "gpui-prototype/target/Flightdeck GPUI.app/Contents/Helpers/collector" \
-            "gpui-prototype/target/Flightdeck GPUI.app/Contents/Helpers/persister" \
-            > gpui-prototype/target/bundle-packaged.sha256
-          cat gpui-prototype/target/bundle-built.sha256 gpui-prototype/target/bundle-packaged.sha256
-          cut -c 1-64 gpui-prototype/target/bundle-built.sha256 \
-            > gpui-prototype/target/bundle-built-digests.sha256
-          cut -c 1-64 gpui-prototype/target/bundle-packaged.sha256 \
-            > gpui-prototype/target/bundle-packaged-digests.sha256
-          diff -u gpui-prototype/target/bundle-built-digests.sha256 \
-            gpui-prototype/target/bundle-packaged-digests.sha256
+            "desktop/target/Flightdeck.app/Contents/MacOS/flightdeck" \
+            "desktop/target/Flightdeck.app/Contents/Helpers/collector" \
+            "desktop/target/Flightdeck.app/Contents/Helpers/persister" \
+            > desktop/target/bundle-packaged.sha256
+          cat desktop/target/bundle-built.sha256 desktop/target/bundle-packaged.sha256
+          cut -c 1-64 desktop/target/bundle-built.sha256 \
+            > desktop/target/bundle-built-digests.sha256
+          cut -c 1-64 desktop/target/bundle-packaged.sha256 \
+            > desktop/target/bundle-packaged-digests.sha256
+          diff -u desktop/target/bundle-built-digests.sha256 \
+            desktop/target/bundle-packaged-digests.sha256
       - name: Reject changed packaged helper bytes
         run: |
-          cp -R "gpui-prototype/target/Flightdeck GPUI.app" \
-            "gpui-prototype/target/Flightdeck GPUI tampered.app"
+          cp -R "desktop/target/Flightdeck.app" \
+            "desktop/target/Flightdeck tampered.app"
           printf changed >> \
-            "gpui-prototype/target/Flightdeck GPUI tampered.app/Contents/Helpers/collector"
+            "desktop/target/Flightdeck tampered.app/Contents/Helpers/collector"
           shasum -a 256 \
-            "gpui-prototype/target/Flightdeck GPUI tampered.app/Contents/MacOS/flightdeck-gpui" \
-            "gpui-prototype/target/Flightdeck GPUI tampered.app/Contents/Helpers/collector" \
-            "gpui-prototype/target/Flightdeck GPUI tampered.app/Contents/Helpers/persister" \
-            > gpui-prototype/target/bundle-tampered.sha256
-          cut -c 1-64 gpui-prototype/target/bundle-tampered.sha256 \
-            > gpui-prototype/target/bundle-tampered-digests.sha256
-          ! diff -u gpui-prototype/target/bundle-built-digests.sha256 \
-            gpui-prototype/target/bundle-tampered-digests.sha256
+            "desktop/target/Flightdeck tampered.app/Contents/MacOS/flightdeck" \
+            "desktop/target/Flightdeck tampered.app/Contents/Helpers/collector" \
+            "desktop/target/Flightdeck tampered.app/Contents/Helpers/persister" \
+            > desktop/target/bundle-tampered.sha256
+          cut -c 1-64 desktop/target/bundle-tampered.sha256 \
+            > desktop/target/bundle-tampered-digests.sha256
+          ! diff -u desktop/target/bundle-built-digests.sha256 \
+            desktop/target/bundle-tampered-digests.sha256

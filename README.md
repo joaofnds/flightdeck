@@ -1,6 +1,6 @@
 # Flightdeck
 
-A macOS system monitor with a SwiftUI/AppKit client and a Rust recording core. It records
+A macOS system monitor with a Rust/GPUI client and a Rust recording core. It records
 process and system readings once a second and keeps them for later inspection.
 Open-file and socket collection is planned. The design research is in
 [docs/recording-research.md](docs/recording-research.md).
@@ -61,60 +61,29 @@ The reference contains private readings too.
 
 ## Native desktop app
 
-With Xcode's command-line tools and Rust installed, build the SwiftUI/AppKit application:
+With Xcode's command-line tools and Rust 1.95.0 installed, build the GPUI application:
 
 ```sh
-cargo run --locked -p viewer --bin flightdeck -- --build
-open target/Flightdeck.app
+cargo build --locked --release -p collector -p persistence --bin collector --bin persister
+cargo build --locked --release --manifest-path desktop/Cargo.toml --bin flightdeck
+desktop/target/release/flightdeck --bundle
+"desktop/target/Flightdeck.app/Contents/MacOS/flightdeck" --bundle --check
+open desktop/target/Flightdeck.app
 ```
 
-Opening the app without arguments shows the captured prototype reference: eleven native
-views, shared time inspection, app/process drilldowns and the animated MacBook schematic.
-This mode uses bundled historical samples, clearly labelled as captured reference data.
-It does not describe the current Mac.
+The movable bundle contains the app, collector, persister and schematic artwork.
+Default launch follows the last fifteen minutes of live readings, attaching to an
+existing collector or starting its own when collection is absent. Only a collector
+started by the app is stopped when it quits. `--recording PATH` opens a recording
+read-only; `--reference` opens captured prototype data.
 
-Choose **Flightdeck recording** in the data-source picker to inspect an actual recording.
-`--run --recording PATH` opens that mode directly. Its default directory is the current
-user's `Library/Application Support/Flightdeck/flightdeck.recording`. The viewer opens
-existing data read-only and never starts a collector or repairs history. Open a recording
-from the File menu. Refresh discovers newly sealed windows; **Live** follows the newest
-shared-memory ticks registered for that recording, including its unsealed tail. Pausing
-live following retains the tail for inspection.
-
-Recording mode provides Overview, CPU/process inspection, GPU, Memory, Energy, Network and
-all ten recorded tables, with 512-row pages and an exact-field row inspector. CPU charts show
-aggregate logical CPU activity; GPU charts show activity and power. Energy keeps system and
-GPU power independent. Network mirrors sent traffic below zero while keeping readouts positive.
-Memory charts show independent recorded VM categories and swap. All component charts preserve
-missing observations and boundaries between collector runs. The charts cover the 15 minutes
-ending at the selected second. Enter a Unix second, step one second or inspect a chart.
-Repeated seconds retain separate run/publication alternatives. Chart selections carry the exact
-observation identity into table requests; unavailable raw observations report an error rather than
-selecting a sibling. A missing second clears readings. Names and app identities are not yet
-in the recording schema, so this mode shows
-recorded PIDs and creation identities. The other reference views still need recording-backed
-sources; the captured reference is a presentation comparison, not full functional parity.
-
-The app uses native controls and drawing with no browser runtime. Theme tokens are shared
-across the dark UI and charts. The build uses optimized Swift and Rust, is
-signed locally for development, and is not a notarized distribution. No build step installs
-a toolchain or changes local hooks.
-
-The builder’s `--check` also runs native model, decoder and table checks; CI runs that same
-command. Optional measurement tools report query wall/CPU time and process physical
-footprint separately from resident memory:
-
-```sh
-cargo run --locked --release -p viewer --bin query_bench -- \
-  --recording PATH --iterations 100
-cargo run --locked --release -p viewer --bin process_watch -- --pid PID --seconds 60
-```
-
-Record the app binary, recording/window/row counts, selected seconds, visibility and
-interaction state with each measurement. `query_bench` reads the 900-second context and
-first page of each table at up to 30 recent seconds; it labels missing-second iterations
-separately. `--second N` selects the ending second. These are opt-in observations, not a
-whole-process memory limit or an automatic application-performance budget.
+The UI uses GPUI's Metal rendering without a browser runtime. Its separate Cargo
+workspace and lockfile keep UI dependencies apart from the recording core.
+[Desktop usage and architecture](desktop/README.md) describes the resource pages,
+source controls, bounded queries, development checks and performance tools.
+[Verification and remaining native checks](desktop/LIVE.md) distinguish automated
+checks from interactive macOS observations. Historical framework measurements and
+the current toolkit decision remain in [the evaluation](desktop/EVALUATION.md).
 
 ## Recording inspection tools
 
@@ -157,5 +126,8 @@ steps under that toolchain:
 cargo fmt --all --check
 cargo clippy --locked --workspace --all-targets -- --deny warnings
 cargo test --locked --workspace
-cargo run --locked -p viewer --bin flightdeck -- --check
+cargo fmt --manifest-path desktop/Cargo.toml --check
+cargo clippy --locked --manifest-path desktop/Cargo.toml --all-targets -- --deny warnings
+cargo test --locked --manifest-path desktop/Cargo.toml
+cargo run --locked --manifest-path desktop/Cargo.toml --bin flightdeck -- --check
 ```

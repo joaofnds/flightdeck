@@ -1,4 +1,0 @@
-module FlightdeckBridge {
-    header "flightdeck.h"
-    export *
-}

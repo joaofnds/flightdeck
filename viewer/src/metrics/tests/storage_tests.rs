@@ -248,8 +248,8 @@ fn keeps_mean_unavailable_when_a_device_reports_no_completed_time() {
 }
 
 #[test]
-fn refuses_an_oversized_nine_hundred_point_sixteen_disk_response() {
-    // Goal: maximum disk cardinality and wide numbers respect the existing response envelope.
+fn preserves_wide_disk_values_in_the_public_selection_projection() {
+    // Goal: maximum disk cardinality and wide numbers survive the public JSON projection.
     // Method: serialize the full public selection envelope with sixteen 31-byte device labels.
     let mut fixture = fixture();
     let mut before = snapshot(1, &[]);
@@ -271,15 +271,22 @@ fn refuses_an_oversized_nine_hundred_point_sixteen_disk_response() {
     let public = public_point(&widest).unwrap();
 
     let envelope = selection_envelope(&public, &widest["observation"], 900);
-    let bytes = serde_json::to_vec(&envelope).unwrap().len();
+    let encoded = serde_json::to_vec(&envelope).unwrap();
+    let decoded: Value = serde_json::from_slice(&encoded).unwrap();
+    let bytes = encoded.len();
 
-    assert_eq!(public["storage"]["devices"].as_array().unwrap().len(), 16);
-    assert!(bytes > 8 * 1024 * 1024, "{bytes}");
-    let response = crate::bridge::tests::response_value(envelope["value"].clone());
+    let devices = &decoded["value"]["summary"]["storage"]["devices"];
+    assert_eq!(devices.as_array().unwrap().len(), 16);
     assert_eq!(
-        response,
-        json!({"value": null, "error": "response exceeds 8 MiB"})
+        devices[0]["driver_id"],
+        json!(18_446_744_073_709_551_515_u64)
     );
+    assert_eq!(
+        devices[15]["media_id"],
+        json!(18_446_744_073_709_551_585_u64)
+    );
+    assert_eq!(devices[0]["read_bps"], json!(0.000_012_345_678_901_234_568));
+    assert_eq!(decoded, envelope);
     println!("storage maximum selection response bytes: {bytes}");
 }
 

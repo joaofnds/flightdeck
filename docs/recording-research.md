@@ -1,6 +1,6 @@
 # Recording a Mac every second
 
-Research for a SwiftUI/AppKit app with a Rust core that records the whole machine once a second, keeps
+Research for a Rust/GPUI app with a Rust recording core that records the whole machine once a second, keeps
 the recording, and lets you go back to any second and join what every process, file
 and socket was doing. Unless dated otherwise or attributed to a source, numbers below
 were measured on this M5 Pro on 2026-10-12 or 2026-10-13. The evidence programs are
@@ -746,12 +746,12 @@ two readings, and no run has watched it.
    full-synced canonical no-overwrite commit markers. Empty windows produce no files,
    and stopping may seal a partial window. Per-minute/hour compaction and retention
    remain future work.
-4. The SwiftUI/AppKit viewer draws live data from the ring, asks the Rust core for history over the
-   sealed files, and joins the two through the ring's unsealed tail as Arrow batches.
+4. The GPUI desktop client reads live and saved observations through the Rust viewer
+   adapter, combining sealed history with the ring's unsealed tail under bounded
+   operation, result and cache limits.
 
 The dated week-query experiment under Where it is kept selects step 3's storage.
-The collector and separate persister implement step 3. The viewer's Arrow union and
-launch-agent registration remain future callers. Legacy layout-2 rings retain their
+The collector and separate persister implement step 3. Launch-agent registration remains a future caller. Legacy layout-2 rings retain their
 readings, with unknown observation timestamps and an all-zero unknown boot identity.
 Choose UTF-8 recording roots without `*`, `?` or `[`. Creation accepts other paths, but
 the query API and checker refuse them so an engine file pattern cannot expand a private
@@ -776,9 +776,10 @@ missing an entry, and on a case whose crate no member depends on.
 
 ### serde_json
 
-- Used: The viewer-only Rust adapter emits bounded JSON across the native C ABI. Raw database cells are decimal strings or NULL, so Swift never rounds a stored integer through a floating-point JSON representation. The crate is pinned to =1.0.154 and was already in DuckDB's transitive graph.
-- Performance: Responses are capped at 8 MiB with 512-row point pages and 4096 contextual observations. Serialization and native decoding need whole-viewer measurement; no allocation-free or comparative performance claim is made. Writing another JSON encoder here would duplicate escaping and integer correctness work.
-- Maintenance: Keep Cargo.lock and check native round trips with wide integers, NULL and refused reads. This reuses serde, serde_core, itoa, memchr and zmij already present in the engine graph. Recheck protocol bounds and the serde_json changelog on upgrades.
+- Used: The viewer-only Rust adapter projects recording data into bounded JSON values for the Rust desktop client and diagnostic tools. Raw database cells remain decimal strings or NULL, preserving stored integers without floating-point conversion. The crate is pinned to =1.0.154 and was already in DuckDB's transitive graph.
+- Performance: Requests use 512-row pages and at most 4096 contextual observations. The former C ABI's serialized 8 MiB envelope is retired; Rust callers consume values directly. Whole-client allocation, query latency and footprint still require measurement. Another JSON encoder would duplicate escaping and integer correctness work.
+- Maintenance: Keep Cargo.lock and check wide integers, NULL and refused reads through the Rust projection. This reuses serde, serde_core, itoa, memchr and zmij already present in the engine graph. Recheck bounds and the serde_json changelog on upgrades.
+
 
 ### duckdb
 
