@@ -12,8 +12,10 @@ use super::{CPUHistory, CPUInspection, CPUStep, PAGE_CPUS};
 use crate::charts::{GREEN, GRID, MUTED, ORANGE, PANEL, RED, TEXT};
 use crate::dashboard::control;
 use crate::live_dashboard::LiveDashboard;
+use crate::live_hover::{Origin, Target};
 
 const ROW_HEIGHT: f32 = 18.0;
+const HOVER_SOURCE: &str = "cpu-history-plot";
 
 impl LiveDashboard {
     pub fn cpu_history_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -56,17 +58,12 @@ impl LiveDashboard {
             return panel.child("Logical CPU history unavailable.");
         }
 
-        let inspection = self.cpu_inspection.or_else(|| history.selected());
+        let inspection = self.cpu_history_inspection(history);
         panel = panel
             .child(Self::cpu_history_pages(history, cx))
             .child(self.cpu_history_plot(history, cx))
             .child(cpu_history_times(history))
-            .child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(rgb(MUTED))
-                    .child(cpu_history_reading(history, inspection)),
-            );
+            .child(cpu_history_readout(history, inspection));
         panel.child(div().text_size(px(11.0)).text_color(rgb(MUTED)).child(
             "0–59% green · 60–79% yellow · 80–89% orange · 90–100% red · \
              Blank: unavailable",
@@ -138,17 +135,41 @@ impl LiveDashboard {
         history: &Arc<CPUHistory>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let Some(focus) = self.cpu_history_focus.as_ref() else {
+            unreachable!("Dashboard initializes the CPU history focus before rendering rows");
+        };
+        let plot = div()
+            .id(HOVER_SOURCE)
+            .debug_selector(|| HOVER_SOURCE.into())
+            .track_focus(focus)
+            .tab_stop(true)
+            .focus(|style| style.bg(rgb(0x20_30_41)))
+            .flex()
+            .gap(px(6.0))
+            .child(cpu_history_rows(
+                history,
+                self.cpu_history_inspection(history),
+            ))
+            .child(self.cpu_history_cells(history, cx))
+            .on_key_down(cx.listener(Self::cpu_history_keyboard));
+
+        self.cpu_history_accessibility(plot, history, cx)
+    }
+
+    fn cpu_history_cells(
+        &self,
+        history: &Arc<CPUHistory>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let measured = Rc::new(Cell::new(Bounds::default()));
         let measure = Rc::clone(&measured);
         let paint_history = Arc::clone(history);
-        let inspection = self.cpu_inspection.or_else(|| history.selected());
+        let inspection = self.cpu_history_inspection(history);
         let Ok(rows) = u8::try_from(history.cpus().len()) else {
             unreachable!("Validated CPU history has at most 32 rows");
         };
         let plot = canvas(
-            move |bounds, _, _| {
-                measure.set(bounds);
-            },
+            move |bounds, _, _| measure.set(bounds),
             move |bounds, (), window, _| {
                 cpu_history_paint(&paint_history, inspection, bounds, window);
             },
@@ -156,52 +177,100 @@ impl LiveDashboard {
         .w_full()
         .h(px(f32::from(rows) * ROW_HEIGHT));
         let move_history = Arc::clone(history);
+        let move_bounds = Rc::clone(&measured);
         let click_history = Arc::clone(history);
         let click_bounds = Rc::clone(&measured);
-        let Some(focus) = self.cpu_history_focus.as_ref() else {
-            unreachable!("Dashboard initializes the CPU history focus before rendering rows");
-        };
-        let leave_focus = focus.clone();
-        let plot = div()
-            .id("cpu-history-plot")
-            .debug_selector(|| "cpu-history-plot".into())
-            .track_focus(focus)
-            .tab_stop(true)
-            .focus(|style| style.bg(rgb(0x20_30_41)))
-            .flex()
-            .gap(px(6.0))
-            .child(cpu_history_rows(history, inspection))
-            .child(
-                div()
-                    .id("cpu-history-cells")
-                    .debug_selector(|| "cpu-history-cells".into())
-                    .flex_1()
-                    .min_w_0()
-                    .child(plot),
-            )
-            .on_key_down(cx.listener(Self::cpu_history_keyboard))
+        let hover_history = Arc::clone(history);
+        div()
+            .id("cpu-history-cells")
+            .debug_selector(|| "cpu-history-cells".into())
+            .flex_1()
+            .min_w_0()
+            .relative()
+            .child(plot)
+            .children(self.reading_membership_observer(HOVER_SOURCE.into(), cx))
             .on_mouse_move(
                 cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {
-                    this.cpu_history_hover(&move_history, measured.get(), event.position, cx);
+                    this.cpu_history_hover(&move_history, move_bounds.get(), event.position, cx);
                 }),
             )
             .on_hover(cx.listener(move |this, hovered, window, cx| {
-                if !hovered {
-                    if !leave_focus.is_focused(window) {
-                        this.cpu_inspection = None;
-                        cx.notify();
+                if *hovered {
+                    this.cpu_history_hover(
+                        &hover_history,
+                        measured.get(),
+                        window.mouse_position(),
+                        cx,
+                    );
+                } else {
+                    if this.reading_keyboard_hover_retained(measured.get(), window) {
+                        return;
+                    }
+                    if this.cpu_history_matches_anchor(&hover_history) {
+                        this.cpu_history_leave(cx);
                     }
                 }
             }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
-                    this.cpu_history_hover(&click_history, click_bounds.get(), event.position, cx);
-                    this.cpu_history_select(window, cx);
+                    if this.cpu_history_hover(
+                        &click_history,
+                        click_bounds.get(),
+                        event.position,
+                        cx,
+                    ) {
+                        this.cpu_history_select(window, cx);
+                    }
                 }),
-            );
+            )
+    }
 
-        self.cpu_history_accessibility(plot, history, cx)
+    fn cpu_history_inspection(&self, history: &CPUHistory) -> Option<CPUInspection> {
+        if let Some(target) = self.reading_target() {
+            if self.cpu_history_owns_preview() {
+                if self.cpu_inspection == Some(CPUInspection::Gap) {
+                    return Some(CPUInspection::Gap);
+                }
+            }
+            return Some(
+                target
+                    .identity
+                    .as_ref()
+                    .and_then(|identity| {
+                        history.matching_inspection(identity, inspected_row(self.cpu_inspection))
+                    })
+                    .unwrap_or(CPUInspection::Gap),
+            );
+        }
+
+        history.selected()
+    }
+
+    fn cpu_history_matches_anchor(&self, history: &Arc<CPUHistory>) -> bool {
+        self.snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.cpu_history.as_ref())
+            .is_some_and(|current| Arc::ptr_eq(current, history))
+    }
+
+    fn cpu_history_owns_preview(&self) -> bool {
+        self.reading_target_source()
+            .is_some_and(|source| source == &gpui::SharedString::from(HOVER_SOURCE))
+    }
+
+    fn cpu_history_leave(&mut self, cx: &mut Context<Self>) {
+        let keyboard = self.reading_origin() == Some(Origin::Keyboard);
+        if self.cpu_history_owns_preview() {
+            if keyboard {
+                return;
+            }
+        }
+
+        self.clear_reading_target(&HOVER_SOURCE.into(), cx);
+        if self.cpu_inspection.take().is_some() {
+            cx.notify();
+        }
     }
 
     fn cpu_history_accessibility(
@@ -210,7 +279,7 @@ impl LiveDashboard {
         history: &CPUHistory,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
-        let inspection = self.cpu_inspection.or_else(|| history.selected());
+        let inspection = self.cpu_history_inspection(history);
         plot.accessibility_id("flightdeck.cpu-history.plot")
             .role(gpui::Role::Slider)
             .aria_label("Logical CPU history")
@@ -266,47 +335,98 @@ impl LiveDashboard {
             return;
         };
         self.cpu_inspection = history.step(
-            self.cpu_inspection,
+            self.cpu_history_inspection(history),
             CPUStep {
                 observations,
                 rows: 0,
             },
         );
+        self.cpu_history_preview_keyboard(cx);
         if let Some(focus) = &self.cpu_history_focus {
             window.focus(focus, cx);
         }
         cx.notify();
     }
 
-    fn cpu_history_hover(
+    pub(crate) fn cpu_history_hover(
         &mut self,
         history: &Arc<CPUHistory>,
         bounds: Bounds<Pixels>,
         position: gpui::Point<Pixels>,
         cx: &mut Context<Self>,
-    ) {
-        let Some(current) = self
-            .snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.cpu_history.as_ref())
-        else {
-            return;
+    ) -> bool {
+        let Some(snapshot) = self.snapshot.as_deref() else {
+            return false;
         };
+
+        let Some(current) = snapshot.cpu_history.as_ref() else {
+            return false;
+        };
+
         if !Arc::ptr_eq(current, history) {
-            return;
+            return false;
         }
-        let fraction =
-            f64::from(f32::from(position.x - bounds.origin.x) / f32::from(bounds.size.width));
+
+        if !bounds.contains(&position) {
+            self.cpu_history_leave(cx);
+            return false;
+        }
+
+        let fraction = f32::from(position.x - bounds.origin.x) / f32::from(bounds.size.width);
         let row = (f32::from(position.y - bounds.origin.y) / ROW_HEIGHT)
             .floor()
             .to_usize();
-        let inspection = match row.and_then(|row| history.inspect(row, fraction)) {
-            Some(inspection) => inspection,
-            None => CPUInspection::Gap,
+        let inspection = row
+            .and_then(|row| history.inspect(row, f64::from(fraction)))
+            .unwrap_or(CPUInspection::Gap);
+        let target = if let Some((second, identity)) = history.target(inspection) {
+            match Target::exact(second, &identity) {
+                Ok(target) => target,
+                Err(error) => {
+                    eprintln!("CPU hover target unavailable: {error}");
+                    self.cpu_history_leave(cx);
+                    return false;
+                }
+            }
+        } else {
+            let Some(second) = crate::live_projection::sample_second(&snapshot.selection, fraction)
+            else {
+                return false;
+            };
+
+            Target::regular(snapshot, second)
         };
-        if self.cpu_inspection != Some(inspection) {
-            self.cpu_inspection = Some(inspection);
+        let changed = self.cpu_inspection != Some(inspection);
+        self.cpu_inspection = Some(inspection);
+        self.set_reading_target(HOVER_SOURCE.into(), target, Origin::Pointer, cx);
+        if changed {
             cx.notify();
+        }
+        true
+    }
+
+    fn cpu_history_preview_keyboard(&mut self, cx: &mut Context<Self>) {
+        let target = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.cpu_history.as_ref())
+            .and_then(|history| {
+                self.cpu_inspection
+                    .and_then(|inspection| history.target(inspection))
+            });
+        let Some((second, identity)) = target else {
+            self.end_reading_preview(cx);
+            return;
+        };
+
+        match Target::exact(second, &identity) {
+            Ok(target) => {
+                self.set_reading_target(HOVER_SOURCE.into(), target, Origin::Keyboard, cx);
+            }
+            Err(error) => {
+                eprintln!("CPU keyboard target unavailable: {error}");
+                self.end_reading_preview(cx);
+            }
         }
     }
 
@@ -323,7 +443,7 @@ impl LiveDashboard {
         else {
             return;
         };
-        let inspection = self.cpu_inspection.or_else(|| history.selected());
+        let inspection = self.cpu_history_inspection(history);
         self.cpu_inspection = match event.keystroke.key.as_str() {
             "left" => history.step(
                 inspection,
@@ -370,6 +490,7 @@ impl LiveDashboard {
             }
             _ => return,
         };
+        self.cpu_history_preview_keyboard(cx);
         window.prevent_default();
         cx.stop_propagation();
         cx.notify();
@@ -383,7 +504,7 @@ impl LiveDashboard {
         else {
             return;
         };
-        let Some(inspection) = self.cpu_inspection.or_else(|| history.selected()) else {
+        let Some(inspection) = self.cpu_history_inspection(history) else {
             return;
         };
         let Some((second, identity)) = history.target(inspection) else {
@@ -479,6 +600,23 @@ fn cpu_history_reading(history: &CPUHistory, inspection: Option<CPUInspection>) 
         sample.observation.wall_ns % super::NS / 1_000_000,
         sample.observation.publication
     )
+}
+
+fn cpu_history_readout(history: &CPUHistory, inspection: Option<CPUInspection>) -> gpui::Div {
+    let reading = cpu_history_reading(history, inspection);
+    let mut row = div()
+        .flex()
+        .flex_wrap()
+        .text_size(px(11.0))
+        .text_color(rgb(MUTED));
+    for (index, part) in reading.split(" · ").take(4).enumerate() {
+        if index > 0 {
+            row = row.child(" · ");
+        }
+        let part = part.to_owned();
+        row = row.child(div().debug_selector(|| part.clone()).child(part));
+    }
+    row
 }
 
 fn cpu_history_times(history: &CPUHistory) -> impl IntoElement {

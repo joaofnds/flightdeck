@@ -14,8 +14,7 @@ impl LiveDashboard {
             .context_snapshot()
             .map_or(&Value::Null, |snapshot| &snapshot.catalog);
         let selection = self
-            .snapshot
-            .as_ref()
+            .reading_snapshot()
             .map_or(&Value::Null, |snapshot| &snapshot.selection);
         header = header.children(
             recording_context::source(RecordingContext { catalog, selection })
@@ -87,6 +86,12 @@ impl LiveDashboard {
         header.child(
             div()
                 .mt(px(6.0))
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(rgb(MUTED))
+                        .child("Committed selection · same-second observation controls"),
+                )
                 .child(self.header_alternative_pages(&page, cx))
                 .child(choices),
         )

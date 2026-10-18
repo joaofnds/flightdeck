@@ -16,6 +16,7 @@ mod live_cpu_history;
 mod live_dashboard;
 mod live_executables;
 mod live_hardware;
+mod live_hover;
 mod live_inventory;
 mod live_launch;
 mod live_memory;

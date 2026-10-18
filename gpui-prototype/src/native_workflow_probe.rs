@@ -28,14 +28,10 @@ pub fn run(root: PathBuf, deadline: Instant) -> Result<Value, String> {
     dashboard.request.second = second;
     dashboard.request.identity = Some(selected.clone());
     dashboard.request.offset = 512;
-    dashboard.chart_hover =
-        dashboard
-            .request
-            .second
-            .map(|second| crate::live_dashboard::ChartHover {
-                source: "recording-switch-probe".into(),
-                second,
-            });
+    dashboard.chart_hover = dashboard
+        .request
+        .second
+        .map(|second| crate::live_dashboard::ChartHover { second });
     dashboard.expanded = Some(("ticks".into(), 1));
     dashboard.begin_recording(root);
     wait_switch(&mut dashboard, deadline)?;

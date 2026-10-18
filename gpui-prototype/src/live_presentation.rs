@@ -53,8 +53,7 @@ fn local_parts(second: u64) -> Option<libc::tm> {
 impl LiveDashboard {
     pub fn overview_status(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let summary = self
-            .snapshot
-            .as_ref()
+            .reading_snapshot()
             .map_or(&Value::Null, |snapshot| &snapshot.selection["summary"]);
         let pressure = match summary["pressure"].as_u64() {
             Some(0) => "Normal",
@@ -62,6 +61,10 @@ impl LiveDashboard {
             Some(2) => "Critical",
             _ => "Unavailable",
         };
+        let status = format!(
+            "Memory pressure: {pressure}    Swap: {}",
+            quantity(summary, "swap_used_bytes", "GiB", 1_073_741_824.0)
+        );
         div()
             .flex()
             .items_center()
@@ -69,10 +72,7 @@ impl LiveDashboard {
             .gap(px(16.0))
             .text_size(px(12.0))
             .text_color(rgb(MUTED))
-            .child(format!(
-                "Memory pressure: {pressure}    Swap: {}",
-                quantity(summary, "swap_used_bytes", "GiB", 1_073_741_824.0)
-            ))
+            .child(div().debug_selector(|| status.clone()).child(status))
             .child(
                 control("Inspect processes →").on_click(cx.listener(|this, _, _, cx| {
                     this.navigate("cpu", cx);
@@ -82,10 +82,9 @@ impl LiveDashboard {
 
     pub fn missing_reading(&self) -> impl IntoElement {
         let missing = self
-            .snapshot
-            .as_ref()
+            .reading_snapshot()
             .is_some_and(|snapshot| snapshot.selection["selected"].is_null());
-        div().children(missing.then(|| {
+        div().h(px(16.0)).children(missing.then(|| {
             div()
                 .text_color(rgb(ORANGE))
                 .child("No recorded observation at this second")

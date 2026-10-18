@@ -3,6 +3,9 @@ use serde_json::json;
 #[path = "live_cpu_history_source_tests.rs"]
 mod cpu_history;
 
+#[path = "live_source_hover_tests.rs"]
+mod hover;
+
 #[test]
 fn an_empty_recording_reports_absence_without_requiring_a_live_ring() {
     // Goal: a valid recording with no saved ticks opens without a fabricated observation.

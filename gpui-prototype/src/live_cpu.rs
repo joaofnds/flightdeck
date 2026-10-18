@@ -151,12 +151,22 @@ impl LiveDashboard {
             .child(div().mt(px(4.0)).text_size(px(11.0)).text_color(rgb(MUTED)).child(
                 "Busy scheduler ticks / total ticks. CPU indices are scheduler identifiers, \
                 not physical cores or cluster assignments."));
+        let unavailable = || {
+            div()
+                .debug_selector(|| "Logical CPU readings unavailable.".into())
+                .child("Logical CPU readings unavailable.")
+        };
+        if self.reading_target_source().map(gpui::SharedString::as_ref) == Some("cpu-history-plot")
+        {
+            if self.cpu_inspection == Some(crate::live_cpu_history::CPUInspection::Gap) {
+                return panel.child(unavailable());
+            }
+        }
         let Some(activity) = self
-            .snapshot
-            .as_ref()
+            .reading_snapshot()
             .and_then(|snapshot| snapshot.cpu_detail.as_ref())
         else {
-            return panel.child("Logical CPU readings unavailable.");
+            return panel.child(unavailable());
         };
         let second = activity.observation["wall_ns"]
             .as_u64()
@@ -175,7 +185,7 @@ impl LiveDashboard {
                 }),
         );
         if activity.cpus.is_empty() {
-            return panel.child("Logical CPU readings unavailable.");
+            return panel.child(unavailable());
         }
         let columns = activity.cpus.len().min(COLUMNS_MAX);
         for cpus in activity.rows() {
@@ -246,7 +256,14 @@ fn cpu_activity_labels(cpus: &[LogicalCPU], columns: u8, kind: Labels) -> impl I
                 .map_or_else(|| "N/A".into(), |value| format!("{value:.0}%")),
             Labels::Index => cpu.cpu.to_string(),
         };
-        row = row.child(div().flex_1().min_w_0().text_center().child(text));
+        row = row.child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_center()
+                .debug_selector(|| text.clone())
+                .child(text),
+        );
     }
     for _column in cpus.len()..usize::from(columns) {
         row = row.child(div().flex_1().min_w_0());

@@ -11,7 +11,7 @@ use serde_json::Value;
 use crate::charts::{self, GRID, Inspection, MUTED, PANEL};
 use crate::dashboard::control;
 use crate::data::{Panel, reading};
-use crate::live_dashboard::{ChartHover, LiveDashboard};
+use crate::live_dashboard::LiveDashboard;
 use crate::live_presentation::clock;
 use crate::live_source::Snapshot;
 
@@ -21,13 +21,7 @@ impl LiveDashboard {
             .lines
             .first()
             .map_or(0, |line| line.values.len().saturating_sub(1));
-        let index = self.snapshot.as_deref().and_then(|snapshot| {
-            inspection_index(
-                panel,
-                snapshot,
-                self.chart_hover.as_ref().map(|hover| hover.second),
-            )
-        });
+        let index = self.chart_inspection_index(panel);
         let inspection = Inspection {
             lower: 0,
             selected: index.or(panel.selected_index).unwrap_or(upper),
@@ -38,13 +32,7 @@ impl LiveDashboard {
         let measured = Rc::new(Cell::new(Bounds::default()));
         let plot =
             charts::plot_without_cursor(Rc::clone(panel), inspection, hidden, Rc::clone(&measured));
-        let cursor = self.snapshot.as_deref().and_then(|snapshot| {
-            cursor_fraction(
-                panel,
-                snapshot,
-                self.chart_hover.as_ref().map(|hover| hover.second),
-            )
-        });
+        let cursor = self.chart_cursor_fraction(panel);
         let chart = self.chart_events(
             div()
                 .relative()
@@ -81,6 +69,20 @@ impl LiveDashboard {
             .child(self.chart_source_state(panel))
     }
 
+    fn chart_cursor_fraction(&self, panel: &Panel) -> Option<f32> {
+        let hover = self.chart_hover.as_ref()?;
+        let snapshot = self.snapshot.as_deref()?;
+        if let Some(target) = self.reading_target() {
+            if let Some(index) = target_index(panel, snapshot, target) {
+                if let Some(position) = panel.positions.as_ref()?.get(index) {
+                    return Some(*position);
+                }
+            }
+        }
+
+        cursor_fraction(panel, snapshot, Some(hover.second))
+    }
+
     fn chart_source_state(&self, panel: &Panel) -> gpui::Div {
         let mut notice = div().text_size(px(11.0)).text_color(rgb(MUTED));
         if panel.id != "live-fans" {
@@ -88,8 +90,7 @@ impl LiveDashboard {
         }
 
         let summary = self
-            .snapshot
-            .as_ref()
+            .reading_snapshot()
             .map(|snapshot| &snapshot.selection["summary"]);
         let text = match summary.map(|summary| &summary["fan_rpm"]) {
             Some(Value::Array(channels)) if channels.is_empty() => {
@@ -104,7 +105,7 @@ impl LiveDashboard {
     }
 
     fn chart_headline(&self, panel: &Panel, index: Option<usize>) -> impl IntoElement {
-        let reading = chart_reading(panel, index);
+        let reading = self.chart_reading(panel, index);
         let mut headline = div()
             .flex()
             .items_baseline()
@@ -119,8 +120,7 @@ impl LiveDashboard {
             );
         if panel.stack == Some(true) {
             let summary = self
-                .snapshot
-                .as_ref()
+                .reading_snapshot()
                 .map_or(&Value::Null, |snapshot| &snapshot.selection["summary"]);
             headline = headline.child(div().text_size(px(11.0)).text_color(rgb(MUTED)).child(
                 format!(
@@ -137,14 +137,34 @@ impl LiveDashboard {
         headline
     }
 
+    fn chart_inspection_index(&self, panel: &Panel) -> Option<usize> {
+        self.snapshot
+            .as_deref()
+            .and_then(|snapshot| match self.reading_target() {
+                Some(target) => target_index(panel, snapshot, target),
+                None => inspection_index(panel, snapshot, None),
+            })
+    }
+
+    fn chart_reading(&self, panel: &Panel, index: Option<usize>) -> String {
+        if panel.id == "live-memory-pressure" {
+            let summary = self
+                .reading_snapshot()
+                .map_or(&Value::Null, |snapshot| &snapshot.selection["summary"]);
+            return crate::live_views::pressure(&summary["pressure"]).to_owned();
+        }
+
+        chart_reading(panel, index)
+    }
+
     fn chart_events(
         &self,
         chart: gpui::Div,
         measured: Rc<Cell<Bounds<gpui::Pixels>>>,
-        panel: &Panel,
+        panel: &Rc<Panel>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let hover = Self::chart_hover_target(panel, Rc::clone(&measured), cx);
+        let hover = self.chart_hover_target(panel, Rc::clone(&measured), cx);
         let chart = self.chart_accessibility(chart, panel, cx);
         chart
             .focusable()
@@ -171,13 +191,16 @@ impl LiveDashboard {
     }
 
     fn chart_hover_target(
-        panel: &Panel,
+        &self,
+        panel: &Rc<Panel>,
         measured: Rc<Cell<Bounds<gpui::Pixels>>>,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let source = SharedString::from(panel.id.clone());
         let move_source = source.clone();
         let move_bounds = Rc::clone(&measured);
+        let move_panel = Rc::clone(panel);
+        let hover_panel = Rc::clone(panel);
         div()
             .id("plot-hover")
             .absolute()
@@ -187,8 +210,13 @@ impl LiveDashboard {
             .left(charts::PLOT_INSETS.left)
             .min_w(px(1.0))
             .min_h(px(1.0))
+            .children(self.reading_membership_observer(move_source.clone(), cx))
             .on_mouse_move(
                 cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {
+                    if !this.chart_anchor_matches(&move_panel) {
+                        return;
+                    }
+
                     let second = chart_hover_second(
                         this.snapshot.as_deref(),
                         move_bounds.get(),
@@ -197,7 +225,20 @@ impl LiveDashboard {
                     this.chart_hover_update(&move_source, second, cx);
                 }),
             )
-            .on_hover(cx.listener(move |this, hovered, window, cx| {
+            .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
+                if !this.chart_anchor_matches(&hover_panel) {
+                    return;
+                }
+
+                if !*hovered {
+                    if this.reading_keyboard_hover_retained(
+                        charts::plot_bounds(measured.get()),
+                        window,
+                    ) {
+                        return;
+                    }
+                }
+
                 let second = if *hovered {
                     chart_hover_second(
                         this.snapshot.as_deref(),
@@ -218,24 +259,27 @@ impl LiveDashboard {
         cx: &mut Context<Self>,
     ) {
         if let Some(second) = second {
-            let changed = self.chart_hover.as_ref().map(|hover| hover.second) != Some(second);
-            self.chart_hover = Some(ChartHover {
-                source: source.clone(),
-                second,
-            });
-            if changed {
-                cx.notify();
-            }
+            let Some(snapshot) = self.snapshot.as_deref() else {
+                return;
+            };
+
+            let target = crate::live_hover::Target::regular(snapshot, second);
+            self.set_reading_target(
+                source.clone(),
+                target,
+                crate::live_hover::Origin::Pointer,
+                cx,
+            );
         } else {
-            if self
-                .chart_hover
-                .as_ref()
-                .is_some_and(|hover| &hover.source == source)
-            {
-                self.chart_hover = None;
-                cx.notify();
-            }
+            self.clear_reading_target(source, cx);
         }
+    }
+
+    fn chart_anchor_matches(&self, panel: &Rc<Panel>) -> bool {
+        self.panels
+            .iter()
+            .take(16)
+            .any(|anchor| Rc::ptr_eq(anchor, panel))
     }
 
     fn chart_accessibility(
@@ -244,10 +288,7 @@ impl LiveDashboard {
         panel: &Panel,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
-        let second = self
-            .snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.selection["second"].as_u64());
+        let (second, reading) = self.chart_accessibility_reading(panel);
         let first = self
             .snapshot
             .as_ref()
@@ -290,14 +331,22 @@ impl LiveDashboard {
                     }
                 }
             })
-            .aria_value(format!(
-                "{}; {}",
-                second.map_or_else(
-                    || "Waiting".into(),
-                    |second| format!("{}; Unix second {second}", clock(second, true))
-                ),
-                chart_reading(panel, panel.selected_index)
-            ))
+            .aria_value(reading)
+    }
+
+    pub(crate) fn chart_accessibility_reading(&self, panel: &Panel) -> (Option<u64>, String) {
+        let second = self
+            .reading_snapshot()
+            .and_then(|snapshot| snapshot.selection["second"].as_u64());
+        let reading = format!(
+            "{}; {}",
+            second.map_or_else(
+                || "Waiting".into(),
+                |second| format!("{}; Unix second {second}", clock(second, true))
+            ),
+            self.chart_reading(panel, self.chart_inspection_index(panel))
+        );
+        (second, reading)
     }
 
     fn chart_keyboard(
@@ -520,6 +569,26 @@ fn chart_hover_second(
 
     let fraction = f32::from(position.x - rect.origin.x) / f32::from(rect.size.width);
     crate::live_projection::sample_second(&snapshot?.selection, fraction)
+}
+
+fn target_index(
+    panel: &Panel,
+    snapshot: &Snapshot,
+    target: &crate::live_hover::Target,
+) -> Option<usize> {
+    target.identity.as_ref()?;
+    if panel.id == "live-memory-pressure" {
+        return inspection_index(panel, snapshot, Some(target.second));
+    }
+    let points = if panel.id.starts_with("live-app-") {
+        snapshot.history.as_ref()?["points"].as_array()?
+    } else {
+        snapshot.selection["trends"].as_array()?
+    };
+    points
+        .iter()
+        .take(crate::data::LIVE_SAMPLE_LIMIT)
+        .rposition(|point| target.matches(point.get("observation").unwrap_or(point)))
 }
 
 fn chart_cursor(fraction: Option<f32>) -> impl IntoElement {

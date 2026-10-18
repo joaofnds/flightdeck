@@ -200,6 +200,7 @@ impl LiveDashboard {
             .child(self.native_open_control(cx))
             .child(
                 control("Copy")
+                    .debug_selector(|| "copy-reading".into())
                     .accessibility_id("flightdeck.copy-reading")
                     .aria_label("Copy selected reading or expanded details")
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -472,6 +473,7 @@ impl LiveDashboard {
             self.executables.clear();
             self.hidden.clear();
             self.chart_hover = None;
+            self.preview = None;
             self.app_picker_open = false;
             self.cpu_inspection = None;
             self.native.alternative_page = 0;
@@ -517,9 +519,9 @@ impl LiveDashboard {
 
     pub fn copy_reading(&mut self, cx: &mut Context<Self>) {
         match selected_copy(
-            self.snapshot.as_deref(),
-            &self.request,
-            self.expanded.as_ref(),
+            self.reading_snapshot(),
+            self.reading_request(),
+            self.reading_expanded(),
         ) {
             Ok(text) => {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));

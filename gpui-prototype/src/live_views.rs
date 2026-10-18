@@ -1,5 +1,6 @@
 use gpui::{AnyElement, Context, IntoElement, div, prelude::*, px, rgb};
 use serde_json::Value;
+use std::rc::Rc;
 
 use crate::charts::{BLUE, GRID, MUTED, PANEL, TEXT};
 use crate::dashboard::control;
@@ -73,7 +74,7 @@ impl LiveDashboard {
             .iter()
             .find(|(route, _)| *route == self.request.route)
             .map_or("Flightdeck", |(_, title)| *title);
-        let selected = self.snapshot.as_ref().map_or_else(
+        let selected = self.reading_snapshot().map_or_else(
             || {
                 self.request.second.map_or_else(
                     || "Waiting for readings".into(),
@@ -105,7 +106,7 @@ impl LiveDashboard {
                     .mt(px(8.0))
                     .text_size(px(11.0))
                     .text_color(rgb(MUTED))
-                    .child(format!("{selected} · {}", self.status())),
+                    .child(self.reading_header(&selected)),
             );
         header = header.child(self.missing_reading());
         if self.request.route != "computer" {
@@ -118,7 +119,32 @@ impl LiveDashboard {
         if self.request.route == "apps" {
             header = header.child(self.app_paging(cx));
         }
+        self.header_geometry(header)
+    }
+
+    fn header_geometry(&self, header: gpui::Div) -> impl IntoElement {
+        let height = self
+            .preview
+            .as_ref()
+            .and_then(|preview| preview.header_height);
+        let measured = Rc::clone(&self.header_height);
         header
+            .id("reading-header")
+            .relative()
+            .when_some(height, |header, height| {
+                header.h(height).overflow_y_scroll()
+            })
+            .child(
+                gpui::canvas(
+                    // Percent canvas bounds omit this header's one-pixel bottom border.
+                    move |bounds, _, _| measured.set(bounds.size.height + px(1.0)),
+                    |_, (), _, _| {},
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            )
     }
 
     fn header_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -164,11 +190,52 @@ impl LiveDashboard {
     }
 
     pub fn row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+        if let Row::Spacer(height) = &self.rows[index] {
+            return div().h(*height).into_any_element();
+        }
+
         let compact = matches!(
             &self.rows[index],
             Row::Table(_, _) | Row::App(_) | Row::Process(_) | Row::Executable(_)
         );
-        let content = match &self.rows[index] {
+        let content = self.row_content(index, cx);
+        let key = self.rows[index].layout_key();
+        let measured = Rc::clone(&self.row_heights);
+        let measured_key = key.clone();
+        let height = self.reading_row_height(&self.rows[index]);
+        let scroll_reserved = matches!(&self.rows[index], Row::AppSummary | Row::CPUActivity);
+        div()
+            .id(gpui::SharedString::from(key))
+            .relative()
+            .when_some(height, |row, height| {
+                row.h(height).when(
+                    scroll_reserved,
+                    gpui::StatefulInteractiveElement::overflow_y_scroll,
+                )
+            })
+            .px(px(24.0))
+            .py(px(if compact { 0.0 } else { 8.0 }))
+            .child(content)
+            .child(
+                gpui::canvas(
+                    move |bounds, _, _| {
+                        let mut cache = measured.borrow_mut();
+                        if cache.len() < 4096 {
+                            cache.insert(measured_key, bounds.size.height);
+                        }
+                    },
+                    |_, (), _, _| {},
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            )
+            .into_any_element()
+    }
+
+    fn row_content(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+        match &self.rows[index] {
             Row::Summary => self.summary().into_any_element(),
             Row::CPUActivity => self.cpu_activity().into_any_element(),
             Row::CPUHistory => self.cpu_history_panel(cx).into_any_element(),
@@ -198,18 +265,13 @@ impl LiveDashboard {
             Row::Process(index) => self.process_row(*index, cx),
             Row::Executable(index) => self.executable_row(*index, cx),
             Row::Inventory => self.computer().into_any_element(),
-        };
-        div()
-            .px(px(24.0))
-            .py(px(if compact { 0.0 } else { 8.0 }))
-            .child(content)
-            .into_any_element()
+            Row::Spacer(height) => div().h(*height).into_any_element(),
+        }
     }
 
     fn summary(&self) -> impl IntoElement {
         let summary = self
-            .snapshot
-            .as_ref()
+            .reading_snapshot()
             .map_or(&Value::Null, |snapshot| &snapshot.selection["summary"]);
         let mut tiles = div().flex().flex_wrap().gap(px(10.0));
         for &(label, key, unit, divisor) in summary_tiles(&self.request.route) {
@@ -248,14 +310,15 @@ impl LiveDashboard {
 
     fn memory_quantities(&self) -> impl IntoElement {
         let selection = self
-            .snapshot
-            .as_ref()
+            .reading_snapshot()
             .map_or(&Value::Null, |snapshot| &snapshot.selection);
         let mut values = div().flex().flex_wrap().gap(px(12.0));
 
         for row in crate::live_memory::quantities(selection) {
+            let selector = format!("memory-quantity:{}:{}", row.name, row.reading);
             values = values.child(
                 div()
+                    .debug_selector(|| selector.clone())
                     .min_w(px(220.0))
                     .flex_1()
                     .flex()
@@ -317,7 +380,7 @@ pub fn text(value: &Value) -> String {
     }
 }
 
-fn pressure(value: &Value) -> &'static str {
+pub(crate) fn pressure(value: &Value) -> &'static str {
     match value.as_u64() {
         Some(0) => "Normal",
         Some(1) => "Warning",

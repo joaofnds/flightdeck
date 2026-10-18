@@ -11,13 +11,12 @@ use crate::live_source::Snapshot;
 
 impl LiveDashboard {
     pub fn live_hardware(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let (speeds, failure) = match fan_speeds(self.snapshot.as_deref()) {
+        let (speeds, failure) = match self.reading_fan_speeds() {
             Ok(speeds) => (speeds, None),
             Err(error) => ([None, None], Some(error)),
         };
         let summary = self
-            .snapshot
-            .as_ref()
+            .reading_snapshot()
             .map_or(&Value::Null, |snapshot| &snapshot.selection["summary"]);
         let (readings, summary_failure) = match live_readings(summary, speeds) {
             Ok(readings) => (readings, None),
@@ -76,6 +75,33 @@ impl LiveDashboard {
                     .chain(summary_failure)
                     .map(|error| div().text_color(rgb(ORANGE)).child(error)),
             )
+    }
+
+    fn reading_fan_speeds(&self) -> Result<[Option<f32>; 2], String> {
+        if self.preview.is_none() {
+            return fan_speeds(self.snapshot.as_deref());
+        }
+
+        let Some(snapshot) = self.reading_snapshot() else {
+            return Ok([None, None]);
+        };
+
+        let value = &snapshot.selection["summary"]["fan_rpm"];
+        if value.is_null() {
+            return Ok([None, None]);
+        }
+
+        let channels = value.as_array().ok_or("Invalid hovered fan channels")?;
+        if channels.len() > 10 {
+            return Err("Hovered fan channels exceed ten".into());
+        }
+
+        let mut speeds = [None, None];
+        for (speed, channel) in speeds.iter_mut().zip(channels) {
+            *speed = fan_speed(channel)?;
+        }
+
+        Ok(speeds)
     }
 }
 

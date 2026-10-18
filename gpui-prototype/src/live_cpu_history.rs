@@ -175,6 +175,30 @@ impl CPUHistory {
         ))
     }
 
+    pub(crate) fn matching_inspection(
+        &self,
+        identity: &Value,
+        row: usize,
+    ) -> Option<CPUInspection> {
+        self.wire.cpus.get(row)?;
+        let Ok((run, boot, publication)) = crate::live_source::identity_signature(identity) else {
+            return None;
+        };
+
+        let observation_index = self.wire.observations.iter().position(|sample| {
+            (
+                sample.observation.run.as_str(),
+                sample.observation.boot.as_str(),
+                sample.observation.publication,
+            ) == (run.as_str(), boot.as_str(), publication)
+        })?;
+
+        Some(CPUInspection::Sample {
+            row,
+            observation_index,
+        })
+    }
+
     pub fn fraction(&self, wall_ns: u64) -> f64 {
         let offset = wall_ns.clamp(self.wire.first_ns, self.wire.end_ns) - self.wire.first_ns;
         let seconds = u32::try_from(offset / NS);
@@ -291,3 +315,7 @@ mod tests;
 #[cfg(test)]
 #[path = "live_cpu_history_input_tests.rs"]
 mod input_tests;
+
+#[cfg(test)]
+#[path = "live_cpu_hover_input_tests.rs"]
+mod hover_input_tests;

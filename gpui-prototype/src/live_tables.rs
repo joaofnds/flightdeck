@@ -17,8 +17,7 @@ impl LiveDashboard {
     pub fn table_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut picker = div().mt(px(8.0)).flex().flex_wrap().gap(px(5.0));
         let tables = self
-            .snapshot
-            .as_ref()
+            .reading_snapshot()
             .and_then(|snapshot| snapshot.catalog["tables"].as_array());
         if let Some(tables) = tables {
             for table in tables.iter().take(32) {
@@ -97,8 +96,7 @@ impl LiveDashboard {
             return unavailable("Recorded row is unavailable");
         };
         let expanded = self
-            .expanded
-            .as_ref()
+            .reading_expanded()
             .is_some_and(|(table, row)| table == name && *row == index);
         let table = name.to_owned();
         let mut content = div()
@@ -156,10 +154,9 @@ impl LiveDashboard {
 
     pub fn app_paging(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let apps = self
-            .snapshot
-            .as_ref()
+            .reading_snapshot()
             .and_then(|snapshot| snapshot.apps.as_ref());
-        let detail = self.snapshot.as_ref().and_then(|snapshot| {
+        let detail = self.reading_snapshot().and_then(|snapshot| {
             crate::live_app_views::selected_detail(
                 snapshot.detail.as_ref(),
                 self.request.app.as_ref(),
@@ -181,7 +178,11 @@ impl LiveDashboard {
             )
             .children(self.executable.as_ref().map(|key| {
                 div().text_color(rgb(MUTED)).child(
-                    if self.executables.iter().any(|group| group.key == *key) {
+                    if self
+                        .reading_executables()
+                        .iter()
+                        .any(|group| group.key == *key)
+                    {
                         "Executable filter active · charts show App totals"
                     } else {
                         "Selected executable is not in this process page"
@@ -191,8 +192,7 @@ impl LiveDashboard {
     }
 
     fn table_page(&self, name: &str) -> &Value {
-        self.snapshot
-            .as_ref()
+        self.reading_snapshot()
             .and_then(|snapshot| snapshot.pages.get(name))
             .map_or(&Value::Null, |page| page)
     }
@@ -220,7 +220,11 @@ impl LiveDashboard {
     }
 
     fn raw_paging(&self, page: &Value, cx: &mut Context<Self>) -> impl IntoElement {
-        let offset = self.request.offset;
+        if page.is_null() {
+            return div().child("Recorded page unavailable");
+        }
+
+        let offset = self.reading_request().offset;
         let total = page["total"].as_u64();
         let mut controls = div()
             .flex()
@@ -230,8 +234,8 @@ impl LiveDashboard {
             .child(format!("Offset {offset}"));
         if offset >= PAGE_ROWS {
             controls = controls.child(control("Previous 512").on_click(cx.listener(
-                |this, _, _, cx| {
-                    this.request.offset = this.request.offset.saturating_sub(PAGE_ROWS);
+                move |this, _, _, cx| {
+                    this.request.offset = offset.saturating_sub(PAGE_ROWS);
                     this.expanded = None;
                     this.submit();
                     this.rebuild();
@@ -240,9 +244,9 @@ impl LiveDashboard {
             )));
         }
         if total.is_some_and(|total| offset.saturating_add(PAGE_ROWS) < total) {
-            controls =
-                controls.child(control("Next 512").on_click(cx.listener(|this, _, _, cx| {
-                    if let Some(offset) = this.request.offset.checked_add(PAGE_ROWS) {
+            controls = controls.child(control("Next 512").on_click(cx.listener(
+                move |this, _, _, cx| {
+                    if let Some(offset) = offset.checked_add(PAGE_ROWS) {
                         this.request.offset = offset;
                         this.expanded = None;
                         this.submit();
@@ -251,7 +255,8 @@ impl LiveDashboard {
                     } else {
                         this.error = Some("Recorded page offset overflow".into());
                     }
-                })));
+                },
+            )));
         }
         controls
     }
@@ -262,20 +267,24 @@ impl LiveDashboard {
         members: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let offset = if members {
-            self.request.members_offset
-        } else {
-            self.request.apps_offset
-        };
         let label = if members { "Processes" } else { "Apps" };
-        let next = match page.and_then(|page| page["page"]["next_offset"].as_u64()) {
+        let Some(page) = page else {
+            return unavailable(&format!("{label} page unavailable"));
+        };
+
+        let offset = if members {
+            self.reading_request().members_offset
+        } else {
+            self.reading_request().apps_offset
+        };
+        let next = match page["page"]["next_offset"].as_u64() {
             Some(offset) => match u32::try_from(offset) {
                 Ok(offset) => Some(offset),
                 Err(error) => return unavailable(&format!("Invalid page offset: {error}")),
             },
             None => None,
         };
-        let total = page.map_or_else(|| "Unavailable".into(), |page| text(&page["page"]["total"]));
+        let total = text(&page["page"]["total"]);
         let mut controls = div()
             .flex()
             .items_center()

@@ -153,7 +153,7 @@ impl Executable {
 
 impl LiveDashboard {
     pub fn executable_row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
-        let Some(group) = self.executables.get(index) else {
+        let Some(group) = self.reading_executables().get(index) else {
             return div()
                 .text_color(rgb(MUTED))
                 .child("Executable unavailable")
@@ -162,8 +162,7 @@ impl LiveDashboard {
         let selected = self.executable.as_ref() == Some(&group.key);
         let key = group.key.clone();
         let expanded = self
-            .expanded
-            .as_ref()
+            .reading_expanded()
             .is_some_and(|(kind, row)| kind == "executables" && *row == index);
         let mut row = div()
             .id(SharedString::from(format!("executable-{index}")))

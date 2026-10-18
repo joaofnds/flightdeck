@@ -31,8 +31,7 @@ impl LiveDashboard {
             .child(self.app_selector_controls(cx))
             .child(self.app_paging(cx));
         if let Some(page) = self
-            .snapshot
-            .as_ref()
+            .reading_snapshot()
             .and_then(|snapshot| snapshot.apps.as_ref())
         {
             if page["ungrouped_members"]
@@ -102,7 +101,7 @@ impl LiveDashboard {
     }
 
     pub fn app_choice_indices(&self) -> Vec<usize> {
-        let Some(snapshot) = &self.snapshot else {
+        let Some(snapshot) = self.reading_snapshot() else {
             return Vec::new();
         };
         let apps = snapshot
@@ -140,15 +139,24 @@ impl LiveDashboard {
             );
         };
         let loaded = self
-            .snapshot
-            .as_ref()
+            .reading_snapshot()
             .and_then(|snapshot| snapshot.detail.as_ref())
             .and_then(|detail| detail["processes"].as_array())
             .map_or(0, Vec::len);
         let expanded = self
-            .expanded
-            .as_ref()
+            .reading_expanded()
             .is_some_and(|(kind, _)| kind == "app_summary");
+        let membership = format!(
+            "{} live of {} members · membership {} · {} this interval",
+            text(&app["live_members"]),
+            text(&app["members"]),
+            if app["membership_complete"].as_bool() == Some(true) {
+                "complete"
+            } else {
+                "uncertain"
+            },
+            value_rate(&app["energy_joules"], "J")
+        );
         div()
             .child(div().text_size(px(20.0)).child(text(&app["display_name"])))
             .child(
@@ -164,17 +172,8 @@ impl LiveDashboard {
                     .mt(px(8.0))
                     .text_size(px(11.0))
                     .text_color(rgb(MUTED))
-                    .child(format!(
-                        "{} live of {} members · membership {} · {} this interval",
-                        text(&app["live_members"]),
-                        text(&app["members"]),
-                        if app["membership_complete"].as_bool() == Some(true) {
-                            "complete"
-                        } else {
-                            "uncertain"
-                        },
-                        value_rate(&app["energy_joules"], "J")
-                    )),
+                    .debug_selector(|| membership.clone())
+                    .child(membership),
             )
             .child(
                 div()
@@ -244,19 +243,18 @@ impl LiveDashboard {
 
     pub fn process_row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
         let Some(process) = self
-            .snapshot
-            .as_ref()
+            .reading_snapshot()
             .and_then(|snapshot| snapshot.detail.as_ref())
             .and_then(|detail| detail["processes"].get(index))
         else {
             return unavailable("Process instance unavailable");
         };
         let expanded = self
-            .expanded
-            .as_ref()
+            .reading_expanded()
             .is_some_and(|(kind, row)| kind == "app_processes" && *row == index);
         let mut row = div()
             .id(SharedString::from(format!("process-{index}")))
+            .debug_selector(|| format!("process-{index}"))
             .accessibility_id(format!(
                 "flightdeck.process.{}.{}",
                 text(&process["pid"]),
@@ -304,7 +302,7 @@ impl LiveDashboard {
     }
 
     fn current_app(&self) -> Option<&Value> {
-        let snapshot = self.snapshot.as_ref()?;
+        let snapshot = self.reading_snapshot()?;
         Some(&selected_detail(snapshot.detail.as_ref(), self.request.app.as_ref())?["app"])
     }
 
@@ -312,7 +310,7 @@ impl LiveDashboard {
         if index == SELECTED_APP_INDEX {
             return self.current_app();
         }
-        self.snapshot.as_ref()?.apps.as_ref()?["apps"].get(index)
+        self.reading_snapshot()?.apps.as_ref()?["apps"].get(index)
     }
 }
 
@@ -431,7 +429,14 @@ pub fn app_cells(name: String, count: String, metrics: [String; 5]) -> gpui::Div
         .items_center()
         .gap(px(8.0))
         .text_size(px(11.0))
-        .child(div().flex_1().min_w_0().truncate().child(name))
+        .child(
+            div()
+                .debug_selector(|| name.clone())
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .child(name),
+        )
         .child(
             div()
                 .w(px(65.0))
@@ -443,6 +448,7 @@ pub fn app_cells(name: String, count: String, metrics: [String; 5]) -> gpui::Div
     for metric in metrics {
         row = row.child(
             div()
+                .debug_selector(|| metric.clone())
                 .w(px(100.0))
                 .flex_shrink_0()
                 .text_right()
@@ -452,6 +458,10 @@ pub fn app_cells(name: String, count: String, metrics: [String; 5]) -> gpui::Div
     }
     row
 }
+
+#[cfg(test)]
+#[path = "live_app_hover_input_tests.rs"]
+mod hover_input_tests;
 
 pub fn memory(value: Option<u64>) -> String {
     let Some(value) = value else {
@@ -492,6 +502,7 @@ pub fn exact_json(value: &Value) -> impl IntoElement {
         "Detail exceeds the 32 KiB display limit".into()
     };
     div()
+        .debug_selector(|| "expanded-json".into())
         .p(px(10.0))
         .bg(rgb(0x10_15_20))
         .text_size(px(10.0))

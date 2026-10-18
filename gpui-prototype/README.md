@@ -72,6 +72,14 @@ select an App to inspect its observed histories and process instances. Executabl
 groups filter the loaded process page; All process groups clears that filter. Computer
 reads current host inventory on entry and Refresh. The schematic is below Overview.
 
+Hovering a plot temporarily shows that exact observation across the page, including
+Memory quantities, CPU and App details, the schematic and Copy. Leaving the plot
+restores the live or paused selection. Missing readings stay unavailable; details
+that need storage show a loading state while the existing reader fetches them.
+Charts retain their time range and position during inspection. Historical detail
+lookups use the existing capacity-one worker and submit at most once per 250 ms;
+leaving the plot restores its committed request.
+
 Open recording uses the native folder picker. Current readings remain available
 until the chosen recording produces its first snapshot; cancellation or a failed
 read keeps the current recording. Opening from Computer validates the recording

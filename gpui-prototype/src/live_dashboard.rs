@@ -1,14 +1,12 @@
 use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use gpui::{
-    Context, ListAlignment, ListOffset, ListState, Render, Window, div, list, prelude::*, px, rgb,
-};
-use serde_json::Value;
-
 use crate::charts::{GRID, MUTED, TEXT};
 use crate::data::Panel;
 use crate::live_source::{Request, Snapshot, Update, Worker};
+use gpui::{
+    Context, ListAlignment, ListOffset, ListState, Render, Window, div, list, prelude::*, px, rgb,
+};
 
 pub const ROUTES: [(&str, &str); 9] = [
     ("overview", "Overview"),
@@ -44,17 +42,23 @@ pub struct LiveDashboard {
     pub animate: bool,
     pub reveal_hardware: bool,
     pub chart_hover: Option<ChartHover>,
+    pub preview: Option<crate::live_hover::Preview>,
+    pub(crate) preview_ready_at: Instant,
+    pub(crate) preview_submissions: u64,
+    pub(crate) row_heights:
+        Rc<std::cell::RefCell<std::collections::BTreeMap<String, gpui::Pixels>>>,
+    pub(crate) header_height: Rc<std::cell::Cell<gpui::Pixels>>,
+    pub(crate) viewport_size: gpui::Size<gpui::Pixels>,
     pub app_picker_open: bool,
     pub cpu_inspection: Option<crate::live_cpu_history::CPUInspection>,
     pub cpu_history_focus: Option<gpui::FocusHandle>,
     pub native: crate::native_workflows::NativeControls,
     pub(crate) inspection_focus: Option<gpui::FocusHandle>,
-    list: ListState,
+    pub(crate) list: ListState,
     last_status: String,
 }
 
 pub struct ChartHover {
-    pub source: gpui::SharedString,
     pub second: u64,
 }
 
@@ -75,6 +79,7 @@ pub enum Row {
     Process(usize),
     Executable(usize),
     Inventory,
+    Spacer(gpui::Pixels),
 }
 
 impl LiveDashboard {
@@ -111,6 +116,12 @@ impl LiveDashboard {
             animate: false,
             reveal_hardware: false,
             chart_hover: None,
+            preview: None,
+            preview_ready_at: Instant::now(),
+            preview_submissions: 0,
+            row_heights: Rc::new(std::cell::RefCell::new(std::collections::BTreeMap::new())),
+            header_height: Rc::new(std::cell::Cell::new(px(0.0))),
+            viewport_size: gpui::size(px(0.0), px(0.0)),
             app_picker_open: false,
             cpu_inspection: None,
             cpu_history_focus: None,
@@ -131,17 +142,28 @@ impl LiveDashboard {
         self.native_tick(cx);
         match self.worker.take() {
             Ok(Some(update)) => {
-                if self.receive(update) {
+                let changed = if self.preview.is_some() {
+                    self.preview_receive(update)
+                } else {
+                    self.receive(update)
+                };
+                if changed {
                     cx.notify();
                 }
             }
             Ok(None) => {}
             Err(error) => {
-                self.clear_presentation();
-                self.error = Some(error);
+                if let Some(preview) = &mut self.preview {
+                    preview.failure = Some(error);
+                    preview.complete = true;
+                } else {
+                    self.clear_presentation();
+                    self.error = Some(error);
+                }
                 cx.notify();
             }
         }
+        self.preview_tick(cx);
         let status = self.status();
         if self.last_status != status {
             self.last_status = status;
@@ -267,12 +289,14 @@ impl LiveDashboard {
         self.executables.clear();
         self.expanded = None;
         self.chart_hover = None;
+        self.preview = None;
         self.cpu_inspection = None;
         self.rebuild();
     }
 
     pub fn navigate(&mut self, route: &str, cx: &mut Context<Self>) {
         self.chart_hover = None;
+        self.preview = None;
         self.request.route = route.into();
         self.request.offset = 0;
         self.request.members_offset = 0;
@@ -365,98 +389,11 @@ impl LiveDashboard {
     }
 
     pub fn rebuild(&mut self) {
-        let previous = self.rows.len();
-        self.rows.clear();
-        if self.request.route == "computer" {
-            self.rows.push(Row::Inventory);
-        } else {
-            self.rebuild_readings();
-        }
-        if previous != self.rows.len() {
-            self.list.reset(self.rows.len());
-        }
-    }
-
-    fn rebuild_readings(&mut self) {
-        if self.request.route == "apps" {
-            self.rebuild_apps();
-            return;
-        }
-        if self.request.route == "memory" {
-            self.rows.push(Row::Summary);
-        }
-        if self.request.route == "cpu" {
-            self.rows.push(Row::CPUHistory);
-            self.rows.push(Row::CPUActivity);
-        }
-        for panels in self.panels.chunks(2) {
-            self.rows.push(Row::Charts(panels.to_vec()));
-        }
-        if self.request.route == "overview" {
-            self.rows.push(Row::OverviewStatus);
-            if self.snapshot.is_some() {
-                self.rows.push(Row::Hardware);
-            }
-        }
-        if let Some(snapshot) = &self.snapshot {
-            for (name, page) in &snapshot.pages {
-                if name == "fans" {
-                    continue;
-                }
-                self.rows.push(Row::TableHeading(name.clone()));
-                for index in 0..array_len(Some(page), "rows") {
-                    self.rows.push(Row::Table(name.clone(), index));
-                }
-            }
-        }
-        assert!(self.rows.len() <= 4096);
-    }
-
-    fn rebuild_apps(&mut self) {
-        self.rows.push(Row::AppSelector);
-        let Some(snapshot) = &self.snapshot else {
-            return;
-        };
-        if self.app_picker_open {
-            self.rows.push(Row::AppColumns("apps"));
-            for index in self.app_choice_indices() {
-                self.rows.push(Row::App(index));
-            }
-        }
-        self.rows.push(Row::AppSummary);
-        let Some(detail) = crate::live_app_views::selected_detail(
-            snapshot.detail.as_ref(),
-            self.request.app.as_ref(),
-        ) else {
-            return;
-        };
-        if detail.is_null() {
-            return;
-        }
-        self.rows.push(Row::Heading(format!(
-            "Inside {} · executable groups",
-            crate::live_views::text(&detail["app"]["display_name"])
-        )));
-        self.rows.push(Row::AppColumns("executables"));
-        for index in 0..self.executables.len() {
-            self.rows.push(Row::Executable(index));
-        }
-        self.rows
-            .push(Row::Heading("Process instances · selected app".into()));
-        self.rows.push(Row::AppColumns("processes"));
-        for index in 0..array_len(Some(detail), "processes") {
-            if let Some(key) = &self.executable {
-                if !crate::live_executables::matches(&detail["processes"][index], key) {
-                    continue;
-                }
-            }
-            self.rows.push(Row::Process(index));
-        }
-        self.rows
-            .push(Row::Heading("Selected app · last 15 minutes".into()));
-        for panels in self.panels.chunks(2) {
-            self.rows.push(Row::Charts(panels.to_vec()));
-        }
+        let layout = self
+            .preview
+            .as_ref()
+            .and_then(|preview| preview.layout.clone());
+        self.rebuild_anchored(layout);
     }
 
     fn inspection_body(&mut self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
@@ -488,21 +425,14 @@ impl LiveDashboard {
     }
 }
 
-fn array_len(value: Option<&Value>, key: &str) -> usize {
-    value
-        .and_then(|value| value[key].as_array())
-        .map_or(0, |rows| rows.len().min(512))
-}
-
 #[cfg(test)]
 #[path = "live_input_tests.rs"]
 mod input_tests;
 
 impl Render for LiveDashboard {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.cpu_history_focus.is_none() {
-            self.cpu_history_focus = Some(cx.focus_handle());
-        }
+        self.reading_viewport(window.viewport_size());
+        self.install_cpu_focus(window, cx);
         self.hardware_state.begin_frame();
         self.renders += 1;
         if self.renders == 1 {

@@ -77,7 +77,7 @@ fn leaves_cpu_history_absent_when_the_selected_second_has_no_observation() {
 }
 
 impl SealedRecording {
-    fn with_cpu_history() -> Self {
+    pub(super) fn with_cpu_history() -> Self {
         let token =
             collector::recording::identity_text(collector::recording::random_identity().unwrap());
         let recording = Self {

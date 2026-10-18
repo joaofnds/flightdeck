@@ -27,6 +27,141 @@ fn inspection_cursor_is_hidden_before_any_plot_hover(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn hovering_overview_updates_the_status_widgets_to_the_graph_timestamp(cx: &mut TestAppContext) {
+    // Dispatch a historical graph hover while observing the exact painted pressure/swap text.
+    let mut harness = InputHarness::setup_route(cx, "overview");
+    harness.driver.seed_distinct_overview_timestamps();
+    assert!(harness.driver.reading_is_visible("87.0 %"));
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("Memory pressure: Normal    Swap: 7.0 GiB")
+    );
+
+    harness.driver.hover_previous_second_on("live-cpu-plot");
+
+    assert!(harness.driver.reading_is_visible("13.0 %"));
+    let historical = harness
+        .driver
+        .reading_is_visible("Memory pressure: Critical    Swap: 3.0 GiB");
+    let current = harness
+        .driver
+        .reading_is_visible("Memory pressure: Normal    Swap: 7.0 GiB");
+    assert!(
+        historical,
+        "Historical CPU is visible, but historical pressure/swap is {historical}; \
+        current pressure/swap is still visible: {current}"
+    );
+    assert!(!current);
+    harness.teardown();
+}
+
+#[gpui::test]
+fn resizing_the_window_retains_the_reading_beneath_a_stationary_pointer(cx: &mut TestAppContext) {
+    // Grow the viewport without moving the pointer out of its original plotted timestamp.
+    let mut harness = InputHarness::setup_route(cx, "overview");
+    harness.driver.seed_distinct_overview_timestamps();
+    harness.driver.hover_previous_second_on("live-cpu-plot");
+    assert!(harness.driver.reading_is_visible("13.0 %"));
+    let pointer = harness.driver.pointer_position();
+
+    harness
+        .driver
+        .resize_with_retained_pointer(gpui::size(gpui::px(1536.0), gpui::px(2500.0)), pointer);
+
+    assert!(
+        harness
+            .driver
+            .plot_bounds("live-cpu-plot")
+            .contains(&pointer)
+    );
+    assert_eq!(harness.driver.pointer_position(), pointer);
+    assert!(harness.driver.cursor_is_visible("live-cpu-plot"));
+    assert!(harness.driver.reading_is_visible("13.0 %"));
+    assert!(!harness.driver.reading_is_visible("87.0 %"));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn widening_the_window_recomputes_the_timestamp_beneath_a_stationary_pointer(
+    cx: &mut TestAppContext,
+) {
+    // Widen the actual plot so the same pointer moves from a measured second into a gap.
+    let mut harness = InputHarness::setup_route(cx, "overview");
+    harness.driver.seed_distinct_overview_timestamps();
+    harness.driver.hover_previous_second_on("live-cpu-plot");
+    assert!(harness.driver.reading_is_visible("13.0 %"));
+    let pointer = harness.driver.pointer_position();
+
+    harness
+        .driver
+        .resize_with_retained_pointer(gpui::size(gpui::px(1736.0), gpui::px(2400.0)), pointer);
+
+    let plot = harness.driver.plot_bounds("live-cpu-plot");
+    assert!(plot.contains(&pointer));
+    assert_eq!(plot.left(), gpui::px(253.0));
+    assert_eq!(plot.size.width, gpui::px(663.0));
+    assert_eq!(harness.driver.pointer_position(), pointer);
+    assert_eq!(
+        harness.driver.chart_accessibility_reading("live-cpu").0,
+        Some(863)
+    );
+    assert!(harness.driver.cursor_is_visible("live-cpu-plot"));
+    assert!(harness.driver.reading_is_visible("Unavailable"));
+    assert!(!harness.driver.reading_is_visible("13.0 %"));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn shrinking_the_viewport_beyond_the_pointer_ends_the_hover(cx: &mut TestAppContext) {
+    // Keep the physical pointer fixed while the clipped viewport stops containing it.
+    let mut harness = InputHarness::setup_route(cx, "overview");
+    harness.driver.seed_distinct_overview_timestamps();
+    harness.driver.hover_previous_second_on("live-cpu-plot");
+    assert!(harness.driver.cursor_is_visible("live-cpu-plot"));
+    let pointer = harness.driver.pointer_position();
+
+    harness
+        .driver
+        .resize_with_retained_pointer(gpui::size(gpui::px(1536.0), gpui::px(300.0)), pointer);
+
+    assert!(pointer.y > gpui::px(300.0));
+    assert_eq!(harness.driver.pointer_position(), pointer);
+    assert!(!harness.driver.cursor_is_visible("live-cpu-plot"));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn chart_accessibility_metadata_matches_the_hovered_reading_and_gap(cx: &mut TestAppContext) {
+    // Dispatch real hover input, then read the exact values passed to production aria setters.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.seed_repeated_second();
+    harness.driver.hover_previous_second_on("live-energy-plot");
+    assert!(harness.driver.reading_is_visible("90.0 W"));
+
+    let (second, reading) = harness.driver.chart_accessibility_reading("live-energy");
+    assert_eq!(second, Some(999));
+    assert!(reading.contains("Unix second 999"));
+    assert!(reading.ends_with("90.0 W"));
+
+    let gap = harness
+        .driver
+        .second_position("live-energy-plot", 897.5 / 900.0);
+    harness.driver.hover_position(gap);
+    assert!(harness.driver.reading_is_visible("Unavailable"));
+    let (second, reading) = harness.driver.chart_accessibility_reading("live-energy");
+    assert_eq!(second, Some(998));
+    assert!(reading.ends_with("Unavailable"));
+    harness
+        .driver
+        .leave_plot("live-energy-plot", PlotExit::Sidebar);
+    let (second, reading) = harness.driver.chart_accessibility_reading("live-energy");
+    assert_eq!(second, Some(1000));
+    assert!(reading.ends_with("8.0 W"));
+    harness.teardown();
+}
+
+#[gpui::test]
 fn moving_directly_from_the_first_plot_keeps_both_cursors_synchronized(cx: &mut TestAppContext) {
     // Deliver one move across sibling plots, then inspect the settled scene without more input.
     let mut harness = InputHarness::setup(cx);
@@ -402,12 +537,16 @@ struct InputHarness {
 
 impl InputHarness {
     fn setup(cx: &mut TestAppContext) -> Self {
+        Self::setup_route(cx, "energy")
+    }
+
+    fn setup_route(cx: &mut TestAppContext, route: &str) -> Self {
         let root =
             std::env::temp_dir().join(format!("flightdeck-input-contract-{}", std::process::id()));
         let worker = Worker::start(root).unwrap();
         let window = cx.update(|cx| {
             cx.open_window(WindowOptions::default(), |_, cx| {
-                crate::native_workflows::create_dashboard(worker, "energy".into(), None, cx)
+                crate::native_workflows::create_dashboard(worker, route.into(), None, cx)
             })
             .unwrap()
         });
@@ -454,6 +593,52 @@ enum PlotExit {
 }
 
 impl InputDriver {
+    fn resize_with_retained_pointer(
+        &mut self,
+        size: gpui::Size<gpui::Pixels>,
+        pointer: gpui::Point<gpui::Pixels>,
+    ) {
+        self.context.update(|window, cx| {
+            window.resize(size);
+            window.bounds_changed(cx);
+            // TestPlatform reports pointer zero on resize; restore its saved coordinate
+            // without a MouseMove, in the same input batch before layout is rendered.
+            window.dispatch_event(
+                gpui::PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
+                    position: pointer,
+                    delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.0), gpui::px(0.0))),
+                    modifiers: Modifiers::none(),
+                    touch_phase: gpui::TouchPhase::Moved,
+                }),
+                cx,
+            );
+        });
+        self.context.run_until_parked();
+    }
+
+    fn seed_distinct_overview_timestamps(&mut self) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            let mut snapshot = accepted_snapshot(dashboard.generation);
+            let mut historical = snapshot.selection["trends"][0].clone();
+            historical["cpu_percent"] = json!(13);
+            historical["pressure"] = json!(2);
+            historical["swap_used_bytes"] = json!(3_221_225_472_u64);
+            let mut current = snapshot.selection["trends"][1].clone();
+            current["cpu_percent"] = json!(87);
+            current["pressure"] = json!(0);
+            current["swap_used_bytes"] = json!(7_516_192_768_u64);
+            snapshot.selection["summary"] = current.clone();
+            snapshot.selection["trends"] = json!([historical, current]);
+
+            dashboard.accept(snapshot);
+            assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
+            cx.notify();
+        });
+        self.context
+            .simulate_resize(gpui::size(gpui::px(1536.0), gpui::px(2400.0)));
+        self.context.run_until_parked();
+    }
+
     fn seed_repeated_second(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = accepted_snapshot(dashboard.generation);
@@ -670,6 +855,17 @@ impl InputDriver {
 
     fn reading_is_visible(&mut self, reading: &'static str) -> bool {
         self.context.debug_bounds(reading).is_some()
+    }
+
+    fn chart_accessibility_reading(&self, panel_id: &str) -> (Option<u64>, String) {
+        self.view.read_with(&self.context, |dashboard, _| {
+            let panel = dashboard
+                .panels
+                .iter()
+                .find(|panel| panel.id == panel_id)
+                .unwrap();
+            dashboard.chart_accessibility_reading(panel)
+        })
     }
 
     fn requested_publication(&self) -> Option<u64> {
