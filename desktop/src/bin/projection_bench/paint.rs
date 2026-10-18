@@ -55,8 +55,8 @@ fn decode(value: &Value) -> Result<Vec<Panel>, Box<dyn std::error::Error>> {
         .as_array()
         .ok_or("Panel bits require an array")?
         .clone();
-    if !(1..=7).contains(&values.len()) {
-        return Err("Panel count must be 1..7".into());
+    if !(1..=crate::live_projection::OVERVIEW_PANELS_MAX).contains(&values.len()) {
+        return Err("Panel count must be 1..9".into());
     }
 
     for panel in &mut values {

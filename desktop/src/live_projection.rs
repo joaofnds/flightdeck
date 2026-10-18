@@ -10,6 +10,8 @@ use crate::data::{Line, Panel};
 mod resource_projection;
 
 const OBSERVATIONS_MAX: usize = 4096;
+pub const OVERVIEW_PANELS_MAX: usize = 9;
+pub const ROUTE_PANELS_MAX: usize = 7;
 const GIBIBYTE: f32 = 1_073_741_824.0;
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
 
@@ -57,7 +59,12 @@ pub fn panels(
     }
     let domain = Domain::read(selection)?;
     let coordinates = coordinates(points, &domain, route == "apps", &source["selected"])?;
-    let mut result = Vec::with_capacity(8);
+    let limit = if route == "overview" {
+        OVERVIEW_PANELS_MAX
+    } else {
+        ROUTE_PANELS_MAX
+    };
+    let mut result = Vec::with_capacity(limit);
     for specification in specifications(route, points)? {
         let mut panel = panel(&specification, points, &coordinates)?;
         if specification.id == "live-memory-pressure" {
@@ -69,11 +76,7 @@ pub fn panels(
 
         result.push(Rc::new(panel));
     }
-    if route == "overview" {
-        assert!(result.len() <= 8);
-    } else {
-        assert!(result.len() <= 7);
-    }
+    assert!(result.len() <= limit);
     Ok(result)
 }
 
@@ -681,6 +684,7 @@ fn overview() -> Vec<Specification> {
             "°C",
             vec![reading("soc_celsius", "SoC temperature", "#f2495c", 1.0)],
         ),
+        memory_pressure(),
     ];
     for specification in &mut result {
         if !specification.stack {
@@ -693,16 +697,20 @@ fn overview() -> Vec<Specification> {
 fn memory_specifications() -> Vec<Specification> {
     vec![
         memory(),
-        specification(
-            "live-memory-pressure",
-            "Memory pressure",
-            "",
-            vec![reading("pressure", "Memory pressure", "#73bf69", 1.0)],
-        ),
+        memory_pressure(),
         memory_swap(),
         memory_paging(),
         memory_swap_flow(),
     ]
+}
+
+fn memory_pressure() -> Specification {
+    specification(
+        "live-memory-pressure",
+        "Memory pressure",
+        "",
+        vec![reading("pressure", "Memory pressure", "#73bf69", 1.0)],
+    )
 }
 
 fn memory_swap() -> Specification {

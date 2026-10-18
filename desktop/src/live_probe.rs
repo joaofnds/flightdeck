@@ -141,7 +141,12 @@ fn probe_wait(probe: &mut Probe, generation: u64) -> Result<Box<Snapshot>, Strin
 fn probe_validate(snapshot: &Snapshot, route: &str) -> Result<(), String> {
     let panels =
         crate::live_projection::panels(route, &snapshot.selection, snapshot.history.as_ref())?;
-    if panels.len() > 8 {
+    let limit = if route == "overview" {
+        crate::live_projection::OVERVIEW_PANELS_MAX
+    } else {
+        crate::live_projection::ROUTE_PANELS_MAX
+    };
+    if panels.len() > limit {
         return Err("Live projection exceeds its panel bound".to_owned());
     }
     if matches!(route, "computer" | "self") {

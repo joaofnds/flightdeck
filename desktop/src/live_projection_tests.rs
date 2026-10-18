@@ -76,7 +76,7 @@ fn energy_series_remain_independent_and_memory_categories_only_stack_in_overview
     assert_eq!(energy[0].lines[1].values[1], Some(2.0));
     assert_eq!(energy[0].stack, Some(false));
     let overview = panels("overview", &selection, None).unwrap();
-    assert_eq!(overview.len(), 8);
+    assert_eq!(overview.len(), 9);
     assert_eq!(overview[1].stack, Some(true));
     let memory = panels("memory", &selection, None).unwrap();
     assert_eq!(memory.len(), 5);
@@ -101,6 +101,59 @@ fn overview_includes_gpu_activity_history_with_independent_missing_observations(
     assert_eq!(activity.lines[0].values, [None, Some(37.5), None]);
     assert_eq!(activity.selected_index, Some(2));
     assert_eq!(activity.unit, "%");
+}
+
+#[test]
+fn overview_pressure_history_keeps_normal_warning_critical_and_missing_seconds() {
+    // Project sparse pressure observations and compare every retained second, including gaps.
+    let mut selection = selection();
+    selection["trends"][0]["pressure"] = json!(0);
+    selection["trends"][1]["pressure"] = json!(1);
+    selection["trends"][2]["pressure"] = json!(2);
+    let mut expected = vec![None; 900];
+    expected[0] = Some(0.0);
+    expected[449] = Some(1.0);
+    expected[899] = Some(2.0);
+
+    let overview = panels("overview", &selection, None).unwrap();
+    let pressure = overview
+        .iter()
+        .find(|panel| panel.id == "live-memory-pressure")
+        .unwrap();
+
+    assert_eq!(pressure.kind, "timeline");
+    assert_eq!(pressure.lines[0].values, expected);
+    assert_eq!(pressure.selected_index, Some(899));
+    assert_eq!(
+        pressure.states.as_ref().unwrap(),
+        &["Normal", "Warning", "Critical"]
+    );
+}
+
+#[test]
+fn overview_pressure_history_retains_the_selected_same_second_alternative() {
+    // Select the earlier same-second warning and keep an unknown pressure observation blank.
+    let mut selection = selection();
+    selection["trends"][0]["pressure"] = json!(8);
+    selection["trends"][1]["wall_ns"] = json!(1_000_100_000_000_u64);
+    selection["trends"][1]["pressure"] = json!(1);
+    selection["trends"][2]["pressure"] = json!(2);
+    selection["selected"] = selection["trends"][1].clone();
+    let mut expected = vec![None; 900];
+    expected[899] = Some(1.0);
+
+    let overview = panels("overview", &selection, None).unwrap();
+    let pressure = overview
+        .iter()
+        .find(|panel| panel.id == "live-memory-pressure")
+        .unwrap();
+
+    assert_eq!(pressure.lines[0].values, expected);
+    assert_eq!(pressure.selected_index, Some(899));
+    assert_eq!(
+        inspection_identity(&selection, 1000),
+        Some(selection["selected"].clone())
+    );
 }
 
 #[test]

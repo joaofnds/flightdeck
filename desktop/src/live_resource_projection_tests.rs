@@ -68,7 +68,7 @@ fn overview_includes_measured_physical_disk_throughput() {
 
     let projected = panels("overview", &selection, None).unwrap();
 
-    assert_eq!(projected.len(), 8);
+    assert_eq!(projected.len(), 9);
     let disk = projected
         .iter()
         .find(|panel| panel.title == "Disk throughput")
