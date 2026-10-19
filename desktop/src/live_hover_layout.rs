@@ -22,6 +22,7 @@ impl Row {
             Self::Diagnostics => "diagnostics".into(),
             Self::OverviewStatus => "overview-status".into(),
             Self::Rankings(metrics) => format!("rankings-{}", metrics[0]),
+            Self::MemoryAttribution(_) => "memory-attribution".into(),
             Self::AppSelector => "app-selector".into(),
             Self::AppSummary => "app-summary".into(),
             Self::AppColumns(kind) => format!("app-columns-{kind}"),
@@ -29,6 +30,12 @@ impl Row {
             Self::CPUHistory => "cpu-history".into(),
             Self::Charts(panels) => format!("charts-{}", panels[0].id),
             Self::Heading(title) => {
+                match title.as_str() {
+                    "Top apps at the selected time" | "MacBook" => {
+                        return format!("overview-heading-{title}");
+                    }
+                    _ => {}
+                }
                 if title.starts_with("Inside ") {
                     "app-executable-heading".into()
                 } else {
@@ -53,6 +60,7 @@ impl Row {
     fn owns_plot(&self, source: &str) -> bool {
         match self {
             Self::Charts(panels) => panels.iter().take(3).any(|panel| panel.id == source),
+            Self::MemoryAttribution(Some(panel)) => panel.id == source,
             Self::CPUHistory => source == "cpu-history-plot",
             _ => false,
         }

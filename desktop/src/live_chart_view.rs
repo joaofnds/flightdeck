@@ -18,6 +18,8 @@ use crate::live_source::Snapshot;
 #[cfg(test)]
 #[path = "live_hover_cost_tests.rs"]
 mod cost_tests;
+#[path = "live_chart_inspector.rs"]
+pub(crate) mod inspector;
 
 impl LiveDashboard {
     pub fn live_chart(&self, panel: &Rc<Panel>, cx: &mut Context<Self>) -> impl IntoElement {
@@ -46,7 +48,8 @@ impl LiveDashboard {
                     190.0
                 }))
                 .child(plot)
-                .child(chart_cursor(cursor)),
+                .child(chart_cursor(cursor))
+                .children(self.chart_tooltip(panel, index, cursor)),
             measured,
             panel,
             cx,
@@ -65,7 +68,7 @@ impl LiveDashboard {
             .border_color(rgb(GRID))
             .bg(rgb(PANEL))
             .p(px(18.0))
-            .child(Self::chart_heading(panel))
+            .child(Self::chart_heading(panel, cx))
             .child(self.chart_headline(panel, index))
             .child(chart)
             .child(self.chart_times())
@@ -89,6 +92,15 @@ impl LiveDashboard {
 
     fn chart_source_state(&self, panel: &Panel) -> gpui::Div {
         let mut notice = div().text_size(px(11.0)).text_color(rgb(MUTED));
+        if panel.id == crate::live_resident_history::PANEL_ID {
+            let reading = self.snapshot.as_ref().and_then(|snapshot| {
+                snapshot
+                    .resident_history
+                    .as_ref()
+                    .map(|history| history.coverage(self.chart_inspection_index(panel)))
+            });
+            return notice.children(reading);
+        }
         if panel.id != "live-fans" {
             return notice;
         }
@@ -131,7 +143,10 @@ impl LiveDashboard {
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .child(reading),
             );
-        if panel.stack == Some(true) {
+        if panel.id == "live-memory" {
+            if panel.stack != Some(true) {
+                return headline;
+            }
             let summary = self
                 .reading_snapshot()
                 .map_or(&Value::Null, |snapshot| &snapshot.selection["summary"]);
@@ -160,6 +175,13 @@ impl LiveDashboard {
     }
 
     fn chart_reading(&self, panel: &Panel, index: Option<usize>) -> String {
+        if panel.id == crate::live_resident_history::PANEL_ID {
+            return self
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.resident_history.as_ref())
+                .map_or_else(|| "Unavailable".into(), |history| history.headline(index));
+        }
         if panel.id == "live-app-disk" {
             return format!(
                 "Read {}; Write {}",
@@ -192,8 +214,23 @@ impl LiveDashboard {
     }
 
     fn chart_line_reading(&self, panel: &Panel, line: usize, index: Option<usize>) -> String {
+        if panel.id == crate::live_resident_history::PANEL_ID {
+            return self
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.resident_history.as_ref())
+                .map_or_else(
+                    || "Unavailable".into(),
+                    |history| history.reading(line, index),
+                );
+        }
         let value = chart_line_value(panel, line, index);
-        let reading = line_reading(panel, value, &panel.unit);
+        let unit = panel
+            .lines
+            .get(line)
+            .and_then(|line| line.unit.as_deref())
+            .unwrap_or(&panel.unit);
+        let reading = line_reading(panel, value, unit);
         if panel.id != "live-app-disk" {
             return reading;
         }
@@ -500,10 +537,36 @@ impl LiveDashboard {
         }
     }
 
-    fn chart_heading(panel: &Panel) -> impl IntoElement {
+    fn chart_heading(panel: &Rc<Panel>, cx: &mut Context<Self>) -> impl IntoElement {
         let help = panel.help.clone().unwrap_or_else(|| {
             "Unavailable readings remain gaps. Click a chart to pause at that second.".into()
         });
+        let inspector_panel = Rc::clone(panel);
+        let keyboard_panel = Rc::clone(panel);
+        let controls = div()
+            .flex()
+            .gap(px(6.0))
+            .when(panel.kind != "timeline", |controls| {
+                controls.child(
+                    control("Data")
+                        .debug_selector(|| format!("chart-data:{}", panel.id))
+                        .aria_label(format!("Data for {}", panel.title))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.open_chart_inspector(&inspector_panel, window, cx);
+                        }))
+                        .on_key_down(cx.listener(
+                            move |this, event: &gpui::KeyDownEvent, window, cx| {
+                                if ["enter", "space"].contains(&event.keystroke.key.as_str()) {
+                                    this.open_chart_inspector(&keyboard_panel, window, cx);
+                                    window.prevent_default();
+                                    cx.stop_propagation();
+                                }
+                            },
+                        )),
+                )
+            })
+            .child(control("ⓘ").tooltip(move |_, cx| cx.new(|_| ChartHelp(help.clone())).into()));
+
         div()
             .flex()
             .justify_between()
@@ -513,7 +576,7 @@ impl LiveDashboard {
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .child(panel.title.clone()),
             )
-            .child(control("ⓘ").tooltip(move |_, cx| cx.new(|_| ChartHelp(help.clone())).into()))
+            .child(controls)
     }
 
     fn chart_ticks(chart: impl IntoElement, domain: (f32, f32)) -> impl IntoElement {
@@ -595,6 +658,8 @@ impl LiveDashboard {
         for (line_index, line) in panel.lines.iter().take(16).enumerate() {
             let key = format!("{}\t{}", panel.id, line.name);
             let reading = self.chart_line_reading(panel, line_index, index);
+            let label = Self::chart_legends_label(panel, line_index, &reading);
+            let keyboard_key = key.clone();
             legends = legends.child(
                 div()
                     .id(SharedString::from(key.clone()))
@@ -619,18 +684,44 @@ impl LiveDashboard {
                         1.0
                     })
                     .text_color(rgb(charts::color(&line.color)))
-                    .child(format!("━ {}  {}", line.name, reading))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if let Some(index) = this.hidden.iter().position(|value| *value == key) {
-                            this.hidden.remove(index);
-                        } else {
-                            this.hidden.push(key.clone());
-                        }
-                        cx.notify();
-                    })),
+                    .child(label)
+                    .on_key_down(cx.listener(
+                        move |this, event: &gpui::KeyDownEvent, window, cx| {
+                            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                this.toggle_chart_legend(&keyboard_key, cx);
+                                window.prevent_default();
+                                cx.stop_propagation();
+                            }
+                        },
+                    ))
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.toggle_chart_legend(&key, cx)),
+                    ),
             );
         }
         legends
+    }
+
+    fn toggle_chart_legend(&mut self, key: &str, cx: &mut Context<Self>) {
+        if let Some(index) = self.hidden.iter().position(|value| value == key) {
+            self.hidden.remove(index);
+        } else {
+            self.hidden.push(key.into());
+        }
+        cx.notify();
+    }
+
+    fn chart_legends_label(panel: &Panel, index: usize, reading: &str) -> gpui::AnyElement {
+        let line = &panel.lines[index];
+        let label = format!("━ {}  {}", line.name, reading);
+        if panel.id == crate::live_resident_history::PANEL_ID {
+            div()
+                .debug_selector(|| line.name.clone())
+                .child(label)
+                .into_any_element()
+        } else {
+            label.into_any_element()
+        }
     }
 }
 
@@ -673,6 +764,9 @@ fn target_index(
     target: &crate::live_hover::Target,
 ) -> Option<usize> {
     target.identity.as_ref()?;
+    if panel.id == crate::live_resident_history::PANEL_ID {
+        return snapshot.resident_history.as_ref()?.index(Some(target));
+    }
     if panel.kind == "timeline" {
         return inspection_index(panel, snapshot, Some(target.second));
     }
@@ -828,6 +922,10 @@ fn inspection_index(panel: &Panel, snapshot: &Snapshot, second: Option<u64>) -> 
     if snapshot.selection["second"].as_u64() == Some(second) {
         return panel.selected_index;
     }
+    if panel.id == crate::live_resident_history::PANEL_ID {
+        let target = crate::live_hover::Target::regular(snapshot, second);
+        return snapshot.resident_history.as_ref()?.index(Some(&target));
+    }
 
     if panel.kind == "timeline" {
         let first = snapshot.selection["second"].as_u64()?.saturating_sub(899);
@@ -900,6 +998,7 @@ mod tests {
             history: None,
             cpu_detail: None,
             cpu_history: None,
+            resident_history: None,
             rankings: None,
             read_ms: 0.0,
         }

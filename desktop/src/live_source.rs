@@ -27,6 +27,7 @@ pub struct Request {
     pub apps_offset: u32,
     pub members_offset: u32,
     pub cpu_offset: u32,
+    pub load_resident_history: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -74,6 +75,7 @@ pub struct Snapshot {
     pub history: Option<Value>,
     pub cpu_detail: Option<crate::live_cpu::CPUActivity>,
     pub cpu_history: Option<Arc<crate::live_cpu_history::CPUHistory>>,
+    pub resident_history: Option<Arc<crate::live_resident_history::ResidentHistory>>,
     pub rankings: Option<Arc<crate::live_rankings::Rankings>>,
     pub read_ms: f64,
 }
@@ -385,6 +387,7 @@ fn reader_snapshot(
         history: None,
         cpu_detail: None,
         cpu_history: None,
+        resident_history: None,
         rankings: None,
         read_ms: 0.0,
     });
@@ -415,6 +418,7 @@ fn reader_computer(reader: &mut Reader, command: &Command) -> Option<Box<Snapsho
         history: None,
         cpu_detail: None,
         cpu_history: None,
+        resident_history: None,
         rankings: None,
         read_ms: 0.0,
     }))
@@ -522,8 +526,25 @@ fn reader_payload(
         )?);
         reader_cpu_history(session, request, snapshot)?;
     }
+    if request.route == "memory" {
+        if request.load_resident_history {
+            reader_resident_history(session, snapshot);
+        }
+    }
 
     Ok(())
+}
+
+fn reader_resident_history(session: &LiveSession, snapshot: &mut Snapshot) {
+    let history = match session.app_resident_history() {
+        Ok(payload) => {
+            crate::live_resident_history::ResidentHistory::prepare(&payload, &snapshot.selection)
+        }
+        Err(error) => crate::live_resident_history::ResidentHistory::Unavailable(
+            crate::live_notices::recording_context::bounded(&error.to_string(), 512),
+        ),
+    };
+    snapshot.resident_history = Some(Arc::new(history));
 }
 
 fn reader_cpu_history(

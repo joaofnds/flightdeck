@@ -93,6 +93,7 @@ pub struct NativeControls {
     pub notice: Option<String>,
     pub source: SourceMode,
     pub diagnostic_selected: Value,
+    pub recording_details_open: bool,
 }
 
 struct Candidate {
@@ -591,6 +592,7 @@ fn fresh_request(route: &str) -> Request {
         apps_offset: 0,
         members_offset: 0,
         cpu_offset: 0,
+        load_resident_history: true,
     }
 }
 

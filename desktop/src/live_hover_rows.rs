@@ -30,7 +30,10 @@ impl LiveDashboard {
         }
 
         let mut rows = Vec::with_capacity(4096);
-        if self.request.route == "memory" {
+        if matches!(
+            self.request.route.as_str(),
+            "overview" | "cpu" | "gpu" | "memory" | "energy" | "network"
+        ) {
             rows.push(Row::Summary);
         }
         if matches!(self.request.route.as_str(), "storage" | "battery") {
@@ -40,12 +43,15 @@ impl LiveDashboard {
             rows.push(Row::CPUHistory);
             rows.push(Row::CPUActivity);
         }
-        for panels in self.panels.chunks(self.reading_chart_columns()) {
-            rows.push(Row::Charts(panels.to_vec()));
-        }
+        self.reading_rows_charts(&mut rows);
         match self.request.route.as_str() {
             "cpu" => rows.push(Row::Rankings(vec![0])),
-            "memory" => rows.push(Row::Rankings(vec![1])),
+            "memory" => rows.push(Row::MemoryAttribution(
+                self.panels
+                    .iter()
+                    .find(|panel| panel.id == crate::live_resident_history::PANEL_ID)
+                    .cloned(),
+            )),
             "energy" => rows.push(Row::Rankings(vec![2])),
             _ => {}
         }
@@ -60,13 +66,34 @@ impl LiveDashboard {
         }
         if self.request.route == "overview" {
             rows.push(Row::OverviewStatus);
+            rows.push(Row::Heading("Top apps at the selected time".into()));
             for metrics in [0, 1, 2].chunks(self.reading_chart_columns()) {
                 rows.push(Row::Rankings(metrics.to_vec()));
             }
             if self.snapshot.is_some() {
+                rows.push(Row::Heading("MacBook".into()));
                 rows.push(Row::Hardware);
             }
         }
+        self.reading_rows_tables(&mut rows);
+        assert!(rows.len() <= 4096);
+
+        rows
+    }
+
+    fn reading_rows_charts(&self, rows: &mut Vec<Row>) {
+        let machine_panel_count = self
+            .panels
+            .iter()
+            .take(16)
+            .take_while(|panel| panel.id != crate::live_resident_history::PANEL_ID)
+            .count();
+        for panels in self.panels[..machine_panel_count].chunks(self.reading_chart_columns()) {
+            rows.push(Row::Charts(panels.to_vec()));
+        }
+    }
+
+    fn reading_rows_tables(&self, rows: &mut Vec<Row>) {
         if let Some(snapshot) = self.reading_snapshot() {
             for (name, page) in &snapshot.pages {
                 if name == "fans" {
@@ -78,9 +105,6 @@ impl LiveDashboard {
                 }
             }
         }
-        assert!(rows.len() <= 4096);
-
-        rows
     }
 
     fn reading_rows_apps(&self) -> Vec<Row> {

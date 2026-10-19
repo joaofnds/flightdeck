@@ -72,23 +72,31 @@ fn regrouping_a_hovered_first_plot_recomputes_its_reading_at_the_stationary_poin
     // Cross from three columns to two while the pointer stays inside the first plot.
     let mut harness = InputHarness::setup_route(cx, "overview");
     harness.driver.seed_rolling_selection();
-    harness.driver.resize_charts(1320.0);
+    harness.driver.resize_charts(1100.0);
     let selected = harness.driver.accepted_selection().unwrap()["selected"].clone();
-    let pointer = harness.driver.second_position("live-cpu-plot", 0.5);
+    let original = harness.driver.plot_bounds("live-cpu-plot");
+    harness.driver.resize_charts(1099.0);
+    let resized = harness.driver.plot_bounds("live-cpu-plot");
+    let overlap = original.intersect(&resized);
+    assert!(overlap.size.height > px(0.0), "{original:?}; {resized:?}");
+    let pointer = gpui::point(original.center().x, overlap.center().y);
+    assert!(overlap.contains(&pointer));
+    harness.driver.resize_charts(1100.0);
+    assert_eq!(harness.driver.plot_bounds("live-cpu-plot"), original);
     harness.driver.hover_position(pointer);
     harness.driver.assert_cpu_inspection(551, "51.0 %");
 
     harness
         .driver
-        .resize_with_retained_pointer(gpui::size(px(840.0), px(2500.0)), pointer);
+        .resize_with_retained_pointer(gpui::size(px(1099.0), px(2500.0)), pointer);
 
     let plot = harness.driver.plot_bounds("live-cpu-plot");
     assert!(plot.contains(&pointer));
     assert_eq!(harness.driver.pointer_position(), pointer);
     let fraction = f32::from(pointer.x - plot.left()) / f32::from(plot.size.width);
     let second = 101 + (fraction * 900.0).floor().to_u64().unwrap();
-    assert_eq!(second, 662);
-    harness.driver.assert_cpu_inspection(second, "62.0 %");
+    assert_eq!(second, 356);
+    harness.driver.assert_cpu_inspection(second, "56.0 %");
     assert_eq!(
         harness.driver.accepted_selection().unwrap()["selected"],
         selected

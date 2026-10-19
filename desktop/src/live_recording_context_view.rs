@@ -9,18 +9,20 @@ use crate::live_notices::recording_context::{
 };
 
 impl LiveDashboard {
-    pub(super) fn header_recording_context(&self, mut header: Div) -> Div {
+    pub(super) fn header_recording_context(&self, mut header: Div, cx: &mut Context<Self>) -> Div {
         let catalog = self
             .context_snapshot()
             .map_or(&Value::Null, |snapshot| &snapshot.catalog);
         let selection = self
             .reading_snapshot()
             .map_or(&Value::Null, |snapshot| &snapshot.selection);
-        header = header.children(
-            recording_context::source(RecordingContext { catalog, selection })
-                .into_iter()
-                .map(|line| div().text_size(px(10.0)).text_color(rgb(MUTED)).child(line)),
-        );
+        header = header.child(self.recording_details_control(cx));
+        if self.native.recording_details_open {
+            header = header.child(Self::recording_details(RecordingContext {
+                catalog,
+                selection,
+            }));
+        }
         header = header.children(
             crate::live_notices::losses(catalog, selection)
                 .into_iter()
@@ -41,6 +43,52 @@ impl LiveDashboard {
         }
 
         header
+    }
+
+    fn recording_details_control(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let label = if self.native.recording_details_open {
+            "▾ Recording details"
+        } else {
+            "▸ Recording details"
+        };
+
+        control(label)
+            .debug_selector(|| "recording-details-toggle".into())
+            .aria_label("Recording details")
+            .aria_selected(self.native.recording_details_open)
+            .text_size(px(10.0))
+            .text_color(rgb(MUTED))
+            .mt(px(4.0))
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    this.native.recording_details_open = !this.native.recording_details_open;
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.native.recording_details_open = !this.native.recording_details_open;
+                cx.notify();
+            }))
+    }
+
+    fn recording_details(context: RecordingContext<'_>) -> impl IntoElement {
+        let path = context.catalog["path"].as_str().unwrap_or("Unavailable");
+        let path = recording_context::bounded(path, 4096);
+
+        div()
+            .debug_selector(|| "recording-details".into())
+            .py(px(6.0))
+            .child(
+                div()
+                    .debug_selector(move || format!("recording-path:{path}"))
+                    .children(
+                        recording_context::source(context).into_iter().map(|line| {
+                            div().text_size(px(10.0)).text_color(rgb(MUTED)).child(line)
+                        }),
+                    ),
+            )
     }
 
     pub(super) fn header_alternatives(&self, header: Div, cx: &mut Context<Self>) -> Div {

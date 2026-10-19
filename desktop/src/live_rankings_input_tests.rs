@@ -930,3 +930,462 @@ impl InputDriver {
         self.context.run_until_parked();
     }
 }
+
+#[gpui::test]
+fn memory_shows_interval_resident_leaders_separately_from_current_top_apps(
+    cx: &mut TestAppContext,
+) {
+    // Display an interval cohort whose excluded ninth App leads the current sample.
+    let mut harness = InputHarness::setup_route(cx, "memory");
+    harness.driver.seed_interval_resident_leaders();
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("ranking:Resident memory:App I:100 B")
+    );
+
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("live-memory-app-resident-plot")
+    );
+
+    assert!(harness.driver.reading_is_visible("Other"));
+    assert!(harness.driver.reading_is_visible("App A"));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn resident_hover_sorts_adjacent_exact_byte_counts_above_plot_precision(cx: &mut TestAppContext) {
+    // Adjacent bytes share an f32 plot value but must retain their exact readout ordering.
+    let mut harness = InputHarness::setup_route(cx, "memory");
+    let mut history = interval_resident_history();
+    history["points"][1]["apps"][0] = resident_history_measure(16_777_217);
+    history["points"][1]["other"]["resident_bytes"] = resident_history_measure(16_777_216);
+    harness.driver.seed_resident_leaders(history);
+
+    harness
+        .driver
+        .hover_selected_second_on("live-memory-app-resident-plot");
+
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("chart-tooltip-row:live-memory-app-resident:0:App A:16777217 B")
+    );
+    harness.teardown();
+}
+
+impl InputDriver {
+    fn seed_interval_resident_leaders(&mut self) {
+        self.seed_resident_leaders(interval_resident_history());
+    }
+
+    fn seed_resident_leaders(&mut self, history: serde_json::Value) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            let mut snapshot = route_ranked_snapshot(dashboard.generation);
+            let mut rankings = ranked_payload(&snapshot, "App I", "4170702049", 80);
+            let crate::live_rankings::Rankings::Ready(ready) = Arc::get_mut(&mut rankings).unwrap()
+            else {
+                panic!("Resident fixture requires captured rankings");
+            };
+            let app = Arc::new(crate::live_rankings::App {
+                name: "App I".into(),
+                key: crate::live_source::AppKey {
+                    kind: "executable".into(),
+                    bytes_hex: "4170702049".into(),
+                },
+            });
+            for metric in &mut ready.metrics {
+                metric.entries[0].app = Arc::clone(&app);
+            }
+            ready.metrics[1].entries[0].amount = 100;
+            snapshot.rankings = Some(rankings);
+            snapshot.history = Some(history);
+            dashboard.accept(snapshot);
+            assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
+            cx.notify();
+        });
+        self.context
+            .simulate_resize(gpui::size(px(1320.0), px(3500.0)));
+        self.context.run_until_parked();
+    }
+}
+
+fn interval_resident_history() -> serde_json::Value {
+    let cohort: Vec<_> = (b'A'..=b'H')
+        .map(|name| {
+            json!({
+        "key":{"kind":"executable", "bytes_hex":format!("41707020{name:02x}"),
+            "display":format!("App {}", char::from(name))},
+        "sum_bytes":"200", "samples":2})
+        })
+        .collect();
+    let earlier: Vec<_> = (0..8).map(|_| resident_history_measure(199)).collect();
+    let current: Vec<_> = (0..8).map(|_| resident_history_measure(1)).collect();
+    json!({"selected":resident_history_observation(2), "context_seconds":900,
+        "cohort":cohort,"points":[
+            {"observation":resident_history_observation(1), "segment":"0",
+                "source_available":true,"membership_complete":true,
+                "ungrouped_members":0,"usage_refused":0,"usage_gone":0,"apps":earlier,
+                "other":{"app_count":1,"resident_bytes":resident_history_measure(0)}},
+            {"observation":resident_history_observation(2), "segment":"0",
+                "source_available":true,"membership_complete":true,
+                "ungrouped_members":0,"usage_refused":0,"usage_gone":0,"apps":current,
+                "other":{"app_count":1,"resident_bytes":resident_history_measure(100)}}],
+        "coverage":{"retention_limited":false,"live_retention_limited":false,
+            "observations_retained":2,"committed_observations":0,"context_app_count":9,
+            "context_app_count_max":24000,"context_key_bytes":45,
+            "context_key_bytes_max":8_388_608,"cache_bytes":0,"cache_bytes_max":67_108_864}})
+}
+
+fn resident_history_observation(publication: u64) -> serde_json::Value {
+    let second = publication + 998;
+    json!({"recording":["5","6"],"stamp":{"boot":["3","4"],"run":["1","2"],
+        "publication":publication.to_string(),"continuous_ns":(second*1_000_000_000).to_string(),
+        "awake_ns":(second*1_000_000_000).to_string()},"run_tick":publication.to_string(),
+        "wall_ns":(second*1_000_000_000).to_string()})
+}
+
+fn resident_history_measure(known: u64) -> serde_json::Value {
+    json!({"known":known.to_string(),"measured_members":1,
+        "unavailable_members":0,"overflowed":false})
+}
+
+#[gpui::test]
+fn resident_history_hover_keeps_interval_cohort_and_exact_bytes_through_loading_and_restore(
+    cx: &mut TestAppContext,
+) {
+    // Inspect the installed resident plot while exact historical App rankings load beside it.
+    let mut harness = InputHarness::setup_route(cx, "memory");
+    harness.driver.seed_interval_resident_leaders();
+    let retained = harness.driver.resident_history_anchors();
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("chart-legend:live-memory-app-resident:App A:1 B")
+    );
+
+    harness
+        .driver
+        .hover_previous_second_on("live-memory-app-resident-plot");
+
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("Hover preview · Loading exact details")
+    );
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("chart-legend:live-memory-app-resident:App A:199 B")
+    );
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("Loading exact App totals")
+    );
+    harness.driver.complete_route_ranked_preview();
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("ranking:Resident memory:Historical:512.0 MiB")
+    );
+    harness.driver.assert_resident_history_anchors(&retained);
+
+    harness
+        .driver
+        .leave_plot("live-memory-app-resident-plot", PlotExit::Sidebar);
+
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("chart-legend:live-memory-app-resident:App A:1 B")
+    );
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("ranking:Resident memory:App I:100 B")
+    );
+    harness.driver.assert_resident_history_anchors(&retained);
+    harness.teardown();
+}
+
+#[gpui::test]
+fn resident_history_worker_failure_retains_the_exact_historical_readout(cx: &mut TestAppContext) {
+    // Fail the preview worker after inspecting an accepted resident context, then leave the plot.
+    let mut harness = InputHarness::setup_route(cx, "memory");
+    harness.driver.seed_interval_resident_leaders();
+    harness
+        .driver
+        .hover_previous_second_on("live-memory-app-resident-plot");
+
+    harness.driver.fail_ranked_preview();
+
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("chart-legend:live-memory-app-resident:App A:199 B")
+    );
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("App totals unavailable: Ranking read failed")
+    );
+    harness
+        .driver
+        .leave_plot("live-memory-app-resident-plot", PlotExit::Sidebar);
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("chart-legend:live-memory-app-resident:App A:1 B")
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn resident_history_missing_second_shows_no_borrowed_residents(cx: &mut TestAppContext) {
+    // Move from a measured historical second to a true context gap through the real hitbox.
+    let mut harness = InputHarness::setup_route(cx, "memory");
+    harness.driver.seed_interval_resident_leaders();
+    harness
+        .driver
+        .hover_previous_second_on("live-memory-app-resident-plot");
+    let gap = harness
+        .driver
+        .second_position("live-memory-app-resident-plot", 897.5 / 900.0);
+
+    harness.driver.hover_position(gap);
+    harness.driver.finish_missing_ranked_preview();
+
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("chart-legend:live-memory-app-resident:App A:Unavailable")
+    );
+    assert!(
+        !harness
+            .driver
+            .reading_is_visible("chart-legend:live-memory-app-resident:App A:199 B")
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn resident_history_and_rankings_share_a_wide_row_and_stack_in_a_narrow_view(
+    cx: &mut TestAppContext,
+) {
+    // Compare installed plot and ranking geometry at desktop and narrow window widths.
+    let mut harness = InputHarness::setup_route(cx, "memory");
+    harness.driver.seed_interval_resident_leaders();
+    harness.driver.assert_resident_attribution_layout(false);
+
+    harness
+        .driver
+        .context
+        .simulate_resize(gpui::size(px(620.0), px(5000.0)));
+    harness.driver.context.run_until_parked();
+
+    harness.driver.assert_resident_attribution_layout(true);
+    harness.teardown();
+}
+
+impl InputDriver {
+    fn resident_history_anchors(
+        &self,
+    ) -> (
+        Arc<crate::live_resident_history::ResidentHistory>,
+        std::rc::Rc<crate::data::Panel>,
+    ) {
+        self.view.read_with(&self.context, |dashboard, _| {
+            let history = dashboard
+                .snapshot
+                .as_ref()
+                .unwrap()
+                .resident_history
+                .as_ref()
+                .unwrap();
+            let panel = dashboard
+                .panels
+                .iter()
+                .find(|panel| panel.id == crate::live_resident_history::PANEL_ID)
+                .unwrap();
+            (Arc::clone(history), std::rc::Rc::clone(panel))
+        })
+    }
+
+    fn assert_resident_history_anchors(
+        &self,
+        retained: &(
+            Arc<crate::live_resident_history::ResidentHistory>,
+            std::rc::Rc<crate::data::Panel>,
+        ),
+    ) {
+        let accepted = self.resident_history_anchors();
+        assert!(Arc::ptr_eq(&retained.0, &accepted.0));
+        assert!(std::rc::Rc::ptr_eq(&retained.1, &accepted.1));
+    }
+
+    fn assert_resident_attribution_layout(&mut self, narrow: bool) {
+        let plot = self.chart_bounds("live-memory-app-resident-plot");
+        let rank = self
+            .context
+            .debug_bounds("ranking:Resident memory:App I:100 B")
+            .unwrap();
+        if narrow {
+            assert!(plot.bottom() <= rank.top());
+        } else {
+            assert!(plot.right() <= rank.left());
+            assert!(rank.top() < plot.bottom());
+        }
+    }
+}
+
+#[gpui::test]
+fn resident_history_same_basename_apps_have_independent_legend_toggles(cx: &mut TestAppContext) {
+    // Address two captured bundle paths sharing a basename and toggle each through the UI.
+    let mut harness = InputHarness::setup_route(cx, "memory");
+    harness
+        .driver
+        .seed_resident_leaders(same_basename_resident_history());
+    assert!(harness.driver.reading_is_visible("/A/Foo.app"));
+    assert!(harness.driver.reading_is_visible("/B/Foo.app"));
+    assert!(!harness.driver.resident_legend_is_hidden("/A/Foo.app"));
+    assert!(!harness.driver.resident_legend_is_hidden("/B/Foo.app"));
+
+    harness
+        .driver
+        .click_resident_legend("chart-legend:live-memory-app-resident:/A/Foo.app:1 B");
+
+    assert!(harness.driver.resident_legend_is_hidden("/A/Foo.app"));
+    assert!(!harness.driver.resident_legend_is_hidden("/B/Foo.app"));
+    harness
+        .driver
+        .click_resident_legend("chart-legend:live-memory-app-resident:/B/Foo.app:1 B");
+    assert!(harness.driver.resident_legend_is_hidden("/A/Foo.app"));
+    assert!(harness.driver.resident_legend_is_hidden("/B/Foo.app"));
+    harness
+        .driver
+        .click_resident_legend("chart-legend:live-memory-app-resident:/A/Foo.app:1 B");
+    assert!(!harness.driver.resident_legend_is_hidden("/A/Foo.app"));
+    assert!(harness.driver.resident_legend_is_hidden("/B/Foo.app"));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn resident_legend_switches_toggle_independently_from_the_keyboard(cx: &mut TestAppContext) {
+    // Activate two installed switches with Space/Enter, then restore only the first series.
+    let mut harness = InputHarness::setup_route(cx, "memory");
+    harness.driver.seed_interval_resident_leaders();
+    harness
+        .driver
+        .focus_resident_legend("chart-legend:live-memory-app-resident:App A:1 B");
+
+    harness.driver.press("space");
+
+    assert!(harness.driver.resident_legend_is_hidden("App A"));
+    assert!(!harness.driver.resident_legend_is_hidden("App B"));
+    harness
+        .driver
+        .focus_resident_legend("chart-legend:live-memory-app-resident:App B:1 B");
+    harness.driver.press("enter");
+    assert!(harness.driver.resident_legend_is_hidden("App A"));
+    assert!(harness.driver.resident_legend_is_hidden("App B"));
+    harness
+        .driver
+        .focus_resident_legend("chart-legend:live-memory-app-resident:App A:1 B");
+    harness.driver.press("space");
+    assert!(!harness.driver.resident_legend_is_hidden("App A"));
+    assert!(harness.driver.resident_legend_is_hidden("App B"));
+    harness.teardown();
+}
+
+impl InputDriver {
+    fn focus_resident_legend(&mut self, selector: &'static str) {
+        let bounds = self.context.debug_bounds(selector).unwrap();
+        self.context
+            .simulate_mouse_down(bounds.center(), MouseButton::Right, Modifiers::none());
+        self.context
+            .simulate_mouse_up(bounds.center(), MouseButton::Right, Modifiers::none());
+        self.context.run_until_parked();
+    }
+
+    fn click_resident_legend(&mut self, selector: &'static str) {
+        let bounds = self.context.debug_bounds(selector).expect(selector);
+        self.context
+            .simulate_click(bounds.center(), Modifiers::none());
+        self.context.run_until_parked();
+    }
+
+    fn resident_legend_is_hidden(&self, name: &str) -> bool {
+        self.view.read_with(&self.context, |dashboard, _| {
+            dashboard.hidden.contains(&format!(
+                "{}\t{name}",
+                crate::live_resident_history::PANEL_ID
+            ))
+        })
+    }
+}
+
+fn same_basename_resident_history() -> serde_json::Value {
+    let mut history = interval_resident_history();
+    history["cohort"][0]["key"] = json!({"kind":"bundle",
+        "bytes_hex":"2f412f466f6f2e617070","display":"/A/Foo.app"});
+    history["cohort"][1]["key"] = json!({"kind":"bundle",
+        "bytes_hex":"2f422f466f6f2e617070","display":"/B/Foo.app"});
+    history["coverage"]["context_key_bytes"] = json!(55);
+
+    history
+}
+
+#[gpui::test]
+fn resident_history_reserved_other_label_has_an_independent_app_toggle(cx: &mut TestAppContext) {
+    // Keep the captured executable Other distinct from the sum of noncohort Apps.
+    let mut harness = InputHarness::setup_route(cx, "memory");
+    let mut history = interval_resident_history();
+    history["cohort"][0]["key"] = json!({"kind":"executable",
+        "bytes_hex":"4f74686572","display":"Other"});
+    harness.driver.seed_resident_leaders(history);
+    assert!(harness.driver.reading_is_visible("Other (executable)"));
+
+    harness
+        .driver
+        .click_resident_legend("chart-legend:live-memory-app-resident:Other (executable):1 B");
+
+    assert!(
+        harness
+            .driver
+            .resident_legend_is_hidden("Other (executable)")
+    );
+    assert!(!harness.driver.resident_legend_is_hidden("Other"));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn resident_history_identical_display_paths_keep_key_kinds_independent(cx: &mut TestAppContext) {
+    // Disambiguate matching displayed paths after two bundle basenames have already collided.
+    let mut harness = InputHarness::setup_route(cx, "memory");
+    let mut history = same_basename_resident_history();
+    history["cohort"][2]["key"] = json!({"kind":"executable",
+        "bytes_hex":"2f412f466f6f2e617070","display":"/A/Foo.app"});
+    history["coverage"]["context_key_bytes"] = json!(60);
+    harness.driver.seed_resident_leaders(history);
+    assert!(harness.driver.reading_is_visible("/A/Foo.app (bundle)"));
+    assert!(harness.driver.reading_is_visible("/A/Foo.app (executable)"));
+
+    harness
+        .driver
+        .click_resident_legend("chart-legend:live-memory-app-resident:/A/Foo.app (bundle):1 B");
+
+    assert!(
+        harness
+            .driver
+            .resident_legend_is_hidden("/A/Foo.app (bundle)")
+    );
+    assert!(
+        !harness
+            .driver
+            .resident_legend_is_hidden("/A/Foo.app (executable)")
+    );
+    harness.teardown();
+}

@@ -400,3 +400,58 @@ fn process(pid: i32) -> Process {
         },
     }
 }
+
+#[test]
+fn real_memory_worker_restores_resident_history_and_installs_its_chart() {
+    // Load saved App residents through the actual Memory worker and prepare its visible panel.
+    let recording = SealedRecording::with_ranked_apps();
+    let request = exact_ranked_request("memory");
+
+    let snapshot = recording.read(request.clone()).unwrap();
+
+    assert!(snapshot.resident_history.is_some());
+    let presentation = crate::live_acceptance::Presentation::prepare(&request, snapshot).unwrap();
+    let panel = presentation
+        .panels
+        .iter()
+        .find(|panel| panel.id == crate::live_resident_history::PANEL_ID)
+        .expect("Real Memory worker must install the resident-by-App plot");
+    assert_eq!(panel.lines.len(), 9);
+    assert_eq!(panel.lines[0].name, "Other");
+    assert_eq!(panel.lines[1].name, "App00600");
+    assert_eq!(panel.selected_index, Some(1));
+}
+
+#[test]
+fn real_memory_preview_reuses_the_accepted_resident_context_without_reloading_it() {
+    // Keep accepted resident ownership while the real worker reads only exact preview details.
+    let recording = SealedRecording::with_ranked_apps();
+    let request = exact_ranked_request("memory");
+    let accepted = recording.read(request.clone()).unwrap();
+    let target = crate::live_hover::Target::exact(
+        1000,
+        &json!({"run":"00000000000000010000000000000002",
+            "boot":"00000000000000030000000000000004","publication":1}),
+    )
+    .unwrap();
+    let preview = crate::live_hover::Preview::resident(&accepted, &request, target);
+    assert!(!preview.request.load_resident_history);
+    assert!(std::sync::Arc::ptr_eq(
+        accepted.resident_history.as_ref().unwrap(),
+        preview.reading.resident_history.as_ref().unwrap()
+    ));
+
+    let exact = recording.read(preview.request).unwrap();
+
+    assert!(exact.resident_history.is_none());
+    assert_eq!(exact.selection["selected"]["publication"], 1);
+    assert!(exact.rankings.is_some());
+    assert!(
+        accepted
+            .resident_history
+            .as_ref()
+            .unwrap()
+            .panel()
+            .is_some()
+    );
+}

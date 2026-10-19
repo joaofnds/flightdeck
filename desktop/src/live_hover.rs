@@ -113,6 +113,7 @@ impl Preview {
                 history: None,
                 cpu_detail: None,
                 cpu_history: None,
+                resident_history: snapshot.resident_history.clone(),
                 rankings: None,
                 read_ms: 0.0,
             }),
@@ -127,6 +128,7 @@ impl Preview {
             request: crate::live_source::Request {
                 second: Some(target.second),
                 identity: target.identity.clone(),
+                load_resident_history: false,
                 ..request.clone()
             },
             base_request: request.clone(),

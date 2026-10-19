@@ -221,6 +221,7 @@ impl CPUHoverDriver {
                 history: None,
                 cpu_detail: Some(activity),
                 cpu_history: Some(history),
+                resident_history: None,
                 rankings: None,
                 read_ms: 0.0,
             }));

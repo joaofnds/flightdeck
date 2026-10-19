@@ -5,10 +5,11 @@ use std::rc::Rc;
 use crate::charts::{BLUE, GRID, MUTED, PANEL, TEXT};
 use crate::dashboard::control;
 use crate::live_dashboard::{LiveDashboard, ROUTES, Row};
-use crate::live_projection::quantity;
 
 #[path = "live_recording_context_view.rs"]
 mod recording_context_view;
+#[path = "live_summary.rs"]
+mod summary;
 
 impl LiveDashboard {
     pub fn navigation(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -107,7 +108,7 @@ impl LiveDashboard {
             );
         if !matches!(self.request.route.as_str(), "computer" | "self") {
             header = header.child(self.missing_reading());
-            header = self.header_recording_context(header);
+            header = self.header_recording_context(header, cx);
             header = self.header_alternatives(header, cx);
         }
         if self.request.route == "raw" {
@@ -272,7 +273,7 @@ impl LiveDashboard {
 
     fn row_content(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
         match &self.rows[index] {
-            Row::Summary => self.summary().into_any_element(),
+            Row::Summary => self.summary(cx).into_any_element(),
             Row::ResourceSummary => self.resource_summary(),
             Row::StorageDevice(index, _) => self.resource_device(*index),
             Row::Diagnostics => self.self_monitoring().into_any_element(),
@@ -280,6 +281,7 @@ impl LiveDashboard {
             Row::CPUHistory => self.cpu_history_panel(cx).into_any_element(),
             Row::OverviewStatus => self.overview_status(cx).into_any_element(),
             Row::Rankings(metrics) => self.app_rankings(metrics, cx),
+            Row::MemoryAttribution(panel) => self.memory_attribution(panel.as_ref(), cx),
             Row::AppSelector => self.app_selector(cx).into_any_element(),
             Row::AppSummary => self.app_summary().into_any_element(),
             Row::AppColumns(kind) => {
@@ -310,43 +312,86 @@ impl LiveDashboard {
         }
     }
 
-    fn summary(&self) -> impl IntoElement {
-        let summary = self
+    fn summary(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let selection = self
             .reading_snapshot()
-            .map_or(&Value::Null, |snapshot| &snapshot.selection["summary"]);
+            .map_or(&Value::Null, |snapshot| &snapshot.selection);
         let mut tiles = div().flex().flex_wrap().gap(px(10.0));
-        for &(label, key, unit, divisor) in summary_tiles(&self.request.route) {
-            tiles = tiles.child(
-                div()
-                    .flex_1()
-                    .min_w(px(120.0))
-                    .p(px(18.0))
-                    .rounded(px(7.0))
-                    .border_1()
-                    .border_color(rgb(GRID))
-                    .bg(rgb(PANEL))
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(rgb(MUTED))
-                            .child(label),
-                    )
-                    .child(
-                        div()
-                            .mt(px(6.0))
-                            .text_size(px(25.0))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child(quantity(summary, key, unit, divisor)),
-                    ),
-            );
+        for card in summary::cards(&self.request.route, selection) {
+            tiles = tiles.child(Self::summary_card(&card, cx));
         }
+
         div()
+            .id("resource-summary")
+            .role(gpui::Role::Group)
+            .aria_label("Resource readings at the selected time")
             .child(tiles)
-            .child(div().mt(px(8.0)).text_color(rgb(MUTED)).child(format!(
-                "Memory pressure: {}",
-                pressure(&summary["pressure"]),
-            )))
             .children((self.request.route == "memory").then(|| self.memory_quantities()))
+    }
+
+    fn summary_card(card: &summary::Card, cx: &mut Context<Self>) -> impl IntoElement {
+        let route = card.route;
+        let selector = format!("summary-card:{}:{}", card.label, card.reading);
+        div()
+            .id(gpui::SharedString::from(format!("summary-{}", card.label)))
+            .debug_selector(move || selector.clone())
+            .accessibility_id(format!("flightdeck.summary.{}", card.label))
+            .role(gpui::Role::Button)
+            .aria_label(format!(
+                "{}: {}; {}. Open {}",
+                card.label, card.reading, card.note, route
+            ))
+            .cursor_pointer()
+            .focusable()
+            .tab_stop(true)
+            .focus(|style| style.bg(rgb(0x32_46_61)))
+            .hover(|style| style.bg(rgb(0x20_29_36)))
+            .flex_1()
+            .min_w(px(145.0))
+            .p(px(16.0))
+            .rounded(px(7.0))
+            .border_1()
+            .border_color(rgb(GRID))
+            .bg(rgb(PANEL))
+            .on_click(cx.listener(move |this, _, _, cx| this.summary_navigate(route, cx)))
+            .on_key_down(
+                cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        this.summary_navigate(route, cx);
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    }
+                }),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(MUTED))
+                    .child(card.label),
+            )
+            .child(
+                div()
+                    .mt(px(6.0))
+                    .text_size(px(25.0))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(rgb(card.color))
+                    .child(card.reading.clone()),
+            )
+            .child(
+                div()
+                    .mt(px(4.0))
+                    .text_size(px(11.0))
+                    .text_color(rgb(MUTED))
+                    .child(card.note),
+            )
+    }
+
+    fn summary_navigate(&mut self, route: &str, cx: &mut Context<Self>) {
+        if let Some(target) = self.reading_target().cloned() {
+            self.request.second = Some(target.second);
+            self.request.identity = target.identity;
+        }
+        self.navigate(route, cx);
     }
 
     fn memory_quantities(&self) -> impl IntoElement {
@@ -428,34 +473,4 @@ pub(crate) fn pressure(value: &Value) -> &'static str {
         Some(2) => "Critical",
         _ => "Unavailable",
     }
-}
-
-fn summary_tiles(route: &str) -> &'static [(&'static str, &'static str, &'static str, f32)] {
-    if route == "memory" {
-        return &[
-            ("Active", "memory_active_bytes", "GiB", 1_073_741_824.0),
-            ("Wired", "memory_wired_bytes", "GiB", 1_073_741_824.0),
-            (
-                "Compressed",
-                "memory_compressed_bytes",
-                "GiB",
-                1_073_741_824.0,
-            ),
-            ("Swap used", "swap_used_bytes", "GiB", 1_073_741_824.0),
-            ("Installed", "memory_total_bytes", "GiB", 1_073_741_824.0),
-        ];
-    }
-    &[
-        ("CPU", "cpu_percent", "%", 1.0),
-        ("GPU", "gpu_active_percent", "%", 1.0),
-        (
-            "Active memory",
-            "memory_active_bytes",
-            "GiB",
-            1_073_741_824.0,
-        ),
-        ("System power", "power_watts", "W", 1.0),
-        ("SoC", "soc_celsius", "°C", 1.0),
-        ("Swap used", "swap_used_bytes", "GiB", 1_073_741_824.0),
-    ]
 }

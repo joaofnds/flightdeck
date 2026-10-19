@@ -45,6 +45,7 @@ pub struct LiveDashboard {
     pub animate: bool,
     pub reveal_hardware: bool,
     pub chart_hover: Option<ChartHover>,
+    pub(crate) chart_inspector: Option<crate::live_chart_view::inspector::ChartInspector>,
     pub preview: Option<crate::live_hover::Preview>,
     pub(crate) preview_ready_at: Instant,
     pub(crate) preview_submissions: u64,
@@ -74,6 +75,7 @@ pub enum Row {
     Diagnostics,
     OverviewStatus,
     Rankings(Vec<usize>),
+    MemoryAttribution(Option<Rc<Panel>>),
     AppSelector,
     AppSummary,
     AppColumns(&'static str),
@@ -105,6 +107,7 @@ impl LiveDashboard {
                 apps_offset: 0,
                 members_offset: 0,
                 cpu_offset: 0,
+                load_resident_history: true,
             },
             snapshot: None,
             pending_snapshot: None,
@@ -125,6 +128,7 @@ impl LiveDashboard {
             animate: false,
             reveal_hardware: false,
             chart_hover: None,
+            chart_inspector: None,
             preview: None,
             preview_ready_at: Instant::now(),
             preview_submissions: 0,
@@ -253,6 +257,7 @@ impl LiveDashboard {
 
         self.request = presentation.request;
         self.panels = presentation.panels;
+        self.refresh_chart_inspector();
         self.executables = presentation.executables;
         self.snapshot = Some(presentation.snapshot);
         self.pending_snapshot = None;
@@ -300,6 +305,7 @@ impl LiveDashboard {
         self.executables.clear();
         self.expanded = None;
         self.chart_hover = None;
+        self.chart_inspector = None;
         self.preview = None;
         self.cpu_inspection = None;
         self.rebuild();
@@ -315,6 +321,7 @@ impl LiveDashboard {
         }
 
         self.chart_hover = None;
+        self.chart_inspector = None;
         self.preview = None;
         self.request.route = route.into();
         self.request.offset = 0;
@@ -504,6 +511,7 @@ impl Render for LiveDashboard {
             .role(gpui::Role::Application)
             .accessibility_id("flightdeck.live")
             .aria_label("Flightdeck system monitor")
+            .relative()
             .size_full()
             .flex()
             .flex_col()
@@ -537,6 +545,7 @@ impl Render for LiveDashboard {
                             .child(body),
                     ),
             )
+            .children(self.chart_inspector_overlay(cx))
     }
 }
 
@@ -567,6 +576,7 @@ mod selection_tests {
             history: None,
             cpu_detail: None,
             cpu_history: None,
+            resident_history: None,
             rankings: None,
             read_ms: 0.0,
         }));

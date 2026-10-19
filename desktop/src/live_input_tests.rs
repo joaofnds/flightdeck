@@ -6,10 +6,14 @@ use serde_json::{Value, json};
 use super::LiveDashboard;
 use crate::live_source::{Snapshot, Update, Worker};
 
+#[path = "live_chart_inspector_input_tests.rs"]
+mod chart_inspector;
 #[path = "live_disk_input_tests.rs"]
 mod disk_attribution;
 #[path = "live_hardware_input_tests.rs"]
 mod hardware;
+#[path = "live_header_input_tests.rs"]
+mod header;
 #[path = "live_layout_input_tests.rs"]
 mod layout;
 #[path = "live_rankings_input_tests.rs"]
@@ -18,6 +22,8 @@ mod rankings;
 mod resource;
 #[path = "live_source_mode_input_tests.rs"]
 mod source_mode;
+#[path = "live_summary_input_tests.rs"]
+mod summary;
 
 #[gpui::test]
 fn hovering_history_keeps_the_cursor_within_the_plot(cx: &mut TestAppContext) {
@@ -766,7 +772,7 @@ impl InputDriver {
 
     fn make_scrollable(&mut self) {
         self.context
-            .simulate_resize(gpui::size(gpui::px(1200.0), gpui::px(650.0)));
+            .simulate_resize(gpui::size(gpui::px(1200.0), gpui::px(850.0)));
         self.context.run_until_parked();
     }
 
@@ -784,7 +790,11 @@ impl InputDriver {
     }
 
     fn cursor_is_visible(&mut self, selector: &'static str) -> bool {
-        let plot = self.plot_bounds(selector);
+        let Some(bounds) = self.context.debug_bounds(selector) else {
+            return false;
+        };
+
+        let plot = crate::charts::plot_bounds(bounds);
         self.context.update(|window, _| {
             let expected =
                 gpui::Bounds::new(plot.origin, gpui::size(gpui::px(1.0), plot.size.height))
@@ -1011,6 +1021,7 @@ fn accepted_snapshot(generation: u64) -> Box<Snapshot> {
         history: None,
         cpu_detail: None,
         cpu_history: None,
+        resident_history: None,
         rankings: None,
         read_ms: 0.0,
     })

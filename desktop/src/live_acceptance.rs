@@ -12,13 +12,30 @@ pub struct Presentation {
 }
 
 impl Presentation {
-    pub fn prepare(request: &Request, snapshot: Box<Snapshot>) -> Result<Box<Self>, String> {
+    pub fn prepare(request: &Request, mut snapshot: Box<Snapshot>) -> Result<Box<Self>, String> {
         let executables = crate::live_executables::groups(snapshot.detail.as_ref())?;
-        let panels = crate::live_projection::panels(
+        let mut panels = crate::live_projection::panels(
             &request.route,
             &snapshot.selection,
             snapshot.history.as_ref(),
         )?;
+        if request.route == "memory" {
+            let payload = snapshot.history.take();
+            if snapshot.resident_history.is_none() {
+                if let Some(payload) = payload {
+                    let resident = crate::live_resident_history::ResidentHistory::prepare(
+                        &payload,
+                        &snapshot.selection,
+                    );
+                    snapshot.resident_history = Some(std::sync::Arc::new(resident));
+                }
+            }
+            if let Some(resident) = &snapshot.resident_history {
+                if let Some(panel) = resident.panel() {
+                    panels.push(panel);
+                }
+            }
+        }
         let mut presentation = Box::new(Self {
             request: request.clone(),
             snapshot,
