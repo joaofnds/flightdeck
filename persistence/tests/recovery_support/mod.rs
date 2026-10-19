@@ -155,20 +155,21 @@ impl RecordingHarness {
             .root
             .join(manifest.data_directory)
             .join("processes.parquet");
-        let connection = duckdb::Connection::open_in_memory().unwrap();
-        let mut statement = connection
-            .prepare(
-                "SELECT pid,awake_ns_at_start,user_ns FROM read_parquet(?) \
-            ORDER BY awake_ns_at_start",
-            )
-            .unwrap();
-        statement
-            .query_map([path.to_str().unwrap()], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        let frame = saved_query(
+            &path,
+            "SELECT pid,awake_ns_at_start,user_ns FROM saved ORDER BY awake_ns_at_start",
+        );
+
+        (0..frame.height())
+            .map(|index| {
+                let row = persistence::engine::Row::new(&frame, index).unwrap();
+                (
+                    row.get(0).unwrap(),
+                    row.get(1).unwrap(),
+                    row.get(2).unwrap(),
+                )
             })
-            .unwrap()
-            .collect::<Result<_, _>>()
-            .unwrap()
+            .collect()
     }
 
     pub fn record_overwritten_history(&mut self) {
@@ -491,13 +492,10 @@ impl RecordingHarness {
             .root
             .join(manifest.data_directory)
             .join("processes.parquet");
-        let connection = duckdb::Connection::open_in_memory().unwrap();
-        let reading: u64 = connection
-            .query_row(
-                "SELECT user_ns FROM read_parquet(?)",
-                [path.to_str().unwrap()],
-                |row| row.get(0),
-            )
+        let frame = saved_query(&path, "SELECT user_ns FROM saved");
+        let reading: u64 = persistence::engine::Row::new(&frame, 0)
+            .unwrap()
+            .get(0)
             .unwrap();
         assert_eq!(reading, 77);
     }
@@ -823,4 +821,13 @@ fn record_legacy_tail(place: &Place) -> String {
     let original = legacy.name().to_owned();
     drop(legacy);
     original
+}
+
+fn saved_query(path: &std::path::Path, sql: &str) -> polars::prelude::DataFrame {
+    let engine = persistence::engine::Engine::new();
+    engine
+        .register_lazy("saved", persistence::engine::scan(path).unwrap())
+        .unwrap();
+
+    engine.query(sql).unwrap()
 }

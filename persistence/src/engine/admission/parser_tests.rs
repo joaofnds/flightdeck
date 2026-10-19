@@ -13,7 +13,7 @@ use polars_parquet_format::thrift::protocol::{
 };
 use polars_parquet_format::thrift::{Error as ThriftError, ProtocolErrorKind};
 use polars_parquet_format::{
-    DataPageHeaderV2, DictionaryPageHeader, Encoding, PageType, Statistics,
+    DataPageHeaderV2, DictionaryPageHeader, Encoding, PageHeader, PageType, Statistics,
 };
 
 use super::protocol::BoundedProtocol;
@@ -46,25 +46,14 @@ fn reads_current_dictionary_pages_with_exact_nullable_recording_values() {
 
 #[test]
 fn reads_legacy_dictionary_pages_with_exact_nullable_recording_values() {
-    // Goal: legacy DuckDB dictionary pages retain their values under the recording policy.
-    // Method: use the previous writer's COPY options and compare the native query directly.
-    let fixture = Fixture::new();
-    std::fs::remove_file(&fixture.path).unwrap();
-    duckdb::Connection::open_in_memory()
-        .unwrap()
-        .execute_batch(&format!(
-            "COPY (SELECT \
-             CASE WHEN i=0 THEN NULL ELSE 'repeated recording value' END AS text, \
-             CASE WHEN i=0 THEN NULL ELSE 18446744073709551615::UBIGINT END AS counter, \
-             CASE WHEN i=0 THEN NULL ELSE true END AS flag, \
-             CASE WHEN i=0 THEN NULL ELSE from_hex('ff5c78343100') END AS bytes \
-             FROM range(1024) readings(i)) TO '{}' \
-             (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 3, \
-             ROW_GROUP_SIZE 16384, WRITE_BLOOM_FILTER false)",
-            fixture.path.display()
-        ))
-        .unwrap();
-    assert!(fixture.encodings().contains(&Encoding::PLAIN_DICTIONARY));
+    // Goal: legacy dictionary pages retain their values under the recording policy.
+    // Method: tag current dictionary pages with the legacy encoding earlier recordings saved,
+    // then compare the native query directly.
+    let fixture = Fixture::with_frame(dictionary_frame());
+    fixture.relabel_dictionary_pages();
+    let encodings = fixture.encodings();
+    assert!(encodings.contains(&Encoding::PLAIN_DICTIONARY));
+    assert!(!encodings.contains(&Encoding::RLE_DICTIONARY));
 
     let actual = fixture.query();
 
@@ -479,6 +468,45 @@ impl Fixture {
         std::fs::write(&self.path, bytes).unwrap();
     }
 
+    /// Tags every dictionary-indexed data page, and the footer, with the legacy encoding.
+    fn relabel_dictionary_pages(&self) {
+        let file = std::fs::File::open(&self.path).unwrap();
+        let size = file.metadata().unwrap().len();
+        let mut reader = BufReader::with_capacity(8192, file);
+        let footer = validate_footer(&mut reader, size).unwrap();
+        let metadata = validate_metadata(&mut reader, &footer).unwrap();
+        let mut bytes = std::fs::read(&self.path).unwrap();
+
+        let mut relabeled = 0;
+        for column in metadata.row_groups.iter().flat_map(|group| &group.columns) {
+            let chunk = column.meta_data.as_ref().unwrap();
+            let start = chunk
+                .dictionary_page_offset
+                .unwrap_or(chunk.data_page_offset);
+            let end = start + chunk.total_compressed_size;
+            relabeled += relabel_dictionary_pages_between(&mut bytes, start, end);
+        }
+        assert!(relabeled > 0);
+        std::fs::write(&self.path, bytes).unwrap();
+
+        self.rewrite(
+            |metadata| {
+                for column in metadata
+                    .row_groups
+                    .iter_mut()
+                    .flat_map(|group| &mut group.columns)
+                {
+                    for encoding in &mut column.meta_data.as_mut().unwrap().encodings {
+                        if *encoding == Encoding::RLE_DICTIONARY {
+                            *encoding = Encoding::PLAIN_DICTIONARY;
+                        }
+                    }
+                }
+            },
+            None,
+        );
+    }
+
     fn write_page(&self, encoding: Encoding, rows: i32, payload: &[u8]) {
         let mut header = page_header(rows);
         header.compressed_page_size = i32::try_from(payload.len()).unwrap();
@@ -530,6 +558,42 @@ fn dictionary_frame() -> DataFrame {
         ],
     )
     .unwrap()
+}
+
+/// Relabels the dictionary-indexed data pages of one column chunk in place and counts them.
+/// Both encoding tags take one byte, so every page keeps its offset.
+fn relabel_dictionary_pages_between(bytes: &mut [u8], start: i64, end: i64) -> u64 {
+    let mut position = usize::try_from(start).unwrap();
+    let end = usize::try_from(end).unwrap();
+    let mut relabeled = 0;
+
+    for _page in 0..1024 {
+        if position == end {
+            return relabeled;
+        }
+
+        let mut cursor = Cursor::new(&bytes[position..end]);
+        let mut header =
+            PageHeader::read_from_in_protocol(&mut BoundedProtocol::new(&mut cursor, 1024))
+                .unwrap();
+        let header_bytes = usize::try_from(cursor.position()).unwrap();
+        if let Some(data) = header.data_page_header.as_mut() {
+            if data.encoding == Encoding::RLE_DICTIONARY {
+                data.encoding = Encoding::PLAIN_DICTIONARY;
+                relabeled += 1;
+            }
+        }
+        let mut encoded = Vec::new();
+        header
+            .write_to_out_protocol(&mut TCompactOutputProtocol::new(&mut encoded))
+            .unwrap();
+        assert_eq!(encoded.len(), header_bytes);
+
+        bytes[position..position + header_bytes].copy_from_slice(&encoded);
+        position += header_bytes + usize::try_from(header.compressed_page_size).unwrap();
+    }
+
+    panic!("column chunk has over 1024 pages");
 }
 
 fn run_refusal_child() {

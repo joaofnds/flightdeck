@@ -1,96 +1,126 @@
-//! Independent `DuckDB` fixtures pass through the native Polars validation boundary.
-use std::os::unix::fs::DirBuilderExt;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+//! Scratch Polars tables for recording fixtures, read back through the validation boundary.
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 
-use duckdb::Connection;
-use persistence::engine::{Engine, scan};
+use persistence::engine::Engine;
 use persistence::query::TableSource;
 use persistence::schema::Table;
-use polars::polars_utils::compression::ZstdLevel;
-use polars::prelude::{DataFrame, ParquetCompression, ParquetWriter, StatisticsOptions};
+use polars::prelude::{Column, DataFrame, IntoColumn, NamedFrom, Series};
 
+pub mod normalized;
+mod schema;
+
+use normalized::{Normalized, normalize};
+
+const READINGS_MAX: u64 = 1_048_577;
+
+/// Named typed tables that tests build, change and save like a small SQL database.
+pub struct Tables {
+    engine: Engine,
+    frames: RefCell<BTreeMap<String, DataFrame>>,
+}
+
+impl Tables {
+    pub fn new() -> Self {
+        Self {
+            engine: Engine::new(),
+            frames: RefCell::new(BTreeMap::new()),
+        }
+    }
+
+    /// Creates an empty table from a column list such as `publication UBIGINT, pid INTEGER`.
+    pub fn create(&self, name: &str, definition: &str) {
+        let columns = definition
+            .split(',')
+            .map(|column| {
+                let (field, kind) = column.trim().split_once(' ').unwrap();
+                Column::full_null(field.into(), 0, &schema::data_type(kind.trim()))
+            })
+            .collect();
+
+        let frame = DataFrame::new(0, columns).unwrap();
+        self.frames.borrow_mut().insert(name.to_owned(), frame);
+    }
+
+    /// Appends `count` rows of `selection`, as `rows` builds them.
+    pub fn insert(&self, name: &str, selection: &str, count: u64) {
+        let rows = self.rows(selection, count);
+        self.append(name, &rows);
+    }
+
+    /// Builds `count` rows of `selection`, which may read the row number `i` from 0.
+    pub fn rows(&self, selection: &str, count: u64) -> DataFrame {
+        assert!(count <= READINGS_MAX);
+
+        let readings = Series::new("i".into(), (0..count).collect::<Vec<u64>>()).into_column();
+        self.engine
+            .register(
+                "readings",
+                DataFrame::new(readings.len(), vec![readings]).unwrap(),
+            )
+            .unwrap();
+        self.engine
+            .query(&format!("SELECT {selection} FROM readings"))
+            .unwrap()
+    }
+
+    /// Appends rows by column name. Absent columns become NULL and the others take the
+    /// table's types.
+    pub fn append(&self, name: &str, rows: &DataFrame) {
+        let mut frames = self.frames.borrow_mut();
+        let table = frames.get_mut(name).unwrap();
+        for column in rows.columns() {
+            assert!(
+                table.column(column.name()).is_ok(),
+                "unknown {}",
+                column.name()
+            );
+        }
+
+        let columns = table
+            .columns()
+            .iter()
+            .map(|column| match rows.column(column.name()) {
+                Ok(values) => values.strict_cast(column.dtype()).unwrap(),
+                Err(_) => Column::full_null(column.name().clone(), rows.height(), column.dtype()),
+            })
+            .collect::<Vec<_>>();
+        table
+            .vstack_mut_owned(DataFrame::new(rows.height(), columns).unwrap())
+            .unwrap();
+    }
+
+    pub fn add_column(&self, name: &str, field: &str, kind: &str) {
+        let data_type = schema::data_type(kind);
+
+        self.change(name, |table| {
+            let column = Column::full_null(field.into(), table.height(), &data_type);
+            table.with_column(column).unwrap();
+        });
+    }
+
+    /// Changes one table in place, as an `ALTER TABLE` or `UPDATE` would.
+    pub fn change(&self, name: &str, change: impl FnOnce(&mut DataFrame)) {
+        let mut frames = self.frames.borrow_mut();
+
+        change(frames.get_mut(name).unwrap());
+    }
+
+    pub fn frame(&self, name: &str) -> DataFrame {
+        self.frames.borrow()[name].clone()
+    }
+}
+
+/// Validates and normalizes one staged table, or one saved file, as the viewer does.
 pub fn table_source(
-    connection: &Connection,
+    tables: &Tables,
     table: Table,
     source: TableSource<'_>,
-) -> persistence::Result<String> {
+) -> persistence::Result<Normalized> {
     let engine = Engine::new();
-    let directory = Directory::new();
-    let normalized = match source {
-        TableSource::Parquet(path) => {
-            persistence::query::table_source(&engine, table, TableSource::Parquet(path))?
-        }
-        TableSource::Staged => {
-            let path = directory.0.join("fixture.parquet");
-            let escaped = persistence::query::parquet_literal(&path)?;
-            connection
-                .execute_batch(&format!(
-                    "COPY {} TO '{escaped}' (FORMAT PARQUET)",
-                    table.name()
-                ))
-                .unwrap();
-            engine.register_lazy(table.name(), scan(&path)?)?;
-            persistence::query::table_source(&engine, table, TableSource::Staged)?
-        }
-    };
-    let mut frame = engine.query(&format!("SELECT * FROM {normalized}"))?;
-    table_source_materialize(connection, &mut frame, &directory)
-}
-
-fn table_source_materialize(
-    connection: &Connection,
-    frame: &mut DataFrame,
-    directory: &Directory,
-) -> persistence::Result<String> {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let path = directory.0.join("normalized.parquet");
-    ParquetWriter::new(std::fs::File::create_new(&path)?)
-        .with_compression(ParquetCompression::Zstd(Some(ZstdLevel::try_new(3)?)))
-        .with_statistics(StatisticsOptions {
-            min_value: true,
-            max_value: true,
-            distinct_count: false,
-            null_count: true,
-            binary_statistics_truncate_length: None,
-        })
-        .with_row_group_size(Some(16_384))
-        .with_data_page_size(None)
-        .set_parallel(false)
-        .with_key_value_metadata(None)
-        .with_context_info(None)
-        .finish(frame)?;
-    let relation = format!("native_normalized_{}", NEXT.fetch_add(1, Ordering::Relaxed));
-    let escaped = persistence::query::parquet_literal(&path)?;
-    connection
-        .execute_batch(&format!(
-            "CREATE TEMP TABLE {relation} AS SELECT * FROM read_parquet('{escaped}')"
-        ))
-        .unwrap();
-    Ok(relation)
-}
-
-pub(super) struct Directory(pub PathBuf);
-
-impl Directory {
-    pub(super) fn new() -> Self {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let number = NEXT.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "polars-query-fixture-{}-{number}",
-            std::process::id()
-        ));
-        std::fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&path)
-            .unwrap();
-
-        Self(path)
+    if matches!(source, TableSource::Staged) {
+        engine.register(table.name(), tables.frame(table.name()))?;
     }
-}
 
-impl Drop for Directory {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.0).unwrap();
-    }
+    normalize(&engine, table, source)
 }

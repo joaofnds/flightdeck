@@ -111,15 +111,6 @@ pub fn validate_root(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Escapes one path as the body of an SQL string literal, refusing what `validate_root` refuses.
-pub fn parquet_literal(path: &Path) -> Result<String> {
-    validate_root(path)?;
-    let text = path
-        .to_str()
-        .ok_or(crate::Error::Bound("query path encoding"))?;
-    Ok(text.replace('\'', "''"))
-}
-
 fn visit_names(path: &Path, mut visit: impl FnMut(&str) -> Result<()>) -> Result<()> {
     layout::visit_names(path, &mut visit)
 }

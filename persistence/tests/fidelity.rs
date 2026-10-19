@@ -21,6 +21,12 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    use polars::polars_utils::compression::ZstdLevel;
+    use polars::prelude::{
+        DataFrame, IntoColumn, NamedFrom, ParquetCompression, ParquetWriter, Series,
+        StatisticsOptions,
+    };
+
     use collector::recording::private;
     use collector::ring::{
         DictionaryCapacity, Found, FoundEvent, Identity, IdentityObservation, IdentityPublication,
@@ -410,15 +416,19 @@ mod tests {
     fn refuses_oversized_disk_text_and_blob_without_panicking() {
         // Goal: untrusted disk cells cannot grow a reference row beyond its bound or abort.
         // Method: seal oversized interface names of both storage types and compare them.
-        for kind in ["VARCHAR", "BLOB"] {
+        let text = "a".repeat(20_000);
+        let names = [
+            Series::new("name".into(), [text.as_str()]),
+            Series::new("name".into(), [text.as_bytes()]),
+        ];
+        for name in names {
             let recording = Recording::new();
             let reference = recording.0.join("source.reference");
             recording.encode(&reference, |directory| {
-                rewrite_table(
-                    directory,
-                    persistence::schema::Table::Interfaces,
-                    &format!("SELECT * REPLACE (repeat('a',20000)::{kind} AS name) FROM source"),
-                );
+                rewrite_frame(directory, persistence::schema::Table::Interfaces, |frame| {
+                    let name = name.new_from_index(0, frame.height());
+                    frame.with_column(name.into_column()).unwrap();
+                });
             });
 
             let result = compare::run(&recording.0, &reference);
@@ -863,18 +873,12 @@ mod tests {
     }
 
     fn encode_row_counts(directory: &std::path::Path, tables: &mut [persistence::TableManifest]) {
-        let config = duckdb::Config::default().threads(1).unwrap();
-        let connection = duckdb::Connection::open_in_memory_with_flags(config).unwrap();
-
         for table in tables {
             let path = directory.join(format!("{}.parquet", table.name));
-            table.rows = connection
-                .query_row(
-                    "SELECT count(*) FROM read_parquet(?)",
-                    [path.to_str().unwrap()],
-                    |row| row.get(0),
-                )
-                .unwrap();
+            let metadata =
+                polars_parquet::parquet::read::read_metadata(&mut fs::File::open(&path).unwrap())
+                    .unwrap();
+            table.rows = u64::try_from(metadata.num_rows).unwrap();
         }
     }
 
@@ -888,7 +892,7 @@ mod tests {
             .join(",");
         let metadata = "1::UTINYINT identity_version,0::UTINYINT identity_availability, \
             18446744073709551615::UBIGINT process_unique_id, \
-            (-2147483648)::INTEGER pid_version,'worker\\xFF'::BLOB executable_name, \
+            (-2147483648)::INTEGER pid_version,NULL::BLOB executable_name, \
             '/Applications/A.app'::BLOB app_path";
 
         rewrite_processes(
@@ -904,31 +908,95 @@ mod tests {
             Table::Events,
             &format!("SELECT *,availability usage_availability,{metadata} FROM source"),
         );
+        for table in [Table::Processes, Table::Events] {
+            rewrite_frame(directory, table, |frame| {
+                let name = Series::new(
+                    "executable_name".into(),
+                    vec![b"worker\xFF".as_slice(); frame.height()],
+                );
+                frame.with_column(name.into_column()).unwrap();
+            });
+        }
     }
 
     fn rewrite_processes(directory: &std::path::Path, selection: &str) {
         rewrite_table(directory, persistence::schema::Table::Processes, selection);
     }
 
+    /// Rewrites one saved table through a query over it, named `source`, keeping column types.
     fn rewrite_table(
         directory: &std::path::Path,
         table: persistence::schema::Table,
         selection: &str,
     ) {
-        let config = duckdb::Config::default().threads(1).unwrap();
-        let connection = duckdb::Connection::open_in_memory_with_flags(config).unwrap();
         let original = directory.join(format!("{}.parquet", table.name()));
-        let extended = directory.join("extended.parquet");
-        let source = persistence::query::parquet_literal(&original).unwrap();
-        let target = persistence::query::parquet_literal(&extended).unwrap();
-
-        connection
-            .execute_batch(&format!(
-                "CREATE TABLE source AS SELECT * FROM read_parquet('{source}'); \
-                COPY ({selection}) TO '{target}' (FORMAT PARQUET,COMPRESSION ZSTD)"
-            ))
+        let types = persistence::engine::scan(&original)
+            .unwrap()
+            .collect_schema()
             .unwrap();
-        fs::rename(extended, original).unwrap();
+
+        let frame = rewrite_table_retyped(directory, table, selection);
+
+        for (name, data_type) in types.iter() {
+            if let Some(rewritten) = frame.schema().get(name) {
+                assert_eq!(rewritten, data_type, "rewritten type of {name}");
+            }
+        }
+    }
+
+    /// Rewrites one saved table through a query over it, named `source`, whatever its types.
+    fn rewrite_table_retyped(
+        directory: &std::path::Path,
+        table: persistence::schema::Table,
+        selection: &str,
+    ) -> DataFrame {
+        let original = directory.join(format!("{}.parquet", table.name()));
+        let engine = persistence::engine::Engine::new();
+        engine
+            .register_lazy("source", persistence::engine::scan(&original).unwrap())
+            .unwrap();
+        let mut frame = engine.query(selection).unwrap();
+
+        write_table(directory, table, &mut frame);
+        frame
+    }
+
+    fn rewrite_frame(
+        directory: &std::path::Path,
+        table: persistence::schema::Table,
+        change: impl FnOnce(&mut DataFrame),
+    ) {
+        let mut frame = rewrite_table_retyped(directory, table, "SELECT * FROM source");
+        change(&mut frame);
+
+        write_table(directory, table, &mut frame);
+    }
+
+    fn write_table(
+        directory: &std::path::Path,
+        table: persistence::schema::Table,
+        frame: &mut DataFrame,
+    ) {
+        let extended = directory.join("extended.parquet");
+        let bytes = ParquetWriter::new(fs::File::create_new(&extended).unwrap())
+            .with_compression(ParquetCompression::Zstd(Some(
+                ZstdLevel::try_new(3).unwrap(),
+            )))
+            .with_statistics(StatisticsOptions::default())
+            .with_row_group_size(Some(16_384))
+            .with_data_page_size(None)
+            .set_parallel(false)
+            .with_key_value_metadata(None)
+            .with_context_info(None)
+            .finish(frame)
+            .unwrap();
+        assert!(bytes > 0);
+
+        fs::rename(
+            extended,
+            directory.join(format!("{}.parquet", table.name())),
+        )
+        .unwrap();
     }
 
     fn frame(shape: &Shape, index: u64) -> Frame {

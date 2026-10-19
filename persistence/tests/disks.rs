@@ -6,9 +6,10 @@ mod query_support;
 
 #[cfg(test)]
 mod tests {
-    use super::query_support::table_source;
+    use super::query_support::normalized::Normalized;
+    use super::query_support::{Tables, table_source};
     use collector::disks::{DISKS_MAX, DiskReading, DiskSnapshot, ScanState};
-    use duckdb::Connection;
+    use persistence::engine::Row;
     use persistence::query::TableSource;
     use persistence::schema::{BATTERY_FIELDS, TABLES, Table};
 
@@ -18,66 +19,30 @@ mod tests {
         // Method: encode sixteen devices, normalize real SQL sources and decode the admitted cell.
         let snapshot = maximum_snapshot();
         let encoded = persistence::disks::encode(&snapshot).unwrap();
-        let connection = connection();
-        connection
-            .execute_batch("ALTER TABLE ticks ADD COLUMN physical_disks VARCHAR")
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO ticks(publication,physical_disks) VALUES(1,?)",
-                [&encoded],
-            )
-            .unwrap();
+        let tables = tables();
+        tables.add_column("ticks", "physical_disks", "VARCHAR");
+        tables.insert(
+            "ticks",
+            &format!("1 AS publication,'{encoded}' AS physical_disks"),
+            1,
+        );
 
-        let source = table_source(&connection, Table::Ticks, TableSource::Staged).unwrap();
-        let actual: String = connection
-            .query_row(&format!("SELECT physical_disks FROM {source}"), [], |row| {
-                row.get(0)
-            })
-            .unwrap();
+        let normalized = table_source(&tables, Table::Ticks, TableSource::Staged).unwrap();
+        let actual = disk_rows(&normalized)[0].0.clone().unwrap();
         let mut decoded = DiskSnapshot::default();
         persistence::disks::decode(&actual, &mut decoded).unwrap();
 
         assert_eq!(encoded.len(), 3904);
         assert_eq!(decoded, snapshot);
-        assert_eq!(
-            connection
-                .prepare(&format!("SELECT * FROM {source}"))
-                .unwrap()
-                .query([])
-                .unwrap()
-                .as_ref()
-                .unwrap()
-                .column_names()
-                .len(),
-            32
-        );
-        connection.execute_batch("DROP TABLE ticks").unwrap();
-        connection
-            .execute_batch(&format!("CREATE TABLE ticks ({})", TABLES[0].1))
-            .unwrap();
-        let legacy = table_source(&connection, Table::Ticks, TableSource::Staged).unwrap();
-        assert_eq!(
-            connection
-                .prepare(&format!("SELECT * FROM {legacy}"))
-                .unwrap()
-                .query([])
-                .unwrap()
-                .as_ref()
-                .unwrap()
-                .column_names()
-                .len(),
-            32
-        );
+        assert_eq!(normalized.query("SELECT * FROM normalized").width(), 32);
+        let legacy = table_source(&self::tables(), Table::Ticks, TableSource::Staged).unwrap();
+        assert_eq!(legacy.query("SELECT * FROM normalized").width(), 32);
     }
 
-    fn connection() -> Connection {
-        let config = duckdb::Config::default().threads(1).unwrap();
-        let connection = Connection::open_in_memory_with_flags(config).unwrap();
-        connection
-            .execute_batch(&format!("CREATE TABLE ticks ({})", TABLES[0].1))
-            .unwrap();
-        connection
+    fn tables() -> Tables {
+        let tables = Tables::new();
+        tables.create("ticks", TABLES[0].1);
+        tables
     }
 
     fn maximum_snapshot() -> DiskSnapshot {
@@ -111,29 +76,21 @@ mod tests {
     fn preserves_battery_columns_when_disk_extension_is_absent() {
         // Goal: disk normalization preserves every preexisting Battery field within 32 columns.
         // Method: normalize a complete Battery tick and inspect its exact high unsigned count.
-        let connection = connection();
+        let tables = tables();
         for (name, kind) in BATTERY_FIELDS {
-            connection
-                .execute_batch(&format!("ALTER TABLE ticks ADD COLUMN {name} {kind}"))
-                .unwrap();
+            tables.add_column("ticks", name, kind);
         }
-        connection
-            .execute_batch(
-                "INSERT INTO ticks(publication,battery_version, \
-        battery_source_continuous_ns,battery_cycle_count) VALUES(1,1,2,18446744073709551615)",
-            )
-            .unwrap();
+        tables.insert(
+            "ticks",
+            "1 AS publication,1 AS battery_version,2 AS battery_source_continuous_ns, \
+            18446744073709551615::UBIGINT AS battery_cycle_count",
+            1,
+        );
 
-        let source = table_source(&connection, Table::Ticks, TableSource::Staged).unwrap();
-        let actual = connection
-            .query_row(
-                &format!("SELECT battery_cycle_count,physical_disks FROM {source}"),
-                [],
-                |row| Ok((row.get::<_, u64>(0)?, row.get::<_, Option<String>>(1)?)),
-            )
-            .unwrap();
+        let normalized = table_source(&tables, Table::Ticks, TableSource::Staged).unwrap();
+        let actual = disk_rows(&normalized);
 
-        assert_eq!(actual, (u64::MAX, None));
+        assert_eq!(actual, [(None, Some(u64::MAX))]);
     }
 
     macro_rules! malformed_cell {
@@ -144,22 +101,20 @@ mod tests {
                 // Method: corrupt one property of an otherwise valid maximum disk cell.
                 let mut encoded = persistence::disks::encode(&maximum_snapshot()).unwrap();
                 ($change)(&mut encoded);
-                let connection = connection();
-                connection
-                    .execute_batch("ALTER TABLE ticks ADD COLUMN physical_disks VARCHAR")
-                    .unwrap();
-                connection
-                    .execute(
-                        "INSERT INTO ticks(publication,physical_disks) VALUES(1,?)",
-                        [&encoded],
-                    )
-                    .unwrap();
+                let tables = tables();
+                tables.add_column("ticks", "physical_disks", "VARCHAR");
+                tables.insert(
+                    "ticks",
+                    &format!("1 AS publication,'{encoded}' AS physical_disks"),
+                    1,
+                );
 
-                let result = table_source(&connection, Table::Ticks, TableSource::Staged);
+                let result = table_source(&tables, Table::Ticks, TableSource::Staged);
 
                 assert!(
                     matches!(result, Err(persistence::Error::Bound(_))),
-                    "{result:?}"
+                    "{:?}",
+                    result.err()
                 );
             }
         };
@@ -212,19 +167,20 @@ mod tests {
     );
 
     macro_rules! malformed_metadata {
-        ($name:ident, $change:literal) => {
+        ($name:ident, $field:literal, $kind:literal) => {
             #[test]
             fn $name() {
                 // Goal: disk metadata is checked even when an empty source has no data to decode.
                 // Method: expose the optional column with one invalid metadata property.
-                let connection = connection();
-                connection.execute_batch($change).unwrap();
+                let tables = tables();
+                tables.add_column("ticks", $field, $kind);
 
-                let result = table_source(&connection, Table::Ticks, TableSource::Staged);
+                let result = table_source(&tables, Table::Ticks, TableSource::Staged);
 
                 assert!(
                     matches!(result, Err(persistence::Error::Bound(_))),
-                    "{result:?}"
+                    "{:?}",
+                    result.err()
                 );
             }
         };
@@ -232,33 +188,23 @@ mod tests {
 
     malformed_metadata!(
         rejects_wrong_disk_column_spelling,
-        "ALTER TABLE ticks ADD COLUMN Physical_Disks VARCHAR"
+        "Physical_Disks",
+        "VARCHAR"
     );
-    malformed_metadata!(
-        rejects_wrong_disk_column_type,
-        "ALTER TABLE ticks ADD COLUMN physical_disks BLOB"
-    );
+    malformed_metadata!(rejects_wrong_disk_column_type, "physical_disks", "BLOB");
 
     #[test]
     fn preserves_unavailable_rows_in_an_extended_disk_window() {
         // Goal: a gap stays SQL NULL without being converted into a zero-device scan.
         // Method: admit an extension with one unavailable tick and inspect its normalized row.
-        let connection = connection();
-        connection
-            .execute_batch(
-                "ALTER TABLE ticks ADD COLUMN physical_disks VARCHAR; \
-        INSERT INTO ticks(publication) VALUES(1)",
-            )
-            .unwrap();
+        let tables = tables();
+        tables.add_column("ticks", "physical_disks", "VARCHAR");
+        tables.insert("ticks", "1 AS publication", 1);
 
-        let source = table_source(&connection, Table::Ticks, TableSource::Staged).unwrap();
-        let actual: Option<String> = connection
-            .query_row(&format!("SELECT physical_disks FROM {source}"), [], |row| {
-                row.get(0)
-            })
-            .unwrap();
+        let normalized = table_source(&tables, Table::Ticks, TableSource::Staged).unwrap();
+        let actual = disk_rows(&normalized);
 
-        assert_eq!(actual, None);
+        assert_eq!(actual, [(None, None)]);
     }
 
     #[test]
@@ -278,28 +224,22 @@ mod tests {
         tick.disks = None;
         tick.battery = None;
         window.push_tick(&observation(2), &tick, &[]).unwrap();
-        let connection = connection();
-        connection.execute_batch("DROP TABLE ticks").unwrap();
-        connection
-            .execute_batch(&format!(
-                "CREATE TABLE ticks ({})",
-                persistence::table_columns(Table::Ticks, &window)
-            ))
-            .unwrap();
-        super::append_support::append(&connection, Table::Ticks, &window);
+        let tables = Tables::new();
+        tables.create("ticks", &persistence::table_columns(Table::Ticks, &window));
+        super::append_support::append(&tables, Table::Ticks, &window);
 
-        let tables = persistence::Encoder.encode(&window, &directory.0).unwrap();
-        let staged = table_source(&connection, Table::Ticks, TableSource::Staged).unwrap();
+        let saved_tables = persistence::Encoder.encode(&window, &directory.0).unwrap();
+        let staged = table_source(&tables, Table::Ticks, TableSource::Staged).unwrap();
         let saved = table_source(
-            &connection,
+            &tables,
             Table::Ticks,
             TableSource::Parquet(&directory.0.join("ticks.parquet")),
         )
         .unwrap();
-        let staged_rows = disk_rows(&connection, &staged);
-        let saved_rows = disk_rows(&connection, &saved);
+        let staged_rows = disk_rows(&staged);
+        let saved_rows = disk_rows(&saved);
 
-        assert_eq!(tables.len(), 10);
+        assert_eq!(saved_tables.len(), 10);
         assert_eq!(staged_rows, saved_rows);
         let mut decoded = DiskSnapshot::default();
         persistence::disks::decode(staged_rows[0].0.as_ref().unwrap(), &mut decoded).unwrap();
@@ -308,16 +248,17 @@ mod tests {
         assert_eq!(staged_rows[1], (None, None));
     }
 
-    fn disk_rows(connection: &Connection, source: &str) -> Vec<(Option<String>, Option<u64>)> {
-        connection
-            .prepare(&format!(
-                "SELECT physical_disks,battery_cycle_count FROM {source} ORDER BY publication"
-            ))
-            .unwrap()
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap()
+    fn disk_rows(normalized: &Normalized) -> Vec<(Option<String>, Option<u64>)> {
+        let frame = normalized.query(
+            "SELECT physical_disks,battery_cycle_count FROM normalized ORDER BY publication",
+        );
+
+        (0..frame.height())
+            .map(|index| {
+                let row = Row::new(&frame, index).unwrap();
+                (row.get(0).unwrap(), row.get(1).unwrap())
+            })
+            .collect()
     }
 
     #[test]
@@ -330,16 +271,13 @@ mod tests {
         window.push_tick(&observation(1), &tick, &[]).unwrap();
 
         let columns = persistence::table_columns(Table::Ticks, &window);
-        let connection = connection();
-        connection.execute_batch("DROP TABLE ticks").unwrap();
-        connection
-            .execute_batch(&format!("CREATE TABLE ticks ({columns})"))
-            .unwrap();
-        super::append_support::append(&connection, Table::Ticks, &window);
-        let source = table_source(&connection, Table::Ticks, TableSource::Staged).unwrap();
+        let tables = Tables::new();
+        tables.create("ticks", &columns);
+        super::append_support::append(&tables, Table::Ticks, &window);
+        let normalized = table_source(&tables, Table::Ticks, TableSource::Staged).unwrap();
 
         assert_eq!(columns, format!("{}, physical_disks VARCHAR", TABLES[0].1));
-        assert_eq!(disk_rows(&connection, &source)[0].1, None);
+        assert_eq!(disk_rows(&normalized)[0].1, None);
     }
 
     fn shape() -> collector::ring::Shape {

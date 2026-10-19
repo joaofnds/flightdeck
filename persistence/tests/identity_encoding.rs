@@ -1,8 +1,10 @@
 #[cfg(test)]
-mod query_support;
+#[path = "query_support/normalized.rs"]
+mod normalized;
 
 #[cfg(test)]
 mod tests {
+    use super::normalized::{Normalized, normalize};
     use collector::machine::Memory;
     use collector::processes::{Process, Task, Usage};
     use collector::ring::{
@@ -12,6 +14,7 @@ mod tests {
         UsageAvailability, Writer,
     };
     use collector::tracker::Event;
+    use persistence::engine::Row;
     use persistence::{Encoder, IdentitySource, Limits, Observation, Window, WindowIdentity};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -300,29 +303,16 @@ mod tests {
         drop(reader);
         fixture.retire();
 
-        let (connection, source, events) = encoded(&fixture, &second);
+        let (processes, events) = encoded(&fixture, &second);
 
-        assert_refused_process(&connection, &source);
-        assert_eq!(
-            connection
-                .query_row(&format!("SELECT count(*) FROM {events}"), [], |row| row
-                    .get::<_, u64>(0))
-                .unwrap(),
-            0
-        );
-        let (first_connection, _processes, first_events) = encoded(&fixture, &first);
-        assert!(
-            first_connection
-                .query_row(
-                    &format!(
-                        "SELECT kind=1 AND identity_version=1 \
-            AND executable_name=? FROM {first_events}"
-                    ),
-                    duckdb::params![b"helper\xff".to_vec()],
-                    |row| row.get::<_, bool>(0)
-                )
-                .unwrap()
-        );
+        assert_refused_process(&processes);
+        assert_eq!(count(&events), 0);
+        let (_processes, first_events) = encoded(&fixture, &first);
+        let frame = first_events
+            .query("SELECT kind=1 AND identity_version=1, executable_name FROM normalized");
+        let row = Row::new(&frame, 0).unwrap();
+        assert!(row.get::<bool>(0).unwrap());
+        assert_eq!(row.get::<Vec<u8>>(1).unwrap(), b"helper\xff");
         commit_second(&fixture, &second);
         let reopened =
             persistence::query::processes_at_second(&fixture.directory.join("recording"), 160)
@@ -330,26 +320,30 @@ mod tests {
         assert!(reopened.processes.is_empty());
     }
 
-    fn assert_refused_process(connection: &duckdb::Connection, source: &str) {
+    fn assert_refused_process(processes: &Normalized) {
         let null_payload = persistence::schema::Table::Processes
             .columns()
             .skip(2)
             .map(|column| format!("{column} IS NULL"))
             .collect::<Vec<_>>()
             .join(" AND ");
-        let valid: bool = connection
-            .query_row(
-                &format!(
-                    "SELECT publication=2 AND pid=1 \
+        let frame = processes.query(&format!(
+            "SELECT publication=2 AND pid=1 \
             AND identity_version=1 AND identity_availability=0 AND usage_availability=1 \
-            AND process_unique_id=0 AND pid_version=-7 AND executable_name=? AND app_path=? \
-            AND {null_payload} FROM {source}"
-                ),
-                duckdb::params![b"helper\xff".to_vec(), b"/Apps/Outer.app".to_vec()],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert!(valid);
+            AND process_unique_id=0 AND pid_version=-7 AND {null_payload}, \
+            executable_name, app_path FROM normalized"
+        ));
+        let row = Row::new(&frame, 0).unwrap();
+
+        assert!(row.get::<bool>(0).unwrap());
+        assert_eq!(row.get::<Vec<u8>>(1).unwrap(), b"helper\xff");
+        assert_eq!(row.get::<Vec<u8>>(2).unwrap(), b"/Apps/Outer.app");
+    }
+
+    fn count(normalized: &Normalized) -> u64 {
+        let frame = normalized.query("SELECT count(*) FROM normalized");
+
+        Row::new(&frame, 0).unwrap().get(0).unwrap()
     }
 
     fn commit_second(fixture: &Fixture, second: &Window) {
@@ -377,16 +371,16 @@ mod tests {
         fixture.store.commit(pending, manifest).unwrap();
     }
 
-    fn encoded(fixture: &Fixture, window: &Window) -> (duckdb::Connection, String, String) {
+    fn encoded(fixture: &Fixture, window: &Window) -> (Normalized, Normalized) {
         let pending = fixture
             .directory
             .join(format!("encoded-{}", window.identity.window));
         std::fs::create_dir(&pending).unwrap();
         Encoder.encode(window, &pending).unwrap();
-        let connection = duckdb::Connection::open_in_memory().unwrap();
-        let source = |table| {
-            super::query_support::table_source(
-                &connection,
+        let engine = persistence::engine::Engine::new();
+        let source = |table: persistence::schema::Table| {
+            normalize(
+                &engine,
                 table,
                 persistence::query::TableSource::Parquet(
                     &pending.join(format!("{}.parquet", table.name())),
@@ -396,7 +390,7 @@ mod tests {
         };
         let processes = source(persistence::schema::Table::Processes);
         let events = source(persistence::schema::Table::Events);
-        (connection, processes, events)
+        (processes, events)
     }
 
     fn process() -> Process {
@@ -454,30 +448,24 @@ mod tests {
         let mut window = fixture.window(0);
         fixture.stage(&mut reader, &mut window, 1);
 
-        let (connection, processes, _events) = encoded(&fixture, &window);
+        let (processes, _events) = encoded(&fixture, &window);
 
-        let actual: (u64, u64, u64, u64, i32, i32, u8, u8, u8) = connection
-            .query_row(
-                &format!(
-                    "SELECT count(*) OVER(), user_ns, system_ns, energy_nj, threads, faults, \
-                identity_version, identity_availability, usage_availability FROM {processes}"
-                ),
-                [],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                        row.get(6)?,
-                        row.get(7)?,
-                        row.get(8)?,
-                    ))
-                },
-            )
-            .unwrap();
+        let frame = processes.query(
+            "SELECT user_ns, system_ns, energy_nj, threads, faults, \
+            identity_version, identity_availability, usage_availability FROM normalized",
+        );
+        let row = Row::new(&frame, 0).unwrap();
+        let actual: (u64, u64, u64, u64, i32, i32, u8, u8, u8) = (
+            u64::try_from(frame.height()).unwrap(),
+            row.get(0).unwrap(),
+            row.get(1).unwrap(),
+            row.get(2).unwrap(),
+            row.get(3).unwrap(),
+            row.get(4).unwrap(),
+            row.get(5).unwrap(),
+            row.get(6).unwrap(),
+            row.get(7).unwrap(),
+        );
         assert_eq!(
             actual,
             (
@@ -492,20 +480,15 @@ mod tests {
                 0
             )
         );
-        let complete: bool = connection
-            .query_row(
-                &format!(
-                    "SELECT publication=1 AND pid=7 \
+        let frame = processes.query(
+            "SELECT publication=1 AND pid=7 \
             AND awake_ns_at_start=0 AND instructions=1 AND super_instructions=2 AND cycles=3 \
             AND idle_wakeups=4 AND interrupt_wakeups=5 AND pageins=6 AND resident_bytes=7 \
             AND footprint_bytes=8 AND disk_read_bytes=9 AND disk_written_bytes=10 \
             AND context_switches=-1 AND mach_syscalls=0 AND unix_syscalls=1 \
-            FROM {processes}"
-                ),
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
+            FROM normalized",
+        );
+        let complete: bool = Row::new(&frame, 0).unwrap().get(0).unwrap();
         assert!(complete);
     }
 
@@ -534,20 +517,15 @@ mod tests {
         let mut window = fixture.window(0);
         fixture.stage(&mut reader, &mut window, 1);
 
-        let (connection, _processes, events) = encoded(&fixture, &window);
+        let (_processes, events) = encoded(&fixture, &window);
 
-        let valid: bool = connection
-            .query_row(
-                &format!(
-                    "SELECT kind=3 AND noticed=1 \
+        let frame = events.query(
+            "SELECT kind=3 AND noticed=1 \
             AND availability=1 AND identity_version=1 AND identity_availability=2 \
             AND usage_availability=1 AND user_ns IS NULL AND executable_name IS NULL \
-            AND process_unique_id IS NULL FROM {events}"
-                ),
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
+            AND process_unique_id IS NULL FROM normalized",
+        );
+        let valid: bool = Row::new(&frame, 0).unwrap().get(0).unwrap();
         assert!(valid);
     }
 
@@ -571,19 +549,13 @@ mod tests {
         let mut window = fixture.window(0);
         fixture.stage(&mut reader, &mut window, 1);
 
-        let (connection, processes, _events) = encoded(&fixture, &window);
+        let (processes, _events) = encoded(&fixture, &window);
 
+        let frame =
+            processes.query("SELECT identity_availability, usage_availability FROM normalized");
+        let row = Row::new(&frame, 0).unwrap();
         assert_eq!(
-            connection
-                .query_row(
-                    &format!(
-                        "SELECT identity_availability, \
-            usage_availability FROM {processes}"
-                    ),
-                    [],
-                    |row| Ok((row.get::<_, u8>(0)?, row.get::<_, u8>(1)?))
-                )
-                .unwrap(),
+            (row.get::<u8>(0).unwrap(), row.get::<u8>(1).unwrap()),
             (2, 0)
         );
     }
@@ -608,24 +580,20 @@ mod tests {
         let mut window = fixture.window(0);
         fixture.stage(&mut reader, &mut window, 1);
 
-        let (connection, processes, _events) = encoded(&fixture, &window);
+        let (processes, _events) = encoded(&fixture, &window);
 
+        let frame = processes.query(
+            "SELECT identity_version, \
+            identity_availability, usage_availability, user_ns FROM normalized",
+        );
+        let row = Row::new(&frame, 0).unwrap();
         assert_eq!(
-            connection
-                .query_row(
-                    &format!(
-                        "SELECT identity_version, \
-            identity_availability, usage_availability, user_ns FROM {processes}"
-                    ),
-                    [],
-                    |row| Ok((
-                        row.get::<_, u8>(0)?,
-                        row.get::<_, u8>(1)?,
-                        row.get::<_, u8>(2)?,
-                        row.get::<_, Option<u64>>(3)?
-                    ))
-                )
-                .unwrap(),
+            (
+                row.get::<u8>(0).unwrap(),
+                row.get::<u8>(1).unwrap(),
+                row.get::<u8>(2).unwrap(),
+                row.get::<Option<u64>>(3).unwrap()
+            ),
             (1, 3, 2, None)
         );
     }
@@ -667,34 +635,22 @@ mod tests {
         drop(reader);
         fixture.retire();
 
-        let (connection, processes, events) = encoded(&fixture, &window);
+        let (processes, events) = encoded(&fixture, &window);
 
-        let valid: bool = connection
-            .query_row(
-                &format!(
-                    "SELECT availability=0 \
-            AND identity_version=1 AND usage_availability=0 AND process_unique_id=? \
-            AND pid_version=? AND executable_name=? AND app_path=? AND user_ns=? FROM {events}"
-                ),
-                duckdb::params![
-                    u64::MAX,
-                    i32::MIN,
-                    b"departed\xfe".to_vec(),
-                    b"/Old.app".to_vec(),
-                    9_007_199_254_740_993_u64
-                ],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert!(valid);
+        let frame = events.query(
+            "SELECT availability=0 AND identity_version=1 AND usage_availability=0, \
+            process_unique_id, pid_version, executable_name, app_path, user_ns FROM normalized",
+        );
+        let row = Row::new(&frame, 0).unwrap();
+        assert!(row.get::<bool>(0).unwrap());
+        assert_eq!(row.get::<u64>(1).unwrap(), u64::MAX);
+        assert_eq!(row.get::<i32>(2).unwrap(), i32::MIN);
+        assert_eq!(row.get::<Vec<u8>>(3).unwrap(), b"departed\xfe");
+        assert_eq!(row.get::<Vec<u8>>(4).unwrap(), b"/Old.app");
+        assert_eq!(row.get::<u64>(5).unwrap(), 9_007_199_254_740_993_u64);
+        let frame = processes.query("SELECT executable_name FROM normalized");
         assert_eq!(
-            connection
-                .query_row(
-                    &format!("SELECT executable_name FROM {processes}"),
-                    [],
-                    |row| row.get::<_, Vec<u8>>(0)
-                )
-                .unwrap(),
+            Row::new(&frame, 0).unwrap().get::<Vec<u8>>(0).unwrap(),
             b"current"
         );
     }
@@ -945,16 +901,8 @@ mod tests {
         assert_eq!(window.staged_bytes(), before);
         drop(reader);
         fixture.retire();
-        let (connection, processes, _events) = encoded(&fixture, &window);
-        assert_eq!(
-            connection
-                .query_row(&format!("SELECT count(*) FROM {processes}"), [], |row| row
-                    .get::<_, u64>(
-                    0
-                ))
-                .unwrap(),
-            1_048_576
-        );
+        let (processes, _events) = encoded(&fixture, &window);
+        assert_eq!(count(&processes), 1_048_576);
     }
 
     #[derive(Debug, PartialEq, Eq)]
@@ -988,38 +936,36 @@ mod tests {
         }
     }
 
-    fn mixed_rows(connection: &duckdb::Connection, source: &str) -> Vec<MixedProcess> {
+    fn mixed_rows(processes: &Normalized) -> Vec<MixedProcess> {
         let nulls = persistence::schema::Table::Processes
             .columns()
             .skip(2)
             .map(|column| format!("{column} IS NULL"))
             .collect::<Vec<_>>()
             .join(" AND ");
-        let mut statement = connection
-            .prepare(&format!(
-                "SELECT pid, usage_availability, \
+        let frame = processes.query(&format!(
+            "SELECT pid, usage_availability, \
             process_unique_id, pid_version, executable_name, app_path, user_ns, energy_nj, \
-            ({nulls}) FROM {source} WHERE identity_version=1 AND identity_availability=0 \
+            ({nulls}) FROM normalized WHERE identity_version=1 AND identity_availability=0 \
             ORDER BY pid"
-            ))
-            .unwrap();
-        statement
-            .query_map([], |row| {
-                Ok(MixedProcess {
-                    pid: row.get(0)?,
-                    usage: row.get(1)?,
-                    unique: row.get(2)?,
-                    version: row.get(3)?,
-                    name: row.get(4)?,
-                    app: row.get(5)?,
-                    user: row.get(6)?,
-                    energy: row.get(7)?,
-                    payload_absent: row.get(8)?,
-                })
+        ));
+
+        (0..frame.height())
+            .map(|index| {
+                let row = Row::new(&frame, index).unwrap();
+                MixedProcess {
+                    pid: row.get(0).unwrap(),
+                    usage: row.get(1).unwrap(),
+                    unique: row.get(2).unwrap(),
+                    version: row.get(3).unwrap(),
+                    name: row.get(4).unwrap(),
+                    app: row.get(5).unwrap(),
+                    user: row.get(6).unwrap(),
+                    energy: row.get(7).unwrap(),
+                    payload_absent: row.get(8).unwrap(),
+                }
             })
-            .unwrap()
-            .collect::<duckdb::Result<Vec<_>>>()
-            .unwrap()
+            .collect()
     }
 
     fn expected_mixed_rows() -> Vec<MixedProcess> {
@@ -1083,17 +1029,9 @@ mod tests {
         drop(reader);
         fixture.retire();
 
-        let (connection, processes, _events) = encoded(&fixture, &window);
+        let (processes, _events) = encoded(&fixture, &window);
 
-        assert_eq!(mixed_rows(&connection, &processes), expected_mixed_rows());
-        assert_eq!(
-            connection
-                .query_row(&format!("SELECT count(*) FROM {processes}"), [], |row| row
-                    .get::<_, u64>(
-                    0
-                ))
-                .unwrap(),
-            4
-        );
+        assert_eq!(mixed_rows(&processes), expected_mixed_rows());
+        assert_eq!(count(&processes), 4);
     }
 }

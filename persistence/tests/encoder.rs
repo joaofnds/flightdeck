@@ -3,15 +3,25 @@
 mod fixture;
 
 #[cfg(test)]
+#[path = "query_support/schema.rs"]
+mod saved_schema;
+
+#[cfg(test)]
 mod tests {
     use super::fixture;
+    use super::saved_schema;
 
     use collector::processes::Unreadable;
     use collector::ring::{DictionaryCapacity, Place, RingReader, Writer};
     use collector::tracker::{Event, Noticed};
+    use persistence::engine::{Engine, Row, scan};
     use persistence::resources::{Footprint, WORKING_BYTES_MAX, Watchdog};
     use persistence::schema::{BATTERY_FIELDS, IDENTITY_FIELDS, TABLES, Table};
     use persistence::{Encoder, IdentitySource, Limits, Observation, Window};
+    use polars::prelude::{Field, Schema};
+    use polars_parquet::parquet::compression::Compression;
+    use polars_parquet::parquet::metadata::RowGroupMetadata;
+    use polars_parquet::parquet::read::read_metadata;
     use std::io::Write;
     use std::os::unix::fs::DirBuilderExt;
     use std::path::PathBuf;
@@ -194,7 +204,6 @@ mod tests {
     }
 
     fn assert_saved_schema(directory: &Directory, schema: SavedSchema) {
-        let connection = duckdb::Connection::open_in_memory().unwrap();
         for (table, definition, _) in TABLES {
             let mut expected = definition
                 .split(',')
@@ -212,23 +221,13 @@ mod tests {
             }
             let expected = expected
                 .into_iter()
-                .map(|(name, kind)| (name.to_owned(), kind.to_owned()))
-                .collect::<Vec<_>>();
+                .map(|(name, kind)| Field::new(name.into(), saved_schema::data_type(kind)))
+                .collect::<Schema>();
             let path = directory.0.join(format!("{}.parquet", table.name()));
-            let path = persistence::query::parquet_literal(&path).unwrap();
-            let actual = connection
-                .prepare(&format!(
-                    "DESCRIBE SELECT * FROM read_parquet('{path}', hive_partitioning=false)"
-                ))
-                .unwrap()
-                .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })
-                .unwrap()
-                .collect::<Result<Vec<_>, _>>()
-                .unwrap();
 
-            assert_eq!(actual, expected, "saved schema for {}", table.name());
+            let actual = scan(&path).unwrap().collect_schema().unwrap();
+
+            assert_eq!(*actual, expected, "saved schema for {}", table.name());
         }
     }
 
@@ -338,40 +337,35 @@ mod tests {
 
         Encoder.encode(&window, &directory.0).unwrap();
 
-        let connection = duckdb::Connection::open_in_memory().unwrap();
         let path = directory.0.join("processes.parquet");
-        let groups = connection
-            .prepare(
-                "SELECT max(row_group_num_rows) FROM parquet_metadata(?) \
-                GROUP BY row_group_id ORDER BY row_group_id",
-            )
-            .unwrap()
-            .query_map([path.to_str().unwrap()], |row| row.get::<_, u64>(0))
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        let incompatible: u64 = connection
-            .query_row(
-                "SELECT count(*) FROM parquet_metadata(?) \
-                WHERE compression!='ZSTD' OR bloom_filter_offset IS NOT NULL",
-                [path.to_str().unwrap()],
-                |row| row.get(0),
-            )
-            .unwrap();
+        let metadata = read_metadata(&mut std::fs::File::open(&path).unwrap()).unwrap();
+        let groups: Vec<_> = metadata
+            .row_groups
+            .iter()
+            .map(RowGroupMetadata::num_rows)
+            .collect();
+        let incompatible = metadata
+            .row_groups
+            .iter()
+            .flat_map(RowGroupMetadata::parquet_columns)
+            .filter(|column| {
+                column.compression() != Compression::Zstd || column.bloom_filter_offset().is_some()
+            })
+            .count();
         assert_eq!(groups, [16_384, 1916]);
         assert_eq!(incompatible, 0);
     }
 
     fn count(directory: &Directory, table: &str, condition: &str) -> u64 {
-        let connection = duckdb::Connection::open_in_memory().unwrap();
+        let engine = Engine::new();
         let path = directory.0.join(format!("{table}.parquet"));
-        connection
-            .query_row(
-                &format!("SELECT count(*) FROM read_parquet(?) WHERE {condition}"),
-                [path.to_str().unwrap()],
-                |row| row.get(0),
-            )
-            .unwrap()
+        engine.register_lazy("saved", scan(&path).unwrap()).unwrap();
+
+        let frame = engine
+            .query(&format!("SELECT count(*) FROM saved WHERE {condition}"))
+            .unwrap();
+
+        Row::new(&frame, 0).unwrap().get(0).unwrap()
     }
 
     #[test]

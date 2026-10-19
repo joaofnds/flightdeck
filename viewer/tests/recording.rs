@@ -8,8 +8,15 @@ mod tests {
     use collector::processes::Unreadable;
     use collector::ring::{Identity, RunIdentity};
     use collector::tracker::{Event, Noticed};
+    use persistence::engine::{Engine, scan};
+    use persistence::schema::Table;
     use persistence::{
         Begin, Encoder, Limits, NumberedEvent, Observation, Store, Window, WindowIdentity,
+    };
+    use polars::polars_utils::compression::ZstdLevel;
+    use polars::prelude::{
+        DataFrame, IntoColumn, NamedFrom, ParquetCompression, ParquetWriter, Series,
+        StatisticsOptions,
     };
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -34,47 +41,78 @@ mod tests {
     }
 
     impl CapturedIdentity {
+        /// Adds identity columns to saved processes, as a collector that captures identity does.
         fn write(&self, directory: &Path) {
-            let config = duckdb::Config::default().threads(1).unwrap();
-            let connection = duckdb::Connection::open_in_memory_with_flags(config).unwrap();
-            let source =
-                persistence::query::parquet_literal(&directory.join("processes.parquet")).unwrap();
-            let target =
-                persistence::query::parquet_literal(&directory.join("captured.parquet")).unwrap();
+            let engine = Engine::new();
+            engine
+                .register_lazy(
+                    "source",
+                    scan(&directory.join("processes.parquet")).unwrap(),
+                )
+                .unwrap();
             let version = self.version;
-            connection
-                .execute_batch(&format!(
-                    r"CREATE TABLE captured AS SELECT *,
-                {version}::UTINYINT identity_version,0::UTINYINT identity_availability,
-                0::UTINYINT usage_availability,(CASE WHEN pid=0 THEN
-                1000000000+awake_ns_at_start ELSE 10000+pid END)::UBIGINT process_unique_id,
-                4::INTEGER pid_version,'worker\xFF'::BLOB executable_name,
-                '/Applications/Engine.app'::BLOB app_path FROM read_parquet('{source}')"
+            let mut captured = engine
+                .query(&format!(
+                    "SELECT *,{version}::UTINYINT identity_version, \
+                    0::UTINYINT identity_availability,0::UTINYINT usage_availability, \
+                    (CASE WHEN pid=0 THEN 1000000000+awake_ns_at_start ELSE 10000+pid END) \
+                    ::UBIGINT process_unique_id,4::INTEGER pid_version, \
+                    NULL::BLOB executable_name,'/Applications/Engine.app'::BLOB app_path \
+                    FROM source"
                 ))
                 .unwrap();
+            let name = Series::new(
+                "executable_name".into(),
+                vec![b"worker\xFF".as_slice(); captured.height()],
+            );
+            captured.with_column(name.into_column()).unwrap();
+
             if let Some(pid) = self.refused_pid {
-                let fields = persistence::schema::Table::Processes
-                    .columns()
-                    .skip(2)
-                    .map(|field| format!("{field}=NULL"))
-                    .collect::<Vec<_>>()
-                    .join(",");
-                connection
-                    .execute_batch(&format!(
-                        "UPDATE captured SET usage_availability=1,{fields} WHERE pid={pid}"
-                    ))
-                    .unwrap();
+                captured = Self::write_refusal(&engine, captured, pid);
             }
-            connection
-                .execute_batch(&format!(
-                    "COPY captured TO '{target}' (FORMAT PARQUET,COMPRESSION ZSTD)"
+
+            Self::write_file(directory, &mut captured);
+        }
+
+        /// Marks one pid's usage refused, with no usage values, keeping every column's type.
+        fn write_refusal(engine: &Engine, captured: DataFrame, pid: i32) -> DataFrame {
+            let types = captured.schema().clone();
+            let fields = Table::Processes
+                .columns()
+                .skip(2)
+                .map(|field| format!("CASE WHEN pid={pid} THEN NULL ELSE {field} END AS {field}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            engine.register("captured", captured).unwrap();
+
+            let refused = engine
+                .query(&format!(
+                    "SELECT * REPLACE ((CASE WHEN pid={pid} THEN 1 ELSE usage_availability END) \
+                    ::UTINYINT AS usage_availability,{fields}) FROM captured"
                 ))
                 .unwrap();
-            std::fs::rename(
-                directory.join("captured.parquet"),
-                directory.join("processes.parquet"),
-            )
-            .unwrap();
+
+            assert_eq!(*refused.schema(), types);
+            refused
+        }
+
+        fn write_file(directory: &Path, captured: &mut DataFrame) {
+            let target = directory.join("captured.parquet");
+            let bytes = ParquetWriter::new(std::fs::File::create_new(&target).unwrap())
+                .with_compression(ParquetCompression::Zstd(Some(
+                    ZstdLevel::try_new(3).unwrap(),
+                )))
+                .with_statistics(StatisticsOptions::default())
+                .with_row_group_size(Some(16_384))
+                .with_data_page_size(None)
+                .set_parallel(false)
+                .with_key_value_metadata(None)
+                .with_context_info(None)
+                .finish(captured)
+                .unwrap();
+            assert!(bytes > 0);
+
+            std::fs::rename(target, directory.join("processes.parquet")).unwrap();
         }
     }
 
