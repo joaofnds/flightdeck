@@ -32,6 +32,7 @@ pub struct Session {
     // Separate from LiveSession's raw cache, bounded to one 8 MiB owned Sample.
     app_sample_cache: std::cell::RefCell<Option<committed_apps::Cache>>,
     app_history_cache: std::cell::RefCell<Option<app_history::Cache>>,
+    app_process_history_cache: std::cell::RefCell<Option<app_history::Cache>>,
     operation: Operation,
     #[cfg(test)]
     pub(crate) source_reads: std::cell::Cell<u64>,
@@ -112,6 +113,7 @@ impl Session {
             cpu_history_cache: None,
             app_sample_cache: std::cell::RefCell::new(None),
             app_history_cache: std::cell::RefCell::new(None),
+            app_process_history_cache: std::cell::RefCell::new(None),
             operation,
             #[cfg(test)]
             source_reads: std::cell::Cell::new(0),
@@ -131,6 +133,7 @@ impl Session {
             self.selected = None;
             self.app_sample_cache.get_mut().take();
             self.app_history_cache.get_mut().take();
+            self.app_process_history_cache.get_mut().take();
         }
         self.operation = self.operation.begin(epoch)?;
         self.operation.attach(&self.connection)

@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 
 use crate::cancellation::Operation;
 use crate::data::{self, Table};
-use crate::live_app_history::{History, Target};
+use crate::live_app_history::{GroupTarget, History, Selection, Target};
 use crate::live_app_response::{Detail, KeyKind, Page, Sample};
 use crate::live_apps::{Frame, Publication, PublicationEvents};
 use crate::session::{ContextRange, OBSERVATIONS_MAX, Observation, PAGE_ROWS};
@@ -680,6 +680,35 @@ impl LiveSession {
     }
 
     pub fn app_history(&self, kind: KeyKind, bytes: &[u8]) -> Result<Value> {
+        self.app_history_selected(&Target { kind, bytes })
+    }
+
+    /// History for one captured executable-name byte sequence within an exact App identity.
+    pub fn app_process_history(
+        &self,
+        kind: KeyKind,
+        app_bytes: &[u8],
+        executable_name_bytes: &[u8],
+    ) -> Result<Value> {
+        let target = GroupTarget {
+            app: Target {
+                kind,
+                bytes: app_bytes,
+            },
+            executable: executable_name_bytes,
+        };
+        target.validate()?;
+
+        let mut response = self.app_history_selected(&target)?;
+        target.identify(&mut response)?;
+        self.app_history.process_coverage(&mut response);
+        let response = crate::live_app_response::bounded(response)?;
+        self.operation.check()?;
+
+        Ok(response)
+    }
+
+    fn app_history_selected(&self, target: &dyn Selection) -> Result<Value> {
         self.operation.run(|| {
             let mut selected = None;
             self.with_selected_apps(|sample| {
@@ -688,28 +717,43 @@ impl LiveSession {
             })?;
 
             let selected = selected.ok_or(Error::Bound("App history selection"))?;
-            let target = Target { kind, bytes };
-
             if let Some(history) = &self.history {
                 let mut restored = false;
-                let result = history.with_app_history(&selected, &target, |saved| {
+                let result = history.with_app_history(&selected, target, |saved| {
                     restored = true;
                     self.app_history
                         .response_merged(&crate::live_app_history::Merge {
                             selected: &selected,
-                            target: &target,
+                            target,
                             saved,
                             context: &self.selected_context,
                             operation: &self.operation,
                         })
                 });
                 match result {
-                    Err(error) if !restored => self.app_history_degraded(&selected, &target, error),
+                    Err(error) if !restored => {
+                        if target.executable().is_some() {
+                            Err(error)
+                        } else {
+                            self.app_history_degraded(&selected, target, error)
+                        }
+                    }
                     result => result,
                 }
             } else {
-                self.app_history
-                    .response(&selected, &target, &self.operation)
+                if target.executable().is_some() {
+                    self.app_history
+                        .response_merged(&crate::live_app_history::Merge {
+                            selected: &selected,
+                            target,
+                            saved: &[],
+                            context: &self.selected_context,
+                            operation: &self.operation,
+                        })
+                } else {
+                    self.app_history
+                        .response(&selected, target, &self.operation)
+                }
             }
         })
     }
@@ -717,7 +761,7 @@ impl LiveSession {
     fn app_history_degraded(
         &self,
         selected: &crate::live_app_response::Observation,
-        target: &Target<'_>,
+        target: &dyn Selection,
         error: Error,
     ) -> Result<Value> {
         self.operation.check()?;
@@ -1931,6 +1975,10 @@ fn follow_merge_point(merge: PointMerge<'_>) -> Result<()> {
 #[cfg(test)]
 #[path = "live_fixture.rs"]
 pub(crate) mod identity_fixture;
+
+#[cfg(test)]
+#[path = "live_app_process_history_tests.rs"]
+mod app_process_history_tests;
 
 #[cfg(test)]
 mod tests {

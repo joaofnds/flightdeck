@@ -1,4 +1,4 @@
-use super::{App, CompactMeasure, Target, apps, count, key};
+use super::{App, CompactMeasure, Selection, apps, count, key};
 use crate::live_app_response::{Measure, Observation};
 use crate::live_apps::Frame;
 use persistence::{Error, Result};
@@ -13,7 +13,7 @@ pub(crate) struct TracePoint {
 }
 
 #[derive(Clone, Copy)]
-struct Totals {
+pub(super) struct Totals {
     members: u16,
     membership_complete: bool,
     cpu_ns: CompactMeasure,
@@ -30,28 +30,20 @@ const _: () = {
 };
 
 impl TracePoint {
+    pub(super) fn source_available(&self) -> bool {
+        self.captured
+    }
+
     pub(crate) fn capture(
         selected: &Frame,
         previous: Option<&Frame>,
-        target: &Target<'_>,
+        target: &dyn Selection,
     ) -> Result<Self> {
         let mut output = None;
 
         selected.with_aggregate(previous, |aggregate| {
-            let totals = aggregate
-                .apps
-                .get(&key(target.kind, target.bytes))
-                .map(|app| Totals {
-                    members: count(app.members),
-                    membership_complete: app.membership_complete,
-                    cpu_ns: capture_subtotal(&app.cpu_ns),
-                    energy_nj: capture_subtotal(&app.energy_nj),
-                    disk_read_bytes: capture_subtotal(&app.disk_read_bytes),
-                    disk_written_bytes: capture_subtotal(&app.disk_written_bytes),
-                    disk_io_bytes: capture_subtotal(&app.disk_io_bytes),
-                    resident_bytes: capture_subtotal(&app.resident_bytes),
-                    footprint_bytes: capture_subtotal(&app.footprint_bytes),
-                });
+            let mut totals = None;
+            capture_totals(aggregate, target, &mut totals);
 
             output = Some(Self {
                 observation: Observation {
@@ -69,6 +61,20 @@ impl TracePoint {
         })?;
 
         output.ok_or(Error::Bound("App history aggregate output"))
+    }
+
+    pub(super) fn from_group(
+        observation: &Observation,
+        elapsed_ns: Option<u64>,
+        totals: Option<&Totals>,
+        output: &mut Self,
+    ) {
+        *output = Self {
+            observation: *observation,
+            elapsed_ns,
+            totals: totals.copied(),
+            captured: true,
+        };
     }
 
     pub(super) fn from_live(
@@ -156,7 +162,43 @@ impl TracePoint {
     }
 }
 
-fn capture_subtotal(source: &apps::Subtotal) -> CompactMeasure {
+fn capture_totals(
+    aggregate: &apps::Aggregate<'_>,
+    target: &dyn Selection,
+    output: &mut Option<Totals>,
+) {
+    let mut group = None;
+    let app = if let Some(executable) = target.executable() {
+        super::process::aggregate_totals(aggregate, target.app(), executable, &mut group);
+        group.as_ref()
+    } else {
+        aggregate
+            .apps
+            .get(&key(target.app().kind, target.app().bytes))
+    };
+
+    if let Some(app) = app {
+        Totals::capture(app, output);
+    }
+}
+
+impl Totals {
+    pub(super) fn capture(app: &apps::AppTotals, output: &mut Option<Self>) {
+        *output = Some(Self {
+            members: count(app.members),
+            membership_complete: app.membership_complete,
+            cpu_ns: capture_subtotal(&app.cpu_ns),
+            energy_nj: capture_subtotal(&app.energy_nj),
+            disk_read_bytes: capture_subtotal(&app.disk_read_bytes),
+            disk_written_bytes: capture_subtotal(&app.disk_written_bytes),
+            disk_io_bytes: capture_subtotal(&app.disk_io_bytes),
+            resident_bytes: capture_subtotal(&app.resident_bytes),
+            footprint_bytes: capture_subtotal(&app.footprint_bytes),
+        });
+    }
+}
+
+pub(super) fn capture_subtotal(source: &apps::Subtotal) -> CompactMeasure {
     CompactMeasure::capture(&Measure {
         known: source.known,
         measured_members: source.measured_members,

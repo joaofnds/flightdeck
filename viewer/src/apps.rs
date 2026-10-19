@@ -303,7 +303,7 @@ fn compute_process_disk(totals: &mut AppTotals, process: &ProcessTotals<'_>) {
 }
 
 impl Subtotal {
-    fn add(&mut self, value: Amount) {
+    pub(crate) fn add(&mut self, value: Amount) {
         match value {
             Amount::Known(value) => {
                 if let Some(sum) = self.known.checked_add(value) {

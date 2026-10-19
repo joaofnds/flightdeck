@@ -1,8 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
+#[cfg(test)]
+use crate::live_app_history::Target;
+
 use super::{ContextRange, NS, OBSERVATIONS_MAX, Session, WINDOWS_MAX};
-use crate::live_app_history::{Target, TracePoint};
+use crate::live_app_history::{Selection, TracePoint};
 use crate::live_app_response::{KeyKind, Observation};
 use crate::live_apps::{Frame, committed::Endpoint};
 use collector::ring::{Identity, PROGRAM_PATH_BYTES_MAX, RunIdentity};
@@ -16,6 +19,7 @@ pub(super) struct Cache {
     recording: [u64; 2],
     kind: KeyKind,
     key: Vec<u8>,
+    executable: Option<Vec<u8>>,
     range: ContextRange,
     points: Vec<TracePoint>,
     pins: Vec<usize>,
@@ -29,7 +33,7 @@ struct Restore {
 }
 
 struct Projection<'target> {
-    target: &'target Target<'target>,
+    target: &'target dyn Selection,
     points: &'target mut Vec<TracePoint>,
     previous: Option<Box<Frame>>,
     reading: Option<Reading>,
@@ -99,27 +103,39 @@ const READINGS_MAX: usize = OBSERVATIONS_MAX * 2;
 const SOURCES_MAX: usize = READINGS_MAX * 2;
 const SOURCE_BYTES_MAX: usize = 16 * 1024 * 1024;
 const CACHE_BYTES_MAX: usize = size_of::<Cache>()
-    + PROGRAM_PATH_BYTES_MAX
+    + 2 * PROGRAM_PATH_BYTES_MAX
     + OBSERVATIONS_MAX * size_of::<TracePoint>()
     + READINGS_MAX * size_of::<usize>();
 
 const _: () = {
     assert!(CACHE_BYTES_MAX < 2 * 1024 * 1024);
+    assert!(2 * CACHE_BYTES_MAX < 4 * 1024 * 1024);
     assert!(READINGS_MAX <= WINDOWS_MAX);
     assert!(TICKS_PER_WINDOW_MAX <= OBSERVATIONS_MAX);
 };
 
 impl Session {
+    fn app_history_target_cache(
+        &self,
+        target: &dyn Selection,
+    ) -> &std::cell::RefCell<Option<Cache>> {
+        if target.executable().is_some() {
+            &self.app_process_history_cache
+        } else {
+            &self.app_history_cache
+        }
+    }
+
     pub(crate) fn with_app_history(
         &self,
         selected: &Observation,
-        target: &Target<'_>,
+        target: &dyn Selection,
         consume: impl FnOnce(&[TracePoint]) -> Result<Value>,
     ) -> Result<Value> {
         let result = self.operation.attach(&self.connection).and_then(|()| {
             self.operation.run(|| {
                 let range = self.app_history_range(selected)?;
-                if target.bytes.len() > PROGRAM_PATH_BYTES_MAX {
+                if target.app().bytes.len() > PROGRAM_PATH_BYTES_MAX {
                     return Err(Error::Bound("committed App history key"));
                 }
 
@@ -127,7 +143,7 @@ impl Session {
                     return Err(Error::Bound("committed App history recording"));
                 }
 
-                let mut cache = self.app_history_cache.borrow_mut();
+                let mut cache = self.app_history_target_cache(target).borrow_mut();
                 let hit = cache
                     .as_ref()
                     .is_some_and(|cache| cache.covers(&range, selected, target));
@@ -163,7 +179,7 @@ impl Session {
             })
         });
         if result.is_err() {
-            *self.app_history_cache.borrow_mut() = None;
+            *self.app_history_target_cache(target).borrow_mut() = None;
         }
 
         result
@@ -201,7 +217,7 @@ impl Session {
         &self,
         range: &ContextRange,
         selected: &Observation,
-        target: &Target<'_>,
+        target: &dyn Selection,
     ) -> Result<Cache> {
         let mut restore = Restore {
             readings: BTreeMap::new(),
@@ -225,8 +241,9 @@ impl Session {
 
         let cache = Cache {
             recording: selected.recording,
-            kind: target.kind,
-            key: target.bytes.to_vec(),
+            kind: target.app().kind,
+            key: target.app().bytes.to_vec(),
+            executable: target.executable().map(<[u8]>::to_vec),
             range: *range,
             points,
             pins: pins.into_iter().collect(),
@@ -443,7 +460,7 @@ impl Session {
     fn app_history_points(
         &self,
         restore: &mut Restore,
-        target: &Target<'_>,
+        target: &dyn Selection,
         output: &mut Vec<TracePoint>,
     ) -> Result<()> {
         let readings: Vec<_> = restore.readings.values().copied().collect();
@@ -533,16 +550,20 @@ impl Session {
 }
 
 impl Cache {
-    fn covers(&self, range: &ContextRange, selected: &Observation, target: &Target<'_>) -> bool {
+    fn covers(&self, range: &ContextRange, selected: &Observation, target: &dyn Selection) -> bool {
         if self.recording != selected.recording {
             return false;
         }
 
-        if self.kind != target.kind {
+        if self.kind != target.app().kind {
             return false;
         }
 
-        if self.key != target.bytes {
+        if self.key != target.app().bytes {
+            return false;
+        }
+
+        if self.executable.as_deref() != target.executable() {
             return false;
         }
 
@@ -556,6 +577,7 @@ impl Cache {
     fn bytes(&self) -> usize {
         size_of::<Self>()
             + self.key.capacity()
+            + self.executable.as_ref().map_or(0, Vec::capacity)
             + self.points.capacity() * size_of::<TracePoint>()
             + self.pins.capacity() * size_of::<usize>()
     }

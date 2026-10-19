@@ -4,7 +4,7 @@ use collector::recording::parse_identity;
 use persistence::{Error, Result};
 use serde_json::{Value, json};
 
-use super::{BYTES_MAX, History, OBSERVATIONS_MAX, Observation, Target, TracePoint};
+use super::{BYTES_MAX, History, OBSERVATIONS_MAX, Observation, Selection, TracePoint};
 use crate::cancellation::Operation;
 use crate::cpu_history_sample::Identity;
 
@@ -13,7 +13,7 @@ type Points = BTreeMap<PointKey, (TracePoint, bool)>;
 
 pub(crate) struct Merge<'a> {
     pub selected: &'a Observation,
-    pub target: &'a Target<'a>,
+    pub target: &'a dyn Selection,
     pub saved: &'a [TracePoint],
     pub context: &'a [Identity],
     pub operation: &'a Operation,
@@ -34,7 +34,7 @@ struct Interval<'a> {
 impl History {
     pub(crate) fn response_merged(&self, request: &Merge<'_>) -> Result<Value> {
         request.operation.check()?;
-        if request.target.bytes.len() > collector::ring::PROGRAM_PATH_BYTES_MAX {
+        if request.target.app().bytes.len() > collector::ring::PROGRAM_PATH_BYTES_MAX {
             return Err(Error::Bound("App history key"));
         }
 
@@ -59,11 +59,23 @@ impl History {
                 selected: request.selected,
                 observation: &point.observation,
             })? {
-                insert(&mut points, &point.trace(request.target), true)?;
+                let trace = point.trace(request.target);
+                if !trace.source_available() {
+                    if points.contains_key(&insert_point_key(&trace.observation)) {
+                        continue;
+                    }
+                }
+                insert(&mut points, &trace, true)?;
             }
         }
 
-        let missing = response_merged_context_missing(request, &mut points)?;
+        let missing = if response_merged_context_missing(request, &mut points)? {
+            true
+        } else {
+            points
+                .values()
+                .any(|(point, _live)| !point.source_available())
+        };
         let mut points: Vec<_> = points.into_values().map(|(point, _live)| point).collect();
 
         points.sort_by_key(|point| {

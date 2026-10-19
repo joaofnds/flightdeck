@@ -14,6 +14,8 @@ use crate::session::OBSERVATIONS_MAX;
 mod attribution;
 mod compact;
 mod merge;
+mod process;
+pub(crate) use process::{GroupTarget, Selection};
 mod resident;
 mod resident_cache;
 pub(crate) use merge::Merge;
@@ -28,7 +30,7 @@ pub(crate) use trace::TracePoint;
 const BYTES_MAX: usize = 64 * 1024 * 1024;
 const _: () = {
     assert!(OBSERVATIONS_MAX > 0);
-    assert!(size_of::<Point>() <= 184);
+    assert!(size_of::<Point>() <= 208);
     assert!(
         BYTES_MAX
             > crate::live_app_response::SAMPLE_BYTES_MAX
@@ -42,6 +44,7 @@ pub(super) struct History {
     observations: VecDeque<Observation>,
     bytes: usize,
     retention_limited: bool,
+    group_bytes: usize,
     saved_residents: RefCell<ResidentCache>,
 }
 
@@ -50,6 +53,7 @@ pub(super) struct Point {
     segment: u64,
     elapsed_ns: Option<u64>,
     apps: Vec<App>,
+    groups: Option<Vec<process::Group>>,
     membership_complete: bool,
     resident_ungrouped_members: u32,
     ungrouped_members: u32,
@@ -93,14 +97,17 @@ impl History {
             observations,
             bytes,
             retention_limited: false,
+            group_bytes: 0,
             saved_residents: RefCell::new(ResidentCache::new()),
         }
     }
 
-    pub(super) fn push(&mut self, point: Box<Point>, first: u64) {
+    pub(super) fn push(&mut self, mut point: Box<Point>, first: u64) {
         // Incoming references keep reused key allocations alive while older points are evicted.
-        let bytes = point.bytes() + point.unshared_key_bytes();
-        if self.bytes + bytes + self.saved_residents.get_mut().bytes() > BYTES_MAX {
+        self.bytes += point.bytes() + point.unshared_key_bytes();
+        self.group_bytes += process::charged_bytes(point.groups.as_ref());
+        self.trim_process_groups(&mut point);
+        if self.bytes + self.saved_residents.get_mut().bytes() > BYTES_MAX {
             *self.saved_residents.get_mut() = ResidentCache::new();
         }
         for _attempt in 0..=OBSERVATIONS_MAX {
@@ -109,11 +116,10 @@ impl History {
                 .front()
                 .is_some_and(|point| point.observation.wall_ns.is_some_and(|wall| wall < first));
             let count_limited = self.points.len() == OBSERVATIONS_MAX;
-            let bytes_limited = self.bytes + bytes > BYTES_MAX;
+            let bytes_limited = self.bytes > BYTES_MAX;
             if !expired {
                 if !count_limited {
                     if !bytes_limited {
-                        self.bytes += bytes;
                         let observation = point.observation;
                         self.points.push_back(point);
                         self.retain_observation(&observation, first);
@@ -127,6 +133,7 @@ impl History {
                 .pop_front()
                 .unwrap_or_else(|| unreachable!("one bounded App point fits the empty cache"));
             self.bytes -= removed.bytes() + removed.unshared_key_bytes();
+            self.group_bytes -= process::charged_bytes(removed.groups.as_ref());
             if !expired {
                 self.retention_limited = true;
             }
@@ -163,14 +170,14 @@ impl History {
     pub(super) fn response(
         &self,
         selected: &Observation,
-        target: &Target<'_>,
+        target: &dyn Selection,
         operation: &Operation,
     ) -> Result<Value> {
         let second = selected
             .wall_ns
             .ok_or(Error::Bound("live App history clock"))?
             / 1_000_000_000;
-        if target.bytes.len() > collector::ring::PROGRAM_PATH_BYTES_MAX {
+        if target.app().bytes.len() > collector::ring::PROGRAM_PATH_BYTES_MAX {
             return Err(Error::Bound("live App history key"));
         }
 
@@ -193,12 +200,21 @@ impl History {
                 point.observation.stamp.publication,
             )
         });
+        let retention_limited = if self.retention_limited {
+            true
+        } else {
+            if target.executable().is_some() {
+                points.iter().any(|point| point.groups.is_none())
+            } else {
+                false
+            }
+        };
         let points: Vec<_> = points.into_iter().map(|point| point.json(target)).collect();
         operation.check()?;
 
         let response = crate::live_app_response::bounded(
             json!({"selected": selected.json(), "context_seconds": 900, "points": points,
-            "coverage": {"retention_limited": self.retention_limited,
+            "coverage": {"retention_limited": retention_limited,
             "observations_retained": self.points.len(), "cache_bytes": self.total_bytes(),
                 "cache_bytes_max": BYTES_MAX}}),
         )?;
@@ -216,13 +232,14 @@ impl Point {
         output: &mut Option<Box<Self>>,
     ) {
         *output = None;
-        let previous = previous.map_or(&[][..], |point| &point.apps);
+        let previous_apps = previous.map_or(&[][..], |point| &point.apps);
         let mut previous_index = 0;
         let mut point = Box::new(Self {
             observation: sample.selected,
             segment,
             elapsed_ns: sample.elapsed_ns,
             apps: Vec::with_capacity(sample.apps().len()),
+            groups: None,
             membership_complete: sample.membership_complete,
             ungrouped_members: sample.ungrouped_members,
             resident_ungrouped_members: u32::try_from(
@@ -241,7 +258,7 @@ impl Point {
 
         for app in sample.apps() {
             point.apps.push(App {
-                key: compact::capture_key(&app.key, previous, &mut previous_index),
+                key: compact::capture_key(&app.key, previous_apps, &mut previous_index),
                 members: count(app.members),
                 membership_complete: app.membership_complete,
                 cpu_ns: CompactMeasure::capture(&app.cpu_ns),
@@ -254,6 +271,8 @@ impl Point {
             });
         }
 
+        point.groups = Some(process::capture(sample, previous, &point.apps));
+
         assert!(
             point.bytes() + point.unshared_key_bytes()
                 <= crate::live_app_response::SAMPLE_BYTES_MAX
@@ -263,7 +282,9 @@ impl Point {
     }
 
     fn bytes(&self) -> usize {
-        size_of::<Self>() + self.apps.capacity() * size_of::<App>()
+        size_of::<Self>()
+            + self.apps.capacity() * size_of::<App>()
+            + process::payload_bytes(self.groups.as_ref())
     }
 
     fn unshared_key_bytes(&self) -> usize {
@@ -271,11 +292,18 @@ impl Point {
             .iter()
             .filter(|app| Arc::strong_count(&app.key) == 1)
             .map(|app| app.key.bytes())
-            .sum()
+            .sum::<usize>()
+            + process::key_bytes(self.groups.as_deref().unwrap_or_default())
     }
 
-    fn trace(&self, target: &Target<'_>) -> TracePoint {
-        let target = key(target.kind, target.bytes);
+    fn trace(&self, target: &dyn Selection) -> TracePoint {
+        if let Some(executable) = target.executable() {
+            let mut trace = TracePoint::unavailable(&self.observation);
+            process::trace(self, target.app(), executable, &mut trace);
+
+            return trace;
+        }
+        let target = key(target.app().kind, target.app().bytes);
         let app = match self
             .apps
             .binary_search_by(|app| app.key.view().cmp(&target))
@@ -287,7 +315,7 @@ impl Point {
         TracePoint::from_live(&self.observation, self.elapsed_ns, app)
     }
 
-    fn json(&self, target: &Target<'_>) -> Value {
+    fn json(&self, target: &dyn Selection) -> Value {
         self.trace(target).json(self.segment)
     }
 }

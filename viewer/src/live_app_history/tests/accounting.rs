@@ -342,6 +342,7 @@ fn point(history: &History, publication: u64, keys: &[(KeyKind, &[u8])]) -> Box<
         segment: 0,
         elapsed_ns: Some(1_000_000_000),
         apps,
+        groups: None,
         membership_complete: false,
         resident_ungrouped_members: 0,
         ungrouped_members: 0,
