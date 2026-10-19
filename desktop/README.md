@@ -158,6 +158,9 @@ and stacking them below. All four retain their captured context during exact ins
 missing intervals and individual source failures stay explicit. Per-App network and GPU
 histories are not captured. Cooling and battery context follows the inspected timestamp,
 with an explicit uncaptured thermal-state reading.
+Overview prepares CPU, process-power and Disk App histories together, sharing saved
+context work and the existing bounded History cache. Their cohorts and failures remain
+independent; Resident history uses its own source path.
 CPU, Memory, Energy and Storage repeat the corresponding ranking on their own pages,
 beside their captured App histories. The CPU plot uses 100% for one core; process
 power remains separate from system and GPU power. Energy's Process power summary
