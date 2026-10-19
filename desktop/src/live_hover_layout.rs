@@ -36,6 +36,9 @@ impl Row {
                 if title.starts_with("Process group history") {
                     return "process-group-history-heading".into();
                 }
+                if title.ends_with(" by App") {
+                    return format!("attribution-heading-{title}");
+                }
                 match title.as_str() {
                     "Swap and paging" => return "memory-swap-paging-heading".into(),
                     "Top apps at the selected time"
