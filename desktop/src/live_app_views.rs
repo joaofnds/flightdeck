@@ -2,12 +2,14 @@ use gpui::{AnyElement, Context, IntoElement, SharedString, div, prelude::*, px, 
 use num_traits::ToPrimitive;
 use serde_json::Value;
 
-use crate::charts::{BLUE, GRID, MUTED, PANEL};
+use crate::charts::{BLUE, GREEN, GRID, MUTED, ORANGE, PANEL, PURPLE, YELLOW};
 use crate::dashboard::control;
 use crate::live_dashboard::LiveDashboard;
 use crate::live_source::AppKey;
-use crate::live_views::text;
+use crate::live_views::{summary, text};
 
+/// The prototype's network cyan.
+const CYAN: u32 = 0x00_ff_ff;
 const APPS_MAX: usize = 512;
 const SELECTED_APP_INDEX: usize = APPS_MAX;
 const JSON_BYTES_MAX: usize = 32 * 1024;
@@ -29,8 +31,10 @@ impl LiveDashboard {
             .flex()
             .flex_col()
             .gap(px(8.0))
-            .child(self.app_selector_controls(cx))
-            .child(self.app_paging(cx));
+            .child(self.app_selector_controls(cx));
+        if self.app_paged() {
+            selector = selector.child(self.app_paging(cx));
+        }
         if let Some(page) = self
             .reading_snapshot()
             .and_then(|snapshot| snapshot.apps.as_ref())
@@ -61,6 +65,9 @@ impl LiveDashboard {
                 }
             }
         };
+        let context = self.app_selector_context();
+        let selector = format!("app-context:{context}");
+
         div()
             .flex()
             .items_center()
@@ -79,26 +86,32 @@ impl LiveDashboard {
                 })),
             )
             .child(
-                control("App details").on_click(cx.listener(|this, _, _, cx| {
-                    let open = this
-                        .expanded
-                        .as_ref()
-                        .is_some_and(|(kind, _)| kind == "app_summary");
-                    this.expanded = if open {
-                        None
-                    } else {
-                        Some(("app_summary".into(), 0))
-                    };
-                    this.rebuild();
-                    cx.notify();
-                })),
-            )
-            .child(
                 div()
                     .text_size(px(11.0))
                     .text_color(rgb(MUTED))
-                    .child("CPU, memory, disk and energy from the selected observation"),
+                    .debug_selector(move || selector.clone())
+                    .child(context),
             )
+    }
+
+    /// The prototype's line beside the App picker: how many process groups the selected
+    /// second shows, and that second.
+    fn app_selector_context(&self) -> String {
+        let Some(snapshot) = self.reading_snapshot() else {
+            return "Waiting for readings".into();
+        };
+        let Some(second) = snapshot.selection["second"].as_u64() else {
+            return "Waiting for readings".into();
+        };
+
+        let groups = self.reading_executables().len();
+        if groups == 0 {
+            return "App history retained; process groups not captured at this instant.".into();
+        }
+        format!(
+            "{groups} process groups at {}",
+            crate::live_presentation::clock(second, true)
+        )
     }
 
     pub fn app_choice_indices(&self) -> Vec<usize> {
@@ -308,7 +321,7 @@ impl LiveDashboard {
         row.into_any_element()
     }
 
-    fn current_app(&self) -> Option<&Value> {
+    pub(crate) fn current_app(&self) -> Option<&Value> {
         let snapshot = self.reading_snapshot()?;
         Some(&selected_detail(snapshot.detail.as_ref(), self.request.app.as_ref())?["app"])
     }
@@ -339,6 +352,82 @@ pub fn selected_detail<'a>(
         }
     }
     Some(detail)
+}
+
+/// The prototype's six readings of the selected App at the selected second. Network has no
+/// per-App source, and GPU time exists only for the seconds the app sampled while it ran.
+pub(crate) fn app_cards(app: Option<&Value>, selection: &Value) -> Vec<summary::Card> {
+    let reading = |read: fn(&Value) -> String| app.map_or_else(|| "Unavailable".into(), read);
+    let card = |label, reading, note: &str, color, route| summary::Card {
+        label,
+        reading,
+        note: note.into(),
+        color,
+        route,
+    };
+    vec![
+        card(
+            "CPU",
+            reading(|app| value_rate(&app["cpu_percent_one_core"], "%")),
+            "100% = one core",
+            BLUE,
+            "cpu",
+        ),
+        card(
+            "Resident memory",
+            reading(|app| measure_memory(&app["resident_bytes"])),
+            "Resident; includes shared pages",
+            GREEN,
+            "memory",
+        ),
+        card(
+            "Network",
+            "Not captured".into(),
+            "No per-app network source",
+            CYAN,
+            "network",
+        ),
+        card(
+            "Disk I/O",
+            reading(measure_disk_rate),
+            "Selected app",
+            YELLOW,
+            "storage",
+        ),
+        card(
+            "GPU time",
+            app.map_or_else(|| "Unavailable".into(), |app| app_gpu_time(app, selection)),
+            "Selected app",
+            PURPLE,
+            "gpu",
+        ),
+        card(
+            "Process power",
+            reading(|app| value_rate(&app["energy_watts"], "W")),
+            "Selected app",
+            ORANGE,
+            "energy",
+        ),
+    ]
+}
+
+/// The selected App's share of GPU time at the selected second. An App the sampler saw no
+/// GPU time for used none, and a second the app did not sample has no reading.
+fn app_gpu_time(app: &Value, selection: &Value) -> String {
+    let Some(apps) = selection["summary"]["gpu_apps"].as_array() else {
+        return "Not sampled".into();
+    };
+    let key = &app["key"];
+    let share = apps.iter().find(|entry| {
+        if entry["kind"] != key["kind"] {
+            return false;
+        }
+        entry["bytes_hex"] == key["bytes_hex"]
+    });
+    match share {
+        Some(entry) => value_rate(&entry["percent"], "%"),
+        None => rate(Some(0.0), "%"),
+    }
 }
 
 fn app_summary_tiles(app: &Value) -> gpui::Div {

@@ -151,6 +151,35 @@ impl LiveDashboard {
     }
 
     pub fn app_paging(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let (apps, detail) = self.app_pages();
+        div()
+            .flex()
+            .flex_wrap()
+            .gap(px(10.0))
+            .text_size(px(11.0))
+            .child(self.app_page_controls(apps, false, cx))
+            .child(self.app_page_controls(detail, true, cx))
+    }
+
+    /// Whether the Apps or the selected App's processes span more than one page, so the
+    /// page controls have something to move between.
+    pub fn app_paged(&self) -> bool {
+        let (apps, detail) = self.app_pages();
+        for page in [apps, detail].into_iter().flatten() {
+            if page["page"]["offset"]
+                .as_u64()
+                .is_some_and(|offset| offset > 0)
+            {
+                return true;
+            }
+            if !page["page"]["next_offset"].is_null() {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn app_pages(&self) -> (Option<&Value>, Option<&Value>) {
         let apps = self
             .reading_snapshot()
             .and_then(|snapshot| snapshot.apps.as_ref());
@@ -160,13 +189,16 @@ impl LiveDashboard {
                 self.request.app.as_ref(),
             )
         });
+        (apps, detail)
+    }
+
+    pub fn process_group_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
             .flex_wrap()
+            .items_center()
             .gap(px(10.0))
             .text_size(px(11.0))
-            .child(self.app_page_controls(apps, false, cx))
-            .child(self.app_page_controls(detail, true, cx))
             .child(
                 control("All process groups")
                     .debug_selector(|| "all-process-groups".into())

@@ -406,6 +406,7 @@ impl LiveDashboard {
     fn reading_rows_apps(&self) -> Vec<Row> {
         let mut rows = Vec::with_capacity(2048);
         rows.push(Row::AppSelector);
+        rows.push(Row::Summary);
         let Some(snapshot) = self.reading_snapshot() else {
             return rows;
         };
@@ -500,6 +501,7 @@ impl LiveDashboard {
             }
         };
         rows.push(Row::Heading(format!("Process group history · {status}")));
+        rows.push(Row::ProcessGroupBar);
         let panels: Vec<_> = self
             .panels
             .iter()

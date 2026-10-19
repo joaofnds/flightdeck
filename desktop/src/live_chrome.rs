@@ -206,9 +206,6 @@ impl LiveDashboard {
         if route == "raw" {
             header = header.child(self.table_picker(cx));
         }
-        if route == "apps" {
-            header = header.child(self.app_paging(cx));
-        }
         self.header_geometry(header)
     }
 

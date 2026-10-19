@@ -51,6 +51,41 @@ fn hovering_an_app_replaces_current_details_with_the_exact_historical_page(
 }
 
 #[gpui::test]
+fn the_selected_app_reads_in_six_summary_cards(cx: &mut TestAppContext) {
+    // Goal: Apps opens on the prototype's six readings of the selected App.
+    // Method: accept the fixture App and find each card's label and reading in the frame.
+    let mut harness = AppHoverHarness::setup(cx);
+    for card in [
+        "summary-card:CPU:87.0 %",
+        "summary-card:Resident memory:7.0 GiB",
+        "summary-card:Network:Not captured",
+        "summary-card:Disk I/O:Unavailable *",
+        "summary-card:GPU time:Not sampled",
+        "summary-card:Process power:9.0 W",
+    ] {
+        assert!(harness.driver.text_is_visible(card), "{card}");
+    }
+    harness.teardown();
+}
+
+#[gpui::test]
+fn the_app_picker_counts_the_process_groups_at_the_selected_second(cx: &mut TestAppContext) {
+    // Goal: the App picker reads like the prototype's, with the groups it shows and their time.
+    // Method: accept the fixture App, whose three processes form two groups, and find the line.
+    let mut harness = AppHoverHarness::setup(cx);
+    let context: &'static str = format!(
+        "app-context:2 process groups at {}",
+        crate::live_presentation::clock(1000, true)
+    )
+    .leak();
+    assert!(
+        harness.driver.context.debug_bounds(context).is_some(),
+        "{context}"
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
 fn historical_app_details_keep_the_graph_under_a_stationary_pointer(cx: &mut TestAppContext) {
     // Vary preceding process/group counts and compare rendered chart bounds without another move.
     let mut harness = AppHoverHarness::setup(cx);

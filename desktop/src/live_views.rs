@@ -100,6 +100,7 @@ impl LiveDashboard {
             Row::AppAttribution(metric, panel) => self.app_attribution(*metric, panel.as_ref(), cx),
             Row::GpuApps(panel) => self.gpu_apps(panel.as_ref(), cx),
             Row::AppSelector => self.app_selector(cx).into_any_element(),
+            Row::ProcessGroupBar => self.process_group_bar(cx).into_any_element(),
             Row::AppSummary => self.app_summary().into_any_element(),
             Row::AppColumns(kind) => {
                 crate::live_app_views::app_table_columns(kind, &self.app_table_scroll)
@@ -149,7 +150,9 @@ impl LiveDashboard {
             .reading_snapshot()
             .map_or(&Value::Null, |snapshot| &snapshot.selection);
         let mut cards = summary::cards(&self.request.route, selection);
-        if let Some(card) = cards.iter_mut().find(|card| card.label == "Process power") {
+        if self.request.route == "apps" {
+            cards = crate::live_app_views::app_cards(self.current_app(), selection);
+        } else if let Some(card) = cards.iter_mut().find(|card| card.label == "Process power") {
             if let Some(history) = self.snapshot.as_ref().and_then(|snapshot| {
                 snapshot.attribution_history(crate::live_app_attribution_history::Metric::Power)
             }) {
