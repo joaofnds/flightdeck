@@ -76,8 +76,9 @@ impl History {
         let restored =
             Self::attribution_prepare(saved, selected, &reduction, &mut rates, space, operation)?;
         for point in rates.points() {
-            reduction.observe(&point.capture, point.apps(metric), Source::Saved)?;
+            reduction.observe_cached(&point.capture)?;
         }
+        reduction.merge(rates.totals(metric))?;
         if restored.uncached > 0 {
             let reduction = RefCell::new(&mut reduction);
             attribution_stream(query, &rates, &reduction, |point, reduction| {
