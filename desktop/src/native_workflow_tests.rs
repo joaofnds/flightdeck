@@ -661,29 +661,6 @@ fn canceling_an_open_keeps_the_current_source_mode() {
 }
 
 #[test]
-fn diagnostic_copy_keeps_current_catalog_and_the_committed_inspection_identity() {
-    // Goal: copying diagnostics explains the source without pretending its catalog is selected.
-    // Method: serialize distinct current and inspected observations with an exact large counter.
-    let mut current = snapshot();
-    current.selection = serde_json::Value::Null;
-    current.catalog = json!({"path":"/recording", "latest_observation":{"publication":9},
-        "tail_cache_bytes":9_007_199_254_740_993_u64});
-    let mut request = fresh_request("self");
-    request.second = Some(1000);
-    request.identity = Some(json!({"publication":7}));
-    let selected = json!({"publication":7});
-
-    let text = super::diagnostic_copy(Some(&current), &request, &selected).unwrap();
-
-    let copied: serde_json::Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(
-        copied,
-        json!({"catalog":current.catalog,"selected":selected,
-        "requested_second":1000,"requested_identity":{"publication":7}})
-    );
-}
-
-#[test]
 fn overview_defers_artwork_until_a_reading_is_available() {
     // Cold row planning must not load the artwork only to push it below arriving charts.
     let mut dashboard = dashboard("overview");

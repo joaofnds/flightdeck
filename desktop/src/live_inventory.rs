@@ -4,26 +4,16 @@ use std::mem;
 use std::ptr;
 use std::sync::OnceLock;
 
+/// This Mac's identity and the sizes the Computer page's model card shows.
 #[must_use]
 pub fn rows() -> Vec<(String, String)> {
     vec![
         row("Model identifier", string(c"hw.product")),
         row("Chip", string(c"machdep.cpu.brand_string")),
         row("Architecture", string(c"hw.machine")),
-        row(
-            "Physical CPU cores · maximum this boot",
-            positive_count(c"hw.physicalcpu_max"),
-        ),
-        row(
-            "Logical CPUs · maximum this boot",
-            positive_count(c"hw.logicalcpu_max"),
-        ),
-        row("Installed memory", memory()),
-        row("macOS version", string(c"kern.osproductversion")),
-        row("macOS build", string(c"kern.osversion")),
-        row("Darwin kernel", string(c"kern.osrelease")),
-        row("VM page size · bytes", positive_count(c"hw.pagesize")),
-        row("Boot time", boot()),
+        row("CPU cores", positive_count(c"hw.physicalcpu_max")),
+        row("GPU cores", gpu_cores()),
+        row("Memory", memory()),
     ]
 }
 
@@ -135,51 +125,28 @@ fn memory() -> Result<String, String> {
     if bytes == 0 {
         return Err("Expected a positive value".into());
     }
+    Ok(memory_format(bytes))
+}
+
+/// Whole gibibytes as the prototype writes them, such as "48 GiB", and any other size to
+/// the hundredth below it.
+fn memory_format(bytes: u64) -> String {
     let gibibytes = bytes / 1_073_741_824;
-    let hundredths = (bytes % 1_073_741_824) * 100 / 1_073_741_824;
-    Ok(format!("{gibibytes}.{hundredths:02} GiB · {bytes} bytes"))
+    let remainder = bytes % 1_073_741_824;
+    if remainder == 0 {
+        return format!("{gibibytes} GiB");
+    }
+    // The hundredths floor, so a size never reads larger than it is.
+    let hundredths = remainder * 100 / 1_073_741_824;
+    format!("{gibibytes}.{hundredths:02} GiB")
 }
 
-fn boot() -> Result<String, String> {
-    let mut value = libc::timeval {
-        tv_sec: 0,
-        tv_usec: 0,
-    };
-    read_value(c"kern.boottime", &mut value)?;
-    if value.tv_sec <= 0 {
-        return Err("Invalid boot timeval: nonpositive seconds".into());
+fn gpu_cores() -> Result<u64, String> {
+    match collector::machine::gpu_cores() {
+        Ok(Some(cores)) => Ok(cores),
+        Ok(None) => Err("The GPU driver reports no core count".into()),
+        Err(error) => Err(error.to_string()),
     }
-    if value.tv_usec < 0 {
-        return Err("Invalid boot timeval: negative microseconds".into());
-    }
-    if value.tv_usec >= 1_000_000 {
-        return Err("Invalid boot timeval: microseconds exceed one second".into());
-    }
-    boot_format(&value)
-}
-
-fn boot_format(value: &libc::timeval) -> Result<String, String> {
-    // localtime_r owns no resource; all output storage stays on this stack.
-    let mut calendar = unsafe { mem::zeroed::<libc::tm>() };
-    if unsafe { libc::localtime_r(&raw const value.tv_sec, &raw mut calendar) }.is_null() {
-        return Err("The boot time could not be converted to local time".into());
-    }
-    let mut bytes = [0_u8; 64];
-    let count = unsafe {
-        libc::strftime(
-            bytes.as_mut_ptr().cast(),
-            bytes.len(),
-            c"%Y-%m-%d %H:%M:%S %z".as_ptr(),
-            &raw const calendar,
-        )
-    };
-    if count == 0 {
-        return Err("The boot time could not be formatted".into());
-    }
-    if count >= bytes.len() {
-        return Err("The formatted boot time exceeded its buffer".into());
-    }
-    String::from_utf8(bytes[..count].to_vec()).map_err(|error| format!("Invalid UTF-8: {error}"))
 }
 
 fn read_value<T>(key: &CStr, value: &mut T) -> Result<(), String> {
@@ -210,6 +177,17 @@ fn read_kernel(key: &CStr, buffer: *mut libc::c_void, count: &mut usize) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memory_format_writes_whole_gibibytes_without_decimals() {
+        // Goal: memory reads as the prototype writes it, with decimals only where they count.
+        // Method: format 48 GiB exactly, and 47.5 GiB less one byte, which floors.
+        let gibibyte = 1_073_741_824_u64;
+
+        let sizes = [48 * gibibyte, 47 * gibibyte + gibibyte / 2 - 1].map(memory_format);
+
+        assert_eq!(sizes, ["48 GiB", "47.49 GiB"]);
+    }
 
     #[test]
     fn logical_cpu_level_name_numbers_the_slower_level_first() {

@@ -84,7 +84,7 @@ fn canceling_the_recording_picker_retains_the_existing_window_source_and_selecti
 }
 
 #[gpui::test]
-fn reader_diagnostics_preserves_paused_inspection_and_copies_its_distinct_live_position(
+fn reader_diagnostics_preserves_paused_inspection_beside_its_distinct_live_position(
     cx: &mut TestAppContext,
 ) {
     // Navigate and copy through rendered controls while a real ring advances beyond inspection.
@@ -103,18 +103,12 @@ fn reader_diagnostics_preserves_paused_inspection_and_copies_its_distinct_live_p
     harness.driver.await_diagnostic_publication(2);
     recording.publish();
     harness.driver.await_diagnostic_publication(3);
-    harness.driver.click_source_control("copy-reading");
 
     assert_eq!(harness.driver.inspection_request(), requested);
     assert!(harness.driver.visible("diagnostic:Latest publication:3"));
     assert!(harness.driver.visible("diagnostic:Selected publication:1"));
     assert!(!harness.driver.visible("missing-observation"));
     assert!(!harness.driver.visible("inspection-time"));
-    let copied = harness.driver.copied_diagnostics();
-    assert_eq!(copied["catalog"]["latest_observation"]["publication"], 3);
-    assert_eq!(copied["selected"]["publication"], 1);
-    assert_eq!(copied["requested_second"], requested.0.unwrap());
-    assert_eq!(copied["requested_identity"], requested.1.unwrap());
     harness.teardown();
 }
 
@@ -141,13 +135,9 @@ fn computer_navigation_preserves_the_accepted_diagnostic_inspection(cx: &mut Tes
             });
         harness.driver.click_source_control("navigation:self");
         harness.driver.await_diagnostic_publication(2);
-        harness.driver.click_source_control("copy-reading");
 
         assert_eq!(harness.driver.inspection_request(), requested);
         assert!(harness.driver.visible("diagnostic:Selected publication:1"));
-        let copied = harness.driver.copied_diagnostics();
-        assert_eq!(copied["selected"]["publication"], 1);
-        assert_eq!(copied["selected"], copied["requested_identity"]);
     }
     harness.teardown();
 }
@@ -304,11 +294,6 @@ impl InputDriver {
         self.view.read_with(&self.context, |dashboard, _| {
             (dashboard.request.second, dashboard.request.identity.clone())
         })
-    }
-
-    fn copied_diagnostics(&self) -> Value {
-        let text = self.context.read_from_clipboard().unwrap().text().unwrap();
-        serde_json::from_str(&text).unwrap()
     }
 }
 

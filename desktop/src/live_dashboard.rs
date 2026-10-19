@@ -460,6 +460,10 @@ impl LiveDashboard {
     }
 
     pub(crate) fn status_at(&self, now: SystemTime) -> String {
+        // Computer reads this Mac's inventory each time it opens, whatever the recording.
+        if self.request.route == "computer" {
+            return "System snapshot".into();
+        }
         let Some(snapshot) = &self.snapshot else {
             if self.error.is_some() {
                 return "Reading unavailable".into();

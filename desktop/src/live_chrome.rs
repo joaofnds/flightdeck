@@ -158,47 +158,44 @@ impl LiveDashboard {
 
     pub fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let route = self.request.route.as_str();
-        let mut header = div()
-            .px(px(24.0))
-            .pt(px(20.0))
-            .pb(px(8.0))
-            .child(
+        let mut header = div().px(px(24.0)).pt(px(20.0)).pb(px(8.0)).child(
+            div()
+                .flex()
+                .flex_wrap()
+                .gap(px(12.0))
+                .justify_between()
+                .items_start()
+                .child(
+                    div()
+                        .min_w_0()
+                        .max_w_full()
+                        .child(
+                            div()
+                                .debug_selector(|| "reading-title".into())
+                                .text_size(px(23.0))
+                                .line_height(px(30.0))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child(route_title(route)),
+                        )
+                        .child(
+                            div()
+                                .mt(px(3.0))
+                                .text_color(rgb(MUTED))
+                                .child(route_subtitle(route)),
+                        ),
+                )
+                .child(self.header_controls(cx)),
+        );
+        if !matches!(route, "computer" | "self") {
+            header = header.child(
                 div()
-                    .flex()
-                    .flex_wrap()
-                    .gap(px(12.0))
-                    .justify_between()
-                    .items_start()
-                    .child(
-                        div()
-                            .min_w_0()
-                            .max_w_full()
-                            .child(
-                                div()
-                                    .debug_selector(|| "reading-title".into())
-                                    .text_size(px(23.0))
-                                    .line_height(px(30.0))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .child(route_title(route)),
-                            )
-                            .child(
-                                div()
-                                    .mt(px(3.0))
-                                    .text_color(rgb(MUTED))
-                                    .child(route_subtitle(route)),
-                            ),
-                    )
-                    .child(self.header_controls(cx)),
-            )
-            .child(
-                div()
+                    .debug_selector(|| "reading-selected".into())
                     .flex()
                     .justify_end()
                     .text_size(px(11.0))
                     .text_color(rgb(MUTED))
                     .child(self.header_selected()),
             );
-        if !matches!(route, "computer" | "self") {
             header = header.child(self.missing_reading());
             header = self.header_recording_context(header);
             header = self.header_alternatives(header, cx);
@@ -210,10 +207,6 @@ impl LiveDashboard {
     }
 
     fn header_selected(&self) -> Div {
-        if self.request.route == "self" {
-            return div().child("Reader diagnostics · independent of chart inspection");
-        }
-
         let selected = self.reading_snapshot().map_or_else(
             || {
                 self.request.second.map_or_else(
@@ -263,22 +256,12 @@ impl LiveDashboard {
             .max_w_full()
             .child(self.source_pill());
 
-        let trailing = match self.request.route.as_str() {
-            "self" => icon_button("Refresh", Icon::Latest, false)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.submit();
-                    cx.notify();
-                }))
-                .into_any_element(),
-            "computer" => icon_button("Refresh", Icon::Latest, false)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.inventory = crate::live_inventory::rows();
-                    cx.notify();
-                }))
-                .into_any_element(),
-            _ => self.latest_button(cx).into_any_element(),
-        };
-        controls.child(self.time_controls(trailing, cx))
+        // Computer and Self-monitoring show no recorded second, so the prototype gives them
+        // no time selection.
+        if matches!(self.request.route.as_str(), "computer" | "self") {
+            return controls;
+        }
+        controls.child(self.time_controls(self.latest_button(cx).into_any_element(), cx))
     }
 
     /// Returns to the latest reading, and is disabled while the charts already follow it.

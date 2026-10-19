@@ -547,19 +547,11 @@ impl LiveDashboard {
     }
 
     pub fn copy_reading(&mut self, cx: &mut Context<Self>) {
-        let result = if self.request.route == "self" {
-            diagnostic_copy(
-                self.snapshot.as_deref(),
-                &self.request,
-                &self.native.diagnostic_selected,
-            )
-        } else {
-            selected_copy(
-                self.reading_snapshot(),
-                self.reading_request(),
-                self.reading_expanded(),
-            )
-        };
+        let result = selected_copy(
+            self.reading_snapshot(),
+            self.reading_request(),
+            self.reading_expanded(),
+        );
         match result {
             Ok(text) => {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
@@ -569,17 +561,6 @@ impl LiveDashboard {
         }
         cx.notify();
     }
-}
-
-fn diagnostic_copy(
-    snapshot: Option<&Snapshot>,
-    request: &Request,
-    selected: &Value,
-) -> Result<String, String> {
-    let snapshot = snapshot.ok_or("Reader diagnostics are unavailable")?;
-    bounded_json(&serde_json::json!({"catalog":snapshot.catalog,
-        "selected":selected,"requested_second":request.second,
-        "requested_identity":request.identity}))
 }
 
 fn fresh_request(route: &str) -> Request {

@@ -71,8 +71,8 @@ disclosure_case!(
     "computer",
     "section:computer-reference",
     [
-        "computer-reference:Apple logic-board service view",
-        "computer-reference:Counterpoint M5 Pro chip teardown"
+        "computer-airflow-stop:50 °C",
+        "computer-reference-paragraph:1"
     ],
     "computer-specifications"
 );

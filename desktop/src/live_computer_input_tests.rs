@@ -3,39 +3,49 @@ use gpui::{TestAppContext, px};
 use super::{InputDriver, InputHarness};
 
 #[gpui::test]
-fn computer_model_and_specifications_lead_the_independent_system_details(cx: &mut TestAppContext) {
-    // Render the approved model from current inventory before the operating-system details.
+fn computer_model_card_shows_the_prototype_specifications_above_the_reference(
+    cx: &mut TestAppContext,
+) {
+    // Goal: the model card reads as the prototype's, with no system details below it.
+    // Method: seed this Mac's inventory and read each rendered specification and section.
     let mut harness = InputHarness::setup_route(cx, "computer");
+
     harness.driver.seed_computer_inventory("Mac17,8");
 
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("computer-model:MacBook Pro")
-    );
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("computer-generation:16-inch · 2026")
-    );
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("computer-spec:Chip:Apple M5 Pro")
-    );
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("computer-spec:Physical CPU cores:18")
-    );
-    assert!(harness.driver.reading_is_visible("computer-system-details"));
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("computer-schematic-reference")
-    );
+    for reading in [
+        "computer-model:MacBook Pro",
+        "computer-generation:16-inch · 2026",
+        "computer-spec:Model identifier:Mac17,8",
+        "computer-spec:Chip:Apple M5 Pro",
+        "computer-spec:CPU:18 cores",
+        "computer-spec:GPU:20 cores",
+        "computer-spec:Memory:48 GiB unified memory",
+        "computer-schematic-reference",
+    ] {
+        assert!(harness.driver.reading_is_visible(reading), "{reading}");
+    }
+    assert!(!harness.driver.reading_is_visible("computer-system-details"));
     harness.driver.assert_computer_sections_ordered();
     harness.driver.assert_computer_model_reference_layout();
+    harness.teardown();
+}
+
+#[gpui::test]
+fn computer_reference_shows_the_prototype_assembly_and_airflow_legend(cx: &mut TestAppContext) {
+    // Goal: the open schematic reference names its reference assembly and the airflow scale.
+    // Method: seed this Mac's inventory and read the reference's heading and legend stops.
+    let mut harness = InputHarness::setup_route(cx, "computer");
+
+    harness.driver.seed_computer_inventory("Mac17,8");
+
+    for reading in [
+        "computer-reference-assembly:MacBook Pro 16″ · 2026 · Apple M5 Pro · Mac17,8 · A3428",
+        "computer-airflow-stop:50 °C",
+        "computer-airflow-stop:70 °C",
+        "computer-airflow-stop:90 °C",
+    ] {
+        assert!(harness.driver.reading_is_visible(reading), "{reading}");
+    }
     harness.teardown();
 }
 
@@ -46,17 +56,9 @@ impl InputDriver {
                 ("Model identifier".into(), model.into()),
                 ("Chip".into(), "Apple M5 Pro".into()),
                 ("Architecture".into(), "arm64".into()),
-                ("Physical CPU cores · maximum this boot".into(), "18".into()),
-                ("Logical CPUs · maximum this boot".into(), "18".into()),
-                (
-                    "Installed memory".into(),
-                    "48.00 GiB · 51539607552 bytes".into(),
-                ),
-                ("macOS version".into(), "26.0".into()),
-                ("macOS build".into(), "25A000".into()),
-                ("Darwin kernel".into(), "25.0.0".into()),
-                ("VM page size · bytes".into(), "16384".into()),
-                ("Boot time".into(), "2026-10-19 09:00:00 +0200".into()),
+                ("CPU cores".into(), "18".into()),
+                ("GPU cores".into(), "20".into()),
+                ("Memory".into(), "48 GiB".into()),
             ];
             cx.notify();
         });
@@ -70,22 +72,18 @@ impl InputDriver {
             .context
             .debug_bounds("computer-specifications")
             .unwrap();
-        let details = self
-            .context
-            .debug_bounds("computer-system-details")
-            .unwrap();
         let reference = self
             .context
             .debug_bounds("computer-schematic-reference")
             .unwrap();
-        assert!(model.bottom() <= details.top());
-        assert!(details.bottom() <= reference.top());
+        assert!(model.bottom() <= reference.top());
     }
 }
 
 #[gpui::test]
-fn computer_specifications_and_exact_system_details_fit_a_narrow_view(cx: &mut TestAppContext) {
-    // Resize the installed model card and verify its values remain within the rendered panel.
+fn computer_specifications_fit_a_narrow_view(cx: &mut TestAppContext) {
+    // Goal: a narrow window keeps every specification inside the model card.
+    // Method: resize below the card's width and compare each reading with the card's bounds.
     let mut harness = InputHarness::setup_route(cx, "computer");
     harness.driver.seed_computer_inventory("Mac17,8");
 
@@ -101,23 +99,7 @@ fn computer_specifications_and_exact_system_details_fit_a_narrow_view(cx: &mut T
         .assert_computer_specification_fits("computer-spec:Chip:Apple M5 Pro");
     harness
         .driver
-        .assert_computer_specification_fits("computer-spec:Installed memory:48.00 GiB");
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("computer-detail:macOS version:26.0")
-    );
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("computer-detail:VM page size · bytes:16384")
-    );
-    harness.driver.assert_computer_detail_fits(
-        "computer-detail:Installed memory:48.00 GiB · 51539607552 bytes",
-    );
-    harness
-        .driver
-        .assert_computer_detail_fits("computer-detail:Boot time:2026-10-19 09:00:00 +0200");
+        .assert_computer_specification_fits("computer-spec:Memory:48 GiB unified memory");
     harness.teardown();
 }
 
@@ -125,31 +107,21 @@ fn computer_specifications_and_exact_system_details_fit_a_narrow_view(cx: &mut T
 fn a_different_computer_model_keeps_its_reported_identity_without_a_guessed_generation(
     cx: &mut TestAppContext,
 ) {
-    // Seed another captured identifier and retain a generic title alongside its actual fields.
+    // Goal: another Mac shows what it reports and no title or generation guessed for it.
+    // Method: seed another identifier, chip, core count and memory size and read the card.
     let mut harness = InputHarness::setup_route(cx, "computer");
+
     harness.driver.seed_distinct_computer_inventory();
 
-    assert!(harness.driver.reading_is_visible("computer-model:This Mac"));
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("computer-spec:Model identifier:Mac99,1")
-    );
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("computer-spec:Chip:Apple M2 Max")
-    );
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("computer-spec:Physical CPU cores:12")
-    );
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("computer-spec:Installed memory:96.00 GiB")
-    );
+    for reading in [
+        "computer-model:This Mac",
+        "computer-spec:Model identifier:Mac99,1",
+        "computer-spec:Chip:Apple M2 Max",
+        "computer-spec:CPU:12 cores",
+        "computer-spec:Memory:96 GiB unified memory",
+    ] {
+        assert!(harness.driver.reading_is_visible(reading), "{reading}");
+    }
     assert!(
         !harness
             .driver
@@ -187,9 +159,8 @@ impl InputDriver {
         self.view.update(&mut self.context, |dashboard, cx| {
             for (label, reading) in [
                 ("Chip", "Apple M2 Max"),
-                ("Physical CPU cores · maximum this boot", "12"),
-                ("Logical CPUs · maximum this boot", "12"),
-                ("Installed memory", "96.00 GiB · 103079215104 bytes"),
+                ("CPU cores", "12"),
+                ("Memory", "96 GiB"),
             ] {
                 dashboard
                     .inventory
@@ -201,23 +172,6 @@ impl InputDriver {
             cx.notify();
         });
         self.context.run_until_parked();
-    }
-
-    fn assert_computer_detail_fits(&mut self, selector: &'static str) {
-        let panel = self
-            .context
-            .debug_bounds("computer-system-details")
-            .unwrap();
-        let reading = self.context.debug_bounds(selector).expect(selector);
-        assert!(panel.left() <= reading.left());
-        assert!(reading.right() <= panel.right());
-        assert!(panel.top() <= reading.top());
-        assert!(reading.bottom() <= panel.bottom());
-        let viewport = self.context.update(|window, _| window.viewport_size());
-        assert!(px(0.0) <= reading.left());
-        assert!(reading.right() <= viewport.width);
-        assert!(px(0.0) <= reading.top());
-        assert!(reading.bottom() <= viewport.height);
     }
 
     fn assert_computer_specification_fits(&mut self, selector: &'static str) {
@@ -232,36 +186,15 @@ impl InputDriver {
 }
 
 #[gpui::test]
-fn computer_reference_links_open_the_traceable_source_with_keyboard_input(cx: &mut TestAppContext) {
-    // Release Enter to activate the named reference through GPUI's fake platform.
+fn computer_reference_inline_link_opens_its_source_when_clicked(cx: &mut TestAppContext) {
+    // Goal: a linked run in the reference text opens its source, as the prototype's links do.
+    // Method: click the first characters of the paragraph that opens with Apple's service view.
     let mut harness = InputHarness::setup_route(cx, "computer");
     harness.driver.seed_computer_inventory("Mac17,8");
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("computer-reference:Apple fan procedure")
-    );
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("computer-reference:Apple exploded view")
-    );
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("computer-reference:Counterpoint M5 Pro chip teardown")
-    );
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("computer-reference:iFixit 2026 logic-board replacement")
-    );
 
-    harness.driver.focus_computer_reference();
-    harness.driver.press_computer_reference_key();
-    assert!(cx.opened_url().is_none());
-
-    harness.driver.release_computer_reference_key();
+    harness
+        .driver
+        .click_computer_reference_start("computer-reference-paragraph:1");
 
     assert_eq!(
         cx.opened_url().as_deref(),
@@ -270,38 +203,68 @@ fn computer_reference_links_open_the_traceable_source_with_keyboard_input(cx: &m
     harness.teardown();
 }
 
+#[gpui::test]
+fn computer_reference_plain_text_opens_nothing_when_clicked(cx: &mut TestAppContext) {
+    // Goal: only linked runs open a source. Method: click the start of the first paragraph,
+    // which links nothing.
+    let mut harness = InputHarness::setup_route(cx, "computer");
+    harness.driver.seed_computer_inventory("Mac17,8");
+
+    harness
+        .driver
+        .click_computer_reference_start("computer-reference-paragraph:0");
+
+    assert!(cx.opened_url().is_none());
+    harness.teardown();
+}
+
 impl InputDriver {
-    fn focus_computer_reference(&mut self) {
-        let bounds = self
-            .context
-            .debug_bounds("computer-reference:Apple logic-board service view")
-            .unwrap();
+    fn click_computer_reference_start(&mut self, paragraph: &'static str) {
+        let bounds = self.context.debug_bounds(paragraph).unwrap();
+        let position = bounds.origin + gpui::point(px(12.0), px(6.0));
         self.context.simulate_mouse_down(
-            bounds.center(),
-            gpui::MouseButton::Right,
+            position,
+            gpui::MouseButton::Left,
             gpui::Modifiers::none(),
         );
-        self.context.simulate_mouse_up(
-            bounds.center(),
-            gpui::MouseButton::Right,
-            gpui::Modifiers::none(),
-        );
+        self.context
+            .simulate_mouse_up(position, gpui::MouseButton::Left, gpui::Modifiers::none());
         self.context.run_until_parked();
     }
+}
 
-    fn press_computer_reference_key(&mut self) {
-        self.context.simulate_event(gpui::KeyDownEvent {
-            keystroke: gpui::Keystroke::parse("enter").unwrap(),
-            is_held: false,
-            prefer_character_input: false,
-        });
-        self.context.run_until_parked();
-    }
+#[gpui::test]
+fn computer_header_names_its_snapshot_source_without_time_controls(cx: &mut TestAppContext) {
+    // Goal: the Computer header reads as the prototype's, a source and no time selection,
+    // since the page shows no recorded second. Method: open Computer and read the header.
+    let mut harness = InputHarness::setup_route(cx, "computer");
 
-    fn release_computer_reference_key(&mut self) {
-        self.context.simulate_event(gpui::KeyUpEvent {
-            keystroke: gpui::Keystroke::parse("enter").unwrap(),
-        });
-        self.context.run_until_parked();
-    }
+    harness.driver.seed_computer_inventory("Mac17,8");
+
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("source-status:System snapshot")
+    );
+    assert!(!harness.driver.reading_is_visible("time-range"));
+    assert!(!harness.driver.reading_is_visible("reading-selected"));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn self_header_keeps_its_source_without_time_controls(cx: &mut TestAppContext) {
+    // Goal: Self-monitoring shows no time selection, as in the prototype, since its readings
+    // do not follow chart inspection. Method: open Self-monitoring and read the header.
+    let mut harness = InputHarness::setup_route(cx, "self");
+
+    harness
+        .driver
+        .context
+        .simulate_resize(gpui::size(px(1200.0), px(2000.0)));
+    harness.driver.context.run_until_parked();
+
+    assert!(harness.driver.reading_is_visible("reading-controls"));
+    assert!(!harness.driver.reading_is_visible("time-range"));
+    assert!(!harness.driver.reading_is_visible("reading-selected"));
+    harness.teardown();
 }

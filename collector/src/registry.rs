@@ -145,6 +145,15 @@ impl Entry {
         ))
     }
 
+    /// The whole number the property `key` holds, or none where the entry has no such
+    /// property, it holds no number, or it holds a negative one.
+    pub(crate) fn count(&self, key: &str) -> io::Result<Option<u64>> {
+        let Some(value) = self.property(&Key::new(key)?) else {
+            return Ok(None);
+        };
+        Ok(number_count(value.0))
+    }
+
     /// The whole-number values the dictionary property `key` holds under each of `names`,
     /// each none where the dictionary lacks it, holds no number there, or holds a negative
     /// one. The whole array is none where the entry has no such dictionary.
@@ -181,6 +190,11 @@ fn dictionary_count(dictionary: *const c_void, name: &Key) -> Option<u64> {
     if value.is_null() {
         return None;
     }
+    number_count(value)
+}
+
+/// The whole number `value` holds, or none where it is no number or a negative one.
+fn number_count(value: *const c_void) -> Option<u64> {
     if unsafe { CFGetTypeID(value) } != unsafe { CFNumberGetTypeID() } {
         return None;
     }

@@ -3,6 +3,7 @@ use std::io;
 use std::mem::offset_of;
 
 use crate::kernel::{self, KernReturn, MachPort, Sysctl, kern_return_check};
+use crate::registry::Entry;
 use crate::{u64_from_usize, usize_from_u32};
 
 pub struct Machine {
@@ -367,6 +368,17 @@ pub fn performance_levels() -> io::Result<Option<PerformanceLevels>> {
     }))
 }
 
+/// The GPU cores the GPU driver reports, or none where the machine has no Apple GPU driver
+/// or the driver reports no count.
+pub fn gpu_cores() -> io::Result<Option<u64>> {
+    let accelerator = match Entry::of_class(c"AGXAccelerator", "GPU accelerator") {
+        Ok(accelerator) => accelerator,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    accelerator.count("gpu-core-count")
+}
+
 // `processor_cpu_load_info.cpu_ticks` holds a core's ticks at the indices the CPU_STATE
 // constants name.
 const USER_INDEX: usize = cpu_ticks_index(CPU_STATE_USER);
@@ -529,6 +541,26 @@ mod tests {
             u32::from_ne_bytes(kernel::sysctl_bytes(c"hw.logicalcpu_max")),
             fast + slow
         );
+    }
+
+    #[test]
+    fn reads_the_gpu_core_count_the_registry_reports() {
+        // Goal: the GPU core count is the one the GPU driver publishes in the I/O Registry.
+        // Method: compare it with the gpu-core-count that ioreg prints for AGXAccelerator.
+        let output = std::process::Command::new("/usr/sbin/ioreg")
+            .args(["-r", "-c", "AGXAccelerator", "-d", "1"])
+            .output()
+            .unwrap();
+        let text = String::from_utf8(output.stdout).unwrap();
+        let line = text
+            .lines()
+            .find(|line| line.contains("\"gpu-core-count\" = "))
+            .unwrap();
+        let printed: u64 = line.rsplit(" = ").next().unwrap().trim().parse().unwrap();
+
+        let cores = gpu_cores().unwrap();
+
+        assert_eq!(cores, Some(printed));
     }
 
     #[test]
