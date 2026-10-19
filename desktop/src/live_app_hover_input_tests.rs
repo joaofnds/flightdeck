@@ -350,6 +350,7 @@ impl AppHoverHarness {
             },
         };
         harness.driver.seed_accepted_app();
+        harness.driver.open_process_instances();
         harness
     }
 
@@ -377,6 +378,16 @@ struct AppHoverDriver {
 }
 
 impl AppHoverDriver {
+    /// The process instances start folded, as the prototype has none, and these tests read
+    /// them, so they open the section the way its header does.
+    fn open_process_instances(&mut self) {
+        self.view
+            .update_in(&mut self.context, |dashboard, window, cx| {
+                dashboard.toggle_section(crate::live_sections::Section::AppProcesses, window, cx);
+            });
+        self.context.run_until_parked();
+    }
+
     fn vertical_wheel_keeps_table_columns(
         &mut self,
         target: fn(&crate::live_dashboard::Row) -> bool,

@@ -58,11 +58,7 @@ impl Row {
                 if title.starts_with("Inside ") {
                     "app-executable-heading".into()
                 } else {
-                    if title.starts_with("Process instances") {
-                        "app-process-heading".into()
-                    } else {
-                        "app-history-heading".into()
-                    }
+                    "app-history-heading".into()
                 }
             }
             Self::Disclosure(section) => format!("section-{}", section.id()),

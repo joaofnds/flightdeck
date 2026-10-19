@@ -8,6 +8,7 @@ pub(crate) enum Section {
     OverviewHistories,
     OverviewContext,
     AppTotals,
+    AppProcesses,
     MemoryQuantities,
     EnergyContext,
     ComputerReference,
@@ -24,6 +25,7 @@ impl Section {
             Self::EnergyContext => 4,
             Self::ComputerReference => 5,
             Self::SystemFiles => 6,
+            Self::AppProcesses => 7,
         }
     }
 
@@ -36,6 +38,7 @@ impl Section {
             Self::EnergyContext => "energy-context",
             Self::ComputerReference => "computer-reference",
             Self::SystemFiles => "system-files",
+            Self::AppProcesses => "app-processes",
         }
     }
 
@@ -48,14 +51,40 @@ impl Section {
             Self::EnergyContext => "Power breakdown and thermal context",
             Self::ComputerReference => "Schematic reference",
             Self::SystemFiles => "System file entries",
+            Self::AppProcesses => "Process instances · selected app",
         }
+    }
+
+    /// The prototype has no table of process instances, so that section starts folded and
+    /// keeps the Apps page to the prototype's content until the user opens it.
+    fn starts_folded(self) -> bool {
+        matches!(self, Self::AppProcesses)
     }
 }
 
-#[derive(Default)]
+const SECTIONS: [Section; 8] = [
+    Section::OverviewHistories,
+    Section::OverviewContext,
+    Section::AppTotals,
+    Section::MemoryQuantities,
+    Section::EnergyContext,
+    Section::ComputerReference,
+    Section::SystemFiles,
+    Section::AppProcesses,
+];
+
 pub(crate) struct Sections {
-    collapsed: [bool; 7],
-    focus: [Option<FocusHandle>; 7],
+    collapsed: [bool; 8],
+    focus: [Option<FocusHandle>; 8],
+}
+
+impl Default for Sections {
+    fn default() -> Self {
+        Self {
+            collapsed: SECTIONS.map(Section::starts_folded),
+            focus: Default::default(),
+        }
+    }
 }
 
 impl Sections {
@@ -64,7 +93,7 @@ impl Sections {
     }
 
     pub(crate) fn reset(&mut self) {
-        self.collapsed.fill(false);
+        self.collapsed = SECTIONS.map(Section::starts_folded);
     }
 
     fn install_focus(&mut self, cx: &mut Context<LiveDashboard>) -> bool {
@@ -166,7 +195,12 @@ impl LiveDashboard {
             )
     }
 
-    fn toggle_section(&mut self, section: Section, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_section(
+        &mut self,
+        section: Section,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let offset = self.list.logical_scroll_top();
         let anchor = self
             .rows

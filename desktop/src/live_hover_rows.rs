@@ -436,11 +436,24 @@ impl LiveDashboard {
         if self.sections.expanded(Section::AppTotals) {
             self.reading_rows_app_totals(&mut rows);
         }
-        rows.push(Row::Heading("Process instances · selected app".into()));
-        rows.push(Row::AppColumns("processes"));
+        rows.push(Row::Disclosure(Section::AppProcesses));
+        if self.sections.expanded(Section::AppProcesses) {
+            rows.push(Row::AppColumns("processes"));
+            Self::reading_rows_processes(&mut rows, detail, self.request.executable.as_deref());
+        }
+        assert!(rows.len() <= 2048);
+
+        rows
+    }
+
+    fn reading_rows_processes(
+        rows: &mut Vec<Row>,
+        detail: Option<&Value>,
+        executable: Option<&str>,
+    ) {
         for index in 0..array_len(detail, "processes") {
             if let Some(detail) = detail {
-                if let Some(key) = &self.request.executable {
+                if let Some(key) = executable {
                     if !crate::live_executables::matches(&detail["processes"][index], key) {
                         continue;
                     }
@@ -448,9 +461,6 @@ impl LiveDashboard {
             }
             rows.push(Row::Process(index));
         }
-        assert!(rows.len() <= 2048);
-
-        rows
     }
 
     fn reading_rows_app_totals(&self, rows: &mut Vec<Row>) {
