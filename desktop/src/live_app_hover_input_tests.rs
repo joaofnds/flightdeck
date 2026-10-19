@@ -334,7 +334,8 @@ impl AppHoverDriver {
         self.context
             .simulate_resize(gpui::size(gpui::px(640.0), gpui::px(2400.0)));
         self.context.run_until_parked();
-        self.scroll_to_processes("process-0");
+        // Reveal every compared process row before testing horizontal column alignment.
+        self.scroll_to_processes("process-2");
         let row = self.context.debug_bounds("process-0").unwrap();
         self.context.simulate_event(gpui::ScrollWheelEvent {
             position: row.center(),

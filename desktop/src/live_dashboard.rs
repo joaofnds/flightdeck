@@ -86,7 +86,10 @@ pub enum Row {
     CPUTop(Option<Rc<Panel>>),
     CPUActivity,
     CPUHistory,
-    Charts(Vec<Rc<Panel>>),
+    Charts {
+        panels: Vec<Rc<Panel>>,
+        columns: usize,
+    },
     Heading(String),
     Hardware,
     TableHeading(String),

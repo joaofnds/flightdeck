@@ -2,6 +2,9 @@ use super::*;
 use crate::live_process_history::ProcessHistory;
 use crate::process_history_tests::payload;
 
+#[path = "live_apps_layout_input_tests.rs"]
+mod apps_layout;
+
 #[gpui::test]
 fn named_process_history_selection_loads_distinct_panels_before_app_totals_and_instances(
     cx: &mut TestAppContext,

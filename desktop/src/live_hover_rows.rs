@@ -11,7 +11,7 @@ impl LiveDashboard {
         if self.viewport_size.width < gpui::px(640.0) {
             return 1;
         }
-        if self.request.route == "overview" {
+        if matches!(self.request.route.as_str(), "overview" | "apps") {
             if self.viewport_size.width >= gpui::px(1100.0) {
                 return 3;
             }
@@ -121,7 +121,10 @@ impl LiveDashboard {
         for panels in self.panels[first.min(primary_panel_count)..primary_panel_count]
             .chunks(self.reading_chart_columns())
         {
-            rows.push(Row::Charts(panels.to_vec()));
+            rows.push(Row::Charts {
+                panels: panels.to_vec(),
+                columns: panels.len(),
+            });
         }
     }
 
@@ -130,7 +133,10 @@ impl LiveDashboard {
             self.reading_rows_charts_memory_panels(&["live-memory", "live-memory-pressure"]);
 
         for panels in primary.chunks(self.reading_chart_columns()) {
-            rows.push(Row::Charts(panels.to_vec()));
+            rows.push(Row::Charts {
+                panels: panels.to_vec(),
+                columns: panels.len(),
+            });
         }
 
         rows.push(Row::Heading("Swap and paging".into()));
@@ -143,7 +149,10 @@ impl LiveDashboard {
         };
 
         for panels in swap.chunks(columns) {
-            rows.push(Row::Charts(panels.to_vec()));
+            rows.push(Row::Charts {
+                panels: panels.to_vec(),
+                columns,
+            });
         }
     }
 
@@ -170,7 +179,10 @@ impl LiveDashboard {
             .collect();
 
         for panels in power.chunks(self.reading_chart_columns()) {
-            rows.push(Row::Charts(panels.to_vec()));
+            rows.push(Row::Charts {
+                panels: panels.to_vec(),
+                columns: panels.len(),
+            });
         }
 
         let metric = crate::live_app_attribution_history::Metric::Power;
@@ -192,7 +204,10 @@ impl LiveDashboard {
             .collect();
 
         for panels in context.chunks(self.reading_chart_columns()) {
-            rows.push(Row::Charts(panels.to_vec()));
+            rows.push(Row::Charts {
+                panels: panels.to_vec(),
+                columns: panels.len(),
+            });
         }
     }
 
@@ -206,7 +221,10 @@ impl LiveDashboard {
             rows.push(Row::CPUTop(panel));
         } else {
             if let Some(panel) = panel {
-                rows.push(Row::Charts(vec![panel]));
+                rows.push(Row::Charts {
+                    panels: vec![panel],
+                    columns: 1,
+                });
             }
             rows.push(Row::CPUActivity);
             rows.push(Row::CPUHistory);
@@ -241,7 +259,10 @@ impl LiveDashboard {
             .collect();
 
         for panels in context.chunks(self.reading_chart_columns()) {
-            rows.push(Row::Charts(panels.to_vec()));
+            rows.push(Row::Charts {
+                panels: panels.to_vec(),
+                columns: panels.len(),
+            });
         }
         if self.snapshot.is_some() {
             rows.push(Row::Heading("MacBook".into()));
@@ -300,8 +321,12 @@ impl LiveDashboard {
             .filter(|panel| panel.id.starts_with("live-app-"))
             .cloned()
             .collect();
-        for panels in totals.chunks(self.reading_chart_columns()) {
-            rows.push(Row::Charts(panels.to_vec()));
+        let columns = self.reading_chart_columns().min(2);
+        for panels in totals.chunks(columns) {
+            rows.push(Row::Charts {
+                panels: panels.to_vec(),
+                columns,
+            });
         }
         rows.push(Row::Heading("Process instances · selected app".into()));
         rows.push(Row::AppColumns("processes"));
@@ -354,7 +379,10 @@ impl LiveDashboard {
             .cloned()
             .collect();
         for panels in panels.chunks(self.reading_chart_columns()) {
-            rows.push(Row::Charts(panels.to_vec()));
+            rows.push(Row::Charts {
+                panels: panels.to_vec(),
+                columns: self.reading_chart_columns(),
+            });
         }
     }
 }

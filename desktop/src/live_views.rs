@@ -239,7 +239,7 @@ impl LiveDashboard {
         );
         let content = self.row_content(index, cx);
         let padding = match &self.rows[index] {
-            Row::Charts(_) => 4.0,
+            Row::Charts { .. } => 4.0,
             _ => 8.0,
         };
         let key = self.rows[index].layout_key();
@@ -304,20 +304,7 @@ impl LiveDashboard {
                 crate::live_app_views::app_table_columns(kind, &self.app_table_scroll)
                     .into_any_element()
             }
-            Row::Charts(panels) => div()
-                .flex()
-                .gap(px(8.0))
-                .children(panels.iter().map(|panel| {
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .child(self.live_chart(panel, cx))
-                }))
-                .when(self.row_content_memory_needs_spacer(panels), |row| {
-                    row.child(div().flex_1().min_w_0())
-                })
-                .into_any_element(),
+            Row::Charts { panels, columns } => self.row_content_charts(panels, *columns, cx),
             Row::Heading(title) => div()
                 .debug_selector(|| title.clone())
                 .text_size(px(17.0))
@@ -334,28 +321,28 @@ impl LiveDashboard {
         }
     }
 
-    fn row_content_memory_needs_spacer(&self, panels: &[Rc<crate::data::Panel>]) -> bool {
-        if self.request.route != "memory" {
-            return false;
-        }
+    fn row_content_charts(
+        &self,
+        panels: &[Rc<crate::data::Panel>],
+        columns: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        assert!((1..=3).contains(&columns));
+        assert!(!panels.is_empty());
+        assert!(panels.len() <= columns);
 
-        let [panel] = panels else {
-            return false;
-        };
-
-        if panel.id != "live-paging" {
-            return false;
-        }
-
-        if self.viewport_size.width < px(640.0) {
-            return false;
-        }
-
-        if self.viewport_size.width >= px(1100.0) {
-            return false;
-        }
-
-        true
+        div()
+            .flex()
+            .gap(px(8.0))
+            .children(panels.iter().map(|panel| {
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .child(self.live_chart(panel, cx))
+            }))
+            .children((panels.len()..columns).map(|_| div().flex_1().min_w_0()))
+            .into_any_element()
     }
 
     fn summary(&self, cx: &mut Context<Self>) -> impl IntoElement {

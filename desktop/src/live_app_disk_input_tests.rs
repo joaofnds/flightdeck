@@ -394,7 +394,7 @@ impl AppHoverDriver {
                 .rows
                 .iter()
                 .position(|row| {
-                    matches!(row, crate::live_dashboard::Row::Charts(panels)
+                    matches!(row, crate::live_dashboard::Row::Charts { panels, .. }
                     if panels.iter().any(|panel| panel.id == "live-app-disk"))
                 })
                 .unwrap();
