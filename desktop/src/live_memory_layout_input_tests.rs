@@ -133,6 +133,34 @@ fn memory_swap_paging_band_hover_keeps_geometry_and_restores_the_exact_selection
     harness.teardown();
 }
 
+#[gpui::test]
+fn memory_pressure_draws_the_prototype_timeline_beside_memory_in_use(cx: &mut TestAppContext) {
+    // Goal: the Memory page's pressure is the prototype's full-height labelled timeline, and
+    // its caption follows the hovered second.
+    // Method: seed two captured seconds, measure the band, then hover the earlier second.
+    let mut harness = InputHarness::setup_route(cx, "memory");
+    harness.driver.seed_memory_band(1320.0);
+
+    let band = harness.driver.chart_bounds("live-memory-pressure-plot");
+    assert_eq!(band.size.height, px(173.0));
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("chart-caption:live-memory-pressure:Warning")
+    );
+
+    harness
+        .driver
+        .hover_previous_second_on("live-memory-pressure-plot");
+
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("chart-caption:live-memory-pressure:Normal")
+    );
+    harness.teardown();
+}
+
 impl InputDriver {
     fn seed_memory_band(&mut self, width: f32) {
         self.view.update(&mut self.context, |dashboard, cx| {
@@ -221,7 +249,7 @@ fn assert_memory_band_order(driver: &mut InputDriver) {
 }
 
 fn assert_memory_band_historical(driver: &mut InputDriver) {
-    assert_memory_band_reading(driver, 999, 1, "1.0 MiB/s");
+    assert_memory_band_reading(driver, 999, 1, "1.0 MB/s");
     assert!(driver.reading_is_visible("memory-quantity:Active:2.0 GiB"));
     assert_memory_band_legends(
         driver,
@@ -255,7 +283,7 @@ fn assert_memory_band_gap(driver: &mut InputDriver) {
 }
 
 fn assert_memory_band_current(driver: &mut InputDriver) {
-    assert_memory_band_reading(driver, 1000, 2, "3.0 MiB/s");
+    assert_memory_band_reading(driver, 1000, 2, "3.0 MB/s");
     assert_memory_band_legends(
         driver,
         [
@@ -310,8 +338,8 @@ fn memory_band_point(point: &mut Value, index: usize) {
         };
     point["memory_active_bytes"] = json!(active * gibibyte);
     point["swap_used_bytes"] = json!(swap * gibibyte);
-    point["swap_in_bytes_per_second"] = json!(input * 1_048_576.0);
-    point["swap_out_bytes_per_second"] = json!(output * 1_048_576.0);
+    point["swap_in_bytes_per_second"] = json!(input * 1_000_000.0);
+    point["swap_out_bytes_per_second"] = json!(output * 1_000_000.0);
     point["memory_pageins_per_second"] = json!(pageins);
     point["memory_pageouts_per_second"] = json!(pageouts);
     point["memory_compressions_per_second"] = json!(compressed);

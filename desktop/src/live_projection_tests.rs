@@ -124,7 +124,7 @@ fn memory_composition_selection() -> Value {
 fn assert_memory_composition(memory: &Panel) {
     assert_eq!(memory.unit, "GiB");
     assert_eq!(memory.stack, Some(true));
-    assert_eq!(memory.fill, Some(1.0));
+    assert_eq!(memory.fill, Some(0.45));
     assert_eq!(
         memory
             .lines
@@ -614,11 +614,12 @@ fn energy_rejects_fan_arrays_beyond_the_recording_bound() {
 
 #[test]
 fn memory_exposes_mirrored_swap_flow_without_negating_quantities() {
-    // Goal: disk swap traffic retains direction and independent missingness.
-    // Method: compare source bytes converted to MiB/s and outgoing plot metadata.
+    // Goal: disk swap traffic retains direction and independent missingness, named and
+    // scaled as the prototype's Paging chart.
+    // Method: compare source bytes converted to MB/s and outgoing plot metadata.
     let mut selection = selection();
-    selection["trends"][1]["swap_in_bytes_per_second"] = json!(1_048_576);
-    selection["trends"][1]["swap_out_bytes_per_second"] = json!(2_097_152);
+    selection["trends"][1]["swap_in_bytes_per_second"] = json!(1_000_000);
+    selection["trends"][1]["swap_out_bytes_per_second"] = json!(2_000_000);
 
     let memory = panels("memory", &selection, None).unwrap();
     let swap = memory
@@ -626,11 +627,34 @@ fn memory_exposes_mirrored_swap_flow_without_negating_quantities() {
         .find(|panel| panel.id == "live-swap-flow")
         .unwrap();
 
-    assert_eq!(swap.unit, "MiB/s");
+    assert_eq!(swap.title, "Paging");
+    assert_eq!(swap.unit, "MB/s");
+    assert_eq!(swap.lines[0].name, "Read from swap");
+    assert_eq!(swap.lines[1].name, "Write to swap");
     assert_eq!(swap.lines[0].values, [None, Some(1.0), None]);
     assert_eq!(swap.lines[1].values, [None, Some(2.0), None]);
     assert_eq!(swap.lines[0].negative, Some(false));
     assert_eq!(swap.lines[1].negative, Some(true));
+}
+
+#[test]
+fn memory_draws_memory_in_use_and_page_ins_as_the_prototype_names_them() {
+    // Goal: the Memory page's charts carry the prototype's titles and solid series lines.
+    // Method: project the memory route and read each chart's title and series.
+    let memory = panels("memory", &selection(), None).unwrap();
+    let find = |id: &str| memory.iter().find(|panel| panel.id == id).unwrap();
+
+    let composition = find("live-memory");
+    let paging = find("live-paging");
+
+    assert_eq!(composition.title, "Memory in use");
+    assert_eq!(paging.title, "Page-ins and compression");
+    let names: Vec<_> = paging.lines.iter().map(|line| line.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["Page-ins", "Page-outs", "Compressed", "Decompressed"]
+    );
+    assert!(paging.lines.iter().all(|line| line.dashed != Some(true)));
 }
 
 #[test]

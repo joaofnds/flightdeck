@@ -3,7 +3,7 @@ use serde_json::Value;
 
 use crate::charts::{GRID, MUTED, ORANGE, PANEL, TEXT};
 use crate::live_chart_view::timeline::{
-    timeline_caption_text, timeline_heading_text, timeline_label,
+    self, timeline_caption_text, timeline_heading_text, timeline_label,
 };
 use crate::live_dashboard::LiveDashboard;
 use crate::live_projection::quantity;
@@ -41,7 +41,7 @@ impl LiveDashboard {
             .iter()
             .take(64)
             .find(|panel| panel.id == "live-memory-pressure")
-            .map(|panel| self.live_timeline(panel, cx));
+            .map(|panel| self.live_timeline(panel, timeline::BAND_COMPACT, cx));
 
         div()
             .grid()
@@ -148,10 +148,9 @@ impl LiveDashboard {
             })
             .gap(px(8.0))
             .child(
-                div()
-                    .flex()
-                    .min_w_0()
-                    .children(panel.map(|panel| self.live_timeline(panel, cx))),
+                div().flex().min_w_0().children(
+                    panel.map(|panel| self.live_timeline(panel, timeline::BAND_COMPACT, cx)),
+                ),
             )
             .child(details)
             .into_any_element()

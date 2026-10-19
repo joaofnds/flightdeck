@@ -536,7 +536,7 @@ fn memory() -> Specification {
     installed.fill = Some(0.0);
     let mut specification = specification(
         "live-memory",
-        "Memory composition",
+        "Memory in use",
         "GiB",
         vec![
             reading("memory_app_bytes", "App memory", "#73bf69", GIBIBYTE),
@@ -546,7 +546,7 @@ fn memory() -> Specification {
         ],
     );
     specification.stack = true;
-    specification.fill = 1.0;
+    specification.fill = 0.45;
 
     specification
 }
@@ -820,7 +820,6 @@ fn memory_paging() -> Specification {
         "#ff9830",
         1.0,
     );
-    compressions.dashed = true;
     compressions.unit = Some("pages/s");
     let mut decompressions = reading(
         "memory_decompressions_per_second",
@@ -828,45 +827,52 @@ fn memory_paging() -> Specification {
         "#b877d9",
         1.0,
     );
-    decompressions.dashed = true;
     decompressions.unit = Some("pages/s");
 
     let mut specification = specification(
         "live-paging",
-        "Paging and compression",
+        "Page-ins and compression",
         "/s",
         vec![pageins, pageouts, compressions, decompressions],
     );
-    specification.help = "Page-ins, page-outs, compression and decompression count pages \
-        per second. Pages are not converted to bytes. \
+    specification.help = "Page-ins count memory pages brought in from disk, including app \
+        code, and are not limited to swap. Page-outs, compression and decompression count \
+        pages per second too. Pages are not converted to bytes. \
         Unavailable counter intervals remain gaps.";
 
     specification
 }
 
+/// Swap traffic, as the prototype's Paging chart draws it. The prototype also draws pages
+/// written out in bytes, which the collector counts only in pages, so page-outs stay in the
+/// page-ins chart rather than being converted here.
 fn memory_swap_flow() -> Specification {
     let mut swap_out = reading(
         "swap_out_bytes_per_second",
-        "Swap-out",
-        "#b877d9",
-        1_048_576.0,
+        "Write to swap",
+        "#f2495c",
+        1_000_000.0,
     );
     swap_out.negative = true;
 
-    specification(
+    let mut specification = specification(
         "live-swap-flow",
-        "Swap traffic",
-        "MiB/s",
+        "Paging",
+        "MB/s",
         vec![
             reading(
                 "swap_in_bytes_per_second",
-                "Swap-in",
-                "#5794f2",
-                1_048_576.0,
+                "Read from swap",
+                "#b877d9",
+                1_000_000.0,
             ),
             swap_out,
         ],
-    )
+    );
+    specification.help = "Bytes read from and written to swap on disk each second. \
+        Pages written out are counted in pages, in Page-ins and compression.";
+
+    specification
 }
 
 fn network() -> Vec<Specification> {

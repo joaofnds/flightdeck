@@ -125,11 +125,12 @@ impl LiveDashboard {
             .flex()
             .gap(px(8.0))
             .children(panels.iter().map(|panel| {
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .child(self.live_chart(panel, cx))
+                let chart = if panel.kind == "timeline" {
+                    self.live_timeline(panel, crate::live_chart_view::timeline::BAND_FULL, cx)
+                } else {
+                    self.live_chart(panel, cx).into_any_element()
+                };
+                div().flex_1().min_w_0().flex().child(chart)
             }))
             .children((panels.len()..columns).map(|_| div().flex_1().min_w_0()))
             .into_any_element()

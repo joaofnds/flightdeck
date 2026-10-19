@@ -39,8 +39,11 @@ impl LiveDashboard {
             time,
         );
         let cursor = self.chart_cursor_fraction(panel);
-        let timeline = panel.kind == "timeline";
-        let height = if timeline { 100.0 } else { 190.0 };
+        assert!(
+            panel.kind != "timeline",
+            "a timeline draws through live_timeline"
+        );
+        let height = 190.0;
         let chart = self
             .chart_events(
                 div()
@@ -54,12 +57,8 @@ impl LiveDashboard {
                 cx,
             )
             .into_any_element();
-        let axis = if timeline {
-            None
-        } else {
-            Some(charts::axis_labels(scale, charts::axis_unit(panel, "left")))
-        };
-        let gutter = axis.as_ref().map_or(px(0.0), |labels| labels.width);
+        let axis = charts::axis_labels(scale, charts::axis_unit(panel, "left"));
+        let gutter = axis.width;
         let reading = if is_process_disk(panel) {
             self.chart_disk_headline(panel, index)
         } else {
@@ -81,7 +80,7 @@ impl LiveDashboard {
             .child(chart_plot_row(
                 &panel.id,
                 reading,
-                axis.map(|labels| (labels, height)),
+                Some((axis, height)),
                 chart,
             ))
             .child(
@@ -212,9 +211,10 @@ impl LiveDashboard {
         }
 
         if panel.id == "live-memory-pressure" {
-            let summary = self
+            let selection = self
                 .reading_snapshot()
-                .map_or(&Value::Null, |snapshot| &snapshot.selection["summary"]);
+                .map_or(&Value::Null, |snapshot| &snapshot.selection);
+            let summary = crate::live_views::matching_summary(selection);
             return crate::live_views::pressure(&summary["pressure"]).to_owned();
         }
 
@@ -589,25 +589,23 @@ impl LiveDashboard {
         let controls = div()
             .flex()
             .gap(px(6.0))
-            .when(panel.kind != "timeline", |controls| {
-                controls.child(
-                    control("Data")
-                        .debug_selector(|| format!("chart-data:{}", panel.id))
-                        .aria_label(format!("Data for {}", panel.title))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.open_chart_inspector(&inspector_panel, window, cx);
-                        }))
-                        .on_key_down(cx.listener(
-                            move |this, event: &gpui::KeyDownEvent, window, cx| {
-                                if ["enter", "space"].contains(&event.keystroke.key.as_str()) {
-                                    this.open_chart_inspector(&keyboard_panel, window, cx);
-                                    window.prevent_default();
-                                    cx.stop_propagation();
-                                }
-                            },
-                        )),
-                )
-            })
+            .child(
+                control("Data")
+                    .debug_selector(|| format!("chart-data:{}", panel.id))
+                    .aria_label(format!("Data for {}", panel.title))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_chart_inspector(&inspector_panel, window, cx);
+                    }))
+                    .on_key_down(cx.listener(
+                        move |this, event: &gpui::KeyDownEvent, window, cx| {
+                            if ["enter", "space"].contains(&event.keystroke.key.as_str()) {
+                                this.open_chart_inspector(&keyboard_panel, window, cx);
+                                window.prevent_default();
+                                cx.stop_propagation();
+                            }
+                        },
+                    )),
+            )
             .child(control("ⓘ").tooltip(move |_, cx| cx.new(|_| ChartHelp(help.clone())).into()));
 
         div()
@@ -654,10 +652,6 @@ impl LiveDashboard {
         index: Option<usize>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        if panel.states.is_some() {
-            return state_legend(panel);
-        }
-
         let mut legends = div()
             .flex()
             .flex_wrap()
@@ -981,27 +975,6 @@ fn line_reading(panel: &Panel, value: Option<f32>, unit: &str) -> String {
     }
 
     reading(value, unit)
-}
-
-fn state_legend(panel: &Panel) -> gpui::Div {
-    let mut legend = div().flex().flex_wrap().gap_x(px(12.0)).text_size(px(11.0));
-    if let Some(states) = &panel.states {
-        for (index, label) in states.iter().take(16).enumerate() {
-            legend = legend.child(
-                div()
-                    .debug_selector(|| format!("state-legend:{label}"))
-                    .text_color(rgb(charts::timeline_color(panel, charts::number(index))))
-                    .child(format!("■ {label}")),
-            );
-        }
-    }
-
-    legend.child(
-        div()
-            .debug_selector(|| "state-legend:Blank: unavailable".into())
-            .text_color(rgb(MUTED))
-            .child("Blank: unavailable"),
-    )
 }
 
 fn inspection_index(panel: &Panel, snapshot: &Snapshot, second: Option<u64>) -> Option<usize> {

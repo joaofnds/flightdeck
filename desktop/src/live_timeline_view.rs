@@ -1,5 +1,5 @@
-//! The compact state timeline the prototype draws for memory pressure beside thermal state:
-//! a labelled band, the window's first and last minute, and a caption naming the state.
+//! The state timeline the prototype draws for memory pressure and charging: a labelled band,
+//! the window's first and last minute, and a caption naming the state.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -13,13 +13,22 @@ use crate::data::Panel;
 use crate::live_dashboard::LiveDashboard;
 use crate::live_presentation::clock;
 
-/// The height of the state band, as the prototype's compact timeline draws it.
-const BAND_HEIGHT: f32 = 45.0;
+/// The height of the state band, as the prototype's compact timeline draws it beside other
+/// context, and as its full timeline draws it as a page's own chart.
+pub(crate) const BAND_COMPACT: Pixels = px(45.0);
+pub(crate) const BAND_FULL: Pixels = px(161.0);
 /// The prototype narrows the label column on plots under this many pixels wide.
 const NARROW_CARD: f32 = 300.0;
 
 impl LiveDashboard {
-    pub(crate) fn live_timeline(&self, panel: &Rc<Panel>, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn live_timeline(
+        &self,
+        panel: &Rc<Panel>,
+        band_height: Pixels,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        assert!(band_height > px(0.0));
+
         let index = self.chart_inspection_index(panel);
         let inspection = super::chart_inspection(panel, index);
         let measured = Rc::new(Cell::new(Bounds::default()));
@@ -36,7 +45,7 @@ impl LiveDashboard {
                 .relative()
                 .flex_1()
                 .min_w_0()
-                .h(charts::PLOT_INSETS.top + px(BAND_HEIGHT) + charts::PLOT_INSETS.bottom)
+                .h(charts::PLOT_INSETS.top + band_height + charts::PLOT_INSETS.bottom)
                 .child(plot)
                 .child(super::chart_cursor(cursor))
                 .children(self.chart_tooltip(panel, index, cursor)),

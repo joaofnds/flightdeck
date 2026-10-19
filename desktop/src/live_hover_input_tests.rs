@@ -16,7 +16,11 @@ fn pressure_accessibility_uses_the_exact_effective_sibling_and_gap(cx: &mut Test
     let mut harness = HoverHarness::setup(cx, Route::Memory, Mode::Follow);
     harness.driver.inspect_same_second_memory_sibling();
 
-    assert!(harness.driver.text_is_visible("Critical"));
+    assert!(
+        harness
+            .driver
+            .text_is_visible("chart-caption:live-memory-pressure:Critical")
+    );
     let (second, reading) = harness.driver.pressure_accessibility_reading();
     assert_eq!(second, Some(1000));
     assert!(reading.ends_with("Critical"));
