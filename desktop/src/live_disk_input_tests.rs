@@ -279,7 +279,7 @@ fn disk_attribution_hover_updates_devices_and_waits_for_exact_rankings(cx: &mut 
     assert!(
         harness
             .driver
-            .reading_is_visible("resource-field:Disk read:3.0 MB/s")
+            .reading_is_visible("summary-card:Disk read:3.0 MB/s")
     );
     assert!(
         harness

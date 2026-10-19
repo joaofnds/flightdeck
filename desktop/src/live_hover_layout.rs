@@ -17,10 +17,10 @@ impl Row {
     pub(crate) fn layout_key(&self) -> String {
         match self {
             Self::Summary => "summary".into(),
-            Self::ResourceSummary => "resource-summary".into(),
             Self::StorageDevice(_, key) => key.clone(),
             Self::Diagnostics => "diagnostics".into(),
             Self::OverviewStatus => "overview-status".into(),
+            Self::BatteryState(_) => "battery-state".into(),
             Self::OverviewRankings(slots) => format!("overview-rankings-{}", slots[0]),
             Self::OverviewAppHistories(slots) => format!("overview-app-histories-{}", slots[0]),
             Self::MemoryAttribution(_) => "memory-attribution".into(),
@@ -74,9 +74,9 @@ impl Row {
             Self::OverviewAppHistories(slots) => slots.iter().take(2).any(|slot| {
                 crate::live_overview_app_histories::overview_app_history_slot(*slot).0 == source
             }),
-            Self::MemoryAttribution(Some(panel)) | Self::AppAttribution(_, Some(panel)) => {
-                panel.id == source
-            }
+            Self::MemoryAttribution(Some(panel))
+            | Self::AppAttribution(_, Some(panel))
+            | Self::BatteryState(Some(panel)) => panel.id == source,
             Self::CPUTop(panel) => {
                 if source == "cpu-history-plot" {
                     true

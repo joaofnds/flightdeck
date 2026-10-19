@@ -1,11 +1,11 @@
 use serde_json::Value;
 
-use crate::charts::{BLUE, GREEN, MUTED, ORANGE, PURPLE, RED, YELLOW};
+use crate::charts::{BLUE, GREEN, MUTED, ORANGE, PURPLE, RED, TEXT, YELLOW};
 
 pub struct Card {
     pub label: &'static str,
     pub reading: String,
-    pub note: &'static str,
+    pub note: String,
     pub color: u32,
     pub route: &'static str,
 }
@@ -13,6 +13,11 @@ pub struct Card {
 #[derive(Clone, Copy)]
 enum Reading {
     Quantity(&'static str, &'static str, f32),
+    /// A quantity of one resource's readings, such as the battery's.
+    Resource(&'static str, &'static str, &'static str, f32),
+    Charging,
+    Health,
+    MemoryInUse,
     Pressure,
     Uncaptured,
 }
@@ -49,7 +54,7 @@ const POWER: Specification = (
 );
 const DISK_READ: Specification = (
     "Disk read",
-    Reading::Quantity("read_bps", "MB/s", 1_000_000.0),
+    Reading::Resource("storage", "read_bps", "MB/s", 1_000_000.0),
     "Machine device I/O",
     YELLOW,
     "storage",
@@ -110,17 +115,11 @@ const GPU_POWER: Specification = (
     PURPLE,
     "gpu",
 );
-const ACTIVE: Specification = (
-    "Active memory",
-    Reading::Quantity("memory_active_bytes", "GiB", 1_073_741_824.0),
-    "Active VM pages",
-    GREEN,
-    "memory",
-);
+const IN_USE: Specification = ("Memory in use", Reading::MemoryInUse, "", GREEN, "memory");
 const COMPRESSED: Specification = (
     "Compressed",
     Reading::Quantity("memory_compressed_bytes", "GiB", 1_073_741_824.0),
-    "Compressed in RAM",
+    "Included in memory in use",
     PURPLE,
     "memory",
 );
@@ -128,7 +127,7 @@ const SWAP: Specification = (
     "Swap used",
     Reading::Quantity("swap_used_bytes", "GiB", 1_073_741_824.0),
     "On the startup disk",
-    YELLOW,
+    TEXT,
     "memory",
 );
 const PROCESS_POWER: Specification = (
@@ -160,13 +159,59 @@ const SENT_PACKETS: Specification = (
     "network",
 );
 
+const DISK_WRITE: Specification = (
+    "Disk write",
+    Reading::Resource("storage", "write_bps", "MB/s", 1_000_000.0),
+    "Machine device I/O",
+    ORANGE,
+    "storage",
+);
+const READ_OPERATIONS: Specification = (
+    "Read operations",
+    Reading::Resource("storage", "read_ops_per_second", "ops/s", 1.0),
+    "Completed requests",
+    YELLOW,
+    "storage",
+);
+const WRITE_OPERATIONS: Specification = (
+    "Write operations",
+    Reading::Resource("storage", "write_ops_per_second", "ops/s", 1.0),
+    "Completed requests",
+    ORANGE,
+    "storage",
+);
+const CHARGE: Specification = (
+    "Charge",
+    Reading::Resource("battery", "charge_percent", "%", 1.0),
+    "Reported full capacity",
+    GREEN,
+    "battery",
+);
+const CHARGING: Specification = (
+    "Charging",
+    Reading::Charging,
+    "Battery-controller state",
+    TEXT,
+    "battery",
+);
+const FLOW: Specification = (
+    "Battery flow",
+    Reading::Resource("battery", "power_watts", "W", 1.0),
+    "Positive in · negative out",
+    ORANGE,
+    "battery",
+);
+const HEALTH: Specification = ("Health", Reading::Health, "", GREEN, "battery");
+
 pub fn cards(route: &str, selection: &Value) -> Vec<Card> {
     let summary = matching_summary(selection);
     let definitions = match route {
         "overview" => &[CPU, GPU, PRESSURE, POWER, DISK_READ, RECEIVE][..],
         "cpu" => &[CPU, PERFORMANCE, SUPER, LOAD][..],
         "gpu" => &[GPU, GPU_FREQUENCY, GPU_MEMORY, GPU_POWER][..],
-        "memory" => &[PRESSURE, ACTIVE, COMPRESSED, SWAP][..],
+        "memory" => &[PRESSURE, IN_USE, COMPRESSED, SWAP][..],
+        "storage" => &[DISK_READ, DISK_WRITE, READ_OPERATIONS, WRITE_OPERATIONS][..],
+        "battery" => &[CHARGE, CHARGING, FLOW, HEALTH][..],
         "energy" => &[POWER, GPU_POWER, PROCESS_POWER, THERMAL][..],
         "network" => &[RECEIVE, SEND, RECEIVED_PACKETS, SENT_PACKETS][..],
         _ => &[],
@@ -182,14 +227,37 @@ pub fn cards(route: &str, selection: &Value) -> Vec<Card> {
 fn card(summary: &Value, definition: &Specification) -> Card {
     let (label, source, note, color, route) = *definition;
     let mut color = color;
+    let mut note = note.to_owned();
     let reading = match source {
         Reading::Quantity(key, unit, divisor) => {
-            let source = if key == "read_bps" {
-                &summary["storage"]
-            } else {
-                summary
+            crate::live_projection::quantity(summary, key, unit, divisor)
+        }
+        Reading::Resource(resource, key, unit, divisor) => {
+            crate::live_projection::quantity(&summary[resource], key, unit, divisor)
+        }
+        Reading::Charging => match summary["battery"]["charging"].as_bool() {
+            Some(true) => "Yes".into(),
+            Some(false) => "No".into(),
+            None => "Unavailable".into(),
+        },
+        Reading::Health => {
+            note = match summary["battery"]["cycle_count"].as_u64() {
+                Some(cycles) => format!("{cycles} cycles"),
+                None => "Cycles unavailable".into(),
             };
-            crate::live_projection::quantity(source, key, unit, divisor)
+            crate::live_projection::quantity(&summary["battery"], "health_percent", "%", 1.0)
+        }
+        Reading::MemoryInUse => {
+            note = format!(
+                "Of {} installed",
+                crate::live_projection::quantity(
+                    summary,
+                    "memory_total_bytes",
+                    "GiB",
+                    1_073_741_824.0
+                )
+            );
+            card_memory_in_use(summary)
         }
         Reading::Pressure => {
             color = match summary["pressure"].as_u64() {
@@ -202,6 +270,9 @@ fn card(summary: &Value, definition: &Specification) -> Card {
         }
         Reading::Uncaptured => "Unavailable".into(),
     };
+    if reading == "Unavailable" {
+        color = MUTED;
+    }
 
     Card {
         label,
@@ -212,6 +283,34 @@ fn card(summary: &Value, definition: &Specification) -> Card {
     }
 }
 
+/// Memory in use as the prototype and Activity Monitor count it: app memory, wired and
+/// compressed. Any one of them missing leaves the total unavailable.
+fn card_memory_in_use(summary: &Value) -> String {
+    let anonymous = summary["memory_anonymous_bytes"].as_u64();
+    let purgeable = summary["memory_purgeable_bytes"].as_u64();
+    let app = anonymous
+        .zip(purgeable)
+        .and_then(|(anonymous, purgeable)| anonymous.checked_sub(purgeable));
+    let wired = summary["memory_wired_bytes"].as_u64();
+    let compressed = summary["memory_compressed_bytes"].as_u64();
+    let total = app
+        .zip(wired)
+        .and_then(|(app, wired)| app.checked_add(wired))
+        .zip(compressed)
+        .and_then(|(used, compressed)| used.checked_add(compressed));
+    match total {
+        Some(bytes) => crate::live_projection::quantity(
+            &serde_json::json!({ "bytes": bytes }),
+            "bytes",
+            "GiB",
+            1_073_741_824.0,
+        ),
+        None => "Unavailable".into(),
+    }
+}
+
+/// The summary only where it is the selected observation's own: the same run, boot and
+/// publication, and the same wall clock, so a sibling observation never lends its readings.
 pub(crate) fn matching_summary(selection: &Value) -> &Value {
     let selected = &selection["selected"];
     let summary = &selection["summary"];
@@ -224,5 +323,25 @@ pub(crate) fn matching_summary(selection: &Value) -> &Value {
         }
     }
 
+    if selected["wall_ns"].is_null() {
+        let (Some(wall), Some(second)) =
+            (summary["wall_ns"].as_u64(), selection["second"].as_u64())
+        else {
+            return &Value::Null;
+        };
+
+        if wall / 1_000_000_000 != second {
+            return &Value::Null;
+        }
+    } else {
+        if selected["wall_ns"] != summary["wall_ns"] {
+            return &Value::Null;
+        }
+    }
+
     summary
 }
+
+#[cfg(test)]
+#[path = "live_summary_tests.rs"]
+mod tests;

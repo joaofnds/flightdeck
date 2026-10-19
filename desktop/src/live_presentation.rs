@@ -99,6 +99,64 @@ impl LiveDashboard {
             )))
     }
 
+    /// The prototype's battery state row: the compact charging timeline and a details card
+    /// with health, cycle count and the adapter's rating.
+    pub fn battery_state(
+        &self,
+        panel: Option<&std::rc::Rc<crate::data::Panel>>,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let selection = self
+            .reading_snapshot()
+            .map_or(&Value::Null, |snapshot| &snapshot.selection);
+        let battery = &crate::live_views::matching_summary(selection)["battery"];
+        let details = overview_context_card("battery-details")
+            .child(timeline_heading_text(
+                "Battery details",
+                BATTERY_HELP.into(),
+                "About",
+            ))
+            .child(overview_context_reading(
+                &ContextReading {
+                    key: "health",
+                    label: "Health",
+                },
+                quantity(battery, "health_percent", "%", 1.0),
+            ))
+            .child(overview_context_reading(
+                &ContextReading {
+                    key: "cycles",
+                    label: "Cycles",
+                },
+                battery["cycle_count"]
+                    .as_u64()
+                    .map_or_else(|| "Unavailable".into(), |cycles| cycles.to_string()),
+            ))
+            .child(overview_context_reading(
+                &ContextReading {
+                    key: "adapter",
+                    label: "Adapter rating",
+                },
+                quantity(battery, "adapter_watts", "W", 1.0),
+            ));
+
+        div()
+            .grid()
+            .grid_cols(match self.reading_chart_columns() {
+                1 => 1,
+                _ => 2,
+            })
+            .gap(px(8.0))
+            .child(
+                div()
+                    .flex()
+                    .min_w_0()
+                    .children(panel.map(|panel| self.live_timeline(panel, cx))),
+            )
+            .child(details)
+            .into_any_element()
+    }
+
     pub fn missing_reading(&self) -> impl IntoElement {
         let missing = self
             .reading_snapshot()
@@ -114,6 +172,9 @@ impl LiveDashboard {
 
 const THERMAL_HELP: &str = "macOS's own verdict on heat, from nominal through fair and \
     serious to critical. This collector does not record it yet, so no state is shown.";
+
+const BATTERY_HELP: &str = "Health compares the full-charge capacity with the design \
+    capacity. The adapter rating is the charger's limit, not a measurement of the power drawn.";
 
 const COOLING_HELP: &str = "The SoC temperature, each fan channel's speed and the battery's \
     charge at the selected second, as the collector read them from the SMC and the battery.";

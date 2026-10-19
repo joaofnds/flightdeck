@@ -15,7 +15,7 @@ fn battery_hover_updates_selected_details_charging_metadata_and_copy_then_restor
     assert!(
         harness
             .driver
-            .reading_is_visible("resource-field:Charge:88.0 %")
+            .reading_is_visible("summary-card:Charge:88.0 %")
     );
 
     harness
@@ -25,29 +25,33 @@ fn battery_hover_updates_selected_details_charging_metadata_and_copy_then_restor
     assert!(
         harness
             .driver
-            .reading_is_visible("resource-field:Charge:33.0 %")
+            .reading_is_visible("summary-card:Charge:33.0 %")
     );
     assert!(
         harness
             .driver
-            .reading_is_visible("resource-field:Battery flow:-3.0 W")
+            .reading_is_visible("summary-card:Battery flow:-3.0 W")
     );
     assert!(
         harness
             .driver
-            .reading_is_visible("resource-field:Health:104.0 %")
+            .reading_is_visible("summary-card:Health:104.0 %")
     );
     assert!(
         harness
             .driver
-            .reading_is_visible("resource-field:Cycles:30")
+            .reading_is_visible("overview-context:cycles:30")
     );
     let (second, reading) = harness
         .driver
         .chart_accessibility_reading("live-battery-charging");
     assert_eq!(second, Some(999));
     assert!(reading.ends_with("Charging"));
-    assert!(harness.driver.reading_is_visible("Charging"));
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("chart-caption:live-battery-charging:Charging")
+    );
     let copied = harness.driver.activate_resource_copy();
     assert_eq!(copied["second"], 999);
     assert_eq!(copied["observation"]["publication"], 3);
@@ -61,14 +65,18 @@ fn battery_hover_updates_selected_details_charging_metadata_and_copy_then_restor
     assert!(
         harness
             .driver
-            .reading_is_visible("resource-field:Charge:88.0 %")
+            .reading_is_visible("summary-card:Charge:88.0 %")
     );
     assert!(
         !harness
             .driver
-            .reading_is_visible("resource-field:Charge:33.0 %")
+            .reading_is_visible("summary-card:Charge:33.0 %")
     );
-    assert!(harness.driver.reading_is_visible("Not charging"));
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("chart-caption:live-battery-charging:Not charging")
+    );
     harness.teardown();
 }
 
@@ -91,12 +99,12 @@ fn battery_gap_clears_selected_details_charging_and_copied_observation(cx: &mut 
     assert!(
         harness
             .driver
-            .reading_is_visible("resource-field:Charge:Unavailable")
+            .reading_is_visible("summary-card:Charge:Unavailable")
     );
     assert!(
         harness
             .driver
-            .reading_is_visible("resource-field:Charging:Unavailable")
+            .reading_is_visible("summary-card:Charging:Unavailable")
     );
     let (second, reading) = harness
         .driver
@@ -134,10 +142,10 @@ fn storage_hover_swaps_virtual_device_rows_and_totals_without_moving_the_plot(
     );
     harness
         .driver
-        .assert_resource_visible("resource-field:Disk read:3.0 MB/s");
+        .assert_resource_visible("summary-card:Disk read:3.0 MB/s");
     harness
         .driver
-        .assert_resource_visible("resource-field:Disk write:1.5 MB/s");
+        .assert_resource_visible("summary-card:Disk write:1.5 MB/s");
     harness
         .driver
         .assert_resource_visible("resource-device:historical-disk0");
@@ -162,7 +170,7 @@ fn storage_hover_swaps_virtual_device_rows_and_totals_without_moving_the_plot(
 
     harness
         .driver
-        .assert_resource_visible("resource-field:Disk read:8.0 MB/s");
+        .assert_resource_visible("summary-card:Disk read:8.0 MB/s");
     harness
         .driver
         .assert_resource_visible("resource-device:current-disk");
@@ -175,11 +183,11 @@ fn storage_hover_swaps_virtual_device_rows_and_totals_without_moving_the_plot(
 }
 
 #[gpui::test]
-fn charging_timeline_paints_only_observed_cells_and_exposes_binary_state_labels(
+fn charging_timeline_paints_only_observed_cells_and_names_the_selected_state(
     cx: &mut TestAppContext,
 ) {
     // Goal: sparse charging history leaves unobserved seconds blank in the composed scene.
-    // Method: count actual painted state-cell quads and inspect the rendered categorical legend.
+    // Method: count actual painted state-cell quads and read the compact timeline's caption.
     let mut harness = InputHarness::setup_route(cx, "battery");
     harness.driver.seed_resources(false);
     harness.driver.context.simulate_scale_factor_change(2.0);
@@ -193,13 +201,7 @@ fn charging_timeline_paints_only_observed_cells_and_exposes_binary_state_labels(
     assert!(
         harness
             .driver
-            .reading_is_visible("state-legend:Not charging")
-    );
-    assert!(harness.driver.reading_is_visible("state-legend:Charging"));
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("state-legend:Blank: unavailable")
+            .reading_is_visible("chart-caption:live-battery-charging:Not charging")
     );
     harness.teardown();
 }
@@ -221,12 +223,12 @@ fn charging_hover_retains_an_explicitly_selected_earlier_same_second_publication
     assert!(
         harness
             .driver
-            .reading_is_visible("resource-field:Charge:88.0 %")
+            .reading_is_visible("summary-card:Charge:88.0 %")
     );
     assert!(
         harness
             .driver
-            .reading_is_visible("resource-field:Charging:No")
+            .reading_is_visible("summary-card:Charging:No")
     );
     let (second, reading) = harness
         .driver

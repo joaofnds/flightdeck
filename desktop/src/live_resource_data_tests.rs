@@ -1,33 +1,6 @@
 use serde_json::{Value, json};
 
-use super::{Field, devices, summary};
-
-#[test]
-fn battery_selected_details_preserve_signed_flow_exact_counts_and_optional_fields() {
-    // Goal: selected battery fields retain signs, exact integers, false, zero and unavailable.
-    // Method: format an identity-matched source response through the production summary API.
-    let selection = selection(&json!({"battery": {
-        "charge_percent": 70.0, "power_watts": -2.5, "charging": false,
-        "health_percent": 105.0, "cycle_count": 9_007_199_254_740_993_u64,
-        "adapter_watts": null, "external_power": true, "age_seconds": 0
-    }}));
-
-    let selected = summary("battery", &selection);
-
-    assert_eq!(
-        selected.fields,
-        vec![
-            field("Charge", "70.0 %"),
-            field("Charging", "No"),
-            field("Battery flow", "-2.5 W"),
-            field("Health", "105.0 %"),
-            field("Cycles", "9007199254740993"),
-            field("Adapter rating", "Unavailable"),
-            field("External power", "Yes"),
-            field("Source age", "0.0 s"),
-        ]
-    );
-}
+use super::{Field, devices, notice};
 
 #[test]
 fn storage_partial_inventory_retains_measured_device_rates_and_warns_about_totals() {
@@ -37,12 +10,9 @@ fn storage_partial_inventory_retains_measured_device_rates_and_warns_about_total
         {"driver_id": 91, "media_id": 3, "name": "disk0", "read_bps": 2_000_000}
     ]}}));
 
-    let selected = summary("storage", &selection);
-
     assert_eq!(devices(&selection).len(), 1);
-    assert_eq!(selected.fields[0], field("Disk read", "Unavailable"));
     assert_eq!(
-        selected.notice.as_deref(),
+        notice("storage", &selection).as_deref(),
         Some("Some physical-disk readings are unavailable. Totals are incomplete.")
     );
 }
@@ -74,40 +44,17 @@ fn physical_device_fields_keep_units_zero_and_independent_missingness() {
 }
 
 #[test]
-fn mismatched_observation_cannot_lend_storage_devices_or_battery_values() {
+fn mismatched_observation_cannot_lend_storage_devices_or_a_battery_notice() {
     // Goal: a sibling publication cannot supply selected resource content.
     // Method: keep measured resources while changing only the summary publication.
     let mut selection = selection(&json!({"battery": {"charge_percent": 70},
         "storage": {"state": "complete", "devices": [{"name": "disk0"}]}}));
     selection["summary"]["publication"] = json!(10);
 
-    let selected = summary("battery", &selection);
-
-    assert_eq!(selected.fields.len(), 8);
-    assert!(
-        selected
-            .fields
-            .iter()
-            .all(|field| field.reading == "Unavailable")
-    );
     assert!(devices(&selection).is_empty());
-}
-
-#[test]
-fn changed_wall_time_cannot_relabel_another_resource_summary() {
-    // Goal: retaining an identity while changing its wall time cannot display stale resources.
-    // Method: supply different selected and summary wall clocks with equal publication stamps.
-    let mut selection = selection(&json!({"battery": {"charge_percent": 70}}));
-    selection["summary"]["wall_ns"] = json!(1_000_000_000_001_u64);
-
-    let selected = summary("battery", &selection);
-
-    assert_eq!(selected.fields.len(), 8);
-    assert!(
-        selected
-            .fields
-            .iter()
-            .all(|field| field.reading == "Unavailable")
+    assert_eq!(
+        notice("battery", &selection).as_deref(),
+        Some("No battery reading is available at this observation.")
     );
 }
 

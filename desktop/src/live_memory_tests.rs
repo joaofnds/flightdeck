@@ -4,7 +4,8 @@ use super::{MemoryQuantity, quantities};
 
 fn selection() -> Value {
     let identity = json!({"run":"00000000000000010000000000000002",
-        "boot":"00000000000000030000000000000004", "publication":9});
+        "boot":"00000000000000030000000000000004", "publication":9,
+        "wall_ns":1_000_000_000_000_u64});
     let mut summary = identity.clone();
     summary["memory_total_bytes"] = json!(51_539_607_552_u64);
     summary["memory_active_bytes"] = json!(1_073_741_824_u64);

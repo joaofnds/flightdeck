@@ -199,7 +199,8 @@ impl LiveDashboard {
 
         if panel.id == "live-battery-charging" {
             let charging = self.reading_snapshot().and_then(|snapshot| {
-                snapshot.selection["summary"]["battery"]["charging"].as_bool()
+                crate::live_views::matching_summary(&snapshot.selection)["battery"]["charging"]
+                    .as_bool()
             });
 
             return match charging {

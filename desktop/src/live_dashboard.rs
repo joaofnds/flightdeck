@@ -86,10 +86,11 @@ pub struct ChartHover {
 
 pub enum Row {
     Summary,
-    ResourceSummary,
     StorageDevice(usize, String),
     Diagnostics,
     OverviewStatus,
+    /// The Battery page's charging timeline beside its details card.
+    BatteryState(Option<Rc<Panel>>),
     OverviewRankings(Vec<usize>),
     OverviewAppHistories(Vec<usize>),
     MemoryAttribution(Option<Rc<Panel>>),

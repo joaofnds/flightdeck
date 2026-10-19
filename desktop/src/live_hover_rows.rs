@@ -37,12 +37,9 @@ impl LiveDashboard {
         let mut rows = Vec::with_capacity(4096);
         if matches!(
             self.request.route.as_str(),
-            "overview" | "cpu" | "gpu" | "memory" | "energy" | "network"
+            "overview" | "cpu" | "gpu" | "memory" | "energy" | "network" | "storage" | "battery"
         ) {
             rows.push(Row::Summary);
-        }
-        if matches!(self.request.route.as_str(), "storage" | "battery") {
-            rows.push(Row::ResourceSummary);
         }
         if self.request.route == "cpu" {
             self.reading_rows_cpu(&mut rows);
@@ -102,6 +99,11 @@ impl LiveDashboard {
             return;
         }
 
+        if self.request.route == "battery" {
+            self.reading_rows_charts_battery(rows);
+            return;
+        }
+
         let machine_panel_count = self
             .panels
             .iter()
@@ -130,8 +132,7 @@ impl LiveDashboard {
     }
 
     fn reading_rows_charts_memory(&self, rows: &mut Vec<Row>) {
-        let primary =
-            self.reading_rows_charts_memory_panels(&["live-memory", "live-memory-pressure"]);
+        let primary = self.named_panels(&["live-memory", "live-memory-pressure"]);
 
         for panels in primary.chunks(self.reading_chart_columns()) {
             rows.push(Row::Charts {
@@ -141,8 +142,7 @@ impl LiveDashboard {
         }
 
         rows.push(Row::Heading("Swap and paging".into()));
-        let swap =
-            self.reading_rows_charts_memory_panels(&["live-swap", "live-swap-flow", "live-paging"]);
+        let swap = self.named_panels(&["live-swap", "live-swap-flow", "live-paging"]);
         let columns = if self.viewport_size.width >= gpui::px(1100.0) {
             3
         } else {
@@ -157,7 +157,21 @@ impl LiveDashboard {
         }
     }
 
-    fn reading_rows_charts_memory_panels(&self, ids: &[&str]) -> Vec<Rc<Panel>> {
+    /// Charge beside power flow, then the charging timeline beside the battery details.
+    fn reading_rows_charts_battery(&self, rows: &mut Vec<Row>) {
+        let flows = self.named_panels(&["live-battery-charge", "live-battery-flow"]);
+        for panels in flows.chunks(self.reading_chart_columns()) {
+            rows.push(Row::Charts {
+                panels: panels.to_vec(),
+                columns: panels.len(),
+            });
+        }
+
+        let charging = self.named_panels(&["live-battery-charging"]);
+        rows.push(Row::BatteryState(charging.into_iter().next()));
+    }
+
+    fn named_panels(&self, ids: &[&str]) -> Vec<Rc<Panel>> {
         assert!(ids.len() <= 3);
         ids.iter()
             .filter_map(|id| {

@@ -8,26 +8,17 @@ use crate::live_dashboard::LiveDashboard;
 mod data;
 
 impl LiveDashboard {
-    pub fn resource_summary(&self) -> AnyElement {
-        let selection = self.resource_selection();
-        let summary = data::summary(&self.request.route, selection);
-        let mut content = div().flex().flex_col().gap(px(10.0));
-        if let Some(notice) = summary.notice {
-            content = content.child(
-                div()
-                    .text_color(rgb(MUTED))
-                    .text_size(px(12.0))
-                    .child(notice),
-            );
-        }
-        content = content.child(fields(summary.fields));
-        if self.request.route == "battery" {
-            content = content.child(div().text_color(rgb(MUTED)).text_size(px(11.0)).child(
-                "Battery flow is positive into the battery and negative while discharging. \
-                 Health can exceed 100%. Adapter rating is capacity, separate from measured flow.",
-            ));
-        }
-        content.into_any_element()
+    /// A line under the stat cards where the page cannot show its readings whole.
+    pub fn resource_notice(&self) -> Option<AnyElement> {
+        let notice = data::notice(&self.request.route, self.resource_selection())?;
+        Some(
+            div()
+                .debug_selector(|| format!("resource-notice:{notice}"))
+                .text_color(rgb(MUTED))
+                .text_size(px(12.0))
+                .child(notice)
+                .into_any_element(),
+        )
     }
 
     pub fn resource_device_count(&self) -> usize {

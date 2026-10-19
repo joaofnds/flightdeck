@@ -21,7 +21,7 @@ pub fn quantities(selection: &Value) -> Vec<MemoryQuantity> {
         ("Swap used", "swap_used_bytes"),
         ("Swap allocated", "swap_total_bytes"),
     ];
-    let summary = matching_summary(selection);
+    let summary = crate::live_views::matching_summary(selection);
     let mut rows = Vec::with_capacity(13);
 
     for (name, key) in QUANTITIES {
@@ -37,22 +37,6 @@ pub fn quantities(selection: &Value) -> Vec<MemoryQuantity> {
     });
 
     rows
-}
-
-fn matching_summary(selection: &Value) -> &Value {
-    let selected = &selection["selected"];
-    let summary = &selection["summary"];
-    if selected.is_null() {
-        return &Value::Null;
-    }
-
-    for field in ["run", "boot", "publication"] {
-        if selected[field] != summary[field] {
-            return &Value::Null;
-        }
-    }
-
-    summary
 }
 
 fn pressure(value: &Value) -> &'static str {

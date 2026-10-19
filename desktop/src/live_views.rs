@@ -29,7 +29,10 @@ impl LiveDashboard {
         );
         let content = self.row_content(index, cx);
         let padding = match &self.rows[index] {
-            Row::Charts { .. } | Row::OverviewStatus | Row::OverviewRankings(_) => 4.0,
+            Row::Charts { .. }
+            | Row::OverviewStatus
+            | Row::BatteryState(_)
+            | Row::OverviewRankings(_) => 4.0,
             _ => 8.0,
         };
         let key = self.rows[index].layout_key();
@@ -38,11 +41,7 @@ impl LiveDashboard {
         let height = self.reading_row_height(&self.rows[index]);
         let scroll_reserved = matches!(
             &self.rows[index],
-            Row::AppSummary
-                | Row::CPUTop(_)
-                | Row::CPUActivity
-                | Row::ResourceSummary
-                | Row::StorageDevice(_, _)
+            Row::AppSummary | Row::CPUTop(_) | Row::CPUActivity | Row::StorageDevice(_, _)
         );
         div()
             .id(gpui::SharedString::from(key))
@@ -77,13 +76,13 @@ impl LiveDashboard {
     fn row_content(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
         match &self.rows[index] {
             Row::Summary => self.summary(cx).into_any_element(),
-            Row::ResourceSummary => self.resource_summary(),
             Row::StorageDevice(index, _) => self.resource_device(*index),
             Row::Diagnostics => self.self_monitoring().into_any_element(),
             Row::CPUTop(panel) => self.cpu_top(panel.as_ref(), cx).into_any_element(),
             Row::CPUActivity => self.cpu_activity().into_any_element(),
             Row::CPUHistory => self.cpu_history_panel(cx).into_any_element(),
             Row::OverviewStatus => self.overview_status(cx).into_any_element(),
+            Row::BatteryState(panel) => self.battery_state(panel.as_ref(), cx),
             Row::OverviewRankings(slots) => {
                 self.overview_rankings(slots, self.reading_chart_columns(), cx)
             }
@@ -144,7 +143,7 @@ impl LiveDashboard {
                 snapshot.attribution_history(crate::live_app_attribution_history::Metric::Power)
             }) {
                 card.reading = history.headline(history.index(self.reading_target()));
-                card.note = "Attributed Apps; separate scope";
+                card.note = "Attributed Apps; separate scope".into();
             }
         }
         let mut tiles = div()
@@ -160,6 +159,10 @@ impl LiveDashboard {
             .role(gpui::Role::Group)
             .aria_label("Resource readings at the selected time")
             .child(tiles)
+            .children(
+                self.resource_notice()
+                    .map(|notice| div().pt(px(8.0)).child(notice)),
+            )
     }
 
     fn summary_card(card: &summary::Card, cx: &mut Context<Self>) -> impl IntoElement {
@@ -220,7 +223,7 @@ impl LiveDashboard {
                     .text_size(px(11.0))
                     .line_height(px(16.0))
                     .text_color(rgb(MUTED))
-                    .child(card.note),
+                    .child(card.note.clone()),
             )
     }
 
