@@ -2,6 +2,7 @@ use persistence::{Error, Result};
 use serde_json::{Value, json};
 
 use super::AppAttributionMetric;
+use super::cache::Total;
 use super::means::{Key, Means};
 use crate::apps::AppKey;
 use crate::cancellation::Operation;
@@ -139,6 +140,42 @@ impl<'operation> Reduction<'operation> {
                 return Err(Error::Bound("attribution observation Apps"));
             }
             self.means.observe(&app, capture.elapsed_ns)?;
+        }
+        Ok(())
+    }
+
+    /// Adds a cached point whose Apps reach the means through `merge` instead of one by one.
+    pub(crate) fn observe_cached(&mut self, capture: &Capture) -> Result<()> {
+        self.operation.check()?;
+        if !self.in_range(&capture.coverage.observation)? {
+            return Err(Error::Bound("cached attribution observation range"));
+        }
+        let index = self
+            .points
+            .binary_search_by_key(&identity(&capture.coverage.observation), |point| {
+                identity(&point.capture.coverage.observation)
+            })
+            .err()
+            .ok_or(Error::Bound("duplicate cached attribution observation"))?;
+        if self.points.len() == 4096 {
+            return Err(Error::Bound("attribution observations"));
+        }
+        self.points
+            .insert(index, Point::new(capture, Source::Saved));
+        Ok(())
+    }
+
+    /// Adds the cached points' per-App totals to the means, in key order.
+    pub(crate) fn merge<'key>(
+        &mut self,
+        totals: impl Iterator<Item = (AppKey<'key>, Total)>,
+    ) -> Result<()> {
+        for (index, (key, total)) in totals.enumerate() {
+            self.operation.check()?;
+            if index == 24_000 {
+                return Err(Error::Bound("attribution cached Apps"));
+            }
+            self.means.merge(&key, total)?;
         }
         Ok(())
     }

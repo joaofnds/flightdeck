@@ -172,10 +172,7 @@ impl History {
         replay: &mut crate::session::AttributionReplay,
         uncached: usize,
     ) -> Result<Box<AppAttributionHistories>> {
-        for point in lease.rates.points() {
-            query.operation.check()?;
-            batch.observe_saved(point);
-        }
+        batch.observe_cached(&lease.rates, query.operation)?;
         if uncached > 0 {
             Self::attribution_batch_stream(query, replay, |point| {
                 batch.observe_saved(point);
@@ -331,6 +328,20 @@ impl<'operation> Batch<'operation> {
                 )
             });
         }
+    }
+
+    fn observe_cached(&mut self, rates: &Cache, operation: &Operation) -> Result<()> {
+        for point in rates.points() {
+            operation.check()?;
+            for state in &mut self.states {
+                state.apply(|reduction| reduction.observe_cached(&point.capture));
+            }
+        }
+        for (metric, state) in METRICS.into_iter().zip(&mut self.states) {
+            state.apply(|reduction| reduction.merge(rates.totals(metric)));
+        }
+
+        Ok(())
     }
 
     fn observe_saved(&mut self, point: &SavedPoint) {

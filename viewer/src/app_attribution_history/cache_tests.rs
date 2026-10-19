@@ -9,27 +9,24 @@ use crate::live_app_response::Observation;
 
 const AVAILABLE: usize = 64 * 1024 * 1024;
 
-/// Inserts a point whose Apps take the previous point's key where the name matches, as
+/// Inserts a point whose Apps take the key the cache already holds where the name matches, as
 /// `Point::capture` does, so the cache holds the only references to its keys.
 fn insert(cache: &mut Cache, publication: u64, names: &[&str]) {
     let keys = names
         .iter()
         .map(|name| {
-            let previous = cache.points.last().and_then(|point| {
-                point
-                    .apps
-                    .iter()
-                    .find(|app| *app.key.bytes == *name.as_bytes())
-            });
-            previous.map_or_else(
-                || {
-                    Arc::new(Key {
-                        bundle: true,
-                        bytes: name.as_bytes().into(),
-                    })
-                },
-                |app| Arc::clone(&app.key),
-            )
+            cache
+                .sums
+                .key(&crate::apps::AppKey::Bundle(name.as_bytes()))
+                .map_or_else(
+                    || {
+                        Arc::new(Key {
+                            bundle: true,
+                            bytes: name.as_bytes().into(),
+                        })
+                    },
+                    Arc::clone,
+                )
         })
         .collect();
     cache.insert(point(publication, keys), AVAILABLE).unwrap();
@@ -132,4 +129,67 @@ fn retain_that_keeps_every_point_leaves_the_bytes_unchanged() {
     cache.retain(&operation(), |_observation| Ok(true)).unwrap();
 
     assert_eq!(cache.bytes(), before);
+}
+
+#[test]
+fn totals_after_a_retain_match_a_cache_of_the_kept_points_alone() {
+    // Goal: the totals a query merges equal what summing the kept points one by one gives.
+    // Method: drop the first of three measured points and compare with the last two alone.
+    let measured = |publication: u64, names: &[&str]| {
+        let mut point = point(publication, Vec::new());
+        point.apps = names
+            .iter()
+            .map(|name| App {
+                key: Arc::new(Key {
+                    bundle: true,
+                    bytes: name.as_bytes().into(),
+                }),
+                cpu: CompactMeasure::capture(&crate::live_app_response::Measure {
+                    known: publication * 7,
+                    measured_members: 1,
+                    unavailable_members: 0,
+                    overflowed: false,
+                }),
+                power: CompactMeasure::default(),
+                disk: CompactMeasure::default(),
+                members: 1,
+                membership_complete: true,
+            })
+            .collect();
+        point
+    };
+    let totals = |cache: &Cache| -> Vec<(Vec<u8>, u128, u128)> {
+        cache
+            .totals(super::AppAttributionMetric::Cpu)
+            .map(|(key, total)| match key {
+                crate::apps::AppKey::Bundle(bytes) | crate::apps::AppKey::Executable(bytes) => {
+                    (bytes.to_vec(), total.amount, total.elapsed_ns)
+                }
+            })
+            .collect()
+    };
+    let mut cache = Cache::new();
+    cache
+        .insert(measured(1, &["a", "gone"]), AVAILABLE)
+        .unwrap();
+    cache.insert(measured(2, &["a", "b"]), AVAILABLE).unwrap();
+    cache.insert(measured(3, &["b"]), AVAILABLE).unwrap();
+    let mut kept = Cache::new();
+    kept.insert(measured(2, &["a", "b"]), AVAILABLE).unwrap();
+    kept.insert(measured(3, &["b"]), AVAILABLE).unwrap();
+
+    cache
+        .retain(&operation(), |observation| {
+            Ok(observation.stamp.publication > 1)
+        })
+        .unwrap();
+
+    assert_eq!(totals(&cache), totals(&kept));
+    assert_eq!(
+        totals(&kept),
+        [
+            (b"a".to_vec(), 14, 1_000_000_000),
+            (b"b".to_vec(), 35, 2_000_000_000)
+        ]
+    );
 }

@@ -8,10 +8,13 @@ use crate::cancellation::Operation;
 use crate::live_app_history::{CompactMeasure, ResidentPin};
 use crate::live_app_response::{Measure, Observation};
 use crate::live_apps::Frame;
+use sums::Sums;
+pub(crate) use sums::Total;
 
 pub(crate) struct Cache {
     points: Vec<Point>,
     pins: Vec<ResidentPin>,
+    sums: Sums,
     bytes: usize,
     limited: Option<usize>,
 }
@@ -46,6 +49,7 @@ impl Cache {
         Self {
             points: Vec::new(),
             pins: Vec::new(),
+            sums: Sums::new(),
             bytes: size_of::<Self>(),
             limited: None,
         }
@@ -76,7 +80,7 @@ impl Cache {
                 return self.retain(operation, |_observation| Ok(true));
             }
             if let Some(point) = self.points.pop() {
-                self.bytes -= point.bytes() + point.unshared_key_bytes();
+                self.bytes -= point.bytes() + self.sums.remove(&point);
                 drop(point);
             } else {
                 *self = Self::new();
@@ -106,7 +110,7 @@ impl Cache {
         let captured = Point::capture(
             frame,
             previous,
-            self.points.last(),
+            Some(&self.sums),
             windows,
             remaining,
             operation,
@@ -157,10 +161,8 @@ impl Cache {
                 }
             }
         });
-        // Each dropped point leaves before the next is measured, so a key that dropped points
-        // alone share is released by the last of them, as `insert` counted it once.
         for point in dropped {
-            self.bytes -= point.bytes() + point.unshared_key_bytes();
+            self.bytes -= point.bytes() + self.sums.remove(&point);
         }
         if let Some(error) = failure {
             return Err(error);
@@ -194,12 +196,21 @@ impl Cache {
     pub(crate) fn points(&self) -> impl Iterator<Item = &Point> {
         self.points.iter()
     }
+
+    /// The per-App totals of every cached point, in key order.
+    pub(crate) fn totals(
+        &self,
+        metric: AppAttributionMetric,
+    ) -> impl Iterator<Item = (AppKey<'_>, Total)> {
+        self.sums.totals(metric)
+    }
+
     pub(crate) fn pins(&self) -> &[ResidentPin] {
         &self.pins
     }
 
     pub(crate) fn insert(&mut self, point: Point, available: usize) -> Result<()> {
-        let bytes = point.bytes() + point.unshared_key_bytes();
+        let bytes = point.bytes() + self.sums.added_bytes(&point);
         if self.points.capacity() == 0 {
             let required = 4096 * size_of::<Point>() + bytes;
             if required > available.saturating_sub(self.bytes) {
@@ -217,7 +228,9 @@ impl Cache {
             return Err(Error::Bound("attribution cache space"));
         }
 
-        self.bytes += bytes;
+        let added = self.sums.add(&point);
+        assert!(added <= bytes - point.bytes());
+        self.bytes += point.bytes() + added;
         self.points.push(point);
         assert!(self.bytes() <= available);
 
@@ -272,21 +285,17 @@ impl Point {
     pub(crate) fn capture(
         frame: &Frame,
         previous: Option<&Frame>,
-        captured: Option<&Self>,
+        sums: Option<&Sums>,
         windows: [Option<WindowIdentity>; 2],
         available: usize,
         operation: &Operation,
     ) -> Result<Self> {
         let mut output = None;
         frame.with_aggregate(previous, |aggregate| {
-            let captured = captured.map_or(&[][..], |point| &point.apps);
             let mut bytes = aggregate.apps.len() * size_of::<App>();
             for key in aggregate.apps.keys() {
                 operation.check()?;
-                if captured
-                    .binary_search_by(|app| app.key.view().cmp(key))
-                    .is_err()
-                {
+                if sums.and_then(|sums| sums.key(key)).is_none() {
                     bytes += Key::owned_bytes(key);
                 }
             }
@@ -296,10 +305,10 @@ impl Point {
             let mut apps = Vec::with_capacity(aggregate.apps.len());
             for (key, app) in &aggregate.apps {
                 operation.check()?;
-                let key = match captured.binary_search_by(|app| app.key.view().cmp(key)) {
-                    Ok(index) => Arc::clone(&captured[index].key),
-                    Err(_) => Arc::new(Key::capture(key)),
-                };
+                // A key the cache already holds is shared, so each name is stored once.
+                let key = sums
+                    .and_then(|sums| sums.key(key))
+                    .map_or_else(|| Arc::new(Key::capture(key)), Arc::clone);
                 apps.push(App {
                     key,
                     cpu: CompactMeasure::capture(&measure(&app.cpu_ns)),
@@ -341,14 +350,6 @@ impl Point {
     fn bytes(&self) -> usize {
         self.apps.capacity() * size_of::<App>()
     }
-
-    fn unshared_key_bytes(&self) -> usize {
-        self.apps
-            .iter()
-            .filter(|app| Arc::strong_count(&app.key) == 1)
-            .map(|app| app.key.bytes())
-            .sum()
-    }
 }
 
 impl Key {
@@ -381,6 +382,9 @@ impl Key {
             }
     }
 }
+
+#[path = "sums.rs"]
+mod sums;
 
 #[cfg(test)]
 #[path = "cache_tests.rs"]

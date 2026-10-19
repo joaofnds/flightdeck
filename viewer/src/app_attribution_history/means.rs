@@ -3,6 +3,7 @@ use std::cmp::Ordering;
 use persistence::{Error, Result};
 use serde_json::{Value, json};
 
+use super::cache::Total;
 use crate::apps::AppKey;
 use crate::cancellation::Operation;
 
@@ -57,16 +58,7 @@ impl Means {
     }
 
     pub(super) fn observe(&mut self, app: &super::Reading<'_>, elapsed: Option<u64>) -> Result<()> {
-        let found = crate::apps::search_ordered(&self.ordered, self.next, &app.key, |index| {
-            self.entries[usize::from(index)].key.view()
-        });
-        let index = match found {
-            Ok(position) => usize::from(self.ordered[position]),
-            Err(position) => self.observe_insert(&app.key, position)?,
-        };
-        let (Ok(position) | Err(position)) = found;
-        self.next = position + 1;
-
+        let index = self.slot(&app.key)?;
         let Some(elapsed) = elapsed.filter(|elapsed| *elapsed > 0) else {
             return Ok(());
         };
@@ -80,6 +72,30 @@ impl Means {
         mean.elapsed_ns += u128::from(elapsed);
 
         Ok(())
+    }
+
+    /// Adds a total that already sums many seconds of one App.
+    pub(super) fn merge(&mut self, key: &AppKey<'_>, total: Total) -> Result<()> {
+        let index = self.slot(key)?;
+        let mean = &mut self.entries[index].mean;
+        mean.amount += total.amount;
+        mean.elapsed_ns += total.elapsed_ns;
+
+        Ok(())
+    }
+
+    fn slot(&mut self, key: &AppKey<'_>) -> Result<usize> {
+        let found = crate::apps::search_ordered(&self.ordered, self.next, key, |index| {
+            self.entries[usize::from(index)].key.view()
+        });
+        let index = match found {
+            Ok(position) => usize::from(self.ordered[position]),
+            Err(position) => self.observe_insert(key, position)?,
+        };
+        let (Ok(position) | Err(position)) = found;
+        self.next = position + 1;
+
+        Ok(index)
     }
 
     fn observe_insert(&mut self, key: &AppKey<'_>, position: usize) -> Result<usize> {
