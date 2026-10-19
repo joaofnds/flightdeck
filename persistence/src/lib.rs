@@ -20,7 +20,10 @@ pub use owned_identity::IdentitySource;
 
 pub use metadata::{Losses, Manifest, TimeBounds};
 pub use reader::{require_numeric_source, tick_buffer};
-pub use store::{Begin, CommitBoundary, PendingWindow, Store, ownership_contended, read_committed};
+pub use store::{
+    Begin, CommitBoundary, PendingWindow, Store, ownership_contended, read_committed,
+    reread_committed,
+};
 
 pub use encoder::{Encoder, TableManifest, frame, table_columns};
 pub use schema::SCHEMA_VERSION;

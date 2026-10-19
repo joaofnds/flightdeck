@@ -781,6 +781,70 @@ mod tests {
     }
 
     #[test]
+    fn rereading_a_commitment_returns_the_manifest_the_full_read_accepted() {
+        // Goal: a reader holding a window open sees the same commitment without a full walk.
+        // Method: commit a window, read its marker in full, then reread it.
+        let recording = Recording::new();
+        let store = Store::open(&recording.0).unwrap();
+        let original = manifest(identity(&store));
+        let pending = stage(&store, &original);
+        let committed = store.commit(pending, original).unwrap();
+        let marker = store.marker_path(&committed.identity);
+        let read = persistence::read_committed(&recording.0, &marker).unwrap();
+
+        let reread = persistence::reread_committed(&recording.0, &marker).unwrap();
+
+        assert_eq!(read, reread);
+    }
+
+    #[test]
+    fn rereading_a_removed_commitment_reports_it_missing() {
+        // Goal: a window evicted while a reader holds it open stops being readable.
+        // Method: commit a window, remove its marker, and reread it.
+        let recording = Recording::new();
+        let store = Store::open(&recording.0).unwrap();
+        let original = manifest(identity(&store));
+        let pending = stage(&store, &original);
+        let committed = store.commit(pending, original).unwrap();
+        let marker = store.marker_path(&committed.identity);
+        fs::remove_file(&marker).unwrap();
+
+        let result = persistence::reread_committed(&recording.0, &marker);
+
+        assert_eq!(std::io::ErrorKind::NotFound, result.err().unwrap().kind());
+    }
+
+    #[test]
+    fn rereading_a_copied_marker_refuses_it() {
+        // Goal: a matching payload alone cannot keep a reread commitment standing.
+        // Method: replace the marker with a byte-identical independent file and reread it.
+        let recording = Recording::new();
+        let store = Store::open(&recording.0).unwrap();
+        let original = manifest(identity(&store));
+        let pending = stage(&store, &original);
+        let committed = store.commit(pending, original).unwrap();
+        let marker = store.marker_path(&committed.identity);
+        let bytes = fs::read(&marker).unwrap();
+        fs::remove_file(&marker).unwrap();
+        let mut replacement = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .read(false)
+            .mode(0o600)
+            .open(&marker)
+            .unwrap();
+        replacement.write_all(&bytes).unwrap();
+        drop(replacement);
+
+        let result = persistence::reread_committed(&recording.0, &marker);
+
+        assert_eq!(
+            std::io::ErrorKind::InvalidData,
+            result.err().unwrap().kind()
+        );
+    }
+
+    #[test]
     fn a_copied_marker_cannot_replace_the_metadata_hard_link() {
         // Goal: a matching metadata payload alone cannot claim the canonical committed set.
         // Method: replace the marker with a byte-identical independent file and query it.

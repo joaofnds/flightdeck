@@ -509,6 +509,15 @@ pub fn read_committed(root: &Path, marker: &Path) -> io::Result<Manifest> {
     Ok(manifest)
 }
 
+/// Rereads a marker that `read_committed` accepted, for a reader holding the window open. A
+/// sealed window's files never change, so the marker still linking the window's metadata
+/// shows its commitment stands, without verifying every file of the window again.
+pub fn reread_committed(root: &Path, marker: &Path) -> io::Result<Manifest> {
+    let (manifest, file) = read_marker(root, marker)?;
+    Store::validate_link(root, &manifest, &file)?;
+    Ok(manifest)
+}
+
 fn read_marker(root: &Path, marker: &Path) -> io::Result<(Manifest, File)> {
     let mut file = private::open_private_file(marker, false)?;
     let manifest = Manifest::read(&mut file)?;

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use collector::recording::{identity_text, private};
 use persistence::engine::{Engine, Row};
 use persistence::layout::{self, Kind};
-use persistence::{Error, Manifest, Result, read_committed};
+use persistence::{Error, Manifest, Result, read_committed, reread_committed};
 use serde_json::{Value, json};
 
 use crate::Cancellation;
@@ -431,12 +431,14 @@ impl Session {
         )
     }
 
+    /// Checks that a window read in full by `discover` is still committed unchanged. Readers
+    /// call it around every read, so it rereads the marker rather than every file.
     fn validate_commitment(&self, window: usize) -> Result<()> {
         self.operation.check()?;
 
         let manifest = &self.windows[window];
         let marker = layout::WindowKey::from(&manifest.identity).marker(&self.root);
-        if read_committed(&self.root, &marker)? != *manifest {
+        if reread_committed(&self.root, &marker)? != *manifest {
             return Err(Error::Bound("changed commitment"));
         }
 
