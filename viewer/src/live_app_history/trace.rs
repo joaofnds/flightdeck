@@ -1,4 +1,5 @@
 use super::{App, CompactMeasure, Selection, apps, count, key};
+use crate::app_process_groups_history::ProcessGroupReading;
 use crate::live_app_response::{Measure, Observation};
 use crate::live_apps::Frame;
 use persistence::{Error, Result};
@@ -15,14 +16,14 @@ pub(crate) struct TracePoint {
 #[derive(Clone, Copy)]
 pub(super) struct Totals {
     pub(super) members: u16,
-    pub(super) membership_complete: bool,
-    pub(super) cpu_ns: CompactMeasure,
-    pub(super) energy_nj: CompactMeasure,
-    pub(super) disk_read_bytes: CompactMeasure,
-    pub(super) disk_written_bytes: CompactMeasure,
-    pub(super) disk_io_bytes: CompactMeasure,
-    pub(super) resident_bytes: CompactMeasure,
-    pub(super) footprint_bytes: CompactMeasure,
+    membership_complete: bool,
+    cpu_ns: CompactMeasure,
+    energy_nj: CompactMeasure,
+    disk_read_bytes: CompactMeasure,
+    disk_written_bytes: CompactMeasure,
+    disk_io_bytes: CompactMeasure,
+    resident_bytes: CompactMeasure,
+    footprint_bytes: CompactMeasure,
 }
 
 const _: () = {
@@ -183,6 +184,22 @@ fn capture_totals(
 }
 
 impl Totals {
+    pub(super) fn process_group_reading(&self, output: &mut ProcessGroupReading) {
+        *output = ProcessGroupReading {
+            present: true,
+            members: u32::from(self.members),
+            measures: [
+                self.cpu_ns.measure(),
+                self.energy_nj.measure(),
+                self.disk_read_bytes.measure(),
+                self.disk_written_bytes.measure(),
+                self.disk_io_bytes.measure(),
+                self.resident_bytes.measure(),
+                self.footprint_bytes.measure(),
+            ],
+        };
+    }
+
     pub(super) fn capture(app: &apps::AppTotals, output: &mut Option<Self>) {
         *output = Some(Self {
             members: count(app.members),

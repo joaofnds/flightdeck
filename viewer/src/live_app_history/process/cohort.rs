@@ -108,21 +108,11 @@ fn capture_readings(
         let mut totals = None;
         crate::live_app_history::trace::Totals::capture(&group.totals, &mut totals);
         let totals = totals.ok_or(Error::Bound("process cohort saved totals"))?;
+        let mut reading = ProcessGroupReading::EMPTY;
+        totals.process_group_reading(&mut reading);
         snapshot.groups.push(NamedReading {
             name: group.name.into(),
-            reading: ProcessGroupReading {
-                present: true,
-                members: u32::from(totals.members),
-                measures: [
-                    totals.cpu_ns.measure(),
-                    totals.energy_nj.measure(),
-                    totals.disk_read_bytes.measure(),
-                    totals.disk_written_bytes.measure(),
-                    totals.disk_io_bytes.measure(),
-                    totals.resident_bytes.measure(),
-                    totals.footprint_bytes.measure(),
-                ],
-            },
+            reading,
         });
     }
     Ok(())
@@ -282,19 +272,8 @@ fn process_groups_visit_point(
             .totals
             .as_ref()
             .ok_or(Error::Bound("process cohort group totals"))?;
-        let reading = ProcessGroupReading {
-            present: true,
-            members: u32::from(totals.members),
-            measures: [
-                totals.cpu_ns.measure(),
-                totals.energy_nj.measure(),
-                totals.disk_read_bytes.measure(),
-                totals.disk_written_bytes.measure(),
-                totals.disk_io_bytes.measure(),
-                totals.resident_bytes.measure(),
-                totals.footprint_bytes.measure(),
-            ],
-        };
+        let mut reading = ProcessGroupReading::EMPTY;
+        totals.process_group_reading(&mut reading);
 
         reduction.group(&group.executable, &reading)?;
     }
