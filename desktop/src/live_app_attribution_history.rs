@@ -122,15 +122,11 @@ impl Metric {
     }
 
     fn rate_text(self, rate: f64) -> String {
-        if self == Self::Disk {
-            let Some(value) = (rate / self.divisor()).to_f32() else {
-                unreachable!("Validated Disk rates fit the chart's numeric range");
-            };
+        let Some(value) = (rate / self.divisor()).to_f32() else {
+            return "Unavailable".to_owned();
+        };
 
-            return crate::live_projection::quantity_text(value, self.unit());
-        }
-
-        format!("{rate:.2} {}", self.unit())
+        crate::live_projection::quantity_text(value, self.unit())
     }
 
     pub fn source(self) -> viewer::AppAttributionMetric {

@@ -4,7 +4,7 @@ use gpui::{AnyElement, Context, IntoElement, SharedString, div, prelude::*, px, 
 use serde_json::{Value, json};
 
 use crate::charts::{GRID, MUTED};
-use crate::live_app_views::{app_cells, memory, rate};
+use crate::live_app_views::{app_cells, event_rate, memory};
 use crate::live_dashboard::LiveDashboard;
 
 pub struct Executable {
@@ -385,7 +385,7 @@ fn counter_optional(value: &Value) -> Result<Option<u64>, String> {
 
 fn subtotal_rate(value: Option<f64>, subtotal: &Subtotal, unit: &str) -> String {
     let suffix = if subtotal.unavailable > 0 { " *" } else { "" };
-    format!("{}{suffix}", rate(value, unit))
+    format!("{}{suffix}", event_rate(value, unit))
 }
 
 fn subtotal_memory(subtotal: &Subtotal) -> String {
@@ -626,7 +626,7 @@ mod tests {
 
         assert_eq!(groups[0].resident_bytes.value(), None);
         assert_eq!(groups[0].disk_io_bytes.value(), Some(4000));
-        assert_eq!(groups[0].disk_rate(), "2.0 kB/s");
+        assert_eq!(groups[0].disk_rate(), "2 kB/s");
     }
 
     #[test]

@@ -12,23 +12,19 @@ fn cpu_attribution_hover_updates_the_whole_page_and_reuses_its_cohort(cx: &mut T
         .driver
         .hover_previous_second_on("live-cpu-apps-plot");
 
-    assert!(harness.driver.reading_is_visible("130.00 % captured"));
-    assert!(harness.driver.reading_is_visible("13.0 %"));
+    assert!(harness.driver.reading_is_visible("130% captured"));
+    assert!(harness.driver.reading_is_visible("13%"));
     assert!(
         harness
             .driver
             .reading_is_visible("Loading exact App totals")
     );
-    assert!(
-        !harness
-            .driver
-            .reading_is_visible("ranking:CPU:Current:80.0 %")
-    );
+    assert!(!harness.driver.reading_is_visible("ranking:CPU:Current:80%"));
     harness.driver.complete_attribution_preview();
     assert!(
         harness
             .driver
-            .reading_is_visible("ranking:CPU:Historical:20.0 %")
+            .reading_is_visible("ranking:CPU:Historical:20%")
     );
     harness.driver.assert_attribution_anchors(&anchors);
 
@@ -36,13 +32,9 @@ fn cpu_attribution_hover_updates_the_whole_page_and_reuses_its_cohort(cx: &mut T
         .driver
         .leave_plot("live-cpu-apps-plot", PlotExit::Sidebar);
 
-    assert!(harness.driver.reading_is_visible("250.00 % captured"));
-    assert!(harness.driver.reading_is_visible("87.0 %"));
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("ranking:CPU:Current:80.0 %")
-    );
+    assert!(harness.driver.reading_is_visible("250% captured"));
+    assert!(harness.driver.reading_is_visible("87%"));
+    assert!(harness.driver.reading_is_visible("ranking:CPU:Current:80%"));
     harness.driver.assert_attribution_anchors(&anchors);
     harness.teardown();
 }
@@ -57,24 +49,24 @@ fn power_attribution_hover_updates_machine_power_and_exact_process_rankings(
     assert!(
         harness
             .driver
-            .reading_is_visible("summary-card:Process power:2.75 W captured")
+            .reading_is_visible("summary-card:Process power:2.8 W captured")
     );
 
     harness
         .driver
         .hover_previous_second_on("live-power-apps-plot");
 
-    assert!(harness.driver.reading_is_visible("1.50 W captured"));
+    assert!(harness.driver.reading_is_visible("1.5 W captured"));
     assert!(
         harness
             .driver
-            .reading_is_visible("summary-card:Process power:1.50 W captured")
+            .reading_is_visible("summary-card:Process power:1.5 W captured")
     );
-    assert!(harness.driver.reading_is_visible("3.0 W"));
+    assert!(harness.driver.reading_is_visible("3 W"));
     assert!(
         harness
             .driver
-            .reading_is_visible("chart-tooltip-row:live-power-apps:0:App A:1.25 W")
+            .reading_is_visible("chart-tooltip-row:live-power-apps:0:App A:1.2 W")
     );
     assert!(
         harness
@@ -85,17 +77,17 @@ fn power_attribution_hover_updates_machine_power_and_exact_process_rankings(
     assert!(
         harness
             .driver
-            .reading_is_visible("summary-card:Process power:1.50 W captured")
+            .reading_is_visible("summary-card:Process power:1.5 W captured")
     );
     assert!(
         harness
             .driver
-            .reading_is_visible("ranking:Process power:Historical:250.0 mW")
+            .reading_is_visible("ranking:Process power:Historical:250 mW")
     );
     assert!(
         harness
             .driver
-            .reading_is_visible("chart-legend:live-power-apps:App A:1.25 W")
+            .reading_is_visible("chart-legend:live-power-apps:App A:1.2 W")
     );
     harness.teardown();
 }
@@ -113,11 +105,11 @@ fn attribution_failure_preserves_the_inspected_rate_and_reports_missing_rankings
 
     harness.driver.fail_ranked_preview();
 
-    assert!(harness.driver.reading_is_visible("1.50 W captured"));
+    assert!(harness.driver.reading_is_visible("1.5 W captured"));
     assert!(
         harness
             .driver
-            .reading_is_visible("summary-card:Process power:1.50 W captured")
+            .reading_is_visible("summary-card:Process power:1.5 W captured")
     );
     assert!(
         harness
@@ -127,16 +119,16 @@ fn attribution_failure_preserves_the_inspected_rate_and_reports_missing_rankings
     assert!(
         !harness
             .driver
-            .reading_is_visible("ranking:Process power:Current:500.0 mW")
+            .reading_is_visible("ranking:Process power:Current:500 mW")
     );
     harness
         .driver
         .leave_plot("live-power-apps-plot", PlotExit::Sidebar);
-    assert!(harness.driver.reading_is_visible("2.75 W captured"));
+    assert!(harness.driver.reading_is_visible("2.8 W captured"));
     assert!(
         harness
             .driver
-            .reading_is_visible("summary-card:Process power:2.75 W captured")
+            .reading_is_visible("summary-card:Process power:2.8 W captured")
     );
     harness.teardown();
 }
@@ -161,7 +153,7 @@ fn power_summary_withholds_a_reading_in_a_history_gap(cx: &mut TestAppContext) {
     assert!(
         !harness
             .driver
-            .reading_is_visible("summary-card:Process power:2.75 W captured")
+            .reading_is_visible("summary-card:Process power:2.8 W captured")
     );
     harness.teardown();
 }
@@ -191,7 +183,7 @@ fn attribution_gaps_clear_readings_and_plot_exit_removes_the_tooltip(cx: &mut Te
             .driver
             .reading_is_visible("chart-legend:live-cpu-apps:App A:Unavailable")
     );
-    assert!(!harness.driver.reading_is_visible("130.00 % captured"));
+    assert!(!harness.driver.reading_is_visible("130% captured"));
     assert!(
         harness
             .driver
@@ -205,7 +197,7 @@ fn attribution_gaps_clear_readings_and_plot_exit_removes_the_tooltip(cx: &mut Te
             .driver
             .reading_is_visible("chart-tooltip:live-cpu-apps")
     );
-    assert!(harness.driver.reading_is_visible("250.00 % captured"));
+    assert!(harness.driver.reading_is_visible("250% captured"));
     harness.teardown();
 }
 
@@ -273,7 +265,7 @@ fn attribution_legend_accepts_native_keydown_and_keyup_and_data_keeps_rates(
     harness.driver.seed_attribution(Metric::Power);
     harness
         .driver
-        .focus_resident_legend("chart-legend:live-power-apps:App A:2.50 W");
+        .focus_resident_legend("chart-legend:live-power-apps:App A:2.5 W");
 
     harness.driver.press("space");
     harness.driver.release_legend_key("space");
@@ -281,7 +273,7 @@ fn attribution_legend_accepts_native_keydown_and_keyup_and_data_keeps_rates(
         .driver
         .click_resident_legend("chart-data:live-power-apps");
 
-    assert!(!harness.driver.reading_is_visible("2.50 W"));
+    assert!(!harness.driver.reading_is_visible("2.5 W"));
     assert!(harness.driver.reading_is_visible("Available samples"));
     harness.driver.click_resident_legend("chart-data-close");
     // Closing Data leaves the pointer where the button was, which may now lie over the plot.
@@ -290,13 +282,13 @@ fn attribution_legend_accepts_native_keydown_and_keyup_and_data_keeps_rates(
         .leave_plot("live-power-apps-plot", PlotExit::Sidebar);
     harness
         .driver
-        .focus_resident_legend("chart-legend:live-power-apps:App A:2.50 W");
+        .focus_resident_legend("chart-legend:live-power-apps:App A:2.5 W");
     harness.driver.press("enter");
     harness.driver.release_legend_key("enter");
     harness
         .driver
         .click_resident_legend("chart-data:live-power-apps");
-    assert!(harness.driver.reading_is_visible("2.50 W"));
+    assert!(harness.driver.reading_is_visible("2.5 W"));
     assert!(harness.driver.reading_is_visible("2 / 2"));
     harness.teardown();
 }
@@ -313,7 +305,7 @@ fn attribution_arrow_inspection_and_app_navigation_keep_the_exact_target(cx: &mu
 
     harness
         .driver
-        .click_ranked_app("ranking:CPU:Historical:20.0 %");
+        .click_ranked_app("ranking:CPU:Historical:20%");
 
     harness.driver.assert_ranked_app_request(999, 1, "42");
     harness.teardown();
@@ -397,19 +389,19 @@ impl InputDriver {
         let (plot, ranking, card, wrapper) = match metric {
             Metric::Cpu => (
                 "live-cpu-apps-plot",
-                "ranking:CPU:Current:80.0 %",
+                "ranking:CPU:Current:80%",
                 "chart-card:live-cpu-apps",
                 "attribution-ranking:live-cpu-apps",
             ),
             Metric::Power => (
                 "live-power-apps-plot",
-                "ranking:Process power:Current:500.0 mW",
+                "ranking:Process power:Current:500 mW",
                 "chart-card:live-power-apps",
                 "attribution-ranking:live-power-apps",
             ),
             Metric::Disk => (
                 "live-disk-apps-plot",
-                "ranking:Disk I/O:Current:80.0 B/s",
+                "ranking:Disk I/O:Current:80 B/s",
                 "chart-card:live-disk-apps",
                 "attribution-ranking:live-disk-apps",
             ),

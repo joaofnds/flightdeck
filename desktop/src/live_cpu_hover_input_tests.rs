@@ -14,11 +14,11 @@ fn cpu_pointer_inspection_updates_the_page_to_its_exact_same_second_publication(
 ) {
     // Dispatch the earlier interval while its sibling owns the committed scalar reading.
     let mut harness = CPUHoverHarness::setup(cx);
-    assert!(harness.driver.reading_is_visible("87.0 %"));
+    assert!(harness.driver.reading_is_visible("87%"));
 
     harness.driver.hover_cpu(1000 * NS + NS * 9 / 10);
 
-    assert!(harness.driver.reading_is_visible("13.0 %"));
+    assert!(harness.driver.reading_is_visible("13%"));
     assert!(harness.driver.cpu_reading_is_visible("publication 2", "0%"));
     assert_eq!(harness.driver.reading_publication(), Some(2));
     assert_eq!(harness.driver.committed_second(), None);
@@ -35,7 +35,7 @@ fn regular_pointer_inspection_synchronizes_the_cpu_history_readout(cx: &mut Test
 
     harness.driver.hover_scalar_selected_second();
 
-    assert!(harness.driver.reading_is_visible("87.0 %"));
+    assert!(harness.driver.reading_is_visible("87%"));
     assert!(
         harness
             .driver
@@ -61,7 +61,7 @@ fn cpu_interval_gaps_preserve_valid_scalars_without_borrowing_cpu_activity(
 
     harness.driver.hover_cpu(1001 * NS + NS * 3 / 4);
 
-    assert!(harness.driver.reading_is_visible("87.0 %"));
+    assert!(harness.driver.reading_is_visible("87%"));
     assert!(
         harness
             .driver
@@ -83,11 +83,11 @@ fn cpu_pointer_exit_into_the_row_labels_restores_the_committed_reading(cx: &mut 
     // The adjacent labels belong to the panel but lie outside the painted cell area.
     let mut harness = CPUHoverHarness::setup(cx);
     harness.driver.hover_cpu(1000 * NS + NS * 9 / 10);
-    assert!(harness.driver.reading_is_visible("13.0 %"));
+    assert!(harness.driver.reading_is_visible("13%"));
 
     harness.driver.hover_cpu_labels();
 
-    assert!(harness.driver.reading_is_visible("87.0 %"));
+    assert!(harness.driver.reading_is_visible("87%"));
     assert!(harness.driver.target_is_clear());
     harness.teardown();
 }
@@ -123,7 +123,7 @@ fn cpu_keyboard_inspection_survives_pointer_exit_and_return_commits_its_identity
 
     harness.driver.hover_cpu_labels();
 
-    assert!(harness.driver.reading_is_visible("13.0 %"));
+    assert!(harness.driver.reading_is_visible("13%"));
     assert_eq!(harness.driver.reading_publication(), Some(2));
     harness.driver.press("enter");
     assert_eq!(harness.driver.committed_second(), Some(1001));

@@ -15,7 +15,7 @@ fn overview_disk_ranking_activates_the_exact_historical_app(cx: &mut TestAppCont
     assert!(
         harness
             .driver
-            .reading_is_visible("ranking:Disk I/O:Current:80.0 B/s")
+            .reading_is_visible("ranking:Disk I/O:Current:80 B/s")
     );
 
     let position = harness
@@ -31,7 +31,7 @@ fn overview_disk_ranking_activates_the_exact_historical_app(cx: &mut TestAppCont
         .leave_plot("live-cpu-plot", super::PlotExit::Sidebar);
     harness
         .driver
-        .click_ranked_app("ranking:Disk I/O:Historical:20.0 B/s");
+        .click_ranked_app("ranking:Disk I/O:Historical:20 B/s");
 
     harness.driver.assert_ranked_app_request(999, 1, "42");
     harness.teardown();
@@ -80,16 +80,16 @@ fn overview_context_follows_exact_hover_and_gap_while_live_acceptance_advances(
     harness.driver.hover_previous_second_on("live-cpu-plot");
     harness.driver.assert_overview_context([
         "overview-context:soc:40.0 °C",
-        "overview-context:fan0:1000 rpm",
-        "overview-context:fan1:1100 rpm",
-        "overview-context:charge:80.0 %",
+        "overview-context:fan0:1,000 rpm",
+        "overview-context:fan1:1,100 rpm",
+        "overview-context:charge:80.0%",
     ]);
     harness.driver.advance_overview_context();
     harness.driver.assert_overview_context([
         "overview-context:soc:40.0 °C",
-        "overview-context:fan0:1000 rpm",
-        "overview-context:fan1:1100 rpm",
-        "overview-context:charge:80.0 %",
+        "overview-context:fan0:1,000 rpm",
+        "overview-context:fan1:1,100 rpm",
+        "overview-context:charge:80.0%",
     ]);
     let gap = harness
         .driver
@@ -107,9 +107,9 @@ fn overview_context_follows_exact_hover_and_gap_while_live_acceptance_advances(
 
     harness.driver.assert_overview_context([
         "overview-context:soc:70.0 °C",
-        "overview-context:fan0:3000 rpm",
+        "overview-context:fan0:3,000 rpm",
         "overview-context:fan1:Unavailable",
-        "overview-context:charge:45.0 %",
+        "overview-context:charge:45.0%",
     ]);
     harness.teardown();
 }
@@ -137,7 +137,7 @@ fn chart_cards_use_reference_padding_and_eight_pixel_column_gaps(cx: &mut TestAp
     let card = harness.driver.chart_bounds("chart-card:live-cpu");
     let adjacent = harness.driver.chart_bounds("chart-card:live-gpu-activity");
     let next_row = harness.driver.chart_bounds("chart-card:live-power");
-    let headline = harness.driver.chart_bounds("chart-reading:live-cpu:0.0 %");
+    let headline = harness.driver.chart_bounds("chart-reading:live-cpu:0%");
     let data = harness.driver.chart_bounds("chart-data:live-cpu");
 
     assert_eq!(adjacent.left() - card.right(), px(8.0));
@@ -183,11 +183,7 @@ fn overview_top_apps_are_a_three_by_two_grid_in_the_prototype_order(cx: &mut Tes
             .driver
             .reading_is_visible("GPU time by App is sampled only while the app runs")
     );
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("ranking:CPU:Current:80.0 %")
-    );
+    assert!(harness.driver.reading_is_visible("ranking:CPU:Current:80%"));
     harness.teardown();
 }
 
@@ -358,7 +354,7 @@ fn regrouping_a_hovered_first_plot_recomputes_its_reading_at_the_stationary_poin
     harness.driver.resize_charts(1100.0);
     assert_eq!(harness.driver.plot_bounds("live-cpu-plot"), original);
     harness.driver.hover_position(pointer);
-    harness.driver.assert_cpu_inspection(551, "51.0 %");
+    harness.driver.assert_cpu_inspection(551, "51%");
 
     harness
         .driver
@@ -370,7 +366,7 @@ fn regrouping_a_hovered_first_plot_recomputes_its_reading_at_the_stationary_poin
     let fraction = f32::from(pointer.x - plot.left()) / f32::from(plot.size.width);
     let second = 101 + (fraction * 900.0).floor().to_u64().unwrap();
     assert_eq!(second, 368);
-    harness.driver.assert_cpu_inspection(second, "68.0 %");
+    harness.driver.assert_cpu_inspection(second, "68%");
     assert_eq!(
         harness.driver.accepted_selection().unwrap()["selected"],
         selected
@@ -502,9 +498,9 @@ impl InputDriver {
         assert!(self.reading_is_visible("overview-context:thermal:Uncaptured"));
         self.assert_overview_context([
             "overview-context:soc:60.0 °C",
-            "overview-context:fan0:2000 rpm",
-            "overview-context:fan1:2100 rpm",
-            "overview-context:charge:50.0 %",
+            "overview-context:fan0:2,000 rpm",
+            "overview-context:fan1:2,100 rpm",
+            "overview-context:charge:50.0%",
         ]);
     }
 

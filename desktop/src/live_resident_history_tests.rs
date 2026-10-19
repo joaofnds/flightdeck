@@ -10,7 +10,7 @@ fn resident_amounts_preserve_exact_bytes_while_readouts_and_plot_use_gib() {
     let value = fixture();
     let history = ResidentHistory::prepare(&value, &selection());
     assert_eq!(history.amount(1, Some(1)), Some(9_007_199_254_740_993));
-    assert_eq!(history.reading(1, Some(1)), "8388608.0 GiB");
+    assert_eq!(history.reading(1, Some(1)), "8,388,608 GiB");
     let panel = history.panel().unwrap();
     assert_eq!(panel.lines[0].name, "Other");
     assert_eq!(panel.lines[1].name, "Captured App");

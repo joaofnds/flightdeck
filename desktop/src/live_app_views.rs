@@ -422,7 +422,7 @@ fn app_gpu_time(app: &Value, selection: &Value) -> String {
     });
     match share {
         Some(entry) => value_rate(&entry["percent"], "%"),
-        None => rate(Some(0.0), "%"),
+        None => event_rate(Some(0.0), "%"),
     }
 }
 
@@ -572,30 +572,13 @@ pub fn memory(value: Option<u64>) -> String {
     let Some(value) = value else {
         return "Unavailable".into();
     };
-    let (divisor, unit) = if value >= 1_073_741_824 {
-        (1_073_741_824, "GiB")
-    } else {
-        if value >= 1_048_576 {
-            (1_048_576, "MiB")
-        } else {
-            if value >= 1024 {
-                (1024, "KiB")
-            } else {
-                return format!("{value} B");
-            }
-        }
-    };
-    format!(
-        "{}.{} {unit}",
-        value / divisor,
-        (value % divisor) * 10 / divisor
-    )
-}
 
-pub fn rate(value: Option<f64>, unit: &str) -> String {
-    match value {
-        Some(value) if value.is_finite() => format!("{value:.1} {unit}"),
-        _ => "Unavailable".into(),
+    match value
+        .to_f64()
+        .and_then(|value| (value / 1_073_741_824.0).to_f32())
+    {
+        Some(value) => crate::live_projection::quantity_text(value, "GiB"),
+        None => "Unavailable".into(),
     }
 }
 
@@ -624,7 +607,7 @@ fn value_rate(value: &Value, unit: &str) -> String {
         return "Unavailable".into();
     }
     match value.as_f64() {
-        Some(value) => rate(Some(value), unit),
+        Some(value) => event_rate(Some(value), unit),
         None => "Invalid reading".into(),
     }
 }

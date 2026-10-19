@@ -17,33 +17,33 @@ fn hovering_an_app_replaces_current_details_with_the_exact_historical_page(
 ) {
     // Hover the real chart and deliver exact historical details while reading the composed frame.
     let mut harness = AppHoverHarness::setup(cx);
-    assert!(harness.driver.text_is_visible("87.0 %"));
+    assert!(harness.driver.text_is_visible("87%"));
     assert!(harness.driver.text_is_visible("Accepted worker"));
     assert!(
         harness
             .driver
-            .text_is_visible("summary-card:Process power:9.0 W")
+            .text_is_visible("summary-card:Process power:9 W")
     );
 
     harness.driver.hover_previous_second();
 
-    assert!(harness.driver.text_is_visible("13.0 %"));
+    assert!(harness.driver.text_is_visible("13%"));
     assert!(!harness.driver.text_is_visible("Accepted worker"));
     assert!(
         !harness
             .driver
-            .text_is_visible("summary-card:Process power:9.0 W")
+            .text_is_visible("summary-card:Process power:9 W")
     );
     harness.driver.deliver_historical_details();
 
-    assert!(harness.driver.text_is_visible("13.0 %"));
+    assert!(harness.driver.text_is_visible("13%"));
     assert!(harness.driver.text_is_visible("Historical worker"));
-    assert!(harness.driver.text_is_visible("120.0 %"));
-    assert!(harness.driver.text_is_visible("64.0 MiB"));
+    assert!(harness.driver.text_is_visible("120%"));
+    assert!(harness.driver.text_is_visible("64 MiB"));
     assert!(
         harness
             .driver
-            .text_is_visible("summary-card:Process power:4.0 W")
+            .text_is_visible("summary-card:Process power:4 W")
     );
     assert!(!harness.driver.text_is_visible("Accepted worker"));
     assert!(!harness.driver.text_is_visible("Accepted helper"));
@@ -61,7 +61,7 @@ fn sub_watt_app_power_reads_in_milliwatts(cx: &mut TestAppContext) {
     assert!(
         harness
             .driver
-            .text_is_visible("summary-card:Process power:142.0 mW")
+            .text_is_visible("summary-card:Process power:142 mW")
     );
     harness.teardown();
 }
@@ -72,12 +72,12 @@ fn the_selected_app_reads_in_six_summary_cards(cx: &mut TestAppContext) {
     // Method: accept the fixture App and find each card's label and reading in the frame.
     let mut harness = AppHoverHarness::setup(cx);
     for card in [
-        "summary-card:CPU:87.0 %",
-        "summary-card:Resident memory:7.0 GiB",
+        "summary-card:CPU:87%",
+        "summary-card:Resident memory:7 GiB",
         "summary-card:Network:Not captured",
         "summary-card:Disk I/O:Unavailable *",
         "summary-card:GPU time:Not sampled",
-        "summary-card:Process power:9.0 W",
+        "summary-card:Process power:9 W",
     ] {
         assert!(harness.driver.text_is_visible(card), "{card}");
     }
@@ -193,7 +193,7 @@ fn historical_app_details_keep_the_graph_under_a_stationary_pointer(cx: &mut Tes
         ready, accepted,
         "Historical row counts must retain the chart's position"
     );
-    assert!(harness.driver.text_is_visible("13.0 %"));
+    assert!(harness.driver.text_is_visible("13%"));
     harness.teardown();
 }
 
@@ -210,11 +210,11 @@ fn growing_historical_app_details_keep_the_graph_under_a_stationary_pointer(
     harness.driver.deliver_historical_details();
 
     assert_eq!(harness.driver.chart_bounds(), accepted);
-    assert!(harness.driver.text_is_visible("13.0 %"));
+    assert!(harness.driver.text_is_visible("13%"));
     assert!(
         harness
             .driver
-            .text_is_visible("summary-card:Process power:4.0 W")
+            .text_is_visible("summary-card:Process power:4 W")
     );
     assert!(!harness.driver.text_is_visible("Accepted worker"));
     harness.teardown();
@@ -232,7 +232,7 @@ fn scrolled_app_details_keep_the_graph_under_a_stationary_pointer(cx: &mut TestA
     harness.driver.deliver_historical_details();
 
     assert_eq!(harness.driver.chart_bounds(), accepted);
-    assert!(harness.driver.text_is_visible("13.0 %"));
+    assert!(harness.driver.text_is_visible("13%"));
     harness.teardown();
 }
 
@@ -321,7 +321,7 @@ fn leaving_history_restores_the_expanded_process_without_moving_the_graph(cx: &m
     harness.driver.leave_history();
 
     assert_eq!(harness.driver.chart_bounds(), accepted);
-    assert!(harness.driver.text_is_visible("87.0 %"));
+    assert!(harness.driver.text_is_visible("87%"));
     harness.driver.scroll_to_processes("expanded-json");
     assert!(harness.driver.expanded_json_is_visible());
     harness.teardown();
@@ -336,7 +336,7 @@ fn leaving_app_history_restores_the_real_end_of_the_recording_view(cx: &mut Test
 
     harness.driver.leave_and_scroll_to_end();
 
-    assert!(harness.driver.text_is_visible("87.0 %"));
+    assert!(harness.driver.text_is_visible("87%"));
     assert!(harness.driver.last_process_is_visible());
     harness.teardown();
 }

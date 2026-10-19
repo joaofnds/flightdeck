@@ -455,8 +455,8 @@ fn all_groups_inspector_uses_the_exact_shared_same_second_observation() {
         crate::live_process_history::groups::reading(history, "live-process-groups-disk", 2, index);
 
     assert_eq!(index, Some(1));
-    assert_eq!(reading, "160.0 B/s");
-    assert_eq!(written, "80.0 B/s");
+    assert_eq!(reading, "160 B/s");
+    assert_eq!(written, "80 B/s");
     assert_eq!(
         history.points[index.unwrap()].observation.stamp.publication,
         2
@@ -524,7 +524,7 @@ fn all_groups_readouts_use_historical_rates() {
         0,
         Some(1),
     );
-    assert_eq!(selected, "240.0 %");
+    assert_eq!(selected, "240%");
     history.points[0].readings[0] = history.points[1].readings[0];
     history.points[0].elapsed_ns = Some(2_000_000_000);
     let historical = crate::live_process_history::groups::reading(
@@ -533,7 +533,7 @@ fn all_groups_readouts_use_historical_rates() {
         0,
         Some(0),
     );
-    assert_eq!(historical, "120.0 %");
+    assert_eq!(historical, "120%");
     history.points[0].readings[0].measures[2].known = 9_007_199_254_740_993;
     let disk = crate::live_process_history::groups::reading(
         &history,
@@ -541,7 +541,7 @@ fn all_groups_readouts_use_historical_rates() {
         0,
         Some(0),
     );
-    assert_eq!(disk, "4503599616.0 MB/s");
+    assert_eq!(disk, "4,503,599,616 MB/s");
     history.points[0].readings[0].measures[3].known = 9_007_199_254_740_995;
     let written = crate::live_process_history::groups::reading(
         &history,
@@ -549,7 +549,7 @@ fn all_groups_readouts_use_historical_rates() {
         history.groups.len(),
         Some(0),
     );
-    assert_eq!(written, "4503599616.0 MB/s");
+    assert_eq!(written, "4,503,599,616 MB/s");
     let power = crate::live_process_history::groups::reading(
         &history,
         "live-process-groups-power",
@@ -596,14 +596,14 @@ fn all_groups_small_nonzero_readouts_preserve_visible_rates() {
         0,
         Some(1),
     );
-    assert_eq!(power, "1.0 mW");
+    assert_eq!(power, "1 mW");
     let cpu = crate::live_process_history::groups::reading(
         &history,
         "live-process-groups-cpu",
         0,
         Some(1),
     );
-    assert_eq!(cpu, "0.001 %");
+    assert_eq!(cpu, "0.001%");
 }
 
 pub(crate) fn all_history() -> Box<viewer::app_process_groups_history::AppProcessGroupsHistory> {

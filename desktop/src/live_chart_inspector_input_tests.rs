@@ -14,8 +14,8 @@ fn chart_data_opens_the_visible_series_statistics_and_closes(cx: &mut TestAppCon
     assert!(harness.driver.reading_is_visible("Sample mean"));
     assert!(harness.driver.reading_is_visible("Sample maximum"));
     assert!(harness.driver.reading_is_visible("Available samples"));
-    assert!(harness.driver.reading_is_visible("49.0 W"));
-    assert!(harness.driver.reading_is_visible("90.0 W"));
+    assert!(harness.driver.reading_is_visible("49 W"));
+    assert!(harness.driver.reading_is_visible("90 W"));
     assert!(harness.driver.reading_is_visible("2 / 3"));
     harness.driver.chart_control("chart-data-close");
     assert!(!harness.driver.reading_is_visible("Sample mean"));
@@ -40,19 +40,19 @@ fn separate_power_plots_share_inspection_and_remove_the_tooltip_on_exit(cx: &mut
     assert!(
         harness
             .driver
-            .reading_is_visible("chart-tooltip-row:live-gpu-power:0:GPU:100.0 W")
+            .reading_is_visible("chart-tooltip-row:live-gpu-power:0:GPU:100 W")
     );
     assert!(
         harness
             .driver
-            .reading_is_visible("chart-reading:live-energy:90.0 W")
+            .reading_is_visible("chart-reading:live-energy:90 W")
     );
     assert!(harness.driver.cursor_is_visible("live-energy-plot"));
     harness.driver.hover_selected_second_on("live-energy-plot");
     assert!(
         harness
             .driver
-            .reading_is_visible("chart-tooltip-row:live-energy:0:Whole machine:8.0 W")
+            .reading_is_visible("chart-tooltip-row:live-energy:0:Whole machine:8 W")
     );
     harness
         .driver

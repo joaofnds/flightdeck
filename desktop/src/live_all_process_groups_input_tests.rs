@@ -12,17 +12,17 @@ fn all_groups_pointer_hover_shares_exact_readings_and_restores_on_exit(cx: &mut 
     assert!(
         harness
             .driver
-            .text_is_visible("chart-legend:live-process-groups-cpu:b:120.0 %")
+            .text_is_visible("chart-legend:live-process-groups-cpu:b:120%")
     );
     assert!(
         harness
             .driver
-            .text_is_visible("chart-tooltip-row:live-process-groups-cpu:0:b:120.0 %")
+            .text_is_visible("chart-tooltip-row:live-process-groups-cpu:0:b:120%")
     );
     assert!(
         harness
             .driver
-            .text_is_visible("chart-legend:live-process-groups-disk:b read:9007199232.0 MB/s")
+            .text_is_visible("chart-legend:live-process-groups-disk:b read:9,007,199,232 MB/s")
     );
     harness.driver.assert_all_groups_historical_quantities();
     harness.driver.assert_all_groups_second(999);
@@ -30,7 +30,7 @@ fn all_groups_pointer_hover_shares_exact_readings_and_restores_on_exit(cx: &mut 
     assert!(
         harness
             .driver
-            .text_is_visible("chart-legend:live-process-groups-cpu:b:240.0 %")
+            .text_is_visible("chart-legend:live-process-groups-cpu:b:240%")
     );
     harness.driver.assert_all_groups_current_quantities();
     assert!(
@@ -106,14 +106,14 @@ fn all_groups_installed_data_and_legend_controls_preserve_exact_selected_values(
             assert_eq!(disk.lines[0].values.iter().flatten().count(), 2);
         });
 
-    assert!(harness.driver.text_is_visible("160.0 B/s"));
-    assert!(harness.driver.text_is_visible("80.0 B/s"));
-    assert!(harness.driver.text_is_visible("80.0 B/s"));
+    assert!(harness.driver.text_is_visible("160 B/s"));
+    assert!(harness.driver.text_is_visible("80 B/s"));
+    assert!(harness.driver.text_is_visible("80 B/s"));
     assert!(harness.driver.text_is_visible("2 / 2"));
     harness.driver.process_history_control("chart-data-close");
     harness
         .driver
-        .process_history_control("chart-legend:live-process-groups-cpu:b:240.0 %");
+        .process_history_control("chart-legend:live-process-groups-cpu:b:240%");
     harness.driver.assert_all_groups_hidden_cpu();
     harness.driver.assert_all_groups_current_quantities();
     harness.teardown();
@@ -208,20 +208,20 @@ impl AppHoverDriver {
     }
 
     fn assert_all_groups_historical_quantities(&mut self) {
-        assert!(self.text_is_visible("chart-legend:live-process-groups-resident:b:3.0 GiB"));
-        assert!(self.text_is_visible("chart-legend:live-process-groups-footprint:b:5.0 GiB"));
-        assert!(self.text_is_visible("chart-legend:live-process-groups-power:b:1.0 W"));
-        assert!(self.text_is_visible("chart-legend:live-process-groups-wakeups:b:5.0 /s"));
-        assert!(self.text_is_visible("chart-legend:live-process-groups-pageins:b:3.0 pages/s"));
+        assert!(self.text_is_visible("chart-legend:live-process-groups-resident:b:3 GiB"));
+        assert!(self.text_is_visible("chart-legend:live-process-groups-footprint:b:5 GiB"));
+        assert!(self.text_is_visible("chart-legend:live-process-groups-power:b:1 W"));
+        assert!(self.text_is_visible("chart-legend:live-process-groups-wakeups:b:5 /s"));
+        assert!(self.text_is_visible("chart-legend:live-process-groups-pageins:b:3 pages/s"));
         assert!(self.text_is_visible("chart-legend:live-process-groups-threads:b:8 threads"));
     }
 
     fn assert_all_groups_current_quantities(&mut self) {
-        assert!(self.text_is_visible("chart-legend:live-process-groups-resident:b:6.0 GiB"));
-        assert!(self.text_is_visible("chart-legend:live-process-groups-footprint:b:9.0 GiB"));
-        assert!(self.text_is_visible("chart-legend:live-process-groups-power:b:2.0 W"));
-        assert!(self.text_is_visible("chart-legend:live-process-groups-wakeups:b:11.0 /s"));
-        assert!(self.text_is_visible("chart-legend:live-process-groups-pageins:b:7.0 pages/s"));
+        assert!(self.text_is_visible("chart-legend:live-process-groups-resident:b:6 GiB"));
+        assert!(self.text_is_visible("chart-legend:live-process-groups-footprint:b:9 GiB"));
+        assert!(self.text_is_visible("chart-legend:live-process-groups-power:b:2 W"));
+        assert!(self.text_is_visible("chart-legend:live-process-groups-wakeups:b:11 /s"));
+        assert!(self.text_is_visible("chart-legend:live-process-groups-pageins:b:7 pages/s"));
         assert!(self.text_is_visible("chart-legend:live-process-groups-threads:b:13 threads"));
     }
 

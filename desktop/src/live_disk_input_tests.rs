@@ -82,7 +82,7 @@ fn storage_disk_hover_uses_exact_ranks_and_restores_live_on_exit(cx: &mut TestAp
     assert!(
         harness
             .driver
-            .reading_is_visible("ranking:Disk I/O:Historical:20.0 B/s")
+            .reading_is_visible("ranking:Disk I/O:Historical:20 B/s")
     );
     assert!(
         !harness
@@ -100,7 +100,7 @@ fn storage_disk_hover_uses_exact_ranks_and_restores_live_on_exit(cx: &mut TestAp
     assert!(
         !harness
             .driver
-            .reading_is_visible("ranking:Disk I/O:Historical:20.0 B/s")
+            .reading_is_visible("ranking:Disk I/O:Historical:20 B/s")
     );
     harness.teardown();
 }
@@ -117,7 +117,7 @@ fn storage_disk_link_keeps_its_keyboard_selected_observation(cx: &mut TestAppCon
 
     harness
         .driver
-        .click_ranked_app("ranking:Disk I/O:Historical:20.0 B/s");
+        .click_ranked_app("ranking:Disk I/O:Historical:20 B/s");
 
     harness.driver.assert_ranked_app_request(999, 1, "42");
     harness.teardown();
@@ -274,12 +274,12 @@ fn disk_attribution_hover_updates_devices_and_waits_for_exact_rankings(cx: &mut 
     assert!(
         harness
             .driver
-            .reading_is_visible("chart-legend:live-disk-apps:Current:500.0 kB/s")
+            .reading_is_visible("chart-legend:live-disk-apps:Current:500 kB/s")
     );
     assert!(
         harness
             .driver
-            .reading_is_visible("summary-card:Disk read:3.0 MB/s")
+            .reading_is_visible("summary-card:Disk read:3 MB/s")
     );
     assert!(
         harness
@@ -300,7 +300,7 @@ fn disk_attribution_hover_updates_devices_and_waits_for_exact_rankings(cx: &mut 
     assert!(
         harness
             .driver
-            .reading_is_visible("ranking:Disk I/O:Current:500.0 kB/s")
+            .reading_is_visible("ranking:Disk I/O:Current:500 kB/s")
     );
     harness.driver.assert_disk_attribution_anchor(&retained);
 
@@ -343,7 +343,7 @@ fn disk_attribution_failure_keeps_the_captured_rate_without_current_rank_links(
     assert!(
         harness
             .driver
-            .reading_is_visible("chart-legend:live-disk-apps:Current:500.0 kB/s")
+            .reading_is_visible("chart-legend:live-disk-apps:Current:500 kB/s")
     );
     assert!(
         harness
@@ -418,7 +418,7 @@ fn disk_attribution_tooltip_orders_exact_bytes_when_plot_values_tie(cx: &mut Tes
     assert!(
         harness
             .driver
-            .reading_is_visible("chart-tooltip-row:live-disk-apps:0:Higher:4503599616.0 MB/s")
+            .reading_is_visible("chart-tooltip-row:live-disk-apps:0:Higher:4,503,599,616 MB/s")
     );
     harness.teardown();
 }
@@ -435,7 +435,7 @@ fn disk_attribution_arrow_inspection_preserves_the_ranked_app_target(cx: &mut Te
 
     harness
         .driver
-        .click_ranked_app("ranking:Disk I/O:Historical:20.0 B/s");
+        .click_ranked_app("ranking:Disk I/O:Historical:20 B/s");
 
     harness.driver.assert_ranked_app_request(999, 1, "42");
     harness.teardown();
@@ -548,8 +548,8 @@ fn disk_attribution_data_keeps_tiny_rates_and_native_legend_switches(cx: &mut Te
     harness
         .driver
         .disk_chart_control("chart-data:live-disk-apps");
-    assert!(harness.driver.reading_is_visible("10.0 B/s"));
-    assert!(harness.driver.reading_is_visible("10.0 B/s"));
+    assert!(harness.driver.reading_is_visible("10 B/s"));
+    assert!(harness.driver.reading_is_visible("10 B/s"));
     harness.driver.disk_chart_control("chart-data-close");
     harness.driver.focus_disk_legend();
 
@@ -559,7 +559,7 @@ fn disk_attribution_data_keeps_tiny_rates_and_native_legend_switches(cx: &mut Te
         .driver
         .disk_chart_control("chart-data:live-disk-apps");
 
-    assert!(!harness.driver.reading_is_visible("10.0 B/s"));
+    assert!(!harness.driver.reading_is_visible("10 B/s"));
     harness.driver.disk_chart_control("chart-data-close");
     harness.driver.focus_disk_legend();
     harness.driver.press("enter");
@@ -567,7 +567,7 @@ fn disk_attribution_data_keeps_tiny_rates_and_native_legend_switches(cx: &mut Te
     harness
         .driver
         .disk_chart_control("chart-data:live-disk-apps");
-    assert!(harness.driver.reading_is_visible("10.0 B/s"));
+    assert!(harness.driver.reading_is_visible("10 B/s"));
     assert!(harness.driver.reading_is_visible("2 / 2"));
     harness.teardown();
 }
@@ -606,7 +606,7 @@ impl InputDriver {
     fn focus_disk_legend(&mut self) {
         let bounds = self
             .context
-            .debug_bounds("chart-legend:live-disk-apps:Current:10.0 B/s")
+            .debug_bounds("chart-legend:live-disk-apps:Current:10 B/s")
             .unwrap();
         self.context.simulate_mouse_down(
             bounds.center(),

@@ -21,35 +21,35 @@ fn memory_hover_worker_failure_keeps_the_historical_scalar_without_current_app_l
 
     harness.driver.fail_ranked_preview();
 
-    assert!(harness.driver.reading_is_visible("2.0 GiB app memory"));
+    assert!(harness.driver.reading_is_visible("2 GiB app memory"));
     assert!(
         harness
             .driver
             .reading_is_visible("App totals unavailable: Ranking read failed")
     );
-    assert!(!harness.driver.reading_is_visible("6.0 GiB app memory"));
+    assert!(!harness.driver.reading_is_visible("6 GiB app memory"));
     assert!(
         !harness
             .driver
-            .reading_is_visible("ranking:Resident memory:Current:1.0 GiB")
+            .reading_is_visible("ranking:Resident memory:Current:1 GiB")
     );
     assert!(
         !harness
             .driver
-            .reading_is_visible("ranking:Resident memory:Historical:512.0 MiB")
+            .reading_is_visible("ranking:Resident memory:Historical:512 MiB")
     );
 
     harness
         .driver
         .leave_plot("live-memory-plot", PlotExit::Sidebar);
 
-    assert!(harness.driver.reading_is_visible("6.0 GiB app memory"));
+    assert!(harness.driver.reading_is_visible("6 GiB app memory"));
     assert!(
         harness
             .driver
-            .reading_is_visible("ranking:Resident memory:Current:1.0 GiB")
+            .reading_is_visible("ranking:Resident memory:Current:1 GiB")
     );
-    assert!(!harness.driver.reading_is_visible("2.0 GiB app memory"));
+    assert!(!harness.driver.reading_is_visible("2 GiB app memory"));
     harness.teardown();
 }
 
@@ -62,11 +62,11 @@ fn energy_hover_gap_clears_historical_readings_without_borrowing_the_current_app
     harness.driver.seed_route_rankings();
     harness.driver.hover_previous_second_on("live-energy-plot");
     harness.driver.complete_route_ranked_preview();
-    assert!(harness.driver.reading_is_visible("3.0 W"));
+    assert!(harness.driver.reading_is_visible("3 W"));
     assert!(
         harness
             .driver
-            .reading_is_visible("ranking:Process power:Historical:250.0 mW")
+            .reading_is_visible("ranking:Process power:Historical:250 mW")
     );
     let gap = harness
         .driver
@@ -83,28 +83,28 @@ fn energy_hover_gap_clears_historical_readings_without_borrowing_the_current_app
             .driver
             .reading_is_visible("App totals unavailable at this observation")
     );
-    assert!(!harness.driver.reading_is_visible("9.0 W"));
-    assert!(!harness.driver.reading_is_visible("3.0 W"));
+    assert!(!harness.driver.reading_is_visible("9 W"));
+    assert!(!harness.driver.reading_is_visible("3 W"));
     assert!(
         !harness
             .driver
-            .reading_is_visible("ranking:Process power:Current:500.0 mW")
+            .reading_is_visible("ranking:Process power:Current:500 mW")
     );
     assert!(
         !harness
             .driver
-            .reading_is_visible("ranking:Process power:Historical:250.0 mW")
+            .reading_is_visible("ranking:Process power:Historical:250 mW")
     );
 
     harness
         .driver
         .leave_plot("live-energy-plot", PlotExit::Sidebar);
 
-    assert!(harness.driver.reading_is_visible("9.0 W"));
+    assert!(harness.driver.reading_is_visible("9 W"));
     assert!(
         harness
             .driver
-            .reading_is_visible("ranking:Process power:Current:500.0 mW")
+            .reading_is_visible("ranking:Process power:Current:500 mW")
     );
     harness.teardown();
 }
@@ -123,13 +123,13 @@ fn historical_memory_app_mouse_activation_preserves_identity_and_resets_offsets(
     assert!(
         harness
             .driver
-            .reading_is_visible("ranking:Resident memory:Historical:512.0 MiB")
+            .reading_is_visible("ranking:Resident memory:Historical:512 MiB")
     );
     harness.driver.seed_stale_ranked_offsets();
 
     harness
         .driver
-        .click_ranked_app("ranking:Resident memory:Historical:512.0 MiB");
+        .click_ranked_app("ranking:Resident memory:Historical:512 MiB");
 
     harness.driver.assert_ranked_app_request(999, 1, "42");
     harness.driver.assert_ranked_offsets_reset();
@@ -150,13 +150,13 @@ fn historical_energy_app_keyboard_activation_preserves_identity_and_resets_offse
     assert!(
         harness
             .driver
-            .reading_is_visible("ranking:Process power:Historical:250.0 mW")
+            .reading_is_visible("ranking:Process power:Historical:250 mW")
     );
     harness.driver.seed_stale_ranked_offsets();
 
     harness
         .driver
-        .activate_ranked_app_with_keyboard("ranking:Process power:Historical:250.0 mW");
+        .activate_ranked_app_with_keyboard("ranking:Process power:Historical:250 mW");
 
     harness.driver.assert_ranked_app_request(999, 1, "42");
     harness.driver.assert_ranked_offsets_reset();
@@ -170,7 +170,7 @@ fn memory_hover_loads_exact_app_rankings_and_restores_the_committed_reading(
     // Hover the installed Memory chart, deliver its exact response, then leave the plot.
     let mut harness = InputHarness::setup_route(cx, "memory");
     harness.driver.seed_route_rankings();
-    assert!(harness.driver.reading_is_visible("6.0 GiB app memory"));
+    assert!(harness.driver.reading_is_visible("6 GiB app memory"));
 
     harness.driver.hover_previous_second_on("live-memory-plot");
 
@@ -179,8 +179,8 @@ fn memory_hover_loads_exact_app_rankings_and_restores_the_committed_reading(
             .driver
             .reading_is_visible("Hover preview · Loading exact details")
     );
-    assert!(harness.driver.reading_is_visible("2.0 GiB app memory"));
-    assert!(!harness.driver.reading_is_visible("6.0 GiB app memory"));
+    assert!(harness.driver.reading_is_visible("2 GiB app memory"));
+    assert!(!harness.driver.reading_is_visible("6 GiB app memory"));
     assert!(
         harness
             .driver
@@ -189,7 +189,7 @@ fn memory_hover_loads_exact_app_rankings_and_restores_the_committed_reading(
     assert!(
         !harness
             .driver
-            .reading_is_visible("ranking:Resident memory:Current:1.0 GiB")
+            .reading_is_visible("ranking:Resident memory:Current:1 GiB")
     );
 
     harness.driver.complete_route_ranked_preview();
@@ -197,13 +197,13 @@ fn memory_hover_loads_exact_app_rankings_and_restores_the_committed_reading(
     assert!(
         harness
             .driver
-            .reading_is_visible("ranking:Resident memory:Historical:512.0 MiB")
+            .reading_is_visible("ranking:Resident memory:Historical:512 MiB")
     );
-    assert!(harness.driver.reading_is_visible("2.0 GiB app memory"));
+    assert!(harness.driver.reading_is_visible("2 GiB app memory"));
     assert!(
         !harness
             .driver
-            .reading_is_visible("ranking:Resident memory:Current:1.0 GiB")
+            .reading_is_visible("ranking:Resident memory:Current:1 GiB")
     );
     assert_eq!(harness.driver.requested_publication(), Some(2));
 
@@ -214,13 +214,13 @@ fn memory_hover_loads_exact_app_rankings_and_restores_the_committed_reading(
     assert!(
         harness
             .driver
-            .reading_is_visible("ranking:Resident memory:Current:1.0 GiB")
+            .reading_is_visible("ranking:Resident memory:Current:1 GiB")
     );
-    assert!(harness.driver.reading_is_visible("6.0 GiB app memory"));
+    assert!(harness.driver.reading_is_visible("6 GiB app memory"));
     assert!(
         !harness
             .driver
-            .reading_is_visible("ranking:Resident memory:Historical:512.0 MiB")
+            .reading_is_visible("ranking:Resident memory:Historical:512 MiB")
     );
     harness.teardown();
 }
@@ -232,7 +232,7 @@ fn energy_hover_loads_exact_app_rankings_and_restores_the_committed_reading(
     // Hover the installed Energy chart, deliver its exact response, then leave the plot.
     let mut harness = InputHarness::setup_route(cx, "energy");
     harness.driver.seed_route_rankings();
-    assert!(harness.driver.reading_is_visible("9.0 W"));
+    assert!(harness.driver.reading_is_visible("9 W"));
 
     harness.driver.hover_previous_second_on("live-energy-plot");
 
@@ -241,8 +241,8 @@ fn energy_hover_loads_exact_app_rankings_and_restores_the_committed_reading(
             .driver
             .reading_is_visible("Hover preview · Loading exact details")
     );
-    assert!(harness.driver.reading_is_visible("3.0 W"));
-    assert!(!harness.driver.reading_is_visible("9.0 W"));
+    assert!(harness.driver.reading_is_visible("3 W"));
+    assert!(!harness.driver.reading_is_visible("9 W"));
     assert!(
         harness
             .driver
@@ -251,7 +251,7 @@ fn energy_hover_loads_exact_app_rankings_and_restores_the_committed_reading(
     assert!(
         !harness
             .driver
-            .reading_is_visible("ranking:Process power:Current:500.0 mW")
+            .reading_is_visible("ranking:Process power:Current:500 mW")
     );
 
     harness.driver.complete_route_ranked_preview();
@@ -259,13 +259,13 @@ fn energy_hover_loads_exact_app_rankings_and_restores_the_committed_reading(
     assert!(
         harness
             .driver
-            .reading_is_visible("ranking:Process power:Historical:250.0 mW")
+            .reading_is_visible("ranking:Process power:Historical:250 mW")
     );
-    assert!(harness.driver.reading_is_visible("3.0 W"));
+    assert!(harness.driver.reading_is_visible("3 W"));
     assert!(
         !harness
             .driver
-            .reading_is_visible("ranking:Process power:Current:500.0 mW")
+            .reading_is_visible("ranking:Process power:Current:500 mW")
     );
     assert_eq!(harness.driver.requested_publication(), Some(2));
 
@@ -276,13 +276,13 @@ fn energy_hover_loads_exact_app_rankings_and_restores_the_committed_reading(
     assert!(
         harness
             .driver
-            .reading_is_visible("ranking:Process power:Current:500.0 mW")
+            .reading_is_visible("ranking:Process power:Current:500 mW")
     );
-    assert!(harness.driver.reading_is_visible("9.0 W"));
+    assert!(harness.driver.reading_is_visible("9 W"));
     assert!(
         !harness
             .driver
-            .reading_is_visible("ranking:Process power:Historical:250.0 mW")
+            .reading_is_visible("ranking:Process power:Historical:250 mW")
     );
     harness.teardown();
 }
@@ -297,7 +297,7 @@ fn energy_rankings_show_the_selected_app_power(cx: &mut TestAppContext) {
     assert!(
         harness
             .driver
-            .reading_is_visible("ranking:Process power:Current:500.0 mW")
+            .reading_is_visible("ranking:Process power:Current:500 mW")
     );
     harness.teardown();
 }
@@ -309,11 +309,7 @@ fn cpu_rankings_show_the_selected_app_cpu(cx: &mut TestAppContext) {
 
     harness.driver.seed_ranked_overview();
 
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("ranking:CPU:Current:80.0 %")
-    );
+    assert!(harness.driver.reading_is_visible("ranking:CPU:Current:80%"));
     harness.teardown();
 }
 
@@ -327,7 +323,7 @@ fn memory_rankings_show_the_selected_app_resident_memory(cx: &mut TestAppContext
     assert!(
         harness
             .driver
-            .reading_is_visible("ranking:Resident memory:Current:1.0 GiB")
+            .reading_is_visible("ranking:Resident memory:Current:1 GiB")
     );
     harness.teardown();
 }
@@ -338,20 +334,16 @@ fn overview_rankings_show_current_measurements_and_explicit_source_limits(cx: &m
     let mut harness = InputHarness::setup_route(cx, "overview");
     harness.driver.seed_ranked_overview();
 
+    assert!(harness.driver.reading_is_visible("ranking:CPU:Current:80%"));
     assert!(
         harness
             .driver
-            .reading_is_visible("ranking:CPU:Current:80.0 %")
+            .reading_is_visible("ranking:Resident memory:Current:1 GiB")
     );
     assert!(
         harness
             .driver
-            .reading_is_visible("ranking:Resident memory:Current:1.0 GiB")
-    );
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("ranking:Process power:Current:500.0 mW")
+            .reading_is_visible("ranking:Process power:Current:500 mW")
     );
     assert!(
         harness
@@ -378,7 +370,7 @@ fn partial_ranked_totals_identify_their_known_subtotal(cx: &mut TestAppContext) 
     assert!(
         harness
             .driver
-            .reading_is_visible("ranking:CPU:Current:80.0 % known")
+            .reading_is_visible("ranking:CPU:Current:80% known")
     );
     assert!(
         harness
@@ -444,22 +436,18 @@ fn a_ranking_only_failure_preserves_the_exact_historical_chart(cx: &mut TestAppC
 
     harness.driver.complete_unavailable_ranked_preview();
 
-    assert!(harness.driver.reading_is_visible("13.0 %"));
+    assert!(harness.driver.reading_is_visible("13%"));
     assert!(
         harness
             .driver
             .reading_is_visible("App totals unavailable: App response bound")
     );
-    assert!(!harness.driver.reading_is_visible("87.0 %"));
+    assert!(!harness.driver.reading_is_visible("87%"));
+    assert!(!harness.driver.reading_is_visible("ranking:CPU:Current:80%"));
     assert!(
         !harness
             .driver
-            .reading_is_visible("ranking:CPU:Current:80.0 %")
-    );
-    assert!(
-        !harness
-            .driver
-            .reading_is_visible("ranking:CPU:Historical:20.0 %")
+            .reading_is_visible("ranking:CPU:Historical:20%")
     );
     harness.teardown();
 }
@@ -477,30 +465,22 @@ fn historical_hover_hides_current_ranks_until_its_exact_payload_arrives(cx: &mut
             .driver
             .reading_is_visible("Loading exact App totals")
     );
-    assert!(
-        !harness
-            .driver
-            .reading_is_visible("ranking:CPU:Current:80.0 %")
-    );
+    assert!(!harness.driver.reading_is_visible("ranking:CPU:Current:80%"));
     harness.driver.complete_ranked_preview();
     assert!(
         harness
             .driver
-            .reading_is_visible("ranking:CPU:Historical:20.0 %")
+            .reading_is_visible("ranking:CPU:Historical:20%")
     );
     assert_eq!(harness.driver.requested_publication(), Some(2));
     harness
         .driver
         .leave_plot("live-cpu-plot", PlotExit::Sidebar);
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("ranking:CPU:Current:80.0 %")
-    );
+    assert!(harness.driver.reading_is_visible("ranking:CPU:Current:80%"));
     assert!(
         !harness
             .driver
-            .reading_is_visible("ranking:CPU:Historical:20.0 %")
+            .reading_is_visible("ranking:CPU:Historical:20%")
     );
     harness.teardown();
 }
@@ -519,15 +499,11 @@ fn failed_historical_rankings_cannot_restore_current_app_links(cx: &mut TestAppC
             .driver
             .reading_is_visible("App totals unavailable: Ranking read failed")
     );
+    assert!(!harness.driver.reading_is_visible("ranking:CPU:Current:80%"));
     assert!(
         !harness
             .driver
-            .reading_is_visible("ranking:CPU:Current:80.0 %")
-    );
-    assert!(
-        !harness
-            .driver
-            .reading_is_visible("ranking:CPU:Historical:20.0 %")
+            .reading_is_visible("ranking:CPU:Historical:20%")
     );
     harness.teardown();
 }
@@ -549,11 +525,7 @@ fn a_missing_historical_observation_has_no_ranked_app_links(cx: &mut TestAppCont
             .driver
             .reading_is_visible("App totals unavailable at this observation")
     );
-    assert!(
-        !harness
-            .driver
-            .reading_is_visible("ranking:CPU:Current:80.0 %")
-    );
+    assert!(!harness.driver.reading_is_visible("ranking:CPU:Current:80%"));
     harness.teardown();
 }
 
@@ -564,9 +536,7 @@ fn a_paused_same_second_rank_link_keeps_the_earlier_observation(cx: &mut TestApp
     harness.driver.seed_ranked_overview();
     harness.driver.add_later_ranked_sibling();
 
-    harness
-        .driver
-        .click_ranked_app("ranking:CPU:Current:80.0 %");
+    harness.driver.click_ranked_app("ranking:CPU:Current:80%");
 
     harness.driver.assert_ranked_app_request(1000, 2, "41");
     harness.teardown();
@@ -584,7 +554,7 @@ fn a_keyboard_inspection_rank_link_commits_its_displayed_historical_identity(
 
     harness
         .driver
-        .click_ranked_app("ranking:CPU:Historical:20.0 %");
+        .click_ranked_app("ranking:CPU:Historical:20%");
 
     harness.driver.assert_ranked_app_request(999, 1, "42");
     harness.teardown();
@@ -954,7 +924,7 @@ fn memory_shows_interval_resident_leaders_separately_from_current_top_apps(
     assert!(
         harness
             .driver
-            .reading_is_visible("ranking:Resident memory:App I:100 B")
+            .reading_is_visible("ranking:Resident memory:App I:0.000095 MiB")
     );
 
     assert!(
@@ -984,7 +954,7 @@ fn resident_hover_sorts_adjacent_exact_byte_counts_above_plot_precision(cx: &mut
     assert!(
         harness
             .driver
-            .reading_is_visible("chart-tooltip-row:live-memory-app-resident:0:App A:16.0 MiB")
+            .reading_is_visible("chart-tooltip-row:live-memory-app-resident:0:App A:16 MiB")
     );
     harness.teardown();
 }
@@ -1076,7 +1046,7 @@ fn resident_history_hover_keeps_interval_cohort_and_exact_bytes_through_loading_
     assert!(
         harness
             .driver
-            .reading_is_visible("chart-legend:live-memory-app-resident:App A:1 B")
+            .reading_is_visible("chart-legend:live-memory-app-resident:App A:0.000001 MiB")
     );
 
     harness
@@ -1091,7 +1061,7 @@ fn resident_history_hover_keeps_interval_cohort_and_exact_bytes_through_loading_
     assert!(
         harness
             .driver
-            .reading_is_visible("chart-legend:live-memory-app-resident:App A:199 B")
+            .reading_is_visible("chart-legend:live-memory-app-resident:App A:0.00019 MiB")
     );
     assert!(
         harness
@@ -1102,7 +1072,7 @@ fn resident_history_hover_keeps_interval_cohort_and_exact_bytes_through_loading_
     assert!(
         harness
             .driver
-            .reading_is_visible("ranking:Resident memory:Historical:512.0 MiB")
+            .reading_is_visible("ranking:Resident memory:Historical:512 MiB")
     );
     harness.driver.assert_resident_history_anchors(&retained);
 
@@ -1113,12 +1083,12 @@ fn resident_history_hover_keeps_interval_cohort_and_exact_bytes_through_loading_
     assert!(
         harness
             .driver
-            .reading_is_visible("chart-legend:live-memory-app-resident:App A:1 B")
+            .reading_is_visible("chart-legend:live-memory-app-resident:App A:0.000001 MiB")
     );
     assert!(
         harness
             .driver
-            .reading_is_visible("ranking:Resident memory:App I:100 B")
+            .reading_is_visible("ranking:Resident memory:App I:0.000095 MiB")
     );
     harness.driver.assert_resident_history_anchors(&retained);
     harness.teardown();
@@ -1138,7 +1108,7 @@ fn resident_history_worker_failure_retains_the_exact_historical_readout(cx: &mut
     assert!(
         harness
             .driver
-            .reading_is_visible("chart-legend:live-memory-app-resident:App A:199 B")
+            .reading_is_visible("chart-legend:live-memory-app-resident:App A:0.00019 MiB")
     );
     assert!(
         harness
@@ -1151,7 +1121,7 @@ fn resident_history_worker_failure_retains_the_exact_historical_readout(cx: &mut
     assert!(
         harness
             .driver
-            .reading_is_visible("chart-legend:live-memory-app-resident:App A:1 B")
+            .reading_is_visible("chart-legend:live-memory-app-resident:App A:0.000001 MiB")
     );
     harness.teardown();
 }
@@ -1179,7 +1149,7 @@ fn resident_history_missing_second_shows_no_borrowed_residents(cx: &mut TestAppC
     assert!(
         !harness
             .driver
-            .reading_is_visible("chart-legend:live-memory-app-resident:App A:199 B")
+            .reading_is_visible("chart-legend:live-memory-app-resident:App A:0.00019 MiB")
     );
     harness.teardown();
 }
@@ -1243,7 +1213,7 @@ impl InputDriver {
         let plot = self.chart_bounds("live-memory-app-resident-plot");
         let rank = self
             .context
-            .debug_bounds("ranking:Resident memory:App I:100 B")
+            .debug_bounds("ranking:Resident memory:App I:0.000095 MiB")
             .unwrap();
         if narrow {
             assert!(plot.bottom() <= rank.top());
@@ -1268,18 +1238,18 @@ fn resident_history_same_basename_apps_have_independent_legend_toggles(cx: &mut 
 
     harness
         .driver
-        .click_resident_legend("chart-legend:live-memory-app-resident:/A/Foo.app:1 B");
+        .click_resident_legend("chart-legend:live-memory-app-resident:/A/Foo.app:0.000001 MiB");
 
     assert!(harness.driver.resident_legend_is_hidden("/A/Foo.app"));
     assert!(!harness.driver.resident_legend_is_hidden("/B/Foo.app"));
     harness
         .driver
-        .click_resident_legend("chart-legend:live-memory-app-resident:/B/Foo.app:1 B");
+        .click_resident_legend("chart-legend:live-memory-app-resident:/B/Foo.app:0.000001 MiB");
     assert!(harness.driver.resident_legend_is_hidden("/A/Foo.app"));
     assert!(harness.driver.resident_legend_is_hidden("/B/Foo.app"));
     harness
         .driver
-        .click_resident_legend("chart-legend:live-memory-app-resident:/A/Foo.app:1 B");
+        .click_resident_legend("chart-legend:live-memory-app-resident:/A/Foo.app:0.000001 MiB");
     assert!(!harness.driver.resident_legend_is_hidden("/A/Foo.app"));
     assert!(harness.driver.resident_legend_is_hidden("/B/Foo.app"));
     harness.teardown();
@@ -1292,7 +1262,7 @@ fn resident_legend_switches_toggle_independently_from_the_keyboard(cx: &mut Test
     harness.driver.seed_interval_resident_leaders();
     harness
         .driver
-        .focus_resident_legend("chart-legend:live-memory-app-resident:App A:1 B");
+        .focus_resident_legend("chart-legend:live-memory-app-resident:App A:0.000001 MiB");
 
     harness.driver.press("space");
     harness.driver.release_legend_key("space");
@@ -1301,14 +1271,14 @@ fn resident_legend_switches_toggle_independently_from_the_keyboard(cx: &mut Test
     assert!(!harness.driver.resident_legend_is_hidden("App B"));
     harness
         .driver
-        .focus_resident_legend("chart-legend:live-memory-app-resident:App B:1 B");
+        .focus_resident_legend("chart-legend:live-memory-app-resident:App B:0.000001 MiB");
     harness.driver.press("enter");
     harness.driver.release_legend_key("enter");
     assert!(harness.driver.resident_legend_is_hidden("App A"));
     assert!(harness.driver.resident_legend_is_hidden("App B"));
     harness
         .driver
-        .focus_resident_legend("chart-legend:live-memory-app-resident:App A:1 B");
+        .focus_resident_legend("chart-legend:live-memory-app-resident:App A:0.000001 MiB");
     harness.driver.press("space");
     harness.driver.release_legend_key("space");
     assert!(!harness.driver.resident_legend_is_hidden("App A"));
@@ -1371,9 +1341,9 @@ fn resident_history_reserved_other_label_has_an_independent_app_toggle(cx: &mut 
     harness.driver.seed_resident_leaders(history);
     assert!(harness.driver.reading_is_visible("Other (executable)"));
 
-    harness
-        .driver
-        .click_resident_legend("chart-legend:live-memory-app-resident:Other (executable):1 B");
+    harness.driver.click_resident_legend(
+        "chart-legend:live-memory-app-resident:Other (executable):0.000001 MiB",
+    );
 
     assert!(
         harness
@@ -1396,9 +1366,9 @@ fn resident_history_identical_display_paths_keep_key_kinds_independent(cx: &mut 
     assert!(harness.driver.reading_is_visible("/A/Foo.app (bundle)"));
     assert!(harness.driver.reading_is_visible("/A/Foo.app (executable)"));
 
-    harness
-        .driver
-        .click_resident_legend("chart-legend:live-memory-app-resident:/A/Foo.app (bundle):1 B");
+    harness.driver.click_resident_legend(
+        "chart-legend:live-memory-app-resident:/A/Foo.app (bundle):0.000001 MiB",
+    );
 
     assert!(
         harness

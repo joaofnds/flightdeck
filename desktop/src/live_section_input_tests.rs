@@ -292,7 +292,7 @@ fn memory_disclosure_keeps_the_hovered_observation_when_reopened_from_the_keyboa
     assert!(
         harness
             .driver
-            .reading_is_visible("memory-quantity:Active:2.0 GiB")
+            .reading_is_visible("memory-quantity:Active:2 GiB")
     );
     assert_eq!(
         harness.driver.chart_accessibility_reading("live-memory").0,
@@ -478,9 +478,9 @@ fn energy_breakdown_inspects_both_components_and_total_then_clears_gaps_and_rest
     harness.driver.seed_energy_breakdown();
     harness.driver.assert_energy_breakdown(&BreakdownReading {
         second: 1000,
-        headline: "chart-reading:live-power-breakdown:15.0 W",
-        remainder_legend: "chart-legend:live-power-breakdown:SoC and rest of system:10.0 W",
-        gpu_legend: "chart-legend:live-power-breakdown:GPU:5.0 W",
+        headline: "chart-reading:live-power-breakdown:15 W",
+        remainder_legend: "chart-legend:live-power-breakdown:SoC and rest of system:10 W",
+        gpu_legend: "chart-legend:live-power-breakdown:GPU:5 W",
     });
 
     harness
@@ -489,9 +489,9 @@ fn energy_breakdown_inspects_both_components_and_total_then_clears_gaps_and_rest
 
     harness.driver.assert_energy_breakdown(&BreakdownReading {
         second: 999,
-        headline: "chart-reading:live-power-breakdown:8.0 W",
-        remainder_legend: "chart-legend:live-power-breakdown:SoC and rest of system:6.0 W",
-        gpu_legend: "chart-legend:live-power-breakdown:GPU:2.0 W",
+        headline: "chart-reading:live-power-breakdown:8 W",
+        remainder_legend: "chart-legend:live-power-breakdown:SoC and rest of system:6 W",
+        gpu_legend: "chart-legend:live-power-breakdown:GPU:2 W",
     });
     let gap = harness
         .driver
@@ -508,9 +508,9 @@ fn energy_breakdown_inspects_both_components_and_total_then_clears_gaps_and_rest
         .leave_plot("live-power-breakdown-plot", super::PlotExit::Sidebar);
     harness.driver.assert_energy_breakdown(&BreakdownReading {
         second: 1000,
-        headline: "chart-reading:live-power-breakdown:15.0 W",
-        remainder_legend: "chart-legend:live-power-breakdown:SoC and rest of system:10.0 W",
-        gpu_legend: "chart-legend:live-power-breakdown:GPU:5.0 W",
+        headline: "chart-reading:live-power-breakdown:15 W",
+        remainder_legend: "chart-legend:live-power-breakdown:SoC and rest of system:10 W",
+        gpu_legend: "chart-legend:live-power-breakdown:GPU:5 W",
     });
     harness.teardown();
 }

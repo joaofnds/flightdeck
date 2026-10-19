@@ -1,4 +1,5 @@
 use gpui::{Context, IntoElement, div, prelude::*, px, rgb};
+use num_traits::ToPrimitive;
 use serde_json::Value;
 
 use crate::charts::{GRID, MUTED, ORANGE, PANEL, TEXT};
@@ -6,7 +7,7 @@ use crate::live_chart_view::timeline::{
     self, timeline_caption_text, timeline_heading_text, timeline_label,
 };
 use crate::live_dashboard::LiveDashboard;
-use crate::live_projection::quantity;
+use crate::live_projection::{hardware_reading, quantity};
 
 pub fn clock(second: u64, seconds: bool) -> String {
     crate::chart_axes::clock(second, seconds)
@@ -121,16 +122,14 @@ impl LiveDashboard {
                     key: "health",
                     label: "Health",
                 },
-                quantity(battery, "health_percent", "%", 1.0),
+                hardware_reading(battery, "health_percent", "%", 1),
             ))
             .child(overview_context_reading(
                 &ContextReading {
                     key: "cycles",
                     label: "Cycles",
                 },
-                battery["cycle_count"]
-                    .as_u64()
-                    .map_or_else(|| "Unavailable".into(), |cycles| cycles.to_string()),
+                hardware_reading(battery, "cycle_count", "", 0),
             ))
             .child(overview_context_reading(
                 &ContextReading {
@@ -195,7 +194,7 @@ fn overview_cooling(summary: &Value) -> gpui::Div {
                 key: "soc",
                 label: "SoC temperature",
             },
-            quantity(summary, "soc_celsius", "°C", 1.0),
+            hardware_reading(summary, "soc_celsius", " °C", 1),
         ))
         .child(overview_context_reading(
             &ContextReading {
@@ -216,7 +215,7 @@ fn overview_cooling(summary: &Value) -> gpui::Div {
                 key: "charge",
                 label: "Battery charge",
             },
-            quantity(&summary["battery"], "charge_percent", "%", 1.0),
+            hardware_reading(&summary["battery"], "charge_percent", "%", 1),
         ))
 }
 
@@ -267,7 +266,10 @@ fn overview_context_fan(summary: &Value, channel: usize) -> String {
         return "Unavailable".into();
     }
 
-    format!("{value:.0} rpm")
+    match value.to_f32() {
+        Some(value) => format!("{} rpm", crate::live_projection::fixed_text(value, 0)),
+        None => "Unavailable".into(),
+    }
 }
 
 #[cfg(test)]

@@ -42,7 +42,7 @@ fn historical_memory_inspection_updates_every_quantity_and_the_header_mode(
     assert!(
         harness
             .driver
-            .text_is_visible("memory-quantity:Active:21.0 GiB")
+            .text_is_visible("memory-quantity:Active:21 GiB")
     );
 
     harness.driver.hover(Epoch::Historical);
@@ -78,12 +78,12 @@ fn null_memory_quantities_remain_unavailable_at_an_existing_historical_observati
     assert!(
         harness
             .driver
-            .text_is_visible("memory-quantity:Wired:2.0 GiB")
+            .text_is_visible("memory-quantity:Wired:2 GiB")
     );
     assert!(
         !harness
             .driver
-            .text_is_visible("memory-quantity:Active:21.0 GiB")
+            .text_is_visible("memory-quantity:Active:21 GiB")
     );
     harness.teardown();
 }
@@ -143,8 +143,8 @@ fn superseding_a_target_immediately_rejects_the_obsolete_ready_response(cx: &mut
     harness.driver.hover(Epoch::Older);
     harness.driver.deliver(obsolete, Epoch::Historical);
 
-    assert!(harness.driver.text_is_visible("27.0 %"));
-    assert!(!harness.driver.text_is_visible("13.0 %"));
+    assert!(harness.driver.text_is_visible("27%"));
+    assert!(!harness.driver.text_is_visible("13%"));
     let copied = harness.driver.copy_json();
     assert_eq!(copied["observation"], Epoch::Older.identity());
     assert!(copied["summary"]["response_marker"].is_null());
@@ -162,7 +162,7 @@ fn pointer_exit_restores_following_readings_and_rejects_a_late_response(cx: &mut
     harness.driver.leave_plot();
     harness.driver.deliver(obsolete, Epoch::Historical);
 
-    assert!(harness.driver.text_is_visible("87.0 %"));
+    assert!(harness.driver.text_is_visible("87%"));
     assert!(
         !harness
             .driver
@@ -250,7 +250,7 @@ fn pointer_exit_restores_the_paused_selection_after_a_late_failure(cx: &mut Test
     harness.driver.leave_plot();
     harness.driver.fail(obsolete, "obsolete hover failure");
 
-    assert!(harness.driver.text_is_visible("87.0 %"));
+    assert!(harness.driver.text_is_visible("87%"));
     assert!(harness.driver.text_is_visible("Paused"));
     assert!(
         !harness
@@ -275,7 +275,7 @@ fn a_response_for_the_wrong_exact_observation_keeps_resident_values_and_explains
 
     harness.driver.deliver_wrong_observation(lookup);
 
-    assert!(harness.driver.text_is_visible("13.0 %"));
+    assert!(harness.driver.text_is_visible("13%"));
     assert!(
         harness.driver.text_is_visible(
             "Hover reading unavailable: Hover response has a different observation"
@@ -657,18 +657,18 @@ impl HoverDriver {
     }
 
     fn assert_historical_memory_visible(&mut self) {
-        assert!(self.text_is_visible("memory-quantity:Installed:16.0 GiB"));
-        assert!(self.text_is_visible("memory-quantity:Active:1.0 GiB"));
-        assert!(self.text_is_visible("memory-quantity:Wired:2.0 GiB"));
-        assert!(self.text_is_visible("memory-quantity:Compressed:3.0 GiB"));
-        assert!(self.text_is_visible("memory-quantity:Free:4.0 GiB"));
-        assert!(self.text_is_visible("memory-quantity:Inactive:5.0 GiB"));
-        assert!(self.text_is_visible("memory-quantity:Speculative:6.0 GiB"));
-        assert!(self.text_is_visible("memory-quantity:Anonymous:7.0 GiB"));
-        assert!(self.text_is_visible("memory-quantity:File-backed:8.0 GiB"));
-        assert!(self.text_is_visible("memory-quantity:Purgeable:9.0 GiB"));
-        assert!(self.text_is_visible("memory-quantity:Swap used:10.0 GiB"));
-        assert!(self.text_is_visible("memory-quantity:Swap allocated:11.0 GiB"));
+        assert!(self.text_is_visible("memory-quantity:Installed:16 GiB"));
+        assert!(self.text_is_visible("memory-quantity:Active:1 GiB"));
+        assert!(self.text_is_visible("memory-quantity:Wired:2 GiB"));
+        assert!(self.text_is_visible("memory-quantity:Compressed:3 GiB"));
+        assert!(self.text_is_visible("memory-quantity:Free:4 GiB"));
+        assert!(self.text_is_visible("memory-quantity:Inactive:5 GiB"));
+        assert!(self.text_is_visible("memory-quantity:Speculative:6 GiB"));
+        assert!(self.text_is_visible("memory-quantity:Anonymous:7 GiB"));
+        assert!(self.text_is_visible("memory-quantity:File-backed:8 GiB"));
+        assert!(self.text_is_visible("memory-quantity:Purgeable:9 GiB"));
+        assert!(self.text_is_visible("memory-quantity:Swap used:10 GiB"));
+        assert!(self.text_is_visible("memory-quantity:Swap allocated:11 GiB"));
         assert!(self.text_is_visible("memory-quantity:Memory pressure:Critical"));
     }
 }

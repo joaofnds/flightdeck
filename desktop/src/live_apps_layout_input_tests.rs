@@ -132,12 +132,12 @@ fn apps_grid_exact_hover_retains_context_and_restores_readings_on_exit(cx: &mut 
     assert!(
         harness
             .driver
-            .text_is_visible("chart-reading:live-process-group-cpu:120.0 %")
+            .text_is_visible("chart-reading:live-process-group-cpu:120%")
     );
     assert!(
         harness
             .driver
-            .text_is_visible("chart-reading:live-app-cpu:13.0 %")
+            .text_is_visible("chart-reading:live-app-cpu:13%")
     );
     harness.driver.deliver_historical_details();
     expect_historical_apps_grid_reading(&harness.driver.apps_grid_reading(), &retained);
@@ -153,12 +153,12 @@ fn apps_grid_exact_hover_retains_context_and_restores_readings_on_exit(cx: &mut 
     assert!(
         harness
             .driver
-            .text_is_visible("chart-reading:live-process-group-cpu:240.0 %")
+            .text_is_visible("chart-reading:live-process-group-cpu:240%")
     );
     assert!(
         harness
             .driver
-            .text_is_visible("chart-reading:live-app-cpu:87.0 %")
+            .text_is_visible("chart-reading:live-app-cpu:87%")
     );
     expect_apps_grid_anchor(&before, &harness.driver.apps_grid_bounds());
     harness.teardown();
@@ -259,10 +259,10 @@ fn expect_initial_apps_grid_selection(reading: &AppsGridReading) {
         })
     );
     assert_eq!(reading.executable.as_deref(), Some("hex:61"));
-    assert!(reading.chart_readings[0].ends_with("240.0 %"));
-    assert!(reading.chart_readings[1].ends_with("2.0 GiB"));
-    assert!(reading.chart_readings[2].ends_with("87.0 %"));
-    assert!(reading.chart_readings[3].ends_with("7.0 GiB"));
+    assert!(reading.chart_readings[0].ends_with("240%"));
+    assert!(reading.chart_readings[1].ends_with("2 GiB"));
+    assert!(reading.chart_readings[2].ends_with("87%"));
+    assert!(reading.chart_readings[3].ends_with("7 GiB"));
 }
 
 fn expect_retained_apps_grid_selection(reading: &AppsGridReading, retained: &AppsGridReading) {

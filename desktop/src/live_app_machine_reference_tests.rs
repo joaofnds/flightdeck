@@ -33,13 +33,13 @@ fn cpu_reference_is_independent_unstacked_and_excluded_from_captured_totals() {
     assert_eq!(panel.lines[2].dashed, Some(true));
     assert_eq!(
         history.reading(2, Some(0)),
-        "150.00 % · all recorded logical CPUs"
+        "150% · all recorded logical CPUs"
     );
     assert_eq!(
         history.reading(2, Some(1)),
-        "450.00 % · all recorded logical CPUs"
+        "450% · all recorded logical CPUs"
     );
-    assert_eq!(history.headline(Some(1)), "250.00 % captured");
+    assert_eq!(history.headline(Some(1)), "250% captured");
 }
 
 #[test]
@@ -62,11 +62,11 @@ fn disk_reference_keeps_whole_device_scope_and_exact_app_bytes() {
     );
     assert_eq!(
         history.reading(2, Some(0)),
-        "3.0 MB/s · whole-device read + write"
+        "3 MB/s · whole-device read + write"
     );
     assert_eq!(
         history.reading(2, Some(1)),
-        "6.0 MB/s · whole-device read + write"
+        "6 MB/s · whole-device read + write"
     );
     assert!(history.reading(1, Some(1)).ends_with(" MB/s"));
 }
@@ -85,7 +85,7 @@ fn references_use_exact_same_second_identity_across_runs_and_boots() {
     let index = history.index(Some(&earlier));
 
     assert_eq!(index, Some(0));
-    assert_eq!(history.reading(1, index), "120.00 %");
+    assert_eq!(history.reading(1, index), "120%");
     assert_eq!(history.amount(2, index), None);
     assert_eq!(history.amount(2, Some(1)), Some(450.0));
 }
@@ -97,7 +97,7 @@ fn a_missing_scalar_observation_never_borrows_its_neighbor() {
     selected["trends"].as_array_mut().unwrap().remove(0);
     let history = AppAttributionHistory::prepare(Metric::Disk, &tests::disk_fixture(), &selected);
 
-    assert_eq!(history.reading(1, Some(0)), "500.0 kB/s");
+    assert_eq!(history.reading(1, Some(0)), "500 kB/s");
     assert_eq!(history.amount(2, Some(0)), None);
     assert_eq!(history.panel().unwrap().lines[2].values, [None, Some(6.0)]);
 }
@@ -114,7 +114,7 @@ fn incomplete_device_scans_remain_explicitly_unavailable() {
         "Unavailable · whole-device scan partial"
     );
     assert_eq!(history.panel().unwrap().lines[2].values, [None, Some(6.0)]);
-    assert_eq!(history.headline(Some(0)), "500.0 kB/s captured");
+    assert_eq!(history.headline(Some(0)), "500 kB/s captured");
 }
 
 #[test]
@@ -171,7 +171,7 @@ fn normalized_cpu_without_recorded_core_rates_remains_unavailable() {
         history.reading(2, Some(1)),
         "Unavailable · machine interval unavailable"
     );
-    assert_eq!(history.headline(Some(1)), "250.00 % captured");
+    assert_eq!(history.headline(Some(1)), "250% captured");
 }
 
 #[test]
@@ -188,7 +188,7 @@ fn duplicate_scalar_identities_make_only_the_machine_context_unavailable() {
         history.reading(2, Some(1)),
         "Unavailable · machine context invalid"
     );
-    assert_eq!(history.headline(Some(1)), "250.00 % captured");
+    assert_eq!(history.headline(Some(1)), "250% captured");
 }
 
 #[test]
@@ -201,7 +201,7 @@ fn a_same_identity_with_different_nanoseconds_cannot_lend_its_reference() {
 
     assert_eq!(history.amount(2, Some(0)), None);
     assert_eq!(history.amount(2, Some(1)), Some(450.0));
-    assert_eq!(history.reading(1, Some(0)), "120.00 %");
+    assert_eq!(history.reading(1, Some(0)), "120%");
 }
 
 #[test]
@@ -216,7 +216,7 @@ fn a_malformed_scalar_identity_refuses_only_the_machine_context() {
         history.reading(2, Some(1)),
         "Unavailable · machine context invalid"
     );
-    assert_eq!(history.headline(Some(1)), "250.00 % captured");
+    assert_eq!(history.headline(Some(1)), "250% captured");
 }
 
 #[test]
@@ -232,7 +232,7 @@ fn an_oversized_scalar_context_cannot_expand_the_reference_index() {
         history.reading(2, Some(1)),
         "Unavailable · machine context invalid"
     );
-    assert_eq!(history.headline(Some(1)), "250.00 % captured");
+    assert_eq!(history.headline(Some(1)), "250% captured");
 }
 
 #[test]
@@ -248,7 +248,7 @@ fn an_exact_limit_scalar_context_keeps_both_matching_references() {
     );
     assert_eq!(history.amount(2, Some(0)), Some(150.0));
     assert_eq!(history.amount(2, Some(1)), Some(450.0));
-    assert_eq!(history.headline(Some(1)), "250.00 % captured");
+    assert_eq!(history.headline(Some(1)), "250% captured");
 }
 
 fn scalar_context_with_count(count: usize) -> Value {
@@ -280,7 +280,7 @@ macro_rules! reference_identity_case {
 
             assert_eq!(history.amount(2, Some(0)), None);
             assert_eq!(history.amount(2, Some(1)), Some(450.0));
-            assert_eq!(history.reading(1, Some(0)), "120.00 %");
+            assert_eq!(history.reading(1, Some(0)), "120%");
         }
     };
 }

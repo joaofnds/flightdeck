@@ -19,8 +19,6 @@ pub(crate) mod summary;
 mod system_context;
 #[path = "live_utilization.rs"]
 mod utilization;
-#[cfg(feature = "automation")]
-pub(crate) use summary::cards;
 pub(crate) use summary::matching_summary;
 
 impl LiveDashboard {
@@ -146,21 +144,29 @@ impl LiveDashboard {
             .into_any_element()
     }
 
-    fn summary(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The summary cards of the page, as the screen shows them.
+    pub(crate) fn summary_cards(&self) -> Vec<summary::Card> {
         let selection = self
             .reading_snapshot()
             .map_or(&Value::Null, |snapshot| &snapshot.selection);
-        let mut cards = summary::cards(&self.request.route, selection);
         if self.request.route == "apps" {
-            cards = crate::live_app_views::app_cards(self.current_app(), selection);
-        } else if let Some(card) = cards.iter_mut().find(|card| card.label == "Process power") {
+            return crate::live_app_views::app_cards(self.current_app(), selection);
+        }
+
+        let mut cards = summary::cards(&self.request.route, selection);
+        if let Some(card) = cards.iter_mut().find(|card| card.label == "Process power") {
             if let Some(history) = self.snapshot.as_ref().and_then(|snapshot| {
                 snapshot.attribution_history(crate::live_app_attribution_history::Metric::Power)
             }) {
                 card.reading = history.headline(history.index(self.reading_target()));
-                card.note = "Attributed Apps; separate scope".into();
+                card.note = "Attributed processes; separate scope".into();
             }
         }
+        cards
+    }
+
+    fn summary(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let cards = self.summary_cards();
         let mut tiles = div()
             .grid()
             .grid_cols(summary_columns(self.viewport_size.width, cards.len()))

@@ -387,9 +387,9 @@ fn quantities_follow_binary_memory_and_adaptive_power_units() {
     // Goal: scalar readouts use the recorded source units and preserve missing data.
     // Method: format numeric, string, zero and unavailable values.
     let values = json!({"memory": "536870912", "power": 0.25, "zero": 0, "missing": null});
-    assert_eq!(quantity(&values, "memory", "GiB", GIBIBYTE), "512.0 MiB");
-    assert_eq!(quantity(&values, "power", "W", 1.0), "250.0 mW");
-    assert_eq!(quantity(&values, "zero", "W", 1.0), "0.0 W");
+    assert_eq!(quantity(&values, "memory", "GiB", GIBIBYTE), "512 MiB");
+    assert_eq!(quantity(&values, "power", "W", 1.0), "250 mW");
+    assert_eq!(quantity(&values, "zero", "W", 1.0), "0 W");
     assert_eq!(quantity(&values, "missing", "%", 1.0), "Unavailable");
     assert_eq!(quantity(&values, "absent", "%", 1.0), "Unavailable");
     assert_eq!(quantity(&values, "power", "W", 0.0), "Unavailable");
@@ -745,7 +745,7 @@ fn cpu_charts_scheduling_and_open_files_only_where_sampled() {
         .unwrap();
     assert_eq!(files.lines[0].values, [None, Some(12_000.0), None]);
     assert_eq!(files.lines[1].axis.as_deref(), Some("right1"));
-    assert_eq!(quantity_text(12_000.0, "files"), "12.0 k files");
+    assert_eq!(quantity_text(12_000.0, "files"), "12 k files");
 }
 
 #[test]
@@ -814,4 +814,38 @@ fn gpu_apps_stack_each_leader_under_the_dashed_gpu_busy_line() {
     assert_eq!(apps.lines[2].dashed, Some(true));
     let unsampled = super::panels("gpu", &super::tests::selection(), None).unwrap();
     assert!(unsampled.iter().all(|panel| panel.id != GPU_APPS_ID));
+}
+
+#[test]
+fn quantity_text_writes_numbers_as_the_prototype_does() {
+    // Goal: every reading reads as the prototype's axisValue writes it, with no decimals at
+    // zero or from 100, one from 1, two significant digits below 1, and thousands grouped.
+    // Method: format a reading of each unit and magnitude the prototype's rules separate.
+    let cases = [
+        (0.0, "W", "0 W"),
+        (0.233, "W", "233 mW"),
+        (0.0032, "W", "3.2 mW"),
+        (-0.5, "W", "-500 mW"),
+        (11.3, "W", "11.3 W"),
+        (12.0, "W", "12 W"),
+        (5.6, "%", "5.6%"),
+        (48.0, "% of one core", "48%"),
+        (0.976, "work items", "0.98 work items"),
+        (0.0, "MB/s", "0 B/s"),
+        (0.0031, "MB/s", "3.1 kB/s"),
+        (1500.0, "MB/s", "1,500 MB/s"),
+        (0.2154, "GiB", "221 MiB"),
+        (0.0, "GiB", "0 B"),
+        (544.8, "ops/s", "545 ops/s"),
+        (1400.0, "rpm", "1.4 k rpm"),
+        (2_000_000.0, "pages/s", "2,000,000 pages/s"),
+        (0.0256, "", "0.026"),
+        (0.0, "", "0"),
+        (0.5, "GHz", "500 MHz"),
+        (f32::NAN, "W", "Unavailable"),
+    ];
+
+    let texts = cases.map(|(value, unit, _)| quantity_text(value, unit));
+
+    assert_eq!(texts, cases.map(|(_, _, text)| text.to_owned()));
 }

@@ -9,14 +9,14 @@ fn overview_summary_cards_show_selected_resources_and_navigate_to_them(cx: &mut 
     let mut harness = InputHarness::setup_route(cx, "overview");
     harness.driver.seed_summary_readings();
 
-    assert!(harness.driver.reading_is_visible("summary-card:CPU:25.0 %"));
-    assert!(harness.driver.reading_is_visible("summary-card:GPU:40.0 %"));
+    assert!(harness.driver.reading_is_visible("summary-card:CPU:25%"));
+    assert!(harness.driver.reading_is_visible("summary-card:GPU:40%"));
     assert!(
         harness
             .driver
             .reading_is_visible("summary-card:Memory pressure:Warning")
     );
-    harness.driver.click_summary_card("summary-card:CPU:25.0 %");
+    harness.driver.click_summary_card("summary-card:CPU:25%");
 
     harness.driver.assert_summary_destination("cpu");
     harness.teardown();
@@ -68,7 +68,7 @@ fn summary_cards_keep_reference_padding_reading_height_and_note_spacing(cx: &mut
     let card = harness
         .driver
         .context
-        .debug_bounds("summary-card:CPU:25.0 %")
+        .debug_bounds("summary-card:CPU:25%")
         .unwrap();
     let label = harness
         .driver
@@ -103,7 +103,7 @@ fn a_wide_cpu_summary_fills_four_equal_tracks(cx: &mut TestAppContext) {
     let mut harness = InputHarness::setup_route(cx, "cpu");
     harness.driver.seed_summary_readings();
     let cards = [
-        "summary-card:CPU:25.0 %",
+        "summary-card:CPU:25%",
         "summary-card:Performance cores:Unavailable",
         "summary-card:Super cores:Unavailable",
         "summary-card:Load average:Unavailable",
@@ -141,10 +141,10 @@ impl InputDriver {
 
     fn overview_summary_bounds(&mut self) -> [Bounds<Pixels>; 6] {
         [
-            "summary-card:CPU:25.0 %",
-            "summary-card:GPU:40.0 %",
+            "summary-card:CPU:25%",
+            "summary-card:GPU:40%",
             "summary-card:Memory pressure:Warning",
-            "summary-card:System power:8.0 W",
+            "summary-card:System power:8 W",
             "summary-card:Disk read:Unavailable",
             "summary-card:Receive:Unavailable",
         ]

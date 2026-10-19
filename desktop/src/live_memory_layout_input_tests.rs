@@ -121,7 +121,7 @@ fn memory_swap_paging_band_hover_keeps_geometry_and_restores_the_exact_selection
     assert!(
         harness
             .driver
-            .reading_is_visible("memory-quantity:Active:6.0 GiB")
+            .reading_is_visible("memory-quantity:Active:6 GiB")
     );
     assert_eq!(harness.driver.chart_bounds("live-swap-flow-plot"), bounds);
     assert!(!harness.driver.cursor_is_visible("live-swap-flow-plot"));
@@ -239,25 +239,25 @@ fn assert_memory_band_order(driver: &mut InputDriver) {
     let swap = driver.chart_bounds("chart-card:live-swap");
     let paging = driver.chart_bounds("chart-card:live-paging");
     let attribution = driver.chart_bounds("memory-attribution-unavailable");
-    let quantities = driver.chart_bounds("memory-quantity:Installed:16.0 GiB");
+    let quantities = driver.chart_bounds("memory-quantity:Installed:16 GiB");
     assert!(pressure.bottom() < heading.top());
     assert!(heading.bottom() < swap.top());
     assert!(paging.bottom() < attribution.top());
     assert!(attribution.bottom() < quantities.top());
-    assert!(driver.reading_is_visible("memory-quantity:Swap allocated:4.0 GiB"));
+    assert!(driver.reading_is_visible("memory-quantity:Swap allocated:4 GiB"));
     assert!(driver.reading_is_visible("memory-quantity:Memory pressure:Warning"));
 }
 
 fn assert_memory_band_historical(driver: &mut InputDriver) {
-    assert_memory_band_reading(driver, 999, 1, "1.0 MB/s");
-    assert!(driver.reading_is_visible("memory-quantity:Active:2.0 GiB"));
+    assert_memory_band_reading(driver, 999, 1, "1 MB/s");
+    assert!(driver.reading_is_visible("memory-quantity:Active:2 GiB"));
     assert_memory_band_legends(
         driver,
         [
-            "chart-legend:live-paging:Page-ins:10.0 pages/s",
-            "chart-legend:live-paging:Page-outs:4.0 pages/s",
-            "chart-legend:live-paging:Compressed:2.0 pages/s",
-            "chart-legend:live-paging:Decompressed:1.0 pages/s",
+            "chart-legend:live-paging:Page-ins:10 pages/s",
+            "chart-legend:live-paging:Page-outs:4 pages/s",
+            "chart-legend:live-paging:Compressed:2 pages/s",
+            "chart-legend:live-paging:Decompressed:1 pages/s",
         ],
     );
     assert!(driver.cursor_is_visible("live-swap-flow-plot"));
@@ -283,14 +283,14 @@ fn assert_memory_band_gap(driver: &mut InputDriver) {
 }
 
 fn assert_memory_band_current(driver: &mut InputDriver) {
-    assert_memory_band_reading(driver, 1000, 2, "3.0 MB/s");
+    assert_memory_band_reading(driver, 1000, 2, "3 MB/s");
     assert_memory_band_legends(
         driver,
         [
-            "chart-legend:live-paging:Page-ins:30.0 pages/s",
-            "chart-legend:live-paging:Page-outs:12.0 pages/s",
-            "chart-legend:live-paging:Compressed:6.0 pages/s",
-            "chart-legend:live-paging:Decompressed:3.0 pages/s",
+            "chart-legend:live-paging:Page-ins:30 pages/s",
+            "chart-legend:live-paging:Page-outs:12 pages/s",
+            "chart-legend:live-paging:Compressed:6 pages/s",
+            "chart-legend:live-paging:Decompressed:3 pages/s",
         ],
     );
 }

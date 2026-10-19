@@ -40,17 +40,14 @@ fn real_overview_worker_installs_four_distinct_captured_app_histories() {
     assert_eq!(cpu.panel().unwrap().lines[9].name, "All CPU");
     assert_eq!(cpu.panel().unwrap().lines[9].values[1], Some(10.0));
     assert_eq!(cpu.amount(9, Some(1)), Some(10.0));
-    assert_eq!(
-        cpu.reading(9, Some(1)),
-        "10.00 % · all recorded logical CPUs"
-    );
+    assert_eq!(cpu.reading(9, Some(1)), "10% · all recorded logical CPUs");
     assert_eq!(disk.panel().unwrap().lines[9].name, "All disk I/O");
     assert_eq!(disk.panel().unwrap().lines[9].values[1], Some(6.0));
     assert_eq!(disk.amount(9, Some(1)), Some(6_000_000.0));
     assert_eq!(disk.captured_amount(9, Some(1)), None);
     assert_eq!(
         disk.reading(9, Some(1)),
-        "6.0 MB/s · whole-device read + write"
+        "6 MB/s · whole-device read + write"
     );
     println!(
         "{}",

@@ -5,9 +5,11 @@ fn machine_cpu_reference_follows_historical_hover_and_restores_on_exit(cx: &mut 
     // Installed pointer input must change both the real reference and the App subtotal.
     let mut harness = InputHarness::setup_route(cx, "overview");
     harness.driver.seed_machine_comparisons();
-    assert!(harness.driver.reading_is_visible(
-        "chart-legend:live-cpu-apps:All CPU:450.00 % · all recorded logical CPUs"
-    ));
+    assert!(
+        harness.driver.reading_is_visible(
+            "chart-legend:live-cpu-apps:All CPU:450% · all recorded logical CPUs"
+        )
+    );
 
     harness
         .driver
@@ -15,23 +17,25 @@ fn machine_cpu_reference_follows_historical_hover_and_restores_on_exit(cx: &mut 
 
     assert_historical_cpu_reference(&mut harness.driver);
     assert!(harness.driver.reading_is_visible(
-        "chart-tooltip-row:live-cpu-apps:2:All CPU:150.00 % · all recorded logical CPUs"
+        "chart-tooltip-row:live-cpu-apps:2:All CPU:150% · all recorded logical CPUs"
     ));
     let (second, reading) = harness.driver.chart_accessibility_reading("live-cpu-apps");
     assert_eq!(second, Some(999));
-    assert!(reading.ends_with("130.00 % captured; All CPU: 150.00 % · all recorded logical CPUs"));
+    assert!(reading.ends_with("130% captured; All CPU: 150% · all recorded logical CPUs"));
     harness.driver.complete_overview_history_preview();
     assert_historical_cpu_reference(&mut harness.driver);
     harness
         .driver
         .leave_plot("live-cpu-apps-plot", PlotExit::Sidebar);
-    assert!(harness.driver.reading_is_visible(
-        "chart-legend:live-cpu-apps:All CPU:450.00 % · all recorded logical CPUs"
-    ));
+    assert!(
+        harness.driver.reading_is_visible(
+            "chart-legend:live-cpu-apps:All CPU:450% · all recorded logical CPUs"
+        )
+    );
     assert!(
         harness
             .driver
-            .reading_is_visible("chart-reading:live-cpu-apps:250.00 % captured")
+            .reading_is_visible("chart-reading:live-cpu-apps:250% captured")
     );
     harness.teardown();
 }
@@ -44,7 +48,7 @@ fn machine_disk_reference_follows_historical_hover_without_changing_exact_app_by
     let mut harness = InputHarness::setup_route(cx, "overview");
     harness.driver.seed_machine_comparisons();
     assert!(harness.driver.reading_is_visible(
-        "chart-legend:live-disk-apps:All disk I/O:6.0 MB/s · whole-device read + write"
+        "chart-legend:live-disk-apps:All disk I/O:6 MB/s · whole-device read + write"
     ));
 
     harness
@@ -52,27 +56,26 @@ fn machine_disk_reference_follows_historical_hover_without_changing_exact_app_by
         .hover_previous_second_on("live-disk-apps-plot");
 
     assert!(harness.driver.reading_is_visible(
-        "chart-legend:live-disk-apps:All disk I/O:3.0 MB/s · whole-device read + write"
+        "chart-legend:live-disk-apps:All disk I/O:3 MB/s · whole-device read + write"
     ));
     assert!(harness.driver.reading_is_visible(
-        "chart-tooltip-row:live-disk-apps:2:All disk I/O:3.0 MB/s · whole-device read + write"
+        "chart-tooltip-row:live-disk-apps:2:All disk I/O:3 MB/s · whole-device read + write"
     ));
     assert!(
         harness
             .driver
-            .reading_is_visible("chart-legend:live-disk-apps:Current:500.0 kB/s")
+            .reading_is_visible("chart-legend:live-disk-apps:Current:500 kB/s")
     );
     let (second, reading) = harness.driver.chart_accessibility_reading("live-disk-apps");
     assert_eq!(second, Some(999));
     assert!(
-        reading
-            .ends_with("500.0 kB/s captured; All disk I/O: 3.0 MB/s · whole-device read + write")
+        reading.ends_with("500 kB/s captured; All disk I/O: 3 MB/s · whole-device read + write")
     );
     harness
         .driver
         .leave_plot("live-disk-apps-plot", PlotExit::Sidebar);
     assert!(harness.driver.reading_is_visible(
-        "chart-legend:live-disk-apps:All disk I/O:6.0 MB/s · whole-device read + write"
+        "chart-legend:live-disk-apps:All disk I/O:6 MB/s · whole-device read + write"
     ));
     assert!(
         harness
@@ -110,7 +113,7 @@ fn machine_references_withhold_neighboring_readings_at_a_history_gap(cx: &mut Te
         .driver
         .leave_plot("live-disk-apps-plot", PlotExit::Sidebar);
     assert!(harness.driver.reading_is_visible(
-        "chart-legend:live-disk-apps:All disk I/O:6.0 MB/s · whole-device read + write"
+        "chart-legend:live-disk-apps:All disk I/O:6 MB/s · whole-device read + write"
     ));
     harness.teardown();
 }
@@ -129,17 +132,19 @@ fn machine_reference_data_reports_the_selected_reference_value(cx: &mut TestAppC
     assert!(
         harness
             .driver
-            .reading_is_visible("6.0 MB/s · whole-device read + write")
+            .reading_is_visible("6 MB/s · whole-device read + write")
     );
     assert!(harness.driver.reading_is_visible("1.5 MB/s"));
     harness.teardown();
 }
 
 fn assert_historical_cpu_reference(driver: &mut InputDriver) {
-    assert!(driver.reading_is_visible(
-        "chart-legend:live-cpu-apps:All CPU:150.00 % · all recorded logical CPUs"
-    ));
-    assert!(driver.reading_is_visible("chart-reading:live-cpu-apps:130.00 % captured"));
+    assert!(
+        driver.reading_is_visible(
+            "chart-legend:live-cpu-apps:All CPU:150% · all recorded logical CPUs"
+        )
+    );
+    assert!(driver.reading_is_visible("chart-reading:live-cpu-apps:130% captured"));
 }
 
 fn comparison_snapshot(generation: u64) -> Box<Snapshot> {
@@ -199,12 +204,12 @@ fn machine_reference_preserves_app_bytes_above_float_integer_precision(cx: &mut 
         .install_machine_comparisons(large_disk_snapshot);
 
     assert!(harness.driver.reading_is_visible(
-        "chart-legend:live-disk-apps:All disk I/O:6.0 MB/s · whole-device read + write"
+        "chart-legend:live-disk-apps:All disk I/O:6 MB/s · whole-device read + write"
     ));
     assert!(
         harness
             .driver
-            .reading_is_visible("chart-legend:live-disk-apps:Current:4503599616.0 MB/s")
+            .reading_is_visible("chart-legend:live-disk-apps:Current:4,503,599,616 MB/s")
     );
     harness.teardown();
 }
@@ -274,25 +279,25 @@ macro_rules! machine_visibility_case {
 
 machine_visibility_case!(
     machine_cpu_visibility_survives_app_name_collision_and_removal,
-    "chart-legend:live-cpu-apps:All CPU:450.00 % · all recorded logical CPUs",
+    "chart-legend:live-cpu-apps:All CPU:450% · all recorded logical CPUs",
     "chart-data:live-cpu-apps",
-    "450.00 % · all recorded logical CPUs",
-    "240.00 %",
+    "450% · all recorded logical CPUs",
+    "240%",
     concat!(
         "chart-legend:live-cpu-apps:All CPU (machine reference 1):",
-        "450.00 % · all recorded logical CPUs"
+        "450% · all recorded logical CPUs"
     ),
-    "chart-legend:live-cpu-apps:All CPU:240.00 %"
+    "chart-legend:live-cpu-apps:All CPU:240%"
 );
 machine_visibility_case!(
     machine_disk_visibility_survives_app_name_collision_and_removal,
-    "chart-legend:live-disk-apps:All disk I/O:6.0 MB/s · whole-device read + write",
+    "chart-legend:live-disk-apps:All disk I/O:6 MB/s · whole-device read + write",
     "chart-data:live-disk-apps",
-    "6.0 MB/s · whole-device read + write",
+    "6 MB/s · whole-device read + write",
     "1.5 MB/s",
     concat!(
         "chart-legend:live-disk-apps:All disk I/O (machine reference 1):",
-        "6.0 MB/s · whole-device read + write"
+        "6 MB/s · whole-device read + write"
     ),
     "chart-legend:live-disk-apps:All disk I/O:1.5 MB/s"
 );

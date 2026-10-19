@@ -13,8 +13,8 @@ fn cpu_rates_preserve_multicore_values_and_captured_positions() {
     assert_eq!(panel.lines[1].values, vec![Some(120.0), Some(240.0)]);
     assert_eq!(panel.maximum, None);
     assert_eq!(panel.stack, Some(true));
-    assert_eq!(history.reading(1, Some(0)), "120.00 %");
-    assert_eq!(history.headline(Some(1)), "250.00 % captured");
+    assert_eq!(history.reading(1, Some(0)), "120%");
+    assert_eq!(history.headline(Some(1)), "250% captured");
     assert!(panel.positions.as_ref().unwrap()[0] < panel.positions.as_ref().unwrap()[1]);
 }
 
@@ -24,9 +24,9 @@ fn power_rates_preserve_fractional_watts() {
     let history =
         AppAttributionHistory::prepare(Metric::Power, &fixture(Metric::Power), &selection());
 
-    assert_eq!(history.reading(1, Some(0)), "1.25 W");
+    assert_eq!(history.reading(1, Some(0)), "1.2 W");
     assert_eq!(history.panel().unwrap().lines[1].values[1], Some(2.5));
-    assert_eq!(history.headline(Some(1)), "2.75 W captured");
+    assert_eq!(history.headline(Some(1)), "2.8 W captured");
 }
 
 #[test]
@@ -39,12 +39,12 @@ fn measured_zero_and_partial_rates_retain_their_coverage() {
     let history = AppAttributionHistory::prepare(Metric::Cpu, &value, &selection());
 
     assert_eq!(history.panel().unwrap().lines[1].values[0], Some(0.0));
-    assert_eq!(history.reading(1, Some(0)), "0.00 %");
+    assert_eq!(history.reading(1, Some(0)), "0%");
     assert_eq!(
         history.reading(1, Some(1)),
-        "240.00 % known subtotal · 1 measured · 2 unavailable"
+        "240% known subtotal · 1 measured · 2 unavailable"
     );
-    assert_eq!(history.headline(Some(1)), "250.00 % known subtotal");
+    assert_eq!(history.headline(Some(1)), "250% known subtotal");
 }
 
 #[test]
@@ -87,7 +87,7 @@ fn empty_other_is_a_measured_zero_only_with_complete_capture() {
         "cpu_percent_one_core":0.0,"membership_complete":true});
     let history = AppAttributionHistory::prepare(Metric::Cpu, &value, &selection());
 
-    assert_eq!(history.reading(0, Some(1)), "0.00 %");
+    assert_eq!(history.reading(0, Some(1)), "0%");
     assert_eq!(history.panel().unwrap().lines[0].values[1], Some(0.0));
 }
 
@@ -103,10 +103,7 @@ fn same_second_siblings_and_boot_changes_keep_their_exact_identity() {
 
     assert_eq!(history.index(Some(&earlier)), Some(0));
     assert_eq!(history.index(Some(&selected)), Some(1));
-    assert_eq!(
-        history.reading(1, history.index(Some(&earlier))),
-        "120.00 %"
-    );
+    assert_eq!(history.reading(1, history.index(Some(&earlier))), "120%");
 }
 
 #[test]
@@ -259,7 +256,7 @@ fn disk_attribution_preserves_bytes_above_float_integer_precision() {
         history.captured_amount(1, Some(1)),
         Some(9_007_199_254_740_993)
     );
-    assert_eq!(history.reading(1, Some(1)), "4503599616.0 MB/s");
+    assert_eq!(history.reading(1, Some(1)), "4,503,599,616 MB/s");
 }
 
 #[test]
@@ -271,7 +268,7 @@ fn disk_attribution_keeps_a_measured_zero_drawable() {
     let history = AppAttributionHistory::prepare(Metric::Disk, &value, &selection());
 
     assert_eq!(history.panel().unwrap().lines[1].values[1], Some(0.0));
-    assert_eq!(history.reading(1, Some(1)), "0.0 MB/s");
+    assert_eq!(history.reading(1, Some(1)), "0 B/s");
 }
 
 #[test]
@@ -368,6 +365,6 @@ fn disk_attribution_small_nonzero_rates_keep_human_units() {
     let history = AppAttributionHistory::prepare(Metric::Disk, &value, &selection());
 
     assert_eq!(history.panel().unwrap().lines[1].values[1], Some(0.000_01));
-    assert_eq!(history.reading(1, Some(1)), "10.0 B/s");
-    assert_eq!(history.headline(Some(1)), "10.0 B/s captured");
+    assert_eq!(history.reading(1, Some(1)), "10 B/s");
+    assert_eq!(history.headline(Some(1)), "10 B/s captured");
 }

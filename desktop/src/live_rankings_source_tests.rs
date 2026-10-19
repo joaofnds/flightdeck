@@ -487,7 +487,7 @@ fn assert_real_rate_attribution(
         assert_eq!(history.amount(9, Some(1)), Some(10.0));
         assert_eq!(
             history.reading(9, Some(1)),
-            "10.00 % · all recorded logical CPUs"
+            "10% · all recorded logical CPUs"
         );
     }
 }
@@ -582,12 +582,12 @@ fn real_disk_worker_restores_attribution_and_keeps_exact_interval_bytes() {
     assert_eq!(history.captured_amount(9, Some(1)), None);
     assert_eq!(
         history.reading(9, Some(1)),
-        "6.0 MB/s · whole-device read + write"
+        "6 MB/s · whole-device read + write"
     );
     assert_eq!(history.captured_amount(1, Some(1)), Some(900_000_000));
     assert_eq!(
         history.reading(1, Some(1)),
-        "900.0 MB/s known subtotal · 1 measured · 0 unavailable"
+        "900 MB/s known subtotal · 1 measured · 0 unavailable"
     );
 }
 

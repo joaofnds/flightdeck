@@ -12,20 +12,16 @@ fn battery_hover_updates_selected_details_charging_metadata_and_copy_then_restor
     let mut harness = InputHarness::setup_route(cx, "battery");
     harness.driver.seed_resources(false);
     harness.driver.focus_resource_copy();
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("summary-card:Charge:88.0 %")
-    );
+    assert!(harness.driver.reading_is_visible("summary-card:Charge:88%"));
 
     harness
         .driver
         .hover_previous_second_on("live-battery-charge-plot");
 
     for selector in [
-        "summary-card:Charge:33.0 %",
-        "summary-card:Battery flow:-3.0 W",
-        "summary-card:Health:104.0 %",
+        "summary-card:Charge:33%",
+        "summary-card:Battery flow:-3 W",
+        "summary-card:Health:104%",
         "overview-context:cycles:30",
     ] {
         assert!(harness.driver.reading_is_visible(selector), "{selector}");
@@ -50,16 +46,8 @@ fn battery_hover_updates_selected_details_charging_metadata_and_copy_then_restor
         .driver
         .leave_plot("live-battery-charge-plot", PlotExit::Sidebar);
 
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("summary-card:Charge:88.0 %")
-    );
-    assert!(
-        !harness
-            .driver
-            .reading_is_visible("summary-card:Charge:33.0 %")
-    );
+    assert!(harness.driver.reading_is_visible("summary-card:Charge:88%"));
+    assert!(!harness.driver.reading_is_visible("summary-card:Charge:33%"));
     assert!(
         harness
             .driver
@@ -130,7 +118,7 @@ fn storage_hover_swaps_virtual_device_rows_and_totals_without_moving_the_plot(
     );
     harness
         .driver
-        .assert_resource_visible("summary-card:Disk read:3.0 MB/s");
+        .assert_resource_visible("summary-card:Disk read:3 MB/s");
     harness
         .driver
         .assert_resource_visible("summary-card:Disk write:1.5 MB/s");
@@ -158,7 +146,7 @@ fn storage_hover_swaps_virtual_device_rows_and_totals_without_moving_the_plot(
 
     harness
         .driver
-        .assert_resource_visible("summary-card:Disk read:8.0 MB/s");
+        .assert_resource_visible("summary-card:Disk read:8 MB/s");
     harness
         .driver
         .assert_resource_visible("resource-device:current-disk");
@@ -208,11 +196,7 @@ fn charging_hover_retains_an_explicitly_selected_earlier_same_second_publication
         .driver
         .hover_selected_second_on("live-battery-charge-plot");
 
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("summary-card:Charge:88.0 %")
-    );
+    assert!(harness.driver.reading_is_visible("summary-card:Charge:88%"));
     assert!(
         harness
             .driver

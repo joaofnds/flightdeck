@@ -12,6 +12,8 @@ pub struct Card {
 
 #[derive(Clone, Copy)]
 enum Reading {
+    /// The busy share of every core, noted with the count of cores macOS reports.
+    AllCores,
     Quantity(&'static str, &'static str, f32),
     /// A quantity of one resource's readings, such as the battery's.
     Resource(&'static str, &'static str, &'static str, f32),
@@ -30,13 +32,7 @@ enum Reading {
 
 type Specification = (&'static str, Reading, &'static str, u32, &'static str);
 
-const CPU: Specification = (
-    "CPU",
-    Reading::Quantity("cpu_percent", "%", 1.0),
-    "All captured cores",
-    BLUE,
-    "cpu",
-);
+const CPU: Specification = ("CPU", Reading::AllCores, "All captured cores", BLUE, "cpu");
 const GPU: Specification = (
     "GPU",
     Reading::Quantity("gpu_active_percent", "%", 1.0),
@@ -146,7 +142,7 @@ const PROCESS_POWER: Specification = (
 const THERMAL: Specification = (
     "Thermal state",
     Reading::Thermal,
-    "macOS thermal pressure",
+    "macOS verdict",
     MUTED,
     "energy",
 );
@@ -235,17 +231,20 @@ fn card(summary: &Value, definition: &Specification) -> Card {
     let mut color = color;
     let mut note = note.to_owned();
     let reading = match source {
+        Reading::AllCores => {
+            if let Some(levels) = crate::live_inventory::performance_levels() {
+                let cores = levels[0].logical_cpus + levels[1].logical_cpus;
+                note = format!("All {cores} cores");
+            }
+            crate::live_projection::quantity(summary, "cpu_percent", "%", 1.0)
+        }
         Reading::Quantity(key, unit, divisor) => {
             crate::live_projection::quantity(summary, key, unit, divisor)
         }
         Reading::Resource(resource, key, unit, divisor) => {
             crate::live_projection::quantity(&summary[resource], key, unit, divisor)
         }
-        Reading::Charging => match summary["battery"]["charging"].as_bool() {
-            Some(true) => "Yes".into(),
-            Some(false) => "No".into(),
-            None => "Unavailable".into(),
-        },
+        Reading::Charging => card_charging(summary).into(),
         Reading::Health => {
             note = match summary["battery"]["cycle_count"].as_u64() {
                 Some(cycles) => format!("{cycles} cycles"),
@@ -295,6 +294,14 @@ fn card(summary: &Value, definition: &Specification) -> Card {
         note,
         color,
         route,
+    }
+}
+
+fn card_charging(summary: &Value) -> &'static str {
+    match summary["battery"]["charging"].as_bool() {
+        Some(true) => "Yes",
+        Some(false) => "No",
+        None => "Unavailable",
     }
 }
 

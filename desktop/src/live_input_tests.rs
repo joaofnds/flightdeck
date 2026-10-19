@@ -70,7 +70,7 @@ fn hovering_overview_updates_the_status_widgets_to_the_graph_timestamp(cx: &mut 
     // Dispatch a historical graph hover while observing the exact painted pressure caption.
     let mut harness = InputHarness::setup_route(cx, "overview");
     harness.driver.seed_distinct_overview_timestamps();
-    assert!(harness.driver.reading_is_visible("87.0 %"));
+    assert!(harness.driver.reading_is_visible("87%"));
     assert!(
         harness
             .driver
@@ -79,7 +79,7 @@ fn hovering_overview_updates_the_status_widgets_to_the_graph_timestamp(cx: &mut 
 
     harness.driver.hover_previous_second_on("live-cpu-plot");
 
-    assert!(harness.driver.reading_is_visible("13.0 %"));
+    assert!(harness.driver.reading_is_visible("13%"));
     let historical = harness
         .driver
         .reading_is_visible("chart-caption:live-memory-pressure:Critical");
@@ -101,7 +101,7 @@ fn resizing_the_window_retains_the_reading_beneath_a_stationary_pointer(cx: &mut
     let mut harness = InputHarness::setup_route(cx, "overview");
     harness.driver.seed_distinct_overview_timestamps();
     harness.driver.hover_previous_second_on("live-cpu-plot");
-    assert!(harness.driver.reading_is_visible("13.0 %"));
+    assert!(harness.driver.reading_is_visible("13%"));
     let pointer = harness.driver.pointer_position();
 
     harness
@@ -116,8 +116,8 @@ fn resizing_the_window_retains_the_reading_beneath_a_stationary_pointer(cx: &mut
     );
     assert_eq!(harness.driver.pointer_position(), pointer);
     assert!(harness.driver.cursor_is_visible("live-cpu-plot"));
-    assert!(harness.driver.reading_is_visible("13.0 %"));
-    assert!(!harness.driver.reading_is_visible("87.0 %"));
+    assert!(harness.driver.reading_is_visible("13%"));
+    assert!(!harness.driver.reading_is_visible("87%"));
     harness.teardown();
 }
 
@@ -129,7 +129,7 @@ fn widening_the_window_recomputes_the_timestamp_beneath_a_stationary_pointer(
     let mut harness = InputHarness::setup_route(cx, "overview");
     harness.driver.seed_distinct_overview_timestamps();
     harness.driver.hover_previous_second_on("live-cpu-plot");
-    assert!(harness.driver.reading_is_visible("13.0 %"));
+    assert!(harness.driver.reading_is_visible("13%"));
     let pointer = harness.driver.pointer_position();
 
     harness
@@ -147,7 +147,7 @@ fn widening_the_window_recomputes_the_timestamp_beneath_a_stationary_pointer(
     );
     assert!(harness.driver.cursor_is_visible("live-cpu-plot"));
     assert!(harness.driver.reading_is_visible("Unavailable"));
-    assert!(!harness.driver.reading_is_visible("13.0 %"));
+    assert!(!harness.driver.reading_is_visible("13%"));
     harness.teardown();
 }
 
@@ -176,12 +176,12 @@ fn chart_accessibility_metadata_matches_the_hovered_reading_and_gap(cx: &mut Tes
     let mut harness = InputHarness::setup(cx);
     harness.driver.seed_repeated_second();
     harness.driver.hover_previous_second_on("live-energy-plot");
-    assert!(harness.driver.reading_is_visible("90.0 W"));
+    assert!(harness.driver.reading_is_visible("90 W"));
 
     let (second, reading) = harness.driver.chart_accessibility_reading("live-energy");
     assert_eq!(second, Some(999));
     assert!(reading.contains("Unix second 999"));
-    assert!(reading.ends_with("90.0 W"));
+    assert!(reading.ends_with("90 W"));
 
     let gap = harness
         .driver
@@ -196,7 +196,7 @@ fn chart_accessibility_metadata_matches_the_hovered_reading_and_gap(cx: &mut Tes
         .leave_plot("live-energy-plot", PlotExit::Sidebar);
     let (second, reading) = harness.driver.chart_accessibility_reading("live-energy");
     assert_eq!(second, Some(1000));
-    assert!(reading.ends_with("8.0 W"));
+    assert!(reading.ends_with("8 W"));
     harness.teardown();
 }
 
@@ -206,14 +206,14 @@ fn moving_directly_from_the_first_plot_keeps_both_cursors_synchronized(cx: &mut 
     let mut harness = InputHarness::setup(cx);
     harness.driver.seed_repeated_second();
     harness.driver.hover_selected_second_on("live-energy-plot");
-    assert!(harness.driver.reading_is_visible("8.0 W"));
+    assert!(harness.driver.reading_is_visible("8 W"));
 
     harness
         .driver
         .hover_previous_second_on("live-gpu-power-plot");
 
-    assert!(harness.driver.reading_is_visible("90.0 W"));
-    assert!(harness.driver.reading_is_visible("60.0 °C"));
+    assert!(harness.driver.reading_is_visible("90 W"));
+    assert!(harness.driver.reading_is_visible("60 °C"));
     harness.driver.assert_cursors_track_previous_second();
     assert!(harness.driver.cursor_is_visible("live-energy-plot"));
     assert!(harness.driver.cursor_is_visible("live-gpu-power-plot"));
@@ -228,12 +228,12 @@ fn moving_directly_from_the_second_plot_keeps_both_cursors_synchronized(cx: &mut
     harness
         .driver
         .hover_selected_second_on("live-gpu-power-plot");
-    assert!(harness.driver.reading_is_visible("8.0 W"));
+    assert!(harness.driver.reading_is_visible("8 W"));
 
     harness.driver.hover_previous_second_on("live-energy-plot");
 
-    assert!(harness.driver.reading_is_visible("90.0 W"));
-    assert!(harness.driver.reading_is_visible("60.0 °C"));
+    assert!(harness.driver.reading_is_visible("90 W"));
+    assert!(harness.driver.reading_is_visible("60 °C"));
     harness.driver.assert_cursors_track_previous_second();
     assert!(harness.driver.cursor_is_visible("live-energy-plot"));
     assert!(harness.driver.cursor_is_visible("live-gpu-power-plot"));
@@ -382,16 +382,16 @@ fn leaving_the_second_plot_restores_selected_readings_and_hides_both_cursors(
     harness
         .driver
         .hover_previous_second_on("live-gpu-power-plot");
-    assert!(harness.driver.reading_is_visible("90.0 W"));
-    assert!(harness.driver.reading_is_visible("60.0 °C"));
+    assert!(harness.driver.reading_is_visible("90 W"));
+    assert!(harness.driver.reading_is_visible("60 °C"));
 
     harness
         .driver
         .leave_plot("live-gpu-power-plot", PlotExit::Bottom);
 
     harness.driver.assert_cursors_hidden();
-    assert!(harness.driver.reading_is_visible("8.0 W"));
-    assert!(harness.driver.reading_is_visible("40.0 °C"));
+    assert!(harness.driver.reading_is_visible("8 W"));
+    assert!(harness.driver.reading_is_visible("40 °C"));
     harness.teardown();
 }
 
@@ -408,15 +408,15 @@ fn scrolling_the_plot_back_under_the_pointer_restores_synchronized_hover(cx: &mu
     harness.driver.hover_position(pointer);
     harness.driver.scroll_at(pointer, -2.0);
     harness.driver.assert_cursors_hidden();
-    assert!(harness.driver.reading_is_visible("8.0 W"));
+    assert!(harness.driver.reading_is_visible("8 W"));
 
     harness.driver.scroll_at(pointer, 2.0);
 
     assert_eq!(harness.driver.pointer_position(), pointer);
     assert_eq!(harness.driver.plot_bounds("live-energy-plot"), plot);
     harness.driver.assert_cursors_visible();
-    assert!(harness.driver.reading_is_visible("90.0 W"));
-    assert!(harness.driver.reading_is_visible("60.0 °C"));
+    assert!(harness.driver.reading_is_visible("90 W"));
+    assert!(harness.driver.reading_is_visible("60 °C"));
     harness.teardown();
 }
 
@@ -427,8 +427,8 @@ fn hovering_a_repeated_second_shows_the_observation_requested_by_click(cx: &mut 
     harness.driver.seed_repeated_second();
 
     harness.driver.hover_previous_second();
-    let latest_reading_visible = harness.driver.reading_is_visible("90.0 W");
-    let previous_reading_visible = harness.driver.reading_is_visible("10.0 W");
+    let latest_reading_visible = harness.driver.reading_is_visible("90 W");
+    let previous_reading_visible = harness.driver.reading_is_visible("10 W");
     harness.driver.click_previous_second();
 
     assert!(

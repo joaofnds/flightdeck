@@ -24,12 +24,12 @@ fn named_process_history_selection_loads_distinct_panels_before_app_totals_and_i
     assert!(
         harness
             .driver
-            .text_is_visible("chart-reading:live-process-group-cpu:240.0 %")
+            .text_is_visible("chart-reading:live-process-group-cpu:240%")
     );
     assert!(
         harness
             .driver
-            .text_is_visible("chart-reading:live-app-cpu:87.0 %")
+            .text_is_visible("chart-reading:live-app-cpu:87%")
     );
     harness.teardown();
 }
@@ -134,7 +134,7 @@ fn named_process_history_survives_current_instance_disappearance(cx: &mut TestAp
     assert!(
         harness
             .driver
-            .text_is_visible("chart-reading:live-process-group-cpu:240.0 %")
+            .text_is_visible("chart-reading:live-process-group-cpu:240%")
     );
     harness.teardown();
 }
@@ -215,7 +215,7 @@ fn named_process_history_preview_reuses_the_accepted_context(cx: &mut TestAppCon
     assert!(
         harness
             .driver
-            .text_is_visible("chart-reading:live-process-group-cpu:120.0 %")
+            .text_is_visible("chart-reading:live-process-group-cpu:120%")
     );
     harness.driver.assert_named_captured_historical();
     harness.driver.assert_named_preview_context(&retained);
@@ -224,7 +224,7 @@ fn named_process_history_preview_reuses_the_accepted_context(cx: &mut TestAppCon
     assert!(
         harness
             .driver
-            .text_is_visible("chart-reading:live-process-group-cpu:120.0 %")
+            .text_is_visible("chart-reading:live-process-group-cpu:120%")
     );
     harness.driver.assert_named_captured_historical();
     harness.driver.leave_history();
@@ -308,8 +308,8 @@ impl AppHoverDriver {
         ] {
             assert!(self.text_is_visible(selector), "{selector}");
         }
-        assert!(self.text_is_visible("chart-reading:live-app-cpu:87.0 %"));
-        assert!(self.text_is_visible("summary-card:Process power:9.0 W"));
+        assert!(self.text_is_visible("chart-reading:live-app-cpu:87%"));
+        assert!(self.text_is_visible("summary-card:Process power:9 W"));
         assert!(self.text_is_visible(["process-0", "process-1", "process-2"][raw_index]));
         let expected = if raw_index == 2 { "hex:62" } else { "hex:61" };
         assert_eq!(self.named_process_selection().as_deref(), Some(expected));
@@ -425,16 +425,16 @@ impl AppHoverDriver {
 
 impl AppHoverDriver {
     fn assert_named_captured_historical(&mut self) {
-        assert!(self.text_is_visible("chart-reading:live-process-group-wakeups:5.0 /s"));
-        assert!(self.text_is_visible("chart-reading:live-process-group-pageins:3.0 pages/s"));
-        assert!(self.text_is_visible("chart-reading:live-process-group-threads:8.0 threads"));
+        assert!(self.text_is_visible("chart-reading:live-process-group-wakeups:5 /s"));
+        assert!(self.text_is_visible("chart-reading:live-process-group-pageins:3 pages/s"));
+        assert!(self.text_is_visible("chart-reading:live-process-group-threads:8 threads"));
         assert!(self.text_is_visible(concat!(
             "chart-legend:live-process-group-wakeups:Accepted worker:",
-            "5.0 /s · 5 wakeups / interval",
+            "5 /s · 5 wakeups / interval",
         )));
         assert!(self.text_is_visible(concat!(
             "chart-legend:live-process-group-pageins:Accepted worker:",
-            "3.0 pages/s · 3 page-ins / interval",
+            "3 pages/s · 3 page-ins / interval",
         )));
         assert!(
             self.text_is_visible(
@@ -444,16 +444,16 @@ impl AppHoverDriver {
     }
 
     fn assert_named_captured_current(&mut self) {
-        assert!(self.text_is_visible("chart-reading:live-process-group-wakeups:11.0 /s"));
-        assert!(self.text_is_visible("chart-reading:live-process-group-pageins:7.0 pages/s"));
-        assert!(self.text_is_visible("chart-reading:live-process-group-threads:13.0 threads"));
+        assert!(self.text_is_visible("chart-reading:live-process-group-wakeups:11 /s"));
+        assert!(self.text_is_visible("chart-reading:live-process-group-pageins:7 pages/s"));
+        assert!(self.text_is_visible("chart-reading:live-process-group-threads:13 threads"));
         assert!(self.text_is_visible(concat!(
             "chart-legend:live-process-group-wakeups:Accepted worker:",
-            "11.0 /s · 11 wakeups / interval",
+            "11 /s · 11 wakeups / interval",
         )));
         assert!(self.text_is_visible(concat!(
             "chart-legend:live-process-group-pageins:Accepted worker:",
-            "7.0 pages/s · 7 page-ins / interval",
+            "7 pages/s · 7 page-ins / interval",
         )));
         assert!(
             self.text_is_visible(
@@ -502,12 +502,12 @@ impl AppHoverDriver {
             .context
             .debug_bounds("executable-disk:hex:61:Unavailable *")
             .unwrap();
-        let wakeups = self.context.debug_bounds("8.0 /s").unwrap();
+        let wakeups = self.context.debug_bounds("8 /s").unwrap();
         let threads = self.context.debug_bounds("11").unwrap();
         assert_eq!(wakeups.center().y, anchor.center().y);
         assert_eq!(threads.center().y, anchor.center().y);
         assert!(wakeups.right() < threads.left());
-        assert!(self.context.debug_bounds("5.0 pages/s").is_none());
+        assert!(self.context.debug_bounds("5 pages/s").is_none());
     }
 
     fn assert_captured_instance_table_cells(&mut self) {
@@ -515,8 +515,8 @@ impl AppHoverDriver {
             .context
             .debug_bounds("process-disk:10:Unavailable")
             .unwrap();
-        let wakeups = self.context.debug_bounds("6.0 /s").unwrap();
-        let pageins = self.context.debug_bounds("4.0 pages/s").unwrap();
+        let wakeups = self.context.debug_bounds("6 /s").unwrap();
+        let pageins = self.context.debug_bounds("4 pages/s").unwrap();
         let threads = self.context.debug_bounds("8").unwrap();
         assert_eq!(wakeups.center().y, anchor.center().y);
         assert_eq!(pageins.center().y, anchor.center().y);

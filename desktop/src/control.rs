@@ -381,7 +381,8 @@ fn state(dashboard: &LiveDashboard, window: &Window) -> Value {
     let selection = dashboard
         .reading_snapshot()
         .map_or(&Value::Null, |snapshot| &snapshot.selection);
-    let cards: Vec<Value> = crate::live_views::cards(&dashboard.request.route, selection)
+    let cards: Vec<Value> = dashboard
+        .summary_cards()
         .iter()
         .map(|card| json!({"label": card.label, "reading": card.reading, "note": card.note}))
         .collect();

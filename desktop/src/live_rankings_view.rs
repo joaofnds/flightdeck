@@ -566,12 +566,9 @@ fn coverage(ranking: &Ranking) -> String {
 
 fn value(metric: Metric, entry: &Entry) -> String {
     let value = match metric {
-        Metric::Cpu | Metric::Gpu => crate::live_app_views::rate(entry.rate, "%"),
+        Metric::Cpu | Metric::Gpu => crate::live_app_views::event_rate(entry.rate, "%"),
         Metric::Resident => crate::live_app_views::memory(Some(entry.amount)),
-        Metric::Power => match entry.rate.and_then(|value| value.to_f32()) {
-            Some(value) => crate::live_projection::quantity_text(value, "W"),
-            None => "Unavailable".into(),
-        },
+        Metric::Power => crate::live_app_views::event_rate(entry.rate, "W"),
         Metric::Disk => crate::live_app_views::disk_rate(entry.rate),
     };
     if entry.unavailable_members > 0 {

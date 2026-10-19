@@ -207,7 +207,7 @@ fn captured_event_rates_use_human_units_and_preserve_small_nonzero_values() {
     // Large rates choose a readable prefix while a small rate cannot appear as zero.
     assert_eq!(
         crate::live_projection::quantity_text(1500.0, "/s"),
-        "1.5 k/s"
+        "1.5 k /s"
     );
     assert_eq!(
         crate::live_projection::quantity_text(0.001, "/s"),
@@ -215,7 +215,7 @@ fn captured_event_rates_use_human_units_and_preserve_small_nonzero_values() {
     );
     assert_eq!(
         crate::live_projection::quantity_text(2_000_000.0, "pages/s"),
-        "2.0 M pages/s"
+        "2,000,000 pages/s"
     );
 }
 

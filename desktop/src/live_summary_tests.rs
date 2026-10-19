@@ -16,10 +16,10 @@ fn battery_cards_preserve_signed_flow_false_and_exact_cycles() {
     assert_eq!(
         readings(&cards),
         vec![
-            ("Charge", "70.0 %".into()),
+            ("Charge", "70%".into()),
             ("Charging", "No".into()),
             ("Battery flow", "-2.5 W".into()),
-            ("Health", "105.0 %".into()),
+            ("Health", "105%".into()),
         ]
     );
     assert_eq!(cards[3].note, "9007199254740993 cycles");
@@ -37,8 +37,8 @@ fn memory_in_use_adds_app_wired_and_compressed_and_refuses_a_partial_total() {
     quantities["memory_wired_bytes"] = Value::Null;
     let partial = cards("memory", &selection(&quantities));
 
-    assert_eq!(whole[1].reading, "8.0 GiB");
-    assert_eq!(whole[1].note, "Of 24.0 GiB installed");
+    assert_eq!(whole[1].reading, "8 GiB");
+    assert_eq!(whole[1].note, "Of 24 GiB installed");
     assert_eq!(partial[1].reading, "Unavailable");
 }
 

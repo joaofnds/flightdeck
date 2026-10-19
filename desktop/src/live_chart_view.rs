@@ -1156,7 +1156,7 @@ mod tests {
         assert_eq!(line_reading(&network, Some(0.0143), "MB/s"), "14.3 kB/s");
         assert_eq!(line_reading(&network, Some(2.5), "MB/s"), "2.5 MB/s");
         assert_eq!(line_reading(&network, None, "MB/s"), "Unavailable");
-        assert_eq!(line_reading(&panel(), Some(42.0), "%"), "42.0 %");
+        assert_eq!(line_reading(&panel(), Some(42.0), "%"), "42%");
     }
 
     #[test]

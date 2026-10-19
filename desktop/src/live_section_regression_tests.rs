@@ -25,7 +25,7 @@ fn collapsing_the_hover_owner_restores_committed_readings_with_existing_leave_be
     assert!(
         harness
             .driver
-            .reading_is_visible("chart-reading:live-energy:15.0 W")
+            .reading_is_visible("chart-reading:live-energy:15 W")
     );
     assert!(harness.driver.section_generation() > generation);
     assert_eq!(harness.driver.section_request(), request);
@@ -34,7 +34,7 @@ fn collapsing_the_hover_owner_restores_committed_readings_with_existing_leave_be
     assert!(
         harness
             .driver
-            .reading_is_visible("chart-reading:live-energy:15.0 W")
+            .reading_is_visible("chart-reading:live-energy:15 W")
     );
     harness.teardown();
 }
@@ -63,7 +63,7 @@ fn collapsing_a_submitted_hover_restores_the_base_request_and_ignores_its_late_r
     assert!(
         harness
             .driver
-            .reading_is_visible("chart-reading:live-energy:15.0 W")
+            .reading_is_visible("chart-reading:live-energy:15 W")
     );
     harness.driver.move_section_pointer_to_sidebar();
     assert!(!harness.driver.has_section_preview());
@@ -95,7 +95,7 @@ fn collapsing_a_superseded_hover_still_restores_the_previously_redirected_worker
     assert!(
         harness
             .driver
-            .reading_is_visible("chart-reading:live-energy:15.0 W")
+            .reading_is_visible("chart-reading:live-energy:15 W")
     );
     harness.teardown();
 }

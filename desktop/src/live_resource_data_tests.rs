@@ -31,13 +31,13 @@ fn physical_device_fields_keep_units_zero_and_independent_missingness() {
     assert_eq!(
         fields,
         vec![
-            field("Read", "2.0 MB/s"),
-            field("Write", "0.0 MB/s"),
-            field("Read operations", "4.0 ops/s"),
-            field("Write operations", "2.0 ops/s"),
+            field("Read", "2 MB/s"),
+            field("Write", "0 B/s"),
+            field("Read operations", "4 ops/s"),
+            field("Write operations", "2 ops/s"),
             field("Read mean", "1.5 ms"),
             field("Write mean", "Unavailable"),
-            field("Read errors", "0.0 errors/s"),
+            field("Read errors", "0 errors/s"),
             field("Write errors", "0.5 errors/s")
         ]
     );

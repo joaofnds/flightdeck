@@ -60,7 +60,7 @@ macro_rules! overview_history_hover_case {
             assert!(
                 harness
                     .driver
-                    .reading_is_visible("ranking:CPU:Historical:20.0 %")
+                    .reading_is_visible("ranking:CPU:Historical:20%")
             );
             assert_eq!(harness.driver.chart_bounds($plot), bounds);
             harness.driver.leave_plot($plot, PlotExit::Sidebar);
@@ -75,22 +75,22 @@ macro_rules! overview_history_hover_case {
 overview_history_hover_case!(
     overview_cpu_history_synchronizes_exact_readings,
     "live-cpu-apps-plot",
-    "chart-tooltip-row:live-cpu-apps:0:App A:120.00 %"
+    "chart-tooltip-row:live-cpu-apps:0:App A:120%"
 );
 overview_history_hover_case!(
     overview_resident_history_synchronizes_exact_readings,
     "live-memory-app-resident-plot",
-    "chart-tooltip-row:live-memory-app-resident:0:Resident App:1.0 GiB"
+    "chart-tooltip-row:live-memory-app-resident:0:Resident App:1 GiB"
 );
 overview_history_hover_case!(
     overview_disk_history_synchronizes_exact_readings,
     "live-disk-apps-plot",
-    "chart-tooltip-row:live-disk-apps:0:Current:500.0 kB/s"
+    "chart-tooltip-row:live-disk-apps:0:Current:500 kB/s"
 );
 overview_history_hover_case!(
     overview_power_history_synchronizes_exact_readings,
     "live-power-apps-plot",
-    "chart-tooltip-row:live-power-apps:0:App A:1.25 W"
+    "chart-tooltip-row:live-power-apps:0:App A:1.2 W"
 );
 
 #[gpui::test]
@@ -110,11 +110,7 @@ fn overview_history_failure_preserves_captured_readings_until_plot_exit(cx: &mut
             .driver
             .reading_is_visible("App totals unavailable: Ranking read failed")
     );
-    assert!(
-        !harness
-            .driver
-            .reading_is_visible("ranking:CPU:Current:80.0 %")
-    );
+    assert!(!harness.driver.reading_is_visible("ranking:CPU:Current:80%"));
     harness
         .driver
         .leave_plot("live-power-apps-plot", PlotExit::Sidebar);
@@ -174,11 +170,7 @@ fn overview_late_history_details_never_replace_the_current_hover(cx: &mut TestAp
             .driver
             .reading_is_visible("Loading exact App totals")
     );
-    assert!(
-        !harness
-            .driver
-            .reading_is_visible("ranking:CPU:Current:80.0 %")
-    );
+    assert!(!harness.driver.reading_is_visible("ranking:CPU:Current:80%"));
     harness.teardown();
 }
 
@@ -199,11 +191,7 @@ fn overview_wrong_observation_details_preserve_captured_hover_readings(cx: &mut 
             "App totals unavailable: Hover response has a different observation"
         )
     );
-    assert!(
-        !harness
-            .driver
-            .reading_is_visible("ranking:CPU:Current:80.0 %")
-    );
+    assert!(!harness.driver.reading_is_visible("ranking:CPU:Current:80%"));
     harness.teardown();
 }
 
@@ -218,7 +206,7 @@ fn overview_one_unavailable_history_keeps_the_other_three_cards(cx: &mut TestApp
     assert!(
         harness
             .driver
-            .reading_is_visible("chart-reading:live-cpu-apps:250.00 % captured")
+            .reading_is_visible("chart-reading:live-cpu-apps:250% captured")
     );
     assert!(harness.driver.reading_is_visible(
         "chart-reading:live-memory-app-resident:3221225472 B captured resident"
@@ -319,25 +307,25 @@ fn assert_overview_histories_order(driver: &mut InputDriver) {
 }
 
 fn assert_overview_histories_historical(driver: &mut InputDriver) {
-    assert!(driver.reading_is_visible("chart-reading:live-cpu-apps:130.00 % captured"));
+    assert!(driver.reading_is_visible("chart-reading:live-cpu-apps:130% captured"));
     assert!(driver.reading_is_visible(
         "chart-reading:live-memory-app-resident:1073741824 B captured resident"
     ));
-    assert!(driver.reading_is_visible("chart-reading:live-disk-apps:500.0 kB/s captured"));
-    assert!(driver.reading_is_visible("chart-reading:live-power-apps:1.50 W captured"));
-    assert!(driver.reading_is_visible("chart-legend:live-cpu-apps:App A:120.00 %"));
-    assert!(driver.reading_is_visible("chart-legend:live-power-apps:App A:1.25 W"));
-    assert!(driver.reading_is_visible("13.0 %"));
+    assert!(driver.reading_is_visible("chart-reading:live-disk-apps:500 kB/s captured"));
+    assert!(driver.reading_is_visible("chart-reading:live-power-apps:1.5 W captured"));
+    assert!(driver.reading_is_visible("chart-legend:live-cpu-apps:App A:120%"));
+    assert!(driver.reading_is_visible("chart-legend:live-power-apps:App A:1.2 W"));
+    assert!(driver.reading_is_visible("13%"));
 }
 
 fn assert_overview_histories_current(driver: &mut InputDriver) {
-    assert!(driver.reading_is_visible("chart-reading:live-cpu-apps:250.00 % captured"));
+    assert!(driver.reading_is_visible("chart-reading:live-cpu-apps:250% captured"));
     assert!(driver.reading_is_visible(
         "chart-reading:live-memory-app-resident:3221225472 B captured resident"
     ));
     assert!(driver.reading_is_visible("chart-reading:live-disk-apps:1.5 MB/s captured"));
-    assert!(driver.reading_is_visible("chart-reading:live-power-apps:2.75 W captured"));
-    assert!(driver.reading_is_visible("ranking:CPU:Current:80.0 %"));
+    assert!(driver.reading_is_visible("chart-reading:live-power-apps:2.8 W captured"));
+    assert!(driver.reading_is_visible("ranking:CPU:Current:80%"));
 }
 
 impl InputDriver {

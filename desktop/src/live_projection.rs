@@ -118,6 +118,20 @@ pub fn quantity(summary: &Value, key: &str, unit: &str, divisor: f32) -> String 
     }
 }
 
+/// A reading with fixed fraction digits, as the prototype's `hardwareReading` writes the
+/// readings of its quantity lists, such as "58.1 °C" and "51.0%".
+#[must_use]
+pub fn hardware_reading(summary: &Value, key: &str, suffix: &str, digits: usize) -> String {
+    match number(&summary[key]) {
+        Ok(Some(value)) if value.is_finite() => format!("{}{suffix}", fixed_text(value, digits)),
+        Ok(_) => "Unavailable".to_owned(),
+        Err(error) => {
+            eprintln!("flightdeck live hardware reading {key}: {error}");
+            "Unavailable".to_owned()
+        }
+    }
+}
+
 #[must_use]
 pub fn sample_second(selection: &Value, fraction: f32) -> Option<u64> {
     if !fraction.is_finite() {
@@ -338,57 +352,119 @@ fn scalar_text(text: &str) -> Result<Option<f32>, String> {
     Ok(Some(value))
 }
 
+/// A reading as the prototype's `axisValue` writes it: a unit below 1 takes its smaller
+/// prefix, a count from 1000 takes k or M, and the number has no decimals at zero or from 100,
+/// one from 1, and two significant digits below 1, with thousands grouped.
 pub(crate) fn quantity_text(value: f32, unit: &str) -> String {
     if !value.is_finite() {
         return "Unavailable".to_owned();
     }
-    let magnitude = value.abs();
-    let (value, unit) = match unit {
-        "W" if (f32::MIN_POSITIVE..1.0).contains(&magnitude) => (value * 1000.0, "mW"),
-        "GiB" if (f32::MIN_POSITIVE..1.0).contains(&magnitude) => (value * 1024.0, "MiB"),
-        "MB/s" if (f32::MIN_POSITIVE..0.001).contains(&magnitude) => (value * 1_000_000.0, "B/s"),
-        "MB/s" if (f32::MIN_POSITIVE..1.0).contains(&magnitude) => (value * 1000.0, "kB/s"),
-        "/s" if magnitude >= 1_000_000.0 => (value / 1_000_000.0, "M/s"),
-        "/s" if magnitude >= 1000.0 => (value / 1000.0, "k/s"),
-        "pages/s" if magnitude >= 1_000_000.0 => (value / 1_000_000.0, "M pages/s"),
-        "pages/s" if magnitude >= 1000.0 => (value / 1000.0, "k pages/s"),
-        "files" if magnitude >= 1000.0 => (value / 1000.0, "k files"),
-        "% of one core" | "% of interval" => (value, "%"),
-        _ => (value, unit),
-    };
-    if value != 0.0 {
-        if value.abs() < 1.0 {
-            let number = quantity_text_small(value);
-            return if unit.is_empty() {
-                number
-            } else {
-                format!("{number} {unit}")
-            };
-        }
-    }
+    let (value, unit) = quantity_text_scaled(value, unit);
+    let number = quantity_text_number(value);
     if unit.is_empty() {
-        format!("{value:.1}")
-    } else {
-        format!("{value:.1} {unit}")
+        return number;
+    }
+    if unit.starts_with('%') {
+        return format!("{number}{unit}");
+    }
+    format!("{number} {unit}")
+}
+
+fn quantity_text_scaled(value: f32, unit: &str) -> (f32, String) {
+    let magnitude = value.abs();
+    // The prototype's `plotUnit` writes every percent unit, such as "% of one core", as "%".
+    let unit = if unit.starts_with('%') { "%" } else { unit };
+    match unit {
+        "W" if magnitude == 0.0 => (value, "W".into()),
+        "W" if magnitude < 1.0 => (value * 1000.0, "mW".into()),
+        "GiB" if magnitude == 0.0 => (value, "B".into()),
+        "GiB" if magnitude < 1.0 => (value * 1024.0, "MiB".into()),
+        "MB/s" if magnitude < 0.001 => (value * 1_000_000.0, "B/s".into()),
+        "MB/s" if magnitude < 1.0 => (value * 1000.0, "kB/s".into()),
+        "GHz" if magnitude < 1.0 => (value * 1000.0, "MHz".into()),
+        "" | "rpm" | "ops/s" | "work items" | "pps" | "/s" | "files" | "threads" | "sockets"
+            if magnitude >= 1000.0 =>
+        {
+            let (scale, prefix) = if magnitude >= 1_000_000.0 {
+                (1_000_000.0, "M")
+            } else {
+                (1000.0, "k")
+            };
+            let unit = if unit.is_empty() {
+                prefix.to_owned()
+            } else {
+                format!("{prefix} {unit}")
+            };
+            (value / scale, unit)
+        }
+        _ => (value, unit.into()),
     }
 }
 
-fn quantity_text_small(value: f32) -> String {
+/// The number with the prototype's fraction digits and trailing zeros dropped.
+fn quantity_text_number(value: f32) -> String {
     assert!(value.is_finite());
-    assert!(value != 0.0);
-    assert!(value.abs() < 1.0);
-    let mut magnitude = value.abs();
-    for precision in 2..14_usize {
-        if magnitude >= 1.0 {
-            return format!("{value:.precision$}")
-                .trim_end_matches('0')
-                .trim_end_matches('.')
-                .to_owned();
-        }
-        magnitude *= 10.0;
+    let magnitude = value.abs();
+    let digits = match magnitude {
+        0.0 | 100.0.. => 0,
+        1.0.. => 1,
+        _ => quantity_text_small_digits(magnitude),
+    };
+    let fixed = fixed_text(value, digits);
+    if !fixed.contains('.') {
+        return fixed;
     }
 
-    format!("{value:.2e}")
+    fixed.trim_end_matches('0').trim_end_matches('.').to_owned()
+}
+
+/// The number with exactly `digits` fraction digits and its whole part grouped in thousands
+/// with commas, as the prototype's `toLocaleString("en-GB")` writes it.
+pub(crate) fn fixed_text(value: f32, digits: usize) -> String {
+    assert!(value.is_finite());
+    assert!(digits <= 6);
+    let magnitude = value.abs();
+    let fixed = format!("{magnitude:.digits$}");
+    let (whole, fraction) = fixed.split_once('.').unwrap_or((fixed.as_str(), ""));
+    let mut number = String::with_capacity(fixed.len() + fixed.len() / 3 + 2);
+    if value < 0.0 {
+        if fixed
+            .bytes()
+            .any(|byte| byte.is_ascii_digit() && byte != b'0')
+        {
+            number.push('-');
+        }
+    }
+    for (index, digit) in whole.chars().enumerate() {
+        if index > 0 {
+            if (whole.len() - index) % 3 == 0 {
+                number.push(',');
+            }
+        }
+        number.push(digit);
+    }
+    if !fraction.is_empty() {
+        number.push('.');
+        number.push_str(fraction);
+    }
+    number
+}
+
+/// Two significant digits for a magnitude below 1, and at most six fraction digits, as the
+/// prototype's `1 - floor(log10(magnitude))` gives them.
+fn quantity_text_small_digits(magnitude: f32) -> usize {
+    assert!(magnitude > 0.0);
+    assert!(magnitude < 1.0);
+    let mut scaled = magnitude;
+    let mut zeros = 0;
+    while scaled < 1.0 {
+        if zeros == 6 {
+            break;
+        }
+        scaled *= 10.0;
+        zeros += 1;
+    }
+    (zeros + 1).clamp(2, 6)
 }
 
 fn panel(
