@@ -67,7 +67,7 @@ backend includes AccessKit and avoids resolving unused platform backends. It use
 Xcode's separate Metal compiler component. Startup measurements include that cost;
 steady-state measurements begin after warmup. No toolchain or hooks are installed.
 
-Live mode provides Overview, CPU & processes, Apps, Memory, GPU, Storage,
+Live mode provides Overview, CPU, Apps, Memory, GPU, Storage,
 Energy, Network, Battery, Computer, Self-monitoring and Recorded readings
 destinations. Click a chart to pause at a
 second; use time arrows, same-second publication choices, and Resume live. Expand
@@ -128,8 +128,10 @@ Null readings stay gaps. Captured histories retain their 121 samples.
 
 Storage shows physical-device throughput, operations, mean I/O time and errors,
 with bounded device cards and explicit partial or unavailable scans. Mirrored
-writes retain positive inspected values. Its Top apps card ranks captured read and
-write bytes together, preserving exact App identity through inspection and drilldown.
+writes retain positive inspected values. Disk I/O by App plots eight leaders plus
+Other over the captured fifteen-minute context, beside rankings for the selected
+observation. Both use jointly measured process read and write deltas, separately
+from device throughput. Byte counts remain exact; small rates use kB/s or B/s.
 Battery shows charge, signed power flow,
 observed charging states and the selected controller details. Resource summaries,
 device cards and Copy follow graph hover, including missing observations.
@@ -144,7 +146,10 @@ context includes known extent, saved-window counts, source errors and paged
 same-second alternatives with full run/boot/publication identities.
 
 Overview ranks the top ten captured Apps by CPU, resident memory and process power.
-CPU, Memory and Energy repeat the corresponding ranking on their own pages.
+CPU, Memory, Energy and Storage repeat the corresponding ranking on their own pages,
+beside their captured App histories. The CPU plot uses 100% for one core; process
+power remains separate from system and GPU power. Energy's Process power summary
+uses the same App history and inspected timestamp as its plot.
 Bars show each value relative to the leading App; help explains the measured quantity.
 Rankings scan all captured Apps through bounded pages, retaining ten entries per
 metric. Zero, partially measured totals, overflow and incomplete membership remain
@@ -170,8 +175,9 @@ Live controls expose accessibility roles, labels, stable identifiers and chart-s
 actions through the macOS adapter. VoiceOver, native input and pixel verification
 still require an interactive check; API integration alone does not establish parity.
 Saved queries, every diagnostic detail and exact web chart smoothing remain outside
-this implementation. App histories contain observations
-seen by the reader session. Missing sensors stay unavailable. Live Overview uses
+this implementation. App histories merge retained live observations with committed
+recording data, preserving exact identities and showing gaps where source or
+retention limits prevent recovery. Missing sensors stay unavailable. Live Overview uses
 three chart columns from 1100 points wide, two from 640, and one below 640. Other
 live chart pages use two columns from 640 and one below it. Header controls wrap
 inside narrow content. Overview includes categorical memory-pressure history.
