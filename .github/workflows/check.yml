@@ -34,9 +34,11 @@ jobs:
       # needs a second user, which the runner's sudo gives without a password and a
       # contributor's machine does not, is ignored elsewhere, and --include-ignored runs it
       # here under whatever name it takes. It fails, rather than skips, where sudo asks for a
-      # password.
+      # password. The runner's disks fail every scan, and the collector reports each failure
+      # on stderr. Captured output grows a buffer the allocation tests count against the
+      # collector, so --no-capture writes it to stderr as the collector does in production.
       - run: >-
-          cargo test --locked --workspace --no-fail-fast -- --exact --include-ignored
+          cargo test --locked --workspace --no-fail-fast -- --exact --include-ignored --no-capture
           --skip coalitions::tests::counts_the_energy_this_process_spends_in_its_coalition
           --skip ioreport::tests::counts_a_busy_cpu_in_its_cores_active_time
           --skip ioreport::tests::counts_the_energy_the_gpu_spends
