@@ -875,9 +875,14 @@ fn chart_line_value(panel: &Panel, line: usize, index: Option<usize>) -> Option<
 }
 
 fn line_reading(panel: &Panel, value: Option<f32>, unit: &str) -> String {
-    if ["live-storage-", "live-battery-", "live-app-disk", "live-disk-apps"]
-        .iter()
-        .any(|prefix| panel.id.starts_with(prefix))
+    if [
+        "live-storage-",
+        "live-battery-",
+        "live-app-disk",
+        "live-disk-apps",
+    ]
+    .iter()
+    .any(|prefix| panel.id.starts_with(prefix))
     {
         return value.map_or_else(
             || "Unavailable".into(),
