@@ -522,7 +522,7 @@ fn cpu() -> Specification {
         "live-cpu",
         "CPU activity",
         "%",
-        vec![reading("cpu_percent", "CPU activity", "#5794f2", 1.0)],
+        vec![reading("cpu_percent", "All cores", "#5794f2", 1.0)],
     );
     specification.maximum = Some(100.0);
     specification.help = "Busy scheduler ticks divided by total ticks across logical CPUs.";
@@ -551,12 +551,21 @@ fn memory() -> Specification {
     specification
 }
 
+fn system_power(id: &'static str) -> Specification {
+    specification(
+        id,
+        "System power",
+        "W",
+        vec![reading("power_watts", "Whole machine", "#ff9830", 1.0)],
+    )
+}
+
 fn gpu_power() -> Specification {
     specification(
         "live-gpu-power",
         "GPU power",
         "W",
-        vec![reading("gpu_watts", "GPU power", "#b877d9", 1.0)],
+        vec![reading("gpu_watts", "GPU", "#b877d9", 1.0)],
     )
 }
 
@@ -565,12 +574,7 @@ fn gpu_activity() -> Specification {
         "live-gpu-activity",
         "GPU activity",
         "%",
-        vec![reading(
-            "gpu_active_percent",
-            "GPU activity",
-            "#b877d9",
-            1.0,
-        )],
+        vec![reading("gpu_active_percent", "Busy", "#b877d9", 1.0)],
     )
 }
 
@@ -591,12 +595,7 @@ fn specifications(route: &str, points: &[Value]) -> Result<Vec<Specification>, S
 
 fn energy(points: &[Value]) -> Result<Vec<Specification>, String> {
     Ok(vec![
-        specification(
-            "live-energy",
-            "System power",
-            "W",
-            vec![reading("power_watts", "System power", "#ff9830", 1.0)],
-        ),
+        system_power("live-energy"),
         gpu_power(),
         power_breakdown(),
         specification(
@@ -740,20 +739,13 @@ fn pressure_state(value: Option<f32>) -> Option<f32> {
 }
 
 fn overview() -> Vec<Specification> {
-    let mut memory = memory();
-    memory.title = "Memory";
     let mut network = network_throughput();
     network.title = "Network throughput";
     let mut result = vec![
         cpu(),
         gpu_activity(),
-        memory,
-        specification(
-            "live-power",
-            "System power",
-            "W",
-            vec![reading("power_watts", "System power", "#ff9830", 1.0)],
-        ),
+        memory(),
+        system_power("live-power"),
         resource_projection::throughput(),
         network,
         memory_pressure(),

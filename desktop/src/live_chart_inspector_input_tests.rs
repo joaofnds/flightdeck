@@ -40,7 +40,7 @@ fn separate_power_plots_share_inspection_and_remove_the_tooltip_on_exit(cx: &mut
     assert!(
         harness
             .driver
-            .reading_is_visible("chart-tooltip-row:live-gpu-power:0:GPU power:100.0 W")
+            .reading_is_visible("chart-tooltip-row:live-gpu-power:0:GPU:100.0 W")
     );
     assert!(
         harness
@@ -52,7 +52,7 @@ fn separate_power_plots_share_inspection_and_remove_the_tooltip_on_exit(cx: &mut
     assert!(
         harness
             .driver
-            .reading_is_visible("chart-tooltip-row:live-energy:0:System power:8.0 W")
+            .reading_is_visible("chart-tooltip-row:live-energy:0:Whole machine:8.0 W")
     );
     harness
         .driver
