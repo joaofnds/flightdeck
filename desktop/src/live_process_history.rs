@@ -90,6 +90,7 @@ impl ProcessHistory {
 
         let mut panels = crate::live_projection::panels("apps", selection, Some(payload))?;
         assert!(panels.len() <= 8);
+        let group = crate::live_views::text(&payload["executable_name"]["display"]);
         for panel in &mut panels {
             let panel = Rc::get_mut(panel).ok_or("Process history projection is already shared")?;
             let suffix = panel
@@ -97,7 +98,9 @@ impl ProcessHistory {
                 .strip_prefix("live-app-")
                 .ok_or("Unexpected process history projection")?;
             panel.id = format!("{PANEL_PREFIX}{suffix}");
-            panel.title = format!("Process group · {}", panel.title);
+            for line in &mut panel.lines {
+                line.name = format!("{group}{}", line.name);
+            }
         }
         Ok(panels)
     }

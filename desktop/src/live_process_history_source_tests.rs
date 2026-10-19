@@ -33,14 +33,65 @@ fn real_named_process_worker_preserves_scope_and_exact_same_second_history() {
     assert_eq!(group.len(), 8);
     assert_eq!(group[0].selected_index, Some(1));
     assert_eq!(group[0].lines[0].values[1], Some(120.0));
-    assert_eq!(group[3].lines[0].values[1], Some(1.25));
-    assert_eq!(group[4].lines[0].values[1], Some(0.000_08));
+    assert_eq!(group[3].lines[0].values[1], Some(0.000_08));
+    assert_eq!(group[4].lines[0].values[1], Some(1.25));
     let total = presentation
         .panels
         .iter()
         .find(|panel| panel.id == "live-app-cpu")
         .unwrap();
     assert_eq!(total.lines[0].values[1], Some(360.0));
+}
+
+#[test]
+fn a_named_process_group_reads_in_the_prototypes_by_process_charts() {
+    // Goal: as in the prototype, choosing one group keeps the same charts with only its
+    // series. Method: project the named group a and read the charts' titles and lines.
+    let recording = named_recording();
+    let request = named_request();
+    let snapshot = recording.read(request.clone()).unwrap();
+
+    let presentation = crate::live_acceptance::Presentation::prepare(&request, snapshot).unwrap();
+
+    let group: Vec<_> = presentation
+        .panels
+        .iter()
+        .filter(|panel| panel.id.starts_with("live-process-group-"))
+        .collect();
+    let titles: Vec<_> = group.iter().map(|panel| panel.title.as_str()).collect();
+    assert_eq!(
+        titles,
+        [
+            "CPU by process",
+            "Resident memory by process",
+            "Footprint by process",
+            "Disk by process",
+            "Power by process",
+            "Idle wakeups by process",
+            "Page-ins by process",
+            "Threads by process"
+        ]
+    );
+    let lines: Vec<_> = group
+        .iter()
+        .flat_map(|panel| panel.lines.iter())
+        .map(|line| (line.name.as_str(), line.negative))
+        .collect();
+    let read = ("a", Some(false));
+    assert_eq!(
+        lines,
+        [
+            read,
+            read,
+            read,
+            ("a read", Some(false)),
+            ("a written", Some(true)),
+            read,
+            read,
+            read,
+            read
+        ]
+    );
 }
 
 #[test]

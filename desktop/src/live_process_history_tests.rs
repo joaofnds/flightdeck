@@ -19,8 +19,8 @@ fn process_history_projects_eight_distinct_captured_group_panels() {
             "live-process-group-cpu",
             "live-process-group-resident",
             "live-process-group-footprint",
-            "live-process-group-power",
             "live-process-group-disk",
+            "live-process-group-power",
             "live-process-group-wakeups",
             "live-process-group-pageins",
             "live-process-group-threads"
@@ -29,9 +29,9 @@ fn process_history_projects_eight_distinct_captured_group_panels() {
     assert_eq!(panels[0].lines[0].values, [Some(120.0), Some(240.0)]);
     assert_eq!(panels[1].lines[0].values, [Some(1.0), Some(2.0)]);
     assert_eq!(panels[2].lines[0].values, [Some(2.0), Some(3.0)]);
-    assert_eq!(panels[3].lines[0].values, [Some(1.25), Some(2.5)]);
-    assert_eq!(panels[4].lines[0].values, [Some(1.0), Some(2.0)]);
-    assert_eq!(panels[4].lines[1].values, [Some(0.5), Some(1.0)]);
+    assert_eq!(panels[3].lines[0].values, [Some(1.0), Some(2.0)]);
+    assert_eq!(panels[3].lines[1].values, [Some(0.5), Some(1.0)]);
+    assert_eq!(panels[4].lines[0].values, [Some(1.25), Some(2.5)]);
     assert_eq!(panels[5].lines[0].values, [Some(5.0), Some(11.0)]);
     assert_eq!(panels[6].lines[0].values, [Some(3.0), Some(7.0)]);
     assert_eq!(panels[7].lines[0].values, [Some(8.0), Some(13.0)]);
@@ -96,7 +96,7 @@ fn process_history_keeps_missing_metrics_and_observation_gaps() {
     let panels = history.panels(&selection()).unwrap();
 
     assert_eq!(panels[0].lines[0].values, [None, Some(240.0)]);
-    assert_eq!(panels[4].lines[0].values, [None, Some(2.0)]);
+    assert_eq!(panels[3].lines[0].values, [None, Some(2.0)]);
     assert!(panels[0].positions.as_ref().unwrap()[0] < panels[0].positions.as_ref().unwrap()[1]);
     assert_ne!(
         panels[0].segments.as_ref().unwrap()[0],

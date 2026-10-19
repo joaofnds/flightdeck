@@ -428,26 +428,38 @@ impl AppHoverDriver {
         assert!(self.text_is_visible("chart-reading:live-process-group-wakeups:5.0 /s"));
         assert!(self.text_is_visible("chart-reading:live-process-group-pageins:3.0 pages/s"));
         assert!(self.text_is_visible("chart-reading:live-process-group-threads:8.0 threads"));
-        assert!(self.text_is_visible(
-            "chart-legend:live-process-group-wakeups:Idle wakeups:5.0 /s · 5 wakeups / interval"
-        ));
-        assert!(self.text_is_visible(
-            "chart-legend:live-process-group-pageins:Page-ins:3.0 pages/s · 3 page-ins / interval"
-        ));
-        assert!(self.text_is_visible("chart-legend:live-process-group-threads:Threads:8 threads"));
+        assert!(self.text_is_visible(concat!(
+            "chart-legend:live-process-group-wakeups:Accepted worker:",
+            "5.0 /s · 5 wakeups / interval",
+        )));
+        assert!(self.text_is_visible(concat!(
+            "chart-legend:live-process-group-pageins:Accepted worker:",
+            "3.0 pages/s · 3 page-ins / interval",
+        )));
+        assert!(
+            self.text_is_visible(
+                "chart-legend:live-process-group-threads:Accepted worker:8 threads"
+            )
+        );
     }
 
     fn assert_named_captured_current(&mut self) {
         assert!(self.text_is_visible("chart-reading:live-process-group-wakeups:11.0 /s"));
         assert!(self.text_is_visible("chart-reading:live-process-group-pageins:7.0 pages/s"));
         assert!(self.text_is_visible("chart-reading:live-process-group-threads:13.0 threads"));
-        assert!(self.text_is_visible(
-            "chart-legend:live-process-group-wakeups:Idle wakeups:11.0 /s · 11 wakeups / interval"
-        ));
-        assert!(self.text_is_visible(
-            "chart-legend:live-process-group-pageins:Page-ins:7.0 pages/s · 7 page-ins / interval"
-        ));
-        assert!(self.text_is_visible("chart-legend:live-process-group-threads:Threads:13 threads"));
+        assert!(self.text_is_visible(concat!(
+            "chart-legend:live-process-group-wakeups:Accepted worker:",
+            "11.0 /s · 11 wakeups / interval",
+        )));
+        assert!(self.text_is_visible(concat!(
+            "chart-legend:live-process-group-pageins:Accepted worker:",
+            "7.0 pages/s · 7 page-ins / interval",
+        )));
+        assert!(
+            self.text_is_visible(
+                "chart-legend:live-process-group-threads:Accepted worker:13 threads"
+            )
+        );
     }
 }
 

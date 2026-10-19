@@ -1205,65 +1205,66 @@ fn network_throughput() -> Specification {
     )
 }
 
+/// One process group's histories in the prototype's by-process charts, which keep their titles
+/// and order when one group is chosen and draw only its series, in the palette's first color.
+/// Each line's name is the suffix after the group's name, which `ProcessHistory::panels` adds.
 fn process_specifications() -> Vec<Specification> {
+    const COLOR: &str = "#73bf69";
+    let mut written = reading("disk_written_bps", " written", COLOR, 1_000_000.0);
+    written.negative = true;
     let mut disk = specification(
         "live-app-disk",
-        "Disk I/O",
+        "Disk by process",
         "MB/s",
         vec![
-            reading("disk_read_bps", "Read", "#73bf69", 1_000_000.0),
-            reading("disk_written_bps", "Write", "#5794f2", 1_000_000.0),
+            reading("disk_read_bps", " read", COLOR, 1_000_000.0),
+            written,
         ],
     );
     disk.help = APP_DISK_HELP;
     let result = vec![
         specification(
             "live-app-cpu",
-            "CPU",
+            "CPU by process",
             "%",
-            vec![reading("cpu_percent_one_core", "CPU", "#5794f2", 1.0)],
+            vec![reading("cpu_percent_one_core", "", COLOR, 1.0)],
         ),
         specification(
             "live-app-resident",
-            "Resident",
+            "Resident memory by process",
             "GiB",
-            vec![reading("resident_bytes", "Resident", "#5794f2", GIBIBYTE)],
+            vec![reading("resident_bytes", "", COLOR, GIBIBYTE)],
         ),
         specification(
             "live-app-footprint",
-            "Footprint",
+            "Footprint by process",
             "GiB",
-            vec![reading("footprint_bytes", "Footprint", "#ff9830", GIBIBYTE)],
-        ),
-        specification(
-            "live-app-power",
-            "Average power",
-            "W",
-            vec![reading("energy_watts", "Average power", "#ff9830", 1.0)],
+            vec![reading("footprint_bytes", "", COLOR, GIBIBYTE)],
         ),
         disk,
         specification(
+            "live-app-power",
+            "Power by process",
+            "W",
+            vec![reading("energy_watts", "", COLOR, 1.0)],
+        ),
+        specification(
             "live-app-wakeups",
-            "Idle wakeups",
+            "Idle wakeups by process",
             "/s",
-            vec![reading(
-                "idle_wakeups_per_second",
-                "Idle wakeups",
-                "#73bf69",
-                1.0,
-            )],
+            vec![reading("idle_wakeups_per_second", "", COLOR, 1.0)],
         ),
         specification(
             "live-app-pageins",
-            "Page-ins",
+            "Page-ins by process",
             "pages/s",
-            vec![reading("pageins_per_second", "Page-ins", "#5794f2", 1.0)],
+            vec![reading("pageins_per_second", "", COLOR, 1.0)],
         ),
         specification(
             "live-app-threads",
-            "Threads",
+            "Threads by process",
             "threads",
-            vec![reading("threads", "Threads", "#b877d9", 1.0)],
+            vec![reading("threads", "", COLOR, 1.0)],
         ),
     ];
 

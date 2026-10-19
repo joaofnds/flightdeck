@@ -55,11 +55,15 @@ fn selected_app_disk_history_combines_interval_rates_and_keeps_gaps() {
     let panels = crate::live_projection::panels("apps", &selection, Some(&history)).unwrap();
     let disk = panels
         .iter()
-        .find(|panel| panel.title == "Disk I/O")
-        .expect("Process group Disk I/O history is missing");
+        .find(|panel| panel.title == "Disk by process")
+        .expect("Process group disk history is missing");
     assert_eq!(disk.lines.len(), 2);
-    let read = disk.lines.iter().find(|line| line.name == "Read").unwrap();
-    let write = disk.lines.iter().find(|line| line.name == "Write").unwrap();
+    let read = disk.lines.iter().find(|line| line.name == " read").unwrap();
+    let write = disk
+        .lines
+        .iter()
+        .find(|line| line.name == " written")
+        .unwrap();
     assert_eq!(read.values, [None, Some(0.002_048)]);
     assert_eq!(write.values, [None, Some(0.000_512)]);
 }
