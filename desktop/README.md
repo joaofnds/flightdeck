@@ -187,8 +187,11 @@ Saved queries, every diagnostic detail and exact web chart smoothing remain outs
 this implementation. App histories merge retained live observations with committed
 recording data, preserving exact identities and showing gaps where source or
 retention limits prevent recovery. Missing sensors stay unavailable. Live Overview uses
-three chart columns from 1100 points wide, two from 640, and one below 640. Other
-live chart pages use two columns from 640 and one below it. Header controls wrap
+three chart columns from 1100 points wide, two from 640, and one below 640.
+Memory starts with composition and pressure, followed by Swap and paging; that
+three-card band uses the same three/two/one breakpoints, keeping equal column
+widths in its incomplete row. Other live chart rows use two columns from 640 and
+one below it. Header controls wrap
 inside narrow content. Overview includes categorical memory-pressure history.
 Captured and live pages have different panel/data workloads and must be measured separately.
 
