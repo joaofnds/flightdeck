@@ -80,7 +80,7 @@ overview_history_hover_case!(
 overview_history_hover_case!(
     overview_resident_history_synchronizes_exact_readings,
     "live-memory-app-resident-plot",
-    "chart-tooltip-row:live-memory-app-resident:0:Resident App:1073741824 B"
+    "chart-tooltip-row:live-memory-app-resident:0:Resident App:1.0 GiB"
 );
 overview_history_hover_case!(
     overview_disk_history_synchronizes_exact_readings,

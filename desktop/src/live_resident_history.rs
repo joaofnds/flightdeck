@@ -120,7 +120,7 @@ impl ResidentHistory {
             return format!("Unavailable · {} unavailable", measure.unavailable_members);
         }
 
-        let reading = format!("{} B", measure.known);
+        let reading = crate::live_app_views::memory(Some(measure.known));
         if measure.unavailable_members > 0 {
             return format!(
                 "{reading} known subtotal · {} measured · {} unavailable",

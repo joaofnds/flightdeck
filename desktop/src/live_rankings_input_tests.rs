@@ -979,7 +979,7 @@ fn resident_hover_sorts_adjacent_exact_byte_counts_above_plot_precision(cx: &mut
     assert!(
         harness
             .driver
-            .reading_is_visible("chart-tooltip-row:live-memory-app-resident:0:App A:16777217 B")
+            .reading_is_visible("chart-tooltip-row:live-memory-app-resident:0:App A:16.0 MiB")
     );
     harness.teardown();
 }
