@@ -7,6 +7,9 @@ use serde_json::json;
 use super::{InputDriver, InputHarness, PlotExit, accepted_snapshot};
 use crate::live_source::{Snapshot, Update};
 
+#[path = "live_overview_app_history_input_tests.rs"]
+mod overview_history;
+
 #[gpui::test]
 fn memory_hover_worker_failure_keeps_the_historical_scalar_without_current_app_links(
     cx: &mut TestAppContext,

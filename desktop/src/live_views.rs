@@ -295,6 +295,7 @@ impl LiveDashboard {
             Row::CPUHistory => self.cpu_history_panel(cx).into_any_element(),
             Row::OverviewStatus => self.overview_status(cx).into_any_element(),
             Row::Rankings(metrics) => self.app_rankings(metrics, cx),
+            Row::OverviewAppHistories(slots) => self.overview_app_histories(slots, cx),
             Row::MemoryAttribution(panel) => self.memory_attribution(panel.as_ref(), cx),
             Row::AppAttribution(metric, panel) => self.app_attribution(*metric, panel.as_ref(), cx),
             Row::AppSelector => self.app_selector(cx).into_any_element(),
@@ -363,11 +364,9 @@ impl LiveDashboard {
             .map_or(&Value::Null, |snapshot| &snapshot.selection);
         let mut cards = summary::cards(&self.request.route, selection);
         if let Some(card) = cards.iter_mut().find(|card| card.label == "Process power") {
-            if let Some(history) = self
-                .snapshot
-                .as_ref()
-                .and_then(|snapshot| snapshot.app_attribution_history.as_deref())
-            {
+            if let Some(history) = self.snapshot.as_ref().and_then(|snapshot| {
+                snapshot.attribution_history(crate::live_app_attribution_history::Metric::Power)
+            }) {
                 card.reading = history.headline(history.index(self.reading_target()));
                 card.note = "Attributed Apps; separate scope";
             }

@@ -81,6 +81,8 @@ pub struct Snapshot {
     pub resident_history: Option<Arc<crate::live_resident_history::ResidentHistory>>,
     pub app_attribution_history:
         Option<Arc<crate::live_app_attribution_history::AppAttributionHistory>>,
+    pub overview_app_histories:
+        Option<Arc<crate::live_overview_app_histories::OverviewAppHistories>>,
     pub process_history: Option<Arc<crate::live_process_history::ProcessHistory>>,
     pub rankings: Option<Arc<crate::live_rankings::Rankings>>,
     pub read_ms: f64,
@@ -392,6 +394,7 @@ fn reader_snapshot(
         cpu_history: None,
         resident_history: None,
         app_attribution_history: None,
+        overview_app_histories: None,
         process_history: None,
         rankings: None,
         read_ms: 0.0,
@@ -425,6 +428,7 @@ fn reader_computer(reader: &mut Reader, command: &Command) -> Option<Box<Snapsho
         cpu_history: None,
         resident_history: None,
         app_attribution_history: None,
+        overview_app_histories: None,
         process_history: None,
         rankings: None,
         read_ms: 0.0,
@@ -533,35 +537,57 @@ fn reader_payload(
         )?);
         reader_cpu_history(session, request, snapshot)?;
     }
-    if request.load_app_attribution_history {
-        if let Some(metric) =
-            crate::live_app_attribution_history::Metric::from_route(&request.route)
-        {
-            reader_app_attribution_history(session, snapshot, metric);
-        }
-    }
-    if request.route == "memory" {
-        if request.load_resident_history {
-            reader_resident_history(session, snapshot);
-        }
-    }
+    reader_payload_histories(session, request, snapshot);
 
     Ok(())
 }
 
+fn reader_payload_histories(session: &LiveSession, request: &Request, snapshot: &mut Snapshot) {
+    if request.load_app_attribution_history {
+        if request.route == "overview" {
+            reader_overview_app_histories(session, snapshot);
+        } else {
+            if let Some(metric) =
+                crate::live_app_attribution_history::Metric::from_route(&request.route)
+            {
+                snapshot.app_attribution_history = Some(reader_app_attribution_history(
+                    session,
+                    &snapshot.selection,
+                    metric,
+                ));
+            }
+        }
+    }
+    if matches!(request.route.as_str(), "memory" | "overview") {
+        if request.load_resident_history {
+            reader_resident_history(session, snapshot);
+        }
+    }
+}
+
 fn reader_app_attribution_history(
     session: &LiveSession,
-    snapshot: &mut Snapshot,
+    selection: &Value,
     metric: crate::live_app_attribution_history::Metric,
-) {
+) -> Arc<crate::live_app_attribution_history::AppAttributionHistory> {
     use crate::live_app_attribution_history::AppAttributionHistory;
-    let history = match session.app_attribution_history(metric.source()) {
-        Ok(payload) => AppAttributionHistory::prepare(metric, &payload, &snapshot.selection),
+    Arc::new(match session.app_attribution_history(metric.source()) {
+        Ok(payload) => AppAttributionHistory::prepare(metric, &payload, selection),
         Err(error) => AppAttributionHistory::Unavailable(
             crate::live_notices::recording_context::bounded(&error.to_string(), 512),
         ),
-    };
-    snapshot.app_attribution_history = Some(Arc::new(history));
+    })
+}
+
+fn reader_overview_app_histories(session: &LiveSession, snapshot: &mut Snapshot) {
+    use crate::live_app_attribution_history::Metric;
+    snapshot.overview_app_histories = Some(Arc::new(
+        crate::live_overview_app_histories::OverviewAppHistories {
+            cpu: reader_app_attribution_history(session, &snapshot.selection, Metric::Cpu),
+            power: reader_app_attribution_history(session, &snapshot.selection, Metric::Power),
+            disk: reader_app_attribution_history(session, &snapshot.selection, Metric::Disk),
+        },
+    ));
 }
 
 fn reader_resident_history(session: &LiveSession, snapshot: &mut Snapshot) {

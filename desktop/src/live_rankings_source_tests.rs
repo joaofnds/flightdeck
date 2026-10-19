@@ -11,6 +11,9 @@ use super::SealedRecording;
 use crate::live_rankings::{Rankings, TopApps};
 use crate::live_source::{Request, Snapshot};
 
+#[path = "live_overview_app_history_source_tests.rs"]
+mod overview_history;
+
 #[test]
 fn real_saved_energy_rankings_reach_later_pages_at_the_exact_sibling() {
     // Read the actual Energy route from 600 sealed Apps after its source ring retires.

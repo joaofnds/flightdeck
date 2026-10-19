@@ -218,13 +218,29 @@ impl LiveDashboard {
         for metrics in [0, 1, 2, 3].chunks(self.reading_chart_columns().min(2)) {
             rows.push(Row::Rankings(metrics.to_vec()));
         }
+        rows.push(Row::Heading("App resource histories".into()));
+        for slots in [0, 1, 2, 3].chunks(self.reading_chart_columns().min(2)) {
+            rows.push(Row::OverviewAppHistories(slots.to_vec()));
+        }
         rows.push(Row::Heading("More resource context".into()));
         rows.push(Row::OverviewStatus);
         let primary_panel_count = self
             .panels
             .len()
             .min(crate::live_projection::OVERVIEW_PRIMARY_PANELS);
-        for panels in self.panels[primary_panel_count..].chunks(self.reading_chart_columns()) {
+        let context: Vec<_> = self.panels[primary_panel_count..]
+            .iter()
+            .take(16)
+            .filter(|panel| {
+                if panel.id == crate::live_resident_history::PANEL_ID {
+                    return false;
+                }
+                crate::live_app_attribution_history::Metric::from_panel(&panel.id).is_none()
+            })
+            .cloned()
+            .collect();
+
+        for panels in context.chunks(self.reading_chart_columns()) {
             rows.push(Row::Charts(panels.to_vec()));
         }
         if self.snapshot.is_some() {

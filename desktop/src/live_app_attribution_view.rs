@@ -12,9 +12,9 @@ impl LiveDashboard {
         &self,
         panel: &Panel,
     ) -> Option<&super::AppAttributionHistory> {
-        Metric::from_panel(&panel.id)?;
+        let metric = Metric::from_panel(&panel.id)?;
 
-        self.snapshot.as_ref()?.app_attribution_history.as_deref()
+        self.snapshot.as_ref()?.attribution_history(metric)
     }
 
     pub(crate) fn app_attribution(
@@ -29,7 +29,7 @@ impl LiveDashboard {
             let reading = self
                 .snapshot
                 .as_ref()
-                .and_then(|snapshot| snapshot.app_attribution_history.as_ref())
+                .and_then(|snapshot| snapshot.attribution_history(metric))
                 .map_or_else(
                     || "App rate history unavailable at this observation".into(),
                     |history| history.coverage(None),

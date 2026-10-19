@@ -74,6 +74,7 @@ pub enum Row {
     Diagnostics,
     OverviewStatus,
     Rankings(Vec<usize>),
+    OverviewAppHistories(Vec<usize>),
     MemoryAttribution(Option<Rc<Panel>>),
     AppAttribution(
         crate::live_app_attribution_history::Metric,
@@ -584,6 +585,7 @@ mod selection_tests {
             cpu_history: None,
             resident_history: None,
             app_attribution_history: None,
+            overview_app_histories: None,
             process_history: None,
             rankings: None,
             read_ms: 0.0,

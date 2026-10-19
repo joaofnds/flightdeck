@@ -22,6 +22,7 @@ impl Row {
             Self::Diagnostics => "diagnostics".into(),
             Self::OverviewStatus => "overview-status".into(),
             Self::Rankings(metrics) => format!("rankings-{}", metrics[0]),
+            Self::OverviewAppHistories(slots) => format!("overview-app-histories-{}", slots[0]),
             Self::MemoryAttribution(_) => "memory-attribution".into(),
             Self::AppAttribution(metric, _) => format!("app-attribution-{}", metric.panel_id()),
             Self::AppSelector => "app-selector".into(),
@@ -37,7 +38,10 @@ impl Row {
                 }
                 match title.as_str() {
                     "Swap and paging" => return "memory-swap-paging-heading".into(),
-                    "Top apps at the selected time" | "More resource context" | "MacBook" => {
+                    "Top apps at the selected time"
+                    | "App resource histories"
+                    | "More resource context"
+                    | "MacBook" => {
                         return format!("overview-heading-{title}");
                     }
                     _ => {}
@@ -66,6 +70,9 @@ impl Row {
     fn owns_plot(&self, source: &str) -> bool {
         match self {
             Self::Charts(panels) => panels.iter().take(3).any(|panel| panel.id == source),
+            Self::OverviewAppHistories(slots) => slots.iter().take(2).any(|slot| {
+                crate::live_overview_app_histories::overview_app_history_slot(*slot).0 == source
+            }),
             Self::MemoryAttribution(Some(panel)) | Self::AppAttribution(_, Some(panel)) => {
                 panel.id == source
             }

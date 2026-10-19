@@ -795,11 +795,8 @@ fn target_index(
     target: &crate::live_hover::Target,
 ) -> Option<usize> {
     target.identity.as_ref()?;
-    if crate::live_app_attribution_history::Metric::from_panel(&panel.id).is_some() {
-        return snapshot
-            .app_attribution_history
-            .as_ref()?
-            .index(Some(target));
+    if let Some(metric) = crate::live_app_attribution_history::Metric::from_panel(&panel.id) {
+        return snapshot.attribution_history(metric)?.index(Some(target));
     }
     if panel.id == crate::live_resident_history::PANEL_ID {
         return snapshot.resident_history.as_ref()?.index(Some(target));
@@ -965,12 +962,9 @@ fn inspection_index(panel: &Panel, snapshot: &Snapshot, second: Option<u64>) -> 
     if snapshot.selection["second"].as_u64() == Some(second) {
         return panel.selected_index;
     }
-    if crate::live_app_attribution_history::Metric::from_panel(&panel.id).is_some() {
+    if let Some(metric) = crate::live_app_attribution_history::Metric::from_panel(&panel.id) {
         let target = crate::live_hover::Target::regular(snapshot, second);
-        return snapshot
-            .app_attribution_history
-            .as_ref()?
-            .index(Some(&target));
+        return snapshot.attribution_history(metric)?.index(Some(&target));
     }
     if panel.id == crate::live_resident_history::PANEL_ID {
         let target = crate::live_hover::Target::regular(snapshot, second);
@@ -1050,6 +1044,7 @@ mod tests {
             cpu_history: None,
             resident_history: None,
             app_attribution_history: None,
+            overview_app_histories: None,
             process_history: None,
             rankings: None,
             read_ms: 0.0,

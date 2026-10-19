@@ -35,6 +35,8 @@ impl Presentation {
                     snapshot.resident_history = Some(std::sync::Arc::new(resident));
                 }
             }
+        }
+        if matches!(request.route.as_str(), "memory" | "overview") {
             if let Some(resident) = &snapshot.resident_history {
                 if let Some(panel) = resident.panel() {
                     panels.push(panel);
@@ -44,6 +46,14 @@ impl Presentation {
         if let Some(history) = &snapshot.app_attribution_history {
             if let Some(panel) = history.panel() {
                 panels.push(panel);
+            }
+        }
+        if let Some(histories) = &snapshot.overview_app_histories {
+            use crate::live_app_attribution_history::Metric;
+            for metric in [Metric::Cpu, Metric::Power, Metric::Disk] {
+                if let Some(panel) = histories.history(metric).panel() {
+                    panels.push(panel);
+                }
             }
         }
         let mut presentation = Box::new(Self {
