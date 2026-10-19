@@ -71,7 +71,8 @@ fn keeps_installed_memory_independent_of_stacked_categories() {
 
     let (_, maximum) = domain(&panel, inspection, &[]);
 
-    assert!((maximum - 51.84).abs() < 0.001);
+    // The axis keeps 4% headroom over installed RAM and ticks at 16 GiB, as the prototype does.
+    assert!((maximum - 49.92).abs() < 0.001);
 }
 
 #[test]
@@ -96,8 +97,9 @@ fn gives_outgoing_traffic_room_below_zero() {
         &[],
     );
 
-    assert!((minimum + 8.0).abs() < f32::EPSILON);
-    assert!(maximum > 3.0);
+    // The prototype rounds the padded range out to its 2.5 MB/s ticks.
+    assert!((minimum + 10.0).abs() < f32::EPSILON);
+    assert!((maximum - 5.0).abs() < f32::EPSILON);
 }
 
 #[test]

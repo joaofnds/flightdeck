@@ -2,15 +2,18 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui::{
-    Bounds, IntoElement, PathBuilder, Pixels, Window, canvas, fill, point, prelude::*, px, rgb,
-    size,
+    Background, Bounds, IntoElement, PathBuilder, Pixels, Window, canvas, fill, linear_color_stop,
+    linear_gradient, point, prelude::*, px, rgb, size,
 };
 
+pub use crate::chart_axes::{TimeWindow, axis_column, axis_labels, time_labels};
 use crate::data::Panel;
 
 pub const BLUE: u32 = 0x0057_94f2;
 pub const GREEN: u32 = 0x0073_bf69;
 pub const GRID: u32 = 0x0028_2a2e;
+/// Card and divider borders: the prototype's text colour at 12% over its panels.
+pub const LINE: u32 = 0x002a_2c33;
 pub const MUTED: u32 = 0x0089_8995;
 pub const ORANGE: u32 = 0x00ff_9830;
 pub const PANEL: u32 = 0x0018_1b1f;
@@ -20,10 +23,13 @@ pub const TEXT: u32 = 0x00cc_ccdc;
 pub const YELLOW: u32 = 0x00f2_cc0c;
 pub const PLOT_INSETS: gpui::Edges<Pixels> = gpui::Edges {
     top: px(8.0),
-    right: px(10.0),
-    bottom: px(20.0),
-    left: px(40.0),
+    right: px(4.0),
+    bottom: px(4.0),
+    left: px(6.0),
 };
+/// Display averaging keeps about one curve point per this many pixels, so a 900-second history
+/// draws as a readable curve; inspection still reads each exact observation.
+const CURVE_POINT_WIDTH: f32 = 4.0;
 
 #[derive(Clone, Copy)]
 pub struct Inspection {
@@ -50,7 +56,7 @@ pub fn plot(
     hidden: Rc<Vec<String>>,
     measured: Rc<Cell<Bounds<Pixels>>>,
 ) -> impl IntoElement {
-    plot_cursor(panel, inspection, hidden, measured, true)
+    plot_cursor(panel, inspection, hidden, measured, (true, None))
 }
 
 pub fn plot_without_cursor(
@@ -58,8 +64,9 @@ pub fn plot_without_cursor(
     inspection: Inspection,
     hidden: Rc<Vec<String>>,
     measured: Rc<Cell<Bounds<Pixels>>>,
+    time: Option<TimeWindow>,
 ) -> impl IntoElement {
-    plot_cursor(panel, inspection, hidden, measured, false)
+    plot_cursor(panel, inspection, hidden, measured, (false, time))
 }
 
 fn plot_cursor(
@@ -67,14 +74,24 @@ fn plot_cursor(
     inspection: Inspection,
     hidden: Rc<Vec<String>>,
     measured: Rc<Cell<Bounds<Pixels>>>,
-    show_cursor: bool,
+    (show_cursor, time): (bool, Option<TimeWindow>),
 ) -> impl IntoElement {
     canvas(
         move |bounds, _, _| measured.set(bounds),
         move |bounds, (), window, _| {
             let chart = plot_bounds(bounds);
             crate::render_evidence::chart(&panel, inspection, chart, window);
-            paint_grid(chart, window);
+            if matches!(panel.kind.as_str(), "line" | "self-chart") {
+                paint_grid(
+                    chart,
+                    axis_scale(&panel, inspection, &hidden, "left"),
+                    window,
+                );
+            }
+            if let Some(time) = time {
+                let ticks = crate::chart_axes::time_ticks(time, f32::from(chart.size.width));
+                paint_time_grid(chart, &ticks, window);
+            }
             clip_plot(chart, window, |window| match panel.kind.as_str() {
                 "timeline" => paint_timeline(&panel, chart, inspection, &hidden, window),
                 "heatmap" => paint_heatmap(&panel, chart, inspection, &hidden, window),
@@ -140,17 +157,32 @@ pub fn number(value: usize) -> f32 {
     }
 }
 
-fn paint_grid(bounds: Bounds<Pixels>, window: &mut Window) {
-    for row in 0..=4 {
+fn paint_grid(bounds: Bounds<Pixels>, scale: Scale, window: &mut Window) {
+    for value in scale.ticks() {
+        let y = bounds.bottom() - bounds.size.height * scale.fraction(value);
+        let color = if value == 0.0 {
+            alpha(TEXT, 0.12)
+        } else {
+            rgb(GRID)
+        };
+        window.paint_quad(fill(
+            Bounds::new(point(bounds.origin.x, y), size(bounds.size.width, px(1.0))),
+            color,
+        ));
+    }
+}
+
+fn paint_time_grid(bounds: Bounds<Pixels>, ticks: &[(f32, u64)], window: &mut Window) {
+    for (fraction, _) in ticks.iter().take(64) {
         window.paint_quad(fill(
             Bounds::new(
                 point(
-                    bounds.origin.x,
-                    bounds.origin.y + bounds.size.height * (number(row) / 4.0),
+                    bounds.origin.x + bounds.size.width * *fraction,
+                    bounds.origin.y,
                 ),
-                size(bounds.size.width, px(1.0)),
+                size(px(1.0), bounds.size.height),
             ),
-            rgb(GRID),
+            alpha(GRID, 0.55),
         ));
     }
 }
@@ -180,7 +212,7 @@ pub(crate) fn prepare_lines(
     hidden: &[String],
     mut paint: impl FnMut(&crate::data::Line, &[Option<(f32, f32)>], &Geometry<'_>),
 ) {
-    let (minimum, maximum) = domain(panel, inspection, hidden);
+    let left = axis_scale(panel, inspection, hidden, "left");
     assert!(inspection.upper < crate::data::LIVE_SAMPLE_LIMIT);
     let mut previous = [0.0; crate::data::LIVE_SAMPLE_LIMIT];
     let mut values = Vec::new();
@@ -205,15 +237,14 @@ pub(crate) fn prepare_lines(
         values.clear();
         values.reserve_exact(readings.size_hint().0);
         values.extend(readings);
-        let (low, high) = if let Some(axis) = &line.axis {
-            axis_domain(panel, inspection, hidden, axis)
-        } else {
-            (minimum, maximum)
+        let scale = match &line.axis {
+            Some(axis) => axis_scale(panel, inspection, hidden, axis),
+            None => left,
         };
         let geometry = Geometry {
             bounds,
-            minimum: low,
-            maximum: high,
+            minimum: scale.minimum,
+            maximum: scale.maximum,
             count: values.len(),
             positions: panel.positions.as_deref(),
             segments: panel.segments.as_deref(),
@@ -286,87 +317,214 @@ fn paint_run(
     geometry: &Geometry<'_>,
     window: &mut Window,
 ) {
-    if range.len() == 1 {
-        if let Some((value, _)) = values[range.start] {
-            let position = geometry.point(range.start, value);
-            window.paint_quad(fill(
-                Bounds::new(position - point(px(1.5), px(1.5)), size(px(3.0), px(3.0))),
-                rgb(color(&line.color)),
-            ));
-        }
+    let tint = color(&line.color);
+    let curve = curve_points(values, range, geometry);
+    if curve.len() == 1 {
+        let position = point(curve[0].x, curve[0].top);
+        window.paint_quad(fill(
+            Bounds::new(position - point(px(1.5), px(1.5)), size(px(3.0), px(3.0))),
+            rgb(tint),
+        ));
         return;
     }
-    let mut stroke = PathBuilder::stroke(px(1.5));
+
+    let stacked = stacked(panel, line);
+    let width = if stacked { px(1.0) } else { px(2.0) };
+    let mut stroke = PathBuilder::stroke(width);
+    if line.dashed == Some(true) {
+        stroke = stroke.dash_array(&[px(5.0), px(3.0)]);
+    }
     let mut area = PathBuilder::fill();
-    for index in range.clone() {
-        if let Some((value, _)) = values[index] {
-            let position = geometry.point(index, value);
-            if index == range.start {
-                stroke.move_to(position);
-                area.move_to(position);
-            } else {
-                if line.dashed == Some(true) {
-                    if let Some((previous, _)) = values[index - 1] {
-                        dashed_segments(
-                            geometry.point(index - 1, previous),
-                            position,
-                            |start, end| {
-                                stroke.move_to(start);
-                                stroke.line_to(end);
-                            },
-                        );
-                    }
-                } else {
-                    stroke.line_to(position);
-                }
-                area.line_to(position);
-            }
-        }
-    }
-    for index in range.rev() {
-        if let Some((_, bottom)) = values[index] {
-            area.line_to(geometry.point(index, bottom));
-        }
-    }
+    let top: Vec<_> = curve
+        .iter()
+        .map(|sample| point(sample.x, sample.top))
+        .collect();
+    let bottom: Vec<_> = curve
+        .iter()
+        .rev()
+        .map(|sample| point(sample.x, sample.bottom))
+        .collect();
+    smooth(&mut stroke, &top, true);
+    smooth(&mut area, &top, true);
+    smooth(&mut area, &bottom, false);
     area.close();
-    let opacity = line.fill.or(panel.fill).unwrap_or(0.10);
-    paint_path(area, alpha(color(&line.color), opacity), window);
-    paint_path(stroke, rgb(color(&line.color)), window);
+
+    let default_opacity = if stacked { 0.45 } else { 0.1 };
+    let opacity = line.fill.or(panel.fill).unwrap_or(default_opacity);
+    if line.dashed != Some(true) {
+        paint_path(area, curve_fill(tint, opacity, stacked, line), window);
+    }
+    paint_path(stroke, rgb(tint), window);
 }
 
-fn dashed_segments(
-    start: gpui::Point<Pixels>,
-    end: gpui::Point<Pixels>,
-    mut paint: impl FnMut(gpui::Point<Pixels>, gpui::Point<Pixels>),
-) {
-    let delta = end - start;
-    let distance = f32::from(delta.x).hypot(f32::from(delta.y));
-    if distance <= 0.0 {
-        return;
+fn curve_fill(tint: u32, opacity: f32, stacked: bool, line: &crate::data::Line) -> Background {
+    if stacked {
+        return alpha(tint, opacity).into();
     }
-    if !distance.is_finite() {
-        eprintln!("Nonfinite chart segment");
-        return;
+
+    let strong = linear_color_stop(alpha(tint, opacity), 0.0);
+    let clear = linear_color_stop(alpha(tint, 0.0), 1.0);
+    if line.negative == Some(true) {
+        linear_gradient(0.0, strong, clear)
+    } else {
+        linear_gradient(180.0, strong, clear)
     }
-    if distance > 32_768.0 {
-        paint(start, end);
-        return;
-    }
-    for index in 0..4096 {
-        let offset = number(index) * 8.0;
-        if offset >= distance {
-            return;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CurvePoint {
+    x: Pixels,
+    top: Pixels,
+    bottom: Pixels,
+}
+
+/// Averages the measured readings that fall in each `CURVE_POINT_WIDTH` column of one run, so the
+/// drawn curve carries no reading that was not measured and keeps every column's mean.
+fn curve_points(
+    values: &[Option<(f32, f32)>],
+    range: std::ops::Range<usize>,
+    geometry: &Geometry<'_>,
+) -> Vec<CurvePoint> {
+    let mut curve = Vec::with_capacity(range.len());
+    let mut column_end = None;
+    let mut sum = (0.0_f32, 0.0_f32, 0.0_f32);
+    let mut count = 0.0_f32;
+    for index in range {
+        let Some((value, bottom)) = values[index] else {
+            continue;
+        };
+
+        let top = geometry.point(index, value);
+        let base = geometry.point(index, bottom);
+        let x = f32::from(top.x);
+        if column_end.is_some_and(|end| x >= end) {
+            curve.push(curve_point(sum, count));
+            sum = (0.0, 0.0, 0.0);
+            count = 0.0;
+            column_end = None;
         }
-        paint(
-            start + delta * (offset / distance),
-            start + delta * ((offset + 5.0).min(distance) / distance),
+        if column_end.is_none() {
+            column_end = Some(x + CURVE_POINT_WIDTH);
+        }
+        sum.0 += x;
+        sum.1 += f32::from(top.y);
+        sum.2 += f32::from(base.y);
+        count += 1.0;
+    }
+    if count > 0.0 {
+        curve.push(curve_point(sum, count));
+    }
+    curve
+}
+
+fn curve_point(sum: (f32, f32, f32), count: f32) -> CurvePoint {
+    assert!(count > 0.0);
+    CurvePoint {
+        x: px(sum.0 / count),
+        top: px(sum.1 / count),
+        bottom: px(sum.2 / count),
+    }
+}
+
+/// Draws a monotone cubic through the points, as the approved prototype does, so a curve never
+/// overshoots the readings it joins.
+fn smooth(builder: &mut PathBuilder, points: &[gpui::Point<Pixels>], start: bool) {
+    let Some(first) = points.first() else {
+        return;
+    };
+
+    if start {
+        builder.move_to(*first);
+    } else {
+        builder.line_to(*first);
+    }
+    if points.len() < 2 {
+        return;
+    }
+
+    let tangents = monotone_tangents(points);
+    for (index, pair) in points.windows(2).enumerate() {
+        let (left, right) = (pair[0], pair[1]);
+        let third = (f32::from(right.x) - f32::from(left.x)) / 3.0;
+        builder.cubic_bezier_to(
+            right,
+            point(left.x + px(third), left.y + px(third * tangents[index])),
+            point(
+                right.x - px(third),
+                right.y - px(third * tangents[index + 1]),
+            ),
         );
     }
 }
 
+fn monotone_tangents(points: &[gpui::Point<Pixels>]) -> Vec<f32> {
+    assert!(points.len() >= 2);
+    let slopes: Vec<f32> = points
+        .windows(2)
+        .map(|pair| {
+            let run = f32::from(pair[1].x) - f32::from(pair[0].x);
+            if run == 0.0 {
+                0.0
+            } else {
+                (f32::from(pair[1].y) - f32::from(pair[0].y)) / run
+            }
+        })
+        .collect();
+    let mut tangents = vec![0.0; points.len()];
+    tangents[0] = slopes[0];
+    tangents[points.len() - 1] = slopes[slopes.len() - 1];
+    for index in 1..points.len() - 1 {
+        let (before, after) = (slopes[index - 1], slopes[index]);
+        if before * after > 0.0 {
+            tangents[index] = f32::midpoint(before, after);
+        }
+    }
+    for (index, slope) in slopes.iter().enumerate() {
+        if *slope == 0.0 {
+            tangents[index] = 0.0;
+            tangents[index + 1] = 0.0;
+            continue;
+        }
+
+        let a = tangents[index] / slope;
+        let b = tangents[index + 1] / slope;
+        let length = a.hypot(b);
+        if length > 3.0 {
+            tangents[index] = 3.0 * a / length * slope;
+            tangents[index + 1] = 3.0 * b / length * slope;
+        }
+    }
+    tangents
+}
+
+/// One axis of a chart: its bounds and the spacing of its labelled ticks, chosen as the approved
+/// prototype chooses them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Scale {
+    pub minimum: f32,
+    pub maximum: f32,
+    pub step: f32,
+}
+
+impl Scale {
+    pub fn ticks(self) -> impl Iterator<Item = f32> {
+        (0..=12_u8)
+            .map(move |index| self.minimum + f32::from(index) * self.step)
+            .take_while(move |value| *value <= self.maximum + self.step * 0.0001)
+    }
+
+    #[must_use]
+    pub fn fraction(self, value: f32) -> f32 {
+        (value - self.minimum) / (self.maximum - self.minimum)
+    }
+}
+
+/// The left axis range, which the tests read without building a whole scale.
+#[cfg(test)]
 #[must_use]
 pub fn domain(panel: &Panel, inspection: Inspection, hidden: &[String]) -> (f32, f32) {
-    axis_domain(panel, inspection, hidden, "left")
+    let scale = axis_scale(panel, inspection, hidden, "left");
+    (scale.minimum, scale.maximum)
 }
 
 #[must_use]
@@ -376,14 +534,63 @@ pub fn axis_domain(
     hidden: &[String],
     axis: &str,
 ) -> (f32, f32) {
+    let scale = axis_scale(panel, inspection, hidden, axis);
+    (scale.minimum, scale.maximum)
+}
+
+#[must_use]
+pub fn axis_scale(panel: &Panel, inspection: Inspection, hidden: &[String], axis: &str) -> Scale {
+    let (low, high) = axis_extent(panel, inspection, hidden, axis);
+    let fixed = if axis == "left" {
+        panel.maximum.filter(|maximum| *maximum > 0.0)
+    } else {
+        None
+    };
+    let mut maximum = fixed.unwrap_or(high * 1.04);
+    let mut minimum = low * 1.04;
+    if maximum <= minimum {
+        maximum = minimum + 1.0;
+    }
+
+    let binary = axis_unit(panel, axis) == "GiB";
+    let step = if binary {
+        binary_step((maximum - minimum) / 3.0)
+    } else {
+        decimal_step(maximum - minimum)
+    };
+    minimum = (minimum / step).floor() * step;
+    if fixed.is_none() {
+        if !binary {
+            maximum = (maximum / step).ceil() * step;
+        }
+    }
+    Scale {
+        minimum,
+        maximum,
+        step,
+    }
+}
+
+#[must_use]
+pub fn axis_unit<'a>(panel: &'a Panel, axis: &str) -> &'a str {
+    panel
+        .lines
+        .iter()
+        .find(|line| line.axis.as_deref().unwrap_or("left") == axis)
+        .and_then(|line| line.unit.as_deref())
+        .unwrap_or(&panel.unit)
+}
+
+fn axis_extent(panel: &Panel, inspection: Inspection, hidden: &[String], axis: &str) -> (f32, f32) {
     let mut minimum = if axis == "left" {
-        panel.minimum.unwrap_or(0.0)
+        panel.minimum.unwrap_or(0.0).min(0.0)
     } else {
         0.0
     };
-    let mut maximum = 1.0_f32;
+    let mut maximum = 0.0_f32;
     for index in inspection.lower..=inspection.upper {
-        let mut sum = 0.0;
+        let mut positive = 0.0;
+        let mut negative = 0.0;
         for line in &panel.lines {
             if hidden.contains(&line.name) {
                 continue;
@@ -391,27 +598,74 @@ pub fn axis_domain(
             if line.axis.as_deref().unwrap_or("left") != axis {
                 continue;
             }
-            if let Some(value) = line.values.get(index).copied().flatten() {
-                let value = if line.negative == Some(true) {
-                    -value
+            let Some(value) = line.values.get(index).copied().flatten() else {
+                continue;
+            };
+
+            let value = if line.negative == Some(true) {
+                -value
+            } else {
+                value
+            };
+            if stacked(panel, line) {
+                if value < 0.0 {
+                    negative += value;
+                    minimum = minimum.min(negative);
                 } else {
-                    value
-                };
-                if stacked(panel, line) {
-                    sum += value;
-                    maximum = maximum.max(sum);
-                } else {
-                    maximum = maximum.max(value);
+                    positive += value;
+                    maximum = maximum.max(positive);
                 }
+            } else {
+                maximum = maximum.max(value);
                 minimum = minimum.min(value);
             }
         }
     }
-    maximum *= 1.08;
-    if axis == "left" {
-        maximum = panel.maximum.unwrap_or(maximum);
+    (minimum, maximum)
+}
+
+/// The prototype's tick spacing: about five ticks, each 1, 2, 2.5, 5 or 10 times a power of ten.
+fn decimal_step(span: f32) -> f32 {
+    assert!(span > 0.0);
+    let rough = span / 5.0;
+    let mut power = 1.0_f32;
+    for _ in 0..40 {
+        if power * 10.0 > rough {
+            break;
+        }
+        power *= 10.0;
     }
-    (minimum, maximum.max(minimum + 0.001))
+    for _ in 0..40 {
+        if power <= rough {
+            break;
+        }
+        power /= 10.0;
+    }
+    let normalized = rough / power;
+    let factor = [1.0, 2.0, 2.5, 5.0, 10.0]
+        .into_iter()
+        .find(|factor| *factor >= normalized)
+        .unwrap_or(10.0);
+    factor * power
+}
+
+/// Binary quantities tick at a power of two, as 16, 32 and 48 GiB do.
+fn binary_step(rough: f32) -> f32 {
+    assert!(rough > 0.0);
+    let mut power = 1.0_f32;
+    for _ in 0..64 {
+        if power * 2.0 > rough {
+            break;
+        }
+        power *= 2.0;
+    }
+    for _ in 0..64 {
+        if power <= rough {
+            break;
+        }
+        power /= 2.0;
+    }
+    power
 }
 
 fn stacked(panel: &Panel, line: &crate::data::Line) -> bool {
@@ -548,7 +802,7 @@ fn threshold(value: f32) -> u32 {
     }
 }
 
-fn paint_path(builder: PathBuilder, color: gpui::Rgba, window: &mut Window) {
+fn paint_path(builder: PathBuilder, color: impl Into<Background>, window: &mut Window) {
     match builder.build() {
         Ok(path) => window.paint_path(path, color),
         Err(error) => eprintln!("chart path: {error}"),
@@ -557,6 +811,12 @@ fn paint_path(builder: PathBuilder, color: gpui::Rgba, window: &mut Window) {
 
 pub fn clip_plot(bounds: Bounds<Pixels>, window: &mut Window, paint: impl FnOnce(&mut Window)) {
     window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| paint(window));
+}
+
+/// The inspection cursor, a brighter line than any gridline so the two never read alike.
+#[must_use]
+pub fn cursor_color() -> gpui::Rgba {
+    alpha(TEXT, 0.6)
 }
 
 #[must_use]
@@ -644,25 +904,72 @@ mod live_tests {
 
         let network = crate::live_projection::panels("network", &selection, None).unwrap();
         let (minimum, maximum) = domain(&network[0], inspection, &[]);
-        assert!((minimum + 1.0).abs() < f32::EPSILON);
-        assert!((maximum - 2.16).abs() < 0.000_001);
+        assert!((minimum + 2.0).abs() < f32::EPSILON);
+        assert!((maximum - 3.0).abs() < f32::EPSILON);
         let energy = crate::live_projection::panels("energy", &selection, None).unwrap();
         let (minimum, maximum) = domain(&energy[0], inspection, &[]);
         assert!(minimum.abs() < f32::EPSILON);
-        assert!((maximum - 8.64).abs() < 0.000_001);
+        assert!((maximum - 10.0).abs() < f32::EPSILON);
     }
 
     #[test]
-    fn a_two_point_dashed_run_keeps_measured_geometry() {
-        // A short measured interval must paint, even before a third sample arrives.
-        let mut strokes = Vec::new();
-        dashed_segments(
-            point(px(0.0), px(0.0)),
-            point(px(2.0), px(0.0)),
-            |start, end| strokes.push((start, end)),
+    fn scales_tick_like_the_prototype() {
+        // Goal: axes use the prototype's readable ticks rather than quarters of the range.
+        // Method: compute decimal and binary steps for spans taken from the captured reference.
+        assert!((decimal_step(104.0) - 25.0).abs() < f32::EPSILON);
+        assert!((decimal_step(8.32) - 2.0).abs() < f32::EPSILON);
+        assert!((decimal_step(0.6) - 0.2).abs() < 0.000_001);
+        assert!((binary_step(49.92 / 3.0) - 16.0).abs() < f32::EPSILON);
+        let scale = Scale {
+            minimum: 0.0,
+            maximum: 49.92,
+            step: 16.0,
+        };
+        assert_eq!(
+            scale.ticks().collect::<Vec<_>>(),
+            vec![0.0, 16.0, 32.0, 48.0]
         );
-        assert_eq!(strokes.len(), 1);
-        assert_eq!(strokes[0].0, point(px(0.0), px(0.0)));
-        assert_eq!(strokes[0].1, point(px(2.0), px(0.0)));
+    }
+
+    #[test]
+    fn curve_points_average_each_column_and_keep_lone_readings() {
+        // Goal: the drawn curve averages measured readings per column and invents none.
+        // Method: place five readings across two 4-pixel columns and compare the means.
+        let bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(8.0), px(100.0)));
+        let geometry = Geometry {
+            bounds,
+            minimum: 0.0,
+            maximum: 100.0,
+            count: 5,
+            positions: Some(&[0.0, 0.1, 0.2, 0.6, 0.9]),
+            segments: None,
+            lower: 0,
+        };
+        let values = [
+            Some((10.0, 0.0)),
+            Some((20.0, 0.0)),
+            Some((30.0, 0.0)),
+            None,
+            Some((50.0, 0.0)),
+        ];
+
+        let curve = curve_points(&values, 0..5, &geometry);
+
+        assert_eq!(curve.len(), 2);
+        assert!((f32::from(curve[0].top) - 80.0).abs() < 0.001);
+        assert!((f32::from(curve[1].top) - 50.0).abs() < 0.001);
+        assert!((f32::from(curve[1].x) - 7.2).abs() < 0.001);
+    }
+
+    #[test]
+    fn monotone_tangents_flatten_at_turning_points() {
+        // Goal: a smoothed curve never overshoots a peak, as the prototype's curve does not.
+        // Method: compute tangents through a peak and check the peak tangent is flat.
+        let points = [
+            point(px(0.0), px(10.0)),
+            point(px(1.0), px(0.0)),
+            point(px(2.0), px(10.0)),
+        ];
+        assert!(monotone_tangents(&points)[1].abs() < f32::EPSILON);
     }
 }

@@ -1,5 +1,7 @@
 #[path = "projection_bench/app.rs"]
 mod app;
+#[path = "../chart_axes.rs"]
+pub mod chart_axes;
 #[path = "../charts.rs"]
 pub mod charts;
 #[path = "../panel_data.rs"]

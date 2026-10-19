@@ -274,8 +274,8 @@ fn regrouping_a_hovered_first_plot_recomputes_its_reading_at_the_stationary_poin
     assert_eq!(harness.driver.pointer_position(), pointer);
     let fraction = f32::from(pointer.x - plot.left()) / f32::from(plot.size.width);
     let second = 101 + (fraction * 900.0).floor().to_u64().unwrap();
-    assert_eq!(second, 366);
-    harness.driver.assert_cpu_inspection(second, "66.0 %");
+    assert_eq!(second, 368);
+    harness.driver.assert_cpu_inspection(second, "68.0 %");
     assert_eq!(
         harness.driver.accepted_selection().unwrap()["selected"],
         selected
@@ -425,14 +425,14 @@ impl InputDriver {
 
     fn assert_overview_primary_grid(&mut self) {
         let first = [
-            self.chart_bounds("live-cpu-plot"),
-            self.chart_bounds("live-gpu-activity-plot"),
-            self.chart_bounds("live-memory-plot"),
+            self.chart_bounds("chart-card:live-cpu"),
+            self.chart_bounds("chart-card:live-gpu-activity"),
+            self.chart_bounds("chart-card:live-memory"),
         ];
         let second = [
-            self.chart_bounds("live-power-plot"),
-            self.chart_bounds("live-storage-throughput-plot"),
-            self.chart_bounds("live-network-plot"),
+            self.chart_bounds("chart-card:live-power"),
+            self.chart_bounds("chart-card:live-storage-throughput"),
+            self.chart_bounds("chart-card:live-network"),
         ];
         assert_chart_columns(&first, 3);
         assert_chart_columns(&second, 3);
@@ -487,9 +487,9 @@ impl InputDriver {
 
     fn assert_overview_columns(&mut self, columns: usize) {
         let bounds = [
-            self.chart_bounds("live-cpu-plot"),
-            self.chart_bounds("live-gpu-activity-plot"),
-            self.chart_bounds("live-memory-plot"),
+            self.chart_bounds("chart-card:live-cpu"),
+            self.chart_bounds("chart-card:live-gpu-activity"),
+            self.chart_bounds("chart-card:live-memory"),
         ];
         assert_chart_columns(&bounds, columns);
     }

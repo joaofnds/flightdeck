@@ -12,7 +12,7 @@ impl Dashboard {
         let inspection = self.chart_inspection(panel);
         let bounds = Rc::new(Cell::new(Bounds::default()));
         let hidden = self.chart_hidden(panel);
-        let (minimum, maximum) = charts::domain(panel, inspection, &hidden);
+        let scale = charts::axis_scale(panel, inspection, &hidden, "left");
         let height = if panel.kind == "timeline" {
             96.0
         } else {
@@ -24,11 +24,18 @@ impl Dashboard {
             hidden,
             Rc::clone(&bounds),
         ));
-        chart = Self::chart_ticks(chart, minimum, maximum);
         chart = self.chart_axes(chart, panel, inspection);
         chart = Self::chart_state(chart, panel, inspection);
         let is_diagnostic = panel.kind == "self-chart";
-        let chart = self.chart_events(chart, bounds, panel, cx);
+        let chart = self
+            .chart_events(chart, bounds, panel, cx)
+            .into_any_element();
+        let axis = if panel.kind == "timeline" {
+            None
+        } else {
+            Some(charts::axis_labels(scale, charts::axis_unit(panel, "left")))
+        };
+        let gutter = axis.as_ref().map_or(px(0.0), |labels| labels.width);
         let label = if is_diagnostic {
             "Separate diagnostic capture".into()
         } else {
@@ -40,9 +47,15 @@ impl Dashboard {
             self.capture.time(inspection.upper)
         };
         div()
-            .child(chart)
             .child(
                 div()
+                    .flex()
+                    .children(axis.map(|labels| charts::axis_column(labels, px(height))))
+                    .child(div().flex_1().min_w_0().child(chart)),
+            )
+            .child(
+                div()
+                    .pl(gutter)
                     .flex()
                     .justify_between()
                     .text_size(px(10.0))
@@ -158,24 +171,6 @@ impl Dashboard {
             }
         }
         hidden
-    }
-
-    fn chart_ticks(mut chart: gpui::Div, minimum: f32, maximum: f32) -> gpui::Div {
-        for tick in 0..=4 {
-            chart = chart.child(
-                div()
-                    .absolute()
-                    .left_0()
-                    .top(px(2.0 + charts::number(tick) * 48.0))
-                    .text_size(px(10.0))
-                    .text_color(rgb(MUTED))
-                    .child(format!(
-                        "{:.0}",
-                        maximum - (maximum - minimum) * charts::number(tick) / 4.0
-                    )),
-            );
-        }
-        chart
     }
 
     fn chart_axes(&self, mut chart: gpui::Div, panel: &Panel, inspection: Inspection) -> gpui::Div {

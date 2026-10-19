@@ -23,41 +23,45 @@ pub(crate) mod inspector;
 
 impl LiveDashboard {
     pub fn live_chart(&self, panel: &Rc<Panel>, cx: &mut Context<Self>) -> impl IntoElement {
-        let upper = panel
-            .lines
-            .first()
-            .map_or(0, |line| line.values.len().saturating_sub(1));
         let index = self.chart_inspection_index(panel);
-        let inspection = Inspection {
-            lower: 0,
-            selected: index.or(panel.selected_index).unwrap_or(upper),
-            upper,
-        };
+        let inspection = chart_inspection(panel, index);
         let hidden = self.chart_hidden(panel);
-        let domain = charts::domain(panel, inspection, &hidden);
+        let scale = charts::axis_scale(panel, inspection, &hidden, "left");
+        let time = self.chart_time_window();
         let measured = Rc::new(Cell::new(Bounds::default()));
-        let plot =
-            charts::plot_without_cursor(Rc::clone(panel), inspection, hidden, Rc::clone(&measured));
-        let cursor = self.chart_cursor_fraction(panel);
-        let chart = self.chart_events(
-            div()
-                .relative()
-                .h(px(if panel.kind == "timeline" {
-                    100.0
-                } else {
-                    190.0
-                }))
-                .child(plot)
-                .child(chart_cursor(cursor))
-                .children(self.chart_tooltip(panel, index, cursor)),
-            measured,
-            panel,
-            cx,
+        let plot = charts::plot_without_cursor(
+            Rc::clone(panel),
+            inspection,
+            hidden,
+            Rc::clone(&measured),
+            time,
         );
-        let chart = if panel.kind == "timeline" {
-            chart.into_any_element()
+        let cursor = self.chart_cursor_fraction(panel);
+        let timeline = panel.kind == "timeline";
+        let height = if timeline { 100.0 } else { 190.0 };
+        let chart = self
+            .chart_events(
+                div()
+                    .relative()
+                    .h(px(height))
+                    .child(plot)
+                    .child(chart_cursor(cursor))
+                    .children(self.chart_tooltip(panel, index, cursor)),
+                measured,
+                panel,
+                cx,
+            )
+            .into_any_element();
+        let axis = if timeline {
+            None
         } else {
-            Self::chart_ticks(chart, domain).into_any_element()
+            Some(charts::axis_labels(scale, charts::axis_unit(panel, "left")))
+        };
+        let gutter = axis.as_ref().map_or(px(0.0), |labels| labels.width);
+        let reading = if is_process_disk(panel) {
+            self.chart_disk_headline(panel, index)
+        } else {
+            self.chart_reading(panel, index)
         };
 
         div()
@@ -66,16 +70,34 @@ impl LiveDashboard {
             .min_w_0()
             .rounded(px(12.0))
             .border_1()
-            .border_color(rgb(GRID))
+            .border_color(rgb(charts::LINE))
             .bg(rgb(PANEL))
             .px(px(12.0))
-            .py(px(8.0))
+            .pt(px(8.0))
+            .pb(px(10.0))
             .child(Self::chart_heading(panel, cx))
-            .child(self.chart_headline(panel, index))
-            .child(chart)
-            .child(self.chart_times())
+            .child(chart_plot_row(
+                &panel.id,
+                reading,
+                axis.map(|labels| (labels, height)),
+                chart,
+            ))
+            .child(
+                div()
+                    .pl(gutter)
+                    .h(px(20.0))
+                    .child(charts::time_labels(time)),
+            )
             .child(self.chart_legends(panel, index, cx))
             .child(self.chart_source_state(panel))
+    }
+
+    fn chart_time_window(&self) -> Option<charts::TimeWindow> {
+        let second = self.snapshot.as_ref()?.selection["second"].as_u64()?;
+        Some(charts::TimeWindow {
+            first: second.saturating_sub(899),
+            span: 900,
+        })
     }
 
     fn chart_cursor_fraction(&self, panel: &Panel) -> Option<f32> {
@@ -140,47 +162,6 @@ impl LiveDashboard {
         notice = notice.child(text);
 
         notice
-    }
-
-    fn chart_headline(&self, panel: &Panel, index: Option<usize>) -> impl IntoElement {
-        let reading = if is_process_disk(panel) {
-            self.chart_disk_headline(panel, index)
-        } else {
-            self.chart_reading(panel, index)
-        };
-        let mut headline = div()
-            .debug_selector(|| format!("chart-reading:{}:{reading}", panel.id))
-            .flex()
-            .items_baseline()
-            .justify_between()
-            .mt(px(12.0))
-            .child(
-                div()
-                    .debug_selector(|| reading.clone())
-                    .text_size(px(if is_process_disk(panel) { 18.0 } else { 25.0 }))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child(reading),
-            );
-        if panel.id == "live-memory" {
-            if panel.stack != Some(true) {
-                return headline;
-            }
-            let summary = self
-                .reading_snapshot()
-                .map_or(&Value::Null, |snapshot| &snapshot.selection["summary"]);
-            headline = headline.child(div().text_size(px(11.0)).text_color(rgb(MUTED)).child(
-                format!(
-                    "{} installed",
-                    crate::live_projection::quantity(
-                        summary,
-                        "memory_total_bytes",
-                        "GiB",
-                        1_073_741_824.0,
-                    )
-                ),
-            ));
-        }
-        headline
     }
 
     fn chart_inspection_index(&self, panel: &Panel) -> Option<usize> {
@@ -632,56 +613,6 @@ impl LiveDashboard {
             .child(controls)
     }
 
-    fn chart_ticks(chart: impl IntoElement, domain: (f32, f32)) -> impl IntoElement {
-        let mut container = div().relative().child(chart);
-        for tick in 0..=4 {
-            let fraction = charts::number(tick) / 4.0;
-            let value = domain.1 - (domain.1 - domain.0) * fraction;
-            container = container.child(
-                div()
-                    .absolute()
-                    .left_0()
-                    .top(px(2.0 + fraction * 162.0))
-                    .w(px(35.0))
-                    .text_size(px(10.0))
-                    .text_color(rgb(MUTED))
-                    .child(axis_reading(value)),
-            );
-        }
-        container
-    }
-
-    fn chart_times(&self) -> impl IntoElement {
-        let second = self
-            .snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.selection["second"].as_u64());
-        let mut labels = div()
-            .flex()
-            .justify_between()
-            .pl(px(40.0))
-            .pr(px(10.0))
-            .text_size(px(10.0))
-            .text_color(rgb(MUTED));
-        if let Some(second) = second {
-            let first = second.saturating_sub(899);
-            for stamp in [first, first + (second - first) / 2, second] {
-                labels = labels.child(clock(stamp, false));
-            }
-        }
-        div().child(labels).child(
-            div()
-                .h(px(18.0))
-                .text_size(px(10.0))
-                .text_color(rgb(MUTED))
-                .children(
-                    self.chart_hover
-                        .as_ref()
-                        .map(|hover| clock(hover.second, true)),
-                ),
-        )
-    }
-
     fn chart_hidden(&self, panel: &Panel) -> Rc<Vec<String>> {
         Rc::new(
             panel
@@ -881,7 +812,7 @@ fn chart_cursor(fraction: Option<f32>) -> impl IntoElement {
                 let x = rect.origin.x + rect.size.width * fraction;
                 window.paint_quad(fill(
                     Bounds::new(point(x, rect.origin.y), size(px(1.0), rect.size.height)),
-                    charts::alpha(crate::charts::TEXT, 0.6),
+                    charts::cursor_color(),
                 ));
             }
         },
@@ -961,6 +892,37 @@ fn chart_line_value(panel: &Panel, line: usize, index: Option<usize>) -> Option<
         .and_then(|line| index.and_then(|index| line.values.get(index).copied().flatten()))
 }
 
+/// The value axis beside the plot. The headline reading left the card for the legend, as in
+/// the prototype, and the row's selectors keep naming the reading the plot shows.
+fn chart_plot_row(
+    id: &str,
+    reading: String,
+    axis: Option<(crate::chart_axes::AxisLabels, f32)>,
+    chart: gpui::AnyElement,
+) -> impl IntoElement {
+    let selector = format!("chart-reading:{id}:{reading}");
+    div().debug_selector(|| selector).child(
+        div()
+            .debug_selector(|| reading)
+            .flex()
+            .children(axis.map(|(labels, height)| charts::axis_column(labels, px(height))))
+            .child(div().flex_1().min_w_0().child(chart)),
+    )
+}
+
+/// Inspects the hovered reading, else the selected second, else the newest reading.
+fn chart_inspection(panel: &Panel, index: Option<usize>) -> Inspection {
+    let upper = panel
+        .lines
+        .first()
+        .map_or(0, |line| line.values.len().saturating_sub(1));
+    Inspection {
+        lower: 0,
+        selected: index.or(panel.selected_index).unwrap_or(upper),
+        upper,
+    }
+}
+
 fn line_reading(panel: &Panel, value: Option<f32>, unit: &str) -> String {
     if [
         "live-storage-",
@@ -1004,19 +966,6 @@ fn state_legend(panel: &Panel) -> gpui::Div {
             .text_color(rgb(MUTED))
             .child("Blank: unavailable"),
     )
-}
-
-fn axis_reading(value: f32) -> String {
-    if value.abs() < 1.0 {
-        if value != 0.0 {
-            return format!("{value:.2}");
-        }
-    }
-    if value.abs() < 10.0 {
-        format!("{value:.1}")
-    } else {
-        format!("{value:.0}")
-    }
 }
 
 fn inspection_index(panel: &Panel, snapshot: &Snapshot, second: Option<u64>) -> Option<usize> {
@@ -1127,14 +1076,6 @@ mod tests {
             "unit":"%","lines":[],"positions":[0.998,0.999,0.9991],
             "selectedIndex":2}))
         .unwrap()
-    }
-
-    #[test]
-    fn fractional_axis_labels_do_not_round_small_activity_to_zero() {
-        // Preserve useful scale information when activity or power stays below one unit.
-        assert_eq!(axis_reading(0.01), "0.01");
-        assert_eq!(axis_reading(-0.05), "-0.05");
-        assert_eq!(axis_reading(100.0), "100");
     }
 
     #[test]

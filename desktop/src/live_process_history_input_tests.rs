@@ -331,11 +331,11 @@ impl AppHoverDriver {
         self.context.run_until_parked();
         let cpu = self
             .context
-            .debug_bounds("live-process-group-cpu-plot")
+            .debug_bounds("chart-card:live-process-group-cpu")
             .unwrap();
         let resident = self
             .context
-            .debug_bounds("live-process-group-resident-plot")
+            .debug_bounds("chart-card:live-process-group-resident")
             .unwrap();
         assert_eq!(cpu.left(), resident.left());
         assert!(cpu.bottom() < resident.top());

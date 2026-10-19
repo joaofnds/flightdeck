@@ -1,4 +1,5 @@
 mod bundle;
+mod chart_axes;
 mod chart_view;
 mod charts;
 mod dashboard;

@@ -7,24 +7,14 @@ use crate::live_dashboard::LiveDashboard;
 use crate::live_projection::quantity;
 
 pub fn clock(second: u64, seconds: bool) -> String {
-    let Some(parts) = local_parts(second) else {
-        return "Unavailable".into();
-    };
-    if seconds {
-        format!(
-            "{:02}:{:02}:{:02}",
-            parts.tm_hour, parts.tm_min, parts.tm_sec
-        )
-    } else {
-        format!("{:02}:{:02}", parts.tm_hour, parts.tm_min)
-    }
+    crate::chart_axes::clock(second, seconds)
 }
 
 pub fn selected_clock(selection: &Value) -> String {
     let Some(second) = selection["second"].as_u64() else {
         return "Waiting for readings".into();
     };
-    let Some(parts) = local_parts(second) else {
+    let Some(parts) = crate::chart_axes::local_parts(second) else {
         return "Time unavailable".into();
     };
     format!(
@@ -34,20 +24,6 @@ pub fn selected_clock(selection: &Value) -> String {
         i64::from(parts.tm_year) + 1900,
         clock(second, true)
     )
-}
-
-fn local_parts(second: u64) -> Option<libc::tm> {
-    let Ok(timestamp) = libc::time_t::try_from(second) else {
-        return None;
-    };
-    let mut output = std::mem::MaybeUninit::<libc::tm>::uninit();
-    // Both pointers are valid for the call; only a successful conversion initializes output.
-    let result = unsafe { libc::localtime_r(&raw const timestamp, output.as_mut_ptr()) };
-    if result.is_null() {
-        return None;
-    }
-    // localtime_r returned the supplied initialized output pointer.
-    Some(unsafe { output.assume_init() })
 }
 
 impl LiveDashboard {

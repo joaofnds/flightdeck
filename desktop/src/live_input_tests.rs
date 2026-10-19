@@ -124,12 +124,12 @@ fn widening_the_window_recomputes_the_timestamp_beneath_a_stationary_pointer(
 
     let plot = harness.driver.plot_bounds("live-cpu-plot");
     assert!(plot.contains(&pointer));
-    assert_eq!(plot.left(), gpui::px(247.0));
-    assert_eq!(plot.size.width, gpui::px(424.5));
+    assert_eq!(plot.left(), gpui::px(249.5));
+    assert_eq!(plot.size.width, gpui::px(428.0));
     assert_eq!(harness.driver.pointer_position(), pointer);
     assert_eq!(
         harness.driver.chart_accessibility_reading("live-cpu").0,
-        Some(858)
+        Some(859)
     );
     assert!(harness.driver.cursor_is_visible("live-cpu-plot"));
     assert!(harness.driver.reading_is_visible("Unavailable"));
@@ -386,7 +386,8 @@ fn scrolling_the_plot_back_under_the_pointer_restores_synchronized_hover(cx: &mu
     // Reverse layout movement so reentry cannot depend on another pointer event.
     let mut harness = InputHarness::setup(cx);
     harness.driver.seed_repeated_second();
-    harness.driver.make_scrollable(1500.0);
+    // The shorter chart cards fit a 1500-pixel window, so a 1000-pixel one keeps it scrollable.
+    harness.driver.make_scrollable(1000.0);
     let plot = harness.driver.plot_bounds("live-energy-plot");
     let previous = harness.driver.previous_second_position();
     let pointer = gpui::point(previous.x, plot.bottom() - gpui::px(1.0));
@@ -790,7 +791,12 @@ impl InputDriver {
                 gpui::Bounds::new(plot.origin, gpui::size(gpui::px(1.0), plot.size.height))
                     .scale(window.scale_factor());
             let right = plot.right().scale(window.scale_factor());
+            let cursor = gpui::Background::from(crate::charts::cursor_color());
             window.painted_quads().into_iter().any(|quad| {
+                // Time gridlines share the cursor's shape, so only its colour tells them apart.
+                if quad.background != cursor {
+                    return false;
+                }
                 if quad.bounds.size != expected.size {
                     return false;
                 }
