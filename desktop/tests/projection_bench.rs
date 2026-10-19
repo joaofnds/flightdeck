@@ -232,17 +232,9 @@ mod tests {
             json!([
                 ["live-app-cpu", 1, [0, 1], [[null, 25.0_f32.to_bits()]]],
                 ["live-app-resident", 1, [0, 1], [[null, 1.0_f32.to_bits()]]],
-                ["live-app-footprint", 1, [0, 1], [[null, 2.0_f32.to_bits()]]],
-                ["live-app-power", 1, [0, 1], [[null, 3.0_f32.to_bits()]]],
-                [
-                    "live-app-disk",
-                    1,
-                    [0, 1],
-                    [
-                        [null, 0.002_048_f32.to_bits()],
-                        [null, 0.000_512_f32.to_bits()]
-                    ]
-                ]
+                ["live-app-disk", 1, [0, 1], [[null, 0.002_56_f32.to_bits()]]],
+                ["live-app-gpu", 1, [0, 1], [[null, null]]],
+                ["live-app-power", 1, [0, 1], [[null, 3.0_f32.to_bits()]]]
             ])
         );
     }
