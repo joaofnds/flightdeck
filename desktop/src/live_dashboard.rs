@@ -55,6 +55,8 @@ pub struct LiveDashboard {
     pub animate: bool,
     pub reveal_hardware: bool,
     pub chart_hover: Option<ChartHover>,
+    /// The width of the plot the pointer last hovered, which keeps its tooltip inside it.
+    pub(crate) chart_plot_width: gpui::Pixels,
     pub(crate) pointer: crate::live_hover::controller::PointerPlace,
     pub(crate) chart_inspector: Option<crate::live_chart_view::inspector::ChartInspector>,
     pub preview: Option<crate::live_hover::Preview>,
@@ -155,6 +157,7 @@ impl LiveDashboard {
             animate: false,
             reveal_hardware: false,
             chart_hover: None,
+            chart_plot_width: px(0.0),
             pointer: crate::live_hover::controller::PointerPlace::InsideWindow,
             chart_inspector: None,
             preview: None,

@@ -375,6 +375,7 @@ impl LiveDashboard {
                         return;
                     }
 
+                    this.chart_plot_width = move_bounds.get().size.width;
                     let second = chart_hover_second(
                         this.snapshot.as_deref(),
                         move_bounds.get(),
@@ -402,6 +403,7 @@ impl LiveDashboard {
                 }
 
                 let second = if *hovered {
+                    this.chart_plot_width = measured.get().size.width;
                     chart_hover_second(
                         this.snapshot.as_deref(),
                         measured.get(),
@@ -946,6 +948,15 @@ fn chart_inspection(panel: &Panel, index: Option<usize>) -> Inspection {
 }
 
 fn line_reading(panel: &Panel, value: Option<f32>, unit: &str) -> String {
+    if let Some(states) = &panel.states {
+        if panel.kind == "timeline" {
+            // A timeline stores each state as its index among the panel's states.
+            let state = value
+                .and_then(|value| value.to_usize())
+                .and_then(|index| states.get(index));
+            return state.map_or_else(|| "Unavailable".into(), Clone::clone);
+        }
+    }
     if [
         "live-storage-",
         "live-battery-",

@@ -149,6 +149,56 @@ fn chart_cards_use_reference_padding_and_eight_pixel_column_gaps(cx: &mut TestAp
 }
 
 #[gpui::test]
+fn chart_tooltips_stay_inside_their_card_at_both_plot_edges(cx: &mut TestAppContext) {
+    // Goal: a hover tooltip never spills past its chart card, where neighbours would cover it.
+    // Method: hover a 900-second plot near its left edge, middle and right edge, and compare
+    // the tooltip's bounds with the card's.
+    let mut harness = InputHarness::setup_route(cx, "overview");
+    harness.driver.seed_rolling_selection();
+    harness.driver.resize_charts(1320.0);
+
+    for fraction in [0.01, 0.3, 0.7, 0.99] {
+        let position = harness.driver.second_position("live-power-plot", fraction);
+        harness.driver.hover_position(position);
+        harness.driver.context.run_until_parked();
+        let card = harness.driver.chart_bounds("chart-card:live-power");
+        let tooltip = harness.driver.chart_bounds("chart-tooltip:live-power");
+
+        assert!(
+            tooltip.left() >= card.left(),
+            "{fraction}: {tooltip:?} {card:?}"
+        );
+        assert!(
+            tooltip.right() <= card.right(),
+            "{fraction}: {tooltip:?} {card:?}"
+        );
+    }
+    harness.teardown();
+}
+
+#[gpui::test]
+fn the_pressure_tooltip_names_the_state(cx: &mut TestAppContext) {
+    // Goal: the pressure tooltip reads as macOS's verdict, never as its stored code.
+    // Method: hover a second recorded as normal pressure and read the tooltip row.
+    let mut harness = InputHarness::setup_route(cx, "overview");
+    harness.driver.seed_rolling_selection();
+    harness.driver.resize_charts(1320.0);
+
+    let position = harness
+        .driver
+        .second_position("live-memory-pressure-plot", 0.5);
+    harness.driver.hover_position(position);
+    harness.driver.context.run_until_parked();
+
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("chart-tooltip-row:live-memory-pressure:0:Memory pressure:Normal")
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
 fn memory_charts_and_attribution_precede_the_full_quantity_table(cx: &mut TestAppContext) {
     // Measure the installed page order at both chart layouts without moving its selection.
     let mut harness = InputHarness::setup_route(cx, "memory");
@@ -467,7 +517,7 @@ impl InputDriver {
                         "boot":snapshot.selection["selected"]["boot"],
                         "publication":second,"wall_ns":second * 1_000_000_000,
                         "segment":0,"cpu_percent":second % 100,
-                        "power_watts":8,"gpu_watts":2,"soc_celsius":40})
+                        "power_watts":8,"gpu_watts":2,"soc_celsius":40,"pressure":0})
                 })
                 .collect();
             snapshot.selection["selected"]["publication"] = json!(1000);

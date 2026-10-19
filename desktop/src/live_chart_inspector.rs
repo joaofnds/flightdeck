@@ -248,11 +248,7 @@ impl LiveDashboard {
             .bg(rgb(0x11_12_17))
             .text_size(px(12.0))
             .child(div().mb(px(4.0)).child(clock(second, true)));
-        if fraction > 0.5 {
-            tooltip = tooltip.right(gpui::relative((1.0 - fraction).max(0.02)));
-        } else {
-            tooltip = tooltip.left(gpui::relative(fraction.max(0.02)));
-        }
+        tooltip = chart_tooltip_place(tooltip, self.chart_plot_width, fraction);
         for (rank, line_index) in indices.into_iter().take(16).enumerate() {
             tooltip = tooltip.child(self.chart_tooltip_row(panel, line_index, index, rank));
         }
@@ -402,4 +398,38 @@ fn chart_summaries(panel: &Panel) -> Vec<SampleSummary> {
             }
         })
         .collect()
+}
+
+/// Places a tooltip beside the cursor and inside its plot, as the prototype does: right of the
+/// cursor where it fits, otherwise left of it, and never past either edge. Before the pointer
+/// has measured a plot, as during keyboard inspection, it falls back to the cursor's side.
+fn chart_tooltip_place(tooltip: gpui::Div, width: gpui::Pixels, fraction: f32) -> gpui::Div {
+    const TOOLTIP_WIDTH: f32 = 252.0;
+    const MARGIN: f32 = 6.0;
+    const OFFSET: f32 = 12.0;
+
+    if width <= px(0.0) {
+        if fraction > 0.5 {
+            return tooltip.right(gpui::relative((1.0 - fraction).max(0.02)));
+        }
+        return tooltip.left(gpui::relative(fraction.max(0.02)));
+    }
+    if width <= px(TOOLTIP_WIDTH + 2.0 * MARGIN) {
+        // The tooltip's full-width cap keeps it inside a plot this narrow.
+        return tooltip.left_0();
+    }
+
+    let cursor = width * fraction;
+    let mut left = cursor + px(OFFSET);
+    if left + px(TOOLTIP_WIDTH) > width - px(MARGIN) {
+        left = cursor - px(OFFSET + TOOLTIP_WIDTH);
+    }
+    if left < px(MARGIN) {
+        left = px(MARGIN);
+    }
+    if left + px(TOOLTIP_WIDTH) > width - px(MARGIN) {
+        left = width - px(MARGIN + TOOLTIP_WIDTH);
+    }
+    assert!(left >= px(MARGIN));
+    tooltip.left(left)
 }
