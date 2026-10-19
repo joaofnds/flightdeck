@@ -255,7 +255,7 @@ impl BatchResultFixture {
         let recording = SealedRecording::with_ranked_apps();
         let mut reader = super::super::SnapshotReader::new();
         reader.command.request = exact_ranked_request("overview");
-        let snapshot = reader.read(&recording).unwrap().unwrap();
+        let snapshot = reader.read_complete(&recording);
         let histories = reader
             .reader
             .session

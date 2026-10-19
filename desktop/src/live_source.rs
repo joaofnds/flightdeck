@@ -85,6 +85,8 @@ pub struct Snapshot {
         Option<Arc<crate::live_overview_app_histories::OverviewAppHistories>>,
     pub process_history: Option<Arc<crate::live_process_history::ProcessHistory>>,
     pub rankings: Option<Arc<crate::live_rankings::Rankings>>,
+    /// The page's App histories are still being read, and a later snapshot carries them.
+    pub histories_pending: bool,
     pub read_ms: f64,
 }
 
@@ -117,6 +119,10 @@ struct Reader {
     system: crate::live_system::SystemSamples,
     last_catalog: Option<Value>,
     last_generation: u64,
+    /// The route of the last published snapshot, so a newly opened page is told apart.
+    last_route: String,
+    /// The generation whose last snapshot left its App histories pending.
+    pending_generation: Option<u64>,
     retry_after: Instant,
 }
 
@@ -261,6 +267,8 @@ fn worker_run(root: &std::path::Path, shared: &Shared) {
         system: crate::live_system::SystemSamples::new(),
         last_catalog: None,
         last_generation: 0,
+        last_route: String::new(),
+        pending_generation: None,
         retry_after: Instant::now(),
     };
     for _step in 0..WORKER_STEPS_MAX {
@@ -354,8 +362,9 @@ fn reader_snapshot(
     shared: &Shared,
 ) -> Result<Option<Box<Snapshot>>, String> {
     let started = Instant::now();
+    let published = reader_published(reader, command.generation);
     if command.mode == SourceMode::Recorded {
-        if reader.last_generation == command.generation {
+        if published {
             return Ok(None);
         }
     }
@@ -364,7 +373,7 @@ fn reader_snapshot(
     }
     if command.request.second.is_some() {
         if command.request.route != "self" {
-            if reader.last_generation == command.generation {
+            if published {
                 return Ok(None);
             }
         }
@@ -387,7 +396,7 @@ fn reader_snapshot(
         session.poll().map_err(|error| error.to_string())?;
     }
     let catalog = session.catalog();
-    if reader.last_generation == command.generation {
+    if published {
         if reader.last_catalog.as_ref() == Some(&catalog) {
             return Ok(None);
         }
@@ -395,12 +404,35 @@ fn reader_snapshot(
     let mut selection = reader_selection(session, &command.request)?;
     reader.system.annotate(&mut selection);
     let mut snapshot = reader_snapshot_new(command.generation, catalog, selection);
+    // A newly opened page publishes its readings first, since replaying its App histories
+    // from saved minutes can take seconds, and the next step reads them.
+    if reader.last_route != command.request.route {
+        snapshot.histories_pending = reader_route_has_histories(&command.request.route);
+    }
     reader_payload(session, &mut command.request, &mut snapshot)?;
     snapshot.read_ms = started.elapsed().as_secs_f64() * 1000.0;
     reader.last_catalog = Some(snapshot.catalog.clone());
     reader.last_generation = command.generation;
+    reader.last_route.clone_from(&command.request.route);
+    reader.pending_generation = snapshot.histories_pending.then_some(command.generation);
 
     Ok(Some(snapshot))
+}
+
+/// Whether the reader has published everything `generation` asks for.
+fn reader_published(reader: &Reader, generation: u64) -> bool {
+    if reader.last_generation != generation {
+        return false;
+    }
+    reader.pending_generation != Some(generation)
+}
+
+/// Whether the route's payload replays App histories from saved minutes.
+fn reader_route_has_histories(route: &str) -> bool {
+    matches!(
+        route,
+        "overview" | "cpu" | "apps" | "memory" | "energy" | "storage"
+    )
 }
 
 /// A snapshot of the catalog and selection, before the route's payload is read.
@@ -418,6 +450,7 @@ fn reader_snapshot_new(generation: u64, catalog: Value, selection: Value) -> Box
         resident_history: None,
         app_attribution_history: None,
         overview_app_histories: None,
+        histories_pending: false,
         process_history: None,
         rankings: None,
         read_ms: 0.0,
@@ -433,6 +466,8 @@ fn reader_computer(reader: &mut Reader, command: &Command) -> Option<Box<Snapsho
         .as_ref()
         .map_or(Value::Null, LiveSession::catalog);
     reader.last_generation = command.generation;
+    reader.last_route.clone_from(&command.request.route);
+    reader.pending_generation = None;
     Some(Box::new(Snapshot {
         generation: command.generation,
         catalog,
@@ -446,6 +481,7 @@ fn reader_computer(reader: &mut Reader, command: &Command) -> Option<Box<Snapsho
         resident_history: None,
         app_attribution_history: None,
         overview_app_histories: None,
+        histories_pending: false,
         process_history: None,
         rankings: None,
         read_ms: 0.0,
@@ -552,9 +588,13 @@ fn reader_payload(
             detail,
             &snapshot.selection["selected"],
         )?);
-        reader_cpu_history(session, request, snapshot)?;
+        if !snapshot.histories_pending {
+            reader_cpu_history(session, request, snapshot)?;
+        }
     }
-    reader_payload_histories(session, request, snapshot);
+    if !snapshot.histories_pending {
+        reader_payload_histories(session, request, snapshot);
+    }
 
     Ok(())
 }
@@ -705,15 +745,19 @@ fn reader_apps(
             }
             identity_validate(&detail["selected"], &snapshot.selection["selected"])?;
         }
-        let history = session
-            .app_history(kind, &bytes)
-            .map_err(|error| error.to_string())?;
-        identity_validate(&history["selected"], &snapshot.selection["selected"])?;
+        if !snapshot.histories_pending {
+            let history = session
+                .app_history(kind, &bytes)
+                .map_err(|error| error.to_string())?;
+            identity_validate(&history["selected"], &snapshot.selection["selected"])?;
+            snapshot.history = Some(history);
+        }
         snapshot.detail = Some(detail);
-        snapshot.history = Some(history);
     }
     if request.load_process_history {
-        reader_process_history(session, request, snapshot);
+        if !snapshot.histories_pending {
+            reader_process_history(session, request, snapshot);
+        }
     }
     snapshot.apps = Some(apps);
 

@@ -42,7 +42,7 @@ impl LiveDashboard {
             .as_ref()
             .and_then(|snapshot| snapshot.cpu_history.as_ref())
         else {
-            return panel.child("Logical CPU history unavailable.");
+            return panel.child(self.history_absent("Logical CPU history unavailable."));
         };
 
         let mut panel = panel;

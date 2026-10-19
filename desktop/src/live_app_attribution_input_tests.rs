@@ -210,6 +210,23 @@ fn attribution_gaps_clear_readings_and_plot_exit_removes_the_tooltip(cx: &mut Te
 }
 
 #[gpui::test]
+fn a_pending_app_history_is_shown_as_being_read(cx: &mut TestAppContext) {
+    // Goal: a newly opened page whose App history is still being read never calls it unavailable.
+    // Method: accept a CPU page snapshot that leaves its App histories pending.
+    let mut harness = InputHarness::setup_route(cx, "cpu");
+
+    harness.driver.seed_pending_histories();
+
+    assert!(harness.driver.reading_is_visible("Reading App history"));
+    assert!(
+        !harness
+            .driver
+            .reading_is_visible("App rate history unavailable at this observation")
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
 fn cpu_attribution_and_ranking_share_a_wide_row_and_stack_narrow(cx: &mut TestAppContext) {
     // Read installed geometry across the same responsive breakpoint used by resident history.
     let mut harness = InputHarness::setup_route(cx, "cpu");
@@ -303,6 +320,19 @@ fn attribution_arrow_inspection_and_app_navigation_keep_the_exact_target(cx: &mu
 }
 
 impl InputDriver {
+    fn seed_pending_histories(&mut self) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            let mut snapshot = attribution_snapshot(dashboard.generation);
+            snapshot.histories_pending = true;
+            dashboard.accept(snapshot);
+            assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
+            cx.notify();
+        });
+        self.context
+            .simulate_resize(gpui::size(px(1320.0), px(3500.0)));
+        self.context.run_until_parked();
+    }
+
     fn seed_attribution(&mut self, metric: Metric) {
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = attribution_snapshot(dashboard.generation);

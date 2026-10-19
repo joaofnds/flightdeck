@@ -48,7 +48,7 @@ fn a_delivered_saved_source_does_not_poll_its_recording_while_idle() {
     // Method: make the real store invalid after a successful request and step again.
     let recording = SealedRecording::new();
     let mut reader = SnapshotReader::new();
-    assert!(reader.read(&recording).unwrap().is_some());
+    reader.read_complete(&recording);
     std::fs::write(recording.root.join("identity"), b"invalid").unwrap();
 
     let idle = reader.read(&recording);
@@ -62,13 +62,48 @@ fn a_new_saved_request_revalidates_the_source_after_idle() {
     // Method: invalidate the real identity and submit the next requested generation.
     let recording = SealedRecording::new();
     let mut reader = SnapshotReader::new();
-    assert!(reader.read(&recording).unwrap().is_some());
+    reader.read_complete(&recording);
     std::fs::write(recording.root.join("identity"), b"invalid").unwrap();
     reader.command.generation += 1;
 
     let refreshed = reader.read(&recording);
 
     assert!(refreshed.is_err());
+}
+
+#[test]
+fn a_history_route_publishes_its_readings_before_its_app_histories() {
+    // Goal: a newly opened page shows its readings without waiting for its slower App histories.
+    // Method: read Overview twice through the reader over a real sealed recording.
+    let recording = SealedRecording::new();
+    let mut reader = SnapshotReader::new();
+
+    let first = reader.read(&recording).unwrap().unwrap();
+    let second = reader.read(&recording).unwrap().unwrap();
+
+    assert!(first.histories_pending);
+    assert_eq!(first.selection["second"], 1002);
+    assert!(first.overview_app_histories.is_none());
+    assert!(first.resident_history.is_none());
+    assert!(!second.histories_pending);
+    assert_eq!(second.selection["second"], 1002);
+    assert!(second.overview_app_histories.is_some());
+    assert!(second.resident_history.is_some());
+}
+
+#[test]
+fn a_route_without_app_histories_publishes_one_complete_snapshot() {
+    // Goal: a page with no App history is read once, with nothing left pending.
+    // Method: read the GPU page twice through the reader over a real sealed recording.
+    let recording = SealedRecording::new();
+    let mut reader = SnapshotReader::new();
+    reader.command.request.route = "gpu".into();
+
+    let first = reader.read(&recording).unwrap().unwrap();
+    let second = reader.read(&recording).unwrap();
+
+    assert!(!first.histories_pending);
+    assert!(second.is_none());
 }
 
 struct SnapshotReader {
@@ -85,6 +120,8 @@ impl SnapshotReader {
                 system: crate::live_system::SystemSamples::unread(),
                 last_catalog: None,
                 last_generation: 0,
+                last_route: String::new(),
+                pending_generation: None,
                 retry_after: std::time::Instant::now(),
             },
             command: super::Command {
@@ -115,6 +152,16 @@ impl SnapshotReader {
             &mut self.command,
             &self.shared,
         )
+    }
+
+    fn read_complete(&mut self, recording: &SealedRecording) -> Box<super::Snapshot> {
+        for _attempt in 0..2 {
+            let snapshot = self.read(recording).unwrap().unwrap();
+            if !snapshot.histories_pending {
+                return snapshot;
+            }
+        }
+        panic!("The reader left its App histories pending");
     }
 }
 
@@ -316,7 +363,9 @@ impl SealedRecording {
         for _attempt in 0..1000 {
             match worker.take()? {
                 Some(Update::Ready(snapshot)) if snapshot.generation == generation => {
-                    return Ok(snapshot);
+                    if !snapshot.histories_pending {
+                        return Ok(snapshot);
+                    }
                 }
                 Some(Update::Failed { message, .. }) => return Err(message),
                 _ => std::thread::sleep(std::time::Duration::from_millis(5)),

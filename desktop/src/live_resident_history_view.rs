@@ -20,7 +20,7 @@ impl LiveDashboard {
                 .as_ref()
                 .and_then(|snapshot| snapshot.resident_history.as_ref())
                 .map_or_else(
-                    || "Resident App history unavailable at this observation".into(),
+                    || self.history_absent("Resident App history unavailable at this observation"),
                     |history| history.coverage(None),
                 );
             div()

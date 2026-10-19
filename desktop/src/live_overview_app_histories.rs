@@ -118,7 +118,7 @@ impl LiveDashboard {
             }
         }
 
-        "App history unavailable at this observation".into()
+        self.history_absent("App history unavailable at this observation")
     }
 }
 

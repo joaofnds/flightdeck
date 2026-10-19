@@ -231,6 +231,7 @@ impl CPUHoverDriver {
                 resident_history: None,
                 app_attribution_history: None,
                 overview_app_histories: None,
+                histories_pending: false,
                 process_history: None,
                 rankings: None,
                 read_ms: 0.0,

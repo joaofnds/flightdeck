@@ -425,6 +425,17 @@ impl LiveDashboard {
         self.status_at(SystemTime::now())
     }
 
+    /// What a history card reads where the snapshot holds no such history: that it is still
+    /// being read on a newly opened page, and otherwise `unavailable`.
+    pub(crate) fn history_absent(&self, unavailable: &str) -> String {
+        if let Some(snapshot) = &self.snapshot {
+            if snapshot.histories_pending {
+                return "Reading App history".into();
+            }
+        }
+        unavailable.into()
+    }
+
     pub(crate) fn status_at(&self, now: SystemTime) -> String {
         let Some(snapshot) = &self.snapshot else {
             if self.error.is_some() {
@@ -626,6 +637,7 @@ mod selection_tests {
             resident_history: None,
             app_attribution_history: None,
             overview_app_histories: None,
+            histories_pending: false,
             process_history: None,
             rankings: None,
             read_ms: 0.0,

@@ -402,6 +402,8 @@ fn state(dashboard: &LiveDashboard, window: &Window) -> Value {
         "scroll": {"row": top.item_ix, "offset": f32::from(top.offset_in_item)},
         "rows": dashboard.rows.len(),
         "renders": dashboard.renders,
+        "read_ms": dashboard.snapshot.as_ref().map(|snapshot| snapshot.read_ms),
+        "histories_pending": dashboard.snapshot.as_ref().map(|snapshot| snapshot.histories_pending),
         "cards": cards,
     })
 }

@@ -71,7 +71,7 @@ impl LiveDashboard {
                 .as_ref()
                 .and_then(|snapshot| snapshot.attribution_history(metric))
                 .map_or_else(
-                    || "App rate history unavailable at this observation".into(),
+                    || self.history_absent("App rate history unavailable at this observation"),
                     |history| history.coverage(None),
                 );
             div()

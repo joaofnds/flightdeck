@@ -117,6 +117,7 @@ impl Preview {
                 app_attribution_history: snapshot.app_attribution_history.clone(),
                 overview_app_histories: snapshot.overview_app_histories.clone(),
                 process_history: snapshot.process_history.clone(),
+                histories_pending: snapshot.histories_pending,
                 rankings: None,
                 read_ms: 0.0,
             }),
