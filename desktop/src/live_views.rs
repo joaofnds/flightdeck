@@ -6,6 +6,8 @@ use crate::charts::{BLUE, GRID, MUTED, PANEL, TEXT};
 use crate::dashboard::control;
 use crate::live_dashboard::{LiveDashboard, ROUTES, Row};
 
+#[path = "live_computer_view.rs"]
+mod computer_view;
 #[path = "live_recording_context_view.rs"]
 mod recording_context_view;
 #[path = "live_summary.rs"]
@@ -433,28 +435,7 @@ impl LiveDashboard {
     }
 
     fn computer(&self) -> impl IntoElement {
-        let mut content = div()
-            .p(px(18.0))
-            .bg(rgb(PANEL))
-            .rounded(px(10.0))
-            .child("Current computer · independent of the selected recording");
-        for (name, value) in &self.inventory {
-            content = content.child(
-                div()
-                    .flex()
-                    .py(px(10.0))
-                    .border_b_1()
-                    .border_color(rgb(GRID))
-                    .child(
-                        div()
-                            .w(px(190.0))
-                            .text_color(rgb(MUTED))
-                            .child(name.clone()),
-                    )
-                    .child(value.clone()),
-            );
-        }
-        content
+        computer_view::view(&self.inventory)
     }
 }
 
