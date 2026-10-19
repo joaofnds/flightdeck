@@ -85,6 +85,9 @@ pub fn panels(
         if specification.id == "live-memory-pressure" {
             pressure_cells(&mut panel, &domain, points, &coordinates)?;
         }
+        if specification.id == THERMAL_STATE_ID {
+            thermal_cells(&mut panel, &domain, points, &coordinates)?;
+        }
         if specification.id == "live-battery-charging" {
             resource_projection::charging_cells(&mut panel, &domain, points, &coordinates)?;
         }
@@ -966,10 +969,56 @@ fn energy(points: &[Value]) -> Result<Vec<Specification>, String> {
             "live-soc-temperature",
             "SoC temperature",
             "°C",
-            vec![reading("soc_celsius", "SoC temperature", "#f2495c", 1.0)],
+            vec![reading(
+                "soc_celsius",
+                "Source SoC group average",
+                "#f2495c",
+                1.0,
+            )],
         ),
         fan_specification(points)?,
+        thermal_state(),
+        area_maxima(),
     ])
+}
+
+pub const THERMAL_STATE_ID: &str = "live-thermal";
+pub const AREA_MAXIMA_ID: &str = "live-area-maxima";
+
+fn thermal_state() -> Specification {
+    specification(
+        THERMAL_STATE_ID,
+        "Thermal state",
+        "",
+        vec![reading("thermal_pressure", "Thermal state", "#73bf69", 1.0)],
+    )
+}
+
+/// The hottest sensor of each area, which the collector does not record yet.
+fn area_maxima() -> Specification {
+    let mut specification = specification(
+        AREA_MAXIMA_ID,
+        "System area maxima",
+        "°C",
+        vec![
+            reading("soc_max_celsius", "Source SoC group max", "#5794f2", 1.0),
+            reading(
+                "voltage_regulator_celsius",
+                "Voltage regulators",
+                "#ff9830",
+                1.0,
+            ),
+            reading("display_celsius", "Display", "#8ab8ff", 1.0),
+            reading("board_celsius", "Board", "#73bf69", 1.0),
+            reading("wireless_celsius", "Wireless", "#b877d9", 1.0),
+            reading("ambient_celsius", "Ambient", "#d1d1de", 1.0),
+        ],
+    );
+    specification.maximum = Some(125.0);
+    specification.fill = 0.0;
+    specification.help = "The hottest measured sensor in each area of the system. This \
+        collector does not record them yet, so no readings are shown.";
+    specification
 }
 
 fn power_breakdown() -> Specification {
@@ -1033,7 +1082,7 @@ fn fan_specification(points: &[Value]) -> Result<Specification, String> {
         lines.push(line);
     }
 
-    let mut specification = specification("live-fans", "Fan speed", "RPM", lines);
+    let mut specification = specification("live-fans", "Fan speed", "rpm", lines);
     specification.fill = 0.0;
     specification.help = "SMC channels retain their numeric indices, without physical-side \
         attribution. Zero means measured stopped; unavailable channels remain gaps. \
@@ -1058,6 +1107,40 @@ fn pressure_cells(
     );
 
     Ok(())
+}
+
+fn thermal_cells(
+    panel: &mut Panel,
+    domain: &Domain,
+    points: &[Value],
+    coordinates: &Coordinates,
+) -> Result<(), String> {
+    timeline_cells(panel, domain, points, coordinates, thermal_state_cell)?;
+    panel.states = Some(vec![
+        "Nominal".into(),
+        "Fair".into(),
+        "Serious".into(),
+        "Critical".into(),
+    ]);
+    panel.help = Some(
+        "macOS thermal pressure by observed second, as Nominal, Fair, Serious or Critical. \
+        Blank means unavailable, including gaps."
+            .to_owned(),
+    );
+
+    Ok(())
+}
+
+/// The thermal pressure levels macOS names Moderate, Heavy, Trapping and Sleeping read as the
+/// states Fair, Serious and Critical, with the last two both critical.
+fn thermal_state_cell(value: Option<f32>) -> Option<f32> {
+    match value {
+        Some(0.0) => Some(0.0),
+        Some(1.0) => Some(1.0),
+        Some(2.0) => Some(2.0),
+        Some(3.0 | 4.0) => Some(3.0),
+        _ => None,
+    }
 }
 
 fn timeline_cells(

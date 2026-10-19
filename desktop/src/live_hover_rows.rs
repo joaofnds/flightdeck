@@ -323,26 +323,25 @@ impl LiveDashboard {
                 .cloned()
                 .collect();
             for panels in context.chunks(self.reading_chart_columns()) {
-                rows.push(Row::Charts {
+                rows.push(Row::ContextCharts {
                     panels: panels.to_vec(),
                     columns: panels.len(),
                 });
             }
         }
         rows.push(Row::Heading("Cooling and temperatures".into()));
-        let cooling: Vec<_> = self
-            .panels
-            .iter()
-            .take(16)
-            .filter(|panel| panel.id == "live-fans")
-            .cloned()
-            .collect();
-        for panels in cooling.chunks(self.reading_chart_columns()) {
-            rows.push(Row::Charts {
-                panels: panels.to_vec(),
-                columns: panels.len(),
-            });
-        }
+        let find = |id: &str| {
+            self.panels
+                .iter()
+                .take(16)
+                .find(|panel| panel.id == id)
+                .cloned()
+        };
+        rows.push(Row::EnergyCooling {
+            fans: find("live-fans"),
+            thermal: find(crate::live_projection::THERMAL_STATE_ID),
+            maxima: find(crate::live_projection::AREA_MAXIMA_ID),
+        });
     }
 
     /// The Memory page's disclosure of every captured memory quantity.

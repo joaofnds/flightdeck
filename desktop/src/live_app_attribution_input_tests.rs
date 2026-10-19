@@ -57,7 +57,7 @@ fn power_attribution_hover_updates_machine_power_and_exact_process_rankings(
     assert!(
         harness
             .driver
-            .reading_is_visible("summary-card:Process power:2.8 W captured")
+            .reading_is_visible("summary-card:Process power:2.8 W")
     );
 
     harness
@@ -68,7 +68,7 @@ fn power_attribution_hover_updates_machine_power_and_exact_process_rankings(
     assert!(
         harness
             .driver
-            .reading_is_visible("summary-card:Process power:1.5 W captured")
+            .reading_is_visible("summary-card:Process power:1.5 W")
     );
     assert!(harness.driver.reading_is_visible("3 W"));
     assert!(
@@ -85,7 +85,7 @@ fn power_attribution_hover_updates_machine_power_and_exact_process_rankings(
     assert!(
         harness
             .driver
-            .reading_is_visible("summary-card:Process power:1.5 W captured")
+            .reading_is_visible("summary-card:Process power:1.5 W")
     );
     assert!(
         harness
@@ -117,7 +117,7 @@ fn attribution_failure_preserves_the_inspected_rate_and_reports_missing_rankings
     assert!(
         harness
             .driver
-            .reading_is_visible("summary-card:Process power:1.5 W captured")
+            .reading_is_visible("summary-card:Process power:1.5 W")
     );
     assert!(
         harness
@@ -136,7 +136,7 @@ fn attribution_failure_preserves_the_inspected_rate_and_reports_missing_rankings
     assert!(
         harness
             .driver
-            .reading_is_visible("summary-card:Process power:2.8 W captured")
+            .reading_is_visible("summary-card:Process power:2.8 W")
     );
     harness.teardown();
 }
@@ -161,7 +161,7 @@ fn power_summary_withholds_a_reading_in_a_history_gap(cx: &mut TestAppContext) {
     assert!(
         !harness
             .driver
-            .reading_is_visible("summary-card:Process power:2.8 W captured")
+            .reading_is_visible("summary-card:Process power:2.8 W")
     );
     harness.teardown();
 }

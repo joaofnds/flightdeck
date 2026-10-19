@@ -201,6 +201,7 @@ fn timeline_name(panel: &Panel) -> &str {
     match panel.id.as_str() {
         "live-memory-pressure" => "Pressure",
         "live-battery-charging" => "Charging",
+        crate::live_projection::THERMAL_STATE_ID => "Thermal",
         _ => panel
             .lines
             .first()

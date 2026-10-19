@@ -202,7 +202,9 @@ fn energy_power_panels_preserve_independent_sources_and_missing_intervals() {
             "live-gpu-power",
             "live-power-breakdown",
             "live-soc-temperature",
-            "live-fans"
+            "live-fans",
+            "live-thermal",
+            "live-area-maxima"
         ]
     );
     assert_eq!(energy[0].title, "System power");
@@ -593,7 +595,7 @@ fn energy_exposes_temperature_and_channel_indexed_fan_history() {
 
     let energy = panels("energy", &selection, None).unwrap();
 
-    assert_eq!(energy.len(), 5);
+    assert_eq!(energy.len(), 7);
     let temperature = energy
         .iter()
         .find(|panel| panel.id == "live-soc-temperature")
@@ -601,7 +603,7 @@ fn energy_exposes_temperature_and_channel_indexed_fan_history() {
     let fans = energy.iter().find(|panel| panel.id == "live-fans").unwrap();
     assert_eq!(temperature.title, "SoC temperature");
     assert_eq!(temperature.lines[0].values, [None, Some(42.5), None]);
-    assert_eq!(fans.unit, "RPM");
+    assert_eq!(fans.unit, "rpm");
     assert_eq!(fans.lines[0].name, "Fan 0");
     assert_eq!(fans.lines[0].values, [Some(0.0), None, Some(1200.0)]);
     assert_eq!(fans.lines[1].name, "Fan 1");

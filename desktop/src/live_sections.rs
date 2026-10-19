@@ -98,11 +98,13 @@ impl Row {
                     | Section::OverviewContext
                     | Section::SystemFiles
                     | Section::MemoryQuantities
+                    | Section::EnergyContext
             ),
             Self::OverviewAppHistories(_)
             | Self::OverviewAnalysis(_)
             | Self::SystemContext(_)
-            | Self::MemoryQuantities => true,
+            | Self::MemoryQuantities
+            | Self::ContextCharts { .. } => true,
             _ => false,
         }
     }

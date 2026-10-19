@@ -83,7 +83,7 @@ impl Metric {
     pub fn title(self) -> &'static str {
         match self {
             Self::Cpu => "CPU by app",
-            Self::Power => "Energy by app",
+            Self::Power => "Process power by app",
             Self::Disk => "Disk by app",
         }
     }
@@ -263,12 +263,25 @@ impl AppAttributionHistory {
     }
 
     pub fn headline(&self, index: Option<usize>) -> String {
+        match self.total(index) {
+            Some((rate, true)) => format!("{rate} captured"),
+            Some((rate, false)) => format!("{rate} known subtotal"),
+            None => "Unavailable".into(),
+        }
+    }
+
+    /// The App rates added up at one observation, without how much of them was captured.
+    pub fn total_rate(&self, index: Option<usize>) -> String {
+        self.total(index)
+            .map_or_else(|| "Unavailable".into(), |(rate, _)| rate)
+    }
+
+    /// The added-up rate as text, and whether every member of it was captured.
+    fn total(&self, index: Option<usize>) -> Option<(String, bool)> {
         let Self::Ready(history) = self else {
-            return "Unavailable".into();
+            return None;
         };
-        let Some(point) = index.and_then(|index| history.points.get(index)) else {
-            return "Unavailable".into();
-        };
+        let point = index.and_then(|index| history.points.get(index))?;
         let mut known = 0.0;
         let mut measured = false;
         let mut complete = point.complete();
@@ -284,16 +297,8 @@ impl AppAttributionHistory {
                 complete = false;
             }
         }
-        if !measured {
-            return "Unavailable".into();
-        }
-        let coverage = if complete {
-            "captured"
-        } else {
-            "known subtotal"
-        };
 
-        format!("{} {coverage}", history.metric.rate_text(known))
+        measured.then(|| (history.metric.rate_text(known), complete))
     }
 }
 

@@ -38,6 +38,8 @@ impl Row {
             Self::CPUHistory => "cpu-history".into(),
             Self::SystemContext(_) => "system-context".into(),
             Self::Charts { panels, .. } => format!("charts-{}", panels[0].id),
+            Self::ContextCharts { panels, .. } => format!("context-charts-{}", panels[0].id),
+            Self::EnergyCooling { .. } => "energy-cooling".into(),
             Self::Heading(title) => {
                 if title.starts_with("Process group history") {
                     return "process-group-history-heading".into();
@@ -77,7 +79,17 @@ impl Row {
 
     pub(crate) fn owns_plot(&self, source: &str) -> bool {
         match self {
-            Self::Charts { panels, .. } => panels.iter().take(3).any(|panel| panel.id == source),
+            Self::Charts { panels, .. } | Self::ContextCharts { panels, .. } => {
+                panels.iter().take(3).any(|panel| panel.id == source)
+            }
+            Self::EnergyCooling {
+                fans,
+                thermal,
+                maxima,
+            } => [fans, thermal, maxima]
+                .into_iter()
+                .flatten()
+                .any(|panel| panel.id == source),
             Self::OverviewAppHistories(slots) => slots.iter().take(2).any(|slot| {
                 crate::live_overview_app_histories::overview_app_history_slot(*slot).0 == source
             }),

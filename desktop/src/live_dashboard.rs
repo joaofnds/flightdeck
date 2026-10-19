@@ -142,6 +142,18 @@ pub enum Row {
         panels: Vec<Rc<Panel>>,
         columns: usize,
     },
+    /// Charts folded under a details panel, which draws one bordered panel around them.
+    ContextCharts {
+        panels: Vec<Rc<Panel>>,
+        columns: usize,
+    },
+    /// The Energy page's fan speed beside the thermal state, then the area maxima beside
+    /// the readings at the selected time.
+    EnergyCooling {
+        fans: Option<Rc<Panel>>,
+        thermal: Option<Rc<Panel>>,
+        maxima: Option<Rc<Panel>>,
+    },
     Heading(String),
     Disclosure(crate::live_sections::Section),
     Hardware,

@@ -100,6 +100,8 @@ impl LiveDashboard {
         match row {
             Row::Summary => (8.0, 12.0),
             Row::Charts { .. }
+            | Row::ContextCharts { .. }
+            | Row::EnergyCooling { .. }
             | Row::OverviewStatus
             | Row::BatteryState(_)
             | Row::Temperature(_, _, _)
@@ -179,7 +181,14 @@ impl LiveDashboard {
                 crate::live_app_views::app_table_columns(kind, &self.app_table_scroll)
                     .into_any_element()
             }
-            Row::Charts { panels, columns } => self.row_content_charts(panels, *columns, cx),
+            Row::Charts { panels, columns } | Row::ContextCharts { panels, columns } => {
+                self.row_content_charts(panels, *columns, cx)
+            }
+            Row::EnergyCooling {
+                fans,
+                thermal,
+                maxima,
+            } => self.energy_cooling(&[fans, thermal, maxima], cx),
             Row::Heading(title) => heading(title).into_any_element(),
             Row::Disclosure(section) => self.disclosure(*section, cx).into_any_element(),
             Row::Hardware => self.live_hardware(cx).into_any_element(),
@@ -233,8 +242,11 @@ impl LiveDashboard {
             if let Some(history) = self.snapshot.as_ref().and_then(|snapshot| {
                 snapshot.attribution_history(crate::live_app_attribution_history::Metric::Power)
             }) {
-                card.reading = history.headline(history.index(self.reading_target()));
+                card.reading = history.total_rate(history.index(self.reading_target()));
                 card.note = "Attributed processes; separate scope".into();
+                if card.reading != "Unavailable" {
+                    card.color = crate::charts::TEXT;
+                }
             }
         }
         cards

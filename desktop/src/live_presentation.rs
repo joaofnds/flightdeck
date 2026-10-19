@@ -146,6 +146,70 @@ const TEMPERATURE_HELP: &str = "The hottest measured sensor in this part of the 
     This collector does not record it yet, so no reading is shown.";
 
 impl LiveDashboard {
+    /// The Energy page's cooling charts: fan speed beside the thermal state, then the area
+    /// maxima beside the readings at the selected time. The prototype leaves no gap between
+    /// the two grids.
+    pub fn energy_cooling(
+        &self,
+        panels: &[&Option<std::rc::Rc<crate::data::Panel>>; 3],
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let selection = self
+            .reading_snapshot()
+            .map_or(&Value::Null, |snapshot| &snapshot.selection);
+        let summary = crate::live_views::matching_summary(selection);
+        let columns = match self.reading_chart_columns() {
+            1 => 1,
+            _ => 2,
+        };
+        let cell = |panel: &Option<std::rc::Rc<crate::data::Panel>>, cx: &mut Context<Self>| {
+            let chart = panel.as_ref().map(|panel| {
+                if panel.kind == "timeline" {
+                    self.live_timeline(panel, crate::live_chart_view::timeline::BAND_FULL, cx)
+                } else {
+                    self.live_chart(panel, cx).into_any_element()
+                }
+            });
+            div().flex().min_w_0().children(chart)
+        };
+        let readings = vec![
+            ("soc-max", "Source SoC group max", "Unavailable".into()),
+            ("regulators", "Voltage regulators", "Unavailable".into()),
+            ("display", "Display", "Unavailable".into()),
+            ("board", "Board", "Unavailable".into()),
+            ("wireless", "Wireless", "Unavailable".into()),
+            ("ambient", "Ambient", "Unavailable".into()),
+            ("fan0", "Fan channel 0", overview_context_fan(summary, 0)),
+            ("fan1", "Fan channel 1", overview_context_fan(summary, 1)),
+        ];
+
+        div()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .grid()
+                    .grid_cols(columns)
+                    .gap(px(8.0))
+                    .child(cell(panels[0], cx))
+                    .child(cell(panels[1], cx)),
+            )
+            .child(
+                div()
+                    .grid()
+                    .grid_cols(columns)
+                    .gap(px(8.0))
+                    .child(cell(panels[2], cx))
+                    .child(quantity_panel(
+                        "area-readings",
+                        "At the selected time",
+                        AREA_HELP,
+                        readings,
+                    )),
+            )
+            .into_any_element()
+    }
+
     /// The prototype's temperature row: the component's chart beside a card with its hottest
     /// sensor at the selected time.
     pub fn temperature(
@@ -181,6 +245,9 @@ impl LiveDashboard {
 
 const THERMAL_HELP: &str = "macOS's own verdict on heat, from nominal through fair and \
     serious to critical. This collector does not record it yet, so no state is shown.";
+
+const AREA_HELP: &str = "The hottest measured sensor of each area and each fan channel's speed \
+    at the selected second. The collector records only the SoC temperature and the fans so far.";
 
 const BATTERY_HELP: &str = "Health compares the full-charge capacity with the design \
     capacity. The adapter rating is the charger's limit, not a measurement of the power drawn.";
