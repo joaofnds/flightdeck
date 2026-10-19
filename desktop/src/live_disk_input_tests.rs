@@ -240,7 +240,7 @@ fn disk_rankings(snapshot: &Snapshot) -> Rankings {
 }
 
 #[gpui::test]
-fn disk_attribution_precedes_devices_and_keeps_the_responsive_ranking_pair(
+fn disk_attribution_precedes_temperature_and_keeps_the_responsive_ranking_pair(
     cx: &mut TestAppContext,
 ) {
     // Read installed cards and physical-device sections across the exact shared breakpoint.
@@ -256,7 +256,7 @@ fn disk_attribution_precedes_devices_and_keeps_the_responsive_ranking_pair(
 }
 
 #[gpui::test]
-fn disk_attribution_hover_updates_devices_and_waits_for_exact_rankings(cx: &mut TestAppContext) {
+fn disk_attribution_hover_updates_summary_and_waits_for_exact_rankings(cx: &mut TestAppContext) {
     // The captured App plot drives the whole Storage page while exact details arrive separately.
     let mut harness = InputHarness::setup_route(cx, "storage");
     harness.driver.seed_disk_storage();
@@ -275,11 +275,6 @@ fn disk_attribution_hover_updates_devices_and_waits_for_exact_rankings(cx: &mut 
         harness
             .driver
             .reading_is_visible("summary-card:Disk read:3 MB/s")
-    );
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("resource-device:historical-disk0")
     );
     assert!(
         harness
@@ -307,11 +302,6 @@ fn disk_attribution_hover_updates_devices_and_waits_for_exact_rankings(cx: &mut 
         harness
             .driver
             .reading_is_visible("chart-legend:live-disk-apps:Current:1.5 MB/s")
-    );
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("resource-device:current-disk")
     );
     assert!(
         harness
@@ -372,16 +362,6 @@ fn disk_attribution_gap_clears_the_rate_and_plot_exit_restores_it(cx: &mut TestA
         harness
             .driver
             .reading_is_visible("chart-legend:live-disk-apps:Current:Unavailable")
-    );
-    assert!(
-        !harness
-            .driver
-            .reading_is_visible("resource-device:current-disk")
-    );
-    assert!(
-        !harness
-            .driver
-            .reading_is_visible("resource-device:historical-disk0")
     );
     harness
         .driver
@@ -469,9 +449,9 @@ impl InputDriver {
         let row = self.chart_bounds("attribution-row:live-disk-apps");
         let history = self.chart_bounds("chart-card:live-disk-apps");
         let ranking = self.chart_bounds("attribution-ranking:live-disk-apps");
-        let device = self.chart_bounds("resource-device:current-disk");
+        let temperature = self.chart_bounds("chart-card:live-storage-temperature");
         assert!(machine.bottom() < row.top());
-        assert!(row.bottom() < device.top());
+        assert!(row.bottom() < temperature.top());
         if narrow {
             assert_eq!(ranking.top() - history.bottom(), px(8.0));
         } else {

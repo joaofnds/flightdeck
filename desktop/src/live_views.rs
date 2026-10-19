@@ -41,10 +41,7 @@ impl LiveDashboard {
         let measured = Rc::clone(&self.row_heights);
         let measured_key = key.clone();
         let height = self.reading_row_height(&self.rows[index]);
-        let scroll_reserved = matches!(
-            &self.rows[index],
-            Row::CPUTop(_) | Row::CPUActivity | Row::StorageDevice(_, _)
-        );
+        let scroll_reserved = matches!(&self.rows[index], Row::CPUTop(_) | Row::CPUActivity);
         div()
             .id(gpui::SharedString::from(key))
             .relative()
@@ -153,7 +150,6 @@ impl LiveDashboard {
     fn row_content(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
         match &self.rows[index] {
             Row::Summary => self.summary(cx).into_any_element(),
-            Row::StorageDevice(index, _) => self.resource_device(*index),
             Row::SelfPart(part) => self.self_part(*part, cx),
             Row::CPUTop(panel) => self.cpu_top(panel.as_ref(), cx).into_any_element(),
             Row::CPUActivity => self.cpu_activity().into_any_element(),
@@ -267,10 +263,6 @@ impl LiveDashboard {
             .role(gpui::Role::Group)
             .aria_label("Resource readings at the selected time")
             .child(tiles)
-            .children(
-                self.resource_notice()
-                    .map(|notice| div().pt(px(8.0)).child(notice)),
-            )
     }
 
     fn summary_card(card: &summary::Card, cx: &mut Context<Self>) -> impl IntoElement {

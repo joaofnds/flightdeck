@@ -86,14 +86,7 @@ impl LiveDashboard {
             _ => {}
         }
         if self.request.route == "storage" {
-            let metric = crate::live_app_attribution_history::Metric::Disk;
-            self.reading_rows_attribution(metric, &mut rows);
-            for index in 0..self.resource_device_count() {
-                rows.push(Row::StorageDevice(
-                    index,
-                    self.resource_device_layout_key(index),
-                ));
-            }
+            self.reading_rows_storage(&mut rows);
         }
         if self.request.route == "overview" {
             self.reading_rows_overview(&mut rows);
@@ -101,6 +94,19 @@ impl LiveDashboard {
         assert!(rows.len() <= 4096);
 
         rows
+    }
+
+    /// Disk I/O by app, then the storage temperature, as the prototype orders them.
+    fn reading_rows_storage(&self, rows: &mut Vec<Row>) {
+        let metric = crate::live_app_attribution_history::Metric::Disk;
+        self.reading_rows_attribution(metric, rows);
+        rows.push(Row::Heading("Storage temperature".into()));
+        let panel = self.named_panels(&[crate::live_projection::STORAGE_TEMPERATURE_ID]);
+        rows.push(Row::Temperature(
+            "storage",
+            "Hottest Storage-area sensor",
+            panel.into_iter().next(),
+        ));
     }
 
     /// The heading and chart of one resource's attribution to apps.
@@ -164,7 +170,9 @@ impl LiveDashboard {
             .iter()
             .take(16)
             .take_while(|panel| {
-                if panel.id == crate::live_resident_history::PANEL_ID {
+                if panel.id == crate::live_resident_history::PANEL_ID
+                    || panel.id == crate::live_projection::STORAGE_TEMPERATURE_ID
+                {
                     return false;
                 }
                 crate::live_app_attribution_history::Metric::from_panel(&panel.id).is_none()

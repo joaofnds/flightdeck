@@ -15,7 +15,7 @@ fn storage_projects_source_rates_in_display_units_without_negating_write_readout
 
     let projected = panels("storage", &selection, None).unwrap();
 
-    assert_eq!(projected.len(), 4);
+    assert_eq!(projected.len(), 5);
     assert_eq!(projected[0].unit, "MB/s");
     assert_eq!(projected[0].lines[0].values, [Some(2.0)]);
     assert_eq!(projected[0].lines[1].values, [Some(1.0)]);
@@ -104,7 +104,7 @@ fn legacy_sources_keep_storage_and_battery_readings_unavailable() {
     let storage = panels("storage", &selection, None).unwrap();
     let battery = panels("battery", &selection, None).unwrap();
 
-    assert_eq!(storage.len(), 4);
+    assert_eq!(storage.len(), 5);
     assert_eq!(battery.len(), 3);
     assert!(
         storage

@@ -84,7 +84,7 @@ impl Metric {
         match self {
             Self::Cpu => "CPU by app",
             Self::Power => "Process power by app",
-            Self::Disk => "Disk by app",
+            Self::Disk => "Disk I/O by app",
         }
     }
 

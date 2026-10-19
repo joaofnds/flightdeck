@@ -93,69 +93,6 @@ fn battery_gap_clears_selected_details_charging_and_copied_observation(cx: &mut 
 }
 
 #[gpui::test]
-fn storage_hover_swaps_virtual_device_rows_and_totals_without_moving_the_plot(
-    cx: &mut TestAppContext,
-) {
-    // Goal: Storage totals, device rows and Copy share one historical publication.
-    // Method: hover a two-device observation from a one-device selection and inspect layout.
-    let mut harness = InputHarness::setup_route(cx, "storage");
-    harness.driver.seed_resources(false);
-    let plot = harness.driver.plot_bounds("live-storage-throughput-plot");
-    harness
-        .driver
-        .assert_resource_visible("resource-device:current-disk");
-
-    harness
-        .driver
-        .hover_previous_second_on("live-storage-throughput-plot");
-
-    assert_eq!(
-        harness.driver.plot_bounds("live-storage-throughput-plot"),
-        plot
-    );
-    harness
-        .driver
-        .assert_resource_visible("summary-card:Disk read:3 MB/s");
-    harness
-        .driver
-        .assert_resource_visible("summary-card:Disk write:1.5 MB/s");
-    harness
-        .driver
-        .assert_resource_visible("resource-device:historical-disk0");
-    harness
-        .driver
-        .assert_resource_visible("resource-device:historical-disk1");
-    assert!(
-        !harness
-            .driver
-            .reading_is_visible("resource-device:current-disk")
-    );
-    let copied = harness.driver.activate_resource_copy();
-    assert_eq!(copied["observation"]["publication"], 3);
-    assert_eq!(
-        copied["summary"]["storage"]["devices"][1]["name"],
-        "historical-disk1"
-    );
-
-    harness
-        .driver
-        .leave_plot("live-storage-throughput-plot", PlotExit::Sidebar);
-
-    harness
-        .driver
-        .assert_resource_visible("summary-card:Disk read:8 MB/s");
-    harness
-        .driver
-        .assert_resource_visible("resource-device:current-disk");
-    assert!(
-        !harness
-            .driver
-            .reading_is_visible("resource-device:historical-disk1")
-    );
-    harness.teardown();
-}
-
-#[gpui::test]
 fn charging_timeline_paints_only_observed_cells_and_names_the_selected_state(
     cx: &mut TestAppContext,
 ) {
@@ -210,13 +147,6 @@ fn charging_hover_retains_an_explicitly_selected_earlier_same_second_publication
 }
 
 impl InputDriver {
-    fn assert_resource_visible(&mut self, selector: &'static str) {
-        assert!(
-            self.reading_is_visible(selector),
-            "{selector} must be rendered"
-        );
-    }
-
     fn seed_resources(&mut self, later_selected_sibling: bool) {
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = accepted_snapshot(dashboard.generation);

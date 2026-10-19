@@ -106,7 +106,6 @@ pub struct ChartHover {
 
 pub enum Row {
     Summary,
-    StorageDevice(usize, String),
     SelfPart(crate::live_diagnostics::SelfPart),
     OverviewStatus,
     /// A component's temperature chart beside the card of its reading at the selected time.

@@ -953,7 +953,11 @@ fn specifications(route: &str, points: &[Value]) -> Result<Vec<Specification>, S
         ],
         "energy" => energy(points)?,
         "network" => network(),
-        "storage" => resource_projection::storage(),
+        "storage" => {
+            let mut specifications = resource_projection::storage();
+            specifications.push(storage_temperature());
+            specifications
+        }
         "battery" => resource_projection::battery(),
         "apps" => app_specifications(),
         _ => Vec::new(),
@@ -1281,6 +1285,21 @@ fn memory_specifications() -> Vec<Specification> {
         memory_paging(),
         memory_temperature(),
     ]
+}
+
+pub const STORAGE_TEMPERATURE_ID: &str = "live-storage-temperature";
+
+fn storage_temperature() -> Specification {
+    let mut specification = specification(
+        STORAGE_TEMPERATURE_ID,
+        "Storage area maximum",
+        "°C",
+        vec![reading("storage_area_celsius", "Storage", "#f2cc0c", 1.0)],
+    );
+    specification.maximum = Some(80.0);
+    specification.help = "The hottest measured sensor in the storage area. This collector does \
+        not record it yet, so no readings are shown.";
+    specification
 }
 
 pub const MEMORY_TEMPERATURE_ID: &str = "live-memory-temperature";

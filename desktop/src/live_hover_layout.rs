@@ -17,7 +17,6 @@ impl Row {
     pub(crate) fn layout_key(&self) -> String {
         match self {
             Self::Summary => "summary".into(),
-            Self::StorageDevice(_, key) => key.clone(),
             Self::SelfPart(part) => part.key().into(),
             Self::OverviewStatus => "overview-status".into(),
             Self::BatteryState(_) => "battery-state".into(),
