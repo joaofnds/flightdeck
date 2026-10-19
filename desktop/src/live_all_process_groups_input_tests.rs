@@ -38,7 +38,7 @@ fn all_groups_pointer_hover_shares_exact_readings_and_restores_on_exit(cx: &mut 
 
 #[gpui::test]
 fn all_groups_gap_never_borrows_the_current_reading(cx: &mut TestAppContext) {
-    // Point at a missing second through the installed chart, then inspect all five panels.
+    // Point at a missing second through the installed chart, then inspect all eight panels.
     let mut harness = AppHoverHarness::setup(cx);
     harness.driver.resize_process_history();
     harness.driver.deliver_all_group_history();
@@ -58,6 +58,7 @@ fn all_groups_gap_never_borrows_the_current_reading(cx: &mut TestAppContext) {
     harness.driver.assert_all_groups_unavailable_quantities();
     harness.driver.assert_all_groups_second(998);
     harness.driver.leave_all_groups();
+    harness.driver.assert_all_groups_current_quantities();
     harness.driver.assert_all_groups_second(1000);
     harness.teardown();
 }
@@ -100,6 +101,7 @@ fn all_groups_installed_data_and_legend_controls_preserve_exact_selected_values(
         "chart-legend:live-process-groups-cpu:Named · b:240.0 % · 2400000000 ns CPU / interval",
     );
     harness.driver.assert_all_groups_hidden_cpu();
+    harness.driver.assert_all_groups_current_quantities();
     harness.teardown();
 }
 
@@ -113,6 +115,7 @@ impl AppHoverDriver {
         history.points[0].observation.wall_ns = Some(999_000_000_000);
         history.points[1].observation.wall_ns = history.selected.wall_ns;
         history.points[0].elapsed_ns = Some(1_000_000_000);
+        history.points[1].elapsed_ns = Some(1_000_000_000);
         history.points[0].readings = history.points[1].readings;
         history.points[0].readings[0].measures[0].known = 1_200_000_000;
         history.points[0].readings[0].measures[2].known = 9_007_199_254_740_993;
@@ -122,6 +125,12 @@ impl AppHoverDriver {
         history.points[1].readings[0].measures[5].known = 6_442_450_944;
         history.points[0].readings[0].measures[6].known = 5_368_709_120;
         history.points[1].readings[0].measures[6].known = 9_663_676_416;
+        history.points[0].readings[0].measures[7].known = 5;
+        history.points[1].readings[0].measures[7].known = 11;
+        history.points[0].readings[0].measures[8].known = 3;
+        history.points[1].readings[0].measures[8].known = 7;
+        history.points[0].readings[0].measures[9].known = 8;
+        history.points[1].readings[0].measures[9].known = 13;
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = AppEpoch::Accepted.snapshot(dashboard.generation);
             snapshot.process_history = Some(std::sync::Arc::new(ProcessHistory::prepare_all(
@@ -134,6 +143,31 @@ impl AppHoverDriver {
             cx.notify();
         });
         self.context.run_until_parked();
+        self.assert_all_groups_plot_values();
+    }
+
+    fn assert_all_groups_plot_values(&self) {
+        self.view.read_with(&self.context, |dashboard, _| {
+            let wakeups = dashboard
+                .panels
+                .iter()
+                .find(|panel| panel.id == "live-process-groups-wakeups")
+                .unwrap();
+            let pageins = dashboard
+                .panels
+                .iter()
+                .find(|panel| panel.id == "live-process-groups-pageins")
+                .unwrap();
+            let threads = dashboard
+                .panels
+                .iter()
+                .find(|panel| panel.id == "live-process-groups-threads")
+                .unwrap();
+
+            assert_eq!(wakeups.lines[0].values, [Some(5.0), Some(11.0)]);
+            assert_eq!(pageins.lines[0].values, [Some(3.0), Some(7.0)]);
+            assert_eq!(threads.lines[0].values, [Some(8.0), Some(13.0)]);
+        });
     }
 
     fn hover_all_groups(&mut self, fraction: f32) {
@@ -169,6 +203,15 @@ impl AppHoverDriver {
         assert!(self.text_is_visible(
             "chart-legend:live-process-groups-power:Named · b:1.0 W · 1000000000 nJ / interval"
         ));
+        assert!(self.text_is_visible(
+            "chart-legend:live-process-groups-wakeups:Named · b:5.0 /s · 5 wakeups / interval"
+        ));
+        assert!(self.text_is_visible(
+            "chart-legend:live-process-groups-pageins:Named · b:3.0 pages/s · 3 page-ins / interval"
+        ));
+        assert!(
+            self.text_is_visible("chart-legend:live-process-groups-threads:Named · b:8 threads")
+        );
     }
 
     fn assert_all_groups_current_quantities(&mut self) {
@@ -181,6 +224,15 @@ impl AppHoverDriver {
         assert!(self.text_is_visible(
             "chart-legend:live-process-groups-power:Named · b:2.0 W · 2000000000 nJ / interval"
         ));
+        assert!(self.text_is_visible(
+            "chart-legend:live-process-groups-wakeups:Named · b:11.0 /s · 11 wakeups / interval"
+        ));
+        assert!(self.text_is_visible(
+            "chart-legend:live-process-groups-pageins:Named · b:7.0 pages/s · 7 page-ins / interval"
+        ));
+        assert!(
+            self.text_is_visible("chart-legend:live-process-groups-threads:Named · b:13 threads")
+        );
     }
 
     fn assert_all_groups_unavailable_quantities(&mut self) {
@@ -195,6 +247,15 @@ impl AppHoverDriver {
         assert!(
             self.text_is_visible("chart-legend:live-process-groups-power:Named · b:Unavailable")
         );
+        assert!(
+            self.text_is_visible("chart-legend:live-process-groups-wakeups:Named · b:Unavailable")
+        );
+        assert!(
+            self.text_is_visible("chart-legend:live-process-groups-pageins:Named · b:Unavailable")
+        );
+        assert!(
+            self.text_is_visible("chart-legend:live-process-groups-threads:Named · b:Unavailable")
+        );
     }
 
     fn assert_all_groups_second(&self, expected: u64) {
@@ -204,7 +265,7 @@ impl AppHoverDriver {
                 .iter()
                 .filter(|panel| panel.id.starts_with("live-process-groups-"))
                 .collect();
-            assert_eq!(panels.len(), 5);
+            assert_eq!(panels.len(), 8);
             for panel in panels {
                 assert_eq!(
                     dashboard.chart_accessibility_reading(panel).0,

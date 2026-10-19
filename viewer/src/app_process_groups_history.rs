@@ -49,7 +49,7 @@ pub struct ProcessGroupsPoint {
 pub struct ProcessGroupReading {
     pub present: bool,
     pub members: u32,
-    pub measures: [Measure; 7],
+    pub measures: [Measure; 10],
 }
 
 #[derive(Clone, Copy)]
@@ -61,12 +61,15 @@ pub enum ProcessGroupMetric {
     DiskTotal,
     Resident,
     Footprint,
+    Wakeups,
+    Pageins,
+    Threads,
 }
 
 const _: () = {
     assert!(SERIES_GROUPS_MAX * 2 == 16);
-    assert!(size_of::<ProcessGroupReading>() <= 176);
-    assert!(RESULT_BYTES_MAX < 8 * 1024 * 1024);
+    assert!(size_of::<ProcessGroupReading>() <= 248);
+    assert!(RESULT_BYTES_MAX < 10 * 1024 * 1024);
     assert!(POINTS_MAX == crate::session::OBSERVATIONS_MAX);
 };
 
@@ -105,7 +108,7 @@ impl ProcessGroupReading {
             measured_members: 0,
             unavailable_members: 0,
             overflowed: false,
-        }; 7],
+        }; 10],
     };
 
     pub(crate) fn add(&mut self, source: &Self) -> Result<()> {
@@ -151,6 +154,9 @@ impl ProcessGroupMetric {
             Self::DiskTotal => 4,
             Self::Resident => 5,
             Self::Footprint => 6,
+            Self::Wakeups => 7,
+            Self::Pageins => 8,
+            Self::Threads => 9,
         }
     }
 
@@ -177,7 +183,11 @@ impl ProcessGroupMetric {
                     elapsed_ns: elapsed_ns?,
                 })
             }
-            Self::Resident | Self::Footprint => Some(value_number(amount)),
+            Self::Wakeups | Self::Pageins => apps::events_per_second(apps::EventRate {
+                events: amount,
+                elapsed_ns: elapsed_ns?,
+            }),
+            Self::Resident | Self::Footprint | Self::Threads => Some(value_number(amount)),
         }
     }
 }

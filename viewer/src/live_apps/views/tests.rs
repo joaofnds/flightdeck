@@ -265,6 +265,7 @@ fn admits_prior_events_at_the_combined_program_view_bound() {
             }),
             program: Err(IdentityUnavailable::Unsupported),
             usage: Err(Unavailable::Refused),
+            threads: None,
         })
         .collect();
 
@@ -372,6 +373,7 @@ fn keeps_scheduled_predecessor_identity_ahead_of_prior_event_fallback() {
         creation: Some(creation()),
         program: Err(IdentityUnavailable::Refused),
         usage: Ok(usage()),
+        threads: None,
     });
 
     scenario

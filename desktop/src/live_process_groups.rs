@@ -71,7 +71,7 @@ struct PanelDefinition {
     metrics: &'static [ProcessGroupMetric],
 }
 
-const PANEL_DEFINITIONS: [PanelDefinition; 5] = [
+const PANEL_DEFINITIONS: [PanelDefinition; 8] = [
     PanelDefinition {
         suffix: "cpu",
         title: "CPU by process",
@@ -104,6 +104,24 @@ const PANEL_DEFINITIONS: [PanelDefinition; 5] = [
         title: "Power by process",
         unit: "W",
         metrics: &[ProcessGroupMetric::Power],
+    },
+    PanelDefinition {
+        suffix: "wakeups",
+        title: "Idle wakeups by process",
+        unit: "/s",
+        metrics: &[ProcessGroupMetric::Wakeups],
+    },
+    PanelDefinition {
+        suffix: "pageins",
+        title: "Page-ins by process",
+        unit: "pages/s",
+        metrics: &[ProcessGroupMetric::Pageins],
+    },
+    PanelDefinition {
+        suffix: "threads",
+        title: "Threads by process",
+        unit: "threads",
+        metrics: &[ProcessGroupMetric::Threads],
     },
 ];
 
@@ -329,21 +347,6 @@ pub fn reading(
         return format!("Unavailable · {} unavailable", measure.unavailable_members);
     }
 
-    let unit = match metric {
-        ProcessGroupMetric::Cpu => "%",
-        ProcessGroupMetric::Power => "W",
-        ProcessGroupMetric::Resident | ProcessGroupMetric::Footprint => "GiB",
-        ProcessGroupMetric::DiskRead
-        | ProcessGroupMetric::DiskWritten
-        | ProcessGroupMetric::DiskTotal => "MB/s",
-    };
-    let human = metric
-        .value(reading, point.elapsed_ns)
-        .and_then(|value| (value / divisor(metric)).to_f32())
-        .map_or_else(
-            || "Unavailable".into(),
-            |value| crate::live_projection::quantity_text(value, unit),
-        );
     let coverage = if measure.unavailable_members > 0 {
         format!(
             " · known subtotal · {} measured · {} unavailable",
@@ -353,11 +356,42 @@ pub fn reading(
         String::new()
     };
 
+    if matches!(metric, ProcessGroupMetric::Threads) {
+        return format!("{} threads{coverage}", measure.known);
+    }
+
+    let human = reading_human(reading, metric, point.elapsed_ns);
     format!(
         "{human} · {} {}{coverage}",
         measure.known,
         reading_exact_unit(metric)
     )
+}
+
+fn reading_human(
+    reading: &viewer::app_process_groups_history::ProcessGroupReading,
+    metric: ProcessGroupMetric,
+    elapsed_ns: Option<u64>,
+) -> String {
+    let unit = match metric {
+        ProcessGroupMetric::Cpu => "%",
+        ProcessGroupMetric::Power => "W",
+        ProcessGroupMetric::Wakeups => "/s",
+        ProcessGroupMetric::Pageins => "pages/s",
+        ProcessGroupMetric::Threads => "threads",
+        ProcessGroupMetric::Resident | ProcessGroupMetric::Footprint => "GiB",
+        ProcessGroupMetric::DiskRead
+        | ProcessGroupMetric::DiskWritten
+        | ProcessGroupMetric::DiskTotal => "MB/s",
+    };
+
+    metric
+        .value(reading, elapsed_ns)
+        .and_then(|value| (value / divisor(metric)).to_f32())
+        .map_or_else(
+            || "Unavailable".into(),
+            |value| crate::live_projection::quantity_text(value, unit),
+        )
 }
 
 fn reading_line_metric(
@@ -375,6 +409,9 @@ fn reading_line_metric(
         "resident" => ProcessGroupMetric::Resident,
         "footprint" => ProcessGroupMetric::Footprint,
         "power" => ProcessGroupMetric::Power,
+        "wakeups" => ProcessGroupMetric::Wakeups,
+        "pageins" => ProcessGroupMetric::Pageins,
+        "threads" => ProcessGroupMetric::Threads,
         "disk" if line < groups => ProcessGroupMetric::DiskRead,
         "disk" => ProcessGroupMetric::DiskWritten,
         _ => return None,
@@ -387,6 +424,9 @@ fn reading_exact_unit(metric: ProcessGroupMetric) -> &'static str {
     match metric {
         ProcessGroupMetric::Cpu => "ns CPU / interval",
         ProcessGroupMetric::Power => "nJ / interval",
+        ProcessGroupMetric::Wakeups => "wakeups / interval",
+        ProcessGroupMetric::Pageins => "page-ins / interval",
+        ProcessGroupMetric::Threads => "threads",
         ProcessGroupMetric::DiskRead
         | ProcessGroupMetric::DiskWritten
         | ProcessGroupMetric::DiskTotal => "B / interval",

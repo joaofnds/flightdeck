@@ -89,7 +89,7 @@ impl ProcessHistory {
         };
 
         let mut panels = crate::live_projection::panels("apps", selection, Some(payload))?;
-        assert!(panels.len() <= 5);
+        assert!(panels.len() <= 8);
         for panel in &mut panels {
             let panel = Rc::get_mut(panel).ok_or("Process history projection is already shared")?;
             let suffix = panel
@@ -187,4 +187,57 @@ pub fn name_bytes(filter: &str) -> Result<Option<Vec<u8>>, String> {
     }
 
     Ok(Some(bytes))
+}
+
+pub fn captured_reading(payload: &Value, panel: &str, index: Option<usize>) -> Option<String> {
+    let (field, rate, unit, exact_unit) = match panel.strip_prefix(PANEL_PREFIX)? {
+        "wakeups" => (
+            "idle_wakeups",
+            "idle_wakeups_per_second",
+            "/s",
+            "wakeups / interval",
+        ),
+        "pageins" => (
+            "pageins",
+            "pageins_per_second",
+            "pages/s",
+            "page-ins / interval",
+        ),
+        "threads" => ("threads", "", "threads", "threads"),
+        _ => return None,
+    };
+
+    let Some(point) = index.and_then(|index| payload["points"].get(index)) else {
+        return Some("Unavailable".into());
+    };
+
+    let measure = &point[field];
+    if measure["overflowed"] == true {
+        return Some("Unavailable · counter sum overflow".into());
+    }
+
+    let measured = measure["measured_members"].as_u64()?;
+    let unavailable = measure["unavailable_members"].as_u64()?;
+    if measured == 0 {
+        return Some(format!("Unavailable · {unavailable} unavailable"));
+    }
+
+    let known = match measure["known"].as_str()?.parse::<u64>() {
+        Ok(value) => value,
+        Err(error) => return Some(format!("Unavailable · invalid exact count: {error}")),
+    };
+
+    let reading = if field == "threads" {
+        format!("{known} threads")
+    } else {
+        let human = crate::live_app_views::event_rate(point[rate].as_f64(), unit);
+        format!("{human} · {known} {exact_unit}")
+    };
+    let coverage = if unavailable > 0 {
+        format!(" · known subtotal · {measured} measured · {unavailable} unavailable")
+    } else {
+        String::new()
+    };
+
+    Some(format!("{reading}{coverage}"))
 }

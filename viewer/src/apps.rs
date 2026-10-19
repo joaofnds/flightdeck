@@ -26,6 +26,12 @@ pub struct BytesRate {
     pub elapsed_ns: u64,
 }
 
+#[derive(Clone, Copy)]
+pub struct EventRate {
+    pub events: u64,
+    pub elapsed_ns: u64,
+}
+
 struct Endpoints<T> {
     previous: T,
     selected: T,
@@ -44,9 +50,10 @@ const _: () = {
     assert!(size_of::<CpuRate>() <= 16);
     assert!(size_of::<EnergyRate>() <= 16);
     assert!(size_of::<BytesRate>() <= 16);
+    assert!(size_of::<EventRate>() <= 16);
     assert!(size_of::<Subtotal>() <= 24);
-    assert!(size_of::<AppTotals>() <= 184);
-    assert!(size_of::<ProcessTotals<'_>>() <= 184);
+    assert!(size_of::<AppTotals>() <= 256);
+    assert!(size_of::<ProcessTotals<'_>>() <= 232);
     assert!(size_of::<ProcessCreation>() <= 16);
 };
 
@@ -77,6 +84,9 @@ pub struct AppTotals {
     pub disk_io_bytes: Subtotal,
     pub resident_bytes: Subtotal,
     pub footprint_bytes: Subtotal,
+    pub idle_wakeups: Subtotal,
+    pub pageins: Subtotal,
+    pub threads: Subtotal,
     /// Completeness of membership only; metric availability is carried by each subtotal.
     pub membership_complete: bool,
 }
@@ -123,6 +133,9 @@ pub struct ProcessTotals<'bytes> {
     pub disk_read_bytes: Amount,
     pub disk_written_bytes: Amount,
     pub disk_io_bytes: Amount,
+    pub idle_wakeups: Amount,
+    pub pageins: Amount,
+    pub threads: Option<u64>,
     pub app_attribution: Option<Unavailable>,
     pub resident_bytes_last: Option<u64>,
     pub footprint_bytes_last: Option<u64>,
@@ -144,6 +157,7 @@ pub struct ProcessObservation<'bytes> {
     pub creation: Option<ProcessCreation>,
     pub program: CapturedProgram<'bytes>,
     pub usage: Result<&'bytes Usage, Unavailable>,
+    pub threads: Option<u64>,
     pub state: ProcessState,
 }
 
@@ -255,6 +269,13 @@ impl<'bytes> Aggregate<'bytes> {
             disk_read_bytes: Amount::Unavailable(Unavailable::Baseline),
             disk_written_bytes: Amount::Unavailable(Unavailable::Baseline),
             disk_io_bytes: Amount::Unavailable(Unavailable::Baseline),
+            idle_wakeups: Amount::Unavailable(Unavailable::Baseline),
+            pageins: Amount::Unavailable(Unavailable::Baseline),
+            threads: if selected.state == ProcessState::Live {
+                selected.threads
+            } else {
+                None
+            },
             app_attribution: None,
             resident_bytes_last: last_gauge(process, |usage| usage.resident_bytes),
             footprint_bytes_last: last_gauge(process, |usage| usage.footprint_bytes),
@@ -272,15 +293,9 @@ impl<'bytes> Aggregate<'bytes> {
             totals
                 .energy_nj
                 .add(attributed(output.energy_nj, output.app_attribution));
-            compute_process_disk(totals, output);
+            compute_process_counters(totals, output);
             if selected.state == ProcessState::Live {
-                totals.live_members += 1;
-                totals
-                    .resident_bytes
-                    .add(gauge(selected, |usage| usage.resident_bytes));
-                totals
-                    .footprint_bytes
-                    .add(gauge(selected, |usage| usage.footprint_bytes));
+                compute_process_gauges(totals, selected);
             }
         } else {
             self.ungrouped_members += 1;
@@ -289,7 +304,28 @@ impl<'bytes> Aggregate<'bytes> {
     }
 }
 
-fn compute_process_disk(totals: &mut AppTotals, process: &ProcessTotals<'_>) {
+fn compute_process_gauges(totals: &mut AppTotals, selected: &ProcessObservation<'_>) {
+    totals.live_members += 1;
+    totals
+        .resident_bytes
+        .add(gauge(selected, |usage| usage.resident_bytes));
+    totals
+        .footprint_bytes
+        .add(gauge(selected, |usage| usage.footprint_bytes));
+    totals.threads.add(
+        selected
+            .threads
+            .map_or(Amount::Unavailable(Unavailable::Unknown), Amount::Known),
+    );
+}
+
+fn compute_process_counters(totals: &mut AppTotals, process: &ProcessTotals<'_>) {
+    totals
+        .idle_wakeups
+        .add(attributed(process.idle_wakeups, process.app_attribution));
+    totals
+        .pageins
+        .add(attributed(process.pageins, process.app_attribution));
     totals
         .disk_read_bytes
         .add(attributed(process.disk_read_bytes, process.app_attribution));
@@ -458,6 +494,7 @@ fn deltas(interval: &Interval, process: &ProcessInterval, output: &mut ProcessTo
             output.cpu_ns = cpu_delta(now, None);
             output.energy_nj = Amount::Known(now.energy_nj);
             deltas_disk(now, None, output);
+            deltas_activity(now, None, output);
             deltas_start(process, output);
         } else {
             deltas_unavailable(output, Unavailable::Baseline);
@@ -489,6 +526,8 @@ fn deltas_unavailable(output: &mut ProcessTotals, reason: Unavailable) {
     output.disk_read_bytes = Amount::Unavailable(reason);
     output.disk_written_bytes = Amount::Unavailable(reason);
     output.disk_io_bytes = Amount::Unavailable(reason);
+    output.idle_wakeups = Amount::Unavailable(reason);
+    output.pageins = Amount::Unavailable(reason);
 }
 
 fn deltas_usage(endpoints: &Endpoints<&Usage>, output: &mut ProcessTotals) {
@@ -506,6 +545,7 @@ fn deltas_usage(endpoints: &Endpoints<&Usage>, output: &mut ProcessTotals) {
         Amount::Known,
     );
     deltas_disk(now, Some(before), output);
+    deltas_activity(now, Some(before), output);
 }
 
 fn deltas_disk(now: &Usage, before: Option<&Usage>, output: &mut ProcessTotals<'_>) {
@@ -531,6 +571,33 @@ fn deltas_disk(now: &Usage, before: Option<&Usage>, output: &mut ProcessTotals<'
             Amount::Unavailable(reason)
         }
     };
+}
+
+fn deltas_activity(now: &Usage, before: Option<&Usage>, output: &mut ProcessTotals<'_>) {
+    output.idle_wakeups = now
+        .idle_wakeups
+        .checked_sub(before.map_or(0, |usage| usage.idle_wakeups))
+        .map_or(
+            Amount::Unavailable(Unavailable::CounterReset),
+            Amount::Known,
+        );
+    output.pageins = now
+        .pageins
+        .checked_sub(before.map_or(0, |usage| usage.pageins))
+        .map_or(
+            Amount::Unavailable(Unavailable::CounterReset),
+            Amount::Known,
+        );
+}
+
+/// Exact event counts divided only after aggregation at the presentation boundary.
+#[must_use]
+pub fn events_per_second(rate: EventRate) -> Option<f64> {
+    if rate.elapsed_ns == 0 {
+        return None;
+    }
+
+    Some(number(rate.events) / number(rate.elapsed_ns) * 1_000_000_000.0)
 }
 
 fn cpu_delta(now: &Usage, before: Option<&Usage>) -> Amount {

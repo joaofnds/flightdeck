@@ -20,6 +20,7 @@ fn named_process_history_selection_loads_distinct_panels_before_app_totals_and_i
     harness.driver.deliver_named_process_history();
 
     harness.driver.assert_named_process_order();
+    harness.driver.assert_named_captured_current();
     assert!(
         harness
             .driver
@@ -176,6 +177,7 @@ fn named_process_history_preview_reuses_the_accepted_context(cx: &mut TestAppCon
             .driver
             .text_is_visible("chart-reading:live-process-group-cpu:120.0 %")
     );
+    harness.driver.assert_named_captured_historical();
     harness.driver.assert_named_preview_context(&retained);
     harness.driver.deliver_historical_details();
     assert!(harness.driver.text_is_visible("Historical worker"));
@@ -184,6 +186,10 @@ fn named_process_history_preview_reuses_the_accepted_context(cx: &mut TestAppCon
             .driver
             .text_is_visible("chart-reading:live-process-group-cpu:120.0 %")
     );
+    harness.driver.assert_named_captured_historical();
+    harness.driver.leave_history();
+    harness.driver.context.run_until_parked();
+    harness.driver.assert_named_captured_current();
     harness.teardown();
 }
 
@@ -376,5 +382,98 @@ impl AppHoverDriver {
                 preview.reading.process_history.as_ref().unwrap()
             ));
         });
+    }
+}
+
+impl AppHoverDriver {
+    fn assert_named_captured_historical(&mut self) {
+        assert!(self.text_is_visible("chart-reading:live-process-group-wakeups:5.0 /s"));
+        assert!(self.text_is_visible("chart-reading:live-process-group-pageins:3.0 pages/s"));
+        assert!(self.text_is_visible("chart-reading:live-process-group-threads:8.0 threads"));
+        assert!(self.text_is_visible(
+            "chart-legend:live-process-group-wakeups:Idle wakeups:5.0 /s · 5 wakeups / interval"
+        ));
+        assert!(self.text_is_visible(
+            "chart-legend:live-process-group-pageins:Page-ins:3.0 pages/s · 3 page-ins / interval"
+        ));
+        assert!(self.text_is_visible("chart-legend:live-process-group-threads:Threads:8 threads"));
+    }
+
+    fn assert_named_captured_current(&mut self) {
+        assert!(self.text_is_visible("chart-reading:live-process-group-wakeups:11.0 /s"));
+        assert!(self.text_is_visible("chart-reading:live-process-group-pageins:7.0 pages/s"));
+        assert!(self.text_is_visible("chart-reading:live-process-group-threads:13.0 threads"));
+        assert!(self.text_is_visible(
+            "chart-legend:live-process-group-wakeups:Idle wakeups:11.0 /s · 11 wakeups / interval"
+        ));
+        assert!(self.text_is_visible(
+            "chart-legend:live-process-group-pageins:Page-ins:7.0 pages/s · 7 page-ins / interval"
+        ));
+        assert!(self.text_is_visible("chart-legend:live-process-group-threads:Threads:13 threads"));
+    }
+}
+
+#[gpui::test]
+fn captured_process_table_cells_keep_metric_order_and_exact_thread_counts(cx: &mut TestAppContext) {
+    // Read actual cells in the grouped and instance rows, independently of chart legends.
+    let mut harness = AppHoverHarness::setup(cx);
+    harness.driver.resize_process_history();
+    harness
+        .driver
+        .view
+        .update(&mut harness.driver.context, |dashboard, cx| {
+            let mut snapshot = AppEpoch::Accepted.snapshot(dashboard.generation);
+            let second = &mut snapshot.detail.as_mut().unwrap()["processes"][1];
+            second["idle_wakeups"] = json!({"known":"2","unavailable":null});
+            second["pageins"] = json!({"known":"1","unavailable":null});
+            second["threads"] = json!({"known":"3","unavailable":null});
+            second["idle_wakeups_per_second"] = json!(2.0);
+            second["pageins_per_second"] = json!(1.0);
+            let helper = &mut snapshot.detail.as_mut().unwrap()["processes"][2];
+            helper["idle_wakeups"] = json!({"known":"42","unavailable":null});
+            helper["pageins"] = json!({"known":"43","unavailable":null});
+            helper["threads"] = json!({"known":"44","unavailable":null});
+            helper["idle_wakeups_per_second"] = json!(42.0);
+            helper["pageins_per_second"] = json!(43.0);
+            dashboard.accept(snapshot);
+            assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
+            cx.notify();
+        });
+    harness.driver.context.run_until_parked();
+
+    harness.driver.assert_captured_group_table_cells();
+    harness.driver.assert_captured_instance_table_cells();
+    harness.teardown();
+}
+
+impl AppHoverDriver {
+    fn assert_captured_group_table_cells(&mut self) {
+        let anchor = self
+            .context
+            .debug_bounds("executable-disk:hex:61:Unavailable *")
+            .unwrap();
+        let wakeups = self.context.debug_bounds("8.0 /s").unwrap();
+        let pageins = self.context.debug_bounds("5.0 pages/s").unwrap();
+        let threads = self.context.debug_bounds("11").unwrap();
+        assert_eq!(wakeups.center().y, anchor.center().y);
+        assert_eq!(pageins.center().y, anchor.center().y);
+        assert_eq!(threads.center().y, anchor.center().y);
+        assert!(wakeups.right() < pageins.left());
+        assert!(pageins.right() < threads.left());
+    }
+
+    fn assert_captured_instance_table_cells(&mut self) {
+        let anchor = self
+            .context
+            .debug_bounds("process-disk:10:Unavailable")
+            .unwrap();
+        let wakeups = self.context.debug_bounds("6.0 /s").unwrap();
+        let pageins = self.context.debug_bounds("4.0 pages/s").unwrap();
+        let threads = self.context.debug_bounds("8").unwrap();
+        assert_eq!(wakeups.center().y, anchor.center().y);
+        assert_eq!(pageins.center().y, anchor.center().y);
+        assert_eq!(threads.center().y, anchor.center().y);
+        assert!(wakeups.right() < pageins.left());
+        assert!(pageins.right() < threads.left());
     }
 }

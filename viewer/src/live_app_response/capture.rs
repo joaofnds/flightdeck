@@ -97,6 +97,12 @@ pub(super) fn processes(
                 apps::Amount::Unavailable(apps::Unavailable::Unknown),
                 apps::Amount::Known,
             ),
+            idle_wakeups: process.idle_wakeups,
+            pageins: process.pageins,
+            threads: process.threads.map_or(
+                apps::Amount::Unavailable(apps::Unavailable::Unknown),
+                apps::Amount::Known,
+            ),
             state: process.state,
         });
     }

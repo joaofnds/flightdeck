@@ -87,7 +87,7 @@ impl History {
             )
         });
         let count = points.len();
-        let points = response_merged_project(&points, request.operation)?;
+        let points = response_merged_project(&points, request.target, request.operation)?;
         request.operation.check()?;
 
         let response = crate::live_app_response::bounded(json!({
@@ -214,7 +214,11 @@ fn response_merged_context_missing(request: &Merge<'_>, points: &mut Points) -> 
     Ok(missing)
 }
 
-fn response_merged_project(points: &[TracePoint], operation: &Operation) -> Result<Vec<Value>> {
+fn response_merged_project(
+    points: &[TracePoint],
+    target: &dyn Selection,
+    operation: &Operation,
+) -> Result<Vec<Value>> {
     assert!(points.len() <= OBSERVATIONS_MAX);
 
     let mut output = Vec::with_capacity(points.len());
@@ -231,7 +235,7 @@ fn response_merged_project(points: &[TracePoint], operation: &Operation) -> Resu
             }
         }
 
-        output.push(point.json(segment));
+        output.push(point.json(segment, target.executable().is_some()));
         previous = Some(&point.observation);
     }
 

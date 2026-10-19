@@ -86,6 +86,9 @@ pub struct Process {
     pub app_attribution: Option<Unavailable>,
     pub resident_bytes: Amount,
     pub footprint_bytes: Amount,
+    pub idle_wakeups: Amount,
+    pub pageins: Amount,
+    pub threads: Amount,
     pub state: ProcessState,
 }
 
@@ -137,6 +140,8 @@ const _: () = {
     assert!(SAMPLE_BYTES_MAX < apps::PROGRAM_BYTES_MAX);
     assert!(APPS_MAX == MEMBERS_MAX);
     assert!(size_of::<Measure>() <= 24);
+    assert!(size_of::<App>() <= 264);
+    assert!(size_of::<Process>() <= 248);
 };
 
 impl Sample {

@@ -30,7 +30,7 @@ pub(crate) struct Point {
 
 struct Group {
     name: Arc<InternedName>,
-    measures: [CompactMeasure; 7],
+    measures: [CompactMeasure; 10],
     members: u16,
 }
 
@@ -45,7 +45,7 @@ const CONTAINERS_BYTES: usize = POINTS_MAX * size_of::<Box<Point>>()
 
 const _: () = {
     assert!(size_of::<Arc<InternedName>>() == 8);
-    assert!(size_of::<Group>() <= 96);
+    assert!(size_of::<Group>() <= 136);
     assert!(CONTAINERS_BYTES < 512 * 1024);
 };
 
@@ -396,7 +396,7 @@ mod tests {
 
     #[test]
     fn accounts_actual_capacity_shared_names_point_metadata_and_exact_measures() {
-        // Two points share one interned raw name while retaining all seven exact compact measures.
+        // Two points share one interned raw name while retaining all ten exact compact measures.
         let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
         let mut cache = Cache::new(&Target {
             kind: KeyKind::Bundle,
@@ -433,7 +433,7 @@ mod tests {
             cache.points[1].groups[0].measures[2].measure().known,
             9_007_199_254_740_993
         );
-        assert_eq!(size_of::<Group>(), 96);
+        assert_eq!(size_of::<Group>(), 136);
         eprintln!(
             "group cache layout: root={} point={} row={} name={} containers={} two_points={}",
             size_of::<Cache>(),
@@ -561,7 +561,7 @@ mod tests {
                             measured_members: 1,
                             unavailable_members: 0,
                             overflowed: false,
-                        }; 7],
+                        }; 10],
                     },
                 }
             })

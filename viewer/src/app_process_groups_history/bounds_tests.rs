@@ -117,7 +117,7 @@ fn reading() -> ProcessGroupReading {
         measured_members: 1,
         unavailable_members: 0,
         overflowed: false,
-    }; 7];
+    }; 10];
     measures[4].known = 2;
     ProcessGroupReading {
         present: true,

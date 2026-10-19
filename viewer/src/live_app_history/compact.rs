@@ -11,7 +11,7 @@ pub(super) struct HistoryKey {
     bytes: Vec<u8>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub(crate) struct CompactMeasure {
     // Bytes keep the exact amount without imposing eight-byte alignment on every measure.
     known: [u8; 8],

@@ -21,7 +21,10 @@ fn selected(session: &Session, second: u64) -> Observation {
 
 fn points(values: &[TracePoint]) -> Result<Value> {
     crate::live_app_response::bounded(json!(
-        values.iter().map(|point| point.json(0)).collect::<Vec<_>>()
+        values
+            .iter()
+            .map(|point| point.json(0, false))
+            .collect::<Vec<_>>()
     ))
 }
 

@@ -185,6 +185,7 @@ fn observations<'a>(
             }),
             program: Ok(program),
             usage: Ok(usage),
+            threads: None,
             state: apps::ProcessState::Live,
         })
         .collect()
@@ -212,6 +213,9 @@ pub fn populated(count: usize, name: &[u8]) -> persistence::Result<Box<Sample>> 
             disk_read_bytes: apps::Amount::Unavailable(apps::Unavailable::Baseline),
             disk_written_bytes: apps::Amount::Unavailable(apps::Unavailable::Baseline),
             disk_io_bytes: apps::Amount::Unavailable(apps::Unavailable::Baseline),
+            idle_wakeups: apps::Amount::Unavailable(apps::Unavailable::Baseline),
+            pageins: apps::Amount::Unavailable(apps::Unavailable::Baseline),
+            threads: None,
             app_attribution: None,
             resident_bytes_last: Some(0),
             footprint_bytes_last: Some(0),

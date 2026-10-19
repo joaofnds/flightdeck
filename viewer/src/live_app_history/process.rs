@@ -31,11 +31,11 @@ pub(super) struct Group {
 struct Member {
     attribution: Option<apps::Unavailable>,
     live: bool,
-    amounts: [apps::Amount; 7],
+    amounts: [apps::Amount; 10],
 }
 
 const _: () = {
-    assert!(size_of::<Group>() <= 104);
+    assert!(size_of::<Group>() <= 144);
 };
 
 impl Selection for Target<'_> {
@@ -123,6 +123,9 @@ pub(super) fn capture(sample: &Sample, previous: Option<&Point>, apps: &[App]) -
                     process.disk_io_bytes,
                     process.resident_bytes,
                     process.footprint_bytes,
+                    process.idle_wakeups,
+                    process.pageins,
+                    process.threads,
                 ],
             },
         );
@@ -305,6 +308,12 @@ pub(super) fn aggregate_totals(
                         apps::Amount::Unavailable(apps::Unavailable::Unknown),
                         apps::Amount::Known,
                     ),
+                    process.idle_wakeups,
+                    process.pageins,
+                    process.threads.map_or(
+                        apps::Amount::Unavailable(apps::Unavailable::Unknown),
+                        apps::Amount::Known,
+                    ),
                 ],
             },
         );
@@ -319,7 +328,18 @@ pub(super) fn aggregate_totals(
 fn add(totals: &mut apps::AppTotals, member: &Member) {
     totals.members += 1;
     assert!(totals.members <= 24_000);
-    let [cpu, energy, read, written, disk, resident, footprint] = member.amounts;
+    let [
+        cpu,
+        energy,
+        read,
+        written,
+        disk,
+        resident,
+        footprint,
+        wakeups,
+        pageins,
+        threads,
+    ] = member.amounts;
     let attributed = |amount| member.attribution.map_or(amount, apps::Amount::Unavailable);
 
     totals.cpu_ns.add(attributed(cpu));
@@ -327,9 +347,12 @@ fn add(totals: &mut apps::AppTotals, member: &Member) {
     totals.disk_read_bytes.add(attributed(read));
     totals.disk_written_bytes.add(attributed(written));
     totals.disk_io_bytes.add(attributed(disk));
+    totals.idle_wakeups.add(attributed(wakeups));
+    totals.pageins.add(attributed(pageins));
     if member.live {
         totals.live_members += 1;
         totals.resident_bytes.add(resident);
         totals.footprint_bytes.add(footprint);
+        totals.threads.add(threads);
     }
 }

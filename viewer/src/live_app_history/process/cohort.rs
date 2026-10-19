@@ -15,7 +15,7 @@ struct SavedGroup<'name> {
 pub(crate) const CAPTURE_WORK_BYTES_MAX: usize = size_of::<Vec<SavedGroup<'static>>>()
     + crate::apps::PROCESS_INTERVALS_MAX * size_of::<SavedGroup<'static>>();
 
-const _: () = assert!(CAPTURE_WORK_BYTES_MAX < 5 * 1024 * 1024);
+const _: () = assert!(CAPTURE_WORK_BYTES_MAX < 7 * 1024 * 1024);
 
 impl History {
     pub(crate) fn process_groups_visit(
@@ -219,6 +219,9 @@ fn capture_groups_add(
                 process.disk_io_bytes,
                 process.resident_bytes,
                 process.footprint_bytes,
+                process.idle_wakeups,
+                process.pageins,
+                process.threads,
             ],
         },
     );

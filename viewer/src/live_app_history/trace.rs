@@ -13,7 +13,7 @@ pub(crate) struct TracePoint {
     captured: bool,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub(super) struct Totals {
     pub(super) members: u16,
     membership_complete: bool,
@@ -24,10 +24,13 @@ pub(super) struct Totals {
     disk_io_bytes: CompactMeasure,
     resident_bytes: CompactMeasure,
     footprint_bytes: CompactMeasure,
+    idle_wakeups: CompactMeasure,
+    pageins: CompactMeasure,
+    threads: CompactMeasure,
 }
 
 const _: () = {
-    assert!(size_of::<TracePoint>() <= 272);
+    assert!(size_of::<TracePoint>() <= 312);
 };
 
 impl TracePoint {
@@ -97,6 +100,7 @@ impl TracePoint {
                 disk_io_bytes: app.disk_io_bytes,
                 resident_bytes: app.resident_bytes,
                 footprint_bytes: app.footprint_bytes,
+                ..Totals::default()
             }),
         }
     }
@@ -110,7 +114,7 @@ impl TracePoint {
         }
     }
 
-    pub(crate) fn json(&self, segment: u64) -> Value {
+    pub(crate) fn json(&self, segment: u64, named_process_group: bool) -> Value {
         let mut point = json!({"observation": self.observation.json(),
             "segment": segment.to_string(), "source_available": self.captured,
             "elapsed_ns": self.elapsed_ns.map(|value| value.to_string()),
@@ -143,7 +147,33 @@ impl TracePoint {
             self.json_disk(app, &mut point);
         }
 
+        if named_process_group {
+            self.json_process(&mut point);
+        }
+
         point
+    }
+
+    fn json_process(&self, point: &mut Value) {
+        point["idle_wakeups"] = Value::Null;
+        point["pageins"] = Value::Null;
+        point["threads"] = Value::Null;
+        point["idle_wakeups_per_second"] = Value::Null;
+        point["pageins_per_second"] = Value::Null;
+        if let Some(app) = &self.totals {
+            point["idle_wakeups"] = app.idle_wakeups.json();
+            point["pageins"] = app.pageins.json();
+            point["threads"] = app.threads.json();
+            point["idle_wakeups_per_second"] = json!(self.json_event_rate(app.idle_wakeups));
+            point["pageins_per_second"] = json!(self.json_event_rate(app.pageins));
+        }
+    }
+
+    fn json_event_rate(&self, amount: CompactMeasure) -> Option<f64> {
+        apps::events_per_second(apps::EventRate {
+            events: amount.measured()?,
+            elapsed_ns: self.elapsed_ns?,
+        })
     }
 
     fn json_disk(&self, app: &Totals, point: &mut Value) {
@@ -196,6 +226,9 @@ impl Totals {
                 self.disk_io_bytes.measure(),
                 self.resident_bytes.measure(),
                 self.footprint_bytes.measure(),
+                self.idle_wakeups.measure(),
+                self.pageins.measure(),
+                self.threads.measure(),
             ],
         };
     }
@@ -211,6 +244,9 @@ impl Totals {
             disk_io_bytes: capture_subtotal(&app.disk_io_bytes),
             resident_bytes: capture_subtotal(&app.resident_bytes),
             footprint_bytes: capture_subtotal(&app.footprint_bytes),
+            idle_wakeups: capture_subtotal(&app.idle_wakeups),
+            pageins: capture_subtotal(&app.pageins),
+            threads: capture_subtotal(&app.threads),
         });
     }
 }

@@ -17,6 +17,8 @@ pub(crate) struct Named<'a> {
     pub usage: Option<Usage>,
     pub exited: bool,
     pub version: i32,
+    pub unique_id: u64,
+    pub threads: i32,
 }
 
 pub(crate) fn member<'a>(pid: i32, name: &'a [u8], app: &'a [u8], usage: Usage) -> Named<'a> {
@@ -27,6 +29,8 @@ pub(crate) fn member<'a>(pid: i32, name: &'a [u8], app: &'a [u8], usage: Usage) 
         usage: Some(usage),
         exited: false,
         version: 1,
+        unique_id: u64::try_from(pid).unwrap() * 100,
+        threads: 1,
     }
 }
 
@@ -77,6 +81,15 @@ pub(crate) fn dense() -> Fixture {
 }
 
 pub(crate) fn publish(fixture: &mut Fixture, publication: u64, rows: &[Named<'_>]) {
+    publish_with_interval(fixture, publication, rows, 1_000_000_000);
+}
+
+pub(crate) fn publish_with_interval(
+    fixture: &mut Fixture,
+    publication: u64,
+    rows: &[Named<'_>],
+    interval_ns: u64,
+) {
     let identities: Vec<_> = rows.iter().map(|row| identity(fixture, row)).collect();
     let processes: Vec<_> = rows
         .iter()
@@ -131,8 +144,8 @@ pub(crate) fn publish(fixture: &mut Fixture, publication: u64, rows: &[Named<'_>
             },
             Some(&collector::ring::ObservationTimes {
                 wall_ns: (1000 + publication) * 1_000_000_000,
-                continuous_ns: publication * 1_000_000_000,
-                awake_ns: publication * 1_000_000_000,
+                continuous_ns: publication * interval_ns,
+                awake_ns: publication * interval_ns,
             }),
             &IdentityPublication {
                 processes: &live,
@@ -149,7 +162,7 @@ fn identity(fixture: &mut Fixture, row: &Named<'_>) -> IdentityObservation {
             usage: UsageAvailability::Measured,
             identity: ProcessIdentity::Unavailable {
                 creation: Some(ProcessCreation {
-                    unique_id: u64::try_from(row.pid).unwrap() * 100,
+                    unique_id: row.unique_id,
                     pid_version: row.version,
                 }),
                 reason: collector::ring::IdentityUnavailable::Refused,
@@ -176,7 +189,7 @@ fn identity(fixture: &mut Fixture, row: &Named<'_>) -> IdentityObservation {
         },
         identity: ProcessIdentity::Measured {
             creation: ProcessCreation {
-                unique_id: u64::try_from(row.pid).unwrap() * 100,
+                unique_id: row.unique_id,
                 pid_version: row.version,
             },
             program: program.unwrap(),
@@ -189,7 +202,7 @@ fn process(row: &Named<'_>) -> Option<Process> {
         pid: row.pid,
         usage,
         task: Task {
-            threads: 1,
+            threads: row.threads,
             faults: 0,
             context_switches: 0,
             mach_syscalls: 0,

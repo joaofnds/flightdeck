@@ -136,6 +136,17 @@ fn process(value: &Process, elapsed_ns: Option<u64>) -> Value {
         "disk_io_bps": disk_rate(known(value.disk_io_bytes), elapsed_ns),
         "resident_bytes": amount(value.resident_bytes),
         "footprint_bytes": amount(value.footprint_bytes),
+        "idle_wakeups": amount(value.idle_wakeups),
+        "pageins": amount(value.pageins),
+        "threads": amount(value.threads),
+        "idle_wakeups_per_second": process_event_rate(&OptionalEventRate {
+            events: known(value.idle_wakeups),
+            elapsed_ns,
+        }),
+        "pageins_per_second": process_event_rate(&OptionalEventRate {
+            events: known(value.pageins),
+            elapsed_ns,
+        }),
         "app_attribution": value.app_attribution.map(reason),
         "state": match value.state {
             apps::ProcessState::Live => "live",
@@ -149,6 +160,18 @@ fn process(value: &Process, elapsed_ns: Option<u64>) -> Value {
         "energy_watts": known(value.energy_nj).and_then(|energy_nj| {
             apps::energy_watts(apps::EnergyRate { energy_nj, elapsed_ns: elapsed_ns? })
         }),
+    })
+}
+
+struct OptionalEventRate {
+    events: Option<u64>,
+    elapsed_ns: Option<u64>,
+}
+
+fn process_event_rate(rate: &OptionalEventRate) -> Option<f64> {
+    apps::events_per_second(apps::EventRate {
+        events: rate.events?,
+        elapsed_ns: rate.elapsed_ns?,
     })
 }
 

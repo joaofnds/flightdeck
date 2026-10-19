@@ -254,7 +254,7 @@ compact_measure_round_trip!(
 );
 
 #[test]
-fn bounds_app_history_layout_with_all_seven_exact_measures() {
+fn bounds_global_app_history_layout_with_seven_exact_measures() {
     // Goal: preserve fifteen minutes for ordinary App populations within the fixed cache budget.
     // Method: guard the actual compiler layouts that Point::bytes charges per App and observation.
     assert!(size_of::<CompactMeasure>() <= 12);

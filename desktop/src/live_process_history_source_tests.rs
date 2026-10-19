@@ -30,7 +30,7 @@ fn real_named_process_worker_preserves_scope_and_exact_same_second_history() {
         .iter()
         .filter(|panel| panel.id.starts_with("live-process-group-"))
         .collect::<Vec<_>>();
-    assert_eq!(group.len(), 5);
+    assert_eq!(group.len(), 8);
     assert_eq!(group[0].selected_index, Some(1));
     assert_eq!(group[0].lines[0].values[1], Some(120.0));
     assert_eq!(group[3].lines[0].values[1], Some(1.25));
@@ -320,7 +320,7 @@ fn named_process(pid: i32, publication: u64) -> Process {
 }
 
 #[test]
-fn default_all_process_groups_loads_five_histories_before_app_totals() {
+fn default_all_process_groups_loads_eight_histories_before_app_totals() {
     // Read a sealed two-name recording through the real worker with the default group selection.
     let recording = named_recording();
     let mut request = named_request();
@@ -348,7 +348,10 @@ fn default_all_process_groups_loads_five_histories_before_app_totals() {
             "live-process-groups-resident",
             "live-process-groups-footprint",
             "live-process-groups-disk",
-            "live-process-groups-power"
+            "live-process-groups-power",
+            "live-process-groups-wakeups",
+            "live-process-groups-pageins",
+            "live-process-groups-threads"
         ]
     );
     assert_eq!(panels[0].lines.len(), 2);
@@ -536,4 +539,100 @@ pub(crate) fn all_history() -> Box<viewer::app_process_groups_history::AppProces
         Ok(crate::live_process_history::ProcessHistory::All { payload, .. }) => payload,
         _ => panic!("Expected uniquely owned All history"),
     }
+}
+
+#[test]
+fn captured_process_sources_project_all_eight_history_cards() {
+    // The real saved worker supplies the same eight captured cards for named and All groups.
+    let recording = named_recording();
+    let named = named_request();
+    let mut all = named.clone();
+    all.executable = None;
+
+    let named_snapshot = recording.read(named.clone()).unwrap();
+    let all_snapshot = recording.read(all.clone()).unwrap();
+    let named_view = crate::live_acceptance::Presentation::prepare(&named, named_snapshot).unwrap();
+    let all_view = crate::live_acceptance::Presentation::prepare(&all, all_snapshot).unwrap();
+
+    assert_eq!(
+        named_view
+            .panels
+            .iter()
+            .filter(|panel| panel.id.starts_with("live-process-group-"))
+            .count(),
+        8
+    );
+    assert_eq!(
+        all_view
+            .panels
+            .iter()
+            .filter(|panel| panel.id.starts_with("live-process-groups-"))
+            .count(),
+        8
+    );
+    assert!(
+        all_view
+            .panels
+            .iter()
+            .any(|panel| panel.id == "live-process-groups-wakeups")
+    );
+    assert!(
+        all_view
+            .panels
+            .iter()
+            .any(|panel| panel.id == "live-process-groups-pageins")
+    );
+    assert!(
+        all_view
+            .panels
+            .iter()
+            .any(|panel| panel.id == "live-process-groups-threads")
+    );
+}
+
+#[test]
+fn added_process_inspectors_preserve_exact_large_counts_and_missing_elapsed() {
+    // Rate formatting may round; the adjacent decimal count must keep every captured bit.
+    let mut history = all_history();
+    let reading = &mut history.points[1].readings[0];
+    reading.measures.get_mut(7).unwrap().known = 9_007_199_254_740_993;
+
+    let wakeups = crate::live_process_history::groups::reading(
+        &history,
+        "live-process-groups-wakeups",
+        0,
+        Some(1),
+    );
+    history.points[1].elapsed_ns = None;
+    let unavailable = crate::live_process_history::groups::reading(
+        &history,
+        "live-process-groups-wakeups",
+        0,
+        Some(1),
+    );
+
+    assert!(wakeups.contains("9007199254740993 wakeups / interval"));
+    assert_eq!(
+        unavailable,
+        "Unavailable · 9007199254740993 wakeups / interval"
+    );
+}
+
+#[test]
+fn all_thread_gauge_preserves_one_exact_quantity_without_elapsed() {
+    // The integer gauge needs neither an elapsed interval nor a rounded duplicate.
+    let mut history = all_history();
+    history.points[1].elapsed_ns = None;
+    let reading = &mut history.points[1].readings[0];
+    reading.measures[9] = reading.measures[0];
+    reading.measures[9].known = 9_007_199_254_740_993;
+
+    let actual = crate::live_process_history::groups::reading(
+        &history,
+        "live-process-groups-threads",
+        0,
+        Some(1),
+    );
+
+    assert_eq!(actual, "9007199254740993 threads");
 }

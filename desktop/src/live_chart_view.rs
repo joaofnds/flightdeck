@@ -241,6 +241,16 @@ impl LiveDashboard {
         if let Some(history) = self.chart_process_groups(panel) {
             return crate::live_process_history::groups::reading(history, &panel.id, line, index);
         }
+        if let Some(reading) = self.snapshot.as_ref().and_then(|snapshot| {
+            crate::live_process_history::captured_reading(
+                snapshot.process_history.as_ref()?.payload()?,
+                &panel.id,
+                index,
+            )
+        }) {
+            return reading;
+        }
+
         if let Some(history) = self.chart_attribution_history(panel) {
             return history.reading(line, index);
         }
@@ -954,6 +964,9 @@ fn line_reading(panel: &Panel, value: Option<f32>, unit: &str) -> String {
         "live-battery-",
         "live-app-disk",
         "live-process-group-disk",
+        "live-process-group-wakeups",
+        "live-process-group-pageins",
+        "live-process-group-threads",
         "live-process-groups-",
         "live-disk-apps",
     ]

@@ -44,6 +44,7 @@ pub(super) fn members(source: &Publication<'_>, frame: &mut Frame) -> Result<()>
                 creation: None,
                 program: Err(IdentityUnavailable::Unsupported),
                 usage: Ok(process.usage),
+                threads: super::threads(process.task.threads),
             });
         }
         return Ok(());
@@ -56,6 +57,7 @@ pub(super) fn members(source: &Publication<'_>, frame: &mut Frame) -> Result<()>
             return Err(Error::Bound("live App identity order"));
         }
         previous_pid = Some(identity.pid);
+        let mut threads = None;
         let usage = match identity.usage {
             UsageAvailability::Measured => {
                 let process = source
@@ -66,6 +68,7 @@ pub(super) fn members(source: &Publication<'_>, frame: &mut Frame) -> Result<()>
                 if process.pid != identity.pid {
                     return Err(Error::Bound("live App numeric association"));
                 }
+                threads = super::threads(process.task.threads);
                 measured += 1;
                 Ok(process.usage)
             }
@@ -80,6 +83,7 @@ pub(super) fn members(source: &Publication<'_>, frame: &mut Frame) -> Result<()>
             creation: identity.creation().copied(),
             program: Err(IdentityUnavailable::Unsupported),
             usage,
+            threads,
         });
         let member = frame.members.last_mut().unwrap_or_else(|| unreachable!());
         member_program(

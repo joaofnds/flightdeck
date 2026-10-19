@@ -4,7 +4,7 @@ use crate::live_process_history::ProcessHistory;
 use crate::live_source::{AppKey, Request};
 
 #[test]
-fn process_history_projects_five_distinct_group_panels_from_the_existing_app_fields() {
+fn process_history_projects_eight_distinct_captured_group_panels() {
     // The adapter changes identity and scope while preserving the captured App-history quantities.
     let history = ProcessHistory::prepare(payload(), &request(), &selection());
 
@@ -20,7 +20,10 @@ fn process_history_projects_five_distinct_group_panels_from_the_existing_app_fie
             "live-process-group-resident",
             "live-process-group-footprint",
             "live-process-group-power",
-            "live-process-group-disk"
+            "live-process-group-disk",
+            "live-process-group-wakeups",
+            "live-process-group-pageins",
+            "live-process-group-threads"
         ]
     );
     assert_eq!(panels[0].lines[0].values, [Some(120.0), Some(240.0)]);
@@ -29,6 +32,9 @@ fn process_history_projects_five_distinct_group_panels_from_the_existing_app_fie
     assert_eq!(panels[3].lines[0].values, [Some(1.25), Some(2.5)]);
     assert_eq!(panels[4].lines[0].values, [Some(1.0), Some(2.0)]);
     assert_eq!(panels[4].lines[1].values, [Some(0.5), Some(1.0)]);
+    assert_eq!(panels[5].lines[0].values, [Some(5.0), Some(11.0)]);
+    assert_eq!(panels[6].lines[0].values, [Some(3.0), Some(7.0)]);
+    assert_eq!(panels[7].lines[0].values, [Some(8.0), Some(13.0)]);
     assert_eq!(panels[0].selected_index, Some(1));
 }
 
@@ -179,8 +185,69 @@ fn observation(publication: u64) -> Value {
 
 fn point(publication: u64) -> Value {
     let factor = if publication == 1 { 1.0 } else { 2.0 };
+    let wakeups = 6 * publication - 1;
+    let pageins = 4 * publication - 1;
+    let threads = 5 * publication + 3;
     json!({"observation":observation(publication),"segment":0,"cpu_percent_one_core":120.0*factor,
         "resident_bytes":(publication*1_073_741_824).to_string(),
         "footprint_bytes":((publication+1)*1_073_741_824).to_string(),"energy_watts":1.25*factor,
-        "disk_read_bps":1_000_000.0*factor,"disk_written_bps":500_000.0*factor})
+        "disk_read_bps":1_000_000.0*factor,"disk_written_bps":500_000.0*factor,
+        "idle_wakeups_per_second":f64::from(u32::try_from(wakeups).unwrap()),
+        "pageins_per_second":f64::from(u32::try_from(pageins).unwrap()),
+        "idle_wakeups":{"known":wakeups.to_string(),"measured_members":1,
+            "unavailable_members":0,"overflowed":false},
+        "pageins":{"known":pageins.to_string(),"measured_members":1,
+            "unavailable_members":0,"overflowed":false},
+        "threads":{"known":threads.to_string(),"measured_members":1,
+            "unavailable_members":0,"overflowed":false}})
+}
+
+#[test]
+fn captured_event_rates_use_human_units_and_preserve_small_nonzero_values() {
+    // Large rates choose a readable prefix while a small rate cannot appear as zero.
+    assert_eq!(
+        crate::live_projection::quantity_text(1500.0, "/s"),
+        "1.5 k/s"
+    );
+    assert_eq!(
+        crate::live_projection::quantity_text(0.001, "/s"),
+        "0.001 /s"
+    );
+    assert_eq!(
+        crate::live_projection::quantity_text(2_000_000.0, "pages/s"),
+        "2.0 M pages/s"
+    );
+}
+
+#[test]
+fn named_thread_reading_shows_one_exact_quantity() {
+    // Read a named captured gauge directly so its exact quantity appears only once.
+    let payload = json!({"points":[{"threads":{"known":"8","measured_members":1,
+        "unavailable_members":0,"overflowed":false}}]});
+
+    let reading = crate::live_process_history::captured_reading(
+        &payload,
+        "live-process-group-threads",
+        Some(0),
+    );
+
+    assert_eq!(reading.as_deref(), Some("8 threads"));
+}
+
+#[test]
+fn named_thread_reading_preserves_partial_coverage() {
+    // Read a partial named gauge without repeating its known subtotal.
+    let payload = json!({"points":[{"threads":{"known":"8","measured_members":1,
+        "unavailable_members":2,"overflowed":false}}]});
+
+    let reading = crate::live_process_history::captured_reading(
+        &payload,
+        "live-process-group-threads",
+        Some(0),
+    );
+
+    assert_eq!(
+        reading.as_deref(),
+        Some("8 threads · known subtotal · 1 measured · 2 unavailable")
+    );
 }

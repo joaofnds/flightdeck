@@ -315,7 +315,7 @@ fn publish(fixture: &mut Fixture, publication: u64) {
         .enumerate()
         .map(|(index, name)| {
             let amount = u64::try_from(index + 1).unwrap() * (publication - 1);
-            named::member(
+            let mut row = named::member(
                 i32::try_from(index + 1).unwrap(),
                 name.as_bytes(),
                 b"/A.app",
@@ -327,15 +327,17 @@ fn publish(fixture: &mut Fixture, publication: u64) {
                     instructions: 0,
                     super_instructions: 0,
                     cycles: 0,
-                    idle_wakeups: 0,
+                    idle_wakeups: amount * 6,
                     interrupt_wakeups: 0,
-                    pageins: 0,
+                    pageins: amount * 4,
                     resident_bytes: 1000,
                     footprint_bytes: 9_007_199_254_740_993,
                     disk_read_bytes: amount * 160,
                     disk_written_bytes: amount * 80,
                 },
-            )
+            );
+            row.threads = i32::try_from(index + 1).unwrap();
+            row
         })
         .collect();
     named::publish(fixture, publication, &rows);
@@ -493,4 +495,44 @@ fn store_marker(fixture: &Fixture, manifest: &persistence::Manifest) -> std::pat
     persistence::Store::open(&fixture.root)
         .unwrap()
         .marker_path(&manifest.identity)
+}
+
+#[test]
+fn warm_reuse_and_zero_budget_keep_nonzero_added_measures_including_other() {
+    // A warm cached result and complete fallback retain all ten readings without decoding again.
+    let cold = cold();
+    let first = call(&cold, 2, BYTES_MAX).unwrap();
+    let decoded = crate::session::ProcessGroupsReplay::test_frame_decodes();
+
+    let warm = call(&cold, 2, BYTES_MAX).unwrap();
+    let after_warm = crate::session::ProcessGroupsReplay::test_frame_decodes();
+    let uncached = call(&cold, 2, 0).unwrap();
+
+    equal(&first, &warm);
+    equal(&warm, &uncached);
+    assert_eq!(after_warm, decoded);
+    assert_eq!(
+        warm.points[1].readings[0].measures.get(7).map(|m| m.known),
+        Some(54)
+    );
+    assert_eq!(
+        warm.points[1].readings[0].measures.get(8).map(|m| m.known),
+        Some(36)
+    );
+    assert_eq!(
+        warm.points[1].readings[0].measures.get(9).map(|m| m.known),
+        Some(9)
+    );
+    assert_eq!(
+        warm.points[1].readings[7].measures.get(7).map(|m| m.known),
+        Some(18)
+    );
+    assert_eq!(
+        warm.points[1].readings[7].measures.get(8).map(|m| m.known),
+        Some(12)
+    );
+    assert_eq!(
+        warm.points[1].readings[7].measures.get(9).map(|m| m.known),
+        Some(3)
+    );
 }

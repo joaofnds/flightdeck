@@ -35,6 +35,7 @@ struct Member {
     creation: Option<ProcessCreation>,
     program: std::result::Result<ProgramSpan, IdentityUnavailable>,
     usage: std::result::Result<Usage, Unavailable>,
+    threads: Option<u64>,
 }
 
 struct Exit {
@@ -251,3 +252,11 @@ mod events;
 #[cfg(test)]
 mod tests;
 mod views;
+
+fn threads(value: i32) -> Option<u64> {
+    if value < 0 {
+        return None;
+    }
+
+    Some(u64::try_from(value).unwrap_or_else(|_| unreachable!("nonnegative i32 fits u64")))
+}

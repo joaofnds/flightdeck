@@ -2,7 +2,7 @@ use super::*;
 use gpui::{Bounds, Pixels, Point, px};
 
 struct AppsGridBounds {
-    named: [Bounds<Pixels>; 5],
+    named: [Bounds<Pixels>; 8],
     app: [Bounds<Pixels>; 5],
     executable: Option<Bounds<Pixels>>,
     totals: Bounds<Pixels>,
@@ -34,7 +34,7 @@ macro_rules! apps_grid_width_case {
     ($name:ident, $width:literal, $columns:literal) => {
         #[gpui::test]
         fn $name(cx: &mut TestAppContext) {
-            // Read the installed five-plus-five card layout at one literal media breakpoint.
+            // Read the installed eight-plus-five card layout at one literal media breakpoint.
             let mut harness = AppHoverHarness::setup(cx);
             harness.driver.prepare_apps_grid($width);
 
@@ -98,7 +98,7 @@ fn apps_grid_empty_third_track_owns_no_history_hitbox(cx: &mut TestAppContext) {
     let mut harness = AppHoverHarness::setup(cx);
     harness.driver.prepare_apps_grid(1100.0);
     let bounds = harness.driver.apps_grid_bounds();
-    let empty = gpui::point(bounds.named[2].center().x, bounds.named[4].center().y);
+    let empty = gpui::point(bounds.named[2].center().x, bounds.named[7].center().y);
     let retained = harness.driver.apps_grid_reading();
     harness.driver.hover_named_process_history();
     expect_historical_apps_grid_reading(&harness.driver.apps_grid_reading(), &retained);
@@ -180,7 +180,7 @@ fn expect_apps_grid(bounds: &AppsGridBounds, columns: usize) {
     );
 }
 
-fn expect_apps_grid_tracks(cards: &[Bounds<Pixels>; 5], columns: usize) {
+fn expect_apps_grid_tracks(cards: &[Bounds<Pixels>], columns: usize) {
     assert!((1..=3).contains(&columns));
     let width = cards[0].size.width;
     for (index, card) in cards.iter().enumerate() {
@@ -218,7 +218,7 @@ fn expect_overview_grid_context_span(bounds: &OverviewGridBounds) {
 fn expect_empty_apps_grid_track(bounds: &AppsGridBounds, pointer: Point<Pixels>) {
     assert!(bounds.named.iter().all(|card| !card.contains(&pointer)));
     assert!(bounds.app.iter().all(|card| !card.contains(&pointer)));
-    assert!(pointer.x > bounds.named[4].right());
+    assert!(pointer.x > bounds.named[7].right());
 }
 
 fn expect_historical_apps_grid_reading(reading: &AppsGridReading, retained: &AppsGridReading) {
@@ -334,6 +334,9 @@ impl AppHoverDriver {
                 "chart-card:live-process-group-footprint",
                 "chart-card:live-process-group-power",
                 "chart-card:live-process-group-disk",
+                "chart-card:live-process-group-wakeups",
+                "chart-card:live-process-group-pageins",
+                "chart-card:live-process-group-threads",
             ]
             .map(|id| self.context.debug_bounds(id).unwrap()),
             app: [

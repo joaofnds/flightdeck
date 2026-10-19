@@ -61,13 +61,23 @@ pub fn panels(
     }
     let domain = Domain::read(selection)?;
     let coordinates = coordinates(points, &domain, route == "apps", &source["selected"])?;
-    let limit = if route == "overview" {
-        OVERVIEW_PANELS_MAX
+    let process = source["scope"] == "selected_named_process_group";
+    let limit = if process {
+        8
     } else {
-        ROUTE_PANELS_MAX
+        if route == "overview" {
+            OVERVIEW_PANELS_MAX
+        } else {
+            ROUTE_PANELS_MAX
+        }
     };
     let mut result = Vec::with_capacity(limit);
-    for specification in specifications(route, points)? {
+    let specifications = if process {
+        process_specifications()
+    } else {
+        specifications(route, points)?
+    };
+    for specification in specifications {
         let mut panel = panel(&specification, points, &coordinates)?;
         if specification.id == "live-memory-pressure" {
             pressure_cells(&mut panel, &domain, points, &coordinates)?;
@@ -329,6 +339,10 @@ pub(crate) fn quantity_text(value: f32, unit: &str) -> String {
         "GiB" if (f32::MIN_POSITIVE..1.0).contains(&magnitude) => (value * 1024.0, "MiB"),
         "MB/s" if (f32::MIN_POSITIVE..0.001).contains(&magnitude) => (value * 1_000_000.0, "B/s"),
         "MB/s" if (f32::MIN_POSITIVE..1.0).contains(&magnitude) => (value * 1000.0, "kB/s"),
+        "/s" if magnitude >= 1_000_000.0 => (value / 1_000_000.0, "M/s"),
+        "/s" if magnitude >= 1000.0 => (value / 1000.0, "k/s"),
+        "pages/s" if magnitude >= 1_000_000.0 => (value / 1_000_000.0, "M pages/s"),
+        "pages/s" if magnitude >= 1000.0 => (value / 1000.0, "k pages/s"),
         "% of one core" | "% of interval" => (value, "%"),
         _ => (value, unit),
     };
@@ -848,6 +862,39 @@ fn network_throughput() -> Specification {
             sent,
         ],
     )
+}
+
+fn process_specifications() -> Vec<Specification> {
+    let mut result = app_specifications();
+    result.extend([
+        specification(
+            "live-app-wakeups",
+            "Idle wakeups",
+            "/s",
+            vec![reading(
+                "idle_wakeups_per_second",
+                "Idle wakeups",
+                "#73bf69",
+                1.0,
+            )],
+        ),
+        specification(
+            "live-app-pageins",
+            "Page-ins",
+            "pages/s",
+            vec![reading("pageins_per_second", "Page-ins", "#5794f2", 1.0)],
+        ),
+        specification(
+            "live-app-threads",
+            "Threads",
+            "threads",
+            vec![reading("threads", "Threads", "#b877d9", 1.0)],
+        ),
+    ]);
+
+    assert_eq!(result.len(), 8);
+
+    result
 }
 
 fn app_specifications() -> Vec<Specification> {

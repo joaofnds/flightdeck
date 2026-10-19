@@ -419,12 +419,6 @@ fn app_summary_tile(app: &Value, tile: SummaryTile) -> impl IntoElement {
 }
 
 pub fn app_table_columns(kind: &str, scroll: &gpui::ScrollHandle) -> impl IntoElement {
-    let name = if kind == "apps" { "App" } else { "Executable" };
-    let count = match kind {
-        "apps" => "Members",
-        "executables" => "Instances",
-        _ => "PID",
-    };
     div()
         .id(SharedString::from(format!("app-columns-{kind}")))
         .min_w_0()
@@ -432,7 +426,22 @@ pub fn app_table_columns(kind: &str, scroll: &gpui::ScrollHandle) -> impl IntoEl
         .overflow_x_scroll()
         .restrict_scroll_to_axis()
         .track_scroll(scroll)
-        .child(app_cells(
+        .child(app_table_headings(kind))
+        .bg(rgb(0x1a_22_2f))
+        .text_color(rgb(MUTED))
+}
+
+fn app_table_headings(kind: &str) -> gpui::Div {
+    let name = if kind == "apps" { "App" } else { "Executable" };
+    let count = match kind {
+        "apps" => "Members",
+        "executables" => "Instances",
+        _ => "PID",
+    };
+
+    let selector = format!("app-column:{kind}:Disk I/O");
+    if kind == "apps" {
+        return app_cells(
             name.into(),
             count.into(),
             [
@@ -443,20 +452,44 @@ pub fn app_table_columns(kind: &str, scroll: &gpui::ScrollHandle) -> impl IntoEl
                 "Energy".into(),
                 "Disk I/O".into(),
             ],
-            &format!("app-column:{kind}:Disk I/O"),
-        ))
-        .bg(rgb(0x1a_22_2f))
-        .text_color(rgb(MUTED))
+            &selector,
+        );
+    }
+
+    app_cells(
+        name.into(),
+        count.into(),
+        [
+            "CPU %".into(),
+            "Resident".into(),
+            "Footprint".into(),
+            "Power".into(),
+            "Energy".into(),
+            "Disk I/O".into(),
+            "Idle wakeups/s".into(),
+            "Page-ins/s".into(),
+            "Threads".into(),
+        ],
+        &selector,
+    )
 }
 
-pub fn app_cells(
+pub fn app_cells<const METRICS: usize>(
     name: String,
     count: String,
-    metrics: [String; 6],
+    metrics: [String; METRICS],
     disk_selector: &str,
 ) -> gpui::Div {
+    assert!(METRICS <= 9);
+
+    let count_metrics = u16::try_from(METRICS).unwrap_or_else(|_| unreachable!());
+    let width_metrics = f32::from(count_metrics);
     let mut row = div()
-        .min_w(px(120.0 + 65.0 + 6.0 * 100.0 + 7.0 * 8.0 + 16.0))
+        .min_w(px(120.0
+            + 65.0
+            + width_metrics * 100.0
+            + (width_metrics + 1.0) * 8.0
+            + 16.0))
         .h(px(26.0))
         .px(px(8.0))
         .flex()
@@ -564,6 +597,13 @@ fn value_rate(value: &Value, unit: &str) -> String {
     }
 }
 
+pub fn event_rate(value: Option<f64>, unit: &str) -> String {
+    value.and_then(|value| value.to_f32()).map_or_else(
+        || "Unavailable".into(),
+        |value| crate::live_projection::quantity_text(value, unit),
+    )
+}
+
 pub fn disk_rate(value: Option<f64>) -> String {
     let Some(value) = value else {
         return "Unavailable".into();
@@ -648,7 +688,7 @@ fn app_metrics(app: &Value) -> [String; 6] {
     ]
 }
 
-fn process_metrics(process: &Value) -> [String; 6] {
+fn process_metrics(process: &Value) -> [String; 9] {
     [
         value_rate(&process["cpu_percent_one_core"], "%"),
         amount_memory(&process["resident_bytes"]),
@@ -656,7 +696,18 @@ fn process_metrics(process: &Value) -> [String; 6] {
         value_rate(&process["energy_watts"], "W"),
         value_rate(&process["energy_joules"], "J"),
         amount_disk_rate(process),
+        event_rate(process["idle_wakeups_per_second"].as_f64(), "/s"),
+        event_rate(process["pageins_per_second"].as_f64(), "pages/s"),
+        amount_count(&process["threads"]),
     ]
+}
+
+fn amount_count(value: &Value) -> String {
+    match decimal(&value["known"]) {
+        Ok(Some(value)) => value.to_string(),
+        Ok(None) => "Unavailable".into(),
+        Err(error) => error,
+    }
 }
 
 fn measure_rate(app: &Value, field: &str, measure: &str, unit: &str) -> String {

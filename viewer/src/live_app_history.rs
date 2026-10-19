@@ -317,7 +317,8 @@ impl Point {
     }
 
     fn json(&self, target: &dyn Selection) -> Value {
-        self.trace(target).json(self.segment)
+        self.trace(target)
+            .json(self.segment, target.executable().is_some())
     }
 }
 

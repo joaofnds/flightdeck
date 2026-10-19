@@ -18,6 +18,9 @@ pub struct Executable {
     pub disk_read_bytes: Subtotal,
     pub disk_written_bytes: Subtotal,
     pub disk_io_bytes: Subtotal,
+    pub idle_wakeups: Subtotal,
+    pub pageins: Subtotal,
+    pub threads: Subtotal,
     elapsed_ns: Option<u64>,
 }
 
@@ -65,6 +68,9 @@ pub fn groups(detail: Option<&Value>) -> Result<Vec<Executable>, String> {
             disk_read_bytes: Subtotal::default(),
             disk_written_bytes: Subtotal::default(),
             disk_io_bytes: Subtotal::default(),
+            idle_wakeups: Subtotal::default(),
+            pageins: Subtotal::default(),
+            threads: Subtotal::default(),
             elapsed_ns,
         });
         groups_add(group, process)?;
@@ -123,7 +129,7 @@ impl Subtotal {
 }
 
 impl Executable {
-    fn metrics(&self) -> [String; 6] {
+    fn metrics(&self) -> [String; 9] {
         let cpu = self.cpu_ns.value().and_then(|cpu_ns| {
             viewer::apps::cpu_percent_one_core(viewer::apps::CpuRate {
                 cpu_ns,
@@ -147,7 +153,34 @@ impl Executable {
                 "J",
             ),
             self.disk_rate(),
+            self.event_rate(&self.idle_wakeups, "/s"),
+            self.event_rate(&self.pageins, "pages/s"),
+            self.threads.value().map_or_else(
+                || "Unavailable".into(),
+                |value| {
+                    format!(
+                        "{value}{}",
+                        if self.threads.unavailable > 0 {
+                            " *"
+                        } else {
+                            ""
+                        }
+                    )
+                },
+            ),
         ]
+    }
+
+    fn event_rate(&self, amount: &Subtotal, unit: &str) -> String {
+        let rate = amount.value().and_then(|events| {
+            viewer::apps::events_per_second(viewer::apps::EventRate {
+                events,
+                elapsed_ns: self.elapsed_ns?,
+            })
+        });
+        let suffix = if amount.unavailable > 0 { " *" } else { "" };
+
+        format!("{}{suffix}", crate::live_app_views::event_rate(rate, unit))
     }
 
     fn disk_rate(&self) -> String {
@@ -172,7 +205,9 @@ impl Executable {
             "footprint_bytes":self.footprint_bytes.json(),
             "disk_read_bytes":self.disk_read_bytes.json(),
             "disk_written_bytes":self.disk_written_bytes.json(),
-            "disk_io_bytes":self.disk_io_bytes.json()})
+            "disk_io_bytes":self.disk_io_bytes.json(),
+            "idle_wakeups":self.idle_wakeups.json(), "pageins":self.pageins.json(),
+            "threads":self.threads.json()})
     }
 }
 
@@ -286,12 +321,16 @@ fn groups_add(group: &mut Executable, process: &Value) -> Result<(), String> {
             .disk_written_bytes
             .add(amount(&process["disk_written_bytes"])?);
         group.disk_io_bytes.add(amount(&process["disk_io_bytes"])?);
+        group.idle_wakeups.add(amount(&process["idle_wakeups"])?);
+        group.pageins.add(amount(&process["pageins"])?);
     } else {
         group.cpu_ns.add(None);
         group.energy_nj.add(None);
         group.disk_read_bytes.add(None);
         group.disk_written_bytes.add(None);
         group.disk_io_bytes.add(None);
+        group.idle_wakeups.add(None);
+        group.pageins.add(None);
     }
     match process["state"].as_str() {
         Some("live") => {
@@ -301,6 +340,7 @@ fn groups_add(group: &mut Executable, process: &Value) -> Result<(), String> {
             group
                 .footprint_bytes
                 .add(amount(&process["footprint_bytes"])?);
+            group.threads.add(amount(&process["threads"])?);
         }
         Some("exited_verified" | "exited_unverified") => {}
         _ => return Err("Missing or invalid executable process state".to_owned()),
@@ -384,8 +424,46 @@ mod tests {
             "footprint_bytes":{"known":"32","unavailable":null},
             "disk_read_bytes":{"known":null,"unavailable":"interval"},
             "disk_written_bytes":{"known":null,"unavailable":"interval"},
-            "disk_io_bytes":{"known":null,"unavailable":"interval"}})
+            "disk_io_bytes":{"known":null,"unavailable":"interval"},
+            "idle_wakeups":{"known":"6","unavailable":null},
+            "pageins":{"known":"4","unavailable":null},
+            "threads":{"known":"8","unavailable":null}})
     }
+
+    macro_rules! missing_captured_amount {
+        ($name:ident, $field:literal) => {
+            #[test]
+            fn $name() {
+                // A missing owned field must fail grouping rather than look like refused data.
+                let mut row = process("61");
+                assert!(row.as_object_mut().unwrap().remove($field).is_some());
+                let detail = json!({"processes":[row]});
+
+                assert!(groups(Some(&detail)).is_err());
+            }
+        };
+    }
+
+    macro_rules! null_captured_amount {
+        ($name:ident, $field:literal) => {
+            #[test]
+            fn $name() {
+                // A whole-field null is malformed; actual unavailability is an Amount object.
+                let mut row = process("61");
+                row[$field] = Value::Null;
+                let detail = json!({"processes":[row]});
+
+                assert!(groups(Some(&detail)).is_err());
+            }
+        };
+    }
+
+    missing_captured_amount!(rejects_missing_wakeups_amount, "idle_wakeups");
+    missing_captured_amount!(rejects_missing_pageins_amount, "pageins");
+    missing_captured_amount!(rejects_missing_threads_amount, "threads");
+    null_captured_amount!(rejects_null_wakeups_amount, "idle_wakeups");
+    null_captured_amount!(rejects_null_pageins_amount, "pageins");
+    null_captured_amount!(rejects_null_threads_amount, "threads");
 
     #[test]
     fn keeps_exact_known_subtotals_beside_unavailable_members() {

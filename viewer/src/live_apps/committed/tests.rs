@@ -340,17 +340,17 @@ macro_rules! chunk_boundary {
 
 chunk_boundary!(
     packs_a_normal_group_one_byte_below_the_logical_target,
-    3_548_001,
+    3_515_985,
     2
 );
 chunk_boundary!(
     packs_a_normal_group_exactly_at_the_logical_target,
-    3_548_002,
+    3_515_986,
     2
 );
 chunk_boundary!(
     splits_a_normal_group_one_byte_above_the_logical_target,
-    3_548_003,
+    3_515_987,
     1
 );
 
@@ -358,9 +358,9 @@ chunk_boundary!(
 fn ties_the_logical_row_charge_to_the_selected_columns_and_extra_row_reserve() {
     // Goal: changing the numeric projection cannot silently loosen its logical accounting.
     // Method: count the shared SELECT fields plus publication and verify the sentinel formula.
-    assert_eq!(PROCESS_COLUMNS.split(',').count() + 5, BATCH_COLUMNS);
-    assert_eq!(ROW_LOGICAL_BYTES, 416);
-    assert_eq!(SENTINEL_LOGICAL_BYTES, 8_606);
+    assert_eq!(PROCESS_COLUMNS.split(',').count() + 6, BATCH_COLUMNS);
+    assert_eq!(ROW_LOGICAL_BYTES, 432);
+    assert_eq!(SENTINEL_LOGICAL_BYTES, 8_622);
     assert_eq!(BATCH_LOGICAL_BYTES_MAX, 8_388_608);
 }
 
@@ -474,7 +474,7 @@ fn preserves_adjacent_totals_across_an_actual_normal_query_group_boundary() {
     Frame::committed_many(&endpoints, &connection, "app_rows", &operation, |frame| {
         restored = Some(
             crate::live_app_history::TracePoint::capture(&frame, previous.as_deref(), &target)?
-                .json(0),
+                .json(0, false),
         );
         previous = Some(frame);
         Ok(())
@@ -608,3 +608,58 @@ fn rejects_duplicate_pid_associations_without_installing_a_partial_frame() {
 
 #[path = "event_tests.rs"]
 mod event_tests;
+
+macro_rules! saved_thread_cell {
+    ($name:ident, $value:expr, $expected:expr) => {
+        #[test]
+        fn $name() {
+            // A saved optional signed Task gauge must preserve zero and reject absent/negative.
+            let connection = connection();
+            measured(&connection);
+            fixture::replace(&connection, "processes", &[("threads", $value)]);
+            let operation = Arc::new(crate::Cancellation::default())
+                .operation(0)
+                .unwrap();
+            let mut frame = None;
+            Frame::committed(&endpoint(), &connection, "app_rows", &operation, &mut frame).unwrap();
+            let mut sample = None;
+
+            crate::live_app_response::Sample::capture(frame.as_ref().unwrap(), None, &mut sample)
+                .unwrap();
+            let sample = sample.unwrap();
+            let detail = sample
+                .app_detail(&crate::live_app_response::Detail {
+                    selected: &sample.selected,
+                    app_index: 0,
+                    page: crate::live_app_response::Page {
+                        offset: 0,
+                        limit: 512,
+                    },
+                })
+                .unwrap();
+
+            assert_eq!(detail["processes"][0]["threads"], $expected);
+        }
+    };
+}
+
+saved_thread_cell!(
+    saved_null_threads_are_unavailable,
+    AnyValue::Null,
+    serde_json::json!({"known":null,"unavailable":"unknown"})
+);
+saved_thread_cell!(
+    saved_negative_threads_are_unavailable,
+    AnyValue::Int32(-1),
+    serde_json::json!({"known":null,"unavailable":"unknown"})
+);
+saved_thread_cell!(
+    saved_zero_threads_are_measured,
+    AnyValue::Int32(0),
+    serde_json::json!({"known":"0","unavailable":null})
+);
+saved_thread_cell!(
+    saved_positive_threads_are_measured,
+    AnyValue::Int32(8),
+    serde_json::json!({"known":"8","unavailable":null})
+);
