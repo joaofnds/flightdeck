@@ -22,10 +22,17 @@ const TIME_INTERVALS: [u64; 8] = [60, 120, 300, 600, 900, 1800, 3600, 7200];
 
 #[must_use]
 pub fn axis_labels(scale: Scale, unit: &str) -> AxisLabels {
-    let entries: Vec<_> = scale
-        .ticks()
-        .map(|value| (scale.fraction(value), axis_label(value, unit)))
-        .collect();
+    labels(
+        scale
+            .ticks()
+            .map(|value| (scale.fraction(value), axis_label(value, unit)))
+            .collect(),
+    )
+}
+
+/// Value labels at the given fractions of the plot's height, the lowest first.
+#[must_use]
+pub fn labels(entries: Vec<(f32, String)>) -> AxisLabels {
     let characters = entries
         .iter()
         .map(|(_, label)| label.chars().count())

@@ -79,7 +79,15 @@ fn dashboard_tick(dashboard: &mut LiveDashboard, cx: &mut Context<LiveDashboard>
     collection
         .session
         .tick(dashboard.request.route != "computer");
-    if previous != collection.session.status() {
+    let mut changed = previous != collection.session.status();
+    let reports = collection.session.reports();
+    if reports.revision != dashboard.self_reports.revision {
+        dashboard.self_reports = std::rc::Rc::new(reports.clone());
+        if dashboard.request.route == "self" {
+            changed = true;
+        }
+    }
+    if changed {
         cx.notify();
     }
 }

@@ -1,4 +1,4 @@
-use gpui::{Context, FocusHandle, IntoElement, ListOffset, Window, div, prelude::*, px, rgb};
+use gpui::{Context, FocusHandle, ListOffset, Window, div, prelude::*, px, rgb};
 
 use crate::charts::{GRID, TEXT};
 use crate::live_dashboard::{LiveDashboard, Row};
@@ -13,6 +13,8 @@ pub(crate) enum Section {
     EnergyContext,
     ComputerReference,
     SystemFiles,
+    SelfReports,
+    SelfMinutes,
 }
 
 impl Section {
@@ -26,6 +28,8 @@ impl Section {
             Self::ComputerReference => 5,
             Self::SystemFiles => 6,
             Self::AppProcesses => 7,
+            Self::SelfReports => 8,
+            Self::SelfMinutes => 9,
         }
     }
 
@@ -39,6 +43,8 @@ impl Section {
             Self::ComputerReference => "computer-reference",
             Self::SystemFiles => "system-files",
             Self::AppProcesses => "app-processes",
+            Self::SelfReports => "self-reports",
+            Self::SelfMinutes => "self-minutes",
         }
     }
 
@@ -52,6 +58,8 @@ impl Section {
             Self::ComputerReference => "Schematic reference",
             Self::SystemFiles => "System file entries",
             Self::AppProcesses => "Process instances · selected app",
+            Self::SelfReports => "Captured report data",
+            Self::SelfMinutes => "CPU budget intervals and capture provenance",
         }
     }
 
@@ -62,7 +70,7 @@ impl Section {
     }
 }
 
-const SECTIONS: [Section; 8] = [
+const SECTIONS: [Section; 10] = [
     Section::OverviewHistories,
     Section::OverviewContext,
     Section::AppTotals,
@@ -71,11 +79,13 @@ const SECTIONS: [Section; 8] = [
     Section::ComputerReference,
     Section::SystemFiles,
     Section::AppProcesses,
+    Section::SelfReports,
+    Section::SelfMinutes,
 ];
 
 pub(crate) struct Sections {
-    collapsed: [bool; 8],
-    focus: [Option<FocusHandle>; 8],
+    collapsed: [bool; 10],
+    focus: [Option<FocusHandle>; 10],
 }
 
 impl Default for Sections {
@@ -114,6 +124,12 @@ impl Row {
             Self::Disclosure(section) => Some(*section),
             Self::MemoryAttribution(_) => Some(Section::MemoryQuantities),
             Self::Inventory => Some(Section::ComputerReference),
+            Self::SelfPart(crate::live_diagnostics::SelfPart::Reports) => {
+                Some(Section::SelfReports)
+            }
+            Self::SelfPart(crate::live_diagnostics::SelfPart::Minutes) => {
+                Some(Section::SelfMinutes)
+            }
             _ => None,
         }
     }
@@ -141,7 +157,11 @@ impl LiveDashboard {
         self.splice_section_rows(0);
     }
 
-    pub(crate) fn disclosure(&self, section: Section, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn disclosure(
+        &self,
+        section: Section,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
         let Some(focus) = &self.sections.focus[section.index()] else {
             unreachable!("Dashboard installs disclosure focus before rendering content");
         };

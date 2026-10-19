@@ -364,7 +364,9 @@ fn paint_run(
     let default_opacity = if stacked { 0.45 } else { 0.1 };
     let opacity = line.fill.or(panel.fill).unwrap_or(default_opacity);
     if line.dashed != Some(true) {
-        paint_path(area, curve_fill(tint, opacity, stacked, line), window);
+        if opacity > 0.0 {
+            paint_path(area, curve_fill(tint, opacity, stacked, line), window);
+        }
     }
     paint_path(stroke, rgb(tint), window);
 }

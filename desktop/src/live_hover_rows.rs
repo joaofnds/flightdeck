@@ -23,7 +23,10 @@ impl LiveDashboard {
 
     pub(crate) fn reading_rows(&self) -> Vec<Row> {
         if self.request.route == "self" {
-            return vec![Row::Diagnostics];
+            return crate::live_diagnostics::SelfPart::ALL
+                .into_iter()
+                .map(Row::SelfPart)
+                .collect();
         }
 
         if self.request.route == "computer" {

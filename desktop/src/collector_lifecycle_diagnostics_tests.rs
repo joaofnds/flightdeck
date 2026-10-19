@@ -57,3 +57,35 @@ fn oversized_output_retains_tail_and_append_resumes_after_truncation() {
     assert!(text.ends_with("done"));
     assert!(text.starts_with('x'));
 }
+
+#[test]
+fn whole_lines_are_taken_once_and_a_partial_line_waits_for_its_end() {
+    // Goal: a reader of the collector's reports sees each finished line exactly once.
+    // Method: write two lines and half a third, take the lines, finish the third, take again.
+    let mut output = Output::new().unwrap();
+    let mut writer = output.writer().unwrap();
+    writer.write_all(b"first\nsecond\nthi").unwrap();
+    output.drain().unwrap();
+
+    let before = output.take_lines();
+    writer.write_all(b"rd\n").unwrap();
+    output.drain().unwrap();
+    let after = output.take_lines();
+
+    assert_eq!(before, ["first", "second"]);
+    assert_eq!(after, ["third"]);
+}
+
+#[test]
+fn a_line_cut_by_skipping_ahead_is_left_out() {
+    // Goal: a line whose start was skipped is never read as a whole line.
+    // Method: write more than the tail bound in one line, then a whole line, and take both.
+    let mut output = Output::new().unwrap();
+    let mut writer = output.writer().unwrap();
+    writer.write_all(&vec![b'x'; TAIL_BYTES_MAX + 1]).unwrap();
+    writer.write_all(b"\nwhole\n").unwrap();
+
+    output.drain().unwrap();
+
+    assert_eq!(output.take_lines(), ["whole"]);
+}

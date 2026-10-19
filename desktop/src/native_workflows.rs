@@ -92,7 +92,6 @@ pub struct NativeControls {
     retirement: Option<RetiringReader>,
     pub notice: Option<String>,
     pub source: SourceMode,
-    pub diagnostic_selected: Value,
     pub recording_details_open: bool,
     pub time_menu_open: bool,
 }
@@ -494,7 +493,6 @@ impl LiveDashboard {
 
         if let Some(candidate) = self.native.candidate.take() {
             self.native.source = candidate.worker.mode();
-            self.native.diagnostic_selected = Value::Null;
             let old = std::mem::replace(&mut self.worker, candidate.worker);
             self.generation = candidate.generation;
             self.expanded = None;

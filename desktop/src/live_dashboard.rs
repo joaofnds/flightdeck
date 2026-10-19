@@ -96,6 +96,10 @@ pub struct LiveDashboard {
     pub(crate) list: ListState,
     last_status: String,
     rendered_source: Option<crate::live_source_mode::SourceMode>,
+    /// The reports of the collector this app started, as of the last tick that changed them.
+    pub(crate) self_reports: Rc<crate::self_reports::SelfReports>,
+    /// The second of the ten-second report the Self charts inspect, or none for the newest.
+    pub(crate) self_inspected: Option<u64>,
 }
 
 pub struct ChartHover {
@@ -105,7 +109,7 @@ pub struct ChartHover {
 pub enum Row {
     Summary,
     StorageDevice(usize, String),
-    Diagnostics,
+    SelfPart(crate::live_diagnostics::SelfPart),
     OverviewStatus,
     /// The Battery page's charging timeline beside its details card.
     BatteryState(Option<Rc<Panel>>),
@@ -206,6 +210,8 @@ impl LiveDashboard {
             list: ListState::new(0, ListAlignment::Top, px(100.0)),
             last_status: String::new(),
             rendered_source: None,
+            self_reports: Rc::default(),
+            self_inspected: None,
         };
         if dashboard.request.route == "computer" {
             dashboard.inventory = crate::live_inventory::rows();
@@ -378,14 +384,6 @@ impl LiveDashboard {
         if self.request.route != route {
             self.sections.reset();
         }
-        if !matches!(self.request.route.as_str(), "computer" | "self") {
-            self.native.diagnostic_selected = self
-                .context_snapshot()
-                .map_or(serde_json::Value::Null, |snapshot| {
-                    snapshot.selection["selected"].clone()
-                });
-        }
-
         self.chart_hover = None;
         self.chart_inspector = None;
         self.preview = None;

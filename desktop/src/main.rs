@@ -49,6 +49,8 @@ mod performance;
 mod render_evidence;
 mod replay;
 mod replay_dashboard;
+mod self_monitoring;
+mod self_reports;
 mod summary;
 
 #[cfg(test)]

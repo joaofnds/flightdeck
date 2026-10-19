@@ -1,7 +1,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 #[path = "collector_lifecycle_diagnostics.rs"]
 mod diagnostics;
@@ -22,6 +22,8 @@ use diagnostics::Output;
 pub(super) use policy::Mode;
 use policy::{Action, Policy, RecordingStatus, Source, State};
 
+use crate::self_reports::SelfReports;
+
 pub(super) const STARTUP_LIMIT: Duration = policy::STARTUP_LIMIT;
 
 pub(super) struct Configuration {
@@ -41,6 +43,7 @@ struct SessionState {
     diagnostic: Option<Output>,
     health: health::Health,
     started: Instant,
+    reports: SelfReports,
 }
 
 const OUTPUT_BYTES_MAX: usize = 16_384;
@@ -65,6 +68,7 @@ impl CollectorSession {
             diagnostic: None,
             health: health::Health::new(),
             started: Instant::now(),
+            reports: SelfReports::default(),
         }))
     }
 
@@ -132,6 +136,11 @@ impl CollectorSession {
 
     pub fn elapsed(&self) -> Duration {
         self.0.started.elapsed()
+    }
+
+    /// What the collector this app started reported of its own cost.
+    pub fn reports(&self) -> &SelfReports {
+        &self.0.reports
     }
 
     pub fn observed_publication(&self) -> Option<u64> {
@@ -241,6 +250,7 @@ impl CollectorSession {
             child.id(),
             std::process::id()
         );
+        self.0.reports.begin(wall_second()?);
         self.0.child = Some(child);
         self.0.standard = Some(standard);
         self.0.diagnostic = Some(diagnostic);
@@ -289,11 +299,18 @@ impl CollectorSession {
     }
 
     fn drain_outputs(&mut self) -> io::Result<()> {
+        let second = wall_second()?;
         if let Some(standard) = &mut self.0.standard {
             standard.drain()?;
+            for line in standard.take_lines() {
+                self.0.reports.standard(&line, second);
+            }
         }
         if let Some(diagnostic) = &mut self.0.diagnostic {
             diagnostic.drain()?;
+            for line in diagnostic.take_lines() {
+                self.0.reports.diagnostic(&line);
+            }
         }
         Ok(())
     }
@@ -362,4 +379,11 @@ pub(super) fn binary(executable: &Path) -> io::Result<PathBuf> {
     }
 
     Ok(Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/release/collector"))
+}
+
+fn wall_second() -> io::Result<u64> {
+    let since_epoch = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_err(io::Error::other)?;
+    Ok(since_epoch.as_secs())
 }

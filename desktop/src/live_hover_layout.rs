@@ -18,7 +18,7 @@ impl Row {
         match self {
             Self::Summary => "summary".into(),
             Self::StorageDevice(_, key) => key.clone(),
-            Self::Diagnostics => "diagnostics".into(),
+            Self::SelfPart(part) => part.key().into(),
             Self::OverviewStatus => "overview-status".into(),
             Self::BatteryState(_) => "battery-state".into(),
             Self::OverviewRankings(slots) => format!("overview-rankings-{}", slots[0]),

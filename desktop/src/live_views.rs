@@ -82,7 +82,7 @@ impl LiveDashboard {
         match &self.rows[index] {
             Row::Summary => self.summary(cx).into_any_element(),
             Row::StorageDevice(index, _) => self.resource_device(*index),
-            Row::Diagnostics => self.self_monitoring().into_any_element(),
+            Row::SelfPart(part) => self.self_part(*part, cx),
             Row::CPUTop(panel) => self.cpu_top(panel.as_ref(), cx).into_any_element(),
             Row::CPUActivity => self.cpu_activity().into_any_element(),
             Row::CPUHistory => self.cpu_history_panel(cx).into_any_element(),
@@ -151,6 +151,9 @@ impl LiveDashboard {
             .map_or(&Value::Null, |snapshot| &snapshot.selection);
         if self.request.route == "apps" {
             return crate::live_app_views::app_cards(self.current_app(), selection);
+        }
+        if self.request.route == "self" {
+            return crate::self_monitoring::cards(&self.self_reports);
         }
 
         let mut cards = summary::cards(&self.request.route, selection);
@@ -344,7 +347,7 @@ pub(crate) fn pressure(value: &Value) -> &'static str {
 }
 
 /// A section title as the prototype sets it, with its note on the right where it has one.
-fn heading(title: &str) -> gpui::Div {
+pub(crate) fn heading(title: &str) -> gpui::Div {
     let note = heading_note(title);
     let selector = title.to_owned();
     div()
@@ -379,6 +382,9 @@ fn heading_note(title: &str) -> &'static str {
     }
     if title.starts_with("Inside ") {
         return "Grouped by process name, not PID";
+    }
+    if title == "Where collector CPU goes" {
+        return "Ten-second report ending at the inspected time";
     }
     ""
 }
