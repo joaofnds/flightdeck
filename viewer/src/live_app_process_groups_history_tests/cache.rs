@@ -20,31 +20,46 @@ struct Cold {
 }
 
 #[test]
-fn warm_pressure_rebuilds_old_excluded_points_and_preserves_other_owners() {
-    // Fill all three owners, then make one new saved row exceed the exact former group envelope.
+fn the_open_pages_groups_displace_other_owners_under_pressure() {
+    // Goal: Apps keeps its process group cache when other pages' saved caches fill the budget.
+    // Method: fill all three owners, then answer with room for the others but not the groups.
+    let cold = cold();
+    let full = call(&cold, 2, BYTES_MAX).unwrap();
+    other_owners(&cold);
+    let others = without_groups(&cold);
+    assert!(cold.history.saved_residents.borrow().bytes() > others);
+
+    let pressed = call(&cold, 2, others).unwrap();
+
+    equal(&full, &pressed);
+    assert_eq!(without_groups(&cold), 0);
+    let mut resident = cold.history.saved_residents.borrow_mut();
+    let groups = resident
+        .take_groups()
+        .expect("the open page keeps its group cache");
+    assert!(groups.points().next().is_some());
+    assert!(groups.bytes() <= others);
+}
+
+#[test]
+fn warm_pressure_rebuilds_old_excluded_points() {
+    // Goal: a group cache that outgrows its budget answers exactly as the uncached fallback.
+    // Method: cache two saved points, then add a third with room for only the former cache.
     let mut cold = cold();
     let first = call(&cold, 2, BYTES_MAX).unwrap();
-    other_owners(&cold);
     let before = cold.history.saved_residents.borrow().bytes();
-    let others = without_groups(&cold);
-    assert!(before > others);
     advance(&mut cold);
 
     let limited = call(&cold, 3, before).unwrap();
-    let fallback = call(&cold, 3, others).unwrap();
+    let fallback = call(&cold, 3, 0).unwrap();
 
     equal(&limited, &fallback);
     assert_eq!(limited.points.len(), 3);
     assert_eq!(limited.points[0].readings[0].measures[5].known, 1000);
     assert_eq!(limited.points[2].readings[0].measures[2].known, 1440);
     assert_eq!(first.points[0].observation, limited.points[0].observation);
-    assert_eq!(without_groups(&cold), others);
     let mut resident = cold.history.saved_residents.borrow_mut();
-    let groups = resident.take_groups();
-    assert!(
-        groups.is_none(),
-        "No group root or key fits at zero available bytes"
-    );
+    assert!(resident.take_groups().is_none());
     assert!(cold.history.bytes + resident.bytes() <= BYTES_MAX);
 }
 

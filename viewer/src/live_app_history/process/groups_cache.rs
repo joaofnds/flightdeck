@@ -276,9 +276,10 @@ impl History {
 impl Lease<'_> {
     fn prepare(&mut self, target: &Target<'_>, available: usize) {
         let previous = self.resident.take_groups();
-        self.available = available
-            .min(BYTES_MAX - self.history.bytes)
-            .saturating_sub(self.resident.bytes());
+        // The open page's groups may use the whole budget, since leaving them no room
+        // replays every saved minute twice on each reading. Other pages' caches give way
+        // when this answer commits.
+        self.available = available.min(BYTES_MAX - self.history.bytes);
         self.groups = previous.filter(|cache| cache.matches(target));
         if self.groups.is_none() {
             self.groups = Some(Cache::new(target));
@@ -311,6 +312,11 @@ impl Drop for Lease<'_> {
     fn drop(&mut self) {
         if self.committed {
             self.resident.install_groups(self.groups.take());
+            if self.resident.bytes() > self.available {
+                let groups = self.resident.take_groups();
+                self.resident = ResidentCache::new();
+                self.resident.install_groups(groups);
+            }
         }
 
         assert!(self.history.bytes + self.resident.bytes() <= BYTES_MAX);
