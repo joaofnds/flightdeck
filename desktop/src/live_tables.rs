@@ -1,7 +1,7 @@
-use gpui::{AnyElement, Context, IntoElement, SharedString, div, prelude::*, px, rgb};
+use gpui::{AnyElement, Context, IntoElement, div, prelude::*, px, rgb};
 use serde_json::Value;
 
-use crate::charts::{GRID, MUTED};
+use crate::charts::MUTED;
 use crate::dashboard::control;
 use crate::live_dashboard::{LiveDashboard, Picker, toggle};
 use crate::live_views::text;
@@ -14,112 +14,6 @@ const _: () = {
 };
 
 impl LiveDashboard {
-    pub fn table_heading(&self, name: &str, cx: &mut Context<Self>) -> impl IntoElement {
-        let page = self.table_page(name);
-        let mut title = div()
-            .h(px(30.0))
-            .flex()
-            .justify_between()
-            .items_center()
-            .child(format!("{name} · {} recorded rows", text(&page["total"])));
-        if self.request.route == "raw" {
-            title = title.child(self.raw_paging(page, cx));
-        }
-        let mut heading = div()
-            .debug_selector(|| format!("raw-heading:{name}"))
-            .child(title);
-        if let Some(columns) = page["columns"].as_array() {
-            heading = heading.child(
-                div()
-                    .h(px(26.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(10.0))
-                    .px(px(8.0))
-                    .bg(rgb(0x1a_22_2f))
-                    .text_size(px(11.0))
-                    .text_color(rgb(MUTED))
-                    .children(
-                        columns
-                            .iter()
-                            .take(4)
-                            .map(|column| div().flex_1().min_w_0().truncate().child(text(column))),
-                    ),
-            );
-        }
-        heading.child(
-            div()
-                .py(px(4.0))
-                .text_size(px(10.0))
-                .text_color(rgb(MUTED))
-                .child("Select a row for all recorded columns. NULL means unavailable."),
-        )
-    }
-
-    pub fn table_row(&self, name: &str, index: usize, cx: &mut Context<Self>) -> AnyElement {
-        let page = self.table_page(name);
-        let Some(row) = page["rows"].get(index).and_then(Value::as_array) else {
-            return unavailable("Recorded row is unavailable");
-        };
-        let expanded = self
-            .reading_expanded()
-            .is_some_and(|(table, row)| table == name && *row == index);
-        let table = name.to_owned();
-        let mut content = div()
-            .id(SharedString::from(format!("raw-{name}-{index}")))
-            .accessibility_id(format!("flightdeck.recorded-row.{name}.{index}"))
-            .role(gpui::Role::Button)
-            .aria_label(format!(
-                "{name}, row {}; {}",
-                index + 1,
-                row.iter()
-                    .take(COLUMNS_MAX)
-                    .map(raw_text)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ))
-            .aria_expanded(expanded)
-            .border_b_1()
-            .border_color(rgb(GRID))
-            .cursor_pointer()
-            .focusable()
-            .tab_stop(true)
-            .focus(|style| style.bg(rgb(0x32_46_61)))
-            .hover(|style| style.bg(rgb(0x20_29_36)))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.expanded = if expanded {
-                    None
-                } else {
-                    Some((table.clone(), index))
-                };
-                this.rebuild();
-                cx.notify();
-            }))
-            .child(
-                div()
-                    .h(px(26.0))
-                    .px(px(8.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(10.0))
-                    .text_size(px(11.0))
-                    .children(row.iter().take(4).map(|value| {
-                        div()
-                            .debug_selector(|| {
-                                format!("raw-value:{name}:{index}:{}", raw_text(value))
-                            })
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .child(raw_text(value))
-                    })),
-            );
-        if expanded {
-            content = content.child(table_columns(page, row));
-        }
-        content.into_any_element()
-    }
-
     pub fn app_paging(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let (apps, detail) = self.app_pages();
         div()
@@ -297,54 +191,6 @@ impl LiveDashboard {
         }
     }
 
-    fn table_page(&self, name: &str) -> &Value {
-        self.reading_snapshot()
-            .and_then(|snapshot| snapshot.pages.get(name))
-            .map_or(&Value::Null, |page| page)
-    }
-
-    fn raw_paging(&self, page: &Value, cx: &mut Context<Self>) -> impl IntoElement {
-        if page.is_null() {
-            return div().child("Recorded page unavailable");
-        }
-
-        let offset = self.reading_request().offset;
-        let total = page["total"].as_u64();
-        let mut controls = div()
-            .flex()
-            .gap(px(6.0))
-            .items_center()
-            .text_size(px(11.0))
-            .child(format!("Offset {offset}"));
-        if offset >= PAGE_ROWS {
-            controls = controls.child(control("Previous 512").on_click(cx.listener(
-                move |this, _, _, cx| {
-                    this.request.offset = offset.saturating_sub(PAGE_ROWS);
-                    this.expanded = None;
-                    this.submit();
-                    this.rebuild();
-                    cx.notify();
-                },
-            )));
-        }
-        if total.is_some_and(|total| offset.saturating_add(PAGE_ROWS) < total) {
-            controls = controls.child(control("Next 512").on_click(cx.listener(
-                move |this, _, _, cx| {
-                    if let Some(offset) = offset.checked_add(PAGE_ROWS) {
-                        this.request.offset = offset;
-                        this.expanded = None;
-                        this.submit();
-                        this.rebuild();
-                        cx.notify();
-                    } else {
-                        this.error = Some("Recorded page offset overflow".into());
-                    }
-                },
-            )));
-        }
-        controls
-    }
-
     fn app_page_controls(
         &self,
         page: Option<&Value>,
@@ -399,41 +245,6 @@ impl LiveDashboard {
         self.submit();
         self.rebuild();
         cx.notify();
-    }
-}
-
-fn table_columns(page: &Value, row: &[Value]) -> impl IntoElement {
-    let mut columns = div().px(px(8.0)).py(px(6.0)).bg(rgb(0x10_15_20));
-    if let Some(names) = page["columns"].as_array() {
-        for (index, name) in names.iter().take(COLUMNS_MAX).enumerate() {
-            let value = row
-                .get(index)
-                .map_or_else(|| "Missing column".to_owned(), raw_text);
-            columns = columns.child(
-                div()
-                    .py(px(3.0))
-                    .flex()
-                    .gap(px(12.0))
-                    .text_size(px(11.0))
-                    .child(
-                        div()
-                            .w(px(220.0))
-                            .flex_shrink_0()
-                            .text_color(rgb(MUTED))
-                            .child(text(name)),
-                    )
-                    .child(div().flex_1().min_w_0().child(value)),
-            );
-        }
-    }
-    columns
-}
-
-fn raw_text(value: &Value) -> String {
-    match value {
-        Value::Null => "NULL".to_owned(),
-        Value::String(value) => value.clone(),
-        value => value.to_string(),
     }
 }
 

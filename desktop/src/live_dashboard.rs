@@ -8,7 +8,7 @@ use gpui::{
     Context, ListAlignment, ListOffset, ListState, Render, Window, div, list, prelude::*, px, rgb,
 };
 
-pub const ROUTES: [(&str, &str); 12] = [
+pub const ROUTES: [(&str, &str); 11] = [
     ("overview", "Overview"),
     ("cpu", "CPU & Processes"),
     ("apps", "Apps"),
@@ -20,11 +20,9 @@ pub const ROUTES: [(&str, &str); 12] = [
     ("battery", "Battery"),
     ("computer", "Computer"),
     ("self", "Self-monitoring"),
-    ("raw", "Recorded readings"),
 ];
 
-/// The sidebar's groups, in the approved prototype's order. Recorded readings open from the
-/// time menu, since the prototype's sidebar has no place for them.
+/// The sidebar's groups, in the approved prototype's order.
 pub const NAVIGATION: [&[&str]; 3] = [
     &["overview", "cpu"],
     &[
@@ -144,8 +142,6 @@ pub enum Row {
     Heading(String),
     Disclosure(crate::live_sections::Section),
     Hardware,
-    TableHeading(String),
-    Table(String, usize),
     App(usize),
     Process(usize),
     Executable(usize),
@@ -645,7 +641,8 @@ mod selection_tests {
             "flightdeck-missing-selection-{}",
             std::process::id()
         ));
-        let mut dashboard = LiveDashboard::new(Worker::start(root).unwrap(), "raw".into(), None);
+        let mut dashboard =
+            LiveDashboard::new(Worker::start(root).unwrap(), "overview".into(), None);
         dashboard.snapshot = Some(Box::new(Snapshot {
             generation: dashboard.generation,
             catalog: json!({"first_second":1000,"last_second":1002}),
@@ -685,8 +682,6 @@ mod selection_tests {
 
         assert!(dashboard.snapshot.is_none());
         assert!(dashboard.expanded.is_none());
-        // Only the page's footer, which shows no reading, remains.
-        assert!(dashboard.rows.iter().all(|row| matches!(row, Row::Footer)));
         assert!(
             crate::native_workflows::selected_copy(
                 dashboard.snapshot.as_deref(),
@@ -712,8 +707,6 @@ mod selection_tests {
         }));
 
         assert!(dashboard.snapshot.is_none());
-        // Only the page's footer, which shows no reading, remains.
-        assert!(dashboard.rows.iter().all(|row| matches!(row, Row::Footer)));
         assert_eq!(dashboard.error.as_deref(), Some("Recording read failed"));
         assert_eq!(dashboard.status(), "Reading unavailable");
     }

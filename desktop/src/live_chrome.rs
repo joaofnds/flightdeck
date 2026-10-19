@@ -29,7 +29,6 @@ pub fn route_subtitle(route: &str) -> &'static str {
         "battery" => "Charge, power flow, health and cycle count.",
         "computer" => "Hardware and system information for this Mac.",
         "self" => "Recording integrity, collection cost and Flightdeck pipeline diagnostics.",
-        "raw" => "Every recorded table, page by page.",
         _ => "",
     }
 }

@@ -46,7 +46,7 @@ const WAIT_STEPS_MAX: u32 = 1200;
 const WAIT_INTERVAL: Duration = Duration::from_millis(250);
 const _: () = {
     assert!(WAIT_STEPS_MAX == 300 * 4);
-    assert!(crate::live_dashboard::ROUTES.len() == 12);
+    assert!(crate::live_dashboard::ROUTES.len() == 11);
 };
 
 fn probe_routes(probe: &mut Probe) -> Result<Value, String> {
@@ -164,7 +164,6 @@ fn probe_validate(snapshot: &Snapshot, route: &str) -> Result<(), String> {
     }
     let tables: &[&str] = match route {
         "overview" => &["fans"],
-        "raw" => &["processes"],
         _ => &[],
     };
     if snapshot.pages.len() != tables.len() {
@@ -366,15 +365,6 @@ fn probe_resume(probe: &mut Probe, paused: &Snapshot) -> Result<Box<Snapshot>, S
 
 fn probe_pagination(probe: &mut Probe) -> Result<Value, String> {
     let mut offsets = BTreeMap::new();
-    let mut request = probe_request("raw");
-    request.offset = u64::MAX - u64::MAX % 512;
-    let snapshot = probe_read(probe, &request)?;
-    probe_validate(&snapshot, "raw")?;
-    let offset = &snapshot.pages["processes"]["offset"];
-    if offset.as_u64() != Some(0) {
-        return Err("Stale raw process offset did not reset to zero".into());
-    }
-    offsets.insert("raw".to_owned(), offset.clone());
     offsets.insert("cpu".to_owned(), json!(probe_pagination_cpu(probe)?));
     let mut request = probe_request("apps");
     request.apps_offset = u32::MAX - u32::MAX % 512;
@@ -430,7 +420,7 @@ fn probe_pagination_cpu(probe: &mut Probe) -> Result<u32, String> {
 
 fn probe_overlapping(probe: &mut Probe) -> Result<Box<Snapshot>, String> {
     let mut latest_generation = None;
-    for route in ["apps", "cpu", "raw", "overview"] {
+    for route in ["apps", "cpu", "overview"] {
         latest_generation = Some(probe.worker.request(probe_request(route))?);
     }
     let latest_generation = latest_generation.ok_or("No overlapping requests were submitted")?;

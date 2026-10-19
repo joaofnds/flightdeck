@@ -53,39 +53,6 @@ fn reads_a_partial_cpu_page_from_real_saved_counters_at_the_exact_same_second_id
 }
 
 #[test]
-fn raw_keeps_cpu_columns_and_counters_at_the_exact_same_second_identity() {
-    // Read real saved counters through Raw after selecting the later same-second publication.
-    let recording = SealedRecording::with_cpu_history();
-    let mut request = SealedRecording::request();
-    request.route = "raw".into();
-    request.table = "cpus".into();
-    request.second = Some(1001);
-    request.identity = Some(json!({"run":"00000000000000010000000000000002",
-        "boot":"00000000000000030000000000000004","publication":3}));
-
-    let snapshot = recording.read(request).unwrap();
-
-    let page = &snapshot.pages["cpus"];
-    assert_eq!(page["observation"], snapshot.selection["selected"]);
-    assert_eq!(page["observation"]["publication"], 3);
-    assert_eq!(
-        page["columns"],
-        json!([
-            "publication",
-            "cpu",
-            "user_ticks",
-            "system_ticks",
-            "nice_ticks",
-            "idle_ticks"
-        ])
-    );
-    assert_eq!(page["total"], 35);
-    assert_eq!(page["offset"], 0);
-    assert_eq!(page["rows"].as_array().unwrap().len(), 35);
-    assert_eq!(page["rows"][32], json!(["3", "32", "96", "0", "0", "204"]));
-}
-
-#[test]
 fn resets_a_cpu_page_beyond_a_smaller_domain_without_changing_the_observation() {
     // Goal: an old page offset cannot make a new recording appear unavailable.
     // Method: request CPU992 from an encoded35-CPU recording at its selected publication.

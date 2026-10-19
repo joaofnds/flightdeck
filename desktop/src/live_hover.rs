@@ -123,7 +123,7 @@ impl Preview {
             }),
             complete: if matches!(
                 request.route.as_str(),
-                "overview" | "cpu" | "apps" | "raw" | "storage" | "memory" | "energy"
+                "overview" | "cpu" | "apps" | "storage" | "memory" | "energy"
             ) {
                 target.matches(&snapshot.selection["selected"])
             } else {

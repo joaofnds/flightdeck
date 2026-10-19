@@ -27,7 +27,7 @@ impl LiveDashboard {
 
         let compact = matches!(
             &self.rows[index],
-            Row::Table(_, _) | Row::App(_) | Row::Process(_) | Row::Executable(_)
+            Row::App(_) | Row::Process(_) | Row::Executable(_)
         );
         let content = self.row_content(index, cx);
         let (padding, padding_bottom) = Self::row_padding(&self.rows[index]);
@@ -165,8 +165,6 @@ impl LiveDashboard {
             Row::Heading(title) => heading(title).into_any_element(),
             Row::Disclosure(section) => self.disclosure(*section, cx).into_any_element(),
             Row::Hardware => self.live_hardware(cx).into_any_element(),
-            Row::TableHeading(name) => self.table_heading(name, cx).into_any_element(),
-            Row::Table(name, index) => self.table_row(name, *index, cx),
             Row::App(index) => self.app_row(*index, cx),
             Row::Process(index) => self.process_row(*index, cx),
             Row::Executable(index) => self.executable_row(*index, cx),

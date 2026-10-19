@@ -140,7 +140,7 @@ impl RetirementHarness {
             cx.open_window(WindowOptions::default(), |_, cx| {
                 super::create_dashboard(
                     Worker::start(missing_recording()).unwrap(),
-                    "raw".into(),
+                    "overview".into(),
                     None,
                     cx,
                 )
@@ -476,7 +476,7 @@ fn dashboard(route: &str) -> LiveDashboard {
 #[test]
 fn opening_an_unreadable_recording_preserves_the_current_selection() {
     // Worker startup can succeed before its real query fails; keep the accepted reading then.
-    let mut dashboard = dashboard("raw");
+    let mut dashboard = dashboard("overview");
     dashboard.snapshot = Some(snapshot());
     dashboard.request.second = Some(1000);
     dashboard.request.identity = Some(json!({"publication":7}));
@@ -541,7 +541,7 @@ fn opening_a_missing_recording_from_computer_keeps_the_previous_recording() {
 #[test]
 fn canceling_a_pending_switch_cannot_publish_its_result_into_the_old_recording() {
     // A canceled candidate has a separate mailbox; a later step cannot accept its update.
-    let mut dashboard = dashboard("raw");
+    let mut dashboard = dashboard("overview");
     dashboard.snapshot = Some(snapshot());
     dashboard.request.second = Some(1000);
     dashboard.begin_recording(missing_recording());
@@ -558,7 +558,7 @@ fn canceling_a_pending_switch_cannot_publish_its_result_into_the_old_recording()
 fn opening_a_recording_with_an_unpresentable_result_preserves_the_current_recording() {
     // Goal: preparation failure cannot replace a readable recording or its selected identity.
     // Method: deliver a candidate result with invalid page metadata through its update port.
-    let mut dashboard = dashboard("raw");
+    let mut dashboard = dashboard("overview");
     dashboard.snapshot = Some(snapshot());
     dashboard.request.second = Some(1000);
     let previous_request = dashboard.request.clone();
@@ -659,7 +659,7 @@ fn overview_defers_artwork_until_a_reading_is_available() {
             .iter()
             .any(|row| matches!(row, Row::Hardware))
     );
-    dashboard.request.route = "raw".into();
+    dashboard.request.route = "cpu".into();
     dashboard.rebuild();
     assert!(
         !dashboard
@@ -675,7 +675,7 @@ fn copying_an_expanded_reading_preserves_exact_counters_nulls_and_observation() 
     let snapshot = snapshot();
     let output = selected_copy(
         Some(&snapshot),
-        &fresh_request("raw"),
+        &fresh_request("overview"),
         Some(&("ticks".into(), 0)),
     )
     .unwrap();

@@ -560,16 +560,10 @@ fn reader_payload(
     }
     let tables: &[&str] = match request.route.as_str() {
         "overview" => &["fans"],
-        "raw" => &[request.table.as_str()],
         _ => &[],
     };
     for table in tables {
-        let offset = if request.route == "raw" {
-            request.offset
-        } else {
-            0
-        };
-        let page = reader_page(session, table, offset)?;
+        let page = reader_page(session, table, 0)?;
         identity_validate(&page["observation"], &snapshot.selection["selected"])?;
         snapshot.pages.insert((*table).to_owned(), page);
     }
@@ -1010,7 +1004,6 @@ fn request_validate(request: &Request) -> Result<(), String> {
             | "battery"
             | "computer"
             | "self"
-            | "raw"
     ) {
         return Err("Unknown live route".to_owned());
     }

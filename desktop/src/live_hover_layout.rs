@@ -63,8 +63,6 @@ impl Row {
             }
             Self::Disclosure(section) => format!("section-{}", section.id()),
             Self::Hardware => "hardware".into(),
-            Self::TableHeading(name) => format!("table-heading-{name}"),
-            Self::Table(name, index) => format!("table-{name}-{index}"),
             Self::App(index) => format!("app-{index}"),
             Self::Process(index) => format!("process-{index}"),
             Self::Executable(index) => format!("executable-{index}"),
@@ -100,7 +98,7 @@ impl Row {
     fn measured_height(&self, heights: &BTreeMap<String, Pixels>) -> Option<Pixels> {
         match self {
             Self::Spacer(height) => Some(*height),
-            Self::Table(_, _) | Self::App(_) | Self::Process(_) | Self::Executable(_) => {
+            Self::App(_) | Self::Process(_) | Self::Executable(_) => {
                 heights.get(&self.layout_key()).copied().or(Some(px(26.0)))
             }
             _ => heights.get(&self.layout_key()).copied(),

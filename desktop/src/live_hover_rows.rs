@@ -85,7 +85,6 @@ impl LiveDashboard {
         if self.request.route == "overview" {
             self.reading_rows_overview(&mut rows);
         }
-        self.reading_rows_tables(&mut rows);
         assert!(rows.len() <= 4096);
 
         rows
@@ -398,21 +397,6 @@ impl LiveDashboard {
             .find(|panel| panel.id == crate::live_projection::CORRELATION_ID)
             .cloned();
         rows.push(Row::OverviewAnalysis(correlation));
-    }
-
-    fn reading_rows_tables(&self, rows: &mut Vec<Row>) {
-        if self.request.route != "raw" {
-            return;
-        }
-
-        if let Some(snapshot) = self.reading_snapshot() {
-            for (name, page) in &snapshot.pages {
-                rows.push(Row::TableHeading(name.clone()));
-                for index in 0..array_len(Some(page), "rows") {
-                    rows.push(Row::Table(name.clone(), index));
-                }
-            }
-        }
     }
 
     fn reading_rows_apps(&self) -> Vec<Row> {
