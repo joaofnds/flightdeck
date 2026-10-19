@@ -1,5 +1,5 @@
-//! Readings the collector does not record: load average, open files, thermal pressure and
-//! the GPU's unified memory. The app samples them once a second while it runs and keeps the
+//! Readings the collector does not record: load average, open files, thermal pressure, the
+//! GPU's unified memory and each App's GPU time. The app samples them once a second while it runs and keeps the
 //! last 16 minutes, so a second before the app started, or one it missed, has no reading.
 
 use std::collections::VecDeque;
@@ -21,6 +21,7 @@ pub struct SystemSample {
     pub open_files: Option<OpenFiles>,
     pub thermal_pressure: Option<u64>,
     pub gpu_memory: Option<GpuMemoryReading>,
+    pub gpu_apps: Option<crate::live_gpu_apps::GpuAppSample>,
 }
 
 /// The file entries open across the system and the most macOS allows.
@@ -36,6 +37,7 @@ pub struct SystemSamples {
     boot_second: Option<u64>,
     thermal: Option<ThermalPressure>,
     gpu: Option<GpuMemory>,
+    gpu_apps: Option<crate::live_gpu_apps::GpuAppSampler>,
     error_last: Option<String>,
 }
 
@@ -62,8 +64,16 @@ impl SystemSamples {
                 None
             }
         };
+        let gpu_apps = match crate::live_gpu_apps::GpuAppSampler::new() {
+            Ok(sampler) => Some(sampler),
+            Err(error) => {
+                eprintln!("flightdeck GPU time by App unreadable: {error}");
+                None
+            }
+        };
         let mut samples = Self::with_boot(boot_second, thermal);
         samples.gpu = gpu;
+        samples.gpu_apps = gpu_apps;
         samples
     }
 
@@ -80,6 +90,7 @@ impl SystemSamples {
             boot_second,
             thermal,
             gpu: None,
+            gpu_apps: None,
             error_last: None,
         }
     }
@@ -93,7 +104,11 @@ impl SystemSamples {
         {
             return;
         }
-        let (sample, errors) = sample_read(second, self.thermal.as_ref(), self.gpu.as_ref());
+        let (mut sample, mut errors) =
+            sample_read(second, self.thermal.as_ref(), self.gpu.as_ref());
+        if let Some(sampler) = &mut self.gpu_apps {
+            sample.gpu_apps = sample_read_keep(sampler.sample(), &mut errors).flatten();
+        }
         let error = (!errors.is_empty()).then(|| errors.join("; "));
         if error != self.error_last {
             if let Some(error) = &error {
@@ -135,6 +150,18 @@ impl SystemSamples {
                 self.annotate_point(summary);
             }
         }
+        crate::live_gpu_apps::annotate(selection, |second| {
+            self.sample_at(second)
+                .and_then(|sample| sample.gpu_apps.as_ref())
+        });
+    }
+
+    fn sample_at(&self, second: u64) -> Option<&SystemSample> {
+        let index = self
+            .samples
+            .binary_search_by_key(&second, |sample| sample.second)
+            .ok()?;
+        self.samples.get(index)
     }
 
     fn annotate_point(&self, point: &mut Value) {
@@ -146,13 +173,9 @@ impl SystemSamples {
                 point["uptime_seconds"] = json!(second - boot);
             }
         }
-        let Ok(index) = self
-            .samples
-            .binary_search_by_key(&second, |sample| sample.second)
-        else {
+        let Some(sample) = self.sample_at(second) else {
             return;
         };
-        let sample = &self.samples[index];
         if let Some(load) = sample.load_average {
             point["load_average"] = json!(load);
         }
@@ -237,6 +260,7 @@ fn sample_read(
         open_files,
         thermal_pressure,
         gpu_memory,
+        gpu_apps: None,
     };
     (sample, errors)
 }
@@ -388,6 +412,7 @@ mod tests {
                 in_use_bytes: Some(1 << 30),
                 allocated_bytes: None,
             }),
+            gpu_apps: None,
         }
     }
 

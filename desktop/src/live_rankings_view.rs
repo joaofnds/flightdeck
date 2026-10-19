@@ -2,7 +2,7 @@ use gpui::{AnyElement, Context, IntoElement, SharedString, div, prelude::*, px, 
 use num_traits::ToPrimitive;
 
 use super::{Entry, Metric, Ranking, Rankings, TopApps};
-use crate::charts::{BLUE, GREEN, GRID, MUTED, ORANGE, PANEL, TEXT, YELLOW};
+use crate::charts::{BLUE, GREEN, GRID, MUTED, ORANGE, PANEL, PURPLE, TEXT, YELLOW};
 use crate::dashboard::control;
 use crate::live_chart_view::ChartHelp;
 use crate::live_dashboard::LiveDashboard;
@@ -34,11 +34,17 @@ const OVERVIEW_SLOTS: [OverviewSlot; 6] = [
         "Per-app network traffic is not recorded by this collector, so no app is ranked.",
     ),
     OverviewSlot::Ranked(3),
-    OverviewSlot::Uncaptured(
-        "GPU",
-        "Per-app GPU time is not recorded by this collector, so no app is ranked.",
-    ),
+    OverviewSlot::Ranked(4),
     OverviewSlot::Ranked(2),
+];
+
+/// The measures a ranking card shows, by index: the recording's four, then GPU time.
+const RANKED_METRICS: [Metric; 5] = [
+    Metric::Cpu,
+    Metric::Resident,
+    Metric::Power,
+    Metric::Disk,
+    Metric::Gpu,
 ];
 
 /// The number of cards in the Overview's top-app grid.
@@ -88,8 +94,11 @@ impl LiveDashboard {
         heading: RankingHeading,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let metric = [Metric::Cpu, Metric::Resident, Metric::Power, Metric::Disk][index];
+        let metric = RANKED_METRICS[index];
         let card = ranking_card(metric_name(metric));
+        if matches!(metric, Metric::Gpu) {
+            return self.gpu_ranking(card, heading, cx);
+        }
 
         let (rankings, target) = match self.ranking_reading() {
             Ok(reading) => reading,
@@ -129,6 +138,39 @@ impl LiveDashboard {
         .child(Self::app_ranking_entries(ranking, &target, cx))
         .when(incomplete, |card| card.child(notice(&coverage(ranking))))
         .into_any_element()
+    }
+
+    /// The GPU ranking of the selected second, from the GPU time the app sampled itself.
+    fn gpu_ranking(
+        &self,
+        card: gpui::Div,
+        heading: RankingHeading,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let card = card.child(ranking_title(Metric::Gpu, heading));
+        let Some(snapshot) = self.reading_snapshot() else {
+            return card
+                .child(notice(
+                    "GPU time by App unavailable while reading the selection",
+                ))
+                .into_any_element();
+        };
+        let selection = &snapshot.selection;
+        let reading = crate::live_gpu_apps::ranking(selection).and_then(|ranking| {
+            let second = selection["second"]
+                .as_u64()
+                .ok_or("GPU App observation time unavailable")?;
+            Ok((ranking, Target::exact(second, &selection["selected"])?))
+        });
+        match reading {
+            Ok((ranking, target)) => card
+                .id(SharedString::from("ranking-card-GPU time"))
+                .role(gpui::Role::Group)
+                .aria_label(format!("GPU top apps at Unix second {}", target.second))
+                .child(Self::app_ranking_entries(&ranking, &target, cx))
+                .into_any_element(),
+            Err(error) => card.child(notice(&error)).into_any_element(),
+        }
     }
 
     fn ranking_reading(&self) -> Result<(&TopApps, Target), String> {
@@ -307,6 +349,7 @@ fn metric_unit(metric: Metric) -> &'static str {
         Metric::Resident => "GiB",
         Metric::Power => "W",
         Metric::Disk => "MB/s",
+        Metric::Gpu => "% of interval",
     }
 }
 
@@ -371,6 +414,7 @@ fn metric_name(metric: Metric) -> &'static str {
         Metric::Resident => "Memory",
         Metric::Power => "Energy",
         Metric::Disk => "Disk",
+        Metric::Gpu => "GPU",
     }
 }
 
@@ -473,6 +517,7 @@ fn metric_color(metric: Metric) -> u32 {
         Metric::Resident => GREEN,
         Metric::Power => ORANGE,
         Metric::Disk => YELLOW,
+        Metric::Gpu => PURPLE,
     }
 }
 
@@ -494,6 +539,10 @@ fn metric_help(metric: Metric) -> &'static str {
             "Process-attributed read plus written bytes over the selected observation interval. \
             Only jointly measured members contribute; known subtotals exclude unavailable members. \
             Separate from physical-device driver throughput."
+        }
+        Metric::Gpu => {
+            "GPU time each App's processes took over the interval, from the GPU driver's own \
+            count, as a share of the interval. The app samples it each second while it runs."
         }
     }
 }
@@ -517,7 +566,7 @@ fn coverage(ranking: &Ranking) -> String {
 
 fn value(metric: Metric, entry: &Entry) -> String {
     let value = match metric {
-        Metric::Cpu => crate::live_app_views::rate(entry.rate, "%"),
+        Metric::Cpu | Metric::Gpu => crate::live_app_views::rate(entry.rate, "%"),
         Metric::Resident => crate::live_app_views::memory(Some(entry.amount)),
         Metric::Power => match entry.rate.and_then(|value| value.to_f32()) {
             Some(value) => crate::live_projection::quantity_text(value, "W"),

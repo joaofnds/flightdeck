@@ -91,6 +91,11 @@ pub fn panels(
 
         result.push(Rc::new(panel));
     }
+    if route == "gpu" {
+        if let Some(panel) = gpu_apps_panel(selection, points, &coordinates)? {
+            result.push(Rc::new(panel));
+        }
+    }
     assert!(result.len() <= limit);
     Ok(result)
 }
@@ -448,6 +453,86 @@ fn panel(
     })
 }
 
+const GPU_APPS_HELP: &str = "GPU time each App's processes took per interval, from the GPU \
+    driver's own count, as a share of the interval. The eight Apps with the most GPU time over \
+    the window lead, and Other sums the rest. The dashed GPU busy line is the GPU's own active \
+    time, which work from several Apps at once can sit under. The app samples GPU time each \
+    second while it runs, so time before it started has no reading.";
+
+/// The stacked chart of GPU time by App: Other and each leader the app sampled, with the
+/// GPU's own busy share dashed over them. A selection without sampled GPU time has none.
+fn gpu_apps_panel(
+    selection: &Value,
+    points: &[Value],
+    coordinates: &Coordinates,
+) -> Result<Option<Panel>, String> {
+    let Some(cohort) = selection["gpu_app_cohort"].as_array() else {
+        return Ok(None);
+    };
+    if cohort.len() + 1 > APP_COLORS.len() {
+        return Err("GPU App cohort exceeds eight leaders".into());
+    }
+    let mut names = Vec::with_capacity(cohort.len() + 1);
+    names.push("Other");
+    for name in cohort {
+        names.push(name.as_str().ok_or("GPU App name unavailable")?);
+    }
+    let mut lines = Vec::with_capacity(names.len() + 1);
+    for (channel, name) in names.into_iter().enumerate() {
+        let mut values = Vec::with_capacity(points.len());
+        for point in points {
+            values.push(number(&point["gpu_app_percent"][channel])?);
+        }
+        lines.push(Line {
+            name: name.to_owned(),
+            color: APP_COLORS[channel].to_owned(),
+            values,
+            stack: None,
+            negative: Some(false),
+            dashed: Some(false),
+            axis: None,
+            unit: Some("%".into()),
+            fill: None,
+        });
+    }
+    let mut busy = Vec::with_capacity(points.len());
+    for point in points {
+        busy.push(number(&point["gpu_active_percent"])?);
+    }
+    lines.push(Line {
+        name: "GPU busy".into(),
+        color: "#d8d9da".into(),
+        values: busy,
+        stack: Some(false),
+        negative: Some(false),
+        dashed: Some(true),
+        axis: None,
+        unit: Some("%".into()),
+        fill: Some(0.0),
+    });
+    Ok(Some(Panel {
+        id: GPU_APPS_ID.to_owned(),
+        title: "GPU time by app".to_owned(),
+        unit: "%".to_owned(),
+        kind: "line".to_owned(),
+        lines,
+        minimum: Some(0.0),
+        maximum: None,
+        stack: Some(true),
+        fill: Some(1.0),
+        caption: None,
+        help: Some(GPU_APPS_HELP.to_owned()),
+        source: Some("Sampled by the app".into()),
+        quantities: None,
+        states: None,
+        table_headings: None,
+        table_rows: None,
+        positions: Some(coordinates.positions.clone()),
+        segments: Some(coordinates.segments.clone()),
+        selected_index: coordinates.selected_index,
+    }))
+}
+
 fn panel_reading_value(reading: &Reading, point: &Value) -> Result<Option<f32>, String> {
     if reading.key == "power_remainder_watts" {
         let system = number(&point["power_watts"])?;
@@ -661,6 +746,15 @@ fn gpu_power() -> Specification {
         vec![reading("gpu_watts", "GPU", "#b877d9", 1.0)],
     )
 }
+
+/// The colors of an App chart's lines, Other first and then each of its eight leaders.
+pub const APP_COLORS: [&str; 9] = [
+    "#737b8c", "#5794f2", "#ff9830", "#b877d9", "#73bf69", "#f2495c", "#f2cc0c", "#56b9c3",
+    "#f28eb9",
+];
+
+/// GPU time by App, from the shares the app sampled each second.
+pub const GPU_APPS_ID: &str = "live-gpu-apps";
 
 /// The unified memory the GPU driver reported in use and allocated, sampled by the app.
 pub const GPU_MEMORY_ID: &str = "live-gpu-memory";

@@ -13,10 +13,7 @@ pub const TITLE: &str = "Resident memory by App";
 const POINTS_MAX: usize = 4096;
 const COHORT_MAX: usize = 8;
 const NS: u64 = 1_000_000_000;
-pub(crate) const COLORS: [&str; 9] = [
-    "#737b8c", "#5794f2", "#ff9830", "#b877d9", "#73bf69", "#f2495c", "#f2cc0c", "#56b9c3",
-    "#f28eb9",
-];
+pub(crate) const COLORS: [&str; 9] = crate::live_projection::APP_COLORS;
 const _: () = {
     assert!(COLORS.len() == COHORT_MAX + 1);
     assert!(POINTS_MAX == crate::data::LIVE_SAMPLE_LIMIT);

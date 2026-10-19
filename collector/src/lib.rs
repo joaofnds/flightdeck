@@ -5,6 +5,7 @@ pub mod coalitions;
 pub mod collector;
 pub mod cost;
 pub mod disks;
+pub mod gpu_clients;
 pub mod gpu_memory;
 pub mod interfaces;
 pub mod ioreport;

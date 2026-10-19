@@ -51,6 +51,8 @@ pub enum Metric {
     Resident,
     Power,
     Disk,
+    /// GPU time, which the app samples itself rather than reading from the recording.
+    Gpu,
 }
 
 #[derive(Debug)]
@@ -310,6 +312,7 @@ impl Metric {
             Self::Resident => "Resident memory",
             Self::Power => "Process power",
             Self::Disk => "Disk I/O",
+            Self::Gpu => "GPU time",
         }
     }
 
@@ -319,6 +322,7 @@ impl Metric {
             Self::Resident => "resident_bytes",
             Self::Power => "energy_nj",
             Self::Disk => "disk_io_bytes",
+            Self::Gpu => "gpu_ns",
         }
     }
 
@@ -327,7 +331,8 @@ impl Metric {
             Self::Cpu => "cpu_percent_one_core",
             Self::Power => "energy_watts",
             Self::Disk => "disk_io_bps",
-            Self::Resident => return Ok(None),
+            // Resident memory has no rate, and the recording's pages carry no GPU time.
+            Self::Resident | Self::Gpu => return Ok(None),
         };
         if source[key].is_null() {
             return Ok(None);

@@ -177,7 +177,12 @@ fn overview_top_apps_are_a_three_by_two_grid_in_the_prototype_order(cx: &mut Tes
             .driver
             .reading_is_visible("ranking-uncaptured:Network")
     );
-    assert!(harness.driver.reading_is_visible("ranking-uncaptured:GPU"));
+    // The fixture's selection has no GPU time the app sampled, and the GPU card says so.
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("GPU time by App is sampled only while the app runs")
+    );
     assert!(
         harness
             .driver

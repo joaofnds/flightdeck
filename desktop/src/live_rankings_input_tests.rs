@@ -358,7 +358,12 @@ fn overview_rankings_show_current_measurements_and_explicit_source_limits(cx: &m
             .driver
             .reading_is_visible("ranking-uncaptured:Network")
     );
-    assert!(harness.driver.reading_is_visible("ranking-uncaptured:GPU"));
+    // The fixture's selection has no GPU time the app sampled, and the GPU card says so.
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("GPU time by App is sampled only while the app runs")
+    );
     harness.teardown();
 }
 

@@ -186,6 +186,13 @@ impl LiveDashboard {
                 columns: 1,
             });
         }
+
+        rows.push(Row::Heading("GPU time by app".into()));
+        rows.push(Row::GpuApps(
+            self.named_panels(&[crate::live_projection::GPU_APPS_ID])
+                .into_iter()
+                .next(),
+        ));
     }
 
     fn reading_rows_charts_memory(&self, rows: &mut Vec<Row>) {

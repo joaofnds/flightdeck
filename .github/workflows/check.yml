@@ -41,6 +41,7 @@ jobs:
           cargo test --locked --workspace --no-fail-fast -- --exact --include-ignored --no-capture
           --skip clock_states::tests::reads_the_tables_of_this_mac
           --skip coalitions::tests::counts_the_energy_this_process_spends_in_its_coalition
+          --skip gpu_clients::tests::reads_each_process_once_with_some_gpu_time
           --skip gpu_memory::tests::reads_the_gpu_memory_of_this_mac
           --skip ioreport::tests::counts_a_busy_cpu_in_its_cores_active_time
           --skip ioreport::tests::counts_the_energy_the_gpu_spends

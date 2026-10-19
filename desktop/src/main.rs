@@ -20,6 +20,7 @@ mod live_cpu_history;
 mod live_dashboard;
 mod live_diagnostics;
 mod live_executables;
+mod live_gpu_apps;
 mod live_hardware;
 mod live_hover;
 mod live_inventory;

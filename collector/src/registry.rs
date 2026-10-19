@@ -37,22 +37,94 @@ impl Entry {
         Ok(entry)
     }
 
+    /// Calls `visit` with each child of this entry in the service plane that conforms to
+    /// class `class`, at most `limit` of them, and returns how many it visited. User clients
+    /// are children of the service they opened and are not matched as services themselves.
+    pub(crate) fn each_child_of_class(
+        &self,
+        class: &CStr,
+        limit: usize,
+        mut visit: impl FnMut(&Self) -> io::Result<()>,
+    ) -> io::Result<usize> {
+        let mut iterator = 0_u32;
+        let status = unsafe {
+            IORegistryEntryGetChildIterator(self.0, c"IOService".as_ptr(), &raw mut iterator)
+        };
+        if status != 0 {
+            return Err(io::Error::other(format!(
+                "IORegistryEntryGetChildIterator failed: {status:#x}"
+            )));
+        }
+        let iterator = Self(iterator);
+
+        let mut visited = 0;
+        while visited < limit {
+            let child = Self(unsafe { IOIteratorNext(iterator.0) });
+            if child.0 == 0 {
+                break;
+            }
+            if unsafe { IOObjectConformsTo(child.0, class.as_ptr()) } == 0 {
+                continue;
+            }
+            visit(&child)?;
+            visited += 1;
+        }
+        Ok(visited)
+    }
+
     /// The property `key`, or none where the entry has no such property.
-    fn property(&self, key: &str) -> io::Result<Option<Owned>> {
-        let name = Owned::string(key)?;
-        let value =
-            Owned(unsafe { IORegistryEntryCreateCFProperty(self.0, name.0, std::ptr::null(), 0) });
+    fn property(&self, key: &Key) -> Option<Owned> {
+        let value = Owned(unsafe {
+            IORegistryEntryCreateCFProperty(self.0, (key.0).0, std::ptr::null(), 0)
+        });
 
         if value.0.is_null() {
-            return Ok(None);
+            return None;
         }
-        Ok(Some(value))
+        Some(value)
+    }
+
+    /// The string property `key` written into `text`, or false where the entry has no such
+    /// property, it holds something other than a string, or it does not fit `text`.
+    pub(crate) fn string(&self, key: &Key, text: &mut [u8]) -> bool {
+        let Some(value) = self.property(key) else {
+            return false;
+        };
+        if unsafe { CFGetTypeID(value.0) } != unsafe { CFStringGetTypeID() } {
+            return false;
+        }
+        let Ok(length) = isize::try_from(text.len()) else {
+            return false;
+        };
+        let written =
+            unsafe { CFStringGetCString(value.0, text.as_mut_ptr().cast(), length, UTF8_ENCODING) };
+        written != 0
+    }
+
+    /// The sum of the whole numbers that each dictionary of the array property `key` holds
+    /// under `name`, or none where the entry has no such array or the sum overflows. A
+    /// dictionary without a whole number under `name` adds nothing.
+    pub(crate) fn array_sum(&self, key: &Key, name: &Key) -> Option<u64> {
+        let array = self.property(key)?;
+        if unsafe { CFGetTypeID(array.0) } != unsafe { CFArrayGetTypeID() } {
+            return None;
+        }
+        let count = unsafe { CFArrayGetCount(array.0) };
+        let mut sum = 0_u64;
+        for index in 0..count {
+            // The array keeps each element alive, and none is ours to release.
+            let dictionary = unsafe { CFArrayGetValueAtIndex(array.0, index) };
+            if let Some(value) = dictionary_count(dictionary, name) {
+                sum = sum.checked_add(value)?;
+            }
+        }
+        Some(sum)
     }
 
     /// The bytes of the data property `key`, or none where the entry has no such property or
     /// it holds something other than data.
     pub(crate) fn data(&self, key: &str) -> io::Result<Option<Vec<u8>>> {
-        let Some(value) = self.property(key)? else {
+        let Some(value) = self.property(&Key::new(key)?) else {
             return Ok(None);
         };
         if unsafe { CFGetTypeID(value.0) } != unsafe { CFDataGetTypeID() } {
@@ -81,7 +153,7 @@ impl Entry {
         key: &str,
         names: [&str; N],
     ) -> io::Result<Option<[Option<u64>; N]>> {
-        let Some(dictionary) = self.property(key)? else {
+        let Some(dictionary) = self.property(&Key::new(key)?) else {
             return Ok(None);
         };
         if unsafe { CFGetTypeID(dictionary.0) } != unsafe { CFDictionaryGetTypeID() } {
@@ -89,27 +161,36 @@ impl Entry {
         }
         let mut counts = [None; N];
         for (name, count) in names.into_iter().zip(counts.iter_mut()) {
-            let name = Owned::string(name)?;
-            // The dictionary keeps the value alive, and the value is not ours to release.
-            let value = unsafe { CFDictionaryGetValue(dictionary.0, name.0) };
-            if value.is_null() {
-                continue;
-            }
-            if unsafe { CFGetTypeID(value) } != unsafe { CFNumberGetTypeID() } {
-                continue;
-            }
-            let mut number: i64 = 0;
-            let exact = unsafe {
-                CFNumberGetValue(value, NUMBER_SINT64, std::ptr::from_mut(&mut number).cast())
-            };
-            if exact != 0 {
-                if let Ok(number) = u64::try_from(number) {
-                    *count = Some(number);
-                }
-            }
+            *count = dictionary_count(dictionary.0, &Key::new(name)?);
         }
         Ok(Some(counts))
     }
+}
+
+/// The whole number `dictionary` holds under `name`, or none where it is not a dictionary,
+/// lacks the name, holds no number there, or holds a negative one.
+fn dictionary_count(dictionary: *const c_void, name: &Key) -> Option<u64> {
+    if dictionary.is_null() {
+        return None;
+    }
+    if unsafe { CFGetTypeID(dictionary) } != unsafe { CFDictionaryGetTypeID() } {
+        return None;
+    }
+    // The dictionary keeps the value alive, and the value is not ours to release.
+    let value = unsafe { CFDictionaryGetValue(dictionary, (name.0).0) };
+    if value.is_null() {
+        return None;
+    }
+    if unsafe { CFGetTypeID(value) } != unsafe { CFNumberGetTypeID() } {
+        return None;
+    }
+    let mut number: i64 = 0;
+    let exact =
+        unsafe { CFNumberGetValue(value, NUMBER_SINT64, std::ptr::from_mut(&mut number).cast()) };
+    if exact == 0 {
+        return None;
+    }
+    u64::try_from(number).ok()
 }
 
 impl Drop for Entry {
@@ -120,6 +201,15 @@ impl Drop for Entry {
                 eprintln!("collector: registry entry release failed: {status:#x}");
             }
         }
+    }
+}
+
+/// A property name, made once so a reader that runs each second does not remake it.
+pub(crate) struct Key(Owned);
+
+impl Key {
+    pub(crate) fn new(name: &str) -> io::Result<Self> {
+        Ok(Self(Owned::string(name)?))
     }
 }
 
@@ -159,6 +249,10 @@ unsafe extern "C" {
     fn IOServiceNameMatching(name: *const c_char) -> *mut c_void;
     fn IOServiceMatching(name: *const c_char) -> *mut c_void;
     fn IOServiceGetMatchingService(port: u32, matching: *mut c_void) -> u32;
+    fn IORegistryEntryGetChildIterator(entry: u32, plane: *const c_char, iterator: *mut u32)
+    -> i32;
+    fn IOObjectConformsTo(object: u32, class: *const c_char) -> u32;
+    fn IOIteratorNext(iterator: u32) -> u32;
     fn IOObjectRelease(object: u32) -> i32;
     fn IORegistryEntryCreateCFProperty(
         entry: u32,
@@ -183,5 +277,15 @@ unsafe extern "C" {
     fn CFDictionaryGetTypeID() -> c_ulong;
     fn CFDictionaryGetValue(dictionary: *const c_void, key: *const c_void) -> *const c_void;
     fn CFNumberGetTypeID() -> c_ulong;
+    fn CFStringGetTypeID() -> c_ulong;
+    fn CFStringGetCString(
+        string: *const c_void,
+        buffer: *mut c_char,
+        size: isize,
+        encoding: u32,
+    ) -> u8;
+    fn CFArrayGetTypeID() -> c_ulong;
+    fn CFArrayGetCount(array: *const c_void) -> isize;
+    fn CFArrayGetValueAtIndex(array: *const c_void, index: isize) -> *const c_void;
     fn CFNumberGetValue(number: *const c_void, kind: isize, value: *mut c_void) -> u8;
 }

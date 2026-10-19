@@ -17,6 +17,46 @@ impl LiveDashboard {
         self.snapshot.as_ref()?.attribution_history(metric)
     }
 
+    /// GPU time by App beside its ranking, laid out as the recorded App charts are. Before the
+    /// app has sampled two seconds there is no chart, and the card says why.
+    pub(crate) fn gpu_apps(&self, panel: Option<&Rc<Panel>>, cx: &mut Context<Self>) -> AnyElement {
+        let chart = match panel {
+            Some(panel) => self.live_chart(panel, cx).into_any_element(),
+            None => div()
+                .debug_selector(|| "attribution-unavailable:live-gpu-apps".into())
+                .flex_1()
+                .min_w_0()
+                .p(px(18.0))
+                .rounded(px(7.0))
+                .border_1()
+                .border_color(rgb(GRID))
+                .bg(rgb(PANEL))
+                .child("GPU time by app")
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(rgb(MUTED))
+                        .child("GPU time by App is sampled only while the app runs"),
+                )
+                .into_any_element(),
+        };
+
+        div()
+            .debug_selector(|| "attribution-row:live-gpu-apps".into())
+            .flex()
+            .gap(px(8.0))
+            .when(self.reading_chart_columns() == 1, gpui::Styled::flex_col)
+            .child(chart)
+            .child(
+                div()
+                    .debug_selector(|| "attribution-ranking:live-gpu-apps".into())
+                    .flex_1()
+                    .min_w_0()
+                    .child(self.app_rankings(&[4], cx)),
+            )
+            .into_any_element()
+    }
+
     pub(crate) fn app_attribution(
         &self,
         metric: Metric,

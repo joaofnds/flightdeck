@@ -100,6 +100,8 @@ pub enum Row {
         crate::live_app_attribution_history::Metric,
         Option<Rc<Panel>>,
     ),
+    /// The GPU page's chart of GPU time by App beside its ranking, from the app's samples.
+    GpuApps(Option<Rc<Panel>>),
     AppSelector,
     AppSummary,
     AppColumns(&'static str),
