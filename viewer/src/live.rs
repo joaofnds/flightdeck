@@ -813,20 +813,7 @@ impl LiveSession {
             }
 
             if let Some(selected) = &self.selected {
-                let second = selected["wall_ns"]
-                    .as_u64()
-                    .ok_or(Error::Bound("selected clock"))?
-                    / NANOSECONDS_PER_SECOND;
-                let response = history.select(second, 0)?;
-                let alternatives = response["alternatives"]
-                    .as_array()
-                    .ok_or(Error::Bound("historical alternatives"))?;
-                if let Some(index) = alternatives
-                    .iter()
-                    .position(|observation| same(observation, selected))
-                {
-                    history.select(second, index)?;
-                }
+                history.restore_selection(selected)?;
             }
 
             refresh_history_pending(&mut self.sources, &history);
@@ -1969,6 +1956,11 @@ mod tests {
     mod app_event_tests {
         use super::*;
         include!("live_app_event_tests.rs");
+    }
+
+    mod commit_selection_tests {
+        use super::*;
+        include!("live_commit_selection_tests.rs");
     }
 
     static NEXT: AtomicU64 = AtomicU64::new(0);

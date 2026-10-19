@@ -582,3 +582,4 @@ mod cpu_history_saved;
 
 mod app_history;
 mod committed_apps;
+mod selection;
