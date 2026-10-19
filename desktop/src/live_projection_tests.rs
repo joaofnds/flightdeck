@@ -28,7 +28,7 @@ fn selection() -> Value {
          "boot": "00000000000000030000000000000004", "segment": 1,
          "wall_ns": 550_000_000_000_u64, "publication": 2, "cpu_percent": 25.0,
          "gpu_watts": 2.0, "power_watts": 8.0,
-         "network_rx_bps": 2048, "network_tx_bps": 1024,
+         "network_rx_bps": 2_000_000, "network_tx_bps": 1_000_000,
          "memory_active_bytes": 1_073_741_824_u64,
          "memory_anonymous_bytes": 1_610_612_736_u64,
          "memory_purgeable_bytes": 536_870_912_u64},
@@ -58,12 +58,13 @@ fn sends_are_mirrored_without_negating_readouts_or_errors() {
     // Method: compare traffic, packets and error line metadata and byte conversion.
     let panels = panels("network", &selection(), None).unwrap();
     assert_eq!(panels.len(), 3);
-    assert_eq!(panels[0].unit, "KiB/s");
+    assert_eq!(panels[0].unit, "MB/s");
     assert_eq!(panels[0].lines[0].values[1], Some(2.0));
     assert_eq!(panels[0].lines[1].values[1], Some(1.0));
     assert_eq!(panels[0].lines[1].negative, Some(true));
     assert_eq!(panels[1].lines[1].negative, Some(true));
-    assert_eq!(panels[1].lines[1].dashed, Some(true));
+    assert_eq!(panels[1].unit, "pps");
+    assert_eq!(panels[1].lines[1].dashed, Some(false));
     assert_eq!(panels[2].lines[1].negative, Some(false));
 }
 
@@ -74,7 +75,7 @@ fn overview_network_combines_positive_readouts_and_mirrors_only_send_geometry() 
     let network = &projected[5];
 
     assert_eq!(network.id, "live-network");
-    assert_eq!(network.unit, "KiB/s");
+    assert_eq!(network.unit, "MB/s");
     assert_eq!(network.lines[0].name, "Receive");
     assert_eq!(network.lines[0].values, [None, Some(2.0), None]);
     assert_eq!(network.lines[0].negative, Some(false));

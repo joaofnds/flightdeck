@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use crate::charts::{self, GRID, Inspection, MUTED, PANEL};
 use crate::dashboard::control;
-use crate::data::{Panel, reading};
+use crate::data::Panel;
 use crate::live_dashboard::LiveDashboard;
 use crate::live_presentation::clock;
 use crate::live_source::Snapshot;
@@ -954,27 +954,10 @@ fn line_reading(panel: &Panel, value: Option<f32>, unit: &str) -> String {
             return state.map_or_else(|| "Unavailable".into(), Clone::clone);
         }
     }
-    if [
-        "live-storage-",
-        "live-battery-",
-        "live-app-disk",
-        "live-process-group-disk",
-        "live-process-group-wakeups",
-        "live-process-group-pageins",
-        "live-process-group-threads",
-        "live-process-groups-",
-        "live-disk-apps",
-    ]
-    .iter()
-    .any(|prefix| panel.id.starts_with(prefix))
-    {
-        return value.map_or_else(
-            || "Unavailable".into(),
-            |value| crate::live_projection::quantity_text(value, unit),
-        );
-    }
-
-    reading(value, unit)
+    value.map_or_else(
+        || "Unavailable".into(),
+        |value| crate::live_projection::quantity_text(value, unit),
+    )
 }
 
 fn inspection_index(panel: &Panel, snapshot: &Snapshot, second: Option<u64>) -> Option<usize> {
@@ -1085,6 +1068,19 @@ mod tests {
             "unit":"%","lines":[],"positions":[0.998,0.999,0.9991],
             "selectedIndex":2}))
         .unwrap()
+    }
+
+    #[test]
+    fn every_chart_reads_small_rates_in_the_unit_that_keeps_their_digits() {
+        // Goal: a slow network rate reads as the prototype prints it rather than as 0.0 MB/s.
+        // Method: read sub-unit values through a network panel and a CPU panel.
+        let network: Panel = serde_json::from_value(json!({"id":"live-network",
+            "title":"Network","kind":"line","unit":"MB/s","lines":[]}))
+        .unwrap();
+        assert_eq!(line_reading(&network, Some(0.0143), "MB/s"), "14.3 kB/s");
+        assert_eq!(line_reading(&network, Some(2.5), "MB/s"), "2.5 MB/s");
+        assert_eq!(line_reading(&network, None, "MB/s"), "Unavailable");
+        assert_eq!(line_reading(&panel(), Some(42.0), "%"), "42.0 %");
     }
 
     #[test]

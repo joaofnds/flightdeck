@@ -126,12 +126,14 @@ impl LiveDashboard {
             machine_panel_count
         };
         let first = usize::from(self.request.route == "cpu");
-        for panels in self.panels[first.min(primary_panel_count)..primary_panel_count]
-            .chunks(self.reading_chart_columns())
+        // A short last row keeps the grid's column width, as the prototype's grid does.
+        let columns = self.reading_chart_columns();
+        for panels in
+            self.panels[first.min(primary_panel_count)..primary_panel_count].chunks(columns)
         {
             rows.push(Row::Charts {
                 panels: panels.to_vec(),
-                columns: panels.len(),
+                columns,
             });
         }
     }

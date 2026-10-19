@@ -84,6 +84,8 @@ pub(super) fn storage() -> Vec<Specification> {
             title: "Disk operations",
             unit: "ops/s",
             keys: ["read_ops_per_second", "write_ops_per_second"],
+            names: ["Read", "Write"],
+            colors: ["#f2cc0c", "#ff9830"],
             mirrored: true,
             help: "Completed block-driver requests per second. Writes are mirrored below zero; \
              inspected values remain positive. These are separate from process I/O calls.",
@@ -93,6 +95,8 @@ pub(super) fn storage() -> Vec<Specification> {
             title: "Mean I/O time",
             unit: "ms",
             keys: ["read_mean_ms", "write_mean_ms"],
+            names: ["Read", "Write"],
+            colors: ["#f2cc0c", "#ff9830"],
             mirrored: false,
             help: "Total completed-request duration divided by completed operations, weighted \
              across devices. This is not queue wait, a latency percentile or busy percentage. \
@@ -101,8 +105,10 @@ pub(super) fn storage() -> Vec<Specification> {
         storage_pair(&StoragePair {
             id: "live-storage-errors",
             title: "Disk errors",
-            unit: "errors/s",
+            unit: "/s",
             keys: ["read_errors_per_second", "write_errors_per_second"],
+            names: ["Disk read", "Disk write"],
+            colors: ["#5794f2", "#ff9830"],
             mirrored: false,
             help: "Changes in block-driver error counters per second. Missing or reset counters \
              leave gaps. A measured zero means no new errors in that interval.",
@@ -143,6 +149,8 @@ struct StoragePair {
     title: &'static str,
     unit: &'static str,
     keys: [&'static str; 2],
+    names: [&'static str; 2],
+    colors: [&'static str; 2],
     mirrored: bool,
     help: &'static str,
 }
@@ -158,17 +166,16 @@ fn storage_pair(pair: &StoragePair) -> Specification {
     let read = resource_reading(&ResourceReading {
         source: "storage",
         key: pair.keys[0],
-        name: "Read",
-        color: "#f2cc0c",
+        name: pair.names[0],
+        color: pair.colors[0],
     });
     let mut write = resource_reading(&ResourceReading {
         source: "storage",
         key: pair.keys[1],
-        name: "Write",
-        color: "#ff9830",
+        name: pair.names[1],
+        color: pair.colors[1],
     });
     write.negative = pair.mirrored;
-    write.dashed = !pair.mirrored;
     let mut result = specification(pair.id, pair.title, pair.unit, vec![read, write]);
     result.help = pair.help;
     result

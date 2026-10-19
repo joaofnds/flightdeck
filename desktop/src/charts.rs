@@ -956,8 +956,8 @@ mod live_tests {
         let selection = serde_json::json!({"second": 1000, "selected": null, "trends": [{
             "run": "00000000000000010000000000000002",
             "boot": "00000000000000030000000000000004", "publication": 1, "segment": 1,
-            "wall_ns": 1_000_000_000_000_u64, "network_rx_bps": 2048,
-            "network_tx_bps": 1024, "power_watts": 8.0, "gpu_watts": 2.0}]});
+            "wall_ns": 1_000_000_000_000_u64, "network_rx_bps": 2_000_000,
+            "network_tx_bps": 1_000_000, "power_watts": 8.0, "gpu_watts": 2.0}]});
         let inspection = Inspection {
             lower: 0,
             selected: 0,

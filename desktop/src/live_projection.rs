@@ -744,8 +744,6 @@ fn overview() -> Vec<Specification> {
     memory.title = "Memory";
     let mut network = network_throughput();
     network.title = "Network throughput";
-    network.lines[0].name = "Receive";
-    network.lines[1].name = "Send";
     let mut result = vec![
         cpu(),
         gpu_activity(),
@@ -876,54 +874,51 @@ fn memory_swap_flow() -> Specification {
 }
 
 fn network() -> Vec<Specification> {
-    let mut sent_packets = reading("network_tx_packets_per_second", "Sent", "#b877d9", 1.0);
+    let mut sent_packets = reading("network_tx_packets_per_second", "Upload", "#73bf69", 1.0);
     sent_packets.negative = true;
-    sent_packets.dashed = true;
-    let mut sent_errors = reading(
-        "network_tx_errors_per_second",
-        "Send errors",
-        "#ff9830",
-        1.0,
-    );
-    sent_errors.dashed = true;
     vec![
         network_throughput(),
         specification(
             "live-packets",
             "Packets",
-            "packets/s",
+            "pps",
             vec![
-                reading("network_rx_packets_per_second", "Received", "#73bf69", 1.0),
+                reading("network_rx_packets_per_second", "Download", "#5794f2", 1.0),
                 sent_packets,
             ],
         ),
         specification(
             "live-network-errors",
             "Network errors",
-            "errors/s",
+            "/s",
             vec![
                 reading(
                     "network_rx_errors_per_second",
-                    "Receive errors",
-                    "#f2495c",
+                    "Network receive",
+                    "#73bf69",
                     1.0,
                 ),
-                sent_errors,
+                reading(
+                    "network_tx_errors_per_second",
+                    "Network send",
+                    "#f2cc0c",
+                    1.0,
+                ),
             ],
         ),
     ]
 }
 
 fn network_throughput() -> Specification {
-    let mut sent = reading("network_tx_bps", "Sent", "#73bf69", 1024.0);
+    let mut sent = reading("network_tx_bps", "Send", "#73bf69", 1_000_000.0);
     sent.negative = true;
 
     specification(
         "live-network",
-        "External interfaces",
-        "KiB/s",
+        "Network",
+        "MB/s",
         vec![
-            reading("network_rx_bps", "Received", "#5794f2", 1024.0),
+            reading("network_rx_bps", "Receive", "#5794f2", 1_000_000.0),
             sent,
         ],
     )
