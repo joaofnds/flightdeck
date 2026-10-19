@@ -48,9 +48,13 @@ fn diagnostics(catalog: &Value, selection: &Value, notices: &mut Vec<String>) {
             ));
         }
     }
-    if let Some(count) = catalog["unknown_clock_ticks"].as_u64() {
-        if count > 0 {
-            notices.push(format!("{count} recorded ticks have no wall time"));
+    // A tick with no wall time falls in no time window the pages draw, so it matters only
+    // when no tick has one and the recording would otherwise look empty.
+    if catalog["last_second"].is_null() {
+        if let Some(count) = catalog["unknown_clock_ticks"].as_u64() {
+            if count > 0 {
+                notices.push(format!("{count} recorded ticks have no wall time"));
+            }
         }
     }
 }
@@ -114,6 +118,17 @@ mod tests {
                 .iter()
                 .any(|message| message == "9007199254740993 recorded ticks have no wall time")
         );
+    }
+
+    #[test]
+    fn clockless_ticks_beside_timed_ones_raise_no_notice() {
+        // Goal: ticks no time window can show do not crowd the pages of a timed recording.
+        // Method: report clockless ticks in a recording whose other ticks have wall time.
+        let catalog = json!({"unknown_clock_ticks": 9, "last_second": 1_792_436_468_u64});
+
+        let messages = losses(&catalog, &Value::Null);
+
+        assert!(messages.is_empty());
     }
 
     #[test]
