@@ -10,8 +10,10 @@ use crate::data::{Line, Panel};
 mod resource_projection;
 
 const OBSERVATIONS_MAX: usize = 4096;
-pub const OVERVIEW_PANELS_MAX: usize = 9;
+pub const OVERVIEW_PRIMARY_PANELS: usize = 6;
+pub const OVERVIEW_PANELS_MAX: usize = 8;
 pub const ROUTE_PANELS_MAX: usize = 7;
+const _: () = assert!(OVERVIEW_PRIMARY_PANELS < OVERVIEW_PANELS_MAX);
 const GIBIBYTE: f32 = 1_073_741_824.0;
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
 
@@ -655,36 +657,29 @@ fn overview() -> Vec<Specification> {
     memory.title = "Memory";
     memory.stack = true;
     memory.fill = 1.0;
+    let mut network = network_throughput();
+    network.title = "Network throughput";
+    network.lines[0].name = "Receive";
+    network.lines[1].name = "Send";
     let mut result = vec![
         cpu(),
-        memory,
         gpu_activity(),
-        resource_projection::throughput(),
-        specification(
-            "live-received",
-            "External interfaces · received",
-            "KiB/s",
-            vec![reading("network_rx_bps", "Received", "#73bf69", 1024.0)],
-        ),
-        specification(
-            "live-sent",
-            "External interfaces · sent",
-            "KiB/s",
-            vec![reading("network_tx_bps", "Sent", "#b877d9", 1024.0)],
-        ),
+        memory,
         specification(
             "live-power",
             "System power",
             "W",
             vec![reading("power_watts", "System power", "#ff9830", 1.0)],
         ),
+        resource_projection::throughput(),
+        network,
+        memory_pressure(),
         specification(
             "live-temperature",
             "SoC temperature",
             "°C",
             vec![reading("soc_celsius", "SoC temperature", "#f2495c", 1.0)],
         ),
-        memory_pressure(),
     ];
     for specification in &mut result {
         if !specification.stack {
@@ -782,8 +777,6 @@ fn memory_swap_flow() -> Specification {
 }
 
 fn network() -> Vec<Specification> {
-    let mut sent = reading("network_tx_bps", "Sent", "#b877d9", 1024.0);
-    sent.negative = true;
     let mut sent_packets = reading("network_tx_packets_per_second", "Sent", "#b877d9", 1.0);
     sent_packets.negative = true;
     sent_packets.dashed = true;
@@ -795,15 +788,7 @@ fn network() -> Vec<Specification> {
     );
     sent_errors.dashed = true;
     vec![
-        specification(
-            "live-network",
-            "External interfaces",
-            "KiB/s",
-            vec![
-                reading("network_rx_bps", "Received", "#73bf69", 1024.0),
-                sent,
-            ],
-        ),
+        network_throughput(),
         specification(
             "live-packets",
             "Packets",
@@ -828,6 +813,21 @@ fn network() -> Vec<Specification> {
             ],
         ),
     ]
+}
+
+fn network_throughput() -> Specification {
+    let mut sent = reading("network_tx_bps", "Sent", "#b877d9", 1024.0);
+    sent.negative = true;
+
+    specification(
+        "live-network",
+        "External interfaces",
+        "KiB/s",
+        vec![
+            reading("network_rx_bps", "Received", "#73bf69", 1024.0),
+            sent,
+        ],
+    )
 }
 
 fn app_specifications() -> Vec<Specification> {

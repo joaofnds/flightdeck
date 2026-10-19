@@ -66,6 +66,22 @@ fn sends_are_mirrored_without_negating_readouts_or_errors() {
 }
 
 #[test]
+fn overview_network_combines_positive_readouts_and_mirrors_only_send_geometry() {
+    // Project the primary network panel with measured traffic between unavailable observations.
+    let projected = panels("overview", &selection(), None).unwrap();
+    let network = &projected[5];
+
+    assert_eq!(network.id, "live-network");
+    assert_eq!(network.unit, "KiB/s");
+    assert_eq!(network.lines[0].name, "Receive");
+    assert_eq!(network.lines[0].values, [None, Some(2.0), None]);
+    assert_eq!(network.lines[0].negative, Some(false));
+    assert_eq!(network.lines[1].name, "Send");
+    assert_eq!(network.lines[1].values, [None, Some(1.0), None]);
+    assert_eq!(network.lines[1].negative, Some(true));
+}
+
+#[test]
 fn energy_series_remain_independent_and_memory_categories_only_stack_in_overview() {
     // Goal: avoid inventing total power or a computed used-memory total.
     // Method: inspect source values and stacking on both memory routes.
@@ -76,8 +92,8 @@ fn energy_series_remain_independent_and_memory_categories_only_stack_in_overview
     assert_eq!(energy[0].lines[1].values[1], Some(2.0));
     assert_eq!(energy[0].stack, Some(false));
     let overview = panels("overview", &selection, None).unwrap();
-    assert_eq!(overview.len(), 9);
-    assert_eq!(overview[1].stack, Some(true));
+    assert_eq!(overview.len(), 8);
+    assert_eq!(overview[2].stack, Some(true));
     let memory = panels("memory", &selection, None).unwrap();
     assert_eq!(memory.len(), 5);
     assert_eq!(memory[0].stack, Some(false));

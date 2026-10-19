@@ -31,7 +31,7 @@ impl Row {
             Self::Charts(panels) => format!("charts-{}", panels[0].id),
             Self::Heading(title) => {
                 match title.as_str() {
-                    "Top apps at the selected time" | "MacBook" => {
+                    "Top apps at the selected time" | "More resource context" | "MacBook" => {
                         return format!("overview-heading-{title}");
                     }
                     _ => {}

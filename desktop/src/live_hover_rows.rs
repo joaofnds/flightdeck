@@ -65,15 +65,7 @@ impl LiveDashboard {
             }
         }
         if self.request.route == "overview" {
-            rows.push(Row::OverviewStatus);
-            rows.push(Row::Heading("Top apps at the selected time".into()));
-            for metrics in [0, 1, 2].chunks(self.reading_chart_columns()) {
-                rows.push(Row::Rankings(metrics.to_vec()));
-            }
-            if self.snapshot.is_some() {
-                rows.push(Row::Heading("MacBook".into()));
-                rows.push(Row::Hardware);
-            }
+            self.reading_rows_overview(&mut rows);
         }
         self.reading_rows_tables(&mut rows);
         assert!(rows.len() <= 4096);
@@ -88,8 +80,33 @@ impl LiveDashboard {
             .take(16)
             .take_while(|panel| panel.id != crate::live_resident_history::PANEL_ID)
             .count();
-        for panels in self.panels[..machine_panel_count].chunks(self.reading_chart_columns()) {
+        let primary_panel_count = if self.request.route == "overview" {
+            machine_panel_count.min(crate::live_projection::OVERVIEW_PRIMARY_PANELS)
+        } else {
+            machine_panel_count
+        };
+        for panels in self.panels[..primary_panel_count].chunks(self.reading_chart_columns()) {
             rows.push(Row::Charts(panels.to_vec()));
+        }
+    }
+
+    fn reading_rows_overview(&self, rows: &mut Vec<Row>) {
+        rows.push(Row::Heading("Top apps at the selected time".into()));
+        for metrics in [0, 1, 2].chunks(self.reading_chart_columns()) {
+            rows.push(Row::Rankings(metrics.to_vec()));
+        }
+        rows.push(Row::Heading("More resource context".into()));
+        rows.push(Row::OverviewStatus);
+        let primary_panel_count = self
+            .panels
+            .len()
+            .min(crate::live_projection::OVERVIEW_PRIMARY_PANELS);
+        for panels in self.panels[primary_panel_count..].chunks(self.reading_chart_columns()) {
+            rows.push(Row::Charts(panels.to_vec()));
+        }
+        if self.snapshot.is_some() {
+            rows.push(Row::Heading("MacBook".into()));
+            rows.push(Row::Hardware);
         }
     }
 

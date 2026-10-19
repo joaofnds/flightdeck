@@ -5,6 +5,20 @@ use serde_json::json;
 use super::{InputDriver, InputHarness, accepted_snapshot};
 
 #[gpui::test]
+fn overview_shows_six_primary_charts_before_rankings_and_keeps_resource_context_below(
+    cx: &mut TestAppContext,
+) {
+    // Read the composed 3-by-2 primary grid and the retained contextual plots beneath rankings.
+    let mut harness = InputHarness::setup_route(cx, "overview");
+    harness.driver.seed_rolling_selection();
+    harness.driver.resize_charts(1320.0);
+
+    harness.driver.assert_overview_primary_grid();
+
+    harness.teardown();
+}
+
+#[gpui::test]
 fn overview_charts_reflow_when_the_same_window_crosses_both_breakpoints(cx: &mut TestAppContext) {
     // Render one exact 900-second selection while resizing through the approved 3/2/1 layout.
     let mut harness = InputHarness::setup_route(cx, "overview");
@@ -44,10 +58,8 @@ fn regrouping_the_third_overview_chart_ends_hover_outside_the_resized_window(
     harness.driver.seed_rolling_selection();
     harness.driver.resize_charts(1320.0);
     let selected = harness.driver.accepted_selection().unwrap()["selected"].clone();
-    harness
-        .driver
-        .hover_previous_second_on("live-gpu-activity-plot");
-    assert!(harness.driver.cursor_is_visible("live-gpu-activity-plot"));
+    harness.driver.hover_previous_second_on("live-memory-plot");
+    assert!(harness.driver.cursor_is_visible("live-memory-plot"));
     let pointer = harness.driver.pointer_position();
 
     harness
@@ -56,7 +68,7 @@ fn regrouping_the_third_overview_chart_ends_hover_outside_the_resized_window(
 
     assert!(pointer.x > px(840.0));
     assert_eq!(harness.driver.pointer_position(), pointer);
-    assert!(!harness.driver.cursor_is_visible("live-gpu-activity-plot"));
+    assert!(!harness.driver.cursor_is_visible("live-memory-plot"));
     assert!(!harness.driver.cursor_is_visible("live-cpu-plot"));
     assert_eq!(
         harness.driver.accepted_selection().unwrap()["selected"],
@@ -147,6 +159,26 @@ fn narrow_headers_keep_selection_controls_inside_the_content(cx: &mut TestAppCon
 }
 
 impl InputDriver {
+    fn assert_overview_primary_grid(&mut self) {
+        let first = [
+            self.chart_bounds("live-cpu-plot"),
+            self.chart_bounds("live-gpu-activity-plot"),
+            self.chart_bounds("live-memory-plot"),
+        ];
+        let second = [
+            self.chart_bounds("live-power-plot"),
+            self.chart_bounds("live-storage-throughput-plot"),
+            self.chart_bounds("live-network-plot"),
+        ];
+        assert_chart_columns(&first, 3);
+        assert_chart_columns(&second, 3);
+        assert!(first[2].bottom() < second[0].top());
+        let ranking = self.context.debug_bounds("ranking-help:CPU").unwrap();
+        assert!(second[2].bottom() < ranking.top());
+        assert!(self.chart_bounds("live-memory-pressure-plot").top() > ranking.bottom());
+        assert!(self.chart_bounds("live-temperature-plot").top() > ranking.bottom());
+    }
+
     fn assert_cpu_inspection(&mut self, second: u64, headline: &'static str) {
         let (observed, accessible) = self.chart_accessibility_reading("live-cpu");
         assert_eq!(observed, Some(second));
@@ -189,8 +221,8 @@ impl InputDriver {
     fn assert_overview_columns(&mut self, columns: usize) {
         let bounds = [
             self.chart_bounds("live-cpu-plot"),
-            self.chart_bounds("live-memory-plot"),
             self.chart_bounds("live-gpu-activity-plot"),
+            self.chart_bounds("live-memory-plot"),
         ];
         assert_chart_columns(&bounds, columns);
     }
