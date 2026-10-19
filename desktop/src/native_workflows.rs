@@ -593,6 +593,7 @@ fn fresh_request(route: &str) -> Request {
         members_offset: 0,
         cpu_offset: 0,
         load_resident_history: true,
+        load_app_attribution_history: true,
     }
 }
 

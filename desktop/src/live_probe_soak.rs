@@ -391,6 +391,7 @@ mod tests {
             cpu_detail: None,
             cpu_history: None,
             resident_history: None,
+            app_attribution_history: None,
             rankings: Some(std::sync::Arc::new(rankings)),
             read_ms: 5.0,
         }

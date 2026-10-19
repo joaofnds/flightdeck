@@ -1399,3 +1399,6 @@ fn resident_history_identical_display_paths_keep_key_kinds_independent(cx: &mut 
     );
     harness.teardown();
 }
+
+#[path = "live_app_attribution_input_tests.rs"]
+mod attribution;

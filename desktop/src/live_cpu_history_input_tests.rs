@@ -180,6 +180,7 @@ impl CPUHistoryDriver {
                 cpu_detail: None,
                 cpu_history: Some(history),
                 resident_history: None,
+                app_attribution_history: None,
                 rankings: None,
                 read_ms: 0.0,
             }));

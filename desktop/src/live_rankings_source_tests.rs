@@ -402,6 +402,45 @@ fn process(pid: i32) -> Process {
 }
 
 #[test]
+fn real_cpu_worker_restores_attribution_and_installs_its_exact_selected_plot() {
+    // Pass 600 saved Apps through the worker, rate decoder and installed panel preparation.
+    assert_real_rate_attribution(crate::live_app_attribution_history::Metric::Cpu, 0.000_06);
+}
+
+#[test]
+fn real_power_worker_restores_attribution_and_installs_its_exact_selected_plot() {
+    // Preserve fractional process watts from captured counters at the earlier same-second sibling.
+    assert_real_rate_attribution(crate::live_app_attribution_history::Metric::Power, 0.000_6);
+}
+
+fn assert_real_rate_attribution(
+    metric: crate::live_app_attribution_history::Metric,
+    expected: f32,
+) {
+    let route = match metric {
+        crate::live_app_attribution_history::Metric::Cpu => "cpu",
+        crate::live_app_attribution_history::Metric::Power => "energy",
+    };
+    let recording = SealedRecording::with_ranked_apps();
+    let request = exact_ranked_request(route);
+
+    let snapshot = recording.read(request.clone()).unwrap();
+
+    assert_eq!(snapshot.selection["selected"]["publication"], 2);
+    let presentation = crate::live_acceptance::Presentation::prepare(&request, snapshot).unwrap();
+    let panel = presentation
+        .panels
+        .iter()
+        .find(|panel| panel.id == metric.panel_id())
+        .expect("Real App counters must produce the attribution plot");
+    assert_eq!(panel.lines.len(), 9);
+    assert_eq!(panel.lines[0].name, "Other");
+    assert_eq!(panel.lines[1].name, "App00600");
+    assert_eq!(panel.selected_index, Some(1));
+    assert_eq!(panel.lines[1].values[1], Some(expected));
+}
+
+#[test]
 fn real_memory_worker_restores_resident_history_and_installs_its_chart() {
     // Load saved App residents through the actual Memory worker and prepare its visible panel.
     let recording = SealedRecording::with_ranked_apps();

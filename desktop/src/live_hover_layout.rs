@@ -23,6 +23,7 @@ impl Row {
             Self::OverviewStatus => "overview-status".into(),
             Self::Rankings(metrics) => format!("rankings-{}", metrics[0]),
             Self::MemoryAttribution(_) => "memory-attribution".into(),
+            Self::AppAttribution(metric, _) => format!("app-attribution-{}", metric.panel_id()),
             Self::AppSelector => "app-selector".into(),
             Self::AppSummary => "app-summary".into(),
             Self::AppColumns(kind) => format!("app-columns-{kind}"),
@@ -61,7 +62,9 @@ impl Row {
     fn owns_plot(&self, source: &str) -> bool {
         match self {
             Self::Charts(panels) => panels.iter().take(3).any(|panel| panel.id == source),
-            Self::MemoryAttribution(Some(panel)) => panel.id == source,
+            Self::MemoryAttribution(Some(panel)) | Self::AppAttribution(_, Some(panel)) => {
+                panel.id == source
+            }
             Self::CPUTop(panel) => {
                 if source == "cpu-history-plot" {
                     true

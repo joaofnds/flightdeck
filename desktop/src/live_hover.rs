@@ -114,6 +114,7 @@ impl Preview {
                 cpu_detail: None,
                 cpu_history: None,
                 resident_history: snapshot.resident_history.clone(),
+                app_attribution_history: snapshot.app_attribution_history.clone(),
                 rankings: None,
                 read_ms: 0.0,
             }),
@@ -129,6 +130,7 @@ impl Preview {
                 second: Some(target.second),
                 identity: target.identity.clone(),
                 load_resident_history: false,
+                load_app_attribution_history: false,
                 ..request.clone()
             },
             base_request: request.clone(),

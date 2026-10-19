@@ -94,6 +94,9 @@ impl LiveDashboard {
 
     fn chart_source_state(&self, panel: &Panel) -> gpui::Div {
         let mut notice = div().text_size(px(11.0)).text_color(rgb(MUTED));
+        if let Some(history) = self.chart_attribution_history(panel) {
+            return notice.child(history.coverage(self.chart_inspection_index(panel)));
+        }
         if panel.id == crate::live_resident_history::PANEL_ID {
             let reading = self.snapshot.as_ref().and_then(|snapshot| {
                 snapshot
@@ -177,6 +180,9 @@ impl LiveDashboard {
     }
 
     fn chart_reading(&self, panel: &Panel, index: Option<usize>) -> String {
+        if let Some(history) = self.chart_attribution_history(panel) {
+            return history.headline(index);
+        }
         if panel.id == crate::live_resident_history::PANEL_ID {
             return self
                 .snapshot
@@ -216,6 +222,9 @@ impl LiveDashboard {
     }
 
     fn chart_line_reading(&self, panel: &Panel, line: usize, index: Option<usize>) -> String {
+        if let Some(history) = self.chart_attribution_history(panel) {
+            return history.reading(line, index);
+        }
         if panel.id == crate::live_resident_history::PANEL_ID {
             return self
                 .snapshot
@@ -756,6 +765,12 @@ fn target_index(
     target: &crate::live_hover::Target,
 ) -> Option<usize> {
     target.identity.as_ref()?;
+    if crate::live_app_attribution_history::Metric::from_panel(&panel.id).is_some() {
+        return snapshot
+            .app_attribution_history
+            .as_ref()?
+            .index(Some(target));
+    }
     if panel.id == crate::live_resident_history::PANEL_ID {
         return snapshot.resident_history.as_ref()?.index(Some(target));
     }
@@ -914,6 +929,13 @@ fn inspection_index(panel: &Panel, snapshot: &Snapshot, second: Option<u64>) -> 
     if snapshot.selection["second"].as_u64() == Some(second) {
         return panel.selected_index;
     }
+    if crate::live_app_attribution_history::Metric::from_panel(&panel.id).is_some() {
+        let target = crate::live_hover::Target::regular(snapshot, second);
+        return snapshot
+            .app_attribution_history
+            .as_ref()?
+            .index(Some(&target));
+    }
     if panel.id == crate::live_resident_history::PANEL_ID {
         let target = crate::live_hover::Target::regular(snapshot, second);
         return snapshot.resident_history.as_ref()?.index(Some(&target));
@@ -991,6 +1013,7 @@ mod tests {
             cpu_detail: None,
             cpu_history: None,
             resident_history: None,
+            app_attribution_history: None,
             rankings: None,
             read_ms: 0.0,
         }

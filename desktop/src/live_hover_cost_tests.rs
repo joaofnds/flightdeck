@@ -63,6 +63,7 @@ fn snapshot() -> Snapshot {
         cpu_detail: None,
         cpu_history: None,
         resident_history: None,
+        app_attribution_history: None,
         rankings: None,
         read_ms: 0.0,
     }

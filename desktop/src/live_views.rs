@@ -295,6 +295,7 @@ impl LiveDashboard {
             Row::OverviewStatus => self.overview_status(cx).into_any_element(),
             Row::Rankings(metrics) => self.app_rankings(metrics, cx),
             Row::MemoryAttribution(panel) => self.memory_attribution(panel.as_ref(), cx),
+            Row::AppAttribution(metric, panel) => self.app_attribution(*metric, panel.as_ref(), cx),
             Row::AppSelector => self.app_selector(cx).into_any_element(),
             Row::AppSummary => self.app_summary().into_any_element(),
             Row::AppColumns(kind) => {

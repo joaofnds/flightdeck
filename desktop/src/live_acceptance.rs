@@ -36,6 +36,11 @@ impl Presentation {
                 }
             }
         }
+        if let Some(history) = &snapshot.app_attribution_history {
+            if let Some(panel) = history.panel() {
+                panels.push(panel);
+            }
+        }
         let mut presentation = Box::new(Self {
             request: request.clone(),
             snapshot,

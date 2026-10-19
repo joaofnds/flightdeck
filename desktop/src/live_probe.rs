@@ -97,6 +97,7 @@ fn probe_request(route: &str) -> Request {
         offset: 0,
         cpu_offset: 0,
         load_resident_history: true,
+        load_app_attribution_history: true,
         app: None,
         apps_offset: 0,
         members_offset: 0,
@@ -185,6 +186,37 @@ fn probe_validate(snapshot: &Snapshot, route: &str) -> Result<(), String> {
     }
     if route == "overview" {
         rankings_report(snapshot)?;
+    }
+    probe_app_attribution(snapshot, route)?;
+
+    Ok(())
+}
+
+fn probe_app_attribution(snapshot: &Snapshot, route: &str) -> Result<(), String> {
+    use crate::live_app_attribution_history::{AppAttributionHistory, Metric};
+    let Some(metric) = Metric::from_route(route) else {
+        return Ok(());
+    };
+    let history = snapshot
+        .app_attribution_history
+        .as_deref()
+        .ok_or("Missing App attribution history")?;
+    if let AppAttributionHistory::Unavailable(error) = history {
+        return Err(format!("App attribution unavailable: {error}"));
+    }
+    let index = history
+        .index(None)
+        .ok_or("Missing selected App attribution")?;
+    let ranking = match metric {
+        Metric::Cpu => 0,
+        Metric::Power => 2,
+    };
+    if let Some(crate::live_rankings::Rankings::Ready(rankings)) = snapshot.rankings.as_deref() {
+        if !rankings.metrics[ranking].entries.is_empty() {
+            if !(0..9).any(|line| history.amount(line, Some(index)).is_some()) {
+                return Err("Measured App rankings have no selected attribution rate".into());
+            }
+        }
     }
 
     Ok(())
@@ -455,9 +487,26 @@ fn probe_route_report(snapshot: &Snapshot) -> Result<Value, String> {
         "pages": snapshot.pages.keys().collect::<Vec<_>>(),
         "app_count": snapshot.apps.as_ref().map(|apps| &apps["app_count"]),
         "overview_rankings": rankings,
+        "app_attribution": attribution_report(snapshot)?,
         "logical_cpu_count": snapshot.cpu_detail.as_ref().map(|activity| activity.cpus.len()),
         "cpu_interval_available": snapshot.cpu_detail.as_ref()
             .map(|activity| activity.interval_available),
         "read_ms": snapshot.read_ms
     }))
+}
+
+fn attribution_report(snapshot: &Snapshot) -> Result<Value, String> {
+    let Some(history) = snapshot.app_attribution_history.as_ref() else {
+        return Ok(Value::Null);
+    };
+    let panel = history.panel().ok_or_else(|| history.coverage(None))?;
+    let available: usize = panel
+        .lines
+        .iter()
+        .map(|line| line.values.iter().filter(|value| value.is_some()).count())
+        .sum();
+
+    Ok(json!({"panel":panel.id,"series":panel.lines.len(),
+        "points":panel.positions.as_ref().map(Vec::len),"available_values":available,
+        "selected_index":panel.selected_index,"selected":history.headline(history.index(None))}))
 }

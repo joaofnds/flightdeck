@@ -28,6 +28,7 @@ pub struct Request {
     pub members_offset: u32,
     pub cpu_offset: u32,
     pub load_resident_history: bool,
+    pub load_app_attribution_history: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -76,6 +77,8 @@ pub struct Snapshot {
     pub cpu_detail: Option<crate::live_cpu::CPUActivity>,
     pub cpu_history: Option<Arc<crate::live_cpu_history::CPUHistory>>,
     pub resident_history: Option<Arc<crate::live_resident_history::ResidentHistory>>,
+    pub app_attribution_history:
+        Option<Arc<crate::live_app_attribution_history::AppAttributionHistory>>,
     pub rankings: Option<Arc<crate::live_rankings::Rankings>>,
     pub read_ms: f64,
 }
@@ -356,10 +359,7 @@ fn reader_snapshot(
                 .map_err(|error| error.to_string())?,
         );
     }
-    let session = reader
-        .session
-        .as_mut()
-        .ok_or_else(|| "Live session did not open".to_owned())?;
+    let session = reader.session.as_mut().ok_or("Live session did not open")?;
     session
         .begin(command.epoch)
         .map_err(|error| error.to_string())?;
@@ -388,6 +388,7 @@ fn reader_snapshot(
         cpu_detail: None,
         cpu_history: None,
         resident_history: None,
+        app_attribution_history: None,
         rankings: None,
         read_ms: 0.0,
     });
@@ -419,6 +420,7 @@ fn reader_computer(reader: &mut Reader, command: &Command) -> Option<Box<Snapsho
         cpu_detail: None,
         cpu_history: None,
         resident_history: None,
+        app_attribution_history: None,
         rankings: None,
         read_ms: 0.0,
     }))
@@ -526,6 +528,13 @@ fn reader_payload(
         )?);
         reader_cpu_history(session, request, snapshot)?;
     }
+    if request.load_app_attribution_history {
+        if let Some(metric) =
+            crate::live_app_attribution_history::Metric::from_route(&request.route)
+        {
+            reader_app_attribution_history(session, snapshot, metric);
+        }
+    }
     if request.route == "memory" {
         if request.load_resident_history {
             reader_resident_history(session, snapshot);
@@ -533,6 +542,21 @@ fn reader_payload(
     }
 
     Ok(())
+}
+
+fn reader_app_attribution_history(
+    session: &LiveSession,
+    snapshot: &mut Snapshot,
+    metric: crate::live_app_attribution_history::Metric,
+) {
+    use crate::live_app_attribution_history::AppAttributionHistory;
+    let history = match session.app_attribution_history(metric.source()) {
+        Ok(payload) => AppAttributionHistory::prepare(metric, &payload, &snapshot.selection),
+        Err(error) => AppAttributionHistory::Unavailable(
+            crate::live_notices::recording_context::bounded(&error.to_string(), 512),
+        ),
+    };
+    snapshot.app_attribution_history = Some(Arc::new(history));
 }
 
 fn reader_resident_history(session: &LiveSession, snapshot: &mut Snapshot) {

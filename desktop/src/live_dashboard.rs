@@ -10,7 +10,7 @@ use gpui::{
 
 pub const ROUTES: [(&str, &str); 12] = [
     ("overview", "Overview"),
-    ("cpu", "CPU & processes"),
+    ("cpu", "CPU"),
     ("apps", "Apps"),
     ("memory", "Memory"),
     ("gpu", "GPU"),
@@ -76,6 +76,10 @@ pub enum Row {
     OverviewStatus,
     Rankings(Vec<usize>),
     MemoryAttribution(Option<Rc<Panel>>),
+    AppAttribution(
+        crate::live_app_attribution_history::Metric,
+        Option<Rc<Panel>>,
+    ),
     AppSelector,
     AppSummary,
     AppColumns(&'static str),
@@ -109,6 +113,7 @@ impl LiveDashboard {
                 members_offset: 0,
                 cpu_offset: 0,
                 load_resident_history: true,
+                load_app_attribution_history: true,
             },
             snapshot: None,
             pending_snapshot: None,
@@ -578,6 +583,7 @@ mod selection_tests {
             cpu_detail: None,
             cpu_history: None,
             resident_history: None,
+            app_attribution_history: None,
             rankings: None,
             read_ms: 0.0,
         }));

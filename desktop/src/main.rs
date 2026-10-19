@@ -9,6 +9,7 @@ mod hardware_clock;
 mod hardware_layout;
 mod hardware_motion;
 mod live_acceptance;
+mod live_app_attribution_history;
 mod live_app_views;
 mod live_chart_view;
 mod live_cpu;

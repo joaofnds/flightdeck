@@ -12,7 +12,7 @@ pub const PANEL_ID: &str = "live-memory-app-resident";
 const POINTS_MAX: usize = 4096;
 const COHORT_MAX: usize = 8;
 const NS: u64 = 1_000_000_000;
-const COLORS: [&str; 9] = [
+pub(crate) const COLORS: [&str; 9] = [
     "#737b8c", "#5794f2", "#ff9830", "#b877d9", "#73bf69", "#f2495c", "#f2cc0c", "#56b9c3",
     "#f28eb9",
 ];
@@ -49,12 +49,12 @@ struct Point {
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
-struct Observation {
-    wall_ns: Option<u64>,
-    recording: [u64; 2],
-    boot: [u64; 2],
-    run: [u64; 2],
-    publication: u64,
+pub(crate) struct Observation {
+    pub(crate) wall_ns: Option<u64>,
+    pub(crate) recording: [u64; 2],
+    pub(crate) boot: [u64; 2],
+    pub(crate) run: [u64; 2],
+    pub(crate) publication: u64,
     run_tick: u64,
     continuous_ns: Option<u64>,
     awake_ns: Option<u64>,
@@ -418,7 +418,7 @@ impl Point {
 }
 
 impl Observation {
-    fn decode(value: &Value) -> Result<Self, String> {
+    pub(crate) fn decode(value: &Value) -> Result<Self, String> {
         let stamp = &value["stamp"];
         Ok(Self {
             recording: identity(&value["recording"])?,
@@ -432,7 +432,7 @@ impl Observation {
         })
     }
 
-    fn matches(&self, target: &Target) -> bool {
+    pub(crate) fn matches(&self, target: &Target) -> bool {
         let Some(identity) = &target.identity else {
             return false;
         };
@@ -529,7 +529,7 @@ fn decode_cohort(value: &Value) -> Result<Vec<String>, String> {
     Ok(names)
 }
 
-fn decode_cohort_labels(entries: &[Value], names: &mut [String]) -> Result<(), String> {
+pub(crate) fn decode_cohort_labels(entries: &[Value], names: &mut [String]) -> Result<(), String> {
     assert!(names.len() <= COHORT_MAX);
     assert_eq!(entries.len(), names.len());
     let collisions = decode_cohort_label_collisions(names);
@@ -582,7 +582,7 @@ fn decode_cohort_label_collisions(names: &[String]) -> [bool; COHORT_MAX] {
     collisions
 }
 
-fn position(wall_ns: Option<u64>, second: u64) -> Result<f32, String> {
+pub(crate) fn position(wall_ns: Option<u64>, second: u64) -> Result<f32, String> {
     let Some(wall_ns) = wall_ns else {
         return Ok(0.0);
     };
@@ -604,7 +604,7 @@ fn position(wall_ns: Option<u64>, second: u64) -> Result<f32, String> {
     )
 }
 
-fn validate_coverage(value: &Value) -> Result<(), String> {
+pub(crate) fn validate_coverage(value: &Value) -> Result<(), String> {
     for (name, bound) in [
         ("context_app_count", 24_000),
         ("context_key_bytes", 8_388_608),
@@ -618,17 +618,17 @@ fn validate_coverage(value: &Value) -> Result<(), String> {
     Ok(())
 }
 
-fn count(value: &Value) -> Result<u32, String> {
+pub(crate) fn count(value: &Value) -> Result<u32, String> {
     u32::try_from(integer(value)?).map_err(|error| error.to_string())
 }
 
-fn boolean(value: &Value) -> Result<bool, String> {
+pub(crate) fn boolean(value: &Value) -> Result<bool, String> {
     value
         .as_bool()
         .ok_or_else(|| "Missing resident App coverage flag".into())
 }
 
-fn optional_integer(value: &Value) -> Result<Option<u64>, String> {
+pub(crate) fn optional_integer(value: &Value) -> Result<Option<u64>, String> {
     if value.is_null() {
         return Ok(None);
     }
@@ -636,7 +636,7 @@ fn optional_integer(value: &Value) -> Result<Option<u64>, String> {
     integer(value).map(Some)
 }
 
-fn optional_count(value: &Value) -> Result<Option<u32>, String> {
+pub(crate) fn optional_count(value: &Value) -> Result<Option<u32>, String> {
     if value.is_null() {
         return Ok(None);
     }
@@ -644,7 +644,7 @@ fn optional_count(value: &Value) -> Result<Option<u32>, String> {
     count(value).map(Some)
 }
 
-fn optional_boolean(value: &Value) -> Result<Option<bool>, String> {
+pub(crate) fn optional_boolean(value: &Value) -> Result<Option<bool>, String> {
     if value.is_null() {
         return Ok(None);
     }

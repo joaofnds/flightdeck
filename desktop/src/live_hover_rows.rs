@@ -44,14 +44,25 @@ impl LiveDashboard {
         }
         self.reading_rows_charts(&mut rows);
         match self.request.route.as_str() {
-            "cpu" => rows.push(Row::Rankings(vec![0])),
+            "cpu" | "energy" => {
+                let metric = if self.request.route == "cpu" {
+                    crate::live_app_attribution_history::Metric::Cpu
+                } else {
+                    crate::live_app_attribution_history::Metric::Power
+                };
+                let panel = self
+                    .panels
+                    .iter()
+                    .find(|panel| panel.id == metric.panel_id())
+                    .cloned();
+                rows.push(Row::AppAttribution(metric, panel));
+            }
             "memory" => rows.push(Row::MemoryAttribution(
                 self.panels
                     .iter()
                     .find(|panel| panel.id == crate::live_resident_history::PANEL_ID)
                     .cloned(),
             )),
-            "energy" => rows.push(Row::Rankings(vec![2])),
             _ => {}
         }
         if self.request.route == "storage" {
@@ -77,7 +88,12 @@ impl LiveDashboard {
             .panels
             .iter()
             .take(16)
-            .take_while(|panel| panel.id != crate::live_resident_history::PANEL_ID)
+            .take_while(|panel| {
+                if panel.id == crate::live_resident_history::PANEL_ID {
+                    return false;
+                }
+                crate::live_app_attribution_history::Metric::from_panel(&panel.id).is_none()
+            })
             .count();
         let primary_panel_count = if self.request.route == "overview" {
             machine_panel_count.min(crate::live_projection::OVERVIEW_PRIMARY_PANELS)
