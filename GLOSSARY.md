@@ -29,6 +29,9 @@ cores are the faster cluster. macOS names them in `sysctl hw.perflevel0.name` an
 processes count once for each of them, so the resident memory of all processes adds up
 to more than the machine uses.
 
+**App memory**: the memory apps asked for themselves, not counting what macOS may discard
+when memory runs short. Activity Monitor shows the same quantity under that name.
+
 **Compressed memory**: memory macOS has compressed in RAM so it takes less room, which
 puts off moving memory to swap.
 

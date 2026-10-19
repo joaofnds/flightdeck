@@ -1,7 +1,7 @@
 use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::charts::{GRID, MUTED, TEXT};
+use crate::charts::TEXT;
 use crate::data::Panel;
 use crate::live_source::{Request, Snapshot, Update, Worker};
 use gpui::{
@@ -10,7 +10,7 @@ use gpui::{
 
 pub const ROUTES: [(&str, &str); 12] = [
     ("overview", "Overview"),
-    ("cpu", "CPU"),
+    ("cpu", "CPU & Processes"),
     ("apps", "Apps"),
     ("memory", "Memory"),
     ("gpu", "GPU"),
@@ -21,6 +21,16 @@ pub const ROUTES: [(&str, &str); 12] = [
     ("computer", "Computer"),
     ("self", "Self-monitoring"),
     ("raw", "Recorded readings"),
+];
+
+/// The sidebar's groups, in the approved prototype's order. Recorded readings open from the
+/// time menu, since the prototype's sidebar has no place for them.
+pub const NAVIGATION: [&[&str]; 3] = [
+    &["overview", "cpu"],
+    &[
+        "apps", "gpu", "memory", "energy", "storage", "network", "battery",
+    ],
+    &["computer", "self"],
 ];
 
 pub struct LiveDashboard {
@@ -473,31 +483,11 @@ impl LiveDashboard {
             .min_h_0()
             .child(body)
     }
-
-    fn render_brandbar(&self) -> impl IntoElement {
-        let status = self.status();
-
-        div()
-            .h(px(48.0))
-            .px(px(24.0))
-            .flex()
-            .items_center()
-            .justify_between()
-            .border_b_1()
-            .border_color(rgb(GRID))
-            .child("◉  FLIGHTDECK")
-            .child(
-                div()
-                    .debug_selector(|| format!("source-status:{status}"))
-                    .text_color(rgb(MUTED))
-                    .child(status),
-            )
-    }
 }
 
 #[cfg(test)]
 #[path = "live_input_tests.rs"]
-mod input_tests;
+pub(crate) mod input_tests;
 
 impl Render for LiveDashboard {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -537,7 +527,7 @@ impl Render for LiveDashboard {
             .font_family(".AppleSystemUIFont")
             .text_size(px(13.0))
             .on_key_down(crate::dashboard::keyboard_navigation)
-            .child(self.render_brandbar())
+            .child(self.brandbar())
             .child(
                 div()
                     .flex()
@@ -562,6 +552,7 @@ impl Render for LiveDashboard {
                             .child(body),
                     ),
             )
+            .child(self.footer())
             .children(self.chart_inspector_overlay(cx))
     }
 }

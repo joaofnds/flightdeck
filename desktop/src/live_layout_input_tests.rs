@@ -323,20 +323,21 @@ fn narrow_headers_keep_selection_controls_inside_the_content(cx: &mut TestAppCon
 
     harness
         .driver
-        .assert_header_control_visible("open-recording-available");
-    harness
-        .driver
         .assert_header_control_visible("reading-title");
     harness
         .driver
         .assert_header_control_visible("reading-controls");
+    harness
+        .driver
+        .assert_header_control_visible("source-follow:Live");
+    super::menu_control_bounds(&mut harness.driver.context, "time-menu");
+    harness
+        .driver
+        .assert_header_control_visible("open-recording-available");
     harness.driver.assert_header_control_visible("copy-reading");
     harness
         .driver
         .assert_header_control_visible("inspection-time");
-    harness
-        .driver
-        .assert_header_control_visible("source-follow:Live");
     harness.teardown();
 }
 
@@ -554,7 +555,7 @@ impl InputDriver {
 
     fn assert_header_control_visible(&mut self, selector: &'static str) {
         let bounds = self.context.debug_bounds(selector).expect(selector);
-        assert!(bounds.left() >= px(170.0), "{selector}: {bounds:?}");
+        assert!(bounds.left() >= px(164.0), "{selector}: {bounds:?}");
         assert!(bounds.right() <= px(576.0), "{selector}: {bounds:?}");
         assert!(bounds.size.width > px(0.0), "{selector}: {bounds:?}");
     }

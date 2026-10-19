@@ -335,15 +335,21 @@ impl RetirementDriver {
     }
 
     fn open_is_available(&mut self) -> bool {
+        self.open_time_menu();
         self.context
             .debug_bounds("open-recording-available")
             .is_some()
     }
 
     fn open_is_unavailable(&mut self) -> bool {
+        self.open_time_menu();
         self.context
             .debug_bounds("open-recording-waiting")
             .is_some()
+    }
+
+    fn open_time_menu(&mut self) {
+        crate::live_dashboard::input_tests::menu_control_bounds(&mut self.context, "time-menu");
     }
 
     fn wait_is_visible(&mut self) -> bool {

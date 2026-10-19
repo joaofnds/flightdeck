@@ -31,6 +31,7 @@ fn opening_a_saved_recording_updates_the_existing_window_and_rendered_source_con
             .visible("source-sidebar:Recorded system readings")
     );
     assert!(harness.driver.visible("source-status:Recorded"));
+    harness.driver.open_time_menu();
     assert!(harness.driver.visible("source-follow:Pause latest"));
     assert!(!harness.driver.visible("source-follow:Pause live"));
     harness.teardown();
@@ -208,12 +209,16 @@ impl InputDriver {
         self.context.window_title().unwrap()
     }
 
+    fn open_time_menu(&mut self) {
+        super::menu_control_bounds(&mut self.context, "time-menu");
+    }
+
     fn visible(&mut self, selector: &'static str) -> bool {
         self.context.debug_bounds(selector).is_some()
     }
 
     fn click_source_control(&mut self, selector: &'static str) {
-        let bounds = self.context.debug_bounds(selector).unwrap();
+        let bounds = super::menu_control_bounds(&mut self.context, selector);
         self.context
             .simulate_click(bounds.center(), Modifiers::none());
         self.context.run_until_parked();

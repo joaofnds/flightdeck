@@ -120,7 +120,7 @@ fn a_wide_cpu_summary_fills_four_equal_tracks(cx: &mut TestAppContext) {
         .context
         .update(|window, _| window.viewport_size());
 
-    assert_eq!(cards[0].left(), px(194.0));
+    assert_eq!(cards[0].left(), px(188.0));
     assert_eq!(cards[3].right(), viewport.width - px(24.0));
     for card in cards {
         assert_eq!(card.top(), cards[0].top());
@@ -163,7 +163,7 @@ impl InputDriver {
         let viewport = self.context.update(|window, _| window.viewport_size());
         for card in cards {
             assert!((card.size.width - cards[0].size.width).abs() <= px(1.0));
-            assert!(card.left() >= px(194.0));
+            assert!(card.left() >= px(188.0));
             assert!(card.right() <= viewport.width - px(24.0));
         }
         assert_eq!(cards[1].left() - cards[0].right(), px(8.0));

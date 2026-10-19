@@ -649,7 +649,13 @@ impl LiveDashboard {
             return state_legend(panel);
         }
 
-        let mut legends = div().flex().flex_wrap().gap_x(px(12.0)).text_size(px(11.0));
+        let mut legends = div()
+            .flex()
+            .flex_wrap()
+            .gap_x(px(12.0))
+            .mt(px(2.0))
+            .text_size(px(12.0))
+            .line_height(px(20.0));
         for (line_index, line) in panel.lines.iter().take(16).enumerate() {
             let key = self.chart_legend_key(panel, line_index);
             let reading = self.chart_line_reading(panel, line_index, index);
@@ -677,7 +683,6 @@ impl LiveDashboard {
                     } else {
                         1.0
                     })
-                    .text_color(rgb(charts::color(&line.color)))
                     .child(label)
                     .on_click(
                         cx.listener(move |this, _, _, cx| this.toggle_chart_legend(&key, cx)),
@@ -698,15 +703,28 @@ impl LiveDashboard {
 
     fn chart_legends_label(panel: &Panel, index: usize, reading: &str) -> gpui::AnyElement {
         let line = &panel.lines[index];
-        let label = format!("━ {}  {}", line.name, reading);
-        if panel.id == crate::live_resident_history::PANEL_ID {
+        let tint = charts::color(&line.color);
+        let swatch = if line.dashed == Some(true) {
             div()
-                .debug_selector(|| line.name.clone())
-                .child(label)
-                .into_any_element()
+                .flex()
+                .gap(px(2.0))
+                .children((0..3).map(|_| div().w(px(3.0)).h(px(3.0)).bg(rgb(tint))))
         } else {
-            label.into_any_element()
-        }
+            div().w(px(12.0)).h(px(4.0)).rounded(px(2.0)).bg(rgb(tint))
+        };
+
+        div()
+            .when(
+                panel.id == crate::live_resident_history::PANEL_ID,
+                |label| label.debug_selector(|| line.name.clone()),
+            )
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .child(swatch.flex_shrink_0())
+            .child(line.name.clone())
+            .child(div().text_color(rgb(MUTED)).child(reading.to_owned()))
+            .into_any_element()
     }
 }
 
@@ -878,7 +896,7 @@ fn chart_reading(panel: &Panel, index: Option<usize>) -> String {
     }
 
     let unit = if panel.id == "live-memory" {
-        "GiB active"
+        "GiB app memory"
     } else {
         &panel.unit
     };

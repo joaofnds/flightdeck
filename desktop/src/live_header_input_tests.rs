@@ -42,10 +42,7 @@ impl InputDriver {
     }
 
     fn click_recording_details(&mut self) {
-        let toggle = self
-            .context
-            .debug_bounds("recording-details-toggle")
-            .unwrap();
+        let toggle = super::menu_control_bounds(&mut self.context, "recording-details-toggle");
         self.context
             .simulate_click(toggle.center(), Modifiers::none());
         self.context.run_until_parked();

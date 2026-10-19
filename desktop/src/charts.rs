@@ -29,7 +29,9 @@ pub const PLOT_INSETS: gpui::Edges<Pixels> = gpui::Edges {
 };
 /// Display averaging keeps about one curve point per this many pixels, so a 900-second history
 /// draws as a readable curve; inspection still reads each exact observation.
-const CURVE_POINT_WIDTH: f32 = 4.0;
+/// Curves and axes average readings over a chart's span divided into this many buckets, ten
+/// seconds of a 15-minute chart, which is the sampling interval of the approved prototype.
+const CURVE_BUCKETS: f32 = 90.0;
 
 #[derive(Clone, Copy)]
 pub struct Inspection {
@@ -265,6 +267,14 @@ pub(crate) struct Geometry<'a> {
 }
 
 impl Geometry<'_> {
+    fn bucket(&self, index: usize) -> u8 {
+        let fraction = self.positions.map_or_else(
+            || number(index) / number(self.count.saturating_sub(1).max(1)),
+            |positions| positions[self.lower + index],
+        );
+        bucket_of(fraction)
+    }
+
     pub(crate) fn point(&self, index: usize, value: f32) -> gpui::Point<Pixels> {
         point(
             self.bounds.origin.x
@@ -378,15 +388,15 @@ struct CurvePoint {
     bottom: Pixels,
 }
 
-/// Averages the measured readings that fall in each `CURVE_POINT_WIDTH` column of one run, so the
-/// drawn curve carries no reading that was not measured and keeps every column's mean.
+/// Averages the measured readings in each bucket of one run, so the drawn curve carries no
+/// reading that was not measured and keeps every bucket's mean.
 fn curve_points(
     values: &[Option<(f32, f32)>],
     range: std::ops::Range<usize>,
     geometry: &Geometry<'_>,
 ) -> Vec<CurvePoint> {
     let mut curve = Vec::with_capacity(range.len());
-    let mut column_end = None;
+    let mut bucket = None;
     let mut sum = (0.0_f32, 0.0_f32, 0.0_f32);
     let mut count = 0.0_f32;
     for index in range {
@@ -394,27 +404,32 @@ fn curve_points(
             continue;
         };
 
-        let top = geometry.point(index, value);
-        let base = geometry.point(index, bottom);
-        let x = f32::from(top.x);
-        if column_end.is_some_and(|end| x >= end) {
+        let current = geometry.bucket(index);
+        if bucket.is_some_and(|bucket| bucket != current) {
             curve.push(curve_point(sum, count));
             sum = (0.0, 0.0, 0.0);
             count = 0.0;
-            column_end = None;
         }
-        if column_end.is_none() {
-            column_end = Some(x + CURVE_POINT_WIDTH);
-        }
-        sum.0 += x;
+        bucket = Some(current);
+        let top = geometry.point(index, value);
+        sum.0 += f32::from(top.x);
         sum.1 += f32::from(top.y);
-        sum.2 += f32::from(base.y);
+        sum.2 += f32::from(geometry.point(index, bottom).y);
         count += 1.0;
     }
     if count > 0.0 {
         curve.push(curve_point(sum, count));
     }
     curve
+}
+
+/// The bucket a reading at `fraction` of the chart's span falls in.
+fn bucket_of(fraction: f32) -> u8 {
+    assert!(fraction.is_finite());
+    match num_traits::ToPrimitive::to_u8(&(fraction.clamp(0.0, 1.0) * CURVE_BUCKETS).floor()) {
+        Some(bucket) => bucket,
+        None => panic!("a clamped fraction maps to a bucket of at most {CURVE_BUCKETS}"),
+    }
 }
 
 fn curve_point(sum: (f32, f32, f32), count: f32) -> CurvePoint {
@@ -581,47 +596,92 @@ pub fn axis_unit<'a>(panel: &'a Panel, axis: &str) -> &'a str {
         .unwrap_or(&panel.unit)
 }
 
+/// The range of the bucket means the curves draw, so the axis spans what is drawn rather than a
+/// one-second spike the averaged curve does not reach.
 fn axis_extent(panel: &Panel, inspection: Inspection, hidden: &[String], axis: &str) -> (f32, f32) {
-    let mut minimum = if axis == "left" {
+    let floor = if axis == "left" {
         panel.minimum.unwrap_or(0.0).min(0.0)
     } else {
         0.0
     };
-    let mut maximum = 0.0_f32;
+    let mut extent = (floor, 0.0_f32);
+    // One mean per line, then the stacked positive and negative totals.
+    let mut slots = vec![(0.0_f32, 0.0_f32); panel.lines.len() + 2];
+    let mut bucket = None;
     for index in inspection.lower..=inspection.upper {
-        let mut positive = 0.0;
-        let mut negative = 0.0;
-        for line in &panel.lines {
-            if hidden.contains(&line.name) {
-                continue;
-            }
-            if line.axis.as_deref().unwrap_or("left") != axis {
-                continue;
-            }
-            let Some(value) = line.values.get(index).copied().flatten() else {
-                continue;
-            };
+        let fraction = panel.positions.as_deref().map_or_else(
+            || {
+                number(index - inspection.lower)
+                    / number((inspection.upper - inspection.lower).max(1))
+            },
+            |positions| positions[index],
+        );
+        let current = bucket_of(fraction);
+        if bucket.is_some_and(|bucket| bucket != current) {
+            extent = axis_extent_flush(&mut slots, extent);
+        }
+        bucket = Some(current);
+        axis_extent_add(panel, hidden, axis, index, &mut slots);
+    }
+    axis_extent_flush(&mut slots, extent)
+}
 
-            let value = if line.negative == Some(true) {
-                -value
+fn axis_extent_add(
+    panel: &Panel,
+    hidden: &[String],
+    axis: &str,
+    index: usize,
+    slots: &mut [(f32, f32)],
+) {
+    let stacks = panel.lines.len();
+    let mut positive = None;
+    let mut negative = None;
+    for (slot, line) in panel.lines.iter().enumerate() {
+        if hidden.contains(&line.name) {
+            continue;
+        }
+        if line.axis.as_deref().unwrap_or("left") != axis {
+            continue;
+        }
+        let Some(value) = line.values.get(index).copied().flatten() else {
+            continue;
+        };
+
+        let value = if line.negative == Some(true) {
+            -value
+        } else {
+            value
+        };
+        if stacked(panel, line) {
+            if value < 0.0 {
+                negative = Some(negative.unwrap_or(0.0) + value);
             } else {
-                value
-            };
-            if stacked(panel, line) {
-                if value < 0.0 {
-                    negative += value;
-                    minimum = minimum.min(negative);
-                } else {
-                    positive += value;
-                    maximum = maximum.max(positive);
-                }
-            } else {
-                maximum = maximum.max(value);
-                minimum = minimum.min(value);
+                positive = Some(positive.unwrap_or(0.0) + value);
             }
+        } else {
+            slots[slot].0 += value;
+            slots[slot].1 += 1.0;
         }
     }
-    (minimum, maximum)
+    for (slot, total) in [(stacks, positive), (stacks + 1, negative)] {
+        if let Some(total) = total {
+            slots[slot].0 += total;
+            slots[slot].1 += 1.0;
+        }
+    }
+}
+
+/// Widens the extent by each slot's mean over the finished bucket and empties the slots.
+fn axis_extent_flush(slots: &mut [(f32, f32)], (minimum, maximum): (f32, f32)) -> (f32, f32) {
+    let mut extent = (minimum, maximum);
+    for slot in slots.iter_mut() {
+        if slot.1 > 0.0 {
+            let mean = slot.0 / slot.1;
+            extent = (extent.0.min(mean), extent.1.max(mean));
+        }
+        *slot = (0.0, 0.0);
+    }
+    extent
 }
 
 /// The prototype's tick spacing: about five ticks, each 1, 2, 2.5, 5 or 10 times a power of ten.
@@ -932,16 +992,16 @@ mod live_tests {
     }
 
     #[test]
-    fn curve_points_average_each_column_and_keep_lone_readings() {
-        // Goal: the drawn curve averages measured readings per column and invents none.
-        // Method: place five readings across two 4-pixel columns and compare the means.
+    fn curve_points_average_each_bucket_and_keep_lone_readings() {
+        // Goal: the drawn curve averages measured readings per bucket and invents none.
+        // Method: place five readings across two buckets and compare the means.
         let bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(8.0), px(100.0)));
         let geometry = Geometry {
             bounds,
             minimum: 0.0,
             maximum: 100.0,
             count: 5,
-            positions: Some(&[0.0, 0.1, 0.2, 0.6, 0.9]),
+            positions: Some(&[0.0, 0.001, 0.002, 0.6, 0.9]),
             segments: None,
             lower: 0,
         };
@@ -958,6 +1018,7 @@ mod live_tests {
         assert_eq!(curve.len(), 2);
         assert!((f32::from(curve[0].top) - 80.0).abs() < 0.001);
         assert!((f32::from(curve[1].top) - 50.0).abs() < 0.001);
+        assert!((f32::from(curve[0].x) - 0.008).abs() < 0.001);
         assert!((f32::from(curve[1].x) - 7.2).abs() < 0.001);
     }
 

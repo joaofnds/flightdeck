@@ -21,13 +21,13 @@ fn memory_hover_worker_failure_keeps_the_historical_scalar_without_current_app_l
 
     harness.driver.fail_ranked_preview();
 
-    assert!(harness.driver.reading_is_visible("2.0 GiB active"));
+    assert!(harness.driver.reading_is_visible("2.0 GiB app memory"));
     assert!(
         harness
             .driver
             .reading_is_visible("App totals unavailable: Ranking read failed")
     );
-    assert!(!harness.driver.reading_is_visible("6.0 GiB active"));
+    assert!(!harness.driver.reading_is_visible("6.0 GiB app memory"));
     assert!(
         !harness
             .driver
@@ -43,13 +43,13 @@ fn memory_hover_worker_failure_keeps_the_historical_scalar_without_current_app_l
         .driver
         .leave_plot("live-memory-plot", PlotExit::Sidebar);
 
-    assert!(harness.driver.reading_is_visible("6.0 GiB active"));
+    assert!(harness.driver.reading_is_visible("6.0 GiB app memory"));
     assert!(
         harness
             .driver
             .reading_is_visible("ranking:Resident memory:Current:1.0 GiB")
     );
-    assert!(!harness.driver.reading_is_visible("2.0 GiB active"));
+    assert!(!harness.driver.reading_is_visible("2.0 GiB app memory"));
     harness.teardown();
 }
 
@@ -170,7 +170,7 @@ fn memory_hover_loads_exact_app_rankings_and_restores_the_committed_reading(
     // Hover the installed Memory chart, deliver its exact response, then leave the plot.
     let mut harness = InputHarness::setup_route(cx, "memory");
     harness.driver.seed_route_rankings();
-    assert!(harness.driver.reading_is_visible("6.0 GiB active"));
+    assert!(harness.driver.reading_is_visible("6.0 GiB app memory"));
 
     harness.driver.hover_previous_second_on("live-memory-plot");
 
@@ -179,8 +179,8 @@ fn memory_hover_loads_exact_app_rankings_and_restores_the_committed_reading(
             .driver
             .reading_is_visible("Hover preview · Loading exact details")
     );
-    assert!(harness.driver.reading_is_visible("2.0 GiB active"));
-    assert!(!harness.driver.reading_is_visible("6.0 GiB active"));
+    assert!(harness.driver.reading_is_visible("2.0 GiB app memory"));
+    assert!(!harness.driver.reading_is_visible("6.0 GiB app memory"));
     assert!(
         harness
             .driver
@@ -199,7 +199,7 @@ fn memory_hover_loads_exact_app_rankings_and_restores_the_committed_reading(
             .driver
             .reading_is_visible("ranking:Resident memory:Historical:512.0 MiB")
     );
-    assert!(harness.driver.reading_is_visible("2.0 GiB active"));
+    assert!(harness.driver.reading_is_visible("2.0 GiB app memory"));
     assert!(
         !harness
             .driver
@@ -216,7 +216,7 @@ fn memory_hover_loads_exact_app_rankings_and_restores_the_committed_reading(
             .driver
             .reading_is_visible("ranking:Resident memory:Current:1.0 GiB")
     );
-    assert!(harness.driver.reading_is_visible("6.0 GiB active"));
+    assert!(harness.driver.reading_is_visible("6.0 GiB app memory"));
     assert!(
         !harness
             .driver
@@ -853,8 +853,12 @@ impl InputDriver {
 fn route_ranked_snapshot(generation: u64) -> Box<Snapshot> {
     let mut snapshot = accepted_snapshot(generation);
     snapshot.selection["trends"][0]["memory_active_bytes"] = json!(2_147_483_648_u64);
+    snapshot.selection["trends"][0]["memory_anonymous_bytes"] = json!(2_147_483_648_u64);
+    snapshot.selection["trends"][0]["memory_purgeable_bytes"] = json!(0);
     snapshot.selection["trends"][0]["power_watts"] = json!(3.0);
     snapshot.selection["trends"][1]["memory_active_bytes"] = json!(6_442_450_944_u64);
+    snapshot.selection["trends"][1]["memory_anonymous_bytes"] = json!(6_442_450_944_u64);
+    snapshot.selection["trends"][1]["memory_purgeable_bytes"] = json!(0);
     snapshot.selection["trends"][1]["power_watts"] = json!(9.0);
     snapshot.selection["summary"] = snapshot.selection["trends"][1].clone();
 

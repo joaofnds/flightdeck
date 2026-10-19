@@ -94,6 +94,7 @@ pub struct NativeControls {
     pub source: SourceMode,
     pub diagnostic_selected: Value,
     pub recording_details_open: bool,
+    pub time_menu_open: bool,
 }
 
 struct Candidate {

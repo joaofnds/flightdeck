@@ -459,6 +459,10 @@ fn panel_reading_value(reading: &Reading, point: &Value) -> Result<Option<f32>, 
         return Ok(Some(remainder));
     }
 
+    if reading.key == "memory_app_bytes" {
+        return resource_projection::value(reading, &app_memory(point));
+    }
+
     let source = reading.resource.map_or(point, |resource| &point[resource]);
     let value = match reading.channel {
         Some(channel) => &source[reading.key][channel],
@@ -466,6 +470,17 @@ fn panel_reading_value(reading: &Reading, point: &Value) -> Result<Option<f32>, 
     };
 
     resource_projection::value(reading, value)
+}
+
+/// App memory as Activity Monitor counts it: anonymous memory that macOS may not purge. A
+/// purgeable count above the anonymous one leaves it unknown rather than zero.
+fn app_memory(point: &Value) -> Value {
+    let anonymous = point["memory_anonymous_bytes"].as_u64();
+    let purgeable = point["memory_purgeable_bytes"].as_u64();
+    anonymous
+        .zip(purgeable)
+        .and_then(|(anonymous, purgeable)| anonymous.checked_sub(purgeable))
+        .map_or(Value::Null, Value::from)
 }
 
 fn specification(
@@ -524,8 +539,8 @@ fn memory() -> Specification {
         "Memory composition",
         "GiB",
         vec![
-            reading("memory_active_bytes", "Active", "#5794f2", GIBIBYTE),
-            reading("memory_wired_bytes", "Wired", "#ff9830", GIBIBYTE),
+            reading("memory_app_bytes", "App memory", "#73bf69", GIBIBYTE),
+            reading("memory_wired_bytes", "Wired", "#5794f2", GIBIBYTE),
             reading("memory_compressed_bytes", "Compressed", "#b877d9", GIBIBYTE),
             installed,
         ],
@@ -894,7 +909,7 @@ fn network() -> Vec<Specification> {
 }
 
 fn network_throughput() -> Specification {
-    let mut sent = reading("network_tx_bps", "Sent", "#b877d9", 1024.0);
+    let mut sent = reading("network_tx_bps", "Sent", "#73bf69", 1024.0);
     sent.negative = true;
 
     specification(
@@ -902,7 +917,7 @@ fn network_throughput() -> Specification {
         "External interfaces",
         "KiB/s",
         vec![
-            reading("network_rx_bps", "Received", "#73bf69", 1024.0),
+            reading("network_rx_bps", "Received", "#5794f2", 1024.0),
             sent,
         ],
     )

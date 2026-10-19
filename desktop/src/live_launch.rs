@@ -91,9 +91,12 @@ pub fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
         let bounds = Bounds::centered(None, size(px(1320.0), px(900.0)), cx);
         let window = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
+            // The window bar draws the title row itself, with the window buttons inside it as
+            // the approved prototype shows them.
             titlebar: Some(gpui::TitlebarOptions {
                 title: Some(title.into()),
-                ..Default::default()
+                appears_transparent: true,
+                traffic_light_position: Some(gpui::point(px(18.0), px(17.0))),
             }),
             ..Default::default()
         };

@@ -29,7 +29,9 @@ fn selection() -> Value {
          "wall_ns": 550_000_000_000_u64, "publication": 2, "cpu_percent": 25.0,
          "gpu_watts": 2.0, "power_watts": 8.0,
          "network_rx_bps": 2048, "network_tx_bps": 1024,
-         "memory_active_bytes": 1_073_741_824_u64},
+         "memory_active_bytes": 1_073_741_824_u64,
+         "memory_anonymous_bytes": 1_610_612_736_u64,
+         "memory_purgeable_bytes": 536_870_912_u64},
         {"run": "00000000000000050000000000000006",
          "boot": "00000000000000030000000000000004", "segment": 1,
          "wall_ns": 1_000_750_000_000_u64, "publication": 3, "cpu_percent": null}
@@ -108,6 +110,8 @@ fn memory_composition_selection() -> Value {
     let mut selection = selection();
     selection["trends"][0]["memory_total_bytes"] = json!(0);
     selection["trends"][0]["memory_active_bytes"] = json!(0);
+    selection["trends"][0]["memory_anonymous_bytes"] = json!(0);
+    selection["trends"][0]["memory_purgeable_bytes"] = json!(0);
     selection["trends"][0]["memory_wired_bytes"] = json!(0);
     selection["trends"][0]["memory_compressed_bytes"] = json!(0);
     selection["trends"][1]["memory_total_bytes"] = json!(51_539_607_552_u64);
@@ -127,7 +131,7 @@ fn assert_memory_composition(memory: &Panel) {
             .iter()
             .map(|line| line.name.as_str())
             .collect::<Vec<_>>(),
-        ["Active", "Wired", "Compressed", "Installed"]
+        ["App memory", "Wired", "Compressed", "Installed"]
     );
     assert_eq!(memory.lines[0].values, [Some(0.0), Some(1.0), None]);
     assert_eq!(memory.lines[1].values, [Some(0.0), Some(2.0), None]);

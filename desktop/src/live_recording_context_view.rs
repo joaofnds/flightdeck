@@ -9,20 +9,15 @@ use crate::live_notices::recording_context::{
 };
 
 impl LiveDashboard {
-    pub(super) fn header_recording_context(&self, mut header: Div, cx: &mut Context<Self>) -> Div {
+    /// The losses and errors of the recording, which stay in the header while its details
+    /// live in the time menu.
+    pub(super) fn header_recording_context(&self, mut header: Div) -> Div {
         let catalog = self
             .context_snapshot()
             .map_or(&Value::Null, |snapshot| &snapshot.catalog);
         let selection = self
             .reading_snapshot()
             .map_or(&Value::Null, |snapshot| &snapshot.selection);
-        header = header.child(self.recording_details_control(cx));
-        if self.native.recording_details_open {
-            header = header.child(Self::recording_details(RecordingContext {
-                catalog,
-                selection,
-            }));
-        }
         header = header.children(
             crate::live_notices::losses(catalog, selection)
                 .into_iter()
@@ -45,7 +40,17 @@ impl LiveDashboard {
         header
     }
 
-    fn recording_details_control(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn recording_details_view(&self) -> impl IntoElement {
+        let catalog = self
+            .context_snapshot()
+            .map_or(&Value::Null, |snapshot| &snapshot.catalog);
+        let selection = self
+            .reading_snapshot()
+            .map_or(&Value::Null, |snapshot| &snapshot.selection);
+        Self::recording_details(RecordingContext { catalog, selection })
+    }
+
+    pub(super) fn recording_details_control(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let label = if self.native.recording_details_open {
             "▾ Recording details"
         } else {

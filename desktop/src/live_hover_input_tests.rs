@@ -463,7 +463,10 @@ impl HoverDriver {
     }
 
     fn focus_copy(&mut self) {
-        let bounds = self.context.debug_bounds("copy-reading").unwrap();
+        let bounds = crate::live_dashboard::input_tests::menu_control_bounds(
+            &mut self.context,
+            "copy-reading",
+        );
         self.context
             .simulate_mouse_down(bounds.center(), MouseButton::Right, Modifiers::none());
         self.context

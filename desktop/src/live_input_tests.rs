@@ -6,6 +6,20 @@ use serde_json::{Value, json};
 use super::LiveDashboard;
 use crate::live_source::{Snapshot, Update, Worker};
 
+/// Opens the time menu when `selector` names a control inside it, and returns the control's
+/// bounds, so tests reach those controls the way a person does.
+pub(crate) fn menu_control_bounds(
+    context: &mut VisualTestContext,
+    selector: &'static str,
+) -> gpui::Bounds<gpui::Pixels> {
+    if context.debug_bounds(selector).is_none() {
+        let picker = context.debug_bounds("time-range").unwrap();
+        context.simulate_click(picker.center(), Modifiers::none());
+        context.run_until_parked();
+    }
+    context.debug_bounds(selector).expect(selector)
+}
+
 #[path = "live_chart_inspector_input_tests.rs"]
 mod chart_inspector;
 #[path = "live_computer_input_tests.rs"]
@@ -124,12 +138,12 @@ fn widening_the_window_recomputes_the_timestamp_beneath_a_stationary_pointer(
 
     let plot = harness.driver.plot_bounds("live-cpu-plot");
     assert!(plot.contains(&pointer));
-    assert_eq!(plot.left(), gpui::px(249.5));
-    assert_eq!(plot.size.width, gpui::px(428.0));
+    assert_eq!(plot.left(), gpui::px(243.5));
+    assert_eq!(plot.size.width, gpui::px(430.0));
     assert_eq!(harness.driver.pointer_position(), pointer);
     assert_eq!(
         harness.driver.chart_accessibility_reading("live-cpu").0,
-        Some(859)
+        Some(860)
     );
     assert!(harness.driver.cursor_is_visible("live-cpu-plot"));
     assert!(harness.driver.reading_is_visible("Unavailable"));
