@@ -203,7 +203,7 @@ fn a_covering_commit_with_a_changed_subsecond_clock_preserves_the_previous_histo
 #[test]
 fn duplicate_covering_commits_preserve_the_previous_history() {
     // Goal: two saved windows covering the same publication cannot pick one by directory order.
-    // Method: commit a second genuine table set covering that publication, then compare public state.
+    // Method: commit a second table set covering that publication, then compare public state.
     let mut handoff = CommitHandoff::new();
     handoff.duplicate_commit();
 
