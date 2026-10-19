@@ -22,26 +22,14 @@ fn battery_hover_updates_selected_details_charging_metadata_and_copy_then_restor
         .driver
         .hover_previous_second_on("live-battery-charge-plot");
 
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("summary-card:Charge:33.0 %")
-    );
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("summary-card:Battery flow:-3.0 W")
-    );
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("summary-card:Health:104.0 %")
-    );
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("overview-context:cycles:30")
-    );
+    for selector in [
+        "summary-card:Charge:33.0 %",
+        "summary-card:Battery flow:-3.0 W",
+        "summary-card:Health:104.0 %",
+        "overview-context:cycles:30",
+    ] {
+        assert!(harness.driver.reading_is_visible(selector), "{selector}");
+    }
     let (second, reading) = harness
         .driver
         .chart_accessibility_reading("live-battery-charging");

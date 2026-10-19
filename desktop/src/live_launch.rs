@@ -161,9 +161,9 @@ fn install_control(
 #[cfg(not(feature = "automation"))]
 fn install_control(
     control: Option<Control>,
-    _: &gpui::Entity<LiveDashboard>,
-    _: &mut gpui::Window,
-    _: &mut App,
+    _dashboard: &gpui::Entity<LiveDashboard>,
+    _window: &mut gpui::Window,
+    _cx: &mut App,
 ) {
     if let Some(control) = control {
         match control {}

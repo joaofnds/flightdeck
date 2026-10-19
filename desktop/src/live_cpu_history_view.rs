@@ -165,20 +165,8 @@ impl LiveDashboard {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let measured = Rc::new(Cell::new(Bounds::default()));
-        let measure = Rc::clone(&measured);
-        let paint_history = Arc::clone(history);
         let inspection = self.cpu_history_inspection(history);
-        let Ok(rows) = u8::try_from(history.cpus().len()) else {
-            unreachable!("Validated CPU history has at most 32 rows");
-        };
-        let plot = canvas(
-            move |bounds, _, _| measure.set(bounds),
-            move |bounds, (), window, _| {
-                cpu_history_paint(&paint_history, inspection, bounds, window);
-            },
-        )
-        .w_full()
-        .h(px(f32::from(rows) * ROW_HEIGHT));
+        let plot = cpu_history_cells_plot(history, inspection, Rc::clone(&measured));
         let move_history = Arc::clone(history);
         let move_bounds = Rc::clone(&measured);
         let click_history = Arc::clone(history);
@@ -732,4 +720,24 @@ fn cpu_history_marker(
         ),
         crate::charts::alpha(color, 0.8),
     ));
+}
+
+/// The history's cells, painted at the measured bounds, which it records for the pointer.
+fn cpu_history_cells_plot(
+    history: &Arc<CPUHistory>,
+    inspection: Option<CPUInspection>,
+    measured: Rc<Cell<Bounds<Pixels>>>,
+) -> impl IntoElement + use<> {
+    let paint_history = Arc::clone(history);
+    let Ok(rows) = u8::try_from(history.cpus().len()) else {
+        unreachable!("Validated CPU history has at most 32 rows");
+    };
+    canvas(
+        move |bounds, _, _| measured.set(bounds),
+        move |bounds, (), window, _| {
+            cpu_history_paint(&paint_history, inspection, bounds, window);
+        },
+    )
+    .w_full()
+    .h(px(f32::from(rows) * ROW_HEIGHT))
 }

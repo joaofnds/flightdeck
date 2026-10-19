@@ -509,6 +509,19 @@ impl LiveDashboard {
 #[path = "live_input_tests.rs"]
 pub(crate) mod input_tests;
 
+impl LiveDashboard {
+    /// The error that stopped the latest refresh, above the page it left in place.
+    fn error_notice(&self) -> Option<gpui::Div> {
+        self.error.as_ref().map(|error| {
+            div()
+                .px(px(24.0))
+                .py(px(8.0))
+                .text_color(rgb(crate::charts::ORANGE))
+                .child(error.clone())
+        })
+    }
+}
+
 impl Render for LiveDashboard {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.rendered_source != Some(self.native.source) {
@@ -568,13 +581,7 @@ impl Render for LiveDashboard {
                             .min_w_0()
                             .child(self.header(cx))
                             .child(self.native_notice(cx))
-                            .children(self.error.as_ref().map(|error| {
-                                div()
-                                    .px(px(24.0))
-                                    .py(px(8.0))
-                                    .text_color(rgb(crate::charts::ORANGE))
-                                    .child(error.clone())
-                            }))
+                            .children(self.error_notice())
                             .child(body),
                     ),
             )

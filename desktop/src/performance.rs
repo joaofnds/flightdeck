@@ -233,18 +233,7 @@ impl Options {
                 self.seconds = Some(seconds);
                 position += 1;
             }
-            "--help" => {
-                println!(
-                    "flightdeck [--recording PATH] [--start-collector] [--page ROUTE]\n\
-                     [--seconds 1..1800] [--live-check --seconds 5..300]\n\
-                     [--reference [--scrub] [--animate]\n\
-                     [--hardware] [--smoke] [--minutes 15|60] [--seconds 1..300]\n\
-                     [--replay ACTIONS.json]] [--check]\n\
-                     [--control SOCKET] (automation builds: hidden window, socket commands)"
-                );
-                println!("--live-soak [--recording PATH] [--seconds 5..1800; default 900]");
-                std::process::exit(0);
-            }
+            "--help" => parse_argument_help(),
             _ => return self.source.parse_argument(flag, arguments, position),
         }
         Ok(position)
@@ -381,6 +370,20 @@ impl Performance {
             })
         );
     }
+}
+
+/// Prints the flags and ends the process, as `--help` asks.
+fn parse_argument_help() -> ! {
+    println!(
+        "flightdeck [--recording PATH] [--start-collector] [--page ROUTE]\n\
+         [--seconds 1..1800] [--live-check --seconds 5..300]\n\
+         [--reference [--scrub] [--animate]\n\
+         [--hardware] [--smoke] [--minutes 15|60] [--seconds 1..300]\n\
+         [--replay ACTIONS.json]] [--check]\n\
+         [--control SOCKET] (automation builds: hidden window, socket commands)"
+    );
+    println!("--live-soak [--recording PATH] [--seconds 5..1800; default 900]");
+    std::process::exit(0);
 }
 
 #[cfg(test)]

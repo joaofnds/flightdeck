@@ -48,13 +48,7 @@ impl LiveDashboard {
         match self.request.route.as_str() {
             "cpu" => {
                 let metric = crate::live_app_attribution_history::Metric::Cpu;
-                let panel = self
-                    .panels
-                    .iter()
-                    .find(|panel| panel.id == metric.panel_id())
-                    .cloned();
-                rows.push(Row::Heading(metric.title().into()));
-                rows.push(Row::AppAttribution(metric, panel));
+                self.reading_rows_attribution(metric, &mut rows);
             }
             "memory" => {
                 rows.push(Row::Heading(crate::live_resident_history::TITLE.into()));
@@ -69,14 +63,7 @@ impl LiveDashboard {
         }
         if self.request.route == "storage" {
             let metric = crate::live_app_attribution_history::Metric::Disk;
-            let panel = self
-                .panels
-                .iter()
-                .take(16)
-                .find(|panel| panel.id == metric.panel_id())
-                .cloned();
-            rows.push(Row::Heading(metric.title().into()));
-            rows.push(Row::AppAttribution(metric, panel));
+            self.reading_rows_attribution(metric, &mut rows);
             for index in 0..self.resource_device_count() {
                 rows.push(Row::StorageDevice(
                     index,
@@ -91,6 +78,21 @@ impl LiveDashboard {
         assert!(rows.len() <= 4096);
 
         rows
+    }
+
+    /// The heading and chart of one resource's attribution to apps.
+    fn reading_rows_attribution(
+        &self,
+        metric: crate::live_app_attribution_history::Metric,
+        rows: &mut Vec<Row>,
+    ) {
+        let panel = self
+            .panels
+            .iter()
+            .find(|panel| panel.id == metric.panel_id())
+            .cloned();
+        rows.push(Row::Heading(metric.title().into()));
+        rows.push(Row::AppAttribution(metric, panel));
     }
 
     fn reading_rows_charts(&self, rows: &mut Vec<Row>) {
