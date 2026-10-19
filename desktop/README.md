@@ -194,8 +194,10 @@ retention limits prevent recovery. Missing sensors stay unavailable. Live Overvi
 three chart columns from 1100 points wide, two from 640, and one below 640.
 Memory starts with composition and pressure, followed by Swap and paging; that
 three-card band uses the same three/two/one breakpoints, keeping equal column
-widths in its incomplete row. Other live chart rows use two columns from 640 and
-one below it. Header controls wrap
+widths in its incomplete row. Named-process histories also use three/two/one
+columns; selected-App totals use two from 640 and one below. Incomplete Apps rows
+retain their declared column widths. Other live chart rows use two columns from
+640 and one below it. Header controls wrap
 inside narrow content. Overview includes categorical memory-pressure history.
 Captured and live pages have different panel/data workloads and must be measured separately.
 
