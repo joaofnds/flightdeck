@@ -308,8 +308,8 @@ impl InputDriver {
             let scale = window.scale_factor();
             let width = (plot.size.width / 900.0).scale(scale).as_f32();
             assert!(width >= 1.0);
-            let top = resource_device_pixel((plot.top() + px(35.0)).scale(scale).as_f32());
-            let bottom = resource_device_pixel((plot.top() + px(63.0)).scale(scale).as_f32());
+            let top = resource_device_pixel(plot.top().scale(scale).as_f32());
+            let bottom = resource_device_pixel(plot.bottom().scale(scale).as_f32());
             let left = resource_device_pixel(plot.left().scale(scale).as_f32());
             let right = resource_device_pixel(plot.right().scale(scale).as_f32());
             let cells: Vec<_> = window

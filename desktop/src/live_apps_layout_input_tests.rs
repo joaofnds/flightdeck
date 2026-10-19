@@ -56,8 +56,9 @@ apps_grid_width_case!(apps_grid_keeps_two_named_tracks_at_640, 640.0, 2);
 apps_grid_width_case!(apps_grid_keeps_one_named_track_at_639, 639.0, 1);
 
 #[gpui::test]
-fn apps_grid_preserves_overview_context_full_row_at_1100(cx: &mut TestAppContext) {
-    // Existing Overview context keeps its full content extent when chart rows gain track counts.
+fn apps_grid_keeps_overview_context_columns_at_1100(cx: &mut TestAppContext) {
+    // The pressure card takes the first chart column, as the prototype's three compact cards do,
+    // and the wider context keeps its full content extent when chart rows gain track counts.
     let mut harness = AppHoverHarness::setup(cx);
     harness.driver.prepare_overview_grid_context(1100.0);
 
@@ -207,10 +208,9 @@ fn expect_apps_grid_coordinate(actual: Pixels, expected: Pixels) {
 
 fn expect_overview_grid_context_span(bounds: &OverviewGridBounds) {
     let width = bounds.primary_last.right() - bounds.primary_first.left();
-    expect_apps_grid_coordinate(bounds.pressure.size.width, width);
+    expect_apps_grid_coordinate(bounds.pressure.size.width, bounds.primary_first.size.width);
     expect_apps_grid_coordinate(bounds.temperature.size.width, width);
     expect_apps_grid_coordinate(bounds.pressure.left(), bounds.primary_first.left());
-    expect_apps_grid_coordinate(bounds.pressure.right(), bounds.primary_last.right());
     expect_apps_grid_coordinate(bounds.temperature.left(), bounds.primary_first.left());
     expect_apps_grid_coordinate(bounds.temperature.right(), bounds.primary_last.right());
     assert!(bounds.pressure.bottom() < bounds.temperature.top());

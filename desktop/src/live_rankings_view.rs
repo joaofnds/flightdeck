@@ -2,18 +2,45 @@ use gpui::{AnyElement, Context, IntoElement, SharedString, div, prelude::*, px, 
 use num_traits::ToPrimitive;
 
 use super::{Entry, Metric, Ranking, Rankings, TopApps};
-use crate::charts::{BLUE, GREEN, GRID, MUTED, ORANGE, PANEL, YELLOW};
+use crate::charts::{BLUE, GREEN, GRID, MUTED, ORANGE, PANEL, TEXT, YELLOW};
 use crate::dashboard::control;
 use crate::live_chart_view::ChartHelp;
 use crate::live_dashboard::LiveDashboard;
 use crate::live_hover::Target;
 use crate::live_source::{AppKey, identity_validate};
 
+/// One card of the Overview's top-app grid, in the prototype's order.
+#[derive(Clone, Copy)]
+enum OverviewSlot {
+    /// A recorded measure, by its index among the rankings' metrics.
+    Ranked(usize),
+    /// A measure the collector does not record per app.
+    Uncaptured(&'static str, &'static str),
+}
+
+const OVERVIEW_SLOTS: [OverviewSlot; 6] = [
+    OverviewSlot::Ranked(0),
+    OverviewSlot::Ranked(1),
+    OverviewSlot::Uncaptured(
+        "Network",
+        "Per-app network traffic is not recorded by this collector, so no app is ranked.",
+    ),
+    OverviewSlot::Ranked(3),
+    OverviewSlot::Uncaptured(
+        "GPU",
+        "Per-app GPU time is not recorded by this collector, so no app is ranked.",
+    ),
+    OverviewSlot::Ranked(2),
+];
+
+/// The number of cards in the Overview's top-app grid.
+pub(crate) const OVERVIEW_SLOT_COUNT: usize = OVERVIEW_SLOTS.len();
+
 impl LiveDashboard {
     pub fn app_rankings(&self, metrics: &[usize], cx: &mut Context<Self>) -> AnyElement {
         div()
             .flex()
-            .gap(px(16.0))
+            .gap(px(8.0))
             .children(
                 metrics
                     .iter()
@@ -23,47 +50,70 @@ impl LiveDashboard {
             .into_any_element()
     }
 
+    /// One row of the Overview's top-app grid. A short last row keeps the grid's column widths.
+    pub fn overview_rankings(
+        &self,
+        slots: &[usize],
+        columns: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        assert!(slots.len() <= columns);
+        div()
+            .flex()
+            .gap(px(8.0))
+            .children(slots.iter().take(3).map(|slot| {
+                assert!(*slot < OVERVIEW_SLOT_COUNT);
+                match OVERVIEW_SLOTS[*slot] {
+                    OverviewSlot::Ranked(index) => self.app_ranking(index, cx),
+                    OverviewSlot::Uncaptured(title, help) => uncaptured_ranking(title, help),
+                }
+            }))
+            .children((slots.len()..columns).map(|_| div().flex_1().min_w_0()))
+            .into_any_element()
+    }
+
     fn app_ranking(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
         let metric = [Metric::Cpu, Metric::Resident, Metric::Power, Metric::Disk][index];
-        let mut card = div()
-            .flex_1()
-            .min_w_0()
-            .p(px(16.0))
-            .rounded(px(7.0))
-            .border_1()
-            .border_color(rgb(GRID))
-            .bg(rgb(PANEL))
-            .child(ranking_heading(metric));
+        let card = ranking_card(metric_name(metric));
 
         let (rankings, target) = match self.ranking_reading() {
             Ok(reading) => reading,
-            Err(error) => return card.child(notice(&error)).into_any_element(),
+            Err(error) => {
+                return card
+                    .child(ranking_heading(metric, metric_help(metric).into()))
+                    .child(notice(&error))
+                    .into_any_element();
+            }
         };
         let ranking = &rankings.metrics[index];
+        let membership = format!(
+            "{} Apps, membership {}, {} ungrouped processes",
+            rankings.app_count,
+            if rankings.membership_complete {
+                "complete"
+            } else {
+                "partial"
+            },
+            rankings.ungrouped_members
+        );
+        let incomplete = [ranking.unavailable, ranking.overflowed, ranking.partial]
+            .iter()
+            .any(|count| *count > 0);
 
-        card = card
-            .child(notice(&format!(
-                "At Unix second {} · top measured totals",
-                target.second
-            )))
-            .child(Self::app_ranking_entries(ranking, &target, cx))
-            .child(notice(&coverage(ranking)))
-            .child(notice(&format!(
-                "{} Apps · membership {} · {} ungrouped processes",
-                rankings.app_count,
-                if rankings.membership_complete {
-                    "complete"
-                } else {
-                    "partial"
-                },
-                rankings.ungrouped_members
-            )));
-
-        if index == 0 {
-            card = card.child(notice("App network and GPU readings are unavailable."));
-        }
-
-        card.into_any_element()
+        card.id(SharedString::from(format!(
+            "ranking-card-{}",
+            metric.title()
+        )))
+        .role(gpui::Role::Group)
+        .aria_label(format!(
+            "{} top apps at Unix second {}; {membership}",
+            metric_name(metric),
+            target.second
+        ))
+        .child(ranking_heading(metric, metric_help(metric).into()))
+        .child(Self::app_ranking_entries(ranking, &target, cx))
+        .when(incomplete, |card| card.child(notice(&coverage(ranking))))
+        .into_any_element()
     }
 
     fn ranking_reading(&self) -> Result<(&TopApps, Target), String> {
@@ -160,8 +210,12 @@ impl LiveDashboard {
             .focus(|style| style.bg(rgb(0x32_46_61)))
             .hover(|style| style.bg(rgb(0x20_29_36)))
             .border_b_1()
-            .border_color(rgb(GRID))
-            .py(px(7.0))
+            .border_color(rgb(crate::charts::LINE))
+            .min_h(px(34.0))
+            .px(px(2.0))
+            .py(px(3.0))
+            .flex()
+            .items_center()
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.open_ranked_app(&key, &target, cx);
             }))
@@ -174,8 +228,7 @@ impl LiveDashboard {
                     }
                 }),
             )
-            .child(ranking_cell(entry, ranking, value))
-            .child(notice(&coverage))
+            .child(ranking_cell(entry, ranking, value, coverage))
             .into_any_element()
     }
 
@@ -191,31 +244,90 @@ impl LiveDashboard {
     }
 }
 
-fn ranking_heading(metric: Metric) -> gpui::Div {
-    let selector = format!("ranking-help:{}", metric.title());
-    let help = metric_help(metric);
+fn ranking_card(name: &'static str) -> gpui::Div {
+    div()
+        .debug_selector(move || format!("ranking-card:{name}"))
+        .flex_1()
+        .min_w_0()
+        .px(px(12.0))
+        .pt(px(8.0))
+        .pb(px(10.0))
+        .rounded(px(12.0))
+        .border_1()
+        .border_color(rgb(crate::charts::LINE))
+        .bg(rgb(PANEL))
+}
 
+fn ranking_heading(metric: Metric, help: String) -> gpui::Div {
+    let selector = format!("ranking-help:{}", metric.title());
+    let label = format!("About {} App rankings", metric.title());
+    ranking_heading_text(metric_name(metric), selector, label, help)
+}
+
+fn ranking_heading_text(
+    name: &'static str,
+    selector: String,
+    label: String,
+    help: String,
+) -> gpui::Div {
+    let description = help.clone();
     div()
         .flex()
         .items_center()
-        .justify_between()
-        .gap(px(8.0))
+        .gap(px(4.0))
+        .min_h(px(40.0))
         .child(
             div()
-                .text_size(px(15.0))
-                .child(format!("{} · Top apps", metric.title())),
+                .text_size(px(14.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .child(name),
         )
         .child(
             control("ⓘ")
                 .id(SharedString::from(selector.clone()))
                 .debug_selector(move || selector.clone())
-                .aria_label(format!("About {} App rankings", metric.title()))
-                .aria_description(help)
-                .tooltip(move |_, cx| cx.new(|_| ChartHelp(help.into())).into()),
+                .text_color(rgb(MUTED))
+                .aria_label(label)
+                .aria_description(description)
+                .tooltip(move |_, cx| cx.new(|_| ChartHelp(help.clone())).into()),
         )
 }
 
-fn ranking_cell(entry: &Entry, ranking: &Ranking, value: String) -> gpui::Div {
+fn uncaptured_ranking(name: &'static str, help: &'static str) -> AnyElement {
+    ranking_card(name)
+        .child(ranking_heading_text(
+            name,
+            format!("ranking-help:{name}"),
+            format!("About {name} App rankings"),
+            help.into(),
+        ))
+        .child(
+            div()
+                .debug_selector(move || format!("ranking-uncaptured:{name}"))
+                .py(px(8.0))
+                .text_size(px(12.0))
+                .text_color(rgb(MUTED))
+                .child("Not recorded per app"),
+        )
+        .into_any_element()
+}
+
+/// The name the prototype gives each ranked measure.
+fn metric_name(metric: Metric) -> &'static str {
+    match metric {
+        Metric::Cpu => "CPU",
+        Metric::Resident => "Memory",
+        Metric::Power => "Energy",
+        Metric::Disk => "Disk",
+    }
+}
+
+/// An app's name as the prototype lists it, without the bundle's `.app` extension.
+fn ranking_name(name: &str) -> &str {
+    name.strip_suffix(".app").unwrap_or(name)
+}
+
+fn ranking_cell(entry: &Entry, ranking: &Ranking, value: String, coverage: String) -> gpui::Div {
     let maximum = ranking.entries.first().map_or(0, |entry| entry.amount);
     let fraction = ranking_fraction(entry, maximum);
     let track = format!(
@@ -230,26 +342,30 @@ fn ranking_cell(entry: &Entry, ranking: &Ranking, value: String) -> gpui::Div {
     );
     let color = metric_color(ranking.metric);
 
+    // The prototype gives the name 1.2 parts of the row and the bar 1 part.
     div()
+        .flex_1()
+        .min_w_0()
         .flex()
         .gap(px(8.0))
         .items_center()
-        .justify_between()
+        .text_size(px(13.0))
         .child(
             div()
-                .flex_1()
+                .debug_selector(move || coverage.clone())
+                .w(gpui::relative(0.545))
                 .min_w_0()
                 .truncate()
-                .child(entry.app.name.clone()),
+                .child(ranking_name(&entry.app.name).to_owned()),
         )
         .child(
             div()
                 .debug_selector(move || track.clone())
                 .relative()
-                .w(gpui::relative(0.48))
-                .min_w(px(85.0))
+                .flex_1()
+                .min_w(px(70.0))
                 .h(px(24.0))
-                .rounded(px(2.0))
+                .rounded(px(4.0))
                 .bg(rgb(GRID))
                 .overflow_hidden()
                 .child(
@@ -260,18 +376,21 @@ fn ranking_cell(entry: &Entry, ranking: &Ranking, value: String) -> gpui::Div {
                         .top_0()
                         .h_full()
                         .w(gpui::relative(fraction))
-                        .bg(rgb(color))
-                        .opacity(0.3),
+                        .bg(crate::charts::alpha(color, 0.35))
+                        .when(fraction > 0.0, |fill| {
+                            fill.border_r_2().border_color(rgb(color))
+                        }),
                 )
                 .child(
                     div()
                         .relative()
                         .size_full()
-                        .px(px(6.0))
+                        .px(px(5.0))
                         .flex()
                         .items_center()
                         .justify_end()
-                        .text_color(rgb(color))
+                        .text_size(px(11.0))
+                        .text_color(rgb(TEXT))
                         .child(value),
                 ),
         )
@@ -359,4 +478,18 @@ fn value(metric: Metric, entry: &Entry) -> String {
     }
 
     value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ranking_name;
+
+    #[test]
+    fn ranked_apps_drop_only_the_bundle_extension() {
+        // Goal: a ranked app reads as the prototype lists it.
+        // Method: name a bundle, a bare executable and a name that only contains ".app".
+        assert_eq!(ranking_name("Brave Browser.app"), "Brave Browser");
+        assert_eq!(ranking_name("claude"), "claude");
+        assert_eq!(ranking_name("com.apple.appkit"), "com.apple.appkit");
+    }
 }

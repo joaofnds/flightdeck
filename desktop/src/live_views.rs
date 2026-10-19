@@ -29,7 +29,7 @@ impl LiveDashboard {
         );
         let content = self.row_content(index, cx);
         let padding = match &self.rows[index] {
-            Row::Charts { .. } => 4.0,
+            Row::Charts { .. } | Row::OverviewStatus | Row::OverviewRankings(_) => 4.0,
             _ => 8.0,
         };
         let key = self.rows[index].layout_key();
@@ -84,7 +84,9 @@ impl LiveDashboard {
             Row::CPUActivity => self.cpu_activity().into_any_element(),
             Row::CPUHistory => self.cpu_history_panel(cx).into_any_element(),
             Row::OverviewStatus => self.overview_status(cx).into_any_element(),
-            Row::Rankings(metrics) => self.app_rankings(metrics, cx),
+            Row::OverviewRankings(slots) => {
+                self.overview_rankings(slots, self.reading_chart_columns(), cx)
+            }
             Row::OverviewAppHistories(slots) => self.overview_app_histories(slots, cx),
             Row::MemoryAttribution(panel) => self.memory_attribution(panel.as_ref(), cx),
             Row::AppAttribution(metric, panel) => self.app_attribution(*metric, panel.as_ref(), cx),
@@ -95,11 +97,7 @@ impl LiveDashboard {
                     .into_any_element()
             }
             Row::Charts { panels, columns } => self.row_content_charts(panels, *columns, cx),
-            Row::Heading(title) => div()
-                .debug_selector(|| title.clone())
-                .text_size(px(17.0))
-                .child(title.clone())
-                .into_any_element(),
+            Row::Heading(title) => heading(title).into_any_element(),
             Row::Disclosure(section) => self.disclosure(*section, cx).into_any_element(),
             Row::Hardware => self.live_hardware(cx).into_any_element(),
             Row::TableHeading(name) => self.table_heading(name, cx).into_any_element(),
@@ -319,4 +317,33 @@ pub(crate) fn pressure(value: &Value) -> &'static str {
         Some(2) => "Critical",
         _ => "Unavailable",
     }
+}
+
+/// A section title as the prototype sets it, with its note on the right where it has one.
+fn heading(title: &str) -> gpui::Div {
+    let note = match title {
+        "Top apps at the selected time" => "Select an app to inspect its processes",
+        _ => "",
+    };
+    let selector = title.to_owned();
+    div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .justify_between()
+        .gap(px(8.0))
+        .pt(px(12.0))
+        .child(
+            div()
+                .debug_selector(move || selector.clone())
+                .text_size(px(14.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .child(title.to_owned()),
+        )
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(rgb(crate::charts::MUTED))
+                .child(note),
+        )
 }

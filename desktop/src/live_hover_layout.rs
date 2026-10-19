@@ -21,7 +21,7 @@ impl Row {
             Self::StorageDevice(_, key) => key.clone(),
             Self::Diagnostics => "diagnostics".into(),
             Self::OverviewStatus => "overview-status".into(),
-            Self::Rankings(metrics) => format!("rankings-{}", metrics[0]),
+            Self::OverviewRankings(slots) => format!("overview-rankings-{}", slots[0]),
             Self::OverviewAppHistories(slots) => format!("overview-app-histories-{}", slots[0]),
             Self::MemoryAttribution(_) => "memory-attribution".into(),
             Self::AppAttribution(metric, _) => format!("app-attribution-{}", metric.panel_id()),
@@ -85,6 +85,7 @@ impl Row {
                 }
             }
             Self::CPUHistory => source == "cpu-history-plot",
+            Self::OverviewStatus => source == "live-memory-pressure",
             _ => false,
         }
     }

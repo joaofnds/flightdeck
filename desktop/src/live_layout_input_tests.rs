@@ -54,14 +54,14 @@ macro_rules! overview_context_width_case {
 }
 
 overview_context_width_case!(
-    overview_context_is_side_by_side_at_1320,
+    overview_context_is_one_row_at_1320,
     1320.0,
     assert_overview_context_columns
 );
 overview_context_width_case!(
-    overview_context_is_side_by_side_at_640,
+    overview_context_is_two_columns_at_640,
     640.0,
-    assert_overview_context_columns
+    assert_overview_context_two_columns
 );
 overview_context_width_case!(
     overview_context_is_stacked_at_639,
@@ -145,6 +145,44 @@ fn chart_cards_use_reference_padding_and_eight_pixel_column_gaps(cx: &mut TestAp
     assert_eq!(headline.left() - card.left(), px(13.0));
     assert_eq!(card.right() - headline.right(), px(13.0));
     assert_eq!(data.top() - card.top(), px(9.0));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn overview_top_apps_are_a_three_by_two_grid_in_the_prototype_order(cx: &mut TestAppContext) {
+    // Goal: the Overview lists top apps as the prototype's six compact cards.
+    // Method: read the installed card bounds at the wide layout, then the uncaptured notices.
+    let mut harness = InputHarness::setup_route(cx, "overview");
+    harness.driver.seed_overview_context();
+
+    let cards = [
+        "ranking-card:CPU",
+        "ranking-card:Memory",
+        "ranking-card:Network",
+        "ranking-card:Disk",
+        "ranking-card:GPU",
+        "ranking-card:Energy",
+    ]
+    .map(|selector| harness.driver.chart_bounds(selector));
+
+    for row in cards.chunks(3) {
+        assert_eq!(row[0].top(), row[1].top());
+        assert_eq!(row[1].top(), row[2].top());
+        assert_eq!(row[1].left() - row[0].right(), px(8.0));
+        assert_eq!(row[2].left() - row[1].right(), px(8.0));
+    }
+    assert_eq!(cards[3].top() - cards[0].bottom(), px(8.0));
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("ranking-uncaptured:Network")
+    );
+    assert!(harness.driver.reading_is_visible("ranking-uncaptured:GPU"));
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("ranking:CPU:Current:80.0 %")
+    );
     harness.teardown();
 }
 
@@ -420,17 +458,35 @@ impl InputDriver {
     }
 
     fn assert_overview_context_columns(&mut self) {
+        let pressure = self.chart_bounds("chart-card:live-memory-pressure");
         let thermal = self.chart_bounds("overview-context:thermal");
         let cooling = self.chart_bounds("overview-context:cooling-battery");
+        assert_eq!(pressure.top(), thermal.top());
         assert_eq!(thermal.top(), cooling.top());
+        assert_eq!(thermal.left() - pressure.right(), px(8.0));
         assert_eq!(cooling.left() - thermal.right(), px(8.0));
+        assert_eq!(pressure.size.height, cooling.size.height);
+        self.assert_overview_context_selected();
+    }
+
+    fn assert_overview_context_two_columns(&mut self) {
+        let pressure = self.chart_bounds("chart-card:live-memory-pressure");
+        let thermal = self.chart_bounds("overview-context:thermal");
+        let cooling = self.chart_bounds("overview-context:cooling-battery");
+        assert_eq!(pressure.top(), thermal.top());
+        assert_eq!(thermal.left() - pressure.right(), px(8.0));
+        assert_eq!(cooling.left(), pressure.left());
+        assert_eq!(cooling.top() - pressure.bottom(), px(8.0));
         self.assert_overview_context_selected();
     }
 
     fn assert_overview_context_stacked(&mut self) {
+        let pressure = self.chart_bounds("chart-card:live-memory-pressure");
         let thermal = self.chart_bounds("overview-context:thermal");
         let cooling = self.chart_bounds("overview-context:cooling-battery");
+        assert_eq!(pressure.left(), thermal.left());
         assert_eq!(thermal.left(), cooling.left());
+        assert_eq!(thermal.top() - pressure.bottom(), px(8.0));
         assert_eq!(cooling.top() - thermal.bottom(), px(8.0));
         self.assert_overview_context_selected();
     }

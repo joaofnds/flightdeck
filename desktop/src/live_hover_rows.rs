@@ -254,22 +254,12 @@ impl LiveDashboard {
     }
 
     fn reading_rows_overview(&self, rows: &mut Vec<Row>) {
-        if let Some(pressure) = self
-            .panels
-            .iter()
-            .take(16)
-            .find(|panel| panel.id == "live-memory-pressure")
-        {
-            rows.push(Row::Charts {
-                panels: vec![Rc::clone(pressure)],
-                columns: 1,
-            });
-        }
         rows.push(Row::OverviewStatus);
 
         rows.push(Row::Heading("Top apps at the selected time".into()));
-        for metrics in [0, 1, 2, 3].chunks(self.reading_chart_columns().min(2)) {
-            rows.push(Row::Rankings(metrics.to_vec()));
+        let slots: Vec<usize> = (0..crate::live_rankings::view::OVERVIEW_SLOT_COUNT).collect();
+        for row in slots.chunks(self.reading_chart_columns()) {
+            rows.push(Row::OverviewRankings(row.to_vec()));
         }
         rows.push(Row::Disclosure(Section::OverviewHistories));
         if self.sections.expanded(Section::OverviewHistories) {

@@ -90,7 +90,7 @@ pub enum Row {
     StorageDevice(usize, String),
     Diagnostics,
     OverviewStatus,
-    Rankings(Vec<usize>),
+    OverviewRankings(Vec<usize>),
     OverviewAppHistories(Vec<usize>),
     MemoryAttribution(Option<Rc<Panel>>),
     AppAttribution(

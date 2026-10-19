@@ -356,8 +356,9 @@ fn overview_rankings_show_current_measurements_and_explicit_source_limits(cx: &m
     assert!(
         harness
             .driver
-            .reading_is_visible("App network and GPU readings are unavailable.")
+            .reading_is_visible("ranking-uncaptured:Network")
     );
+    assert!(harness.driver.reading_is_visible("ranking-uncaptured:GPU"));
     harness.teardown();
 }
 

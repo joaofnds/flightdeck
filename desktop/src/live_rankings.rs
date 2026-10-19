@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use crate::live_source::{AppKey, identity_signature, identity_validate};
 
 #[path = "live_rankings_view.rs"]
-mod view;
+pub(crate) mod view;
 
 pub const RANKS_MAX: usize = 10;
 const APPS_MAX: u32 = 24_000;

@@ -91,8 +91,10 @@ fn plot_cursor(
                 );
             }
             if let Some(time) = time {
-                let ticks = crate::chart_axes::time_ticks(time, f32::from(chart.size.width));
-                paint_time_grid(chart, &ticks, window);
+                if panel.kind != "timeline" {
+                    let ticks = crate::chart_axes::time_ticks(time, f32::from(chart.size.width));
+                    paint_time_grid(chart, &ticks, window);
+                }
             }
             clip_plot(chart, window, |window| match panel.kind.as_str() {
                 "timeline" => paint_timeline(&panel, chart, inspection, &hidden, window),
@@ -759,9 +761,9 @@ fn paint_timeline(
                     point(
                         bounds.origin.x
                             + bounds.size.width * (number(index - view.lower) / number(count)),
-                        bounds.origin.y + px(35.0),
+                        bounds.origin.y,
                     ),
-                    size(bounds.size.width / number(count), px(28.0)),
+                    size(bounds.size.width / number(count), bounds.size.height),
                 ),
                 alpha(tint, 0.7),
             ));

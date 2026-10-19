@@ -2,7 +2,9 @@ use gpui::{Context, IntoElement, div, prelude::*, px, rgb};
 use serde_json::Value;
 
 use crate::charts::{GRID, MUTED, ORANGE, PANEL, TEXT};
-use crate::dashboard::control;
+use crate::live_chart_view::timeline::{
+    timeline_caption_text, timeline_heading_text, timeline_label,
+};
 use crate::live_dashboard::LiveDashboard;
 use crate::live_projection::quantity;
 
@@ -27,43 +29,74 @@ pub fn selected_clock(selection: &Value) -> String {
 }
 
 impl LiveDashboard {
+    /// The prototype's row of three compact cards: memory pressure, thermal state, and
+    /// cooling and battery. They share the chart grid's columns.
     pub fn overview_status(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let selection = self
             .reading_snapshot()
             .map_or(&Value::Null, |snapshot| &snapshot.selection);
         let summary = crate::live_views::matching_summary(selection);
-        let pressure = match summary["pressure"].as_u64() {
-            Some(0) => "Normal",
-            Some(1) => "Warning",
-            Some(2) => "Critical",
-            _ => "Unavailable",
-        };
-        let status = format!(
-            "Memory pressure: {pressure}    Swap: {}",
-            quantity(summary, "swap_used_bytes", "GiB", 1_073_741_824.0)
-        );
-        let status = div()
+        let pressure = self
+            .panels
+            .iter()
+            .take(64)
+            .find(|panel| panel.id == "live-memory-pressure")
+            .map(|panel| self.live_timeline(panel, cx));
+
+        div()
+            .grid()
+            .grid_cols(match self.reading_chart_columns() {
+                1 => 1,
+                2 => 2,
+                _ => 3,
+            })
+            .gap(px(8.0))
+            .child(div().flex().min_w_0().children(pressure))
+            .child(self.overview_thermal())
+            .child(overview_cooling(summary))
+    }
+
+    /// Thermal state as the compact timeline will draw it. The collector records no thermal
+    /// state yet, so the band says so instead of showing a state nobody measured.
+    fn overview_thermal(&self) -> gpui::Div {
+        let gutter = self.timeline_gutter();
+        let second = self
+            .reading_snapshot()
+            .and_then(|snapshot| snapshot.selection["second"].as_u64());
+        let time = second.map_or_else(|| "Unavailable".into(), |second| clock(second, true));
+        let band = div()
+            .debug_selector(|| "overview-context:thermal:Uncaptured".into())
+            .flex_1()
+            .min_w_0()
+            .h(px(45.0))
+            .my(px(6.0))
             .flex()
             .items_center()
-            .justify_between()
-            .gap(px(16.0))
-            .text_size(px(12.0))
+            .justify_center()
+            .rounded(px(2.0))
+            .border_1()
+            .border_color(rgb(GRID))
+            .text_size(px(11.0))
             .text_color(rgb(MUTED))
-            .child(div().debug_selector(|| status.clone()).child(status))
-            .child(
-                control("Inspect processes →").on_click(cx.listener(|this, _, _, cx| {
-                    this.navigate("cpu", cx);
-                })),
-            );
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .child(status)
-            .child(overview_context(
-                summary,
-                self.viewport_size.width < px(640.0),
+            .child("Uncaptured");
+
+        overview_context_card("thermal")
+            .child(timeline_heading_text(
+                "Thermal state",
+                THERMAL_HELP.into(),
+                "ⓘ",
             ))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .child(timeline_label(gutter, "Thermal"))
+                    .child(band),
+            )
+            .child(self.timeline_bounds(gutter))
+            .child(timeline_caption_text(format!(
+                "{time} · Uncaptured · Nominal / Fair / Serious / Critical"
+            )))
     }
 
     pub fn missing_reading(&self) -> impl IntoElement {
@@ -79,88 +112,68 @@ impl LiveDashboard {
     }
 }
 
-struct ContextCard {
-    key: &'static str,
-    title: &'static str,
-}
+const THERMAL_HELP: &str = "macOS's own verdict on heat, from nominal through fair and \
+    serious to critical. This collector does not record it yet, so no state is shown.";
+
+const COOLING_HELP: &str = "The SoC temperature, each fan channel's speed and the battery's \
+    charge at the selected second, as the collector read them from the SMC and the battery.";
 
 struct ContextReading {
     key: &'static str,
     label: &'static str,
 }
 
-fn overview_context(summary: &Value, narrow: bool) -> gpui::Div {
-    let thermal = overview_context_card(&ContextCard {
-        key: "thermal",
-        title: "Thermal state",
-    })
-    .child(overview_context_reading(
-        &ContextReading {
-            key: "thermal",
-            label: "macOS verdict",
-        },
-        "Uncaptured".into(),
-    ));
-    let cooling = overview_context_card(&ContextCard {
-        key: "cooling-battery",
-        title: "Cooling and battery",
-    })
-    .child(overview_context_reading(
-        &ContextReading {
-            key: "soc",
-            label: "SoC temperature",
-        },
-        quantity(summary, "soc_celsius", "°C", 1.0),
-    ))
-    .child(overview_context_reading(
-        &ContextReading {
-            key: "fan0",
-            label: "Fan channel 0",
-        },
-        overview_context_fan(summary, 0),
-    ))
-    .child(overview_context_reading(
-        &ContextReading {
-            key: "fan1",
-            label: "Fan channel 1",
-        },
-        overview_context_fan(summary, 1),
-    ))
-    .child(overview_context_reading(
-        &ContextReading {
-            key: "charge",
-            label: "Battery charge",
-        },
-        quantity(&summary["battery"], "charge_percent", "%", 1.0),
-    ));
-    div()
-        .flex()
-        .gap(px(8.0))
-        .when(narrow, gpui::Styled::flex_col)
-        .child(thermal)
-        .child(cooling)
+fn overview_cooling(summary: &Value) -> gpui::Div {
+    overview_context_card("cooling-battery")
+        .child(timeline_heading_text(
+            "Cooling and battery",
+            COOLING_HELP.into(),
+            "About",
+        ))
+        .child(overview_context_reading(
+            &ContextReading {
+                key: "soc",
+                label: "SoC temperature",
+            },
+            quantity(summary, "soc_celsius", "°C", 1.0),
+        ))
+        .child(overview_context_reading(
+            &ContextReading {
+                key: "fan0",
+                label: "Fan channel 0",
+            },
+            overview_context_fan(summary, 0),
+        ))
+        .child(overview_context_reading(
+            &ContextReading {
+                key: "fan1",
+                label: "Fan channel 1",
+            },
+            overview_context_fan(summary, 1),
+        ))
+        .child(overview_context_reading(
+            &ContextReading {
+                key: "charge",
+                label: "Battery charge",
+            },
+            quantity(&summary["battery"], "charge_percent", "%", 1.0),
+        ))
 }
 
-fn overview_context_card(specification: &ContextCard) -> gpui::Div {
-    let key = specification.key;
+fn overview_context_card(key: &'static str) -> gpui::Div {
     div()
         .debug_selector(move || format!("overview-context:{key}"))
-        .flex_1()
         .min_w_0()
         .flex()
         .flex_col()
-        .gap(px(8.0))
         .rounded(px(12.0))
         .border_1()
-        .border_color(rgb(GRID))
+        .border_color(rgb(crate::charts::LINE))
         .bg(rgb(PANEL))
-        .p(px(12.0))
+        .px(px(12.0))
+        .pt(px(8.0))
+        .pb(px(10.0))
         .text_color(rgb(TEXT))
-        .child(
-            div()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .child(specification.title),
-        )
 }
 
 fn overview_context_reading(specification: &ContextReading, reading: String) -> gpui::Div {
@@ -169,12 +182,15 @@ fn overview_context_reading(specification: &ContextReading, reading: String) -> 
     div()
         .debug_selector(move || selector.clone())
         .flex()
-        .flex_wrap()
         .justify_between()
-        .gap(px(8.0))
-        .text_size(px(12.0))
+        .gap(px(12.0))
+        .py(px(8.0))
+        .mb(px(2.0))
+        .border_b_1()
+        .border_color(rgb(GRID))
+        .text_size(px(13.0))
         .child(div().text_color(rgb(MUTED)).child(specification.label))
-        .child(reading)
+        .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(reading))
 }
 
 fn overview_context_fan(summary: &Value, channel: usize) -> String {

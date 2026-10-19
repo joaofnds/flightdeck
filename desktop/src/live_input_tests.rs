@@ -67,14 +67,14 @@ fn inspection_cursor_is_hidden_before_any_plot_hover(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn hovering_overview_updates_the_status_widgets_to_the_graph_timestamp(cx: &mut TestAppContext) {
-    // Dispatch a historical graph hover while observing the exact painted pressure/swap text.
+    // Dispatch a historical graph hover while observing the exact painted pressure caption.
     let mut harness = InputHarness::setup_route(cx, "overview");
     harness.driver.seed_distinct_overview_timestamps();
     assert!(harness.driver.reading_is_visible("87.0 %"));
     assert!(
         harness
             .driver
-            .reading_is_visible("Memory pressure: Normal    Swap: 7.0 GiB")
+            .reading_is_visible("chart-caption:live-memory-pressure:Normal")
     );
 
     harness.driver.hover_previous_second_on("live-cpu-plot");
@@ -82,14 +82,14 @@ fn hovering_overview_updates_the_status_widgets_to_the_graph_timestamp(cx: &mut 
     assert!(harness.driver.reading_is_visible("13.0 %"));
     let historical = harness
         .driver
-        .reading_is_visible("Memory pressure: Critical    Swap: 3.0 GiB");
+        .reading_is_visible("chart-caption:live-memory-pressure:Critical");
     let current = harness
         .driver
-        .reading_is_visible("Memory pressure: Normal    Swap: 7.0 GiB");
+        .reading_is_visible("chart-caption:live-memory-pressure:Normal");
     assert!(
         historical,
-        "Historical CPU is visible, but historical pressure/swap is {historical}; \
-        current pressure/swap is still visible: {current}"
+        "Historical CPU is visible, but historical pressure is {historical}; \
+        current pressure is still visible: {current}"
     );
     assert!(!current);
     harness.teardown();

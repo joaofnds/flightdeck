@@ -20,6 +20,8 @@ use crate::live_source::Snapshot;
 mod cost_tests;
 #[path = "live_chart_inspector.rs"]
 pub(crate) mod inspector;
+#[path = "live_timeline_view.rs"]
+pub(crate) mod timeline;
 
 impl LiveDashboard {
     pub fn live_chart(&self, panel: &Rc<Panel>, cx: &mut Context<Self>) -> impl IntoElement {
