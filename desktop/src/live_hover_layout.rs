@@ -29,6 +29,7 @@ impl Row {
             Self::GpuApps(_) => "app-attribution-live-gpu-apps".into(),
             Self::AppSelector => "app-selector".into(),
             Self::ProcessGroupBar => "process-group-bar".into(),
+            Self::ProcessGroupingAbout => "process-grouping-about".into(),
             Self::AppSummary => "app-summary".into(),
             Self::AppColumns(kind) => format!("app-columns-{kind}"),
             Self::CPUTop(_) => "cpu-top".into(),

@@ -453,13 +453,11 @@ impl AppHoverDriver {
             .debug_bounds("executable-disk:hex:61:Unavailable *")
             .unwrap();
         let wakeups = self.context.debug_bounds("8.0 /s").unwrap();
-        let pageins = self.context.debug_bounds("5.0 pages/s").unwrap();
         let threads = self.context.debug_bounds("11").unwrap();
         assert_eq!(wakeups.center().y, anchor.center().y);
-        assert_eq!(pageins.center().y, anchor.center().y);
         assert_eq!(threads.center().y, anchor.center().y);
-        assert!(wakeups.right() < pageins.left());
-        assert!(pageins.right() < threads.left());
+        assert!(wakeups.right() < threads.left());
+        assert!(self.context.debug_bounds("5.0 pages/s").is_none());
     }
 
     fn assert_captured_instance_table_cells(&mut self) {

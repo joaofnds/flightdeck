@@ -405,8 +405,8 @@ impl LiveDashboard {
 
     fn reading_rows_apps(&self) -> Vec<Row> {
         let mut rows = Vec::with_capacity(2048);
-        rows.push(Row::AppSelector);
         rows.push(Row::Summary);
+        rows.push(Row::AppSelector);
         let Some(snapshot) = self.reading_snapshot() else {
             return rows;
         };
@@ -425,11 +425,12 @@ impl LiveDashboard {
             || "selected App".into(),
             |detail| crate::live_views::text(&detail["app"]["display_name"]),
         );
-        rows.push(Row::Heading(format!("Inside {name} · executable groups")));
+        rows.push(Row::Heading(format!("Inside {name}")));
         rows.push(Row::AppColumns("executables"));
         for index in 0..self.reading_executables().len().min(512) {
             rows.push(Row::Executable(index));
         }
+        rows.push(Row::ProcessGroupingAbout);
         self.reading_rows_process_history(&mut rows, snapshot);
         rows.push(Row::Disclosure(Section::AppTotals));
         if self.sections.expanded(Section::AppTotals) {

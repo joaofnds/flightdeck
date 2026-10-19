@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 
-use gpui::{AnyElement, Context, IntoElement, SharedString, div, prelude::*, rgb};
+use gpui::{AnyElement, Context, IntoElement, SharedString, div, prelude::*, px, rgb};
 use serde_json::{Value, json};
 
 use crate::charts::{GRID, MUTED};
-use crate::live_app_views::{app_cells, exact_json, memory, rate};
+use crate::live_app_views::{app_cells, memory, rate};
 use crate::live_dashboard::LiveDashboard;
 
 pub struct Executable {
@@ -32,6 +32,24 @@ pub struct Subtotal {
     pub overflowed: bool,
 }
 
+/// The process group table's metric columns, as the prototype orders them.
+pub const COLUMNS: [&str; 11] = [
+    "CPU",
+    "Resident",
+    "Footprint",
+    "Network",
+    "Disk I/O",
+    "GPU time",
+    "Power",
+    "Wakeups/s",
+    "Threads",
+    "Open files",
+    "Sockets",
+];
+/// The reading of a column no source records per process, which the prototype marks so.
+const NOT_CAPTURED: &str = "—";
+/// The index of Disk I/O in `COLUMNS`.
+const DISK_COLUMN: usize = 4;
 const PROCESS_ROWS_MAX: usize = 512;
 const PROGRAM_BYTES_MAX: usize = 4095;
 const HEX_BYTES_MAX: usize = PROGRAM_BYTES_MAX * 2;
@@ -39,6 +57,7 @@ const DISPLAY_BYTES_MAX: usize = PROGRAM_BYTES_MAX * 3;
 const UNAVAILABLE: &str = "unavailable";
 const _: () = {
     assert!(PROCESS_ROWS_MAX <= 4_294_967_295);
+    assert!(DISK_COLUMN < COLUMNS.len());
     assert!(HEX_BYTES_MAX >= PROGRAM_BYTES_MAX);
     assert!(DISPLAY_BYTES_MAX >= PROGRAM_BYTES_MAX);
 };
@@ -129,7 +148,7 @@ impl Subtotal {
 }
 
 impl Executable {
-    fn metrics(&self) -> [String; 9] {
+    fn metrics(&self) -> [String; COLUMNS.len()] {
         let cpu = self.cpu_ns.value().and_then(|cpu_ns| {
             viewer::apps::cpu_percent_one_core(viewer::apps::CpuRate {
                 cpu_ns,
@@ -146,15 +165,11 @@ impl Executable {
             subtotal_rate(cpu, &self.cpu_ns, "%"),
             subtotal_memory(&self.resident_bytes),
             subtotal_memory(&self.footprint_bytes),
-            subtotal_rate(power, &self.energy_nj, "W"),
-            subtotal_rate(
-                self.energy_nj.value().map(viewer::apps::energy_joules),
-                &self.energy_nj,
-                "J",
-            ),
+            NOT_CAPTURED.into(),
             self.disk_rate(),
+            NOT_CAPTURED.into(),
+            subtotal_rate(power, &self.energy_nj, "W"),
             self.event_rate(&self.idle_wakeups, "/s"),
-            self.event_rate(&self.pageins, "pages/s"),
             self.threads.value().map_or_else(
                 || "Unavailable".into(),
                 |value| {
@@ -168,6 +183,8 @@ impl Executable {
                     )
                 },
             ),
+            NOT_CAPTURED.into(),
+            NOT_CAPTURED.into(),
         ]
     }
 
@@ -221,11 +238,8 @@ impl LiveDashboard {
         };
         let selected = self.request.executable.as_ref() == Some(&group.key);
         let key = group.key.clone();
-        let expanded = self
-            .reading_expanded()
-            .is_some_and(|(kind, row)| kind == "executables" && *row == index);
         let metrics = group.metrics();
-        let disk_selector = format!("executable-disk:{}:{}", group.key, metrics[5]);
+        let disk_selector = format!("executable-disk:{}:{}", group.key, metrics[DISK_COLUMN]);
         let selection_help =
             if crate::live_process_history::ProcessHistory::filter_reason(Some(&group.key))
                 .is_some()
@@ -235,7 +249,7 @@ impl LiveDashboard {
                 "Select captured group history and matching instances"
             };
 
-        let mut row = div()
+        div()
             .id(SharedString::from(format!("executable-{index}")))
             .accessibility_id(format!("flightdeck.executable.{}", group.key))
             .role(gpui::Role::Button)
@@ -244,7 +258,7 @@ impl LiveDashboard {
                 group.name, group.instances,
             ))
             .aria_selected(selected)
-            .aria_expanded(expanded)
+            .py(px(10.0))
             .min_w_0()
             .max_w_full()
             .overflow_x_scroll()
@@ -260,11 +274,6 @@ impl LiveDashboard {
             .hover(|style| style.bg(rgb(0x20_29_36)))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.select_executable(if selected { None } else { Some(key.clone()) });
-                this.expanded = if expanded {
-                    None
-                } else {
-                    Some(("executables".into(), index))
-                };
                 this.rebuild();
                 cx.notify();
             }))
@@ -272,12 +281,9 @@ impl LiveDashboard {
                 group.name.clone(),
                 group.instances.to_string(),
                 metrics,
-                &disk_selector,
-            ));
-        if expanded {
-            row = row.child(exact_json(&group.json()));
-        }
-        row.into_any_element()
+                crate::live_app_views::reading_selector(DISK_COLUMN, &disk_selector),
+            ))
+            .into_any_element()
     }
 }
 

@@ -86,6 +86,39 @@ fn the_app_picker_counts_the_process_groups_at_the_selected_second(cx: &mut Test
 }
 
 #[gpui::test]
+fn the_process_group_table_reads_in_the_prototypes_columns(cx: &mut TestAppContext) {
+    // Goal: the table inside the App has the prototype's title, note and columns, and each
+    // reading sits under its column.
+    // Method: accept the fixture App, find the title, note and headings, and align Disk I/O.
+    let mut harness = AppHoverHarness::setup(cx);
+    for text in [
+        "Inside Example App",
+        "Grouped by process name, not PID",
+        "app-column:executables:Process group",
+        "app-column:executables:Network",
+        "app-column:executables:GPU time",
+        "app-column:executables:Wakeups/s",
+        "app-column:executables:Open files",
+        "app-column:executables:Sockets",
+        "About process grouping and snapshot coverage",
+    ] {
+        assert!(harness.driver.text_is_visible(text), "{text}");
+    }
+    let heading = harness
+        .driver
+        .context
+        .debug_bounds("app-column:executables:Disk I/O")
+        .unwrap();
+    let reading = harness
+        .driver
+        .context
+        .debug_bounds("executable-disk:hex:61:Unavailable *")
+        .unwrap();
+    assert_eq!(reading.left(), heading.left());
+    harness.teardown();
+}
+
+#[gpui::test]
 fn historical_app_details_keep_the_graph_under_a_stationary_pointer(cx: &mut TestAppContext) {
     // Vary preceding process/group counts and compare rendered chart bounds without another move.
     let mut harness = AppHoverHarness::setup(cx);

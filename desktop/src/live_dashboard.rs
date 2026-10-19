@@ -105,6 +105,8 @@ pub enum Row {
     AppSelector,
     /// The Apps page's process group control above the process histories.
     ProcessGroupBar,
+    /// The Apps page's note on process grouping and coverage, under the group table.
+    ProcessGroupingAbout,
     AppSummary,
     AppColumns(&'static str),
     CPUTop(Option<Rc<Panel>>),

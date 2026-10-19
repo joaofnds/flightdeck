@@ -101,6 +101,7 @@ impl LiveDashboard {
             Row::GpuApps(panel) => self.gpu_apps(panel.as_ref(), cx),
             Row::AppSelector => self.app_selector(cx).into_any_element(),
             Row::ProcessGroupBar => self.process_group_bar(cx).into_any_element(),
+            Row::ProcessGroupingAbout => self.process_grouping_about().into_any_element(),
             Row::AppSummary => self.app_summary().into_any_element(),
             Row::AppColumns(kind) => {
                 crate::live_app_views::app_table_columns(kind, &self.app_table_scroll)
@@ -338,13 +339,7 @@ pub(crate) fn pressure(value: &Value) -> &'static str {
 
 /// A section title as the prototype sets it, with its note on the right where it has one.
 fn heading(title: &str) -> gpui::Div {
-    let note = if title == "Top apps at the selected time" {
-        "Select an app to inspect its processes"
-    } else if title.ends_with(" by App") {
-        "At the selected sample · select an app to inspect"
-    } else {
-        ""
-    };
+    let note = heading_note(title);
     let selector = title.to_owned();
     div()
         .flex()
@@ -362,8 +357,22 @@ fn heading(title: &str) -> gpui::Div {
         )
         .child(
             div()
+                .debug_selector(move || note.into())
                 .text_size(px(11.0))
                 .text_color(rgb(crate::charts::MUTED))
                 .child(note),
         )
+}
+
+fn heading_note(title: &str) -> &'static str {
+    if title == "Top apps at the selected time" {
+        return "Select an app to inspect its processes";
+    }
+    if title.ends_with(" by App") {
+        return "At the selected sample · select an app to inspect";
+    }
+    if title.starts_with("Inside ") {
+        return "Grouped by process name, not PID";
+    }
+    ""
 }

@@ -13,7 +13,14 @@ const CYAN: u32 = 0x00_ff_ff;
 const APPS_MAX: usize = 512;
 const SELECTED_APP_INDEX: usize = APPS_MAX;
 const JSON_BYTES_MAX: usize = 32 * 1024;
+/// The most metric columns a table row has, the process group table's eleven.
+const METRICS_MAX: usize = 11;
+/// The prototype's column widths, in points: names wide enough for a helper's full name.
+const NAME_WIDTH: f32 = 200.0;
+const COUNT_WIDTH: f32 = 65.0;
+const METRIC_WIDTH: f32 = 76.0;
 const _: () = {
+    assert!(crate::live_executables::COLUMNS.len() <= METRICS_MAX);
     assert!(JSON_BYTES_MAX > 2 * 4095);
     assert!(APPS_MAX == 512);
 };
@@ -34,22 +41,6 @@ impl LiveDashboard {
             .child(self.app_selector_controls(cx));
         if self.app_paged() {
             selector = selector.child(self.app_paging(cx));
-        }
-        if let Some(page) = self
-            .reading_snapshot()
-            .and_then(|snapshot| snapshot.apps.as_ref())
-        {
-            if page["ungrouped_members"]
-                .as_u64()
-                .is_some_and(|count| count > 0)
-            {
-                selector = selector.child(div().text_size(px(11.0)).text_color(rgb(MUTED)).child(
-                    format!(
-                        "{} processes have unavailable App identity",
-                        text(&page["ungrouped_members"])
-                    ),
-                ));
-            }
         }
         selector
     }
@@ -112,6 +103,71 @@ impl LiveDashboard {
             "{groups} process groups at {}",
             crate::live_presentation::clock(second, true)
         )
+    }
+
+    /// The prototype's control under the process group table, whose note says how processes
+    /// group and how much of the App this second's readings cover.
+    pub fn process_grouping_about(&self) -> impl IntoElement {
+        let help = self.process_grouping_help();
+        let label = "About process grouping and snapshot coverage";
+
+        div()
+            .id("process-grouping-about")
+            .debug_selector(|| label.into())
+            .role(gpui::Role::Button)
+            .aria_label(label)
+            .focusable()
+            .tab_stop(true)
+            .px(px(8.0))
+            .py(px(6.0))
+            .text_size(px(11.0))
+            .text_color(rgb(MUTED))
+            .cursor_pointer()
+            .child(label)
+            .tooltip(move |_, cx| {
+                cx.new(|_| crate::live_chart_view::ChartHelp(help.clone()))
+                    .into()
+            })
+    }
+
+    fn process_grouping_help(&self) -> String {
+        let mut parts = Vec::with_capacity(3);
+        parts.push(
+            "Process groups gather the selected App's processes by executable name, so a row \
+            may stand for several processes and is not a PID. * marks a reading some of the \
+            group's processes lack."
+                .to_owned(),
+        );
+        let snapshot = self.reading_snapshot();
+        if let Some(app) = self.current_app() {
+            let loaded = snapshot
+                .and_then(|snapshot| snapshot.detail.as_ref())
+                .and_then(|detail| detail["processes"].as_array())
+                .map_or(0, Vec::len);
+            parts.push(format!(
+                "At this second the App has {} live of {} members, and its membership is {}. \
+                The table covers the {loaded} processes loaded.",
+                text(&app["live_members"]),
+                text(&app["members"]),
+                if app["membership_complete"].as_bool() == Some(true) {
+                    "complete"
+                } else {
+                    "uncertain"
+                },
+            ));
+        }
+        if let Some(page) = snapshot.and_then(|snapshot| snapshot.apps.as_ref()) {
+            if page["ungrouped_members"]
+                .as_u64()
+                .is_some_and(|count| count > 0)
+            {
+                parts.push(format!(
+                    "{} processes have unavailable App identity.",
+                    text(&page["ungrouped_members"])
+                ));
+            }
+        }
+        parts.join(" ")
     }
 
     pub fn app_choice_indices(&self) -> Vec<usize> {
@@ -253,7 +309,7 @@ impl LiveDashboard {
                 text(&app["display_name"]),
                 text(&app["members"]),
                 metrics,
-                &disk_selector,
+                reading_selector(5, &disk_selector),
             ))
             .into_any_element()
     }
@@ -313,7 +369,7 @@ impl LiveDashboard {
                 text(&process["executable_name"]["display"]),
                 text(&process["pid"]),
                 metrics,
-                &disk_selector,
+                reading_selector(5, &disk_selector),
             ));
         if expanded {
             row = row.child(exact_json(process));
@@ -521,18 +577,11 @@ pub fn app_table_columns(kind: &str, scroll: &gpui::ScrollHandle) -> impl IntoEl
 }
 
 fn app_table_headings(kind: &str) -> gpui::Div {
-    let name = if kind == "apps" { "App" } else { "Executable" };
-    let count = match kind {
-        "apps" => "Members",
-        "executables" => "Instances",
-        _ => "PID",
-    };
-
-    let selector = format!("app-column:{kind}:Disk I/O");
-    if kind == "apps" {
-        return app_cells(
-            name.into(),
-            count.into(),
+    let selector = move |_: usize, text: &str| format!("app-column:{kind}:{text}");
+    match kind {
+        "apps" => app_cells(
+            "App".into(),
+            "Members".into(),
             [
                 "CPU %".into(),
                 "Resident".into(),
@@ -541,42 +590,51 @@ fn app_table_headings(kind: &str) -> gpui::Div {
                 "Energy".into(),
                 "Disk I/O".into(),
             ],
-            &selector,
-        );
+            selector,
+        ),
+        "executables" => app_cells(
+            "Process group".into(),
+            "Instances".into(),
+            crate::live_executables::COLUMNS.map(String::from),
+            selector,
+        ),
+        _ => app_cells(
+            "Executable".into(),
+            "PID".into(),
+            [
+                "CPU %".into(),
+                "Resident".into(),
+                "Footprint".into(),
+                "Power".into(),
+                "Energy".into(),
+                "Disk I/O".into(),
+                "Idle wakeups/s".into(),
+                "Page-ins/s".into(),
+                "Threads".into(),
+            ],
+            selector,
+        ),
     }
-
-    app_cells(
-        name.into(),
-        count.into(),
-        [
-            "CPU %".into(),
-            "Resident".into(),
-            "Footprint".into(),
-            "Power".into(),
-            "Energy".into(),
-            "Disk I/O".into(),
-            "Idle wakeups/s".into(),
-            "Page-ins/s".into(),
-            "Threads".into(),
-        ],
-        &selector,
-    )
 }
 
+/// A table row's cells: the name, the count and the metrics, each found by the selector
+/// `selector` gives its column index and text, the name being column 0.
 pub fn app_cells<const METRICS: usize>(
     name: String,
     count: String,
     metrics: [String; METRICS],
-    disk_selector: &str,
+    selector: impl Fn(usize, &str) -> String,
 ) -> gpui::Div {
-    assert!(METRICS <= 9);
+    assert!(METRICS <= METRICS_MAX);
 
     let count_metrics = u16::try_from(METRICS).unwrap_or_else(|_| unreachable!());
     let width_metrics = f32::from(count_metrics);
+    let name_selector = selector(0, &name);
+    let count_selector = selector(1, &count);
     let mut row = div()
-        .min_w(px(120.0
-            + 65.0
-            + width_metrics * 100.0
+        .min_w(px(NAME_WIDTH
+            + COUNT_WIDTH
+            + width_metrics * METRIC_WIDTH
             + (width_metrics + 1.0) * 8.0
             + 16.0))
         .h(px(26.0))
@@ -587,31 +645,27 @@ pub fn app_cells<const METRICS: usize>(
         .text_size(px(11.0))
         .child(
             div()
-                .debug_selector(|| name.clone())
+                .debug_selector(move || name_selector.clone())
                 .flex_1()
-                .min_w_0()
+                .min_w(px(NAME_WIDTH))
                 .truncate()
                 .child(name),
         )
         .child(
             div()
-                .w(px(65.0))
+                .debug_selector(move || count_selector.clone())
+                .w(px(COUNT_WIDTH))
                 .flex_shrink_0()
                 .text_right()
                 .truncate()
                 .child(count),
         );
     for (index, metric) in metrics.into_iter().enumerate() {
+        let metric_selector = selector(index + 2, &metric);
         row = row.child(
             div()
-                .debug_selector(|| {
-                    if index == 5 {
-                        disk_selector.to_owned()
-                    } else {
-                        metric.clone()
-                    }
-                })
-                .w(px(100.0))
+                .debug_selector(move || metric_selector.clone())
+                .w(px(METRIC_WIDTH))
                 .flex_shrink_0()
                 .text_right()
                 .truncate()
@@ -619,6 +673,21 @@ pub fn app_cells<const METRICS: usize>(
         );
     }
     row
+}
+
+/// The selector of a reading's cell: its own text, the count's prefixed so a PID reads apart
+/// from a reading, or `disk` for the Disk I/O column, so a test can find that column's reading
+/// in any row.
+pub fn reading_selector(disk_index: usize, disk: &str) -> impl Fn(usize, &str) -> String {
+    move |index, text| {
+        if index == 1 {
+            return format!("count:{text}");
+        }
+        if index == disk_index + 2 {
+            return disk.to_owned();
+        }
+        text.to_owned()
+    }
 }
 
 #[cfg(test)]
