@@ -556,17 +556,14 @@ fn notice(text: &str) -> gpui::Div {
 }
 
 fn value(metric: Metric, entry: &Entry) -> String {
-    let value = match metric {
-        Metric::Cpu | Metric::Gpu => crate::live_app_views::event_rate(entry.rate, "%"),
+    match metric {
+        Metric::Cpu | Metric::Gpu => entry
+            .rate
+            .map_or_else(|| "Unavailable".into(), |rate| format!("{rate:.1}%")),
         Metric::Resident => crate::live_app_views::memory(Some(entry.amount)),
         Metric::Power => crate::live_app_views::event_rate(entry.rate, "W"),
         Metric::Disk => crate::live_app_views::disk_rate(entry.rate),
-    };
-    if entry.unavailable_members > 0 {
-        return format!("{value} known");
     }
-
-    value
 }
 
 #[cfg(test)]

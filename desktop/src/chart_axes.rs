@@ -100,6 +100,17 @@ pub fn axis_column(labels: AxisLabels, height: Pixels, side: AxisSide) -> impl I
 /// Local wall-clock labels at the same ticks the plot's time grid uses.
 #[must_use]
 pub fn time_labels(time: Option<TimeWindow>) -> impl IntoElement {
+    time_labels_between(time, PLOT_INSETS.left, PLOT_INSETS.right)
+}
+
+/// Local wall-clock labels for a plot that starts `left` pixels in from the labels' left edge
+/// and ends `right` pixels before their right edge.
+#[must_use]
+pub fn time_labels_between(
+    time: Option<TimeWindow>,
+    left: Pixels,
+    right: Pixels,
+) -> impl IntoElement {
     canvas(
         |_, _, _| (),
         move |bounds, (), window, cx| {
@@ -107,9 +118,9 @@ pub fn time_labels(time: Option<TimeWindow>) -> impl IntoElement {
                 return;
             };
 
-            let plot_width = bounds.size.width - PLOT_INSETS.left - PLOT_INSETS.right;
+            let plot_width = bounds.size.width - left - right;
             for (fraction, second) in time_ticks(time, f32::from(plot_width)) {
-                let x = bounds.origin.x + PLOT_INSETS.left + plot_width * fraction;
+                let x = bounds.origin.x + left + plot_width * fraction;
                 let label = clock(second, false);
                 paint_label(&label, point(x, bounds.origin.y), plot_width, window, cx);
             }

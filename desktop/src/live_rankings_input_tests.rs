@@ -299,7 +299,11 @@ fn cpu_rankings_show_the_selected_app_cpu(cx: &mut TestAppContext) {
 
     harness.driver.seed_ranked_overview();
 
-    assert!(harness.driver.reading_is_visible("ranking:CPU:Current:80%"));
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("ranking:CPU:Current:80.0%")
+    );
     harness.teardown();
 }
 
@@ -324,7 +328,11 @@ fn overview_rankings_show_current_measurements_and_explicit_source_limits(cx: &m
     let mut harness = InputHarness::setup_route(cx, "overview");
     harness.driver.seed_ranked_overview();
 
-    assert!(harness.driver.reading_is_visible("ranking:CPU:Current:80%"));
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("ranking:CPU:Current:80.0%")
+    );
     assert!(
         harness
             .driver
@@ -345,27 +353,6 @@ fn overview_rankings_show_current_measurements_and_explicit_source_limits(cx: &m
         harness
             .driver
             .reading_is_visible("GPU time by App is sampled only while the app runs")
-    );
-    harness.teardown();
-}
-
-#[gpui::test]
-fn partial_ranked_totals_identify_their_known_subtotal(cx: &mut TestAppContext) {
-    // A measured subtotal remains available while missing members stay visible beside it.
-    let mut harness = InputHarness::setup_route(cx, "overview");
-    harness.driver.seed_ranked_overview();
-
-    harness.driver.make_ranked_cpu_partial();
-
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("ranking:CPU:Current:80% known")
-    );
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("1 measured · 2 unavailable")
     );
     harness.teardown();
 }
@@ -433,11 +420,15 @@ fn a_ranking_only_failure_preserves_the_exact_historical_chart(cx: &mut TestAppC
             .reading_is_visible("App totals unavailable: App response bound")
     );
     assert!(!harness.driver.reading_is_visible("87%"));
-    assert!(!harness.driver.reading_is_visible("ranking:CPU:Current:80%"));
     assert!(
         !harness
             .driver
-            .reading_is_visible("ranking:CPU:Historical:20%")
+            .reading_is_visible("ranking:CPU:Current:80.0%")
+    );
+    assert!(
+        !harness
+            .driver
+            .reading_is_visible("ranking:CPU:Historical:20.0%")
     );
     harness.teardown();
 }
@@ -455,22 +446,30 @@ fn historical_hover_hides_current_ranks_until_its_exact_payload_arrives(cx: &mut
             .driver
             .reading_is_visible("Loading exact App totals")
     );
-    assert!(!harness.driver.reading_is_visible("ranking:CPU:Current:80%"));
+    assert!(
+        !harness
+            .driver
+            .reading_is_visible("ranking:CPU:Current:80.0%")
+    );
     harness.driver.complete_ranked_preview();
     assert!(
         harness
             .driver
-            .reading_is_visible("ranking:CPU:Historical:20%")
+            .reading_is_visible("ranking:CPU:Historical:20.0%")
     );
     assert_eq!(harness.driver.requested_publication(), Some(2));
     harness
         .driver
         .leave_plot("live-cpu-plot", PlotExit::Sidebar);
-    assert!(harness.driver.reading_is_visible("ranking:CPU:Current:80%"));
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("ranking:CPU:Current:80.0%")
+    );
     assert!(
         !harness
             .driver
-            .reading_is_visible("ranking:CPU:Historical:20%")
+            .reading_is_visible("ranking:CPU:Historical:20.0%")
     );
     harness.teardown();
 }
@@ -489,11 +488,15 @@ fn failed_historical_rankings_cannot_restore_current_app_links(cx: &mut TestAppC
             .driver
             .reading_is_visible("App totals unavailable: Ranking read failed")
     );
-    assert!(!harness.driver.reading_is_visible("ranking:CPU:Current:80%"));
     assert!(
         !harness
             .driver
-            .reading_is_visible("ranking:CPU:Historical:20%")
+            .reading_is_visible("ranking:CPU:Current:80.0%")
+    );
+    assert!(
+        !harness
+            .driver
+            .reading_is_visible("ranking:CPU:Historical:20.0%")
     );
     harness.teardown();
 }
@@ -515,7 +518,11 @@ fn a_missing_historical_observation_has_no_ranked_app_links(cx: &mut TestAppCont
             .driver
             .reading_is_visible("App totals unavailable at this observation")
     );
-    assert!(!harness.driver.reading_is_visible("ranking:CPU:Current:80%"));
+    assert!(
+        !harness
+            .driver
+            .reading_is_visible("ranking:CPU:Current:80.0%")
+    );
     harness.teardown();
 }
 
@@ -526,7 +533,7 @@ fn a_paused_same_second_rank_link_keeps_the_earlier_observation(cx: &mut TestApp
     harness.driver.seed_ranked_overview();
     harness.driver.add_later_ranked_sibling();
 
-    harness.driver.click_ranked_app("ranking:CPU:Current:80%");
+    harness.driver.click_ranked_app("ranking:CPU:Current:80.0%");
 
     harness.driver.assert_ranked_app_request(1000, 2, "41");
     harness.teardown();
@@ -544,7 +551,7 @@ fn a_keyboard_inspection_rank_link_commits_its_displayed_historical_identity(
 
     harness
         .driver
-        .click_ranked_app("ranking:CPU:Historical:20%");
+        .click_ranked_app("ranking:CPU:Historical:20.0%");
 
     harness.driver.assert_ranked_app_request(999, 1, "42");
     harness.teardown();
@@ -594,20 +601,6 @@ impl InputDriver {
         self.context
             .executor()
             .advance_clock(std::time::Duration::from_secs(1));
-        self.context.run_until_parked();
-    }
-
-    fn make_ranked_cpu_partial(&mut self) {
-        self.view.update(&mut self.context, |dashboard, cx| {
-            let snapshot = dashboard.snapshot.as_mut().unwrap();
-            let rankings = Arc::get_mut(snapshot.rankings.as_mut().unwrap()).unwrap();
-            let crate::live_rankings::Rankings::Ready(rankings) = rankings else {
-                panic!()
-            };
-            rankings.metrics[0].partial = 1;
-            rankings.metrics[0].entries[0].unavailable_members = 2;
-            cx.notify();
-        });
         self.context.run_until_parked();
     }
 

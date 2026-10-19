@@ -13,7 +13,6 @@ struct CPUHistoryWire {
     end_ns: u64,
     offset: u32,
     total: u32,
-    retention_limited: bool,
     restoration_error: Option<String>,
     observations: Vec<CPUSample>,
     cpus: Vec<CPUHistoryRow>,

@@ -21,6 +21,7 @@ impl Row {
             Self::SelfPart(part) => part.key().into(),
             Self::OverviewStatus => "overview-status".into(),
             Self::BatteryState(_) => "battery-state".into(),
+            Self::Temperature(name, _, _) => format!("temperature-{name}"),
             Self::OverviewRankings(slots) => format!("overview-rankings-{}", slots[0]),
             Self::OverviewAppHistories(slots) => format!("overview-app-histories-{}", slots[0]),
             Self::OverviewAnalysis(_) => "overview-analysis".into(),
@@ -35,11 +36,14 @@ impl Row {
             Self::CPUTop(_) => "cpu-top".into(),
             Self::CPUActivity => "cpu-activity".into(),
             Self::CPUHistory => "cpu-history".into(),
-            Self::SystemContext => "system-context".into(),
+            Self::SystemContext(_) => "system-context".into(),
             Self::Charts { panels, .. } => format!("charts-{}", panels[0].id),
             Self::Heading(title) => {
                 if title.starts_with("Process group history") {
                     return "process-group-history-heading".into();
+                }
+                if title.ends_with(" temperature") {
+                    return format!("temperature-heading-{title}");
                 }
                 if title.ends_with(" by app") {
                     return format!("attribution-heading-{title}");
@@ -81,6 +85,8 @@ impl Row {
             Self::MemoryAttribution(Some(panel))
             | Self::OverviewAnalysis(Some(panel))
             | Self::AppAttribution(_, Some(panel))
+            | Self::SystemContext(Some(panel))
+            | Self::Temperature(_, _, Some(panel))
             | Self::BatteryState(Some(panel)) => panel.id == source,
             Self::CPUTop(panel) => {
                 if source == "cpu-history-plot" {

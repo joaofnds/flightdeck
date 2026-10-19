@@ -46,11 +46,12 @@ impl LiveDashboard {
             .flex()
             .gap(px(8.0))
             .when(self.reading_chart_columns() == 1, gpui::Styled::flex_col)
-            .child(chart)
+            .child(attribution_chart(self, chart))
             .child(
                 div()
                     .debug_selector(|| "attribution-ranking:live-gpu-apps".into())
-                    .flex_1()
+                    .flex_basis(px(0.0))
+                    .flex_grow(1.0)
                     .min_w_0()
                     .child(self.app_rankings(&[4], cx)),
             )
@@ -104,14 +105,29 @@ impl LiveDashboard {
             .flex()
             .gap(px(8.0))
             .when(self.reading_chart_columns() == 1, gpui::Styled::flex_col)
-            .child(chart)
+            .child(attribution_chart(self, chart))
             .child(
                 div()
                     .debug_selector(|| format!("attribution-ranking:{}", metric.panel_id()))
-                    .flex_1()
+                    .flex_basis(px(0.0))
+                    .flex_grow(1.0)
                     .min_w_0()
                     .child(self.app_rankings(&[ranking], cx)),
             )
             .into_any_element()
     }
+}
+
+/// The chart of an attribution row, twice as wide as its ranking beside it.
+fn attribution_chart(dashboard: &LiveDashboard, chart: AnyElement) -> gpui::Div {
+    div()
+        .flex()
+        .flex_basis(px(0.0))
+        .flex_grow(if dashboard.reading_chart_columns() == 1 {
+            1.0
+        } else {
+            2.0
+        })
+        .min_w_0()
+        .child(chart)
 }

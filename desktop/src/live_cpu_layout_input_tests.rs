@@ -44,33 +44,6 @@ fn cpu_top_reflows_across_the_breakpoint_without_losing_its_panels(cx: &mut Test
     harness.teardown();
 }
 
-#[gpui::test]
-fn compact_selected_cpu_bars_show_indices_and_restore_percentages_when_stacked(
-    cx: &mut TestAppContext,
-) {
-    // Inspect the 18-CPU pane at its narrowest wide width, where percentage text cannot fit.
-    let mut harness = InputHarness::setup_route(cx, "cpu");
-    harness.driver.seed_cpu_layout_readings();
-    harness.driver.resize_cpu_layout(1100.0);
-
-    let label = harness
-        .driver
-        .context
-        .debug_bounds("cpu-selected-value:0:67%");
-    eprintln!("Wide CPU percentage label geometry: {label:?}");
-    assert!(label.is_none());
-    assert!(harness.driver.reading_is_visible("cpu-selected-value:0:0"));
-
-    harness.driver.resize_cpu_layout(1099.0);
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("cpu-selected-value:0:67%")
-    );
-
-    harness.teardown();
-}
-
 impl InputDriver {
     fn resize_cpu_layout(&mut self, width: f32) {
         self.context

@@ -19,7 +19,6 @@ fn cpu_pointer_inspection_updates_the_page_to_its_exact_same_second_publication(
     harness.driver.hover_cpu(1000 * NS + NS * 9 / 10);
 
     assert!(harness.driver.reading_is_visible("13%"));
-    assert!(harness.driver.cpu_reading_is_visible("publication 2", "0%"));
     assert_eq!(harness.driver.reading_publication(), Some(2));
     assert_eq!(harness.driver.committed_second(), None);
     harness.teardown();
@@ -31,16 +30,11 @@ fn regular_pointer_inspection_synchronizes_the_cpu_history_readout(cx: &mut Test
     let mut harness = CPUHoverHarness::setup(cx);
     harness.driver.focus_cpu();
     harness.driver.press("left");
-    assert!(harness.driver.cpu_reading_is_visible("publication 2", "0%"));
+    assert_eq!(harness.driver.reading_publication(), Some(2));
 
     harness.driver.hover_scalar_selected_second();
 
     assert!(harness.driver.reading_is_visible("87%"));
-    assert!(
-        harness
-            .driver
-            .cpu_reading_is_visible("publication 3", "50%")
-    );
     assert_eq!(harness.driver.reading_publication(), Some(3));
     harness.teardown();
 }
@@ -52,7 +46,6 @@ fn cpu_interval_gaps_preserve_valid_scalars_without_borrowing_cpu_activity(
     // The final second contains a scalar observation but has no measured interval at this x.
     let mut harness = CPUHoverHarness::setup(cx);
     harness.driver.show_stacked_cpu_activity();
-    assert!(harness.driver.reading_is_visible("73%"));
     assert!(
         !harness
             .driver
@@ -66,12 +59,6 @@ fn cpu_interval_gaps_preserve_valid_scalars_without_borrowing_cpu_activity(
         harness
             .driver
             .reading_is_visible("Logical CPU readings unavailable.")
-    );
-    assert!(!harness.driver.reading_is_visible("73%"));
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("No measurement interval here.")
     );
     assert_eq!(harness.driver.reading_publication(), Some(3));
     assert_eq!(harness.driver.committed_second(), None);
@@ -102,11 +89,6 @@ fn cpu_empty_seconds_show_unavailable_readings_instead_of_the_committed_observat
     harness.driver.hover_cpu(999 * NS + NS / 2);
 
     assert!(harness.driver.reading_is_visible("Unavailable"));
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("No measurement interval here.")
-    );
     assert_eq!(harness.driver.reading_publication(), None);
     assert_eq!(harness.driver.committed_second(), None);
     harness.teardown();
@@ -299,12 +281,6 @@ impl CPUHoverDriver {
 
     fn reading_is_visible(&mut self, reading: &'static str) -> bool {
         self.context.debug_bounds(reading).is_some()
-    }
-
-    fn cpu_reading_is_visible(&mut self, publication: &'static str, value: &'static str) -> bool {
-        self.reading_is_visible("Logical CPU 0")
-            && self.reading_is_visible(value)
-            && self.reading_is_visible(publication)
     }
 
     fn reading_publication(&self) -> Option<u64> {

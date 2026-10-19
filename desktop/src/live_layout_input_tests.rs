@@ -183,7 +183,11 @@ fn overview_top_apps_are_a_three_by_two_grid_in_the_prototype_order(cx: &mut Tes
             .driver
             .reading_is_visible("GPU time by App is sampled only while the app runs")
     );
-    assert!(harness.driver.reading_is_visible("ranking:CPU:Current:80%"));
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("ranking:CPU:Current:80.0%")
+    );
     harness.teardown();
 }
 

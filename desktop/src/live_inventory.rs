@@ -21,6 +21,8 @@ pub fn rows() -> Vec<(String, String)> {
 pub struct PerformanceLevel {
     pub name: String,
     pub cores: String,
+    /// The same, in lower case, as a chart's legend names a cluster.
+    pub cluster_cores: String,
     pub logical_cpus: u32,
 }
 
@@ -77,6 +79,7 @@ fn performance_levels_level(key: &CStr, logical_cpus: u32) -> Result<Performance
     let name = string(key)?;
     Ok(PerformanceLevel {
         cores: format!("{name} cores"),
+        cluster_cores: format!("{} cores", name.to_lowercase()),
         name,
         logical_cpus,
     })
@@ -196,6 +199,7 @@ mod tests {
         let level = |name: &str, logical_cpus| PerformanceLevel {
             name: name.into(),
             cores: String::new(),
+            cluster_cores: String::new(),
             logical_cpus,
         };
         let levels = [level("Super", 6), level("Performance", 12)];

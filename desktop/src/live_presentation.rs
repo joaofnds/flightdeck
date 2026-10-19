@@ -142,6 +142,43 @@ impl LiveDashboard {
     }
 }
 
+const TEMPERATURE_HELP: &str = "The hottest measured sensor in this part of the machine. \
+    This collector does not record it yet, so no reading is shown.";
+
+impl LiveDashboard {
+    /// The prototype's temperature row: the component's chart beside a card with its hottest
+    /// sensor at the selected time.
+    pub fn temperature(
+        &self,
+        sensor: &'static str,
+        panel: Option<&std::rc::Rc<crate::data::Panel>>,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let details = quantity_panel(
+            "temperature-now",
+            "At the selected time",
+            TEMPERATURE_HELP,
+            vec![("hottest", sensor, "Unavailable".into())],
+        );
+
+        div()
+            .grid()
+            .grid_cols(match self.reading_chart_columns() {
+                1 => 1,
+                _ => 2,
+            })
+            .gap(px(8.0))
+            .child(
+                div()
+                    .flex()
+                    .min_w_0()
+                    .children(panel.map(|panel| self.live_chart(panel, cx))),
+            )
+            .child(details)
+            .into_any_element()
+    }
+}
+
 const THERMAL_HELP: &str = "macOS's own verdict on heat, from nominal through fair and \
     serious to critical. This collector does not record it yet, so no state is shown.";
 
@@ -196,8 +233,25 @@ fn overview_cooling(summary: &Value) -> gpui::Div {
 }
 
 /// The prototype's list of labelled readings, ten pixels apart.
-fn quantity_list<const N: usize>(rows: [gpui::Div; N]) -> gpui::Div {
+fn quantity_list(rows: impl IntoIterator<Item = gpui::Div>) -> gpui::Div {
     div().flex().flex_col().gap(px(10.0)).children(rows)
+}
+
+/// A prototype panel of labelled readings: its heading with an About control, then each reading
+/// as a key, a label and its value.
+pub(crate) fn quantity_panel(
+    key: &'static str,
+    title: &str,
+    help: &str,
+    readings: Vec<(&'static str, &'static str, String)>,
+) -> gpui::Div {
+    overview_context_card(key)
+        .child(timeline_heading_text(title, help.to_owned(), "About"))
+        .child(quantity_list(readings.into_iter().map(
+            |(key, label, reading)| {
+                overview_context_reading(&ContextReading { key, label }, reading)
+            },
+        )))
 }
 
 pub(crate) fn overview_context_card(key: &'static str) -> gpui::Div {

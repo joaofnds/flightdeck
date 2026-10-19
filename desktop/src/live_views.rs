@@ -101,7 +101,11 @@ impl LiveDashboard {
     fn row_padding(row: &Row) -> (f32, f32) {
         match row {
             Row::Summary => (8.0, 12.0),
-            Row::Charts { .. } | Row::OverviewStatus | Row::BatteryState(_) => (4.0, 4.0),
+            Row::Charts { .. }
+            | Row::OverviewStatus
+            | Row::BatteryState(_)
+            | Row::Temperature(_, _, _)
+            | Row::CPUTop(_) => (4.0, 4.0),
             Row::OverviewRankings(_) => (6.0, 6.0),
             Row::Heading(_) => (16.0, 8.0),
             _ => (8.0, 8.0),
@@ -112,9 +116,8 @@ impl LiveDashboard {
     /// paddings alone would not give it.
     fn spacing_above(above: &Row, row: &Row) -> Option<f32> {
         match (above, row) {
-            (Row::Heading(_), Row::OverviewRankings(_) | Row::Hardware) => Some(10.0),
-            (Row::OverviewRankings(_), Row::Disclosure(_)) => Some(16.0),
-            (above, Row::Disclosure(_)) if above.in_details() => Some(16.0),
+            (Row::Heading(_), _) => Some(10.0),
+            (Row::Summary, _) | (_, Row::Disclosure(_)) => Some(16.0),
             (above, Row::Heading(_)) if above.in_details() => Some(20.0),
             _ => None,
         }
@@ -142,9 +145,10 @@ impl LiveDashboard {
             Row::CPUTop(panel) => self.cpu_top(panel.as_ref(), cx).into_any_element(),
             Row::CPUActivity => self.cpu_activity().into_any_element(),
             Row::CPUHistory => self.cpu_history_panel(cx).into_any_element(),
-            Row::SystemContext => self.system_context().into_any_element(),
+            Row::SystemContext(panel) => self.system_context(panel.as_ref(), cx).into_any_element(),
             Row::OverviewStatus => self.overview_status(cx).into_any_element(),
             Row::BatteryState(panel) => self.battery_state(panel.as_ref(), cx),
+            Row::Temperature(_, sensor, panel) => self.temperature(sensor, panel.as_ref(), cx),
             Row::OverviewRankings(slots) => {
                 self.overview_rankings(slots, self.reading_chart_columns(), cx)
             }
@@ -432,7 +436,7 @@ fn heading_note(title: &str) -> &'static str {
     if title == "Top apps at the selected time" {
         return "Select an app to inspect its processes";
     }
-    if title.ends_with(" by App") {
+    if title.ends_with(" by app") {
         return "At the selected sample · select an app to inspect";
     }
     if title.starts_with("Inside ") {

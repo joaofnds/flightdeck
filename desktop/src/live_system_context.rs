@@ -1,15 +1,23 @@
-use gpui::{IntoElement, div, prelude::*, px, rgb};
+use std::rc::Rc;
+
+use gpui::{Context, IntoElement, div, prelude::*};
 use serde_json::Value;
 
-use crate::charts::{GRID, LINE, MUTED, PANEL, TEXT};
+use crate::data::Panel;
 use crate::live_dashboard::LiveDashboard;
+use crate::live_presentation::quantity_panel;
 
 const SECONDS_PER_HOUR: u64 = 60 * 60;
 const SECONDS_PER_DAY: u64 = 24 * SECONDS_PER_HOUR;
 
 impl LiveDashboard {
-    /// How long this Mac had run since it booted, at the selected second.
-    pub(crate) fn system_context(&self) -> impl IntoElement {
+    /// How long this Mac had run since it booted, at the selected second, above the system's
+    /// open file entries, which the prototype folds into the same panel.
+    pub(crate) fn system_context(
+        &self,
+        panel: Option<&Rc<Panel>>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let selection = self
             .reading_snapshot()
             .map_or(&Value::Null, |snapshot| &snapshot.selection);
@@ -17,47 +25,17 @@ impl LiveDashboard {
         let uptime = summary["uptime_seconds"]
             .as_u64()
             .map_or_else(|| "Unavailable".into(), uptime_text);
-        let selector = format!("system-context:Uptime:{uptime}");
+
         div()
-            .debug_selector(|| "system-context".into())
             .flex()
             .flex_col()
-            .px(px(12.0))
-            .pt(px(8.0))
-            .pb(px(10.0))
-            .rounded(px(12.0))
-            .border_1()
-            .border_color(rgb(LINE))
-            .bg(rgb(PANEL))
-            .child(
-                div()
-                    .flex()
-                    .items_baseline()
-                    .gap(px(8.0))
-                    .min_h(px(32.0))
-                    .text_size(px(14.0))
-                    .text_color(rgb(TEXT))
-                    .child("System context")
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(rgb(MUTED))
-                            .child("About"),
-                    ),
-            )
-            .child(
-                div()
-                    .debug_selector(move || selector.clone())
-                    .flex()
-                    .justify_between()
-                    .items_center()
-                    .min_h(px(32.0))
-                    .border_b_1()
-                    .border_color(rgb(GRID))
-                    .text_size(px(12.0))
-                    .child(div().text_color(rgb(MUTED)).child("Uptime"))
-                    .child(div().text_color(rgb(TEXT)).child(uptime)),
-            )
+            .child(quantity_panel(
+                "system-context",
+                "System context",
+                "How long this Mac has run since it booted, at the selected time.",
+                vec![("uptime", "Uptime", uptime)],
+            ))
+            .children(panel.map(|panel| div().min_w_0().flex().child(self.live_chart(panel, cx))))
     }
 }
 

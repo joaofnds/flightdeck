@@ -109,6 +109,8 @@ pub enum Row {
     StorageDevice(usize, String),
     SelfPart(crate::live_diagnostics::SelfPart),
     OverviewStatus,
+    /// A component's temperature chart beside the card of its reading at the selected time.
+    Temperature(&'static str, &'static str, Option<Rc<Panel>>),
     /// The Battery page's charging timeline beside its details card.
     BatteryState(Option<Rc<Panel>>),
     OverviewRankings(Vec<usize>),
@@ -133,8 +135,9 @@ pub enum Row {
     CPUTop(Option<Rc<Panel>>),
     CPUActivity,
     CPUHistory,
-    /// The CPU page's system context: how long this Mac has run since it booted.
-    SystemContext,
+    /// The CPU page's system context: how long this Mac has run since it booted, and the
+    /// system's open file entries.
+    SystemContext(Option<Rc<Panel>>),
     Charts {
         panels: Vec<Rc<Panel>>,
         columns: usize,

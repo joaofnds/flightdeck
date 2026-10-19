@@ -60,6 +60,13 @@ impl LiveDashboard {
                 let metric = crate::live_app_attribution_history::Metric::Cpu;
                 self.reading_rows_attribution(metric, &mut rows);
                 self.reading_rows_system_files(&mut rows);
+                rows.push(Row::Heading("CPU temperature".into()));
+                let panel = self.named_panels(&[crate::live_projection::CPU_TEMPERATURE_ID]);
+                rows.push(Row::Temperature(
+                    "cpu",
+                    "Hottest CPU-area sensor",
+                    panel.into_iter().next(),
+                ));
             }
             "memory" => {
                 rows.push(Row::Heading(crate::live_resident_history::TITLE.into()));
@@ -325,18 +332,13 @@ impl LiveDashboard {
     fn reading_rows_system_files(&self, rows: &mut Vec<Row>) {
         rows.push(Row::Disclosure(Section::SystemFiles));
         if self.sections.expanded(Section::SystemFiles) {
-            rows.push(Row::SystemContext);
-            self.reading_rows_panel(crate::live_projection::OPEN_FILES_ID, rows);
-        }
-    }
-
-    /// One chart across the row, where the page has a panel of that id.
-    fn reading_rows_panel(&self, id: &str, rows: &mut Vec<Row>) {
-        if let Some(panel) = self.panels.iter().take(16).find(|panel| panel.id == id) {
-            rows.push(Row::Charts {
-                panels: vec![Rc::clone(panel)],
-                columns: 1,
-            });
+            let panel = self
+                .panels
+                .iter()
+                .take(16)
+                .find(|panel| panel.id == crate::live_projection::OPEN_FILES_ID)
+                .cloned();
+            rows.push(Row::SystemContext(panel));
         }
     }
 

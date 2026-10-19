@@ -717,6 +717,22 @@ pub const LOAD_AVERAGE_ID: &str = "live-load-average";
 pub const OPEN_FILES_ID: &str = "live-open-files";
 
 pub const FREQUENCY_ID: &str = "live-cpu-frequency";
+pub const CPU_TEMPERATURE_ID: &str = "live-cpu-temperature";
+
+/// The hottest sensor in the CPU area. The collector does not record it, so the chart has the
+/// prototype's panel and no readings.
+fn cpu_temperature() -> Specification {
+    let mut specification = specification(
+        CPU_TEMPERATURE_ID,
+        "CPU area maximum",
+        "°C",
+        vec![reading("cpu_area_celsius", "CPU", "#5794f2", 1.0)],
+    );
+    specification.maximum = Some(125.0);
+    specification.help = "The hottest measured sensor in the CPU area. This collector does \
+        not record it yet, so no readings are shown.";
+    specification
+}
 
 /// The mean clock of each performance level while its cores were active, from the time they
 /// spent in each clock state.
@@ -724,7 +740,12 @@ fn frequency() -> Specification {
     let mut lines = Vec::with_capacity(2);
     if let Some(levels) = crate::live_inventory::performance_levels() {
         for (index, color) in [(1, "#73bf69"), (0, "#b877d9")] {
-            let mut line = reading("cpu_level_ghz", cpu_level_cores(&levels[index]), color, 1.0);
+            let mut line = reading(
+                "cpu_level_ghz",
+                levels[index].cluster_cores.as_str(),
+                color,
+                1.0,
+            );
             line.channel = Some(index);
             lines.push(line);
         }
@@ -773,7 +794,7 @@ fn open_files() -> Specification {
         OPEN_FILES_ID,
         "Open files",
         "files",
-        vec![reading("open_files", "Open", "#5ad8e6", 1.0), share],
+        vec![reading("open_files", "Open", "#00ffff", 1.0), share],
     );
     specification.help = "File entries open across the system and their share of the \
         kernel's limit. Flightdeck samples them once a second while the app runs, so earlier \
@@ -885,6 +906,7 @@ fn specifications(route: &str, points: &[Value]) -> Result<Vec<Specification>, S
             frequency(),
             load_average(),
             open_files(),
+            cpu_temperature(),
         ],
         "memory" => memory_specifications(),
         "gpu" => vec![gpu_activity(), gpu_power(), gpu_memory()],

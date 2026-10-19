@@ -680,10 +680,7 @@ impl LiveDashboard {
         let line = &panel.lines[index];
         let tint = charts::color(&line.color);
         let swatch = if line.dashed == Some(true) {
-            div()
-                .flex()
-                .gap(px(2.0))
-                .children((0..3).map(|_| div().w(px(3.0)).h(px(3.0)).bg(rgb(tint))))
+            div().w(px(12.0)).h(px(3.0)).bg(rgb(tint))
         } else {
             div().w(px(12.0)).h(px(4.0)).rounded(px(2.0)).bg(rgb(tint))
         };

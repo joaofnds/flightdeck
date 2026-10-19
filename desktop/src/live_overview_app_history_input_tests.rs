@@ -55,7 +55,7 @@ macro_rules! overview_history_hover_case {
             assert!(
                 harness
                     .driver
-                    .reading_is_visible("ranking:CPU:Historical:20%")
+                    .reading_is_visible("ranking:CPU:Historical:20.0%")
             );
             assert_eq!(harness.driver.chart_bounds($plot), bounds);
             harness.driver.leave_plot($plot, PlotExit::Sidebar);
@@ -105,7 +105,11 @@ fn overview_history_failure_preserves_captured_readings_until_plot_exit(cx: &mut
             .driver
             .reading_is_visible("App totals unavailable: Ranking read failed")
     );
-    assert!(!harness.driver.reading_is_visible("ranking:CPU:Current:80%"));
+    assert!(
+        !harness
+            .driver
+            .reading_is_visible("ranking:CPU:Current:80.0%")
+    );
     harness
         .driver
         .leave_plot("live-power-apps-plot", PlotExit::Sidebar);
@@ -165,7 +169,11 @@ fn overview_late_history_details_never_replace_the_current_hover(cx: &mut TestAp
             .driver
             .reading_is_visible("Loading exact App totals")
     );
-    assert!(!harness.driver.reading_is_visible("ranking:CPU:Current:80%"));
+    assert!(
+        !harness
+            .driver
+            .reading_is_visible("ranking:CPU:Current:80.0%")
+    );
     harness.teardown();
 }
 
@@ -186,7 +194,11 @@ fn overview_wrong_observation_details_preserve_captured_hover_readings(cx: &mut 
             "App totals unavailable: Hover response has a different observation"
         )
     );
-    assert!(!harness.driver.reading_is_visible("ranking:CPU:Current:80%"));
+    assert!(
+        !harness
+            .driver
+            .reading_is_visible("ranking:CPU:Current:80.0%")
+    );
     harness.teardown();
 }
 
@@ -334,7 +346,7 @@ fn assert_overview_histories_current(driver: &mut InputDriver) {
     ));
     assert!(driver.reading_is_visible("chart-reading:live-disk-apps:1.5 MB/s captured"));
     assert!(driver.reading_is_visible("chart-reading:live-power-apps:2.8 W captured"));
-    assert!(driver.reading_is_visible("ranking:CPU:Current:80%"));
+    assert!(driver.reading_is_visible("ranking:CPU:Current:80.0%"));
 }
 
 impl InputDriver {

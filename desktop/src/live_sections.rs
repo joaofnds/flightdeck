@@ -125,9 +125,11 @@ impl Row {
         match self {
             Self::Disclosure(section) => matches!(
                 section,
-                Section::OverviewHistories | Section::OverviewContext
+                Section::OverviewHistories | Section::OverviewContext | Section::SystemFiles
             ),
-            Self::OverviewAppHistories(_) | Self::OverviewAnalysis(_) => true,
+            Self::OverviewAppHistories(_) | Self::OverviewAnalysis(_) | Self::SystemContext(_) => {
+                true
+            }
             _ => false,
         }
     }

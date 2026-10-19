@@ -19,12 +19,16 @@ fn cpu_attribution_hover_updates_the_whole_page_and_reuses_its_cohort(cx: &mut T
             .driver
             .reading_is_visible("Loading exact App totals")
     );
-    assert!(!harness.driver.reading_is_visible("ranking:CPU:Current:80%"));
+    assert!(
+        !harness
+            .driver
+            .reading_is_visible("ranking:CPU:Current:80.0%")
+    );
     harness.driver.complete_attribution_preview();
     assert!(
         harness
             .driver
-            .reading_is_visible("ranking:CPU:Historical:20%")
+            .reading_is_visible("ranking:CPU:Historical:20.0%")
     );
     harness.driver.assert_attribution_anchors(&anchors);
 
@@ -34,7 +38,11 @@ fn cpu_attribution_hover_updates_the_whole_page_and_reuses_its_cohort(cx: &mut T
 
     assert!(harness.driver.reading_is_visible("250% captured"));
     assert!(harness.driver.reading_is_visible("87%"));
-    assert!(harness.driver.reading_is_visible("ranking:CPU:Current:80%"));
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("ranking:CPU:Current:80.0%")
+    );
     harness.driver.assert_attribution_anchors(&anchors);
     harness.teardown();
 }
@@ -305,7 +313,7 @@ fn attribution_arrow_inspection_and_app_navigation_keep_the_exact_target(cx: &mu
 
     harness
         .driver
-        .click_ranked_app("ranking:CPU:Historical:20%");
+        .click_ranked_app("ranking:CPU:Historical:20.0%");
 
     harness.driver.assert_ranked_app_request(999, 1, "42");
     harness.teardown();
@@ -389,7 +397,7 @@ impl InputDriver {
         let (plot, ranking, card, wrapper) = match metric {
             Metric::Cpu => (
                 "live-cpu-apps-plot",
-                "ranking:CPU:Current:80%",
+                "ranking:CPU:Current:80.0%",
                 "chart-card:live-cpu-apps",
                 "attribution-ranking:live-cpu-apps",
             ),

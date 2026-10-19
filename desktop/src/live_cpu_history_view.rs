@@ -8,13 +8,26 @@ use gpui::{
 };
 use num_traits::ToPrimitive;
 
-use super::{CPUHistory, CPUInspection, CPUStep, PAGE_CPUS};
-use crate::charts::{GREEN, MUTED, ORANGE, PANEL, RED, TEXT};
-use crate::dashboard::control;
+use super::{CPUHistory, CPUInspection, CPUStep};
+use crate::charts::{GRID, MUTED, PANEL, TEXT};
 use crate::live_dashboard::LiveDashboard;
 use crate::live_hover::{Origin, Target};
 
-const ROW_HEIGHT: f32 = 18.0;
+/// The prototype's heatmap: a 244 pixel plot whose rows share 204 of them, below a 10 pixel
+/// margin, with the row labels to the left of the cells and the time labels under them.
+const PLOT_HEIGHT: f32 = 244.0;
+const PLOT_TOP: f32 = 10.0;
+const PLOT_BOTTOM: f32 = 30.0;
+const PLOT_RIGHT: f32 = 8.0;
+const LABEL_COLUMN: f32 = 104.0;
+/// A row label ends this far left of the cells.
+const LABEL_GAP: f32 = 9.0;
+/// Green at 0%, yellow at 50% and red at 100%, as the prototype blends them.
+const SCALE: [(f32, f32, f32); 3] = [
+    (115.0, 191.0, 105.0),
+    (250.0, 222.0, 42.0),
+    (242.0, 73.0, 92.0),
+];
 const HOVER_SOURCE: &str = "cpu-history-plot";
 
 impl LiveDashboard {
@@ -25,7 +38,7 @@ impl LiveDashboard {
             .min_w_0()
             .px(px(12.0))
             .pt(px(8.0))
-            .pb(px(10.0))
+            .pb(px(8.0))
             .rounded(px(12.0))
             .border_1()
             .border_color(rgb(crate::charts::LINE))
@@ -44,99 +57,18 @@ impl LiveDashboard {
         else {
             return panel.child(self.history_absent("Logical CPU history unavailable."));
         };
-
-        let mut panel = panel;
-        if history.wire.retention_limited {
-            panel = panel.child("Some CPU history is unavailable in this 15-minute window.");
-        }
-        if let Some(message) = &history.wire.restoration_error {
-            panel = panel.child(
-                div()
-                    .id("cpu-history-restoration-error")
-                    .debug_selector(|| "cpu-history-restoration-error".into())
-                    .accessibility_id("flightdeck.cpu-history.restoration-error")
-                    .role(gpui::Role::Status)
-                    .aria_label(message.clone())
-                    .text_color(rgb(ORANGE))
-                    .child(message.clone()),
-            );
-        }
         if history.cpus().is_empty() {
             return panel.child("Logical CPU history unavailable.");
         }
 
-        let inspection = self.cpu_history_inspection(history);
-        if history.total() > PAGE_CPUS {
-            panel = panel.child(Self::cpu_history_pages(history, cx));
-        }
-        panel = panel
-            .child(self.cpu_history_plot(history, cx))
-            .child(cpu_history_times(history))
-            .child(cpu_history_readout(history, inspection));
-        panel.child(div().text_size(px(11.0)).text_color(rgb(MUTED)).child(
-            "0–59% green · 60–79% yellow · 80–89% orange · 90–100% red · \
-             Blank: unavailable",
-        ))
-    }
-
-    fn cpu_history_pages(history: &CPUHistory, cx: &mut Context<Self>) -> impl IntoElement {
-        let previous = history.offset().checked_sub(PAGE_CPUS);
-        let next = history.offset() + PAGE_CPUS;
-        let next = (next < history.total()).then_some(next);
-        let Ok(count) = u32::try_from(history.cpus().len()) else {
-            unreachable!("Validated CPU history has at most 32 rows");
-        };
-        div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .mt(px(12.0))
-            .child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(rgb(MUTED))
-                    .child(format!(
-                        "Logical CPUs {}–{} of {} · 15-minute context",
-                        history.offset(),
-                        history.offset() + count - 1,
-                        history.total()
-                    )),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap(px(6.0))
-                    .child(
-                        control("Previous")
-                            .accessibility_id("flightdeck.cpu-history.previous")
-                            .aria_label("Previous logical CPU history page")
-                            .when(previous.is_none(), |button| {
-                                button.opacity(0.35).cursor_default()
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if let Some(offset) = previous {
-                                    this.request.cpu_offset = offset;
-                                    this.submit();
-                                    cx.notify();
-                                }
-                            })),
-                    )
-                    .child(
-                        control("Next")
-                            .accessibility_id("flightdeck.cpu-history.next")
-                            .aria_label("Next logical CPU history page")
-                            .when(next.is_none(), |button| {
-                                button.opacity(0.35).cursor_default()
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if let Some(offset) = next {
-                                    this.request.cpu_offset = offset;
-                                    this.submit();
-                                    cx.notify();
-                                }
-                            })),
-                    ),
-            )
+        panel.child(self.cpu_history_plot(history, cx)).child(
+            div()
+                .mt(px(7.0))
+                .text_size(px(11.0))
+                .line_height(px(17.0))
+                .text_color(rgb(MUTED))
+                .child("Green → yellow → red: 0–100% utilization."),
+        )
     }
 
     fn cpu_history_plot(
@@ -147,19 +79,36 @@ impl LiveDashboard {
         let Some(focus) = self.cpu_history_focus.as_ref() else {
             unreachable!("Dashboard initializes the CPU history focus before rendering rows");
         };
+        let time = crate::chart_axes::TimeWindow {
+            first: history.wire.first_ns / super::NS,
+            span: (history.wire.end_ns - history.wire.first_ns) / super::NS,
+        };
         let plot = div()
             .id(HOVER_SOURCE)
             .debug_selector(|| HOVER_SOURCE.into())
             .track_focus(focus)
             .tab_stop(true)
             .focus(|style| style.bg(rgb(0x20_30_41)))
-            .flex()
-            .gap(px(6.0))
+            .relative()
+            .h(px(PLOT_HEIGHT))
             .child(cpu_history_rows(
                 history,
                 self.cpu_history_inspection(history),
             ))
             .child(self.cpu_history_cells(history, cx))
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .top(px(PLOT_HEIGHT - PLOT_BOTTOM))
+                    .h(px(PLOT_BOTTOM))
+                    .child(crate::chart_axes::time_labels_between(
+                        Some(time),
+                        px(LABEL_COLUMN),
+                        px(PLOT_RIGHT),
+                    )),
+            )
             .on_key_down(cx.listener(Self::cpu_history_keyboard));
 
         self.cpu_history_accessibility(plot, history, cx)
@@ -181,9 +130,11 @@ impl LiveDashboard {
         div()
             .id("cpu-history-cells")
             .debug_selector(|| "cpu-history-cells".into())
-            .flex_1()
-            .min_w_0()
-            .relative()
+            .absolute()
+            .left(px(LABEL_COLUMN))
+            .right(px(PLOT_RIGHT))
+            .top(px(PLOT_TOP))
+            .bottom(px(PLOT_BOTTOM))
             .child(plot)
             .children(self.reading_membership_observer(HOVER_SOURCE.into(), cx))
             .on_mouse_move(
@@ -373,7 +324,11 @@ impl LiveDashboard {
         }
 
         let fraction = f32::from(position.x - bounds.origin.x) / f32::from(bounds.size.width);
-        let row = (f32::from(position.y - bounds.origin.y) / ROW_HEIGHT)
+        let Some(rows) = history.cpus().len().to_f32() else {
+            return false;
+        };
+        let row_height = f32::from(bounds.size.height) / rows;
+        let row = (f32::from(position.y - bounds.origin.y) / row_height)
             .floor()
             .to_usize();
         let inspection = row
@@ -523,19 +478,19 @@ impl LiveDashboard {
     }
 }
 
-/// Wide enough for "performance 11", the longest row label on an M5 Pro.
-const CPU_LABEL_WIDTH: f32 = 84.0;
-
+/// The row labels, each as tall as its row of cells.
 fn cpu_history_rows(history: &CPUHistory, inspection: Option<CPUInspection>) -> impl IntoElement {
+    let row_height = row_height(history);
     let mut labels = div()
-        .w(px(CPU_LABEL_WIDTH))
-        .flex_shrink_0()
-        .pr(px(6.0))
+        .absolute()
+        .left_0()
+        .top(px(PLOT_TOP))
+        .w(px(LABEL_COLUMN - LABEL_GAP))
         .flex()
         .flex_col()
         .items_end()
-        .text_size(px(10.0))
-        .text_color(rgb(MUTED));
+        .text_size(px(11.0))
+        .text_color(rgb(TEXT));
     for (row, cpu) in history.cpus().iter().enumerate() {
         let value = match inspection {
             Some(CPUInspection::Sample {
@@ -560,12 +515,23 @@ fn cpu_history_rows(history: &CPUHistory, inspection: Option<CPUInspection>) -> 
                 .role(gpui::Role::Label)
                 .aria_label(format!("Logical CPU {}", cpu.cpu()))
                 .aria_value(value)
-                .h(px(ROW_HEIGHT))
+                .h(px(row_height))
+                .line_height(px(row_height))
                 .child(crate::live_inventory::logical_cpu_name(cpu.cpu())),
         );
     }
 
     labels
+}
+
+/// The rows share the plot's height between the margins.
+fn row_height(history: &CPUHistory) -> f32 {
+    let Some(rows) = history.cpus().len().to_f32() else {
+        unreachable!("Validated CPU history has at most 32 rows");
+    };
+    assert!(rows > 0.0);
+
+    (PLOT_HEIGHT - PLOT_TOP - PLOT_BOTTOM) / rows
 }
 
 fn inspected_row(inspection: Option<CPUInspection>) -> usize {
@@ -609,54 +575,23 @@ fn cpu_history_reading(history: &CPUHistory, inspection: Option<CPUInspection>) 
     )
 }
 
-fn cpu_history_readout(history: &CPUHistory, inspection: Option<CPUInspection>) -> gpui::Div {
-    let reading = cpu_history_reading(history, inspection);
-    let mut row = div()
-        .flex()
-        .flex_wrap()
-        .text_size(px(11.0))
-        .text_color(rgb(MUTED));
-    for (index, part) in reading.split(" · ").take(4).enumerate() {
-        if index > 0 {
-            row = row.child(" · ");
-        }
-        let part = part.to_owned();
-        row = row.child(div().debug_selector(|| part.clone()).child(part));
-    }
-    row
-}
-
-fn cpu_history_times(history: &CPUHistory) -> impl IntoElement {
-    let middle = history.wire.first_ns + (history.wire.end_ns - history.wire.first_ns) / 2;
-    div()
-        .flex()
-        .pl(px(CPU_LABEL_WIDTH + 6.0))
-        .justify_between()
-        .text_size(px(10.0))
-        .text_color(rgb(MUTED))
-        .children(
-            [history.wire.first_ns, middle, history.wire.end_ns]
-                .map(|wall_ns| crate::live_presentation::clock(wall_ns / super::NS, false)),
-        )
-}
-
 fn cpu_history_paint(
     history: &CPUHistory,
     inspection: Option<CPUInspection>,
     bounds: Bounds<Pixels>,
     window: &mut Window,
 ) {
+    let row_height = row_height(history);
     for (row, cpu) in history.cpus().iter().enumerate() {
-        let Ok(row) = u8::try_from(row) else {
+        let Some(row) = row.to_f32() else {
             unreachable!("Validated CPU history has at most 32 rows");
         };
-        let top = bounds.origin.y + px(f32::from(row) * ROW_HEIGHT);
+        // The prototype insets each cell half a pixel from its row's top and leaves 0.7 below.
+        let top = bounds.origin.y + px(row * row_height + 0.5);
+        let height = px((row_height - 0.7).max(1.0));
         window.paint_quad(fill(
-            Bounds::new(
-                point(bounds.origin.x, top),
-                size(bounds.size.width, px(ROW_HEIGHT - 2.0)),
-            ),
-            rgb(0x10_14_1b),
+            Bounds::new(point(bounds.origin.x, top), size(bounds.size.width, height)),
+            rgb(GRID),
         ));
         for interval in &history.wire.intervals {
             if let Some(value) = cpu.busy_percent()[interval.observation_index] {
@@ -667,72 +602,73 @@ fn cpu_history_paint(
                 };
                 let rectangle = Bounds::new(
                     point(bounds.origin.x + bounds.size.width * first, top),
-                    size(bounds.size.width * (end - first), px(ROW_HEIGHT - 2.0)),
+                    size(bounds.size.width * (end - first), height),
                 );
                 window.paint_quad(fill(rectangle, cpu_history_color(value)));
             }
         }
     }
-    cpu_history_marker(
+    let inspected = match inspection {
+        Some(CPUInspection::Sample {
+            observation_index, ..
+        }) => history
+            .wire
+            .observations
+            .get(observation_index)
+            .map(|sample| sample.observation.wall_ns),
+        Some(CPUInspection::Gap) | None => None,
+    };
+    cpu_history_cursor(
         history,
-        history.wire.observation.wall_ns,
+        inspected.unwrap_or(history.wire.observation.wall_ns),
         bounds,
-        TEXT,
         window,
     );
-    if let Some(CPUInspection::Sample {
-        observation_index, ..
-    }) = inspection
-    {
-        if let Some(sample) = history.wire.observations.get(observation_index) {
-            cpu_history_marker(
-                history,
-                sample.observation.wall_ns,
-                bounds,
-                0x6d_a9_ff,
-                window,
-            );
-        }
-    }
 }
 
+/// Green through yellow to red, blended between the prototype's three stops.
 fn cpu_history_color(value: f64) -> gpui::Rgba {
-    let color = if value >= 90.0 {
-        RED
-    } else {
-        if value >= 80.0 {
-            ORANGE
-        } else {
-            if value >= 60.0 { 0xf2_cc_0d } else { GREEN }
-        }
+    let Some(position) = (value.clamp(0.0, 100.0) / 50.0).to_f32() else {
+        unreachable!("A clamped percentage fits f32");
     };
-    let Some(opacity) = (0.24 + (value / 5.0).floor() * 0.038).to_f32() else {
-        unreachable!("Validated CPU percentages fit f32");
+    let stop = position.floor().min(1.0);
+    let fraction = position - stop;
+    let (from, to) = if stop < 1.0 {
+        (SCALE[0], SCALE[1])
+    } else {
+        (SCALE[1], SCALE[2])
+    };
+    let channel = |from: f32, to: f32| {
+        (from + (to - from) * fraction)
+            .round()
+            .to_u32()
+            .unwrap_or_default()
     };
 
-    crate::charts::alpha(color, opacity)
+    rgb(channel(from.0, to.0) << 16 | channel(from.1, to.1) << 8 | channel(from.2, to.2))
 }
 
-fn cpu_history_marker(
+/// The prototype's cursor over the cells: a dashed line of three pixels and a gap of three.
+fn cpu_history_cursor(
     history: &CPUHistory,
     wall_ns: u64,
     bounds: Bounds<Pixels>,
-    color: u32,
     window: &mut Window,
 ) {
     let Some(fraction) = history.fraction(wall_ns).to_f32() else {
         unreachable!("Validated CPU history fractions fit f32");
     };
-    window.paint_quad(fill(
-        Bounds::new(
-            point(
-                bounds.origin.x + bounds.size.width * fraction,
-                bounds.origin.y,
-            ),
-            size(px(1.0), bounds.size.height),
-        ),
-        crate::charts::alpha(color, 0.8),
-    ));
+    let x = bounds.origin.x + bounds.size.width * fraction;
+    let bottom = bounds.origin.y + bounds.size.height;
+    let dash = px(3.0);
+    let mut top = bounds.origin.y;
+    while top < bottom {
+        window.paint_quad(fill(
+            Bounds::new(point(x, top), size(px(1.0), dash.min(bottom - top))),
+            crate::charts::alpha(TEXT, 0.7),
+        ));
+        top += dash * 2.0;
+    }
 }
 
 /// The history's cells, painted at the measured bounds, which it records for the pointer.
@@ -742,15 +678,11 @@ fn cpu_history_cells_plot(
     measured: Rc<Cell<Bounds<Pixels>>>,
 ) -> impl IntoElement + use<> {
     let paint_history = Arc::clone(history);
-    let Ok(rows) = u8::try_from(history.cpus().len()) else {
-        unreachable!("Validated CPU history has at most 32 rows");
-    };
     canvas(
         move |bounds, _, _| measured.set(bounds),
         move |bounds, (), window, _| {
             cpu_history_paint(&paint_history, inspection, bounds, window);
         },
     )
-    .w_full()
-    .h(px(f32::from(rows) * ROW_HEIGHT))
+    .size_full()
 }

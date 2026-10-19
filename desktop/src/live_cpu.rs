@@ -4,7 +4,7 @@ use gpui::{
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::charts::{GREEN, MUTED, ORANGE, PANEL, RED};
+use crate::charts::{GREEN, ORANGE, PANEL, RED, TEXT};
 use crate::live_dashboard::LiveDashboard;
 use crate::live_source::{identity_signature, identity_validate};
 
@@ -152,7 +152,7 @@ impl LiveDashboard {
             .min_w_0()
             .px(px(12.0))
             .pt(px(8.0))
-            .pb(px(10.0))
+            .pb(px(8.0))
             .rounded(px(12.0))
             .border_1()
             .border_color(rgb(crate::charts::LINE))
@@ -181,46 +181,25 @@ impl LiveDashboard {
         else {
             return panel.child(unavailable());
         };
-        let second = activity.observation["wall_ns"]
-            .as_u64()
-            .map(|wall| wall / 1_000_000_000);
-        panel = panel.child(
-            div()
-                .mt(px(6.0))
-                .text_size(px(11.0))
-                .text_color(rgb(MUTED))
-                .child(match second {
-                    Some(second) => format!(
-                        "Activity at {} · 100% is one fully busy logical CPU",
-                        crate::live_presentation::clock(second, true)
-                    ),
-                    None => "Selected CPU observation time unavailable".into(),
-                }),
-        );
         if activity.cpus.is_empty() {
             return panel.child(unavailable());
         }
         let columns = activity.cpus.len().min(COLUMNS_MAX);
-        let compact = self.viewport_size.width >= px(1100.0);
         for cpus in activity.rows() {
-            panel = panel.child(cpu_activity_row(cpus, columns, compact));
+            panel = panel.child(cpu_activity_row(cpus, columns));
         }
-        panel.children(activity.unavailable_reason.clone().map(|reason| {
-            div()
-                .text_size(px(11.0))
-                .text_color(rgb(MUTED))
-                .child(reason)
-        }))
+        panel
     }
 }
 
-#[derive(Clone, Copy)]
-enum Labels {
-    Percent,
-    Index,
-}
+/// The prototype's bars: a 244 pixel plot of twenty segments per core, with each core's index
+/// under its bar.
+const PLOT_HEIGHT: f32 = 244.0;
+const PLOT_INSET: f32 = 4.0;
+const SEGMENTS_TOP: f32 = 12.0;
+const INDEX_TOP: f32 = 226.5;
 
-fn cpu_activity_row(cpus: &[LogicalCPU], columns: usize, compact: bool) -> impl IntoElement {
+fn cpu_activity_row(cpus: &[LogicalCPU], columns: usize) -> impl IntoElement {
     assert!(columns <= COLUMNS_MAX);
     assert!(cpus.len() <= columns);
     let columns = match u8::try_from(columns) {
@@ -229,13 +208,8 @@ fn cpu_activity_row(cpus: &[LogicalCPU], columns: usize, compact: bool) -> impl 
     };
     let values = cpus.iter().map(|cpu| cpu.busy_percent).collect::<Vec<_>>();
     div()
-        .h(px(if compact { 248.0 } else { 268.0 }))
-        .flex()
-        .flex_col()
-        .when(!compact, |row| {
-            row.child(cpu_activity_labels(cpus, columns, Labels::Percent))
-        })
-        .child(div().h(px(10.0)))
+        .relative()
+        .h(px(PLOT_HEIGHT))
         .child(
             canvas(
                 |_, _, _| (),
@@ -243,54 +217,43 @@ fn cpu_activity_row(cpus: &[LogicalCPU], columns: usize, compact: bool) -> impl 
                     cpu_activity_paint(&values, columns, bounds, window);
                 },
             )
-            .w_full()
-            .h(px(210.0)),
+            .absolute()
+            .size_full(),
         )
-        .child(cpu_activity_labels(cpus, columns, Labels::Index))
+        .child(cpu_activity_labels(cpus, columns))
 }
 
-fn cpu_activity_labels(cpus: &[LogicalCPU], columns: u8, kind: Labels) -> impl IntoElement {
-    let height = match kind {
-        Labels::Percent => 20.0,
-        Labels::Index => 28.0,
-    };
+fn cpu_activity_labels(cpus: &[LogicalCPU], columns: u8) -> impl IntoElement {
     let mut row = div()
-        .h(px(height))
+        .absolute()
+        .left(px(PLOT_INSET))
+        .right(px(PLOT_INSET))
+        .top(px(INDEX_TOP))
+        .h(px(14.0))
         .flex()
         .items_center()
         .text_size(px(10.0))
+        .text_color(rgb(TEXT))
         .whitespace_nowrap();
     for cpu in cpus {
-        let text = match kind {
-            Labels::Percent => cpu
-                .busy_percent
-                .map_or_else(|| "N/A".into(), |value| format!("{value:.0}%")),
-            Labels::Index => cpu.cpu.to_string(),
-        };
+        let text = cpu.cpu.to_string();
         row = row.child(
             div()
                 .id(gpui::SharedString::from(format!(
                     "cpu-selected-label-{}-{text}",
                     cpu.cpu
                 )))
-                .when(matches!(kind, Labels::Index), |label| {
-                    label
-                        .role(gpui::Role::Label)
-                        .aria_label(format!("Selected logical CPU {}", cpu.cpu))
-                        .aria_value(
-                            cpu.busy_percent
-                                .map_or_else(|| "Unavailable".into(), |value| format!("{value}%")),
-                        )
-                })
+                .role(gpui::Role::Label)
+                .aria_label(format!("Selected logical CPU {}", cpu.cpu))
+                .aria_value(
+                    cpu.busy_percent
+                        .map_or_else(|| "Unavailable".into(), |value| format!("{value}%")),
+                )
                 .flex_1()
                 .min_w_0()
                 .text_center()
                 .debug_selector(|| text.clone())
-                .child(
-                    div()
-                        .debug_selector(|| format!("cpu-selected-value:{}:{text}", cpu.cpu))
-                        .child(text),
-                ),
+                .child(text),
         );
     }
     for _column in cpus.len()..usize::from(columns) {
@@ -308,7 +271,7 @@ fn cpu_activity_paint(
     assert!(columns > 0);
     assert!(usize::from(columns) <= COLUMNS_MAX);
     assert!(cpus.len() <= usize::from(columns));
-    let width = bounds.size.width / f32::from(columns);
+    let width = (bounds.size.width - px(2.0 * PLOT_INSET)) / f32::from(columns);
     for (index, value) in (0_u8..18).zip(cpus) {
         for segment in 0..SEGMENTS {
             let opacity = if segment_lit(*value, segment) {
@@ -318,8 +281,8 @@ fn cpu_activity_paint(
             };
             let rectangle = Bounds::new(
                 point(
-                    bounds.origin.x + width * f32::from(index) + px(1.0),
-                    bounds.origin.y + px(f32::from(segment) * 10.5),
+                    bounds.origin.x + px(PLOT_INSET) + width * f32::from(index),
+                    bounds.origin.y + px(SEGMENTS_TOP + f32::from(segment) * 10.5),
                 ),
                 size((width - px(2.0)).max(px(1.0)), px(8.8)),
             );

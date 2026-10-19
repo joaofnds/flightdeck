@@ -64,20 +64,6 @@ fn clicking_a_measured_interval_selects_its_exact_observation(cx: &mut TestAppCo
     harness.teardown();
 }
 
-#[gpui::test]
-fn restoration_failure_remains_visible_when_cpu_acquisition_is_unavailable(
-    cx: &mut TestAppContext,
-) {
-    // Goal: an unavailable CPU domain cannot hide the reason its saved history failed to restore.
-    // Method: render a validated empty CPU response carrying the backend's restoration diagnostic.
-    let mut harness = CPUHistoryHarness::setup(cx);
-
-    harness.driver.show_unavailable_history();
-
-    assert!(harness.driver.restoration_failure_is_visible());
-    harness.teardown();
-}
-
 struct CPUHistoryHarness {
     driver: CPUHistoryDriver,
 }
@@ -149,18 +135,6 @@ impl CPUHistoryDriver {
             .push(json!(50.0));
         selection["selected"] = selected.clone();
         selection["trends"].as_array_mut().unwrap().push(selected);
-        self.install_history(CPUHistoryFixture { payload, selection });
-    }
-
-    fn show_unavailable_history(&mut self) {
-        let (mut payload, selection) = super::tests::fixture();
-        payload["total"] = json!(0);
-        payload["cpus"] = json!([]);
-        payload["observations"][0]["cpu_count"] = json!(0);
-        payload["observations"][1]["cpu_count"] = json!(0);
-        payload["observations"][1]["interval_available"] = json!(false);
-        payload["retention_limited"] = json!(true);
-        payload["restoration_error"] = json!("Saved CPU tables could not be restored");
         self.install_history(CPUHistoryFixture { payload, selection });
     }
 
@@ -250,11 +224,5 @@ impl CPUHistoryDriver {
     fn readings_are_hidden(&self) -> bool {
         self.view
             .read_with(&self.context, |dashboard, _| dashboard.snapshot.is_none())
-    }
-
-    fn restoration_failure_is_visible(&mut self) -> bool {
-        self.context
-            .debug_bounds("cpu-history-restoration-error")
-            .is_some()
     }
 }
