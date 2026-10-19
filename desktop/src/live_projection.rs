@@ -662,6 +662,36 @@ fn gpu_power() -> Specification {
     )
 }
 
+/// The unified memory the GPU driver reported in use and allocated, sampled by the app.
+pub const GPU_MEMORY_ID: &str = "live-gpu-memory";
+
+fn gpu_memory() -> Specification {
+    let mut allocated = reading(
+        "gpu_memory_allocated_bytes",
+        "Allocated",
+        "#d1d1de",
+        GIBIBYTE,
+    );
+    allocated.dashed = true;
+    allocated.fill = Some(0.0);
+
+    let mut specification = specification(
+        GPU_MEMORY_ID,
+        "GPU memory",
+        "GiB",
+        vec![
+            reading("gpu_memory_in_use_bytes", "In use", "#b877d9", GIBIBYTE),
+            allocated,
+        ],
+    );
+    specification.help = "The unified memory the GPU driver reports. In use is the memory \
+        GPU work holds now, and allocated is what the driver has set aside for it. The GPU \
+        shares RAM with the CPU, so this memory also counts in the Mac's memory in use. The \
+        app samples the driver each second while it runs, so time before it started has no \
+        reading.";
+    specification
+}
+
 fn gpu_activity() -> Specification {
     specification(
         "live-gpu-activity",
@@ -681,7 +711,7 @@ fn specifications(route: &str, points: &[Value]) -> Result<Vec<Specification>, S
             open_files(),
         ],
         "memory" => memory_specifications(),
-        "gpu" => vec![gpu_activity(), gpu_power()],
+        "gpu" => vec![gpu_activity(), gpu_power(), gpu_memory()],
         "energy" => energy(points)?,
         "network" => network(),
         "storage" => resource_projection::storage(),

@@ -1,8 +1,9 @@
 //! The clock frequency of each performance state a CPU core reports through `IOReport`, read
 //! from the voltage-state tables the power manager publishes in the I/O Registry.
 
-use std::ffi::{CString, c_char, c_ulong, c_void};
 use std::io;
+
+use crate::registry::Entry;
 
 /// The voltage-state tables of the power manager, each one's frequencies in kilohertz,
 /// rising, and none of them twice.
@@ -52,7 +53,7 @@ const ENTRY_BYTES: usize = 8;
 /// Reads the power manager's tables, or an error where the registry has no power manager.
 /// It allocates, so a program reads them once, at startup.
 pub fn read() -> io::Result<ClockTables> {
-    let service = Service::power_manager()?;
+    let service = Entry::named(c"pmgr", "power manager")?;
 
     let mut tables = ClockTables::default();
     for index in 0..TABLES_MAX {
@@ -107,121 +108,6 @@ fn frequencies_khz(bytes: &[u8]) -> Option<Vec<u32>> {
         return Some(frequencies.iter().map(|hertz| hertz / 1000).collect());
     }
     None
-}
-
-/// An I/O Registry entry this module owns a reference to.
-struct Service(u32);
-
-impl Service {
-    fn power_manager() -> io::Result<Self> {
-        let matching = unsafe { IOServiceNameMatching(c"pmgr".as_ptr()) };
-        if matching.is_null() {
-            return Err(io::Error::new(
-                io::ErrorKind::OutOfMemory,
-                "IOServiceNameMatching returned no dictionary",
-            ));
-        }
-
-        // IOServiceGetMatchingService consumes the matching dictionary.
-        let service = Self(unsafe { IOServiceGetMatchingService(0, matching) });
-
-        if service.0 == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "the I/O Registry has no power manager",
-            ));
-        }
-        Ok(service)
-    }
-
-    /// The bytes of the data property `key`, or none where the entry has no such property or
-    /// it holds something other than data.
-    fn data(&self, key: &str) -> io::Result<Option<Vec<u8>>> {
-        let key = CString::new(key).map_err(|error| io::Error::other(error.to_string()))?;
-        let name = Owned(unsafe {
-            CFStringCreateWithCString(std::ptr::null(), key.as_ptr(), UTF8_ENCODING)
-        });
-
-        if name.0.is_null() {
-            return Err(io::Error::new(
-                io::ErrorKind::OutOfMemory,
-                "CFStringCreateWithCString returned no string",
-            ));
-        }
-        let value =
-            Owned(unsafe { IORegistryEntryCreateCFProperty(self.0, name.0, std::ptr::null(), 0) });
-
-        if value.0.is_null() {
-            return Ok(None);
-        }
-        if unsafe { CFGetTypeID(value.0) } != unsafe { CFDataGetTypeID() } {
-            return Ok(None);
-        }
-        let length = usize::try_from(unsafe { CFDataGetLength(value.0) })
-            .map_err(|error| io::Error::other(error.to_string()))?;
-        if length == 0 {
-            return Ok(Some(Vec::new()));
-        }
-        let pointer = unsafe { CFDataGetBytePtr(value.0) };
-        if pointer.is_null() {
-            return Ok(None);
-        }
-        // CFData holds `length` bytes at `pointer` for as long as `value` keeps it alive.
-        Ok(Some(
-            unsafe { std::slice::from_raw_parts(pointer, length) }.to_vec(),
-        ))
-    }
-}
-
-impl Drop for Service {
-    fn drop(&mut self) {
-        if self.0 != 0 {
-            let status = unsafe { IOObjectRelease(self.0) };
-            if status != 0 {
-                eprintln!("collector: power manager release failed: {status:#x}");
-            }
-        }
-    }
-}
-
-/// A CoreFoundation object this module owns a reference to.
-struct Owned(*const c_void);
-
-impl Drop for Owned {
-    fn drop(&mut self) {
-        if !self.0.is_null() {
-            unsafe { CFRelease(self.0) };
-        }
-    }
-}
-
-const UTF8_ENCODING: u32 = 0x0800_0100;
-
-#[link(name = "IOKit", kind = "framework")]
-unsafe extern "C" {
-    fn IOServiceNameMatching(name: *const c_char) -> *mut c_void;
-    fn IOServiceGetMatchingService(port: u32, matching: *mut c_void) -> u32;
-    fn IOObjectRelease(object: u32) -> i32;
-    fn IORegistryEntryCreateCFProperty(
-        entry: u32,
-        key: *const c_void,
-        allocator: *const c_void,
-        options: u32,
-    ) -> *const c_void;
-}
-
-#[link(name = "CoreFoundation", kind = "framework")]
-unsafe extern "C" {
-    fn CFStringCreateWithCString(
-        allocator: *const c_void,
-        value: *const c_char,
-        encoding: u32,
-    ) -> *const c_void;
-    fn CFRelease(value: *const c_void);
-    fn CFGetTypeID(value: *const c_void) -> c_ulong;
-    fn CFDataGetTypeID() -> c_ulong;
-    fn CFDataGetLength(data: *const c_void) -> isize;
-    fn CFDataGetBytePtr(data: *const c_void) -> *const u8;
 }
 
 #[cfg(test)]

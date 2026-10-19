@@ -1,0 +1,63 @@
+//! The unified memory the GPU driver reports in its performance statistics: the memory GPU
+//! work uses now and the memory the driver has allocated for it.
+
+use std::io;
+
+use crate::registry::Entry;
+
+/// The GPU driver's entry, kept open so each reading only fetches its statistics.
+pub struct GpuMemory {
+    accelerator: Entry,
+}
+
+/// One reading of the GPU driver's memory, in bytes, each none where the driver left it out.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GpuMemoryReading {
+    pub in_use_bytes: Option<u64>,
+    pub allocated_bytes: Option<u64>,
+}
+
+impl GpuMemory {
+    /// The GPU driver's entry, or an error where the registry has none.
+    pub fn open() -> io::Result<Self> {
+        Ok(Self {
+            accelerator: Entry::of_class(c"AGXAccelerator", "GPU accelerator")?,
+        })
+    }
+
+    /// The driver's memory now, or none where it publishes no performance statistics. Each
+    /// reading allocates the statistics dictionary, so a caller reads it at most once a second.
+    pub fn read(&self) -> io::Result<Option<GpuMemoryReading>> {
+        let Some([in_use_bytes, allocated_bytes]) = self.accelerator.dictionary_counts(
+            "PerformanceStatistics",
+            ["In use system memory", "Alloc system memory"],
+        )?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(GpuMemoryReading {
+            in_use_bytes,
+            allocated_bytes,
+        }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_the_gpu_memory_of_this_mac() {
+        // Goal: the GPU driver of an Apple silicon Mac reports both quantities, and the memory
+        // in use fits within what the driver allocated.
+        // Method: read this Mac's driver statistics once.
+        let memory = GpuMemory::open().unwrap();
+
+        let reading = memory.read().unwrap().unwrap();
+
+        let in_use = reading.in_use_bytes.unwrap();
+        let allocated = reading.allocated_bytes.unwrap();
+        assert!(in_use > 0);
+        assert!(in_use <= allocated);
+    }
+}

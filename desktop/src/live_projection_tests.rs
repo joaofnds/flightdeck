@@ -758,3 +758,27 @@ fn cpu_frequency_charts_each_level_where_measured() {
     assert_eq!(values, [&[None, Some(2.2), None], &[None, Some(4.1), None]]);
     assert_eq!(quantity_text(2.2, "GHz"), "2.2 GHz");
 }
+
+#[test]
+fn gpu_memory_charts_in_use_and_dashed_allocation_in_gibibytes() {
+    // Goal: the GPU memory chart draws the driver's memory in use solid and its allocation
+    // dashed without fill, in GiB, and a second the app did not sample stays a gap.
+    // Method: sample only the middle point of three, 1 GiB in use of 6 GiB allocated.
+    let mut selection = selection();
+    selection["trends"][1]["gpu_memory_in_use_bytes"] = json!(1_u64 << 30);
+    selection["trends"][1]["gpu_memory_allocated_bytes"] = json!(6_u64 << 30);
+
+    let panels = panels("gpu", &selection, None).unwrap();
+
+    let memory = panels
+        .iter()
+        .find(|panel| panel.id == GPU_MEMORY_ID)
+        .unwrap();
+    let names: Vec<_> = memory.lines.iter().map(|line| line.name.as_str()).collect();
+    assert_eq!(names, ["In use", "Allocated"]);
+    let values: Vec<_> = memory.lines.iter().map(|line| &line.values).collect();
+    assert_eq!(values, [&[None, Some(1.0), None], &[None, Some(6.0), None]]);
+    assert_eq!(memory.lines[0].dashed, Some(false));
+    assert_eq!(memory.lines[1].dashed, Some(true));
+    assert_eq!(memory.unit, "GiB");
+}

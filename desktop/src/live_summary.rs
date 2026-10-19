@@ -109,8 +109,8 @@ const GPU_FREQUENCY: Specification = (
 );
 const GPU_MEMORY: Specification = (
     "Memory in use",
-    Reading::Uncaptured,
-    "GPU allocation not captured",
+    Reading::Quantity("gpu_memory_in_use_bytes", "GiB", 1_073_741_824.0),
+    "Unified-memory allocation",
     PURPLE,
     "gpu",
 );

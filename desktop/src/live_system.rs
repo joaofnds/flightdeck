@@ -1,10 +1,11 @@
-//! Scheduling and file readings the collector does not record: load average, open files
-//! and thermal pressure. The app samples them once a second while it runs and keeps the
+//! Readings the collector does not record: load average, open files, thermal pressure and
+//! the GPU's unified memory. The app samples them once a second while it runs and keeps the
 //! last 16 minutes, so a second before the app started, or one it missed, has no reading.
 
 use std::collections::VecDeque;
 use std::ffi::{CStr, c_char, c_int};
 
+use collector::gpu_memory::{GpuMemory, GpuMemoryReading};
 use serde_json::{Value, json};
 
 /// The samples kept, a minute past the 15 the charts show so the window's first second
@@ -19,6 +20,7 @@ pub struct SystemSample {
     pub logical_cpus: Option<u32>,
     pub open_files: Option<OpenFiles>,
     pub thermal_pressure: Option<u64>,
+    pub gpu_memory: Option<GpuMemoryReading>,
 }
 
 /// The file entries open across the system and the most macOS allows.
@@ -33,6 +35,7 @@ pub struct SystemSamples {
     samples: VecDeque<SystemSample>,
     boot_second: Option<u64>,
     thermal: Option<ThermalPressure>,
+    gpu: Option<GpuMemory>,
     error_last: Option<String>,
 }
 
@@ -52,7 +55,16 @@ impl SystemSamples {
                 None
             }
         };
-        Self::with_boot(boot_second, thermal)
+        let gpu = match GpuMemory::open() {
+            Ok(gpu) => Some(gpu),
+            Err(error) => {
+                eprintln!("flightdeck GPU memory unreadable: {error}");
+                None
+            }
+        };
+        let mut samples = Self::with_boot(boot_second, thermal);
+        samples.gpu = gpu;
+        samples
     }
 
     /// Samples that know no boot time and read no thermal pressure, for tests that compare
@@ -67,6 +79,7 @@ impl SystemSamples {
             samples: VecDeque::with_capacity(SAMPLES_MAX),
             boot_second,
             thermal,
+            gpu: None,
             error_last: None,
         }
     }
@@ -80,7 +93,7 @@ impl SystemSamples {
         {
             return;
         }
-        let (sample, errors) = sample_read(second, self.thermal.as_ref());
+        let (sample, errors) = sample_read(second, self.thermal.as_ref(), self.gpu.as_ref());
         let error = (!errors.is_empty()).then(|| errors.join("; "));
         if error != self.error_last {
             if let Some(error) = &error {
@@ -156,6 +169,14 @@ impl SystemSamples {
         if let Some(level) = sample.thermal_pressure {
             point["thermal_pressure"] = json!(level);
         }
+        if let Some(gpu) = sample.gpu_memory {
+            if let Some(bytes) = gpu.in_use_bytes {
+                point["gpu_memory_in_use_bytes"] = json!(bytes);
+            }
+            if let Some(bytes) = gpu.allocated_bytes {
+                point["gpu_memory_allocated_bytes"] = json!(bytes);
+            }
+        }
     }
 }
 
@@ -193,19 +214,29 @@ pub fn thermal_pressure_name(level: u64) -> Option<&'static str> {
     }
 }
 
-fn sample_read(second: u64, thermal: Option<&ThermalPressure>) -> (SystemSample, Vec<String>) {
+fn sample_read(
+    second: u64,
+    thermal: Option<&ThermalPressure>,
+    gpu: Option<&GpuMemory>,
+) -> (SystemSample, Vec<String>) {
     let mut errors = Vec::new();
     let load_average = sample_read_keep(load_average(), &mut errors);
     let logical_cpus = sample_read_keep(logical_cpus(), &mut errors);
     let open_files = sample_read_keep(open_files(), &mut errors);
     let thermal_pressure =
         thermal.and_then(|thermal| sample_read_keep(thermal.level(), &mut errors));
+    let gpu_memory = gpu
+        .and_then(|gpu| {
+            sample_read_keep(gpu.read().map_err(|error| error.to_string()), &mut errors)
+        })
+        .flatten();
     let sample = SystemSample {
         second,
         load_average,
         logical_cpus,
         open_files,
         thermal_pressure,
+        gpu_memory,
     };
     (sample, errors)
 }
@@ -353,6 +384,10 @@ mod tests {
                 limit: 4_000,
             }),
             thermal_pressure: Some(0),
+            gpu_memory: Some(GpuMemoryReading {
+                in_use_bytes: Some(1 << 30),
+                allocated_bytes: None,
+            }),
         }
     }
 
@@ -383,6 +418,9 @@ mod tests {
         assert_eq!(trends[1]["uptime_seconds"], json!(61));
         assert_eq!(trends[2]["logical_cpu_count"], json!(18));
         assert_eq!(selection["summary"]["thermal_pressure"], json!(0));
+        assert_eq!(trends[0]["gpu_memory_in_use_bytes"], json!(1_u64 << 30));
+        assert_eq!(trends[0]["gpu_memory_allocated_bytes"], Value::Null);
+        assert_eq!(trends[1]["gpu_memory_in_use_bytes"], Value::Null);
     }
 
     #[test]

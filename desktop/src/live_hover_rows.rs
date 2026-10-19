@@ -112,6 +112,11 @@ impl LiveDashboard {
             return;
         }
 
+        if self.request.route == "gpu" {
+            self.reading_rows_charts_gpu(rows);
+            return;
+        }
+
         if self.request.route == "cpu" {
             rows.push(Row::Heading("Frequency and scheduling".into()));
             let panels: Vec<_> = [
@@ -157,6 +162,28 @@ impl LiveDashboard {
             rows.push(Row::Charts {
                 panels: panels.to_vec(),
                 columns,
+            });
+        }
+    }
+
+    /// The GPU's activity and power in the grid, then its memory across the page under its
+    /// own heading, as the prototype lays them out.
+    fn reading_rows_charts_gpu(&self, rows: &mut Vec<Row>) {
+        let columns = self.reading_chart_columns();
+        let primary = self.named_panels(&["live-gpu-activity", "live-gpu-power"]);
+        for panels in primary.chunks(columns) {
+            rows.push(Row::Charts {
+                panels: panels.to_vec(),
+                columns,
+            });
+        }
+
+        let memory = self.named_panels(&[crate::live_projection::GPU_MEMORY_ID]);
+        if !memory.is_empty() {
+            rows.push(Row::Heading("Unified-memory allocations".into()));
+            rows.push(Row::Charts {
+                panels: memory,
+                columns: 1,
             });
         }
     }
