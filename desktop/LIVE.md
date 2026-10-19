@@ -18,7 +18,72 @@ pending/failed selection recovery. It does not exercise native macOS event deliv
 or inspect screen pixels. Saved-recording fixtures distinguish final same-second
 publications and preserve an explicitly chosen earlier observation.
 
-The current ranking increment passes 489 desktop test executions: 442 application,
+The integrated disk, Battery and route-ranking increments pass 621 canonical desktop
+test executions: 521 application, 83 projection benchmark and 17 public CLI.
+Rust 1.98.0 normal-profile
+fmt, strict all-target Clippy and 30 tidy checks pass on unchanged input manifests.
+The transitive block0.1.6 dependency emits a future-compiler incompatibility notice;
+Inbox TASK-47 retains that finding without suppression.
+
+Storage attribution scans a real sealed 600-App fixture and retains the exact
+same-second publication and leader beyond the first 512-row page. Installed chart
+input checks cover separate Read/Write coverage, small rates, historical loading,
+failure and restored readings. Four vertical-wheel regressions preserve horizontal
+column positions while the surrounding list scrolls. These are TestPlatform and
+reader observations, without native event or pixel verification.
+
+The Battery schematic preserves selected charge and signed power, including measured
+zero and unavailable values. Installed-input checks cover pending, failed and missing
+historical observations, restored live readings, malformed Battery input alongside
+valid unrelated readings, and the numeric byte/finite bounds. CPU, Memory and Energy
+show their corresponding Top apps card. Real sealed 600-App cases preserve the
+leader beyond page one and the exact same-second observation on all three routes.
+Historical Memory failure retains its scalar with an explicit App error; missing
+Energy clears both. Rendered click and focused Enter activation retain the historical
+App identity and reset stale offsets. Enter follows pointer focus in that case;
+keyboard-only navigation and native event delivery remain unverified.
+
+The latest optimized package, built from committed source through `6fba081`, passes
+captured-route, font, package-resource and app/helper byte checks. Its app SHA-256 is
+`fe9de696738ccc2aa1b0537e1a7a58205bd16ca9bd653af41761d9a71085644d`.
+A modified artwork copy fails validation. This package reopened the newly collected
+recording read-only in a twenty-second window, ending with 900 scalar points and
+`error:null`; the saved capture independently contains 900 points. No helper was
+started by that reopening. The application reported populated canvases, but those
+reports do not establish visible pixels. Build inputs, package identities and raw
+reopening output are under ignored `desktop/target/final-candidate-logs/` from the
+repository root. The canonical bundle contains those same verified bytes.
+
+The preceding disk-only optimized build passes captured-route and font checks, packaged app/helper
+byte identity, resource validation and a tampered-resource refusal. Its executable
+SHA-256 is `9c486f20b7979702655d4e4a1819290cad38ce49d045897932bb8a1cbebb42f1`.
+A read-only capture from a frozen real recording contains 900 WindowManager App
+history points, each with CPU, resident memory, footprint, power and disk readings.
+All five production chart projections are present. The cache accounts for 32,816
+bytes with neither recorded nor live retention limitation. This capture establishes
+saved-data support; it does not establish a currently advancing collector.
+
+The separate `projection_bench` executable has SHA-256
+`dfaa8e66a559f1908ab89e991e6a4988dcf3c2876a3e35c8f7648712857a36d3`.
+The benchmark and capture-input hashes were recorded before and verified after a
+fresh twenty-iteration measurement. Its output transcript matches the earlier
+capture's five-panel transcript byte-for-byte. After one warmup, median wall time
+is 712,854ns and process CPU time is 713,895.5ns.
+Each records 3,684 allocation requests and 146,602 requested
+bytes. Counters cover panel preparation only; requested bytes are not retained
+memory. Timings include clock/counter overhead and exclude query, decoding,
+encoding and UI. Shared-host activity was uncontrolled. This scoped observation
+does not establish visible responsiveness, a whole-app resource budget or a
+framework ranking. Raw canonical checks and source manifests remain under ignored
+`target/disk-attribution/canonical-1.98-repaired/` in the desktop workspace;
+optimized package and capture outputs are under the repository root's
+`target/polars_migration/desktop_candidate_logs/`. The separately identified
+measurement is in the desktop workspace's ignored
+`target/disk-attribution/app-measurement-identified/`. The earlier run reported
+650,521ns wall and 651,459ns process CPU; its benchmark hash was first observed
+after that run, so it has weaker executable provenance.
+
+The earlier ranking increment passed 489 desktop test executions: 442 application,
 36 projection benchmark and 11 replay tests. Strict all-target Clippy, formatting
 and tidy pass. Production TestPlatform nodes check Overview's 3/2/1
 columns at the 1100/640-point boundaries, header control bounds, retained selection
@@ -66,7 +131,7 @@ the reported missed publication remained recoverable in history. The source had
 already been running before that observation, so the 300 seconds alone did not
 collect a complete fifteen-minute interval.
 
-After installing the current package, its owned collector restarted on the same
+After installing the earlier `ff871c24…` ranking package, its owned collector restarted on the same
 recording. A 15-second read-only soak accepted 13 distinct advancing updates without
 errors. Its history showed 858 of 900 seconds, retaining the 42-second collection
 gap from the restart. A later full context must age that gap out or preserve it;
@@ -79,6 +144,34 @@ Physical footprint moved from 278,234,936 to 297,387,880 bytes, with sampled max
 305,235,816 bytes. That binary predates the final bar/help and parsing changes.
 The run excludes a window and rendering; it establishes neither current whole-app
 cost, a memory plateau, an improvement nor a framework ranking.
+
+## Advancing Polars recording and cost
+
+The `9c486f20…` package collected a new isolated recording for 1,100 seconds. Its
+final app report contains 1,099 accepted updates, 900 scalar points, zero reported
+publication/event losses and `error:null`. A separate twenty-second worker soak
+observed twenty distinct advancing publications and 900 unique seconds without
+internal or context gaps. The final save reports zero losses, and the owned app,
+collector and persister were absent after the normal timer expired. LaunchServices
+does not provide their Unix exit statuses. This binary predates the Battery and
+CPU/Memory/Energy ranking increments above.
+
+An external forty-five-second observation after the history reached 900 points
+used 7.1583 CPU seconds over 45.2914 elapsed seconds, or 15.8051% of one core.
+The first 42.2728 seconds averaged 9.7506%; a final 3.0186-second interval averaged
+100.59%. Footprint moved from 462,047,248 to 472,631,312 bytes. An earlier,
+short-history loaded-host sample averaged 3.66%; it is not a matched comparison.
+Our and the migration thread's builds were paused for the full-history sample,
+but ordinary host activity and sustained window presentation were uncontrolled.
+
+A later five-second stack sample found the main thread mostly waiting and some
+live-worker time in scalar JSON cloning/encoding, polling and App ranking responses.
+It did not overlap the saturation burst and cannot identify its cause. Repeated
+full-context construction and commit-time history restoration remain hypotheses.
+No speed, memory-plateau or whole-app performance acceptance follows from these
+observations.
+Raw app, soak, process-counter and stack outputs are retained under ignored
+`desktop/target/disk-attribution/live-acceptance-20261019-0139/`.
 
 ## Pre-promotion verification
 

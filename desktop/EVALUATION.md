@@ -5,7 +5,8 @@ logical-CPU history, complete selected Memory quantities, pressure and swap
 traffic, SoC/fan history, Storage, Battery, Self-monitoring, recording context and
 same-second observation choices.
 Overview adds exact-observation top-ten App rankings for CPU, resident memory and
-process power, with proportional bars and drilldown. Charts reflow across three,
+process power, with corresponding cards on CPU, Memory and Energy. The schematic
+includes selected Battery charge and signed power. Charts reflow across three,
 two and one columns while preserving inspection.
 It packages its own collector and persister and uses the shared Rust recording format.
 The [README](README.md) gives build and launch commands;
@@ -29,7 +30,23 @@ than maintain a fallback client. Native acceptance and sustained responsiveness
 remain open. The earlier Slint research below records an alternative for a future
 concrete requirement or maintenance problem; it does not authorize another pilot.
 
-The current ranking package passed 489 desktop test executions and a read-only
+The integrated disk, Battery and route-ranking increments pass 621 canonical desktop tests on Rust 1.98.0,
+strict lint, formatting and tidy checks. An optimized isolated package passes font,
+route, helper-byte and resource-tamper checks. A separately identified projection
+benchmark prepares five selected-App charts from 900 real recorded WindowManager
+observations in about 0.71ms median over twenty iterations after one warmup.
+Its executable and input hashes match before and after the run; the projected
+output matches the earlier capture byte-for-byte. This shared-host measurement covers panel preparation,
+excluding queries, decoding, encoding and UI; it establishes neither visible
+responsiveness nor whole-app memory use. Exact identities, counters and limits
+are in [LIVE.md](LIVE.md). The latest package also reopens a newly collected recording
+with 900 scalar points. The preceding disk package completed an isolated 1,100-second
+live run with 900 points and no reported reader losses. Its full-history CPU sample
+averaged 15.81% of one core, including a brief saturation burst; the cause remains
+unsettled. These observations establish advancing data support, while sustained
+responsiveness, native acceptance and resource-budget acceptance remain open.
+
+The earlier ranking package passed 489 desktop test executions and a read-only
 39-snapshot check across all twelve routes. Scalar and two selected App histories
 each covered 900 unique seconds without gaps. The package and input identities,
 the subsequent collection-restart gap and measurement limits are in

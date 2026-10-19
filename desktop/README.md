@@ -128,7 +128,9 @@ Null readings stay gaps. Captured histories retain their 121 samples.
 
 Storage shows physical-device throughput, operations, mean I/O time and errors,
 with bounded device cards and explicit partial or unavailable scans. Mirrored
-writes retain positive inspected values. Battery shows charge, signed power flow,
+writes retain positive inspected values. Its Top apps card ranks captured read and
+write bytes together, preserving exact App identity through inspection and drilldown.
+Battery shows charge, signed power flow,
 observed charging states and the selected controller details. Resource summaries,
 device cards and Copy follow graph hover, including missing observations.
 
@@ -142,6 +144,7 @@ context includes known extent, saved-window counts, source errors and paged
 same-second alternatives with full run/boot/publication identities.
 
 Overview ranks the top ten captured Apps by CPU, resident memory and process power.
+CPU, Memory and Energy repeat the corresponding ranking on their own pages.
 Bars show each value relative to the leading App; help explains the measured quantity.
 Rankings scan all captured Apps through bounded pages, retaining ten entries per
 metric. Zero, partially measured totals, overflow and incomplete membership remain
@@ -149,7 +152,14 @@ explicit. Hover inspection loads rankings for the exact observation or shows its
 loading/error state. Selecting a rank opens that App at the displayed observation.
 
 App tables include measured executable subtotals with explicit unavailable
-and overflow states. The schematic uses the shared chassis and rotor assets,
+and overflow states. Selected App histories include CPU, resident memory,
+footprint, process power and disk rates. Disk charts show Read and Write in both
+the headline and accessible value, with separate measured-coverage counts;
+missing observations remain gaps and small nonzero rates retain useful units.
+The schematic shows the selected Battery charge and signed power independently;
+missing Battery readings remain unavailable. Invalid Battery input reports its
+diagnostic while preserving valid CPU, GPU, installed-memory and fan readings.
+The schematic uses the shared chassis and rotor assets,
 anchored callouts, illustrative airflow and explicit QA simulation. Its 30 Hz clock
 suspends while inactive or offscreen. The macOS text backend is enabled and checked
 at startup; the earlier blank-text builds are unsuitable performance baselines.
@@ -210,6 +220,26 @@ target/release/projection_bench --paint-input target/memory-bits.json \
 The capture requires 900 saved scalar points. Compare frozen binaries using the
 same input and byte-identical output transcripts. Paint counters cover production
 line preparation, excluding path construction, GPU work and pixels.
+
+To measure a selected App's five chart projections, identify its exact second,
+same-second alternative and captured key bytes. From `desktop/`:
+
+```sh
+target/release/projection_bench --capture-app /path/to/session.recording \
+  --second 1792344734 --alternative 0 --kind bundle \
+  --bytes-hex 2f53797374656d2f4c6962726172792f436f726553657276696365732f57696e646f774d616e616765722e617070 \
+  --output target/app-selection.json
+target/release/projection_bench --app-input target/app-selection.json \
+  --iterations 20 --output target/app-chart-bits.json
+```
+
+The example key names WindowManager; choose a key and second present in the input
+recording. Capture preserves the exact selected observation and App-history envelope.
+Measurement validates that envelope, performs one oracle/warmup projection, then
+records wall time, process CPU and Rust allocation requests during production panel
+preparation. Requested bytes are not retained memory. Querying, decoding, encoding,
+UI drawing and screen presentation are outside this measurement. Each output path
+must be new; the command refuses to overwrite an existing file.
 
 The 240 cached rotor orientations preserve the existing artwork through GPUI image
 primitives. Their CPU pixels occupy 41,533,440 bytes, plus chassis pixels and GPU
