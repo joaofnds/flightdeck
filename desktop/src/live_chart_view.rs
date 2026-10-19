@@ -657,7 +657,8 @@ impl LiveDashboard {
         for (line_index, line) in panel.lines.iter().take(16).enumerate() {
             let key = self.chart_legend_key(panel, line_index);
             let reading = self.chart_line_reading(panel, line_index, index);
-            let label = Self::chart_legends_label(panel, line_index, &reading);
+            let shown = (panel.lines.len() <= LEGEND_VALUE_LINES_MAX).then_some(reading.as_str());
+            let label = Self::chart_legends_label(panel, line_index, shown);
             legends = legends.child(
                 div()
                     .id(SharedString::from(key.clone()))
@@ -699,7 +700,7 @@ impl LiveDashboard {
         cx.notify();
     }
 
-    fn chart_legends_label(panel: &Panel, index: usize, reading: &str) -> gpui::AnyElement {
+    fn chart_legends_label(panel: &Panel, index: usize, reading: Option<&str>) -> gpui::AnyElement {
         let line = &panel.lines[index];
         let tint = charts::color(&line.color);
         let swatch = if line.dashed == Some(true) {
@@ -721,10 +722,16 @@ impl LiveDashboard {
             .gap(px(8.0))
             .child(swatch.flex_shrink_0())
             .child(line.name.clone())
-            .child(div().text_color(rgb(MUTED)).child(reading.to_owned()))
+            .when_some(reading, |label, reading| {
+                label.child(div().text_color(rgb(MUTED)).child(reading.to_owned()))
+            })
             .into_any_element()
     }
 }
+
+/// The most lines a chart's legend shows each line's reading for. Past it the legend names
+/// the lines alone, as the prototype's does, and the inspector holds the readings.
+const LEGEND_VALUE_LINES_MAX: usize = 4;
 
 pub(crate) struct ChartHelp(pub(crate) String);
 
