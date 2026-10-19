@@ -66,7 +66,9 @@ jobs:
   desktop:
     # Build the GPUI desktop client with its separate UI dependency lockfile.
     runs-on: macos-26
-    timeout-minutes: 30
+    # Cold, this job reaches the app's own check after 26 minutes, with two release builds
+    # of Polars still ahead of it, one for the helpers and one for the app.
+    timeout-minutes: 120
     env:
       RUSTUP_TOOLCHAIN: 1.98.0
     steps:
