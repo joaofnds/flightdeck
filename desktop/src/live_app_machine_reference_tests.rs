@@ -68,7 +68,7 @@ fn disk_reference_keeps_whole_device_scope_and_exact_app_bytes() {
         history.reading(2, Some(1)),
         "6.0 MB/s · whole-device read + write"
     );
-    assert!(history.reading(1, Some(1)).contains("9007199254740993 B"));
+    assert!(history.reading(1, Some(1)).ends_with(" MB/s"));
 }
 
 #[test]
@@ -97,7 +97,7 @@ fn a_missing_scalar_observation_never_borrows_its_neighbor() {
     selected["trends"].as_array_mut().unwrap().remove(0);
     let history = AppAttributionHistory::prepare(Metric::Disk, &tests::disk_fixture(), &selected);
 
-    assert_eq!(history.reading(1, Some(0)), "500.0 kB/s · 1000000 B");
+    assert_eq!(history.reading(1, Some(0)), "500.0 kB/s");
     assert_eq!(history.amount(2, Some(0)), None);
     assert_eq!(history.panel().unwrap().lines[2].values, [None, Some(6.0)]);
 }

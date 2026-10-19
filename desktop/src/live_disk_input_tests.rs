@@ -274,7 +274,7 @@ fn disk_attribution_hover_updates_devices_and_waits_for_exact_rankings(cx: &mut 
     assert!(
         harness
             .driver
-            .reading_is_visible("chart-legend:live-disk-apps:Current:500.0 kB/s · 1000000 B")
+            .reading_is_visible("chart-legend:live-disk-apps:Current:500.0 kB/s")
     );
     assert!(
         harness
@@ -311,7 +311,7 @@ fn disk_attribution_hover_updates_devices_and_waits_for_exact_rankings(cx: &mut 
     assert!(
         harness
             .driver
-            .reading_is_visible("chart-legend:live-disk-apps:Current:1.5 MB/s · 3000000 B")
+            .reading_is_visible("chart-legend:live-disk-apps:Current:1.5 MB/s")
     );
     assert!(
         harness
@@ -343,7 +343,7 @@ fn disk_attribution_failure_keeps_the_captured_rate_without_current_rank_links(
     assert!(
         harness
             .driver
-            .reading_is_visible("chart-legend:live-disk-apps:Current:500.0 kB/s · 1000000 B")
+            .reading_is_visible("chart-legend:live-disk-apps:Current:500.0 kB/s")
     );
     assert!(
         harness
@@ -399,7 +399,7 @@ fn disk_attribution_gap_clears_the_rate_and_plot_exit_restores_it(cx: &mut TestA
     assert!(
         harness
             .driver
-            .reading_is_visible("chart-legend:live-disk-apps:Current:1.5 MB/s · 3000000 B")
+            .reading_is_visible("chart-legend:live-disk-apps:Current:1.5 MB/s")
     );
     harness.teardown();
 }
@@ -415,9 +415,11 @@ fn disk_attribution_tooltip_orders_exact_bytes_when_plot_values_tie(cx: &mut Tes
         .driver
         .hover_selected_second_on("live-disk-apps-plot");
 
-    assert!(harness.driver.reading_is_visible(
-        "chart-tooltip-row:live-disk-apps:0:Higher:4503599616.0 MB/s · 9007199254740993 B"
-    ));
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("chart-tooltip-row:live-disk-apps:0:Higher:4503599616.0 MB/s")
+    );
     harness.teardown();
 }
 
@@ -547,7 +549,7 @@ fn disk_attribution_data_keeps_tiny_rates_and_native_legend_switches(cx: &mut Te
         .driver
         .disk_chart_control("chart-data:live-disk-apps");
     assert!(harness.driver.reading_is_visible("10.0 B/s"));
-    assert!(harness.driver.reading_is_visible("10.0 B/s · 20 B"));
+    assert!(harness.driver.reading_is_visible("10.0 B/s"));
     harness.driver.disk_chart_control("chart-data-close");
     harness.driver.focus_disk_legend();
 
@@ -604,7 +606,7 @@ impl InputDriver {
     fn focus_disk_legend(&mut self) {
         let bounds = self
             .context
-            .debug_bounds("chart-legend:live-disk-apps:Current:10.0 B/s · 20 B")
+            .debug_bounds("chart-legend:live-disk-apps:Current:10.0 B/s")
             .unwrap();
         self.context.simulate_mouse_down(
             bounds.center(),

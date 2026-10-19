@@ -85,7 +85,7 @@ overview_history_hover_case!(
 overview_history_hover_case!(
     overview_disk_history_synchronizes_exact_readings,
     "live-disk-apps-plot",
-    "chart-tooltip-row:live-disk-apps:0:Current:500.0 kB/s · 1000000 B"
+    "chart-tooltip-row:live-disk-apps:0:Current:500.0 kB/s"
 );
 overview_history_hover_case!(
     overview_power_history_synchronizes_exact_readings,
@@ -246,7 +246,7 @@ fn overview_history_data_and_legend_keep_each_resource_reading(cx: &mut TestAppC
         .driver
         .click_resident_legend("chart-data:live-disk-apps");
 
-    assert!(harness.driver.reading_is_visible("1.5 MB/s · 3000000 B"));
+    assert!(harness.driver.reading_is_visible("1.5 MB/s"));
     assert!(harness.driver.reading_is_visible("Available samples"));
     harness.driver.click_resident_legend("chart-data-close");
     harness
@@ -254,13 +254,13 @@ fn overview_history_data_and_legend_keep_each_resource_reading(cx: &mut TestAppC
         .leave_plot("live-disk-apps-plot", PlotExit::Sidebar);
     harness
         .driver
-        .focus_resident_legend("chart-legend:live-disk-apps:Current:1.5 MB/s · 3000000 B");
+        .focus_resident_legend("chart-legend:live-disk-apps:Current:1.5 MB/s");
     harness.driver.press("space");
     harness.driver.release_legend_key("space");
     harness
         .driver
         .click_resident_legend("chart-data:live-disk-apps");
-    assert!(!harness.driver.reading_is_visible("1.5 MB/s · 3000000 B"));
+    assert!(!harness.driver.reading_is_visible("1.5 MB/s"));
     harness.teardown();
 }
 

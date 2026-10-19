@@ -587,7 +587,7 @@ fn real_disk_worker_restores_attribution_and_keeps_exact_interval_bytes() {
     assert_eq!(history.captured_amount(1, Some(1)), Some(900_000_000));
     assert_eq!(
         history.reading(1, Some(1)),
-        "900.0 MB/s · 900000000 B known subtotal · 1 measured · 0 unavailable"
+        "900.0 MB/s known subtotal · 1 measured · 0 unavailable"
     );
 }
 

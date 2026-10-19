@@ -60,7 +60,7 @@ fn machine_disk_reference_follows_historical_hover_without_changing_exact_app_by
     assert!(
         harness
             .driver
-            .reading_is_visible("chart-legend:live-disk-apps:Current:500.0 kB/s · 1000000 B")
+            .reading_is_visible("chart-legend:live-disk-apps:Current:500.0 kB/s")
     );
     let (second, reading) = harness.driver.chart_accessibility_reading("live-disk-apps");
     assert_eq!(second, Some(999));
@@ -77,7 +77,7 @@ fn machine_disk_reference_follows_historical_hover_without_changing_exact_app_by
     assert!(
         harness
             .driver
-            .reading_is_visible("chart-legend:live-disk-apps:Current:1.5 MB/s · 3000000 B")
+            .reading_is_visible("chart-legend:live-disk-apps:Current:1.5 MB/s")
     );
     harness.teardown();
 }
@@ -131,7 +131,7 @@ fn machine_reference_data_reports_the_selected_reference_value(cx: &mut TestAppC
             .driver
             .reading_is_visible("6.0 MB/s · whole-device read + write")
     );
-    assert!(harness.driver.reading_is_visible("1.5 MB/s · 3000000 B"));
+    assert!(harness.driver.reading_is_visible("1.5 MB/s"));
     harness.teardown();
 }
 
@@ -201,9 +201,11 @@ fn machine_reference_preserves_app_bytes_above_float_integer_precision(cx: &mut 
     assert!(harness.driver.reading_is_visible(
         "chart-legend:live-disk-apps:All disk I/O:6.0 MB/s · whole-device read + write"
     ));
-    assert!(harness.driver.reading_is_visible(
-        "chart-legend:live-disk-apps:Current:4503599616.0 MB/s · 9007199254740993 B"
-    ));
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("chart-legend:live-disk-apps:Current:4503599616.0 MB/s")
+    );
     harness.teardown();
 }
 
@@ -287,12 +289,12 @@ machine_visibility_case!(
     "chart-legend:live-disk-apps:All disk I/O:6.0 MB/s · whole-device read + write",
     "chart-data:live-disk-apps",
     "6.0 MB/s · whole-device read + write",
-    "1.5 MB/s · 3000000 B",
+    "1.5 MB/s",
     concat!(
         "chart-legend:live-disk-apps:All disk I/O (machine reference 1):",
         "6.0 MB/s · whole-device read + write"
     ),
-    "chart-legend:live-disk-apps:All disk I/O:1.5 MB/s · 3000000 B"
+    "chart-legend:live-disk-apps:All disk I/O:1.5 MB/s"
 );
 
 fn expect_machine_visibility(driver: &mut InputDriver, expected: &MachineVisibility) {

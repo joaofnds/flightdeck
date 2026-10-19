@@ -243,7 +243,7 @@ fn disk_attribution_scales_rates_without_changing_the_captured_interval_bytes() 
     assert_eq!(panel.unit, "MB/s");
     assert_eq!(panel.lines[1].values, [Some(0.5), Some(1.5)]);
     assert_eq!(history.captured_amount(1, Some(1)), Some(3_000_000));
-    assert_eq!(history.reading(1, Some(1)), "1.5 MB/s · 3000000 B");
+    assert_eq!(history.reading(1, Some(1)), "1.5 MB/s");
     assert_eq!(history.headline(Some(1)), "1.5 MB/s captured");
 }
 
@@ -259,10 +259,7 @@ fn disk_attribution_preserves_bytes_above_float_integer_precision() {
         history.captured_amount(1, Some(1)),
         Some(9_007_199_254_740_993)
     );
-    assert_eq!(
-        history.reading(1, Some(1)),
-        "4503599616.0 MB/s · 9007199254740993 B"
-    );
+    assert_eq!(history.reading(1, Some(1)), "4503599616.0 MB/s");
 }
 
 #[test]
@@ -274,7 +271,7 @@ fn disk_attribution_keeps_a_measured_zero_drawable() {
     let history = AppAttributionHistory::prepare(Metric::Disk, &value, &selection());
 
     assert_eq!(history.panel().unwrap().lines[1].values[1], Some(0.0));
-    assert_eq!(history.reading(1, Some(1)), "0.0 MB/s · 0 B");
+    assert_eq!(history.reading(1, Some(1)), "0.0 MB/s");
 }
 
 #[test]
@@ -289,7 +286,7 @@ fn disk_attribution_labels_jointly_measured_partial_subtotals() {
 
     assert_eq!(
         history.reading(1, Some(1)),
-        "1.5 MB/s · 3000000 B known subtotal · 1 measured · 1 unavailable"
+        "1.5 MB/s known subtotal · 1 measured · 1 unavailable"
     );
     assert_eq!(history.headline(Some(1)), "1.5 MB/s known subtotal");
 }
@@ -371,6 +368,6 @@ fn disk_attribution_small_nonzero_rates_keep_human_units() {
     let history = AppAttributionHistory::prepare(Metric::Disk, &value, &selection());
 
     assert_eq!(history.panel().unwrap().lines[1].values[1], Some(0.000_01));
-    assert_eq!(history.reading(1, Some(1)), "10.0 B/s · 20 B");
+    assert_eq!(history.reading(1, Some(1)), "10.0 B/s");
     assert_eq!(history.headline(Some(1)), "10.0 B/s captured");
 }

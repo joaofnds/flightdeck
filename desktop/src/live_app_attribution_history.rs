@@ -214,11 +214,6 @@ impl AppAttributionHistory {
         let Some(measure) = reading.measure else {
             return text;
         };
-        let text = if history.metric == Metric::Disk {
-            format!("{text} · {} B", measure.known)
-        } else {
-            text
-        };
         if !reading.complete() {
             return format!(
                 "{text} known subtotal · {} measured · {} unavailable",
