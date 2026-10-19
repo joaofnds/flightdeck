@@ -73,7 +73,11 @@ destinations. Click a chart to pause at a
 second; use time arrows, same-second publication choices, and Resume live. Expand
 raw rows to read exact stored values, page through raw/App/process results, and
 select an App to inspect its observed histories and process instances. Executable
-groups filter the loaded process page; All process groups clears that filter. Computer
+rows group the loaded process page. Selecting a captured name loads its CPU,
+resident memory, footprint, process power and disk histories above the App totals;
+those histories include captured members outside the loaded page. All process groups
+clears the named selection and instance filter. Missing or empty names retain the
+filter and explain why named history is unavailable. Computer
 reads current host inventory on entry and Refresh. Self-monitoring separates the
 latest producer's metadata from the selected observation and reports reader losses,
 saved windows and cache accounting. Refresh updates that metadata even while the
@@ -139,13 +143,17 @@ device cards and Copy follow graph hover, including missing observations.
 The live CPU view includes selected logical-CPU intervals, 20-segment meters and
 900-second logical-CPU history, paged 32 CPUs at a time. History preserves actual
 predecessor intervals, gaps and exact observations; the labels identify logical
-scheduler CPUs. Memory shows all twelve selected VM/swap quantities, categorical
-pressure and swap traffic. Energy includes available SoC temperature and indexed
+scheduler CPUs. Memory shows active, wired and compressed composition against a
+dashed installed-capacity guide, all twelve selected VM/swap quantities, categorical
+pressure and swap traffic. Page-ins, page-outs, compression and decompression use
+captured page rates. Energy includes available SoC temperature and indexed
 fan histories, preserving stopped zero readings and missing channels. Recording
 context includes known extent, saved-window counts, source errors and paged
 same-second alternatives with full run/boot/publication identities.
 
-Overview ranks the top ten captured Apps by CPU, resident memory and process power.
+Overview ranks the top ten captured Apps by CPU, resident memory, process power and
+jointly measured disk I/O. Cooling and battery context follows the inspected timestamp,
+with an explicit uncaptured thermal-state reading.
 CPU, Memory, Energy and Storage repeat the corresponding ranking on their own pages,
 beside their captured App histories. The CPU plot uses 100% for one core; process
 power remains separate from system and GPU power. Energy's Process power summary
@@ -157,7 +165,8 @@ explicit. Hover inspection loads rankings for the exact observation or shows its
 loading/error state. Selecting a rank opens that App at the displayed observation.
 
 App tables include measured executable subtotals with explicit unavailable
-and overflow states. Selected App histories include CPU, resident memory,
+and overflow states. Selected named process groups and selected App histories
+include CPU, resident memory,
 footprint, process power and disk rates. Disk charts show Read and Write in both
 the headline and accessible value, with separate measured-coverage counts;
 missing observations remain gaps and small nonzero rates retain useful units.
