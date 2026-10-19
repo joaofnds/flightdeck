@@ -9,7 +9,7 @@ use gpui::{
 use num_traits::ToPrimitive;
 
 use super::{CPUHistory, CPUInspection, CPUStep, PAGE_CPUS};
-use crate::charts::{GREEN, GRID, MUTED, ORANGE, PANEL, RED, TEXT};
+use crate::charts::{GREEN, MUTED, ORANGE, PANEL, RED, TEXT};
 use crate::dashboard::control;
 use crate::live_dashboard::LiveDashboard;
 use crate::live_hover::{Origin, Target};
@@ -23,15 +23,19 @@ impl LiveDashboard {
             .debug_selector(|| "cpu-heatmap-panel".into())
             .flex_1()
             .min_w_0()
-            .p(px(16.0))
-            .rounded(px(8.0))
+            .px(px(12.0))
+            .pt(px(8.0))
+            .pb(px(10.0))
+            .rounded(px(12.0))
             .border_1()
-            .border_color(rgb(GRID))
+            .border_color(rgb(crate::charts::LINE))
             .bg(rgb(PANEL))
-            .child(div().text_size(px(15.0)).child("Logical CPU history"))
-            .child(div().text_size(px(11.0)).text_color(rgb(MUTED)).child(
-                "Busy scheduler ticks over 15 minutes. Blank intervals are unavailable. \
-                 CPU indices do not identify physical cores or clusters.",
+            .child(crate::live_chart_view::timeline::timeline_heading_text(
+                "Cores over time",
+                "Busy scheduler ticks of each logical CPU over 15 minutes, grouped by the \
+                 core level macOS places it in. Blank intervals are unavailable."
+                    .into(),
+                "ⓘ",
             ));
         let Some(history) = self
             .snapshot
@@ -62,8 +66,10 @@ impl LiveDashboard {
         }
 
         let inspection = self.cpu_history_inspection(history);
+        if history.total() > PAGE_CPUS {
+            panel = panel.child(Self::cpu_history_pages(history, cx));
+        }
         panel = panel
-            .child(Self::cpu_history_pages(history, cx))
             .child(self.cpu_history_plot(history, cx))
             .child(cpu_history_times(history))
             .child(cpu_history_readout(history, inspection));
@@ -517,10 +523,17 @@ impl LiveDashboard {
     }
 }
 
+/// Wide enough for "performance 11", the longest row label on an M5 Pro.
+const CPU_LABEL_WIDTH: f32 = 84.0;
+
 fn cpu_history_rows(history: &CPUHistory, inspection: Option<CPUInspection>) -> impl IntoElement {
     let mut labels = div()
-        .w(px(46.0))
+        .w(px(CPU_LABEL_WIDTH))
         .flex_shrink_0()
+        .pr(px(6.0))
+        .flex()
+        .flex_col()
+        .items_end()
         .text_size(px(10.0))
         .text_color(rgb(MUTED));
     for (row, cpu) in history.cpus().iter().enumerate() {
@@ -548,7 +561,7 @@ fn cpu_history_rows(history: &CPUHistory, inspection: Option<CPUInspection>) -> 
                 .aria_label(format!("Logical CPU {}", cpu.cpu()))
                 .aria_value(value)
                 .h(px(ROW_HEIGHT))
-                .child(format!("CPU {}", cpu.cpu())),
+                .child(crate::live_inventory::logical_cpu_name(cpu.cpu())),
         );
     }
 
@@ -617,7 +630,7 @@ fn cpu_history_times(history: &CPUHistory) -> impl IntoElement {
     let middle = history.wire.first_ns + (history.wire.end_ns - history.wire.first_ns) / 2;
     div()
         .flex()
-        .pl(px(52.0))
+        .pl(px(CPU_LABEL_WIDTH + 6.0))
         .justify_between()
         .text_size(px(10.0))
         .text_color(rgb(MUTED))

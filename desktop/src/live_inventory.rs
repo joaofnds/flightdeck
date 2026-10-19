@@ -49,6 +49,27 @@ pub fn performance_levels() -> Option<&'static [PerformanceLevel; 2]> {
         .as_ref()
 }
 
+/// A logical CPU named by its performance level as the prototype names it, such as
+/// "super 12". macOS numbers the slower level's CPUs first. A CPU past both levels, or a Mac
+/// whose levels could not be read, keeps its plain index.
+#[must_use]
+pub fn logical_cpu_name(cpu: u32) -> String {
+    logical_cpu_level_name(performance_levels(), cpu)
+}
+
+fn logical_cpu_level_name(levels: Option<&[PerformanceLevel; 2]>, cpu: u32) -> String {
+    let Some([fastest, slower]) = levels else {
+        return format!("CPU {cpu}");
+    };
+    if cpu < slower.logical_cpus {
+        return format!("{} {cpu}", slower.name.to_lowercase());
+    }
+    if cpu - slower.logical_cpus < fastest.logical_cpus {
+        return format!("{} {cpu}", fastest.name.to_lowercase());
+    }
+    format!("CPU {cpu}")
+}
+
 fn performance_levels_read() -> Result<Option<[PerformanceLevel; 2]>, String> {
     let Some(levels) =
         collector::machine::performance_levels().map_err(|error| error.to_string())?
@@ -184,4 +205,35 @@ fn read_kernel(key: &CStr, buffer: *mut libc::c_void, count: &mut usize) -> Resu
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn logical_cpu_level_name_numbers_the_slower_level_first() {
+        // Goal: CPUs read as the prototype labels them, slower level first, then the fastest.
+        // Method: twelve performance and six super CPUs, with an index past both and no levels.
+        let level = |name: &str, logical_cpus| PerformanceLevel {
+            name: name.into(),
+            cores: String::new(),
+            logical_cpus,
+        };
+        let levels = [level("Super", 6), level("Performance", 12)];
+
+        let names = [0, 11, 12, 17, 18].map(|cpu| logical_cpu_level_name(Some(&levels), cpu));
+
+        assert_eq!(
+            names,
+            [
+                "performance 0",
+                "performance 11",
+                "super 12",
+                "super 17",
+                "CPU 18"
+            ]
+        );
+        assert_eq!(logical_cpu_level_name(None, 3), "CPU 3");
+    }
 }

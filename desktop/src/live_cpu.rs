@@ -4,7 +4,7 @@ use gpui::{
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::charts::{GREEN, GRID, MUTED, ORANGE, PANEL, RED};
+use crate::charts::{GREEN, MUTED, ORANGE, PANEL, RED};
 use crate::live_dashboard::LiveDashboard;
 use crate::live_source::{identity_signature, identity_validate};
 
@@ -146,13 +146,24 @@ impl CPUActivity {
 
 impl LiveDashboard {
     pub fn cpu_activity(&self) -> impl IntoElement {
-        let mut panel = div().debug_selector(|| "cpu-selected-panel".into())
-            .flex_1().min_w_0()
-            .p(px(16.0)).rounded(px(8.0)).border_1().border_color(rgb(GRID))
-            .bg(rgb(PANEL)).child(div().text_size(px(15.0)).child("Logical CPU activity"))
-            .child(div().mt(px(4.0)).text_size(px(11.0)).text_color(rgb(MUTED)).child(
-                "Busy scheduler ticks / total ticks. CPU indices are scheduler identifiers, \
-                not physical cores or cluster assignments."));
+        let mut panel = div()
+            .debug_selector(|| "cpu-selected-panel".into())
+            .flex_1()
+            .min_w_0()
+            .px(px(12.0))
+            .pt(px(8.0))
+            .pb(px(10.0))
+            .rounded(px(12.0))
+            .border_1()
+            .border_color(rgb(crate::charts::LINE))
+            .bg(rgb(PANEL))
+            .child(crate::live_chart_view::timeline::timeline_heading_text(
+                "Cores at the selected time",
+                "Busy scheduler ticks over total ticks of each logical CPU at the selected \
+                second. 100% is one fully busy logical CPU."
+                    .into(),
+                "ⓘ",
+            ));
         let unavailable = || {
             div()
                 .debug_selector(|| "Logical CPU readings unavailable.".into())
@@ -194,18 +205,12 @@ impl LiveDashboard {
         for cpus in activity.rows() {
             panel = panel.child(cpu_activity_row(cpus, columns, compact));
         }
-        panel.child(
-            div().text_size(px(11.0)).text_color(rgb(MUTED)).child(
-                activity
-                    .unavailable_reason
-                    .as_ref()
-                    .map_or(
-                        "Activity at the selected time. 100% is one logical CPU.",
-                        String::as_str,
-                    )
-                    .to_owned(),
-            ),
-        )
+        panel.children(activity.unavailable_reason.clone().map(|reason| {
+            div()
+                .text_size(px(11.0))
+                .text_color(rgb(MUTED))
+                .child(reason)
+        }))
     }
 }
 
@@ -253,7 +258,8 @@ fn cpu_activity_labels(cpus: &[LogicalCPU], columns: u8, kind: Labels) -> impl I
         .h(px(height))
         .flex()
         .items_center()
-        .text_size(px(11.0));
+        .text_size(px(10.0))
+        .whitespace_nowrap();
     for cpu in cpus {
         let text = match kind {
             Labels::Percent => cpu
