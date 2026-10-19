@@ -1,5 +1,6 @@
 pub mod battery;
 pub mod clock;
+pub mod clock_states;
 pub mod coalitions;
 pub mod collector;
 pub mod cost;

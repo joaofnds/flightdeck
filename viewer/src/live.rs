@@ -1908,6 +1908,18 @@ fn project_observation_tables(
             )?,
         );
     }
+    tables.insert(
+        metrics::core_frequency::CORE_LEVEL_STATES,
+        metrics::core_frequency::core_level_states(
+            connection,
+            &persistence::query::table_source(
+                connection,
+                persistence::schema::Table::CoreStates,
+                persistence::query::TableSource::Staged,
+            )?,
+            operation,
+        )?,
+    );
 
     Ok(tables)
 }

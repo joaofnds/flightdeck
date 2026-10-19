@@ -738,3 +738,23 @@ fn cpu_charts_scheduling_and_open_files_only_where_sampled() {
     assert_eq!(files.lines[1].axis.as_deref(), Some("right1"));
     assert_eq!(quantity_text(12_000.0, "files"), "12.0 k files");
 }
+
+#[test]
+fn cpu_frequency_charts_each_level_where_measured() {
+    // Goal: the CPU active frequency chart draws each core level's clock from its own channel,
+    // and an interval with no clock reading stays a gap.
+    // Method: measure the middle point of three, the slower level at 2.2 GHz and the faster
+    // at 4.1 GHz, and project the CPU page of this Mac.
+    let mut selection = selection();
+    selection["trends"][1]["cpu_level_ghz"] = json!([4.1, 2.2]);
+
+    let panels = panels("cpu", &selection, None).unwrap();
+
+    let frequency = panels
+        .iter()
+        .find(|panel| panel.id == FREQUENCY_ID)
+        .unwrap();
+    let values: Vec<_> = frequency.lines.iter().map(|line| &line.values).collect();
+    assert_eq!(values, [&[None, Some(2.2), None], &[None, Some(4.1), None]]);
+    assert_eq!(quantity_text(2.2, "GHz"), "2.2 GHz");
+}

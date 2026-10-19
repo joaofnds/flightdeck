@@ -549,6 +549,27 @@ fn cpu(level_name: fn(&'static PerformanceLevel) -> &'static str) -> Specificati
 pub const LOAD_AVERAGE_ID: &str = "live-load-average";
 pub const OPEN_FILES_ID: &str = "live-open-files";
 
+pub const FREQUENCY_ID: &str = "live-cpu-frequency";
+
+/// The mean clock of each performance level while its cores were active, from the time they
+/// spent in each clock state.
+fn frequency() -> Specification {
+    let mut lines = Vec::with_capacity(2);
+    if let Some(levels) = crate::live_inventory::performance_levels() {
+        for (index, color) in [(1, "#73bf69"), (0, "#b877d9")] {
+            let mut line = reading("cpu_level_ghz", cpu_level_cores(&levels[index]), color, 1.0);
+            line.channel = Some(index);
+            lines.push(line);
+        }
+    }
+    let mut specification = specification(FREQUENCY_ID, "CPU active frequency", "GHz", lines);
+    specification.help = "The mean clock of each core level while its cores were active, \
+        weighting each clock state macOS reports by the time the cores spent in it. The clock \
+        of each state comes from the power manager's own tables. macOS changes clock states as \
+        the work changes, so this is a measure of the interval and not a fixed maximum.";
+    specification
+}
+
 /// The load averages the app sampled each second, with the logical CPU count dashed, since
 /// work above it waits for a core.
 fn load_average() -> Specification {
@@ -653,7 +674,12 @@ fn gpu_activity() -> Specification {
 fn specifications(route: &str, points: &[Value]) -> Result<Vec<Specification>, String> {
     Ok(match route {
         "overview" => overview(),
-        "cpu" => vec![cpu(cpu_level_cores), load_average(), open_files()],
+        "cpu" => vec![
+            cpu(cpu_level_cores),
+            frequency(),
+            load_average(),
+            open_files(),
+        ],
         "memory" => memory_specifications(),
         "gpu" => vec![gpu_activity(), gpu_power()],
         "energy" => energy(points)?,

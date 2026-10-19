@@ -7,13 +7,14 @@ use crate::data::Table;
 use crate::session::{OBSERVATIONS_MAX, Observation, Session, partition};
 
 type ObservationKey = ([u64; 2], [u64; 2], u64);
-pub(crate) const TABLE_NAMES: [&str; 6] = [
+pub(crate) const TABLE_NAMES: [&str; 7] = [
     "ticks",
     "memory",
     "cpus",
     "interfaces",
     "gpu_states",
     "fans",
+    core_frequency::CORE_LEVEL_STATES,
 ];
 const MEMORY_RATES: [(&str, &str); 6] = [
     ("memory_pageins_per_second", "pageins"),
@@ -131,7 +132,7 @@ pub(crate) fn point(
     let mut value = json!({"wall_ns": current.wall, "publication": current.publication,
         "run_tick": current.run_tick, "continuous_ns": current.continuous,
         "segment": segment, "cpu_percent": null, "cpu_percent_one_core": null,
-        "cpu_level_percent": null,
+        "cpu_level_percent": null, "cpu_level_ghz": null,
         "gpu_active_percent": null, "gpu_watts": null,
         "power_watts": ticks.number(tick, "power_watts")?,
         "soc_celsius": ticks.number(tick, "soc_celsius")?, "fan_rpm": fan_rpm,
@@ -239,6 +240,16 @@ fn point_interval(
     if let Some(levels) = crate::cpu_history_sample::this_mac_levels()? {
         value["cpu_level_percent"] =
             json!(crate::cpu_history_sample::level_busy(counters, levels)?);
+        let states = optional(tables, current, core_frequency::CORE_LEVEL_STATES);
+        let old_states = optional(tables, previous, core_frequency::CORE_LEVEL_STATES);
+        if let (Some(states), Some(old_states)) = (states, old_states) {
+            // A recording without core states reads an empty table live and none from
+            // history, so the field stays null unless some level measured a clock.
+            let ghz = core_frequency::level_ghz(states, old_states)?;
+            if ghz.iter().any(Option::is_some) {
+                value["cpu_level_ghz"] = json!(ghz);
+            }
+        }
     }
     let elapsed = current
         .continuous
@@ -499,4 +510,5 @@ mod tests;
 mod encoding_tests;
 
 mod battery;
+pub(crate) mod core_frequency;
 mod storage;

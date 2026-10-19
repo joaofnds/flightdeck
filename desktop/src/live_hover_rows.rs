@@ -114,7 +114,21 @@ impl LiveDashboard {
 
         if self.request.route == "cpu" {
             rows.push(Row::Heading("Frequency and scheduling".into()));
-            self.reading_rows_panel(crate::live_projection::LOAD_AVERAGE_ID, rows);
+            let panels: Vec<_> = [
+                crate::live_projection::FREQUENCY_ID,
+                crate::live_projection::LOAD_AVERAGE_ID,
+            ]
+            .iter()
+            .filter_map(|id| self.panels.iter().take(16).find(|panel| panel.id == *id))
+            .cloned()
+            .collect();
+            let columns = self.reading_chart_columns().min(panels.len().max(1));
+            for panels in panels.chunks(columns) {
+                rows.push(Row::Charts {
+                    panels: panels.to_vec(),
+                    columns,
+                });
+            }
             return;
         }
 

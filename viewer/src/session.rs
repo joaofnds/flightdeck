@@ -444,6 +444,13 @@ impl Session {
     }
 
     pub(crate) fn table(&self, window: usize, name: &str) -> Result<Table> {
+        if name == metrics::core_frequency::CORE_LEVEL_STATES {
+            return metrics::core_frequency::core_level_states(
+                &self.connection,
+                &self.source(window, "core_states")?,
+                &self.operation,
+            );
+        }
         let order = if name == "fans" {
             "publication, fan"
         } else {
