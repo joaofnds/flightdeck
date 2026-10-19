@@ -399,7 +399,7 @@ pub(crate) fn app_cards(app: Option<&Value>, selection: &Value) -> Vec<summary::
         ),
         card(
             "Process power",
-            reading(|app| value_rate(&app["energy_watts"], "W")),
+            reading(|app| value_quantity(&app["energy_watts"], "W")),
             "Selected app",
             ORANGE,
             "energy",
@@ -625,6 +625,18 @@ fn value_rate(value: &Value, unit: &str) -> String {
     }
     match value.as_f64() {
         Some(value) => rate(Some(value), unit),
+        None => "Invalid reading".into(),
+    }
+}
+
+/// A reading in the unit the charts scale it to, so the App's power reads in milliwatts below
+/// one watt, as its chart legend does.
+fn value_quantity(value: &Value, unit: &str) -> String {
+    if value.is_null() {
+        return "Unavailable".into();
+    }
+    match value.as_f64() {
+        Some(value) => event_rate(Some(value), unit),
         None => "Invalid reading".into(),
     }
 }

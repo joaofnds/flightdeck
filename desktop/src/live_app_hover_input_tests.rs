@@ -51,6 +51,22 @@ fn hovering_an_app_replaces_current_details_with_the_exact_historical_page(
 }
 
 #[gpui::test]
+fn sub_watt_app_power_reads_in_milliwatts(cx: &mut TestAppContext) {
+    // Goal: the card keeps the prototype's milliwatt precision instead of rounding to 0.1 W.
+    // Method: accept an App drawing 0.142 W and read its Process power card.
+    let mut harness = AppHoverHarness::setup(cx);
+
+    harness.driver.seed_app_power(0.142);
+
+    assert!(
+        harness
+            .driver
+            .text_is_visible("summary-card:Process power:142.0 mW")
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
 fn the_selected_app_reads_in_six_summary_cards(cx: &mut TestAppContext) {
     // Goal: Apps opens on the prototype's six readings of the selected App.
     // Method: accept the fixture App and find each card's label and reading in the frame.
@@ -485,6 +501,19 @@ impl AppHoverDriver {
             }
         }
         panic!("Native wheel input did not reveal {selector}");
+    }
+
+    fn seed_app_power(&mut self, watts: f64) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            let mut snapshot = AppEpoch::Accepted.snapshot(dashboard.generation);
+            let detail = snapshot.detail.as_mut().unwrap();
+            detail["app"]["energy_watts"] = json!(watts);
+            snapshot.apps.as_mut().unwrap()["apps"][0] = detail["app"].clone();
+            dashboard.accept(snapshot);
+            assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
+            cx.notify();
+        });
+        self.context.run_until_parked();
     }
 
     fn seed_scrollable_process_page(&mut self) {
