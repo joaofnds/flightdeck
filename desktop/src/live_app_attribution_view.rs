@@ -59,6 +59,39 @@ impl LiveDashboard {
             .into_any_element()
     }
 
+    /// Network traffic by App beside its ranking. The collector records no traffic per App, so
+    /// the chart has no readings and the ranking says so.
+    pub(crate) fn network_apps(
+        &self,
+        panel: Option<&Rc<Panel>>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .debug_selector(|| "attribution-row:live-network-apps".into())
+            .flex()
+            .gap(px(8.0))
+            .when(self.reading_chart_columns() == 1, gpui::Styled::flex_col)
+            .child(attribution_chart(
+                self,
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_w_0()
+                    .children(panel.map(|panel| self.live_chart(panel, cx)))
+                    .into_any_element(),
+            ))
+            .child(
+                div()
+                    .debug_selector(|| "attribution-ranking:live-network-apps".into())
+                    .flex()
+                    .flex_basis(px(0.0))
+                    .flex_grow(1.0)
+                    .min_w_0()
+                    .child(crate::live_rankings::view::network_ranking()),
+            )
+            .into_any_element()
+    }
+
     pub(crate) fn app_attribution(
         &self,
         metric: Metric,

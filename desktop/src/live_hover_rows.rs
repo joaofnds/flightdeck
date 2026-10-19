@@ -83,10 +83,13 @@ impl LiveDashboard {
                     panel.into_iter().next(),
                 ));
             }
+            "storage" => self.reading_rows_storage(&mut rows),
+            "network" => {
+                rows.push(Row::Heading("Network by app".into()));
+                let panel = self.named_panels(&[crate::live_projection::NETWORK_APPS_ID]);
+                rows.push(Row::NetworkApps(panel.into_iter().next()));
+            }
             _ => {}
-        }
-        if self.request.route == "storage" {
-            self.reading_rows_storage(&mut rows);
         }
         if self.request.route == "overview" {
             self.reading_rows_overview(&mut rows);
@@ -172,6 +175,7 @@ impl LiveDashboard {
             .take_while(|panel| {
                 if panel.id == crate::live_resident_history::PANEL_ID
                     || panel.id == crate::live_projection::STORAGE_TEMPERATURE_ID
+                    || panel.id == crate::live_projection::NETWORK_APPS_ID
                 {
                     return false;
                 }

@@ -57,7 +57,7 @@ fn sends_are_mirrored_without_negating_readouts_or_errors() {
     // Goal: directional traffic follows mirrored plots while values stay positive.
     // Method: compare traffic, packets and error line metadata and byte conversion.
     let panels = panels("network", &selection(), None).unwrap();
-    assert_eq!(panels.len(), 3);
+    assert_eq!(panels.len(), 4);
     assert_eq!(panels[0].unit, "MB/s");
     assert_eq!(panels[0].lines[0].values[1], Some(2.0));
     assert_eq!(panels[0].lines[1].values[1], Some(1.0));

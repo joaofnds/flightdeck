@@ -324,12 +324,33 @@ fn ranking_card(name: &'static str) -> gpui::Div {
         .bg(rgb(PANEL))
 }
 
+/// The Network page's ranking, which has no Apps to list because the collector records no
+/// traffic per process.
+pub(crate) fn network_ranking() -> AnyElement {
+    ranking_card("Network")
+        .child(top_apps_title("ranking-heading:Network".into(), "MB/s"))
+        .child(
+            div()
+                .debug_selector(|| "ranking-uncaptured:Network".into())
+                .py(px(8.0))
+                .text_size(px(12.0))
+                .text_color(rgb(MUTED))
+                .child("Not recorded per app"),
+        )
+        .into_any_element()
+}
+
 fn ranking_title(metric: Metric, heading: RankingHeading) -> gpui::Div {
     if heading == RankingHeading::Measure {
         return ranking_heading(metric, metric_help(metric).into());
     }
-    let selector = format!("ranking-heading:{}", metric.title());
+    top_apps_title(
+        format!("ranking-heading:{}", metric.title()),
+        metric_unit(metric),
+    )
+}
 
+fn top_apps_title(selector: String, unit: &'static str) -> gpui::Div {
     div()
         .debug_selector(move || selector.clone())
         .flex()
@@ -348,7 +369,7 @@ fn ranking_title(metric: Metric, heading: RankingHeading) -> gpui::Div {
                 .text_size(px(11.0))
                 .line_height(px(16.5))
                 .text_color(rgb(MUTED))
-                .child(metric_unit(metric)),
+                .child(unit),
         )
 }
 

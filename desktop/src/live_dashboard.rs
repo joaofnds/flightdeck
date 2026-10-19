@@ -125,6 +125,8 @@ pub enum Row {
     ),
     /// The GPU page's chart of GPU time by App beside its ranking, from the app's samples.
     GpuApps(Option<Rc<Panel>>),
+    /// The Network page's chart of network traffic by App beside its ranking.
+    NetworkApps(Option<Rc<Panel>>),
     AppSelector,
     /// The Apps page's process group control above the process histories.
     ProcessGroupBar,

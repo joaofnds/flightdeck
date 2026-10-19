@@ -103,6 +103,7 @@ impl LiveDashboard {
             | Row::BatteryState(_)
             | Row::Temperature(_, _, _)
             | Row::GpuApps(_)
+            | Row::NetworkApps(_)
             | Row::CPUTop(_) => (4.0, 4.0),
             Row::OverviewRankings(_) => (6.0, 6.0),
             Row::Heading(_) => (16.0, 8.0),
@@ -167,6 +168,7 @@ impl LiveDashboard {
             Row::MemoryQuantities => self.memory_quantities().into_any_element(),
             Row::AppAttribution(metric, panel) => self.app_attribution(*metric, panel.as_ref(), cx),
             Row::GpuApps(panel) => self.gpu_apps(panel.as_ref(), cx),
+            Row::NetworkApps(panel) => self.network_apps(panel.as_ref(), cx),
             Row::AppSelector => self.app_selector(cx).into_any_element(),
             Row::ProcessGroupBar => self.process_group_bar(cx).into_any_element(),
             Row::ProcessGroupingAbout => self.process_grouping_about().into_any_element(),

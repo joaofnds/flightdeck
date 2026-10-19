@@ -1408,6 +1408,26 @@ fn memory_swap_flow() -> Specification {
     specification
 }
 
+/// Network traffic by App, which the collector does not record per process.
+pub const NETWORK_APPS_ID: &str = "live-network-apps";
+
+fn network_apps() -> Specification {
+    let mut specification = specification(
+        NETWORK_APPS_ID,
+        "Network by app",
+        "MB/s",
+        vec![reading(
+            "network_apps_bytes_per_second",
+            "All traffic",
+            "#d8d9da",
+            1_000_000.0,
+        )],
+    );
+    specification.help = "Traffic each App's processes moved over external interfaces. This \
+        collector does not record it per process, so no readings are shown.";
+    specification
+}
+
 fn network() -> Vec<Specification> {
     let mut sent_packets = reading("network_tx_packets_per_second", "Upload", "#73bf69", 1.0);
     sent_packets.negative = true;
@@ -1441,6 +1461,7 @@ fn network() -> Vec<Specification> {
                 ),
             ],
         ),
+        network_apps(),
     ]
 }
 
