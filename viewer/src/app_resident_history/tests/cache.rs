@@ -213,7 +213,7 @@ fn resident_history_excludes_agreeing_live_facts_before_decoding_saved_frames() 
 
 #[test]
 fn resident_history_reuses_saved_facts_after_refreshing_endpoint_metadata() {
-    // Goal: an unchanged saved context repeats only metadata work, preserving its entire response.
+    // Goal: an unchanged saved context repeats only metadata work and no tick query, preserving its entire response.
     // Method: reopen two real sealed publications and count the existing normalized-source reads.
     let mut fixture = Fixture::new();
     fixture.publish_with_usage(1000, &usage(11));
@@ -230,11 +230,13 @@ fn resident_history_reuses_saved_facts_after_refreshing_endpoint_metadata() {
     let first = session.app_resident_history().unwrap();
     let saved = session.history.as_ref().unwrap();
     let reads = saved.source_reads.get();
+    let queries = saved.tick_queries.get();
 
     let repeated = session.app_resident_history().unwrap();
 
     assert_eq!(repeated, first);
     assert_eq!(saved.source_reads.get() - reads, 1);
+    assert_eq!(saved.tick_queries.get() - queries, 0);
 }
 
 #[test]

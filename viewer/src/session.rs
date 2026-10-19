@@ -33,10 +33,13 @@ pub struct Session {
     app_sample_cache: std::cell::RefCell<Option<committed_apps::Cache>>,
     app_history_cache: std::cell::RefCell<Option<app_history::Cache>>,
     app_process_history_cache: std::cell::RefCell<Option<app_history::Cache>>,
+    app_history_ticks: std::cell::RefCell<app_history::Ticks>,
     pub(crate) saved_history_context_preparations: std::cell::Cell<u64>,
     operation: Operation,
     #[cfg(test)]
     pub(crate) source_reads: std::cell::Cell<u64>,
+    #[cfg(test)]
+    pub(crate) tick_queries: std::cell::Cell<u64>,
     #[cfg(test)]
     pub(crate) before_cpu_history_install: Option<Box<dyn FnOnce()>>,
     #[cfg(test)]
@@ -117,10 +120,13 @@ impl Session {
             app_sample_cache: std::cell::RefCell::new(None),
             app_history_cache: std::cell::RefCell::new(None),
             app_process_history_cache: std::cell::RefCell::new(None),
+            app_history_ticks: std::cell::RefCell::new(app_history::Ticks::new()),
             saved_history_context_preparations: std::cell::Cell::new(0),
             operation,
             #[cfg(test)]
             source_reads: std::cell::Cell::new(0),
+            #[cfg(test)]
+            tick_queries: std::cell::Cell::new(0),
             #[cfg(test)]
             before_cpu_history_install: None,
             #[cfg(test)]

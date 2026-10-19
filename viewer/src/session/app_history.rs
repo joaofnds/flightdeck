@@ -76,6 +76,20 @@ impl SourceQuery {
     }
 }
 
+/// The tick rows of each sealed window the App histories read. A sealed window's rows never
+/// change and each second's history reads the same windows again, so the Session keeps them.
+pub(super) struct Ticks {
+    windows: BTreeMap<usize, Vec<Reading>>,
+}
+
+impl Ticks {
+    pub(super) fn new() -> Self {
+        Self {
+            windows: BTreeMap::new(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct Key {
     recording: [u64; 2],
@@ -105,6 +119,7 @@ const TICKS_PER_WINDOW_MAX: usize = crate::live_apps::committed::ENDPOINTS_MAX;
 const READINGS_MAX: usize = OBSERVATIONS_MAX * 2;
 const SOURCES_MAX: usize = READINGS_MAX * 2;
 const SOURCE_BYTES_MAX: usize = 16 * 1024 * 1024;
+const TICKS_WINDOWS_MAX: usize = 64;
 const CACHE_BYTES_MAX: usize = size_of::<Cache>()
     + 2 * PROGRAM_PATH_BYTES_MAX
     + OBSERVATIONS_MAX * size_of::<TracePoint>()
@@ -115,6 +130,7 @@ const _: () = {
     assert!(2 * CACHE_BYTES_MAX < 4 * 1024 * 1024);
     assert!(READINGS_MAX <= WINDOWS_MAX);
     assert!(TICKS_PER_WINDOW_MAX <= OBSERVATIONS_MAX);
+    assert!(TICKS_WINDOWS_MAX * TICKS_PER_WINDOW_MAX * size_of::<Reading>() < 1024 * 1024);
 };
 
 impl Session {
@@ -268,7 +284,6 @@ impl Session {
                 .saturating_add(1),
         );
         assert!(self.windows.len() <= WINDOWS_MAX);
-        let predicate = format!("wall_ns>={} AND wall_ns<{}", range.first_ns, range.end_ns);
         for (window, manifest) in self.windows.iter().enumerate() {
             self.operation.check()?;
             if let Some(bounds) = manifest.wall_ns {
@@ -283,9 +298,14 @@ impl Session {
             self.app_history_ticks(
                 restore,
                 window,
-                &predicate,
                 TICKS_PER_WINDOW_MAX,
                 &mut readings,
+                |reading| {
+                    reading
+                        .observation
+                        .wall_ns
+                        .is_some_and(|wall| (range.first_ns..range.end_ns).contains(&wall))
+                },
             )?;
             for mut reading in readings {
                 if self.app_history_window(&reading.observation)? != Some(window) {
@@ -322,13 +342,9 @@ impl Session {
                 continue;
             };
             let mut readings = Vec::with_capacity(1);
-            self.app_history_ticks(
-                restore,
-                window,
-                &format!("publication={publication}"),
-                1,
-                &mut readings,
-            )?;
+            self.app_history_ticks(restore, window, 1, &mut readings, |reading| {
+                reading.observation.stamp.publication == publication
+            })?;
             if let Some(reading) = readings.first() {
                 app_history_insert(restore, reading)?;
             }
@@ -366,32 +382,70 @@ impl Session {
         &self,
         restore: &mut Restore,
         window: usize,
-        predicate: &str,
         maximum: usize,
         output: &mut Vec<Reading>,
+        keep: impl Fn(&Reading) -> bool,
     ) -> Result<()> {
         assert!(maximum <= TICKS_PER_WINDOW_MAX);
         assert!(output.is_empty());
+        self.app_history_ticks_cache(restore, window)?;
+        let ticks = self.app_history_ticks.borrow();
+        let readings = ticks
+            .windows
+            .get(&window)
+            .ok_or(Error::Bound("committed App history ticks"))?;
+        for reading in readings {
+            self.operation.check()?;
+            if keep(reading) {
+                if output.len() == maximum {
+                    return Err(Error::Bound("committed App history tick rows"));
+                }
+                output.push(*reading);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn app_history_ticks_cache(&self, restore: &mut Restore, window: usize) -> Result<()> {
+        // Registering the source pins its file and checks the window is still committed.
         let source = self.app_history_source(restore, window, Source::Ticks)?;
-        let limit = maximum + 1;
+        if self
+            .app_history_ticks
+            .borrow()
+            .windows
+            .contains_key(&window)
+        {
+            return Ok(());
+        }
+
+        #[cfg(test)]
+        self.tick_queries.set(self.tick_queries.get() + 1);
+        let limit = TICKS_PER_WINDOW_MAX + 1;
         let frame = self.connection.query(&format!(
             "SELECT publication, run_tick, wall_ns, continuous_ns, awake_ns, processes_refused, \
             processes_gone, events_first, events_end FROM {source} \
-            WHERE {predicate} ORDER BY publication LIMIT {limit}"
+            ORDER BY publication LIMIT {limit}"
         ))?;
-        if frame.height() > maximum {
+        if frame.height() > TICKS_PER_WINDOW_MAX {
             return Err(Error::Bound("committed App history tick rows"));
         }
+        let mut readings = Vec::with_capacity(frame.height());
         for index in 0..frame.height() {
             self.operation.check()?;
             let row = persistence::engine::Row::new(&frame, index)?;
-            output.push(app_history_reading(
+            readings.push(app_history_reading(
                 &row,
                 window,
                 &self.windows[window].identity.run,
             )?);
         }
 
+        let mut ticks = self.app_history_ticks.borrow_mut();
+        if ticks.windows.len() == TICKS_WINDOWS_MAX {
+            ticks.windows.clear();
+        }
+        ticks.windows.insert(window, readings);
         Ok(())
     }
 
