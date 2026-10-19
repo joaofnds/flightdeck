@@ -56,9 +56,9 @@ pub(super) fn preflight(envelope: &super::Envelope) -> io::Result<Value> {
     let panels =
         crate::live_projection::panels("apps", &value["selection"], Some(&value["history"]))
             .map_err(io::Error::other)?;
-    if panels.len() != 5 {
+    if panels.len() != 6 {
         return Err(io::Error::other(
-            "App projection requires all five App panels",
+            "App projection requires all six App panels",
         ));
     }
 

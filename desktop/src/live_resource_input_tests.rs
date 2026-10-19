@@ -261,7 +261,7 @@ impl InputDriver {
                 crate::native_workflows::selected_copy(
                     dashboard.reading_snapshot(),
                     dashboard.reading_request(),
-                    dashboard.reading_expanded(),
+                    None,
                 )
             })
             .unwrap();

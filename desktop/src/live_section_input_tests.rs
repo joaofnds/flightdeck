@@ -78,30 +78,6 @@ disclosure_case!(
 );
 
 #[gpui::test]
-fn app_process_instances_start_folded_and_open_on_click(cx: &mut TestAppContext) {
-    // Goal: match the prototype, which shows no table of process instances, while keeping
-    // them one click away. Method: fold the totals to bring the header into view, then open it.
-    let mut harness = InputHarness::setup_route(cx, "apps");
-    harness.driver.prepare_sections();
-    harness.driver.click_section("section:app-totals");
-    assert!(harness.driver.reading_is_visible("section:app-processes"));
-    assert!(
-        !harness
-            .driver
-            .reading_is_visible("app-column:processes:PID")
-    );
-
-    harness.driver.click_section("section:app-processes");
-
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("app-column:processes:PID")
-    );
-    harness.teardown();
-}
-
-#[gpui::test]
 fn overview_disclosures_keep_independent_folds_through_updates_and_hover(cx: &mut TestAppContext) {
     // Goal: redraws retain independent folds. Method: accept updates and hover outside the fold.
     let mut harness = InputHarness::setup_route(cx, "overview");

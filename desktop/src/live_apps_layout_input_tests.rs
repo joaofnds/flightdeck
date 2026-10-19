@@ -3,10 +3,9 @@ use gpui::{Bounds, Pixels, Point, px};
 
 struct AppsGridBounds {
     named: [Bounds<Pixels>; 8],
-    app: [Bounds<Pixels>; 5],
+    app: [Bounds<Pixels>; 6],
     executable: Option<Bounds<Pixels>>,
     totals: Bounds<Pixels>,
-    instances: Bounds<Pixels>,
 }
 
 struct AppsGridReading {
@@ -35,7 +34,7 @@ macro_rules! apps_grid_width_case {
     ($name:ident, $width:literal, $columns:literal) => {
         #[gpui::test]
         fn $name(cx: &mut TestAppContext) {
-            // Read the installed eight-plus-five card layout at one literal media breakpoint.
+            // Read the installed eight-plus-six card layout at one literal media breakpoint.
             let mut harness = AppHoverHarness::setup(cx);
             harness.driver.prepare_apps_grid($width);
 
@@ -175,12 +174,6 @@ fn expect_apps_grid(bounds: &AppsGridBounds, columns: usize) {
             .all(|card| card.bottom() < bounds.totals.top())
     );
     assert!(bounds.totals.bottom() < bounds.app[0].top());
-    assert!(
-        bounds
-            .app
-            .iter()
-            .all(|card| card.bottom() < bounds.instances.top())
-    );
 }
 
 fn expect_apps_grid_tracks(cards: &[Bounds<Pixels>], columns: usize) {
@@ -333,7 +326,7 @@ impl AppHoverDriver {
 
     fn prepare_apps_grid(&mut self, width: f32) {
         self.resize_apps_grid(1536.0);
-        self.process_history_control("executable-disk:hex:61:Unavailable *");
+        self.process_history_control("executable-disk:hex:61:— *");
         self.deliver_named_process_history();
         self.resize_apps_grid(width);
     }
@@ -360,19 +353,14 @@ impl AppHoverDriver {
             app: [
                 "chart-card:live-app-cpu",
                 "chart-card:live-app-resident",
+                "chart-card:live-app-network",
                 "chart-card:live-app-disk",
                 "chart-card:live-app-gpu",
                 "chart-card:live-app-power",
             ]
             .map(|id| self.context.debug_bounds(id).unwrap()),
-            executable: self
-                .context
-                .debug_bounds("executable-disk:hex:61:Unavailable *"),
+            executable: self.context.debug_bounds("executable-disk:hex:61:— *"),
             totals: self.context.debug_bounds("Selected app totals").unwrap(),
-            instances: self
-                .context
-                .debug_bounds("Process instances · selected app")
-                .unwrap(),
         })
     }
 

@@ -1,7 +1,5 @@
 use std::rc::Rc;
 
-use serde_json::Value;
-
 use crate::data::Panel;
 
 use crate::live_dashboard::{LiveDashboard, Row};
@@ -421,7 +419,7 @@ impl LiveDashboard {
         );
         let name = detail.map_or_else(
             || "selected App".into(),
-            |detail| crate::live_views::text(&detail["app"]["display_name"]),
+            |detail| crate::live_app_views::app_name(&detail["app"]),
         );
         rows.push(Row::Heading(format!("Inside {name}")));
         rows.push(Row::AppColumns("executables"));
@@ -434,39 +432,16 @@ impl LiveDashboard {
         if self.sections.expanded(Section::AppTotals) {
             self.reading_rows_app_totals(&mut rows);
         }
-        rows.push(Row::Disclosure(Section::AppProcesses));
-        if self.sections.expanded(Section::AppProcesses) {
-            rows.push(Row::AppColumns("processes"));
-            Self::reading_rows_processes(&mut rows, detail, self.request.executable.as_deref());
-        }
         assert!(rows.len() <= 2048);
 
         rows
     }
 
-    fn reading_rows_processes(
-        rows: &mut Vec<Row>,
-        detail: Option<&Value>,
-        executable: Option<&str>,
-    ) {
-        for index in 0..array_len(detail, "processes") {
-            if let Some(detail) = detail {
-                if let Some(key) = executable {
-                    if !crate::live_executables::matches(&detail["processes"][index], key) {
-                        continue;
-                    }
-                }
-            }
-            rows.push(Row::Process(index));
-        }
-    }
-
     fn reading_rows_app_totals(&self, rows: &mut Vec<Row>) {
-        rows.push(Row::AppTotalsNote);
         let totals: Vec<_> = self
             .panels
             .iter()
-            .take(16)
+            .take(32)
             .filter(|panel| panel.id.starts_with("live-app-"))
             .cloned()
             .collect();
@@ -485,7 +460,7 @@ impl LiveDashboard {
         let panels: Vec<_> = self
             .panels
             .iter()
-            .take(16)
+            .take(32)
             .filter(|panel| {
                 if panel.id.starts_with(PANEL_PREFIX) {
                     return true;
@@ -501,10 +476,4 @@ impl LiveDashboard {
             });
         }
     }
-}
-
-fn array_len(value: Option<&Value>, key: &str) -> usize {
-    value
-        .and_then(|value| value[key].as_array())
-        .map_or(0, |rows| rows.len().min(512))
 }

@@ -4,6 +4,7 @@ use serde_json::Value;
 use crate::charts::MUTED;
 use crate::dashboard::control;
 use crate::live_dashboard::{LiveDashboard, Picker, toggle};
+use crate::live_views::chrome::select;
 use crate::live_views::text;
 
 const COLUMNS_MAX: usize = 32;
@@ -61,33 +62,36 @@ impl LiveDashboard {
     pub fn process_group_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let selected = self.process_group_selected();
         let selector = format!("process-group-picker:{selected}");
-        let arrow = if self.picker == Some(Picker::ProcessGroup) {
-            "▴"
-        } else {
-            "▾"
-        };
         let state = self
             .process_history_state()
             .unwrap_or_else(|| "Process histories · grouped by name, not PID".into());
         let picker = div()
             .flex()
-            .flex_wrap()
             .items_center()
-            .gap(px(10.0))
-            .child("Process group")
+            .h(px(44.0))
             .child(
-                div().debug_selector(move || selector.clone()).child(
-                    control(&format!("{selected}  {arrow}"))
-                        .debug_selector(|| "process-group-picker".into())
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.picker = toggle(this.picker, Picker::ProcessGroup);
-                            this.rebuild();
-                            cx.notify();
-                        })),
-                ),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .w(px(340.0))
+                    .text_size(px(13.0))
+                    .child("Process group")
+                    .child(
+                        div().debug_selector(move || selector.clone()).child(
+                            select(&selected, 244.6)
+                                .debug_selector(|| "process-group-picker".into())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.picker = toggle(this.picker, Picker::ProcessGroup);
+                                    this.rebuild();
+                                    cx.notify();
+                                })),
+                        ),
+                    ),
             )
             .child(
                 div()
+                    .ml(px(12.0))
                     .debug_selector({
                         let state = state.clone();
                         move || format!("process-history-state:{state}")
@@ -101,14 +105,7 @@ impl LiveDashboard {
         if self.picker == Some(Picker::ProcessGroup) {
             bar = bar.child(self.process_group_options(cx));
         }
-        let uncaptured = "Per-process network, GPU time, open files and sockets are not captured.";
-        bar.child(
-            div()
-                .debug_selector(|| uncaptured.into())
-                .text_size(px(11.0))
-                .text_color(rgb(MUTED))
-                .child(uncaptured),
-        )
+        bar
     }
 
     fn process_group_selected(&self) -> String {

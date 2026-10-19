@@ -1394,6 +1394,14 @@ fn app_specifications() -> Vec<Specification> {
     );
     gpu.help = "The App's GPU time as a share of each second, read from the GPU driver while \
         Flightdeck runs. Seconds before it started, or that it did not sample, remain gaps.";
+    let mut network = specification(
+        "live-app-network",
+        "Network",
+        "MB/s",
+        vec![reading("network_bps", "Network", "#00ffff", 1_000_000.0)],
+    );
+    network.help = "The App's network bytes per second. This collector does not record network \
+        bytes per process, so no readings are shown.";
     vec![
         specification(
             "live-app-cpu",
@@ -1412,6 +1420,7 @@ fn app_specifications() -> Vec<Specification> {
                 GIBIBYTE,
             )],
         ),
+        network,
         disk,
         gpu,
         specification(

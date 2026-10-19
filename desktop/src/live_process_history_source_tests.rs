@@ -371,7 +371,7 @@ fn named_process(pid: i32, publication: u64) -> Process {
 }
 
 #[test]
-fn default_all_process_groups_loads_eight_histories_before_app_totals() {
+fn default_all_process_groups_loads_twelve_histories_before_app_totals() {
     // Read a sealed two-name recording through the real worker with the default group selection.
     let recording = named_recording();
     let mut request = named_request();
@@ -398,17 +398,21 @@ fn default_all_process_groups_loads_eight_histories_before_app_totals() {
             "live-process-groups-cpu",
             "live-process-groups-resident",
             "live-process-groups-footprint",
+            "live-process-groups-network",
             "live-process-groups-disk",
+            "live-process-groups-gpu",
             "live-process-groups-power",
             "live-process-groups-wakeups",
             "live-process-groups-pageins",
-            "live-process-groups-threads"
+            "live-process-groups-threads",
+            "live-process-groups-files",
+            "live-process-groups-sockets"
         ]
     );
     assert_eq!(panels[0].lines.len(), 2);
-    assert_eq!(panels[3].lines.len(), 4);
+    assert_eq!(panels[4].lines.len(), 4);
     assert_eq!(panels[0].selected_index, Some(1));
-    assert_eq!(panels[0].lines[0].values[1], Some(240.0));
+    assert_eq!(panels[0].lines[1].values[1], Some(240.0));
     assert_eq!(presentation.panels[0].id, "live-process-groups-cpu");
 }
 
@@ -450,9 +454,9 @@ fn all_groups_inspector_uses_the_exact_shared_same_second_observation() {
 
     let index = crate::live_process_history::groups::index(history, &target);
     let reading =
-        crate::live_process_history::groups::reading(history, "live-process-groups-disk", 0, index);
+        crate::live_process_history::groups::reading(history, "live-process-groups-disk", 1, index);
     let written =
-        crate::live_process_history::groups::reading(history, "live-process-groups-disk", 2, index);
+        crate::live_process_history::groups::reading(history, "live-process-groups-disk", 3, index);
 
     assert_eq!(index, Some(1));
     assert_eq!(reading, "160 B/s");
@@ -521,7 +525,7 @@ fn all_groups_readouts_use_historical_rates() {
     let selected = crate::live_process_history::groups::reading(
         &history,
         "live-process-groups-cpu",
-        0,
+        1,
         Some(1),
     );
     assert_eq!(selected, "240%");
@@ -530,7 +534,7 @@ fn all_groups_readouts_use_historical_rates() {
     let historical = crate::live_process_history::groups::reading(
         &history,
         "live-process-groups-cpu",
-        0,
+        1,
         Some(0),
     );
     assert_eq!(historical, "120%");
@@ -538,7 +542,7 @@ fn all_groups_readouts_use_historical_rates() {
     let disk = crate::live_process_history::groups::reading(
         &history,
         "live-process-groups-disk",
-        0,
+        1,
         Some(0),
     );
     assert_eq!(disk, "4,503,599,616 MB/s");
@@ -546,14 +550,14 @@ fn all_groups_readouts_use_historical_rates() {
     let written = crate::live_process_history::groups::reading(
         &history,
         "live-process-groups-disk",
-        history.groups.len(),
+        history.groups.len() + 1,
         Some(0),
     );
     assert_eq!(written, "4,503,599,616 MB/s");
     let power = crate::live_process_history::groups::reading(
         &history,
         "live-process-groups-power",
-        0,
+        1,
         Some(1),
     );
     assert_eq!(power, "2.5 W");
@@ -567,7 +571,7 @@ fn all_groups_unavailable_elapsed_keeps_known_bytes_and_partial_coverage() {
     let disk = crate::live_process_history::groups::reading(
         &history,
         "live-process-groups-disk",
-        0,
+        1,
         Some(1),
     );
     assert_eq!(disk, "Unavailable");
@@ -575,7 +579,7 @@ fn all_groups_unavailable_elapsed_keeps_known_bytes_and_partial_coverage() {
     let partial = crate::live_process_history::groups::reading(
         &history,
         "live-process-groups-disk",
-        0,
+        1,
         Some(1),
     );
     assert_eq!(
@@ -593,14 +597,14 @@ fn all_groups_small_nonzero_readouts_preserve_visible_rates() {
     let power = crate::live_process_history::groups::reading(
         &history,
         "live-process-groups-power",
-        0,
+        1,
         Some(1),
     );
     assert_eq!(power, "1 mW");
     let cpu = crate::live_process_history::groups::reading(
         &history,
         "live-process-groups-cpu",
-        0,
+        1,
         Some(1),
     );
     assert_eq!(cpu, "0.001%");
@@ -618,8 +622,8 @@ pub(crate) fn all_history() -> Box<viewer::app_process_groups_history::AppProces
 }
 
 #[test]
-fn captured_process_sources_project_all_eight_history_cards() {
-    // The real saved worker supplies the same eight captured cards for named and All groups.
+fn captured_process_sources_project_all_history_cards() {
+    // The real saved worker supplies eight captured cards for named groups and twelve for All groups.
     let recording = named_recording();
     let named = named_request();
     let mut all = named.clone();
@@ -644,7 +648,7 @@ fn captured_process_sources_project_all_eight_history_cards() {
             .iter()
             .filter(|panel| panel.id.starts_with("live-process-groups-"))
             .count(),
-        8
+        12
     );
     assert!(
         all_view
@@ -677,14 +681,14 @@ fn added_process_readings_need_their_interval() {
     let wakeups = crate::live_process_history::groups::reading(
         &history,
         "live-process-groups-wakeups",
-        0,
+        1,
         Some(1),
     );
     history.points[1].elapsed_ns = None;
     let unavailable = crate::live_process_history::groups::reading(
         &history,
         "live-process-groups-wakeups",
-        0,
+        1,
         Some(1),
     );
 
@@ -704,7 +708,7 @@ fn all_thread_gauge_preserves_one_exact_quantity_without_elapsed() {
     let actual = crate::live_process_history::groups::reading(
         &history,
         "live-process-groups-threads",
-        0,
+        1,
         Some(1),
     );
 

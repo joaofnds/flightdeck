@@ -73,15 +73,19 @@ struct PanelDefinition {
     /// the App's total. Disk draws read above the axis and written below it, so it does not
     /// stack.
     stacked: bool,
+    /// The names, after each group's, of the readings the collector does not record per
+    /// process, which the chart lists with no values. Empty for a recorded metric.
+    missing: &'static [&'static str],
 }
 
-const PANEL_DEFINITIONS: [PanelDefinition; 8] = [
+const PANEL_DEFINITIONS: [PanelDefinition; 12] = [
     PanelDefinition {
         suffix: "cpu",
         title: "CPU by process",
         unit: "%",
         metrics: &[ProcessGroupMetric::Cpu],
         stacked: true,
+        missing: &[],
     },
     PanelDefinition {
         suffix: "resident",
@@ -89,6 +93,7 @@ const PANEL_DEFINITIONS: [PanelDefinition; 8] = [
         unit: "GiB",
         metrics: &[ProcessGroupMetric::Resident],
         stacked: true,
+        missing: &[],
     },
     PanelDefinition {
         suffix: "footprint",
@@ -96,6 +101,15 @@ const PANEL_DEFINITIONS: [PanelDefinition; 8] = [
         unit: "GiB",
         metrics: &[ProcessGroupMetric::Footprint],
         stacked: true,
+        missing: &[],
+    },
+    PanelDefinition {
+        suffix: "network",
+        title: "Network by process",
+        unit: "MB/s",
+        metrics: &[],
+        stacked: false,
+        missing: &[" received", " sent"],
     },
     PanelDefinition {
         suffix: "disk",
@@ -106,6 +120,15 @@ const PANEL_DEFINITIONS: [PanelDefinition; 8] = [
             ProcessGroupMetric::DiskWritten,
         ],
         stacked: false,
+        missing: &[],
+    },
+    PanelDefinition {
+        suffix: "gpu",
+        title: "GPU by process",
+        unit: "%",
+        metrics: &[],
+        stacked: true,
+        missing: &[""],
     },
     PanelDefinition {
         suffix: "power",
@@ -113,6 +136,7 @@ const PANEL_DEFINITIONS: [PanelDefinition; 8] = [
         unit: "W",
         metrics: &[ProcessGroupMetric::Power],
         stacked: true,
+        missing: &[],
     },
     PanelDefinition {
         suffix: "wakeups",
@@ -120,6 +144,7 @@ const PANEL_DEFINITIONS: [PanelDefinition; 8] = [
         unit: "/s",
         metrics: &[ProcessGroupMetric::Wakeups],
         stacked: true,
+        missing: &[],
     },
     PanelDefinition {
         suffix: "pageins",
@@ -127,6 +152,7 @@ const PANEL_DEFINITIONS: [PanelDefinition; 8] = [
         unit: "pages/s",
         metrics: &[ProcessGroupMetric::Pageins],
         stacked: true,
+        missing: &[],
     },
     PanelDefinition {
         suffix: "threads",
@@ -134,6 +160,23 @@ const PANEL_DEFINITIONS: [PanelDefinition; 8] = [
         unit: "threads",
         metrics: &[ProcessGroupMetric::Threads],
         stacked: true,
+        missing: &[],
+    },
+    PanelDefinition {
+        suffix: "files",
+        title: "Open files by process",
+        unit: "files",
+        metrics: &[],
+        stacked: true,
+        missing: &[""],
+    },
+    PanelDefinition {
+        suffix: "sockets",
+        title: "Sockets by process",
+        unit: "sockets",
+        metrics: &[],
+        stacked: true,
+        missing: &[""],
     },
 ];
 
@@ -162,7 +205,8 @@ fn panels_panel(
     let mut segments = Vec::with_capacity(payload.points.len());
 
     panels_panel_positions(payload, first, span, &mut positions, &mut segments)?;
-    let mut lines = Vec::with_capacity(payload.groups.len() * definition.metrics.len());
+    let order = group_order(payload);
+    let mut lines = Vec::with_capacity(order.len() * definition.metrics.len().max(2));
 
     // The prototype mirrors written bytes below the axis, so that chart has no zero floor.
     let mirrored = definition
@@ -170,8 +214,17 @@ fn panels_panel(
         .iter()
         .any(|metric| matches!(metric, ProcessGroupMetric::DiskWritten));
     for metric in definition.metrics {
-        for (group, identity) in payload.groups.iter().enumerate() {
-            lines.push(panels_panel_line(payload, group, identity, *metric));
+        for (position, group) in order.iter().enumerate() {
+            lines.push(panels_panel_line(payload, (position, *group), *metric));
+        }
+    }
+    for suffix in definition.missing {
+        for (position, group) in order.iter().enumerate() {
+            lines.push(panels_panel_line_missing(
+                payload,
+                (position, *group),
+                suffix,
+            ));
         }
     }
 
@@ -181,7 +234,11 @@ fn panels_panel(
         unit: definition.unit.into(),
         kind: "line".into(),
         lines,
-        minimum: if mirrored { None } else { Some(0.0) },
+        minimum: if mirrored || definition.suffix == "network" {
+            None
+        } else {
+            Some(0.0)
+        },
         maximum: None,
         stack: Some(definition.stacked),
         fill: Some(if definition.stacked { 0.45 } else { 0.1 }),
@@ -250,25 +307,42 @@ fn panels_panel_positions(
     Ok(())
 }
 
+/// The groups in the order the prototype lists them, by name with Other last, which also
+/// gives each its color.
+fn group_order(payload: &AppProcessGroupsHistory) -> Vec<usize> {
+    let mut order = Vec::with_capacity(payload.groups.len());
+    order.extend(0..payload.groups.len());
+    order.sort_by_cached_key(|index| match &payload.groups[*index] {
+        ProcessGroup::Named(bytes) => (false, panels_panel_line_display(bytes).to_lowercase()),
+        ProcessGroup::Other => (true, String::new()),
+    });
+    order
+}
+
+fn group_name(identity: &ProcessGroup) -> String {
+    match identity {
+        ProcessGroup::Named(bytes) => panels_panel_line_display(bytes),
+        ProcessGroup::Other => "Other".into(),
+    }
+}
+
+/// A line of the group at `group.1` colored by its place `group.0` in the listing.
 fn panels_panel_line(
     payload: &AppProcessGroupsHistory,
-    group: usize,
-    identity: &ProcessGroup,
+    group: (usize, usize),
     metric: ProcessGroupMetric,
 ) -> Line {
+    let (position, group) = group;
+    let identity = &payload.groups[group];
     let suffix = match metric {
         ProcessGroupMetric::DiskRead => " read",
         ProcessGroupMetric::DiskWritten => " written",
         _ => "",
     };
-    let name = match identity {
-        ProcessGroup::Named(bytes) => panels_panel_line_display(bytes),
-        ProcessGroup::Other => "Other".into(),
-    };
 
     Line {
-        name: format!("{name}{suffix}"),
-        color: panels_panel_line_color(group, identity).into(),
+        name: format!("{}{suffix}", group_name(identity)),
+        color: panels_panel_line_color(position, identity).into(),
         values: payload
             .points
             .iter()
@@ -280,6 +354,28 @@ fn panels_panel_line(
             .collect(),
         stack: None,
         negative: Some(matches!(metric, ProcessGroupMetric::DiskWritten)),
+        dashed: Some(false),
+        axis: None,
+        unit: None,
+        fill: None,
+    }
+}
+
+/// A line of a reading the collector does not record per process, so every second is a gap.
+fn panels_panel_line_missing(
+    payload: &AppProcessGroupsHistory,
+    group: (usize, usize),
+    suffix: &str,
+) -> Line {
+    let (position, group) = group;
+    let identity = &payload.groups[group];
+
+    Line {
+        name: format!("{}{suffix}", group_name(identity)),
+        color: panels_panel_line_color(position, identity).into(),
+        values: vec![None; payload.points.len()],
+        stack: None,
+        negative: Some(suffix == " sent"),
         dashed: Some(false),
         axis: None,
         unit: None,
@@ -342,9 +438,10 @@ pub fn reading(
     line: usize,
     index: Option<usize>,
 ) -> String {
-    let Some((group, metric)) = reading_line_metric(payload, panel, line) else {
+    let Some((position, metric)) = reading_line_metric(payload, panel, line) else {
         return "Unavailable".into();
     };
+    let group = group_order(payload)[position];
 
     let Some(point) = index.and_then(|index| payload.points.get(index)) else {
         return "Unavailable".into();

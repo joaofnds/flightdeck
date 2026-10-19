@@ -8,9 +8,9 @@ use super::{decode, iterations};
 mod command_tests;
 
 #[test]
-fn preserves_all_five_app_panels_and_recorded_gaps() {
+fn preserves_all_six_app_panels_and_recorded_gaps() {
     // Goal: benchmark populated App histories without replacing their gaps or identity.
-    // Method: decode an envelope and project its real production route into all five panels.
+    // Method: decode an envelope and project its real production route into all six panels.
     let envelope = fixture();
     let decoded = decode(&serde_json::to_vec(&envelope).unwrap())
         .unwrap()
@@ -22,16 +22,17 @@ fn preserves_all_five_app_panels_and_recorded_gaps() {
     let bits = crate::projection_bench::bits(&panels);
 
     assert_eq!(decoded, envelope);
-    assert_eq!(bits.as_array().unwrap().len(), 5);
+    assert_eq!(bits.as_array().unwrap().len(), 6);
     assert_eq!(bits[0]["id"], "live-app-cpu");
     assert_eq!(bits[1]["id"], "live-app-resident");
-    assert_eq!(bits[2]["id"], "live-app-disk");
-    assert_eq!(bits[3]["id"], "live-app-gpu");
-    assert_eq!(bits[4]["id"], "live-app-power");
-    assert_eq!(bits[2]["selected_index"], 1);
-    assert_eq!(bits[2]["segments"], json!([0, 1]));
-    assert_eq!(bits[2]["lines"][0]["values"][0], Value::Null);
-    assert_eq!(bits[2]["lines"][0]["values"][1], 0.002_56_f32.to_bits());
+    assert_eq!(bits[2]["id"], "live-app-network");
+    assert_eq!(bits[3]["id"], "live-app-disk");
+    assert_eq!(bits[4]["id"], "live-app-gpu");
+    assert_eq!(bits[5]["id"], "live-app-power");
+    assert_eq!(bits[3]["selected_index"], 1);
+    assert_eq!(bits[3]["segments"], json!([0, 1]));
+    assert_eq!(bits[3]["lines"][0]["values"][0], Value::Null);
+    assert_eq!(bits[3]["lines"][0]["values"][1], 0.002_56_f32.to_bits());
 }
 
 macro_rules! rejects_envelope {

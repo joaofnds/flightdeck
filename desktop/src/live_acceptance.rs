@@ -101,7 +101,7 @@ fn prepare_app_names(
     let Some(detail) = detail else {
         return Ok(());
     };
-    let name = crate::live_views::text(&detail["app"]["display_name"]);
+    let name = crate::live_app_views::app_name(&detail["app"]);
     for panel in panels {
         let panel = Rc::get_mut(panel).ok_or("App totals projection is already shared")?;
         assert!(panel.id.starts_with("live-app-"));

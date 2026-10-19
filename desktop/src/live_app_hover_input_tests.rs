@@ -38,8 +38,8 @@ fn hovering_an_app_replaces_current_details_with_the_exact_historical_page(
 
     assert!(harness.driver.text_is_visible("13%"));
     assert!(harness.driver.text_is_visible("Historical worker"));
-    assert!(harness.driver.text_is_visible("120%"));
-    assert!(harness.driver.text_is_visible("64 MiB"));
+    assert!(harness.driver.text_is_visible("120.0%"));
+    assert!(harness.driver.text_is_visible("0.12 GiB"));
     assert!(
         harness
             .driver
@@ -74,7 +74,7 @@ fn the_selected_app_reads_in_six_summary_cards(cx: &mut TestAppContext) {
     for card in [
         "summary-card:CPU:87%",
         "summary-card:Resident memory:7 GiB",
-        "summary-card:Network:Not captured",
+        "summary-card:Network:Unavailable",
         "summary-card:Disk I/O:Unavailable *",
         "summary-card:GPU time:Not sampled",
         "summary-card:Process power:9 W",
@@ -106,6 +106,7 @@ fn the_selected_app_totals_read_as_the_prototypes_app_named_charts(cx: &mut Test
                 [
                     "CPU · Example App",
                     "Resident memory · Example App",
+                    "Network · Example App",
                     "Disk I/O · Example App",
                     "GPU time · Example App",
                     "Process power · Example App",
@@ -117,9 +118,6 @@ fn the_selected_app_totals_read_as_the_prototypes_app_named_charts(cx: &mut Test
             }
         });
     assert!(harness.driver.text_is_visible("chart-card:live-app-gpu"));
-    assert!(harness.driver.text_is_visible(
-        "Per-process network bytes are not captured, so the App has no network chart."
-    ));
     harness.teardown();
 }
 
@@ -167,7 +165,7 @@ fn the_process_group_table_reads_in_the_prototypes_columns(cx: &mut TestAppConte
     let reading = harness
         .driver
         .context
-        .debug_bounds("executable-disk:hex:61:Unavailable *")
+        .debug_bounds("executable-disk:hex:61:— *")
         .unwrap();
     assert_eq!(reading.left(), heading.left());
     harness.teardown();
@@ -257,16 +255,6 @@ macro_rules! vertical_table_wheel_case {
 }
 
 vertical_table_wheel_case!(
-    vertical_wheel_over_process_keeps_columns_and_scrolls_outer_view,
-    crate::live_dashboard::Row::Process(0),
-    "process-disk:10:Unavailable"
-);
-vertical_table_wheel_case!(
-    vertical_wheel_over_heading_keeps_columns_and_scrolls_outer_view,
-    crate::live_dashboard::Row::AppColumns("processes"),
-    "app-column:processes:Disk I/O"
-);
-vertical_table_wheel_case!(
     vertical_wheel_over_app_picker_keeps_columns_and_scrolls_outer_view,
     crate::live_dashboard::Row::App(0),
     "app-disk:bundle:41:Unavailable *"
@@ -274,58 +262,8 @@ vertical_table_wheel_case!(
 vertical_table_wheel_case!(
     vertical_wheel_over_executable_keeps_columns_and_scrolls_outer_view,
     crate::live_dashboard::Row::Executable(0),
-    "executable-disk:hex:61:Unavailable *"
+    "executable-disk:hex:61:— *"
 );
-
-#[gpui::test]
-fn scrolling_a_process_keeps_its_disk_column_aligned_with_the_heading(cx: &mut TestAppContext) {
-    // Scroll a narrow table through real wheel input and compare the displayed column positions.
-    let mut harness = AppHoverHarness::setup(cx);
-    harness.driver.scroll_process_horizontally();
-
-    let heading = harness
-        .driver
-        .context
-        .debug_bounds("app-column:processes:Disk I/O")
-        .unwrap();
-    let reading = harness
-        .driver
-        .context
-        .debug_bounds("process-disk:10:Unavailable")
-        .unwrap();
-    assert_eq!(reading.left(), heading.left());
-    assert_eq!(reading.size.width, heading.size.width);
-    assert!(reading.right() <= gpui::px(640.0));
-    let next = harness
-        .driver
-        .context
-        .debug_bounds("process-disk:11:Unavailable")
-        .unwrap();
-    assert_eq!(next.left(), heading.left());
-    harness.teardown();
-}
-
-#[gpui::test]
-fn leaving_history_restores_the_expanded_process_without_moving_the_graph(cx: &mut TestAppContext) {
-    // Expand a real process disclosure, then restore it across preview while scrolled mid-view.
-    let mut harness = AppHoverHarness::setup(cx);
-    harness.driver.expand_last_process();
-    harness.driver.scroll_to_history();
-    let accepted = harness.driver.chart_bounds();
-
-    harness.driver.hover_previous_second();
-    assert_eq!(harness.driver.chart_bounds(), accepted);
-    assert!(!harness.driver.expanded_json_is_visible());
-    harness.driver.deliver_historical_details();
-    assert_eq!(harness.driver.chart_bounds(), accepted);
-    harness.driver.leave_history();
-
-    assert_eq!(harness.driver.chart_bounds(), accepted);
-    assert!(harness.driver.text_is_visible("87%"));
-    harness.driver.scroll_to_processes("expanded-json");
-    assert!(harness.driver.expanded_json_is_visible());
-    harness.teardown();
-}
 
 #[gpui::test]
 fn leaving_app_history_restores_the_real_end_of_the_recording_view(cx: &mut TestAppContext) {
@@ -337,7 +275,7 @@ fn leaving_app_history_restores_the_real_end_of_the_recording_view(cx: &mut Test
     harness.driver.leave_and_scroll_to_end();
 
     assert!(harness.driver.text_is_visible("87%"));
-    assert!(harness.driver.last_process_is_visible());
+    assert!(harness.driver.last_chart_is_visible());
     harness.teardown();
 }
 
@@ -366,7 +304,6 @@ impl AppHoverHarness {
             },
         };
         harness.driver.seed_accepted_app();
-        harness.driver.open_process_instances();
         harness
     }
 
@@ -394,16 +331,6 @@ struct AppHoverDriver {
 }
 
 impl AppHoverDriver {
-    /// The process instances start folded, as the prototype has none, and these tests read
-    /// them, so they open the section the way its header does.
-    fn open_process_instances(&mut self) {
-        self.view
-            .update_in(&mut self.context, |dashboard, window, cx| {
-                dashboard.toggle_section(crate::live_sections::Section::AppProcesses, window, cx);
-            });
-        self.context.run_until_parked();
-    }
-
     fn vertical_wheel_keeps_table_columns(
         &mut self,
         target: fn(&crate::live_dashboard::Row) -> bool,
@@ -464,45 +391,6 @@ impl AppHoverDriver {
         );
     }
 
-    fn scroll_process_horizontally(&mut self) {
-        self.context
-            .simulate_resize(gpui::size(gpui::px(640.0), gpui::px(2400.0)));
-        self.context.run_until_parked();
-        // Reveal every compared process row before testing horizontal column alignment.
-        self.scroll_to_processes("process-2");
-        let row = self.context.debug_bounds("process-0").unwrap();
-        self.context.simulate_event(gpui::ScrollWheelEvent {
-            position: row.center(),
-            delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(-1000.0), gpui::px(0.0))),
-            modifiers: Modifiers::none(),
-            touch_phase: gpui::TouchPhase::Moved,
-        });
-        self.context.run_until_parked();
-    }
-
-    fn scroll_to_processes(&mut self, selector: &'static str) {
-        let position = self.view.read_with(&self.context, |dashboard, _| {
-            let viewport = dashboard.list.viewport_bounds();
-            gpui::point(viewport.left() + gpui::px(8.0), viewport.center().y)
-        });
-        self.context
-            .simulate_mouse_move(position, None, Modifiers::none());
-        // Virtual rows gain their measured heights as successive real wheel events reveal them.
-        for _attempt in 0..8 {
-            self.context.simulate_event(gpui::ScrollWheelEvent {
-                position,
-                delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.0), gpui::px(-10000.0))),
-                modifiers: Modifiers::none(),
-                touch_phase: gpui::TouchPhase::Moved,
-            });
-            self.context.run_until_parked();
-            if self.context.debug_bounds(selector).is_some() {
-                return;
-            }
-        }
-        panic!("Native wheel input did not reveal {selector}");
-    }
-
     fn seed_app_power(&mut self, watts: f64) {
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = AppEpoch::Accepted.snapshot(dashboard.generation);
@@ -536,19 +424,6 @@ impl AppHoverDriver {
             cx.notify();
         });
         self.context.run_until_parked();
-    }
-
-    fn expand_last_process(&mut self) {
-        let row = self.context.debug_bounds("process-2").unwrap();
-        self.context.simulate_click(row.center(), Modifiers::none());
-        self.context.run_until_parked();
-        let expanded = self.context.debug_bounds("process-2").unwrap();
-        assert!(expanded.size.height > gpui::px(26.0));
-        assert!(self.expanded_json_is_visible());
-    }
-
-    fn expanded_json_is_visible(&mut self) -> bool {
-        self.context.debug_bounds("expanded-json").is_some()
     }
 
     fn leave_history(&mut self) {
@@ -637,8 +512,10 @@ impl AppHoverDriver {
         self.context.debug_bounds(text).is_some()
     }
 
-    fn last_process_is_visible(&mut self) -> bool {
-        self.context.debug_bounds("process-2").is_some()
+    fn last_chart_is_visible(&mut self) -> bool {
+        self.context
+            .debug_bounds("chart-card:live-app-power")
+            .is_some()
     }
 
     fn chart_bounds(&mut self) -> gpui::Bounds<gpui::Pixels> {

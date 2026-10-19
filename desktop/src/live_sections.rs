@@ -1,6 +1,6 @@
 use gpui::{Context, FocusHandle, ListOffset, Window, div, prelude::*, px, rgb};
 
-use crate::charts::MUTED;
+use crate::charts::{MUTED, TEXT};
 use crate::live_dashboard::{LiveDashboard, Row};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -8,7 +8,6 @@ pub(crate) enum Section {
     OverviewHistories,
     OverviewContext,
     AppTotals,
-    AppProcesses,
     MemoryQuantities,
     EnergyContext,
     ComputerReference,
@@ -27,9 +26,8 @@ impl Section {
             Self::EnergyContext => 4,
             Self::ComputerReference => 5,
             Self::SystemFiles => 6,
-            Self::AppProcesses => 7,
-            Self::SelfReports => 8,
-            Self::SelfMinutes => 9,
+            Self::SelfReports => 7,
+            Self::SelfMinutes => 8,
         }
     }
 
@@ -42,7 +40,6 @@ impl Section {
             Self::EnergyContext => "energy-context",
             Self::ComputerReference => "computer-reference",
             Self::SystemFiles => "system-files",
-            Self::AppProcesses => "app-processes",
             Self::SelfReports => "self-reports",
             Self::SelfMinutes => "self-minutes",
         }
@@ -57,44 +54,16 @@ impl Section {
             Self::EnergyContext => "Power breakdown and thermal context",
             Self::ComputerReference => "Schematic reference",
             Self::SystemFiles => "System file entries",
-            Self::AppProcesses => "Process instances · selected app",
             Self::SelfReports => "Captured report data",
             Self::SelfMinutes => "CPU budget intervals and capture provenance",
         }
     }
-
-    /// The prototype has no table of process instances, so that section starts folded and
-    /// keeps the Apps page to the prototype's content until the user opens it.
-    fn starts_folded(self) -> bool {
-        matches!(self, Self::AppProcesses)
-    }
 }
 
-const SECTIONS: [Section; 10] = [
-    Section::OverviewHistories,
-    Section::OverviewContext,
-    Section::AppTotals,
-    Section::MemoryQuantities,
-    Section::EnergyContext,
-    Section::ComputerReference,
-    Section::SystemFiles,
-    Section::AppProcesses,
-    Section::SelfReports,
-    Section::SelfMinutes,
-];
-
+#[derive(Default)]
 pub(crate) struct Sections {
-    collapsed: [bool; 10],
-    focus: [Option<FocusHandle>; 10],
-}
-
-impl Default for Sections {
-    fn default() -> Self {
-        Self {
-            collapsed: SECTIONS.map(Section::starts_folded),
-            focus: Default::default(),
-        }
-    }
+    collapsed: [bool; 9],
+    focus: [Option<FocusHandle>; 9],
 }
 
 impl Sections {
@@ -103,7 +72,7 @@ impl Sections {
     }
 
     pub(crate) fn reset(&mut self) {
-        self.collapsed = SECTIONS.map(Section::starts_folded);
+        self.collapsed = Default::default();
     }
 
     fn install_focus(&mut self, cx: &mut Context<LiveDashboard>) -> bool {
@@ -181,6 +150,9 @@ impl LiveDashboard {
             unreachable!("Dashboard installs disclosure focus before rendering content");
         };
         let expanded = self.sections.expanded(section);
+        // The prototype's plain details read in the page's own text, and the ones in panels
+        // read quietly.
+        let plain = matches!(section, Section::AppTotals);
 
         div()
             .id(section.id())
@@ -199,10 +171,10 @@ impl LiveDashboard {
             .gap(px(5.0))
             .min_h(px(44.0))
             .rounded(px(5.0))
-            .text_size(px(12.0))
-            .line_height(px(18.0))
+            .text_size(px(if plain { 13.0 } else { 12.0 }))
+            .line_height(px(if plain { 19.5 } else { 18.0 }))
             .font_weight(gpui::FontWeight::MEDIUM)
-            .text_color(rgb(MUTED))
+            .text_color(rgb(if plain { TEXT } else { MUTED }))
             .child(
                 div()
                     .text_size(px(16.0))

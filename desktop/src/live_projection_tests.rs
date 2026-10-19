@@ -415,6 +415,7 @@ fn history_projection_reads_decimal_stamps_and_partial_measurements() {
         [
             "CPU",
             "Resident memory",
+            "Network",
             "Disk I/O",
             "GPU time",
             "Process power"
@@ -424,7 +425,8 @@ fn history_projection_reads_decimal_stamps_and_partial_measurements() {
     assert_eq!(apps[1].lines[0].values, [Some(0.5)]);
     assert_eq!(apps[2].lines[0].values, [None]);
     assert_eq!(apps[3].lines[0].values, [None]);
-    assert_eq!(apps[4].lines[0].values, [Some(0.25)]);
+    assert_eq!(apps[4].lines[0].values, [None]);
+    assert_eq!(apps[5].lines[0].values, [Some(0.25)]);
 }
 
 #[test]

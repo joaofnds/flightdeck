@@ -432,6 +432,33 @@ enum Icon {
     Latest,
 }
 
+/// The prototype's select control: the choice made, and the arrow of a menu, in a box of the
+/// given width.
+pub(crate) fn select(label: &str, width: f32) -> gpui::Stateful<Div> {
+    div()
+        .id(gpui::SharedString::from(label.to_owned()))
+        .role(gpui::Role::Button)
+        .aria_label(label.to_owned())
+        .flex()
+        .items_center()
+        .justify_between()
+        .w(px(width))
+        .h(px(44.0))
+        .px(px(12.0))
+        .rounded(px(5.0))
+        .bg(rgb(RAISED))
+        .border_1()
+        .border_color(charts::alpha(TEXT, 0.12))
+        .text_size(px(13.0))
+        .text_color(rgb(TEXT))
+        .cursor_pointer()
+        .focusable()
+        .tab_stop(true)
+        .focus(|style| style.bg(rgb(0x32_46_61)))
+        .child(div().truncate().child(label.to_owned()))
+        .child(icon(Icon::Chevron))
+}
+
 fn icon_button(label: &'static str, shape: Icon, disabled: bool) -> gpui::Stateful<Div> {
     div()
         .id(label)

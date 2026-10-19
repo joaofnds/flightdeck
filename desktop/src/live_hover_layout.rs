@@ -31,7 +31,6 @@ impl Row {
             Self::AppSelector => "app-selector".into(),
             Self::ProcessGroupBar => "process-group-bar".into(),
             Self::ProcessGroupingAbout => "process-grouping-about".into(),
-            Self::AppTotalsNote => "app-totals-note".into(),
             Self::AppColumns(kind) => format!("app-columns-{kind}"),
             Self::CPUTop(_) => "cpu-top".into(),
             Self::CPUActivity => "cpu-activity".into(),
@@ -68,7 +67,6 @@ impl Row {
             Self::Disclosure(section) => format!("section-{}", section.id()),
             Self::Hardware => "hardware".into(),
             Self::App(index) => format!("app-{index}"),
-            Self::Process(index) => format!("process-{index}"),
             Self::Executable(index) => format!("executable-{index}"),
             Self::Inventory => "inventory".into(),
             Self::Footer => "footer".into(),
@@ -104,7 +102,7 @@ impl Row {
     fn measured_height(&self, heights: &BTreeMap<String, Pixels>) -> Option<Pixels> {
         match self {
             Self::Spacer(height) => Some(*height),
-            Self::App(_) | Self::Process(_) | Self::Executable(_) => {
+            Self::App(_) | Self::Executable(_) => {
                 heights.get(&self.layout_key()).copied().or(Some(px(26.0)))
             }
             _ => heights.get(&self.layout_key()).copied(),

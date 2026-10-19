@@ -39,7 +39,6 @@ pub struct Preview {
     pub complete: bool,
     pub failure: Option<String>,
     pub executables: Vec<crate::live_executables::Executable>,
-    pub expanded: Option<(String, usize)>,
     pub layout: Option<layout::Layout>,
     pub header_height: Option<gpui::Pixels>,
     pub retarget_geometry: bool,
@@ -142,7 +141,6 @@ impl Preview {
             generation: None,
             failure: None,
             executables: Vec::new(),
-            expanded: None,
             layout: None,
             header_height: None,
             retarget_geometry: false,
@@ -180,12 +178,6 @@ impl LiveDashboard {
         self.preview
             .as_ref()
             .map_or(&self.request, |preview| &preview.request)
-    }
-
-    pub(crate) fn reading_expanded(&self) -> Option<&(String, usize)> {
-        self.preview
-            .as_ref()
-            .map_or(self.expanded.as_ref(), |preview| preview.expanded.as_ref())
     }
 
     pub(crate) fn reading_executables(&self) -> &[crate::live_executables::Executable] {

@@ -17,7 +17,7 @@ fn all_groups_pointer_hover_shares_exact_readings_and_restores_on_exit(cx: &mut 
     assert!(
         harness
             .driver
-            .text_is_visible("chart-tooltip-row:live-process-groups-cpu:0:b:120%")
+            .text_is_visible("chart-tooltip-row:live-process-groups-cpu:1:b:120%")
     );
     assert!(
         harness
@@ -114,6 +114,10 @@ fn all_groups_installed_data_and_legend_controls_preserve_exact_selected_values(
     harness.teardown();
 }
 
+fn group_b(panel: &crate::data::Panel) -> &crate::data::Line {
+    panel.lines.iter().find(|line| line.name == "b").unwrap()
+}
+
 impl AppHoverDriver {
     fn deliver_all_group_history(&mut self) {
         let mut history = crate::live_source::tests::process_history::all_history();
@@ -173,9 +177,9 @@ impl AppHoverDriver {
                 .find(|panel| panel.id == "live-process-groups-threads")
                 .unwrap();
 
-            assert_eq!(wakeups.lines[0].values, [Some(5.0), Some(11.0)]);
-            assert_eq!(pageins.lines[0].values, [Some(3.0), Some(7.0)]);
-            assert_eq!(threads.lines[0].values, [Some(8.0), Some(13.0)]);
+            assert_eq!(group_b(wakeups).values, [Some(5.0), Some(11.0)]);
+            assert_eq!(group_b(pageins).values, [Some(3.0), Some(7.0)]);
+            assert_eq!(group_b(threads).values, [Some(8.0), Some(13.0)]);
         });
     }
 
@@ -236,7 +240,7 @@ impl AppHoverDriver {
                 .iter()
                 .filter(|panel| panel.id.starts_with("live-process-groups-"))
                 .collect();
-            assert_eq!(panels.len(), 8);
+            assert_eq!(panels.len(), 12);
             for panel in panels {
                 assert_eq!(
                     dashboard.chart_accessibility_reading(panel).0,
@@ -266,8 +270,8 @@ impl AppHoverDriver {
 
 #[gpui::test]
 fn all_groups_stack_as_the_prototypes_areas(cx: &mut TestAppContext) {
-    // Goal: process group histories stack as filled areas, and disk keeps read and written
-    // lines apart, as the prototype draws them.
+    // Goal: process group histories stack as filled areas, and disk and network keep their two
+    // directions apart as lines, as the prototype draws them.
     // Method: deliver every group's history and read the installed panels' stacking and fill.
     let mut harness = AppHoverHarness::setup(cx);
     harness.driver.resize_process_history();
@@ -282,9 +286,11 @@ fn all_groups_stack_as_the_prototypes_areas(cx: &mut TestAppContext) {
                 .iter()
                 .filter(|panel| panel.id.starts_with("live-process-groups-"))
                 .collect();
-            assert_eq!(panels.len(), 8);
+            assert_eq!(panels.len(), 12);
             for panel in panels {
-                if panel.id == "live-process-groups-disk" {
+                if ["live-process-groups-disk", "live-process-groups-network"]
+                    .contains(&panel.id.as_str())
+                {
                     assert_eq!(panel.stack, Some(false));
                     assert_eq!(panel.fill, Some(0.1));
                 } else {
@@ -293,8 +299,5 @@ fn all_groups_stack_as_the_prototypes_areas(cx: &mut TestAppContext) {
                 }
             }
         });
-    assert!(harness.driver.text_is_visible(
-        "Per-process network, GPU time, open files and sockets are not captured."
-    ));
     harness.teardown();
 }

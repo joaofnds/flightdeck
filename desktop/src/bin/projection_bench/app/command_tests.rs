@@ -121,7 +121,7 @@ fn refuses_unknown_command_modes() {
 #[test]
 fn retains_selected_identity_and_all_panels_in_the_output() {
     // Goal: bitwise comparisons remain attributable to the actual selected App and observation.
-    // Method: build a transcript from the decoded synthetic contract fixture and all five panels.
+    // Method: build a transcript from the decoded synthetic contract fixture and all six panels.
     let value = super::fixture();
     let envelope = decode(&serde_json::to_vec(&value).unwrap()).unwrap();
     let panels =

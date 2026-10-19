@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 
 use gpui::{AnyElement, Context, IntoElement, SharedString, div, prelude::*, px, rgb};
+use num_traits::ToPrimitive;
 use serde_json::{Value, json};
 
-use crate::charts::{GRID, MUTED};
-use crate::live_app_views::{app_cells, event_rate, memory};
+use crate::charts::{BLUE, MUTED, PANEL, TEXT};
 use crate::live_dashboard::LiveDashboard;
 
 pub struct Executable {
@@ -96,22 +96,14 @@ pub fn groups(detail: Option<&Value>) -> Result<Vec<Executable>, String> {
     }
     let mut groups: Vec<_> = groups.into_values().collect();
     groups.sort_by(|first, second| {
-        first
-            .name
-            .cmp(&second.name)
+        let cpu = |group: &Executable| group.cpu_percent().unwrap_or(f64::NEG_INFINITY);
+        cpu(second)
+            .total_cmp(&cpu(first))
+            .then(first.name.cmp(&second.name))
             .then(first.key.cmp(&second.key))
     });
     assert!(groups.len() <= PROCESS_ROWS_MAX);
     Ok(groups)
-}
-
-pub fn matches(process: &Value, key: &str) -> bool {
-    match groups_bytes(process) {
-        Some(bytes) => key
-            .strip_prefix("hex:")
-            .is_some_and(|selected| selected.eq_ignore_ascii_case(bytes)),
-        None => key == UNAVAILABLE,
-    }
 }
 
 impl Subtotal {
@@ -148,56 +140,51 @@ impl Subtotal {
 }
 
 impl Executable {
+    /// The group's share of one core, from the CPU time its processes used in the interval.
+    fn cpu_percent(&self) -> Option<f64> {
+        let cpu_ns = self.cpu_ns.value()?;
+        viewer::apps::cpu_percent_one_core(viewer::apps::CpuRate {
+            cpu_ns,
+            elapsed_ns: self.elapsed_ns?,
+        })
+    }
+
+    /// The cells of the prototype's table: CPU to one decimal, memory in GiB to two, power in
+    /// watts to two, wakeups to one, and a dash for a reading that is missing or not recorded
+    /// per process.
     fn metrics(&self) -> [String; COLUMNS.len()] {
-        let cpu = self.cpu_ns.value().and_then(|cpu_ns| {
-            viewer::apps::cpu_percent_one_core(viewer::apps::CpuRate {
-                cpu_ns,
-                elapsed_ns: self.elapsed_ns?,
-            })
-        });
         let power = self.energy_nj.value().and_then(|energy_nj| {
             viewer::apps::energy_watts(viewer::apps::EnergyRate {
                 energy_nj,
                 elapsed_ns: self.elapsed_ns?,
             })
         });
-        [
-            subtotal_rate(cpu, &self.cpu_ns, "%"),
-            subtotal_memory(&self.resident_bytes),
-            subtotal_memory(&self.footprint_bytes),
-            NOT_CAPTURED.into(),
-            self.disk_rate(),
-            NOT_CAPTURED.into(),
-            subtotal_rate(power, &self.energy_nj, "W"),
-            self.event_rate(&self.idle_wakeups, "/s"),
-            self.threads.value().map_or_else(
-                || "Unavailable".into(),
-                |value| {
-                    format!(
-                        "{value}{}",
-                        if self.threads.unavailable > 0 {
-                            " *"
-                        } else {
-                            ""
-                        }
-                    )
-                },
-            ),
-            NOT_CAPTURED.into(),
-            NOT_CAPTURED.into(),
-        ]
-    }
-
-    fn event_rate(&self, amount: &Subtotal, unit: &str) -> String {
-        let rate = amount.value().and_then(|events| {
+        let wakeups = self.idle_wakeups.value().and_then(|events| {
             viewer::apps::events_per_second(viewer::apps::EventRate {
                 events,
                 elapsed_ns: self.elapsed_ns?,
             })
         });
-        let suffix = if amount.unavailable > 0 { " *" } else { "" };
-
-        format!("{}{suffix}", crate::live_app_views::event_rate(rate, unit))
+        let threads = self.threads.value().and_then(|value| value.to_f64());
+        [
+            partial(&self.cpu_ns, fixed(self.cpu_percent(), 1, "%")),
+            partial(
+                &self.resident_bytes,
+                fixed(gibibytes(&self.resident_bytes), 2, " GiB"),
+            ),
+            partial(
+                &self.footprint_bytes,
+                fixed(gibibytes(&self.footprint_bytes), 2, " GiB"),
+            ),
+            NOT_CAPTURED.into(),
+            self.disk_rate(),
+            NOT_CAPTURED.into(),
+            partial(&self.energy_nj, fixed(power, 2, " W")),
+            partial(&self.idle_wakeups, fixed(wakeups, 1, "")),
+            partial(&self.threads, fixed(threads, 0, "")),
+            NOT_CAPTURED.into(),
+            NOT_CAPTURED.into(),
+        ]
     }
 
     fn disk_rate(&self) -> String {
@@ -207,12 +194,7 @@ impl Executable {
                 elapsed_ns: self.elapsed_ns?,
             })
         });
-        let reading = crate::live_app_views::disk_rate(rate);
-        if self.disk_io_bytes.unavailable > 0 {
-            return format!("{reading} *");
-        }
-
-        reading
+        partial(&self.disk_io_bytes, byte_rate(rate))
     }
 
     pub(crate) fn json(&self) -> Value {
@@ -228,6 +210,117 @@ impl Executable {
     }
 }
 
+/// The prototype's column widths, in points, for the process group table: the group's name,
+/// its instances and `COLUMNS`. The table is wider than the page and scrolls sideways.
+const TABLE_WIDTHS: [f32; COLUMNS.len() + 2] = [
+    230.3, 79.7, 57.8, 77.4, 77.4, 74.4, 82.0, 78.3, 69.2, 86.0, 71.8, 82.3, 70.8,
+];
+const TABLE_WIDTH: f32 = 1137.4;
+const TABLE_RADIUS: f32 = 7.0;
+/// The heading's height with the panel's top border above it.
+const TABLE_HEADER_HEIGHT: f32 = 38.0;
+const TABLE_ROW_HEIGHT: f32 = 65.0;
+
+/// The cells of one row of the table, each as wide as its column. The name's cell holds the
+/// prototype's button, which `pressed` marks as the group selected for the histories.
+fn table_cells(
+    cells: [String; COLUMNS.len() + 2],
+    selector: impl Fn(usize, &str) -> String,
+    pressed: Option<bool>,
+) -> gpui::Div {
+    let mut row = div().flex().items_center().min_w(px(TABLE_WIDTH)).h_full();
+    for (index, cell) in cells.into_iter().enumerate() {
+        let cell_selector = selector(index, &cell);
+        let mut column = div()
+            .debug_selector(move || cell_selector.clone())
+            .w(px(TABLE_WIDTHS[index]))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .px(px(14.0));
+        column = match (index, pressed) {
+            (0, Some(pressed)) => column.child(
+                div()
+                    .h(px(44.0))
+                    .px(px(8.0))
+                    .rounded(px(5.0))
+                    .flex()
+                    .items_center()
+                    .when(pressed, |button| {
+                        button
+                            .bg(crate::charts::alpha(BLUE, 0.15))
+                            .text_color(rgb(BLUE))
+                    })
+                    .child(cell),
+            ),
+            (0, None) => column.child(cell),
+            _ => column.justify_end().child(cell),
+        };
+        row = row.child(column);
+    }
+    row
+}
+
+/// The heading of the process group table, the top of the prototype's bordered panel.
+pub fn table_header(scroll: &gpui::ScrollHandle) -> impl IntoElement {
+    let headings = ["Process group", "Instances"]
+        .into_iter()
+        .chain(COLUMNS)
+        .map(String::from)
+        .collect::<Vec<_>>();
+    let Ok(headings) = <[String; COLUMNS.len() + 2]>::try_from(headings) else {
+        unreachable!("The table has one heading for each column");
+    };
+
+    div()
+        .id("app-columns-executables")
+        .h(px(TABLE_HEADER_HEIGHT))
+        .border_1()
+        .border_b_0()
+        .border_color(crate::charts::alpha(TEXT, 0.12))
+        .rounded_t(px(TABLE_RADIUS))
+        .bg(rgb(0x2c_2f_35))
+        .overflow_x_scroll()
+        .restrict_scroll_to_axis()
+        .track_scroll(scroll)
+        .text_size(px(11.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(rgb(MUTED))
+        .child(table_cells(
+            headings,
+            |_, text| format!("app-column:executables:{text}"),
+            None,
+        ))
+}
+
+/// A row of the table with the panel's sides, and its bottom and corners when it is the last.
+fn table_row(id: String, last: bool, scroll: &gpui::ScrollHandle) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(SharedString::from(id))
+        .h(px(if last {
+            TABLE_ROW_HEIGHT + 0.5
+        } else {
+            TABLE_ROW_HEIGHT
+        }))
+        .min_w_0()
+        .max_w_full()
+        .overflow_x_scroll()
+        .restrict_scroll_to_axis()
+        .track_scroll(scroll)
+        .border_l_1()
+        .border_r_1()
+        .border_b_1()
+        .border_color(crate::charts::alpha(TEXT, 0.12))
+        .bg(rgb(PANEL))
+        .text_size(px(12.0))
+        .text_color(rgb(TEXT))
+        .when(last, |row| row.rounded_b(px(TABLE_RADIUS)))
+        .cursor_pointer()
+        .focusable()
+        .tab_stop(true)
+        .focus(|style| style.bg(rgb(0x32_46_61)))
+}
+
 impl LiveDashboard {
     pub fn executable_row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
         let Some(group) = self.reading_executables().get(index) else {
@@ -236,6 +329,7 @@ impl LiveDashboard {
                 .child("Executable unavailable")
                 .into_any_element();
         };
+        let last = index + 1 == self.reading_executables().len();
         let selected = self.request.executable.as_ref() == Some(&group.key);
         let key = group.key.clone();
         let metrics = group.metrics();
@@ -248,9 +342,21 @@ impl LiveDashboard {
             } else {
                 "Select captured group history and matching instances"
             };
+        let [
+            cpu,
+            resident,
+            footprint,
+            network,
+            disk,
+            gpu,
+            power,
+            wakeups,
+            threads,
+            files,
+            sockets,
+        ] = metrics;
 
-        div()
-            .id(SharedString::from(format!("executable-{index}")))
+        table_row(format!("executable-{index}"), last, &self.app_table_scroll)
             .accessibility_id(format!("flightdeck.executable.{}", group.key))
             .role(gpui::Role::Button)
             .aria_label(format!(
@@ -258,30 +364,29 @@ impl LiveDashboard {
                 group.name, group.instances,
             ))
             .aria_selected(selected)
-            .py(px(10.0))
-            .min_w_0()
-            .max_w_full()
-            .overflow_x_scroll()
-            .restrict_scroll_to_axis()
-            .track_scroll(&self.app_table_scroll)
-            .border_b_1()
-            .border_color(rgb(GRID))
-            .cursor_pointer()
-            .focusable()
-            .tab_stop(true)
-            .focus(|style| style.bg(rgb(0x32_46_61)))
-            .bg(rgb(if selected { 0x20_30_41 } else { 0x14_19_24 }))
-            .hover(|style| style.bg(rgb(0x20_29_36)))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.select_executable(if selected { None } else { Some(key.clone()) });
                 this.rebuild();
                 cx.notify();
             }))
-            .child(app_cells(
-                group.name.clone(),
-                group.instances.to_string(),
-                metrics,
+            .child(table_cells(
+                [
+                    group.name.clone(),
+                    group.instances.to_string(),
+                    cpu,
+                    resident,
+                    footprint,
+                    network,
+                    disk,
+                    gpu,
+                    power,
+                    wakeups,
+                    threads,
+                    files,
+                    sockets,
+                ],
                 crate::live_app_views::reading_selector(DISK_COLUMN, &disk_selector),
+                Some(selected),
             ))
             .into_any_element()
     }
@@ -383,14 +488,66 @@ fn counter_optional(value: &Value) -> Result<Option<u64>, String> {
     }
 }
 
-fn subtotal_rate(value: Option<f64>, subtotal: &Subtotal, unit: &str) -> String {
-    let suffix = if subtotal.unavailable > 0 { " *" } else { "" };
-    format!("{}{suffix}", event_rate(value, unit))
+/// A reading marked with `*` when some of the group's processes lack it.
+fn partial(subtotal: &Subtotal, reading: String) -> String {
+    if subtotal.unavailable > 0 {
+        return format!("{reading} *");
+    }
+
+    reading
 }
 
-fn subtotal_memory(subtotal: &Subtotal) -> String {
-    let suffix = if subtotal.unavailable > 0 { " *" } else { "" };
-    format!("{}{suffix}", memory(subtotal.value()))
+/// The prototype's `fmt`: grouped thousands, a fixed number of decimals, and a dash for a
+/// missing reading.
+fn fixed(value: Option<f64>, decimals: usize, unit: &str) -> String {
+    let Some(value) = value.filter(|value| value.is_finite()) else {
+        return NOT_CAPTURED.into();
+    };
+    let text = format!("{value:.decimals$}");
+    let (sign, digits) = match text.strip_prefix('-') {
+        Some(digits) => ("-", digits),
+        None => ("", text.as_str()),
+    };
+    let (whole, fraction) = digits.split_once('.').unwrap_or((digits, ""));
+    let mut grouped = String::with_capacity(text.len() + whole.len() / 3);
+    for (index, digit) in whole.chars().enumerate() {
+        if index > 0 && (whole.len() - index) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    if fraction.is_empty() {
+        return format!("{sign}{grouped}{unit}");
+    }
+
+    format!("{sign}{grouped}.{fraction}{unit}")
+}
+
+/// The prototype's `byteRate`: the largest of B, kB, MB and GB per second that keeps the
+/// reading at or above one, to one decimal.
+fn byte_rate(rate: Option<f64>) -> String {
+    let Some(rate) = rate.filter(|rate| rate.is_finite()) else {
+        return NOT_CAPTURED.into();
+    };
+    let magnitude = rate.abs();
+    let (scale, unit) = if magnitude >= 1e9 {
+        (1e9, " GB/s")
+    } else if magnitude >= 1e6 {
+        (1e6, " MB/s")
+    } else if magnitude >= 1e3 {
+        (1e3, " kB/s")
+    } else {
+        (1.0, " B/s")
+    };
+
+    fixed(Some(rate / scale), 1, unit)
+}
+
+fn gibibytes(subtotal: &Subtotal) -> Option<f64> {
+    subtotal
+        .value()?
+        .to_f64()
+        .map(|bytes| bytes / 1_073_741_824.0)
 }
 
 fn groups_identity(process: &Value) -> (String, String) {
@@ -587,7 +744,7 @@ mod tests {
         assert_eq!(groups[0].disk_written_bytes.value(), Some(7));
         assert_eq!(groups[0].disk_io_bytes.value(), None);
         assert_eq!(groups[0].disk_io_bytes.unavailable, 2);
-        assert_eq!(groups[0].disk_rate(), "Unavailable *");
+        assert_eq!(groups[0].disk_rate(), "— *");
     }
 
     #[test]
@@ -609,7 +766,7 @@ mod tests {
         assert_eq!(groups[0].disk_written_bytes.value(), Some(1));
         assert!(groups[0].disk_io_bytes.overflowed);
         assert_eq!(groups[0].disk_io_bytes.value(), None);
-        assert_eq!(groups[0].disk_rate(), "Unavailable *");
+        assert_eq!(groups[0].disk_rate(), "— *");
     }
 
     #[test]
@@ -626,7 +783,7 @@ mod tests {
 
         assert_eq!(groups[0].resident_bytes.value(), None);
         assert_eq!(groups[0].disk_io_bytes.value(), Some(4000));
-        assert_eq!(groups[0].disk_rate(), "2 kB/s");
+        assert_eq!(groups[0].disk_rate(), "2.0 kB/s");
     }
 
     #[test]
@@ -680,31 +837,30 @@ mod tests {
         let groups = groups(Some(&detail)).unwrap();
 
         assert_eq!(groups.len(), 2);
-        assert!(matches(&detail["processes"][0], UNAVAILABLE));
-        assert!(matches(&detail["processes"][1], "hex:"));
+        assert!(groups.iter().any(|group| group.key == UNAVAILABLE));
+        assert!(groups.iter().any(|group| group.key == "hex:"));
     }
 
     #[test]
     fn incomplete_hex_bytes_are_unavailable() {
         // Goal: truncated bytes cannot become a valid executable identity.
-        // Method: filter a captured name containing an incomplete hexadecimal byte.
-        assert!(matches(&process("f"), UNAVAILABLE));
+        // Method: group a captured name containing an incomplete hexadecimal byte.
+        assert_eq!(groups_identity(&process("f")).0, UNAVAILABLE);
     }
 
     #[test]
     fn non_hex_bytes_are_unavailable() {
-        // Goal: malformed names cannot match a captured executable byte key.
-        // Method: filter a captured name containing non-hexadecimal text.
-        assert!(matches(&process("zz"), UNAVAILABLE));
+        // Goal: malformed names cannot become a captured executable byte key.
+        // Method: group a captured name containing non-hexadecimal text.
+        assert_eq!(groups_identity(&process("zz")).0, UNAVAILABLE);
     }
 
     #[test]
     fn oversized_executable_bytes_are_unavailable() {
         // Goal: an executable identity cannot exceed the recording's captured byte bound.
         // Method: exceed the maximum program path size by one byte.
-        assert!(matches(
-            &process(&"00".repeat(PROGRAM_BYTES_MAX + 1)),
-            UNAVAILABLE
-        ));
+        let oversized = process(&"00".repeat(PROGRAM_BYTES_MAX + 1));
+
+        assert_eq!(groups_identity(&oversized).0, UNAVAILABLE);
     }
 }

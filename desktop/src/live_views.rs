@@ -4,6 +4,7 @@ use std::rc::Rc;
 
 use crate::charts::{GRID, MUTED, PANEL};
 use crate::live_dashboard::{LiveDashboard, Row};
+use crate::live_sections::Section;
 
 #[path = "live_chrome.rs"]
 pub(crate) mod chrome;
@@ -25,19 +26,16 @@ impl LiveDashboard {
             return div().h(*height).into_any_element();
         }
 
-        let compact = matches!(
-            &self.rows[index],
-            Row::App(_) | Row::Process(_) | Row::Executable(_)
-        );
         let content = self.row_content(index, cx);
         let (padding, padding_bottom) = Self::row_padding(&self.rows[index]);
-        let padding = if index == 0 {
-            padding
-        } else {
-            let above = &self.rows[index - 1];
+        let above = self.rows[..index]
+            .iter()
+            .rev()
+            .find(|row| !matches!(row, Row::Spacer(_)));
+        let padding = above.map_or(padding, |above| {
             Self::spacing_above(above, &self.rows[index])
                 .map_or(padding, |gap| gap - Self::row_padding(above).1)
-        };
+        });
         let framed = self.details_frame(index);
         let key = self.rows[index].layout_key();
         let measured = Rc::clone(&self.row_heights);
@@ -61,12 +59,12 @@ impl LiveDashboard {
             } else {
                 24.0
             }))
-            .pt(px(if compact || framed.is_some_and(|f| !f.top) {
+            .pt(px(if framed.is_some_and(|f| !f.top) {
                 0.0
             } else {
                 padding
             }))
-            .pb(px(if compact || framed.is_some_and(|f| !f.bottom) {
+            .pb(px(if framed.is_some_and(|f| !f.bottom) {
                 0.0
             } else {
                 padding_bottom
@@ -108,6 +106,12 @@ impl LiveDashboard {
             | Row::CPUTop(_) => (4.0, 4.0),
             Row::OverviewRankings(_) => (6.0, 6.0),
             Row::Heading(_) => (16.0, 8.0),
+            Row::App(_)
+            | Row::Executable(_)
+            | Row::AppColumns("executables")
+            | Row::Disclosure(Section::AppTotals)
+            | Row::ProcessGroupingAbout => (0.0, 0.0),
+            Row::ProcessGroupBar => (0.0, 12.0),
             _ => (8.0, 8.0),
         }
     }
@@ -117,7 +121,13 @@ impl LiveDashboard {
     fn spacing_above(above: &Row, row: &Row) -> Option<f32> {
         match (above, row) {
             (Row::Heading(_), _) => Some(10.0),
-            (Row::Summary, _) | (_, Row::Disclosure(_)) => Some(16.0),
+            (Row::ProcessGroupingAbout, Row::ProcessGroupBar)
+            | (Row::Charts { .. }, Row::Disclosure(Section::AppTotals)) => Some(14.0),
+            (_, Row::ProcessGroupingAbout)
+            | (Row::Disclosure(Section::AppTotals), Row::Charts { .. }) => Some(0.0),
+            (Row::AppSelector, Row::Heading(_)) | (Row::Summary, _) | (_, Row::Disclosure(_)) => {
+                Some(16.0)
+            }
             (above, Row::Heading(_)) if above.in_details() => Some(20.0),
             _ => None,
         }
@@ -160,7 +170,9 @@ impl LiveDashboard {
             Row::AppSelector => self.app_selector(cx).into_any_element(),
             Row::ProcessGroupBar => self.process_group_bar(cx).into_any_element(),
             Row::ProcessGroupingAbout => self.process_grouping_about().into_any_element(),
-            Row::AppTotalsNote => crate::live_app_views::app_totals_note().into_any_element(),
+            Row::AppColumns("executables") => {
+                crate::live_executables::table_header(&self.app_table_scroll).into_any_element()
+            }
             Row::AppColumns(kind) => {
                 crate::live_app_views::app_table_columns(kind, &self.app_table_scroll)
                     .into_any_element()
@@ -170,7 +182,6 @@ impl LiveDashboard {
             Row::Disclosure(section) => self.disclosure(*section, cx).into_any_element(),
             Row::Hardware => self.live_hardware(cx).into_any_element(),
             Row::App(index) => self.app_row(*index, cx),
-            Row::Process(index) => self.process_row(*index, cx),
             Row::Executable(index) => self.executable_row(*index, cx),
             Row::Inventory => self.computer(cx).into_any_element(),
             Row::Footer => self.footer().into_any_element(),

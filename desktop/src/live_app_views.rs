@@ -3,9 +3,9 @@ use num_traits::ToPrimitive;
 use serde_json::Value;
 
 use crate::charts::{BLUE, GREEN, GRID, MUTED, ORANGE, PURPLE, YELLOW};
-use crate::dashboard::control;
 use crate::live_dashboard::{LiveDashboard, Picker, toggle};
 use crate::live_source::AppKey;
+use crate::live_views::chrome::select;
 use crate::live_views::{summary, text};
 
 /// The prototype's network cyan.
@@ -40,7 +40,7 @@ impl LiveDashboard {
 
     fn app_selector_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let label = match self.current_app() {
-            Some(app) => text(&app["display_name"]),
+            Some(app) => app_name(app),
             None => {
                 if self.request.app.is_some() {
                     "Selected App is not on this page".into()
@@ -55,26 +55,26 @@ impl LiveDashboard {
         div()
             .flex()
             .items_center()
-            .gap(px(10.0))
-            .child("App")
+            .h(px(44.0))
             .child(
-                control(&format!(
-                    "{}  {}",
-                    label,
-                    if self.picker == Some(Picker::App) {
-                        "▴"
-                    } else {
-                        "▾"
-                    }
-                ))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.picker = toggle(this.picker, Picker::App);
-                    this.rebuild();
-                    cx.notify();
-                })),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .w(px(340.0))
+                    .text_size(px(13.0))
+                    .child("App")
+                    .child(
+                        select(&label, 300.0).on_click(cx.listener(|this, _, _, cx| {
+                            this.picker = toggle(this.picker, Picker::App);
+                            this.rebuild();
+                            cx.notify();
+                        })),
+                    ),
             )
             .child(
                 div()
+                    .ml(px(12.0))
                     .text_size(px(11.0))
                     .text_color(rgb(MUTED))
                     .debug_selector(move || selector.clone())
@@ -115,8 +115,10 @@ impl LiveDashboard {
             .aria_label(label)
             .focusable()
             .tab_stop(true)
+            .flex()
+            .items_center()
+            .h(px(44.0))
             .px(px(8.0))
-            .py(px(6.0))
             .text_size(px(11.0))
             .text_color(rgb(MUTED))
             .cursor_pointer()
@@ -246,75 +248,12 @@ impl LiveDashboard {
                 cx.notify();
             }))
             .child(app_cells(
-                text(&app["display_name"]),
+                app_name(app),
                 text(&app["members"]),
                 metrics,
                 reading_selector(5, &disk_selector),
             ))
             .into_any_element()
-    }
-
-    pub fn process_row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
-        let Some(process) = self
-            .reading_snapshot()
-            .and_then(|snapshot| snapshot.detail.as_ref())
-            .and_then(|detail| detail["processes"].get(index))
-        else {
-            return unavailable("Process instance unavailable");
-        };
-        let expanded = self
-            .reading_expanded()
-            .is_some_and(|(kind, row)| kind == "app_processes" && *row == index);
-        let metrics = process_metrics(process);
-        let disk_selector = format!("process-disk:{}:{}", text(&process["pid"]), metrics[5]);
-
-        let mut row = div()
-            .id(SharedString::from(format!("process-{index}")))
-            .debug_selector(|| format!("process-{index}"))
-            .accessibility_id(format!(
-                "flightdeck.process.{}.{}",
-                text(&process["pid"]),
-                text(&process["creation"]["unique_id"])
-            ))
-            .role(gpui::Role::Button)
-            .aria_label(format!(
-                "{}; PID {}; CPU {}",
-                text(&process["executable_name"]["display"]),
-                text(&process["pid"]),
-                value_rate(&process["cpu_percent_one_core"], "%")
-            ))
-            .aria_expanded(expanded)
-            .min_w_0()
-            .max_w_full()
-            .overflow_x_scroll()
-            .restrict_scroll_to_axis()
-            .track_scroll(&self.app_table_scroll)
-            .border_b_1()
-            .border_color(rgb(GRID))
-            .cursor_pointer()
-            .focusable()
-            .tab_stop(true)
-            .focus(|style| style.bg(rgb(0x32_46_61)))
-            .hover(|style| style.bg(rgb(0x20_29_36)))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.expanded = if expanded {
-                    None
-                } else {
-                    Some(("app_processes".into(), index))
-                };
-                this.rebuild();
-                cx.notify();
-            }))
-            .child(app_cells(
-                text(&process["executable_name"]["display"]),
-                text(&process["pid"]),
-                metrics,
-                reading_selector(5, &disk_selector),
-            ));
-        if expanded {
-            row = row.child(exact_json(process));
-        }
-        row.into_any_element()
     }
 
     pub(crate) fn current_app(&self) -> Option<&Value> {
@@ -327,6 +266,15 @@ impl LiveDashboard {
             return self.current_app();
         }
         self.reading_snapshot()?.apps.as_ref()?["apps"].get(index)
+    }
+}
+
+/// An App's name as the prototype shows it, without the bundle's `.app` extension.
+pub(crate) fn app_name(app: &Value) -> String {
+    let name = text(&app["display_name"]);
+    match name.strip_suffix(".app") {
+        Some(stem) => stem.to_owned(),
+        None => name,
     }
 }
 
@@ -378,8 +326,8 @@ pub(crate) fn app_cards(app: Option<&Value>, selection: &Value) -> Vec<summary::
         ),
         card(
             "Network",
-            "Not captured".into(),
-            "No per-app network source",
+            "Unavailable".into(),
+            "Selected app",
             CYAN,
             "network",
         ),
@@ -424,17 +372,6 @@ fn app_gpu_time(app: &Value, selection: &Value) -> String {
         Some(entry) => value_rate(&entry["percent"], "%"),
         None => event_rate(Some(0.0), "%"),
     }
-}
-
-/// The prototype also charts the App's network bytes, which the collector does not record
-/// per process, so the page says so instead of drawing an empty chart.
-pub fn app_totals_note() -> impl IntoElement {
-    let text = "Per-process network bytes are not captured, so the App has no network chart.";
-    div()
-        .text_size(px(12.0))
-        .text_color(rgb(MUTED))
-        .debug_selector(move || text.into())
-        .child(text)
 }
 
 pub fn app_table_columns(kind: &str, scroll: &gpui::ScrollHandle) -> impl IntoElement {
@@ -582,22 +519,6 @@ pub fn memory(value: Option<u64>) -> String {
     }
 }
 
-pub fn exact_json(value: &Value) -> impl IntoElement {
-    let detail = value.to_string();
-    let detail = if detail.len() <= JSON_BYTES_MAX {
-        detail
-    } else {
-        "Detail exceeds the 32 KiB display limit".into()
-    };
-    div()
-        .debug_selector(|| "expanded-json".into())
-        .p(px(10.0))
-        .bg(rgb(0x10_15_20))
-        .text_size(px(10.0))
-        .text_color(rgb(BLUE))
-        .child(detail)
-}
-
 fn app_key(app: &Value) -> Result<AppKey, String> {
     crate::live_source::app_key_from_json(app)
 }
@@ -679,31 +600,6 @@ fn measure_disk_rate(app: &Value) -> String {
     reading
 }
 
-fn amount_disk_rate(process: &Value) -> String {
-    let amount = &process["disk_io_bytes"];
-    if !amount.is_object() {
-        return "Missing disk amount".into();
-    }
-
-    match decimal(&amount["known"]) {
-        Ok(Some(_)) => {
-            if !amount["unavailable"].is_null() {
-                return "Invalid disk amount".into();
-            }
-
-            value_disk_rate(&process["disk_io_bps"])
-        }
-        Ok(None) => {
-            if amount["unavailable"].as_str().is_none() {
-                return "Missing disk availability".into();
-            }
-
-            "Unavailable".into()
-        }
-        Err(error) => error,
-    }
-}
-
 fn app_metrics(app: &Value) -> [String; 6] {
     [
         value_rate(&app["cpu_percent_one_core"], "%"),
@@ -713,28 +609,6 @@ fn app_metrics(app: &Value) -> [String; 6] {
         value_rate(&app["energy_joules"], "J"),
         measure_disk_rate(app),
     ]
-}
-
-fn process_metrics(process: &Value) -> [String; 9] {
-    [
-        value_rate(&process["cpu_percent_one_core"], "%"),
-        amount_memory(&process["resident_bytes"]),
-        amount_memory(&process["footprint_bytes"]),
-        value_rate(&process["energy_watts"], "W"),
-        value_rate(&process["energy_joules"], "J"),
-        amount_disk_rate(process),
-        event_rate(process["idle_wakeups_per_second"].as_f64(), "/s"),
-        event_rate(process["pageins_per_second"].as_f64(), "pages/s"),
-        amount_count(&process["threads"]),
-    ]
-}
-
-fn amount_count(value: &Value) -> String {
-    match decimal(&value["known"]) {
-        Ok(Some(value)) => value.to_string(),
-        Ok(None) => "Unavailable".into(),
-        Err(error) => error,
-    }
 }
 
 fn measure_memory(value: &Value) -> String {
@@ -766,13 +640,6 @@ fn measure_value(value: &Value) -> Result<Option<u64>, String> {
         return Ok(None);
     }
     decimal(&value["known"])
-}
-
-fn amount_memory(value: &Value) -> String {
-    match decimal(&value["known"]) {
-        Ok(value) => memory(value),
-        Err(error) => error,
-    }
 }
 
 fn decimal(value: &Value) -> Result<Option<u64>, String> {

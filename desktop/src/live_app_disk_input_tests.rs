@@ -21,9 +21,6 @@ fn selected_app_disk_summary_and_columns_keep_joint_coverage(cx: &mut gpui::Test
             .driver
             .text_is_visible("app-disk:bundle:41:1.5 MB/s *")
     );
-    assert!(harness.driver.text_is_visible("process-disk:10:1 MB/s"));
-    assert!(harness.driver.text_is_visible("process-disk:11:500 kB/s"));
-    assert!(harness.driver.text_is_visible("process-disk:12:250 kB/s"));
     assert!(
         harness
             .driver
@@ -507,27 +504,19 @@ impl AppHoverDriver {
     fn assert_current_disk_visible(&mut self) {
         assert!(self.text_is_visible("summary-card:Disk I/O:1.5 MB/s *"));
         assert!(self.text_is_visible("app-disk:bundle:41:1.5 MB/s *"));
-        assert!(self.text_is_visible("process-disk:10:1 MB/s"));
-        assert!(self.text_is_visible("process-disk:11:500 kB/s"));
-        assert!(self.text_is_visible("process-disk:12:250 kB/s"));
         assert!(self.text_is_visible("executable-disk:hex:61:1.5 MB/s *"));
     }
 
     fn assert_current_disk_hidden(&mut self) {
         assert!(!self.text_is_visible("summary-card:Disk I/O:1.5 MB/s *"));
         assert!(!self.text_is_visible("app-disk:bundle:41:1.5 MB/s *"));
-        assert!(!self.text_is_visible("process-disk:10:1 MB/s"));
-        assert!(!self.text_is_visible("process-disk:11:500 kB/s"));
-        assert!(!self.text_is_visible("process-disk:12:250 kB/s"));
         assert!(!self.text_is_visible("executable-disk:hex:61:1.5 MB/s *"));
     }
 
     fn assert_historical_disk_visible(&mut self) {
         assert!(self.text_is_visible("summary-card:Disk I/O:3 MB/s"));
         assert!(self.text_is_visible("app-disk:bundle:41:3 MB/s"));
-        assert!(self.text_is_visible("process-disk:20:2 MB/s"));
-        assert!(self.text_is_visible("process-disk:21:1 MB/s"));
-        assert!(self.text_is_visible("executable-disk:hex:63:3 MB/s"));
+        assert!(self.text_is_visible("executable-disk:hex:63:3.0 MB/s"));
         assert_eq!(
             self.selected_disk_executable()["disk_io_bytes"],
             complete_measure("6000000")
@@ -537,9 +526,7 @@ impl AppHoverDriver {
     fn assert_historical_disk_hidden(&mut self) {
         assert!(!self.text_is_visible("summary-card:Disk I/O:3 MB/s"));
         assert!(!self.text_is_visible("app-disk:bundle:41:3 MB/s"));
-        assert!(!self.text_is_visible("process-disk:20:2 MB/s"));
-        assert!(!self.text_is_visible("process-disk:21:1 MB/s"));
-        assert!(!self.text_is_visible("executable-disk:hex:63:3 MB/s"));
+        assert!(!self.text_is_visible("executable-disk:hex:63:3.0 MB/s"));
     }
 
     fn assert_disk_history(&self, second: u64, headline: &str, index: usize, rate: f32) {

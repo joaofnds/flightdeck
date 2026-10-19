@@ -208,7 +208,7 @@ mod tests {
 
     #[test]
     fn projects_selected_app_history_through_the_public_command() {
-        // Goal: the spawned App command retains five exact panel outputs and selected identity.
+        // Goal: the spawned App command retains six exact panel outputs and selected identity.
         // Method: submit a synthetic coherent envelope through the existing CLI driver.
         let input = app_input();
         let benchmark = Benchmark::new(&input);
@@ -232,6 +232,7 @@ mod tests {
             json!([
                 ["live-app-cpu", 1, [0, 1], [[null, 25.0_f32.to_bits()]]],
                 ["live-app-resident", 1, [0, 1], [[null, 1.0_f32.to_bits()]]],
+                ["live-app-network", 1, [0, 1], [[null, null]]],
                 ["live-app-disk", 1, [0, 1], [[null, 0.002_56_f32.to_bits()]]],
                 ["live-app-gpu", 1, [0, 1], [[null, null]]],
                 ["live-app-power", 1, [0, 1], [[null, 3.0_f32.to_bits()]]]
