@@ -56,6 +56,7 @@ impl LiveDashboard {
         let ranking = match metric {
             Metric::Cpu => 0,
             Metric::Power => 2,
+            Metric::Disk => 3,
         };
 
         div()

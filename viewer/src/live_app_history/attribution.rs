@@ -155,6 +155,12 @@ impl History {
         )?;
         saved.validate_attribution_cache(&rates.borrow())?;
         let inserted = rates.borrow().count() - before;
+        if uncached.get() > inserted {
+            rates
+                .borrow_mut()
+                .retain(operation, |_observation| Ok(true))?;
+            saved.validate_attribution_cache(&rates.borrow())?;
+        }
         Ok(Restored {
             committed,
             uncached: uncached.get() - inserted,
@@ -228,6 +234,7 @@ impl Point {
             measure: match metric {
                 AppAttributionMetric::Cpu => app.cpu_ns.measure(),
                 AppAttributionMetric::Power => app.energy_nj.measure(),
+                AppAttributionMetric::Disk => app.disk_io_bytes.measure(),
             },
             members: u32::from(app.members),
             membership_complete: app.membership_complete,

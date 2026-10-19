@@ -191,6 +191,7 @@ impl Reading {
         let (measure, rate) = match metric {
             Metric::Cpu => (&value["cpu_ns"], &value["cpu_percent_one_core"]),
             Metric::Power => (&value["energy_nj"], &value["energy_watts"]),
+            Metric::Disk => (&value["disk_io_bytes"], &value["disk_io_bps"]),
         };
         let reading = Self {
             rate: decode_rate(rate)?,
@@ -291,6 +292,7 @@ fn validate_metric(metric: Metric, value: &Value) -> Result<(), String> {
     let expected = match metric {
         Metric::Cpu => "cpu",
         Metric::Power => "power",
+        Metric::Disk => "disk",
     };
     if value["metric"].as_str() != Some(expected) {
         return Err("App rate history has a different metric".into());

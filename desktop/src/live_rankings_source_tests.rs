@@ -420,6 +420,7 @@ fn assert_real_rate_attribution(
     let route = match metric {
         crate::live_app_attribution_history::Metric::Cpu => "cpu",
         crate::live_app_attribution_history::Metric::Power => "energy",
+        crate::live_app_attribution_history::Metric::Disk => "storage",
     };
     let recording = SealedRecording::with_ranked_apps();
     let request = exact_ranked_request(route);
@@ -493,4 +494,63 @@ fn real_memory_preview_reuses_the_accepted_resident_context_without_reloading_it
             .panel()
             .is_some()
     );
+}
+
+#[test]
+fn real_disk_worker_restores_attribution_and_keeps_exact_interval_bytes() {
+    // Carry 600 sealed Apps through the actual Storage worker and public desktop decoder.
+    use crate::live_app_attribution_history::Metric;
+    let recording = SealedRecording::with_ranked_apps();
+    let request = exact_ranked_request("storage");
+    let snapshot = recording.read(request.clone()).unwrap();
+
+    let presentation = crate::live_acceptance::Presentation::prepare(&request, snapshot).unwrap();
+
+    assert_eq!(
+        presentation.snapshot.selection["selected"]["publication"],
+        2
+    );
+    let history = presentation
+        .snapshot
+        .app_attribution_history
+        .as_ref()
+        .unwrap();
+    let panel = presentation
+        .panels
+        .iter()
+        .find(|panel| panel.id == Metric::Disk.panel_id())
+        .unwrap();
+    assert_eq!(panel.lines.len(), 9);
+    assert_eq!(panel.lines[0].name, "Other");
+    assert_eq!(panel.lines[1].name, "App00600");
+    assert_eq!(panel.selected_index, Some(1));
+    assert_eq!(panel.lines[1].values[1], Some(900.0));
+    assert_eq!(history.captured_amount(1, Some(1)), Some(900_000_000));
+    assert_eq!(
+        history.reading(1, Some(1)),
+        "900.0 MB/s · 900000000 B known subtotal · 1 measured · 0 unavailable"
+    );
+}
+
+#[test]
+fn real_disk_preview_reuses_the_context_while_loading_exact_ranks() {
+    // Hover keeps the accepted byte cohort while the worker reads only exact historical Apps.
+    let recording = SealedRecording::with_ranked_apps();
+    let request = exact_ranked_request("storage");
+    let accepted = recording.read(request.clone()).unwrap();
+    let target =
+        crate::live_hover::Target::exact(1000, &json!({"run":[1,2],"boot":[3,4],"publication":1}))
+            .unwrap();
+    let preview = crate::live_hover::Preview::resident(&accepted, &request, target);
+    assert!(!preview.request.load_app_attribution_history);
+    assert!(std::sync::Arc::ptr_eq(
+        accepted.app_attribution_history.as_ref().unwrap(),
+        preview.reading.app_attribution_history.as_ref().unwrap()
+    ));
+
+    let exact = recording.read(preview.request).unwrap();
+
+    assert!(exact.app_attribution_history.is_none());
+    assert_eq!(exact.selection["selected"]["publication"], 1);
+    assert!(exact.rankings.is_some());
 }

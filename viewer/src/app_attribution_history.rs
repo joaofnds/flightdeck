@@ -1,4 +1,4 @@
-//! Bounded CPU and process-power attribution over the selected App context.
+//! Bounded CPU, process-power and disk attribution over the selected App context.
 use persistence::{Error, Result};
 use serde_json::Value;
 
@@ -16,6 +16,7 @@ pub(crate) use reduce::{Capture, Reading, Reduction};
 pub enum AppAttributionMetric {
     Cpu,
     Power,
+    Disk,
 }
 
 impl LiveSession {
@@ -42,6 +43,7 @@ impl AppAttributionMetric {
         match self {
             Self::Cpu => "cpu",
             Self::Power => "power",
+            Self::Disk => "disk",
         }
     }
 
@@ -49,6 +51,7 @@ impl AppAttributionMetric {
         match self {
             Self::Cpu => "cpu_ns",
             Self::Power => "energy_nj",
+            Self::Disk => "disk_io_bytes",
         }
     }
 
@@ -56,6 +59,7 @@ impl AppAttributionMetric {
         match self {
             Self::Cpu => "cpu_percent_one_core",
             Self::Power => "energy_watts",
+            Self::Disk => "disk_io_bps",
         }
     }
 
@@ -67,6 +71,10 @@ impl AppAttributionMetric {
             }),
             Self::Power => crate::apps::energy_watts(crate::apps::EnergyRate {
                 energy_nj: amount,
+                elapsed_ns: elapsed_ns?,
+            }),
+            Self::Disk => crate::apps::bytes_per_second(crate::apps::BytesRate {
+                bytes: amount,
                 elapsed_ns: elapsed_ns?,
             }),
         }

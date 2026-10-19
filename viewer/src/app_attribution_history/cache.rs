@@ -27,6 +27,7 @@ struct App {
     key: Arc<Key>,
     cpu: CompactMeasure,
     power: CompactMeasure,
+    disk: CompactMeasure,
     members: u16,
     membership_complete: bool,
 }
@@ -37,7 +38,7 @@ struct Key {
 }
 
 const _: () = {
-    assert!(size_of::<App>() <= 40);
+    assert!(size_of::<App>() <= 48);
     assert!(size_of::<CompactMeasure>() <= 12);
 };
 
@@ -312,6 +313,7 @@ impl Point {
                     key,
                     cpu: CompactMeasure::capture(&measure(&app.cpu_ns)),
                     power: CompactMeasure::capture(&measure(&app.energy_nj)),
+                    disk: CompactMeasure::capture(&measure(&app.disk_io_bytes)),
                     members: u16::try_from(app.members)
                         .map_err(|_| Error::Bound("attribution App members"))?,
                     membership_complete: app.membership_complete,
@@ -338,6 +340,7 @@ impl Point {
             measure: match metric {
                 AppAttributionMetric::Cpu => app.cpu.measure(),
                 AppAttributionMetric::Power => app.power.measure(),
+                AppAttributionMetric::Disk => app.disk.measure(),
             },
             members: u32::from(app.members),
             membership_complete: app.membership_complete,

@@ -62,7 +62,14 @@ impl LiveDashboard {
             _ => {}
         }
         if self.request.route == "storage" {
-            rows.push(Row::Rankings(vec![3]));
+            let metric = crate::live_app_attribution_history::Metric::Disk;
+            let panel = self
+                .panels
+                .iter()
+                .take(16)
+                .find(|panel| panel.id == metric.panel_id())
+                .cloned();
+            rows.push(Row::AppAttribution(metric, panel));
             for index in 0..self.resource_device_count() {
                 rows.push(Row::StorageDevice(
                     index,

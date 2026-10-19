@@ -268,6 +268,13 @@ impl LiveDashboard {
         right: usize,
     ) -> std::cmp::Ordering {
         if let Some(history) = self.chart_attribution_history(panel) {
+            if crate::live_app_attribution_history::Metric::from_panel(&panel.id)
+                == Some(crate::live_app_attribution_history::Metric::Disk)
+            {
+                return history
+                    .captured_amount(right, index)
+                    .cmp(&history.captured_amount(left, index));
+            }
             let left = history.amount(left, index);
             let right = history.amount(right, index);
             return match (left, right) {

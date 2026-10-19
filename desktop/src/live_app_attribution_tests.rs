@@ -232,3 +232,145 @@ fn another_recordings_points_are_refused() {
 
     assert!(history.panel().is_none());
 }
+
+#[test]
+fn disk_attribution_scales_rates_without_changing_the_captured_interval_bytes() {
+    // A two-second interval carries three million exact bytes and a distinct MB/s value.
+    let history = AppAttributionHistory::prepare(Metric::Disk, &disk_fixture(), &selection());
+    let panel = history.panel().unwrap();
+
+    assert_eq!(panel.id, "live-disk-apps");
+    assert_eq!(panel.unit, "MB/s");
+    assert_eq!(panel.lines[1].values, [Some(0.5), Some(1.5)]);
+    assert_eq!(history.captured_amount(1, Some(1)), Some(3_000_000));
+    assert_eq!(history.reading(1, Some(1)), "1.5 MB/s · 3000000 B");
+    assert_eq!(history.headline(Some(1)), "1.5 MB/s captured");
+}
+
+#[test]
+fn disk_attribution_preserves_bytes_above_float_integer_precision() {
+    // Keep the interval's exact counter even when floating-point rate conversion rounds it.
+    let mut value = disk_fixture();
+    value["points"][1]["apps"][0]["disk_io_bytes"]["known"] = json!("9007199254740993");
+    value["points"][1]["apps"][0]["disk_io_bps"] = json!(4_503_599_627_370_496.0);
+    let history = AppAttributionHistory::prepare(Metric::Disk, &value, &selection());
+
+    assert_eq!(
+        history.captured_amount(1, Some(1)),
+        Some(9_007_199_254_740_993)
+    );
+    assert_eq!(
+        history.reading(1, Some(1)),
+        "4503599616.0 MB/s · 9007199254740993 B"
+    );
+}
+
+#[test]
+fn disk_attribution_keeps_a_measured_zero_drawable() {
+    // A jointly measured zero belongs in the history rather than becoming an availability gap.
+    let mut value = disk_fixture();
+    value["points"][1]["apps"][0]["disk_io_bytes"]["known"] = json!("0");
+    value["points"][1]["apps"][0]["disk_io_bps"] = json!(0.0);
+    let history = AppAttributionHistory::prepare(Metric::Disk, &value, &selection());
+
+    assert_eq!(history.panel().unwrap().lines[1].values[1], Some(0.0));
+    assert_eq!(history.reading(1, Some(1)), "0.0 MB/s · 0 B");
+}
+
+#[test]
+fn disk_attribution_labels_jointly_measured_partial_subtotals() {
+    // A refused member does not erase the other members' measured bytes or imply a full total.
+    let mut value = disk_fixture();
+    value["points"][1]["apps"][0]["disk_io_bytes"]["unavailable_members"] = json!(1);
+    value["points"][1]["usage_refused"] = json!(1);
+    value["points"][1]["other"]["disk_io_bytes"] = Value::Null;
+    value["points"][1]["other"]["disk_io_bps"] = Value::Null;
+    let history = AppAttributionHistory::prepare(Metric::Disk, &value, &selection());
+
+    assert_eq!(
+        history.reading(1, Some(1)),
+        "1.5 MB/s · 3000000 B known subtotal · 1 measured · 1 unavailable"
+    );
+    assert_eq!(history.headline(Some(1)), "1.5 MB/s known subtotal");
+}
+
+#[test]
+fn disk_attribution_unmeasured_members_do_not_borrow_a_directional_rate() {
+    // Directional readings cannot fill a missing jointly measured read-plus-write interval.
+    let mut value = disk_fixture();
+    value["points"][1]["apps"][0]["disk_io_bps"] = Value::Null;
+    value["points"][1]["apps"][0]["disk_io_bytes"]["measured_members"] = json!(0);
+    value["points"][1]["apps"][0]["disk_io_bytes"]["unavailable_members"] = json!(1);
+    value["points"][1]["apps"][0]["disk_read_bps"] = json!(9_000_000.0);
+    let history = AppAttributionHistory::prepare(Metric::Disk, &value, &selection());
+
+    assert_eq!(history.panel().unwrap().lines[1].values[1], None);
+    assert_eq!(history.captured_amount(1, Some(1)), None);
+    assert_eq!(history.reading(1, Some(1)), "Unavailable · 1 unavailable");
+}
+
+#[test]
+fn disk_attribution_overflow_remains_unavailable() {
+    // An overflowing byte sum has no plotted rate or exact sortable total.
+    let mut value = disk_fixture();
+    value["points"][1]["apps"][0]["disk_io_bps"] = Value::Null;
+    value["points"][1]["apps"][0]["disk_io_bytes"]["overflowed"] = json!(true);
+    let history = AppAttributionHistory::prepare(Metric::Disk, &value, &selection());
+
+    assert_eq!(history.panel().unwrap().lines[1].values[1], None);
+    assert_eq!(history.captured_amount(1, Some(1)), None);
+    assert_eq!(
+        history.reading(1, Some(1)),
+        "Unavailable · counter sum overflow"
+    );
+}
+
+#[test]
+fn disk_attribution_missing_source_remains_an_observation_gap() {
+    // A missing capture cannot acquire rates or coverage from the preceding observation.
+    let mut value = disk_fixture();
+    value["points"][0] = json!({"observation":observation(1),"segment":"1",
+        "elapsed_ns":null,"source_available":false,"membership_complete":null,
+        "ungrouped_members":null,"usage_refused":null,"usage_gone":null,
+        "apps":[null],"other":null});
+    let history = AppAttributionHistory::prepare(Metric::Disk, &value, &selection());
+
+    assert_eq!(history.panel().unwrap().lines[1].values[0], None);
+    assert_eq!(history.reading(1, Some(0)), "Unavailable");
+}
+
+pub(crate) fn disk_fixture() -> Value {
+    let mut value = fixture(Metric::Cpu);
+    value["metric"] = json!("disk");
+    value["cohort"][0]["key"] = json!({"kind":"bundle","bytes_hex":"41","display":"Current"});
+    value["coverage"]["context_app_count"] = json!(1);
+    for (index, point) in value["points"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .enumerate()
+    {
+        point["elapsed_ns"] = json!("2000000000");
+        point["apps"][0] = json!({"members":1,"membership_complete":true,
+            "disk_io_bytes":measure(["1000000", "3000000"][index]),
+            "disk_io_bps":([500_000.0, 1_500_000.0][index])});
+        point["other"] = json!({"app_count":0,"membership_complete":true,
+            "disk_io_bytes":{"known":"0","measured_members":0,
+            "unavailable_members":0,"overflowed":false},"disk_io_bps":0.0});
+    }
+
+    value
+}
+
+#[test]
+fn disk_attribution_small_nonzero_rates_keep_human_units() {
+    // A captured ten bytes per second must stay distinct from measured zero and unavailable data.
+    let mut value = disk_fixture();
+    value["points"][1]["apps"][0]["disk_io_bytes"]["known"] = json!("20");
+    value["points"][1]["apps"][0]["disk_io_bps"] = json!(10.0);
+    let history = AppAttributionHistory::prepare(Metric::Disk, &value, &selection());
+
+    assert_eq!(history.panel().unwrap().lines[1].values[1], Some(0.000_01));
+    assert_eq!(history.reading(1, Some(1)), "10.0 B/s · 20 B");
+    assert_eq!(history.headline(Some(1)), "10.0 B/s captured");
+}

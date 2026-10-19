@@ -210,6 +210,7 @@ fn probe_app_attribution(snapshot: &Snapshot, route: &str) -> Result<(), String>
     let ranking = match metric {
         Metric::Cpu => 0,
         Metric::Power => 2,
+        Metric::Disk => 3,
     };
     if let Some(crate::live_rankings::Rankings::Ready(rankings)) = snapshot.rankings.as_deref() {
         if !rankings.metrics[ranking].entries.is_empty() {

@@ -7,6 +7,115 @@ use crate::{AppAttributionMetric, LiveSession};
 mod pressure_fixture;
 
 #[test]
+fn disk_attribution_keeps_exact_combined_deltas_and_continuous_rates_after_reopen() {
+    // High cumulative counters retain an exact small delta through live, cold and warm queries.
+    let mut fixture = Fixture::new();
+    fixture.set_clock_intervals(2_000_000_000, 100_000_000);
+    let mut counters = usage(0);
+    counters.disk_read_bytes = 9_007_199_254_740_993;
+    counters.disk_written_bytes = 9_007_199_254_741_993;
+    fixture.publish_with_usage(1000, &counters);
+    counters.disk_read_bytes += 4096;
+    counters.disk_written_bytes += 1024;
+    fixture.publish_with_usage(1001, &counters);
+    let mut live = LiveSession::open(&fixture.root).unwrap();
+    live.follow_latest().unwrap();
+    let before = live
+        .app_attribution_history(AppAttributionMetric::Disk)
+        .unwrap();
+    fixture.seal();
+    collector::recording::Registry {
+        runs: Vec::new(),
+        evictions: 0,
+    }
+    .write(&fixture.root)
+    .unwrap();
+    let mut saved = LiveSession::open(&fixture.root).unwrap();
+    saved.select(1001, 0).unwrap();
+
+    let after = saved
+        .app_attribution_history(AppAttributionMetric::Disk)
+        .unwrap();
+    let warm = saved
+        .app_attribution_history(AppAttributionMetric::Disk)
+        .unwrap();
+
+    assert_eq!(after["metric"], "disk");
+    assert_eq!(after["points"], before["points"]);
+    assert_eq!(after["cohort"], before["cohort"]);
+    assert_eq!(warm, after);
+    assert_eq!(after["points"][1]["elapsed_ns"], "2000000000");
+    assert_eq!(
+        after["points"][1]["apps"][0]["disk_io_bytes"]["known"],
+        "5120"
+    );
+    assert_eq!(after["points"][1]["apps"][0]["disk_io_bps"], 2560.0);
+    assert_eq!(
+        after["points"][0]["apps"][0]["disk_io_bps"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        after["points"][1]["other"]["disk_io_bps"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        after["points"][1]["other"]["disk_io_bytes"]["unavailable_members"],
+        1
+    );
+}
+
+#[test]
+fn disk_attribution_restores_verified_exit_work_and_reuses_cpu_warmed_saved_facts() {
+    // Verified terminal disk work survives after the App's gauge disappears and shares warm facts.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_usage(1000, &usage(0));
+    let mut counters = usage(1_000_000_000);
+    counters.disk_read_bytes = 2000;
+    counters.disk_written_bytes = 4000;
+    fixture.publish_with_usage(1001, &counters);
+    counters.disk_read_bytes = 5000;
+    counters.disk_written_bytes = 8000;
+    publish_exits_with_usage(&mut fixture, &counters);
+    let mut live = LiveSession::open(&fixture.root).unwrap();
+    live.follow_latest().unwrap();
+    let before = live
+        .app_attribution_history(AppAttributionMetric::Disk)
+        .unwrap();
+    let resident = live.app_resident_history().unwrap();
+    fixture.seal();
+    collector::recording::Registry {
+        runs: Vec::new(),
+        evictions: 0,
+    }
+    .write(&fixture.root)
+    .unwrap();
+    let mut saved = LiveSession::open(&fixture.root).unwrap();
+    saved.select(1002, 0).unwrap();
+    saved
+        .app_attribution_history(AppAttributionMetric::Cpu)
+        .unwrap();
+    let reads = saved.history.as_ref().unwrap().source_reads.get();
+
+    let after = saved
+        .app_attribution_history(AppAttributionMetric::Disk)
+        .unwrap();
+
+    assert_eq!(after["points"], before["points"]);
+    assert_eq!(after["cohort"], before["cohort"]);
+    assert_eq!(
+        after["points"][2]["apps"][0]["disk_io_bytes"]["known"],
+        "7000"
+    );
+    assert_eq!(after["points"][2]["apps"][0]["disk_io_bps"], 7000.0);
+    assert_eq!(resident["points"][2]["apps"][0], serde_json::Value::Null);
+    assert_eq!(
+        saved.history.as_ref().unwrap().source_reads.get() - reads,
+        1
+    );
+    assert!(after["coverage"]["cache_bytes"].as_u64().unwrap() <= 67_108_864);
+}
+
+#[test]
 fn attribution_shares_repeated_long_keys_and_compact_rates_under_real_cache_pressure() {
     // The old per-observation key copies alone exceeded 64 MiB across this real sealed context.
     let fixture = pressure_fixture::Recording::new();
@@ -347,12 +456,16 @@ fn attribution_keeps_verified_exit_deltas_after_cold_reopen_without_resident_gau
 }
 
 fn publish_exits(fixture: &mut Fixture) {
+    publish_exits_with_usage(fixture, &usage(3_000_000_000));
+}
+
+fn publish_exits_with_usage(fixture: &mut Fixture, final_usage: &Usage) {
     use collector::ring::{
         IdentityObservation, ProcessCreation, ProcessIdentity, UsageAvailability,
     };
     let events = [1, 7].map(|pid| collector::tracker::Event::Exit {
         pid,
-        last: Ok(usage(3_000_000_000)),
+        last: Ok(*final_usage),
         noticed: collector::tracker::Noticed::OnExit,
     });
     let identities = [1, 7].map(|pid| IdentityObservation {

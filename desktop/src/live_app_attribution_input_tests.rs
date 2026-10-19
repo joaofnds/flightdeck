@@ -373,6 +373,12 @@ impl InputDriver {
                 "chart-card:live-power-apps",
                 "attribution-ranking:live-power-apps",
             ),
+            Metric::Disk => (
+                "live-disk-apps-plot",
+                "ranking:Disk I/O:Current:80.0 B/s",
+                "chart-card:live-disk-apps",
+                "attribution-ranking:live-disk-apps",
+            ),
         };
         let plot = self.chart_bounds(plot);
         let ranking = self.context.debug_bounds(ranking).unwrap();

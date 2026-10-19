@@ -336,7 +336,7 @@ fn resource_device_pixel(value: f32) -> f32 {
 }
 
 #[derive(Clone, Copy)]
-enum ResourceEpoch {
+pub(super) enum ResourceEpoch {
     EarlierSibling,
     Historical,
     Current,
@@ -363,7 +363,7 @@ fn resource_point(template: &Value, epoch: ResourceEpoch) -> Value {
     point
 }
 
-fn resource_devices(epoch: ResourceEpoch) -> Value {
+pub(super) fn resource_devices(epoch: ResourceEpoch) -> Value {
     match epoch {
         ResourceEpoch::EarlierSibling => json!([
             {"driver_id":20, "media_id":1, "name":"earlier-disk", "read_bps":1_000_000}

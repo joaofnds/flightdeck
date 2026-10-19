@@ -21,6 +21,7 @@ pub enum AppAttributionHistory {
 pub enum Metric {
     Cpu,
     Power,
+    Disk,
 }
 
 pub struct History {
@@ -70,6 +71,7 @@ impl Metric {
         match self {
             Self::Cpu => "live-cpu-apps",
             Self::Power => "live-power-apps",
+            Self::Disk => "live-disk-apps",
         }
     }
 
@@ -77,6 +79,7 @@ impl Metric {
         match self {
             Self::Cpu => "CPU by App",
             Self::Power => "Process power by App",
+            Self::Disk => "Disk I/O by App",
         }
     }
 
@@ -84,6 +87,7 @@ impl Metric {
         match self {
             Self::Cpu => "%",
             Self::Power => "W",
+            Self::Disk => "MB/s",
         }
     }
 
@@ -91,6 +95,7 @@ impl Metric {
         match id {
             "live-cpu-apps" => Some(Self::Cpu),
             "live-power-apps" => Some(Self::Power),
+            "live-disk-apps" => Some(Self::Disk),
             _ => None,
         }
     }
@@ -99,14 +104,35 @@ impl Metric {
         match route {
             "cpu" => Some(Self::Cpu),
             "energy" => Some(Self::Power),
+            "storage" => Some(Self::Disk),
             _ => None,
         }
+    }
+
+    fn divisor(self) -> f64 {
+        match self {
+            Self::Cpu | Self::Power => 1.0,
+            Self::Disk => 1_000_000.0,
+        }
+    }
+
+    fn rate_text(self, rate: f64) -> String {
+        if self == Self::Disk {
+            let Some(value) = (rate / self.divisor()).to_f32() else {
+                unreachable!("Validated Disk rates fit the chart's numeric range");
+            };
+
+            return crate::live_projection::quantity_text(value, self.unit());
+        }
+
+        format!("{rate:.2} {}", self.unit())
     }
 
     pub fn source(self) -> viewer::AppAttributionMetric {
         match self {
             Self::Cpu => viewer::AppAttributionMetric::Cpu,
             Self::Power => viewer::AppAttributionMetric::Power,
+            Self::Disk => viewer::AppAttributionMetric::Disk,
         }
     }
 }
@@ -148,6 +174,16 @@ impl AppAttributionHistory {
         history.points.get(index?)?.reading(line)?.rate
     }
 
+    pub fn captured_amount(&self, line: usize, index: Option<usize>) -> Option<u64> {
+        let Self::Ready(history) = self else {
+            return None;
+        };
+        let reading = history.points.get(index?)?.reading(line)?;
+        reading.rate?;
+
+        Some(reading.measure?.known)
+    }
+
     pub fn reading(&self, line: usize, index: Option<usize>) -> String {
         let Self::Ready(history) = self else {
             return "Unavailable".into();
@@ -161,9 +197,14 @@ impl AppAttributionHistory {
         let Some(rate) = reading.rate else {
             return reading.unavailable();
         };
-        let text = format!("{rate:.2} {}", history.metric.unit());
+        let text = history.metric.rate_text(rate);
         let Some(measure) = reading.measure else {
             return text;
+        };
+        let text = if history.metric == Metric::Disk {
+            format!("{text} · {} B", measure.known)
+        } else {
+            text
         };
         if !reading.complete() {
             return format!(
@@ -232,7 +273,7 @@ impl AppAttributionHistory {
             "known subtotal"
         };
 
-        format!("{known:.2} {} {coverage}", history.metric.unit())
+        format!("{} {coverage}", history.metric.rate_text(known))
     }
 }
 
@@ -246,7 +287,11 @@ impl History {
             lines.push(Line {
                 name: name.into(),
                 color: COLORS[index].into(),
-                values: self.points.iter().map(|point| point.value(index)).collect(),
+                values: self
+                    .points
+                    .iter()
+                    .map(|point| point.value(index, self.metric))
+                    .collect(),
                 stack: None,
                 negative: Some(false),
                 dashed: Some(false),
@@ -293,6 +338,13 @@ impl History {
                 rate. Other sums remaining captured Apps. Missing intervals remain gaps; \
                 known subtotals exclude unavailable process members."
             }
+            Metric::Disk => {
+                "Captured process read-plus-write bytes per interval, displayed in MB/s. \
+                Exact interval bytes stay separate from the rate. This is separate from \
+                device-driver throughput. Eight leaders use the complete context's mean rate; \
+                Other sums remaining captured Apps. Known subtotals include only members with \
+                both directions measured. Missing Apps and unavailable intervals remain gaps."
+            }
         }
     }
 }
@@ -318,9 +370,9 @@ impl Point {
         self.apps.get(line - 1).copied().flatten()
     }
 
-    fn value(&self, line: usize) -> Option<f32> {
+    fn value(&self, line: usize, metric: Metric) -> Option<f32> {
         self.observation.wall_ns?;
-        self.reading(line)?.rate?.to_f32()
+        (self.reading(line)?.rate? / metric.divisor()).to_f32()
     }
 }
 
