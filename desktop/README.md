@@ -152,7 +152,11 @@ context includes known extent, saved-window counts, source errors and paged
 same-second alternatives with full run/boot/publication identities.
 
 Overview ranks the top ten captured Apps by CPU, resident memory, process power and
-jointly measured disk I/O. Cooling and battery context follows the inspected timestamp,
+jointly measured disk I/O. Its App resource histories follow those rankings, pairing
+CPU, resident memory, disk and process-power charts at viewport widths from 640 points
+and stacking them below. All four retain their captured context during exact inspection;
+missing intervals and individual source failures stay explicit. Per-App network and GPU
+histories are not captured. Cooling and battery context follows the inspected timestamp,
 with an explicit uncaptured thermal-state reading.
 CPU, Memory, Energy and Storage repeat the corresponding ranking on their own pages,
 beside their captured App histories. The CPU plot uses 100% for one core; process
