@@ -17,5 +17,7 @@ mod session;
 pub use cancellation::Cancellation;
 pub use live::LiveSession;
 pub(crate) use live::attribution_history as app_attribution_history;
-pub use live::attribution_history::AppAttributionMetric;
+pub use live::attribution_history::{
+    APP_ATTRIBUTION_HISTORIES_RESPONSE_BYTES_MAX, AppAttributionHistories, AppAttributionMetric,
+};
 pub use session::Session;

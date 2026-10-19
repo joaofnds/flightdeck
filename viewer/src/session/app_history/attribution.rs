@@ -224,3 +224,174 @@ impl Session {
         self.operation.check()
     }
 }
+
+pub(crate) struct AttributionReplay {
+    restore: Restore,
+    context: Vec<Key>,
+    readings: Vec<Reading>,
+    prepared: Option<BTreeSet<Key>>,
+}
+
+const REPLAY_LEDGER_BYTES_MAX: usize = size_of::<AttributionReplay>()
+    + super::super::OBSERVATIONS_MAX * size_of::<Key>()
+    + super::READINGS_MAX * (size_of::<Reading>() + 2 * size_of::<Key>());
+const _: () = {
+    assert!(REPLAY_LEDGER_BYTES_MAX < 4 * 1024 * 1024);
+};
+
+impl Session {
+    pub(crate) fn with_app_attribution_replay<T>(
+        &self,
+        selected: &Observation,
+        consume: impl FnOnce(&mut AttributionReplay) -> Result<T>,
+    ) -> Result<T> {
+        self.operation.attach(&self.connection)?;
+        self.operation.check()?;
+        if collector::recording::read_identity(&self.root)?.0 != selected.recording {
+            return Err(Error::Bound("attribution saved recording"));
+        }
+
+        let range = self.app_history_range(selected)?;
+        let mut replay = Box::new(AttributionReplay {
+            restore: Restore {
+                readings: BTreeMap::new(),
+                sources: BTreeMap::new(),
+                source_bytes: 0,
+                plotted: 0,
+            },
+            context: Vec::with_capacity(super::super::OBSERVATIONS_MAX),
+            readings: Vec::with_capacity(super::READINGS_MAX),
+            prepared: None,
+        });
+        self.app_history_gather(&range, &mut replay.restore)?;
+        for key in replay.restore.readings.keys() {
+            replay.context.push(*key);
+        }
+        self.attribution_replay_validate(&replay)?;
+        let response = consume(&mut replay)?;
+        self.attribution_replay_validate(&replay)?;
+
+        Ok(response)
+    }
+
+    pub(crate) fn attribution_replay_plan(
+        &self,
+        replay: &mut AttributionReplay,
+        mut excluded: impl FnMut(&Observation) -> Result<bool>,
+    ) -> Result<()> {
+        assert!(replay.context.len() <= super::super::OBSERVATIONS_MAX);
+        assert!(replay.restore.readings.len() <= super::READINGS_MAX);
+        for reading in replay.restore.readings.values_mut() {
+            self.operation.check()?;
+            reading.plotted = false;
+        }
+        for key in &replay.context {
+            self.operation.check()?;
+            let reading = replay
+                .restore
+                .readings
+                .get_mut(key)
+                .ok_or(Error::Bound("attribution replay context"))?;
+            reading.plotted = !excluded(&reading.observation)?;
+        }
+        let needed = match &replay.prepared {
+            None => self.attribution_readings(&mut replay.restore)?,
+            Some(prepared) => {
+                let needed = self.attribution_replay_keys(replay)?;
+                if !needed.is_subset(prepared) {
+                    return Err(Error::Bound("attribution replay expanded"));
+                }
+
+                needed
+            }
+        };
+        replay.readings.clear();
+        for reading in replay.restore.readings.values() {
+            self.operation.check()?;
+            if needed.contains(&Key::new(&reading.observation)) {
+                if replay.readings.len() == super::READINGS_MAX {
+                    return Err(Error::Bound("attribution replay endpoints"));
+                }
+
+                replay.readings.push(*reading);
+            }
+        }
+        if replay.prepared.is_none() {
+            replay.prepared = Some(needed);
+        }
+
+        Ok(())
+    }
+
+    fn attribution_replay_keys(&self, replay: &AttributionReplay) -> Result<BTreeSet<Key>> {
+        let mut needed = BTreeSet::new();
+        for reading in replay.restore.readings.values() {
+            self.operation.check()?;
+            if reading.plotted {
+                let key = Key::new(&reading.observation);
+                needed.insert(key);
+                if let Some(publication) = key.publication.checked_sub(1) {
+                    needed.insert(Key { publication, ..key });
+                }
+            }
+        }
+        assert!(needed.len() <= super::READINGS_MAX);
+
+        Ok(needed)
+    }
+
+    pub(crate) fn visit_attribution_replay(
+        &self,
+        replay: &mut AttributionReplay,
+        mut consume: impl FnMut(&Frame, Option<&Frame>, [Option<WindowIdentity>; 2]) -> Result<()>,
+        mut pin: impl FnMut(ResidentPin) -> Result<()>,
+    ) -> Result<()> {
+        let mut projection = Projection {
+            previous: None,
+            reading: None,
+        };
+        let mut index = 0;
+        for _batch in 0..super::READINGS_MAX {
+            self.operation.check()?;
+            if index == replay.readings.len() {
+                self.attribution_pins(&replay.restore, &mut pin)?;
+                return self.attribution_replay_validate(replay);
+            }
+            let count = replay.readings[index..]
+                .iter()
+                .take_while(|reading| reading.window == replay.readings[index].window)
+                .count();
+            let end = index + count;
+            self.attribution_batch(
+                &mut replay.restore,
+                &replay.readings[index..end],
+                &mut projection,
+                &mut consume,
+                &mut pin,
+            )?;
+            index = end;
+        }
+
+        Err(Error::Bound("attribution saved batches"))
+    }
+
+    fn attribution_replay_validate(&self, replay: &AttributionReplay) -> Result<()> {
+        self.operation.check()?;
+        for (window, _source) in replay.restore.sources.keys() {
+            self.operation.check()?;
+            self.validate_commitment(*window)?;
+        }
+        for source in replay.restore.sources.values() {
+            self.operation.check()?;
+            source.refresh(&self.connection)?;
+        }
+
+        self.operation.check()
+    }
+}
+
+impl AttributionReplay {
+    pub(crate) fn count(&self) -> usize {
+        self.context.len()
+    }
+}

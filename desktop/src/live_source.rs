@@ -570,8 +570,20 @@ fn reader_app_attribution_history(
     selection: &Value,
     metric: crate::live_app_attribution_history::Metric,
 ) -> Arc<crate::live_app_attribution_history::AppAttributionHistory> {
+    reader_app_attribution_result(
+        session.app_attribution_history(metric.source()),
+        selection,
+        metric,
+    )
+}
+
+fn reader_app_attribution_result(
+    result: persistence::Result<Value>,
+    selection: &Value,
+    metric: crate::live_app_attribution_history::Metric,
+) -> Arc<crate::live_app_attribution_history::AppAttributionHistory> {
     use crate::live_app_attribution_history::AppAttributionHistory;
-    Arc::new(match session.app_attribution_history(metric.source()) {
+    Arc::new(match result {
         Ok(payload) => AppAttributionHistory::prepare(metric, &payload, selection),
         Err(error) => AppAttributionHistory::Unavailable(
             crate::live_notices::recording_context::bounded(&error.to_string(), 512),
@@ -580,14 +592,35 @@ fn reader_app_attribution_history(
 }
 
 fn reader_overview_app_histories(session: &LiveSession, snapshot: &mut Snapshot) {
-    use crate::live_app_attribution_history::Metric;
-    snapshot.overview_app_histories = Some(Arc::new(
-        crate::live_overview_app_histories::OverviewAppHistories {
-            cpu: reader_app_attribution_history(session, &snapshot.selection, Metric::Cpu),
-            power: reader_app_attribution_history(session, &snapshot.selection, Metric::Power),
-            disk: reader_app_attribution_history(session, &snapshot.selection, Metric::Disk),
-        },
-    ));
+    reader_overview_app_histories_result(session.app_attribution_histories(), snapshot);
+}
+
+fn reader_overview_app_histories_result(
+    result: persistence::Result<Box<viewer::AppAttributionHistories>>,
+    snapshot: &mut Snapshot,
+) {
+    use crate::live_app_attribution_history::{AppAttributionHistory, Metric};
+    use crate::live_overview_app_histories::OverviewAppHistories;
+    let histories = match result {
+        Ok(histories) => histories,
+        Err(error) => {
+            let unavailable = Arc::new(AppAttributionHistory::Unavailable(
+                crate::live_notices::recording_context::bounded(&error.to_string(), 512),
+            ));
+            snapshot.overview_app_histories = Some(Arc::new(OverviewAppHistories {
+                cpu: Arc::clone(&unavailable),
+                power: Arc::clone(&unavailable),
+                disk: unavailable,
+            }));
+            return;
+        }
+    };
+
+    snapshot.overview_app_histories = Some(Arc::new(OverviewAppHistories {
+        cpu: reader_app_attribution_result(histories.cpu, &snapshot.selection, Metric::Cpu),
+        power: reader_app_attribution_result(histories.power, &snapshot.selection, Metric::Power),
+        disk: reader_app_attribution_result(histories.disk, &snapshot.selection, Metric::Disk),
+    }));
 }
 
 fn reader_resident_history(session: &LiveSession, snapshot: &mut Snapshot) {

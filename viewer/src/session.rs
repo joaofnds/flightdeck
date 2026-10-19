@@ -33,6 +33,7 @@ pub struct Session {
     app_sample_cache: std::cell::RefCell<Option<committed_apps::Cache>>,
     app_history_cache: std::cell::RefCell<Option<app_history::Cache>>,
     app_process_history_cache: std::cell::RefCell<Option<app_history::Cache>>,
+    pub(crate) saved_history_context_preparations: std::cell::Cell<u64>,
     operation: Operation,
     #[cfg(test)]
     pub(crate) source_reads: std::cell::Cell<u64>,
@@ -114,6 +115,7 @@ impl Session {
             app_sample_cache: std::cell::RefCell::new(None),
             app_history_cache: std::cell::RefCell::new(None),
             app_process_history_cache: std::cell::RefCell::new(None),
+            saved_history_context_preparations: std::cell::Cell::new(0),
             operation,
             #[cfg(test)]
             source_reads: std::cell::Cell::new(0),
@@ -584,5 +586,6 @@ fn discover(root: &Path, windows: &mut Vec<Manifest>, operation: &Operation) -> 
 mod cpu_history_saved;
 
 mod app_history;
+pub(crate) use app_history::AttributionReplay;
 mod committed_apps;
 mod selection;

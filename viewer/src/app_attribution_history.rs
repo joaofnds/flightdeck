@@ -19,7 +19,47 @@ pub enum AppAttributionMetric {
     Disk,
 }
 
+pub struct AppAttributionHistories {
+    pub cpu: Result<Value>,
+    pub power: Result<Value>,
+    pub disk: Result<Value>,
+}
+
+pub const APP_ATTRIBUTION_HISTORIES_RESPONSE_BYTES_MAX: usize =
+    3 * crate::live_app_response::RESPONSE_BYTES_MAX;
+
+const _: () = {
+    assert!(APP_ATTRIBUTION_HISTORIES_RESPONSE_BYTES_MAX == 24 * 1024 * 1024);
+    assert!(size_of::<Box<AppAttributionHistories>>() <= 16);
+    assert!(3 * reduce::WORKING_BYTES_MAX + 512 * 1024 < 40 * 1024 * 1024);
+};
+
 impl LiveSession {
+    /// Counts saved App-history context preparation attempts, not disk reads or bytes.
+    /// Resets when the saved interpreter is replaced and saturates at `u64::MAX`.
+    #[must_use]
+    pub fn saved_history_context_preparations(&self) -> u64 {
+        self.history.as_ref().map_or(0, |history| {
+            history.saved_history_context_preparations.get()
+        })
+    }
+
+    pub fn app_attribution_histories(&self) -> Result<Box<AppAttributionHistories>> {
+        self.operation.run(|| {
+            let mut selected = None;
+            self.with_selected_apps(|sample| {
+                selected = Some(sample.selected);
+                Ok(Value::Null)
+            })?;
+            let selected = selected.ok_or(Error::Bound("App attribution selection"))?;
+            self.app_history.attribution_batch_response(
+                &selected,
+                self.history.as_ref(),
+                &self.operation,
+            )
+        })
+    }
+
     pub fn app_attribution_history(&self, metric: AppAttributionMetric) -> Result<Value> {
         self.operation.run(|| {
             let mut selected = None;
@@ -88,3 +128,7 @@ mod tests;
 #[cfg(test)]
 #[path = "app_attribution_history/cohort_tests.rs"]
 mod cohort_tests;
+
+#[cfg(test)]
+#[path = "app_attribution_history/batch_tests.rs"]
+mod batch_tests;

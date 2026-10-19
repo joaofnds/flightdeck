@@ -13,6 +13,7 @@ use persistence::{Error, Result};
 use serde_json::Value;
 
 mod attribution;
+pub(crate) use attribution::AttributionReplay;
 mod resident;
 
 pub(super) struct Cache {
@@ -259,6 +260,11 @@ impl Session {
     }
 
     fn app_history_gather(&self, range: &ContextRange, restore: &mut Restore) -> Result<()> {
+        self.saved_history_context_preparations.set(
+            self.saved_history_context_preparations
+                .get()
+                .saturating_add(1),
+        );
         assert!(self.windows.len() <= WINDOWS_MAX);
         let predicate = format!("wall_ns>={} AND wall_ns<{}", range.first_ns, range.end_ns);
         for (window, manifest) in self.windows.iter().enumerate() {

@@ -1,3 +1,6 @@
+#[path = "attribution_batch.rs"]
+mod batch;
+
 use std::cell::{Cell, RefCell};
 
 use persistence::{Error, Result};

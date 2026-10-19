@@ -164,3 +164,161 @@ fn overview_exact_history_lookup_reports_its_frontend_cost() {
     );
     assert!(counts.calls <= 16, "{counts:?}");
 }
+
+#[test]
+fn real_overview_warm_reader_prepares_one_attribution_and_one_resident_context() {
+    // A real warm Reader must gather two saved contexts even though it installs four histories.
+    let recording = SealedRecording::with_ranked_apps();
+    let mut reader = super::super::SnapshotReader::new();
+    reader.command.request = exact_ranked_request("overview");
+    assert!(reader.read(&recording).unwrap().is_some());
+    let before = reader
+        .reader
+        .session
+        .as_ref()
+        .unwrap()
+        .saved_history_context_preparations();
+    reader.command.generation += 1;
+
+    let snapshot = reader.read(&recording).unwrap().unwrap();
+
+    let after = reader
+        .reader
+        .session
+        .as_ref()
+        .unwrap()
+        .saved_history_context_preparations();
+    assert_eq!(after - before, 2);
+    assert_healthy_cpu_and_disk(&snapshot);
+    let power = snapshot.attribution_history(Metric::Power).unwrap();
+    assert_eq!(power.captured_amount(1, power.index(None)), Some(600_000));
+    let resident = snapshot.resident_history.as_ref().unwrap();
+    assert_eq!(resident.amount(1, resident.index(None)), Some(1_228_800));
+}
+
+#[test]
+fn overview_batch_common_failure_replaces_stale_histories_and_preserves_other_readings() {
+    // Feed the production adapter a common error after accepting real CPU, Disk and Resident data.
+    let mut fixture = BatchResultFixture::new();
+    let preserved: Box<PreservedReadings> = fixture.snapshot.as_ref().into();
+    let failure = persistence::Error::Io(std::io::Error::other("x".repeat(2048)));
+
+    crate::live_source::reader_overview_app_histories_result(Err(failure), &mut fixture.snapshot);
+
+    assert_unavailable(&fixture.snapshot, Metric::Cpu);
+    assert_unavailable(&fixture.snapshot, Metric::Power);
+    assert_unavailable(&fixture.snapshot, Metric::Disk);
+    preserved.assert_unchanged(&fixture.snapshot);
+}
+
+#[test]
+fn overview_batch_power_failure_preserves_literal_cpu_disk_and_other_readings() {
+    // A real batch's metric-local refusal cannot poison its two successful siblings.
+    let mut fixture = BatchResultFixture::new();
+    let preserved: Box<PreservedReadings> = fixture.snapshot.as_ref().into();
+    fixture.histories.power = Err(persistence::Error::Bound("power test refusal"));
+
+    crate::live_source::reader_overview_app_histories_result(
+        Ok(fixture.histories),
+        &mut fixture.snapshot,
+    );
+
+    assert_unavailable(&fixture.snapshot, Metric::Power);
+    assert_healthy_cpu_and_disk(&fixture.snapshot);
+    preserved.assert_unchanged(&fixture.snapshot);
+}
+
+#[test]
+fn overview_batch_wrong_power_selection_withholds_only_power() {
+    // Changing one actual payload's selected publication must not admit a neighboring identity.
+    let mut fixture = BatchResultFixture::new();
+    let preserved: Box<PreservedReadings> = fixture.snapshot.as_ref().into();
+    fixture.histories.power.as_mut().unwrap()["selected"]["stamp"]["publication"] = json!("1");
+
+    crate::live_source::reader_overview_app_histories_result(
+        Ok(fixture.histories),
+        &mut fixture.snapshot,
+    );
+
+    assert_unavailable(&fixture.snapshot, Metric::Power);
+    assert_healthy_cpu_and_disk(&fixture.snapshot);
+    preserved.assert_unchanged(&fixture.snapshot);
+}
+
+struct BatchResultFixture {
+    snapshot: Box<crate::live_source::Snapshot>,
+    histories: Box<viewer::AppAttributionHistories>,
+}
+
+impl BatchResultFixture {
+    fn new() -> Self {
+        let recording = SealedRecording::with_ranked_apps();
+        let mut reader = super::super::SnapshotReader::new();
+        reader.command.request = exact_ranked_request("overview");
+        let snapshot = reader.read(&recording).unwrap().unwrap();
+        let histories = reader
+            .reader
+            .session
+            .as_ref()
+            .unwrap()
+            .app_attribution_histories()
+            .unwrap();
+
+        Self {
+            snapshot,
+            histories,
+        }
+    }
+}
+
+struct PreservedReadings {
+    selection: serde_json::Value,
+    pages: std::collections::BTreeMap<String, serde_json::Value>,
+    resident: Arc<crate::live_resident_history::ResidentHistory>,
+    rankings: Arc<crate::live_rankings::Rankings>,
+}
+
+impl From<&crate::live_source::Snapshot> for Box<PreservedReadings> {
+    fn from(snapshot: &crate::live_source::Snapshot) -> Self {
+        Box::new(PreservedReadings {
+            selection: snapshot.selection.clone(),
+            pages: snapshot.pages.clone(),
+            resident: Arc::clone(snapshot.resident_history.as_ref().unwrap()),
+            rankings: Arc::clone(snapshot.rankings.as_ref().unwrap()),
+        })
+    }
+}
+
+impl PreservedReadings {
+    fn assert_unchanged(&self, snapshot: &crate::live_source::Snapshot) {
+        assert_eq!(snapshot.selection, self.selection);
+        assert_eq!(snapshot.pages, self.pages);
+        assert!(Arc::ptr_eq(
+            snapshot.resident_history.as_ref().unwrap(),
+            &self.resident
+        ));
+        assert!(Arc::ptr_eq(
+            snapshot.rankings.as_ref().unwrap(),
+            &self.rankings
+        ));
+    }
+}
+
+fn assert_healthy_cpu_and_disk(snapshot: &crate::live_source::Snapshot) {
+    let cpu = snapshot.attribution_history(Metric::Cpu).unwrap();
+    assert_eq!(cpu.captured_amount(1, cpu.index(None)), Some(600));
+    assert_eq!(cpu.panel().unwrap().lines[1].values[1], Some(0.000_06));
+    let disk = snapshot.attribution_history(Metric::Disk).unwrap();
+    assert_eq!(disk.captured_amount(1, disk.index(None)), Some(900_000_000));
+    assert_eq!(disk.amount(1, disk.index(None)), Some(900_000_000.0));
+}
+
+fn assert_unavailable(snapshot: &crate::live_source::Snapshot, metric: Metric) {
+    let crate::live_app_attribution_history::AppAttributionHistory::Unavailable(message) =
+        snapshot.attribution_history(metric).unwrap()
+    else {
+        panic!("{metric:?} retained a history after its batch failed");
+    };
+    assert!(!message.is_empty());
+    assert!(message.chars().count() <= 513);
+}

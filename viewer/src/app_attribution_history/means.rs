@@ -36,7 +36,7 @@ struct Comparison<'mean> {
 
 const APPS_MAX: usize = 24_000;
 const KEY_BYTES_MAX: usize = 8 * 1024 * 1024;
-const BYTES_MAX: usize = 10 * 1024 * 1024;
+pub(super) const BYTES_MAX: usize = 10 * 1024 * 1024;
 const _: () = {
     assert!(size_of::<Entry>() <= 64);
     assert!(APPS_MAX == crate::live_app_response::APPS_MAX);
