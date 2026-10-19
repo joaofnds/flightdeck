@@ -1,5 +1,6 @@
 use super::*;
 
+mod app_machine_tests;
 mod battery_tests;
 mod storage_tests;
 
@@ -58,13 +59,14 @@ impl Fixture {
                 publication,
                 table(
                     &[
+                        "publication",
                         "cpu",
                         "user_ticks",
                         "system_ticks",
                         "nice_ticks",
                         "idle_ticks",
                     ],
-                    &[&["0", "10", "20", "0", "70"]],
+                    &[&[if current { "2" } else { "1" }, "0", "10", "20", "0", "70"]],
                 ),
             );
             tables
@@ -589,11 +591,12 @@ fn preserves_independent_memory_and_network_counter_availability() {
     assert_eq!(value["network_tx_bps"], 512.0);
 }
 
-const POINT_FIELDS: [&str; 41] = [
+const POINT_FIELDS: [&str; 42] = [
     "battery",
     "boot",
     "continuous_ns",
     "cpu_percent",
+    "cpu_percent_one_core",
     "fan_rpm",
     "gpu_active_percent",
     "gpu_watts",

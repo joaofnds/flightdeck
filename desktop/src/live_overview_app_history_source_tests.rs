@@ -33,6 +33,25 @@ fn real_overview_worker_installs_four_distinct_captured_app_histories() {
         .attribution_history(Metric::Disk)
         .unwrap();
     assert_eq!(disk.captured_amount(1, disk.index(None)), Some(900_000_000));
+    let cpu = presentation
+        .snapshot
+        .attribution_history(Metric::Cpu)
+        .unwrap();
+    assert_eq!(cpu.panel().unwrap().lines[9].name, "All CPU");
+    assert_eq!(cpu.panel().unwrap().lines[9].values[1], Some(10.0));
+    assert_eq!(cpu.amount(9, Some(1)), Some(10.0));
+    assert_eq!(
+        cpu.reading(9, Some(1)),
+        "10.00 % · all recorded logical CPUs"
+    );
+    assert_eq!(disk.panel().unwrap().lines[9].name, "All disk I/O");
+    assert_eq!(disk.panel().unwrap().lines[9].values[1], Some(6.0));
+    assert_eq!(disk.amount(9, Some(1)), Some(6_000_000.0));
+    assert_eq!(disk.captured_amount(9, Some(1)), None);
+    assert_eq!(
+        disk.reading(9, Some(1)),
+        "6.0 MB/s · whole-device read + write"
+    );
     println!(
         "{}",
         json!({"case":"overview_real_worker", "read_ms":read_ms})
@@ -50,7 +69,8 @@ fn assert_overview_rate(
         .iter()
         .find(|panel| panel.id == metric.panel_id())
         .unwrap();
-    assert_eq!(panel.lines.len(), 9);
+    let expected_lines = if metric == Metric::Power { 9 } else { 10 };
+    assert_eq!(panel.lines.len(), expected_lines);
     assert_eq!(panel.lines[0].name, "Other");
     assert_eq!(panel.lines[1].name, "App00600");
     assert_eq!(panel.selected_index, Some(1));

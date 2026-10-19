@@ -482,7 +482,7 @@ impl LiveDashboard {
         let second = self
             .reading_snapshot()
             .and_then(|snapshot| snapshot.selection["second"].as_u64());
-        let reading = format!(
+        let mut reading = format!(
             "{}; {}",
             second.map_or_else(
                 || "Waiting".into(),
@@ -490,6 +490,13 @@ impl LiveDashboard {
             ),
             self.chart_reading(panel, self.chart_inspection_index(panel))
         );
+        if let Some(history) = self.chart_attribution_history(panel) {
+            if let Some(reference) = history.reference_reading(self.chart_inspection_index(panel)) {
+                reading.push_str("; ");
+                reading.push_str(&reference);
+            }
+        }
+
         (second, reading)
     }
 
@@ -648,13 +655,24 @@ impl LiveDashboard {
                 .lines
                 .iter()
                 .take(16)
-                .filter(|line| {
-                    self.hidden
-                        .contains(&format!("{}\t{}", panel.id, line.name))
-                })
-                .map(|line| line.name.clone())
+                .enumerate()
+                .filter(|(index, _)| self.hidden.contains(&self.chart_legend_key(panel, *index)))
+                .map(|(_, line)| line.name.clone())
                 .collect(),
         )
+    }
+
+    pub(crate) fn chart_legend_key(&self, panel: &Panel, index: usize) -> String {
+        let line = &panel.lines[index];
+        if let Some(history) = self.chart_attribution_history(panel) {
+            if history.is_reference(index) {
+                return format!("{}\tmachine-reference", panel.id);
+            }
+
+            return format!("{}\tapp-series\t{}", panel.id, line.name);
+        }
+
+        format!("{}\t{}", panel.id, line.name)
     }
 
     fn chart_legends(
@@ -669,7 +687,7 @@ impl LiveDashboard {
 
         let mut legends = div().flex().flex_wrap().gap_x(px(12.0)).text_size(px(11.0));
         for (line_index, line) in panel.lines.iter().take(16).enumerate() {
-            let key = format!("{}\t{}", panel.id, line.name);
+            let key = self.chart_legend_key(panel, line_index);
             let reading = self.chart_line_reading(panel, line_index, index);
             let label = Self::chart_legends_label(panel, line_index, &reading);
             legends = legends.child(

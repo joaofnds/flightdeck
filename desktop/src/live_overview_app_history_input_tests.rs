@@ -2,6 +2,9 @@ use super::*;
 use crate::live_app_attribution_history::{AppAttributionHistory, Metric, tests::fixture};
 use crate::live_overview_app_histories::OverviewAppHistories;
 
+#[path = "live_app_machine_reference_input_tests.rs"]
+mod machine_reference;
+
 macro_rules! overview_history_width_case {
     ($name:ident, $width:literal, $assertion:ident) => {
         #[gpui::test]

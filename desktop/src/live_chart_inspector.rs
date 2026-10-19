@@ -216,7 +216,7 @@ impl LiveDashboard {
     fn chart_series_visible(&self, panel: &Panel, line_index: usize) -> bool {
         !self
             .hidden
-            .contains(&format!("{}\t{}", panel.id, panel.lines[line_index].name))
+            .contains(&self.chart_legend_key(panel, line_index))
     }
 
     pub(crate) fn chart_tooltip(
@@ -268,6 +268,11 @@ impl LiveDashboard {
         right: usize,
     ) -> std::cmp::Ordering {
         if let Some(history) = self.chart_attribution_history(panel) {
+            let reference_order = history.is_reference(left).cmp(&history.is_reference(right));
+            if reference_order != std::cmp::Ordering::Equal {
+                return reference_order;
+            }
+
             if crate::live_app_attribution_history::Metric::from_panel(&panel.id)
                 == Some(crate::live_app_attribution_history::Metric::Disk)
             {

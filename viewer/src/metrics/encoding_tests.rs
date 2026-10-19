@@ -29,7 +29,7 @@ impl Recording {
         };
         let shape = Shape {
             slot_count: 2,
-            cpu_capacity: 1,
+            cpu_capacity: 2,
             interface_capacity: 1,
             core_capacity: 1,
             state_capacity: 2,
@@ -122,12 +122,20 @@ impl Drop for Recording {
 
 fn tick(current: bool) -> Tick {
     let mut tick = Tick::from_buffers(TickBuffers {
-        cpus: vec![CPUTicks {
-            user: 1,
-            system: 2,
-            nice: 0,
-            idle: 7,
-        }],
+        cpus: vec![
+            CPUTicks {
+                user: if current { 100 } else { 0 },
+                system: 0,
+                nice: 0,
+                idle: 0,
+            },
+            CPUTicks {
+                user: if current { 100 } else { 0 },
+                system: 0,
+                nice: 0,
+                idle: if current { 100 } else { 0 },
+            },
+        ],
         interfaces: Vec::new(),
         gpu_active_ns: if current {
             vec![1_500_000_000, 2_300_000_000]
@@ -209,6 +217,9 @@ fn keeps_the_unsealed_encoder_projection_equal_to_saved_resource_scalars() {
 
     assert_eq!(public_point(&unsealed).unwrap(), expected);
     assert_eq!(response["summary"], expected);
+    assert_eq!(expected["cpu_percent_one_core"], 150.0);
+    assert_eq!(response["trends"][0]["cpu_percent_one_core"], Value::Null);
+    assert_eq!(response["trends"][1]["cpu_percent_one_core"], 150.0);
     assert_eq!(response["summary"]["fan_rpm"], json!([]));
     assert_eq!(response["summary"]["gpu_active_percent"], 40.0);
     assert_eq!(response["summary"]["gpu_watts"], 2.0);

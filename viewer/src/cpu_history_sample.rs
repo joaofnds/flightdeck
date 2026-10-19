@@ -25,12 +25,19 @@ pub(crate) struct Interval<'a> {
 }
 
 #[derive(Clone, Copy)]
+pub(crate) struct CounterInterval<'a> {
+    pub current: &'a Counters,
+    pub previous: &'a Counters,
+}
+
+#[derive(Clone, Copy)]
 struct BusyInterval<'a> {
     current: &'a [Option<u64>; 4],
     previous: &'a [Option<u64>; 4],
 }
 
 const _: () = {
+    assert!(size_of::<CounterInterval<'static>>() <= 16);
     assert!(size_of::<BusyInterval<'static>>() <= 16);
     assert!(size_of::<Option<f64>>() == 16);
     assert!(size_of::<Option<u64>>() == 16);
@@ -145,6 +152,30 @@ pub(crate) fn derive(
     }
 
     Ok(unavailable)
+}
+
+pub(crate) fn sum_busy(interval: CounterInterval<'_>) -> Result<Option<f64>> {
+    assert!(interval.current.len() <= CPUS_MAX);
+    assert!(interval.previous.len() <= CPUS_MAX);
+    if interval.current.is_empty() {
+        return Ok(None);
+    }
+
+    if interval.current.len() != interval.previous.len() {
+        return Ok(None);
+    }
+
+    let mut sum = 0.0;
+    for (current, previous) in interval.current.iter().zip(interval.previous) {
+        let Some(percent) = derive_busy(BusyInterval { current, previous })? else {
+            return Ok(None);
+        };
+
+        sum += percent;
+    }
+    assert!(sum.is_finite());
+
+    Ok(Some(sum))
 }
 
 fn derive_unavailable(interval: &Interval<'_>) -> Option<&'static str> {

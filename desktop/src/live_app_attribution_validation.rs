@@ -50,6 +50,7 @@ impl History {
             retention_limited: boolean(&value["coverage"]["retention_limited"])?,
         };
         history.decode_points(values, &selected, second)?;
+        history.attach_reference(selection);
         validate_coverage(&value["coverage"])?;
 
         Ok(history)
@@ -117,6 +118,7 @@ impl Point {
                 .map(|app| Reading::decode_optional(metric, app))
                 .collect::<Result<_, _>>()?,
             other: Other::decode_optional(metric, &value["other"])?,
+            reference: super::MachineReference::Unavailable("machine observation unavailable"),
         };
         point.validate()?;
 

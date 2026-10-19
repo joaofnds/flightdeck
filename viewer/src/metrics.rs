@@ -130,7 +130,8 @@ pub(crate) fn point(
     let row = only(memory)?;
     let mut value = json!({"wall_ns": current.wall, "publication": current.publication,
         "run_tick": current.run_tick, "continuous_ns": current.continuous,
-        "segment": segment, "cpu_percent": null, "gpu_active_percent": null, "gpu_watts": null,
+        "segment": segment, "cpu_percent": null, "cpu_percent_one_core": null,
+        "gpu_active_percent": null, "gpu_watts": null,
         "power_watts": ticks.number(tick, "power_watts")?,
         "soc_celsius": ticks.number(tick, "soc_celsius")?, "fan_rpm": fan_rpm,
         "interval_unavailable": "Requires consecutive compatible counter samples"});
@@ -225,6 +226,16 @@ fn point_interval(
     let cpus = get(tables, current, "cpus")?;
     let old_cpus = get(tables, previous, "cpus")?;
     value["cpu_percent"] = json!(cpu_percent(cpus, old_cpus)?);
+    let mut current_counters = Vec::new();
+    let mut previous_counters = Vec::new();
+    crate::cpu_history_sample::counters(cpus, current.publication, &mut current_counters)?;
+    crate::cpu_history_sample::counters(old_cpus, previous.publication, &mut previous_counters)?;
+    value["cpu_percent_one_core"] = json!(crate::cpu_history_sample::sum_busy(
+        crate::cpu_history_sample::CounterInterval {
+            current: &current_counters,
+            previous: &previous_counters,
+        }
+    )?);
     let elapsed = current
         .continuous
         .and_then(|now| {

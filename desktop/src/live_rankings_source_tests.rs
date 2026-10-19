@@ -1,9 +1,10 @@
+use collector::disks::{DiskReading, DiskSnapshot, ScanState};
 use collector::machine::Memory;
 use collector::processes::{Process, Task, Usage};
 use collector::ring::{
     DictionaryCapacity, Dropped, Found, IdentityObservation, IdentityPublication, ObservationTimes,
-    Place, ProcessCreation, ProcessIdentity, ProgramBytes, Readings, RingReader, UsageAvailability,
-    Writer,
+    Place, ProcessCreation, ProcessIdentity, ProgramBytes, Readings, RingReader,
+    SupplementalReadings, UsageAvailability, Writer,
 };
 use serde_json::json;
 
@@ -207,7 +208,7 @@ impl SealedRecording {
             name_prefix: "fdrank".into(),
         };
         let mut generation = RankedGeneration {
-            writer: Writer::create_with_identity(
+            writer: Writer::create_with_disks(
                 &place,
                 shape,
                 DictionaryCapacity {
@@ -250,14 +251,7 @@ impl SealedRecording {
         identities: &[IdentityObservation],
         publication: u64,
     ) {
-        for process in &mut *processes {
-            let pid = u64::try_from(process.pid).unwrap();
-            process.usage.user_ns = pid * publication;
-            process.usage.energy_nj = pid * publication * 1000;
-            process.usage.resident_bytes = pid * publication * 1024;
-            process.usage.disk_read_bytes = pid * publication * 1_000_000;
-            process.usage.disk_written_bytes = pid * publication * 500_000;
-        }
+        Self::with_ranked_apps_counters(processes, publication);
         let times = ObservationTimes {
             wall_ns: match publication {
                 1 => 1_000_000_000_000,
@@ -275,8 +269,10 @@ impl SealedRecording {
             nice: 0,
             idle: counter * 90,
         }];
+        let mut disks = DiskSnapshot::default();
+        Self::with_ranked_apps_disks(&mut disks, publication);
         writer
-            .publish_with_identity(
+            .publish_with_disks(
                 &Readings {
                     run_tick: publication - 1,
                     cpus: &cpus,
@@ -296,9 +292,46 @@ impl SealedRecording {
                     processes: identities,
                     events: &[],
                 },
+                &SupplementalReadings {
+                    battery: None,
+                    disks: Some(&disks),
+                },
             )
             .unwrap();
         Self::with_ranked_apps_stage(reader, window, &times, publication);
+    }
+
+    fn with_ranked_apps_counters(processes: &mut [Process], publication: u64) {
+        assert_eq!(processes.len(), 600);
+        for process in processes {
+            let pid = u64::try_from(process.pid).unwrap();
+            process.usage.user_ns = pid * publication;
+            process.usage.energy_nj = pid * publication * 1000;
+            process.usage.resident_bytes = pid * publication * 1024;
+            process.usage.disk_read_bytes = pid * publication * 1_000_000;
+            process.usage.disk_written_bytes = pid * publication * 500_000;
+        }
+    }
+
+    fn with_ranked_apps_disks(disks: &mut DiskSnapshot, publication: u64) {
+        // Whole-device deltas are independent of the captured per-App byte counters.
+        disks.source_continuous_ns = publication * 1_000_000_000;
+        disks.state = ScanState::Complete;
+        disks.count = 1;
+        disks.records[0] = DiskReading {
+            driver_id: 91,
+            media_id: 92,
+            read_bytes: Some(100_000_000 + publication * 4_000_000),
+            write_bytes: Some(50_000_000 + publication * 2_000_000),
+            read_operations: Some(publication * 4),
+            write_operations: Some(publication * 2),
+            read_errors: Some(0),
+            write_errors: Some(0),
+            read_time_ns: Some(publication * 6_000_000),
+            write_time_ns: Some(publication * 3_000_000),
+            ..DiskReading::default()
+        };
+        disks.records[0].name[..5].copy_from_slice(b"disk0");
     }
 
     fn with_ranked_apps_stage(
@@ -437,11 +470,26 @@ fn assert_real_rate_attribution(
         .iter()
         .find(|panel| panel.id == metric.panel_id())
         .expect("Real App counters must produce the attribution plot");
-    assert_eq!(panel.lines.len(), 9);
+    let expected_lines = if metric == crate::live_app_attribution_history::Metric::Power {
+        9
+    } else {
+        10
+    };
+    assert_eq!(panel.lines.len(), expected_lines);
     assert_eq!(panel.lines[0].name, "Other");
     assert_eq!(panel.lines[1].name, "App00600");
     assert_eq!(panel.selected_index, Some(1));
     assert_eq!(panel.lines[1].values[1], Some(expected));
+    if metric == crate::live_app_attribution_history::Metric::Cpu {
+        let history = presentation.snapshot.attribution_history(metric).unwrap();
+        assert_eq!(panel.lines[9].name, "All CPU");
+        assert_eq!(panel.lines[9].values[1], Some(10.0));
+        assert_eq!(history.amount(9, Some(1)), Some(10.0));
+        assert_eq!(
+            history.reading(9, Some(1)),
+            "10.00 % · all recorded logical CPUs"
+        );
+    }
 }
 
 #[test]
@@ -523,11 +571,19 @@ fn real_disk_worker_restores_attribution_and_keeps_exact_interval_bytes() {
         .iter()
         .find(|panel| panel.id == Metric::Disk.panel_id())
         .unwrap();
-    assert_eq!(panel.lines.len(), 9);
+    assert_eq!(panel.lines.len(), 10);
     assert_eq!(panel.lines[0].name, "Other");
     assert_eq!(panel.lines[1].name, "App00600");
     assert_eq!(panel.selected_index, Some(1));
     assert_eq!(panel.lines[1].values[1], Some(900.0));
+    assert_eq!(panel.lines[9].name, "All disk I/O");
+    assert_eq!(panel.lines[9].values[1], Some(6.0));
+    assert_eq!(history.amount(9, Some(1)), Some(6_000_000.0));
+    assert_eq!(history.captured_amount(9, Some(1)), None);
+    assert_eq!(
+        history.reading(9, Some(1)),
+        "6.0 MB/s · whole-device read + write"
+    );
     assert_eq!(history.captured_amount(1, Some(1)), Some(900_000_000));
     assert_eq!(
         history.reading(1, Some(1)),

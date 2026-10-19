@@ -7,10 +7,14 @@ use crate::data::{Line, Panel};
 use crate::live_hover::Target;
 use crate::live_resident_history::{COLORS, Observation};
 
+#[path = "live_app_machine_reference.rs"]
+mod machine_reference;
 #[path = "live_app_attribution_validation.rs"]
 mod validation;
 #[path = "live_app_attribution_view.rs"]
 mod view;
+
+use machine_reference::MachineReference;
 
 pub enum AppAttributionHistory {
     Ready(History),
@@ -44,6 +48,7 @@ struct Point {
     usage_gone: Option<u32>,
     apps: Vec<Option<Reading>>,
     other: Option<Other>,
+    reference: MachineReference,
 }
 
 #[derive(Clone, Copy)]
@@ -171,7 +176,12 @@ impl AppAttributionHistory {
             return None;
         };
 
-        history.points.get(index?)?.reading(line)?.rate
+        let point = history.points.get(index?)?;
+        if history.is_reference(line) {
+            return point.reference.rate();
+        }
+
+        point.reading(line)?.rate
     }
 
     pub fn captured_amount(&self, line: usize, index: Option<usize>) -> Option<u64> {
@@ -188,6 +198,9 @@ impl AppAttributionHistory {
         let Self::Ready(history) = self else {
             return "Unavailable".into();
         };
+        if history.is_reference(line) {
+            return history.reference_reading(index);
+        }
         let Some(reading) = index
             .and_then(|index| history.points.get(index))
             .and_then(|point| point.reading(line))
@@ -214,6 +227,22 @@ impl AppAttributionHistory {
         }
 
         text
+    }
+
+    pub fn is_reference(&self, line: usize) -> bool {
+        match self {
+            Self::Ready(history) => history.is_reference(line),
+            Self::Unavailable(_) => false,
+        }
+    }
+
+    pub fn reference_reading(&self, index: Option<usize>) -> Option<String> {
+        let Self::Ready(history) = self else {
+            return None;
+        };
+        let name = history.reference_label()?;
+
+        Some(format!("{name}: {}", history.reference_reading(index)))
     }
 
     pub fn coverage(&self, index: Option<usize>) -> String {
@@ -279,7 +308,7 @@ impl AppAttributionHistory {
 
 impl History {
     fn panel(&self) -> Panel {
-        let mut lines = Vec::with_capacity(self.cohort.len() + 1);
+        let mut lines = Vec::with_capacity(self.cohort.len() + 2);
         for (index, name) in std::iter::once("Other")
             .chain(self.cohort.iter().map(String::as_str))
             .enumerate()
@@ -300,6 +329,8 @@ impl History {
                 fill: None,
             });
         }
+
+        self.panel_reference_line(&mut lines);
 
         Panel {
             id: self.metric.panel_id().into(),
@@ -330,7 +361,8 @@ impl History {
                 "Captured process CPU time per interval. 100% equals one core; \
                 Apps can exceed 100%. Eight leaders use the complete context's mean rate. \
                 Other sums remaining captured Apps. Missing intervals remain gaps; known \
-                subtotals exclude unavailable process members."
+                subtotals exclude unavailable process members. The dashed All CPU reference sums \
+                recorded per-core busy percentages; it is excluded from App totals."
             }
             Metric::Power => {
                 "Captured process energy per interval, in watts. This is separate \
@@ -343,7 +375,10 @@ impl History {
                 Exact interval bytes stay separate from the rate. This is separate from \
                 device-driver throughput. Eight leaders use the complete context's mean rate; \
                 Other sums remaining captured Apps. Known subtotals include only members with \
-                both directions measured. Missing Apps and unavailable intervals remain gaps."
+                both directions measured. Missing Apps and unavailable intervals remain gaps. \
+                The dashed All disk I/O reference sums measured whole-device read and write \
+                rates; incomplete device coverage is unavailable. References stay outside \
+                App totals."
             }
         }
     }
