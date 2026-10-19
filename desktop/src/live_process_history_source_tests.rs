@@ -362,6 +362,30 @@ fn default_all_process_groups_loads_eight_histories_before_app_totals() {
 }
 
 #[test]
+fn all_groups_disk_draws_written_bytes_below_zero() {
+    // Goal: as in the prototype, each group's reads rise above the axis and its writes fall
+    // below it. Method: project the two-name recording and read the disk lines' directions.
+    let recording = named_recording();
+    let mut request = named_request();
+    request.executable = None;
+    let snapshot = recording.read(request.clone()).unwrap();
+
+    let presentation = crate::live_acceptance::Presentation::prepare(&request, snapshot).unwrap();
+
+    let disk = presentation
+        .panels
+        .iter()
+        .find(|panel| panel.id == "live-process-groups-disk")
+        .unwrap();
+    let directions: Vec<_> = disk.lines.iter().map(|line| line.negative).collect();
+    assert_eq!(
+        directions,
+        [Some(false), Some(false), Some(true), Some(true)]
+    );
+    assert_eq!(disk.minimum, None);
+}
+
+#[test]
 fn all_groups_inspector_uses_the_exact_shared_same_second_observation() {
     // Two observations share a second; all panels and exact Disk values use publication two.
     let recording = named_recording();

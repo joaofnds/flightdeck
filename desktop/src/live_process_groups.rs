@@ -70,7 +70,8 @@ struct PanelDefinition {
     unit: &'static str,
     metrics: &'static [ProcessGroupMetric],
     /// Whether the groups stack as areas, as they do for every metric whose groups add up to
-    /// the App's total. Disk draws read and written apart, so it does not stack.
+    /// the App's total. Disk draws read above the axis and written below it, so it does not
+    /// stack.
     stacked: bool,
 }
 
@@ -163,6 +164,11 @@ fn panels_panel(
     panels_panel_positions(payload, first, span, &mut positions, &mut segments)?;
     let mut lines = Vec::with_capacity(payload.groups.len() * definition.metrics.len());
 
+    // The prototype mirrors written bytes below the axis, so that chart has no zero floor.
+    let mirrored = definition
+        .metrics
+        .iter()
+        .any(|metric| matches!(metric, ProcessGroupMetric::DiskWritten));
     for metric in definition.metrics {
         for (group, identity) in payload.groups.iter().enumerate() {
             lines.push(panels_panel_line(payload, group, identity, *metric));
@@ -175,7 +181,7 @@ fn panels_panel(
         unit: definition.unit.into(),
         kind: "line".into(),
         lines,
-        minimum: Some(0.0),
+        minimum: if mirrored { None } else { Some(0.0) },
         maximum: None,
         stack: Some(definition.stacked),
         fill: Some(if definition.stacked { 0.45 } else { 0.1 }),
@@ -273,7 +279,7 @@ fn panels_panel_line(
             })
             .collect(),
         stack: None,
-        negative: Some(false),
+        negative: Some(matches!(metric, ProcessGroupMetric::DiskWritten)),
         dashed: Some(false),
         axis: None,
         unit: None,
