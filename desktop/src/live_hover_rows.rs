@@ -44,12 +44,8 @@ impl LiveDashboard {
         }
         self.reading_rows_charts(&mut rows);
         match self.request.route.as_str() {
-            "cpu" | "energy" => {
-                let metric = if self.request.route == "cpu" {
-                    crate::live_app_attribution_history::Metric::Cpu
-                } else {
-                    crate::live_app_attribution_history::Metric::Power
-                };
+            "cpu" => {
+                let metric = crate::live_app_attribution_history::Metric::Cpu;
                 let panel = self
                     .panels
                     .iter()
@@ -84,6 +80,11 @@ impl LiveDashboard {
     }
 
     fn reading_rows_charts(&self, rows: &mut Vec<Row>) {
+        if self.request.route == "energy" {
+            self.reading_rows_charts_energy(rows);
+            return;
+        }
+
         let machine_panel_count = self
             .panels
             .iter()
@@ -104,6 +105,42 @@ impl LiveDashboard {
         for panels in self.panels[first.min(primary_panel_count)..primary_panel_count]
             .chunks(self.reading_chart_columns())
         {
+            rows.push(Row::Charts(panels.to_vec()));
+        }
+    }
+
+    fn reading_rows_charts_energy(&self, rows: &mut Vec<Row>) {
+        let power: Vec<_> = self
+            .panels
+            .iter()
+            .take(16)
+            .filter(|panel| matches!(panel.id.as_str(), "live-energy" | "live-gpu-power"))
+            .cloned()
+            .collect();
+
+        for panels in power.chunks(self.reading_chart_columns()) {
+            rows.push(Row::Charts(panels.to_vec()));
+        }
+
+        let metric = crate::live_app_attribution_history::Metric::Power;
+        let attribution = self
+            .panels
+            .iter()
+            .take(16)
+            .find(|panel| panel.id == metric.panel_id())
+            .cloned();
+
+        rows.push(Row::AppAttribution(metric, attribution));
+
+        let context: Vec<_> = self
+            .panels
+            .iter()
+            .take(16)
+            .filter(|panel| matches!(panel.id.as_str(), "live-soc-temperature" | "live-fans"))
+            .cloned()
+            .collect();
+
+        for panels in context.chunks(self.reading_chart_columns()) {
             rows.push(Row::Charts(panels.to_vec()));
         }
     }

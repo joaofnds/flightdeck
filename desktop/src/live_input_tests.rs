@@ -194,17 +194,13 @@ fn moving_directly_from_the_first_plot_keeps_both_cursors_synchronized(cx: &mut 
 
     harness
         .driver
-        .hover_previous_second_on("live-soc-temperature-plot");
+        .hover_previous_second_on("live-gpu-power-plot");
 
     assert!(harness.driver.reading_is_visible("90.0 W"));
     assert!(harness.driver.reading_is_visible("60.0 °C"));
     harness.driver.assert_cursors_track_previous_second();
     assert!(harness.driver.cursor_is_visible("live-energy-plot"));
-    assert!(
-        harness
-            .driver
-            .cursor_is_visible("live-soc-temperature-plot")
-    );
+    assert!(harness.driver.cursor_is_visible("live-gpu-power-plot"));
     harness.teardown();
 }
 
@@ -215,7 +211,7 @@ fn moving_directly_from_the_second_plot_keeps_both_cursors_synchronized(cx: &mut
     harness.driver.seed_repeated_second();
     harness
         .driver
-        .hover_selected_second_on("live-soc-temperature-plot");
+        .hover_selected_second_on("live-gpu-power-plot");
     assert!(harness.driver.reading_is_visible("8.0 W"));
 
     harness.driver.hover_previous_second_on("live-energy-plot");
@@ -224,11 +220,7 @@ fn moving_directly_from_the_second_plot_keeps_both_cursors_synchronized(cx: &mut
     assert!(harness.driver.reading_is_visible("60.0 °C"));
     harness.driver.assert_cursors_track_previous_second();
     assert!(harness.driver.cursor_is_visible("live-energy-plot"));
-    assert!(
-        harness
-            .driver
-            .cursor_is_visible("live-soc-temperature-plot")
-    );
+    assert!(harness.driver.cursor_is_visible("live-gpu-power-plot"));
     harness.teardown();
 }
 
@@ -241,11 +233,7 @@ fn scrolling_a_plot_away_from_a_stationary_pointer_hides_both_cursors(cx: &mut T
     let pointer = gpui::point(plot.center().x, plot.bottom() - gpui::px(1.0));
     harness.driver.hover_position(pointer);
     assert!(harness.driver.cursor_is_visible("live-energy-plot"));
-    assert!(
-        harness
-            .driver
-            .cursor_is_visible("live-soc-temperature-plot")
-    );
+    assert!(harness.driver.cursor_is_visible("live-gpu-power-plot"));
 
     harness.driver.scroll_at(pointer, -2.0);
 
@@ -260,11 +248,7 @@ fn scrolling_a_plot_away_from_a_stationary_pointer_hides_both_cursors(cx: &mut T
     );
     assert_eq!(harness.driver.pointer_position(), pointer);
     assert!(!harness.driver.cursor_is_visible("live-energy-plot"));
-    assert!(
-        !harness
-            .driver
-            .cursor_is_visible("live-soc-temperature-plot")
-    );
+    assert!(!harness.driver.cursor_is_visible("live-gpu-power-plot"));
     harness.teardown();
 }
 
@@ -381,13 +365,13 @@ fn leaving_the_second_plot_restores_selected_readings_and_hides_both_cursors(
     harness.driver.hover_selected_second_on("live-energy-plot");
     harness
         .driver
-        .hover_previous_second_on("live-soc-temperature-plot");
+        .hover_previous_second_on("live-gpu-power-plot");
     assert!(harness.driver.reading_is_visible("90.0 W"));
     assert!(harness.driver.reading_is_visible("60.0 °C"));
 
     harness
         .driver
-        .leave_plot("live-soc-temperature-plot", PlotExit::Bottom);
+        .leave_plot("live-gpu-power-plot", PlotExit::Bottom);
 
     harness.driver.assert_cursors_hidden();
     assert!(harness.driver.reading_is_visible("8.0 W"));
@@ -822,17 +806,17 @@ impl InputDriver {
 
     fn assert_cursors_track_previous_second(&mut self) {
         self.assert_cursor_tracks_previous_second("live-energy-plot");
-        self.assert_cursor_tracks_previous_second("live-soc-temperature-plot");
+        self.assert_cursor_tracks_previous_second("live-gpu-power-plot");
     }
 
     fn assert_cursors_visible(&mut self) {
         assert!(self.cursor_is_visible("live-energy-plot"));
-        assert!(self.cursor_is_visible("live-soc-temperature-plot"));
+        assert!(self.cursor_is_visible("live-gpu-power-plot"));
     }
 
     fn assert_cursors_hidden(&mut self) {
         assert!(!self.cursor_is_visible("live-energy-plot"));
-        assert!(!self.cursor_is_visible("live-soc-temperature-plot"));
+        assert!(!self.cursor_is_visible("live-gpu-power-plot"));
     }
 
     fn assert_cursor_tracks_previous_second(&mut self, selector: &'static str) {

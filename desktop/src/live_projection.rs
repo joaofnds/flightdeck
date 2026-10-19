@@ -530,13 +530,11 @@ fn energy(points: &[Value]) -> Result<Vec<Specification>, String> {
     Ok(vec![
         specification(
             "live-energy",
-            "Recorded power",
+            "System power",
             "W",
-            vec![
-                reading("power_watts", "System power", "#ff9830", 1.0),
-                reading("gpu_watts", "GPU power", "#b877d9", 1.0),
-            ],
+            vec![reading("power_watts", "System power", "#ff9830", 1.0)],
         ),
+        gpu_power(),
         specification(
             "live-soc-temperature",
             "SoC temperature",

@@ -82,15 +82,9 @@ fn overview_network_combines_positive_readouts_and_mirrors_only_send_geometry() 
 }
 
 #[test]
-fn energy_series_remain_independent_and_memory_categories_only_stack_in_overview() {
-    // Goal: avoid inventing total power or a computed used-memory total.
-    // Method: inspect source values and stacking on both memory routes.
+fn memory_categories_only_stack_in_overview() {
+    // Inspect source values and stacking without inventing a computed used-memory total.
     let selection = selection();
-    let energy = panels("energy", &selection, None).unwrap();
-    assert_eq!(energy[0].lines.len(), 2);
-    assert_eq!(energy[0].lines[0].values[1], Some(8.0));
-    assert_eq!(energy[0].lines[1].values[1], Some(2.0));
-    assert_eq!(energy[0].stack, Some(false));
     let overview = panels("overview", &selection, None).unwrap();
     assert_eq!(overview.len(), 8);
     assert_eq!(overview[2].stack, Some(true));
@@ -100,6 +94,43 @@ fn energy_series_remain_independent_and_memory_categories_only_stack_in_overview
     assert_eq!(memory[0].lines[0].values[1], Some(1.0));
     assert_eq!(memory[0].lines[1].values[1], None);
     assert_eq!(memory[2].lines[1].dashed, Some(true));
+}
+
+#[test]
+fn energy_power_panels_preserve_independent_sources_and_missing_intervals() {
+    // Separate captured system and GPU power while preserving each source's measured zero and gaps.
+    let mut selection = selection();
+    selection["trends"][0]["gpu_watts"] = json!(0.0);
+    selection["trends"][1]["gpu_watts"] = Value::Null;
+    selection["trends"][2]["gpu_watts"] = json!(2.5);
+
+    let energy = panels("energy", &selection, None).unwrap();
+
+    assert_eq!(
+        energy
+            .iter()
+            .map(|panel| panel.id.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "live-energy",
+            "live-gpu-power",
+            "live-soc-temperature",
+            "live-fans"
+        ]
+    );
+    assert_eq!(energy[0].title, "System power");
+    assert_eq!(energy[1].title, "GPU power");
+    assert_eq!(energy[0].lines.len(), 1);
+    assert_eq!(energy[1].lines.len(), 1);
+    assert_eq!(energy[0].lines[0].values, [None, Some(8.0), None]);
+    assert_eq!(energy[1].lines[0].values, [Some(0.0), None, Some(2.5)]);
+    assert_eq!(energy[0].unit, "W");
+    assert_eq!(energy[1].unit, "W");
+    assert_eq!(energy[0].stack, Some(false));
+    assert_eq!(energy[1].stack, Some(false));
+    assert_eq!(energy[0].positions, energy[1].positions);
+    assert_eq!(energy[0].segments, energy[1].segments);
+    assert_eq!(energy[0].selected_index, energy[1].selected_index);
 }
 
 #[test]
@@ -395,14 +426,14 @@ fn energy_exposes_temperature_and_channel_indexed_fan_history() {
 
     let energy = panels("energy", &selection, None).unwrap();
 
-    assert_eq!(energy.len(), 3);
-    assert_eq!(energy[1].title, "SoC temperature");
-    assert_eq!(energy[1].lines[0].values, [None, Some(42.5), None]);
-    assert_eq!(energy[2].unit, "RPM");
-    assert_eq!(energy[2].lines[0].name, "Fan 0");
-    assert_eq!(energy[2].lines[0].values, [Some(0.0), None, Some(1200.0)]);
-    assert_eq!(energy[2].lines[1].name, "Fan 1");
-    assert_eq!(energy[2].lines[1].values, [None, None, None]);
+    assert_eq!(energy.len(), 4);
+    assert_eq!(energy[2].title, "SoC temperature");
+    assert_eq!(energy[2].lines[0].values, [None, Some(42.5), None]);
+    assert_eq!(energy[3].unit, "RPM");
+    assert_eq!(energy[3].lines[0].name, "Fan 0");
+    assert_eq!(energy[3].lines[0].values, [Some(0.0), None, Some(1200.0)]);
+    assert_eq!(energy[3].lines[1].name, "Fan 1");
+    assert_eq!(energy[3].lines[1].values, [None, None, None]);
 }
 
 #[test]

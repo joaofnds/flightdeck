@@ -174,18 +174,29 @@ fn regrouping_a_hovered_first_plot_recomputes_its_reading_at_the_stationary_poin
 }
 
 #[gpui::test]
-fn energy_charts_keep_two_columns_until_the_narrow_breakpoint(cx: &mut TestAppContext) {
-    // A resource page has two columns even at the width where Overview has three.
+fn energy_power_and_attribution_precede_thermal_context_at_wide_and_narrow_widths(
+    cx: &mut TestAppContext,
+) {
+    // Measure the installed power pair, captured App plot, ranking and source context in order.
     let mut harness = InputHarness::setup(cx);
-    harness.driver.seed_rolling_selection();
+    harness.driver.seed_energy_layout_selection();
+    let selected = harness.driver.accepted_selection().unwrap()["selected"].clone();
 
     harness.driver.resize_charts(1320.0);
-    harness.driver.assert_energy_columns(2);
+    harness.driver.assert_energy_layout(false);
     harness.driver.resize_charts(840.0);
-    harness.driver.assert_energy_columns(2);
+    harness.driver.assert_energy_layout(false);
+    harness.driver.resize_charts(640.0);
+    harness.driver.assert_energy_layout(false);
+    harness.driver.resize_charts(639.0);
+    harness.driver.assert_energy_layout(true);
     harness.driver.resize_charts(600.0);
+    harness.driver.assert_energy_layout(true);
 
-    harness.driver.assert_energy_columns(1);
+    assert_eq!(
+        harness.driver.accepted_selection().unwrap()["selected"],
+        selected
+    );
     harness.teardown();
 }
 
@@ -284,13 +295,55 @@ impl InputDriver {
         assert_chart_columns(&bounds, columns);
     }
 
-    fn assert_energy_columns(&mut self, columns: usize) {
-        let bounds = [
-            self.chart_bounds("live-energy-plot"),
-            self.chart_bounds("live-soc-temperature-plot"),
-            self.chart_bounds("live-fans-plot"),
-        ];
-        assert_chart_columns(&bounds, columns);
+    fn seed_energy_layout_selection(&mut self) {
+        use crate::live_app_attribution_history::{AppAttributionHistory, Metric, tests::fixture};
+        self.view.update(&mut self.context, |dashboard, cx| {
+            let mut snapshot = accepted_snapshot(dashboard.generation);
+            for (index, point) in snapshot.selection["trends"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .enumerate()
+            {
+                point["soc_celsius"] = json!([20.0, 40.0][index]);
+                point["fan_rpm"] = json!([[1000.0], [1200.0]][index]);
+            }
+            snapshot.selection["summary"] = snapshot.selection["trends"][1].clone();
+            let history = AppAttributionHistory::prepare(
+                Metric::Power,
+                &fixture(Metric::Power),
+                &snapshot.selection,
+            );
+            assert!(history.panel().is_some(), "{}", history.coverage(None));
+            snapshot.app_attribution_history = Some(std::sync::Arc::new(history));
+            dashboard.accept(snapshot);
+            assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
+            cx.notify();
+        });
+        self.context.run_until_parked();
+    }
+
+    fn assert_energy_layout(&mut self, narrow: bool) {
+        let system = self.chart_bounds("chart-card:live-energy");
+        let gpu = self.chart_bounds("chart-card:live-gpu-power");
+        let attribution = self.chart_bounds("attribution-row:live-power-apps");
+        let apps = self.chart_bounds("chart-card:live-power-apps");
+        let ranking = self.chart_bounds("attribution-ranking:live-power-apps");
+        let temperature = self.chart_bounds("chart-card:live-soc-temperature");
+        let fans = self.chart_bounds("chart-card:live-fans");
+        if narrow {
+            assert_eq!(gpu.top() - system.bottom(), px(8.0));
+            assert_eq!(ranking.top() - apps.bottom(), px(8.0));
+            assert_eq!(fans.top() - temperature.bottom(), px(8.0));
+        } else {
+            assert_eq!(system.top(), gpu.top());
+            assert_eq!(gpu.left() - system.right(), px(8.0));
+            assert_eq!(ranking.left() - apps.right(), px(8.0));
+            assert_eq!(temperature.top(), fans.top());
+            assert_eq!(fans.left() - temperature.right(), px(8.0));
+        }
+        assert!(gpu.bottom() < attribution.top());
+        assert!(attribution.bottom() < temperature.top());
     }
 
     fn assert_header_control_visible(&mut self, selector: &'static str) {

@@ -23,23 +23,31 @@ fn chart_data_opens_the_visible_series_statistics_and_closes(cx: &mut TestAppCon
 }
 
 #[gpui::test]
-fn chart_hover_floats_the_sorted_readouts_and_removes_them_on_exit(cx: &mut TestAppContext) {
-    // Two series exchange magnitude between timestamps, so input must reorder the visible rows.
+fn separate_power_plots_share_inspection_and_remove_the_tooltip_on_exit(cx: &mut TestAppContext) {
+    // GPU inspection drives the separate system plot at the same timestamp, then clears on exit.
     let mut harness = InputHarness::setup(cx);
     harness.driver.seed_chart_sample_gaps();
 
-    harness.driver.hover_previous_second_on("live-energy-plot");
+    harness
+        .driver
+        .hover_previous_second_on("live-gpu-power-plot");
 
     assert!(
         harness
             .driver
-            .reading_is_visible("chart-tooltip:live-energy")
+            .reading_is_visible("chart-tooltip:live-gpu-power")
     );
     assert!(
         harness
             .driver
-            .reading_is_visible("chart-tooltip-row:live-energy:0:GPU power:100.0 W")
+            .reading_is_visible("chart-tooltip-row:live-gpu-power:0:GPU power:100.0 W")
     );
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("chart-reading:live-energy:90.0 W")
+    );
+    assert!(harness.driver.cursor_is_visible("live-energy-plot"));
     harness.driver.hover_selected_second_on("live-energy-plot");
     assert!(
         harness
