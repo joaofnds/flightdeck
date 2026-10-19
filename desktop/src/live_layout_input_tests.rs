@@ -39,6 +39,43 @@ fn chart_cards_use_reference_padding_and_eight_pixel_column_gaps(cx: &mut TestAp
 }
 
 #[gpui::test]
+fn memory_charts_and_attribution_precede_the_full_quantity_table(cx: &mut TestAppContext) {
+    // Measure the installed page order at both chart layouts without moving its selection.
+    let mut harness = InputHarness::setup_route(cx, "memory");
+    let selected = harness.driver.accepted_selection().unwrap()["selected"].clone();
+
+    for width in [1320.0, 600.0] {
+        harness
+            .driver
+            .context
+            .simulate_resize(gpui::size(px(width), px(4000.0)));
+        harness.driver.context.run_until_parked();
+        let quantities = harness
+            .driver
+            .chart_bounds("memory-quantity:Memory pressure:Unavailable");
+        let ranking = harness.driver.chart_bounds("ranking-help:Resident memory");
+        let history = harness
+            .driver
+            .chart_bounds("memory-attribution-unavailable");
+        let rank_card = harness.driver.chart_bounds("memory-attribution-ranking");
+
+        assert!(harness.driver.chart_bounds("live-memory-plot").bottom() < quantities.top());
+        assert!(harness.driver.chart_bounds("live-swap-flow-plot").bottom() < ranking.top());
+        assert!(ranking.bottom() < quantities.top());
+        if width >= 640.0 {
+            assert_eq!(rank_card.left() - history.right(), px(8.0));
+        } else {
+            assert_eq!(rank_card.top() - history.bottom(), px(8.0));
+        }
+    }
+    assert_eq!(
+        harness.driver.accepted_selection().unwrap()["selected"],
+        selected
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
 fn overview_charts_reflow_when_the_same_window_crosses_both_breakpoints(cx: &mut TestAppContext) {
     // Render one exact 900-second selection while resizing through the approved 3/2/1 layout.
     let mut harness = InputHarness::setup_route(cx, "overview");

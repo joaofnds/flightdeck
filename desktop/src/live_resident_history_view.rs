@@ -24,6 +24,7 @@ impl LiveDashboard {
                     |history| history.coverage(None),
                 );
             div()
+                .debug_selector(|| "memory-attribution-unavailable".into())
                 .flex_1()
                 .min_w_0()
                 .p(px(18.0))
@@ -43,11 +44,21 @@ impl LiveDashboard {
         };
 
         div()
-            .flex()
-            .gap(px(16.0))
-            .when(self.reading_chart_columns() == 1, gpui::Styled::flex_col)
-            .child(chart)
-            .child(div().flex_1().min_w_0().child(self.app_rankings(&[1], cx)))
+            .child(
+                div()
+                    .flex()
+                    .gap(px(8.0))
+                    .when(self.reading_chart_columns() == 1, gpui::Styled::flex_col)
+                    .child(chart)
+                    .child(
+                        div()
+                            .debug_selector(|| "memory-attribution-ranking".into())
+                            .flex_1()
+                            .min_w_0()
+                            .child(self.app_rankings(&[1], cx)),
+                    ),
+            )
+            .child(self.memory_quantities())
             .into_any_element()
     }
 }

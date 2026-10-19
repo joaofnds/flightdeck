@@ -343,7 +343,6 @@ impl LiveDashboard {
             .role(gpui::Role::Group)
             .aria_label("Resource readings at the selected time")
             .child(tiles)
-            .children((self.request.route == "memory").then(|| self.memory_quantities()))
     }
 
     fn summary_card(card: &summary::Card, cx: &mut Context<Self>) -> impl IntoElement {
@@ -416,7 +415,7 @@ impl LiveDashboard {
         self.navigate(route, cx);
     }
 
-    fn memory_quantities(&self) -> impl IntoElement {
+    pub(crate) fn memory_quantities(&self) -> impl IntoElement {
         let selection = self
             .reading_snapshot()
             .map_or(&Value::Null, |snapshot| &snapshot.selection);
