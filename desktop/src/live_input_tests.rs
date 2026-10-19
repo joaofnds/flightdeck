@@ -24,6 +24,8 @@ mod layout;
 mod rankings;
 #[path = "live_resource_input_tests.rs"]
 mod resource;
+#[path = "live_section_input_tests.rs"]
+mod sections;
 #[path = "live_source_mode_input_tests.rs"]
 mod source_mode;
 #[path = "live_summary_input_tests.rs"]
@@ -228,7 +230,7 @@ fn moving_directly_from_the_second_plot_keeps_both_cursors_synchronized(cx: &mut
 fn scrolling_a_plot_away_from_a_stationary_pointer_hides_both_cursors(cx: &mut TestAppContext) {
     // A wheel event moves only layout: the pointer leaves the plot but stays inside its wrapper.
     let mut harness = InputHarness::setup(cx);
-    harness.driver.make_scrollable();
+    harness.driver.make_scrollable(850.0);
     let plot = harness.driver.plot_bounds("live-energy-plot");
     let pointer = gpui::point(plot.center().x, plot.bottom() - gpui::px(1.0));
     harness.driver.hover_position(pointer);
@@ -384,7 +386,7 @@ fn scrolling_the_plot_back_under_the_pointer_restores_synchronized_hover(cx: &mu
     // Reverse layout movement so reentry cannot depend on another pointer event.
     let mut harness = InputHarness::setup(cx);
     harness.driver.seed_repeated_second();
-    harness.driver.make_scrollable();
+    harness.driver.make_scrollable(1500.0);
     let plot = harness.driver.plot_bounds("live-energy-plot");
     let previous = harness.driver.previous_second_position();
     let pointer = gpui::point(previous.x, plot.bottom() - gpui::px(1.0));
@@ -758,9 +760,9 @@ impl InputDriver {
         crate::charts::plot_bounds(self.chart_bounds(selector))
     }
 
-    fn make_scrollable(&mut self) {
+    fn make_scrollable(&mut self, height: f32) {
         self.context
-            .simulate_resize(gpui::size(gpui::px(1200.0), gpui::px(850.0)));
+            .simulate_resize(gpui::size(gpui::px(1200.0), gpui::px(height)));
         self.context.run_until_parked();
     }
 

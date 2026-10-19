@@ -36,6 +36,7 @@ pub struct LiveDashboard {
     pub executables: Vec<crate::live_executables::Executable>,
     pub inventory: Vec<(String, String)>,
     pub hidden: Vec<String>,
+    pub(crate) sections: crate::live_sections::Sections,
     pub hardware_state: Rc<crate::hardware_motion::HardwareState>,
     pub started: Instant,
     pub seconds: Option<u32>,
@@ -91,6 +92,7 @@ pub enum Row {
         columns: usize,
     },
     Heading(String),
+    Disclosure(crate::live_sections::Section),
     Hardware,
     TableHeading(String),
     Table(String, usize),
@@ -130,6 +132,7 @@ impl LiveDashboard {
             executables: Vec::with_capacity(512),
             inventory: Vec::with_capacity(16),
             hidden: Vec::with_capacity(64),
+            sections: crate::live_sections::Sections::default(),
             hardware_state: Rc::new(crate::hardware_motion::HardwareState::new()),
             started: Instant::now(),
             seconds,
@@ -322,6 +325,9 @@ impl LiveDashboard {
     }
 
     pub fn navigate(&mut self, route: &str, cx: &mut Context<Self>) {
+        if self.request.route != route {
+            self.sections.reset();
+        }
         if !matches!(self.request.route.as_str(), "computer" | "self") {
             self.native.diagnostic_selected = self
                 .context_snapshot()
@@ -342,7 +348,7 @@ impl LiveDashboard {
         self.expanded = None;
         self.panels.clear();
         self.rows.clear();
-        self.list.reset(0);
+        self.reset_section_rows();
         if route == "computer" {
             self.inventory = crate::live_inventory::rows();
         }
@@ -500,6 +506,7 @@ impl Render for LiveDashboard {
             self.rendered_source = Some(self.native.source);
         }
 
+        self.install_section_focus(cx);
         self.reading_viewport(window.viewport_size());
         self.install_cpu_focus(window, cx);
         self.hardware_state.begin_frame();

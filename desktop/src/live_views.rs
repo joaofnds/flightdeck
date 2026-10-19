@@ -310,13 +310,14 @@ impl LiveDashboard {
                 .text_size(px(17.0))
                 .child(title.clone())
                 .into_any_element(),
+            Row::Disclosure(section) => self.disclosure(*section, cx).into_any_element(),
             Row::Hardware => self.live_hardware(cx).into_any_element(),
             Row::TableHeading(name) => self.table_heading(name, cx).into_any_element(),
             Row::Table(name, index) => self.table_row(name, *index, cx),
             Row::App(index) => self.app_row(*index, cx),
             Row::Process(index) => self.process_row(*index, cx),
             Row::Executable(index) => self.executable_row(*index, cx),
-            Row::Inventory => self.computer().into_any_element(),
+            Row::Inventory => self.computer(cx).into_any_element(),
             Row::Spacer(height) => div().h(*height).into_any_element(),
         }
     }
@@ -443,7 +444,7 @@ impl LiveDashboard {
         self.navigate(route, cx);
     }
 
-    pub(crate) fn memory_quantities(&self) -> impl IntoElement {
+    pub(crate) fn memory_quantities(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let selection = self
             .reading_snapshot()
             .map_or(&Value::Null, |snapshot| &snapshot.selection);
@@ -464,6 +465,15 @@ impl LiveDashboard {
             );
         }
 
+        let note = div()
+            .mt(px(12.0))
+            .text_size(px(11.0))
+            .text_color(rgb(MUTED))
+            .child(
+                "Independent VM categories overlap and are not an additive used-memory total. \
+                 Speculative is included in Free.",
+            );
+
         div()
             .mt(px(16.0))
             .p(px(18.0))
@@ -471,18 +481,20 @@ impl LiveDashboard {
             .border_1()
             .border_color(rgb(GRID))
             .bg(rgb(PANEL))
-            .child(div().text_size(px(15.0)).child("All memory quantities"))
-            .child(div().mt(px(12.0)).text_size(px(12.0)).child(values))
-            .child(
-                div().mt(px(12.0)).text_size(px(11.0)).text_color(rgb(MUTED)).child(
-                    "Independent VM categories overlap and are not an additive used-memory total. \
-                    Speculative is included in Free.",
-                ),
+            .child(self.disclosure(crate::live_sections::Section::MemoryQuantities, cx))
+            .when(
+                self.sections
+                    .expanded(crate::live_sections::Section::MemoryQuantities),
+                |panel| {
+                    panel
+                        .child(div().mt(px(12.0)).text_size(px(12.0)).child(values))
+                        .child(note)
+                },
             )
     }
 
-    fn computer(&self) -> impl IntoElement {
-        computer_view::view(&self.inventory)
+    fn computer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        computer_view::view(self, cx)
     }
 }
 

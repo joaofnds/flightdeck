@@ -56,6 +56,7 @@ impl Row {
                     }
                 }
             }
+            Self::Disclosure(section) => format!("section-{}", section.id()),
             Self::Hardware => "hardware".into(),
             Self::TableHeading(name) => format!("table-heading-{name}"),
             Self::Table(name, index) => format!("table-{name}-{index}"),
@@ -67,7 +68,7 @@ impl Row {
         }
     }
 
-    fn owns_plot(&self, source: &str) -> bool {
+    pub(crate) fn owns_plot(&self, source: &str) -> bool {
         match self {
             Self::Charts { panels, .. } => panels.iter().take(3).any(|panel| panel.id == source),
             Self::OverviewAppHistories(slots) => slots.iter().take(2).any(|slot| {
@@ -276,16 +277,29 @@ impl LiveDashboard {
 
     pub(crate) fn rebuild_anchored(&mut self, layout: Option<Layout>) {
         let previous = self.rows.len();
-        self.rows = self.reading_rows();
+        let rows = self.reading_rows();
+        let focus_changed = self
+            .rows
+            .iter()
+            .map(Row::disclosure_section)
+            .ne(rows.iter().map(Row::disclosure_section));
+
+        self.rows = rows;
         if let Some(layout) = layout {
             if let Some(offset) = self.reading_layout_offset(&layout) {
-                self.list.splice(0..previous, self.rows.len());
+                self.splice_section_rows(previous);
                 self.list.scroll_to(offset);
                 return;
             }
         }
-        if previous != self.rows.len() {
-            self.list.reset(self.rows.len());
+        if previous == self.rows.len() {
+            if focus_changed {
+                let offset = self.list.logical_scroll_top();
+                self.splice_section_rows(previous);
+                self.list.scroll_to(offset);
+            }
+        } else {
+            self.reset_section_rows();
         }
     }
 

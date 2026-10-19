@@ -207,12 +207,13 @@ fn expect_apps_grid_coordinate(actual: Pixels, expected: Pixels) {
 
 fn expect_overview_grid_context_span(bounds: &OverviewGridBounds) {
     let width = bounds.primary_last.right() - bounds.primary_first.left();
-    let card_width = (width - px(8.0)) / 2.0;
-    expect_apps_grid_coordinate(bounds.pressure.size.width, card_width);
-    expect_apps_grid_coordinate(bounds.temperature.size.width, card_width);
+    expect_apps_grid_coordinate(bounds.pressure.size.width, width);
+    expect_apps_grid_coordinate(bounds.temperature.size.width, width);
     expect_apps_grid_coordinate(bounds.pressure.left(), bounds.primary_first.left());
+    expect_apps_grid_coordinate(bounds.pressure.right(), bounds.primary_last.right());
+    expect_apps_grid_coordinate(bounds.temperature.left(), bounds.primary_first.left());
     expect_apps_grid_coordinate(bounds.temperature.right(), bounds.primary_last.right());
-    expect_apps_grid_coordinate(bounds.temperature.left() - bounds.pressure.right(), px(8.0));
+    assert!(bounds.pressure.bottom() < bounds.temperature.top());
 }
 
 fn expect_empty_apps_grid_track(bounds: &AppsGridBounds, pointer: Point<Pixels>) {

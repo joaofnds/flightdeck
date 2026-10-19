@@ -390,14 +390,7 @@ fn panel(
     for reading in &specification.lines {
         let mut values = Vec::with_capacity(points.len());
         for point in points {
-            let source = reading.resource.map_or(point, |resource| &point[resource]);
-            let value = match reading.channel {
-                Some(channel) => &source[reading.key][channel],
-                None => &source[reading.key],
-            };
-            values.push(
-                resource_projection::value(reading, value)?.map(|value| value / reading.divisor),
-            );
+            values.push(panel_reading_value(reading, point)?.map(|value| value / reading.divisor));
         }
         lines.push(Line {
             name: reading.name.to_owned(),
@@ -448,6 +441,31 @@ fn panel(
         segments: Some(coordinates.segments.clone()),
         selected_index: coordinates.selected_index,
     })
+}
+
+fn panel_reading_value(reading: &Reading, point: &Value) -> Result<Option<f32>, String> {
+    if reading.key == "power_remainder_watts" {
+        let system = number(&point["power_watts"])?;
+        let gpu = number(&point["gpu_watts"])?;
+        let Some((system, gpu)) = system.zip(gpu) else {
+            return Ok(None);
+        };
+
+        let remainder = system - gpu;
+        if !remainder.is_finite() {
+            return Err("Nonfinite derived power remainder".into());
+        }
+
+        return Ok(Some(remainder));
+    }
+
+    let source = reading.resource.map_or(point, |resource| &point[resource]);
+    let value = match reading.channel {
+        Some(channel) => &source[reading.key][channel],
+        None => &source[reading.key],
+    };
+
+    resource_projection::value(reading, value)
 }
 
 fn specification(
@@ -565,6 +583,7 @@ fn energy(points: &[Value]) -> Result<Vec<Specification>, String> {
             vec![reading("power_watts", "System power", "#ff9830", 1.0)],
         ),
         gpu_power(),
+        power_breakdown(),
         specification(
             "live-soc-temperature",
             "SoC temperature",
@@ -573,6 +592,31 @@ fn energy(points: &[Value]) -> Result<Vec<Specification>, String> {
         ),
         fan_specification(points)?,
     ])
+}
+
+fn power_breakdown() -> Specification {
+    let mut specification = specification(
+        "live-power-breakdown",
+        "Power",
+        "W",
+        vec![
+            reading(
+                "power_remainder_watts",
+                "SoC and rest of system",
+                "#ff9830",
+                1.0,
+            ),
+            reading("gpu_watts", "GPU", "#b877d9", 1.0),
+        ],
+    );
+    specification.stack = true;
+    specification.fill = 0.45;
+    specification.help = "SoC and rest of system is system power minus GPU power, \
+        not independently measured CPU power. The remainder requires both readings; \
+        GPU retains its own availability. The sources have different measurement scopes, \
+        so a negative remainder is preserved. The headline sums both available components.";
+
+    specification
 }
 
 fn fan_specification(points: &[Value]) -> Result<Specification, String> {

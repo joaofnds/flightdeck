@@ -201,6 +201,7 @@ fn energy_power_panels_preserve_independent_sources_and_missing_intervals() {
         [
             "live-energy",
             "live-gpu-power",
+            "live-power-breakdown",
             "live-soc-temperature",
             "live-fans"
         ]
@@ -218,6 +219,75 @@ fn energy_power_panels_preserve_independent_sources_and_missing_intervals() {
     assert_eq!(energy[0].positions, energy[1].positions);
     assert_eq!(energy[0].segments, energy[1].segments);
     assert_eq!(energy[0].selected_index, energy[1].selected_index);
+}
+
+#[test]
+fn energy_breakdown_keeps_measured_zero_and_negative_remainders_without_clamping() {
+    // Subtract only aligned readings, including a GPU interval above the system sensor.
+    let mut selection = selection();
+    for (point, (system, gpu)) in selection["trends"].as_array_mut().unwrap().iter_mut().zip([
+        (8.0, 2.0),
+        (0.0, 0.0),
+        (2.0, 5.0),
+    ]) {
+        point["power_watts"] = json!(system);
+        point["gpu_watts"] = json!(gpu);
+    }
+
+    let projected = panels("energy", &selection, None).unwrap();
+    let power = projected
+        .iter()
+        .find(|panel| panel.id == "live-power-breakdown")
+        .unwrap();
+
+    assert_eq!(power.title, "Power");
+    assert_eq!(power.unit, "W");
+    assert_eq!(power.stack, Some(true));
+    assert_eq!(power.lines.len(), 2);
+    assert_eq!(power.lines[0].name, "SoC and rest of system");
+    assert_eq!(power.lines[0].values, [Some(6.0), Some(0.0), Some(-3.0)]);
+    assert_eq!(power.lines[1].name, "GPU");
+    assert_eq!(power.lines[1].values, [Some(2.0), Some(0.0), Some(5.0)]);
+    assert_eq!(power.selected_index, Some(2));
+    assert_eq!(power.positions, projected[0].positions);
+    assert_eq!(power.segments, projected[0].segments);
+    assert!(
+        power
+            .help
+            .as_ref()
+            .unwrap()
+            .contains("not independently measured")
+    );
+}
+
+#[test]
+fn energy_breakdown_requires_both_sources_for_the_remainder_and_keeps_gpu_independent() {
+    // Missing system or GPU readings must not be replaced by a measured zero remainder.
+    let mut selection = selection();
+    selection["trends"][0]["gpu_watts"] = json!(2.0);
+    selection["trends"][2]["power_watts"] = json!(4.0);
+
+    let projected = panels("energy", &selection, None).unwrap();
+    let power = projected
+        .iter()
+        .find(|panel| panel.id == "live-power-breakdown")
+        .unwrap();
+
+    assert_eq!(power.lines[0].values, [None, Some(6.0), None]);
+    assert_eq!(power.lines[1].values, [Some(2.0), Some(2.0), None]);
+}
+
+#[test]
+fn energy_breakdown_rejects_a_nonfinite_derived_remainder() {
+    // Finite inputs may still overflow their difference; never send infinity to the renderer.
+    let mut selection = selection();
+    selection["trends"][1]["power_watts"] = json!(3.0e38);
+    selection["trends"][1]["gpu_watts"] = json!(-3.0e38);
+
+    match panels("energy", &selection, None) {
+        Err(error) => assert!(error.contains("power remainder")),
+        Ok(_) => panic!("The derived power remainder must reject overflow"),
+    }
 }
 
 #[test]
@@ -513,14 +583,19 @@ fn energy_exposes_temperature_and_channel_indexed_fan_history() {
 
     let energy = panels("energy", &selection, None).unwrap();
 
-    assert_eq!(energy.len(), 4);
-    assert_eq!(energy[2].title, "SoC temperature");
-    assert_eq!(energy[2].lines[0].values, [None, Some(42.5), None]);
-    assert_eq!(energy[3].unit, "RPM");
-    assert_eq!(energy[3].lines[0].name, "Fan 0");
-    assert_eq!(energy[3].lines[0].values, [Some(0.0), None, Some(1200.0)]);
-    assert_eq!(energy[3].lines[1].name, "Fan 1");
-    assert_eq!(energy[3].lines[1].values, [None, None, None]);
+    assert_eq!(energy.len(), 5);
+    let temperature = energy
+        .iter()
+        .find(|panel| panel.id == "live-soc-temperature")
+        .unwrap();
+    let fans = energy.iter().find(|panel| panel.id == "live-fans").unwrap();
+    assert_eq!(temperature.title, "SoC temperature");
+    assert_eq!(temperature.lines[0].values, [None, Some(42.5), None]);
+    assert_eq!(fans.unit, "RPM");
+    assert_eq!(fans.lines[0].name, "Fan 0");
+    assert_eq!(fans.lines[0].values, [Some(0.0), None, Some(1200.0)]);
+    assert_eq!(fans.lines[1].name, "Fan 1");
+    assert_eq!(fans.lines[1].values, [None, None, None]);
 }
 
 #[test]

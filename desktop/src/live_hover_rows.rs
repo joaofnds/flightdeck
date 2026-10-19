@@ -5,6 +5,7 @@ use serde_json::Value;
 use crate::data::Panel;
 
 use crate::live_dashboard::{LiveDashboard, Row};
+use crate::live_sections::Section;
 
 impl LiveDashboard {
     pub(crate) fn reading_chart_columns(&self) -> usize {
@@ -195,15 +196,36 @@ impl LiveDashboard {
 
         rows.push(Row::AppAttribution(metric, attribution));
 
-        let context: Vec<_> = self
+        rows.push(Row::Disclosure(Section::EnergyContext));
+        if self.sections.expanded(Section::EnergyContext) {
+            let context: Vec<_> = self
+                .panels
+                .iter()
+                .take(16)
+                .filter(|panel| {
+                    matches!(
+                        panel.id.as_str(),
+                        "live-power-breakdown" | "live-soc-temperature"
+                    )
+                })
+                .cloned()
+                .collect();
+            for panels in context.chunks(self.reading_chart_columns()) {
+                rows.push(Row::Charts {
+                    panels: panels.to_vec(),
+                    columns: panels.len(),
+                });
+            }
+        }
+        rows.push(Row::Heading("Cooling and temperatures".into()));
+        let cooling: Vec<_> = self
             .panels
             .iter()
             .take(16)
-            .filter(|panel| matches!(panel.id.as_str(), "live-soc-temperature" | "live-fans"))
+            .filter(|panel| panel.id == "live-fans")
             .cloned()
             .collect();
-
-        for panels in context.chunks(self.reading_chart_columns()) {
+        for panels in cooling.chunks(self.reading_chart_columns()) {
             rows.push(Row::Charts {
                 panels: panels.to_vec(),
                 columns: panels.len(),
@@ -232,16 +254,40 @@ impl LiveDashboard {
     }
 
     fn reading_rows_overview(&self, rows: &mut Vec<Row>) {
+        if let Some(pressure) = self
+            .panels
+            .iter()
+            .take(16)
+            .find(|panel| panel.id == "live-memory-pressure")
+        {
+            rows.push(Row::Charts {
+                panels: vec![Rc::clone(pressure)],
+                columns: 1,
+            });
+        }
+        rows.push(Row::OverviewStatus);
+
         rows.push(Row::Heading("Top apps at the selected time".into()));
         for metrics in [0, 1, 2, 3].chunks(self.reading_chart_columns().min(2)) {
             rows.push(Row::Rankings(metrics.to_vec()));
         }
-        rows.push(Row::Heading("App resource histories".into()));
-        for slots in [0, 1, 2, 3].chunks(self.reading_chart_columns().min(2)) {
-            rows.push(Row::OverviewAppHistories(slots.to_vec()));
+        rows.push(Row::Disclosure(Section::OverviewHistories));
+        if self.sections.expanded(Section::OverviewHistories) {
+            for slots in [0, 1, 2, 3].chunks(self.reading_chart_columns().min(2)) {
+                rows.push(Row::OverviewAppHistories(slots.to_vec()));
+            }
         }
-        rows.push(Row::Heading("More resource context".into()));
-        rows.push(Row::OverviewStatus);
+        rows.push(Row::Disclosure(Section::OverviewContext));
+        if self.sections.expanded(Section::OverviewContext) {
+            self.reading_rows_overview_context(rows);
+        }
+        if self.snapshot.is_some() {
+            rows.push(Row::Heading("MacBook".into()));
+            rows.push(Row::Hardware);
+        }
+    }
+
+    fn reading_rows_overview_context(&self, rows: &mut Vec<Row>) {
         let primary_panel_count = self
             .panels
             .len()
@@ -250,6 +296,9 @@ impl LiveDashboard {
             .iter()
             .take(16)
             .filter(|panel| {
+                if panel.id == "live-memory-pressure" {
+                    return false;
+                }
                 if panel.id == crate::live_resident_history::PANEL_ID {
                     return false;
                 }
@@ -263,10 +312,6 @@ impl LiveDashboard {
                 panels: panels.to_vec(),
                 columns: panels.len(),
             });
-        }
-        if self.snapshot.is_some() {
-            rows.push(Row::Heading("MacBook".into()));
-            rows.push(Row::Hardware);
         }
     }
 
@@ -312,21 +357,9 @@ impl LiveDashboard {
             rows.push(Row::Executable(index));
         }
         self.reading_rows_process_history(&mut rows, snapshot);
-        rows.push(Row::Heading("Selected App totals · last 15 minutes".into()));
-        rows.push(Row::AppSummary);
-        let totals: Vec<_> = self
-            .panels
-            .iter()
-            .take(16)
-            .filter(|panel| panel.id.starts_with("live-app-"))
-            .cloned()
-            .collect();
-        let columns = self.reading_chart_columns().min(2);
-        for panels in totals.chunks(columns) {
-            rows.push(Row::Charts {
-                panels: panels.to_vec(),
-                columns,
-            });
+        rows.push(Row::Disclosure(Section::AppTotals));
+        if self.sections.expanded(Section::AppTotals) {
+            self.reading_rows_app_totals(&mut rows);
         }
         rows.push(Row::Heading("Process instances · selected app".into()));
         rows.push(Row::AppColumns("processes"));
@@ -343,6 +376,24 @@ impl LiveDashboard {
         assert!(rows.len() <= 2048);
 
         rows
+    }
+
+    fn reading_rows_app_totals(&self, rows: &mut Vec<Row>) {
+        rows.push(Row::AppSummary);
+        let totals: Vec<_> = self
+            .panels
+            .iter()
+            .take(16)
+            .filter(|panel| panel.id.starts_with("live-app-"))
+            .cloned()
+            .collect();
+        let columns = self.reading_chart_columns().min(2);
+        for panels in totals.chunks(columns) {
+            rows.push(Row::Charts {
+                panels: panels.to_vec(),
+                columns,
+            });
+        }
     }
 
     fn reading_rows_process_history(

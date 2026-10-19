@@ -58,7 +58,7 @@ impl LiveDashboard {
                             .child(self.app_rankings(&[1], cx)),
                     ),
             )
-            .child(self.memory_quantities())
+            .child(self.memory_quantities(cx))
             .into_any_element()
     }
 }

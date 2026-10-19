@@ -931,10 +931,13 @@ impl Render for ChartHelp {
 }
 
 fn chart_reading(panel: &Panel, index: Option<usize>) -> String {
-    let value = panel
-        .lines
-        .first()
-        .and_then(|line| index.and_then(|index| line.values.get(index).copied().flatten()));
+    let value = if panel.id == "live-power-breakdown" {
+        chart_line_value(panel, 0, index)
+            .zip(chart_line_value(panel, 1, index))
+            .map(|(remainder, gpu)| remainder + gpu)
+    } else {
+        chart_line_value(panel, 0, index)
+    };
     if let Some(states) = &panel.states {
         return states
             .iter()

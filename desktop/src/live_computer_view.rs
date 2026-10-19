@@ -1,4 +1,4 @@
-use gpui::{IntoElement, div, prelude::*, px, rgb};
+use gpui::{Context, IntoElement, div, prelude::*, px, rgb};
 
 use crate::charts::{BLUE, GRID, MUTED, PANEL};
 
@@ -36,7 +36,11 @@ const REFERENCES: [Reference; 5] = [
     },
 ];
 
-pub(super) fn view(inventory: &[(String, String)]) -> impl IntoElement {
+pub(super) fn view(
+    dashboard: &crate::live_dashboard::LiveDashboard,
+    cx: &mut Context<crate::live_dashboard::LiveDashboard>,
+) -> impl IntoElement {
+    let inventory = &dashboard.inventory;
     assert!(inventory.len() <= 16);
     div()
         .flex()
@@ -44,7 +48,7 @@ pub(super) fn view(inventory: &[(String, String)]) -> impl IntoElement {
         .gap(px(16.0))
         .child(model_card(inventory))
         .child(system_details(inventory))
-        .child(schematic_reference())
+        .child(schematic_reference(dashboard, cx))
 }
 
 fn model_card(inventory: &[(String, String)]) -> impl IntoElement {
@@ -199,7 +203,10 @@ fn system_details(inventory: &[(String, String)]) -> impl IntoElement {
         .child(rows)
 }
 
-fn schematic_reference() -> impl IntoElement {
+fn schematic_reference(
+    dashboard: &crate::live_dashboard::LiveDashboard,
+    cx: &mut Context<crate::live_dashboard::LiveDashboard>,
+) -> impl IntoElement {
     div()
         .id("computer-schematic-reference")
         .debug_selector(|| "computer-schematic-reference".into())
@@ -212,13 +219,17 @@ fn schematic_reference() -> impl IntoElement {
         .bg(rgb(PANEL))
         .text_size(px(12.0))
         .text_color(rgb(MUTED))
-        .child(
-            div()
-                .text_size(px(16.0))
-                .text_color(rgb(crate::charts::TEXT))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .child("Schematic reference"),
+        .child(dashboard.disclosure(crate::live_sections::Section::ComputerReference, cx))
+        .when(
+            dashboard
+                .sections
+                .expanded(crate::live_sections::Section::ComputerReference),
+            |panel| panel.child(schematic_reference_content()),
         )
+}
+
+fn schematic_reference_content() -> impl IntoElement {
+    div()
         .child(div().mt(px(12.0)).child(
             "Reference assembly: MacBook Pro 16-inch · 2026 · Mac17,8. \
              Bottom cover removed, hinge at the top.",

@@ -31,6 +31,7 @@ mod live_projection;
 mod live_rankings;
 mod live_resident_history;
 mod live_resources;
+mod live_sections;
 mod live_source;
 mod live_source_mode;
 mod live_tables;

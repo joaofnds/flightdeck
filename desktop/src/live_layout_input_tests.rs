@@ -115,7 +115,7 @@ fn overview_context_follows_exact_hover_and_gap_while_live_acceptance_advances(
 }
 
 #[gpui::test]
-fn overview_shows_six_primary_charts_before_rankings_and_keeps_resource_context_below(
+fn overview_places_primary_status_before_rankings_and_supplemental_context_after(
     cx: &mut TestAppContext,
 ) {
     // Read the composed 3-by-2 primary grid and the retained contextual plots beneath rankings.
@@ -283,32 +283,36 @@ fn regrouping_a_hovered_first_plot_recomputes_its_reading_at_the_stationary_poin
     harness.teardown();
 }
 
-#[gpui::test]
-fn energy_power_and_attribution_precede_thermal_context_at_wide_and_narrow_widths(
-    cx: &mut TestAppContext,
-) {
-    // Measure the installed power pair, captured App plot, ranking and source context in order.
-    let mut harness = InputHarness::setup(cx);
-    harness.driver.seed_energy_layout_selection();
-    let selected = harness.driver.accepted_selection().unwrap()["selected"].clone();
+macro_rules! energy_context_width_case {
+    ($name:ident, $width:literal, $narrow:literal) => {
+        #[gpui::test]
+        fn $name(cx: &mut TestAppContext) {
+            // Keep all rows mounted to compare one independently reported viewport breakpoint.
+            let mut harness = InputHarness::setup(cx);
+            harness.driver.seed_energy_layout_selection();
+            let selected = harness.driver.accepted_selection().unwrap()["selected"].clone();
+            harness
+                .driver
+                .context
+                .simulate_resize(gpui::size(px($width), px(3500.0)));
+            harness.driver.context.run_until_parked();
 
-    harness.driver.resize_charts(1320.0);
-    harness.driver.assert_energy_layout(false);
-    harness.driver.resize_charts(840.0);
-    harness.driver.assert_energy_layout(false);
-    harness.driver.resize_charts(640.0);
-    harness.driver.assert_energy_layout(false);
-    harness.driver.resize_charts(639.0);
-    harness.driver.assert_energy_layout(true);
-    harness.driver.resize_charts(600.0);
-    harness.driver.assert_energy_layout(true);
+            harness.driver.assert_energy_layout($narrow);
 
-    assert_eq!(
-        harness.driver.accepted_selection().unwrap()["selected"],
-        selected
-    );
-    harness.teardown();
+            assert_eq!(
+                harness.driver.accepted_selection().unwrap()["selected"],
+                selected
+            );
+            harness.teardown();
+        }
+    };
 }
+
+energy_context_width_case!(energy_context_is_two_columns_at_1320, 1320.0, false);
+energy_context_width_case!(energy_context_is_two_columns_at_840, 840.0, false);
+energy_context_width_case!(energy_context_is_two_columns_at_640, 640.0, false);
+energy_context_width_case!(energy_context_is_one_column_at_639, 639.0, true);
+energy_context_width_case!(energy_context_is_one_column_at_600, 600.0, true);
 
 #[gpui::test]
 fn narrow_headers_keep_selection_controls_inside_the_content(cx: &mut TestAppContext) {
@@ -434,8 +438,11 @@ impl InputDriver {
         assert_chart_columns(&second, 3);
         assert!(first[2].bottom() < second[0].top());
         let ranking = self.context.debug_bounds("ranking-help:CPU").unwrap();
-        assert!(second[2].bottom() < ranking.top());
-        assert!(self.chart_bounds("live-memory-pressure-plot").top() > ranking.bottom());
+        let pressure = self.chart_bounds("live-memory-pressure-plot");
+        let cooling = self.chart_bounds("overview-context:cooling-battery");
+        assert!(second[2].bottom() < pressure.top());
+        assert!(pressure.bottom() < ranking.top());
+        assert!(cooling.bottom() < ranking.top());
         assert!(self.chart_bounds("live-temperature-plot").top() > ranking.bottom());
     }
 
@@ -521,21 +528,28 @@ impl InputDriver {
         let attribution = self.chart_bounds("attribution-row:live-power-apps");
         let apps = self.chart_bounds("chart-card:live-power-apps");
         let ranking = self.chart_bounds("attribution-ranking:live-power-apps");
+        let breakdown = self.chart_bounds("chart-card:live-power-breakdown");
         let temperature = self.chart_bounds("chart-card:live-soc-temperature");
         let fans = self.chart_bounds("chart-card:live-fans");
         if narrow {
             assert_eq!(gpu.top() - system.bottom(), px(8.0));
             assert_eq!(ranking.top() - apps.bottom(), px(8.0));
-            assert_eq!(fans.top() - temperature.bottom(), px(8.0));
+            assert_eq!(temperature.top() - breakdown.bottom(), px(8.0));
         } else {
             assert_eq!(system.top(), gpu.top());
             assert_eq!(gpu.left() - system.right(), px(8.0));
             assert_eq!(ranking.left() - apps.right(), px(8.0));
-            assert_eq!(temperature.top(), fans.top());
-            assert_eq!(fans.left() - temperature.right(), px(8.0));
+            assert_eq!(temperature.top(), breakdown.top());
+            assert_eq!(temperature.left() - breakdown.right(), px(8.0));
         }
         assert!(gpu.bottom() < attribution.top());
         assert!(attribution.bottom() < temperature.top());
+        let disclosure = self.chart_bounds("section:energy-context");
+        let cooling = self.chart_bounds("Cooling and temperatures");
+        assert!(attribution.bottom() < disclosure.top());
+        assert!(disclosure.bottom() < temperature.top());
+        assert!(temperature.bottom() < cooling.top());
+        assert!(cooling.bottom() < fans.top());
     }
 
     fn assert_header_control_visible(&mut self, selector: &'static str) {
