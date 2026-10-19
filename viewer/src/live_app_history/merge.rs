@@ -82,7 +82,7 @@ impl History {
             "selected": request.selected.json(), "context_seconds": 900, "points": points,
             "coverage": {"retention_limited": missing,
                 "live_retention_limited": self.retention_limited,
-                "observations_retained": count, "cache_bytes": self.bytes,
+                "observations_retained": count, "cache_bytes": self.total_bytes(),
                 "cache_bytes_max": BYTES_MAX, "committed_observations": request.saved.len()}
         }))?;
         request.operation.check()?;

@@ -9,6 +9,8 @@ use collector::ring::{Identity, PROGRAM_PATH_BYTES_MAX, RunIdentity};
 use persistence::{Error, Result};
 use serde_json::Value;
 
+mod resident;
+
 pub(super) struct Cache {
     recording: [u64; 2],
     kind: KeyKind,

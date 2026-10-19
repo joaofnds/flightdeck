@@ -176,6 +176,10 @@ pub(super) fn point(publication: u64, app_count: usize) -> Box<Point> {
         segment: 0,
         elapsed_ns: Some(1_000_000_000),
         apps,
+        membership_complete: false,
+        resident_ungrouped_members: 0,
+        usage_refused: 0,
+        usage_gone: 0,
     })
 }
 

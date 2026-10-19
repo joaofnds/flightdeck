@@ -55,7 +55,7 @@ impl CompactMeasure {
         }
     }
 
-    fn measure(self) -> Measure {
+    pub(super) fn measure(self) -> Measure {
         Measure {
             known: u64::from_le_bytes(self.known),
             measured_members: self.coverage & MEMBERS_MASK,

@@ -342,6 +342,10 @@ fn point(history: &History, publication: u64, keys: &[(KeyKind, &[u8])]) -> Box<
         segment: 0,
         elapsed_ns: Some(1_000_000_000),
         apps,
+        membership_complete: false,
+        resident_ungrouped_members: 0,
+        usage_refused: 0,
+        usage_gone: 0,
     })
 }
 
@@ -360,7 +364,9 @@ fn response(history: &History, kind: KeyKind, bytes: &[u8]) -> Value {
 
 fn accounted_bytes(history: &History) -> usize {
     let mut addresses = BTreeSet::new();
-    let mut bytes = size_of::<History>() + history.points.capacity() * size_of::<Box<Point>>();
+    let mut bytes = size_of::<History>()
+        + history.points.capacity() * size_of::<Box<Point>>()
+        + history.observations.capacity() * size_of::<super::super::Observation>();
     for point in &history.points {
         bytes += point.bytes();
         for app in &point.apps {

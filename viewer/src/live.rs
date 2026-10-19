@@ -17,6 +17,9 @@ use crate::live_apps::{Frame, Publication, PublicationEvents};
 use crate::session::{ContextRange, OBSERVATIONS_MAX, Observation, PAGE_ROWS};
 use crate::{Cancellation, Session, metrics};
 
+#[path = "app_resident_history.rs"]
+pub(crate) mod resident_history;
+
 #[path = "live_storage_merge.rs"]
 mod storage_merge;
 

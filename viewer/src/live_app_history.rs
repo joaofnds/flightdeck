@@ -1,4 +1,5 @@
 //! Compact App facts retained independently of the bounded raw process cache.
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -12,7 +13,12 @@ use crate::session::OBSERVATIONS_MAX;
 
 mod compact;
 mod merge;
+mod resident;
+mod resident_cache;
 pub(crate) use merge::Merge;
+pub(crate) use resident_cache::{
+    PIN_BYTES_MAX, ResidentCache, ResidentFile, ResidentPin, ResidentPoint,
+};
 mod trace;
 use compact::{CompactMeasure, HistoryKey, count};
 pub(crate) use trace::TracePoint;
@@ -20,18 +26,21 @@ pub(crate) use trace::TracePoint;
 const BYTES_MAX: usize = 64 * 1024 * 1024;
 const _: () = {
     assert!(OBSERVATIONS_MAX > 0);
+    assert!(size_of::<Point>() <= 176);
     assert!(
         BYTES_MAX
             > crate::live_app_response::SAMPLE_BYTES_MAX
-                + OBSERVATIONS_MAX * size_of::<Box<Point>>()
+                + OBSERVATIONS_MAX * (size_of::<Box<Point>>() + size_of::<Observation>())
                 + size_of::<History>()
     );
 };
 
 pub(super) struct History {
     points: VecDeque<Box<Point>>,
+    observations: VecDeque<Observation>,
     bytes: usize,
     retention_limited: bool,
+    saved_residents: RefCell<ResidentCache>,
 }
 
 pub(super) struct Point {
@@ -39,6 +48,10 @@ pub(super) struct Point {
     segment: u64,
     elapsed_ns: Option<u64>,
     apps: Vec<App>,
+    membership_complete: bool,
+    resident_ungrouped_members: u32,
+    usage_refused: u32,
+    usage_gone: u32,
 }
 
 struct App {
@@ -60,21 +73,33 @@ pub(super) struct Target<'bytes> {
 }
 
 impl History {
+    pub(super) fn total_bytes(&self) -> usize {
+        self.bytes + self.saved_residents.borrow().bytes()
+    }
+
     pub(super) fn new() -> Self {
         let points = VecDeque::with_capacity(OBSERVATIONS_MAX);
-        let bytes = size_of::<Self>() + points.capacity() * size_of::<Box<Point>>();
+        let observations = VecDeque::with_capacity(OBSERVATIONS_MAX);
+        let bytes = size_of::<Self>()
+            + points.capacity() * size_of::<Box<Point>>()
+            + observations.capacity() * size_of::<Observation>();
         assert!(bytes < BYTES_MAX);
 
         Self {
             points,
+            observations,
             bytes,
             retention_limited: false,
+            saved_residents: RefCell::new(ResidentCache::new()),
         }
     }
 
     pub(super) fn push(&mut self, point: Box<Point>, first: u64) {
         // Incoming references keep reused key allocations alive while older points are evicted.
         let bytes = point.bytes() + point.unshared_key_bytes();
+        if self.bytes + bytes + self.saved_residents.get_mut().bytes() > BYTES_MAX {
+            *self.saved_residents.get_mut() = ResidentCache::new();
+        }
         for _attempt in 0..=OBSERVATIONS_MAX {
             let expired = self
                 .points
@@ -86,7 +111,9 @@ impl History {
                 if !count_limited {
                     if !bytes_limited {
                         self.bytes += bytes;
+                        let observation = point.observation;
                         self.points.push_back(point);
+                        self.retain_observation(&observation, first);
                         assert!(self.bytes <= BYTES_MAX);
                         return;
                     }
@@ -103,6 +130,27 @@ impl History {
         }
 
         unreachable!("a bounded cache can evict all prior points");
+    }
+
+    fn retain_observation(&mut self, observation: &Observation, first: u64) {
+        for _attempt in 0..=OBSERVATIONS_MAX {
+            let expired = self
+                .observations
+                .front()
+                .is_some_and(|observation| observation.wall_ns.is_some_and(|wall| wall < first));
+            if !expired {
+                if self.observations.len() < OBSERVATIONS_MAX {
+                    self.observations.push_back(*observation);
+                    return;
+                }
+            }
+
+            self.observations.pop_front().unwrap_or_else(|| {
+                unreachable!("an expired or full metadata ledger has a first observation")
+            });
+        }
+
+        unreachable!("a bounded metadata ledger can release every prior observation");
     }
 
     pub(super) fn capture(&self, sample: &Sample, segment: u64, output: &mut Option<Box<Point>>) {
@@ -148,7 +196,7 @@ impl History {
         let response = crate::live_app_response::bounded(
             json!({"selected": selected.json(), "context_seconds": 900, "points": points,
             "coverage": {"retention_limited": self.retention_limited,
-                "observations_retained": self.points.len(), "cache_bytes": self.bytes,
+            "observations_retained": self.points.len(), "cache_bytes": self.total_bytes(),
                 "cache_bytes_max": BYTES_MAX}}),
         )?;
         operation.check()?;
@@ -172,6 +220,19 @@ impl Point {
             segment,
             elapsed_ns: sample.elapsed_ns,
             apps: Vec::with_capacity(sample.apps().len()),
+            membership_complete: sample.membership_complete,
+            resident_ungrouped_members: u32::try_from(
+                sample
+                    .processes()
+                    .iter()
+                    .filter(|process| {
+                        process.state == apps::ProcessState::Live && process.app_index.is_none()
+                    })
+                    .count(),
+            )
+            .unwrap_or_else(|_| unreachable!("bounded resident process count fits u32")),
+            usage_refused: sample.usage_refused,
+            usage_gone: sample.usage_gone,
         });
 
         for app in sample.apps() {
