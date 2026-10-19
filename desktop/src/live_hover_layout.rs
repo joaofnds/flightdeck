@@ -23,6 +23,7 @@ impl Row {
             Self::BatteryState(_) => "battery-state".into(),
             Self::OverviewRankings(slots) => format!("overview-rankings-{}", slots[0]),
             Self::OverviewAppHistories(slots) => format!("overview-app-histories-{}", slots[0]),
+            Self::OverviewAnalysis(_) => "overview-analysis".into(),
             Self::MemoryAttribution(_) => "memory-attribution".into(),
             Self::AppAttribution(metric, _) => format!("app-attribution-{}", metric.panel_id()),
             Self::AppSelector => "app-selector".into(),
@@ -78,6 +79,7 @@ impl Row {
                 crate::live_overview_app_histories::overview_app_history_slot(*slot).0 == source
             }),
             Self::MemoryAttribution(Some(panel))
+            | Self::OverviewAnalysis(Some(panel))
             | Self::AppAttribution(_, Some(panel))
             | Self::BatteryState(Some(panel)) => panel.id == source,
             Self::CPUTop(panel) => {

@@ -12,6 +12,8 @@ mod resource_projection;
 
 const OBSERVATIONS_MAX: usize = 4096;
 pub const OVERVIEW_PRIMARY_PANELS: usize = 6;
+/// The Overview chart that sets load, power and heat side by side.
+pub const CORRELATION_ID: &str = "live-correlation";
 pub const OVERVIEW_PANELS_MAX: usize = 8;
 pub const ROUTE_PANELS_MAX: usize = 7;
 const _: () = assert!(OVERVIEW_PRIMARY_PANELS < OVERVIEW_PANELS_MAX);
@@ -797,7 +799,7 @@ fn correlation() -> Specification {
     temperature.axis = Some("right2");
     temperature.fill = Some(0.0);
     let mut specification = specification(
-        "live-correlation",
+        CORRELATION_ID,
         "Load, power and heat together",
         "%",
         vec![

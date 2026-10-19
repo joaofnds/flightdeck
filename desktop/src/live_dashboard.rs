@@ -93,6 +93,8 @@ pub enum Row {
     BatteryState(Option<Rc<Panel>>),
     OverviewRankings(Vec<usize>),
     OverviewAppHistories(Vec<usize>),
+    /// The Overview's utilization panel beside the load, power and heat chart.
+    OverviewAnalysis(Option<Rc<Panel>>),
     MemoryAttribution(Option<Rc<Panel>>),
     AppAttribution(
         crate::live_app_attribution_history::Metric,

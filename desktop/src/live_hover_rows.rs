@@ -306,27 +306,12 @@ impl LiveDashboard {
             .panels
             .len()
             .min(crate::live_projection::OVERVIEW_PRIMARY_PANELS);
-        let context: Vec<_> = self.panels[primary_panel_count..]
+        let correlation = self.panels[primary_panel_count..]
             .iter()
             .take(16)
-            .filter(|panel| {
-                if panel.id == "live-memory-pressure" {
-                    return false;
-                }
-                if panel.id == crate::live_resident_history::PANEL_ID {
-                    return false;
-                }
-                crate::live_app_attribution_history::Metric::from_panel(&panel.id).is_none()
-            })
-            .cloned()
-            .collect();
-
-        for panels in context.chunks(self.reading_chart_columns()) {
-            rows.push(Row::Charts {
-                panels: panels.to_vec(),
-                columns: panels.len(),
-            });
-        }
+            .find(|panel| panel.id == crate::live_projection::CORRELATION_ID)
+            .cloned();
+        rows.push(Row::OverviewAnalysis(correlation));
     }
 
     fn reading_rows_tables(&self, rows: &mut Vec<Row>) {

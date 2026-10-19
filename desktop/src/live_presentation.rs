@@ -220,7 +220,7 @@ fn overview_cooling(summary: &Value) -> gpui::Div {
         ))
 }
 
-fn overview_context_card(key: &'static str) -> gpui::Div {
+pub(crate) fn overview_context_card(key: &'static str) -> gpui::Div {
     div()
         .debug_selector(move || format!("overview-context:{key}"))
         .min_w_0()

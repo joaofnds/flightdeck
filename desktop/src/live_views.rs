@@ -15,6 +15,8 @@ mod cpu_top_view;
 mod recording_context_view;
 #[path = "live_summary.rs"]
 mod summary;
+#[path = "live_utilization.rs"]
+mod utilization;
 #[cfg(feature = "automation")]
 pub(crate) use summary::cards;
 pub(crate) use summary::matching_summary;
@@ -32,6 +34,7 @@ impl LiveDashboard {
         let content = self.row_content(index, cx);
         let padding = match &self.rows[index] {
             Row::Charts { .. }
+            | Row::OverviewAnalysis(_)
             | Row::OverviewStatus
             | Row::BatteryState(_)
             | Row::OverviewRankings(_) => 4.0,
@@ -89,6 +92,7 @@ impl LiveDashboard {
                 self.overview_rankings(slots, self.reading_chart_columns(), cx)
             }
             Row::OverviewAppHistories(slots) => self.overview_app_histories(slots, cx),
+            Row::OverviewAnalysis(panel) => self.overview_analysis(panel.as_ref(), cx),
             Row::MemoryAttribution(panel) => self.memory_attribution(panel.as_ref(), cx),
             Row::AppAttribution(metric, panel) => self.app_attribution(*metric, panel.as_ref(), cx),
             Row::AppSelector => self.app_selector(cx).into_any_element(),

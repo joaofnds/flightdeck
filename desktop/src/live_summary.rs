@@ -303,19 +303,7 @@ fn card_level(summary: &Value, index: usize) -> String {
 /// Memory in use as the prototype and Activity Monitor count it: app memory, wired and
 /// compressed. Any one of them missing leaves the total unavailable.
 fn card_memory_in_use(summary: &Value) -> String {
-    let anonymous = summary["memory_anonymous_bytes"].as_u64();
-    let purgeable = summary["memory_purgeable_bytes"].as_u64();
-    let app = anonymous
-        .zip(purgeable)
-        .and_then(|(anonymous, purgeable)| anonymous.checked_sub(purgeable));
-    let wired = summary["memory_wired_bytes"].as_u64();
-    let compressed = summary["memory_compressed_bytes"].as_u64();
-    let total = app
-        .zip(wired)
-        .and_then(|(app, wired)| app.checked_add(wired))
-        .zip(compressed)
-        .and_then(|(used, compressed)| used.checked_add(compressed));
-    match total {
+    match memory_in_use_bytes(summary) {
         Some(bytes) => crate::live_projection::quantity(
             &serde_json::json!({ "bytes": bytes }),
             "bytes",
@@ -324,6 +312,21 @@ fn card_memory_in_use(summary: &Value) -> String {
         ),
         None => "Unavailable".into(),
     }
+}
+
+/// App memory, wired and compressed memory together, or none where any one is missing.
+pub(crate) fn memory_in_use_bytes(summary: &Value) -> Option<u64> {
+    let anonymous = summary["memory_anonymous_bytes"].as_u64();
+    let purgeable = summary["memory_purgeable_bytes"].as_u64();
+    let app = anonymous
+        .zip(purgeable)
+        .and_then(|(anonymous, purgeable)| anonymous.checked_sub(purgeable));
+    let wired = summary["memory_wired_bytes"].as_u64();
+    let compressed = summary["memory_compressed_bytes"].as_u64();
+    app.zip(wired)
+        .and_then(|(app, wired)| app.checked_add(wired))
+        .zip(compressed)
+        .and_then(|(used, compressed)| used.checked_add(compressed))
 }
 
 /// The summary only where it is the selected observation's own: the same run, boot and

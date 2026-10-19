@@ -27,7 +27,8 @@ struct OverviewGridBounds {
     primary_first: Bounds<Pixels>,
     primary_last: Bounds<Pixels>,
     pressure: Bounds<Pixels>,
-    temperature: Bounds<Pixels>,
+    utilization: Bounds<Pixels>,
+    correlation: Bounds<Pixels>,
 }
 
 macro_rules! apps_grid_width_case {
@@ -57,8 +58,9 @@ apps_grid_width_case!(apps_grid_keeps_one_named_track_at_639, 639.0, 1);
 
 #[gpui::test]
 fn apps_grid_keeps_overview_context_columns_at_1100(cx: &mut TestAppContext) {
-    // The pressure card takes the first chart column, as the prototype's three compact cards do,
-    // and the wider context keeps its full content extent when chart rows gain track counts.
+    // Goal: the pressure card takes the first chart column, as the prototype's three compact
+    // cards do, and the utilization panel and the correlation chart share the full width.
+    // Method: lay the Overview out at 1100 points and compare the cards' bounds.
     let mut harness = AppHoverHarness::setup(cx);
     harness.driver.prepare_overview_grid_context(1100.0);
 
@@ -207,13 +209,17 @@ fn expect_apps_grid_coordinate(actual: Pixels, expected: Pixels) {
 }
 
 fn expect_overview_grid_context_span(bounds: &OverviewGridBounds) {
-    let width = bounds.primary_last.right() - bounds.primary_first.left();
     expect_apps_grid_coordinate(bounds.pressure.size.width, bounds.primary_first.size.width);
-    expect_apps_grid_coordinate(bounds.temperature.size.width, width);
     expect_apps_grid_coordinate(bounds.pressure.left(), bounds.primary_first.left());
-    expect_apps_grid_coordinate(bounds.temperature.left(), bounds.primary_first.left());
-    expect_apps_grid_coordinate(bounds.temperature.right(), bounds.primary_last.right());
-    assert!(bounds.pressure.bottom() < bounds.temperature.top());
+    expect_apps_grid_coordinate(bounds.utilization.left(), bounds.primary_first.left());
+    expect_apps_grid_coordinate(
+        bounds.correlation.left() - bounds.utilization.right(),
+        px(8.0),
+    );
+    expect_apps_grid_coordinate(bounds.correlation.right(), bounds.primary_last.right());
+    expect_apps_grid_coordinate(bounds.correlation.top(), bounds.utilization.top());
+    assert!(bounds.utilization.size.width < bounds.correlation.size.width);
+    assert!(bounds.pressure.bottom() < bounds.correlation.top());
 }
 
 fn expect_empty_apps_grid_track(bounds: &AppsGridBounds, pointer: Point<Pixels>) {
@@ -307,7 +313,11 @@ impl AppHoverDriver {
                 .context
                 .debug_bounds("chart-card:live-memory-pressure")
                 .unwrap(),
-            temperature: self
+            utilization: self
+                .context
+                .debug_bounds("overview-context:utilization")
+                .unwrap(),
+            correlation: self
                 .context
                 .debug_bounds("chart-card:live-correlation")
                 .unwrap(),
