@@ -267,6 +267,10 @@ fn attribution_legend_accepts_native_keydown_and_keyup_and_data_keeps_rates(
     assert!(!harness.driver.reading_is_visible("2.50 W"));
     assert!(harness.driver.reading_is_visible("Available samples"));
     harness.driver.click_resident_legend("chart-data-close");
+    // Closing Data leaves the pointer where the button was, which may now lie over the plot.
+    harness
+        .driver
+        .leave_plot("live-power-apps-plot", PlotExit::Sidebar);
     harness
         .driver
         .focus_resident_legend("chart-legend:live-power-apps:App A:2.50 W");

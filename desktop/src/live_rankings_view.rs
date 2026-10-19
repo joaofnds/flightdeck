@@ -18,6 +18,14 @@ enum OverviewSlot {
     Uncaptured(&'static str, &'static str),
 }
 
+/// The title a ranking card carries. Beside an App chart the prototype calls the card Top apps
+/// and names the chart's unit, while on the Overview it names the measure.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RankingHeading {
+    Measure,
+    TopApps,
+}
+
 const OVERVIEW_SLOTS: [OverviewSlot; 6] = [
     OverviewSlot::Ranked(0),
     OverviewSlot::Ranked(1),
@@ -45,7 +53,7 @@ impl LiveDashboard {
                 metrics
                     .iter()
                     .take(3)
-                    .map(|index| self.app_ranking(*index, cx)),
+                    .map(|index| self.app_ranking(*index, RankingHeading::TopApps, cx)),
             )
             .into_any_element()
     }
@@ -64,7 +72,9 @@ impl LiveDashboard {
             .children(slots.iter().take(3).map(|slot| {
                 assert!(*slot < OVERVIEW_SLOT_COUNT);
                 match OVERVIEW_SLOTS[*slot] {
-                    OverviewSlot::Ranked(index) => self.app_ranking(index, cx),
+                    OverviewSlot::Ranked(index) => {
+                        self.app_ranking(index, RankingHeading::Measure, cx)
+                    }
                     OverviewSlot::Uncaptured(title, help) => uncaptured_ranking(title, help),
                 }
             }))
@@ -72,7 +82,12 @@ impl LiveDashboard {
             .into_any_element()
     }
 
-    fn app_ranking(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+    fn app_ranking(
+        &self,
+        index: usize,
+        heading: RankingHeading,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let metric = [Metric::Cpu, Metric::Resident, Metric::Power, Metric::Disk][index];
         let card = ranking_card(metric_name(metric));
 
@@ -80,7 +95,7 @@ impl LiveDashboard {
             Ok(reading) => reading,
             Err(error) => {
                 return card
-                    .child(ranking_heading(metric, metric_help(metric).into()))
+                    .child(ranking_title(metric, heading))
                     .child(notice(&error))
                     .into_any_element();
             }
@@ -110,7 +125,7 @@ impl LiveDashboard {
             metric_name(metric),
             target.second
         ))
-        .child(ranking_heading(metric, metric_help(metric).into()))
+        .child(ranking_title(metric, heading))
         .child(Self::app_ranking_entries(ranking, &target, cx))
         .when(incomplete, |card| card.child(notice(&coverage(ranking))))
         .into_any_element()
@@ -256,6 +271,43 @@ fn ranking_card(name: &'static str) -> gpui::Div {
         .border_1()
         .border_color(rgb(crate::charts::LINE))
         .bg(rgb(PANEL))
+}
+
+fn ranking_title(metric: Metric, heading: RankingHeading) -> gpui::Div {
+    if heading == RankingHeading::Measure {
+        return ranking_heading(metric, metric_help(metric).into());
+    }
+    let selector = format!("ranking-heading:{}", metric.title());
+
+    div()
+        .debug_selector(move || selector.clone())
+        .flex()
+        .items_baseline()
+        .gap(px(6.0))
+        .min_h(px(40.0))
+        .pt(px(12.0))
+        .child(
+            div()
+                .text_size(px(14.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .child("Top apps"),
+        )
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(rgb(MUTED))
+                .child(metric_unit(metric)),
+        )
+}
+
+/// The unit the prototype names beside Top apps, the unit of the chart the card ranks.
+fn metric_unit(metric: Metric) -> &'static str {
+    match metric {
+        Metric::Cpu => "% of one core",
+        Metric::Resident => "GiB",
+        Metric::Power => "W",
+        Metric::Disk => "MB/s",
+    }
 }
 
 fn ranking_heading(metric: Metric, help: String) -> gpui::Div {

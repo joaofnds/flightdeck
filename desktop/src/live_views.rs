@@ -327,9 +327,12 @@ pub(crate) fn pressure(value: &Value) -> &'static str {
 
 /// A section title as the prototype sets it, with its note on the right where it has one.
 fn heading(title: &str) -> gpui::Div {
-    let note = match title {
-        "Top apps at the selected time" => "Select an app to inspect its processes",
-        _ => "",
+    let note = if title == "Top apps at the selected time" {
+        "Select an app to inspect its processes"
+    } else if title.ends_with(" by App") {
+        "At the selected sample · select an app to inspect"
+    } else {
+        ""
     };
     let selector = title.to_owned();
     div()

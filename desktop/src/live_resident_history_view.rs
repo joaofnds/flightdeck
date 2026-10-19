@@ -32,7 +32,7 @@ impl LiveDashboard {
                 .border_1()
                 .border_color(rgb(GRID))
                 .bg(rgb(PANEL))
-                .child("Resident memory by App")
+                .child(crate::live_resident_history::TITLE)
                 .child(
                     div()
                         .text_size(px(11.0))

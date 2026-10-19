@@ -53,14 +53,18 @@ impl LiveDashboard {
                     .iter()
                     .find(|panel| panel.id == metric.panel_id())
                     .cloned();
+                rows.push(Row::Heading(metric.title().into()));
                 rows.push(Row::AppAttribution(metric, panel));
             }
-            "memory" => rows.push(Row::MemoryAttribution(
-                self.panels
-                    .iter()
-                    .find(|panel| panel.id == crate::live_resident_history::PANEL_ID)
-                    .cloned(),
-            )),
+            "memory" => {
+                rows.push(Row::Heading(crate::live_resident_history::TITLE.into()));
+                rows.push(Row::MemoryAttribution(
+                    self.panels
+                        .iter()
+                        .find(|panel| panel.id == crate::live_resident_history::PANEL_ID)
+                        .cloned(),
+                ));
+            }
             _ => {}
         }
         if self.request.route == "storage" {
@@ -71,6 +75,7 @@ impl LiveDashboard {
                 .take(16)
                 .find(|panel| panel.id == metric.panel_id())
                 .cloned();
+            rows.push(Row::Heading(metric.title().into()));
             rows.push(Row::AppAttribution(metric, panel));
             for index in 0..self.resource_device_count() {
                 rows.push(Row::StorageDevice(
@@ -208,6 +213,7 @@ impl LiveDashboard {
             .find(|panel| panel.id == metric.panel_id())
             .cloned();
 
+        rows.push(Row::Heading(metric.title().into()));
         rows.push(Row::AppAttribution(metric, attribution));
 
         rows.push(Row::Disclosure(Section::EnergyContext));

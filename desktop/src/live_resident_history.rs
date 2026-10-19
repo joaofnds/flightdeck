@@ -9,6 +9,7 @@ use crate::live_hover::Target;
 use crate::live_projection::{identity, integer};
 
 pub const PANEL_ID: &str = "live-memory-app-resident";
+pub const TITLE: &str = "Resident memory by App";
 const POINTS_MAX: usize = 4096;
 const COHORT_MAX: usize = 8;
 const NS: u64 = 1_000_000_000;
@@ -286,7 +287,7 @@ impl History {
 
         Panel {
             id: PANEL_ID.into(),
-            title: "Resident memory by App".into(),
+            title: TITLE.into(),
             unit: "GiB".into(),
             kind: "line".into(),
             lines,
