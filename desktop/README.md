@@ -76,8 +76,10 @@ select an App to inspect its observed histories and process instances. Executabl
 rows group the loaded process page. Selecting a captured name loads its CPU,
 resident memory, footprint, process power and disk histories above the App totals;
 those histories include captured members outside the loaded page. All process groups
-clears the named selection and instance filter. Missing or empty names retain the
-filter and explain why named history is unavailable. Computer
+is the default and shows those five histories with the seven highest mean-CPU names
+over the context plus Other. It includes captured members outside the loaded page
+and clears the named selection and instance filter. Missing or empty names retain
+the filter and explain why named history is unavailable. Computer
 reads current host inventory on entry and Refresh. Self-monitoring separates the
 latest producer's metadata from the selected observation and reports reader losses,
 saved windows and cache accounting. Refresh updates that metadata even while the
