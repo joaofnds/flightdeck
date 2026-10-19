@@ -10,7 +10,7 @@ use crate::live_inventory::PerformanceLevel;
 #[path = "live_resource_projection.rs"]
 mod resource_projection;
 
-const OBSERVATIONS_MAX: usize = 4096;
+pub const OBSERVATIONS_MAX: usize = 4096;
 pub const OVERVIEW_PRIMARY_PANELS: usize = 6;
 /// The Overview chart that sets load, power and heat side by side.
 pub const CORRELATION_ID: &str = "live-correlation";
@@ -347,6 +347,7 @@ pub(crate) fn quantity_text(value: f32, unit: &str) -> String {
         "/s" if magnitude >= 1000.0 => (value / 1000.0, "k/s"),
         "pages/s" if magnitude >= 1_000_000.0 => (value / 1_000_000.0, "M pages/s"),
         "pages/s" if magnitude >= 1000.0 => (value / 1000.0, "k pages/s"),
+        "files" if magnitude >= 1000.0 => (value / 1000.0, "k files"),
         "% of one core" | "% of interval" => (value, "%"),
         _ => (value, unit),
     };
@@ -545,6 +546,53 @@ fn cpu(level_name: fn(&'static PerformanceLevel) -> &'static str) -> Specificati
     specification
 }
 
+pub const LOAD_AVERAGE_ID: &str = "live-load-average";
+pub const OPEN_FILES_ID: &str = "live-open-files";
+
+/// The load averages the app sampled each second, with the logical CPU count dashed, since
+/// work above it waits for a core.
+fn load_average() -> Specification {
+    let mut lines = Vec::with_capacity(4);
+    for (channel, name, color) in [
+        (0, "1 minute", "#5794f2"),
+        (1, "5 minutes", "#73bf69"),
+        (2, "15 minutes", "#b877d9"),
+    ] {
+        let mut line = reading("load_average", name, color, 1.0);
+        line.channel = Some(channel);
+        lines.push(line);
+    }
+    let mut cores = reading("logical_cpu_count", "Cores", "#d1d1de", 1.0);
+    cores.dashed = true;
+    lines.push(cores);
+    let mut specification = specification(LOAD_AVERAGE_ID, "Load average", "work items", lines);
+    specification.fill = 0.0;
+    specification.help = "Work running or waiting for a CPU, averaged by macOS over 1, 5 and \
+        15 minutes. Above the dashed core count, work waits for a core. Flightdeck samples it \
+        once a second while the app runs, so earlier seconds have no reading.";
+    specification
+}
+
+/// The file entries open across the system, with their share of the most macOS allows on
+/// its own axis.
+fn open_files() -> Specification {
+    let mut share = reading("open_files_percent", "Share of limit", "#d1d1de", 1.0);
+    share.unit = Some("%");
+    share.axis = Some("right1");
+    share.dashed = true;
+    share.fill = Some(0.0);
+    let mut specification = specification(
+        OPEN_FILES_ID,
+        "Open files",
+        "files",
+        vec![reading("open_files", "Open", "#5ad8e6", 1.0), share],
+    );
+    specification.help = "File entries open across the system and their share of the \
+        kernel's limit. Flightdeck samples them once a second while the app runs, so earlier \
+        seconds have no reading.";
+    specification
+}
+
 fn cpu_level_cores(level: &'static PerformanceLevel) -> &'static str {
     level.cores.as_str()
 }
@@ -605,7 +653,7 @@ fn gpu_activity() -> Specification {
 fn specifications(route: &str, points: &[Value]) -> Result<Vec<Specification>, String> {
     Ok(match route {
         "overview" => overview(),
-        "cpu" => vec![cpu(cpu_level_cores)],
+        "cpu" => vec![cpu(cpu_level_cores), load_average(), open_files()],
         "memory" => memory_specifications(),
         "gpu" => vec![gpu_activity(), gpu_power()],
         "energy" => energy(points)?,

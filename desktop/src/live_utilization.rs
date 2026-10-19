@@ -129,7 +129,10 @@ fn utilization_panel(summary: &Value) -> gpui::Div {
                     "Memory pressure",
                     super::pressure(&summary["pressure"]),
                 ))
-                .child(utilization_status("Thermal state", "Unavailable")),
+                .child(utilization_status(
+                    "Thermal state",
+                    crate::live_system::thermal_pressure_text(summary),
+                )),
         )
         .child(
             div()

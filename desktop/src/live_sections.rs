@@ -11,6 +11,7 @@ pub(crate) enum Section {
     MemoryQuantities,
     EnergyContext,
     ComputerReference,
+    SystemFiles,
 }
 
 impl Section {
@@ -22,6 +23,7 @@ impl Section {
             Self::MemoryQuantities => 3,
             Self::EnergyContext => 4,
             Self::ComputerReference => 5,
+            Self::SystemFiles => 6,
         }
     }
 
@@ -33,6 +35,7 @@ impl Section {
             Self::MemoryQuantities => "memory-quantities",
             Self::EnergyContext => "energy-context",
             Self::ComputerReference => "computer-reference",
+            Self::SystemFiles => "system-files",
         }
     }
 
@@ -44,14 +47,15 @@ impl Section {
             Self::MemoryQuantities => "All memory quantities",
             Self::EnergyContext => "Power breakdown and thermal context",
             Self::ComputerReference => "Schematic reference",
+            Self::SystemFiles => "System file entries",
         }
     }
 }
 
 #[derive(Default)]
 pub(crate) struct Sections {
-    collapsed: [bool; 6],
-    focus: [Option<FocusHandle>; 6],
+    collapsed: [bool; 7],
+    focus: [Option<FocusHandle>; 7],
 }
 
 impl Sections {

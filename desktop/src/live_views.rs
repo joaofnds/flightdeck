@@ -14,7 +14,9 @@ mod cpu_top_view;
 #[path = "live_recording_context_view.rs"]
 mod recording_context_view;
 #[path = "live_summary.rs"]
-mod summary;
+pub(crate) mod summary;
+#[path = "live_system_context.rs"]
+mod system_context;
 #[path = "live_utilization.rs"]
 mod utilization;
 #[cfg(feature = "automation")]
@@ -86,6 +88,7 @@ impl LiveDashboard {
             Row::CPUTop(panel) => self.cpu_top(panel.as_ref(), cx).into_any_element(),
             Row::CPUActivity => self.cpu_activity().into_any_element(),
             Row::CPUHistory => self.cpu_history_panel(cx).into_any_element(),
+            Row::SystemContext => self.system_context().into_any_element(),
             Row::OverviewStatus => self.overview_status(cx).into_any_element(),
             Row::BatteryState(panel) => self.battery_state(panel.as_ref(), cx),
             Row::OverviewRankings(slots) => {

@@ -32,6 +32,7 @@ impl Row {
             Self::CPUTop(_) => "cpu-top".into(),
             Self::CPUActivity => "cpu-activity".into(),
             Self::CPUHistory => "cpu-history".into(),
+            Self::SystemContext => "system-context".into(),
             Self::Charts { panels, .. } => format!("charts-{}", panels[0].id),
             Self::Heading(title) => {
                 if title.starts_with("Process group history") {
@@ -42,6 +43,7 @@ impl Row {
                 }
                 match title.as_str() {
                     "Swap and paging" => return "memory-swap-paging-heading".into(),
+                    "Frequency and scheduling" => return "cpu-scheduling-heading".into(),
                     "Top apps at the selected time"
                     | "App resource histories"
                     | "More resource context"

@@ -50,6 +50,10 @@ on their own, as swap-ins and swap-outs.
 critical. Only critical means heat is cutting the system's performance. Fair and serious
 ask apps to cut back their work before that happens.
 
+**Thermal pressure**: the level macOS publishes for heat, from nominal through moderate,
+heavy and trapping to sleeping. Flightdeck shows it as the thermal state, since it is the
+verdict macOS gives apps.
+
 **SMC**: the System Management Controller, the part of the Mac that measures its
 temperatures, fan speeds and power draw. It names each reading with a four-character key.
 

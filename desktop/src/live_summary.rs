@@ -19,8 +19,12 @@ enum Reading {
     Health,
     /// The busy share of one performance level, by its index fastest first.
     Level(usize),
+    /// The one-minute load average the app sampled in the selected second.
+    LoadAverage,
     MemoryInUse,
     Pressure,
+    /// macOS's thermal pressure level the app sampled in the selected second.
+    Thermal,
     Uncaptured,
 }
 
@@ -91,9 +95,9 @@ const SUPER: Specification = (
 );
 const LOAD: Specification = (
     "Load average",
-    Reading::Uncaptured,
-    "Scheduling demand not captured",
-    YELLOW,
+    Reading::LoadAverage,
+    "1 minute · running or waiting",
+    TEXT,
     "cpu",
 );
 const GPU_FREQUENCY: Specification = (
@@ -141,8 +145,8 @@ const PROCESS_POWER: Specification = (
 );
 const THERMAL: Specification = (
     "Thermal state",
-    Reading::Uncaptured,
-    "macOS verdict not captured",
+    Reading::Thermal,
+    "macOS thermal pressure",
     MUTED,
     "energy",
 );
@@ -259,15 +263,7 @@ fn card(summary: &Value, definition: &Specification) -> Card {
             None => "Unavailable".into(),
         },
         Reading::MemoryInUse => {
-            note = format!(
-                "Of {} installed",
-                crate::live_projection::quantity(
-                    summary,
-                    "memory_total_bytes",
-                    "GiB",
-                    1_073_741_824.0
-                )
-            );
+            note = card_memory_installed(summary);
             card_memory_in_use(summary)
         }
         Reading::Pressure => {
@@ -278,6 +274,14 @@ fn card(summary: &Value, definition: &Specification) -> Card {
                 _ => MUTED,
             };
             crate::live_views::pressure(&summary["pressure"]).into()
+        }
+        Reading::LoadAverage => {
+            let load = serde_json::json!({ "load": summary["load_average"][0] });
+            crate::live_projection::quantity(&load, "load", "work items", 1.0)
+        }
+        Reading::Thermal => {
+            color = thermal_color(summary);
+            crate::live_system::thermal_pressure_text(summary).into()
         }
         Reading::Uncaptured => "Unavailable".into(),
     };
@@ -294,10 +298,27 @@ fn card(summary: &Value, definition: &Specification) -> Card {
     }
 }
 
+/// Green at nominal pressure, then yellow, orange and red as macOS asks for less heat.
+fn thermal_color(summary: &Value) -> u32 {
+    match summary["thermal_pressure"].as_u64() {
+        Some(0) => GREEN,
+        Some(1) => YELLOW,
+        Some(2) => ORANGE,
+        Some(3 | 4) => RED,
+        _ => MUTED,
+    }
+}
+
 /// The busy share of the performance level at `index`, fastest first.
 fn card_level(summary: &Value, index: usize) -> String {
     let percent = serde_json::json!({ "percent": summary["cpu_level_percent"][index] });
     crate::live_projection::quantity(&percent, "percent", "%", 1.0)
+}
+
+fn card_memory_installed(summary: &Value) -> String {
+    let installed =
+        crate::live_projection::quantity(summary, "memory_total_bytes", "GiB", 1_073_741_824.0);
+    format!("Of {installed} installed")
 }
 
 /// Memory in use as the prototype and Activity Monitor count it: app memory, wired and

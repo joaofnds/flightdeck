@@ -114,6 +114,7 @@ struct Command {
 
 struct Reader {
     session: Option<LiveSession>,
+    system: crate::live_system::SystemSamples,
     last_catalog: Option<Value>,
     last_generation: u64,
     retry_after: Instant,
@@ -257,6 +258,7 @@ fn worker_run(root: &std::path::Path, shared: &Shared) {
     let mut command = None;
     let mut reader = Reader {
         session: None,
+        system: crate::live_system::SystemSamples::new(),
         last_catalog: None,
         last_generation: 0,
         retry_after: Instant::now(),
@@ -278,6 +280,7 @@ fn worker_run(root: &std::path::Path, shared: &Shared) {
                 return;
             }
         }
+        worker_sample(&mut reader.system);
         if let Some(command) = &mut command {
             if let Some(output) = reader_read(&mut reader, root, command, shared) {
                 worker_publish(shared, command.generation, output);
@@ -296,6 +299,14 @@ fn worker_run(root: &std::path::Path, shared: &Shared) {
         );
     }
     shared.stopped.store(true, Ordering::Release);
+}
+
+/// Samples the readings the collector does not record, once in each wall-clock second.
+fn worker_sample(system: &mut crate::live_system::SystemSamples) {
+    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(now) => system.sample(now.as_secs()),
+        Err(error) => eprintln!("flightdeck system clock precedes 1970: {error}"),
+    }
 }
 
 fn worker_publish(shared: &Shared, generation: u64, output: Update) {
@@ -381,9 +392,21 @@ fn reader_snapshot(
             return Ok(None);
         }
     }
-    let selection = reader_selection(session, &command.request)?;
-    let mut snapshot = Box::new(Snapshot {
-        generation: command.generation,
+    let mut selection = reader_selection(session, &command.request)?;
+    reader.system.annotate(&mut selection);
+    let mut snapshot = reader_snapshot_new(command.generation, catalog, selection);
+    reader_payload(session, &mut command.request, &mut snapshot)?;
+    snapshot.read_ms = started.elapsed().as_secs_f64() * 1000.0;
+    reader.last_catalog = Some(snapshot.catalog.clone());
+    reader.last_generation = command.generation;
+
+    Ok(Some(snapshot))
+}
+
+/// A snapshot of the catalog and selection, before the route's payload is read.
+fn reader_snapshot_new(generation: u64, catalog: Value, selection: Value) -> Box<Snapshot> {
+    Box::new(Snapshot {
+        generation,
         catalog,
         selection,
         pages: BTreeMap::new(),
@@ -398,13 +421,7 @@ fn reader_snapshot(
         process_history: None,
         rankings: None,
         read_ms: 0.0,
-    });
-    reader_payload(session, &mut command.request, &mut snapshot)?;
-    snapshot.read_ms = started.elapsed().as_secs_f64() * 1000.0;
-    reader.last_catalog = Some(snapshot.catalog.clone());
-    reader.last_generation = command.generation;
-
-    Ok(Some(snapshot))
+    })
 }
 
 fn reader_computer(reader: &mut Reader, command: &Command) -> Option<Box<Snapshot>> {

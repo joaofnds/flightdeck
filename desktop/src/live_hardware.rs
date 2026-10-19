@@ -1,6 +1,7 @@
 use std::rc::Rc;
 
 use gpui::{Context, IntoElement, div, prelude::*, px, rgb};
+use num_traits::ToPrimitive;
 use serde_json::Value;
 
 use crate::charts::{GRID, ORANGE, PANEL};
@@ -28,9 +29,9 @@ impl LiveDashboard {
                     .justify_between()
                     .items_center()
                     .child(if self.hardware_state.qa.get() {
-                        "Readings · Simulated"
+                        "Readings · Simulated".to_owned()
                     } else {
-                        "Thermal state · Unavailable"
+                        format!("Thermal state · {}", readings.thermal)
                     })
                     .child(
                         div()
@@ -129,11 +130,18 @@ fn live_readings(summary: &Value, speeds: [Option<f32>; 2]) -> Result<Readings, 
             live_number(&summary["gpu_active_percent"], 1.0)?,
         ],
         memory: [
-            None,
+            live_memory_in_use(summary),
             live_number(&summary["memory_total_bytes"], 1_073_741_824.0)?,
         ],
+        thermal: crate::live_system::thermal_pressure_text(summary).into(),
         ..Readings::default()
     })
+}
+
+/// Memory in use in GiB, counted as the Memory page counts it.
+fn live_memory_in_use(summary: &Value) -> Option<f32> {
+    let bytes = crate::live_views::summary::memory_in_use_bytes(summary)?;
+    Some(bytes.to_f32()? / 1_073_741_824.0)
 }
 
 fn live_battery(summary: &Value) -> Result<[Option<f32>; 2], String> {

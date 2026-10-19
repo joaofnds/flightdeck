@@ -707,3 +707,34 @@ fn inspecting_another_repeated_second_selects_its_latest_observation() {
 
     assert_eq!(identity["publication"], 3);
 }
+
+#[test]
+fn cpu_charts_scheduling_and_open_files_only_where_sampled() {
+    // Goal: the load average and open files charts read the app's samples, and a point the
+    // app did not sample stays a gap rather than a zero.
+    // Method: sample the middle point of three and project the CPU page.
+    let mut selection = selection();
+    let point = &mut selection["trends"][1];
+    point["load_average"] = json!([2.5, 3.0, 3.5]);
+    point["logical_cpu_count"] = json!(18);
+    point["open_files"] = json!(12_000);
+    point["open_files_percent"] = json!(3.0);
+
+    let panels = panels("cpu", &selection, None).unwrap();
+
+    let load = panels
+        .iter()
+        .find(|panel| panel.id == LOAD_AVERAGE_ID)
+        .unwrap();
+    let names: Vec<_> = load.lines.iter().map(|line| line.name.as_str()).collect();
+    assert_eq!(names, ["1 minute", "5 minutes", "15 minutes", "Cores"]);
+    assert_eq!(load.lines[2].values, [None, Some(3.5), None]);
+    assert_eq!(load.lines[3].dashed, Some(true));
+    let files = panels
+        .iter()
+        .find(|panel| panel.id == OPEN_FILES_ID)
+        .unwrap();
+    assert_eq!(files.lines[0].values, [None, Some(12_000.0), None]);
+    assert_eq!(files.lines[1].axis.as_deref(), Some("right1"));
+    assert_eq!(quantity_text(12_000.0, "files"), "12.0 k files");
+}

@@ -37,6 +37,7 @@ mod live_resources;
 mod live_sections;
 mod live_source;
 mod live_source_mode;
+mod live_system;
 mod live_tables;
 mod live_timer;
 mod live_views;

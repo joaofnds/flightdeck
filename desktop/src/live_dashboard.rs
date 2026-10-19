@@ -106,6 +106,8 @@ pub enum Row {
     CPUTop(Option<Rc<Panel>>),
     CPUActivity,
     CPUHistory,
+    /// The CPU page's system context: how long this Mac has run since it booted.
+    SystemContext,
     Charts {
         panels: Vec<Rc<Panel>>,
         columns: usize,

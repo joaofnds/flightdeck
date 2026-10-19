@@ -82,6 +82,7 @@ impl SnapshotReader {
         Self {
             reader: super::Reader {
                 session: None,
+                system: crate::live_system::SystemSamples::unread(),
                 last_catalog: None,
                 last_generation: 0,
                 retry_after: std::time::Instant::now(),

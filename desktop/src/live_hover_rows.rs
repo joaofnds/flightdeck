@@ -49,6 +49,7 @@ impl LiveDashboard {
             "cpu" => {
                 let metric = crate::live_app_attribution_history::Metric::Cpu;
                 self.reading_rows_attribution(metric, &mut rows);
+                self.reading_rows_system_files(&mut rows);
             }
             "memory" => {
                 rows.push(Row::Heading(crate::live_resident_history::TITLE.into()));
@@ -108,6 +109,12 @@ impl LiveDashboard {
 
         if self.request.route == "battery" {
             self.reading_rows_charts_battery(rows);
+            return;
+        }
+
+        if self.request.route == "cpu" {
+            rows.push(Row::Heading("Frequency and scheduling".into()));
+            self.reading_rows_panel(crate::live_projection::LOAD_AVERAGE_ID, rows);
             return;
         }
 
@@ -253,6 +260,25 @@ impl LiveDashboard {
             rows.push(Row::Charts {
                 panels: panels.to_vec(),
                 columns: panels.len(),
+            });
+        }
+    }
+
+    /// The CPU page's disclosure of uptime and the file entries open across the system.
+    fn reading_rows_system_files(&self, rows: &mut Vec<Row>) {
+        rows.push(Row::Disclosure(Section::SystemFiles));
+        if self.sections.expanded(Section::SystemFiles) {
+            rows.push(Row::SystemContext);
+            self.reading_rows_panel(crate::live_projection::OPEN_FILES_ID, rows);
+        }
+    }
+
+    /// One chart across the row, where the page has a panel of that id.
+    fn reading_rows_panel(&self, id: &str, rows: &mut Vec<Row>) {
+        if let Some(panel) = self.panels.iter().take(16).find(|panel| panel.id == id) {
+            rows.push(Row::Charts {
+                panels: vec![Rc::clone(panel)],
+                columns: 1,
             });
         }
     }
