@@ -50,7 +50,7 @@ disclosure_case!(
     [
         "live-app-cpu-plot",
         "live-app-resident-plot",
-        "live-app-footprint-plot",
+        "live-app-gpu-plot",
         "live-app-power-plot",
         "live-app-disk-plot"
     ],

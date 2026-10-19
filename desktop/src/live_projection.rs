@@ -1206,39 +1206,6 @@ fn network_throughput() -> Specification {
 }
 
 fn process_specifications() -> Vec<Specification> {
-    let mut result = app_specifications();
-    result.extend([
-        specification(
-            "live-app-wakeups",
-            "Idle wakeups",
-            "/s",
-            vec![reading(
-                "idle_wakeups_per_second",
-                "Idle wakeups",
-                "#73bf69",
-                1.0,
-            )],
-        ),
-        specification(
-            "live-app-pageins",
-            "Page-ins",
-            "pages/s",
-            vec![reading("pageins_per_second", "Page-ins", "#5794f2", 1.0)],
-        ),
-        specification(
-            "live-app-threads",
-            "Threads",
-            "threads",
-            vec![reading("threads", "Threads", "#b877d9", 1.0)],
-        ),
-    ]);
-
-    assert_eq!(result.len(), 8);
-
-    result
-}
-
-fn app_specifications() -> Vec<Specification> {
     let mut disk = specification(
         "live-app-disk",
         "Disk I/O",
@@ -1248,9 +1215,8 @@ fn app_specifications() -> Vec<Specification> {
             reading("disk_written_bps", "Write", "#5794f2", 1_000_000.0),
         ],
     );
-    disk.help = "Process-attributed read and write rates for each selected observation interval. \
-        Unavailable intervals remain gaps. These are separate from device-driver throughput.";
-    vec![
+    disk.help = APP_DISK_HELP;
+    let result = vec![
         specification(
             "live-app-cpu",
             "CPU",
@@ -1276,6 +1242,85 @@ fn app_specifications() -> Vec<Specification> {
             vec![reading("energy_watts", "Average power", "#ff9830", 1.0)],
         ),
         disk,
+        specification(
+            "live-app-wakeups",
+            "Idle wakeups",
+            "/s",
+            vec![reading(
+                "idle_wakeups_per_second",
+                "Idle wakeups",
+                "#73bf69",
+                1.0,
+            )],
+        ),
+        specification(
+            "live-app-pageins",
+            "Page-ins",
+            "pages/s",
+            vec![reading("pageins_per_second", "Page-ins", "#5794f2", 1.0)],
+        ),
+        specification(
+            "live-app-threads",
+            "Threads",
+            "threads",
+            vec![reading("threads", "Threads", "#b877d9", 1.0)],
+        ),
+    ];
+
+    assert_eq!(result.len(), 8);
+
+    result
+}
+
+const APP_DISK_HELP: &str = "Process-attributed read and write rates for each selected \
+    observation interval. Unavailable intervals remain gaps. These are separate from \
+    device-driver throughput.";
+
+/// The selected App's totals in the prototype's order and colors. The collector records no
+/// network bytes per process, so the prototype's Network chart has no source and is left out.
+/// GPU time comes from the app's own GPU sampler, which `SystemSamples::annotate_app` adds.
+fn app_specifications() -> Vec<Specification> {
+    let mut disk = specification(
+        "live-app-disk",
+        "Disk I/O",
+        "MB/s",
+        vec![reading("disk_io_bps", "Disk I/O", "#f2cc0c", 1_000_000.0)],
+    );
+    disk.help = APP_DISK_HELP;
+    let mut gpu = specification(
+        "live-app-gpu",
+        "GPU time",
+        "%",
+        vec![reading("gpu_percent", "GPU time", "#b877d9", 1.0)],
+    );
+    gpu.help = "The App's GPU time as a share of each second, read from the GPU driver while \
+        Flightdeck runs. Seconds before it started, or that it did not sample, remain gaps.";
+    vec![
+        specification(
+            "live-app-cpu",
+            "CPU",
+            "%",
+            vec![reading("cpu_percent_one_core", "CPU", "#5794f2", 1.0)],
+        ),
+        specification(
+            "live-app-resident",
+            "Resident memory",
+            "GiB",
+            vec![reading(
+                "resident_bytes",
+                "Resident memory",
+                "#73bf69",
+                GIBIBYTE,
+            )],
+        ),
+        disk,
+        gpu,
+        specification(
+            "live-app-power",
+            "Process power",
+            "W",
+            vec![reading("energy_watts", "Process power", "#ff9830", 1.0)],
+        ),
     ]
 }
 

@@ -14,7 +14,7 @@ fn selected_app_disk_summary_and_columns_keep_joint_coverage(cx: &mut gpui::Test
     assert!(
         harness
             .driver
-            .text_is_visible("app-summary:disk_io_bytes:1.5 MB/s *")
+            .text_is_visible("summary-card:Disk I/O:1.5 MB/s *")
     );
     assert!(
         harness
@@ -47,12 +47,9 @@ fn disk_hover_replaces_every_app_widget_then_restores_the_committed_interval(
     harness.driver.assert_current_disk_visible();
     harness.driver.assert_disk_history(
         1000,
-        concat!(
-            "Read 1.0 MB/s · known subtotal · 2 measured · 1 unavailable; ",
-            "Write 500.0 kB/s · known subtotal · 2 measured · 1 unavailable"
-        ),
+        "1.5 MB/s · known subtotal · 2 measured · 1 unavailable",
         1,
-        [1.0, 0.5],
+        1.5,
     );
 
     harness.driver.hover_previous_second();
@@ -66,20 +63,15 @@ fn disk_hover_replaces_every_app_widget_then_restores_the_committed_interval(
     harness.driver.complete_disk_history();
     harness.driver.assert_current_disk_hidden();
     harness.driver.assert_historical_disk_visible();
-    harness
-        .driver
-        .assert_disk_history(999, "Read 2.0 MB/s; Write 1.0 MB/s", 0, [2.0, 1.0]);
+    harness.driver.assert_disk_history(999, "3.0 MB/s", 0, 3.0);
     harness.driver.leave_history();
     harness.driver.assert_current_disk_visible();
     harness.driver.assert_historical_disk_hidden();
     harness.driver.assert_disk_history(
         1000,
-        concat!(
-            "Read 1.0 MB/s · known subtotal · 2 measured · 1 unavailable; ",
-            "Write 500.0 kB/s · known subtotal · 2 measured · 1 unavailable"
-        ),
+        "1.5 MB/s · known subtotal · 2 measured · 1 unavailable",
         1,
-        [1.0, 0.5],
+        1.5,
     );
     harness.driver.assert_disk_selection_unchanged();
     harness.teardown();
@@ -127,58 +119,53 @@ fn a_disk_history_gap_has_no_app_widgets_or_neighboring_readout(cx: &mut gpui::T
 }
 
 #[gpui::test]
-fn disk_history_small_rates_use_adaptive_headline_and_both_legends(cx: &mut gpui::TestAppContext) {
-    // Render complete two-second byte deltas through production chart and accessibility paths.
+fn disk_history_small_rates_use_adaptive_headline_and_legend(cx: &mut gpui::TestAppContext) {
+    // Goal: small combined rates read in the unit that suits them.
+    // Method: render complete two-second byte deltas through production chart and accessibility
+    // paths.
     let mut harness = AppHoverHarness::setup(cx);
     harness.driver.seed_disk_readout(DiskReadout::Small);
 
-    harness.driver.assert_disk_readout(&DiskReadoutExpectation {
-        second: 1000,
-        headline: "Read 2.0 kB/s; Write 512.0 B/s",
-        headline_selector: "chart-reading:live-app-disk:Read 2.0 kB/s · Write 512.0 B/s",
-        read_legend: "chart-legend:live-app-disk:Read:2.0 kB/s",
-        write_legend: "chart-legend:live-app-disk:Write:512.0 B/s",
-    });
+    harness.driver.assert_small_complete_disk_readout();
     harness.teardown();
 }
 
 #[gpui::test]
-fn disk_history_zero_rates_remain_measured_in_headline_and_both_legends(
-    cx: &mut gpui::TestAppContext,
-) {
-    // Keep measured zero distinct from unavailable through the same real chart readouts.
+fn disk_history_zero_rates_remain_measured_in_headline_and_legend(cx: &mut gpui::TestAppContext) {
+    // Goal: a measured zero stays distinct from unavailable.
+    // Method: render measured zero deltas through the same real chart readouts.
     let mut harness = AppHoverHarness::setup(cx);
     harness.driver.seed_disk_readout(DiskReadout::Zero);
 
     harness.driver.assert_disk_readout(&DiskReadoutExpectation {
         second: 1000,
-        headline: "Read 0.0 MB/s; Write 0.0 MB/s",
-        headline_selector: "chart-reading:live-app-disk:Read 0.0 MB/s · Write 0.0 MB/s",
-        read_legend: "chart-legend:live-app-disk:Read:0.0 MB/s",
-        write_legend: "chart-legend:live-app-disk:Write:0.0 MB/s",
+        headline: "0.0 MB/s",
+        headline_selector: "chart-reading:live-app-disk:0.0 MB/s",
+        legend: "chart-legend:live-app-disk:Example App:0.0 MB/s",
     });
     harness.teardown();
 }
 
 #[gpui::test]
 fn disk_history_unavailable_rates_stay_unavailable_in_all_readouts(cx: &mut gpui::TestAppContext) {
-    // Nullable rates with no measured members must never appear as a measured zero.
+    // Goal: nullable rates with no measured members never read as a measured zero.
+    // Method: render an interval no member measured through the real chart readouts.
     let mut harness = AppHoverHarness::setup(cx);
     harness.driver.seed_disk_readout(DiskReadout::Unavailable);
 
     harness.driver.assert_disk_readout(&DiskReadoutExpectation {
         second: 1000,
-        headline: "Read Unavailable; Write Unavailable",
-        headline_selector: "chart-reading:live-app-disk:Read Unavailable · Write Unavailable",
-        read_legend: "chart-legend:live-app-disk:Read:Unavailable",
-        write_legend: "chart-legend:live-app-disk:Write:Unavailable",
+        headline: "Unavailable",
+        headline_selector: "chart-reading:live-app-disk:Unavailable",
+        legend: "chart-legend:live-app-disk:Example App:Unavailable",
     });
     harness.teardown();
 }
 
 #[gpui::test]
-fn disk_history_directional_coverage_follows_hover_and_exit(cx: &mut gpui::TestAppContext) {
-    // Equal directional rates isolate coverage changes at the exact hovered publication.
+fn disk_history_coverage_follows_hover_and_exit(cx: &mut gpui::TestAppContext) {
+    // Goal: the combined line's coverage follows the hovered publication and returns on exit.
+    // Method: hover a partial second through the plot, deliver its exact details, then leave.
     let mut harness = AppHoverHarness::setup(cx);
     harness.driver.seed_disk_readout(DiskReadout::Complete);
     harness.driver.assert_complete_disk_readout();
@@ -196,52 +183,39 @@ fn disk_history_directional_coverage_follows_hover_and_exit(cx: &mut gpui::TestA
     harness.driver.leave_history();
     harness.driver.assert_complete_disk_readout();
     assert!(!harness.driver.text_is_visible(concat!(
-        "chart-legend:live-app-disk:Read:2.0 MB/s",
-        " · known subtotal · 2 measured · 1 unavailable"
-    )));
-    assert!(!harness.driver.text_is_visible(concat!(
-        "chart-legend:live-app-disk:Write:1.0 MB/s",
-        " · known subtotal · 1 measured · 2 unavailable"
+        "chart-legend:live-app-disk:Example App:",
+        "2.5 MB/s · known subtotal · 1 measured · 2 unavailable",
     )));
     harness.driver.assert_disk_selection_unchanged();
     harness.teardown();
 }
 
 #[gpui::test]
-fn disk_headline_identifies_write_partial_with_complete_reads(cx: &mut gpui::TestAppContext) {
-    // A complete Read must not hide Write's independent unavailable-member count.
+fn disk_headline_marks_partial_writes_with_complete_reads(cx: &mut gpui::TestAppContext) {
+    // Goal: complete reads do not hide the members whose writes are unavailable.
+    // Method: seed reads from every member and writes from one, then read the combined line.
     let mut harness = AppHoverHarness::setup(cx);
     harness.driver.seed_disk_readout(DiskReadout::WritePartial);
 
-    harness.driver.assert_write_partial_disk_readout(1000);
+    harness.driver.assert_partial_small_disk_readout(1000);
     harness.teardown();
 }
 
 #[gpui::test]
-fn disk_headline_identifies_read_partial_with_complete_writes(cx: &mut gpui::TestAppContext) {
-    // A partial Read must not incorrectly qualify the independently complete Write.
+fn disk_headline_marks_partial_reads_with_complete_writes(cx: &mut gpui::TestAppContext) {
+    // Goal: complete writes do not hide the members whose reads are unavailable.
+    // Method: seed writes from every member and reads from one, then read the combined line.
     let mut harness = AppHoverHarness::setup(cx);
     harness.driver.seed_disk_readout(DiskReadout::ReadPartial);
 
-    harness.driver.assert_disk_readout(&DiskReadoutExpectation {
-        second: 1000,
-        headline: concat!(
-            "Read 2.0 kB/s · known subtotal · 1 measured · 2 unavailable; ",
-            "Write 512.0 B/s"
-        ),
-        headline_selector: "chart-reading:live-app-disk:Read 2.0 kB/s * · Write 512.0 B/s",
-        read_legend: concat!(
-            "chart-legend:live-app-disk:Read:2.0 kB/s",
-            " · known subtotal · 1 measured · 2 unavailable"
-        ),
-        write_legend: "chart-legend:live-app-disk:Write:512.0 B/s",
-    });
+    harness.driver.assert_partial_small_disk_readout(1000);
     harness.teardown();
 }
 
 #[gpui::test]
-fn disk_headline_retains_known_writes_when_reads_are_unavailable(cx: &mut gpui::TestAppContext) {
-    // No jointly measured process exists, but all three independent Write amounts remain known.
+fn disk_headline_is_unavailable_when_reads_are_unavailable(cx: &mut gpui::TestAppContext) {
+    // Goal: known writes alone never stand in for the App's combined disk rate.
+    // Method: seed writes from every member and reads from none, then read the combined line.
     let mut harness = AppHoverHarness::setup(cx);
     harness
         .driver
@@ -249,17 +223,17 @@ fn disk_headline_retains_known_writes_when_reads_are_unavailable(cx: &mut gpui::
 
     harness.driver.assert_disk_readout(&DiskReadoutExpectation {
         second: 1000,
-        headline: "Read Unavailable; Write 512.0 B/s",
-        headline_selector: "chart-reading:live-app-disk:Read Unavailable · Write 512.0 B/s",
-        read_legend: "chart-legend:live-app-disk:Read:Unavailable",
-        write_legend: "chart-legend:live-app-disk:Write:512.0 B/s",
+        headline: "Unavailable",
+        headline_selector: "chart-reading:live-app-disk:Unavailable",
+        legend: "chart-legend:live-app-disk:Example App:Unavailable",
     });
     harness.teardown();
 }
 
 #[gpui::test]
-fn disk_headline_write_partial_follows_loading_exact_hover_and_exit(cx: &mut gpui::TestAppContext) {
-    // Equal rates isolate Write's coverage change across exact pub2/pub1 and hover exit.
+fn disk_headline_partial_follows_loading_exact_hover_and_exit(cx: &mut gpui::TestAppContext) {
+    // Goal: equal rates isolate the coverage change across the exact hovered publication.
+    // Method: hover a second whose writes are partial, deliver its details, then leave.
     let mut harness = AppHoverHarness::setup(cx);
     harness
         .driver
@@ -268,19 +242,19 @@ fn disk_headline_write_partial_follows_loading_exact_hover_and_exit(cx: &mut gpu
 
     harness.driver.hover_previous_second();
 
-    harness.driver.assert_write_partial_disk_readout(999);
+    harness.driver.assert_partial_small_disk_readout(999);
     assert!(
         harness
             .driver
             .text_is_visible("Hover preview · Loading exact details")
     );
     harness.driver.complete_write_partial_disk_history();
-    harness.driver.assert_write_partial_disk_readout(999);
+    harness.driver.assert_partial_small_disk_readout(999);
     harness.driver.leave_history();
     harness.driver.assert_small_complete_disk_readout();
     assert!(!harness.driver.text_is_visible(concat!(
-        "chart-legend:live-app-disk:Write:512.0 B/s",
-        " · known subtotal · 1 measured · 2 unavailable"
+        "chart-legend:live-app-disk:Example App:",
+        "2.6 kB/s · known subtotal · 1 measured · 2 unavailable",
     )));
     harness.driver.assert_disk_selection_unchanged();
     harness.teardown();
@@ -290,8 +264,7 @@ struct DiskReadoutExpectation {
     second: u64,
     headline: &'static str,
     headline_selector: &'static str,
-    read_legend: &'static str,
-    write_legend: &'static str,
+    legend: &'static str,
 }
 
 #[gpui::test]
@@ -340,25 +313,20 @@ impl AppHoverDriver {
     fn assert_small_complete_disk_readout(&mut self) {
         self.assert_disk_readout(&DiskReadoutExpectation {
             second: 1000,
-            headline: "Read 2.0 kB/s; Write 512.0 B/s",
-            headline_selector: "chart-reading:live-app-disk:Read 2.0 kB/s · Write 512.0 B/s",
-            read_legend: "chart-legend:live-app-disk:Read:2.0 kB/s",
-            write_legend: "chart-legend:live-app-disk:Write:512.0 B/s",
+            headline: "2.6 kB/s",
+            headline_selector: "chart-reading:live-app-disk:2.6 kB/s",
+            legend: "chart-legend:live-app-disk:Example App:2.6 kB/s",
         });
     }
 
-    fn assert_write_partial_disk_readout(&mut self, second: u64) {
+    fn assert_partial_small_disk_readout(&mut self, second: u64) {
         self.assert_disk_readout(&DiskReadoutExpectation {
             second,
-            headline: concat!(
-                "Read 2.0 kB/s; ",
-                "Write 512.0 B/s · known subtotal · 1 measured · 2 unavailable"
-            ),
-            headline_selector: "chart-reading:live-app-disk:Read 2.0 kB/s · Write 512.0 B/s *",
-            read_legend: "chart-legend:live-app-disk:Read:2.0 kB/s",
-            write_legend: concat!(
-                "chart-legend:live-app-disk:Write:512.0 B/s",
-                " · known subtotal · 1 measured · 2 unavailable"
+            headline: "2.6 kB/s · known subtotal · 1 measured · 2 unavailable",
+            headline_selector: "chart-reading:live-app-disk:2.6 kB/s *",
+            legend: concat!(
+                "chart-legend:live-app-disk:Example App:",
+                "2.6 kB/s · known subtotal · 1 measured · 2 unavailable",
             ),
         });
     }
@@ -471,35 +439,26 @@ impl AppHoverDriver {
             assert!(reading.ends_with(expected.headline), "{reading}");
         });
         assert!(self.text_is_visible(expected.headline_selector));
-        assert!(self.text_is_visible(expected.read_legend));
-        assert!(self.text_is_visible(expected.write_legend));
+        assert!(self.text_is_visible(expected.legend));
     }
 
     fn assert_complete_disk_readout(&mut self) {
         self.assert_disk_readout(&DiskReadoutExpectation {
             second: 1000,
-            headline: "Read 2.0 MB/s; Write 1.0 MB/s",
-            headline_selector: "chart-reading:live-app-disk:Read 2.0 MB/s · Write 1.0 MB/s",
-            read_legend: "chart-legend:live-app-disk:Read:2.0 MB/s",
-            write_legend: "chart-legend:live-app-disk:Write:1.0 MB/s",
+            headline: "3.0 MB/s",
+            headline_selector: "chart-reading:live-app-disk:3.0 MB/s",
+            legend: "chart-legend:live-app-disk:Example App:3.0 MB/s",
         });
     }
 
     fn assert_partial_disk_readout(&mut self) {
         self.assert_disk_readout(&DiskReadoutExpectation {
             second: 999,
-            headline: concat!(
-                "Read 2.0 MB/s · known subtotal · 2 measured · 1 unavailable; ",
-                "Write 1.0 MB/s · known subtotal · 1 measured · 2 unavailable"
-            ),
-            headline_selector: "chart-reading:live-app-disk:Read 2.0 MB/s * · Write 1.0 MB/s *",
-            read_legend: concat!(
-                "chart-legend:live-app-disk:Read:2.0 MB/s",
-                " · known subtotal · 2 measured · 1 unavailable"
-            ),
-            write_legend: concat!(
-                "chart-legend:live-app-disk:Write:1.0 MB/s",
-                " · known subtotal · 1 measured · 2 unavailable"
+            headline: "2.5 MB/s · known subtotal · 1 measured · 2 unavailable",
+            headline_selector: "chart-reading:live-app-disk:2.5 MB/s *",
+            legend: concat!(
+                "chart-legend:live-app-disk:Example App:",
+                "2.5 MB/s · known subtotal · 1 measured · 2 unavailable",
             ),
         });
     }
@@ -566,7 +525,7 @@ impl AppHoverDriver {
     }
 
     fn assert_current_disk_visible(&mut self) {
-        assert!(self.text_is_visible("app-summary:disk_io_bytes:1.5 MB/s *"));
+        assert!(self.text_is_visible("summary-card:Disk I/O:1.5 MB/s *"));
         assert!(self.text_is_visible("app-disk:bundle:41:1.5 MB/s *"));
         assert!(self.text_is_visible("process-disk:10:1.0 MB/s"));
         assert!(self.text_is_visible("process-disk:11:500.0 kB/s"));
@@ -575,7 +534,7 @@ impl AppHoverDriver {
     }
 
     fn assert_current_disk_hidden(&mut self) {
-        assert!(!self.text_is_visible("app-summary:disk_io_bytes:1.5 MB/s *"));
+        assert!(!self.text_is_visible("summary-card:Disk I/O:1.5 MB/s *"));
         assert!(!self.text_is_visible("app-disk:bundle:41:1.5 MB/s *"));
         assert!(!self.text_is_visible("process-disk:10:1.0 MB/s"));
         assert!(!self.text_is_visible("process-disk:11:500.0 kB/s"));
@@ -584,7 +543,7 @@ impl AppHoverDriver {
     }
 
     fn assert_historical_disk_visible(&mut self) {
-        assert!(self.text_is_visible("app-summary:disk_io_bytes:3.0 MB/s"));
+        assert!(self.text_is_visible("summary-card:Disk I/O:3.0 MB/s"));
         assert!(self.text_is_visible("app-disk:bundle:41:3.0 MB/s"));
         assert!(self.text_is_visible("process-disk:20:2.0 MB/s"));
         assert!(self.text_is_visible("process-disk:21:1.0 MB/s"));
@@ -596,14 +555,14 @@ impl AppHoverDriver {
     }
 
     fn assert_historical_disk_hidden(&mut self) {
-        assert!(!self.text_is_visible("app-summary:disk_io_bytes:3.0 MB/s"));
+        assert!(!self.text_is_visible("summary-card:Disk I/O:3.0 MB/s"));
         assert!(!self.text_is_visible("app-disk:bundle:41:3.0 MB/s"));
         assert!(!self.text_is_visible("process-disk:20:2.0 MB/s"));
         assert!(!self.text_is_visible("process-disk:21:1.0 MB/s"));
         assert!(!self.text_is_visible("executable-disk:hex:63:3.0 MB/s"));
     }
 
-    fn assert_disk_history(&self, second: u64, headline: &str, index: usize, rates: [f32; 2]) {
+    fn assert_disk_history(&self, second: u64, headline: &str, index: usize, rate: f32) {
         self.view.read_with(&self.context, |dashboard, _| {
             let panel = dashboard
                 .panels
@@ -614,8 +573,8 @@ impl AppHoverDriver {
             assert_eq!(observed, Some(second));
             assert!(reading.contains(&format!("Unix second {second}")));
             assert!(reading.ends_with(headline), "{reading}");
-            assert_eq!(panel.lines[0].values[index], Some(rates[0]));
-            assert_eq!(panel.lines[1].values[index], Some(rates[1]));
+            assert_eq!(panel.lines.len(), 1);
+            assert_eq!(panel.lines[0].values[index], Some(rate));
         });
     }
 
@@ -632,10 +591,7 @@ impl AppHoverDriver {
                 .unwrap();
             let (second, headline) = dashboard.chart_accessibility_reading(panel);
             assert_eq!(second, Some(998));
-            assert!(
-                headline.ends_with("Read Unavailable; Write Unavailable"),
-                "{headline}"
-            );
+            assert!(headline.ends_with("Unavailable"), "{headline}");
         });
     }
 

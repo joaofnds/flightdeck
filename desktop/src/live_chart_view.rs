@@ -186,6 +186,9 @@ impl LiveDashboard {
                 .map_or_else(|| "Unavailable".into(), |history| history.headline(index));
         }
         if is_process_disk(panel) {
+            if panel.id == APP_DISK_PANEL {
+                return self.chart_line_reading(panel, 0, index);
+            }
             return format!(
                 "Read {}; Write {}",
                 self.chart_line_reading(panel, 0, index),
@@ -272,6 +275,9 @@ impl LiveDashboard {
     }
 
     fn chart_disk_headline(&self, panel: &Panel, index: Option<usize>) -> String {
+        if panel.id == APP_DISK_PANEL {
+            return self.chart_disk_headline_line(panel, 0, index);
+        }
         format!(
             "Read {} · Write {}",
             self.chart_disk_headline_line(panel, 0, index),
@@ -304,7 +310,12 @@ impl LiveDashboard {
         index: Option<usize>,
     ) -> Option<(u64, u64)> {
         assert!(line < 2);
-        let field = ["disk_read_bytes", "disk_written_bytes"][line];
+        let field = if panel.id == APP_DISK_PANEL {
+            assert_eq!(line, 0);
+            "disk_io_bytes"
+        } else {
+            ["disk_read_bytes", "disk_written_bytes"][line]
+        };
         // Panels retain the accepted history while exact preview details load.
         let snapshot = self.snapshot.as_ref()?;
         let measure = &process_history_payload(panel, snapshot)?["points"].get(index?)?[field];
@@ -768,10 +779,14 @@ fn chart_hover_second(
     crate::live_projection::sample_second(&snapshot?.selection, fraction)
 }
 
+/// The selected App's disk chart, one line of the bytes read and written together as the
+/// prototype draws it. A process group's disk chart keeps read and written apart.
+const APP_DISK_PANEL: &str = "live-app-disk";
+
 fn is_process_disk(panel: &Panel) -> bool {
     matches!(
         panel.id.as_str(),
-        "live-app-disk" | crate::live_process_history::DISK_PANEL
+        APP_DISK_PANEL | crate::live_process_history::DISK_PANEL
     )
 }
 

@@ -43,7 +43,7 @@ impl Section {
         match self {
             Self::OverviewHistories => "App resource histories",
             Self::OverviewContext => "More resource context",
-            Self::AppTotals => "Selected App totals · last 15 minutes",
+            Self::AppTotals => "Selected app totals",
             Self::MemoryQuantities => "All memory quantities",
             Self::EnergyContext => "Power breakdown and thermal context",
             Self::ComputerReference => "Schematic reference",

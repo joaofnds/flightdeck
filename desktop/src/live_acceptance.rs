@@ -20,6 +20,7 @@ impl Presentation {
             snapshot.history.as_ref(),
         )?;
         if request.route == "apps" {
+            prepare_app_names(&mut panels, snapshot.detail.as_ref())?;
             let mut group_panels = prepare_process_panels(request, &mut snapshot);
             group_panels.append(&mut panels);
             panels = group_panels;
@@ -89,6 +90,27 @@ impl Presentation {
 
         false
     }
+}
+
+/// Names each of the selected App's total charts and its line after the App, as
+/// "CPU · Brave Browser", so the totals read apart from the process group charts above them.
+fn prepare_app_names(
+    panels: &mut [Rc<Panel>],
+    detail: Option<&serde_json::Value>,
+) -> Result<(), String> {
+    let Some(detail) = detail else {
+        return Ok(());
+    };
+    let name = crate::live_views::text(&detail["app"]["display_name"]);
+    for panel in panels {
+        let panel = Rc::get_mut(panel).ok_or("App totals projection is already shared")?;
+        assert!(panel.id.starts_with("live-app-"));
+        panel.title = format!("{} · {name}", panel.title);
+        for line in &mut panel.lines {
+            line.name.clone_from(&name);
+        }
+    }
+    Ok(())
 }
 
 fn prepare_process_panels(request: &Request, snapshot: &mut Snapshot) -> Vec<Rc<Panel>> {

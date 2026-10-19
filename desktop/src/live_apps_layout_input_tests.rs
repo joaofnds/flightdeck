@@ -353,18 +353,15 @@ impl AppHoverDriver {
             app: [
                 "chart-card:live-app-cpu",
                 "chart-card:live-app-resident",
-                "chart-card:live-app-footprint",
-                "chart-card:live-app-power",
                 "chart-card:live-app-disk",
+                "chart-card:live-app-gpu",
+                "chart-card:live-app-power",
             ]
             .map(|id| self.context.debug_bounds(id).unwrap()),
             executable: self
                 .context
                 .debug_bounds("executable-disk:hex:61:Unavailable *"),
-            totals: self
-                .context
-                .debug_bounds("Selected App totals · last 15 minutes")
-                .unwrap(),
+            totals: self.context.debug_bounds("Selected app totals").unwrap(),
             instances: self
                 .context
                 .debug_bounds("Process instances · selected app")

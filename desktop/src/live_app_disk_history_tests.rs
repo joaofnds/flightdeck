@@ -1,8 +1,11 @@
 use serde_json::json;
 
 #[test]
-fn selected_app_disk_history_preserves_directional_interval_rates_and_gaps() {
-    // Project an unavailable point and a two-second interval through the real App chart adapter.
+fn selected_app_disk_history_combines_interval_rates_and_keeps_gaps() {
+    // Goal: the App's disk chart draws read and written bytes as one line, as the prototype
+    // does, and a process group's disk chart keeps them apart, with gaps left as gaps.
+    // Method: project an unavailable point and a two-second interval through the real chart
+    // adapter, once as the App's history and once as a process group's.
     let run = "00000000000000010000000000000002";
     let boot = "00000000000000030000000000000004";
     let selected = json!({"wall_ns":"1000000000000","stamp":{"run":run,"boot":boot,
@@ -29,7 +32,7 @@ fn selected_app_disk_history_preserves_directional_interval_rates_and_gaps() {
         "disk_read_bytes":measure(4096),"disk_written_bytes":measure(1024),
         "disk_io_bytes":measure(5120),"disk_read_bps":2048.0,
         "disk_written_bps":512.0,"disk_io_bps":2560.0});
-    let history = json!({"selected":selected,"points":[unavailable,measured]});
+    let mut history = json!({"selected":selected,"points":[unavailable,measured]});
 
     let panels = crate::live_projection::panels("apps", &selection, Some(&history)).unwrap();
 
@@ -39,15 +42,24 @@ fn selected_app_disk_history_preserves_directional_interval_rates_and_gaps() {
         .expect("Selected-App Disk I/O history is missing");
     assert_eq!(disk.unit, "MB/s");
     assert_eq!(disk.selected_index, Some(1));
-    assert_eq!(disk.lines.len(), 2);
-    let read = disk.lines.iter().find(|line| line.name == "Read").unwrap();
-    let write = disk.lines.iter().find(|line| line.name == "Write").unwrap();
-    assert_eq!(read.values, [None, Some(0.002_048)]);
-    assert_eq!(write.values, [None, Some(0.000_512)]);
+    assert_eq!(disk.lines.len(), 1);
+    assert_eq!(disk.lines[0].values, [None, Some(0.002_56)]);
     assert!(
         disk.help
             .as_ref()
             .unwrap()
             .contains("selected observation interval")
     );
+
+    history["scope"] = json!("selected_named_process_group");
+    let panels = crate::live_projection::panels("apps", &selection, Some(&history)).unwrap();
+    let disk = panels
+        .iter()
+        .find(|panel| panel.title == "Disk I/O")
+        .expect("Process group Disk I/O history is missing");
+    assert_eq!(disk.lines.len(), 2);
+    let read = disk.lines.iter().find(|line| line.name == "Read").unwrap();
+    let write = disk.lines.iter().find(|line| line.name == "Write").unwrap();
+    assert_eq!(read.values, [None, Some(0.002_048)]);
+    assert_eq!(write.values, [None, Some(0.000_512)]);
 }

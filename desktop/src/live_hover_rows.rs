@@ -454,7 +454,7 @@ impl LiveDashboard {
     }
 
     fn reading_rows_app_totals(&self, rows: &mut Vec<Row>) {
-        rows.push(Row::AppSummary);
+        rows.push(Row::AppTotalsNote);
         let totals: Vec<_> = self
             .panels
             .iter()

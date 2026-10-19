@@ -410,6 +410,13 @@ fn reader_snapshot(
         snapshot.histories_pending = reader_route_has_histories(&command.request.route);
     }
     reader_payload(session, &mut command.request, &mut snapshot)?;
+    if command.request.route == "apps" {
+        if let Some(app) = &command.request.app {
+            if let Some(history) = &mut snapshot.history {
+                reader.system.annotate_app(history, app);
+            }
+        }
+    }
     snapshot.read_ms = started.elapsed().as_secs_f64() * 1000.0;
     reader.last_catalog = Some(snapshot.catalog.clone());
     reader.last_generation = command.generation;

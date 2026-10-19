@@ -30,7 +30,7 @@ impl Row {
             Self::AppSelector => "app-selector".into(),
             Self::ProcessGroupBar => "process-group-bar".into(),
             Self::ProcessGroupingAbout => "process-grouping-about".into(),
-            Self::AppSummary => "app-summary".into(),
+            Self::AppTotalsNote => "app-totals-note".into(),
             Self::AppColumns(kind) => format!("app-columns-{kind}"),
             Self::CPUTop(_) => "cpu-top".into(),
             Self::CPUActivity => "cpu-activity".into(),

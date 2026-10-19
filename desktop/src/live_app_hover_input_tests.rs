@@ -22,7 +22,7 @@ fn hovering_an_app_replaces_current_details_with_the_exact_historical_page(
     assert!(
         harness
             .driver
-            .text_is_visible("3 live of 3 members · membership complete · 9.0 J this interval")
+            .text_is_visible("summary-card:Process power:9.0 W")
     );
 
     harness.driver.hover_previous_second();
@@ -32,7 +32,7 @@ fn hovering_an_app_replaces_current_details_with_the_exact_historical_page(
     assert!(
         !harness
             .driver
-            .text_is_visible("3 live of 3 members · membership complete · 9.0 J this interval")
+            .text_is_visible("summary-card:Process power:9.0 W")
     );
     harness.driver.deliver_historical_details();
 
@@ -43,7 +43,7 @@ fn hovering_an_app_replaces_current_details_with_the_exact_historical_page(
     assert!(
         harness
             .driver
-            .text_is_visible("2 live of 2 members · membership complete · 4.0 J this interval")
+            .text_is_visible("summary-card:Process power:4.0 W")
     );
     assert!(!harness.driver.text_is_visible("Accepted worker"));
     assert!(!harness.driver.text_is_visible("Accepted helper"));
@@ -65,6 +65,45 @@ fn the_selected_app_reads_in_six_summary_cards(cx: &mut TestAppContext) {
     ] {
         assert!(harness.driver.text_is_visible(card), "{card}");
     }
+    harness.teardown();
+}
+
+#[gpui::test]
+fn the_selected_app_totals_read_as_the_prototypes_app_named_charts(cx: &mut TestAppContext) {
+    // Goal: the totals chart the selected App's CPU, resident memory, disk, GPU time and power
+    // under its name, one line each, and say why the prototype's network chart is missing.
+    // Method: accept the fixture App and read the installed totals panels and the note.
+    let mut harness = AppHoverHarness::setup(cx);
+
+    harness
+        .driver
+        .view
+        .read_with(&harness.driver.context, |dashboard, _| {
+            let totals: Vec<_> = dashboard
+                .panels
+                .iter()
+                .filter(|panel| panel.id.starts_with("live-app-"))
+                .collect();
+            let titles: Vec<&str> = totals.iter().map(|panel| panel.title.as_str()).collect();
+            assert_eq!(
+                titles,
+                [
+                    "CPU · Example App",
+                    "Resident memory · Example App",
+                    "Disk I/O · Example App",
+                    "GPU time · Example App",
+                    "Process power · Example App",
+                ]
+            );
+            for panel in totals {
+                assert_eq!(panel.lines.len(), 1, "{}", panel.id);
+                assert_eq!(panel.lines[0].name, "Example App", "{}", panel.id);
+            }
+        });
+    assert!(harness.driver.text_is_visible("chart-card:live-app-gpu"));
+    assert!(harness.driver.text_is_visible(
+        "Per-process network bytes are not captured, so the App has no network chart."
+    ));
     harness.teardown();
 }
 
@@ -159,7 +198,7 @@ fn growing_historical_app_details_keep_the_graph_under_a_stationary_pointer(
     assert!(
         harness
             .driver
-            .text_is_visible("5 live of 5 members · membership complete · 4.0 J this interval")
+            .text_is_visible("summary-card:Process power:4.0 W")
     );
     assert!(!harness.driver.text_is_visible("Accepted worker"));
     harness.teardown();

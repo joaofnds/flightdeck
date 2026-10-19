@@ -302,16 +302,14 @@ impl AppHoverDriver {
         for selector in [
             "live-app-cpu-plot",
             "live-app-resident-plot",
-            "live-app-footprint-plot",
+            "live-app-gpu-plot",
             "live-app-power-plot",
             "live-app-disk-plot",
         ] {
             assert!(self.text_is_visible(selector), "{selector}");
         }
         assert!(self.text_is_visible("chart-reading:live-app-cpu:87.0 %"));
-        assert!(
-            self.text_is_visible("3 live of 3 members · membership complete · 9.0 J this interval")
-        );
+        assert!(self.text_is_visible("summary-card:Process power:9.0 W"));
         assert!(self.text_is_visible(["process-0", "process-1", "process-2"][raw_index]));
         let expected = if raw_index == 2 { "hex:62" } else { "hex:61" };
         assert_eq!(self.named_process_selection().as_deref(), Some(expected));

@@ -239,6 +239,18 @@ pub fn annotate<'samples>(
     }
 }
 
+/// One App's GPU time over the sample's interval, as a percent of it. An App the driver lists
+/// no GPU client for used no GPU time, so it reads zero.
+pub fn app_percent(sample: &GpuAppSample, app: &AppKey) -> f64 {
+    let mut gpu_ns: u64 = 0;
+    for time in &sample.apps {
+        if time.app.key() == *app {
+            gpu_ns = gpu_ns.saturating_add(time.gpu_ns);
+        }
+    }
+    percent(gpu_ns, sample.elapsed_ns)
+}
+
 fn point_second(point: &Value) -> Option<u64> {
     point["wall_ns"].as_u64().map(|wall| wall / 1_000_000_000)
 }

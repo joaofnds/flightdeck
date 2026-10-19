@@ -25,14 +25,13 @@ fn preserves_all_five_app_panels_and_recorded_gaps() {
     assert_eq!(bits.as_array().unwrap().len(), 5);
     assert_eq!(bits[0]["id"], "live-app-cpu");
     assert_eq!(bits[1]["id"], "live-app-resident");
-    assert_eq!(bits[2]["id"], "live-app-footprint");
-    assert_eq!(bits[3]["id"], "live-app-power");
-    assert_eq!(bits[4]["id"], "live-app-disk");
-    assert_eq!(bits[4]["selected_index"], 1);
-    assert_eq!(bits[4]["segments"], json!([0, 1]));
-    assert_eq!(bits[4]["lines"][0]["values"][0], Value::Null);
-    assert_eq!(bits[4]["lines"][0]["values"][1], 0.002_048_f32.to_bits());
-    assert_eq!(bits[4]["lines"][1]["values"][1], 0.000_512_f32.to_bits());
+    assert_eq!(bits[2]["id"], "live-app-disk");
+    assert_eq!(bits[3]["id"], "live-app-gpu");
+    assert_eq!(bits[4]["id"], "live-app-power");
+    assert_eq!(bits[2]["selected_index"], 1);
+    assert_eq!(bits[2]["segments"], json!([0, 1]));
+    assert_eq!(bits[2]["lines"][0]["values"][0], Value::Null);
+    assert_eq!(bits[2]["lines"][0]["values"][1], 0.002_56_f32.to_bits());
 }
 
 macro_rules! rejects_envelope {

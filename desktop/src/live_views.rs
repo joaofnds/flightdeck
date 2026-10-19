@@ -48,7 +48,7 @@ impl LiveDashboard {
         let height = self.reading_row_height(&self.rows[index]);
         let scroll_reserved = matches!(
             &self.rows[index],
-            Row::AppSummary | Row::CPUTop(_) | Row::CPUActivity | Row::StorageDevice(_, _)
+            Row::CPUTop(_) | Row::CPUActivity | Row::StorageDevice(_, _)
         );
         div()
             .id(gpui::SharedString::from(key))
@@ -102,7 +102,7 @@ impl LiveDashboard {
             Row::AppSelector => self.app_selector(cx).into_any_element(),
             Row::ProcessGroupBar => self.process_group_bar(cx).into_any_element(),
             Row::ProcessGroupingAbout => self.process_grouping_about().into_any_element(),
-            Row::AppSummary => self.app_summary().into_any_element(),
+            Row::AppTotalsNote => crate::live_app_views::app_totals_note().into_any_element(),
             Row::AppColumns(kind) => {
                 crate::live_app_views::app_table_columns(kind, &self.app_table_scroll)
                     .into_any_element()

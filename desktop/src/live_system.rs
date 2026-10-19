@@ -157,6 +157,30 @@ impl SystemSamples {
         });
     }
 
+    /// Adds the selected App's GPU time to each point of its history as `gpu_percent`,
+    /// matched by the second of the point's observation. A point with no GPU sample of its
+    /// second gets no reading, never a neighbour's.
+    pub fn annotate_app(&self, history: &mut Value, app: &crate::live_source::AppKey) {
+        let Some(points) = history.get_mut("points").and_then(Value::as_array_mut) else {
+            return;
+        };
+        for point in points
+            .iter_mut()
+            .take(crate::live_projection::OBSERVATIONS_MAX)
+        {
+            let Ok(wall_ns) = crate::live_projection::integer(&point["observation"]["wall_ns"])
+            else {
+                continue;
+            };
+            let sample = self
+                .sample_at(wall_ns / 1_000_000_000)
+                .and_then(|sample| sample.gpu_apps.as_ref());
+            if let Some(sample) = sample {
+                point["gpu_percent"] = json!(crate::live_gpu_apps::app_percent(sample, app));
+            }
+        }
+    }
+
     fn sample_at(&self, second: u64) -> Option<&SystemSample> {
         let index = self
             .samples
@@ -447,6 +471,59 @@ mod tests {
         assert_eq!(trends[0]["gpu_memory_in_use_bytes"], json!(1_u64 << 30));
         assert_eq!(trends[0]["gpu_memory_allocated_bytes"], Value::Null);
         assert_eq!(trends[1]["gpu_memory_in_use_bytes"], Value::Null);
+    }
+
+    #[test]
+    fn annotate_app_reads_the_selected_apps_gpu_time_in_each_points_second() {
+        // Goal: an App history point takes the selected App's GPU share of its own second,
+        // reads zero where the App used no GPU, and stays without a reading where no GPU
+        // sample exists.
+        // Method: GPU samples at seconds 100 and 102, the App present only in the first, and
+        // history points at 100, 101 and 102.
+        let selected = std::rc::Rc::new(crate::live_gpu_apps::GpuApp {
+            bundle: false,
+            bytes: b"A".to_vec(),
+        });
+        let other = std::rc::Rc::new(crate::live_gpu_apps::GpuApp {
+            bundle: false,
+            bytes: b"B".to_vec(),
+        });
+        let time = |app: &std::rc::Rc<crate::live_gpu_apps::GpuApp>, gpu_ns: u64| {
+            crate::live_gpu_apps::GpuAppTime {
+                app: std::rc::Rc::clone(app),
+                gpu_ns,
+                processes: 1,
+            }
+        };
+        let mut samples = SystemSamples::with_boot(None, None);
+        let mut first = sample(100);
+        first.gpu_apps = Some(crate::live_gpu_apps::GpuAppSample {
+            elapsed_ns: 1_000_000_000,
+            apps: vec![time(&selected, 250_000_000), time(&other, 500_000_000)],
+        });
+        samples.record(first);
+        let mut last = sample(102);
+        last.gpu_apps = Some(crate::live_gpu_apps::GpuAppSample {
+            elapsed_ns: 1_000_000_000,
+            apps: vec![time(&other, 500_000_000)],
+        });
+        samples.record(last);
+        let mut history = json!({"points": [
+            {"observation": {"wall_ns": "100500000000"}},
+            {"observation": {"wall_ns": "101000000000"}},
+            {"observation": {"wall_ns": "102900000000"}},
+        ]});
+        let key = crate::live_source::AppKey {
+            kind: "executable".into(),
+            bytes_hex: "41".into(),
+        };
+
+        samples.annotate_app(&mut history, &key);
+
+        let points = &history["points"];
+        assert_eq!(points[0]["gpu_percent"], json!(25.0));
+        assert_eq!(points[1]["gpu_percent"], Value::Null);
+        assert_eq!(points[2]["gpu_percent"], json!(0.0));
     }
 
     #[test]

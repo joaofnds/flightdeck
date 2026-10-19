@@ -2,7 +2,7 @@ use gpui::{AnyElement, Context, IntoElement, SharedString, div, prelude::*, px, 
 use num_traits::ToPrimitive;
 use serde_json::Value;
 
-use crate::charts::{BLUE, GREEN, GRID, MUTED, ORANGE, PANEL, PURPLE, YELLOW};
+use crate::charts::{BLUE, GREEN, GRID, MUTED, ORANGE, PURPLE, YELLOW};
 use crate::dashboard::control;
 use crate::live_dashboard::{LiveDashboard, Picker, toggle};
 use crate::live_source::AppKey;
@@ -24,13 +24,6 @@ const _: () = {
     assert!(JSON_BYTES_MAX > 2 * 4095);
     assert!(APPS_MAX == 512);
 };
-
-struct SummaryTile {
-    label: &'static str,
-    reading: String,
-    field: &'static str,
-    note: &'static str,
-}
 
 impl LiveDashboard {
     pub fn app_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -204,63 +197,6 @@ impl LiveDashboard {
         choices.sort_by(|first, second| first.0.cmp(&second.0).then(first.1.cmp(&second.1)));
         assert!(choices.len() <= APPS_MAX + 1);
         choices.into_iter().map(|(_, index)| index).collect()
-    }
-
-    pub fn app_summary(&self) -> impl IntoElement {
-        let Some(app) = self.current_app() else {
-            return div().text_color(rgb(MUTED)).child(
-                "Selected App unavailable in this observation. Its identity remains selected.",
-            );
-        };
-        let loaded = self
-            .reading_snapshot()
-            .and_then(|snapshot| snapshot.detail.as_ref())
-            .and_then(|detail| detail["processes"].as_array())
-            .map_or(0, Vec::len);
-        let expanded = self
-            .reading_expanded()
-            .is_some_and(|(kind, _)| kind == "app_summary");
-        let membership = format!(
-            "{} live of {} members · membership {} · {} this interval",
-            text(&app["live_members"]),
-            text(&app["members"]),
-            if app["membership_complete"].as_bool() == Some(true) {
-                "complete"
-            } else {
-                "uncertain"
-            },
-            value_rate(&app["energy_joules"], "J")
-        );
-        div()
-            .child(div().text_size(px(20.0)).child(text(&app["display_name"])))
-            .child(
-                div()
-                    .mt(px(3.0))
-                    .text_size(px(11.0))
-                    .text_color(rgb(MUTED))
-                    .child(text(&app["key"]["display"])),
-            )
-            .child(div().mt(px(10.0)).child(app_summary_tiles(app)))
-            .child(
-                div()
-                    .mt(px(8.0))
-                    .text_size(px(11.0))
-                    .text_color(rgb(MUTED))
-                    .debug_selector(|| membership.clone())
-                    .child(membership),
-            )
-            .child(
-                div()
-                    .mt(px(4.0))
-                    .text_size(px(11.0))
-                    .text_color(rgb(MUTED))
-                    .child(format!(
-                        "{loaded} of {} processes loaded · group subtotals cover this page. \
-                    * marks partial coverage; exec-crossing CPU, disk and energy are unavailable.",
-                        text(&app["members"])
-                    )),
-            )
-            .children(expanded.then(|| exact_json(app)))
     }
 
     pub fn app_row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
@@ -490,81 +426,15 @@ fn app_gpu_time(app: &Value, selection: &Value) -> String {
     }
 }
 
-fn app_summary_tiles(app: &Value) -> gpui::Div {
-    let mut tiles = div().flex().flex_wrap().gap(px(10.0));
-    for tile in [
-        SummaryTile {
-            label: "CPU",
-            field: "cpu_ns",
-            note: "100% = one core",
-            reading: measure_rate(app, "cpu_percent_one_core", "cpu_ns", "%"),
-        },
-        SummaryTile {
-            label: "Resident",
-            field: "resident_bytes",
-            note: "Shared pages count per process",
-            reading: measure_memory(&app["resident_bytes"]),
-        },
-        SummaryTile {
-            label: "Footprint",
-            field: "footprint_bytes",
-            note: "Separate process memory gauge",
-            reading: measure_memory(&app["footprint_bytes"]),
-        },
-        SummaryTile {
-            label: "Average power",
-            field: "energy_nj",
-            note: "Selected observation interval",
-            reading: measure_rate(app, "energy_watts", "energy_nj", "W"),
-        },
-        SummaryTile {
-            label: "Disk I/O",
-            field: "disk_io_bytes",
-            note: "Selected observation interval · process attribution. \
-                Separate from device throughput.",
-            reading: measure_disk_rate(app),
-        },
-    ] {
-        tiles = tiles.child(app_summary_tile(app, tile));
-    }
-    tiles
-}
-
-fn app_summary_tile(app: &Value, tile: SummaryTile) -> impl IntoElement {
-    let selector = format!("app-summary:{}:{}", tile.field, tile.reading);
-
+/// The prototype also charts the App's network bytes, which the collector does not record
+/// per process, so the page says so instead of drawing an empty chart.
+pub fn app_totals_note() -> impl IntoElement {
+    let text = "Per-process network bytes are not captured, so the App has no network chart.";
     div()
-        .flex_1()
-        .flex_basis(px(180.0))
-        .min_w(px(160.0))
-        .max_w_full()
-        .debug_selector(move || selector.clone())
-        .p(px(12.0))
-        .rounded(px(8.0))
-        .bg(rgb(PANEL))
-        .border_1()
-        .border_color(rgb(GRID))
-        .child(
-            div()
-                .text_size(px(11.0))
-                .text_color(rgb(MUTED))
-                .child(tile.label),
-        )
-        .child(div().mt(px(5.0)).text_size(px(23.0)).child(tile.reading))
-        .child(
-            div()
-                .mt(px(4.0))
-                .text_size(px(10.0))
-                .text_color(rgb(MUTED))
-                .child(tile.note),
-        )
-        .child(
-            div()
-                .mt(px(4.0))
-                .text_size(px(10.0))
-                .text_color(rgb(MUTED))
-                .child(coverage(&app[tile.field])),
-        )
+        .text_size(px(12.0))
+        .text_color(rgb(MUTED))
+        .debug_selector(move || text.into())
+        .child(text)
 }
 
 pub fn app_table_columns(kind: &str, scroll: &gpui::ScrollHandle) -> impl IntoElement {
@@ -872,14 +742,6 @@ fn amount_count(value: &Value) -> String {
     }
 }
 
-fn measure_rate(app: &Value, field: &str, measure: &str, unit: &str) -> String {
-    match measure_value(&app[measure]) {
-        Ok(Some(_)) => value_rate(&app[field], unit),
-        Ok(None) => "Unavailable".into(),
-        Err(error) => error,
-    }
-}
-
 fn measure_memory(value: &Value) -> String {
     let reading = match measure_value(value) {
         Ok(value) => memory(value),
@@ -927,19 +789,6 @@ fn decimal(value: &Value) -> Result<Option<u64>, String> {
             .map_err(|error| error.to_string()),
         _ => Err("Invalid exact counter".into()),
     }
-}
-
-fn coverage(value: &Value) -> String {
-    format!(
-        "{} measured · {} unavailable{}",
-        text(&value["measured_members"]),
-        text(&value["unavailable_members"]),
-        if value["overflowed"].as_bool() == Some(true) {
-            " · overflow"
-        } else {
-            ""
-        }
-    )
 }
 
 fn unavailable(message: &str) -> AnyElement {

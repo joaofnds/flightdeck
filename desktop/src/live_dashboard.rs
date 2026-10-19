@@ -125,7 +125,8 @@ pub enum Row {
     ProcessGroupBar,
     /// The Apps page's note on process grouping and coverage, under the group table.
     ProcessGroupingAbout,
-    AppSummary,
+    /// The Apps page's note on the App total the collector cannot record.
+    AppTotalsNote,
     AppColumns(&'static str),
     CPUTop(Option<Rc<Panel>>),
     CPUActivity,
