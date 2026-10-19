@@ -5,6 +5,9 @@ use crate::process_history_tests::payload;
 #[path = "live_apps_layout_input_tests.rs"]
 mod apps_layout;
 
+#[path = "live_all_process_groups_input_tests.rs"]
+mod all_groups;
+
 #[gpui::test]
 fn named_process_history_selection_loads_distinct_panels_before_app_totals_and_instances(
     cx: &mut TestAppContext,

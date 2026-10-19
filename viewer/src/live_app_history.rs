@@ -15,6 +15,7 @@ mod attribution;
 mod compact;
 mod merge;
 mod process;
+pub(crate) use process::cohort;
 pub(crate) use process::{GroupTarget, Selection};
 mod resident;
 mod resident_cache;

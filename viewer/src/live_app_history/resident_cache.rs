@@ -13,6 +13,7 @@ pub(crate) struct ResidentCache {
     pins: Vec<ResidentPin>,
     bytes: usize,
     attribution: Option<Box<crate::app_attribution_history::cache::Cache>>,
+    groups: Option<Box<crate::app_process_groups_history::cache::Cache>>,
 }
 
 pub(crate) struct ResidentPoint {
@@ -48,11 +49,27 @@ impl ResidentCache {
             pins: Vec::new(),
             bytes: 0,
             attribution: None,
+            groups: None,
         }
     }
 
     pub(crate) fn bytes(&self) -> usize {
-        self.bytes + self.attribution.as_ref().map_or(0, |cache| cache.bytes())
+        self.bytes
+            + self.attribution.as_ref().map_or(0, |cache| cache.bytes())
+            + self.groups.as_ref().map_or(0, |cache| cache.bytes())
+    }
+
+    pub(crate) fn take_groups(
+        &mut self,
+    ) -> Option<Box<crate::app_process_groups_history::cache::Cache>> {
+        self.groups.take()
+    }
+
+    pub(crate) fn install_groups(
+        &mut self,
+        cache: Option<Box<crate::app_process_groups_history::cache::Cache>>,
+    ) {
+        self.groups = cache;
     }
 
     pub(crate) fn take_attribution(&mut self) -> crate::app_attribution_history::cache::Cache {
@@ -151,8 +168,10 @@ impl ResidentCache {
         }
         if self.points.is_empty() {
             let attribution = self.attribution.take();
+            let groups = self.groups.take();
             *self = Self::new();
             self.attribution = attribution;
+            self.groups = groups;
         }
         Ok(())
     }

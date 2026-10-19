@@ -92,8 +92,25 @@ impl LiveDashboard {
         cursor_fraction(panel, snapshot, Some(hover.second))
     }
 
+    fn chart_process_groups(
+        &self,
+        panel: &Panel,
+    ) -> Option<&viewer::app_process_groups_history::AppProcessGroupsHistory> {
+        if !panel.id.starts_with("live-process-groups-") {
+            return None;
+        }
+
+        self.snapshot.as_ref()?.process_history.as_ref()?.all()
+    }
+
     fn chart_source_state(&self, panel: &Panel) -> gpui::Div {
         let mut notice = div().text_size(px(11.0)).text_color(rgb(MUTED));
+        if let Some(history) = self.chart_process_groups(panel) {
+            return notice.child(crate::live_process_history::groups::coverage(
+                history,
+                self.chart_inspection_index(panel),
+            ));
+        }
         if let Some(history) = self.chart_attribution_history(panel) {
             return notice.child(history.coverage(self.chart_inspection_index(panel)));
         }
@@ -176,6 +193,9 @@ impl LiveDashboard {
     }
 
     fn chart_reading(&self, panel: &Panel, index: Option<usize>) -> String {
+        if let Some(history) = self.chart_process_groups(panel) {
+            return format!("{} captured named groups", history.named_group_count);
+        }
         if let Some(history) = self.chart_attribution_history(panel) {
             return history.headline(index);
         }
@@ -218,6 +238,9 @@ impl LiveDashboard {
     }
 
     fn chart_line_reading(&self, panel: &Panel, line: usize, index: Option<usize>) -> String {
+        if let Some(history) = self.chart_process_groups(panel) {
+            return crate::live_process_history::groups::reading(history, &panel.id, line, index);
+        }
         if let Some(history) = self.chart_attribution_history(panel) {
             return history.reading(line, index);
         }
@@ -813,6 +836,12 @@ fn target_index(
     target: &crate::live_hover::Target,
 ) -> Option<usize> {
     target.identity.as_ref()?;
+    if panel.id.starts_with("live-process-groups-") {
+        return crate::live_process_history::groups::index(
+            snapshot.process_history.as_ref()?.all()?,
+            target,
+        );
+    }
     if let Some(metric) = crate::live_app_attribution_history::Metric::from_panel(&panel.id) {
         return snapshot.attribution_history(metric)?.index(Some(target));
     }
@@ -925,6 +954,7 @@ fn line_reading(panel: &Panel, value: Option<f32>, unit: &str) -> String {
         "live-battery-",
         "live-app-disk",
         "live-process-group-disk",
+        "live-process-groups-",
         "live-disk-apps",
     ]
     .iter()
@@ -979,6 +1009,13 @@ fn inspection_index(panel: &Panel, snapshot: &Snapshot, second: Option<u64>) -> 
     };
     if snapshot.selection["second"].as_u64() == Some(second) {
         return panel.selected_index;
+    }
+    if panel.id.starts_with("live-process-groups-") {
+        let target = crate::live_hover::Target::regular(snapshot, second);
+        return crate::live_process_history::groups::index(
+            snapshot.process_history.as_ref()?.all()?,
+            &target,
+        );
     }
     if let Some(metric) = crate::live_app_attribution_history::Metric::from_panel(&panel.id) {
         let target = crate::live_hover::Target::regular(snapshot, second);

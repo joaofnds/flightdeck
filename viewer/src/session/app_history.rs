@@ -14,6 +14,8 @@ use serde_json::Value;
 
 mod attribution;
 pub(crate) use attribution::AttributionReplay;
+mod process_groups;
+pub(crate) use process_groups::Replay as ProcessGroupsReplay;
 mod resident;
 
 pub(super) struct Cache {

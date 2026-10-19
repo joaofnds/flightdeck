@@ -5,7 +5,14 @@ use serde_json::Value;
 use crate::data::Panel;
 use crate::live_source::{AppKey, Request, identity_validate};
 
+#[path = "live_process_groups.rs"]
+pub(crate) mod groups;
+
 pub enum ProcessHistory {
+    All {
+        app: AppKey,
+        payload: Box<viewer::app_process_groups_history::AppProcessGroupsHistory>,
+    },
     Ready {
         app: AppKey,
         executable: String,
@@ -31,15 +38,31 @@ impl ProcessHistory {
         }
     }
 
+    pub fn prepare_all(
+        payload: Box<viewer::app_process_groups_history::AppProcessGroupsHistory>,
+        request: &Request,
+        selection: &Value,
+    ) -> Self {
+        groups::prepare(payload, request, selection).unwrap_or_else(Self::Unavailable)
+    }
+
+    pub fn all(&self) -> Option<&viewer::app_process_groups_history::AppProcessGroupsHistory> {
+        match self {
+            Self::All { payload, .. } => Some(payload),
+            Self::Ready { .. } | Self::Unavailable(_) => None,
+        }
+    }
+
     pub fn payload(&self) -> Option<&Value> {
         match self {
             Self::Ready { payload, .. } => Some(payload),
-            Self::Unavailable(_) => None,
+            Self::All { .. } | Self::Unavailable(_) => None,
         }
     }
 
     pub fn matches(&self, request: &Request) -> bool {
         match self {
+            Self::All { app, .. } => groups::matches(app, request),
             Self::Ready {
                 app, executable, ..
             } => {
@@ -57,6 +80,10 @@ impl ProcessHistory {
     }
 
     pub fn panels(&self, selection: &Value) -> Result<Vec<Rc<Panel>>, String> {
+        if let Self::All { payload, .. } = self {
+            return groups::panels(payload);
+        }
+
         let Some(payload) = self.payload() else {
             return Ok(Vec::new());
         };

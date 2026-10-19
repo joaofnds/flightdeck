@@ -43,6 +43,8 @@ pub struct Session {
     before_app_sample_install: std::cell::RefCell<Option<Box<dyn FnOnce()>>>,
     #[cfg(test)]
     before_app_history_install: std::cell::RefCell<Option<Box<dyn FnOnce()>>>,
+    #[cfg(test)]
+    pub(crate) after_process_groups_frame: std::cell::RefCell<Option<Box<dyn FnOnce()>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -125,6 +127,8 @@ impl Session {
             before_app_sample_install: std::cell::RefCell::new(None),
             #[cfg(test)]
             before_app_history_install: std::cell::RefCell::new(None),
+            #[cfg(test)]
+            after_process_groups_frame: std::cell::RefCell::new(None),
         };
         session.operation.begin(epoch)?.run(|| session.extent())?;
         Ok(session)
@@ -587,5 +591,6 @@ mod cpu_history_saved;
 
 mod app_history;
 pub(crate) use app_history::AttributionReplay;
+pub(crate) use app_history::ProcessGroupsReplay;
 mod committed_apps;
 mod selection;

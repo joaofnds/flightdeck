@@ -93,16 +93,14 @@ impl Presentation {
 
 fn prepare_process_panels(request: &Request, snapshot: &mut Snapshot) -> Vec<Rc<Panel>> {
     use crate::live_process_history::ProcessHistory;
-    if request.executable.is_none() {
-        snapshot.process_history = None;
-        return Vec::new();
-    }
-
     let Some(history) = snapshot.process_history.as_deref() else {
         return Vec::new();
     };
 
-    if let ProcessHistory::Ready { .. } = history {
+    if matches!(
+        history,
+        ProcessHistory::Ready { .. } | ProcessHistory::All { .. }
+    ) {
         if !history.matches(request) {
             snapshot.process_history = Some(std::sync::Arc::new(ProcessHistory::Unavailable(
                 "Process history belongs to another selected group".into(),

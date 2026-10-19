@@ -26,6 +26,9 @@ pub(crate) mod attribution_history;
 #[path = "live_storage_merge.rs"]
 mod storage_merge;
 
+#[path = "live_process_groups.rs"]
+mod process_groups;
+
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
 const CACHE_BYTES_MAX: usize = 128 * 1024 * 1024;
 const SOURCES_MAX: usize = 2;
@@ -3609,3 +3612,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "live_app_process_groups_history_tests.rs"]
+pub(crate) mod app_process_groups_history_tests;

@@ -303,6 +303,36 @@ fn refuses_member_counts_above_the_source_population_limit() {
     super::super::compact::count(24_001);
 }
 
+#[test]
+fn incoming_live_points_release_all_optional_saved_owners_before_pool_overflow() {
+    // Actual incoming live allocations evict optional saved facts before exceeding one shared pool.
+    let mut history = History::new();
+    let mut resident = history.saved_residents.borrow_mut();
+    assert!(resident.prepare(super::super::BYTES_MAX - history.bytes));
+    resident.install_attribution(crate::app_attribution_history::cache::Cache::new());
+    let mut groups = crate::app_process_groups_history::cache::Cache::new(&Target {
+        kind: KeyKind::Bundle,
+        bytes: b"/A.app",
+    });
+    assert!(groups.prepare(
+        super::super::BYTES_MAX - history.bytes - resident.bytes(),
+        1002
+    ));
+    resident.install_groups(Some(groups));
+    let saved_bytes = resident.bytes();
+    assert!(saved_bytes > 1024 * 1024);
+    drop(resident);
+
+    for publication in 1..=18 {
+        history.push(super::point(publication, 1024), 0);
+        assert!(history.total_bytes() <= super::super::BYTES_MAX);
+        assert_eq!(history.bytes, accounted_bytes(&history));
+    }
+
+    assert_eq!(history.saved_residents.borrow().bytes(), 0);
+    assert!(history.retention_limited);
+}
+
 fn retain(history: &mut History, keys: &[(KeyKind, &[u8])], count: u64) {
     for publication in 1..=count {
         history.push(point(history, publication, keys), 0);

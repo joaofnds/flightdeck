@@ -318,3 +318,222 @@ fn named_process(pid: i32, publication: u64) -> Process {
         },
     }
 }
+
+#[test]
+fn default_all_process_groups_loads_five_histories_before_app_totals() {
+    // Read a sealed two-name recording through the real worker with the default group selection.
+    let recording = named_recording();
+    let mut request = named_request();
+    request.executable = None;
+
+    let snapshot = recording.read(request.clone()).unwrap();
+
+    assert!(
+        snapshot.process_history.is_some(),
+        "Default All process groups loads captured history"
+    );
+    let presentation = crate::live_acceptance::Presentation::prepare(&request, snapshot).unwrap();
+    let panels: Vec<_> = presentation
+        .panels
+        .iter()
+        .filter(|panel| panel.id.starts_with("live-process-groups-"))
+        .collect();
+    assert_eq!(
+        panels
+            .iter()
+            .map(|panel| panel.id.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "live-process-groups-cpu",
+            "live-process-groups-resident",
+            "live-process-groups-footprint",
+            "live-process-groups-disk",
+            "live-process-groups-power"
+        ]
+    );
+    assert_eq!(panels[0].lines.len(), 2);
+    assert_eq!(panels[3].lines.len(), 4);
+    assert_eq!(panels[0].selected_index, Some(1));
+    assert_eq!(panels[0].lines[0].values[1], Some(240.0));
+    assert_eq!(presentation.panels[0].id, "live-process-groups-cpu");
+}
+
+#[test]
+fn all_groups_inspector_uses_the_exact_shared_same_second_observation() {
+    // Two observations share a second; all panels and exact Disk values use publication two.
+    let recording = named_recording();
+    let mut request = named_request();
+    request.executable = None;
+    let snapshot = recording.read(request).unwrap();
+    let history = snapshot.process_history.as_ref().unwrap().all().unwrap();
+    let target =
+        crate::live_hover::Target::exact(1001, &json!({"run":[1,2],"boot":[3,4],"publication":2}))
+            .unwrap();
+
+    let index = crate::live_process_history::groups::index(history, &target);
+    let reading =
+        crate::live_process_history::groups::reading(history, "live-process-groups-disk", 0, index);
+    let written =
+        crate::live_process_history::groups::reading(history, "live-process-groups-disk", 2, index);
+
+    assert_eq!(index, Some(1));
+    assert_eq!(reading, "160.0 B/s · 160 B / interval");
+    assert_eq!(written, "80.0 B/s · 80 B / interval");
+    assert_eq!(
+        history.points[index.unwrap()].observation.stamp.publication,
+        2
+    );
+}
+
+#[test]
+fn all_groups_preview_retains_the_accepted_context_without_reloading_it() {
+    // Exact preview detail loading keeps the same accepted cohort Arc used by the charts.
+    let recording = named_recording();
+    let mut request = named_request();
+    request.executable = None;
+    let snapshot = recording.read(request.clone()).unwrap();
+    let target =
+        crate::live_hover::Target::exact(1000, &json!({"run":[1,2],"boot":[3,4],"publication":1}))
+            .unwrap();
+
+    let preview = crate::live_hover::Preview::resident(&snapshot, &request, target);
+
+    assert!(preview.request.executable.is_none());
+    assert!(!preview.request.load_process_history);
+    assert!(std::sync::Arc::ptr_eq(
+        snapshot.process_history.as_ref().unwrap(),
+        preview.reading.process_history.as_ref().unwrap()
+    ));
+}
+
+#[test]
+fn all_groups_history_ignores_the_loaded_member_page() {
+    // A page containing only b cannot remove a from the all-groups cohort.
+    let recording = named_recording_with_members(513);
+    let mut request = named_request();
+    request.executable = None;
+    request.members_offset = 512;
+
+    let snapshot = recording.read(request).unwrap();
+
+    assert_eq!(
+        snapshot.detail.as_ref().unwrap()["processes"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        snapshot
+            .process_history
+            .as_ref()
+            .unwrap()
+            .all()
+            .unwrap()
+            .named_group_count,
+        2
+    );
+}
+
+#[test]
+fn all_groups_readouts_use_historical_rates_and_keep_exact_interval_values() {
+    // Human units use each observation's interval; the byte suffix never uses floating point.
+    let mut history = all_history();
+    let selected = crate::live_process_history::groups::reading(
+        &history,
+        "live-process-groups-cpu",
+        0,
+        Some(1),
+    );
+    assert_eq!(selected, "240.0 % · 2400000000 ns CPU / interval");
+    history.points[0].readings[0] = history.points[1].readings[0];
+    history.points[0].elapsed_ns = Some(2_000_000_000);
+    let historical = crate::live_process_history::groups::reading(
+        &history,
+        "live-process-groups-cpu",
+        0,
+        Some(0),
+    );
+    assert_eq!(historical, "120.0 % · 2400000000 ns CPU / interval");
+    history.points[0].readings[0].measures[2].known = 9_007_199_254_740_993;
+    let disk = crate::live_process_history::groups::reading(
+        &history,
+        "live-process-groups-disk",
+        0,
+        Some(0),
+    );
+    assert_eq!(disk, "4503599616.0 MB/s · 9007199254740993 B / interval");
+    history.points[0].readings[0].measures[3].known = 9_007_199_254_740_995;
+    let written = crate::live_process_history::groups::reading(
+        &history,
+        "live-process-groups-disk",
+        history.groups.len(),
+        Some(0),
+    );
+    assert_eq!(written, "4503599616.0 MB/s · 9007199254740995 B / interval");
+    let power = crate::live_process_history::groups::reading(
+        &history,
+        "live-process-groups-power",
+        0,
+        Some(1),
+    );
+    assert_eq!(power, "2.5 W · 2500000000 nJ / interval");
+}
+
+#[test]
+fn all_groups_unavailable_elapsed_keeps_known_bytes_and_partial_coverage() {
+    // Missing timing prevents a rate, while known bytes and honest member coverage survive.
+    let mut history = all_history();
+    history.points[1].elapsed_ns = None;
+    let disk = crate::live_process_history::groups::reading(
+        &history,
+        "live-process-groups-disk",
+        0,
+        Some(1),
+    );
+    assert_eq!(disk, "Unavailable · 160 B / interval");
+    history.points[1].readings[0].measures[2].unavailable_members = 2;
+    let partial = crate::live_process_history::groups::reading(
+        &history,
+        "live-process-groups-disk",
+        0,
+        Some(1),
+    );
+    assert_eq!(
+        partial,
+        "Unavailable · 160 B / interval · known subtotal · 1 measured · 2 unavailable"
+    );
+}
+
+#[test]
+fn all_groups_small_nonzero_readouts_preserve_visible_rates() {
+    // Use the shared quantity formatter so small captured rates cannot display as zero.
+    let mut history = all_history();
+    history.points[1].readings[0].measures[1].known = 1_000_000;
+    history.points[1].readings[0].measures[0].known = 10_000;
+    let power = crate::live_process_history::groups::reading(
+        &history,
+        "live-process-groups-power",
+        0,
+        Some(1),
+    );
+    assert_eq!(power, "1.0 mW · 1000000 nJ / interval");
+    let cpu = crate::live_process_history::groups::reading(
+        &history,
+        "live-process-groups-cpu",
+        0,
+        Some(1),
+    );
+    assert_eq!(cpu, "0.001 % · 10000 ns CPU / interval");
+}
+
+pub(crate) fn all_history() -> Box<viewer::app_process_groups_history::AppProcessGroupsHistory> {
+    let recording = named_recording();
+    let mut request = named_request();
+    request.executable = None;
+    let snapshot = recording.read(request).unwrap();
+    match std::sync::Arc::try_unwrap(snapshot.process_history.unwrap()) {
+        Ok(crate::live_process_history::ProcessHistory::All { payload, .. }) => payload,
+        _ => panic!("Expected uniquely owned All history"),
+    }
+}

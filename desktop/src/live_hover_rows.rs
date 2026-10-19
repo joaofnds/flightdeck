@@ -351,31 +351,41 @@ impl LiveDashboard {
         snapshot: &crate::live_source::Snapshot,
     ) {
         use crate::live_process_history::{PANEL_PREFIX, ProcessHistory};
-        let Some(filter) = self.request.executable.as_deref() else {
-            rows.push(Row::Heading(
-                "Process group history · Select an executable group to inspect captured history"
-                    .into(),
-            ));
-            return;
-        };
-
-        let status = match ProcessHistory::filter_reason(Some(filter)) {
-            Some(reason) => reason.to_owned(),
-            None => match snapshot.process_history.as_deref() {
-                Some(ProcessHistory::Ready { payload, .. }) => format!(
-                    "{} · last 15 minutes",
-                    crate::live_views::text(&payload["executable_name"]["display"])
+        let status = if let Some(filter) = self.request.executable.as_deref() {
+            match ProcessHistory::filter_reason(Some(filter)) {
+                Some(reason) => reason.to_owned(),
+                None => match snapshot.process_history.as_deref() {
+                    Some(ProcessHistory::Ready { payload, .. }) => format!(
+                        "{} · last 15 minutes",
+                        crate::live_views::text(&payload["executable_name"]["display"])
+                    ),
+                    Some(ProcessHistory::Unavailable(reason)) => format!("Unavailable: {reason}"),
+                    Some(ProcessHistory::All { .. }) => "Different process group context".into(),
+                    None => "Loading captured history".into(),
+                },
+            }
+        } else {
+            match snapshot.process_history.as_deref() {
+                Some(ProcessHistory::All { payload, .. }) => format!(
+                    "All process groups · {} captured names · last 15 minutes",
+                    payload.named_group_count
                 ),
                 Some(ProcessHistory::Unavailable(reason)) => format!("Unavailable: {reason}"),
+                Some(ProcessHistory::Ready { .. }) => "Different process group context".into(),
                 None => "Loading captured history".into(),
-            },
+            }
         };
         rows.push(Row::Heading(format!("Process group history · {status}")));
         let panels: Vec<_> = self
             .panels
             .iter()
             .take(16)
-            .filter(|panel| panel.id.starts_with(PANEL_PREFIX))
+            .filter(|panel| {
+                if panel.id.starts_with(PANEL_PREFIX) {
+                    return true;
+                }
+                panel.id.starts_with("live-process-groups-")
+            })
             .cloned()
             .collect();
         for panels in panels.chunks(self.reading_chart_columns()) {

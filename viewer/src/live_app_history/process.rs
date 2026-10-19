@@ -9,6 +9,9 @@ use super::trace::Totals;
 use super::{App, BYTES_MAX, History, Point, Target, TracePoint, apps, key};
 use crate::live_app_response::Sample;
 
+pub(crate) mod cohort;
+mod groups_cache;
+
 pub(crate) trait Selection {
     fn app(&self) -> &Target<'_>;
     fn executable(&self) -> Option<&[u8]>;

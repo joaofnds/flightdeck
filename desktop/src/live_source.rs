@@ -705,11 +705,21 @@ fn reader_apps(
 
 fn reader_process_history(session: &LiveSession, request: &Request, snapshot: &mut Snapshot) {
     use crate::live_process_history::ProcessHistory;
-    let Some(filter) = request.executable.as_deref() else {
-        return;
-    };
-
     let read = || -> Result<ProcessHistory, String> {
+        let Some(filter) = request.executable.as_deref() else {
+            let key = request.app.as_ref().ok_or("Selected App unavailable")?;
+            let kind = app_key_kind(&key.kind)?;
+            let bytes = app_key_bytes(&key.bytes_hex)?;
+            let payload = session
+                .app_process_groups_history(kind, &bytes)
+                .map_err(|error| error.to_string())?;
+
+            return Ok(ProcessHistory::prepare_all(
+                payload,
+                request,
+                &snapshot.selection,
+            ));
+        };
         let name = crate::live_process_history::name_bytes(filter)?;
         let Some(name) = name else {
             return Err(ProcessHistory::filter_reason(Some(filter))
@@ -883,7 +893,7 @@ fn app_first_key(apps: &Value) -> Result<Option<AppKey>, String> {
     }))
 }
 
-fn app_key_kind(kind: &str) -> Result<KeyKind, String> {
+pub(crate) fn app_key_kind(kind: &str) -> Result<KeyKind, String> {
     match kind {
         "bundle" => Ok(KeyKind::Bundle),
         "executable" => Ok(KeyKind::Executable),
@@ -965,4 +975,4 @@ pub(crate) mod app_key_tests;
 
 #[cfg(test)]
 #[path = "live_source_tests.rs"]
-mod tests;
+pub(crate) mod tests;

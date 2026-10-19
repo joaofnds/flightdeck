@@ -14,15 +14,15 @@ pub(crate) struct TracePoint {
 
 #[derive(Clone, Copy)]
 pub(super) struct Totals {
-    members: u16,
-    membership_complete: bool,
-    cpu_ns: CompactMeasure,
-    energy_nj: CompactMeasure,
-    disk_read_bytes: CompactMeasure,
-    disk_written_bytes: CompactMeasure,
-    disk_io_bytes: CompactMeasure,
-    resident_bytes: CompactMeasure,
-    footprint_bytes: CompactMeasure,
+    pub(super) members: u16,
+    pub(super) membership_complete: bool,
+    pub(super) cpu_ns: CompactMeasure,
+    pub(super) energy_nj: CompactMeasure,
+    pub(super) disk_read_bytes: CompactMeasure,
+    pub(super) disk_written_bytes: CompactMeasure,
+    pub(super) disk_io_bytes: CompactMeasure,
+    pub(super) resident_bytes: CompactMeasure,
+    pub(super) footprint_bytes: CompactMeasure,
 }
 
 const _: () = {

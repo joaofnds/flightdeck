@@ -6,7 +6,7 @@ mod cpu_history;
 #[path = "live_source_hover_tests.rs"]
 mod hover;
 #[path = "live_process_history_source_tests.rs"]
-mod process_history;
+pub(crate) mod process_history;
 #[path = "live_rankings_source_tests.rs"]
 mod rankings;
 
