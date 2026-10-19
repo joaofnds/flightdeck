@@ -30,6 +30,7 @@ pub(super) fn battery() -> Vec<Specification> {
     );
     flow.help = "Positive is power into the battery; negative is discharge. Derived from \
         controller current and voltage. Adapter rating is separate from measured battery flow.";
+    flow.caption = Some("Positive is charging; negative is discharge.");
     let charging = specification(
         "live-battery-charging",
         "Charging state",

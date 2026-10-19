@@ -84,6 +84,7 @@ impl LiveDashboard {
             .child(chart_plot_row(&panel.id, reading, axes, chart))
             .child(time_row)
             .child(self.chart_legends(panel, index, cx))
+            .children(panel.caption.clone().map(timeline::timeline_caption_text))
     }
 
     fn chart_time_window(&self) -> Option<charts::TimeWindow> {

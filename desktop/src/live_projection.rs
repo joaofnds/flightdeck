@@ -177,6 +177,8 @@ struct Specification {
     stack: bool,
     fill: f32,
     help: &'static str,
+    /// The line of text under the legend, as the prototype gives the battery's power flow.
+    caption: Option<&'static str>,
 }
 
 struct Reading {
@@ -519,7 +521,7 @@ fn panel(
         maximum,
         stack: Some(specification.stack),
         fill: Some(specification.fill),
-        caption: None,
+        caption: specification.caption.map(str::to_owned),
         help: Some(specification.help.to_owned()),
         source: Some("Live recording".into()),
         quantities: None,
@@ -677,6 +679,7 @@ fn specification(
         stack: false,
         fill: 0.1,
         help: "Recorded readings over the last 15 minutes. Unavailable intervals remain gaps.",
+        caption: None,
     }
 }
 

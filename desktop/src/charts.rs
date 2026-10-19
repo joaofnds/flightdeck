@@ -80,7 +80,7 @@ fn plot_cursor(
 ) -> impl IntoElement {
     canvas(
         move |bounds, _, _| measured.set(bounds),
-        move |bounds, (), window, _| {
+        move |bounds, (), window, cx| {
             let chart = plot_bounds(bounds);
             crate::render_evidence::chart(&panel, inspection, chart, window);
             if matches!(panel.kind.as_str(), "line" | "self-chart") {
@@ -97,7 +97,7 @@ fn plot_cursor(
                 }
             }
             clip_plot(chart, window, |window| match panel.kind.as_str() {
-                "timeline" => paint_timeline(&panel, chart, inspection, &hidden, window),
+                "timeline" => paint_timeline(&panel, chart, inspection, &hidden, (window, cx)),
                 "heatmap" => paint_heatmap(&panel, chart, inspection, &hidden, window),
                 "core-bars" | "pressure" => paint_bars(&panel, chart, inspection, &hidden, window),
                 _ => paint_lines(&panel, chart, inspection, &hidden, window),
@@ -767,40 +767,84 @@ fn paint_timeline(
     bounds: Bounds<Pixels>,
     view: Inspection,
     hidden: &[String],
-    window: &mut Window,
+    (window, cx): (&mut Window, &mut gpui::App),
 ) {
-    if let Some(line) = panel.lines.first() {
-        if hidden.contains(&line.name) {
-            return;
+    let Some(line) = panel.lines.first() else {
+        return;
+    };
+    if hidden.contains(&line.name) {
+        return;
+    }
+    let count = view.upper - view.lower + 1;
+    let cell = bounds.size.width / number(count);
+    let mut index = view.lower;
+    while index <= view.upper {
+        let Some(value) = line.values.get(index).copied().flatten() else {
+            index += 1;
+            continue;
+        };
+        let mut end = index + 1;
+        while end <= view.upper && line.values.get(end).copied().flatten() == Some(value) {
+            end += 1;
         }
-        let count = view.upper - view.lower + 1;
-        for index in view.lower..=view.upper {
-            let value = line.values.get(index).copied().flatten();
-            let Some(value) = value else {
-                continue;
-            };
+        let run = Bounds::new(
+            point(
+                bounds.origin.x + bounds.size.width * (number(index - view.lower) / number(count)),
+                bounds.origin.y,
+            ),
+            size(cell * number(end - index), bounds.size.height),
+        );
+        window.paint_quad(fill(run, alpha(timeline_color(panel, value), 0.85)));
+        paint_run_label(panel, value, run, window, cx);
+        index = end;
+    }
+}
 
-            let tint = timeline_color(panel, value);
-            window.paint_quad(fill(
-                Bounds::new(
-                    point(
-                        bounds.origin.x
-                            + bounds.size.width * (number(index - view.lower) / number(count)),
-                        bounds.origin.y,
-                    ),
-                    size(bounds.size.width / number(count), bounds.size.height),
-                ),
-                alpha(tint, 0.85),
-            ));
-        }
+/// The charging state's name inside a run wider than 90 pixels, as the prototype draws it.
+fn paint_run_label(
+    panel: &Panel,
+    value: f32,
+    run: Bounds<Pixels>,
+    window: &mut Window,
+    cx: &mut gpui::App,
+) {
+    if panel.id != "live-battery-charging" || run.size.width <= px(90.0) {
+        return;
+    }
+    let Some(name) = panel
+        .states
+        .as_ref()
+        .and_then(|states| states.get(usize::from(value != 0.0)))
+    else {
+        return;
+    };
+    let shaped = window.text_system().shape_line(
+        name.clone().into(),
+        px(12.0),
+        &[gpui::TextRun {
+            len: name.len(),
+            font: gpui::font(".SystemUIFont"),
+            color: rgb(0x0011_1217).into(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        }],
+        None,
+    );
+    let origin = point(
+        run.origin.x + (run.size.width - shaped.width) / 2.0,
+        run.origin.y + (run.size.height - px(18.0)) / 2.0,
+    );
+    if let Err(error) = shaped.paint(origin, px(18.0), gpui::TextAlign::Left, None, window, cx) {
+        eprintln!("timeline label: {error}");
     }
 }
 
 pub(crate) fn timeline_color(panel: &Panel, value: f32) -> u32 {
     if panel.id == "live-battery-charging" {
         return match value {
-            0.0 => MUTED,
-            1.0 => YELLOW,
+            0.0 => BLUE,
+            1.0 => GREEN,
             _ => MUTED,
         };
     }
