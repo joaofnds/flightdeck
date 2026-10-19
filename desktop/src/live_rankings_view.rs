@@ -296,7 +296,7 @@ impl LiveDashboard {
         self.request.apps_offset = 0;
         self.request.members_offset = 0;
         self.request.executable = None;
-        self.app_picker_open = false;
+        self.picker = None;
         self.navigate("apps", cx);
     }
 }

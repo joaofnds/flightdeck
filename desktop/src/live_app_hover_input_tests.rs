@@ -490,7 +490,7 @@ impl AppHoverDriver {
                 kind: "bundle".into(),
                 bytes_hex: "41".into(),
             });
-            dashboard.app_picker_open = true;
+            dashboard.picker = Some(crate::live_dashboard::Picker::App);
             let mut snapshot = AppEpoch::Accepted.snapshot(dashboard.generation);
             snapshot.history.as_mut().unwrap()["points"][0] = historical.history_point();
             dashboard.accept(snapshot);

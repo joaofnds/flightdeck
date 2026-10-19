@@ -124,10 +124,12 @@ impl LiveDashboard {
     fn chart_source_state(&self, panel: &Panel) -> gpui::Div {
         let mut notice = div().text_size(px(11.0)).text_color(rgb(MUTED));
         if let Some(history) = self.chart_process_groups(panel) {
-            return notice.child(crate::live_process_history::groups::coverage(
+            let gap = crate::live_process_history::groups::coverage(
                 history,
                 self.chart_inspection_index(panel),
-            ));
+            );
+            return notice
+                .children(gap.map(|text| div().debug_selector(move || text.into()).child(text)));
         }
         if let Some(history) = self.chart_attribution_history(panel) {
             return notice.child(history.coverage(self.chart_inspection_index(panel)));

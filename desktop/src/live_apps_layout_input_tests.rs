@@ -144,7 +144,7 @@ fn apps_grid_exact_hover_retains_context_and_restores_readings_on_exit(cx: &mut 
     assert!(
         harness
             .driver
-            .text_is_visible("Process group history · Accepted worker · last 15 minutes")
+            .text_is_visible("process-group-picker:Accepted worker")
     );
     assert!(harness.driver.text_is_visible("Historical worker"));
     expect_apps_grid_anchor(&before, &harness.driver.apps_grid_bounds());

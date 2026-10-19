@@ -9,23 +9,29 @@ fn all_groups_pointer_hover_shares_exact_readings_and_restores_on_exit(cx: &mut 
 
     harness.driver.hover_all_groups(898.5 / 900.0);
 
-    assert!(harness.driver.text_is_visible(
-        "chart-legend:live-process-groups-cpu:Named · b:120.0 % · 1200000000 ns CPU / interval"
-    ));
-    assert!(harness.driver.text_is_visible(
-        "chart-tooltip-row:live-process-groups-cpu:0:Named · b:120.0 % · \
-        1200000000 ns CPU / interval"
-    ));
-    assert!(harness.driver.text_is_visible(
-        "chart-legend:live-process-groups-disk:Named · b read:9007199232.0 MB/s · \
-        9007199254740993 B / interval"
-    ));
+    assert!(
+        harness
+            .driver
+            .text_is_visible("chart-legend:live-process-groups-cpu:b:120.0 %")
+    );
+    assert!(
+        harness
+            .driver
+            .text_is_visible("chart-tooltip-row:live-process-groups-cpu:0:b:120.0 %")
+    );
+    assert!(
+        harness
+            .driver
+            .text_is_visible("chart-legend:live-process-groups-disk:b read:9007199232.0 MB/s")
+    );
     harness.driver.assert_all_groups_historical_quantities();
     harness.driver.assert_all_groups_second(999);
     harness.driver.leave_all_groups();
-    assert!(harness.driver.text_is_visible(
-        "chart-legend:live-process-groups-cpu:Named · b:240.0 % · 2400000000 ns CPU / interval"
-    ));
+    assert!(
+        harness
+            .driver
+            .text_is_visible("chart-legend:live-process-groups-cpu:b:240.0 %")
+    );
     harness.driver.assert_all_groups_current_quantities();
     assert!(
         !harness
@@ -38,7 +44,9 @@ fn all_groups_pointer_hover_shares_exact_readings_and_restores_on_exit(cx: &mut 
 
 #[gpui::test]
 fn all_groups_gap_never_borrows_the_current_reading(cx: &mut TestAppContext) {
-    // Point at a missing second through the installed chart, then inspect all eight panels.
+    // Goal: a missing second reads as missing and names the gap under the charts.
+    // Method: point at a missing second through the installed chart, then inspect all eight
+    // panels and the footnote, and leave to read the current second again.
     let mut harness = AppHoverHarness::setup(cx);
     harness.driver.resize_process_history();
     harness.driver.deliver_all_group_history();
@@ -48,17 +56,27 @@ fn all_groups_gap_never_borrows_the_current_reading(cx: &mut TestAppContext) {
     assert!(
         harness
             .driver
-            .text_is_visible("chart-legend:live-process-groups-cpu:Named · b:Unavailable")
+            .text_is_visible("chart-legend:live-process-groups-cpu:b:Unavailable")
     );
     assert!(
         harness
             .driver
-            .text_is_visible("chart-legend:live-process-groups-disk:Named · b read:Unavailable")
+            .text_is_visible("chart-legend:live-process-groups-disk:b read:Unavailable")
     );
     harness.driver.assert_all_groups_unavailable_quantities();
+    assert!(
+        harness
+            .driver
+            .text_is_visible("No process group readings at this second.")
+    );
     harness.driver.assert_all_groups_second(998);
     harness.driver.leave_all_groups();
     harness.driver.assert_all_groups_current_quantities();
+    assert!(
+        !harness
+            .driver
+            .text_is_visible("No process group readings at this second.")
+    );
     harness.driver.assert_all_groups_second(1000);
     harness.teardown();
 }
@@ -88,18 +106,14 @@ fn all_groups_installed_data_and_legend_controls_preserve_exact_selected_values(
             assert_eq!(disk.lines[0].values.iter().flatten().count(), 2);
         });
 
-    assert!(
-        harness
-            .driver
-            .text_is_visible("160.0 B/s · 160 B / interval")
-    );
-    assert!(harness.driver.text_is_visible("80.0 B/s · 80 B / interval"));
+    assert!(harness.driver.text_is_visible("160.0 B/s"));
+    assert!(harness.driver.text_is_visible("80.0 B/s"));
     assert!(harness.driver.text_is_visible("80.0 B/s"));
     assert!(harness.driver.text_is_visible("2 / 2"));
     harness.driver.process_history_control("chart-data-close");
-    harness.driver.process_history_control(
-        "chart-legend:live-process-groups-cpu:Named · b:240.0 % · 2400000000 ns CPU / interval",
-    );
+    harness
+        .driver
+        .process_history_control("chart-legend:live-process-groups-cpu:b:240.0 %");
     harness.driver.assert_all_groups_hidden_cpu();
     harness.driver.assert_all_groups_current_quantities();
     harness.teardown();
@@ -194,68 +208,30 @@ impl AppHoverDriver {
     }
 
     fn assert_all_groups_historical_quantities(&mut self) {
-        assert!(self.text_is_visible(
-            "chart-legend:live-process-groups-resident:Named · b:3.0 GiB · 3221225472 B"
-        ));
-        assert!(self.text_is_visible(
-            "chart-legend:live-process-groups-footprint:Named · b:5.0 GiB · 5368709120 B"
-        ));
-        assert!(self.text_is_visible(
-            "chart-legend:live-process-groups-power:Named · b:1.0 W · 1000000000 nJ / interval"
-        ));
-        assert!(self.text_is_visible(
-            "chart-legend:live-process-groups-wakeups:Named · b:5.0 /s · 5 wakeups / interval"
-        ));
-        assert!(self.text_is_visible(
-            "chart-legend:live-process-groups-pageins:Named · b:3.0 pages/s · 3 page-ins / interval"
-        ));
-        assert!(
-            self.text_is_visible("chart-legend:live-process-groups-threads:Named · b:8 threads")
-        );
+        assert!(self.text_is_visible("chart-legend:live-process-groups-resident:b:3.0 GiB"));
+        assert!(self.text_is_visible("chart-legend:live-process-groups-footprint:b:5.0 GiB"));
+        assert!(self.text_is_visible("chart-legend:live-process-groups-power:b:1.0 W"));
+        assert!(self.text_is_visible("chart-legend:live-process-groups-wakeups:b:5.0 /s"));
+        assert!(self.text_is_visible("chart-legend:live-process-groups-pageins:b:3.0 pages/s"));
+        assert!(self.text_is_visible("chart-legend:live-process-groups-threads:b:8 threads"));
     }
 
     fn assert_all_groups_current_quantities(&mut self) {
-        assert!(self.text_is_visible(
-            "chart-legend:live-process-groups-resident:Named · b:6.0 GiB · 6442450944 B"
-        ));
-        assert!(self.text_is_visible(
-            "chart-legend:live-process-groups-footprint:Named · b:9.0 GiB · 9663676416 B"
-        ));
-        assert!(self.text_is_visible(
-            "chart-legend:live-process-groups-power:Named · b:2.0 W · 2000000000 nJ / interval"
-        ));
-        assert!(self.text_is_visible(
-            "chart-legend:live-process-groups-wakeups:Named · b:11.0 /s · 11 wakeups / interval"
-        ));
-        assert!(self.text_is_visible(
-            "chart-legend:live-process-groups-pageins:Named · b:7.0 pages/s · 7 page-ins / interval"
-        ));
-        assert!(
-            self.text_is_visible("chart-legend:live-process-groups-threads:Named · b:13 threads")
-        );
+        assert!(self.text_is_visible("chart-legend:live-process-groups-resident:b:6.0 GiB"));
+        assert!(self.text_is_visible("chart-legend:live-process-groups-footprint:b:9.0 GiB"));
+        assert!(self.text_is_visible("chart-legend:live-process-groups-power:b:2.0 W"));
+        assert!(self.text_is_visible("chart-legend:live-process-groups-wakeups:b:11.0 /s"));
+        assert!(self.text_is_visible("chart-legend:live-process-groups-pageins:b:7.0 pages/s"));
+        assert!(self.text_is_visible("chart-legend:live-process-groups-threads:b:13 threads"));
     }
 
     fn assert_all_groups_unavailable_quantities(&mut self) {
-        assert!(
-            self.text_is_visible("chart-legend:live-process-groups-resident:Named · b:Unavailable")
-        );
-        assert!(
-            self.text_is_visible(
-                "chart-legend:live-process-groups-footprint:Named · b:Unavailable"
-            )
-        );
-        assert!(
-            self.text_is_visible("chart-legend:live-process-groups-power:Named · b:Unavailable")
-        );
-        assert!(
-            self.text_is_visible("chart-legend:live-process-groups-wakeups:Named · b:Unavailable")
-        );
-        assert!(
-            self.text_is_visible("chart-legend:live-process-groups-pageins:Named · b:Unavailable")
-        );
-        assert!(
-            self.text_is_visible("chart-legend:live-process-groups-threads:Named · b:Unavailable")
-        );
+        assert!(self.text_is_visible("chart-legend:live-process-groups-resident:b:Unavailable"));
+        assert!(self.text_is_visible("chart-legend:live-process-groups-footprint:b:Unavailable"));
+        assert!(self.text_is_visible("chart-legend:live-process-groups-power:b:Unavailable"));
+        assert!(self.text_is_visible("chart-legend:live-process-groups-wakeups:b:Unavailable"));
+        assert!(self.text_is_visible("chart-legend:live-process-groups-pageins:b:Unavailable"));
+        assert!(self.text_is_visible("chart-legend:live-process-groups-threads:b:Unavailable"));
     }
 
     fn assert_all_groups_second(&self, expected: u64) {
@@ -281,14 +257,49 @@ impl AppHoverDriver {
                 dashboard
                     .hidden
                     .iter()
-                    .any(|key| key == "live-process-groups-cpu\tNamed · b")
+                    .any(|key| key == "live-process-groups-cpu\tb")
             );
             assert!(
                 !dashboard
                     .hidden
                     .iter()
-                    .any(|key| key == "live-process-groups-disk\tNamed · b read")
+                    .any(|key| key == "live-process-groups-disk\tb read")
             );
         });
     }
+}
+
+#[gpui::test]
+fn all_groups_stack_as_the_prototypes_areas(cx: &mut TestAppContext) {
+    // Goal: process group histories stack as filled areas, and disk keeps read and written
+    // lines apart, as the prototype draws them.
+    // Method: deliver every group's history and read the installed panels' stacking and fill.
+    let mut harness = AppHoverHarness::setup(cx);
+    harness.driver.resize_process_history();
+    harness.driver.deliver_all_group_history();
+
+    harness
+        .driver
+        .view
+        .read_with(&harness.driver.context, |dashboard, _| {
+            let panels: Vec<_> = dashboard
+                .panels
+                .iter()
+                .filter(|panel| panel.id.starts_with("live-process-groups-"))
+                .collect();
+            assert_eq!(panels.len(), 8);
+            for panel in panels {
+                if panel.id == "live-process-groups-disk" {
+                    assert_eq!(panel.stack, Some(false));
+                    assert_eq!(panel.fill, Some(0.1));
+                } else {
+                    assert_eq!(panel.stack, Some(true), "{}", panel.id);
+                    assert_eq!(panel.fill, Some(0.45), "{}", panel.id);
+                }
+            }
+        });
+    assert!(harness.driver.text_is_visible(
+        "Per-process network, GPU time, open files and sockets are not captured."
+    ));
+    harness.teardown();
 }

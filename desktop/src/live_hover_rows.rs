@@ -411,7 +411,7 @@ impl LiveDashboard {
             return rows;
         };
 
-        if self.app_picker_open {
+        if self.picker == Some(crate::live_dashboard::Picker::App) {
             rows.push(Row::AppColumns("apps"));
             for index in self.app_choice_indices() {
                 rows.push(Row::App(index));
@@ -431,7 +431,7 @@ impl LiveDashboard {
             rows.push(Row::Executable(index));
         }
         rows.push(Row::ProcessGroupingAbout);
-        self.reading_rows_process_history(&mut rows, snapshot);
+        self.reading_rows_process_history(&mut rows);
         rows.push(Row::Disclosure(Section::AppTotals));
         if self.sections.expanded(Section::AppTotals) {
             self.reading_rows_app_totals(&mut rows);
@@ -471,37 +471,8 @@ impl LiveDashboard {
         }
     }
 
-    fn reading_rows_process_history(
-        &self,
-        rows: &mut Vec<Row>,
-        snapshot: &crate::live_source::Snapshot,
-    ) {
-        use crate::live_process_history::{PANEL_PREFIX, ProcessHistory};
-        let status = if let Some(filter) = self.request.executable.as_deref() {
-            match ProcessHistory::filter_reason(Some(filter)) {
-                Some(reason) => reason.to_owned(),
-                None => match snapshot.process_history.as_deref() {
-                    Some(ProcessHistory::Ready { payload, .. }) => format!(
-                        "{} · last 15 minutes",
-                        crate::live_views::text(&payload["executable_name"]["display"])
-                    ),
-                    Some(ProcessHistory::Unavailable(reason)) => format!("Unavailable: {reason}"),
-                    Some(ProcessHistory::All { .. }) => "Different process group context".into(),
-                    None => "Loading captured history".into(),
-                },
-            }
-        } else {
-            match snapshot.process_history.as_deref() {
-                Some(ProcessHistory::All { payload, .. }) => format!(
-                    "All process groups · {} captured names · last 15 minutes",
-                    payload.named_group_count
-                ),
-                Some(ProcessHistory::Unavailable(reason)) => format!("Unavailable: {reason}"),
-                Some(ProcessHistory::Ready { .. }) => "Different process group context".into(),
-                None => "Loading captured history".into(),
-            }
-        };
-        rows.push(Row::Heading(format!("Process group history · {status}")));
+    fn reading_rows_process_history(&self, rows: &mut Vec<Row>) {
+        use crate::live_process_history::PANEL_PREFIX;
         rows.push(Row::ProcessGroupBar);
         let panels: Vec<_> = self
             .panels

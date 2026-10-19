@@ -3,7 +3,7 @@ use serde_json::Value;
 
 use crate::charts::{GRID, MUTED};
 use crate::dashboard::control;
-use crate::live_dashboard::LiveDashboard;
+use crate::live_dashboard::{LiveDashboard, Picker, toggle};
 use crate::live_views::text;
 
 const COLUMNS_MAX: usize = 32;
@@ -192,34 +192,139 @@ impl LiveDashboard {
         (apps, detail)
     }
 
+    /// The prototype's Process group picker above the process histories, with the histories'
+    /// state beside it and the readings no source records per process below.
     pub fn process_group_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
+        let selected = self.process_group_selected();
+        let selector = format!("process-group-picker:{selected}");
+        let arrow = if self.picker == Some(Picker::ProcessGroup) {
+            "▴"
+        } else {
+            "▾"
+        };
+        let state = self
+            .process_history_state()
+            .unwrap_or_else(|| "Process histories · grouped by name, not PID".into());
+        let picker = div()
             .flex()
             .flex_wrap()
             .items_center()
             .gap(px(10.0))
-            .text_size(px(11.0))
+            .child("Process group")
             .child(
-                control("All process groups")
-                    .debug_selector(|| "all-process-groups".into())
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.select_executable(None);
+                div().debug_selector(move || selector.clone()).child(
+                    control(&format!("{selected}  {arrow}"))
+                        .debug_selector(|| "process-group-picker".into())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.picker = toggle(this.picker, Picker::ProcessGroup);
+                            this.rebuild();
+                            cx.notify();
+                        })),
+                ),
+            )
+            .child(
+                div()
+                    .debug_selector({
+                        let state = state.clone();
+                        move || format!("process-history-state:{state}")
+                    })
+                    .text_size(px(11.0))
+                    .text_color(rgb(MUTED))
+                    .child(state),
+            );
+
+        let mut bar = div().flex().flex_col().gap(px(6.0)).child(picker);
+        if self.picker == Some(Picker::ProcessGroup) {
+            bar = bar.child(self.process_group_options(cx));
+        }
+        let uncaptured = "Per-process network, GPU time, open files and sockets are not captured.";
+        bar.child(
+            div()
+                .debug_selector(|| uncaptured.into())
+                .text_size(px(11.0))
+                .text_color(rgb(MUTED))
+                .child(uncaptured),
+        )
+    }
+
+    fn process_group_selected(&self) -> String {
+        let Some(key) = self.request.executable.as_ref() else {
+            return "All process groups".into();
+        };
+
+        if let Some(group) = self
+            .reading_executables()
+            .iter()
+            .find(|group| group.key == *key)
+        {
+            return group.name.clone();
+        }
+        // A historical second may not list the group, whose history still names it.
+        let history = self
+            .reading_snapshot()
+            .and_then(|snapshot| snapshot.process_history.as_deref())
+            .and_then(crate::live_process_history::ProcessHistory::payload);
+        match history {
+            Some(payload) => crate::live_views::text(&payload["executable_name"]["display"]),
+            None => "Selected group is not on this process page".into(),
+        }
+    }
+
+    fn process_group_options(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut options = div().flex().flex_col().gap(px(2.0)).max_w(px(360.0)).child(
+            control("All process groups")
+                .debug_selector(|| "all-process-groups".into())
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.picker = None;
+                    this.select_executable(None);
+                    this.rebuild();
+                    cx.notify();
+                })),
+        );
+        for group in self.reading_executables().iter().take(512) {
+            let key = group.key.clone();
+            let selector = format!("process-group-option:{}", group.name);
+            options = options.child(
+                control(&group.name)
+                    .debug_selector(move || selector.clone())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.picker = None;
+                        this.select_executable(Some(key.clone()));
+                        this.rebuild();
                         cx.notify();
                     })),
-            )
-            .children(self.request.executable.as_ref().map(|key| {
-                div().text_color(rgb(MUTED)).child(
-                    if self
-                        .reading_executables()
-                        .iter()
-                        .any(|group| group.key == *key)
-                    {
-                        "Executable filter active · selected group history below"
-                    } else {
-                        "Selected executable is not in this process page"
-                    },
-                )
-            }))
+            );
+        }
+        options
+    }
+
+    /// Why the process histories show nothing yet, or `None` once they show the selection.
+    fn process_history_state(&self) -> Option<String> {
+        use crate::live_process_history::ProcessHistory;
+
+        let filter = self.request.executable.as_deref();
+        if let Some(reason) = ProcessHistory::filter_reason(filter) {
+            return Some(reason.into());
+        }
+        let history = self.reading_snapshot()?.process_history.as_deref();
+        match history {
+            Some(ProcessHistory::Ready { .. }) => {
+                if filter.is_some() {
+                    None
+                } else {
+                    Some("Loading captured history".into())
+                }
+            }
+            Some(ProcessHistory::All { .. }) => {
+                if filter.is_none() {
+                    None
+                } else {
+                    Some("Loading captured history".into())
+                }
+            }
+            Some(ProcessHistory::Unavailable(reason)) => Some(format!("Unavailable: {reason}")),
+            None => Some("Loading captured history".into()),
+        }
     }
 
     fn table_page(&self, name: &str) -> &Value {

@@ -69,6 +69,9 @@ struct PanelDefinition {
     title: &'static str,
     unit: &'static str,
     metrics: &'static [ProcessGroupMetric],
+    /// Whether the groups stack as areas, as they do for every metric whose groups add up to
+    /// the App's total. Disk draws read and written apart, so it does not stack.
+    stacked: bool,
 }
 
 const PANEL_DEFINITIONS: [PanelDefinition; 8] = [
@@ -77,18 +80,21 @@ const PANEL_DEFINITIONS: [PanelDefinition; 8] = [
         title: "CPU by process",
         unit: "%",
         metrics: &[ProcessGroupMetric::Cpu],
+        stacked: true,
     },
     PanelDefinition {
         suffix: "resident",
         title: "Resident memory by process",
         unit: "GiB",
         metrics: &[ProcessGroupMetric::Resident],
+        stacked: true,
     },
     PanelDefinition {
         suffix: "footprint",
         title: "Footprint by process",
         unit: "GiB",
         metrics: &[ProcessGroupMetric::Footprint],
+        stacked: true,
     },
     PanelDefinition {
         suffix: "disk",
@@ -98,30 +104,35 @@ const PANEL_DEFINITIONS: [PanelDefinition; 8] = [
             ProcessGroupMetric::DiskRead,
             ProcessGroupMetric::DiskWritten,
         ],
+        stacked: false,
     },
     PanelDefinition {
         suffix: "power",
         title: "Power by process",
         unit: "W",
         metrics: &[ProcessGroupMetric::Power],
+        stacked: true,
     },
     PanelDefinition {
         suffix: "wakeups",
         title: "Idle wakeups by process",
         unit: "/s",
         metrics: &[ProcessGroupMetric::Wakeups],
+        stacked: true,
     },
     PanelDefinition {
         suffix: "pageins",
         title: "Page-ins by process",
         unit: "pages/s",
         metrics: &[ProcessGroupMetric::Pageins],
+        stacked: true,
     },
     PanelDefinition {
         suffix: "threads",
         title: "Threads by process",
         unit: "threads",
         metrics: &[ProcessGroupMetric::Threads],
+        stacked: true,
     },
 ];
 
@@ -166,8 +177,8 @@ fn panels_panel(
         lines,
         minimum: Some(0.0),
         maximum: None,
-        stack: Some(false),
-        fill: Some(0.0),
+        stack: Some(definition.stacked),
+        fill: Some(if definition.stacked { 0.45 } else { 0.1 }),
         caption: None,
         help: Some(
             "Seven groups with highest known mean CPU over captured context; Other includes \
@@ -245,13 +256,13 @@ fn panels_panel_line(
         _ => "",
     };
     let name = match identity {
-        ProcessGroup::Named(bytes) => format!("Named · {}", panels_panel_line_display(bytes)),
+        ProcessGroup::Named(bytes) => panels_panel_line_display(bytes),
         ProcessGroup::Other => "Other".into(),
     };
 
     Line {
         name: format!("{name}{suffix}"),
-        color: panels_panel_line_color(identity).into(),
+        color: panels_panel_line_color(group, identity).into(),
         values: payload
             .points
             .iter()
@@ -261,12 +272,12 @@ fn panels_panel_line(
                 value.to_f32()
             })
             .collect(),
-        stack: Some(false),
+        stack: None,
         negative: Some(false),
         dashed: Some(false),
         axis: None,
         unit: None,
-        fill: Some(0.0),
+        fill: None,
     }
 }
 
@@ -361,11 +372,7 @@ pub fn reading(
     }
 
     let human = reading_human(reading, metric, point.elapsed_ns);
-    format!(
-        "{human} · {} {}{coverage}",
-        measure.known,
-        reading_exact_unit(metric)
-    )
+    format!("{human}{coverage}")
 }
 
 fn reading_human(
@@ -420,43 +427,19 @@ fn reading_line_metric(
     Some((line % groups, metric))
 }
 
-fn reading_exact_unit(metric: ProcessGroupMetric) -> &'static str {
-    match metric {
-        ProcessGroupMetric::Cpu => "ns CPU / interval",
-        ProcessGroupMetric::Power => "nJ / interval",
-        ProcessGroupMetric::Wakeups => "wakeups / interval",
-        ProcessGroupMetric::Pageins => "page-ins / interval",
-        ProcessGroupMetric::Threads => "threads",
-        ProcessGroupMetric::DiskRead
-        | ProcessGroupMetric::DiskWritten
-        | ProcessGroupMetric::DiskTotal => "B / interval",
-        _ => "B",
-    }
-}
-
-pub fn coverage(payload: &AppProcessGroupsHistory, index: Option<usize>) -> String {
+/// Names the gap when the selected second has no process group readings. Partial membership
+/// is not named, since it counts unreadable processes anywhere on the Mac rather than in this
+/// App, and the process grouping note already reports that count.
+pub fn coverage(payload: &AppProcessGroupsHistory, index: Option<usize>) -> Option<&'static str> {
     let Some(point) = index.and_then(|index| payload.points.get(index)) else {
-        return "Process group observation unavailable".into();
+        return Some("No process group readings at this second.");
     };
 
-    if !point.source_available {
-        return "Captured group facts unavailable at this observation".into();
+    if point.source_available {
+        None
+    } else {
+        Some("Process group readings unavailable at this second.")
     }
-
-    format!(
-        "{} captured names · {} unavailable context observations · \
-        {} unnamed members · membership {}",
-        payload.named_group_count,
-        payload.context_observations_unavailable,
-        point
-            .unnamed_members
-            .map_or_else(|| "unknown".into(), |members| members.to_string()),
-        if point.membership_complete {
-            "complete"
-        } else {
-            "partial"
-        }
-    )
 }
 
 #[derive(Clone, Copy)]
@@ -537,20 +520,15 @@ fn panels_panel_line_display(bytes: &[u8]) -> String {
     output
 }
 
-fn panels_panel_line_color(identity: &ProcessGroup) -> &'static str {
-    let ProcessGroup::Named(bytes) = identity else {
+/// The prototype's classic palette, in the groups' order, and grey for Other.
+fn panels_panel_line_color(group: usize, identity: &ProcessGroup) -> &'static str {
+    const CLASSIC: [&str; 10] = [
+        "#73bf69", "#f2cc0c", "#5794f2", "#ff9830", "#f2495c", "#b877d9", "#37872d", "#e0b400",
+        "#1f60c4", "#c15c17",
+    ];
+    if let ProcessGroup::Other = identity {
         return "#898995";
-    };
-
-    let mut hash = 0_u64;
-
-    for byte in bytes {
-        hash = hash.wrapping_mul(31).wrapping_add(u64::from(*byte));
     }
 
-    let index = usize::try_from(hash % 7).unwrap_or_else(|_| unreachable!());
-
-    [
-        "#5794f2", "#73bf69", "#ff9830", "#b877d9", "#f2cc0c", "#f2495c", "#8fbbf6",
-    ][index]
+    CLASSIC[group % CLASSIC.len()]
 }

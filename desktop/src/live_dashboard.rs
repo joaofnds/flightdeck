@@ -33,6 +33,23 @@ pub const NAVIGATION: [&[&str]; 3] = [
     &["computer", "self"],
 ];
 
+/// A picker on the Apps page whose choices show below it. One shows at a time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Picker {
+    App,
+    ProcessGroup,
+}
+
+/// The open picker after its control is pressed: the picker's choices, or none if they
+/// showed already.
+pub fn toggle(open: Option<Picker>, pressed: Picker) -> Option<Picker> {
+    if open == Some(pressed) {
+        None
+    } else {
+        Some(pressed)
+    }
+}
+
 pub struct LiveDashboard {
     pub worker: Worker,
     pub request: Request,
@@ -69,7 +86,8 @@ pub struct LiveDashboard {
         Rc<std::cell::RefCell<std::collections::BTreeMap<String, gpui::Pixels>>>,
     pub(crate) header_height: Rc<std::cell::Cell<gpui::Pixels>>,
     pub(crate) viewport_size: gpui::Size<gpui::Pixels>,
-    pub app_picker_open: bool,
+    /// The Apps page's picker whose choices are open, if any.
+    pub picker: Option<Picker>,
     pub(crate) app_table_scroll: gpui::ScrollHandle,
     pub cpu_inspection: Option<crate::live_cpu_history::CPUInspection>,
     pub cpu_history_focus: Option<gpui::FocusHandle>,
@@ -178,7 +196,7 @@ impl LiveDashboard {
             row_heights: Rc::new(std::cell::RefCell::new(std::collections::BTreeMap::new())),
             header_height: Rc::new(std::cell::Cell::new(px(0.0))),
             viewport_size: gpui::size(px(0.0), px(0.0)),
-            app_picker_open: false,
+            picker: None,
             app_table_scroll: gpui::ScrollHandle::new(),
             cpu_inspection: None,
             cpu_history_focus: None,

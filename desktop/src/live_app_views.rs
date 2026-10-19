@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use crate::charts::{BLUE, GREEN, GRID, MUTED, ORANGE, PANEL, PURPLE, YELLOW};
 use crate::dashboard::control;
-use crate::live_dashboard::LiveDashboard;
+use crate::live_dashboard::{LiveDashboard, Picker, toggle};
 use crate::live_source::AppKey;
 use crate::live_views::{summary, text};
 
@@ -68,10 +68,14 @@ impl LiveDashboard {
                 control(&format!(
                     "{}  {}",
                     label,
-                    if self.app_picker_open { "▴" } else { "▾" }
+                    if self.picker == Some(Picker::App) {
+                        "▴"
+                    } else {
+                        "▾"
+                    }
                 ))
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.app_picker_open = !this.app_picker_open;
+                    this.picker = toggle(this.picker, Picker::App);
                     this.rebuild();
                     cx.notify();
                 })),
@@ -299,7 +303,7 @@ impl LiveDashboard {
                 this.request.app = Some(key.clone());
                 this.request.executable = None;
                 this.request.members_offset = 0;
-                this.app_picker_open = false;
+                this.picker = None;
                 this.expanded = None;
                 this.submit();
                 this.rebuild();

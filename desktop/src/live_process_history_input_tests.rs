@@ -87,25 +87,25 @@ macro_rules! process_refusal_case {
 process_refusal_case!(
     named_process_history_failure_keeps_app_totals_and_instances,
     Source,
-    "Process group history · Unavailable: Captured group read refused",
+    "process-history-state:Unavailable: Captured group read refused",
     0
 );
 process_refusal_case!(
     named_process_history_projection_refusal_keeps_app_totals_and_instances,
     Projection,
-    "Process group history · Unavailable: Invalid live chart quantity",
+    "process-history-state:Unavailable: Invalid live chart quantity",
     0
 );
 process_refusal_case!(
     named_process_history_rejects_prevalidated_context_for_another_app,
     App,
-    "Process group history · Unavailable: Process history belongs to another selected group",
+    "process-history-state:Unavailable: Process history belongs to another selected group",
     0
 );
 process_refusal_case!(
     named_process_history_rejects_prevalidated_context_for_another_name,
     Name,
-    "Process group history · Unavailable: Process history belongs to another selected group",
+    "process-history-state:Unavailable: Process history belongs to another selected group",
     2
 );
 
@@ -140,6 +140,43 @@ fn named_process_history_survives_current_instance_disappearance(cx: &mut TestAp
 }
 
 #[gpui::test]
+fn the_process_group_picker_selects_a_group_by_name(cx: &mut TestAppContext) {
+    // Goal: the picker above the histories lists the App's groups by name and selects one,
+    // as the prototype's does.
+    // Method: open the picker, choose the helper group, and read the selected group.
+    let mut harness = AppHoverHarness::setup(cx);
+    harness.driver.resize_process_history();
+    assert!(
+        harness
+            .driver
+            .text_is_visible("process-group-picker:All process groups")
+    );
+
+    harness
+        .driver
+        .process_history_control("process-group-picker");
+    harness
+        .driver
+        .process_history_control("process-group-option:Accepted helper");
+
+    assert_eq!(
+        harness.driver.named_process_selection().as_deref(),
+        Some("hex:62")
+    );
+    assert!(
+        harness
+            .driver
+            .text_is_visible("process-group-picker:Accepted helper")
+    );
+    assert!(
+        !harness
+            .driver
+            .text_is_visible("process-group-option:Accepted worker")
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
 fn all_process_groups_clears_the_named_history_and_instance_filter(cx: &mut TestAppContext) {
     // The All control clears both selection roles without substituting App totals as group charts.
     let mut harness = AppHoverHarness::setup(cx);
@@ -147,6 +184,9 @@ fn all_process_groups_clears_the_named_history_and_instance_filter(cx: &mut Test
     harness.driver.choose_named_process();
     harness.driver.deliver_named_process_history();
 
+    harness
+        .driver
+        .process_history_control("process-group-picker");
     harness.driver.process_history_control("all-process-groups");
     harness.driver.deliver_all_processes();
 

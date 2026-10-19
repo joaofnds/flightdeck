@@ -380,8 +380,8 @@ fn all_groups_inspector_uses_the_exact_shared_same_second_observation() {
         crate::live_process_history::groups::reading(history, "live-process-groups-disk", 2, index);
 
     assert_eq!(index, Some(1));
-    assert_eq!(reading, "160.0 B/s · 160 B / interval");
-    assert_eq!(written, "80.0 B/s · 80 B / interval");
+    assert_eq!(reading, "160.0 B/s");
+    assert_eq!(written, "80.0 B/s");
     assert_eq!(
         history.points[index.unwrap()].observation.stamp.publication,
         2
@@ -439,8 +439,9 @@ fn all_groups_history_ignores_the_loaded_member_page() {
 }
 
 #[test]
-fn all_groups_readouts_use_historical_rates_and_keep_exact_interval_values() {
-    // Human units use each observation's interval; the byte suffix never uses floating point.
+fn all_groups_readouts_use_historical_rates() {
+    // Goal: each reading is a rate over its own observation's interval.
+    // Method: give an earlier observation a longer interval and read both observations.
     let mut history = all_history();
     let selected = crate::live_process_history::groups::reading(
         &history,
@@ -448,7 +449,7 @@ fn all_groups_readouts_use_historical_rates_and_keep_exact_interval_values() {
         0,
         Some(1),
     );
-    assert_eq!(selected, "240.0 % · 2400000000 ns CPU / interval");
+    assert_eq!(selected, "240.0 %");
     history.points[0].readings[0] = history.points[1].readings[0];
     history.points[0].elapsed_ns = Some(2_000_000_000);
     let historical = crate::live_process_history::groups::reading(
@@ -457,7 +458,7 @@ fn all_groups_readouts_use_historical_rates_and_keep_exact_interval_values() {
         0,
         Some(0),
     );
-    assert_eq!(historical, "120.0 % · 2400000000 ns CPU / interval");
+    assert_eq!(historical, "120.0 %");
     history.points[0].readings[0].measures[2].known = 9_007_199_254_740_993;
     let disk = crate::live_process_history::groups::reading(
         &history,
@@ -465,7 +466,7 @@ fn all_groups_readouts_use_historical_rates_and_keep_exact_interval_values() {
         0,
         Some(0),
     );
-    assert_eq!(disk, "4503599616.0 MB/s · 9007199254740993 B / interval");
+    assert_eq!(disk, "4503599616.0 MB/s");
     history.points[0].readings[0].measures[3].known = 9_007_199_254_740_995;
     let written = crate::live_process_history::groups::reading(
         &history,
@@ -473,14 +474,14 @@ fn all_groups_readouts_use_historical_rates_and_keep_exact_interval_values() {
         history.groups.len(),
         Some(0),
     );
-    assert_eq!(written, "4503599616.0 MB/s · 9007199254740995 B / interval");
+    assert_eq!(written, "4503599616.0 MB/s");
     let power = crate::live_process_history::groups::reading(
         &history,
         "live-process-groups-power",
         0,
         Some(1),
     );
-    assert_eq!(power, "2.5 W · 2500000000 nJ / interval");
+    assert_eq!(power, "2.5 W");
 }
 
 #[test]
@@ -494,7 +495,7 @@ fn all_groups_unavailable_elapsed_keeps_known_bytes_and_partial_coverage() {
         0,
         Some(1),
     );
-    assert_eq!(disk, "Unavailable · 160 B / interval");
+    assert_eq!(disk, "Unavailable");
     history.points[1].readings[0].measures[2].unavailable_members = 2;
     let partial = crate::live_process_history::groups::reading(
         &history,
@@ -504,7 +505,7 @@ fn all_groups_unavailable_elapsed_keeps_known_bytes_and_partial_coverage() {
     );
     assert_eq!(
         partial,
-        "Unavailable · 160 B / interval · known subtotal · 1 measured · 2 unavailable"
+        "Unavailable · known subtotal · 1 measured · 2 unavailable"
     );
 }
 
@@ -520,14 +521,14 @@ fn all_groups_small_nonzero_readouts_preserve_visible_rates() {
         0,
         Some(1),
     );
-    assert_eq!(power, "1.0 mW · 1000000 nJ / interval");
+    assert_eq!(power, "1.0 mW");
     let cpu = crate::live_process_history::groups::reading(
         &history,
         "live-process-groups-cpu",
         0,
         Some(1),
     );
-    assert_eq!(cpu, "0.001 % · 10000 ns CPU / interval");
+    assert_eq!(cpu, "0.001 %");
 }
 
 pub(crate) fn all_history() -> Box<viewer::app_process_groups_history::AppProcessGroupsHistory> {
@@ -591,8 +592,9 @@ fn captured_process_sources_project_all_eight_history_cards() {
 }
 
 #[test]
-fn added_process_inspectors_preserve_exact_large_counts_and_missing_elapsed() {
-    // Rate formatting may round; the adjacent decimal count must keep every captured bit.
+fn added_process_readings_need_their_interval() {
+    // Goal: a wakeup rate reads only where its observation has an interval to divide by.
+    // Method: read one large count with its interval, then without it.
     let mut history = all_history();
     let reading = &mut history.points[1].readings[0];
     reading.measures.get_mut(7).unwrap().known = 9_007_199_254_740_993;
@@ -611,11 +613,8 @@ fn added_process_inspectors_preserve_exact_large_counts_and_missing_elapsed() {
         Some(1),
     );
 
-    assert!(wakeups.contains("9007199254740993 wakeups / interval"));
-    assert_eq!(
-        unavailable,
-        "Unavailable · 9007199254740993 wakeups / interval"
-    );
+    assert!(wakeups.ends_with("/s"), "{wakeups}");
+    assert_eq!(unavailable, "Unavailable");
 }
 
 #[test]

@@ -503,7 +503,7 @@ impl LiveDashboard {
             self.hidden.clear();
             self.chart_hover = None;
             self.preview = None;
-            self.app_picker_open = false;
+            self.picker = None;
             self.cpu_inspection = None;
             self.native.alternative_page = 0;
 
