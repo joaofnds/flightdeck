@@ -94,11 +94,15 @@ impl Row {
         match self {
             Self::Disclosure(section) => matches!(
                 section,
-                Section::OverviewHistories | Section::OverviewContext | Section::SystemFiles
+                Section::OverviewHistories
+                    | Section::OverviewContext
+                    | Section::SystemFiles
+                    | Section::MemoryQuantities
             ),
-            Self::OverviewAppHistories(_) | Self::OverviewAnalysis(_) | Self::SystemContext(_) => {
-                true
-            }
+            Self::OverviewAppHistories(_)
+            | Self::OverviewAnalysis(_)
+            | Self::SystemContext(_)
+            | Self::MemoryQuantities => true,
             _ => false,
         }
     }
@@ -106,7 +110,6 @@ impl Row {
     pub(crate) fn disclosure_section(&self) -> Option<Section> {
         match self {
             Self::Disclosure(section) => Some(*section),
-            Self::MemoryAttribution(_) => Some(Section::MemoryQuantities),
             Self::Inventory => Some(Section::ComputerReference),
             Self::SelfPart(crate::live_diagnostics::SelfPart::Reports) => {
                 Some(Section::SelfReports)

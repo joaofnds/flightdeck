@@ -110,7 +110,7 @@ fn memory_swap_paging_band_hover_keeps_geometry_and_restores_the_exact_selection
     assert!(
         harness
             .driver
-            .reading_is_visible("memory-quantity:Active:Unavailable")
+            .reading_is_visible("overview-context:memory-free:Unavailable")
     );
     assert_eq!(harness.driver.chart_bounds("live-swap-flow-plot"), bounds);
     harness
@@ -121,7 +121,7 @@ fn memory_swap_paging_band_hover_keeps_geometry_and_restores_the_exact_selection
     assert!(
         harness
             .driver
-            .reading_is_visible("memory-quantity:Active:6 GiB")
+            .reading_is_visible("overview-context:memory-free:6.0 GiB")
     );
     assert_eq!(harness.driver.chart_bounds("live-swap-flow-plot"), bounds);
     assert!(!harness.driver.cursor_is_visible("live-swap-flow-plot"));
@@ -239,25 +239,24 @@ fn assert_memory_band_order(driver: &mut InputDriver) {
     let swap = driver.chart_bounds("chart-card:live-swap");
     let paging = driver.chart_bounds("chart-card:live-paging");
     let attribution = driver.chart_bounds("memory-attribution-unavailable");
-    let quantities = driver.chart_bounds("memory-quantity:Installed:16 GiB");
+    let quantities = driver.chart_bounds("overview-context:memory-wired:2.0 GiB");
     assert!(pressure.bottom() < heading.top());
     assert!(heading.bottom() < swap.top());
     assert!(paging.bottom() < attribution.top());
     assert!(attribution.bottom() < quantities.top());
-    assert!(driver.reading_is_visible("memory-quantity:Swap allocated:4 GiB"));
-    assert!(driver.reading_is_visible("memory-quantity:Memory pressure:Warning"));
+    assert!(driver.reading_is_visible("overview-context:memory-compressed:1.0 GiB"));
+    assert!(driver.reading_is_visible("overview-context:memory-pressure:Warning"));
 }
 
 fn assert_memory_band_historical(driver: &mut InputDriver) {
     assert_memory_band_reading(driver, 999, 1, "1 MB/s");
-    assert!(driver.reading_is_visible("memory-quantity:Active:2 GiB"));
+    assert!(driver.reading_is_visible("overview-context:memory-free:2.0 GiB"));
     assert_memory_band_legends(
         driver,
         [
-            "chart-legend:live-paging:Page-ins:10 pages/s",
-            "chart-legend:live-paging:Page-outs:4 pages/s",
-            "chart-legend:live-paging:Compressed:2 pages/s",
-            "chart-legend:live-paging:Decompressed:1 pages/s",
+            "chart-legend:live-paging:Page-ins:10 /s",
+            "chart-legend:live-paging:Compressed:2 /s",
+            "chart-legend:live-paging:Decompressed:1 /s",
         ],
     );
     assert!(driver.cursor_is_visible("live-swap-flow-plot"));
@@ -269,7 +268,6 @@ fn assert_memory_band_gap(driver: &mut InputDriver) {
         driver,
         [
             "chart-legend:live-paging:Page-ins:Unavailable",
-            "chart-legend:live-paging:Page-outs:Unavailable",
             "chart-legend:live-paging:Compressed:Unavailable",
             "chart-legend:live-paging:Decompressed:Unavailable",
         ],
@@ -287,15 +285,14 @@ fn assert_memory_band_current(driver: &mut InputDriver) {
     assert_memory_band_legends(
         driver,
         [
-            "chart-legend:live-paging:Page-ins:30 pages/s",
-            "chart-legend:live-paging:Page-outs:12 pages/s",
-            "chart-legend:live-paging:Compressed:6 pages/s",
-            "chart-legend:live-paging:Decompressed:3 pages/s",
+            "chart-legend:live-paging:Page-ins:30 /s",
+            "chart-legend:live-paging:Compressed:6 /s",
+            "chart-legend:live-paging:Decompressed:3 /s",
         ],
     );
 }
 
-fn assert_memory_band_legends(driver: &mut InputDriver, selectors: [&'static str; 4]) {
+fn assert_memory_band_legends(driver: &mut InputDriver, selectors: [&'static str; 3]) {
     for selector in selectors {
         assert!(driver.reading_is_visible(selector), "{selector}");
     }
@@ -320,7 +317,6 @@ fn memory_band_point(point: &mut Value, index: usize) {
         ("memory_total_bytes", 16),
         ("memory_wired_bytes", 2),
         ("memory_compressed_bytes", 1),
-        ("memory_free_bytes", 7),
         ("memory_inactive_bytes", 1),
         ("memory_speculative_bytes", 0),
         ("memory_anonymous_bytes", 3),
@@ -336,7 +332,7 @@ fn memory_band_point(point: &mut Value, index: usize) {
         } else {
             (6, 2, 3.0, 2.0, 30, 12, 6, 3, 1)
         };
-    point["memory_active_bytes"] = json!(active * gibibyte);
+    point["memory_free_bytes"] = json!(active * gibibyte);
     point["swap_used_bytes"] = json!(swap * gibibyte);
     point["swap_in_bytes_per_second"] = json!(input * 1_000_000.0);
     point["swap_out_bytes_per_second"] = json!(output * 1_000_000.0);

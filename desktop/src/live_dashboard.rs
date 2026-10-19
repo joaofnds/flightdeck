@@ -118,6 +118,8 @@ pub enum Row {
     /// The Overview's utilization panel beside the load, power and heat chart.
     OverviewAnalysis(Option<Rc<Panel>>),
     MemoryAttribution(Option<Rc<Panel>>),
+    /// The Memory page's captured quantities, folded under the All memory quantities details.
+    MemoryQuantities,
     AppAttribution(
         crate::live_app_attribution_history::Metric,
         Option<Rc<Panel>>,

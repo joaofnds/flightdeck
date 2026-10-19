@@ -102,7 +102,7 @@ fn memory_stacks_captured_categories_below_an_independent_installed_guide() {
 
     let memory = panels("memory", &selection, None).unwrap();
 
-    assert_eq!(memory.len(), 5);
+    assert_eq!(memory.len(), 6);
     assert_memory_composition(&memory[0]);
     assert_eq!(memory[2].lines[1].dashed, Some(true));
 }
@@ -173,19 +173,13 @@ fn memory_keeps_all_page_rates_and_unavailable_intervals() {
         .find(|panel| panel.id == "live-paging")
         .unwrap();
 
-    assert_eq!(paging.lines.len(), 4);
+    assert_eq!(paging.lines.len(), 3);
     assert_eq!(paging.lines[0].name, "Page-ins");
-    assert_eq!(paging.lines[0].unit.as_deref(), Some("pages/s"));
     assert_eq!(paging.lines[0].values, [None, Some(1.0), Some(0.0), None]);
-    assert_eq!(paging.lines[1].name, "Page-outs");
-    assert_eq!(paging.lines[1].unit.as_deref(), Some("pages/s"));
-    assert_eq!(paging.lines[1].values, [None, Some(4.0), Some(0.0), None]);
-    assert_eq!(paging.lines[2].name, "Compressed");
-    assert_eq!(paging.lines[2].unit.as_deref(), Some("pages/s"));
-    assert_eq!(paging.lines[2].values, [None, Some(2.0), Some(0.0), None]);
-    assert_eq!(paging.lines[3].name, "Decompressed");
-    assert_eq!(paging.lines[3].unit.as_deref(), Some("pages/s"));
-    assert_eq!(paging.lines[3].values, [None, Some(3.0), Some(0.0), None]);
+    assert_eq!(paging.lines[1].name, "Compressed");
+    assert_eq!(paging.lines[1].values, [None, Some(2.0), Some(0.0), None]);
+    assert_eq!(paging.lines[2].name, "Decompressed");
+    assert_eq!(paging.lines[2].values, [None, Some(3.0), Some(0.0), None]);
 }
 
 #[test]
@@ -642,11 +636,13 @@ fn memory_exposes_mirrored_swap_flow_without_negating_quantities() {
     assert_eq!(swap.title, "Paging");
     assert_eq!(swap.unit, "MB/s");
     assert_eq!(swap.lines[0].name, "Read from swap");
-    assert_eq!(swap.lines[1].name, "Write to swap");
+    assert_eq!(swap.lines[1].name, "Paged out");
+    assert_eq!(swap.lines[2].name, "Write to swap");
     assert_eq!(swap.lines[0].values, [None, Some(1.0), None]);
-    assert_eq!(swap.lines[1].values, [None, Some(2.0), None]);
+    assert_eq!(swap.lines[1].values, [None, None, None]);
+    assert_eq!(swap.lines[2].values, [None, Some(2.0), None]);
     assert_eq!(swap.lines[0].negative, Some(false));
-    assert_eq!(swap.lines[1].negative, Some(true));
+    assert_eq!(swap.lines[2].negative, Some(true));
 }
 
 #[test]
@@ -662,10 +658,7 @@ fn memory_draws_memory_in_use_and_page_ins_as_the_prototype_names_them() {
     assert_eq!(composition.title, "Memory in use");
     assert_eq!(paging.title, "Page-ins and compression");
     let names: Vec<_> = paging.lines.iter().map(|line| line.name.as_str()).collect();
-    assert_eq!(
-        names,
-        ["Page-ins", "Page-outs", "Compressed", "Decompressed"]
-    );
+    assert_eq!(names, ["Page-ins", "Compressed", "Decompressed"]);
     assert!(paging.lines.iter().all(|line| line.dashed != Some(true)));
 }
 

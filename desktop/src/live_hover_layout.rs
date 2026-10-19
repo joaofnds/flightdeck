@@ -26,6 +26,7 @@ impl Row {
             Self::OverviewAppHistories(slots) => format!("overview-app-histories-{}", slots[0]),
             Self::OverviewAnalysis(_) => "overview-analysis".into(),
             Self::MemoryAttribution(_) => "memory-attribution".into(),
+            Self::MemoryQuantities => "memory-quantities".into(),
             Self::AppAttribution(metric, _) => format!("app-attribution-{}", metric.panel_id()),
             Self::GpuApps(_) => "app-attribution-live-gpu-apps".into(),
             Self::AppSelector => "app-selector".into(),

@@ -166,6 +166,7 @@ impl LiveDashboard {
             Row::OverviewAppHistories(slots) => self.overview_app_histories(slots, cx),
             Row::OverviewAnalysis(panel) => self.overview_analysis(panel.as_ref(), cx),
             Row::MemoryAttribution(panel) => self.memory_attribution(panel.as_ref(), cx),
+            Row::MemoryQuantities => self.memory_quantities().into_any_element(),
             Row::AppAttribution(metric, panel) => self.app_attribution(*metric, panel.as_ref(), cx),
             Row::GpuApps(panel) => self.gpu_apps(panel.as_ref(), cx),
             Row::AppSelector => self.app_selector(cx).into_any_element(),
@@ -330,53 +331,31 @@ impl LiveDashboard {
         self.navigate(route, cx);
     }
 
-    pub(crate) fn memory_quantities(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn memory_quantities(&self) -> impl IntoElement {
         let selection = self
             .reading_snapshot()
             .map_or(&Value::Null, |snapshot| &snapshot.selection);
-        let mut values = div().flex().flex_wrap().gap(px(12.0));
+        let keys = [
+            "memory-app",
+            "memory-wired",
+            "memory-compressed",
+            "memory-cached",
+            "memory-free",
+            "memory-pressure",
+        ];
+        let readings = crate::live_memory::quantities(selection)
+            .into_iter()
+            .zip(keys)
+            .map(|(row, key)| (key, row.name, row.reading))
+            .collect();
 
-        for row in crate::live_memory::quantities(selection) {
-            let selector = format!("memory-quantity:{}:{}", row.name, row.reading);
-            values = values.child(
-                div()
-                    .debug_selector(|| selector.clone())
-                    .min_w(px(220.0))
-                    .flex_1()
-                    .flex()
-                    .justify_between()
-                    .gap(px(12.0))
-                    .child(div().text_color(rgb(MUTED)).child(row.name))
-                    .child(row.reading),
-            );
-        }
-
-        let note = div()
-            .mt(px(12.0))
-            .text_size(px(11.0))
-            .text_color(rgb(MUTED))
-            .child(
-                "Independent VM categories overlap and are not an additive used-memory total. \
-                 Speculative is included in Free.",
-            );
-
-        div()
-            .mt(px(16.0))
-            .p(px(18.0))
-            .rounded(px(7.0))
-            .border_1()
-            .border_color(rgb(GRID))
-            .bg(rgb(PANEL))
-            .child(self.disclosure(crate::live_sections::Section::MemoryQuantities, cx))
-            .when(
-                self.sections
-                    .expanded(crate::live_sections::Section::MemoryQuantities),
-                |panel| {
-                    panel
-                        .child(div().mt(px(12.0)).text_size(px(12.0)).child(values))
-                        .child(note)
-                },
-            )
+        crate::live_presentation::quantity_panel(
+            "memory-quantities",
+            "Captured memory quantities",
+            "Memory quantities at the selected time. Independent VM categories overlap and are \
+             not an additive used-memory total.",
+            readings,
+        )
     }
 
     fn computer(&self, cx: &mut Context<Self>) -> impl IntoElement {

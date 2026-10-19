@@ -61,8 +61,8 @@ disclosure_case!(
     "memory",
     "section:memory-quantities",
     [
-        "memory-quantity:Installed:Unavailable",
-        "memory-quantity:Free:Unavailable"
+        "overview-context:memory-wired:Unavailable",
+        "overview-context:memory-cached:Unavailable"
     ],
     "live-memory-plot"
 );
@@ -268,7 +268,7 @@ fn memory_disclosure_keeps_the_hovered_observation_when_reopened_from_the_keyboa
     assert!(
         harness
             .driver
-            .reading_is_visible("memory-quantity:Active:2 GiB")
+            .reading_is_visible("overview-context:memory-free:2.0 GiB")
     );
     assert_eq!(
         harness.driver.chart_accessibility_reading("live-memory").0,
@@ -393,7 +393,7 @@ impl InputDriver {
                 point["fan_rpm"] = serde_json::json!([1500, 1700]);
                 point["soc_celsius"] = serde_json::json!(42);
                 if dashboard.request.route == "memory" {
-                    point["memory_active_bytes"] =
+                    point["memory_free_bytes"] =
                         serde_json::json!([2_147_483_648_u64, 4_294_967_296][index]);
                 }
             }

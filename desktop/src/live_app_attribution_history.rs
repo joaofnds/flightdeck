@@ -12,7 +12,7 @@ mod machine_reference;
 #[path = "live_app_attribution_validation.rs"]
 mod validation;
 #[path = "live_app_attribution_view.rs"]
-mod view;
+pub(crate) mod view;
 
 use machine_reference::MachineReference;
 

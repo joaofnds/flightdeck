@@ -44,21 +44,19 @@ impl LiveDashboard {
         };
 
         div()
+            .flex()
+            .gap(px(8.0))
+            .when(self.reading_chart_columns() == 1, gpui::Styled::flex_col)
+            .child(crate::live_app_attribution_history::view::attribution_chart(self, chart))
             .child(
                 div()
+                    .debug_selector(|| "memory-attribution-ranking".into())
                     .flex()
-                    .gap(px(8.0))
-                    .when(self.reading_chart_columns() == 1, gpui::Styled::flex_col)
-                    .child(chart)
-                    .child(
-                        div()
-                            .debug_selector(|| "memory-attribution-ranking".into())
-                            .flex_1()
-                            .min_w_0()
-                            .child(self.app_rankings(&[1], cx)),
-                    ),
+                    .flex_basis(px(0.0))
+                    .flex_grow(1.0)
+                    .min_w_0()
+                    .child(self.app_rankings(&[1], cx)),
             )
-            .child(self.memory_quantities(cx))
             .into_any_element()
     }
 }

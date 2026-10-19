@@ -121,7 +121,7 @@ impl LiveDashboard {
 }
 
 /// The chart of an attribution row, twice as wide as its ranking beside it.
-fn attribution_chart(dashboard: &LiveDashboard, chart: AnyElement) -> gpui::Div {
+pub(crate) fn attribution_chart(dashboard: &LiveDashboard, chart: AnyElement) -> gpui::Div {
     div()
         .flex()
         .flex_basis(px(0.0))

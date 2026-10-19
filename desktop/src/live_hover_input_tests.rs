@@ -41,7 +41,7 @@ fn historical_memory_inspection_updates_every_quantity_and_the_header_mode(
     assert!(
         harness
             .driver
-            .text_is_visible("memory-quantity:Active:21 GiB")
+            .text_is_visible("overview-context:memory-free:24.0 GiB")
     );
 
     harness.driver.hover(Epoch::Historical);
@@ -60,24 +60,24 @@ fn null_memory_quantities_remain_unavailable_at_an_existing_historical_observati
 ) {
     // Keep the historical identity while removing one value that the accepted point possesses.
     let mut harness = HoverHarness::setup(cx, Route::Memory, Mode::Follow);
-    harness.driver.remove_historical_active_memory();
+    harness.driver.remove_historical_free_memory();
 
     harness.driver.hover(Epoch::Historical);
 
     assert!(
         harness
             .driver
-            .text_is_visible("memory-quantity:Active:Unavailable")
+            .text_is_visible("overview-context:memory-free:Unavailable")
     );
     assert!(
         harness
             .driver
-            .text_is_visible("memory-quantity:Wired:2 GiB")
+            .text_is_visible("overview-context:memory-wired:2.0 GiB")
     );
     assert!(
         !harness
             .driver
-            .text_is_visible("memory-quantity:Active:21 GiB")
+            .text_is_visible("overview-context:memory-free:24.0 GiB")
     );
     harness.teardown();
 }
@@ -92,12 +92,12 @@ fn empty_memory_seconds_clear_readings_and_copy_an_explicit_gap(cx: &mut TestApp
     assert!(
         harness
             .driver
-            .text_is_visible("memory-quantity:Active:Unavailable")
+            .text_is_visible("overview-context:memory-free:Unavailable")
     );
     assert!(
         harness
             .driver
-            .text_is_visible("memory-quantity:Memory pressure:Unavailable")
+            .text_is_visible("overview-context:memory-pressure:Unavailable")
     );
     let copied = harness.driver.copy_json();
     assert_eq!(copied["second"], 997);
@@ -428,10 +428,10 @@ impl HoverDriver {
         self.now = Instant::now();
     }
 
-    fn remove_historical_active_memory(&mut self) {
+    fn remove_historical_free_memory(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = Epoch::Accepted.snapshot(dashboard.generation, false);
-            snapshot.selection["trends"][1]["memory_active_bytes"] = Value::Null;
+            snapshot.selection["trends"][1]["memory_free_bytes"] = Value::Null;
             snapshot.pages.clear();
             dashboard.accept(snapshot);
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
@@ -607,19 +607,12 @@ impl HoverDriver {
     }
 
     fn assert_historical_memory_visible(&mut self) {
-        assert!(self.text_is_visible("memory-quantity:Installed:16 GiB"));
-        assert!(self.text_is_visible("memory-quantity:Active:1 GiB"));
-        assert!(self.text_is_visible("memory-quantity:Wired:2 GiB"));
-        assert!(self.text_is_visible("memory-quantity:Compressed:3 GiB"));
-        assert!(self.text_is_visible("memory-quantity:Free:4 GiB"));
-        assert!(self.text_is_visible("memory-quantity:Inactive:5 GiB"));
-        assert!(self.text_is_visible("memory-quantity:Speculative:6 GiB"));
-        assert!(self.text_is_visible("memory-quantity:Anonymous:7 GiB"));
-        assert!(self.text_is_visible("memory-quantity:File-backed:8 GiB"));
-        assert!(self.text_is_visible("memory-quantity:Purgeable:9 GiB"));
-        assert!(self.text_is_visible("memory-quantity:Swap used:10 GiB"));
-        assert!(self.text_is_visible("memory-quantity:Swap allocated:11 GiB"));
-        assert!(self.text_is_visible("memory-quantity:Memory pressure:Critical"));
+        assert!(self.text_is_visible("overview-context:memory-app:Unavailable"));
+        assert!(self.text_is_visible("overview-context:memory-wired:2.0 GiB"));
+        assert!(self.text_is_visible("overview-context:memory-compressed:3.0 GiB"));
+        assert!(self.text_is_visible("overview-context:memory-cached:17.0 GiB"));
+        assert!(self.text_is_visible("overview-context:memory-free:4.0 GiB"));
+        assert!(self.text_is_visible("overview-context:memory-pressure:Critical"));
     }
 }
 

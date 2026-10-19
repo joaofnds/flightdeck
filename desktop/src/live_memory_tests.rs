@@ -20,24 +20,17 @@ fn selection() -> Value {
 #[test]
 fn exposes_all_selected_quantities_with_independent_missingness() {
     // Goal: the selected observation supplies every VM quantity without inventing totals.
-    // Method: compare all thirteen readouts for measured, zero and unavailable fields.
+    // Method: compare all six readouts for measured, zero and unavailable fields.
     let rows = quantities(&selection());
 
     assert_eq!(
         rows,
         vec![
-            row("Installed", "48 GiB"),
-            row("Active", "1 GiB"),
-            row("Wired", "512 MiB"),
-            row("Compressed", "0 B"),
-            row("Free", "2 GiB"),
-            row("Inactive", "Unavailable"),
-            row("Speculative", "Unavailable"),
-            row("Anonymous", "Unavailable"),
-            row("File-backed", "Unavailable"),
-            row("Purgeable", "Unavailable"),
-            row("Swap used", "Unavailable"),
-            row("Swap allocated", "Unavailable"),
+            row("App memory", "Unavailable"),
+            row("Wired", "0.5 GiB"),
+            row("Compressed", "0.0 GiB"),
+            row("Cached", "Unavailable"),
+            row("Free", "2.0 GiB"),
             row("Memory pressure", "Warning"),
         ]
     );
@@ -45,8 +38,8 @@ fn exposes_all_selected_quantities_with_independent_missingness() {
 
 #[test]
 fn measured_quantities_keep_each_vm_and_swap_field_distinct() {
-    // Goal: each named quantity reads its own measured field, including less common gauges.
-    // Method: give all twelve byte fields distinct GiB values and compare every readout.
+    // Goal: each named quantity reads its own measured fields, including the two it derives.
+    // Method: give the byte fields distinct GiB values and compare every readout.
     let mut input = selection();
     input["summary"]["memory_total_bytes"] = json!(1_073_741_824_u64);
     input["summary"]["memory_active_bytes"] = json!(2_147_483_648_u64);
@@ -55,7 +48,7 @@ fn measured_quantities_keep_each_vm_and_swap_field_distinct() {
     input["summary"]["memory_free_bytes"] = json!(5_368_709_120_u64);
     input["summary"]["memory_inactive_bytes"] = json!(6_442_450_944_u64);
     input["summary"]["memory_speculative_bytes"] = json!(7_516_192_768_u64);
-    input["summary"]["memory_anonymous_bytes"] = json!(8_589_934_592_u64);
+    input["summary"]["memory_anonymous_bytes"] = json!(12_884_901_888_u64);
     input["summary"]["memory_file_backed_bytes"] = json!(9_663_676_416_u64);
     input["summary"]["memory_purgeable_bytes"] = json!(10_737_418_240_u64);
     input["summary"]["swap_used_bytes"] = json!(11_811_160_064_u64);
@@ -66,18 +59,11 @@ fn measured_quantities_keep_each_vm_and_swap_field_distinct() {
     assert_eq!(
         rows,
         vec![
-            row("Installed", "1 GiB"),
-            row("Active", "2 GiB"),
-            row("Wired", "3 GiB"),
-            row("Compressed", "4 GiB"),
-            row("Free", "5 GiB"),
-            row("Inactive", "6 GiB"),
-            row("Speculative", "7 GiB"),
-            row("Anonymous", "8 GiB"),
-            row("File-backed", "9 GiB"),
-            row("Purgeable", "10 GiB"),
-            row("Swap used", "11 GiB"),
-            row("Swap allocated", "12 GiB"),
+            row("App memory", "2.0 GiB"),
+            row("Wired", "3.0 GiB"),
+            row("Compressed", "4.0 GiB"),
+            row("Cached", "19.0 GiB"),
+            row("Free", "5.0 GiB"),
             row("Memory pressure", "Warning"),
         ]
     );
@@ -99,7 +85,7 @@ fn refuses_a_summary_from_another_same_second_publication() {
 
     let rows = quantities(&selection);
 
-    assert_eq!(rows.len(), 13);
+    assert_eq!(rows.len(), 6);
     assert!(rows.iter().all(|row| row.reading == "Unavailable"));
 }
 
@@ -112,7 +98,7 @@ fn missing_selection_does_not_borrow_the_latest_summary() {
 
     let rows = quantities(&selection);
 
-    assert_eq!(rows.len(), 13);
+    assert_eq!(rows.len(), 6);
     assert!(rows.iter().all(|row| row.reading == "Unavailable"));
 }
 

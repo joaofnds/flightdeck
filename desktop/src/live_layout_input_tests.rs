@@ -255,7 +255,7 @@ fn memory_charts_and_attribution_precede_the_full_quantity_table(cx: &mut TestAp
         harness.driver.context.run_until_parked();
         let quantities = harness
             .driver
-            .chart_bounds("memory-quantity:Memory pressure:Unavailable");
+            .chart_bounds("overview-context:memory-pressure:Unavailable");
         let ranking = harness
             .driver
             .chart_bounds("ranking-heading:Resident memory");

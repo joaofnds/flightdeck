@@ -144,14 +144,14 @@ offscreen_disclosure_case!(
     nested_disclosure_keeps_its_key_handler_outside_overdraw,
     "memory",
     "section:memory-quantities",
-    "memory-quantity:Installed:Unavailable",
+    "overview-context:memory-wired:Unavailable",
     redraw_section_frame
 );
 offscreen_disclosure_case!(
     nested_disclosure_keeps_its_key_handler_after_an_offscreen_live_update,
     "memory",
     "section:memory-quantities",
-    "memory-quantity:Installed:Unavailable",
+    "overview-context:memory-wired:Unavailable",
     advance_section_reading
 );
 

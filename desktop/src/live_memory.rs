@@ -1,3 +1,4 @@
+use num_traits::ToPrimitive;
 use serde_json::Value;
 
 #[derive(Debug, PartialEq)]
@@ -7,36 +8,49 @@ pub struct MemoryQuantity {
 }
 
 pub fn quantities(selection: &Value) -> Vec<MemoryQuantity> {
-    const QUANTITIES: [(&str, &str); 12] = [
-        ("Installed", "memory_total_bytes"),
-        ("Active", "memory_active_bytes"),
-        ("Wired", "memory_wired_bytes"),
-        ("Compressed", "memory_compressed_bytes"),
-        ("Free", "memory_free_bytes"),
-        ("Inactive", "memory_inactive_bytes"),
-        ("Speculative", "memory_speculative_bytes"),
-        ("Anonymous", "memory_anonymous_bytes"),
-        ("File-backed", "memory_file_backed_bytes"),
-        ("Purgeable", "memory_purgeable_bytes"),
-        ("Swap used", "swap_used_bytes"),
-        ("Swap allocated", "swap_total_bytes"),
-    ];
     let summary = crate::live_views::matching_summary(selection);
-    let mut rows = Vec::with_capacity(13);
+    let bytes = |key: &str| summary[key].as_u64();
+    let cached = bytes("memory_file_backed_bytes")
+        .zip(bytes("memory_purgeable_bytes"))
+        .and_then(|(file_backed, purgeable)| file_backed.checked_add(purgeable));
+    let readings = [
+        (
+            "App memory",
+            crate::live_projection::app_memory(summary).as_u64(),
+        ),
+        ("Wired", bytes("memory_wired_bytes")),
+        ("Compressed", bytes("memory_compressed_bytes")),
+        ("Cached", cached),
+        ("Free", bytes("memory_free_bytes")),
+    ];
 
-    for (name, key) in QUANTITIES {
-        rows.push(MemoryQuantity {
+    let mut rows: Vec<MemoryQuantity> = readings
+        .into_iter()
+        .map(|(name, bytes)| MemoryQuantity {
             name,
-            reading: crate::live_projection::quantity(summary, key, "GiB", 1_073_741_824.0),
-        });
-    }
-
+            reading: gibibytes(bytes),
+        })
+        .collect();
     rows.push(MemoryQuantity {
         name: "Memory pressure",
         reading: pressure(&summary["pressure"]).to_owned(),
     });
 
     rows
+}
+
+/// A byte count in GiB to one decimal, as the prototype writes its memory quantities.
+fn gibibytes(bytes: Option<u64>) -> String {
+    const GIBIBYTE: f32 = 1_073_741_824.0;
+    bytes.and_then(|bytes| bytes.to_f32()).map_or_else(
+        || "Unavailable".to_owned(),
+        |bytes| {
+            format!(
+                "{} GiB",
+                crate::live_projection::fixed_text(bytes / GIBIBYTE, 1)
+            )
+        },
+    )
 }
 
 fn pressure(value: &Value) -> &'static str {

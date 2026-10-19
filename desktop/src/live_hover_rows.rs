@@ -74,6 +74,14 @@ impl LiveDashboard {
                         .find(|panel| panel.id == crate::live_resident_history::PANEL_ID)
                         .cloned(),
                 ));
+                self.reading_rows_memory_quantities(&mut rows);
+                rows.push(Row::Heading("Memory temperature".into()));
+                let panel = self.named_panels(&[crate::live_projection::MEMORY_TEMPERATURE_ID]);
+                rows.push(Row::Temperature(
+                    "memory",
+                    "Hottest Memory-area sensor",
+                    panel.into_iter().next(),
+                ));
             }
             _ => {}
         }
@@ -334,6 +342,14 @@ impl LiveDashboard {
                 panels: panels.to_vec(),
                 columns: panels.len(),
             });
+        }
+    }
+
+    /// The Memory page's disclosure of every captured memory quantity.
+    fn reading_rows_memory_quantities(&self, rows: &mut Vec<Row>) {
+        rows.push(Row::Disclosure(Section::MemoryQuantities));
+        if self.sections.expanded(Section::MemoryQuantities) {
+            rows.push(Row::MemoryQuantities);
         }
     }
 

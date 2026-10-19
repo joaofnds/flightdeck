@@ -650,7 +650,7 @@ fn panel_reading_value(reading: &Reading, point: &Value) -> Result<Option<f32>, 
 
 /// App memory as Activity Monitor counts it: anonymous memory that macOS may not purge. A
 /// purgeable count above the anonymous one leaves it unknown rather than zero.
-fn app_memory(point: &Value) -> Value {
+pub(crate) fn app_memory(point: &Value) -> Value {
     let anonymous = point["memory_anonymous_bytes"].as_u64();
     let purgeable = point["memory_purgeable_bytes"].as_u64();
     anonymous
@@ -1194,9 +1194,25 @@ fn memory_specifications() -> Vec<Specification> {
         memory(),
         memory_pressure(),
         memory_swap(),
-        memory_paging(),
         memory_swap_flow(),
+        memory_paging(),
+        memory_temperature(),
     ]
+}
+
+pub const MEMORY_TEMPERATURE_ID: &str = "live-memory-temperature";
+
+fn memory_temperature() -> Specification {
+    let mut specification = specification(
+        MEMORY_TEMPERATURE_ID,
+        "Memory area maximum",
+        "°C",
+        vec![reading("memory_area_celsius", "Memory", "#73bf69", 1.0)],
+    );
+    specification.maximum = Some(125.0);
+    specification.help = "The hottest measured sensor in the memory area. This collector does \
+        not record it yet, so no readings are shown.";
+    specification
 }
 
 fn memory_pressure() -> Specification {
@@ -1225,42 +1241,36 @@ fn memory_swap() -> Specification {
 }
 
 fn memory_paging() -> Specification {
-    let mut pageins = reading("memory_pageins_per_second", "Page-ins", "#5794f2", 1.0);
-    pageins.unit = Some("pages/s");
-    let mut pageouts = reading("memory_pageouts_per_second", "Page-outs", "#73bf69", 1.0);
-    pageouts.unit = Some("pages/s");
-    let mut compressions = reading(
+    let pageins = reading("memory_pageins_per_second", "Page-ins", "#5794f2", 1.0);
+    let compressions = reading(
         "memory_compressions_per_second",
         "Compressed",
         "#ff9830",
         1.0,
     );
-    compressions.unit = Some("pages/s");
-    let mut decompressions = reading(
+    let decompressions = reading(
         "memory_decompressions_per_second",
         "Decompressed",
         "#b877d9",
         1.0,
     );
-    decompressions.unit = Some("pages/s");
 
     let mut specification = specification(
         "live-paging",
         "Page-ins and compression",
         "/s",
-        vec![pageins, pageouts, compressions, decompressions],
+        vec![pageins, compressions, decompressions],
     );
     specification.help = "Page-ins count memory pages brought in from disk, including app \
-        code, and are not limited to swap. Page-outs, compression and decompression count \
-        pages per second too. Pages are not converted to bytes. \
+        code, and are not limited to swap. Compression and decompression count pages per \
+        second too. Pages are not converted to bytes. \
         Unavailable counter intervals remain gaps.";
 
     specification
 }
 
-/// Swap traffic, as the prototype's Paging chart draws it. The prototype also draws pages
-/// written out in bytes, which the collector counts only in pages, so page-outs stay in the
-/// page-ins chart rather than being converted here.
+/// Swap traffic, as the prototype's Paging chart draws it. The collector counts pages written
+/// out only in pages, so the prototype's bytes per second of them stay unavailable.
 fn memory_swap_flow() -> Specification {
     let mut swap_out = reading(
         "swap_out_bytes_per_second",
@@ -1281,11 +1291,17 @@ fn memory_swap_flow() -> Specification {
                 "#b877d9",
                 1_000_000.0,
             ),
+            reading(
+                "pageout_bytes_per_second",
+                "Paged out",
+                "#73bf69",
+                1_000_000.0,
+            ),
             swap_out,
         ],
     );
     specification.help = "Bytes read from and written to swap on disk each second. \
-        Pages written out are counted in pages, in Page-ins and compression.";
+        The collector does not record pages written out in bytes, so that line is unavailable.";
 
     specification
 }
