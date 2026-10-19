@@ -4,6 +4,9 @@ use serde_json::json;
 
 use super::{InputDriver, InputHarness, accepted_snapshot};
 
+#[path = "live_memory_layout_input_tests.rs"]
+mod memory_layout;
+
 #[gpui::test]
 fn overview_disk_ranking_activates_the_exact_historical_app(cx: &mut TestAppContext) {
     // Use the installed fourth ranking and its historical App link after real plot input.

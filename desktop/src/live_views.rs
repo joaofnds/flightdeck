@@ -306,11 +306,16 @@ impl LiveDashboard {
             Row::Charts(panels) => div()
                 .flex()
                 .gap(px(8.0))
-                .children(
-                    panels
-                        .iter()
-                        .map(|panel| self.live_chart(panel, cx).into_any_element()),
-                )
+                .children(panels.iter().map(|panel| {
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .child(self.live_chart(panel, cx))
+                }))
+                .when(self.row_content_memory_needs_spacer(panels), |row| {
+                    row.child(div().flex_1().min_w_0())
+                })
                 .into_any_element(),
             Row::Heading(title) => div()
                 .debug_selector(|| title.clone())
@@ -326,6 +331,30 @@ impl LiveDashboard {
             Row::Inventory => self.computer().into_any_element(),
             Row::Spacer(height) => div().h(*height).into_any_element(),
         }
+    }
+
+    fn row_content_memory_needs_spacer(&self, panels: &[Rc<crate::data::Panel>]) -> bool {
+        if self.request.route != "memory" {
+            return false;
+        }
+
+        let [panel] = panels else {
+            return false;
+        };
+
+        if panel.id != "live-paging" {
+            return false;
+        }
+
+        if self.viewport_size.width < px(640.0) {
+            return false;
+        }
+
+        if self.viewport_size.width >= px(1100.0) {
+            return false;
+        }
+
+        true
     }
 
     fn summary(&self, cx: &mut Context<Self>) -> impl IntoElement {

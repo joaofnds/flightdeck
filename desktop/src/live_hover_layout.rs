@@ -36,6 +36,7 @@ impl Row {
                     return "process-group-history-heading".into();
                 }
                 match title.as_str() {
+                    "Swap and paging" => return "memory-swap-paging-heading".into(),
                     "Top apps at the selected time" | "More resource context" | "MacBook" => {
                         return format!("overview-heading-{title}");
                     }
@@ -160,7 +161,7 @@ impl LiveDashboard {
         }
 
         let previous_columns = self.reading_chart_columns();
-        let previous_cpu_wide = self.viewport_size.width >= px(1100.0);
+        let previous_wide = self.viewport_size.width >= px(1100.0);
         self.viewport_size = size;
         self.row_heights.borrow_mut().clear();
         if let Some(preview) = &mut self.preview {
@@ -169,8 +170,8 @@ impl LiveDashboard {
             preview.retarget_geometry = preview.origin == Origin::Pointer;
         }
         if previous_columns == self.reading_chart_columns() {
-            if self.request.route == "cpu" {
-                if previous_cpu_wide != (self.viewport_size.width >= px(1100.0)) {
+            if matches!(self.request.route.as_str(), "cpu" | "memory") {
+                if previous_wide != (self.viewport_size.width >= px(1100.0)) {
                     self.rebuild();
                 }
             }

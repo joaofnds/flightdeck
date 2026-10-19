@@ -1,4 +1,8 @@
+use std::rc::Rc;
+
 use serde_json::Value;
+
+use crate::data::Panel;
 
 use crate::live_dashboard::{LiveDashboard, Row};
 
@@ -92,6 +96,11 @@ impl LiveDashboard {
             return;
         }
 
+        if self.request.route == "memory" {
+            self.reading_rows_charts_memory(rows);
+            return;
+        }
+
         let machine_panel_count = self
             .panels
             .iter()
@@ -114,6 +123,41 @@ impl LiveDashboard {
         {
             rows.push(Row::Charts(panels.to_vec()));
         }
+    }
+
+    fn reading_rows_charts_memory(&self, rows: &mut Vec<Row>) {
+        let primary =
+            self.reading_rows_charts_memory_panels(&["live-memory", "live-memory-pressure"]);
+
+        for panels in primary.chunks(self.reading_chart_columns()) {
+            rows.push(Row::Charts(panels.to_vec()));
+        }
+
+        rows.push(Row::Heading("Swap and paging".into()));
+        let swap =
+            self.reading_rows_charts_memory_panels(&["live-swap", "live-swap-flow", "live-paging"]);
+        let columns = if self.viewport_size.width >= gpui::px(1100.0) {
+            3
+        } else {
+            self.reading_chart_columns()
+        };
+
+        for panels in swap.chunks(columns) {
+            rows.push(Row::Charts(panels.to_vec()));
+        }
+    }
+
+    fn reading_rows_charts_memory_panels(&self, ids: &[&str]) -> Vec<Rc<Panel>> {
+        assert!(ids.len() <= 3);
+        ids.iter()
+            .filter_map(|id| {
+                self.panels
+                    .iter()
+                    .take(16)
+                    .find(|panel| panel.id == *id)
+                    .cloned()
+            })
+            .collect()
     }
 
     fn reading_rows_charts_energy(&self, rows: &mut Vec<Row>) {
