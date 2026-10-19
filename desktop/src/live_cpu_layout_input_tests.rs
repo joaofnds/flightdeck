@@ -5,6 +5,37 @@ use std::sync::Arc;
 use super::{InputDriver, InputHarness, accepted_snapshot};
 
 #[gpui::test]
+fn cpu_composition_excludes_raw_tables_even_with_stale_pages(cx: &mut TestAppContext) {
+    // Render stale raw payloads in a tall CPU window so an accidental table would be visible.
+    let mut harness = InputHarness::setup_route(cx, "cpu");
+    harness.driver.seed_cpu_layout_readings();
+    harness.driver.seed_stale_cpu_table();
+
+    assert!(!harness.driver.reading_is_visible("raw-heading:processes"));
+    assert!(
+        !harness
+            .driver
+            .reading_is_visible("raw-value:processes:0:123")
+    );
+
+    harness.teardown();
+}
+
+#[gpui::test]
+fn raw_composition_displays_fan_rows(cx: &mut TestAppContext) {
+    // Render an accepted fan page and inspect its actual heading and RPM cell geometry.
+    let mut harness = InputHarness::setup_route(cx, "raw");
+    harness.driver.seed_raw_fan_table();
+
+    let heading = harness.driver.chart_bounds("raw-heading:fans");
+    let value = harness.driver.chart_bounds("raw-value:fans:0:2345");
+    assert!(heading.bottom() <= value.top());
+    assert!(value.size.width > px(0.0));
+    assert!(value.size.height > px(0.0));
+    harness.teardown();
+}
+
+#[gpui::test]
 fn cpu_top_places_history_selected_bars_and_heatmap_beside_each_other(cx: &mut TestAppContext) {
     // Measure the installed CPU page rather than a separate layout fixture.
     let mut harness = InputHarness::setup_route(cx, "cpu");
@@ -72,6 +103,35 @@ fn compact_selected_cpu_bars_show_indices_and_restore_percentages_when_stacked(
 }
 
 impl InputDriver {
+    fn seed_stale_cpu_table(&mut self) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            dashboard.snapshot.as_mut().unwrap().pages.insert(
+                "processes".into(),
+                json!({"columns":["pid"],"rows":[[123]]}),
+            );
+            dashboard.rebuild();
+            cx.notify();
+        });
+        self.context
+            .simulate_resize(gpui::size(px(1320.0), px(4000.0)));
+        self.context.run_until_parked();
+    }
+
+    fn seed_raw_fan_table(&mut self) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            dashboard.request.table = "fans".into();
+            let mut snapshot = accepted_snapshot(dashboard.generation);
+            snapshot.pages.insert(
+                "fans".into(),
+                json!({"total":1,"offset":0,
+                    "columns":["publication","fan","rpm"],"rows":[[2,0,2345]]}),
+            );
+            dashboard.accept(snapshot);
+            cx.notify();
+        });
+        self.context.run_until_parked();
+    }
+
     fn resize_cpu_layout(&mut self, width: f32) {
         self.context
             .simulate_resize(gpui::size(px(width), px(2400.0)));

@@ -130,11 +130,12 @@ impl LiveDashboard {
     }
 
     fn reading_rows_tables(&self, rows: &mut Vec<Row>) {
+        if self.request.route != "raw" {
+            return;
+        }
+
         if let Some(snapshot) = self.reading_snapshot() {
             for (name, page) in &snapshot.pages {
-                if name == "fans" {
-                    continue;
-                }
                 rows.push(Row::TableHeading(name.clone()));
                 for index in 0..array_len(Some(page), "rows") {
                     rows.push(Row::Table(name.clone(), index));

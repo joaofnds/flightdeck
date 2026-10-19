@@ -161,7 +161,6 @@ fn probe_validate(snapshot: &Snapshot, route: &str) -> Result<(), String> {
     }
     let tables: &[&str] = match route {
         "overview" => &["fans"],
-        "cpu" => &["processes", "ticks", "memory", "cpus", "interfaces"],
         "raw" => &["processes"],
         _ => &[],
     };
@@ -332,19 +331,16 @@ fn probe_resume(probe: &mut Probe, paused: &Snapshot) -> Result<Box<Snapshot>, S
 
 fn probe_pagination(probe: &mut Probe) -> Result<Value, String> {
     let mut offsets = BTreeMap::new();
-    for route in ["raw", "cpu"] {
-        let mut request = probe_request(route);
-        request.offset = u64::MAX - u64::MAX % 512;
-        let snapshot = probe_read(probe, &request)?;
-        probe_validate(&snapshot, route)?;
-        let offset = &snapshot.pages["processes"]["offset"];
-        if offset.as_u64() != Some(0) {
-            return Err(format!(
-                "Stale {route} process offset did not reset to zero"
-            ));
-        }
-        offsets.insert(route.to_owned(), offset.clone());
+    let mut request = probe_request("raw");
+    request.offset = u64::MAX - u64::MAX % 512;
+    let snapshot = probe_read(probe, &request)?;
+    probe_validate(&snapshot, "raw")?;
+    let offset = &snapshot.pages["processes"]["offset"];
+    if offset.as_u64() != Some(0) {
+        return Err("Stale raw process offset did not reset to zero".into());
     }
+    offsets.insert("raw".to_owned(), offset.clone());
+    offsets.insert("cpu".to_owned(), json!(probe_pagination_cpu(probe)?));
     let mut request = probe_request("apps");
     request.apps_offset = u32::MAX - u32::MAX % 512;
     request.members_offset = request.apps_offset;
@@ -370,6 +366,31 @@ fn probe_pagination(probe: &mut Probe) -> Result<Value, String> {
     offsets.insert("members".to_owned(), member_offset.clone());
 
     Ok(json!(offsets))
+}
+
+fn probe_pagination_cpu(probe: &mut Probe) -> Result<u32, String> {
+    let mut request = probe_request("cpu");
+    request.cpu_offset = 992;
+    let snapshot = probe_read(probe, &request)?;
+    probe_validate(&snapshot, "cpu")?;
+    let history = snapshot
+        .cpu_history
+        .as_deref()
+        .ok_or("CPU pagination cannot be checked because CPU history is unavailable")?;
+    if history.total() == 0 {
+        return Err("CPU pagination cannot be checked because logical CPU history is empty".into());
+    }
+
+    let expected = if request.cpu_offset < history.total() {
+        request.cpu_offset
+    } else {
+        0
+    };
+    if history.offset() != expected {
+        return Err("Stale CPU history offset did not match the logical CPU domain".into());
+    }
+
+    Ok(history.offset())
 }
 
 fn probe_overlapping(probe: &mut Probe) -> Result<Box<Snapshot>, String> {

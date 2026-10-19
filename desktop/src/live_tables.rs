@@ -54,14 +54,10 @@ impl LiveDashboard {
             .child(format!("{name} · {} recorded rows", text(&page["total"])));
         if self.request.route == "raw" {
             title = title.child(self.raw_paging(page, cx));
-        } else {
-            if self.request.route == "cpu" {
-                if name == "processes" {
-                    title = title.child(self.raw_paging(page, cx));
-                }
-            }
         }
-        let mut heading = div().child(title);
+        let mut heading = div()
+            .debug_selector(|| format!("raw-heading:{name}"))
+            .child(title);
         if let Some(columns) = page["columns"].as_array() {
             heading = heading.child(
                 div()
@@ -74,9 +70,9 @@ impl LiveDashboard {
                     .text_size(px(11.0))
                     .text_color(rgb(MUTED))
                     .children(
-                        self.table_indices(name)
+                        columns
                             .iter()
-                            .filter_map(|index| columns.get(*index))
+                            .take(4)
                             .map(|column| div().flex_1().min_w_0().truncate().child(text(column))),
                     ),
             );
@@ -137,14 +133,16 @@ impl LiveDashboard {
                     .items_center()
                     .gap(px(10.0))
                     .text_size(px(11.0))
-                    .children(
-                        self.table_indices(name)
-                            .iter()
-                            .filter_map(|index| row.get(*index))
-                            .map(|value| {
-                                div().flex_1().min_w_0().truncate().child(raw_text(value))
-                            }),
-                    ),
+                    .children(row.iter().take(4).map(|value| {
+                        div()
+                            .debug_selector(|| {
+                                format!("raw-value:{name}:{index}:{}", raw_text(value))
+                            })
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(raw_text(value))
+                    })),
             );
         if expanded {
             content = content.child(table_columns(page, row));
@@ -195,28 +193,6 @@ impl LiveDashboard {
         self.reading_snapshot()
             .and_then(|snapshot| snapshot.pages.get(name))
             .map_or(&Value::Null, |page| page)
-    }
-
-    fn table_indices(&self, name: &str) -> Vec<usize> {
-        if self.request.route == "cpu" {
-            if matches!(name, "cpus" | "interfaces") {
-                return self.table_page(name)["columns"]
-                    .as_array()
-                    .map_or_else(Vec::new, |columns| {
-                        (0..columns.len().min(COLUMNS_MAX)).collect()
-                    });
-            }
-            if name == "processes" {
-                let Some(columns) = self.table_page(name)["columns"].as_array() else {
-                    return Vec::new();
-                };
-                return ["pid", "awake_ns_at_start", "user_ns", "resident_bytes"]
-                    .iter()
-                    .filter_map(|field| columns.iter().position(|name| name == field))
-                    .collect();
-            }
-        }
-        (0..4).collect()
     }
 
     fn raw_paging(&self, page: &Value, cx: &mut Context<Self>) -> impl IntoElement {

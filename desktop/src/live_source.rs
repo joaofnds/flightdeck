@@ -493,14 +493,14 @@ fn reader_payload(
     }
     let tables: &[&str] = match request.route.as_str() {
         "overview" => &["fans"],
-        "cpu" => &["processes", "ticks", "memory", "cpus", "interfaces"],
         "raw" => &[request.table.as_str()],
         _ => &[],
     };
     for table in tables {
-        let offset = match (request.route.as_str(), *table) {
-            ("raw", _) | ("cpu", "processes") => request.offset,
-            _ => 0,
+        let offset = if request.route == "raw" {
+            request.offset
+        } else {
+            0
         };
         let page = reader_page(session, table, offset)?;
         identity_validate(&page["observation"], &snapshot.selection["selected"])?;

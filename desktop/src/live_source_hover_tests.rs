@@ -257,10 +257,7 @@ impl Reading {
             publication: Some(publication),
             cpu_publication: Some(publication),
             cpu_count: 35,
-            page_publications: ["cpus", "interfaces", "memory", "processes", "ticks"]
-                .into_iter()
-                .map(|name| (name.into(), Some(publication)))
-                .collect(),
+            page_publications: Vec::new(),
         }
     }
 }
