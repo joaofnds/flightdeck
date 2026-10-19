@@ -48,9 +48,9 @@ pub(crate) enum Source {
 
 type Identity = ([u64; 2], [u64; 2], [u64; 2], u64);
 
-struct Interval<'observation> {
-    before: &'observation Observation,
-    after: &'observation Observation,
+pub(crate) struct Interval<'observation> {
+    pub before: &'observation Observation,
+    pub after: &'observation Observation,
 }
 
 const POINT_BYTES_MAX: usize = 2 * 1024 * 1024;
@@ -387,7 +387,7 @@ fn add(total: &mut Measure, value: &Measure) -> Result<()> {
     Ok(())
 }
 
-fn consecutive(interval: &Interval<'_>) -> bool {
+pub(crate) fn consecutive(interval: &Interval<'_>) -> bool {
     let Interval { before, after } = interval;
     if before.recording != after.recording {
         return false;

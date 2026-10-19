@@ -105,7 +105,7 @@ impl History {
 }
 
 impl Point {
-    fn resident_capture(&self) -> Capture {
+    pub(super) fn resident_capture(&self) -> Capture {
         Capture {
             observation: self.observation,
             membership_complete: self.membership_complete,

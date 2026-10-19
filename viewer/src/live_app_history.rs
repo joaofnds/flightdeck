@@ -11,6 +11,7 @@ use crate::cancellation::Operation;
 use crate::live_app_response::{KeyKind, Observation, Sample};
 use crate::session::OBSERVATIONS_MAX;
 
+mod attribution;
 mod compact;
 mod merge;
 mod resident;
@@ -20,13 +21,14 @@ pub(crate) use resident_cache::{
     PIN_BYTES_MAX, ResidentCache, ResidentFile, ResidentPin, ResidentPoint,
 };
 mod trace;
-use compact::{CompactMeasure, HistoryKey, count};
+pub(crate) use compact::CompactMeasure;
+use compact::{HistoryKey, count};
 pub(crate) use trace::TracePoint;
 
 const BYTES_MAX: usize = 64 * 1024 * 1024;
 const _: () = {
     assert!(OBSERVATIONS_MAX > 0);
-    assert!(size_of::<Point>() <= 176);
+    assert!(size_of::<Point>() <= 184);
     assert!(
         BYTES_MAX
             > crate::live_app_response::SAMPLE_BYTES_MAX
@@ -50,6 +52,7 @@ pub(super) struct Point {
     apps: Vec<App>,
     membership_complete: bool,
     resident_ungrouped_members: u32,
+    ungrouped_members: u32,
     usage_refused: u32,
     usage_gone: u32,
 }
@@ -221,6 +224,7 @@ impl Point {
             elapsed_ns: sample.elapsed_ns,
             apps: Vec::with_capacity(sample.apps().len()),
             membership_complete: sample.membership_complete,
+            ungrouped_members: sample.ungrouped_members,
             resident_ungrouped_members: u32::try_from(
                 sample
                     .processes()

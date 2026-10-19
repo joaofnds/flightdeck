@@ -9,6 +9,7 @@ use collector::ring::{Identity, PROGRAM_PATH_BYTES_MAX, RunIdentity};
 use persistence::{Error, Result};
 use serde_json::Value;
 
+mod attribution;
 mod resident;
 
 pub(super) struct Cache {

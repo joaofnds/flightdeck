@@ -20,6 +20,9 @@ use crate::{Cancellation, Session, metrics};
 #[path = "app_resident_history.rs"]
 pub(crate) mod resident_history;
 
+#[path = "app_attribution_history.rs"]
+pub(crate) mod attribution_history;
+
 #[path = "live_storage_merge.rs"]
 mod storage_merge;
 

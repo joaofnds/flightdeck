@@ -12,7 +12,7 @@ pub(super) struct HistoryKey {
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct CompactMeasure {
+pub(crate) struct CompactMeasure {
     // Bytes keep the exact amount without imposing eight-byte alignment on every measure.
     known: [u8; 8],
     coverage: u32,
@@ -42,7 +42,7 @@ impl HistoryKey {
 }
 
 impl CompactMeasure {
-    pub(super) fn capture(source: &Measure) -> Self {
+    pub(crate) fn capture(source: &Measure) -> Self {
         // Each count fits fifteen bits under the validated process population bound.
         let measured_members = u32::from(count(source.measured_members));
         let unavailable_members = u32::from(count(source.unavailable_members));
@@ -55,7 +55,7 @@ impl CompactMeasure {
         }
     }
 
-    pub(super) fn measure(self) -> Measure {
+    pub(crate) fn measure(self) -> Measure {
         Measure {
             known: u64::from_le_bytes(self.known),
             measured_members: self.coverage & MEMBERS_MASK,

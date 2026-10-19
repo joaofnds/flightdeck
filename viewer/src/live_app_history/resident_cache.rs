@@ -12,6 +12,7 @@ pub(crate) struct ResidentCache {
     points: Vec<ResidentPoint>,
     pins: Vec<ResidentPin>,
     bytes: usize,
+    attribution: Option<Box<crate::app_attribution_history::cache::Cache>>,
 }
 
 pub(crate) struct ResidentPoint {
@@ -46,18 +47,34 @@ impl ResidentCache {
             points: Vec::new(),
             pins: Vec::new(),
             bytes: 0,
+            attribution: None,
         }
     }
 
     pub(crate) fn bytes(&self) -> usize {
-        self.bytes
+        self.bytes + self.attribution.as_ref().map_or(0, |cache| cache.bytes())
+    }
+
+    pub(crate) fn take_attribution(&mut self) -> crate::app_attribution_history::cache::Cache {
+        self.attribution
+            .take()
+            .map_or_else(crate::app_attribution_history::cache::Cache::new, |cache| {
+                *cache
+            })
+    }
+
+    pub(crate) fn install_attribution(
+        &mut self,
+        cache: crate::app_attribution_history::cache::Cache,
+    ) {
+        self.attribution = Some(Box::new(cache));
     }
 
     pub(crate) fn prepare(&mut self, available: usize) -> bool {
         if self.points.capacity() > 0 {
             return true;
         }
-        if available < CONTAINER_BYTES {
+        if available.saturating_sub(self.bytes()) < CONTAINER_BYTES {
             return false;
         }
 
@@ -133,7 +150,9 @@ impl ResidentCache {
             self.bytes += pin.owned_bytes();
         }
         if self.points.is_empty() {
+            let attribution = self.attribution.take();
             *self = Self::new();
+            self.attribution = attribution;
         }
         Ok(())
     }
@@ -252,7 +271,7 @@ impl ResidentPin {
         size_of::<Self>() + self.owned_bytes()
     }
 
-    fn owned_bytes(&self) -> usize {
+    pub(crate) fn owned_bytes(&self) -> usize {
         self.manifest.data_directory.capacity()
             + self.manifest.tables.capacity() * size_of::<persistence::TableManifest>()
             + self.files.capacity() * size_of::<ResidentFile>()

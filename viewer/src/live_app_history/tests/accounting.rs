@@ -344,6 +344,7 @@ fn point(history: &History, publication: u64, keys: &[(KeyKind, &[u8])]) -> Box<
         apps,
         membership_complete: false,
         resident_ungrouped_members: 0,
+        ungrouped_members: 0,
         usage_refused: 0,
         usage_gone: 0,
     })

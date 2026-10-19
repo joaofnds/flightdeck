@@ -26,7 +26,7 @@ mod means;
 mod reduce;
 #[path = "app_resident_history/saved.rs"]
 mod saved;
-pub(crate) use reduce::{AppReading, Capture, Reduction, Source, identity};
+pub(crate) use reduce::{AppReading, Capture, Interval, Reduction, Source, consecutive, identity};
 pub(crate) use saved::capture;
 
 pub(crate) fn has_resident(measure: &crate::live_app_response::Measure) -> bool {
