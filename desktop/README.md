@@ -162,6 +162,10 @@ CPU, Memory, Energy and Storage repeat the corresponding ranking on their own pa
 beside their captured App histories. The CPU plot uses 100% for one core; process
 power remains separate from system and GPU power. Energy's Process power summary
 uses the same App history and inspected timestamp as its plot.
+CPU and Disk App histories include independent dashed machine references. All CPU
+sums the recorded logical CPUs' busy percentages; All disk I/O requires complete
+whole-device read and write rates. Both follow exact observation identities and
+stay outside captured App totals. Missing machine intervals remain unavailable.
 Bars show each value relative to the leading App; help explains the measured quantity.
 Rankings scan all captured Apps through bounded pages, retaining ten entries per
 metric. Zero, partially measured totals, overflow and incomplete membership remain
