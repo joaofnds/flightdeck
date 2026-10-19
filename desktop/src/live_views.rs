@@ -15,6 +15,8 @@ mod cpu_top_view;
 mod recording_context_view;
 #[path = "live_summary.rs"]
 mod summary;
+#[cfg(feature = "automation")]
+pub(crate) use summary::cards;
 pub(crate) use summary::matching_summary;
 
 impl LiveDashboard {

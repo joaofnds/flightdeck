@@ -2,6 +2,8 @@ mod bundle;
 mod chart_axes;
 mod chart_view;
 mod charts;
+#[cfg(feature = "automation")]
+mod control;
 mod dashboard;
 mod data;
 mod diagnostics;

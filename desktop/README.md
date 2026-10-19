@@ -36,6 +36,26 @@ target/release/flightdeck --recording /path/to/session.recording --live-soak --s
 The Live control in a Recorded window follows new readings from that recording
 through the existing reader. It does not start a collector or acquire shutdown ownership.
 
+A build with the `automation` feature can be driven without the screen. With
+`--control SOCKET` the window opens hidden, never takes focus, and answers one command
+per line on that Unix socket with one JSON line. `flightdeck-control` sends them:
+
+```sh
+cargo +1.98.0 build --locked --features automation
+target/debug/flightdeck --start-collector --control /tmp/flightdeck.sock &
+target/debug/flightdeck-control --socket /tmp/flightdeck.sock --command help
+target/debug/flightdeck-control --socket /tmp/flightdeck.sock \
+  --command 'navigate battery' --command 'move 500 420' \
+  --command state --command 'screenshot /tmp/battery.png' --command quit
+```
+
+`state` reports the route, the selected and hovered seconds, the live status, the
+viewport, the scroll position and the stat cards. `rows` lists the page's rows, which
+`reveal ROW_KEY` scrolls to the top. Pointer commands take window coordinates in
+points. A screenshot renders the window's own frame offscreen, at its scale factor,
+so it shows exactly what the window draws and nothing of the desktop around it.
+Builds without the feature refuse `--control`.
+
 Timed interactive live windows accept `--seconds 1..1800`. Run
 `target/release/flightdeck --seconds 900`
 to observe a full fifteen-minute history interval in the window, or use `1800` to

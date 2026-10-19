@@ -40,6 +40,8 @@ pub struct Options {
     pub range_minutes: u16,
     pub seconds: Option<u32>,
     pub replay: Option<std::path::PathBuf>,
+    /// The control socket an automation build listens on, with its window hidden.
+    pub control: Option<std::path::PathBuf>,
     mode: RunMode,
 }
 
@@ -82,6 +84,7 @@ impl Options {
             range_minutes: 15,
             seconds: None,
             replay: None,
+            control: None,
             mode: RunMode::Interactive,
         };
         if arguments.len() > 20 {
@@ -200,6 +203,15 @@ impl Options {
                 );
                 position += 1;
             }
+            "--control" => {
+                self.control = Some(
+                    arguments
+                        .get(position)
+                        .ok_or("--control needs a socket path")?
+                        .into(),
+                );
+                position += 1;
+            }
             "--smoke" => self.parse_mode(RunMode::Smoke)?,
             "--check" => self.parse_mode(RunMode::Check)?,
             "--minutes" => {
@@ -227,7 +239,8 @@ impl Options {
                      [--seconds 1..1800] [--live-check --seconds 5..300]\n\
                      [--reference [--scrub] [--animate]\n\
                      [--hardware] [--smoke] [--minutes 15|60] [--seconds 1..300]\n\
-                     [--replay ACTIONS.json]] [--check]"
+                     [--replay ACTIONS.json]] [--check]\n\
+                     [--control SOCKET] (automation builds: hidden window, socket commands)"
                 );
                 println!("--live-soak [--recording PATH] [--seconds 5..1800; default 900]");
                 std::process::exit(0);
@@ -373,6 +386,19 @@ impl Performance {
 #[cfg(test)]
 mod tests {
     use super::{Options, ProbeMode};
+
+    #[test]
+    fn parses_the_control_socket_and_refuses_it_without_a_path() {
+        // Goal: the control socket path reaches the launch, and a missing path is an error.
+        // Method: parse the flag with a path, then as the last argument without one.
+        let arguments = ["--start-collector", "--control", "/tmp/fd.sock"].map(str::to_owned);
+        let missing = ["--control"].map(str::to_owned);
+
+        let options = Options::parse_arguments(&arguments).unwrap();
+
+        assert_eq!(options.control, Some("/tmp/fd.sock".into()));
+        assert!(Options::parse_arguments(&missing).is_err());
+    }
 
     #[test]
     fn parses_a_long_soak_when_the_mode_precedes_its_duration() {

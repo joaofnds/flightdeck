@@ -68,6 +68,7 @@ pub fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
         return Err("--smoke requires --reference".into());
     }
 
+    let control = control(&options)?;
     let root = recording(&options)?;
     let collector = collector_session(&root, &options)?;
     let worker = match (
@@ -91,6 +92,9 @@ pub fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
         let bounds = Bounds::centered(None, size(px(1320.0), px(900.0)), cx);
         let window = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
+            // A window under the control socket stays off the screen and never takes focus.
+            show: control.is_none(),
+            focus: control.is_none(),
             // The window bar draws the title row itself, with the window buttons inside it as
             // the approved prototype shows them.
             titlebar: Some(gpui::TitlebarOptions {
@@ -100,8 +104,17 @@ pub fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
             }),
             ..Default::default()
         };
-        match cx.open_window(window, move |_, cx| create_dashboard(worker, options, cx)) {
-            Ok(_) => cx.activate(true),
+        let hidden = control.is_some();
+        match cx.open_window(window, move |window, cx| {
+            let dashboard = create_dashboard(worker, options, cx);
+            install_control(control, &dashboard, window, cx);
+            dashboard
+        }) {
+            Ok(_) => {
+                if !hidden {
+                    cx.activate(true);
+                }
+            }
             Err(error) => {
                 eprintln!("Live window failed: {error}");
                 request_quit(cx);
@@ -109,6 +122,52 @@ pub fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
         }
     });
     Ok(())
+}
+
+#[cfg(feature = "automation")]
+type Control = std::sync::mpsc::Receiver<crate::control::Command>;
+#[cfg(not(feature = "automation"))]
+type Control = std::convert::Infallible;
+
+/// Binds the control socket before the window opens, so a failure stops the launch.
+fn control(options: &Options) -> Result<Option<Control>, Box<dyn std::error::Error>> {
+    let Some(path) = &options.control else {
+        return Ok(None);
+    };
+
+    #[cfg(feature = "automation")]
+    return Ok(Some(crate::control::serve(path)?));
+    #[cfg(not(feature = "automation"))]
+    return Err(format!(
+        "--control {} needs a build with --features automation",
+        path.display()
+    )
+    .into());
+}
+
+#[cfg(feature = "automation")]
+fn install_control(
+    control: Option<Control>,
+    dashboard: &gpui::Entity<LiveDashboard>,
+    window: &mut gpui::Window,
+    cx: &mut App,
+) {
+    if let Some(control) = control {
+        crate::control::install(control, dashboard.clone(), window, cx);
+    }
+}
+
+/// Without the feature no control can exist, since `control` refuses the flag.
+#[cfg(not(feature = "automation"))]
+fn install_control(
+    control: Option<Control>,
+    _: &gpui::Entity<LiveDashboard>,
+    _: &mut gpui::Window,
+    _: &mut App,
+) {
+    if let Some(control) = control {
+        match control {}
+    }
 }
 
 fn create_dashboard(worker: Worker, options: Options, cx: &mut App) -> gpui::Entity<LiveDashboard> {

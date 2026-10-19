@@ -82,6 +82,10 @@ jobs:
       - run: >-
           cargo clippy --locked --manifest-path desktop/Cargo.toml
           --all-targets -- --deny warnings
+      # The control socket builds only with the automation feature, so check it here too.
+      - run: >-
+          cargo clippy --locked --manifest-path desktop/Cargo.toml
+          --all-targets --features automation -- --deny warnings
       - run: cargo test --locked --manifest-path desktop/Cargo.toml
       - run: >-
           cargo run --locked --manifest-path desktop/Cargo.toml

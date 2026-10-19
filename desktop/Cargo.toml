@@ -40,6 +40,9 @@ rev = "56934ec0560bce8929025497411de7f5322fb6ca"
 default-features = false
 features = ["font-kit", "runtime_shaders"]
 
+[features]
+automation = ["gpui/test-support", "gpui_macos/test-support"]
+
 # Keep the native query engine's debug unwind tables within Mach-O limits.
 [profile.dev.package."*"]
 opt-level = 1
