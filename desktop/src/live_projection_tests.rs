@@ -82,18 +82,105 @@ fn overview_network_combines_positive_readouts_and_mirrors_only_send_geometry() 
 }
 
 #[test]
-fn memory_categories_only_stack_in_overview() {
-    // Inspect source values and stacking without inventing a computed used-memory total.
-    let selection = selection();
+fn overview_stacks_captured_memory_categories_below_an_independent_installed_guide() {
+    // Project measured capacity, zero and missing values without adding capacity to the stack.
+    let selection = memory_composition_selection();
+
     let overview = panels("overview", &selection, None).unwrap();
+
     assert_eq!(overview.len(), 8);
-    assert_eq!(overview[2].stack, Some(true));
+    assert_memory_composition(&overview[2]);
+}
+
+#[test]
+fn memory_stacks_captured_categories_below_an_independent_installed_guide() {
+    // Project the Memory route with the same category and capacity contract as Overview.
+    let selection = memory_composition_selection();
+
     let memory = panels("memory", &selection, None).unwrap();
+
     assert_eq!(memory.len(), 5);
-    assert_eq!(memory[0].stack, Some(false));
-    assert_eq!(memory[0].lines[0].values[1], Some(1.0));
-    assert_eq!(memory[0].lines[1].values[1], None);
+    assert_memory_composition(&memory[0]);
     assert_eq!(memory[2].lines[1].dashed, Some(true));
+}
+
+fn memory_composition_selection() -> Value {
+    let mut selection = selection();
+    selection["trends"][0]["memory_total_bytes"] = json!(0);
+    selection["trends"][0]["memory_active_bytes"] = json!(0);
+    selection["trends"][0]["memory_wired_bytes"] = json!(0);
+    selection["trends"][0]["memory_compressed_bytes"] = json!(0);
+    selection["trends"][1]["memory_total_bytes"] = json!(51_539_607_552_u64);
+    selection["trends"][1]["memory_wired_bytes"] = json!(2_147_483_648_u64);
+    selection["trends"][1]["memory_compressed_bytes"] = json!(3_221_225_472_u64);
+
+    selection
+}
+
+fn assert_memory_composition(memory: &Panel) {
+    assert_eq!(memory.unit, "GiB");
+    assert_eq!(memory.stack, Some(true));
+    assert_eq!(memory.fill, Some(1.0));
+    assert_eq!(
+        memory
+            .lines
+            .iter()
+            .map(|line| line.name.as_str())
+            .collect::<Vec<_>>(),
+        ["Active", "Wired", "Compressed", "Installed"]
+    );
+    assert_eq!(memory.lines[0].values, [Some(0.0), Some(1.0), None]);
+    assert_eq!(memory.lines[1].values, [Some(0.0), Some(2.0), None]);
+    assert_eq!(memory.lines[2].values, [Some(0.0), Some(3.0), None]);
+    assert_ne!(memory.lines[0].stack, Some(false));
+    assert_ne!(memory.lines[1].stack, Some(false));
+    assert_ne!(memory.lines[2].stack, Some(false));
+    assert_eq!(memory.lines[3].values, [Some(0.0), Some(48.0), None]);
+    assert_eq!(memory.lines[3].unit.as_deref(), Some("GiB"));
+    assert_eq!(memory.lines[3].stack, Some(false));
+    assert_eq!(memory.lines[3].dashed, Some(true));
+    assert_eq!(memory.lines[3].fill, Some(0.0));
+}
+
+#[test]
+fn memory_keeps_all_page_rates_and_unavailable_intervals() {
+    // Project measured page/compression rates beside absent and reset-produced null rates.
+    let mut selection = selection();
+    selection["trends"][1]["memory_pageins_per_second"] = json!(1.0);
+    selection["trends"][1]["memory_pageouts_per_second"] = json!(4.0);
+    selection["trends"][1]["memory_compressions_per_second"] = json!(2.0);
+    selection["trends"][1]["memory_decompressions_per_second"] = json!(3.0);
+    selection["trends"][2]["memory_pageins_per_second"] = json!(0.0);
+    selection["trends"][2]["memory_pageouts_per_second"] = json!(0.0);
+    selection["trends"][2]["memory_compressions_per_second"] = json!(0.0);
+    selection["trends"][2]["memory_decompressions_per_second"] = json!(0.0);
+    let mut reset = selection["trends"][2].clone();
+    reset["publication"] = json!(4);
+    reset["memory_pageins_per_second"] = Value::Null;
+    reset["memory_pageouts_per_second"] = Value::Null;
+    reset["memory_compressions_per_second"] = Value::Null;
+    reset["memory_decompressions_per_second"] = Value::Null;
+    selection["trends"].as_array_mut().unwrap().push(reset);
+
+    let memory = panels("memory", &selection, None).unwrap();
+    let paging = memory
+        .iter()
+        .find(|panel| panel.id == "live-paging")
+        .unwrap();
+
+    assert_eq!(paging.lines.len(), 4);
+    assert_eq!(paging.lines[0].name, "Page-ins");
+    assert_eq!(paging.lines[0].unit.as_deref(), Some("pages/s"));
+    assert_eq!(paging.lines[0].values, [None, Some(1.0), Some(0.0), None]);
+    assert_eq!(paging.lines[1].name, "Page-outs");
+    assert_eq!(paging.lines[1].unit.as_deref(), Some("pages/s"));
+    assert_eq!(paging.lines[1].values, [None, Some(4.0), Some(0.0), None]);
+    assert_eq!(paging.lines[2].name, "Compressed");
+    assert_eq!(paging.lines[2].unit.as_deref(), Some("pages/s"));
+    assert_eq!(paging.lines[2].values, [None, Some(2.0), Some(0.0), None]);
+    assert_eq!(paging.lines[3].name, "Decompressed");
+    assert_eq!(paging.lines[3].unit.as_deref(), Some("pages/s"));
+    assert_eq!(paging.lines[3].values, [None, Some(3.0), Some(0.0), None]);
 }
 
 #[test]

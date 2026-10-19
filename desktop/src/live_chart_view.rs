@@ -126,7 +126,7 @@ impl LiveDashboard {
     }
 
     fn chart_headline(&self, panel: &Panel, index: Option<usize>) -> impl IntoElement {
-        let reading = if panel.id == "live-app-disk" {
+        let reading = if is_process_disk(panel) {
             self.chart_disk_headline(panel, index)
         } else {
             self.chart_reading(panel, index)
@@ -140,11 +140,7 @@ impl LiveDashboard {
             .child(
                 div()
                     .debug_selector(|| reading.clone())
-                    .text_size(px(if panel.id == "live-app-disk" {
-                        18.0
-                    } else {
-                        25.0
-                    }))
+                    .text_size(px(if is_process_disk(panel) { 18.0 } else { 25.0 }))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .child(reading),
             );
@@ -190,7 +186,7 @@ impl LiveDashboard {
                 .and_then(|snapshot| snapshot.resident_history.as_ref())
                 .map_or_else(|| "Unavailable".into(), |history| history.headline(index));
         }
-        if panel.id == "live-app-disk" {
+        if is_process_disk(panel) {
             return format!(
                 "Read {}; Write {}",
                 self.chart_line_reading(panel, 0, index),
@@ -242,7 +238,7 @@ impl LiveDashboard {
             .and_then(|line| line.unit.as_deref())
             .unwrap_or(&panel.unit);
         let reading = line_reading(panel, value, unit);
-        if panel.id != "live-app-disk" {
+        if !is_process_disk(panel) {
             return reading;
         }
 
@@ -250,7 +246,7 @@ impl LiveDashboard {
             return reading;
         }
 
-        let Some((measured, unavailable)) = self.chart_disk_counts(line, index) else {
+        let Some((measured, unavailable)) = self.chart_disk_counts(panel, line, index) else {
             return format!("{reading} · coverage unavailable");
         };
 
@@ -276,7 +272,7 @@ impl LiveDashboard {
             return reading;
         }
 
-        let Some((_, unavailable)) = self.chart_disk_counts(line, index) else {
+        let Some((_, unavailable)) = self.chart_disk_counts(panel, line, index) else {
             return format!("{reading} · coverage unavailable");
         };
 
@@ -287,11 +283,17 @@ impl LiveDashboard {
         reading
     }
 
-    fn chart_disk_counts(&self, line: usize, index: Option<usize>) -> Option<(u64, u64)> {
+    fn chart_disk_counts(
+        &self,
+        panel: &Panel,
+        line: usize,
+        index: Option<usize>,
+    ) -> Option<(u64, u64)> {
         assert!(line < 2);
         let field = ["disk_read_bytes", "disk_written_bytes"][line];
         // Panels retain the accepted history while exact preview details load.
-        let measure = &self.snapshot.as_ref()?.history.as_ref()?["points"].get(index?)?[field];
+        let snapshot = self.snapshot.as_ref()?;
+        let measure = &process_history_payload(panel, snapshot)?["points"].get(index?)?[field];
 
         Some((
             measure["measured_members"].as_u64()?,
@@ -759,6 +761,34 @@ fn chart_hover_second(
     crate::live_projection::sample_second(&snapshot?.selection, fraction)
 }
 
+fn is_process_disk(panel: &Panel) -> bool {
+    matches!(
+        panel.id.as_str(),
+        "live-app-disk" | crate::live_process_history::DISK_PANEL
+    )
+}
+
+fn is_process_history(panel: &Panel) -> bool {
+    if panel.id.starts_with("live-app-") {
+        return true;
+    }
+
+    panel
+        .id
+        .starts_with(crate::live_process_history::PANEL_PREFIX)
+}
+
+fn process_history_payload<'a>(panel: &Panel, snapshot: &'a Snapshot) -> Option<&'a Value> {
+    if panel
+        .id
+        .starts_with(crate::live_process_history::PANEL_PREFIX)
+    {
+        return snapshot.process_history.as_ref()?.payload();
+    }
+
+    snapshot.history.as_ref()
+}
+
 fn target_index(
     panel: &Panel,
     snapshot: &Snapshot,
@@ -777,8 +807,8 @@ fn target_index(
     if panel.kind == "timeline" {
         return inspection_index(panel, snapshot, Some(target.second));
     }
-    let points = if panel.id.starts_with("live-app-") {
-        snapshot.history.as_ref()?["points"].as_array()?
+    let points = if is_process_history(panel) {
+        process_history_payload(panel, snapshot)?["points"].as_array()?
     } else {
         snapshot.selection["trends"].as_array()?
     };
@@ -879,6 +909,7 @@ fn line_reading(panel: &Panel, value: Option<f32>, unit: &str) -> String {
         "live-storage-",
         "live-battery-",
         "live-app-disk",
+        "live-process-group-disk",
         "live-disk-apps",
     ]
     .iter()
@@ -954,8 +985,8 @@ fn inspection_index(panel: &Panel, snapshot: &Snapshot, second: Option<u64>) -> 
         return (offset < panel.lines.first()?.values.len()).then_some(offset);
     }
 
-    let points = if panel.id.starts_with("live-app-") {
-        snapshot.history.as_ref()?["points"].as_array()?
+    let points = if is_process_history(panel) {
+        process_history_payload(panel, snapshot)?["points"].as_array()?
     } else {
         snapshot.selection["trends"].as_array()?
     };
@@ -1019,6 +1050,7 @@ mod tests {
             cpu_history: None,
             resident_history: None,
             app_attribution_history: None,
+            process_history: None,
             rankings: None,
             read_ms: 0.0,
         }

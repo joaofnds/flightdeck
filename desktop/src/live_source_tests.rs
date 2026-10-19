@@ -5,6 +5,8 @@ mod cpu_history;
 
 #[path = "live_source_hover_tests.rs"]
 mod hover;
+#[path = "live_process_history_source_tests.rs"]
+mod process_history;
 #[path = "live_rankings_source_tests.rs"]
 mod rankings;
 
@@ -299,6 +301,8 @@ impl SealedRecording {
             cpu_offset: 0,
             load_resident_history: true,
             load_app_attribution_history: true,
+            load_process_history: true,
+            executable: None,
             app: None,
             apps_offset: 0,
             members_offset: 0,
@@ -340,6 +344,8 @@ fn the_default_app_survives_a_new_first_row_and_an_empty_page() {
         cpu_offset: 0,
         load_resident_history: true,
         load_app_attribution_history: true,
+        load_process_history: true,
+        executable: None,
         app: None,
         apps_offset: 0,
         members_offset: 0,
@@ -514,6 +520,8 @@ fn refuses_superseded_results_after_accepting_a_new_request() {
         cpu_offset: 0,
         load_resident_history: true,
         load_app_attribution_history: true,
+        load_process_history: true,
+        executable: None,
         app: None,
         apps_offset: 0,
         members_offset: 0,

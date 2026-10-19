@@ -8,6 +8,8 @@ use crate::live_source::{AppKey, Snapshot, Update, Worker};
 
 #[path = "live_app_disk_input_tests.rs"]
 mod disk;
+#[path = "live_process_history_input_tests.rs"]
+mod process_history;
 
 #[gpui::test]
 fn hovering_an_app_replaces_current_details_with_the_exact_historical_page(
@@ -187,7 +189,6 @@ fn leaving_history_restores_the_expanded_process_without_moving_the_graph(cx: &m
     harness.driver.expand_last_process();
     harness.driver.scroll_to_history();
     let accepted = harness.driver.chart_bounds();
-    assert!(harness.driver.expanded_json_is_visible());
 
     harness.driver.hover_previous_second();
     assert_eq!(harness.driver.chart_bounds(), accepted);
@@ -196,9 +197,10 @@ fn leaving_history_restores_the_expanded_process_without_moving_the_graph(cx: &m
     assert_eq!(harness.driver.chart_bounds(), accepted);
     harness.driver.leave_history();
 
-    assert!(harness.driver.expanded_json_is_visible());
     assert_eq!(harness.driver.chart_bounds(), accepted);
     assert!(harness.driver.text_is_visible("87.0 %"));
+    harness.driver.scroll_to_processes("expanded-json");
+    assert!(harness.driver.expanded_json_is_visible());
     harness.teardown();
 }
 
@@ -212,7 +214,7 @@ fn leaving_app_history_restores_the_real_end_of_the_recording_view(cx: &mut Test
     harness.driver.leave_and_scroll_to_end();
 
     assert!(harness.driver.text_is_visible("87.0 %"));
-    assert!(harness.driver.last_chart_is_visible());
+    assert!(harness.driver.last_process_is_visible());
     harness.teardown();
 }
 
@@ -273,6 +275,7 @@ impl AppHoverDriver {
         target: fn(&crate::live_dashboard::Row) -> bool,
         selector: &'static str,
     ) {
+        self.seed_scrollable_process_page();
         self.context
             .simulate_resize(gpui::size(gpui::px(640.0), gpui::px(900.0)));
         self.context.run_until_parked();
@@ -331,12 +334,58 @@ impl AppHoverDriver {
         self.context
             .simulate_resize(gpui::size(gpui::px(640.0), gpui::px(2400.0)));
         self.context.run_until_parked();
+        self.scroll_to_processes("process-0");
         let row = self.context.debug_bounds("process-0").unwrap();
         self.context.simulate_event(gpui::ScrollWheelEvent {
             position: row.center(),
             delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(-1000.0), gpui::px(0.0))),
             modifiers: Modifiers::none(),
             touch_phase: gpui::TouchPhase::Moved,
+        });
+        self.context.run_until_parked();
+    }
+
+    fn scroll_to_processes(&mut self, selector: &'static str) {
+        let position = self.view.read_with(&self.context, |dashboard, _| {
+            let viewport = dashboard.list.viewport_bounds();
+            gpui::point(viewport.left() + gpui::px(8.0), viewport.center().y)
+        });
+        self.context
+            .simulate_mouse_move(position, None, Modifiers::none());
+        // Virtual rows gain their measured heights as successive real wheel events reveal them.
+        for _attempt in 0..8 {
+            self.context.simulate_event(gpui::ScrollWheelEvent {
+                position,
+                delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.0), gpui::px(-10000.0))),
+                modifiers: Modifiers::none(),
+                touch_phase: gpui::TouchPhase::Moved,
+            });
+            self.context.run_until_parked();
+            if self.context.debug_bounds(selector).is_some() {
+                return;
+            }
+        }
+        panic!("Native wheel input did not reveal {selector}");
+    }
+
+    fn seed_scrollable_process_page(&mut self) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            let mut snapshot = AppEpoch::Accepted.snapshot(dashboard.generation);
+            let detail = snapshot.detail.as_mut().unwrap();
+            for pid in 100..150 {
+                detail["processes"].as_array_mut().unwrap().push(process(
+                    "Accepted worker",
+                    "61",
+                    pid,
+                ));
+            }
+            detail["app"]["members"] = json!(53);
+            detail["app"]["live_members"] = json!(53);
+            detail["page"]["total"] = json!(53);
+            snapshot.apps.as_mut().unwrap()["apps"][0] = detail["app"].clone();
+            dashboard.accept(snapshot);
+            assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
+            cx.notify();
         });
         self.context.run_until_parked();
     }
@@ -440,8 +489,8 @@ impl AppHoverDriver {
         self.context.debug_bounds(text).is_some()
     }
 
-    fn last_chart_is_visible(&mut self) -> bool {
-        self.context.debug_bounds("live-app-disk-plot").is_some()
+    fn last_process_is_visible(&mut self) -> bool {
+        self.context.debug_bounds("process-2").is_some()
     }
 
     fn chart_bounds(&mut self) -> gpui::Bounds<gpui::Pixels> {
@@ -489,6 +538,7 @@ impl AppEpoch {
             cpu_history: None,
             resident_history: None,
             app_attribution_history: None,
+            process_history: None,
             rankings: None,
             read_ms: 0.0,
         })

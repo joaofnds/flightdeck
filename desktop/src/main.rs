@@ -25,6 +25,7 @@ mod live_memory;
 mod live_notices;
 mod live_presentation;
 mod live_probe;
+mod live_process_history;
 mod live_projection;
 mod live_rankings;
 mod live_resident_history;
@@ -45,6 +46,9 @@ mod summary;
 
 #[cfg(test)]
 mod allocation_tests;
+#[cfg(test)]
+#[path = "live_process_history_tests.rs"]
+pub(crate) mod process_history_tests;
 #[cfg(test)]
 mod tests;
 

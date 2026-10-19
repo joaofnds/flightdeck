@@ -1,7 +1,7 @@
 use gpui::{Context, IntoElement, div, prelude::*, px, rgb};
 use serde_json::Value;
 
-use crate::charts::{MUTED, ORANGE};
+use crate::charts::{GRID, MUTED, ORANGE, PANEL, TEXT};
 use crate::dashboard::control;
 use crate::live_dashboard::LiveDashboard;
 use crate::live_projection::quantity;
@@ -52,9 +52,10 @@ fn local_parts(second: u64) -> Option<libc::tm> {
 
 impl LiveDashboard {
     pub fn overview_status(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let summary = self
+        let selection = self
             .reading_snapshot()
-            .map_or(&Value::Null, |snapshot| &snapshot.selection["summary"]);
+            .map_or(&Value::Null, |snapshot| &snapshot.selection);
+        let summary = crate::live_views::matching_summary(selection);
         let pressure = match summary["pressure"].as_u64() {
             Some(0) => "Normal",
             Some(1) => "Warning",
@@ -65,7 +66,7 @@ impl LiveDashboard {
             "Memory pressure: {pressure}    Swap: {}",
             quantity(summary, "swap_used_bytes", "GiB", 1_073_741_824.0)
         );
-        div()
+        let status = div()
             .flex()
             .items_center()
             .justify_between()
@@ -77,7 +78,16 @@ impl LiveDashboard {
                 control("Inspect processes →").on_click(cx.listener(|this, _, _, cx| {
                     this.navigate("cpu", cx);
                 })),
-            )
+            );
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .child(status)
+            .child(overview_context(
+                summary,
+                self.viewport_size.width < px(640.0),
+            ))
     }
 
     pub fn missing_reading(&self) -> impl IntoElement {
@@ -91,6 +101,121 @@ impl LiveDashboard {
                 .child("No recorded observation at this second")
         }))
     }
+}
+
+struct ContextCard {
+    key: &'static str,
+    title: &'static str,
+}
+
+struct ContextReading {
+    key: &'static str,
+    label: &'static str,
+}
+
+fn overview_context(summary: &Value, narrow: bool) -> gpui::Div {
+    let thermal = overview_context_card(&ContextCard {
+        key: "thermal",
+        title: "Thermal state",
+    })
+    .child(overview_context_reading(
+        &ContextReading {
+            key: "thermal",
+            label: "macOS verdict",
+        },
+        "Uncaptured".into(),
+    ));
+    let cooling = overview_context_card(&ContextCard {
+        key: "cooling-battery",
+        title: "Cooling and battery",
+    })
+    .child(overview_context_reading(
+        &ContextReading {
+            key: "soc",
+            label: "SoC temperature",
+        },
+        quantity(summary, "soc_celsius", "°C", 1.0),
+    ))
+    .child(overview_context_reading(
+        &ContextReading {
+            key: "fan0",
+            label: "Fan channel 0",
+        },
+        overview_context_fan(summary, 0),
+    ))
+    .child(overview_context_reading(
+        &ContextReading {
+            key: "fan1",
+            label: "Fan channel 1",
+        },
+        overview_context_fan(summary, 1),
+    ))
+    .child(overview_context_reading(
+        &ContextReading {
+            key: "charge",
+            label: "Battery charge",
+        },
+        quantity(&summary["battery"], "charge_percent", "%", 1.0),
+    ));
+    div()
+        .flex()
+        .gap(px(8.0))
+        .when(narrow, gpui::Styled::flex_col)
+        .child(thermal)
+        .child(cooling)
+}
+
+fn overview_context_card(specification: &ContextCard) -> gpui::Div {
+    let key = specification.key;
+    div()
+        .debug_selector(move || format!("overview-context:{key}"))
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .rounded(px(12.0))
+        .border_1()
+        .border_color(rgb(GRID))
+        .bg(rgb(PANEL))
+        .p(px(12.0))
+        .text_color(rgb(TEXT))
+        .child(
+            div()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .child(specification.title),
+        )
+}
+
+fn overview_context_reading(specification: &ContextReading, reading: String) -> gpui::Div {
+    let key = specification.key;
+    let selector = format!("overview-context:{key}:{reading}");
+    div()
+        .debug_selector(move || selector.clone())
+        .flex()
+        .flex_wrap()
+        .justify_between()
+        .gap(px(8.0))
+        .text_size(px(12.0))
+        .child(div().text_color(rgb(MUTED)).child(specification.label))
+        .child(reading)
+}
+
+fn overview_context_fan(summary: &Value, channel: usize) -> String {
+    assert!(channel < 2);
+    let Some(value) = summary["fan_rpm"].get(channel).and_then(Value::as_f64) else {
+        return "Unavailable".into();
+    };
+
+    if !value.is_finite() {
+        return "Unavailable".into();
+    }
+
+    if value < 0.0 {
+        return "Unavailable".into();
+    }
+
+    format!("{value:.0} rpm")
 }
 
 #[cfg(test)]

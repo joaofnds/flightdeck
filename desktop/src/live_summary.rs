@@ -212,7 +212,7 @@ fn card(summary: &Value, definition: &Specification) -> Card {
     }
 }
 
-fn matching_summary(selection: &Value) -> &Value {
+pub(crate) fn matching_summary(selection: &Value) -> &Value {
     let selected = &selection["selected"];
     let summary = &selection["summary"];
     for field in ["run", "boot", "publication"] {

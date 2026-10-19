@@ -98,6 +98,8 @@ fn probe_request(route: &str) -> Request {
         cpu_offset: 0,
         load_resident_history: true,
         load_app_attribution_history: true,
+        load_process_history: true,
+        executable: None,
         app: None,
         apps_offset: 0,
         members_offset: 0,

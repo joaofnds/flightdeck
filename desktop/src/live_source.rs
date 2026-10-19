@@ -29,6 +29,8 @@ pub struct Request {
     pub cpu_offset: u32,
     pub load_resident_history: bool,
     pub load_app_attribution_history: bool,
+    pub load_process_history: bool,
+    pub executable: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -79,6 +81,7 @@ pub struct Snapshot {
     pub resident_history: Option<Arc<crate::live_resident_history::ResidentHistory>>,
     pub app_attribution_history:
         Option<Arc<crate::live_app_attribution_history::AppAttributionHistory>>,
+    pub process_history: Option<Arc<crate::live_process_history::ProcessHistory>>,
     pub rankings: Option<Arc<crate::live_rankings::Rankings>>,
     pub read_ms: f64,
 }
@@ -389,6 +392,7 @@ fn reader_snapshot(
         cpu_history: None,
         resident_history: None,
         app_attribution_history: None,
+        process_history: None,
         rankings: None,
         read_ms: 0.0,
     });
@@ -421,6 +425,7 @@ fn reader_computer(reader: &mut Reader, command: &Command) -> Option<Box<Snapsho
         cpu_history: None,
         resident_history: None,
         app_attribution_history: None,
+        process_history: None,
         rankings: None,
         read_ms: 0.0,
     }))
@@ -631,9 +636,47 @@ fn reader_apps(
         snapshot.detail = Some(detail);
         snapshot.history = Some(history);
     }
+    if request.load_process_history {
+        reader_process_history(session, request, snapshot);
+    }
     snapshot.apps = Some(apps);
 
     Ok(())
+}
+
+fn reader_process_history(session: &LiveSession, request: &Request, snapshot: &mut Snapshot) {
+    use crate::live_process_history::ProcessHistory;
+    let Some(filter) = request.executable.as_deref() else {
+        return;
+    };
+
+    let read = || -> Result<ProcessHistory, String> {
+        let name = crate::live_process_history::name_bytes(filter)?;
+        let Some(name) = name else {
+            return Err(ProcessHistory::filter_reason(Some(filter))
+                .unwrap_or("Named process history unavailable")
+                .into());
+        };
+
+        let key = request.app.as_ref().ok_or("Selected App unavailable")?;
+        let kind = app_key_kind(&key.kind)?;
+        let bytes = app_key_bytes(&key.bytes_hex)?;
+        let payload = session
+            .app_process_history(kind, &bytes, &name)
+            .map_err(|error| error.to_string())?;
+        Ok(ProcessHistory::prepare(
+            payload,
+            request,
+            &snapshot.selection,
+        ))
+    };
+    let history = match read() {
+        Ok(history) => history,
+        Err(error) => ProcessHistory::Unavailable(crate::live_notices::recording_context::bounded(
+            &error, 512,
+        )),
+    };
+    snapshot.process_history = Some(Arc::new(history));
 }
 
 fn reader_apps_remember(request: &mut Request, apps: &Value) -> Result<(), String> {
@@ -789,7 +832,7 @@ fn app_key_kind(kind: &str) -> Result<KeyKind, String> {
     }
 }
 
-fn app_key_bytes(text: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn app_key_bytes(text: &str) -> Result<Vec<u8>, String> {
     if text.len() > APP_KEY_BYTES_MAX * 2 {
         return Err("Live App key exceeds the byte bound".to_owned());
     }
@@ -812,6 +855,9 @@ fn app_key_bytes(text: &str) -> Result<Vec<u8>, String> {
 }
 
 fn request_validate(request: &Request) -> Result<(), String> {
+    if let Some(filter) = &request.executable {
+        drop(crate::live_process_history::name_bytes(filter)?);
+    }
     if !request.cpu_offset.is_multiple_of(32) {
         return Err("Logical CPU history offset must be a page of 32".into());
     }

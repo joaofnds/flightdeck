@@ -210,6 +210,7 @@ fn resident_decode_failure_preserves_machine_panels_and_selected_app_rankings() 
         cpu_history: None,
         resident_history: None,
         app_attribution_history: None,
+        process_history: None,
         rankings: Some(std::sync::Arc::clone(&rankings)),
         read_ms: 0.0,
     });
@@ -225,6 +226,8 @@ fn resident_decode_failure_preserves_machine_panels_and_selected_app_rankings() 
         cpu_offset: 0,
         load_resident_history: true,
         load_app_attribution_history: true,
+        load_process_history: true,
+        executable: None,
     };
 
     let presentation = crate::live_acceptance::Presentation::prepare(&request, snapshot).unwrap();

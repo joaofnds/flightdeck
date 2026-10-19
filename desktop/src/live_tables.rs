@@ -168,20 +168,21 @@ impl LiveDashboard {
             .child(self.app_page_controls(apps, false, cx))
             .child(self.app_page_controls(detail, true, cx))
             .child(
-                control("All process groups").on_click(cx.listener(|this, _, _, cx| {
-                    this.executable = None;
-                    this.rebuild();
-                    cx.notify();
-                })),
+                control("All process groups")
+                    .debug_selector(|| "all-process-groups".into())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.select_executable(None);
+                        cx.notify();
+                    })),
             )
-            .children(self.executable.as_ref().map(|key| {
+            .children(self.request.executable.as_ref().map(|key| {
                 div().text_color(rgb(MUTED)).child(
                     if self
                         .reading_executables()
                         .iter()
                         .any(|group| group.key == *key)
                     {
-                        "Executable filter active · charts show App totals"
+                        "Executable filter active · selected group history below"
                     } else {
                         "Selected executable is not in this process page"
                     },

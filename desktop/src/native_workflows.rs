@@ -497,7 +497,7 @@ impl LiveDashboard {
             let old = std::mem::replace(&mut self.worker, candidate.worker);
             self.generation = candidate.generation;
             self.expanded = None;
-            self.executable = None;
+            self.request.executable = None;
             self.executables.clear();
             self.hidden.clear();
             self.chart_hover = None;
@@ -594,6 +594,8 @@ fn fresh_request(route: &str) -> Request {
         cpu_offset: 0,
         load_resident_history: true,
         load_app_attribution_history: true,
+        load_process_history: true,
+        executable: None,
     }
 }
 

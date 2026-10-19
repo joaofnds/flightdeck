@@ -32,6 +32,9 @@ impl Row {
             Self::CPUHistory => "cpu-history".into(),
             Self::Charts(panels) => format!("charts-{}", panels[0].id),
             Self::Heading(title) => {
+                if title.starts_with("Process group history") {
+                    return "process-group-history-heading".into();
+                }
                 match title.as_str() {
                     "Top apps at the selected time" | "More resource context" | "MacBook" => {
                         return format!("overview-heading-{title}");

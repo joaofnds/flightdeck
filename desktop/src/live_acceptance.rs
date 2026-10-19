@@ -19,6 +19,11 @@ impl Presentation {
             &snapshot.selection,
             snapshot.history.as_ref(),
         )?;
+        if request.route == "apps" {
+            let mut group_panels = prepare_process_panels(request, &mut snapshot);
+            group_panels.append(&mut panels);
+            panels = group_panels;
+        }
         if request.route == "memory" {
             let payload = snapshot.history.take();
             if snapshot.resident_history.is_none() {
@@ -73,6 +78,36 @@ impl Presentation {
         }
 
         false
+    }
+}
+
+fn prepare_process_panels(request: &Request, snapshot: &mut Snapshot) -> Vec<Rc<Panel>> {
+    use crate::live_process_history::ProcessHistory;
+    if request.executable.is_none() {
+        snapshot.process_history = None;
+        return Vec::new();
+    }
+
+    let Some(history) = snapshot.process_history.as_deref() else {
+        return Vec::new();
+    };
+
+    if let ProcessHistory::Ready { .. } = history {
+        if !history.matches(request) {
+            snapshot.process_history = Some(std::sync::Arc::new(ProcessHistory::Unavailable(
+                "Process history belongs to another selected group".into(),
+            )));
+            return Vec::new();
+        }
+    }
+    match history.panels(&snapshot.selection) {
+        Ok(panels) => panels,
+        Err(reason) => {
+            snapshot.process_history = Some(std::sync::Arc::new(ProcessHistory::Unavailable(
+                crate::live_notices::recording_context::bounded(&reason, 512),
+            )));
+            Vec::new()
+        }
     }
 }
 

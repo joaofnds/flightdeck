@@ -184,21 +184,29 @@ impl LiveDashboard {
                 .child("Executable unavailable")
                 .into_any_element();
         };
-        let selected = self.executable.as_ref() == Some(&group.key);
+        let selected = self.request.executable.as_ref() == Some(&group.key);
         let key = group.key.clone();
         let expanded = self
             .reading_expanded()
             .is_some_and(|(kind, row)| kind == "executables" && *row == index);
         let metrics = group.metrics();
         let disk_selector = format!("executable-disk:{}:{}", group.key, metrics[5]);
+        let selection_help =
+            if crate::live_process_history::ProcessHistory::filter_reason(Some(&group.key))
+                .is_some()
+            {
+                "Filter instances; named history unavailable"
+            } else {
+                "Select captured group history and matching instances"
+            };
 
         let mut row = div()
             .id(SharedString::from(format!("executable-{index}")))
             .accessibility_id(format!("flightdeck.executable.{}", group.key))
             .role(gpui::Role::Button)
             .aria_label(format!(
-                "{}; {} instances; loaded process page subtotal",
-                group.name, group.instances
+                "{}; {} instances; loaded process page subtotal; {selection_help}",
+                group.name, group.instances,
             ))
             .aria_selected(selected)
             .aria_expanded(expanded)
@@ -216,7 +224,7 @@ impl LiveDashboard {
             .bg(rgb(if selected { 0x20_30_41 } else { 0x14_19_24 }))
             .hover(|style| style.bg(rgb(0x20_29_36)))
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.executable = if selected { None } else { Some(key.clone()) };
+                this.select_executable(if selected { None } else { Some(key.clone()) });
                 this.expanded = if expanded {
                     None
                 } else {
@@ -235,6 +243,34 @@ impl LiveDashboard {
             row = row.child(exact_json(&group.json()));
         }
         row.into_any_element()
+    }
+}
+
+impl LiveDashboard {
+    pub(crate) fn select_executable(&mut self, executable: Option<String>) {
+        self.request.executable = executable;
+        if let Some(preview) = &self.preview {
+            self.request.second = Some(preview.target.second);
+            self.request.identity = preview.target.identity.clone();
+            self.submit();
+            return;
+        }
+
+        if let Some(snapshot) = &mut self.snapshot {
+            snapshot.process_history = None;
+        }
+        self.panels.retain(|panel| {
+            !panel
+                .id
+                .starts_with(crate::live_process_history::PANEL_PREFIX)
+        });
+        self.chart_inspector = None;
+        self.error = None;
+        match self.worker.request(self.request.clone()) {
+            Ok(generation) => self.generation = generation,
+            Err(error) => self.error = Some(error),
+        }
+        self.rebuild();
     }
 }
 

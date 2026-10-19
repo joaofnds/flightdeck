@@ -185,7 +185,7 @@ impl LiveDashboard {
         self.request.app = Some(key.clone());
         self.request.apps_offset = 0;
         self.request.members_offset = 0;
-        self.executable = None;
+        self.request.executable = None;
         self.app_picker_open = false;
         self.navigate("apps", cx);
     }

@@ -5,6 +5,113 @@ use serde_json::json;
 use super::{InputDriver, InputHarness, accepted_snapshot};
 
 #[gpui::test]
+fn overview_disk_ranking_activates_the_exact_historical_app(cx: &mut TestAppContext) {
+    // Use the installed fourth ranking and its historical App link after real plot input.
+    let mut harness = InputHarness::setup_route(cx, "overview");
+    harness.driver.seed_overview_context();
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("ranking:Disk I/O:Current:80.0 B/s")
+    );
+
+    let position = harness
+        .driver
+        .second_position("live-cpu-plot", 898.5 / 900.0);
+    harness
+        .driver
+        .context
+        .simulate_click(position, gpui::Modifiers::none());
+    harness.driver.complete_ranked_selection();
+    harness
+        .driver
+        .leave_plot("live-cpu-plot", super::PlotExit::Sidebar);
+    harness
+        .driver
+        .click_ranked_app("ranking:Disk I/O:Historical:20.0 B/s");
+
+    harness.driver.assert_ranked_app_request(999, 1, "42");
+    harness.teardown();
+}
+
+macro_rules! overview_context_width_case {
+    ($name:ident, $width:literal, $assertion:ident) => {
+        #[gpui::test]
+        fn $name(cx: &mut TestAppContext) {
+            // Compare installed context card bounds at one independently reported viewport width.
+            let mut harness = InputHarness::setup_route(cx, "overview");
+            harness.driver.seed_overview_context();
+            harness.driver.resize_overview_context($width);
+
+            harness.driver.$assertion();
+
+            harness.teardown();
+        }
+    };
+}
+
+overview_context_width_case!(
+    overview_context_is_side_by_side_at_1320,
+    1320.0,
+    assert_overview_context_columns
+);
+overview_context_width_case!(
+    overview_context_is_side_by_side_at_640,
+    640.0,
+    assert_overview_context_columns
+);
+overview_context_width_case!(
+    overview_context_is_stacked_at_639,
+    639.0,
+    assert_overview_context_stacked
+);
+
+#[gpui::test]
+fn overview_context_follows_exact_hover_and_gap_while_live_acceptance_advances(
+    cx: &mut TestAppContext,
+) {
+    // Keep historical identity during a live acceptance, then leave a true gap to restore Live.
+    let mut harness = InputHarness::setup_route(cx, "overview");
+    harness.driver.seed_overview_context();
+
+    harness.driver.hover_previous_second_on("live-cpu-plot");
+    harness.driver.assert_overview_context([
+        "overview-context:soc:40.0 °C",
+        "overview-context:fan0:1000 rpm",
+        "overview-context:fan1:1100 rpm",
+        "overview-context:charge:80.0 %",
+    ]);
+    harness.driver.advance_overview_context();
+    harness.driver.assert_overview_context([
+        "overview-context:soc:40.0 °C",
+        "overview-context:fan0:1000 rpm",
+        "overview-context:fan1:1100 rpm",
+        "overview-context:charge:80.0 %",
+    ]);
+    let gap = harness
+        .driver
+        .second_position("live-cpu-plot", 896.5 / 900.0);
+    harness.driver.hover_position(gap);
+    harness.driver.assert_overview_context([
+        "overview-context:soc:Unavailable",
+        "overview-context:fan0:Unavailable",
+        "overview-context:fan1:Unavailable",
+        "overview-context:charge:Unavailable",
+    ]);
+    harness
+        .driver
+        .leave_plot("live-cpu-plot", super::PlotExit::Sidebar);
+
+    harness.driver.assert_overview_context([
+        "overview-context:soc:70.0 °C",
+        "overview-context:fan0:3000 rpm",
+        "overview-context:fan1:Unavailable",
+        "overview-context:charge:45.0 %",
+    ]);
+    harness.teardown();
+}
+
+#[gpui::test]
 fn overview_shows_six_primary_charts_before_rankings_and_keeps_resource_context_below(
     cx: &mut TestAppContext,
 ) {
@@ -227,6 +334,88 @@ fn narrow_headers_keep_selection_controls_inside_the_content(cx: &mut TestAppCon
 }
 
 impl InputDriver {
+    fn seed_overview_context(&mut self) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            dashboard.request.second = None;
+            dashboard.request.identity = None;
+            let mut snapshot = accepted_snapshot(dashboard.generation);
+            let points = snapshot.selection["trends"].as_array_mut().unwrap();
+            points[0]["soc_celsius"] = json!(40);
+            points[0]["fan_rpm"] = json!([1000, 1100]);
+            points[0]["battery"] = json!({"charge_percent":80});
+            points[1]["soc_celsius"] = json!(60);
+            points[1]["fan_rpm"] = json!([2000, 2100]);
+            points[1]["battery"] = json!({"charge_percent":50});
+            snapshot.selection["summary"] = snapshot.selection["trends"][1].clone();
+            snapshot.rankings = Some(overview_context_rankings(&snapshot));
+            dashboard.accept(snapshot);
+            assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
+            cx.notify();
+        });
+        self.resize_overview_context(1320.0);
+    }
+
+    fn resize_overview_context(&mut self, width: f32) {
+        self.context
+            .simulate_resize(gpui::size(px(width), px(7000.0)));
+        self.context.run_until_parked();
+    }
+
+    fn assert_overview_context_columns(&mut self) {
+        let thermal = self.chart_bounds("overview-context:thermal");
+        let cooling = self.chart_bounds("overview-context:cooling-battery");
+        assert_eq!(thermal.top(), cooling.top());
+        assert_eq!(cooling.left() - thermal.right(), px(8.0));
+        self.assert_overview_context_selected();
+    }
+
+    fn assert_overview_context_stacked(&mut self) {
+        let thermal = self.chart_bounds("overview-context:thermal");
+        let cooling = self.chart_bounds("overview-context:cooling-battery");
+        assert_eq!(thermal.left(), cooling.left());
+        assert_eq!(cooling.top() - thermal.bottom(), px(8.0));
+        self.assert_overview_context_selected();
+    }
+
+    fn assert_overview_context_selected(&mut self) {
+        assert!(self.reading_is_visible("overview-context:thermal:Uncaptured"));
+        self.assert_overview_context([
+            "overview-context:soc:60.0 °C",
+            "overview-context:fan0:2000 rpm",
+            "overview-context:fan1:2100 rpm",
+            "overview-context:charge:50.0 %",
+        ]);
+    }
+
+    fn assert_overview_context(&mut self, selectors: [&'static str; 4]) {
+        for selector in selectors {
+            assert!(self.context.debug_bounds(selector).is_some(), "{selector}");
+        }
+    }
+
+    fn advance_overview_context(&mut self) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            let mut snapshot = accepted_snapshot(dashboard.generation);
+            snapshot.selection["second"] = json!(1001);
+            snapshot.selection["selected"]["publication"] = json!(3);
+            let mut point = snapshot.selection["trends"][1].clone();
+            point["publication"] = json!(3);
+            point["wall_ns"] = json!(1_001_000_000_000_u64);
+            point["soc_celsius"] = json!(70);
+            point["fan_rpm"] = json!([3000, null]);
+            point["battery"] = json!({"charge_percent":45});
+            snapshot.selection["summary"] = point.clone();
+            snapshot.selection["trends"]
+                .as_array_mut()
+                .unwrap()
+                .push(point);
+            dashboard.accept(snapshot);
+            assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
+            cx.notify();
+        });
+        self.context.run_until_parked();
+    }
+
     fn assert_overview_primary_grid(&mut self) {
         let first = [
             self.chart_bounds("live-cpu-plot"),
@@ -352,6 +541,24 @@ impl InputDriver {
         assert!(bounds.right() <= px(576.0), "{selector}: {bounds:?}");
         assert!(bounds.size.width > px(0.0), "{selector}: {bounds:?}");
     }
+}
+
+fn overview_context_rankings(
+    snapshot: &crate::live_source::Snapshot,
+) -> std::sync::Arc<crate::live_rankings::Rankings> {
+    let measure = json!({"known":"80","measured_members":1,
+        "unavailable_members":0,"overflowed":false});
+    let app = json!({"display_name":"Current","key":{"kind":"bundle","bytes_hex":"41"},
+        "cpu_ns":measure,"energy_nj":measure,"resident_bytes":measure,
+        "disk_read_bytes":measure,"disk_written_bytes":measure,"disk_io_bytes":measure,
+        "cpu_percent_one_core":80,"energy_watts":0.5,"disk_io_bps":80.0});
+    let page = json!({"selected":snapshot.selection["selected"],"apps":[app],
+        "app_count":1,"membership_complete":true,"ungrouped_members":0,
+        "page":{"offset":0,"limit":512,"total":1,"next_offset":null}});
+    std::sync::Arc::new(crate::live_rankings::read(
+        &snapshot.selection["selected"],
+        |_| Ok(page.clone()),
+    ))
 }
 
 fn assert_chart_columns(bounds: &[Bounds<Pixels>; 3], columns: usize) {

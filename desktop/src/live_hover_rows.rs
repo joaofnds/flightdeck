@@ -171,7 +171,7 @@ impl LiveDashboard {
 
     fn reading_rows_overview(&self, rows: &mut Vec<Row>) {
         rows.push(Row::Heading("Top apps at the selected time".into()));
-        for metrics in [0, 1, 2].chunks(self.reading_chart_columns()) {
+        for metrics in [0, 1, 2, 3].chunks(self.reading_chart_columns().min(2)) {
             rows.push(Row::Rankings(metrics.to_vec()));
         }
         rows.push(Row::Heading("More resource context".into()));
@@ -217,7 +217,6 @@ impl LiveDashboard {
                 rows.push(Row::App(index));
             }
         }
-        rows.push(Row::AppSummary);
         let detail = crate::live_app_views::selected_detail(
             snapshot.detail.as_ref(),
             self.request.app.as_ref(),
@@ -231,11 +230,24 @@ impl LiveDashboard {
         for index in 0..self.reading_executables().len().min(512) {
             rows.push(Row::Executable(index));
         }
+        self.reading_rows_process_history(&mut rows, snapshot);
+        rows.push(Row::Heading("Selected App totals · last 15 minutes".into()));
+        rows.push(Row::AppSummary);
+        let totals: Vec<_> = self
+            .panels
+            .iter()
+            .take(16)
+            .filter(|panel| panel.id.starts_with("live-app-"))
+            .cloned()
+            .collect();
+        for panels in totals.chunks(self.reading_chart_columns()) {
+            rows.push(Row::Charts(panels.to_vec()));
+        }
         rows.push(Row::Heading("Process instances · selected app".into()));
         rows.push(Row::AppColumns("processes"));
         for index in 0..array_len(detail, "processes") {
             if let Some(detail) = detail {
-                if let Some(key) = &self.executable {
+                if let Some(key) = &self.request.executable {
                     if !crate::live_executables::matches(&detail["processes"][index], key) {
                         continue;
                     }
@@ -243,13 +255,47 @@ impl LiveDashboard {
             }
             rows.push(Row::Process(index));
         }
-        rows.push(Row::Heading("Selected app · last 15 minutes".into()));
-        for panels in self.panels.chunks(self.reading_chart_columns()) {
-            rows.push(Row::Charts(panels.to_vec()));
-        }
         assert!(rows.len() <= 2048);
 
         rows
+    }
+
+    fn reading_rows_process_history(
+        &self,
+        rows: &mut Vec<Row>,
+        snapshot: &crate::live_source::Snapshot,
+    ) {
+        use crate::live_process_history::{PANEL_PREFIX, ProcessHistory};
+        let Some(filter) = self.request.executable.as_deref() else {
+            rows.push(Row::Heading(
+                "Process group history · Select an executable group to inspect captured history"
+                    .into(),
+            ));
+            return;
+        };
+
+        let status = match ProcessHistory::filter_reason(Some(filter)) {
+            Some(reason) => reason.to_owned(),
+            None => match snapshot.process_history.as_deref() {
+                Some(ProcessHistory::Ready { payload, .. }) => format!(
+                    "{} · last 15 minutes",
+                    crate::live_views::text(&payload["executable_name"]["display"])
+                ),
+                Some(ProcessHistory::Unavailable(reason)) => format!("Unavailable: {reason}"),
+                None => "Loading captured history".into(),
+            },
+        };
+        rows.push(Row::Heading(format!("Process group history · {status}")));
+        let panels: Vec<_> = self
+            .panels
+            .iter()
+            .take(16)
+            .filter(|panel| panel.id.starts_with(PANEL_PREFIX))
+            .cloned()
+            .collect();
+        for panels in panels.chunks(self.reading_chart_columns()) {
+            rows.push(Row::Charts(panels.to_vec()));
+        }
     }
 }
 

@@ -228,7 +228,7 @@ impl LiveDashboard {
             .hover(|style| style.bg(rgb(0x20_29_36)))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.request.app = Some(key.clone());
-                this.executable = None;
+                this.request.executable = None;
                 this.request.members_offset = 0;
                 this.app_picker_open = false;
                 this.expanded = None;

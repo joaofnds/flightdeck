@@ -151,6 +151,9 @@ struct Reading {
     divisor: f32,
     negative: bool,
     dashed: bool,
+    stack: Option<bool>,
+    fill: Option<f32>,
+    unit: Option<&'static str>,
     channel: Option<usize>,
     resource: Option<&'static str>,
 }
@@ -386,16 +389,17 @@ fn panel(
             name: reading.name.to_owned(),
             color: reading.color.to_owned(),
             values,
-            stack: None,
+            stack: reading.stack,
             negative: Some(reading.negative),
             dashed: Some(reading.dashed),
             axis: None,
-            unit: Some(specification.unit.to_owned()),
-            fill: if reading.key == "swap_total_bytes" {
-                Some(0.0)
-            } else {
-                None
-            },
+            unit: Some(
+                reading
+                    .unit
+                    .map_or(specification.unit, |unit| unit)
+                    .to_owned(),
+            ),
+            fill: reading.fill,
         });
     }
     let maximum = if specification.id == "live-gpu-activity" {
@@ -458,6 +462,9 @@ fn reading(key: &'static str, name: &'static str, color: &'static str, divisor: 
         divisor,
         negative: false,
         dashed: false,
+        stack: None,
+        fill: None,
+        unit: None,
         channel: None,
         resource: None,
     }
@@ -476,16 +483,25 @@ fn cpu() -> Specification {
 }
 
 fn memory() -> Specification {
-    specification(
+    let mut installed = reading("memory_total_bytes", "Installed", "#d1d1de", GIBIBYTE);
+    installed.dashed = true;
+    installed.stack = Some(false);
+    installed.fill = Some(0.0);
+    let mut specification = specification(
         "live-memory",
-        "Recorded memory categories",
+        "Memory composition",
         "GiB",
         vec![
             reading("memory_active_bytes", "Active", "#5794f2", GIBIBYTE),
             reading("memory_wired_bytes", "Wired", "#ff9830", GIBIBYTE),
             reading("memory_compressed_bytes", "Compressed", "#b877d9", GIBIBYTE),
+            installed,
         ],
-    )
+    );
+    specification.stack = true;
+    specification.fill = 1.0;
+
+    specification
 }
 
 fn gpu_power() -> Specification {
@@ -653,8 +669,6 @@ fn pressure_state(value: Option<f32>) -> Option<f32> {
 fn overview() -> Vec<Specification> {
     let mut memory = memory();
     memory.title = "Memory";
-    memory.stack = true;
-    memory.fill = 1.0;
     let mut network = network_throughput();
     network.title = "Network throughput";
     network.lines[0].name = "Receive";
@@ -709,6 +723,7 @@ fn memory_pressure() -> Specification {
 fn memory_swap() -> Specification {
     let mut allocated = reading("swap_total_bytes", "Allocated", "#d1d1de", GIBIBYTE);
     allocated.dashed = true;
+    allocated.fill = Some(0.0);
 
     specification(
         "live-swap",
@@ -722,6 +737,10 @@ fn memory_swap() -> Specification {
 }
 
 fn memory_paging() -> Specification {
+    let mut pageins = reading("memory_pageins_per_second", "Page-ins", "#5794f2", 1.0);
+    pageins.unit = Some("pages/s");
+    let mut pageouts = reading("memory_pageouts_per_second", "Page-outs", "#73bf69", 1.0);
+    pageouts.unit = Some("pages/s");
     let mut compressions = reading(
         "memory_compressions_per_second",
         "Compressed",
@@ -729,6 +748,7 @@ fn memory_paging() -> Specification {
         1.0,
     );
     compressions.dashed = true;
+    compressions.unit = Some("pages/s");
     let mut decompressions = reading(
         "memory_decompressions_per_second",
         "Decompressed",
@@ -736,17 +756,19 @@ fn memory_paging() -> Specification {
         1.0,
     );
     decompressions.dashed = true;
+    decompressions.unit = Some("pages/s");
 
-    specification(
+    let mut specification = specification(
         "live-paging",
-        "Page-ins and compression",
+        "Paging and compression",
         "/s",
-        vec![
-            reading("memory_pageins_per_second", "Page-ins", "#5794f2", 1.0),
-            compressions,
-            decompressions,
-        ],
-    )
+        vec![pageins, pageouts, compressions, decompressions],
+    );
+    specification.help = "Page-ins, page-outs, compression and decompression count pages \
+        per second. Pages are not converted to bytes. \
+        Unavailable counter intervals remain gaps.";
+
+    specification
 }
 
 fn memory_swap_flow() -> Specification {

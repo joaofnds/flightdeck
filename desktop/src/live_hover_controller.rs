@@ -215,7 +215,7 @@ impl LiveDashboard {
     }
 }
 
-fn preview_accept(preview: &mut Preview, snapshot: Box<Snapshot>) -> Result<(), String> {
+fn preview_accept(preview: &mut Preview, mut snapshot: Box<Snapshot>) -> Result<(), String> {
     if snapshot.selection["second"].as_u64() != Some(preview.target.second) {
         return Err("Hover response has a different timestamp".into());
     }
@@ -229,6 +229,10 @@ fn preview_accept(preview: &mut Preview, snapshot: Box<Snapshot>) -> Result<(), 
     }
 
     crate::live_acceptance::normalize_offsets(&mut preview.request, &snapshot)?;
+    // Exact details omit context; the committed group remains the inspection source.
+    snapshot
+        .process_history
+        .clone_from(&preview.reading.process_history);
     let executables = crate::live_executables::groups(snapshot.detail.as_ref())?;
     preview.executables = executables;
     preview.reading = snapshot;

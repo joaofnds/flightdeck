@@ -14,6 +14,7 @@ mod cpu_top_view;
 mod recording_context_view;
 #[path = "live_summary.rs"]
 mod summary;
+pub(crate) use summary::matching_summary;
 
 impl LiveDashboard {
     pub fn navigation(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -312,6 +313,7 @@ impl LiveDashboard {
                 )
                 .into_any_element(),
             Row::Heading(title) => div()
+                .debug_selector(|| title.clone())
                 .text_size(px(17.0))
                 .child(title.clone())
                 .into_any_element(),
