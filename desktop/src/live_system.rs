@@ -1,6 +1,7 @@
 //! Readings the collector does not record: load average, open files, thermal pressure, the
-//! GPU's unified memory and each App's GPU time. The app samples them once a second while it runs and keeps the
-//! last 16 minutes, so a second before the app started, or one it missed, has no reading.
+//! GPU's unified memory and each App's GPU time. The app samples them once a second while it
+//! runs and keeps the last 16 minutes, so a second before the app started, or one it missed,
+//! has no reading.
 
 use std::collections::VecDeque;
 use std::ffi::{CStr, c_char, c_int};

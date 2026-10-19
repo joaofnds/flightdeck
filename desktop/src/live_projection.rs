@@ -479,21 +479,7 @@ fn gpu_apps_panel(
     }
     let mut lines = Vec::with_capacity(names.len() + 1);
     for (channel, name) in names.into_iter().enumerate() {
-        let mut values = Vec::with_capacity(points.len());
-        for point in points {
-            values.push(number(&point["gpu_app_percent"][channel])?);
-        }
-        lines.push(Line {
-            name: name.to_owned(),
-            color: APP_COLORS[channel].to_owned(),
-            values,
-            stack: None,
-            negative: Some(false),
-            dashed: Some(false),
-            axis: None,
-            unit: Some("%".into()),
-            fill: None,
-        });
+        lines.push(gpu_apps_panel_line(name, channel, points)?);
     }
     let mut busy = Vec::with_capacity(points.len());
     for point in points {
@@ -531,6 +517,26 @@ fn gpu_apps_panel(
         segments: Some(coordinates.segments.clone()),
         selected_index: coordinates.selected_index,
     }))
+}
+
+/// The stacked line of one App's share of GPU time, at `channel` of each point's shares.
+fn gpu_apps_panel_line(name: &str, channel: usize, points: &[Value]) -> Result<Line, String> {
+    let mut values = Vec::with_capacity(points.len());
+    for point in points {
+        values.push(number(&point["gpu_app_percent"][channel])?);
+    }
+
+    Ok(Line {
+        name: name.to_owned(),
+        color: APP_COLORS[channel].to_owned(),
+        values,
+        stack: None,
+        negative: Some(false),
+        dashed: Some(false),
+        axis: None,
+        unit: Some("%".into()),
+        fill: None,
+    })
 }
 
 fn panel_reading_value(reading: &Reading, point: &Value) -> Result<Option<f32>, String> {
