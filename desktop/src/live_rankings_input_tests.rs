@@ -1274,7 +1274,7 @@ fn resident_history_same_basename_apps_have_independent_legend_toggles(cx: &mut 
 
 #[gpui::test]
 fn resident_legend_switches_toggle_independently_from_the_keyboard(cx: &mut TestAppContext) {
-    // Activate two installed switches with Space/Enter, then restore only the first series.
+    // Release Space/Enter on two switches, then restore only the first series.
     let mut harness = InputHarness::setup_route(cx, "memory");
     harness.driver.seed_interval_resident_leaders();
     harness
@@ -1282,6 +1282,7 @@ fn resident_legend_switches_toggle_independently_from_the_keyboard(cx: &mut Test
         .focus_resident_legend("chart-legend:live-memory-app-resident:App A:1 B");
 
     harness.driver.press("space");
+    harness.driver.release_legend_key("space");
 
     assert!(harness.driver.resident_legend_is_hidden("App A"));
     assert!(!harness.driver.resident_legend_is_hidden("App B"));
@@ -1289,18 +1290,27 @@ fn resident_legend_switches_toggle_independently_from_the_keyboard(cx: &mut Test
         .driver
         .focus_resident_legend("chart-legend:live-memory-app-resident:App B:1 B");
     harness.driver.press("enter");
+    harness.driver.release_legend_key("enter");
     assert!(harness.driver.resident_legend_is_hidden("App A"));
     assert!(harness.driver.resident_legend_is_hidden("App B"));
     harness
         .driver
         .focus_resident_legend("chart-legend:live-memory-app-resident:App A:1 B");
     harness.driver.press("space");
+    harness.driver.release_legend_key("space");
     assert!(!harness.driver.resident_legend_is_hidden("App A"));
     assert!(harness.driver.resident_legend_is_hidden("App B"));
     harness.teardown();
 }
 
 impl InputDriver {
+    fn release_legend_key(&mut self, key: &str) {
+        self.context.simulate_event(gpui::KeyUpEvent {
+            keystroke: gpui::Keystroke::parse(key).unwrap(),
+        });
+        self.context.run_until_parked();
+    }
+
     fn focus_resident_legend(&mut self, selector: &'static str) {
         let bounds = self.context.debug_bounds(selector).unwrap();
         self.context

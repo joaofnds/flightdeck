@@ -659,7 +659,6 @@ impl LiveDashboard {
             let key = format!("{}\t{}", panel.id, line.name);
             let reading = self.chart_line_reading(panel, line_index, index);
             let label = Self::chart_legends_label(panel, line_index, &reading);
-            let keyboard_key = key.clone();
             legends = legends.child(
                 div()
                     .id(SharedString::from(key.clone()))
@@ -685,15 +684,6 @@ impl LiveDashboard {
                     })
                     .text_color(rgb(charts::color(&line.color)))
                     .child(label)
-                    .on_key_down(cx.listener(
-                        move |this, event: &gpui::KeyDownEvent, window, cx| {
-                            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                                this.toggle_chart_legend(&keyboard_key, cx);
-                                window.prevent_default();
-                                cx.stop_propagation();
-                            }
-                        },
-                    ))
                     .on_click(
                         cx.listener(move |this, _, _, cx| this.toggle_chart_legend(&key, cx)),
                     ),
