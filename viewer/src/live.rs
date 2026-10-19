@@ -68,6 +68,9 @@ pub struct LiveSession {
 
 struct ScalarContext {
     range: ContextRange,
+    /// The end of the sealed history the points were read from. A minute sealed later begins
+    /// at or after it, so a later follow reads only the history past it.
+    through_ns: u64,
     points: Vec<Value>,
 }
 
@@ -418,27 +421,44 @@ impl LiveSession {
             })
             .transpose()?;
 
+        let mut kept = Vec::new();
+        let mut first_ns = range.first_ns;
         if self.history_error.is_none() {
             if let Some(restored) = &self.restored {
                 if range.first_ns >= restored.range.first_ns {
-                    if history_end.is_none_or(|end| range.end_ns.min(end) <= restored.range.end_ns)
-                    {
+                    if history_end.is_none_or(|end| range.end_ns.min(end) <= restored.through_ns) {
                         return Ok(());
                     }
+
+                    first_ns = restored.through_ns.max(range.first_ns);
+                    follow_restore_kept(&restored.points, range.first_ns, first_ns, &mut kept)?;
                 }
             }
         }
+        assert!(first_ns < range.end_ns);
 
         let mut points = Vec::new();
-        history.context(range, &mut points)?;
-        context_bytes(&points)?;
+        history.context(
+            ContextRange {
+                first_ns,
+                end_ns: range.end_ns,
+            },
+            &mut points,
+        )?;
+        kept.append(&mut points);
+        context_bytes(&kept)?;
         #[cfg(test)]
         if let Some(barrier) = self.before_restore.take() {
             barrier();
         }
 
         self.operation.check()?;
-        self.restored = Some(ScalarContext { range, points });
+        let through_ns = history_end.map_or(range.first_ns, |end| end.min(range.end_ns));
+        self.restored = Some(ScalarContext {
+            range,
+            through_ns,
+            points: kept,
+        });
         self.history_error = None;
 
         Ok(())
@@ -870,8 +890,18 @@ impl LiveSession {
             }
 
             refresh_history_pending(&mut self.sources, &history);
+            if let Some(restored) = &self.restored {
+                // A recovered minute can land before the restored context's end, and only a
+                // full restoration reads it.
+                let kept = self.history.as_ref().is_some_and(|previous| {
+                    refresh_history_before(&previous.windows, restored.through_ns)
+                        == refresh_history_before(&history.windows, restored.through_ns)
+                });
+                if !kept {
+                    self.restored = None;
+                }
+            }
             self.history = Some(history);
-            self.restored = None;
         }
 
         Ok(())
@@ -1924,6 +1954,36 @@ fn project_observation_tables(
     Ok(tables)
 }
 
+/// Keeps the restored points from `first_ns` up to `end_ns`, where newly sealed history
+/// takes over.
+fn follow_restore_kept(
+    points: &[Value],
+    first_ns: u64,
+    end_ns: u64,
+    output: &mut Vec<Value>,
+) -> Result<()> {
+    assert!(output.is_empty());
+
+    if first_ns < end_ns {
+        let range = ContextRange { first_ns, end_ns };
+        for point in points {
+            if context_contains(range, point)? {
+                output.push(point.clone());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Counts the sealed minutes that begin before `through_ns`, or at an unknown time.
+fn refresh_history_before(windows: &[persistence::Manifest], through_ns: u64) -> usize {
+    windows
+        .iter()
+        .filter(|window| window.wall_ns.is_none_or(|wall| wall.min < through_ns))
+        .count()
+}
+
 fn context_contains(range: ContextRange, point: &Value) -> Result<bool> {
     let wall = point["wall_ns"]
         .as_u64()
@@ -2290,6 +2350,32 @@ mod tests {
     }
 
     #[test]
+    fn following_reads_only_the_newly_sealed_minute_into_restored_history() {
+        // Goal: a sealed minute extends the restored context without re-reading earlier ones,
+        // and the extended context reads as a full restoration would.
+        // Method: follow fourteen sealed minutes, seal the fifteenth, then compare the follow
+        // and its saved-source reads with those of a newly opened session.
+        let mut fixture = RingFixture::new_following();
+        let mut pending = None;
+        follow_restoration_publish_pending(&mut fixture, &mut pending);
+        let mut session = LiveSession::open(&fixture.root).unwrap();
+        session.follow_latest().unwrap();
+        seal_window(&fixture.root, pending.as_ref().unwrap());
+        assert!(!session.poll().unwrap());
+        let before = session.history.as_ref().unwrap().source_reads.get();
+
+        let extended = session.follow_latest().unwrap();
+
+        let mut opened = LiveSession::open(&fixture.root).unwrap();
+        let restored = opened.follow_latest().unwrap();
+        let reads_extended = session.history.as_ref().unwrap().source_reads.get() - before;
+        let reads_restored = opened.history.as_ref().unwrap().source_reads.get();
+        assert_eq!(extended["trends"], restored["trends"]);
+        assert_eq!(session.restored.as_ref().unwrap().points.len(), 899);
+        assert!(reads_extended * 7 < reads_restored);
+    }
+
+    #[test]
     fn following_rebuilds_an_empty_requested_range_after_clock_rollback() {
         // Goal: clock rollback rebuilds coverage and caches an honestly empty historical range.
         // Method: move live wall time before every committed tick, then follow twice.
@@ -2488,7 +2574,8 @@ mod tests {
     #[test]
     fn following_keeps_live_metrics_and_retries_an_unreadable_context() {
         // Goal: failed historical restoration preserves usable live metrics and recovers publicly.
-        // Method: move real data aside, roll the clock back to force restoration, then restore it.
+        // Method: move real data aside, roll the clock back into the saved minute to force its
+        // restoration, then restore it. The live reading keeps the cached minute's first half.
         let mut fixture = RingFixture::new_following();
         follow_restoration_short(&mut fixture);
         let mut session = LiveSession::open(&fixture.root).unwrap();
@@ -2502,7 +2589,7 @@ mod tests {
         }
         assert!(session.catalog()["history_error"].is_string());
         assert_eq!(session.restored.as_ref().unwrap().points, cached);
-        fixture.publish_following_wall(63, 500);
+        fixture.publish_following_wall(63, 1030);
         assert!(session.poll().unwrap());
         let cursor = session.sources[0].reader.next_publication();
         let losses = session.sources[0].losses;
@@ -2511,7 +2598,7 @@ mod tests {
 
         assert_eq!(degraded["selected"]["publication"], 63);
         assert_eq!(degraded["summary"]["publication"], 63);
-        assert_eq!(degraded["trends"].as_array().unwrap().len(), 1);
+        assert_eq!(degraded["trends"].as_array().unwrap().len(), 31);
         assert!(!degraded["context_error"].as_str().unwrap().is_empty());
         assert!(degraded["context_error"].as_str().unwrap().chars().count() <= 512);
         assert_eq!(
@@ -2767,7 +2854,7 @@ mod tests {
         follow_restoration_measure("post_commit_poll", 0, || {
             assert!(!session.poll().unwrap());
         });
-        assert!(session.restored.is_none());
+        assert_eq!(session.restored.as_ref().unwrap().points.len(), 839);
         follow_restoration_measure("post_commit_follow", 0, || {
             let response = session.follow_latest().unwrap();
             follow_restoration_assert_window(&response);
@@ -3445,9 +3532,9 @@ mod tests {
                     publication_end: publications.end,
                     events_first: events.start,
                     events_end: events.end,
-                    wall_ns: None,
-                    continuous_ns: None,
-                    awake_ns: None,
+                    wall_ns: seal_window_bounds(window, |value| value.wall_ns),
+                    continuous_ns: seal_window_bounds(window, |value| value.continuous_ns),
+                    awake_ns: seal_window_bounds(window, |value| value.awake_ns),
                     losses: Losses::default(),
                     data_directory: String::new(),
                     tables,
@@ -3455,6 +3542,30 @@ mod tests {
             )
             .unwrap();
     }
+
+    /// Bounds a sealed minute's times as the persister does, so a fixture's minutes carry
+    /// the wall times that let a read skip them.
+    fn seal_window_bounds(
+        window: &Window,
+        field: impl Fn(&persistence::Observation) -> Option<u64>,
+    ) -> Option<persistence::TimeBounds> {
+        let mut result: Option<persistence::TimeBounds> = None;
+        for observation in window.observations() {
+            let value = field(observation)?;
+            result = Some(match result {
+                Some(bounds) => persistence::TimeBounds {
+                    min: bounds.min.min(value),
+                    max: bounds.max.max(value),
+                },
+                None => persistence::TimeBounds {
+                    min: value,
+                    max: value,
+                },
+            });
+        }
+        result
+    }
+
     #[test]
     fn keeps_null_context_gaps_when_optional_app_history_is_unreadable() {
         // Goal: missing saved facts remain explicit gaps beside independently available detail.
