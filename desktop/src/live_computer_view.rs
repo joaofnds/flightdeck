@@ -1,6 +1,9 @@
 use gpui::{Context, IntoElement, div, prelude::*, px, rgb};
 
-use crate::charts::{BLUE, GRID, MUTED, PANEL, RED, YELLOW};
+use crate::charts::{BLUE, GRID, LINE, MUTED, PANEL, RED};
+
+/// The prototype's yellow, which the airflow key and the hot end of the tint use.
+const AIRFLOW_YELLOW: u32 = 0x00fa_de2a;
 
 /// One run of a reference paragraph, linked to its source where it names one.
 struct Run {
@@ -90,7 +93,7 @@ pub(super) fn view(
     div()
         .flex()
         .flex_col()
-        .gap(px(16.0))
+        .gap(px(14.0))
         .child(model_card(inventory))
         .child(schematic_reference(dashboard, cx))
 }
@@ -107,31 +110,38 @@ fn model_card(inventory: &[(String, String)]) -> impl IntoElement {
         .role(gpui::Role::Group)
         .aria_label("Computer model and specifications")
         .max_w(px(760.0))
-        .p(px(18.0))
-        .rounded(px(7.0))
+        .px(px(12.0))
+        .py(px(8.0))
+        .rounded(px(12.0))
         .border_1()
-        .border_color(rgb(GRID))
+        .border_color(rgb(LINE))
         .bg(rgb(PANEL))
         .child(
             div()
-                .text_size(px(14.0))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .debug_selector(|| format!("computer-model:{title}"))
-                .child(title),
-        )
-        .child(
-            div()
-                .mt(px(5.0))
-                .text_size(px(11.0))
-                .text_color(rgb(MUTED))
-                .debug_selector(|| format!("computer-generation:{generation}"))
-                .child(generation),
+                .h(px(40.0))
+                .pt(px(1.0))
+                .child(
+                    div()
+                        .text_size(px(14.0))
+                        .line_height(px(21.0))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .debug_selector(|| format!("computer-model:{title}"))
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .line_height(px(17.0))
+                        .text_color(rgb(MUTED))
+                        .debug_selector(|| format!("computer-generation:{generation}"))
+                        .child(generation),
+                ),
         )
         .child(model_card_specifications(inventory))
 }
 
 fn model_card_specifications(inventory: &[(String, String)]) -> impl IntoElement {
-    let mut specifications = div().mt(px(16.0));
+    let mut specifications = div().flex().flex_col().gap(px(10.0));
     let memory = inventory_value(inventory, "Memory");
     let memory = if inventory_value(inventory, "Architecture") == "arm64" {
         format!("{memory} unified memory")
@@ -155,6 +165,7 @@ fn model_card_specifications(inventory: &[(String, String)]) -> impl IntoElement
                 .items_start()
                 .gap(px(12.0))
                 .py(px(8.0))
+                .line_height(px(19.5))
                 .border_b_1()
                 .border_color(rgb(GRID))
                 .child(
@@ -191,12 +202,14 @@ fn schematic_reference(
         .debug_selector(|| "computer-schematic-reference".into())
         .role(gpui::Role::Group)
         .aria_label("Schematic reference")
-        .p(px(18.0))
-        .rounded(px(7.0))
+        .px(px(12.0))
+        .py(px(8.0))
+        .rounded(px(12.0))
         .border_1()
-        .border_color(rgb(GRID))
+        .border_color(rgb(LINE))
         .bg(rgb(PANEL))
         .text_size(px(12.0))
+        .line_height(px(19.2))
         .text_color(rgb(MUTED))
         .child(dashboard.disclosure(crate::live_sections::Section::ComputerReference, cx))
         .when(
@@ -209,6 +222,7 @@ fn schematic_reference(
 
 fn schematic_reference_content() -> impl IntoElement {
     div()
+        .pb(px(12.0))
         .child(
             div()
                 .mt(px(12.0))
@@ -229,20 +243,22 @@ fn schematic_reference_content() -> impl IntoElement {
 }
 
 fn airflow_guide() -> impl IntoElement {
-    let mut key = div().flex().flex_wrap().gap(px(14.0)).mt(px(6.0));
-    for (color, stop) in [(BLUE, "50 °C"), (YELLOW, "70 °C"), (RED, "90 °C")] {
+    let mut key = div().flex().flex_wrap().gap(px(12.0));
+    for (color, stop) in [(BLUE, "50 °C"), (AIRFLOW_YELLOW, "70 °C"), (RED, "90 °C")] {
         key = key.child(
             div()
                 .flex()
                 .items_center()
-                .gap(px(6.0))
+                .gap(px(5.0))
                 .debug_selector(|| format!("computer-airflow-stop:{stop}"))
-                .child(div().w(px(12.0)).h(px(7.0)).rounded(px(1.0)).bg(rgb(color)))
+                .child(div().w(px(16.0)).h(px(8.0)).opacity(0.55).bg(rgb(color)))
                 .child(stop),
         );
     }
     div()
         .mt(px(12.0))
+        .text_size(px(11.0))
+        .line_height(px(16.5))
         .child("Airflow tint · left CPU-area temperature · right GPU-area temperature")
         .child(key)
 }
@@ -273,7 +289,7 @@ fn schematic_reference_paragraph(index: usize, runs: &'static [Run]) -> impl Int
     let styled = gpui::StyledText::new(paragraph)
         .with_highlights(ranges.iter().map(|range| (range.clone(), link_style)));
     div()
-        .mt(px(10.0))
+        .mt(px(12.0))
         .debug_selector(move || format!("computer-reference-paragraph:{index}"))
         .child(
             gpui::InteractiveText::new(("computer-reference-paragraph", index), styled)

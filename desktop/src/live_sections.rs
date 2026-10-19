@@ -157,7 +157,7 @@ impl LiveDashboard {
         let expanded = self.sections.expanded(section);
         // The prototype's plain details read in the page's own text, and the ones in panels
         // read quietly.
-        let plain = matches!(section, Section::AppTotals);
+        let plain = matches!(section, Section::AppTotals | Section::ComputerReference);
 
         div()
             .id(section.id())
