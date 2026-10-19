@@ -203,6 +203,21 @@ fn the_source_status_follows_the_newest_reading_while_an_old_second_is_shown(
 }
 
 #[gpui::test]
+fn the_source_status_stays_live_while_a_hover_holds_the_view(cx: &mut TestAppContext) {
+    // Goal: a hover that holds the live view does not report a stalled collector.
+    // Method: judge the status ten seconds later, first without a hover and then during one.
+    let mut harness = HoverHarness::setup(cx, Route::Cpu, Mode::Follow);
+    harness.driver.make_newest_reading_current();
+    let later = std::time::SystemTime::now() + std::time::Duration::from_secs(10);
+    assert_eq!(harness.driver.status_at(later), "Waiting");
+
+    harness.driver.hover(Epoch::Historical);
+
+    assert_eq!(harness.driver.status_at(later), "Live");
+    harness.teardown();
+}
+
+#[gpui::test]
 fn pointer_exit_restores_the_paused_selection_after_a_late_failure(cx: &mut TestAppContext) {
     // A failed hover cannot unpause or overwrite the committed paused observation.
     let mut harness = HoverHarness::setup(cx, Route::Cpu, Mode::Paused);
@@ -519,6 +534,11 @@ impl HoverDriver {
     fn status(&self) -> String {
         self.view
             .read_with(&self.context, |dashboard, _| dashboard.status())
+    }
+
+    fn status_at(&self, now: std::time::SystemTime) -> String {
+        self.view
+            .read_with(&self.context, |dashboard, _| dashboard.status_at(now))
     }
 
     fn focus_copy(&mut self) {

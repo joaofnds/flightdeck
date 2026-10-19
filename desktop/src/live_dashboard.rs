@@ -59,6 +59,9 @@ pub struct LiveDashboard {
     pub(crate) chart_inspector: Option<crate::live_chart_view::inspector::ChartInspector>,
     pub preview: Option<crate::live_hover::Preview>,
     pub(crate) preview_ready_at: Instant,
+    /// When the shown live reading arrived. A preview holds the live view, so while one is
+    /// shown the source status is judged at this moment instead of now.
+    received_at: SystemTime,
     pub(crate) preview_submissions: u64,
     pub(crate) row_heights:
         Rc<std::cell::RefCell<std::collections::BTreeMap<String, gpui::Pixels>>>,
@@ -156,6 +159,7 @@ impl LiveDashboard {
             chart_inspector: None,
             preview: None,
             preview_ready_at: Instant::now(),
+            received_at: SystemTime::now(),
             preview_submissions: 0,
             row_heights: Rc::new(std::cell::RefCell::new(std::collections::BTreeMap::new())),
             header_height: Rc::new(std::cell::Cell::new(px(0.0))),
@@ -285,6 +289,7 @@ impl LiveDashboard {
         self.refresh_chart_inspector();
         self.executables = presentation.executables;
         self.snapshot = Some(presentation.snapshot);
+        self.received_at = SystemTime::now();
         self.pending_snapshot = None;
         self.error = None;
         self.updates += 1;
@@ -407,6 +412,10 @@ impl LiveDashboard {
     }
 
     pub fn status(&self) -> String {
+        self.status_at(SystemTime::now())
+    }
+
+    pub(crate) fn status_at(&self, now: SystemTime) -> String {
         let Some(snapshot) = &self.snapshot else {
             if self.error.is_some() {
                 return "Reading unavailable".into();
@@ -435,7 +444,12 @@ impl LiveDashboard {
         let Some(newest) = snapshot.catalog["last_second"].as_u64() else {
             return "No live readings".into();
         };
-        match SystemTime::now().duration_since(UNIX_EPOCH) {
+        let judged = if self.preview.is_some() {
+            self.received_at
+        } else {
+            now
+        };
+        match judged.duration_since(UNIX_EPOCH) {
             Ok(now) => {
                 let observed = Duration::from_secs(newest);
                 if observed > now + Duration::from_secs(3) {
