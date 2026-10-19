@@ -99,12 +99,31 @@ impl Session {
     }
 
     pub fn open_with(root: &Path, cancellation: Arc<Cancellation>, epoch: u64) -> Result<Self> {
+        Self::reopen(root, cancellation, epoch, &[])
+    }
+
+    /// Opens the recording again, verifying in full only the windows not in `accepted`, which
+    /// an earlier open verified. A sealed window's files never change, so rereading its marker
+    /// shows its commitment stands, as `validate_commitment` does around every read.
+    pub fn reopen(
+        root: &Path,
+        cancellation: Arc<Cancellation>,
+        epoch: u64,
+        accepted: &[Manifest],
+    ) -> Result<Self> {
         let operation = cancellation.operation(epoch)?;
         persistence::query::validate_root(root)?;
         private::verify_directory(root)?;
-        collector::recording::read_identity(root)?;
+        let recording = collector::recording::read_identity(root)?;
+        let mut accepted_markers = BTreeMap::new();
+        for manifest in accepted {
+            if manifest.identity.run.recording == recording {
+                let marker = layout::WindowKey::from(&manifest.identity).marker(root);
+                accepted_markers.insert(marker, manifest);
+            }
+        }
         let mut windows = Vec::new();
-        discover(root, &mut windows, &operation)?;
+        discover(root, &accepted_markers, &mut windows, &operation)?;
         let connection = data::connection();
         operation.attach(&connection)?;
         let mut session = Self {
@@ -571,7 +590,12 @@ pub(crate) fn partition(table: &Table) -> Result<BTreeMap<u64, Table>> {
     Ok(result)
 }
 
-fn discover(root: &Path, windows: &mut Vec<Manifest>, operation: &Operation) -> Result<()> {
+fn discover(
+    root: &Path,
+    accepted: &BTreeMap<PathBuf, &Manifest>,
+    windows: &mut Vec<Manifest>,
+    operation: &Operation,
+) -> Result<()> {
     let base = layout::base(root, Kind::Commits);
     if !base.try_exists()? {
         return Err(io::Error::from(io::ErrorKind::InvalidData).into());
@@ -592,13 +616,29 @@ fn discover(root: &Path, windows: &mut Vec<Manifest>, operation: &Operation) -> 
                 if windows.len() == WINDOWS_MAX {
                     return Err(Error::Bound("catalog windows"));
                 }
-                windows.push(read_committed(root, &run_path.join(day).join(name))?);
+                let marker = run_path.join(day).join(name);
+                windows.push(discover_window(
+                    root,
+                    &marker,
+                    accepted.get(&marker).copied(),
+                )?);
                 Ok(())
             })
         })
     })?;
     windows.sort_by_key(|manifest| (manifest.identity.run.run.0, manifest.publication_first));
     Ok(())
+}
+
+fn discover_window(root: &Path, marker: &Path, accepted: Option<&Manifest>) -> Result<Manifest> {
+    if let Some(accepted) = accepted {
+        let manifest = reread_committed(root, marker)?;
+        if manifest == *accepted {
+            return Ok(manifest);
+        }
+    }
+
+    Ok(read_committed(root, marker)?)
 }
 
 #[path = "cpu_history_saved.rs"]
@@ -608,4 +648,6 @@ mod app_history;
 pub(crate) use app_history::AttributionReplay;
 pub(crate) use app_history::ProcessGroupsReplay;
 mod committed_apps;
+#[cfg(test)]
+mod reopen_tests;
 mod selection;
