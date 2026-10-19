@@ -72,6 +72,24 @@ pub enum AppKey<'bytes> {
     Executable(&'bytes [u8]),
 }
 
+/// Searches `ordered`, indexes whose keys ascend, as `binary_search_by` does. The Apps of one
+/// reading arrive in key order, so the slot after the last match usually holds the next App,
+/// and trying `next` first spares the search, whose key comparisons dominate a history.
+pub(crate) fn search_ordered<'key>(
+    ordered: &[u16],
+    next: usize,
+    key: &AppKey<'_>,
+    key_at: impl Fn(u16) -> AppKey<'key>,
+) -> Result<usize, usize> {
+    if let Some(index) = ordered.get(next) {
+        if key_at(*index) == *key {
+            return Ok(next);
+        }
+    }
+
+    ordered.binary_search_by(|index| key_at(*index).cmp(key))
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct AppTotals {
     pub members: u32,
@@ -752,6 +770,8 @@ mod disk_tests;
 mod fixture_tests;
 #[cfg(test)]
 mod limits_tests;
+#[cfg(test)]
+mod order_tests;
 #[cfg(test)]
 mod performance_tests;
 #[cfg(test)]

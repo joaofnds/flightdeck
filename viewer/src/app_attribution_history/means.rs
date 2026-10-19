@@ -9,6 +9,8 @@ use crate::cancellation::Operation;
 pub(super) struct Means {
     entries: Vec<Entry>,
     ordered: Vec<u16>,
+    /// The slot after the last App found, where the next App of a reading usually is.
+    next: usize,
     key_bytes: usize,
 }
 
@@ -49,18 +51,21 @@ impl Means {
         Self {
             entries: Vec::with_capacity(APPS_MAX),
             ordered: Vec::with_capacity(APPS_MAX),
+            next: 0,
             key_bytes: 0,
         }
     }
 
     pub(super) fn observe(&mut self, app: &super::Reading<'_>, elapsed: Option<u64>) -> Result<()> {
-        let index = match self
-            .ordered
-            .binary_search_by(|index| self.entries[usize::from(*index)].key.view().cmp(&app.key))
-        {
-            Ok(index) => usize::from(self.ordered[index]),
+        let found = crate::apps::search_ordered(&self.ordered, self.next, &app.key, |index| {
+            self.entries[usize::from(index)].key.view()
+        });
+        let index = match found {
+            Ok(position) => usize::from(self.ordered[position]),
             Err(position) => self.observe_insert(&app.key, position)?,
         };
+        let (Ok(position) | Err(position)) = found;
+        self.next = position + 1;
 
         let Some(elapsed) = elapsed.filter(|elapsed| *elapsed > 0) else {
             return Ok(());
