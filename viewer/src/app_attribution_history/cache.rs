@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use persistence::{Error, Result, WindowIdentity};
@@ -149,53 +148,45 @@ impl Cache {
     ) -> Result<()> {
         let mut failure = None;
         let count = self.points.len();
-        self.points
-            .retain(|point| match needed(&point.capture.coverage.observation) {
-                Ok(needed) => needed,
+        let dropped = self.points.extract_if(.., |point| {
+            match needed(&point.capture.coverage.observation) {
+                Ok(needed) => !needed,
                 Err(error) => {
                     failure = Some(error);
-                    false
+                    true
                 }
-            });
+            }
+        });
+        // Each dropped point leaves before the next is measured, so a key that dropped points
+        // alone share is released by the last of them, as `insert` counted it once.
+        for point in dropped {
+            self.bytes -= point.bytes() + point.unshared_key_bytes();
+        }
         if let Some(error) = failure {
             return Err(error);
         }
         if self.points.len() != count {
             self.limited = None;
         }
-        let mut failure = None;
-        self.pins.retain(|pin| {
-            for point in &self.points {
+
+        let points = &self.points;
+        let dropped = self.pins.extract_if(.., |pin| {
+            for point in points {
                 if let Err(error) = operation.check() {
                     failure = Some(error);
-                    return false;
-                }
-                if point.windows.contains(&Some(pin.manifest.identity)) {
                     return true;
                 }
-            }
-            false
-        });
-        if let Some(error) = failure {
-            return Err(error);
-        }
-        self.bytes = size_of::<Self>()
-            + self.points.capacity() * size_of::<Point>()
-            + self.pins.capacity() * size_of::<ResidentPin>();
-        let mut keys = BTreeSet::new();
-        for point in &self.points {
-            operation.check()?;
-            self.bytes += point.bytes();
-            for app in &point.apps {
-                operation.check()?;
-                if keys.insert(Arc::as_ptr(&app.key).addr()) {
-                    self.bytes += app.key.bytes();
+                if point.windows.contains(&Some(pin.manifest.identity)) {
+                    return false;
                 }
             }
+            true
+        });
+        for pin in dropped {
+            self.bytes -= pin.owned_bytes();
         }
-        for pin in &self.pins {
-            operation.check()?;
-            self.bytes += pin.owned_bytes();
+        if let Some(error) = failure {
+            return Err(error);
         }
         Ok(())
     }
@@ -390,6 +381,10 @@ impl Key {
             }
     }
 }
+
+#[cfg(test)]
+#[path = "cache_tests.rs"]
+mod tests;
 
 fn measure(source: &crate::apps::Subtotal) -> Measure {
     Measure {
