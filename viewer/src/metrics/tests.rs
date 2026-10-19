@@ -591,10 +591,11 @@ fn preserves_independent_memory_and_network_counter_availability() {
     assert_eq!(value["network_tx_bps"], 512.0);
 }
 
-const POINT_FIELDS: [&str; 42] = [
+const POINT_FIELDS: [&str; 43] = [
     "battery",
     "boot",
     "continuous_ns",
+    "cpu_level_percent",
     "cpu_percent",
     "cpu_percent_one_core",
     "fan_rpm",
@@ -649,6 +650,7 @@ fn widest_point() -> Value {
         }
     }
     point["fan_rpm"] = json!(vec![0.000_012_345_678_901_234_568; 10]);
+    point["cpu_level_percent"] = json!(vec![0.000_012_345_678_901_234_568; 2]);
     point["battery"] = json!({"source_continuous_ns": u64::MAX,
         "age_seconds": 0.000_012_345_678_901_234_568,
         "charge_percent": 0.000_012_345_678_901_234_568,

@@ -17,6 +17,8 @@ enum Reading {
     Resource(&'static str, &'static str, &'static str, f32),
     Charging,
     Health,
+    /// The busy share of one performance level, by its index fastest first.
+    Level(usize),
     MemoryInUse,
     Pressure,
     Uncaptured,
@@ -74,16 +76,16 @@ const SEND: Specification = (
     "network",
 );
 const PERFORMANCE: Specification = (
-    "Performance cores",
-    Reading::Uncaptured,
-    "Cluster activity not captured",
+    "Core level 1",
+    Reading::Level(1),
+    "Core levels unreadable",
     GREEN,
     "cpu",
 );
 const SUPER: Specification = (
-    "Super cores",
-    Reading::Uncaptured,
-    "Cluster activity not captured",
+    "Core level 0",
+    Reading::Level(0),
+    "Core levels unreadable",
     PURPLE,
     "cpu",
 );
@@ -225,7 +227,7 @@ pub fn cards(route: &str, selection: &Value) -> Vec<Card> {
 }
 
 fn card(summary: &Value, definition: &Specification) -> Card {
-    let (label, source, note, color, route) = *definition;
+    let (mut label, source, note, color, route) = *definition;
     let mut color = color;
     let mut note = note.to_owned();
     let reading = match source {
@@ -247,6 +249,15 @@ fn card(summary: &Value, definition: &Specification) -> Card {
             };
             crate::live_projection::quantity(&summary["battery"], "health_percent", "%", 1.0)
         }
+        Reading::Level(index) => match crate::live_inventory::performance_levels() {
+            Some(levels) => {
+                let level = &levels[index];
+                label = level.cores.as_str();
+                note = format!("{} cores · cluster capacity", level.logical_cpus);
+                card_level(summary, index)
+            }
+            None => "Unavailable".into(),
+        },
         Reading::MemoryInUse => {
             note = format!(
                 "Of {} installed",
@@ -281,6 +292,12 @@ fn card(summary: &Value, definition: &Specification) -> Card {
         color,
         route,
     }
+}
+
+/// The busy share of the performance level at `index`, fastest first.
+fn card_level(summary: &Value, index: usize) -> String {
+    let percent = serde_json::json!({ "percent": summary["cpu_level_percent"][index] });
+    crate::live_projection::quantity(&percent, "percent", "%", 1.0)
 }
 
 /// Memory in use as the prototype and Activity Monitor count it: app memory, wired and

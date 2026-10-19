@@ -155,6 +155,19 @@ pub(crate) fn derive(
 }
 
 pub(crate) fn sum_busy(interval: CounterInterval<'_>) -> Result<Option<f64>> {
+    sum_busy_slices(&CounterSlices {
+        current: interval.current,
+        previous: interval.previous,
+    })
+}
+
+/// The counters of one interval for some of the logical CPUs.
+struct CounterSlices<'a> {
+    current: &'a [[Option<u64>; 4]],
+    previous: &'a [[Option<u64>; 4]],
+}
+
+fn sum_busy_slices(interval: &CounterSlices<'_>) -> Result<Option<f64>> {
     assert!(interval.current.len() <= CPUS_MAX);
     assert!(interval.previous.len() <= CPUS_MAX);
     if interval.current.is_empty() {
@@ -166,7 +179,7 @@ pub(crate) fn sum_busy(interval: CounterInterval<'_>) -> Result<Option<f64>> {
     }
 
     let mut sum = 0.0;
-    for (current, previous) in interval.current.iter().zip(interval.previous) {
+    for (current, previous) in interval.current.iter().zip(interval.previous.iter()) {
         let Some(percent) = derive_busy(BusyInterval { current, previous })? else {
             return Ok(None);
         };
@@ -176,6 +189,63 @@ pub(crate) fn sum_busy(interval: CounterInterval<'_>) -> Result<Option<f64>> {
     assert!(sum.is_finite());
 
     Ok(Some(sum))
+}
+
+/// This Mac's performance levels, read once, since they do not change while the Mac runs.
+/// The recordings this viewer reads come from this Mac's collector.
+pub(crate) fn this_mac_levels() -> Result<Option<collector::machine::PerformanceLevels>> {
+    static LEVELS: std::sync::OnceLock<
+        std::result::Result<Option<collector::machine::PerformanceLevels>, ()>,
+    > = std::sync::OnceLock::new();
+    let levels = LEVELS.get_or_init(|| {
+        collector::machine::performance_levels().map_err(|error| {
+            eprintln!("viewer: performance levels unreadable: {error}");
+        })
+    });
+
+    levels.map_err(|()| Error::Bound("performance levels unreadable"))
+}
+
+/// The mean busy share of each performance level's CPUs, level 0 first. The slower level's
+/// CPUs take the lowest indices, as macOS numbers them. Levels that do not cover the recorded
+/// CPUs read nothing, since no CPU can then be placed in a level.
+pub(crate) fn level_busy(
+    interval: CounterInterval<'_>,
+    levels: collector::machine::PerformanceLevels,
+) -> Result<[Option<f64>; 2]> {
+    assert!(interval.current.len() <= CPUS_MAX);
+    let [fast, slow] = levels.logical_cpus.map(|count| usize::try_from(count).ok());
+    let (Some(fast), Some(slow)) = (fast, slow) else {
+        return Ok([None, None]);
+    };
+    if fast.checked_add(slow) != Some(interval.current.len()) {
+        return Ok([None, None]);
+    }
+    if interval.previous.len() != interval.current.len() {
+        return Ok([None, None]);
+    }
+
+    let slow_busy = mean_busy(&CounterSlices {
+        current: &interval.current[..slow],
+        previous: &interval.previous[..slow],
+    })?;
+    let fast_busy = mean_busy(&CounterSlices {
+        current: &interval.current[slow..],
+        previous: &interval.previous[slow..],
+    })?;
+
+    Ok([fast_busy, slow_busy])
+}
+
+fn mean_busy(interval: &CounterSlices<'_>) -> Result<Option<f64>> {
+    let Some(sum) = sum_busy_slices(interval)? else {
+        return Ok(None);
+    };
+    let count = u32::try_from(interval.current.len())
+        .map_err(|_| Error::Bound("performance level CPU count"))?;
+    assert!(count > 0);
+
+    Ok(Some(sum / f64::from(count)))
 }
 
 fn derive_unavailable(interval: &Interval<'_>) -> Option<&'static str> {
@@ -240,4 +310,83 @@ fn derive_busy(interval: BusyInterval<'_>) -> Result<Option<f64>> {
     assert!((0.0..=100.0).contains(&percent));
 
     Ok(Some(percent))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ticks(busy: u64, idle: u64) -> [Option<u64>; 4] {
+        [Some(busy), Some(0), Some(0), Some(idle)]
+    }
+
+    #[test]
+    fn level_busy_averages_each_level_over_its_own_cpus() {
+        // Goal: each level reads the mean busy share of its own CPUs, the slow level's CPUs
+        // taking the lowest indices.
+        // Method: two slow CPUs at 0% and 50% and one fast CPU at 100% over one interval.
+        let previous = vec![ticks(0, 0), ticks(0, 0), ticks(0, 0)];
+        let current = vec![ticks(0, 100), ticks(50, 50), ticks(100, 0)];
+        let levels = collector::machine::PerformanceLevels {
+            logical_cpus: [1, 2],
+        };
+
+        let busy = level_busy(
+            CounterInterval {
+                current: &current,
+                previous: &previous,
+            },
+            levels,
+        )
+        .unwrap();
+
+        assert_eq!(busy, [Some(100.0), Some(25.0)]);
+    }
+
+    #[test]
+    fn level_busy_is_unavailable_when_the_levels_do_not_cover_the_recorded_cpus() {
+        // Goal: a recording whose CPUs the levels do not cover reads no level, since its CPUs
+        // cannot be placed in a level.
+        // Method: levels of four CPUs against three recorded CPUs.
+        let previous = vec![ticks(0, 0), ticks(0, 0), ticks(0, 0)];
+        let current = vec![ticks(0, 100), ticks(50, 50), ticks(100, 0)];
+        let levels = collector::machine::PerformanceLevels {
+            logical_cpus: [2, 2],
+        };
+
+        let busy = level_busy(
+            CounterInterval {
+                current: &current,
+                previous: &previous,
+            },
+            levels,
+        )
+        .unwrap();
+
+        assert_eq!(busy, [None, None]);
+    }
+
+    #[test]
+    fn level_busy_withholds_only_the_level_with_an_unread_cpu() {
+        // Goal: a CPU without a reading withholds its own level and leaves the other level read.
+        // Method: the second slow CPU lacks its idle ticks.
+        let previous = vec![ticks(0, 0), ticks(0, 0), ticks(0, 0)];
+        let mut unread = ticks(50, 50);
+        unread[3] = None;
+        let current = vec![ticks(0, 100), unread, ticks(100, 0)];
+        let levels = collector::machine::PerformanceLevels {
+            logical_cpus: [1, 2],
+        };
+
+        let busy = level_busy(
+            CounterInterval {
+                current: &current,
+                previous: &previous,
+            },
+            levels,
+        )
+        .unwrap();
+
+        assert_eq!(busy, [Some(100.0), None]);
+    }
 }

@@ -338,6 +338,35 @@ pub fn cpu_limit() -> io::Result<usize> {
     kernel::read_limit(c"hw.logicalcpu_max")
 }
 
+/// The logical CPUs of a chip's two performance levels, level 0 the fastest, as
+/// `hw.perflevelN.logicalcpu` gives them. macOS numbers the CPUs of the slower level first,
+/// so the CPUs of level 0 take the highest indices.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PerformanceLevels {
+    pub logical_cpus: [u32; 2],
+}
+
+/// Reads the machine's performance levels, or none when it has other than two. An Intel Mac
+/// names no levels at all.
+pub fn performance_levels() -> io::Result<Option<PerformanceLevels>> {
+    let levels = match Sysctl::named(c"hw.nperflevels") {
+        Ok(levels) => levels,
+        Err(error) if error.raw_os_error() == Some(kernel::ENOENT) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let levels: c_int = levels.read()?;
+    if levels != 2 {
+        return Ok(None);
+    }
+
+    let fast: u32 = Sysctl::named(c"hw.perflevel0.logicalcpu")?.read()?;
+    let slow: u32 = Sysctl::named(c"hw.perflevel1.logicalcpu")?.read()?;
+
+    Ok(Some(PerformanceLevels {
+        logical_cpus: [fast, slow],
+    }))
+}
+
 // `processor_cpu_load_info.cpu_ticks` holds a core's ticks at the indices the CPU_STATE
 // constants name.
 const USER_INDEX: usize = cpu_ticks_index(CPU_STATE_USER);
@@ -482,6 +511,23 @@ mod tests {
         assert_eq!(
             u32::from_ne_bytes(kernel::sysctl_bytes(c"hw.logicalcpu")),
             u32::try_from(machine.cpus.len()).unwrap()
+        );
+    }
+
+    #[test]
+    fn reads_the_logical_cpus_of_each_performance_level_fastest_first() {
+        // Goal: the two performance levels give their logical CPUs fastest level first, and
+        // together cover every logical CPU the machine runs.
+        // Method: compare the levels with hw.perflevel0 and hw.perflevel1 read as raw bytes.
+        let fast = u32::from_ne_bytes(kernel::sysctl_bytes(c"hw.perflevel0.logicalcpu"));
+        let slow = u32::from_ne_bytes(kernel::sysctl_bytes(c"hw.perflevel1.logicalcpu"));
+
+        let levels = performance_levels().unwrap().unwrap();
+
+        assert_eq!(levels.logical_cpus, [fast, slow]);
+        assert_eq!(
+            u32::from_ne_bytes(kernel::sysctl_bytes(c"hw.logicalcpu_max")),
+            fast + slow
         );
     }
 

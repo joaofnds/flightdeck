@@ -40,7 +40,7 @@ disclosure_case!(
     overview_context_disclosure_keeps_primary_pressure_outside,
     "overview",
     "section:overview-context",
-    ["live-temperature-plot"],
+    ["live-correlation-plot"],
     "live-memory-pressure-plot"
 );
 disclosure_case!(

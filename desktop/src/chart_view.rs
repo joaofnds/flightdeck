@@ -50,7 +50,9 @@ impl Dashboard {
             .child(
                 div()
                     .flex()
-                    .children(axis.map(|labels| charts::axis_column(labels, px(height))))
+                    .children(axis.map(|labels| {
+                        charts::axis_column(labels, px(height), charts::AxisSide::Leading)
+                    }))
                     .child(div().flex_1().min_w_0().child(chart)),
             )
             .child(

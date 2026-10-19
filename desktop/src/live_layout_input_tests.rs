@@ -552,7 +552,7 @@ impl InputDriver {
         assert!(second[2].bottom() < pressure.top());
         assert!(pressure.bottom() < ranking.top());
         assert!(cooling.bottom() < ranking.top());
-        assert!(self.chart_bounds("live-temperature-plot").top() > ranking.bottom());
+        assert!(self.chart_bounds("live-correlation-plot").top() > ranking.bottom());
     }
 
     fn assert_cpu_inspection(&mut self, second: u64, headline: &'static str) {

@@ -29,6 +29,7 @@ impl LiveDashboard {
         let inspection = chart_inspection(panel, index);
         let hidden = self.chart_hidden(panel);
         let scale = charts::axis_scale(panel, inspection, &hidden, "left");
+        let trailing = trailing_axes(panel, inspection, &hidden);
         let time = self.chart_time_window();
         let measured = Rc::new(Cell::new(Bounds::default()));
         let plot = charts::plot_without_cursor(
@@ -57,8 +58,12 @@ impl LiveDashboard {
                 cx,
             )
             .into_any_element();
-        let axis = charts::axis_labels(scale, charts::axis_unit(panel, "left"));
-        let gutter = axis.width;
+        let axes = PlotAxes {
+            leading: charts::axis_labels(scale, charts::axis_unit(panel, "left")),
+            trailing,
+            height,
+        };
+        let time_row = chart_time_row(&axes, time);
         let reading = if is_process_disk(panel) {
             self.chart_disk_headline(panel, index)
         } else {
@@ -77,18 +82,8 @@ impl LiveDashboard {
             .pt(px(8.0))
             .pb(px(10.0))
             .child(Self::chart_heading(panel, cx))
-            .child(chart_plot_row(
-                &panel.id,
-                reading,
-                Some((axis, height)),
-                chart,
-            ))
-            .child(
-                div()
-                    .pl(gutter)
-                    .h(px(20.0))
-                    .child(charts::time_labels(time)),
-            )
+            .child(chart_plot_row(&panel.id, reading, axes, chart))
+            .child(time_row)
             .child(self.chart_legends(panel, index, cx))
             .child(self.chart_source_state(panel))
     }
@@ -913,22 +908,78 @@ fn chart_line_value(panel: &Panel, line: usize, index: Option<usize>) -> Option<
         .and_then(|line| index.and_then(|index| line.values.get(index).copied().flatten()))
 }
 
-/// The value axis beside the plot. The headline reading left the card for the legend, as in
+/// The value axes beside a plot `height` tall: the left axis, then any right-hand axes in
+/// order outward.
+struct PlotAxes {
+    leading: crate::chart_axes::AxisLabels,
+    trailing: Vec<crate::chart_axes::AxisLabels>,
+    height: f32,
+}
+
+/// The labels of each right-hand axis that a visible line reads on.
+fn trailing_axes(
+    panel: &Panel,
+    inspection: charts::Inspection,
+    hidden: &[String],
+) -> Vec<crate::chart_axes::AxisLabels> {
+    let mut axes = Vec::new();
+    for axis in ["right1", "right2"] {
+        let visible = panel.lines.iter().any(|line| {
+            if hidden.contains(&line.name) {
+                return false;
+            }
+            line.axis.as_deref() == Some(axis)
+        });
+        if visible {
+            let scale = charts::axis_scale(panel, inspection, hidden, axis);
+            axes.push(charts::axis_labels(scale, charts::axis_unit(panel, axis)));
+        }
+    }
+    axes
+}
+
+/// The value axes beside the plot. The headline reading left the card for the legend, as in
 /// the prototype, and the row's selectors keep naming the reading the plot shows.
 fn chart_plot_row(
     id: &str,
     reading: String,
-    axis: Option<(crate::chart_axes::AxisLabels, f32)>,
+    axes: PlotAxes,
     chart: gpui::AnyElement,
 ) -> impl IntoElement {
     let selector = format!("chart-reading:{id}:{reading}");
+    let height = px(axes.height);
     div().debug_selector(|| selector).child(
         div()
             .debug_selector(|| reading)
             .flex()
-            .children(axis.map(|(labels, height)| charts::axis_column(labels, px(height))))
-            .child(div().flex_1().min_w_0().child(chart)),
+            .child(charts::axis_column(
+                axes.leading,
+                height,
+                charts::AxisSide::Leading,
+            ))
+            .child(div().flex_1().min_w_0().child(chart))
+            .children(
+                axes.trailing
+                    .into_iter()
+                    .map(|labels| charts::axis_column(labels, height, charts::AxisSide::Trailing)),
+            ),
     )
+}
+
+/// The time labels under the plot, inset by the value axes on either side.
+fn chart_time_row(
+    axes: &PlotAxes,
+    time: Option<crate::chart_axes::TimeWindow>,
+) -> impl IntoElement + use<> {
+    let trailing_width = axes
+        .trailing
+        .iter()
+        .fold(px(0.0), |width, labels| width + labels.width);
+    div()
+        .pl(axes.leading.width)
+        .pr(trailing_width)
+        .h(px(20.0))
+        .child(charts::time_labels(time))
 }
 
 /// Inspects the hovered reading, else the selected second, else the newest reading.

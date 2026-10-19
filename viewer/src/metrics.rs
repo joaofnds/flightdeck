@@ -131,6 +131,7 @@ pub(crate) fn point(
     let mut value = json!({"wall_ns": current.wall, "publication": current.publication,
         "run_tick": current.run_tick, "continuous_ns": current.continuous,
         "segment": segment, "cpu_percent": null, "cpu_percent_one_core": null,
+        "cpu_level_percent": null,
         "gpu_active_percent": null, "gpu_watts": null,
         "power_watts": ticks.number(tick, "power_watts")?,
         "soc_celsius": ticks.number(tick, "soc_celsius")?, "fan_rpm": fan_rpm,
@@ -230,12 +231,15 @@ fn point_interval(
     let mut previous_counters = Vec::new();
     crate::cpu_history_sample::counters(cpus, current.publication, &mut current_counters)?;
     crate::cpu_history_sample::counters(old_cpus, previous.publication, &mut previous_counters)?;
-    value["cpu_percent_one_core"] = json!(crate::cpu_history_sample::sum_busy(
-        crate::cpu_history_sample::CounterInterval {
-            current: &current_counters,
-            previous: &previous_counters,
-        }
-    )?);
+    let counters = crate::cpu_history_sample::CounterInterval {
+        current: &current_counters,
+        previous: &previous_counters,
+    };
+    value["cpu_percent_one_core"] = json!(crate::cpu_history_sample::sum_busy(counters)?);
+    if let Some(levels) = crate::cpu_history_sample::this_mac_levels()? {
+        value["cpu_level_percent"] =
+            json!(crate::cpu_history_sample::level_busy(counters, levels)?);
+    }
     let elapsed = current
         .continuous
         .and_then(|now| {

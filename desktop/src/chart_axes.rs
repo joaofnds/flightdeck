@@ -37,9 +37,17 @@ pub fn axis_labels(scale: Scale, unit: &str) -> AxisLabels {
     }
 }
 
-/// Right-aligned value labels beside a plot of `height`, each centred on its gridline.
+/// The side of the plot an axis column stands on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AxisSide {
+    Leading,
+    Trailing,
+}
+
+/// Value labels beside a plot of `height`, each centred on its gridline and aligned toward
+/// the plot.
 #[must_use]
-pub fn axis_column(labels: AxisLabels, height: Pixels) -> impl IntoElement {
+pub fn axis_column(labels: AxisLabels, height: Pixels, side: AxisSide) -> impl IntoElement {
     let plot = height - PLOT_INSETS.top - PLOT_INSETS.bottom;
     let mut column = div()
         .relative()
@@ -49,13 +57,14 @@ pub fn axis_column(labels: AxisLabels, height: Pixels) -> impl IntoElement {
         .text_size(px(LABEL_SIZE))
         .text_color(rgb(TEXT));
     for (fraction, label) in labels.entries {
-        column = column.child(
-            div()
-                .absolute()
-                .right(px(2.0))
-                .top(PLOT_INSETS.top + plot * (1.0 - fraction) - px(8.0))
-                .child(label),
-        );
+        let entry = div()
+            .absolute()
+            .top(PLOT_INSETS.top + plot * (1.0 - fraction) - px(8.0))
+            .child(label);
+        column = column.child(match side {
+            AxisSide::Leading => entry.right(px(2.0)),
+            AxisSide::Trailing => entry.left(px(4.0)),
+        });
     }
     column
 }

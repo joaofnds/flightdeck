@@ -6,7 +6,7 @@ use gpui::{
     linear_gradient, point, prelude::*, px, rgb, size,
 };
 
-pub use crate::chart_axes::{TimeWindow, axis_column, axis_labels, time_labels};
+pub use crate::chart_axes::{AxisSide, TimeWindow, axis_column, axis_labels, time_labels};
 use crate::data::Panel;
 
 pub const BLUE: u32 = 0x0057_94f2;

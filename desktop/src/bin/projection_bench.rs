@@ -6,6 +6,8 @@ pub mod chart_axes;
 pub mod charts;
 #[path = "../panel_data.rs"]
 pub mod data;
+#[path = "../live_inventory.rs"]
+pub mod live_inventory;
 #[path = "../live_projection.rs"]
 pub mod live_projection;
 #[path = "projection_bench/paint.rs"]

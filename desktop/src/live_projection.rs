@@ -5,6 +5,7 @@ use num_traits::ToPrimitive;
 use serde_json::Value;
 
 use crate::data::{Line, Panel};
+use crate::live_inventory::PerformanceLevel;
 
 #[path = "live_resource_projection.rs"]
 mod resource_projection;
@@ -166,6 +167,7 @@ struct Reading {
     unit: Option<&'static str>,
     channel: Option<usize>,
     resource: Option<&'static str>,
+    axis: Option<&'static str>,
 }
 
 impl Domain {
@@ -399,7 +401,7 @@ fn panel(
             stack: reading.stack,
             negative: Some(reading.negative),
             dashed: Some(reading.dashed),
-            axis: None,
+            axis: reading.axis.map(str::to_owned),
             unit: Some(
                 reading
                     .unit
@@ -459,6 +461,10 @@ fn panel_reading_value(reading: &Reading, point: &Value) -> Result<Option<f32>, 
         return Ok(Some(remainder));
     }
 
+    if reading.key == FAN_MEAN_KEY {
+        return fan_mean(&point["fan_rpm"]);
+    }
+
     if reading.key == "memory_app_bytes" {
         return resource_projection::value(reading, &app_memory(point));
     }
@@ -514,19 +520,35 @@ fn reading(key: &'static str, name: &'static str, color: &'static str, divisor: 
         unit: None,
         channel: None,
         resource: None,
+        axis: None,
     }
 }
 
-fn cpu() -> Specification {
-    let mut specification = specification(
-        "live-cpu",
-        "CPU activity",
-        "%",
-        vec![reading("cpu_percent", "All cores", "#5794f2", 1.0)],
-    );
+/// CPU activity across all cores and within each performance level, the slower level first
+/// as the prototype lists it. The level's name comes from `level_name`, since the Overview
+/// names a level alone and the CPU page names its cores.
+fn cpu(level_name: fn(&'static PerformanceLevel) -> &'static str) -> Specification {
+    let mut lines = vec![reading("cpu_percent", "All cores", "#5794f2", 1.0)];
+    if let Some(levels) = crate::live_inventory::performance_levels() {
+        for (index, color) in [(1, "#73bf69"), (0, "#b877d9")] {
+            let mut line = reading("cpu_level_percent", level_name(&levels[index]), color, 1.0);
+            line.channel = Some(index);
+            lines.push(line);
+        }
+    }
+    let mut specification = specification("live-cpu", "CPU activity", "%", lines);
     specification.maximum = Some(100.0);
-    specification.help = "Busy scheduler ticks divided by total ticks across logical CPUs.";
+    specification.help = "Busy scheduler ticks divided by total ticks across logical CPUs. \
+        Each level averages its own CPUs, as macOS groups them.";
     specification
+}
+
+fn cpu_level_cores(level: &'static PerformanceLevel) -> &'static str {
+    level.cores.as_str()
+}
+
+fn cpu_level_name(level: &'static PerformanceLevel) -> &'static str {
+    level.name.as_str()
 }
 
 fn memory() -> Specification {
@@ -581,7 +603,7 @@ fn gpu_activity() -> Specification {
 fn specifications(route: &str, points: &[Value]) -> Result<Vec<Specification>, String> {
     Ok(match route {
         "overview" => overview(),
-        "cpu" => vec![cpu()],
+        "cpu" => vec![cpu(cpu_level_cores)],
         "memory" => memory_specifications(),
         "gpu" => vec![gpu_activity(), gpu_power()],
         "energy" => energy(points)?,
@@ -742,19 +764,14 @@ fn overview() -> Vec<Specification> {
     let mut network = network_throughput();
     network.title = "Network throughput";
     let mut result = vec![
-        cpu(),
+        cpu(cpu_level_name),
         gpu_activity(),
         memory(),
         system_power("live-power"),
         resource_projection::throughput(),
         network,
         memory_pressure(),
-        specification(
-            "live-temperature",
-            "SoC temperature",
-            "°C",
-            vec![reading("soc_celsius", "SoC temperature", "#f2495c", 1.0)],
-        ),
+        correlation(),
     ];
     for specification in &mut result {
         if !specification.stack {
@@ -762,6 +779,72 @@ fn overview() -> Vec<Specification> {
         }
     }
     result
+}
+
+/// The prototype's overlay of load, power and heat. Power and temperature read on their own
+/// right-hand axes, and the fans share a hidden axis, so each keeps its own shape.
+fn correlation() -> Specification {
+    let mut fans = reading(FAN_MEAN_KEY, "Fans", "#d1d1de", 1.0);
+    fans.unit = Some("rpm");
+    fans.axis = Some("hidden");
+    fans.dashed = true;
+    fans.fill = Some(0.0);
+    let mut power = reading("power_watts", "Power", "#ff9830", 1.0);
+    power.unit = Some("W");
+    power.axis = Some("right1");
+    let mut temperature = reading("soc_celsius", "SoC temperature", "#f2495c", 1.0);
+    temperature.unit = Some("°C");
+    temperature.axis = Some("right2");
+    temperature.fill = Some(0.0);
+    let mut specification = specification(
+        "live-correlation",
+        "Load, power and heat together",
+        "%",
+        vec![
+            reading("cpu_percent", "CPU", "#5794f2", 1.0),
+            reading("gpu_active_percent", "GPU", "#b877d9", 1.0),
+            fans,
+            power,
+            temperature,
+        ],
+    );
+    specification.help = "CPU and GPU activity, whole-machine power, SoC temperature and the \
+        mean speed of the measured fans at the same recorded times. Power and temperature \
+        have their own axes. Reading them together helps investigate a workload, and does not \
+        show that one reading caused another.";
+
+    specification
+}
+
+const FAN_MEAN_KEY: &str = "fan_mean_rpm";
+const FAN_CHANNELS_MAX: usize = 10;
+
+/// The mean speed of the fan channels measured at one reading, or none when no channel was.
+fn fan_mean(channels: &Value) -> Result<Option<f32>, String> {
+    if channels.is_null() {
+        return Ok(None);
+    }
+    let channels = channels.as_array().ok_or("Invalid fan channel array")?;
+    if channels.len() > FAN_CHANNELS_MAX {
+        return Err("Fan history exceeds ten channels".into());
+    }
+    let mut sum = 0.0_f32;
+    let mut count = 0_u8;
+    for channel in channels.iter().take(FAN_CHANNELS_MAX) {
+        let Some(speed) = number(channel)? else {
+            continue;
+        };
+        if speed < 0.0 {
+            return Err("Negative fan speed".into());
+        }
+        sum += speed;
+        count += 1;
+    }
+    if count == 0 {
+        return Ok(None);
+    }
+
+    Ok(Some(sum / f32::from(count)))
 }
 
 fn memory_specifications() -> Vec<Specification> {

@@ -2,6 +2,7 @@ use std::ffi::CStr;
 use std::fmt::Display;
 use std::mem;
 use std::ptr;
+use std::sync::OnceLock;
 
 #[must_use]
 pub fn rows() -> Vec<(String, String)> {
@@ -24,6 +25,50 @@ pub fn rows() -> Vec<(String, String)> {
         row("VM page size · bytes", positive_count(c"hw.pagesize")),
         row("Boot time", boot()),
     ]
+}
+
+/// One performance level of this Mac's CPUs, named as macOS names it.
+pub struct PerformanceLevel {
+    pub name: String,
+    pub cores: String,
+    pub logical_cpus: u32,
+}
+
+/// This Mac's two performance levels, fastest first, or none on a Mac without two levels
+/// or whose levels could not be read.
+pub fn performance_levels() -> Option<&'static [PerformanceLevel; 2]> {
+    static LEVELS: OnceLock<Option<[PerformanceLevel; 2]>> = OnceLock::new();
+    LEVELS
+        .get_or_init(|| match performance_levels_read() {
+            Ok(levels) => levels,
+            Err(error) => {
+                eprintln!("flightdeck performance levels unreadable: {error}");
+                None
+            }
+        })
+        .as_ref()
+}
+
+fn performance_levels_read() -> Result<Option<[PerformanceLevel; 2]>, String> {
+    let Some(levels) =
+        collector::machine::performance_levels().map_err(|error| error.to_string())?
+    else {
+        return Ok(None);
+    };
+    let [fastest, slower] = levels.logical_cpus;
+    Ok(Some([
+        performance_levels_level(c"hw.perflevel0.name", fastest)?,
+        performance_levels_level(c"hw.perflevel1.name", slower)?,
+    ]))
+}
+
+fn performance_levels_level(key: &CStr, logical_cpus: u32) -> Result<PerformanceLevel, String> {
+    let name = string(key)?;
+    Ok(PerformanceLevel {
+        cores: format!("{name} cores"),
+        name,
+        logical_cpus,
+    })
 }
 
 fn row(label: &str, reading: Result<impl Display, String>) -> (String, String) {

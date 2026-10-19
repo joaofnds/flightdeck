@@ -309,7 +309,7 @@ impl AppHoverDriver {
                 .unwrap(),
             temperature: self
                 .context
-                .debug_bounds("chart-card:live-temperature")
+                .debug_bounds("chart-card:live-correlation")
                 .unwrap(),
         })
     }
