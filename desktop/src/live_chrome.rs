@@ -123,9 +123,11 @@ impl LiveDashboard {
             .child(title)
     }
 
-    pub fn footer(&self) -> impl IntoElement {
-        let range = self
-            .reading_snapshot()
+    /// The window of seconds the charts show. It follows the held live reading and not a
+    /// hovered second, since a hover moves the cursor and never the charted window.
+    pub(crate) fn capture_range(&self) -> String {
+        self.snapshot
+            .as_deref()
             .and_then(|snapshot| snapshot.selection["second"].as_u64())
             .map_or_else(String::new, |second| {
                 format!(
@@ -133,7 +135,11 @@ impl LiveDashboard {
                     crate::chart_axes::clock(second.saturating_sub(899), true),
                     crate::chart_axes::clock(second, true)
                 )
-            });
+            })
+    }
+
+    pub fn footer(&self) -> impl IntoElement {
+        let range = self.capture_range();
 
         div()
             .flex()
