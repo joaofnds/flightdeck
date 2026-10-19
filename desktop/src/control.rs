@@ -27,6 +27,10 @@ const POLL: Duration = Duration::from_millis(16);
 const BATCH: usize = 16;
 /// How long a screenshot waits for the window to draw the commands before it.
 const SETTLE: Duration = Duration::from_millis(250);
+/// How often, and how many times, a screenshot looks for the page's readings to arrive, so
+/// a page that never answers still gets its screenshot after five seconds.
+const READING_POLL: Duration = Duration::from_millis(50);
+const READING_POLLS_MAX: u32 = 100;
 /// The rows the `rows` command lists, matching the dashboard's own row bound.
 const ROWS_MAX: usize = 4096;
 
@@ -155,13 +159,14 @@ async fn respond(
         let Some(path) = words.get(1).map(|path| (*path).to_owned()) else {
             return Some(failure("screenshot needs a path"));
         };
+        let settled = settle(dashboard, cx).await?;
         // Two frames apart, so rows measured in the first frame lay out in the second.
         cx.update(draw).ok()?;
         cx.background_executor().timer(SETTLE).await;
         return cx
             .update(|window, cx| {
                 draw(window, cx);
-                screenshot(window, &path)
+                screenshot(window, &path, settled)
             })
             .ok();
     }
@@ -179,6 +184,32 @@ async fn respond(
     })
 }
 
+/// Waits until the page holds its readings or its error, since a page reads its selection
+/// on a worker after each navigation or inspection. Answers whether it did, or none once the
+/// window is gone.
+async fn settle(
+    dashboard: &Entity<LiveDashboard>,
+    cx: &mut gpui::AsyncWindowContext,
+) -> Option<bool> {
+    for _ in 0..READING_POLLS_MAX {
+        let settled = cx
+            .update(|_, cx| {
+                let dashboard = dashboard.read(cx);
+                if dashboard.snapshot.is_some() {
+                    true
+                } else {
+                    dashboard.error.is_some()
+                }
+            })
+            .ok()?;
+        if settled {
+            return Some(true);
+        }
+        cx.background_executor().timer(READING_POLL).await;
+    }
+    Some(false)
+}
+
 /// Draws a frame now. A hidden window gets no display refresh, so without this its hit
 /// areas and its screenshots would stay at the first frame.
 fn draw(window: &mut Window, cx: &mut App) {
@@ -190,14 +221,14 @@ fn failure(error: &str) -> String {
     json!({"ok": false, "error": error}).to_string()
 }
 
-fn screenshot(window: &Window, path: &str) -> String {
+fn screenshot(window: &Window, path: &str, settled: bool) -> String {
     let image = match window.render_to_image() {
         Ok(image) => image,
         Err(error) => return failure(&format!("render: {error}")),
     };
     match image.save(path) {
         Ok(()) => json!({"ok": true, "result": {"path": path, "width": image.width(),
-            "height": image.height()}})
+            "height": image.height(), "settled": settled}})
         .to_string(),
         Err(error) => failure(&format!("{path}: {error}")),
     }

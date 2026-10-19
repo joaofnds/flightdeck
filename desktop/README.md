@@ -53,8 +53,9 @@ target/debug/flightdeck-control --socket /tmp/flightdeck.sock \
 viewport, the scroll position and the stat cards. `rows` lists the page's rows, which
 `reveal ROW_KEY` scrolls to the top. Pointer commands take window coordinates in
 points. A screenshot renders the window's own frame offscreen, at its scale factor,
-so it shows exactly what the window draws and nothing of the desktop around it.
-Builds without the feature refuse `--control`.
+so it shows exactly what the window draws and nothing of the desktop around it. It
+first waits up to five seconds for the page's readings and reports in `settled` whether
+they arrived. Builds without the feature refuse `--control`.
 
 Timed interactive live windows accept `--seconds 1..1800`. Run
 `target/release/flightdeck --seconds 900`
