@@ -10,7 +10,7 @@ use crate::live_source::{Snapshot, identity_publication, identity_signature};
 mod identity_tests;
 
 #[path = "live_hover_controller.rs"]
-mod controller;
+pub(crate) mod controller;
 #[path = "live_hover_layout.rs"]
 pub(crate) mod layout;
 #[path = "live_hover_rows.rs"]

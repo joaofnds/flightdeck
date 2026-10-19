@@ -55,6 +55,7 @@ pub struct LiveDashboard {
     pub animate: bool,
     pub reveal_hardware: bool,
     pub chart_hover: Option<ChartHover>,
+    pub(crate) pointer: crate::live_hover::controller::PointerPlace,
     pub(crate) chart_inspector: Option<crate::live_chart_view::inspector::ChartInspector>,
     pub preview: Option<crate::live_hover::Preview>,
     pub(crate) preview_ready_at: Instant,
@@ -151,6 +152,7 @@ impl LiveDashboard {
             animate: false,
             reveal_hardware: false,
             chart_hover: None,
+            pointer: crate::live_hover::controller::PointerPlace::InsideWindow,
             chart_inspector: None,
             preview: None,
             preview_ready_at: Instant::now(),
@@ -430,12 +432,12 @@ impl LiveDashboard {
         if self.request.second.is_some() {
             return "Paused".into();
         }
-        let Some(wall) = snapshot.selection["selected"]["wall_ns"].as_u64() else {
+        let Some(newest) = snapshot.catalog["last_second"].as_u64() else {
             return "No live readings".into();
         };
         match SystemTime::now().duration_since(UNIX_EPOCH) {
             Ok(now) => {
-                let observed = Duration::from_nanos(wall);
+                let observed = Duration::from_secs(newest);
                 if observed > now + Duration::from_secs(3) {
                     return "Clock changed".into();
                 }
@@ -527,6 +529,12 @@ impl Render for LiveDashboard {
             .font_family(".AppleSystemUIFont")
             .text_size(px(13.0))
             .on_key_down(crate::dashboard::keyboard_navigation)
+            .on_mouse_move(cx.listener(|this, _: &gpui::MouseMoveEvent, _, _| {
+                this.pointer = crate::live_hover::controller::PointerPlace::InsideWindow;
+            }))
+            .on_mouse_exit(cx.listener(|this, _: &gpui::MouseExitEvent, _, cx| {
+                this.pointer_left_window(cx);
+            }))
             .child(self.brandbar())
             .child(
                 div()

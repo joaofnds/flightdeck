@@ -388,7 +388,11 @@ impl LiveDashboard {
                     return;
                 }
 
-                if !*hovered {
+                if *hovered {
+                    if this.pointer == crate::live_hover::controller::PointerPlace::OutsideWindow {
+                        return;
+                    }
+                } else {
                     if this.reading_keyboard_hover_retained(
                         charts::plot_bounds(measured.get()),
                         window,

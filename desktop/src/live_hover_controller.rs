@@ -8,6 +8,15 @@ use crate::live_source::{Snapshot, Update};
 #[path = "live_hover_input_tests.rs"]
 mod input_tests;
 
+/// Where the pointer was last seen. GPUI keeps the last pointer position after the pointer
+/// leaves the window, so a hover listener must not trust a hit test until the pointer moves
+/// inside the window again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PointerPlace {
+    InsideWindow,
+    OutsideWindow,
+}
+
 impl LiveDashboard {
     pub(crate) fn reading_header(&self, selected: &str) -> gpui::Div {
         use gpui::prelude::*;
@@ -96,6 +105,16 @@ impl LiveDashboard {
         }
 
         if self.reading_target_source() == Some(source) {
+            self.end_reading_preview(cx);
+        }
+    }
+
+    /// Ends a pointer hover when the pointer leaves the window. GPUI keeps the last pointer
+    /// position, so until the pointer moves again the next frame would hover the plot under
+    /// that stale position.
+    pub(crate) fn pointer_left_window(&mut self, cx: &mut Context<Self>) {
+        self.pointer = PointerPlace::OutsideWindow;
+        if self.reading_origin() == Some(Origin::Pointer) {
             self.end_reading_preview(cx);
         }
     }

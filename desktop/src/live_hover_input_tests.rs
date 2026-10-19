@@ -171,6 +171,38 @@ fn pointer_exit_restores_following_readings_and_rejects_a_late_response(cx: &mut
 }
 
 #[gpui::test]
+fn leaving_the_window_ends_the_hover_after_the_next_frame(cx: &mut TestAppContext) {
+    // Goal: a pointer that leaves the window stops inspecting, though GPUI keeps its last
+    // position. Method: hover the plot, leave the window, repaint, and look for the preview.
+    let mut harness = HoverHarness::setup(cx, Route::Cpu, Mode::Follow);
+    harness.driver.hover(Epoch::Historical);
+
+    harness.driver.leave_window();
+
+    assert!(
+        !harness
+            .driver
+            .text_is_visible("Hover preview · Loading exact details")
+    );
+    assert_eq!(harness.driver.committed_mode(), Mode::Follow);
+    harness.teardown();
+}
+
+#[gpui::test]
+fn the_source_status_follows_the_newest_reading_while_an_old_second_is_shown(
+    cx: &mut TestAppContext,
+) {
+    // Goal: showing an older second leaves the source status on the newest reading.
+    // Method: make only the newest reading current and read the status of the old selection.
+    let mut harness = HoverHarness::setup(cx, Route::Cpu, Mode::Follow);
+
+    harness.driver.make_newest_reading_current();
+
+    assert_eq!(harness.driver.status(), "Live");
+    harness.teardown();
+}
+
+#[gpui::test]
 fn pointer_exit_restores_the_paused_selection_after_a_late_failure(cx: &mut TestAppContext) {
     // A failed hover cannot unpause or overwrite the committed paused observation.
     let mut harness = HoverHarness::setup(cx, Route::Cpu, Mode::Paused);
@@ -460,6 +492,33 @@ impl HoverDriver {
     fn leave_plot(&mut self) {
         let bounds = self.context.debug_bounds(self.route.plot()).unwrap();
         self.hover_position(gpui::point(gpui::px(20.0), bounds.center().y));
+    }
+
+    fn leave_window(&mut self) {
+        let bounds = self.context.debug_bounds(self.route.plot()).unwrap();
+        self.context.simulate_event(gpui::MouseExitEvent {
+            position: bounds.center(),
+            pressed_button: None,
+            modifiers: Modifiers::none(),
+        });
+        self.context.update(|window, _| window.refresh());
+        self.context.run_until_parked();
+    }
+
+    fn make_newest_reading_current(&mut self) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        self.view.update(&mut self.context, |dashboard, _| {
+            let snapshot = dashboard.snapshot.as_mut().unwrap();
+            snapshot.catalog["last_second"] = json!(now);
+        });
+    }
+
+    fn status(&self) -> String {
+        self.view
+            .read_with(&self.context, |dashboard, _| dashboard.status())
     }
 
     fn focus_copy(&mut self) {
