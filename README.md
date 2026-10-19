@@ -1,8 +1,12 @@
 # Flightdeck
 
-A macOS system monitor with a Rust/GPUI client and a Rust recording core. It records
-process and system readings once a second and keeps them for later inspection.
-Open-file and socket collection is planned. The design research is in
+A macOS system monitor with a Rust/GPUI client and a Rust recording core, meant to be
+the only monitor the Mac needs. It records process and system readings once a second and
+keeps them for later inspection. The aim is every reading of the machine, its processes
+and apps, its devices and its events, charts that explore any of them over any range, and
+a way to see which processes, apps and events changed with a spike, a lag or a power
+draw. Open files, sockets, per-process network, devices, inventory and most events are
+not recorded yet, and neither exploration nor that view exists. The design research is in
 [docs/recording-research.md](docs/recording-research.md). Running the collector without
 the app and reading it from Grafana are weighed in
 [docs/headless-collector-research.md](docs/headless-collector-research.md).

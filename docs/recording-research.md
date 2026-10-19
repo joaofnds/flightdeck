@@ -14,8 +14,13 @@ described at the end.
   for now (confirmed 2026-10-15). Completeness
   comes first, then benchmarks that run on CI, then optimizing against them ("let's try
   to keep it under 5% for now and aim for completeness", 2026-10-13).
-- The collector runs without root. Root may come later as an option the user turns on
-  in the app.
+- The collector runs without root. Root is planned as an option the user turns on in
+  the app, after the readings that need no root ("every single possible visibility point
+  that we can make on the computer", 2026-10-19).
+- The recording keeps its readings for a time limit the user sets in minutes, hours or
+  days, one day by default ("we should definitely have a configurable limit in time
+  duration (minutes/hours/days) and default to maybe 1 day", 2026-10-19). At the
+  1.10 GB a day the recording reached on 2026-10-18, the default keeps about 1.1 GB.
 - A kernel panic or a power loss may lose the minute not yet sealed.
 - The collector stays in Rust ("agree, stay in rust", 2026-10-13). Measured against
   Zig, performance did not decide between the two, as Rust against Zig below shows.
@@ -195,8 +200,13 @@ bits, which wrap every 4 GB. Per-process network bytes come from the private
 NetworkStatistics framework that `nettop` uses, and without root `nettop` reported
 processes of root and four system users beside the user's own. Running `nettop` itself
 costs about 30 ms of CPU and 5 seconds a sample, so the collector has to call the
-framework directly. Per-process GPU time has not been located beyond the coalition
-totals.
+framework directly. Per-process GPU time is readable without root: each client of the
+GPU's `AGXAccelerator` entry in the I/O Registry names its process in
+`IOUserClientCreator` and carries an `accumulatedGPUTime` in nanoseconds. Summing a pid's
+clients would give that process's GPU time, which no run here has compared with another
+source. On 2026-10-19 the user's account read 95
+such clients with `ioreg -l -w0 -r -c AGXAccelerator`. The collector does not read them
+yet, and their cost is not measured.
 
 Summed from parts measured apart, the collector was estimated at 20 to 22 ms a second,
 2.0 to 2.2% of one core. The collector in Rust reads every row above with a cost in its
@@ -741,8 +751,8 @@ two readings, and no run has watched it.
    boot and publication identify readings across restarts; actual observation clocks
    preserve gaps and backward wall time. Complete table sets become visible through
    full-synced canonical no-overwrite commit markers. Empty windows produce no files,
-   and stopping may seal a partial window. Per-minute/hour compaction and retention
-   remain future work.
+   and stopping may seal a partial window. The time limit under Decisions is not built
+   yet, and per-minute and per-hour compaction remain future work.
 4. The GPUI desktop client reads live and saved observations through the Rust viewer
    adapter, combining sealed history with the ring's unsealed tail under bounded
    operation, result and cache limits.
