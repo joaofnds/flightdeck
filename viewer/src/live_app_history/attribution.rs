@@ -51,7 +51,7 @@ impl History {
         drop(self.saved_residents.replace(ResidentCache::new()));
         reduction.choose()?;
         self.attribution_project(&mut reduction, metric)?;
-        self.attribution_finish(reduction, 0, 0)
+        crate::live_app_response::bounded(self.attribution_finish(reduction, 0, 0)?)
     }
 
     fn attribution_saved(
@@ -217,7 +217,7 @@ impl History {
         coverage["committed_observations"] = json!(committed);
         coverage["cache_bytes"] = json!(self.bytes + saved_bytes);
         coverage["cache_bytes_max"] = json!(BYTES_MAX);
-        crate::live_app_response::bounded(response)
+        Ok(response)
     }
 }
 

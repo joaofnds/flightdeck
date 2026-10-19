@@ -262,11 +262,18 @@ impl<'operation> Reduction<'operation> {
             previous = Some(&point.capture.coverage.observation);
         }
         let cohort: Vec<_> = self.cohort.iter().map(Key::json).collect();
-        crate::live_app_response::bounded(json!({"metric":self.metric.name(),
-            "selected":self.selected.json(),"context_seconds":900,"cohort":cohort,"points":points,
+        // The json! macro copies each embedded value, so the built values move in afterwards.
+        let mut response = json!({"metric":self.metric.name(),
+            "selected":null,"context_seconds":900,"cohort":null,"points":null,
             "coverage":{"retention_limited":self.missing,"context_app_count":self.means.count(),
                 "context_app_count_max":24000,"context_key_bytes":self.means.bytes(),
-                "context_key_bytes_max":8_388_608}}))
+                "context_key_bytes_max":8_388_608}});
+        response["selected"] = self.selected.json();
+        response["cohort"] = Value::Array(cohort);
+        response["points"] = Value::Array(points);
+
+        // The caller checks the bound once it has added its own coverage.
+        Ok(response)
     }
 
     fn in_range(&self, observation: &Observation) -> Result<bool> {
@@ -305,14 +312,18 @@ impl Point {
     fn json(&self, metric: AppAttributionMetric, count: usize, segment: u64) -> Value {
         let apps: Vec<_> = self.apps[..count]
             .iter()
-            .map(|app| app.map(|app| app.json(metric, self.capture.elapsed_ns)))
+            .map(|app| app.map_or(Value::Null, |app| app.json(metric, self.capture.elapsed_ns)))
             .collect();
         let capture = &self.capture.coverage;
+        // The json! macro copies each embedded value, so the built values move in afterwards.
         if self.source == Source::Missing {
-            return json!({"observation":capture.observation.json(),"segment":segment.to_string(),
+            let mut point = json!({"observation":null,"segment":segment.to_string(),
                 "elapsed_ns":null,"source_available":false,"membership_complete":null,
                 "ungrouped_members":null,"usage_refused":null,"usage_gone":null,
-                "apps":apps,"other":null});
+                "apps":null,"other":null});
+            point["observation"] = capture.observation.json();
+            point["apps"] = Value::Array(apps);
+            return point;
         }
         let mut other = self.other.json(metric, self.capture.elapsed_ns);
         other["app_count"] = json!(self.other_count);
@@ -332,11 +343,16 @@ impl Point {
                 other[metric.rate_name()] = Value::Null;
             }
         }
-        json!({"observation":capture.observation.json(),"segment":segment.to_string(),
+        let mut point = json!({"observation":null,"segment":segment.to_string(),
             "elapsed_ns":self.capture.elapsed_ns.map(|value| value.to_string()),
             "source_available":true,"membership_complete":capture.membership_complete,
             "ungrouped_members":capture.ungrouped_members,"usage_refused":capture.usage_refused,
-            "usage_gone":capture.usage_gone,"apps":apps,"other":other})
+            "usage_gone":capture.usage_gone,"apps":null,"other":null});
+        point["observation"] = capture.observation.json();
+        point["apps"] = Value::Array(apps);
+        point["other"] = other;
+
+        point
     }
 }
 

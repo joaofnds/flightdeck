@@ -245,11 +245,18 @@ impl<'operation> Reduction<'operation> {
             previous = Some(&point.capture.observation);
         }
 
-        crate::live_app_response::bounded(json!({"selected":self.selected.json(),
-            "context_seconds":900,"cohort":cohort,"points":points,"coverage":{
+        // The json! macro copies each embedded value, so the built values move in afterwards.
+        let mut response = json!({"selected":null,
+            "context_seconds":900,"cohort":null,"points":null,"coverage":{
                 "retention_limited":self.missing,
                 "context_app_count":self.means.count(),"context_app_count_max":APPS_MAX,
-                "context_key_bytes":self.means.key_bytes(),"context_key_bytes_max":KEY_BYTES_MAX}}))
+                "context_key_bytes":self.means.key_bytes(),"context_key_bytes_max":KEY_BYTES_MAX}});
+        response["selected"] = self.selected.json();
+        response["cohort"] = Value::Array(cohort);
+        response["points"] = Value::Array(points);
+
+        // The caller checks the bound once it has added its own coverage.
+        Ok(response)
     }
 
     pub(crate) fn retain_metadata(&mut self, observation: &Observation) -> Result<()> {
@@ -320,42 +327,51 @@ impl Point {
     fn json(&self, count: usize, segment: u64) -> Value {
         let apps: Vec<_> = self.apps[..count]
             .iter()
-            .map(|app| app.map(|app| app.json()))
+            .map(|app| app.map_or(Value::Null, |app| app.json()))
             .collect();
+        // The json! macro copies each embedded value, so the built values move in afterwards.
         if self.source == Source::Missing {
-            return json!({"observation":self.capture.observation.json(),
+            let mut point = json!({"observation":null,
                 "segment":segment.to_string(),"source_available":false,
                 "membership_complete":null,"ungrouped_members":null,
-                "usage_refused":null,"usage_gone":null,"apps":apps,"other":null});
+                "usage_refused":null,"usage_gone":null,"apps":null,"other":null});
+            point["observation"] = self.capture.observation.json();
+            point["apps"] = Value::Array(apps);
+            return point;
         }
 
         let other = if self.other_count > 0 {
-            Some(self.other.json())
+            self.other.json()
         } else {
             if self.capture.membership_complete {
                 if self.capture.ungrouped_members == 0 {
                     if self.capture.usage_refused == 0 {
                         if self.capture.usage_gone == 0 {
-                            Some(EMPTY.json())
+                            EMPTY.json()
                         } else {
-                            None
+                            Value::Null
                         }
                     } else {
-                        None
+                        Value::Null
                     }
                 } else {
-                    None
+                    Value::Null
                 }
             } else {
-                None
+                Value::Null
             }
         };
 
-        json!({"observation":self.capture.observation.json(),"segment":segment.to_string(),
+        let mut point = json!({"observation":null,"segment":segment.to_string(),
             "source_available":true,"membership_complete":self.capture.membership_complete,
             "ungrouped_members":self.capture.ungrouped_members,
             "usage_refused":self.capture.usage_refused,"usage_gone":self.capture.usage_gone,
-            "apps":apps,"other":{"app_count":self.other_count,"resident_bytes":other}})
+            "apps":null,"other":{"app_count":self.other_count,"resident_bytes":null}});
+        point["observation"] = self.capture.observation.json();
+        point["apps"] = Value::Array(apps);
+        point["other"]["resident_bytes"] = other;
+
+        point
     }
 }
 

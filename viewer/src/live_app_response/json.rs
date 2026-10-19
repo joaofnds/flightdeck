@@ -13,7 +13,7 @@ pub(super) fn apps_page(sample: &Sample, page: Page) -> Result<Value> {
         .enumerate()
         .map(|(index, value)| app(value, range.start + index, sample.elapsed_ns))
         .collect();
-    result["apps"] = json!(values);
+    result["apps"] = Value::Array(values);
     result["page"] = page_json(page, range.end, sample.apps.len());
 
     bounded(result)
@@ -47,7 +47,7 @@ pub(super) fn members_page(sample: &Sample, app_index: Option<u32>, page: Page) 
         .map(|value| process(value, sample.elapsed_ns))
         .collect();
     let mut result = header(sample);
-    result["processes"] = json!(values);
+    result["processes"] = Value::Array(values);
     result["page"] = page_json(page, range.end, count);
 
     bounded(result)

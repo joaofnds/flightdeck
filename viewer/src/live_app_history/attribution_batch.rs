@@ -416,10 +416,9 @@ impl<'operation> MetricState<'operation> {
             response["coverage"]["saved_cache_limited"] = json!(coverage.uncached > 0);
             response["coverage"]["saved_observations_cached"] = json!(coverage.cached);
             response["coverage"]["saved_observations_uncached"] = json!(coverage.uncached);
-            return crate::live_app_response::bounded(response);
         }
 
-        Ok(response)
+        crate::live_app_response::bounded(response)
     }
 }
 
