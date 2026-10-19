@@ -3,7 +3,9 @@
 A macOS system monitor with a Rust/GPUI client and a Rust recording core. It records
 process and system readings once a second and keeps them for later inspection.
 Open-file and socket collection is planned. The design research is in
-[docs/recording-research.md](docs/recording-research.md).
+[docs/recording-research.md](docs/recording-research.md). Running the collector without
+the app and reading it from Grafana are weighed in
+[docs/headless-collector-research.md](docs/headless-collector-research.md).
 
 ## Collector
 
