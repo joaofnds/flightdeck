@@ -237,6 +237,10 @@ impl LiveDashboard {
             Row::Table(_, _) | Row::App(_) | Row::Process(_) | Row::Executable(_)
         );
         let content = self.row_content(index, cx);
+        let padding = match &self.rows[index] {
+            Row::Charts(_) => 4.0,
+            _ => 8.0,
+        };
         let key = self.rows[index].layout_key();
         let measured = Rc::clone(&self.row_heights);
         let measured_key = key.clone();
@@ -259,7 +263,7 @@ impl LiveDashboard {
                 )
             })
             .px(px(24.0))
-            .py(px(if compact { 0.0 } else { 8.0 }))
+            .py(px(if compact { 0.0 } else { padding }))
             .child(content)
             .child(
                 gpui::canvas(
@@ -299,7 +303,7 @@ impl LiveDashboard {
             }
             Row::Charts(panels) => div()
                 .flex()
-                .gap(px(16.0))
+                .gap(px(8.0))
                 .children(
                     panels
                         .iter()
@@ -325,8 +329,12 @@ impl LiveDashboard {
         let selection = self
             .reading_snapshot()
             .map_or(&Value::Null, |snapshot| &snapshot.selection);
-        let mut tiles = div().flex().flex_wrap().gap(px(10.0));
-        for card in summary::cards(&self.request.route, selection) {
+        let cards = summary::cards(&self.request.route, selection);
+        let mut tiles = div()
+            .grid()
+            .grid_cols(summary_columns(self.viewport_size.width, cards.len()))
+            .gap(px(8.0));
+        for card in cards {
             tiles = tiles.child(Self::summary_card(&card, cx));
         }
 
@@ -355,10 +363,12 @@ impl LiveDashboard {
             .tab_stop(true)
             .focus(|style| style.bg(rgb(0x32_46_61)))
             .hover(|style| style.bg(rgb(0x20_29_36)))
-            .flex_1()
-            .min_w(px(145.0))
-            .p(px(16.0))
-            .rounded(px(7.0))
+            .flex()
+            .flex_col()
+            .gap(px(3.0))
+            .min_w_0()
+            .p(px(12.0))
+            .rounded(px(8.0))
             .border_1()
             .border_color(rgb(GRID))
             .bg(rgb(PANEL))
@@ -374,22 +384,25 @@ impl LiveDashboard {
             )
             .child(
                 div()
+                    .debug_selector(|| format!("summary-label:{}", card.label))
                     .text_size(px(12.0))
                     .text_color(rgb(MUTED))
                     .child(card.label),
             )
             .child(
                 div()
-                    .mt(px(6.0))
-                    .text_size(px(25.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .debug_selector(|| format!("summary-value:{}", card.label))
+                    .text_size(px(22.0))
+                    .line_height(px(30.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(rgb(card.color))
                     .child(card.reading.clone()),
             )
             .child(
                 div()
-                    .mt(px(4.0))
+                    .debug_selector(|| format!("summary-note:{}", card.label))
                     .text_size(px(11.0))
+                    .line_height(px(16.0))
                     .text_color(rgb(MUTED))
                     .child(card.note),
             )
@@ -443,6 +456,22 @@ impl LiveDashboard {
 
     fn computer(&self) -> impl IntoElement {
         computer_view::view(&self.inventory)
+    }
+}
+
+fn summary_columns(width: gpui::Pixels, count: usize) -> u16 {
+    assert!((1..=6).contains(&count));
+    if width < px(640.0) {
+        return 2;
+    }
+
+    if width < px(1100.0) {
+        return 4;
+    }
+
+    match u16::try_from(count) {
+        Ok(count) => count,
+        Err(_) => unreachable!("Summary cards are bounded to six"),
     }
 }
 

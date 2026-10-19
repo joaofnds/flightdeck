@@ -61,13 +61,15 @@ impl LiveDashboard {
         };
 
         div()
+            .debug_selector(|| format!("chart-card:{}", panel.id))
             .flex_1()
             .min_w_0()
-            .rounded(px(7.0))
+            .rounded(px(12.0))
             .border_1()
             .border_color(rgb(GRID))
             .bg(rgb(PANEL))
-            .p(px(18.0))
+            .px(px(12.0))
+            .py(px(8.0))
             .child(Self::chart_heading(panel, cx))
             .child(self.chart_headline(panel, index))
             .child(chart)

@@ -19,6 +19,26 @@ fn overview_shows_six_primary_charts_before_rankings_and_keeps_resource_context_
 }
 
 #[gpui::test]
+fn chart_cards_use_reference_padding_and_eight_pixel_column_gaps(cx: &mut TestAppContext) {
+    // Compare production card edges, headline bounds and Data controls in a real chart row.
+    let mut harness = InputHarness::setup_route(cx, "overview");
+    harness.driver.seed_rolling_selection();
+    harness.driver.resize_charts(1320.0);
+    let card = harness.driver.chart_bounds("chart-card:live-cpu");
+    let adjacent = harness.driver.chart_bounds("chart-card:live-gpu-activity");
+    let next_row = harness.driver.chart_bounds("chart-card:live-power");
+    let headline = harness.driver.chart_bounds("chart-reading:live-cpu:0.0 %");
+    let data = harness.driver.chart_bounds("chart-data:live-cpu");
+
+    assert_eq!(adjacent.left() - card.right(), px(8.0));
+    assert_eq!(next_row.top() - card.bottom(), px(8.0));
+    assert_eq!(headline.left() - card.left(), px(13.0));
+    assert_eq!(card.right() - headline.right(), px(13.0));
+    assert_eq!(data.top() - card.top(), px(9.0));
+    harness.teardown();
+}
+
+#[gpui::test]
 fn overview_charts_reflow_when_the_same_window_crosses_both_breakpoints(cx: &mut TestAppContext) {
     // Render one exact 900-second selection while resizing through the approved 3/2/1 layout.
     let mut harness = InputHarness::setup_route(cx, "overview");
@@ -107,8 +127,8 @@ fn regrouping_a_hovered_first_plot_recomputes_its_reading_at_the_stationary_poin
     assert_eq!(harness.driver.pointer_position(), pointer);
     let fraction = f32::from(pointer.x - plot.left()) / f32::from(plot.size.width);
     let second = 101 + (fraction * 900.0).floor().to_u64().unwrap();
-    assert_eq!(second, 356);
-    harness.driver.assert_cpu_inspection(second, "56.0 %");
+    assert_eq!(second, 366);
+    harness.driver.assert_cpu_inspection(second, "66.0 %");
     assert_eq!(
         harness.driver.accepted_selection().unwrap()["selected"],
         selected
