@@ -150,6 +150,8 @@ pub enum Row {
     Process(usize),
     Executable(usize),
     Inventory,
+    /// The page's last row, which reports where the readings come from.
+    Footer,
     Spacer(gpui::Pixels),
 }
 
@@ -601,6 +603,7 @@ impl Render for LiveDashboard {
             .text_color(rgb(TEXT))
             .font_family(".AppleSystemUIFont")
             .text_size(px(13.0))
+            .line_height(gpui::relative(1.5))
             .on_key_down(crate::dashboard::keyboard_navigation)
             .on_mouse_move(cx.listener(|this, _: &gpui::MouseMoveEvent, _, _| {
                 this.pointer = crate::live_hover::controller::PointerPlace::InsideWindow;
@@ -627,7 +630,6 @@ impl Render for LiveDashboard {
                             .child(body),
                     ),
             )
-            .child(self.footer())
             .children(self.chart_inspector_overlay(cx))
     }
 }
@@ -683,7 +685,8 @@ mod selection_tests {
 
         assert!(dashboard.snapshot.is_none());
         assert!(dashboard.expanded.is_none());
-        assert!(dashboard.rows.is_empty());
+        // Only the page's footer, which shows no reading, remains.
+        assert!(dashboard.rows.iter().all(|row| matches!(row, Row::Footer)));
         assert!(
             crate::native_workflows::selected_copy(
                 dashboard.snapshot.as_deref(),
@@ -709,7 +712,8 @@ mod selection_tests {
         }));
 
         assert!(dashboard.snapshot.is_none());
-        assert!(dashboard.rows.is_empty());
+        // Only the page's footer, which shows no reading, remains.
+        assert!(dashboard.rows.iter().all(|row| matches!(row, Row::Footer)));
         assert_eq!(dashboard.error.as_deref(), Some("Recording read failed"));
         assert_eq!(dashboard.status(), "Reading unavailable");
     }

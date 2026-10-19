@@ -1,7 +1,7 @@
-use gpui::{App, Hsla, IntoElement, Pixels, TextRun, Window, canvas, div, font, point};
+use gpui::{App, Hsla, IntoElement, Pixels, TextRun, TextSystem, Window, canvas, div, font, point};
 use gpui::{prelude::*, px, rgb};
 
-use crate::charts::{PLOT_INSETS, Scale, TEXT, number};
+use crate::charts::{PLOT_INSETS, Scale, TEXT};
 
 /// The wall-clock seconds a live chart spans, from `first` for `span` seconds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -16,32 +16,52 @@ pub struct AxisLabels {
     entries: Vec<(f32, String)>,
 }
 
-const LABEL_SIZE: f32 = 11.0;
+const LABEL_SIZE: f32 = 12.0;
+/// The gap between a value label and the plot it labels, and the margin beyond the labels.
+const LABEL_GAP: f32 = 7.0;
+/// Where a time label's line starts below the plot, in a row `TIME_ROW_HEIGHT` tall.
+const TIME_LABEL_TOP: f32 = 8.5;
+pub const TIME_ROW_HEIGHT: f32 = 28.0;
+const LABEL_LINE: f32 = 15.0;
 const TIME_LABEL_WIDTH: f32 = 60.0;
 const TIME_INTERVALS: [u64; 8] = [60, 120, 300, 600, 900, 1800, 3600, 7200];
 
 #[must_use]
-pub fn axis_labels(scale: Scale, unit: &str) -> AxisLabels {
+pub fn axis_labels(scale: Scale, unit: &str, text: &TextSystem) -> AxisLabels {
     labels(
         scale
             .ticks()
             .map(|value| (scale.fraction(value), axis_label(value, unit)))
             .collect(),
+        text,
     )
 }
 
 /// Value labels at the given fractions of the plot's height, the lowest first.
 #[must_use]
-pub fn labels(entries: Vec<(f32, String)>) -> AxisLabels {
-    let characters = entries
+pub fn labels(entries: Vec<(f32, String)>, text: &TextSystem) -> AxisLabels {
+    let widest = entries
         .iter()
-        .map(|(_, label)| label.chars().count())
-        .max()
-        .unwrap_or(1);
+        .map(|(_, label)| text_width(text, label))
+        .fold(px(0.0), Pixels::max);
     AxisLabels {
-        width: px((number(characters.min(18)) * LABEL_SIZE * 0.6 + 10.0).max(28.0)),
+        width: widest + px(2.0 * LABEL_GAP),
         entries,
     }
+}
+
+/// How wide `label` sets at the axis label size, as the sum of its glyph advances.
+fn text_width(text: &TextSystem, label: &str) -> Pixels {
+    let face = text.resolve_font(&font(".SystemUIFont"));
+    let mut width = px(0.0);
+    for character in label.chars() {
+        match text.advance(face, px(LABEL_SIZE), character) {
+            Ok(advance) => width += advance.width,
+            Err(error) => eprintln!("axis label glyph: {error}"),
+        }
+    }
+
+    width
 }
 
 /// The side of the plot an axis column stands on.
@@ -62,15 +82,16 @@ pub fn axis_column(labels: AxisLabels, height: Pixels, side: AxisSide) -> impl I
         .w(labels.width)
         .h(height)
         .text_size(px(LABEL_SIZE))
+        .line_height(px(LABEL_LINE))
         .text_color(rgb(TEXT));
     for (fraction, label) in labels.entries {
         let entry = div()
             .absolute()
-            .top(PLOT_INSETS.top + plot * (1.0 - fraction) - px(8.0))
+            .top(PLOT_INSETS.top + plot * (1.0 - fraction) - px(LABEL_LINE / 2.0))
             .child(label);
         column = column.child(match side {
-            AxisSide::Leading => entry.right(px(2.0)),
-            AxisSide::Trailing => entry.left(px(4.0)),
+            AxisSide::Leading => entry.right(px(LABEL_GAP)),
+            AxisSide::Trailing => entry.left(px(LABEL_GAP)),
         });
     }
     column
@@ -121,8 +142,11 @@ fn paint_label(
     let half = line.width / 2.0;
     let left = (center.x - half).min(center.x + plot_width - line.width);
     if let Err(error) = line.paint(
-        point(left.max(center.x - line.width), center.y + px(2.0)),
-        px(LABEL_SIZE + 5.0),
+        point(
+            left.max(center.x - line.width),
+            center.y + px(TIME_LABEL_TOP),
+        ),
+        px(LABEL_LINE),
         gpui::TextAlign::Left,
         None,
         window,
@@ -191,6 +215,62 @@ pub fn clock(second: u64, seconds: bool) -> String {
     } else {
         format!("{:02}:{:02}", parts.tm_hour, parts.tm_min)
     }
+}
+
+const MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+/// The local date and zone abbreviation of `second`, as in `15 Oct 2026 CEST`.
+#[must_use]
+pub fn date_with_zone(second: u64) -> String {
+    let Some(parts) = local_parts(second) else {
+        return "Unavailable".into();
+    };
+    let Some(date) = date(&parts) else {
+        return "Unavailable".into();
+    };
+
+    format!("{date} {}", zone(&parts))
+}
+
+/// The local window from `first` to `last`, as in `15 Oct 2026 · 22:13:00–23:13:00 CEST`.
+#[must_use]
+pub fn range_label(first: u64, last: u64) -> String {
+    let Some(parts) = local_parts(last) else {
+        return "Unavailable".into();
+    };
+    let Some(date) = date(&parts) else {
+        return "Unavailable".into();
+    };
+
+    format!(
+        "{date} · {}–{} {}",
+        clock(first, true),
+        clock(last, true),
+        zone(&parts)
+    )
+}
+
+fn date(parts: &libc::tm) -> Option<String> {
+    let index = usize::try_from(parts.tm_mon).ok()?;
+    let month = MONTHS.get(index)?;
+
+    Some(format!(
+        "{} {month} {}",
+        parts.tm_mday,
+        i64::from(parts.tm_year) + 1900
+    ))
+}
+
+fn zone(parts: &libc::tm) -> String {
+    if parts.tm_zone.is_null() {
+        return String::new();
+    }
+    // localtime_r points tm_zone at a NUL-terminated abbreviation that outlives this call.
+    let name = unsafe { std::ffi::CStr::from_ptr(parts.tm_zone) };
+
+    name.to_string_lossy().into_owned()
 }
 
 pub(crate) fn local_parts(second: u64) -> Option<libc::tm> {

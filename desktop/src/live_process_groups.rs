@@ -433,21 +433,6 @@ fn reading_line_metric(
     Some((line % groups, metric))
 }
 
-/// Names the gap when the selected second has no process group readings. Partial membership
-/// is not named, since it counts unreadable processes anywhere on the Mac rather than in this
-/// App, and the process grouping note already reports that count.
-pub fn coverage(payload: &AppProcessGroupsHistory, index: Option<usize>) -> Option<&'static str> {
-    let Some(point) = index.and_then(|index| payload.points.get(index)) else {
-        return Some("No process group readings at this second.");
-    };
-
-    if point.source_available {
-        None
-    } else {
-        Some("Process group readings unavailable at this second.")
-    }
-}
-
 #[derive(Clone, Copy)]
 struct ObservationPair<'observation> {
     previous: &'observation viewer::live_app_response::Observation,

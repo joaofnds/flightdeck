@@ -1,6 +1,6 @@
 use gpui::{Context, FocusHandle, ListOffset, Window, div, prelude::*, px, rgb};
 
-use crate::charts::{GRID, TEXT};
+use crate::charts::MUTED;
 use crate::live_dashboard::{LiveDashboard, Row};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -119,6 +119,19 @@ impl Sections {
 }
 
 impl Row {
+    /// Whether the row belongs to a details panel, which the prototype draws as a bordered
+    /// panel around its summary and the content it folds.
+    pub(crate) fn in_details(&self) -> bool {
+        match self {
+            Self::Disclosure(section) => matches!(
+                section,
+                Section::OverviewHistories | Section::OverviewContext
+            ),
+            Self::OverviewAppHistories(_) | Self::OverviewAnalysis(_) => true,
+            _ => false,
+        }
+    }
+
     pub(crate) fn disclosure_section(&self) -> Option<Section> {
         match self {
             Self::Disclosure(section) => Some(*section),
@@ -181,15 +194,18 @@ impl LiveDashboard {
             .hover(|style| style.bg(rgb(0x22_25_2b)))
             .flex()
             .items_center()
-            .gap(px(8.0))
+            .gap(px(5.0))
             .min_h(px(44.0))
-            .px(px(8.0))
             .rounded(px(5.0))
-            .border_b_1()
-            .border_color(rgb(GRID))
-            .text_size(px(16.0))
-            .text_color(rgb(TEXT))
-            .child(if expanded { "⌄" } else { "›" })
+            .text_size(px(12.0))
+            .line_height(px(18.0))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(rgb(MUTED))
+            .child(
+                div()
+                    .text_size(px(16.0))
+                    .child(if expanded { "⌄" } else { "›" }),
+            )
             .child(
                 div()
                     .flex_1()

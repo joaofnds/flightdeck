@@ -12,13 +12,13 @@ use image::{Frame, Rgba, RgbaImage};
 
 use crate::charts::{BLUE, GREEN, GRID, MUTED, ORANGE, PANEL, PURPLE, RED, TEXT};
 use crate::dashboard::{Dashboard, control};
-use crate::data::{reading, state};
+use crate::data::state;
 use crate::hardware_layout::{CALLOUTS, Callout, Layout};
 use crate::hardware_motion::{
     FanFrame, HardwareState, HardwareVisibility, Vector, contains, particle, perimeter,
 };
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Readings {
     pub temperatures: [Option<f32>; 3],
     pub speeds: [Option<f32>; 2],
@@ -213,6 +213,12 @@ impl Element for HardwareStage {
             self.readings.temperatures[1] = Some(80.0);
             self.readings.speeds = [Some(3000.0); 2];
         }
+        let simulation = self.state.simulation.get();
+        let [cpu, gpu, fan0, fan1] = simulation;
+        self.readings.temperatures[0] = cpu.or(self.readings.temperatures[0]);
+        self.readings.temperatures[1] = gpu.or(self.readings.temperatures[1]);
+        self.readings.speeds[0] = fan0.or(self.readings.speeds[0]);
+        self.readings.speeds[1] = fan1.or(self.readings.speeds[1]);
         if !visible {
             self.state.frame(self.readings.speeds, false);
             self.state.acknowledge_visibility(&visibility);
@@ -228,14 +234,8 @@ impl Element for HardwareStage {
             }
             Err(error) => paint_text(error, bounds.origin, 12.0, rgb(ORANGE).into(), window, cx),
         }
-        paint_callouts(
-            bounds,
-            &layout,
-            &self.readings,
-            self.state.qa.get(),
-            window,
-            cx,
-        );
+        let simulated = simulation.map(|value| value.is_some() || self.state.qa.get());
+        paint_callouts(bounds, &layout, &self.readings, simulated, window, cx);
     }
 }
 
@@ -605,7 +605,7 @@ fn paint_callouts(
     bounds: Bounds<Pixels>,
     layout: &Layout,
     readings: &Readings,
-    qa: bool,
+    simulated: [bool; 4],
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -639,55 +639,59 @@ fn paint_callouts(
             Vector::new(4.0, 4.0),
         );
         window.paint_quad(fill(anchor, rgb(tint)).corner_radii(px(2.0)));
-        paint_label(bounds, layout, callout, readings, qa, window, cx);
+        paint_label(bounds, layout, callout, readings, simulated, window, cx);
     }
 }
+
+/// How far apart the prototype sets the letters of a callout's name, in em.
+const TITLE_TRACKING: f32 = 0.08;
 
 fn paint_label(
     bounds: Bounds<Pixels>,
     layout: &Layout,
     callout: Callout,
     readings: &Readings,
-    qa: bool,
+    simulated: [bool; 4],
     window: &mut Window,
     cx: &mut App,
 ) {
     let (primary, secondary) = label_values(callout, readings);
     let mut title = callout.title().to_owned();
-    if qa {
-        if matches!(
-            callout,
-            Callout::Cpu | Callout::Gpu | Callout::Fan0 | Callout::Fan1
-        ) {
-            title.push_str(" · QA");
-        }
+    if callout
+        .simulation_slot()
+        .is_some_and(|slot| simulated[slot])
+    {
+        title.push_str(" · QA");
     }
     let origin = layout.label(callout);
-    for (index, (text, offset, height, color)) in [
-        (title, 0.0, 11.0, MUTED),
-        (primary, 18.0, 20.0, TEXT),
-        (secondary, 48.0, 11.0, MUTED),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let mut origin = point(
-            bounds.origin.x + px(origin.x),
+    let at = |offset: f32, x: f32| {
+        point(
+            bounds.origin.x + px(origin.x + x),
             bounds.origin.y + px(origin.y + offset),
-        );
-        let mut line = shape_text(&text, height, rgb(color).into(), window);
-        if index == 1 {
-            if line.width > px(layout.label_width) {
-                let factor = (layout.label_width / f32::from(line.width)).max(0.65);
-                line = shape_text(&text, height * factor, rgb(color).into(), window);
-            }
+        )
+    };
+    let right = |width: Pixels| {
+        if callout.left() {
+            0.0
+        } else {
+            layout.label_width - f32::from(width)
         }
-        if !callout.left() {
-            origin.x += px(layout.label_width) - line.width;
+    };
+
+    let tracked = tracked_width(&title, 11.0, window);
+    paint_tracked(&title, at(0.0, right(tracked)), 11.0, window, cx);
+    for (text, offset, size, line, color) in [
+        (primary, 18.0, 22.0, 33.0, TEXT),
+        (secondary, 51.0, 11.0, 18.0, MUTED),
+    ] {
+        let mut shaped = shape_text(&text, size, rgb(color).into(), window);
+        if shaped.width > px(layout.label_width) {
+            let factor = (layout.label_width / f32::from(shaped.width)).max(0.65);
+            shaped = shape_text(&text, size * factor, rgb(color).into(), window);
         }
-        if let Err(error) = line.paint(
-            origin,
-            px(height + 5.0),
+        if let Err(error) = shaped.paint(
+            at(offset, right(shaped.width)),
+            px(line),
             gpui::TextAlign::Left,
             None,
             window,
@@ -698,13 +702,57 @@ fn paint_label(
     }
 }
 
+/// The width of an upper-cased name with the prototype's letter spacing, which follows every
+/// letter, the last one too.
+fn tracked_width(text: &str, size: f32, window: &Window) -> Pixels {
+    text.to_uppercase()
+        .chars()
+        .map(|letter| {
+            shape_text(&letter.to_string(), size, rgb(MUTED).into(), window).width
+                + px(size * TITLE_TRACKING)
+        })
+        .fold(px(0.0), |total, width| total + width)
+}
+
+fn paint_tracked(text: &str, origin: Point<Pixels>, size: f32, window: &mut Window, cx: &mut App) {
+    let mut x = origin.x;
+    for letter in text.to_uppercase().chars() {
+        let shaped = shape_text(&letter.to_string(), size, rgb(MUTED).into(), window);
+        let width = shaped.width;
+        if let Err(error) = shaped.paint(
+            point(x, origin.y),
+            px(18.0),
+            gpui::TextAlign::Left,
+            None,
+            window,
+            cx,
+        ) {
+            eprintln!("Painting schematic label: {error}");
+        }
+        x += width + px(size * TITLE_TRACKING);
+    }
+}
+
+/// A reading to a fixed number of decimals with a unit, or Unavailable where there is none.
+fn measure(value: Option<f32>, digits: usize, unit: &str) -> String {
+    match value {
+        Some(value) if value.is_finite() => {
+            format!(
+                "{}{unit}",
+                crate::live_projection::fixed_text(value, digits)
+            )
+        }
+        _ => "Unavailable".into(),
+    }
+}
+
 fn label_values(callout: Callout, readings: &Readings) -> (String, String) {
     match callout {
         Callout::Fan0 | Callout::Fan1 => {
             let index = usize::from(matches!(callout, Callout::Fan1));
             let speed = readings.speeds[index];
             (
-                reading(speed, "rpm"),
+                measure(speed, 0, " rpm"),
                 match speed {
                     Some(0.0) => "Stopped",
                     Some(_) => "Running",
@@ -715,43 +763,33 @@ fn label_values(callout: Callout, readings: &Readings) -> (String, String) {
         }
         Callout::Cpu | Callout::Gpu => {
             let index = usize::from(matches!(callout, Callout::Gpu));
-            if readings.temperatures[index].is_some() {
-                (
-                    reading(readings.temperatures[index], "°C"),
-                    format!("Utilization {}", reading(readings.utilization[index], "%")),
-                )
-            } else {
-                (
-                    reading(readings.utilization[index], "%"),
-                    "Temperature unavailable".into(),
-                )
-            }
+            (
+                measure(readings.temperatures[index], 1, " °C"),
+                format!(
+                    "Utilization {}",
+                    measure(readings.utilization[index], 1, "%")
+                ),
+            )
         }
         Callout::Memory => {
-            let primary = if readings.memory[0].is_some() {
-                format!(
-                    "{} / {}",
-                    reading(readings.memory[0], ""),
-                    reading(readings.memory[1], "GiB")
-                )
-            } else {
-                if readings.memory[1].is_some() {
-                    format!("{} installed", reading(readings.memory[1], "GiB"))
-                } else {
-                    "Unavailable".into()
-                }
-            };
+            let total = readings.memory[1].map(|total| {
+                let text = crate::live_projection::fixed_text(total, 1);
+                format!("{} GiB", text.strip_suffix(".0").unwrap_or(&text))
+            });
             (
-                primary,
-                match readings.temperatures[2] {
-                    Some(value) => format!("Peak {value:.1} °C"),
-                    None => "Temperature unavailable".into(),
+                match (readings.memory[0], total) {
+                    (Some(used), Some(total)) => {
+                        format!("{} / {total}", crate::live_projection::fixed_text(used, 1))
+                    }
+                    (None, Some(total)) => format!("{total} installed"),
+                    _ => "Unavailable".into(),
                 },
+                format!("Peak {}", measure(readings.temperatures[2], 1, " °C")),
             )
         }
         Callout::Battery => (
-            reading(readings.battery[0], "%"),
-            format!("Power {}", reading(readings.battery[1], "W")),
+            measure(readings.battery[0], 1, "%"),
+            format!("Power {}", measure(readings.battery[1], 1, " W")),
         ),
     }
 }

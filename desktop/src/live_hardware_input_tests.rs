@@ -23,17 +23,11 @@ fn schematic_battery_hover_keeps_historical_values_through_loading_and_exit(
     harness.driver.hover_previous_second_on("live-cpu-plot");
     let generation = harness.driver.begin_schematic_lookup();
 
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("Hover preview · Loading exact details")
-    );
     assert_eq!(
         harness.driver.schematic_battery().unwrap(),
         [Some(33.0), Some(-3.0)]
     );
     harness.driver.complete_schematic_lookup(generation);
-    assert!(harness.driver.reading_is_visible("Hover preview"));
     assert_eq!(
         harness.driver.schematic_battery().unwrap(),
         [Some(33.0), Some(-3.0)]
@@ -59,14 +53,8 @@ fn schematic_battery_missing_hover_stays_unavailable_after_completion(cx: &mut T
     harness.driver.hover_previous_second_on("live-cpu-plot");
     let generation = harness.driver.begin_schematic_lookup();
 
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("Hover preview · Loading exact details")
-    );
     assert_eq!(harness.driver.schematic_battery().unwrap(), [None, None]);
     harness.driver.complete_schematic_lookup(generation);
-    assert!(harness.driver.reading_is_visible("Hover preview"));
     assert_eq!(harness.driver.schematic_battery().unwrap(), [None, None]);
 
     harness
@@ -91,11 +79,6 @@ fn schematic_battery_missing_hover_stays_unavailable_after_failure(cx: &mut Test
 
     assert_eq!(harness.driver.schematic_battery().unwrap(), [None, None]);
     harness.driver.fail_schematic_lookup(generation);
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("Hover reading unavailable: Schematic exact details failed")
-    );
     assert_eq!(harness.driver.schematic_battery().unwrap(), [None, None]);
 
     harness
@@ -254,11 +237,6 @@ fn schematic_battery_populated_hover_keeps_history_after_exact_failure(cx: &mut 
     let generation = harness.driver.begin_schematic_lookup();
     harness.driver.fail_schematic_lookup(generation);
 
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("Hover reading unavailable: Schematic exact details failed")
-    );
     assert_eq!(
         harness.driver.schematic_battery().unwrap(),
         [Some(33.0), Some(-3.0)]

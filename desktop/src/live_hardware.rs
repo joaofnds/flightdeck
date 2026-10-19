@@ -1,12 +1,11 @@
 use std::rc::Rc;
 
-use gpui::{Context, IntoElement, div, prelude::*, px, rgb};
+use gpui::{Context, IntoElement, div, prelude::*, px, rgb, rgba};
 use num_traits::ToPrimitive;
 use serde_json::Value;
 
-use crate::charts::{GRID, ORANGE, PANEL};
-use crate::dashboard::control;
-use crate::hardware::{Readings, hardware_caption, hardware_stage};
+use crate::charts::{BLUE, GREEN, LINE, MUTED, ORANGE, PANEL, RED, TEXT, YELLOW};
+use crate::hardware::{Readings, hardware_stage};
 use crate::live_dashboard::LiveDashboard;
 use crate::live_source::Snapshot;
 
@@ -17,53 +16,61 @@ impl LiveDashboard {
             Err(error) => ([None, None], Some(error)),
         };
         let (readings, summary_failure) = self.live_hardware_projection(speeds);
+        let simulation = self.hardware_state.simulation.get();
+        let values = [
+            simulation[0].or(readings.temperatures[0]),
+            simulation[1].or(readings.temperatures[1]),
+            simulation[2].or(readings.speeds[0]),
+            simulation[3].or(readings.speeds[1]),
+        ];
+        let simulated = simulation.iter().any(Option::is_some);
+        let open = self.hardware_state.controls_open.get();
+        let thermal = readings.thermal.clone();
         div()
             .p(px(16.0))
             .rounded(px(12.0))
             .border_1()
-            .border_color(rgb(GRID))
+            .border_color(rgb(LINE))
             .bg(rgb(PANEL))
             .child(
                 div()
                     .flex()
-                    .justify_between()
                     .items_center()
-                    .child(if self.hardware_state.qa.get() {
-                        "Readings · Simulated".to_owned()
-                    } else {
-                        format!("Thermal state · {}", readings.thermal)
-                    })
+                    .justify_between()
+                    .gap(px(12.0))
+                    .child(hardware_state(simulated, &thermal))
                     .child(
                         div()
+                            .id("hardware-controls-toggle")
+                            .debug_selector(|| "hardware-controls-toggle".into())
                             .flex()
-                            .gap(px(8.0))
-                            .child(
-                                control(if self.animate {
-                                    "Pause animation"
-                                } else {
-                                    "Animate fans"
-                                })
-                                .on_click(cx.listener(
-                                    |this, _, _, cx| {
-                                        this.animate = !this.animate;
-                                        cx.notify();
-                                    },
-                                )),
-                            )
-                            .child(control("QA: 3000 rpm / 80°C").on_click(cx.listener(
-                                |this, _, _, cx| {
-                                    this.hardware_state.qa.set(!this.hardware_state.qa.get());
-                                    cx.notify();
-                                },
-                            ))),
+                            .items_center()
+                            .h(px(44.0))
+                            .px(px(12.0))
+                            .rounded(px(5.0))
+                            .border_1()
+                            .border_color(rgb(LINE))
+                            .text_size(px(12.0))
+                            .line_height(px(18.0))
+                            .text_color(rgb(if open { BLUE } else { TEXT }))
+                            .when(open, |button| button.bg(rgba(0x5794_f226)))
+                            .cursor_pointer()
+                            .child("QA controls")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let open = this.hardware_state.controls_open.get();
+                                this.hardware_state.controls_open.set(!open);
+                                cx.notify();
+                            })),
                     ),
             )
-            .child(hardware_stage(
+            .child(div().mt(px(16.0)).child(hardware_stage(
                 readings,
                 Rc::clone(&self.hardware_state),
                 self.animate,
-            ))
-            .child(hardware_caption(self.hardware_state.qa.get()))
+            )))
+            .when(open, |panel| {
+                panel.child(div().mt(px(24.0)).child(self.hardware_controls(values, cx)))
+            })
             .children(failure.into_iter().chain(summary_failure).map(|error| {
                 div()
                     .debug_selector(|| "schematic-error".into())
@@ -519,4 +526,40 @@ mod projection_boundary_tests {
 
         assert!(readings.is_err());
     }
+}
+
+/// The thermal state beside its colored dot, or that the readings are simulated.
+fn hardware_state(simulated: bool, thermal: &str) -> gpui::Div {
+    let (caption, value, color) = if simulated {
+        ("Readings", "Simulated", GREEN)
+    } else {
+        (
+            "Thermal state",
+            thermal,
+            match thermal {
+                "Fair" => YELLOW,
+                "Serious" => ORANGE,
+                "Critical" => RED,
+                "Nominal" => GREEN,
+                _ => MUTED,
+            },
+        )
+    };
+    div()
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .pl(px(8.0))
+        .text_size(px(12.0))
+        .line_height(px(18.0))
+        .text_color(rgb(MUTED))
+        .child(div().size(px(6.0)).rounded_full().bg(rgb(color)))
+        .child(
+            div().flex().gap(px(4.0)).child(caption.to_owned()).child(
+                div()
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(rgb(TEXT))
+                    .child(value.to_owned()),
+            ),
+        )
 }

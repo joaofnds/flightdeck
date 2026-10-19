@@ -22,16 +22,16 @@ pub const RED: u32 = 0x00f2_495c;
 pub const TEXT: u32 = 0x00cc_ccdc;
 pub const YELLOW: u32 = 0x00f2_cc0c;
 pub const PLOT_INSETS: gpui::Edges<Pixels> = gpui::Edges {
-    top: px(8.0),
-    right: px(4.0),
-    bottom: px(4.0),
-    left: px(6.0),
+    top: px(12.0),
+    right: px(8.0),
+    bottom: px(0.0),
+    left: px(0.0),
 };
 /// Display averaging keeps about one curve point per this many pixels, so a 900-second history
 /// draws as a readable curve; inspection still reads each exact observation.
-/// Curves and axes average readings over a chart's span divided into this many buckets, ten
+/// Curves and axes average readings over a chart's span divided into this many buckets, thirty
 /// seconds of a 15-minute chart, which is the sampling interval of the approved prototype.
-const CURVE_BUCKETS: f32 = 90.0;
+const CURVE_BUCKETS: f32 = 30.0;
 
 #[derive(Clone, Copy)]
 pub struct Inspection {
@@ -344,7 +344,7 @@ fn paint_run(
     let width = if stacked { px(1.0) } else { px(2.0) };
     let mut stroke = PathBuilder::stroke(width);
     if line.dashed == Some(true) {
-        stroke = stroke.dash_array(&[px(5.0), px(3.0)]);
+        stroke = stroke.dash_array(&[px(6.0), px(4.0)]);
     }
     let mut area = PathBuilder::fill();
     let top: Vec<_> = curve
@@ -361,28 +361,51 @@ fn paint_run(
     smooth(&mut area, &bottom, false);
     area.close();
 
-    let default_opacity = if stacked { 0.45 } else { 0.1 };
+    let default_opacity = if stacked { 0.45 } else { 0.12 };
     let opacity = line.fill.or(panel.fill).unwrap_or(default_opacity);
     if line.dashed != Some(true) {
         if opacity > 0.0 {
-            paint_path(area, curve_fill(tint, opacity, stacked, line), window);
+            let span = curve
+                .iter()
+                .fold(None, |span: Option<(Pixels, Pixels)>, sample| {
+                    let (low, high) = span.unwrap_or((sample.top, sample.bottom));
+                    Some((low.min(sample.top), high.max(sample.bottom)))
+                });
+            let fill = curve_fill(tint, opacity, line, geometry.bounds, span);
+            paint_path(area, fill, window);
         }
     }
     paint_path(stroke, rgb(tint), window);
 }
 
-fn curve_fill(tint: u32, opacity: f32, stacked: bool, line: &crate::data::Line) -> Background {
-    if stacked {
-        return alpha(tint, opacity).into();
-    }
+/// The prototype fades every area from its full opacity at the plot's top to nothing at the
+/// plot's bottom, however tall the area is. A gradient spans the area's own bounds, so each end
+/// takes the opacity the plot-wide fade has at that height.
+fn curve_fill(
+    tint: u32,
+    opacity: f32,
+    line: &crate::data::Line,
+    plot: Bounds<Pixels>,
+    span: Option<(Pixels, Pixels)>,
+) -> Background {
+    let Some((high, low)) = span else {
+        return alpha(tint, 0.0).into();
+    };
+    let fade = |y: Pixels| {
+        let depth = ((y - plot.origin.y) / plot.size.height).clamp(0.0, 1.0);
+        let level = if line.negative == Some(true) {
+            depth
+        } else {
+            1.0 - depth
+        };
+        alpha(tint, opacity * level)
+    };
 
-    let strong = linear_color_stop(alpha(tint, opacity), 0.0);
-    let clear = linear_color_stop(alpha(tint, 0.0), 1.0);
-    if line.negative == Some(true) {
-        linear_gradient(0.0, strong, clear)
-    } else {
-        linear_gradient(180.0, strong, clear)
-    }
+    linear_gradient(
+        180.0,
+        linear_color_stop(fade(high.min(low)), 0.0),
+        linear_color_stop(fade(high.max(low)), 1.0),
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -767,7 +790,7 @@ fn paint_timeline(
                     ),
                     size(bounds.size.width / number(count), bounds.size.height),
                 ),
-                alpha(tint, 0.7),
+                alpha(tint, 0.85),
             ));
         }
     }
@@ -880,7 +903,7 @@ pub fn clip_plot(bounds: Bounds<Pixels>, window: &mut Window, paint: impl FnOnce
 /// The inspection cursor, a brighter line than any gridline so the two never read alike.
 #[must_use]
 pub fn cursor_color() -> gpui::Rgba {
-    alpha(TEXT, 0.6)
+    alpha(TEXT, 0.55)
 }
 
 #[must_use]

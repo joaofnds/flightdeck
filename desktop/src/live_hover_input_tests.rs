@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use gpui::{Entity, Modifiers, MouseButton, TestAppContext, VisualTestContext, WindowOptions};
+use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, WindowOptions};
 use serde_json::{Value, json};
 
 use crate::live_dashboard::LiveDashboard;
@@ -38,7 +38,6 @@ fn historical_memory_inspection_updates_every_quantity_and_the_header_mode(
 ) {
     // Read all quantity rows from the composed Memory page after a production plot hover.
     let mut harness = HoverHarness::setup(cx, Route::Memory, Mode::Follow);
-    harness.driver.focus_copy();
     assert!(
         harness
             .driver
@@ -48,11 +47,6 @@ fn historical_memory_inspection_updates_every_quantity_and_the_header_mode(
     harness.driver.hover(Epoch::Historical);
 
     harness.driver.assert_historical_memory_visible();
-    assert!(
-        harness
-            .driver
-            .text_is_visible("Hover preview · Loading exact details")
-    );
     let copied = harness.driver.copy_json();
     assert_eq!(copied["second"], 999);
     assert_eq!(copied["observation"]["publication"], 2);
@@ -92,7 +86,6 @@ fn null_memory_quantities_remain_unavailable_at_an_existing_historical_observati
 fn empty_memory_seconds_clear_readings_and_copy_an_explicit_gap(cx: &mut TestAppContext) {
     // A missing second must not inherit the accepted selection, even with a focused Copy button.
     let mut harness = HoverHarness::setup(cx, Route::Memory, Mode::Follow);
-    harness.driver.focus_copy();
 
     harness.driver.hover_second(997);
 
@@ -118,7 +111,6 @@ fn copy_uses_the_hover_identity_without_the_accepted_expanded_row(cx: &mut TestA
     // Seed a private accepted row, then activate the production Copy control from the keyboard.
     let mut harness = HoverHarness::setup(cx, Route::Cpu, Mode::Follow);
     harness.driver.expand_accepted_row();
-    harness.driver.focus_copy();
 
     harness.driver.hover(Epoch::Historical);
     let copied = harness.driver.copy_json();
@@ -136,7 +128,6 @@ fn copy_uses_the_hover_identity_without_the_accepted_expanded_row(cx: &mut TestA
 fn superseding_a_target_immediately_rejects_the_obsolete_ready_response(cx: &mut TestAppContext) {
     // Deliver A after the pointer has chosen B, before B has dispatched any lookup.
     let mut harness = HoverHarness::setup(cx, Route::Cpu, Mode::Follow);
-    harness.driver.focus_copy();
     harness.driver.hover(Epoch::Historical);
     let obsolete = harness.driver.begin_lookup();
 
@@ -155,7 +146,6 @@ fn superseding_a_target_immediately_rejects_the_obsolete_ready_response(cx: &mut
 fn pointer_exit_restores_following_readings_and_rejects_a_late_response(cx: &mut TestAppContext) {
     // The old response arrives only after the pointer leaves the entire plot ownership region.
     let mut harness = HoverHarness::setup(cx, Route::Cpu, Mode::Follow);
-    harness.driver.focus_copy();
     harness.driver.hover(Epoch::Historical);
     let obsolete = harness.driver.begin_lookup();
 
@@ -163,11 +153,6 @@ fn pointer_exit_restores_following_readings_and_rejects_a_late_response(cx: &mut
     harness.driver.deliver(obsolete, Epoch::Historical);
 
     assert!(harness.driver.text_is_visible("87%"));
-    assert!(
-        !harness
-            .driver
-            .text_is_visible("Hover preview · Loading exact details")
-    );
     let copied = harness.driver.copy_json();
     assert_eq!(copied["observation"], Epoch::Accepted.observation());
     assert_eq!(harness.driver.committed_mode(), Mode::Follow);
@@ -183,11 +168,6 @@ fn leaving_the_window_ends_the_hover_after_the_next_frame(cx: &mut TestAppContex
 
     harness.driver.leave_window();
 
-    assert!(
-        !harness
-            .driver
-            .text_is_visible("Hover preview · Loading exact details")
-    );
     assert_eq!(harness.driver.committed_mode(), Mode::Follow);
     harness.teardown();
 }
@@ -230,11 +210,6 @@ fn the_capture_range_stays_on_the_charted_window_during_a_hover(cx: &mut TestApp
 
     harness.driver.hover(Epoch::Historical);
 
-    assert!(
-        harness
-            .driver
-            .text_is_visible("Hover preview · Loading exact details")
-    );
     assert_eq!(harness.driver.capture_range(), before);
     harness.teardown();
 }
@@ -243,7 +218,6 @@ fn the_capture_range_stays_on_the_charted_window_during_a_hover(cx: &mut TestApp
 fn pointer_exit_restores_the_paused_selection_after_a_late_failure(cx: &mut TestAppContext) {
     // A failed hover cannot unpause or overwrite the committed paused observation.
     let mut harness = HoverHarness::setup(cx, Route::Cpu, Mode::Paused);
-    harness.driver.focus_copy();
     harness.driver.hover(Epoch::Historical);
     let obsolete = harness.driver.begin_lookup();
 
@@ -251,12 +225,6 @@ fn pointer_exit_restores_the_paused_selection_after_a_late_failure(cx: &mut Test
     harness.driver.fail(obsolete, "obsolete hover failure");
 
     assert!(harness.driver.text_is_visible("87%"));
-    assert!(harness.driver.text_is_visible("Paused"));
-    assert!(
-        !harness
-            .driver
-            .text_is_visible("Hover reading unavailable: obsolete hover failure")
-    );
     let copied = harness.driver.copy_json();
     assert_eq!(copied["observation"], Epoch::Accepted.observation());
     assert_eq!(harness.driver.committed_mode(), Mode::Paused);
@@ -269,18 +237,12 @@ fn a_response_for_the_wrong_exact_observation_keeps_resident_values_and_explains
 ) {
     // Keep A's generation but return another publication to isolate identity acceptance.
     let mut harness = HoverHarness::setup(cx, Route::Cpu, Mode::Follow);
-    harness.driver.focus_copy();
     harness.driver.hover(Epoch::Historical);
     let lookup = harness.driver.begin_lookup();
 
     harness.driver.deliver_wrong_observation(lookup);
 
     assert!(harness.driver.text_is_visible("13%"));
-    assert!(
-        harness.driver.text_is_visible(
-            "Hover reading unavailable: Hover response has a different observation"
-        )
-    );
     let copied = harness.driver.copy_json();
     assert_eq!(copied["observation"], Epoch::Historical.identity());
     assert!(copied["summary"]["response_marker"].is_null());
@@ -291,7 +253,6 @@ fn a_response_for_the_wrong_exact_observation_keeps_resident_values_and_explains
 fn repeated_moves_within_one_timestamp_preserve_the_first_pending_lookup(cx: &mut TestAppContext) {
     // The first response remains acceptable after many real moves and scheduled ticks in one bin.
     let mut harness = HoverHarness::setup(cx, Route::Cpu, Mode::Follow);
-    harness.driver.focus_copy();
     harness.driver.hover(Epoch::Historical);
     let first = harness.driver.begin_lookup();
 
@@ -299,7 +260,6 @@ fn repeated_moves_within_one_timestamp_preserve_the_first_pending_lookup(cx: &mu
     harness.driver.tick_after(Duration::from_millis(250));
     harness.driver.deliver(first, Epoch::Historical);
 
-    assert!(harness.driver.text_is_visible("Hover preview"));
     let copied = harness.driver.copy_json();
     assert_eq!(copied["summary"]["response_marker"], "historical-response");
     assert_eq!(copied["observation"], Epoch::Historical.observation());
@@ -312,7 +272,6 @@ fn superseded_lookups_wait_for_the_next_quarter_second_before_new_details_can_ap
 ) {
     // An early response is deliverable only if production actually submitted a premature request.
     let mut harness = HoverHarness::setup(cx, Route::Cpu, Mode::Follow);
-    harness.driver.focus_copy();
     harness.driver.hover(Epoch::Historical);
     harness.driver.begin_lookup();
     harness.driver.hover(Epoch::Older);
@@ -320,11 +279,6 @@ fn superseded_lookups_wait_for_the_next_quarter_second_before_new_details_can_ap
     harness.driver.tick_after(Duration::from_millis(249));
     harness.driver.deliver_if_requested(Epoch::Older);
 
-    assert!(
-        harness
-            .driver
-            .text_is_visible("Hover preview · Loading exact details")
-    );
     let before = harness.driver.copy_json();
     assert!(before["summary"]["response_marker"].is_null());
     harness.driver.tick_after(Duration::from_millis(1));
@@ -568,23 +522,19 @@ impl HoverDriver {
             .read_with(&self.context, |dashboard, _| dashboard.status_at(now))
     }
 
-    fn focus_copy(&mut self) {
-        let bounds = crate::live_dashboard::input_tests::menu_control_bounds(
-            &mut self.context,
-            "copy-reading",
-        );
-        self.context
-            .simulate_mouse_down(bounds.center(), MouseButton::Right, Modifiers::none());
-        self.context
-            .simulate_mouse_up(bounds.center(), MouseButton::Right, Modifiers::none());
-    }
-
+    /// The prototype has no copy control, so the copy is the model's own: the text the control
+    /// copied while it existed.
     fn copy_json(&mut self) -> Value {
-        self.context.simulate_keystrokes("space");
-        self.context.simulate_event(gpui::KeyUpEvent {
-            keystroke: gpui::Keystroke::parse("space").unwrap(),
-        });
-        let text = self.context.read_from_clipboard().unwrap().text().unwrap();
+        let text = self
+            .view
+            .read_with(&self.context, |dashboard, _| {
+                crate::native_workflows::selected_copy(
+                    dashboard.reading_snapshot(),
+                    dashboard.reading_request(),
+                    dashboard.reading_expanded(),
+                )
+            })
+            .unwrap();
         serde_json::from_str(&text).unwrap()
     }
 

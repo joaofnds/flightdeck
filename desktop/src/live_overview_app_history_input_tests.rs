@@ -16,11 +16,6 @@ macro_rules! overview_history_width_case {
             $assertion(&mut harness.driver);
             assert_overview_histories_order(&mut harness.driver);
 
-            assert!(
-                harness
-                    .driver
-                    .reading_is_visible("Per-App network and GPU histories are not captured.")
-            );
             harness.teardown();
         }
     };
@@ -252,41 +247,55 @@ fn overview_history_data_and_legend_keep_each_resource_reading(cx: &mut TestAppC
     harness.teardown();
 }
 
+/// The card of one history slot: its chart, or the card that says it is not recorded.
+fn history_card(driver: &mut InputDriver, id: &'static str) -> gpui::Bounds<gpui::Pixels> {
+    // Selectors are static strings, so the few this builds are leaked for the test's life.
+    let chart: &'static str = Box::leak(format!("chart-card:{id}").into_boxed_str());
+    let missing: &'static str =
+        Box::leak(format!("overview-app-history-unavailable:{id}").into_boxed_str());
+    driver
+        .context
+        .debug_bounds(chart)
+        .or_else(|| driver.context.debug_bounds(missing))
+        .unwrap_or_else(|| panic!("{id}"))
+}
+
+fn history_cards(driver: &mut InputDriver) -> [gpui::Bounds<gpui::Pixels>; 6] {
+    [0, 1, 2, 3, 4, 5].map(|slot| {
+        history_card(
+            driver,
+            crate::live_overview_app_histories::overview_app_history_slot(slot).0,
+        )
+    })
+}
+
 fn assert_overview_histories_paired(driver: &mut InputDriver) {
-    let cpu = driver.chart_bounds("chart-card:live-cpu-apps");
-    let resident = driver.chart_bounds("chart-card:live-memory-app-resident");
-    let disk = driver.chart_bounds("chart-card:live-disk-apps");
-    let power = driver.chart_bounds("chart-card:live-power-apps");
-    assert_eq!(cpu.top(), resident.top());
-    assert_eq!(disk.top(), power.top());
-    assert_eq!(resident.left() - cpu.right(), px(8.0));
-    assert_eq!(power.left() - disk.right(), px(8.0));
-    assert!(cpu.bottom() < disk.top());
+    let cards = history_cards(driver);
+    for pair in cards.chunks(2) {
+        assert_eq!(pair[0].top(), pair[1].top());
+        assert_eq!(pair[1].left() - pair[0].right(), px(8.0));
+    }
+    assert!(cards[0].bottom() < cards[2].top());
+    assert!(cards[2].bottom() < cards[4].top());
 }
 
 fn assert_overview_histories_stacked(driver: &mut InputDriver) {
-    let cpu = driver.chart_bounds("chart-card:live-cpu-apps");
-    let resident = driver.chart_bounds("chart-card:live-memory-app-resident");
-    let disk = driver.chart_bounds("chart-card:live-disk-apps");
-    let power = driver.chart_bounds("chart-card:live-power-apps");
-    assert_eq!(cpu.left(), resident.left());
-    assert_eq!(resident.left(), disk.left());
-    assert_eq!(disk.left(), power.left());
-    assert!(cpu.bottom() < resident.top());
-    assert!(resident.bottom() < disk.top());
-    assert!(disk.bottom() < power.top());
+    let cards = history_cards(driver);
+    for pair in cards.windows(2) {
+        assert_eq!(pair[0].left(), pair[1].left());
+        assert!(pair[0].bottom() < pair[1].top());
+    }
 }
 
 fn assert_overview_histories_order(driver: &mut InputDriver) {
     let top = driver.chart_bounds("Top apps at the selected time");
     let heading = driver.chart_bounds("App resource histories");
-    let cpu = driver.chart_bounds("chart-card:live-cpu-apps");
-    let power = driver.chart_bounds("chart-card:live-power-apps");
+    let cards = history_cards(driver);
     let context = driver.chart_bounds("More resource context");
     let macbook = driver.chart_bounds("MacBook");
     assert!(top.bottom() < heading.top());
-    assert!(heading.bottom() < cpu.top());
-    assert!(power.bottom() < context.top());
+    assert!(heading.bottom() < cards[0].top());
+    assert!(cards[5].bottom() < context.top());
     assert!(context.bottom() < macbook.top());
     driver.view.read_with(&driver.context, |dashboard, _| {
         let slots: Vec<_> = dashboard
@@ -302,7 +311,7 @@ fn assert_overview_histories_order(driver: &mut InputDriver) {
             .flatten()
             .copied()
             .collect();
-        assert_eq!(slots, [0, 1, 2, 3]);
+        assert_eq!(slots, [0, 1, 2, 3, 4, 5]);
     });
 }
 
@@ -337,7 +346,7 @@ impl InputDriver {
             cx.notify();
         });
         self.context
-            .simulate_resize(gpui::size(px(width), px(6500.0)));
+            .simulate_resize(gpui::size(px(width), px(12000.0)));
         self.context.run_until_parked();
     }
 

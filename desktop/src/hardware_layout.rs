@@ -1,5 +1,8 @@
 use crate::hardware_motion::Vector;
 
+/// The width the prototype reserves beside the stage for the callouts' labels.
+const RAIL: f32 = 174.0;
+
 pub struct Layout {
     pub width: f32,
     pub height: f32,
@@ -34,12 +37,14 @@ impl Layout {
         assert!(width > 0.0);
         let rails = width >= 850.0;
         if rails {
-            let scale = width / 1188.0;
+            // The prototype keeps 174 pixels either side of the stage for the callouts, 50 above
+            // it and 36 below, and fits the 840 by 600 assembly into what is left.
+            let scale = (width - 2.0 * RAIL) / 840.0;
             Self {
                 width,
-                height: width * 686.0 / 1188.0,
+                height: 50.0 + 600.0 * scale + 36.0,
                 scale,
-                stage: Vector::new(174.0 * scale, 50.0 * scale),
+                stage: Vector::new(RAIL, 50.0),
                 label_width: 158.0,
                 rails,
             }
@@ -69,7 +74,7 @@ impl Layout {
             self.width - self.label_width
         };
         let top = if self.rails {
-            (self.stage.y + (callout.anchor().y + callout.rise()) * self.scale - 73.0).max(0.0)
+            (self.stage.y + (callout.anchor().y + callout.rise()) * self.scale - 76.0).max(0.0)
         } else {
             match callout {
                 Callout::Fan0 | Callout::Fan1 => 98.0,
@@ -106,6 +111,16 @@ impl Layout {
 impl Callout {
     pub fn left(self) -> bool {
         matches!(self, Self::Fan0 | Self::Cpu | Self::Memory)
+    }
+    /// Which of the QA controls overrides this callout's reading, if any.
+    pub fn simulation_slot(self) -> Option<usize> {
+        match self {
+            Self::Cpu => Some(0),
+            Self::Gpu => Some(1),
+            Self::Fan0 => Some(2),
+            Self::Fan1 => Some(3),
+            Self::Memory | Self::Battery => None,
+        }
     }
     pub fn title(self) -> &'static str {
         match self {

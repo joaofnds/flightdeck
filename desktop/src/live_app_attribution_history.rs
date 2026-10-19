@@ -82,9 +82,9 @@ impl Metric {
 
     pub fn title(self) -> &'static str {
         match self {
-            Self::Cpu => "CPU by App",
-            Self::Power => "Process power by App",
-            Self::Disk => "Disk I/O by App",
+            Self::Cpu => "CPU by app",
+            Self::Power => "Energy by app",
+            Self::Disk => "Disk by app",
         }
     }
 
@@ -305,7 +305,7 @@ impl History {
             .enumerate()
         {
             lines.push(Line {
-                name: name.into(),
+                name: name.strip_suffix(".app").unwrap_or(name).into(),
                 color: COLORS[index].into(),
                 values: self
                     .points

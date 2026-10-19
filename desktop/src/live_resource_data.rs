@@ -37,7 +37,7 @@ pub fn device_key(selection: &Value, index: usize) -> String {
 
 pub fn device_name(device: &Value) -> String {
     match device["name"].as_str() {
-        Some(name) => crate::live_notices::recording_context::bounded(name, 64),
+        Some(name) => crate::bounded::bounded(name, 64),
         None => "Unavailable name".into(),
     }
 }

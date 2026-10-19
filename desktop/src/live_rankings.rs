@@ -80,9 +80,7 @@ struct Reading {
 pub fn read(selected: &Value, page: impl FnMut(u32) -> Result<Value, String>) -> Rankings {
     match read_pages(selected, page) {
         Ok(rankings) => Rankings::Ready(rankings),
-        Err(error) => {
-            Rankings::Unavailable(crate::live_notices::recording_context::bounded(&error, 512))
-        }
+        Err(error) => Rankings::Unavailable(crate::bounded::bounded(&error, 512)),
     }
 }
 

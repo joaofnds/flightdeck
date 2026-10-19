@@ -168,10 +168,10 @@ fn overview_top_apps_are_a_three_by_two_grid_in_the_prototype_order(cx: &mut Tes
     for row in cards.chunks(3) {
         assert_eq!(row[0].top(), row[1].top());
         assert_eq!(row[1].top(), row[2].top());
-        assert_eq!(row[1].left() - row[0].right(), px(8.0));
-        assert_eq!(row[2].left() - row[1].right(), px(8.0));
+        assert_eq!(row[1].left() - row[0].right(), px(12.0));
+        assert_eq!(row[2].left() - row[1].right(), px(12.0));
     }
-    assert_eq!(cards[3].top() - cards[0].bottom(), px(8.0));
+    assert_eq!(cards[3].top() - cards[0].bottom(), px(12.0));
     assert!(
         harness
             .driver
@@ -365,8 +365,8 @@ fn regrouping_a_hovered_first_plot_recomputes_its_reading_at_the_stationary_poin
     assert_eq!(harness.driver.pointer_position(), pointer);
     let fraction = f32::from(pointer.x - plot.left()) / f32::from(plot.size.width);
     let second = 101 + (fraction * 900.0).floor().to_u64().unwrap();
-    assert_eq!(second, 368);
-    harness.driver.assert_cpu_inspection(second, "68%");
+    assert_eq!(second, 366);
+    harness.driver.assert_cpu_inspection(second, "66%");
     assert_eq!(
         harness.driver.accepted_selection().unwrap()["selected"],
         selected
@@ -422,13 +422,6 @@ fn narrow_headers_keep_selection_controls_inside_the_content(cx: &mut TestAppCon
         .driver
         .assert_header_control_visible("source-follow:Live");
     super::menu_control_bounds(&mut harness.driver.context, "time-menu");
-    harness
-        .driver
-        .assert_header_control_visible("open-recording-available");
-    harness.driver.assert_header_control_visible("copy-reading");
-    harness
-        .driver
-        .assert_header_control_visible("inspection-time");
     harness.teardown();
 }
 
@@ -591,7 +584,7 @@ impl InputDriver {
 
     fn resize_charts(&mut self, width: f32) {
         self.context
-            .simulate_resize(gpui::size(px(width), px(2500.0)));
+            .simulate_resize(gpui::size(px(width), px(4600.0)));
         self.context.run_until_parked();
     }
 

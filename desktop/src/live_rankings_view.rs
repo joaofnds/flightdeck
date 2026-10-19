@@ -3,8 +3,7 @@ use num_traits::ToPrimitive;
 
 use super::{Entry, Metric, Ranking, Rankings, TopApps};
 use crate::charts::{BLUE, GREEN, GRID, MUTED, ORANGE, PANEL, PURPLE, TEXT, YELLOW};
-use crate::dashboard::control;
-use crate::live_chart_view::ChartHelp;
+use crate::live_chart_view::{ChartHelp, chart_head_button};
 use crate::live_dashboard::LiveDashboard;
 use crate::live_hover::Target;
 use crate::live_source::{AppKey, identity_validate};
@@ -54,7 +53,7 @@ impl LiveDashboard {
     pub fn app_rankings(&self, metrics: &[usize], cx: &mut Context<Self>) -> AnyElement {
         div()
             .flex()
-            .gap(px(8.0))
+            .gap(px(12.0))
             .children(
                 metrics
                     .iter()
@@ -74,7 +73,7 @@ impl LiveDashboard {
         assert!(slots.len() <= columns);
         div()
             .flex()
-            .gap(px(8.0))
+            .gap(px(12.0))
             .children(slots.iter().take(3).map(|slot| {
                 assert!(*slot < OVERVIEW_SLOT_COUNT);
                 match OVERVIEW_SLOTS[*slot] {
@@ -120,9 +119,6 @@ impl LiveDashboard {
             },
             rankings.ungrouped_members
         );
-        let incomplete = [ranking.unavailable, ranking.overflowed, ranking.partial]
-            .iter()
-            .any(|count| *count > 0);
 
         card.id(SharedString::from(format!(
             "ranking-card-{}",
@@ -136,7 +132,6 @@ impl LiveDashboard {
         ))
         .child(ranking_title(metric, heading))
         .child(Self::app_ranking_entries(ranking, &target, cx))
-        .when(incomplete, |card| card.child(notice(&coverage(ranking))))
         .into_any_element()
     }
 
@@ -227,7 +222,11 @@ impl LiveDashboard {
                     .entries
                     .iter()
                     .take(super::RANKS_MAX)
-                    .map(|entry| Self::app_ranking_entry(entry, ranking, target, cx)),
+                    .enumerate()
+                    .map(|(position, entry)| {
+                        let last = position + 1 == ranking.entries.len().min(super::RANKS_MAX);
+                        Self::app_ranking_entry(entry, ranking, target, last, cx)
+                    }),
             )
             .into_any_element()
     }
@@ -236,6 +235,7 @@ impl LiveDashboard {
         entry: &Entry,
         ranking: &Ranking,
         target: &Target,
+        last: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let key = entry.app.key.clone();
@@ -266,8 +266,9 @@ impl LiveDashboard {
             .tab_stop(true)
             .focus(|style| style.bg(rgb(0x32_46_61)))
             .hover(|style| style.bg(rgb(0x20_29_36)))
-            .border_b_1()
-            .border_color(rgb(crate::charts::LINE))
+            .when(!last, |row| {
+                row.border_b_1().border_color(rgb(crate::charts::LINE))
+            })
             .min_h(px(34.0))
             .px(px(2.0))
             .py(px(3.0))
@@ -308,7 +309,7 @@ fn ranking_card(name: &'static str) -> gpui::Div {
         .min_w_0()
         .px(px(12.0))
         .pt(px(8.0))
-        .pb(px(10.0))
+        .pb(px(8.0))
         .rounded(px(12.0))
         .border_1()
         .border_color(rgb(crate::charts::LINE))
@@ -370,18 +371,18 @@ fn ranking_heading_text(
         .flex()
         .items_center()
         .gap(px(4.0))
-        .min_h(px(40.0))
+        .min_h(px(44.0))
         .child(
             div()
                 .text_size(px(14.0))
+                .line_height(px(21.0))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .child(name),
         )
         .child(
-            control("ⓘ")
-                .id(SharedString::from(selector.clone()))
+            chart_head_button(selector.clone(), "ⓘ")
                 .debug_selector(move || selector.clone())
-                .text_color(rgb(MUTED))
+                .px(px(8.0))
                 .aria_label(label)
                 .aria_description(description)
                 .tooltip(move |_, cx| cx.new(|_| ChartHelp(help.clone())).into()),
@@ -472,10 +473,7 @@ fn ranking_cell(entry: &Entry, ranking: &Ranking, value: String, coverage: Strin
                         .top_0()
                         .h_full()
                         .w(gpui::relative(fraction))
-                        .bg(crate::charts::alpha(color, 0.35))
-                        .when(fraction > 0.0, |fill| {
-                            fill.border_r_2().border_color(rgb(color))
-                        }),
+                        .bg(crate::charts::alpha(color, 0.35)),
                 )
                 .child(
                     div()
@@ -548,20 +546,13 @@ fn metric_help(metric: Metric) -> &'static str {
 }
 
 fn notice(text: &str) -> gpui::Div {
-    let text = crate::live_notices::recording_context::bounded(text, 512);
+    let text = crate::bounded::bounded(text, 512);
     div()
         .debug_selector(|| text.clone())
         .mt(px(8.0))
         .text_size(px(11.0))
         .text_color(rgb(MUTED))
         .child(text)
-}
-
-fn coverage(ranking: &Ranking) -> String {
-    format!(
-        "{} unavailable · {} overflowed · {} partial known subtotals",
-        ranking.unavailable, ranking.overflowed, ranking.partial
-    )
 }
 
 fn value(metric: Metric, entry: &Entry) -> String {

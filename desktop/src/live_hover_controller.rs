@@ -18,34 +18,6 @@ pub(crate) enum PointerPlace {
 }
 
 impl LiveDashboard {
-    pub(crate) fn reading_header(&self, selected: &str) -> gpui::Div {
-        use gpui::prelude::*;
-        let status = match &self.preview {
-            Some(preview) => match &preview.failure {
-                Some(error) => format!("Hover reading unavailable: {error}"),
-                None => {
-                    if preview.complete {
-                        "Hover preview".into()
-                    } else {
-                        "Hover preview · Loading exact details".into()
-                    }
-                }
-            },
-            None => self.status(),
-        };
-        let selected = selected.to_owned();
-        gpui::div()
-            .flex()
-            .flex_wrap()
-            .child(
-                gpui::div()
-                    .debug_selector(|| selected.clone())
-                    .child(selected),
-            )
-            .child(" · ")
-            .child(gpui::div().debug_selector(|| status.clone()).child(status))
-    }
-
     pub(crate) fn set_reading_target(
         &mut self,
         source: SharedString,

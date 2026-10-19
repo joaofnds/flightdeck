@@ -121,8 +121,8 @@ fn duplicate_basenames_use_full_app_keys_for_independent_labels() {
         .panel()
         .unwrap();
 
-    assert_eq!(panel.lines[1].name, "/A/Foo.app");
-    assert_eq!(panel.lines[2].name, "/B/Foo.app");
+    assert_eq!(panel.lines[1].name, "/A/Foo");
+    assert_eq!(panel.lines[2].name, "/B/Foo");
 }
 
 #[test]

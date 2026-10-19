@@ -64,11 +64,6 @@ fn all_groups_gap_never_borrows_the_current_reading(cx: &mut TestAppContext) {
             .text_is_visible("chart-legend:live-process-groups-disk:b read:Unavailable")
     );
     harness.driver.assert_all_groups_unavailable_quantities();
-    assert!(
-        harness
-            .driver
-            .text_is_visible("No process group readings at this second.")
-    );
     harness.driver.assert_all_groups_second(998);
     harness.driver.leave_all_groups();
     harness.driver.assert_all_groups_current_quantities();

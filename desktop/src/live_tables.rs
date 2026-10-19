@@ -14,36 +14,6 @@ const _: () = {
 };
 
 impl LiveDashboard {
-    pub fn table_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut picker = div().mt(px(8.0)).flex().flex_wrap().gap(px(5.0));
-        let tables = self
-            .reading_snapshot()
-            .and_then(|snapshot| snapshot.catalog["tables"].as_array());
-        if let Some(tables) = tables {
-            for table in tables.iter().take(32) {
-                if let Some(name) = table.as_str() {
-                    let name = name.to_owned();
-                    let label = if self.request.table == name {
-                        format!("● {name}")
-                    } else {
-                        name.clone()
-                    };
-                    picker = picker.child(control(&label).on_click(cx.listener(
-                        move |this, _, _, cx| {
-                            this.request.table.clone_from(&name);
-                            this.request.offset = 0;
-                            this.expanded = None;
-                            this.submit();
-                            this.rebuild();
-                            cx.notify();
-                        },
-                    )));
-                }
-            }
-        }
-        picker
-    }
-
     pub fn table_heading(&self, name: &str, cx: &mut Context<Self>) -> impl IntoElement {
         let page = self.table_page(name);
         let mut title = div()

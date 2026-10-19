@@ -22,6 +22,13 @@ impl LiveDashboard {
     }
 
     pub(crate) fn reading_rows(&self) -> Vec<Row> {
+        let mut rows = self.reading_rows_page();
+        rows.push(Row::Footer);
+
+        rows
+    }
+
+    fn reading_rows_page(&self) -> Vec<Row> {
         if self.request.route == "self" {
             return crate::live_diagnostics::SelfPart::ALL
                 .into_iter()
@@ -364,7 +371,9 @@ impl LiveDashboard {
         }
         rows.push(Row::Disclosure(Section::OverviewHistories));
         if self.sections.expanded(Section::OverviewHistories) {
-            for slots in [0, 1, 2, 3].chunks(self.reading_chart_columns().min(2)) {
+            let slots: Vec<usize> =
+                (0..crate::live_overview_app_histories::OVERVIEW_APP_HISTORY_SLOTS).collect();
+            for slots in slots.chunks(self.reading_chart_columns().min(2)) {
                 rows.push(Row::OverviewAppHistories(slots.to_vec()));
             }
         }

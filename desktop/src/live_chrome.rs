@@ -5,7 +5,6 @@ use gpui::{
 use std::rc::Rc;
 
 use crate::charts::{self, BLUE, GREEN, MUTED, PANEL, TEXT};
-use crate::dashboard::control;
 use crate::live_dashboard::{LiveDashboard, NAVIGATION, ROUTES};
 
 /// The window bar's height, which also places the macOS window buttons inside it.
@@ -44,7 +43,7 @@ impl LiveDashboard {
             .id("window-bar")
             .h(px(BRAND_HEIGHT))
             .flex_shrink_0()
-            .pl(px(88.0))
+            .pl(px(81.0))
             .pr(px(18.0))
             .flex()
             .items_center()
@@ -130,24 +129,22 @@ impl LiveDashboard {
             .as_deref()
             .and_then(|snapshot| snapshot.selection["second"].as_u64())
             .map_or_else(String::new, |second| {
-                format!(
-                    "{} – {}",
-                    crate::chart_axes::clock(second.saturating_sub(899), true),
-                    crate::chart_axes::clock(second, true)
-                )
+                crate::chart_axes::range_label(second.saturating_sub(899), second)
             })
     }
 
+    /// The page's last row: where the readings come from and the window the charts show.
     pub fn footer(&self) -> impl IntoElement {
         let range = self.capture_range();
 
         div()
             .flex()
-            .flex_shrink_0()
+            .flex_wrap()
             .justify_between()
             .gap(px(12.0))
             .px(px(18.0))
             .py(px(14.0))
+            .mt(px(16.0))
             .text_size(px(11.0))
             .text_color(rgb(MUTED))
             .border_t_1()
@@ -158,7 +155,7 @@ impl LiveDashboard {
 
     pub fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let route = self.request.route.as_str();
-        let mut header = div().px(px(24.0)).pt(px(20.0)).pb(px(8.0)).child(
+        let header = div().px(px(24.0)).pt(px(24.0)).pb(px(8.0)).child(
             div()
                 .flex()
                 .flex_wrap()
@@ -186,38 +183,7 @@ impl LiveDashboard {
                 )
                 .child(self.header_controls(cx)),
         );
-        if !matches!(route, "computer" | "self") {
-            header = header.child(
-                div()
-                    .debug_selector(|| "reading-selected".into())
-                    .flex()
-                    .justify_end()
-                    .text_size(px(11.0))
-                    .text_color(rgb(MUTED))
-                    .child(self.header_selected()),
-            );
-            header = header.child(self.missing_reading());
-            header = self.header_recording_context(header);
-            header = self.header_alternatives(header, cx);
-        }
-        if route == "raw" {
-            header = header.child(self.table_picker(cx));
-        }
         self.header_geometry(header)
-    }
-
-    fn header_selected(&self) -> Div {
-        let selected = self.reading_snapshot().map_or_else(
-            || {
-                self.request.second.map_or_else(
-                    || "Waiting for readings".into(),
-                    |second| format!("Requested Unix second {second}"),
-                )
-            },
-            |snapshot| crate::live_presentation::selected_clock(&snapshot.selection),
-        );
-
-        self.reading_header(&selected)
     }
 
     fn header_geometry(&self, header: Div) -> impl IntoElement {
@@ -362,34 +328,46 @@ impl LiveDashboard {
             .child(
                 div()
                     .flex()
-                    .justify_between()
-                    .p(px(8.0))
-                    .rounded(px(5.0))
-                    .bg(charts::alpha(SELECTED, 0.15))
-                    .text_color(rgb(BLUE))
-                    .child("Last 15 minutes")
-                    .child("✓"),
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .min_h(px(44.0))
+                            .p(px(8.0))
+                            .rounded(px(5.0))
+                            .bg(charts::alpha(SELECTED, 0.15))
+                            .text_color(rgb(BLUE))
+                            .child("Last 15 minutes")
+                            .child("✓"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .min_h(px(44.0))
+                            .p(px(8.0))
+                            .opacity(0.4)
+                            .child("Last 1 hour"),
+                    ),
             )
             .child(self.time_menu_range())
-            .when(
-                !matches!(self.request.route.as_str(), "self" | "computer"),
-                |menu| {
-                    menu.child(menu_heading("Inspect a second"))
-                        .child(self.time_menu_inspection(cx))
-                },
-            )
-            .child(menu_heading("Recording"))
-            .child(self.time_menu_recording(cx))
-            .children(
-                self.native
-                    .recording_details_open
-                    .then(|| self.recording_details_view()),
-            )
-            .child(div().text_size(px(11.0)).text_color(rgb(MUTED)).child(
-                "Ranges end at the latest reading. Hover a chart or use its arrow keys to inspect.",
-            ));
+            .child(
+                div()
+                    .px(px(8.0))
+                    .py(px(4.0))
+                    .text_size(px(11.0))
+                    .line_height(px(16.5))
+                    .text_color(rgb(MUTED))
+                    .child(
+                        "Ranges end at the latest captured sample. Hover a chart or use its \
+                         arrow keys to inspect.",
+                    ),
+            );
 
-        deferred(div().absolute().top(px(48.0)).right_0().child(menu)).with_priority(1)
+        deferred(div().absolute().top(px(52.0)).right(px(48.0)).child(menu)).with_priority(1)
     }
 
     fn time_menu_range(&self) -> impl IntoElement {
@@ -410,79 +388,25 @@ impl LiveDashboard {
                 |second| crate::chart_axes::clock(second, true),
             )
         };
-        let date = self.reading_snapshot().map_or_else(
-            || "Unavailable".into(),
-            |snapshot| {
-                let selected = crate::live_presentation::selected_clock(&snapshot.selection);
-                selected
-                    .split(" · ")
-                    .next()
-                    .map_or_else(String::new, str::to_owned)
-            },
-        );
+        let date = second.map_or_else(|| "Unavailable".into(), crate::chart_axes::date_with_zone);
 
         div()
             .flex()
             .flex_col()
             .gap(px(6.0))
             .px(px(8.0))
+            .mt(px(4.0))
             .pt(px(12.0))
             .border_t_1()
             .border_color(charts::alpha(TEXT, 0.12))
             .text_size(px(12.0))
+            .line_height(px(18.0))
             .child(entry(
                 "From",
                 clock(second.map(|second| second.saturating_sub(899))),
             ))
             .child(entry("To", clock(second)))
             .child(entry("Date", date))
-    }
-
-    fn time_menu_inspection(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let paused = self.request.second.is_some();
-        let label = self.native.source.following_label(paused);
-        let mut row = div()
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .gap(px(6.0))
-            .children(self.native.input.clone());
-        if paused {
-            for (step, delta) in [("‹", -1_i64), ("›", 1)] {
-                row = row.child(
-                    control(step)
-                        .on_click(cx.listener(move |this, _, _, cx| this.chart_step(delta, cx))),
-                );
-            }
-        } else {
-            row = row.child(
-                control(label)
-                    .debug_selector(move || format!("source-follow:{label}"))
-                    .on_click(cx.listener(|this, _, _, cx| this.pause(cx))),
-            );
-        }
-        row
-    }
-
-    fn time_menu_recording(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .gap(px(6.0))
-            .child(self.native_header_controls(cx))
-            .when(self.request.route != "raw", |row| {
-                row.child(
-                    control("Recorded readings")
-                        .debug_selector(|| "navigation:raw".into())
-                        .accessibility_id("flightdeck.navigation.raw")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.native.time_menu_open = false;
-                            this.navigate("raw", cx);
-                        })),
-                )
-            })
-            .child(self.recording_details_control(cx))
     }
 }
 

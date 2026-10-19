@@ -9,7 +9,7 @@ use crate::live_hover::Target;
 use crate::live_projection::{identity, integer};
 
 pub const PANEL_ID: &str = "live-memory-app-resident";
-pub const TITLE: &str = "Resident memory by App";
+pub const TITLE: &str = "Memory by app";
 const POINTS_MAX: usize = 4096;
 const COHORT_MAX: usize = 8;
 const NS: u64 = 1_000_000_000;
@@ -270,7 +270,7 @@ impl History {
             .enumerate()
         {
             lines.push(Line {
-                name: name.into(),
+                name: name.strip_suffix(".app").unwrap_or(name).into(),
                 color: COLORS[index].into(),
                 values: self.points.iter().map(|point| point.value(index)).collect(),
                 stack: None,

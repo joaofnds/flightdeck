@@ -4,11 +4,10 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use gpui::{AnyElement, Bounds, Context, Pixels, SharedString, div, prelude::*, px, rgb};
+use gpui::{AnyElement, Bounds, Context, Pixels, div, prelude::*, px, rgb};
 
 use super::ChartHelp;
-use crate::charts::{self, MUTED, PANEL};
-use crate::dashboard::control;
+use crate::charts::{self, MUTED, PANEL, TEXT};
 use crate::data::Panel;
 use crate::live_dashboard::LiveDashboard;
 use crate::live_presentation::clock;
@@ -19,6 +18,9 @@ pub(crate) const BAND_COMPACT: Pixels = px(45.0);
 pub(crate) const BAND_FULL: Pixels = px(161.0);
 /// The prototype narrows the label column on plots under this many pixels wide.
 const NARROW_CARD: f32 = 300.0;
+/// The band starts this far below the plot's top edge, which is two pixels lower than a line
+/// chart's plot starts.
+pub(crate) const BAND_TOP: Pixels = px(2.0);
 
 impl LiveDashboard {
     pub(crate) fn live_timeline(
@@ -39,15 +41,19 @@ impl LiveDashboard {
             Rc::clone(&measured),
             None,
         );
-        let cursor = self.chart_cursor_fraction(panel);
+        let cursor = self.chart_cursor_fraction(panel).or_else(|| {
+            let position = panel.positions.as_ref()?;
+            position.get(index?).copied()
+        });
         let band = self.chart_events(
             div()
                 .relative()
                 .flex_1()
                 .min_w_0()
+                .mt(BAND_TOP)
                 .h(charts::PLOT_INSETS.top + band_height + charts::PLOT_INSETS.bottom)
                 .child(plot)
-                .child(super::chart_cursor(cursor))
+                .child(super::chart_cursor(cursor, true))
                 .children(self.chart_tooltip(panel, index, cursor)),
             measured,
             panel,
@@ -59,19 +65,21 @@ impl LiveDashboard {
             .debug_selector(|| format!("chart-card:{}", panel.id))
             .flex_1()
             .min_w_0()
+            .flex()
+            .flex_col()
             .rounded(px(12.0))
             .border_1()
             .border_color(rgb(charts::LINE))
             .bg(rgb(PANEL))
             .px(px(12.0))
             .pt(px(8.0))
-            .pb(px(10.0))
+            .pb(px(8.0))
             .child(timeline_heading(panel))
             .child(
                 div()
                     .flex()
-                    .items_center()
-                    .child(timeline_label(gutter, timeline_name(panel)))
+                    .items_start()
+                    .child(timeline_label(gutter, timeline_name(panel), band_height))
                     .child(band),
             )
             .child(self.timeline_bounds(gutter))
@@ -98,12 +106,15 @@ impl LiveDashboard {
     pub(crate) fn timeline_bounds(&self, gutter: Pixels) -> gpui::Div {
         let row = div()
             .pl(gutter)
-            .h(px(20.0))
+            .pr(px(8.0))
+            .mt(px(15.0))
+            .mb(px(7.0))
+            .h(px(15.0))
             .flex()
             .items_center()
             .justify_between()
-            .text_size(px(11.0))
-            .text_color(rgb(MUTED));
+            .text_size(px(12.0))
+            .text_color(rgb(TEXT));
         let Some(time) = self.chart_time_window() else {
             return row;
         };
@@ -138,17 +149,18 @@ pub(crate) fn timeline_heading_text(title: &str, help: String, glyph: &'static s
         .flex()
         .items_center()
         .gap(px(4.0))
-        .min_h(px(40.0))
+        .min_h(px(44.0))
         .child(
             div()
+                .text_size(px(14.0))
+                .line_height(px(21.0))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .child(title.to_owned()),
         )
         .child(
-            control(glyph)
-                .id(SharedString::from(selector.clone()))
+            super::chart_head_button(selector.clone(), glyph)
                 .debug_selector(move || selector.clone())
-                .text_color(rgb(MUTED))
+                .px(px(8.0))
                 .tooltip(move |_, cx| cx.new(|_| ChartHelp(help.clone())).into()),
         )
 }
@@ -161,15 +173,18 @@ fn timeline_heading(panel: &Panel) -> gpui::Div {
     timeline_heading_text(&panel.title, help, "ⓘ")
 }
 
-pub(crate) fn timeline_label(gutter: Pixels, name: &str) -> gpui::Div {
+pub(crate) fn timeline_label(gutter: Pixels, name: &str, band: Pixels) -> gpui::Div {
     div()
         .w(gutter)
+        .h(band)
+        .mt(charts::PLOT_INSETS.top + BAND_TOP)
         .flex_shrink_0()
         .pr(px(8.0))
         .flex()
+        .items_center()
         .justify_end()
         .text_size(px(11.0))
-        .text_color(rgb(MUTED))
+        .text_color(rgb(TEXT))
         .child(name.to_owned())
 }
 

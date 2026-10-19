@@ -1,7 +1,7 @@
 use gpui::{AnyElement, Context, IntoElement, div, prelude::*, px, rgb};
 use std::sync::Arc;
 
-use crate::charts::{GRID, MUTED, PANEL};
+use crate::charts::{MUTED, PANEL};
 use crate::live_app_attribution_history::{AppAttributionHistory, Metric};
 use crate::live_dashboard::LiveDashboard;
 use crate::live_source::Snapshot;
@@ -55,21 +55,7 @@ impl LiveDashboard {
             );
         }
 
-        div()
-            .child(cards)
-            .when(slots.contains(&3), |row| {
-                row.child(
-                    div()
-                        .debug_selector(|| {
-                            "Per-App network and GPU histories are not captured.".into()
-                        })
-                        .mt(px(8.0))
-                        .text_size(px(11.0))
-                        .text_color(rgb(MUTED))
-                        .child("Per-App network and GPU histories are not captured."),
-                )
-            })
-            .into_any_element()
+        cards.into_any_element()
     }
 
     fn overview_app_histories_card(
@@ -78,24 +64,38 @@ impl LiveDashboard {
         title: &'static str,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        if let Some(panel) = self.panels.iter().take(16).find(|panel| panel.id == id) {
+        if let Some(panel) = self.panels.iter().take(24).find(|panel| panel.id == id) {
             return self.live_chart(panel, cx).into_any_element();
         }
 
-        let reading = self.overview_app_histories_unavailable(id);
+        let reading = if id == NETWORK_APPS_ID {
+            "Not recorded per app".to_owned()
+        } else {
+            self.overview_app_histories_unavailable(id)
+        };
         div()
             .debug_selector(move || format!("overview-app-history-unavailable:{id}"))
             .flex_1()
             .min_w_0()
-            .p(px(18.0))
+            .min_h(px(356.0))
+            .px(px(12.0))
+            .pt(px(8.0))
             .rounded(px(12.0))
             .border_1()
-            .border_color(rgb(GRID))
+            .border_color(rgb(crate::charts::LINE))
             .bg(rgb(PANEL))
-            .child(title)
             .child(
                 div()
-                    .mt(px(8.0))
+                    .h(px(44.0))
+                    .flex()
+                    .items_center()
+                    .text_size(px(14.0))
+                    .line_height(px(21.0))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child(title),
+            )
+            .child(
+                div()
                     .text_size(px(11.0))
                     .text_color(rgb(MUTED))
                     .debug_selector(|| reading.clone())
@@ -122,15 +122,24 @@ impl LiveDashboard {
     }
 }
 
+/// The prototype's six histories in its order, each as the panel that draws it and the title
+/// it carries.
+pub(crate) const OVERVIEW_APP_HISTORY_SLOTS: usize = 6;
+
 pub(crate) fn overview_app_history_slot(slot: usize) -> (&'static str, &'static str) {
     match slot {
         0 => (Metric::Cpu.panel_id(), Metric::Cpu.title()),
         1 => (
             crate::live_resident_history::PANEL_ID,
-            "Resident memory by App",
+            crate::live_resident_history::TITLE,
         ),
-        2 => (Metric::Disk.panel_id(), Metric::Disk.title()),
-        3 => (Metric::Power.panel_id(), Metric::Power.title()),
-        _ => unreachable!("Overview App history has four fixed resource slots"),
+        2 => (NETWORK_APPS_ID, "Network by app"),
+        3 => (Metric::Disk.panel_id(), Metric::Disk.title()),
+        4 => (crate::live_projection::GPU_APPS_ID, "GPU by app"),
+        5 => (Metric::Power.panel_id(), Metric::Power.title()),
+        _ => unreachable!("Overview App history has six fixed resource slots"),
     }
 }
+
+/// The collector does not record network traffic per app, so no panel carries this id.
+const NETWORK_APPS_ID: &str = "live-network-apps";

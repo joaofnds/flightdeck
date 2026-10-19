@@ -5,7 +5,7 @@ use std::task::{Context as PollContext, Poll, Waker};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use gpui::{ClipboardItem, Context, Entity};
+use gpui::{Context, Entity};
 use serde_json::Value;
 
 use crate::live_dashboard::LiveDashboard;
@@ -92,7 +92,6 @@ pub struct NativeControls {
     retirement: Option<RetiringReader>,
     pub notice: Option<String>,
     pub source: SourceMode,
-    pub recording_details_open: bool,
     pub time_menu_open: bool,
 }
 
@@ -196,78 +195,6 @@ impl NativeControls {
 }
 
 impl LiveDashboard {
-    pub fn native_header_controls(&self, cx: &mut Context<Self>) -> gpui::Div {
-        use crate::dashboard::control;
-        use gpui::{div, prelude::*, px};
-        let mut controls = div()
-            .flex()
-            .gap(px(6.0))
-            .items_center()
-            .child(self.native_open_control(cx))
-            .child(
-                control("Copy")
-                    .debug_selector(|| "copy-reading".into())
-                    .accessibility_id("flightdeck.copy-reading")
-                    .aria_label("Copy selected reading or expanded details")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.copy_reading(cx);
-                    })),
-            );
-        if self.native.opening() {
-            controls = controls.child(control("Cancel open").on_click(cx.listener(
-                |this, _, _, cx| {
-                    this.cancel_recording("Recording unchanged");
-                    cx.notify();
-                },
-            )));
-        }
-        if self.native.source == crate::live_source_mode::SourceMode::Recorded {
-            controls = controls.child(
-                control("Live")
-                    .debug_selector(|| "source-live".into())
-                    .accessibility_id("flightdeck.source.live")
-                    .aria_label("Follow live readings from this recording")
-                    .on_click(cx.listener(|this, _, _, cx| this.follow_live(cx))),
-            );
-        }
-        controls
-    }
-
-    fn follow_live(&mut self, cx: &mut Context<Self>) {
-        self.worker.follow_live();
-        self.native.source = crate::live_source_mode::SourceMode::Live;
-        if self.request.second.is_some() {
-            self.pause(cx);
-        } else {
-            self.submit();
-            cx.notify();
-        }
-    }
-
-    fn native_open_control(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        use gpui::prelude::*;
-        if let Some(status) = self.native.retirement_status() {
-            return gpui::div()
-                .id("open-recording-waiting")
-                .debug_selector(|| "open-recording-waiting".into())
-                .role(gpui::Role::Status)
-                .aria_label("Open recording unavailable")
-                .aria_description(status)
-                .px(gpui::px(9.0))
-                .py(gpui::px(7.0))
-                .text_color(gpui::rgb(crate::charts::MUTED))
-                .child("Open unavailable")
-                .into_any_element();
-        }
-
-        crate::dashboard::control("Open…")
-            .debug_selector(|| "open-recording-available".into())
-            .accessibility_id("flightdeck.open-recording")
-            .aria_label("Open recording folder")
-            .on_click(cx.listener(|this, _, _, cx| this.open_recording(cx)))
-            .into_any_element()
-    }
-
     pub fn native_notice(&self, cx: &mut Context<Self>) -> impl gpui::IntoElement {
         use gpui::prelude::*;
         let mut notices = gpui::div().children(self.native.notice.as_ref().map(|notice| {
@@ -542,22 +469,6 @@ impl LiveDashboard {
                 cx.notify();
             }
         }
-    }
-
-    pub fn copy_reading(&mut self, cx: &mut Context<Self>) {
-        let result = selected_copy(
-            self.reading_snapshot(),
-            self.reading_request(),
-            self.reading_expanded(),
-        );
-        match result {
-            Ok(text) => {
-                cx.write_to_clipboard(ClipboardItem::new_string(text));
-                self.native.notice = Some("Selected reading copied".into());
-            }
-            Err(error) => self.native.notice = Some(error),
-        }
-        cx.notify();
     }
 }
 

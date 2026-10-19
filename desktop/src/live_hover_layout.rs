@@ -41,7 +41,7 @@ impl Row {
                 if title.starts_with("Process group history") {
                     return "process-group-history-heading".into();
                 }
-                if title.ends_with(" by App") {
+                if title.ends_with(" by app") {
                     return format!("attribution-heading-{title}");
                 }
                 match title.as_str() {
@@ -69,6 +69,7 @@ impl Row {
             Self::Process(index) => format!("process-{index}"),
             Self::Executable(index) => format!("executable-{index}"),
             Self::Inventory => "inventory".into(),
+            Self::Footer => "footer".into(),
             Self::Spacer(_) => "hover-spacing".into(),
         }
     }

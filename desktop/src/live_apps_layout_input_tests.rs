@@ -211,12 +211,19 @@ fn expect_apps_grid_coordinate(actual: Pixels, expected: Pixels) {
 fn expect_overview_grid_context_span(bounds: &OverviewGridBounds) {
     expect_apps_grid_coordinate(bounds.pressure.size.width, bounds.primary_first.size.width);
     expect_apps_grid_coordinate(bounds.pressure.left(), bounds.primary_first.left());
-    expect_apps_grid_coordinate(bounds.utilization.left(), bounds.primary_first.left());
+    // The details panel that holds them is inset by its border and padding.
+    expect_apps_grid_coordinate(
+        bounds.utilization.left(),
+        bounds.primary_first.left() + px(13.0),
+    );
     expect_apps_grid_coordinate(
         bounds.correlation.left() - bounds.utilization.right(),
         px(8.0),
     );
-    expect_apps_grid_coordinate(bounds.correlation.right(), bounds.primary_last.right());
+    expect_apps_grid_coordinate(
+        bounds.correlation.right(),
+        bounds.primary_last.right() - px(13.0),
+    );
     expect_apps_grid_coordinate(bounds.correlation.top(), bounds.utilization.top());
     assert!(bounds.utilization.size.width < bounds.correlation.size.width);
     assert!(bounds.pressure.bottom() < bounds.correlation.top());

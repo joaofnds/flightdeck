@@ -1,4 +1,4 @@
-use gpui::{Modifiers, MouseButton, TestAppContext, px, size};
+use gpui::{TestAppContext, px, size};
 use serde_json::{Value, json};
 
 use super::{InputDriver, InputHarness, PlotExit, accepted_snapshot};
@@ -11,7 +11,6 @@ fn battery_hover_updates_selected_details_charging_metadata_and_copy_then_restor
     // Method: move over a repeated second, activate the focused Copy control, then leave.
     let mut harness = InputHarness::setup_route(cx, "battery");
     harness.driver.seed_resources(false);
-    harness.driver.focus_resource_copy();
     assert!(harness.driver.reading_is_visible("summary-card:Charge:88%"));
 
     harness
@@ -62,7 +61,6 @@ fn battery_gap_clears_selected_details_charging_and_copied_observation(cx: &mut 
     // Method: move from a measured historical second into a true gap through rendered input.
     let mut harness = InputHarness::setup_route(cx, "battery");
     harness.driver.seed_resources(false);
-    harness.driver.focus_resource_copy();
     harness
         .driver
         .hover_previous_second_on("live-battery-charge-plot");
@@ -102,7 +100,6 @@ fn storage_hover_swaps_virtual_device_rows_and_totals_without_moving_the_plot(
     // Method: hover a two-device observation from a one-device selection and inspect layout.
     let mut harness = InputHarness::setup_route(cx, "storage");
     harness.driver.seed_resources(false);
-    harness.driver.focus_resource_copy();
     let plot = harness.driver.plot_bounds("live-storage-throughput-plot");
     harness
         .driver
@@ -190,7 +187,6 @@ fn charging_hover_retains_an_explicitly_selected_earlier_same_second_publication
     // Method: hover the selected second with a conflicting later sibling in resident history.
     let mut harness = InputHarness::setup_route(cx, "battery");
     harness.driver.seed_resources(true);
-    harness.driver.focus_resource_copy();
 
     harness
         .driver
@@ -256,23 +252,19 @@ impl InputDriver {
         self.context.run_until_parked();
     }
 
-    fn focus_resource_copy(&mut self) {
-        let bounds = crate::live_dashboard::input_tests::menu_control_bounds(
-            &mut self.context,
-            "copy-reading",
-        );
-        self.context
-            .simulate_mouse_down(bounds.center(), MouseButton::Right, Modifiers::none());
-        self.context
-            .simulate_mouse_up(bounds.center(), MouseButton::Right, Modifiers::none());
-    }
-
+    /// The prototype has no copy control, so the copy is the model's own: the text the control
+    /// copied while it existed.
     fn activate_resource_copy(&mut self) -> Value {
-        self.context.simulate_keystrokes("space");
-        self.context.simulate_event(gpui::KeyUpEvent {
-            keystroke: gpui::Keystroke::parse("space").unwrap(),
-        });
-        let text = self.context.read_from_clipboard().unwrap().text().unwrap();
+        let text = self
+            .view
+            .read_with(&self.context, |dashboard, _| {
+                crate::native_workflows::selected_copy(
+                    dashboard.reading_snapshot(),
+                    dashboard.reading_request(),
+                    dashboard.reading_expanded(),
+                )
+            })
+            .unwrap();
         serde_json::from_str(&text).unwrap()
     }
 

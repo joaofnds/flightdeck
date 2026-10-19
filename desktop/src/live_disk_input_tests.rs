@@ -56,11 +56,6 @@ fn storage_hover_waits_for_exact_historical_app_details(cx: &mut TestAppContext)
         .hover_previous_second_on("live-storage-throughput-plot");
 
     assert!(
-        harness
-            .driver
-            .reading_is_visible("Hover preview · Loading exact details")
-    );
-    assert!(
         !harness
             .driver
             .reading_is_visible("ranking:Disk I/O:Current:1.5 MB/s")

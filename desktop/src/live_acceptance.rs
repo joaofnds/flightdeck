@@ -134,7 +134,7 @@ fn prepare_process_panels(request: &Request, snapshot: &mut Snapshot) -> Vec<Rc<
         Ok(panels) => panels,
         Err(reason) => {
             snapshot.process_history = Some(std::sync::Arc::new(ProcessHistory::Unavailable(
-                crate::live_notices::recording_context::bounded(&reason, 512),
+                crate::bounded::bounded(&reason, 512),
             )));
             Vec::new()
         }

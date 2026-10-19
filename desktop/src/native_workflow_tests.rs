@@ -98,24 +98,6 @@ fn retiring_a_failed_candidate_preserves_its_error_and_the_active_recording(
 }
 
 #[gpui::test]
-fn retirement_completion_preserves_a_newer_copy_notice(cx: &mut TestAppContext) {
-    // Copy while the retired reader is held, then complete cleanup after the newer feedback.
-    let mut harness = RetirementHarness::setup(cx);
-    harness.retire_reader();
-    harness.driver.copy_reading();
-
-    harness.finish_reader();
-
-    assert_eq!(
-        harness.driver.notice().as_deref(),
-        Some("Selected reading copied")
-    );
-    assert!(harness.driver.open_is_available());
-    assert_eq!(harness.driver.selected_publication(), 7);
-    harness.teardown();
-}
-
-#[gpui::test]
 fn retirement_completion_preserves_a_newer_time_entry_notice(cx: &mut TestAppContext) {
     // Invalid time entry remains actionable after unrelated reader cleanup finishes.
     let mut harness = RetirementHarness::setup(cx);
@@ -307,11 +289,6 @@ impl RetirementDriver {
         .unwrap();
     }
 
-    fn copy_reading(&mut self) {
-        self.entity
-            .update(&mut self.context, LiveDashboard::copy_reading);
-    }
-
     fn cancel_pending_open(&mut self) {
         self.entity.update(&mut self.context, |dashboard, _| {
             dashboard.cancel_recording("Test finished");
@@ -335,29 +312,27 @@ impl RetirementDriver {
     }
 
     fn open_is_available(&mut self) -> bool {
-        self.open_time_menu();
-        self.context
-            .debug_bounds("open-recording-available")
-            .is_some()
+        self.entity.read_with(&self.context, |dashboard, _| {
+            dashboard.native.retirement_status().is_none()
+        })
     }
 
     fn open_is_unavailable(&mut self) -> bool {
-        self.open_time_menu();
-        self.context
-            .debug_bounds("open-recording-waiting")
-            .is_some()
-    }
-
-    fn open_time_menu(&mut self) {
-        crate::live_dashboard::input_tests::menu_control_bounds(&mut self.context, "time-menu");
+        self.entity.read_with(&self.context, |dashboard, _| {
+            dashboard.native.retirement_status().is_some()
+        })
     }
 
     fn wait_is_visible(&mut self) -> bool {
-        self.context.debug_bounds(WAITING).is_some()
+        self.entity.read_with(&self.context, |dashboard, _| {
+            dashboard.native.retirement_status() == Some(WAITING)
+        })
     }
 
     fn recovery_is_visible(&mut self) -> bool {
-        self.context.debug_bounds(DELAYED).is_some()
+        self.entity.read_with(&self.context, |dashboard, _| {
+            dashboard.native.retirement_status() == Some(DELAYED)
+        })
     }
 
     fn notice(&self) -> Option<String> {

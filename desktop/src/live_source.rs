@@ -151,10 +151,6 @@ impl Worker {
         self.mode
     }
 
-    pub fn follow_live(&mut self) {
-        self.mode = SourceMode::Live;
-    }
-
     fn start_mode(root: PathBuf, mode: SourceMode) -> std::io::Result<Self> {
         let shared = Arc::new(Shared {
             mailbox: Mutex::new(Mailbox {
@@ -649,9 +645,9 @@ fn reader_app_attribution_result(
     use crate::live_app_attribution_history::AppAttributionHistory;
     Arc::new(match result {
         Ok(payload) => AppAttributionHistory::prepare(metric, &payload, selection),
-        Err(error) => AppAttributionHistory::Unavailable(
-            crate::live_notices::recording_context::bounded(&error.to_string(), 512),
-        ),
+        Err(error) => {
+            AppAttributionHistory::Unavailable(crate::bounded::bounded(&error.to_string(), 512))
+        }
     })
 }
 
@@ -669,7 +665,7 @@ fn reader_overview_app_histories_result(
         Ok(histories) => histories,
         Err(error) => {
             let unavailable = Arc::new(AppAttributionHistory::Unavailable(
-                crate::live_notices::recording_context::bounded(&error.to_string(), 512),
+                crate::bounded::bounded(&error.to_string(), 512),
             ));
             snapshot.overview_app_histories = Some(Arc::new(OverviewAppHistories {
                 cpu: Arc::clone(&unavailable),
@@ -693,7 +689,7 @@ fn reader_resident_history(session: &LiveSession, snapshot: &mut Snapshot) {
             crate::live_resident_history::ResidentHistory::prepare(&payload, &snapshot.selection)
         }
         Err(error) => crate::live_resident_history::ResidentHistory::Unavailable(
-            crate::live_notices::recording_context::bounded(&error.to_string(), 512),
+            crate::bounded::bounded(&error.to_string(), 512),
         ),
     };
     snapshot.resident_history = Some(Arc::new(history));
@@ -809,9 +805,7 @@ fn reader_process_history(session: &LiveSession, request: &Request, snapshot: &m
     };
     let history = match read() {
         Ok(history) => history,
-        Err(error) => ProcessHistory::Unavailable(crate::live_notices::recording_context::bounded(
-            &error, 512,
-        )),
+        Err(error) => ProcessHistory::Unavailable(crate::bounded::bounded(&error, 512)),
     };
     snapshot.process_history = Some(Arc::new(history));
 }

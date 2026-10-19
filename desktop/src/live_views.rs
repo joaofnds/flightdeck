@@ -11,8 +11,6 @@ pub(crate) mod chrome;
 mod computer_view;
 #[path = "live_cpu_top_view.rs"]
 mod cpu_top_view;
-#[path = "live_recording_context_view.rs"]
-mod recording_context_view;
 #[path = "live_summary.rs"]
 pub(crate) mod summary;
 #[path = "live_system_context.rs"]
@@ -32,14 +30,15 @@ impl LiveDashboard {
             Row::Table(_, _) | Row::App(_) | Row::Process(_) | Row::Executable(_)
         );
         let content = self.row_content(index, cx);
-        let padding = match &self.rows[index] {
-            Row::Charts { .. }
-            | Row::OverviewAnalysis(_)
-            | Row::OverviewStatus
-            | Row::BatteryState(_)
-            | Row::OverviewRankings(_) => 4.0,
-            _ => 8.0,
+        let (padding, padding_bottom) = Self::row_padding(&self.rows[index]);
+        let padding = if index == 0 {
+            padding
+        } else {
+            let above = &self.rows[index - 1];
+            Self::spacing_above(above, &self.rows[index])
+                .map_or(padding, |gap| gap - Self::row_padding(above).1)
         };
+        let framed = self.details_frame(index);
         let key = self.rows[index].layout_key();
         let measured = Rc::clone(&self.row_heights);
         let measured_key = key.clone();
@@ -57,9 +56,25 @@ impl LiveDashboard {
                     gpui::StatefulInteractiveElement::overflow_y_scroll,
                 )
             })
-            .px(px(24.0))
-            .py(px(if compact { 0.0 } else { padding }))
-            .child(content)
+            .px(px(if matches!(&self.rows[index], Row::Footer) {
+                0.0
+            } else {
+                24.0
+            }))
+            .pt(px(if compact || framed.is_some_and(|f| !f.top) {
+                0.0
+            } else {
+                padding
+            }))
+            .pb(px(if compact || framed.is_some_and(|f| !f.bottom) {
+                0.0
+            } else {
+                padding_bottom
+            }))
+            .child(match framed {
+                Some(frame) => details_frame(frame, content),
+                None => content,
+            })
             .child(
                 gpui::canvas(
                     move |bounds, _, _| {
@@ -76,6 +91,47 @@ impl LiveDashboard {
                 .size_full(),
             )
             .into_any_element()
+    }
+
+    /// Where this row sits in a details panel, which the prototype draws as one bordered panel
+    /// around the summary and what it folds. The rows are separate list items, so each draws its
+    /// own slice of the panel.
+    /// The room above and below a row. Two rows are as far apart as the lower padding of the
+    /// first and the upper padding of the second, unless `spacing_above` names the distance.
+    fn row_padding(row: &Row) -> (f32, f32) {
+        match row {
+            Row::Summary => (8.0, 12.0),
+            Row::Charts { .. } | Row::OverviewStatus | Row::BatteryState(_) => (4.0, 4.0),
+            Row::OverviewRankings(_) => (6.0, 6.0),
+            Row::Heading(_) => (16.0, 8.0),
+            _ => (8.0, 8.0),
+        }
+    }
+
+    /// The distance the prototype puts between a row and the one before it, where the
+    /// paddings alone would not give it.
+    fn spacing_above(above: &Row, row: &Row) -> Option<f32> {
+        match (above, row) {
+            (Row::Heading(_), Row::OverviewRankings(_) | Row::Hardware) => Some(10.0),
+            (Row::OverviewRankings(_), Row::Disclosure(_)) => Some(16.0),
+            (above, Row::Disclosure(_)) if above.in_details() => Some(16.0),
+            (above, Row::Heading(_)) if above.in_details() => Some(20.0),
+            _ => None,
+        }
+    }
+
+    fn details_frame(&self, index: usize) -> Option<Frame> {
+        let member = |row: &Row| row.in_details();
+        let row = &self.rows[index];
+        if !member(row) {
+            return None;
+        }
+
+        let next = self.rows.get(index + 1);
+        Some(Frame {
+            top: matches!(row, Row::Disclosure(_)),
+            bottom: next.is_none_or(|next| !member(next) || matches!(next, Row::Disclosure(_))),
+        })
     }
 
     fn row_content(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
@@ -115,6 +171,7 @@ impl LiveDashboard {
             Row::Process(index) => self.process_row(*index, cx),
             Row::Executable(index) => self.executable_row(*index, cx),
             Row::Inventory => self.computer(cx).into_any_element(),
+            Row::Footer => self.footer().into_any_element(),
             Row::Spacer(height) => div().h(*height).into_any_element(),
         }
     }
@@ -356,11 +413,11 @@ pub(crate) fn heading(title: &str) -> gpui::Div {
         .items_center()
         .justify_between()
         .gap(px(8.0))
-        .pt(px(12.0))
         .child(
             div()
                 .debug_selector(move || selector.clone())
                 .text_size(px(14.0))
+                .line_height(px(21.0))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .child(title.to_owned()),
         )
@@ -387,4 +444,28 @@ fn heading_note(title: &str) -> &'static str {
         return "Ten-second report ending at the inspected time";
     }
     ""
+}
+
+/// A row's slice of a details panel.
+#[derive(Clone, Copy)]
+struct Frame {
+    top: bool,
+    bottom: bool,
+}
+
+/// The panel's sides, with its corners and padding on the rows that begin and end it. The gap
+/// between rows is the prototype's eight pixels, half of it on each side of the seam.
+fn details_frame(frame: Frame, content: AnyElement) -> AnyElement {
+    div()
+        .px(px(12.0))
+        .pt(px(if frame.top { 8.0 } else { 4.0 }))
+        .pb(px(if frame.bottom { 8.0 } else { 4.0 }))
+        .border_l_1()
+        .border_r_1()
+        .border_color(rgb(crate::charts::LINE))
+        .bg(rgb(crate::charts::PANEL))
+        .when(frame.top, |panel| panel.border_t_1().rounded_t(px(12.0)))
+        .when(frame.bottom, |panel| panel.border_b_1().rounded_b(px(12.0)))
+        .child(content)
+        .into_any_element()
 }

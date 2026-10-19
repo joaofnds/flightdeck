@@ -174,11 +174,6 @@ fn memory_hover_loads_exact_app_rankings_and_restores_the_committed_reading(
 
     harness.driver.hover_previous_second_on("live-memory-plot");
 
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("Hover preview · Loading exact details")
-    );
     assert!(harness.driver.reading_is_visible("2 GiB app memory"));
     assert!(!harness.driver.reading_is_visible("6 GiB app memory"));
     assert!(
@@ -236,11 +231,6 @@ fn energy_hover_loads_exact_app_rankings_and_restores_the_committed_reading(
 
     harness.driver.hover_previous_second_on("live-energy-plot");
 
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("Hover preview · Loading exact details")
-    );
     assert!(harness.driver.reading_is_visible("3 W"));
     assert!(!harness.driver.reading_is_visible("9 W"));
     assert!(
@@ -1056,11 +1046,6 @@ fn resident_history_hover_keeps_interval_cohort_and_exact_bytes_through_loading_
     assert!(
         harness
             .driver
-            .reading_is_visible("Hover preview · Loading exact details")
-    );
-    assert!(
-        harness
-            .driver
             .reading_is_visible("chart-legend:live-memory-app-resident:App A:0.00019 MiB")
     );
     assert!(
@@ -1231,27 +1216,27 @@ fn resident_history_same_basename_apps_have_independent_legend_toggles(cx: &mut 
     harness
         .driver
         .seed_resident_leaders(same_basename_resident_history());
-    assert!(harness.driver.reading_is_visible("/A/Foo.app"));
-    assert!(harness.driver.reading_is_visible("/B/Foo.app"));
-    assert!(!harness.driver.resident_legend_is_hidden("/A/Foo.app"));
-    assert!(!harness.driver.resident_legend_is_hidden("/B/Foo.app"));
+    assert!(harness.driver.reading_is_visible("/A/Foo"));
+    assert!(harness.driver.reading_is_visible("/B/Foo"));
+    assert!(!harness.driver.resident_legend_is_hidden("/A/Foo"));
+    assert!(!harness.driver.resident_legend_is_hidden("/B/Foo"));
 
     harness
         .driver
-        .click_resident_legend("chart-legend:live-memory-app-resident:/A/Foo.app:0.000001 MiB");
+        .click_resident_legend("chart-legend:live-memory-app-resident:/A/Foo:0.000001 MiB");
 
-    assert!(harness.driver.resident_legend_is_hidden("/A/Foo.app"));
-    assert!(!harness.driver.resident_legend_is_hidden("/B/Foo.app"));
+    assert!(harness.driver.resident_legend_is_hidden("/A/Foo"));
+    assert!(!harness.driver.resident_legend_is_hidden("/B/Foo"));
     harness
         .driver
-        .click_resident_legend("chart-legend:live-memory-app-resident:/B/Foo.app:0.000001 MiB");
-    assert!(harness.driver.resident_legend_is_hidden("/A/Foo.app"));
-    assert!(harness.driver.resident_legend_is_hidden("/B/Foo.app"));
+        .click_resident_legend("chart-legend:live-memory-app-resident:/B/Foo:0.000001 MiB");
+    assert!(harness.driver.resident_legend_is_hidden("/A/Foo"));
+    assert!(harness.driver.resident_legend_is_hidden("/B/Foo"));
     harness
         .driver
-        .click_resident_legend("chart-legend:live-memory-app-resident:/A/Foo.app:0.000001 MiB");
-    assert!(!harness.driver.resident_legend_is_hidden("/A/Foo.app"));
-    assert!(harness.driver.resident_legend_is_hidden("/B/Foo.app"));
+        .click_resident_legend("chart-legend:live-memory-app-resident:/A/Foo:0.000001 MiB");
+    assert!(!harness.driver.resident_legend_is_hidden("/A/Foo"));
+    assert!(harness.driver.resident_legend_is_hidden("/B/Foo"));
     harness.teardown();
 }
 

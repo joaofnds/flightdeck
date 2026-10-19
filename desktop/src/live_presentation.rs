@@ -2,7 +2,7 @@ use gpui::{Context, IntoElement, div, prelude::*, px, rgb};
 use num_traits::ToPrimitive;
 use serde_json::Value;
 
-use crate::charts::{GRID, MUTED, ORANGE, PANEL, TEXT};
+use crate::charts::{self, GRID, MUTED, PANEL, TEXT};
 use crate::live_chart_view::timeline::{
     self, timeline_caption_text, timeline_heading_text, timeline_label,
 };
@@ -11,22 +11,6 @@ use crate::live_projection::{hardware_reading, quantity};
 
 pub fn clock(second: u64, seconds: bool) -> String {
     crate::chart_axes::clock(second, seconds)
-}
-
-pub fn selected_clock(selection: &Value) -> String {
-    let Some(second) = selection["second"].as_u64() else {
-        return "Waiting for readings".into();
-    };
-    let Some(parts) = crate::chart_axes::local_parts(second) else {
-        return "Time unavailable".into();
-    };
-    format!(
-        "{:02}/{:02}/{} · {}",
-        parts.tm_mday,
-        parts.tm_mon + 1,
-        i64::from(parts.tm_year) + 1900,
-        clock(second, true)
-    )
 }
 
 impl LiveDashboard {
@@ -69,8 +53,8 @@ impl LiveDashboard {
             .debug_selector(|| "overview-context:thermal:Uncaptured".into())
             .flex_1()
             .min_w_0()
-            .h(px(45.0))
-            .my(px(6.0))
+            .mt(timeline::BAND_TOP + charts::PLOT_INSETS.top)
+            .h(timeline::BAND_COMPACT)
             .flex()
             .items_center()
             .justify_center()
@@ -90,8 +74,8 @@ impl LiveDashboard {
             .child(
                 div()
                     .flex()
-                    .items_center()
-                    .child(timeline_label(gutter, "Thermal"))
+                    .items_start()
+                    .child(timeline_label(gutter, "Thermal", timeline::BAND_COMPACT))
                     .child(band),
             )
             .child(self.timeline_bounds(gutter))
@@ -117,27 +101,29 @@ impl LiveDashboard {
                 BATTERY_HELP.into(),
                 "About",
             ))
-            .child(overview_context_reading(
-                &ContextReading {
-                    key: "health",
-                    label: "Health",
-                },
-                hardware_reading(battery, "health_percent", "%", 1),
-            ))
-            .child(overview_context_reading(
-                &ContextReading {
-                    key: "cycles",
-                    label: "Cycles",
-                },
-                hardware_reading(battery, "cycle_count", "", 0),
-            ))
-            .child(overview_context_reading(
-                &ContextReading {
-                    key: "adapter",
-                    label: "Adapter rating",
-                },
-                quantity(battery, "adapter_watts", "W", 1.0),
-            ));
+            .child(quantity_list([
+                overview_context_reading(
+                    &ContextReading {
+                        key: "health",
+                        label: "Health",
+                    },
+                    hardware_reading(battery, "health_percent", "%", 1),
+                ),
+                overview_context_reading(
+                    &ContextReading {
+                        key: "cycles",
+                        label: "Cycles",
+                    },
+                    hardware_reading(battery, "cycle_count", "", 0),
+                ),
+                overview_context_reading(
+                    &ContextReading {
+                        key: "adapter",
+                        label: "Adapter rating",
+                    },
+                    quantity(battery, "adapter_watts", "W", 1.0),
+                ),
+            ]));
 
         div()
             .grid()
@@ -153,18 +139,6 @@ impl LiveDashboard {
             )
             .child(details)
             .into_any_element()
-    }
-
-    pub fn missing_reading(&self) -> impl IntoElement {
-        let missing = self
-            .reading_snapshot()
-            .is_some_and(|snapshot| snapshot.selection["selected"].is_null());
-        div().h(px(16.0)).children(missing.then(|| {
-            div()
-                .debug_selector(|| "missing-observation".into())
-                .text_color(rgb(ORANGE))
-                .child("No recorded observation at this second")
-        }))
     }
 }
 
@@ -189,34 +163,41 @@ fn overview_cooling(summary: &Value) -> gpui::Div {
             COOLING_HELP.into(),
             "About",
         ))
-        .child(overview_context_reading(
-            &ContextReading {
-                key: "soc",
-                label: "SoC temperature",
-            },
-            hardware_reading(summary, "soc_celsius", " °C", 1),
-        ))
-        .child(overview_context_reading(
-            &ContextReading {
-                key: "fan0",
-                label: "Fan channel 0",
-            },
-            overview_context_fan(summary, 0),
-        ))
-        .child(overview_context_reading(
-            &ContextReading {
-                key: "fan1",
-                label: "Fan channel 1",
-            },
-            overview_context_fan(summary, 1),
-        ))
-        .child(overview_context_reading(
-            &ContextReading {
-                key: "charge",
-                label: "Battery charge",
-            },
-            hardware_reading(&summary["battery"], "charge_percent", "%", 1),
-        ))
+        .child(quantity_list([
+            overview_context_reading(
+                &ContextReading {
+                    key: "soc",
+                    label: "SoC temperature",
+                },
+                hardware_reading(summary, "soc_celsius", " °C", 1),
+            ),
+            overview_context_reading(
+                &ContextReading {
+                    key: "fan0",
+                    label: "Fan channel 0",
+                },
+                overview_context_fan(summary, 0),
+            ),
+            overview_context_reading(
+                &ContextReading {
+                    key: "fan1",
+                    label: "Fan channel 1",
+                },
+                overview_context_fan(summary, 1),
+            ),
+            overview_context_reading(
+                &ContextReading {
+                    key: "charge",
+                    label: "Battery charge",
+                },
+                hardware_reading(&summary["battery"], "charge_percent", "%", 1),
+            ),
+        ]))
+}
+
+/// The prototype's list of labelled readings, ten pixels apart.
+fn quantity_list<const N: usize>(rows: [gpui::Div; N]) -> gpui::Div {
+    div().flex().flex_col().gap(px(10.0)).children(rows)
 }
 
 pub(crate) fn overview_context_card(key: &'static str) -> gpui::Div {
@@ -231,7 +212,7 @@ pub(crate) fn overview_context_card(key: &'static str) -> gpui::Div {
         .bg(rgb(PANEL))
         .px(px(12.0))
         .pt(px(8.0))
-        .pb(px(10.0))
+        .pb(px(8.0))
         .text_color(rgb(TEXT))
 }
 
@@ -244,12 +225,11 @@ fn overview_context_reading(specification: &ContextReading, reading: String) -> 
         .justify_between()
         .gap(px(12.0))
         .py(px(8.0))
-        .mb(px(2.0))
         .border_b_1()
         .border_color(rgb(GRID))
         .text_size(px(13.0))
         .child(div().text_color(rgb(MUTED)).child(specification.label))
-        .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(reading))
+        .child(div().font_weight(gpui::FontWeight::BOLD).child(reading))
 }
 
 fn overview_context_fan(summary: &Value, channel: usize) -> String {

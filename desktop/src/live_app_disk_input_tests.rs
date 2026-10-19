@@ -55,11 +55,6 @@ fn disk_hover_replaces_every_app_widget_then_restores_the_committed_interval(
     harness.driver.hover_previous_second();
 
     harness.driver.assert_current_disk_hidden();
-    assert!(
-        harness
-            .driver
-            .text_is_visible("Hover preview · Loading exact details")
-    );
     harness.driver.complete_disk_history();
     harness.driver.assert_current_disk_hidden();
     harness.driver.assert_historical_disk_visible();
@@ -87,11 +82,6 @@ fn failed_disk_hover_keeps_committed_app_widgets_hidden(cx: &mut gpui::TestAppCo
     harness.driver.hover_previous_second();
     harness.driver.fail_disk_history();
 
-    assert!(
-        harness
-            .driver
-            .text_is_visible("Hover reading unavailable: Disk details failed")
-    );
     harness.driver.assert_current_disk_hidden();
     harness.driver.assert_historical_disk_hidden();
     harness.driver.leave_history();
@@ -173,11 +163,6 @@ fn disk_history_coverage_follows_hover_and_exit(cx: &mut gpui::TestAppContext) {
     harness.driver.hover_previous_second();
 
     harness.driver.assert_partial_disk_readout();
-    assert!(
-        harness
-            .driver
-            .text_is_visible("Hover preview · Loading exact details")
-    );
     harness.driver.complete_disk_readout_history();
     harness.driver.assert_partial_disk_readout();
     harness.driver.leave_history();
@@ -243,11 +228,6 @@ fn disk_headline_partial_follows_loading_exact_hover_and_exit(cx: &mut gpui::Tes
     harness.driver.hover_previous_second();
 
     harness.driver.assert_partial_small_disk_readout(999);
-    assert!(
-        harness
-            .driver
-            .text_is_visible("Hover preview · Loading exact details")
-    );
     harness.driver.complete_write_partial_disk_history();
     harness.driver.assert_partial_small_disk_readout(999);
     harness.driver.leave_history();

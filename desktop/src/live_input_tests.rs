@@ -30,8 +30,6 @@ mod cpu_layout;
 mod disk_attribution;
 #[path = "live_hardware_input_tests.rs"]
 mod hardware;
-#[path = "live_header_input_tests.rs"]
-mod header;
 #[path = "live_layout_input_tests.rs"]
 mod layout;
 #[path = "live_rankings_input_tests.rs"]
@@ -138,12 +136,12 @@ fn widening_the_window_recomputes_the_timestamp_beneath_a_stationary_pointer(
 
     let plot = harness.driver.plot_bounds("live-cpu-plot");
     assert!(plot.contains(&pointer));
-    assert_eq!(plot.left(), gpui::px(243.5));
-    assert_eq!(plot.size.width, gpui::px(430.0));
+    assert_eq!(plot.left(), gpui::px(244.0));
+    assert_eq!(plot.size.width, gpui::px(425.5));
     assert_eq!(harness.driver.pointer_position(), pointer);
     assert_eq!(
         harness.driver.chart_accessibility_reading("live-cpu").0,
-        Some(860)
+        Some(859)
     );
     assert!(harness.driver.cursor_is_visible("live-cpu-plot"));
     assert!(harness.driver.reading_is_visible("Unavailable"));
@@ -245,16 +243,18 @@ fn scrolling_a_plot_away_from_a_stationary_pointer_hides_both_cursors(cx: &mut T
     // A wheel event moves only layout: the pointer leaves the plot but stays inside its wrapper.
     let mut harness = InputHarness::setup(cx);
     harness.driver.make_scrollable(850.0);
+    let page = harness.driver.plot_bounds("live-energy-plot").center();
+    harness.driver.scroll_at(page, -10.0);
     let plot = harness.driver.plot_bounds("live-energy-plot");
-    let pointer = gpui::point(plot.center().x, plot.bottom() - gpui::px(1.0));
+    let pointer = gpui::point(plot.center().x, plot.top() + gpui::px(1.0));
     harness.driver.hover_position(pointer);
     assert!(harness.driver.cursor_is_visible("live-energy-plot"));
     assert!(harness.driver.cursor_is_visible("live-gpu-power-plot"));
 
-    harness.driver.scroll_at(pointer, -2.0);
+    harness.driver.scroll_at(pointer, 2.0);
 
     let moved = harness.driver.plot_bounds("live-energy-plot");
-    assert_eq!(moved.bottom(), plot.bottom() - gpui::px(2.0));
+    assert_eq!(moved.top(), plot.top() + gpui::px(2.0));
     assert!(!moved.contains(&pointer));
     assert!(
         harness

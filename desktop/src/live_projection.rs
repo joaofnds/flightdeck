@@ -574,7 +574,7 @@ fn gpu_apps_panel(
     });
     Ok(Some(Panel {
         id: GPU_APPS_ID.to_owned(),
-        title: "GPU time by app".to_owned(),
+        title: "GPU by app".to_owned(),
         unit: "%".to_owned(),
         kind: "line".to_owned(),
         lines,
@@ -831,8 +831,8 @@ fn gpu_power() -> Specification {
 
 /// The colors of an App chart's lines, Other first and then each of its eight leaders.
 pub const APP_COLORS: [&str; 9] = [
-    "#737b8c", "#5794f2", "#ff9830", "#b877d9", "#73bf69", "#f2495c", "#f2cc0c", "#56b9c3",
-    "#f28eb9",
+    "#808080", "#f2cc0c", "#5794f2", "#ff9830", "#f2495c", "#b877d9", "#37872d", "#e0b400",
+    "#1f60c4",
 ];
 
 /// GPU time by App, from the shares the app sampled each second.

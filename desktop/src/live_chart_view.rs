@@ -9,7 +9,6 @@ use gpui::{
 use serde_json::Value;
 
 use crate::charts::{self, GRID, Inspection, MUTED, PANEL};
-use crate::dashboard::control;
 use crate::data::Panel;
 use crate::live_dashboard::LiveDashboard;
 use crate::live_presentation::clock;
@@ -29,7 +28,8 @@ impl LiveDashboard {
         let inspection = chart_inspection(panel, index);
         let hidden = self.chart_hidden(panel);
         let scale = charts::axis_scale(panel, inspection, &hidden, "left");
-        let trailing = trailing_axes(panel, inspection, &hidden);
+        let text = cx.text_system().clone();
+        let trailing = trailing_axes(panel, inspection, &hidden, &text);
         let time = self.chart_time_window();
         let measured = Rc::new(Cell::new(Bounds::default()));
         let plot = charts::plot_without_cursor(
@@ -44,14 +44,14 @@ impl LiveDashboard {
             panel.kind != "timeline",
             "a timeline draws through live_timeline"
         );
-        let height = 190.0;
+        let height = 192.0;
         let chart = self
             .chart_events(
                 div()
                     .relative()
                     .h(px(height))
                     .child(plot)
-                    .child(chart_cursor(cursor))
+                    .child(chart_cursor(cursor, false))
                     .children(self.chart_tooltip(panel, index, cursor)),
                 measured,
                 panel,
@@ -59,7 +59,7 @@ impl LiveDashboard {
             )
             .into_any_element();
         let axes = PlotAxes {
-            leading: charts::axis_labels(scale, charts::axis_unit(panel, "left")),
+            leading: charts::axis_labels(scale, charts::axis_unit(panel, "left"), &text),
             trailing,
             height,
         };
@@ -79,13 +79,11 @@ impl LiveDashboard {
             .border_color(rgb(charts::LINE))
             .bg(rgb(PANEL))
             .px(px(12.0))
-            .pt(px(8.0))
-            .pb(px(10.0))
+            .py(px(8.0))
             .child(Self::chart_heading(panel, cx))
             .child(chart_plot_row(&panel.id, reading, axes, chart))
             .child(time_row)
             .child(self.chart_legends(panel, index, cx))
-            .child(self.chart_source_state(panel))
     }
 
     fn chart_time_window(&self) -> Option<charts::TimeWindow> {
@@ -119,47 +117,6 @@ impl LiveDashboard {
         }
 
         self.snapshot.as_ref()?.process_history.as_ref()?.all()
-    }
-
-    fn chart_source_state(&self, panel: &Panel) -> gpui::Div {
-        let mut notice = div().text_size(px(11.0)).text_color(rgb(MUTED));
-        if let Some(history) = self.chart_process_groups(panel) {
-            let gap = crate::live_process_history::groups::coverage(
-                history,
-                self.chart_inspection_index(panel),
-            );
-            return notice
-                .children(gap.map(|text| div().debug_selector(move || text.into()).child(text)));
-        }
-        if let Some(history) = self.chart_attribution_history(panel) {
-            return notice.child(history.coverage(self.chart_inspection_index(panel)));
-        }
-        if panel.id == crate::live_resident_history::PANEL_ID {
-            let reading = self.snapshot.as_ref().and_then(|snapshot| {
-                snapshot
-                    .resident_history
-                    .as_ref()
-                    .map(|history| history.coverage(self.chart_inspection_index(panel)))
-            });
-            return notice.children(reading);
-        }
-        if panel.id != "live-fans" {
-            return notice;
-        }
-
-        let summary = self
-            .reading_snapshot()
-            .map(|snapshot| &snapshot.selection["summary"]);
-        let text = match summary.map(|summary| &summary["fan_rpm"]) {
-            Some(Value::Array(channels)) if channels.is_empty() => {
-                "No fan channels reported by SMC at this observation."
-            }
-            Some(Value::Array(_)) => "SMC channel indices; physical positions are unreported.",
-            _ => "Fan source unavailable at this observation.",
-        };
-        notice = notice.child(text);
-
-        notice
     }
 
     fn chart_inspection_index(&self, panel: &Panel) -> Option<usize> {
@@ -594,38 +551,44 @@ impl LiveDashboard {
         });
         let inspector_panel = Rc::clone(panel);
         let keyboard_panel = Rc::clone(panel);
-        let controls = div()
-            .flex()
-            .gap(px(6.0))
-            .child(
-                control("Data")
-                    .debug_selector(|| format!("chart-data:{}", panel.id))
-                    .aria_label(format!("Data for {}", panel.title))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.open_chart_inspector(&inspector_panel, window, cx);
-                    }))
-                    .on_key_down(cx.listener(
-                        move |this, event: &gpui::KeyDownEvent, window, cx| {
-                            if ["enter", "space"].contains(&event.keystroke.key.as_str()) {
-                                this.open_chart_inspector(&keyboard_panel, window, cx);
-                                window.prevent_default();
-                                cx.stop_propagation();
-                            }
-                        },
-                    )),
-            )
-            .child(control("ⓘ").tooltip(move |_, cx| cx.new(|_| ChartHelp(help.clone())).into()));
+        let data = chart_head_button(format!("data-{}", panel.id), "Data")
+            .debug_selector(|| format!("chart-data:{}", panel.id))
+            .aria_label(format!("Data for {}", panel.title))
+            .w(px(44.0))
+            .border_1()
+            .border_color(charts::alpha(charts::TEXT, 0.12))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.open_chart_inspector(&inspector_panel, window, cx);
+            }))
+            .on_key_down(
+                cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
+                    if ["enter", "space"].contains(&event.keystroke.key.as_str()) {
+                        this.open_chart_inspector(&keyboard_panel, window, cx);
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    }
+                }),
+            );
+        let about = chart_head_button(format!("about-{}", panel.id), "ⓘ")
+            .px(px(8.0))
+            .tooltip(move |_, cx| cx.new(|_| ChartHelp(help.clone())).into());
 
         div()
             .flex()
-            .justify_between()
             .items_center()
+            .gap(px(4.0))
+            .min_h(px(44.0))
             .child(
                 div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(px(14.0))
+                    .line_height(px(21.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .child(panel.title.clone()),
             )
-            .child(controls)
+            .child(data)
+            .child(about)
     }
 
     fn chart_hidden(&self, panel: &Panel) -> Rc<Vec<String>> {
@@ -689,7 +652,7 @@ impl LiveDashboard {
                     .focusable()
                     .tab_stop(true)
                     .focus(|style| style.bg(rgb(0x32_46_61)))
-                    .py(px(4.0))
+                    .py(px(2.0))
                     .opacity(if self.hidden.contains(&key) {
                         0.35
                     } else {
@@ -740,6 +703,29 @@ impl LiveDashboard {
             })
             .into_any_element()
     }
+}
+
+/// A button of a chart card's heading, as tall as the heading and set in the muted small type.
+pub(crate) fn chart_head_button(id: String, label: &'static str) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(SharedString::from(id))
+        .role(gpui::Role::Button)
+        .aria_label(label)
+        .flex()
+        .items_center()
+        .justify_center()
+        .h(px(44.0))
+        .flex_shrink_0()
+        .rounded(px(5.0))
+        .text_size(px(11.0))
+        .line_height(px(16.5))
+        .text_color(rgb(MUTED))
+        .cursor_pointer()
+        .focusable()
+        .tab_stop(true)
+        .focus(|style| style.bg(rgb(0x32_46_61)))
+        .hover(|style| style.bg(rgb(0x2c_2f_35)))
+        .child(label)
 }
 
 /// The most lines a chart's legend shows each line's reading for. Past it the legend names
@@ -843,17 +829,34 @@ fn target_index(
         .rposition(|point| target.matches(point.get("observation").unwrap_or(point)))
 }
 
-fn chart_cursor(fraction: Option<f32>) -> impl IntoElement {
+/// The cursor over a chart. A state timeline draws it dashed and always, as the prototype does,
+/// and a line chart draws it solid while the pointer is over it.
+fn chart_cursor(fraction: Option<f32>, dashed: bool) -> impl IntoElement {
     canvas(
         |_, _, _| (),
         move |bounds, (), window, _| {
-            if let Some(fraction) = fraction {
-                let rect = charts::plot_bounds(bounds);
-                let x = rect.origin.x + rect.size.width * fraction;
+            let Some(fraction) = fraction else {
+                return;
+            };
+            let rect = charts::plot_bounds(bounds);
+            let x = rect.origin.x + rect.size.width * fraction;
+            if !dashed {
                 window.paint_quad(fill(
                     Bounds::new(point(x, rect.origin.y), size(px(1.0), rect.size.height)),
                     charts::cursor_color(),
                 ));
+                return;
+            }
+            let dash = px(3.0);
+            let mut top = rect.origin.y;
+            let bottom = rect.origin.y + rect.size.height;
+            while top < bottom {
+                let length = dash.min(bottom - top);
+                window.paint_quad(fill(
+                    Bounds::new(point(x, top), size(px(1.0), length)),
+                    charts::alpha(charts::TEXT, 0.7),
+                ));
+                top += dash * 2.0;
             }
         },
     )
@@ -945,6 +948,7 @@ fn trailing_axes(
     panel: &Panel,
     inspection: charts::Inspection,
     hidden: &[String],
+    text: &gpui::TextSystem,
 ) -> Vec<crate::chart_axes::AxisLabels> {
     let mut axes = Vec::new();
     for axis in ["right1", "right2"] {
@@ -956,7 +960,11 @@ fn trailing_axes(
         });
         if visible {
             let scale = charts::axis_scale(panel, inspection, hidden, axis);
-            axes.push(charts::axis_labels(scale, charts::axis_unit(panel, axis)));
+            axes.push(charts::axis_labels(
+                scale,
+                charts::axis_unit(panel, axis),
+                text,
+            ));
         }
     }
     axes
@@ -1002,7 +1010,7 @@ fn chart_time_row(
     div()
         .pl(axes.leading.width)
         .pr(trailing_width)
-        .h(px(20.0))
+        .h(px(crate::chart_axes::TIME_ROW_HEIGHT))
         .child(charts::time_labels(time))
 }
 

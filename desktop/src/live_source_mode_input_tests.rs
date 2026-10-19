@@ -31,9 +31,6 @@ fn opening_a_saved_recording_updates_the_existing_window_and_rendered_source_con
             .visible("source-sidebar:Recorded system readings")
     );
     assert!(harness.driver.visible("source-status:Recorded"));
-    harness.driver.open_time_menu();
-    assert!(harness.driver.visible("source-follow:Pause latest"));
-    assert!(!harness.driver.visible("source-follow:Pause live"));
     harness.teardown();
 }
 
@@ -92,9 +89,7 @@ fn self_monitoring_preserves_the_paused_inspection_while_the_live_position_advan
     recording.publish();
     let mut harness = InputHarness::setup_source(cx, &recording.root);
     harness.driver.await_publication(1);
-    harness
-        .driver
-        .click_source_control("source-follow:Pause live");
+    harness.driver.pause_following();
     harness.driver.await_publication(1);
     let requested = harness.driver.inspection_request();
     recording.publish();
@@ -117,9 +112,7 @@ fn computer_navigation_preserves_the_accepted_diagnostic_inspection(cx: &mut Tes
     recording.publish();
     let mut harness = InputHarness::setup_source(cx, &recording.root);
     harness.driver.await_publication(1);
-    harness
-        .driver
-        .click_source_control("source-follow:Pause live");
+    harness.driver.pause_following();
     harness.driver.await_publication(1);
     let requested = harness.driver.inspection_request();
     recording.publish();
@@ -136,41 +129,6 @@ fn computer_navigation_preserves_the_accepted_diagnostic_inspection(cx: &mut Tes
 
         assert_eq!(harness.driver.inspection_request(), requested);
     }
-    harness.teardown();
-}
-
-#[gpui::test]
-fn an_opened_recording_can_follow_later_publications_without_reopening_its_reader(
-    cx: &mut TestAppContext,
-) {
-    // Follow a real registered source after Open, then observe another publication and pause.
-    let mut recording = LiveRecording::new();
-    recording.publish();
-    let mut harness = InputHarness::setup(cx);
-    harness.driver.choose_recording(&recording.root);
-    harness.driver.await_source(SourceMode::Recorded);
-    harness.driver.await_publication(1);
-    recording.publish();
-
-    harness.driver.click_source_control("source-live");
-    harness.driver.await_publication(2);
-    recording.publish();
-    harness.driver.await_publication(3);
-
-    assert_eq!(harness.driver.source_title(), "Flightdeck · Live");
-    assert!(
-        harness
-            .driver
-            .visible("source-sidebar:Live system readings")
-    );
-    harness
-        .driver
-        .click_source_control("source-follow:Pause live");
-    harness.driver.await_publication(3);
-    assert_eq!(
-        harness.driver.inspection_request().1.unwrap()["publication"],
-        3
-    );
     harness.teardown();
 }
 
@@ -196,8 +154,10 @@ impl InputDriver {
         self.context.window_title().unwrap()
     }
 
-    fn open_time_menu(&mut self) {
-        super::menu_control_bounds(&mut self.context, "time-menu");
+    /// Pauses on the latest reading, which the prototype does by selecting a time on a chart.
+    fn pause_following(&mut self) {
+        self.view.update(&mut self.context, LiveDashboard::pause);
+        self.context.run_until_parked();
     }
 
     fn visible(&mut self, selector: &'static str) -> bool {
