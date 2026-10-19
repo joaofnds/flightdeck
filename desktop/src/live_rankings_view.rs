@@ -53,6 +53,8 @@ impl LiveDashboard {
     pub fn app_rankings(&self, metrics: &[usize], cx: &mut Context<Self>) -> AnyElement {
         div()
             .flex()
+            .flex_1()
+            .min_w_0()
             .gap(px(12.0))
             .children(
                 metrics
@@ -207,7 +209,13 @@ impl LiveDashboard {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if ranking.entries.is_empty() {
-            return notice("No measured App totals at this observation").into_any_element();
+            return div()
+                .py(px(20.0))
+                .text_size(px(11.0))
+                .line_height(px(17.0))
+                .text_color(rgb(MUTED))
+                .child("No active app readings.")
+                .into_any_element();
         }
 
         div()
@@ -325,19 +333,20 @@ fn ranking_title(metric: Metric, heading: RankingHeading) -> gpui::Div {
     div()
         .debug_selector(move || selector.clone())
         .flex()
-        .items_baseline()
+        .items_center()
         .gap(px(6.0))
-        .min_h(px(40.0))
-        .pt(px(12.0))
+        .h(px(40.0))
         .child(
             div()
                 .text_size(px(14.0))
+                .line_height(px(21.0))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .child("Top apps"),
         )
         .child(
             div()
                 .text_size(px(11.0))
+                .line_height(px(16.5))
                 .text_color(rgb(MUTED))
                 .child(metric_unit(metric)),
         )

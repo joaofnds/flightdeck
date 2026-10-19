@@ -10,7 +10,7 @@ impl LiveDashboard {
         if self.viewport_size.width < gpui::px(640.0) {
             return 1;
         }
-        if matches!(self.request.route.as_str(), "overview" | "apps") {
+        if matches!(self.request.route.as_str(), "overview" | "apps" | "gpu") {
             if self.viewport_size.width >= gpui::px(1100.0) {
                 return 3;
             }
@@ -184,7 +184,11 @@ impl LiveDashboard {
     /// own heading, as the prototype lays them out.
     fn reading_rows_charts_gpu(&self, rows: &mut Vec<Row>) {
         let columns = self.reading_chart_columns();
-        let primary = self.named_panels(&["live-gpu-activity", "live-gpu-power"]);
+        let primary = self.named_panels(&[
+            "live-gpu-activity",
+            crate::live_projection::GPU_FREQUENCY_ID,
+            "live-gpu-power",
+        ]);
         for panels in primary.chunks(columns) {
             rows.push(Row::Charts {
                 panels: panels.to_vec(),
@@ -206,6 +210,13 @@ impl LiveDashboard {
             self.named_panels(&[crate::live_projection::GPU_APPS_ID])
                 .into_iter()
                 .next(),
+        ));
+        rows.push(Row::Heading("GPU temperature".into()));
+        let temperature = self.named_panels(&[crate::live_projection::GPU_TEMPERATURE_ID]);
+        rows.push(Row::Temperature(
+            "gpu",
+            "Hottest GPU-area sensor",
+            temperature.into_iter().next(),
         ));
     }
 

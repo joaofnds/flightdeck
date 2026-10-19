@@ -99,7 +99,7 @@ const LOAD: Specification = (
 const GPU_FREQUENCY: Specification = (
     "Active frequency",
     Reading::Uncaptured,
-    "Frequency not captured",
+    "Cycles / active time",
     YELLOW,
     "gpu",
 );
@@ -115,6 +115,13 @@ const GPU_POWER: Specification = (
     Reading::Quantity("gpu_watts", "W", 1.0),
     "Recorded energy / second",
     PURPLE,
+    "gpu",
+);
+const GPU_PAGE_POWER: Specification = (
+    "GPU power",
+    Reading::Quantity("gpu_watts", "W", 1.0),
+    "Recorded energy / second",
+    ORANGE,
     "gpu",
 );
 const IN_USE: Specification = ("Memory in use", Reading::MemoryInUse, "", GREEN, "memory");
@@ -210,7 +217,7 @@ pub fn cards(route: &str, selection: &Value) -> Vec<Card> {
     let definitions = match route {
         "overview" => &[CPU, GPU, PRESSURE, POWER, DISK_READ, RECEIVE][..],
         "cpu" => &[CPU, PERFORMANCE, SUPER, LOAD][..],
-        "gpu" => &[GPU, GPU_FREQUENCY, GPU_MEMORY, GPU_POWER][..],
+        "gpu" => &[GPU, GPU_FREQUENCY, GPU_MEMORY, GPU_PAGE_POWER][..],
         "memory" => &[PRESSURE, IN_USE, COMPRESSED, SWAP][..],
         "storage" => &[DISK_READ, DISK_WRITE, READ_OPERATIONS, WRITE_OPERATIONS][..],
         "battery" => &[CHARGE, CHARGING, FLOW, HEALTH][..],

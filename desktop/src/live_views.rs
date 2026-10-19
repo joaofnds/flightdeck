@@ -103,6 +103,7 @@ impl LiveDashboard {
             | Row::OverviewStatus
             | Row::BatteryState(_)
             | Row::Temperature(_, _, _)
+            | Row::GpuApps(_)
             | Row::CPUTop(_) => (4.0, 4.0),
             Row::OverviewRankings(_) => (6.0, 6.0),
             Row::Heading(_) => (16.0, 8.0),

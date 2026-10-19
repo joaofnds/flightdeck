@@ -574,7 +574,7 @@ fn gpu_apps_panel(
     });
     Ok(Some(Panel {
         id: GPU_APPS_ID.to_owned(),
-        title: "GPU by app".to_owned(),
+        title: "GPU time by app".to_owned(),
         unit: "%".to_owned(),
         kind: "line".to_owned(),
         lines,
@@ -898,6 +898,38 @@ fn gpu_activity() -> Specification {
     )
 }
 
+pub const GPU_FREQUENCY_ID: &str = "live-gpu-frequency";
+pub const GPU_TEMPERATURE_ID: &str = "live-gpu-temperature";
+
+/// The clock the GPU ran at while active. The collector does not record it, so the chart has
+/// the prototype's panel and no readings.
+fn gpu_frequency() -> Specification {
+    let mut specification = specification(
+        GPU_FREQUENCY_ID,
+        "GPU active frequency",
+        "GHz",
+        vec![reading("gpu_frequency_ghz", "Frequency", "#d1d1de", 1.0)],
+    );
+    specification.help = "The GPU's cycles divided by its active time. This collector does \
+        not record it yet, so no readings are shown.";
+    specification
+}
+
+/// The hottest sensor in the GPU area. The collector does not record it, so the chart has the
+/// prototype's panel and no readings.
+fn gpu_temperature() -> Specification {
+    let mut specification = specification(
+        GPU_TEMPERATURE_ID,
+        "GPU area maximum",
+        "°C",
+        vec![reading("gpu_area_celsius", "GPU", "#b877d9", 1.0)],
+    );
+    specification.maximum = Some(125.0);
+    specification.help = "The hottest measured sensor in the GPU area. This collector does \
+        not record it yet, so no readings are shown.";
+    specification
+}
+
 fn specifications(route: &str, points: &[Value]) -> Result<Vec<Specification>, String> {
     Ok(match route {
         "overview" => overview(),
@@ -909,7 +941,13 @@ fn specifications(route: &str, points: &[Value]) -> Result<Vec<Specification>, S
             cpu_temperature(),
         ],
         "memory" => memory_specifications(),
-        "gpu" => vec![gpu_activity(), gpu_power(), gpu_memory()],
+        "gpu" => vec![
+            gpu_activity(),
+            gpu_frequency(),
+            gpu_power(),
+            gpu_memory(),
+            gpu_temperature(),
+        ],
         "energy" => energy(points)?,
         "network" => network(),
         "storage" => resource_projection::storage(),

@@ -310,6 +310,9 @@ pub fn ranking(selection: &Value) -> Result<Ranking, String> {
         let name = app["name"].as_str().ok_or("GPU App name unavailable")?;
         let amount = app["gpu_ns"].as_u64().ok_or("GPU App time unavailable")?;
         let rate = app["percent"].as_f64().ok_or("GPU App share unavailable")?;
+        if rate <= 0.0 {
+            continue;
+        }
         let processes = app["processes"]
             .as_u64()
             .ok_or("GPU App processes unavailable")?;

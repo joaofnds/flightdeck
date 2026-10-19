@@ -50,6 +50,7 @@ impl LiveDashboard {
             .child(
                 div()
                     .debug_selector(|| "attribution-ranking:live-gpu-apps".into())
+                    .flex()
                     .flex_basis(px(0.0))
                     .flex_grow(1.0)
                     .min_w_0()
@@ -109,6 +110,7 @@ impl LiveDashboard {
             .child(
                 div()
                     .debug_selector(|| format!("attribution-ranking:{}", metric.panel_id()))
+                    .flex()
                     .flex_basis(px(0.0))
                     .flex_grow(1.0)
                     .min_w_0()
