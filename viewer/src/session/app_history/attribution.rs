@@ -72,17 +72,7 @@ impl Session {
     }
 
     fn attribution_readings(&self, restore: &mut Restore) -> Result<BTreeSet<Key>> {
-        let mut needed = BTreeSet::new();
-        for reading in restore.readings.values() {
-            self.operation.check()?;
-            if reading.plotted {
-                let key = Key::new(&reading.observation);
-                needed.insert(key);
-                if let Some(publication) = key.publication.checked_sub(1) {
-                    needed.insert(Key { publication, ..key });
-                }
-            }
-        }
+        let needed = self.attribution_required_keys(restore)?;
         if !needed.is_empty() {
             self.app_history_predecessors(restore)?;
         }
@@ -297,7 +287,7 @@ impl Session {
         let needed = match &replay.prepared {
             None => self.attribution_readings(&mut replay.restore)?,
             Some(prepared) => {
-                let needed = self.attribution_replay_keys(replay)?;
+                let needed = self.attribution_required_keys(&replay.restore)?;
                 if !needed.is_subset(prepared) {
                     return Err(Error::Bound("attribution replay expanded"));
                 }
@@ -323,9 +313,9 @@ impl Session {
         Ok(())
     }
 
-    fn attribution_replay_keys(&self, replay: &AttributionReplay) -> Result<BTreeSet<Key>> {
+    fn attribution_required_keys(&self, restore: &Restore) -> Result<BTreeSet<Key>> {
         let mut needed = BTreeSet::new();
-        for reading in replay.restore.readings.values() {
+        for reading in restore.readings.values() {
             self.operation.check()?;
             if reading.plotted {
                 let key = Key::new(&reading.observation);
