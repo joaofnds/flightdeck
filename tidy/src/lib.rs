@@ -479,6 +479,58 @@ fn function_text(indentation: &str, line_count: usize) -> String {
     format!("{indentation}fn step() {{\n{block}{steps}{indentation}}}\n")
 }
 
+#[test]
+fn mise_pins_the_toolchain_ci_checks_with() {
+    // Goal: a contributor who runs cargo through mise gets the compiler, clippy and rustfmt
+    // that CI checks with, so a change that passes there passes here.
+    // Method: read the Rust version from mise.toml and every toolchain the CI workflow pins.
+    let root = repository_root();
+    let mise = read_text(&root.join("mise.toml"));
+    let workflow = read_text(&root.join(".github/workflows/check.yml"));
+
+    let version = mise_rust_version(&mise);
+    let pins = workflow_toolchains(&workflow);
+
+    assert!(!pins.is_empty());
+    for pin in pins {
+        assert_eq!(pin, version);
+    }
+}
+
+#[test]
+fn mise_rust_version_and_workflow_toolchains_read_their_pins() {
+    // Goal: each reader finds its pin in the form its file writes it, and the workflow reader
+    // finds every job's pin.
+    // Method: a mise table with another tool before Rust, and a workflow of two jobs.
+    let mise = "[tools]\njust = \"1.59.0\"\nrust = { version = \"1.98.0\", profile = \"x\" }\n";
+    let workflow = "jobs:\n  a:\n    env:\n      RUSTUP_TOOLCHAIN: 1.98.0\n  b:\n    env:\n      \
+                    RUSTUP_TOOLCHAIN: 1.97.0\n";
+
+    assert_eq!(mise_rust_version(mise), "1.98.0");
+    assert_eq!(workflow_toolchains(workflow), ["1.98.0", "1.97.0"]);
+}
+
+/// Returns the version the `rust` entry of mise's `[tools]` table names.
+fn mise_rust_version(text: &str) -> &str {
+    let line = text
+        .lines()
+        .find(|line| line.starts_with("rust = "))
+        .expect("mise.toml pins rust");
+    let (_, rest) = line
+        .split_once("version = \"")
+        .expect("the rust entry names a version");
+    let (version, _) = rest.split_once('"').expect("the version is quoted");
+    assert!(!version.is_empty());
+    version
+}
+
+/// Lists the toolchain each `RUSTUP_TOOLCHAIN` setting of a workflow names, in order.
+fn workflow_toolchains(text: &str) -> Vec<&str> {
+    text.lines()
+        .filter_map(|line| line.trim().strip_prefix("RUSTUP_TOOLCHAIN: "))
+        .collect()
+}
+
 /// Tells whether the file pins the toolchain, which rustup by default installs for anyone
 /// who runs cargo beside it.
 fn toolchain_file(path: &str) -> bool {

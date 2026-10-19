@@ -67,15 +67,19 @@ The reference contains private readings too.
 
 ## Native desktop app
 
-With Xcode's command-line tools and Rust 1.98.0 installed, build the GPUI application:
+`mise.toml` pins the tools the repository uses, Rust 1.98.0 as CI does and `just`. With
+Xcode's command-line tools and [mise](https://mise.jdx.dev) installed, trust and install
+them once, then build, package and open the GPUI application:
 
 ```sh
-cargo build --locked --release -p collector -p persistence --bin collector --bin persister
-cargo build --locked --release --manifest-path desktop/Cargo.toml --bin flightdeck
-desktop/target/release/flightdeck --bundle
-"desktop/target/Flightdeck.app/Contents/MacOS/flightdeck" --bundle --check
-open desktop/target/Flightdeck.app
+mise trust
+mise install
+just dev
 ```
+
+`just bundle` builds and packages without opening, and `just --list` shows each recipe.
+Mise acts only for a contributor who trusts the file, and without it the recipes in
+`justfile` run as they are under Rust 1.98.0.
 
 The movable bundle contains the app, collector, persister and schematic artwork.
 Default launch follows the last fifteen minutes of live readings, attaching to an

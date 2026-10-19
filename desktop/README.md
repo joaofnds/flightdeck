@@ -6,17 +6,13 @@ reference remains available with `--reference`. The UI has its own Cargo workspa
 and lockfile; the recording backend is a local path dependency.
 
 ```sh
-cargo +1.98.0 build --release --locked -p collector -p persistence --bin collector --bin persister
-cargo +1.98.0 build --release --locked --manifest-path desktop/Cargo.toml --bin flightdeck
-desktop/target/release/flightdeck --bundle
-'desktop/target/Flightdeck.app/Contents/MacOS/flightdeck' --bundle --check
-open 'desktop/target/Flightdeck.app'
+just dev
 ```
 
-Run those commands from the repository root. The bundle contains the app, required
-collector and persister executables, and artwork; missing helpers fail packaging.
-It can be moved outside the checkout. Rust 1.98.0 matches CI; these commands install
-no toolchain or hooks.
+`just dev` builds the helpers and the app, packages them, checks the bundle and opens it,
+with the tools `mise.toml` pins, as the repository README describes. The bundle contains
+the app, required collector and persister executables, and artwork; missing helpers fail
+packaging. It can be moved outside the checkout.
 
 Default launch uses `~/Library/Application Support/Flightdeck/flightdeck.recording`.
 It attaches to an advancing existing collector or starts its own when collection
