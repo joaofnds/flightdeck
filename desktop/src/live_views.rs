@@ -330,7 +330,17 @@ impl LiveDashboard {
         let selection = self
             .reading_snapshot()
             .map_or(&Value::Null, |snapshot| &snapshot.selection);
-        let cards = summary::cards(&self.request.route, selection);
+        let mut cards = summary::cards(&self.request.route, selection);
+        if let Some(card) = cards.iter_mut().find(|card| card.label == "Process power") {
+            if let Some(history) = self
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.app_attribution_history.as_deref())
+            {
+                card.reading = history.headline(history.index(self.reading_target()));
+                card.note = "Attributed Apps; separate scope";
+            }
+        }
         let mut tiles = div()
             .grid()
             .grid_cols(summary_columns(self.viewport_size.width, cards.len()))

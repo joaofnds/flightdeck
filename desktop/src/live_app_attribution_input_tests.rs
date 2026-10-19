@@ -54,12 +54,22 @@ fn power_attribution_hover_updates_machine_power_and_exact_process_rankings(
     // The process-power history drives machine widgets at the same exact timestamp.
     let mut harness = InputHarness::setup_route(cx, "energy");
     harness.driver.seed_attribution(Metric::Power);
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("summary-card:Process power:2.75 W captured")
+    );
 
     harness
         .driver
         .hover_previous_second_on("live-power-apps-plot");
 
     assert!(harness.driver.reading_is_visible("1.50 W captured"));
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("summary-card:Process power:1.50 W captured")
+    );
     assert!(harness.driver.reading_is_visible("3.0 W"));
     assert!(
         harness
@@ -72,6 +82,11 @@ fn power_attribution_hover_updates_machine_power_and_exact_process_rankings(
             .reading_is_visible("Loading exact App totals")
     );
     harness.driver.complete_attribution_preview();
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("summary-card:Process power:1.50 W captured")
+    );
     assert!(
         harness
             .driver
@@ -102,6 +117,11 @@ fn attribution_failure_preserves_the_inspected_rate_and_reports_missing_rankings
     assert!(
         harness
             .driver
+            .reading_is_visible("summary-card:Process power:1.50 W captured")
+    );
+    assert!(
+        harness
+            .driver
             .reading_is_visible("App totals unavailable: Ranking read failed")
     );
     assert!(
@@ -113,6 +133,36 @@ fn attribution_failure_preserves_the_inspected_rate_and_reports_missing_rankings
         .driver
         .leave_plot("live-power-apps-plot", PlotExit::Sidebar);
     assert!(harness.driver.reading_is_visible("2.75 W captured"));
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("summary-card:Process power:2.75 W captured")
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn power_summary_withholds_a_reading_in_a_history_gap(cx: &mut TestAppContext) {
+    // The installed App plot clears the summary when its selected second has no observation.
+    let mut harness = InputHarness::setup_route(cx, "energy");
+    harness.driver.seed_attribution(Metric::Power);
+    let gap = harness
+        .driver
+        .second_position("live-power-apps-plot", 897.5 / 900.0);
+
+    harness.driver.hover_position(gap);
+    harness.driver.finish_missing_ranked_preview();
+
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("summary-card:Process power:Unavailable")
+    );
+    assert!(
+        !harness
+            .driver
+            .reading_is_visible("summary-card:Process power:2.75 W captured")
+    );
     harness.teardown();
 }
 
