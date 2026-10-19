@@ -17,9 +17,9 @@ described at the end.
 - The collector runs without root. Root is planned as an option the user turns on in
   the app, after the readings that need no root ("every single possible visibility point
   that we can make on the computer", 2026-10-19).
-- The recording keeps its readings for a time limit the user sets in minutes, hours or
-  days, one day by default ("we should definitely have a configurable limit in time
-  duration (minutes/hours/days) and default to maybe 1 day", 2026-10-19). At the
+- The recording keeps its readings for a retention period the user sets in minutes,
+  hours or days, one day by default ("we should definitely have a configurable limit in
+  time duration (minutes/hours/days) and default to maybe 1 day", 2026-10-19). At the
   1.10 GB a day the recording reached on 2026-10-18, the default keeps about 1.1 GB.
 - A kernel panic or a power loss may lose the minute not yet sealed.
 - The collector stays in Rust ("agree, stay in rust", 2026-10-13). Measured against
@@ -751,8 +751,8 @@ two readings, and no run has watched it.
    boot and publication identify readings across restarts; actual observation clocks
    preserve gaps and backward wall time. Complete table sets become visible through
    full-synced canonical no-overwrite commit markers. Empty windows produce no files,
-   and stopping may seal a partial window. The time limit under Decisions is not built
-   yet, and per-minute and per-hour compaction remain future work.
+   and stopping may seal a partial window. The retention period under Decisions is not
+   built yet, and per-minute and per-hour compaction remain future work.
 4. The GPUI desktop client reads live and saved observations through the Rust viewer
    adapter, combining sealed history with the ring's unsealed tail under bounded
    operation, result and cache limits.

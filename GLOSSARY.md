@@ -3,6 +3,9 @@
 **Recording**: the readings kept so the user can return to an earlier second. A recording
 continues across collector restarts.
 
+**Retention period**: how long the recording keeps each reading, which the user sets in
+minutes, hours or days. A reading older than the retention period is deleted.
+
 **Tick**: one scheduled collection of the Mac's readings. A missed tick has no readings.
 
 **Sealed minute**: the saved, immutable readings of a window of 60 elapsed seconds of a
