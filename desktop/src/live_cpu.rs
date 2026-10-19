@@ -146,7 +146,9 @@ impl CPUActivity {
 
 impl LiveDashboard {
     pub fn cpu_activity(&self) -> impl IntoElement {
-        let mut panel = div().p(px(16.0)).rounded(px(8.0)).border_1().border_color(rgb(GRID))
+        let mut panel = div().debug_selector(|| "cpu-selected-panel".into())
+            .flex_1().min_w_0()
+            .p(px(16.0)).rounded(px(8.0)).border_1().border_color(rgb(GRID))
             .bg(rgb(PANEL)).child(div().text_size(px(15.0)).child("Logical CPU activity"))
             .child(div().mt(px(4.0)).text_size(px(11.0)).text_color(rgb(MUTED)).child(
                 "Busy scheduler ticks / total ticks. CPU indices are scheduler identifiers, \
@@ -188,8 +190,9 @@ impl LiveDashboard {
             return panel.child(unavailable());
         }
         let columns = activity.cpus.len().min(COLUMNS_MAX);
+        let compact = self.viewport_size.width >= px(1100.0);
         for cpus in activity.rows() {
-            panel = panel.child(cpu_activity_row(cpus, columns));
+            panel = panel.child(cpu_activity_row(cpus, columns, compact));
         }
         panel.child(
             div().text_size(px(11.0)).text_color(rgb(MUTED)).child(
@@ -212,7 +215,7 @@ enum Labels {
     Index,
 }
 
-fn cpu_activity_row(cpus: &[LogicalCPU], columns: usize) -> impl IntoElement {
+fn cpu_activity_row(cpus: &[LogicalCPU], columns: usize, compact: bool) -> impl IntoElement {
     assert!(columns <= COLUMNS_MAX);
     assert!(cpus.len() <= columns);
     let columns = match u8::try_from(columns) {
@@ -221,10 +224,12 @@ fn cpu_activity_row(cpus: &[LogicalCPU], columns: usize) -> impl IntoElement {
     };
     let values = cpus.iter().map(|cpu| cpu.busy_percent).collect::<Vec<_>>();
     div()
-        .h(px(268.0))
+        .h(px(if compact { 248.0 } else { 268.0 }))
         .flex()
         .flex_col()
-        .child(cpu_activity_labels(cpus, columns, Labels::Percent))
+        .when(!compact, |row| {
+            row.child(cpu_activity_labels(cpus, columns, Labels::Percent))
+        })
         .child(div().h(px(10.0)))
         .child(
             canvas(
@@ -258,11 +263,28 @@ fn cpu_activity_labels(cpus: &[LogicalCPU], columns: u8, kind: Labels) -> impl I
         };
         row = row.child(
             div()
+                .id(gpui::SharedString::from(format!(
+                    "cpu-selected-label-{}-{text}",
+                    cpu.cpu
+                )))
+                .when(matches!(kind, Labels::Index), |label| {
+                    label
+                        .role(gpui::Role::Label)
+                        .aria_label(format!("Selected logical CPU {}", cpu.cpu))
+                        .aria_value(
+                            cpu.busy_percent
+                                .map_or_else(|| "Unavailable".into(), |value| format!("{value}%")),
+                        )
+                })
                 .flex_1()
                 .min_w_0()
                 .text_center()
                 .debug_selector(|| text.clone())
-                .child(text),
+                .child(
+                    div()
+                        .debug_selector(|| format!("cpu-selected-value:{}:{text}", cpu.cpu))
+                        .child(text),
+                ),
         );
     }
     for _column in cpus.len()..usize::from(columns) {

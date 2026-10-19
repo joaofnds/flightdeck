@@ -26,6 +26,7 @@ impl Row {
             Self::AppSelector => "app-selector".into(),
             Self::AppSummary => "app-summary".into(),
             Self::AppColumns(kind) => format!("app-columns-{kind}"),
+            Self::CPUTop(_) => "cpu-top".into(),
             Self::CPUActivity => "cpu-activity".into(),
             Self::CPUHistory => "cpu-history".into(),
             Self::Charts(panels) => format!("charts-{}", panels[0].id),
@@ -61,6 +62,13 @@ impl Row {
         match self {
             Self::Charts(panels) => panels.iter().take(3).any(|panel| panel.id == source),
             Self::MemoryAttribution(Some(panel)) => panel.id == source,
+            Self::CPUTop(panel) => {
+                if source == "cpu-history-plot" {
+                    true
+                } else {
+                    panel.as_ref().is_some_and(|panel| panel.id == source)
+                }
+            }
             Self::CPUHistory => source == "cpu-history-plot",
             _ => false,
         }
@@ -146,6 +154,7 @@ impl LiveDashboard {
         }
 
         let previous_columns = self.reading_chart_columns();
+        let previous_cpu_wide = self.viewport_size.width >= px(1100.0);
         self.viewport_size = size;
         self.row_heights.borrow_mut().clear();
         if let Some(preview) = &mut self.preview {
@@ -153,7 +162,13 @@ impl LiveDashboard {
             preview.header_height = None;
             preview.retarget_geometry = preview.origin == Origin::Pointer;
         }
-        if previous_columns != self.reading_chart_columns() {
+        if previous_columns == self.reading_chart_columns() {
+            if self.request.route == "cpu" {
+                if previous_cpu_wide != (self.viewport_size.width >= px(1100.0)) {
+                    self.rebuild();
+                }
+            }
+        } else {
             self.rebuild();
         }
     }

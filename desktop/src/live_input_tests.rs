@@ -10,6 +10,8 @@ use crate::live_source::{Snapshot, Update, Worker};
 mod chart_inspector;
 #[path = "live_computer_input_tests.rs"]
 mod computer;
+#[path = "live_cpu_layout_input_tests.rs"]
+mod cpu_layout;
 #[path = "live_disk_input_tests.rs"]
 mod disk_attribution;
 #[path = "live_hardware_input_tests.rs"]

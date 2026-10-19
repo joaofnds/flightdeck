@@ -79,6 +79,7 @@ pub enum Row {
     AppSelector,
     AppSummary,
     AppColumns(&'static str),
+    CPUTop(Option<Rc<Panel>>),
     CPUActivity,
     CPUHistory,
     Charts(Vec<Rc<Panel>>),

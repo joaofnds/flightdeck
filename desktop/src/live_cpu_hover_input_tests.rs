@@ -51,6 +51,7 @@ fn cpu_interval_gaps_preserve_valid_scalars_without_borrowing_cpu_activity(
 ) {
     // The final second contains a scalar observation but has no measured interval at this x.
     let mut harness = CPUHoverHarness::setup(cx);
+    harness.driver.show_stacked_cpu_activity();
     assert!(harness.driver.reading_is_visible("73%"));
     assert!(
         !harness
@@ -179,6 +180,12 @@ struct CPUHoverDriver {
 }
 
 impl CPUHoverDriver {
+    fn show_stacked_cpu_activity(&mut self) {
+        self.context
+            .simulate_resize(gpui::size(gpui::px(1099.0), gpui::px(2400.0)));
+        self.context.run_until_parked();
+    }
+
     fn seed_same_second_history(&mut self) {
         let (mut payload, mut selection) = super::tests::fixture();
         let mut selected = payload["observation"].clone();

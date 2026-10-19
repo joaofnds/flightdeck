@@ -20,6 +20,9 @@ const HOVER_SOURCE: &str = "cpu-history-plot";
 impl LiveDashboard {
     pub fn cpu_history_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let panel = div()
+            .debug_selector(|| "cpu-heatmap-panel".into())
+            .flex_1()
+            .min_w_0()
             .p(px(16.0))
             .rounded(px(8.0))
             .border_1()

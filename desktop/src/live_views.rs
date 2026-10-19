@@ -8,6 +8,8 @@ use crate::live_dashboard::{LiveDashboard, ROUTES, Row};
 
 #[path = "live_computer_view.rs"]
 mod computer_view;
+#[path = "live_cpu_top_view.rs"]
+mod cpu_top_view;
 #[path = "live_recording_context_view.rs"]
 mod recording_context_view;
 #[path = "live_summary.rs"]
@@ -241,7 +243,11 @@ impl LiveDashboard {
         let height = self.reading_row_height(&self.rows[index]);
         let scroll_reserved = matches!(
             &self.rows[index],
-            Row::AppSummary | Row::CPUActivity | Row::ResourceSummary | Row::StorageDevice(_, _)
+            Row::AppSummary
+                | Row::CPUTop(_)
+                | Row::CPUActivity
+                | Row::ResourceSummary
+                | Row::StorageDevice(_, _)
         );
         div()
             .id(gpui::SharedString::from(key))
@@ -279,6 +285,7 @@ impl LiveDashboard {
             Row::ResourceSummary => self.resource_summary(),
             Row::StorageDevice(index, _) => self.resource_device(*index),
             Row::Diagnostics => self.self_monitoring().into_any_element(),
+            Row::CPUTop(panel) => self.cpu_top(panel.as_ref(), cx).into_any_element(),
             Row::CPUActivity => self.cpu_activity().into_any_element(),
             Row::CPUHistory => self.cpu_history_panel(cx).into_any_element(),
             Row::OverviewStatus => self.overview_status(cx).into_any_element(),

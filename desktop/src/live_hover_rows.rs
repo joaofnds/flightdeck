@@ -40,8 +40,7 @@ impl LiveDashboard {
             rows.push(Row::ResourceSummary);
         }
         if self.request.route == "cpu" {
-            rows.push(Row::CPUHistory);
-            rows.push(Row::CPUActivity);
+            self.reading_rows_cpu(&mut rows);
         }
         self.reading_rows_charts(&mut rows);
         match self.request.route.as_str() {
@@ -85,8 +84,28 @@ impl LiveDashboard {
         } else {
             machine_panel_count
         };
-        for panels in self.panels[..primary_panel_count].chunks(self.reading_chart_columns()) {
+        let first = usize::from(self.request.route == "cpu");
+        for panels in self.panels[first.min(primary_panel_count)..primary_panel_count]
+            .chunks(self.reading_chart_columns())
+        {
             rows.push(Row::Charts(panels.to_vec()));
+        }
+    }
+
+    fn reading_rows_cpu(&self, rows: &mut Vec<Row>) {
+        let panel = self
+            .panels
+            .iter()
+            .find(|panel| panel.id == "live-cpu")
+            .cloned();
+        if self.viewport_size.width >= gpui::px(1100.0) {
+            rows.push(Row::CPUTop(panel));
+        } else {
+            if let Some(panel) = panel {
+                rows.push(Row::Charts(vec![panel]));
+            }
+            rows.push(Row::CPUActivity);
+            rows.push(Row::CPUHistory);
         }
     }
 
