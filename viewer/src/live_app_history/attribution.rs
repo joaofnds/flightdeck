@@ -35,7 +35,7 @@ impl History {
         operation: &Operation,
     ) -> Result<Value> {
         let mut reduction = Reduction::new(selected, metric, operation)?;
-        self.attribution_observe(&mut reduction, metric)?;
+        self.attribution_observe(&mut reduction, metric, selected)?;
         if let Some(saved) = saved {
             return self.attribution_saved(
                 &SavedQuery {
@@ -76,7 +76,7 @@ impl History {
         let restored =
             Self::attribution_prepare(saved, selected, &reduction, &mut rates, space, operation)?;
         for point in rates.points() {
-            reduction.observe_cached(&point.capture)?;
+            reduction.observe_summed(&point.capture, Source::Saved)?;
         }
         reduction.merge(rates.totals(metric))?;
         if restored.uncached > 0 {
@@ -190,7 +190,14 @@ impl History {
         &self,
         reduction: &mut Reduction<'_>,
         metric: AppAttributionMetric,
+        selected: &Observation,
     ) -> Result<()> {
+        if self.attribution_summable(selected) {
+            for point in &self.points {
+                reduction.observe_summed(&point.attribution_capture(), Source::Live)?;
+            }
+            return reduction.merge(self.sums.totals(metric));
+        }
         for point in &self.points {
             reduction.observe(
                 &point.attribution_capture(),
@@ -199,6 +206,28 @@ impl History {
             )?;
         }
         Ok(())
+    }
+
+    /// Whether every live point lies in the context of `selected`, so that the live totals
+    /// are that context's own.
+    fn attribution_summable(&self, selected: &Observation) -> bool {
+        let Some(wall) = selected.wall_ns else {
+            return false;
+        };
+        let context = (wall / 1_000_000_000).saturating_sub(899)..=wall / 1_000_000_000;
+        for point in &self.points {
+            if point.observation.recording != selected.recording {
+                return false;
+            }
+            let Some(wall) = point.observation.wall_ns else {
+                return false;
+            };
+            if !context.contains(&(wall / 1_000_000_000)) {
+                return false;
+            }
+        }
+
+        true
     }
 
     fn attribution_finish(

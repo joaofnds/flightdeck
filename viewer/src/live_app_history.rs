@@ -6,8 +6,10 @@ use std::sync::Arc;
 use persistence::{Error, Result};
 use serde_json::{Value, json};
 
+use crate::app_attribution_history::sums::{OwnedKey, Summed, Sums};
 use crate::apps::{self, AppKey};
 use crate::cancellation::Operation;
+use crate::live_app_response::Measure;
 use crate::live_app_response::{KeyKind, Observation, Sample};
 use crate::session::OBSERVATIONS_MAX;
 
@@ -46,6 +48,9 @@ pub(super) struct History {
     bytes: usize,
     retention_limited: bool,
     group_bytes: usize,
+    /// The attribution totals of every point, which own their keys so that each point's key
+    /// keeps the reference count its byte accounting reads.
+    sums: Sums<OwnedKey>,
     saved_residents: RefCell<ResidentCache>,
 }
 
@@ -99,6 +104,7 @@ impl History {
             bytes,
             retention_limited: false,
             group_bytes: 0,
+            sums: Sums::new(),
             saved_residents: RefCell::new(ResidentCache::new()),
         }
     }
@@ -106,6 +112,7 @@ impl History {
     pub(super) fn push(&mut self, mut point: Box<Point>, first: u64) {
         // Incoming references keep reused key allocations alive while older points are evicted.
         self.bytes += point.bytes() + point.unshared_key_bytes();
+        self.bytes += self.sums.add(point.elapsed_ns, &point.apps);
         self.group_bytes += process::charged_bytes(point.groups.as_ref());
         self.trim_process_groups(&mut point);
         if self.bytes + self.saved_residents.get_mut().bytes() > BYTES_MAX {
@@ -134,6 +141,7 @@ impl History {
                 .pop_front()
                 .unwrap_or_else(|| unreachable!("one bounded App point fits the empty cache"));
             self.bytes -= removed.bytes() + removed.unshared_key_bytes();
+            self.bytes -= self.sums.remove(removed.elapsed_ns, &removed.apps);
             self.group_bytes -= process::charged_bytes(removed.groups.as_ref());
             if !expired {
                 self.retention_limited = true;
@@ -222,6 +230,30 @@ impl History {
         operation.check()?;
 
         Ok(response)
+    }
+}
+
+impl Summed for App {
+    type Key = OwnedKey;
+
+    fn view(&self) -> AppKey<'_> {
+        self.key.view()
+    }
+
+    fn measures(&self) -> [Measure; 3] {
+        [
+            self.cpu_ns.measure(),
+            self.energy_nj.measure(),
+            self.disk_io_bytes.measure(),
+        ]
+    }
+
+    fn key(&self) -> OwnedKey {
+        OwnedKey::capture(&self.key.view())
+    }
+
+    fn key_bytes(&self) -> usize {
+        OwnedKey::heap_bytes(&self.key.view())
     }
 }
 

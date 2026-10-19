@@ -172,7 +172,7 @@ impl History {
         replay: &mut crate::session::AttributionReplay,
         uncached: usize,
     ) -> Result<Box<AppAttributionHistories>> {
-        batch.observe_cached(&lease.rates, query.operation)?;
+        batch.observe_summed(&lease.rates, query.operation)?;
         if uncached > 0 {
             Self::attribution_batch_stream(query, replay, |point| {
                 batch.observe_saved(point);
@@ -256,6 +256,7 @@ impl<'operation> Batch<'operation> {
             .ok_or(Error::Bound("attribution selected clock"))?
             / 1_000_000_000;
         assert!(history.points.len() <= OBSERVATIONS_MAX);
+        let summable = history.attribution_summable(selected);
         for point in &history.points {
             operation.check()?;
             if point.observation.recording != selected.recording {
@@ -269,7 +270,20 @@ impl<'operation> Batch<'operation> {
             if (second.saturating_sub(899)..=second).contains(&(wall / 1_000_000_000)) {
                 batch.live.push(point.observation);
             }
-            batch.observe_live(point);
+            if summable {
+                for state in &mut batch.states {
+                    state.apply(|reduction| {
+                        reduction.observe_summed(&point.attribution_capture(), Source::Live)
+                    });
+                }
+            } else {
+                batch.observe_live(point);
+            }
+        }
+        if summable {
+            for (metric, state) in METRICS.into_iter().zip(&mut batch.states) {
+                state.apply(|reduction| reduction.merge(history.sums.totals(metric)));
+            }
         }
         batch.live.sort_by_key(identity);
         for pair in batch.live.windows(2) {
@@ -330,11 +344,11 @@ impl<'operation> Batch<'operation> {
         }
     }
 
-    fn observe_cached(&mut self, rates: &Cache, operation: &Operation) -> Result<()> {
+    fn observe_summed(&mut self, rates: &Cache, operation: &Operation) -> Result<()> {
         for point in rates.points() {
             operation.check()?;
             for state in &mut self.states {
-                state.apply(|reduction| reduction.observe_cached(&point.capture));
+                state.apply(|reduction| reduction.observe_summed(&point.capture, Source::Saved));
             }
         }
         for (metric, state) in METRICS.into_iter().zip(&mut self.states) {

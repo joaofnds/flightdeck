@@ -111,6 +111,33 @@ fn reclaims_churned_keys_when_their_last_retained_point_expires() {
 }
 
 #[test]
+fn attribution_totals_after_expiry_match_a_history_of_the_kept_point_alone() {
+    // Goal: the live totals a query merges equal what the kept points alone sum to.
+    // Method: expire two points by pushing a later one and compare with a history of it alone.
+    let mut history = History::new();
+    let first = [
+        (KeyKind::Executable, b"A".as_slice()),
+        (KeyKind::Executable, b"B"),
+    ];
+    let second = [
+        (KeyKind::Executable, b"B".as_slice()),
+        (KeyKind::Executable, b"C"),
+    ];
+    let third = [(KeyKind::Executable, b"C".as_slice())];
+    history.push(point(&history, 1, &first), 0);
+    history.push(point(&history, 2, &second), 0);
+    let mut incoming = point(&history, 3, &third);
+    incoming.observation.wall_ns = Some(1_001_000_000_000);
+    let mut reference = History::new();
+    reference.push(point(&reference, 3, &third), 0);
+
+    history.push(incoming, 1_001_000_000_000);
+
+    assert_eq!(cpu_totals(&history), cpu_totals(&reference));
+    assert_eq!(cpu_totals(&reference), [(b"C".to_vec(), 42, 1_000_000_000)]);
+}
+
+#[test]
 fn keeps_coverage_and_full_unsigned_amounts_exact_after_compaction() {
     // Compact member counts do not compact or round any u64 metric amount.
     let history = History::new();
@@ -398,7 +425,8 @@ fn accounted_bytes(history: &History) -> usize {
     let mut addresses = BTreeSet::new();
     let mut bytes = size_of::<History>()
         + history.points.capacity() * size_of::<Box<Point>>()
-        + history.observations.capacity() * size_of::<super::super::Observation>();
+        + history.observations.capacity() * size_of::<super::super::Observation>()
+        + history.sums.bytes();
     for point in &history.points {
         bytes += point.bytes();
         for app in &point.apps {
@@ -409,4 +437,15 @@ fn accounted_bytes(history: &History) -> usize {
     }
 
     bytes
+}
+
+fn cpu_totals(history: &History) -> Vec<(Vec<u8>, u128, u128)> {
+    history
+        .sums
+        .totals(crate::AppAttributionMetric::Cpu)
+        .map(|(key, total)| {
+            let (crate::apps::AppKey::Bundle(bytes) | crate::apps::AppKey::Executable(bytes)) = key;
+            (bytes.to_vec(), total.amount, total.elapsed_ns)
+        })
+        .collect()
 }

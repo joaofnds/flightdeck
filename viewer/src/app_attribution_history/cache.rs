@@ -2,19 +2,19 @@ use std::sync::Arc;
 
 use persistence::{Error, Result, WindowIdentity};
 
+pub(crate) use super::sums::Total;
+use super::sums::{SumKey, Summed, Sums};
 use super::{AppAttributionMetric, Capture, Reading};
 use crate::apps::AppKey;
 use crate::cancellation::Operation;
 use crate::live_app_history::{CompactMeasure, ResidentPin};
 use crate::live_app_response::{Measure, Observation};
 use crate::live_apps::Frame;
-use sums::Sums;
-pub(crate) use sums::Total;
 
 pub(crate) struct Cache {
     points: Vec<Point>,
     pins: Vec<ResidentPin>,
-    sums: Sums,
+    sums: Sums<Arc<Key>>,
     bytes: usize,
     limited: Option<usize>,
 }
@@ -25,7 +25,7 @@ pub(crate) struct Point {
     apps: Vec<App>,
 }
 
-struct App {
+pub(crate) struct App {
     key: Arc<Key>,
     cpu: CompactMeasure,
     power: CompactMeasure,
@@ -34,7 +34,7 @@ struct App {
     membership_complete: bool,
 }
 
-struct Key {
+pub(crate) struct Key {
     bundle: bool,
     bytes: Box<[u8]>,
 }
@@ -80,7 +80,8 @@ impl Cache {
                 return self.retain(operation, |_observation| Ok(true));
             }
             if let Some(point) = self.points.pop() {
-                self.bytes -= point.bytes() + self.sums.remove(&point);
+                self.bytes -=
+                    point.bytes() + self.sums.remove(point.capture.elapsed_ns, &point.apps);
                 drop(point);
             } else {
                 *self = Self::new();
@@ -162,7 +163,7 @@ impl Cache {
             }
         });
         for point in dropped {
-            self.bytes -= point.bytes() + self.sums.remove(&point);
+            self.bytes -= point.bytes() + self.sums.remove(point.capture.elapsed_ns, &point.apps);
         }
         if let Some(error) = failure {
             return Err(error);
@@ -210,7 +211,7 @@ impl Cache {
     }
 
     pub(crate) fn insert(&mut self, point: Point, available: usize) -> Result<()> {
-        let bytes = point.bytes() + self.sums.added_bytes(&point);
+        let bytes = point.bytes() + self.sums.added_bytes(&point.apps);
         if self.points.capacity() == 0 {
             let required = 4096 * size_of::<Point>() + bytes;
             if required > available.saturating_sub(self.bytes) {
@@ -228,7 +229,7 @@ impl Cache {
             return Err(Error::Bound("attribution cache space"));
         }
 
-        let added = self.sums.add(&point);
+        let added = self.sums.add(point.capture.elapsed_ns, &point.apps);
         assert!(added <= bytes - point.bytes());
         self.bytes += point.bytes() + added;
         self.points.push(point);
@@ -285,7 +286,7 @@ impl Point {
     pub(crate) fn capture(
         frame: &Frame,
         previous: Option<&Frame>,
-        sums: Option<&Sums>,
+        sums: Option<&Sums<Arc<Key>>>,
         windows: [Option<WindowIdentity>; 2],
         available: usize,
         operation: &Operation,
@@ -352,6 +353,36 @@ impl Point {
     }
 }
 
+impl Summed for App {
+    type Key = Arc<Key>;
+
+    fn view(&self) -> AppKey<'_> {
+        self.key.view()
+    }
+
+    fn measures(&self) -> [Measure; 3] {
+        [
+            self.cpu.measure(),
+            self.power.measure(),
+            self.disk.measure(),
+        ]
+    }
+
+    fn key(&self) -> Arc<Key> {
+        Arc::clone(&self.key)
+    }
+
+    fn key_bytes(&self) -> usize {
+        self.key.bytes()
+    }
+}
+
+impl SumKey for Arc<Key> {
+    fn view(&self) -> AppKey<'_> {
+        Key::view(self)
+    }
+}
+
 impl Key {
     fn capture(key: &AppKey<'_>) -> Self {
         Self {
@@ -382,9 +413,6 @@ impl Key {
             }
     }
 }
-
-#[path = "sums.rs"]
-mod sums;
 
 #[cfg(test)]
 #[path = "cache_tests.rs"]

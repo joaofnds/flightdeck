@@ -10,6 +10,8 @@ pub(crate) mod cache;
 mod means;
 #[path = "app_attribution_history/reduce.rs"]
 mod reduce;
+#[path = "app_attribution_history/sums.rs"]
+pub(crate) mod sums;
 pub(crate) use reduce::{Capture, Reading, Reduction};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
