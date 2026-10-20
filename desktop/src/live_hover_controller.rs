@@ -76,9 +76,6 @@ impl LiveDashboard {
             };
         }
         if changed {
-            if self.preview_awaiting_reply() {
-                crate::live_launch::poll_quickly(cx);
-            }
             self.rebuild();
             cx.notify();
         } else {
@@ -141,10 +138,7 @@ impl LiveDashboard {
 
         hover_unfinished(&mut self.hover_timings, &preview);
         self.chart_hover = None;
-        match self.worker.request(self.request.clone()) {
-            Ok(generation) => self.generation = generation,
-            Err(error) => self.error = Some(error),
-        }
+        self.request_reading();
         self.rebuild_anchored(preview.layout);
         cx.notify();
     }
@@ -194,7 +188,6 @@ impl LiveDashboard {
             Ok(generation) => {
                 preview.generation = Some(generation);
                 self.preview_submissions += 1;
-                crate::live_launch::poll_quickly(cx);
             }
             Err(error) => {
                 preview.failure = Some(error);

@@ -477,7 +477,6 @@ impl LiveDashboard {
 
     pub fn navigate(&mut self, route: &str, cx: &mut Context<Self>) {
         self.switch_route(route);
-        crate::live_launch::poll_quickly(cx);
         cx.notify();
     }
 
@@ -635,7 +634,7 @@ impl LiveDashboard {
     }
 
     /// Asks the worker for the request as it stands, leaving the reading shown until the reply.
-    fn request_reading(&mut self) {
+    pub(crate) fn request_reading(&mut self) {
         match self.worker.request(self.request.clone()) {
             Ok(generation) => {
                 self.generation = generation;
@@ -914,6 +913,24 @@ mod selection_tests {
         });
 
         assert!(!dashboard.awaiting_reply());
+    }
+
+    #[test]
+    fn choosing_an_executable_awaits_the_readings_it_asks_for() {
+        // Goal: the app polls the worker quickly for the readings a chosen executable asks
+        // for, so its process charts appear as soon as they are read rather than at the next
+        // tick a quarter second later. Method: choose an executable on a page whose readings
+        // are shown and answered.
+        let mut dashboard = dashboard();
+        let mut shown = dashboard.snapshot.take().unwrap();
+        dashboard.submit();
+        shown.generation = dashboard.generation;
+        assert!(dashboard.receive(Update::Ready(shown)));
+        assert!(!dashboard.awaiting_reply());
+
+        dashboard.select_executable(Some("hex:61".into()));
+
+        assert!(dashboard.awaiting_reply());
     }
 
     #[test]

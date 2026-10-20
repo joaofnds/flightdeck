@@ -413,10 +413,7 @@ impl LiveDashboard {
         });
         self.chart_inspector = None;
         self.error = None;
-        match self.worker.request(self.request.clone()) {
-            Ok(generation) => self.generation = generation,
-            Err(error) => self.error = Some(error),
-        }
+        self.request_reading();
         self.rebuild();
     }
 }

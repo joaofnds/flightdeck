@@ -52,25 +52,33 @@ pub(super) fn install(session: CollectorSession, cx: &mut App) {
 }
 
 pub(super) fn start_timer(entity: &Entity<LiveDashboard>, cx: &mut App) -> Result<(), String> {
-    let entity = entity.downgrade();
+    let page = entity.downgrade();
     let application = cx.to_async();
-    let quick_entity = entity.clone();
+    let quick_page = page.clone();
     let quick_application = application.clone();
     let timer = Timer::start(move || {
-        application.update(|cx| tick(&entity, cx));
+        application.update(|cx| tick(&page, cx));
     })?;
     let quick_timer = Timer::with_interval(QUICK_POLL_INTERVAL, move || {
-        quick_application.update(|cx| quick_tick(&quick_entity, cx));
+        quick_application.update(|cx| quick_tick(&quick_page, cx));
     })?;
     quick_timer.set_running(false);
     let collection = cx.global_mut::<Collection>();
     collection.timer = Some(timer);
     collection.quick_timer = Some(quick_timer);
+    // Every change that sends the worker a request notifies the page, so watching the page here
+    // takes each answer within a frame, whichever change sent its request.
+    cx.observe(entity, |dashboard, cx| {
+        if dashboard.read(cx).awaiting_reply() {
+            poll_quickly(cx);
+        }
+    })
+    .detach();
     Ok(())
 }
 
 /// Starts polling the worker every few milliseconds, until it has answered the last request.
-pub fn poll_quickly(cx: &App) {
+fn poll_quickly(cx: &App) {
     if let Some(collection) = cx.try_global::<Collection>() {
         if let Some(timer) = &collection.quick_timer {
             timer.set_running(true);

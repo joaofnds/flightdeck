@@ -97,6 +97,23 @@ fn a_hover_holds_the_page_awaiting_its_read_until_the_reply(cx: &mut TestAppCont
     harness.teardown();
 }
 
+#[gpui::test]
+fn leaving_a_hover_awaits_the_page_reading_it_asks_for_again(cx: &mut TestAppContext) {
+    // Goal: the app polls the worker quickly for the page's reading that leaving a hover asks
+    // for, so the page shows its own second again as soon as it is read rather than at the
+    // next tick a quarter second later.
+    // Method: hover a saved second through the production controller, take its reading, then
+    // leave the hover and ask whether the page awaits a reply.
+    let mut harness = ReaderHoverHarness::setup(cx);
+    harness.driver.preview_publication(2);
+    harness.driver.await_preview();
+
+    harness.driver.leave_preview();
+
+    assert!(harness.driver.awaiting_reply());
+    harness.teardown();
+}
+
 struct ReaderHoverHarness {
     driver: ReaderHoverDriver,
     recording: SealedRecording,
@@ -195,10 +212,14 @@ impl ReaderHoverDriver {
         let generation = self.view.read_with(&self.context, |dashboard, _| {
             dashboard.snapshot.as_ref().unwrap().generation
         });
+        self.leave_preview();
+        self.await_state(Await::FollowAfter(generation));
+    }
+
+    fn leave_preview(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
             dashboard.end_reading_preview(cx);
         });
-        self.await_state(Await::FollowAfter(generation));
     }
 
     fn poll_once(&mut self) {
