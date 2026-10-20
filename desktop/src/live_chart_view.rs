@@ -88,8 +88,7 @@ impl LiveDashboard {
     }
 
     fn chart_time_window(&self) -> Option<charts::TimeWindow> {
-        let second = self.snapshot.as_ref()?.selection["second"].as_u64()?;
-        Some(charts::TimeWindow::live(second))
+        self.view_window()
     }
 
     fn chart_cursor_fraction(&self, panel: &Panel) -> Option<f32> {
@@ -103,7 +102,7 @@ impl LiveDashboard {
             }
         }
 
-        cursor_fraction(panel, snapshot, Some(hover.second))
+        cursor_fraction(panel, snapshot, self.view_window(), Some(hover.second))
     }
 
     fn chart_process_groups(
@@ -309,7 +308,8 @@ impl LiveDashboard {
         let move_bounds = Rc::clone(&measured);
         let move_panel = Rc::clone(panel);
         let hover_panel = Rc::clone(panel);
-        div()
+        let drag = (source.clone(), Rc::clone(&measured));
+        let target = div()
             .id("plot-hover")
             .absolute()
             .top(charts::PLOT_INSETS.top)
@@ -319,6 +319,7 @@ impl LiveDashboard {
             .min_w(px(1.0))
             .min_h(px(1.0))
             .children(self.reading_membership_observer(move_source.clone(), cx))
+            .children(self.drag_band(&source))
             .on_mouse_move(
                 cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {
                     let hovered_at = Instant::now();
@@ -327,11 +328,9 @@ impl LiveDashboard {
                     }
 
                     this.chart_plot_width = move_bounds.get().size.width;
-                    let second = chart_hover_second(
-                        this.snapshot.as_deref(),
-                        move_bounds.get(),
-                        event.position,
-                    );
+                    this.drag_move(&move_source, move_bounds.get(), event.position.x, cx);
+                    let second =
+                        chart_hover_second(this.view_window(), move_bounds.get(), event.position);
                     this.chart_hover_update(&move_source, second, hovered_at, cx);
                 }),
             )
@@ -356,16 +355,14 @@ impl LiveDashboard {
 
                 let second = if *hovered {
                     this.chart_plot_width = measured.get().size.width;
-                    chart_hover_second(
-                        this.snapshot.as_deref(),
-                        measured.get(),
-                        window.mouse_position(),
-                    )
+                    chart_hover_second(this.view_window(), measured.get(), window.mouse_position())
                 } else {
                     None
                 };
                 this.chart_hover_update(&source, second, hovered_at, cx);
-            }))
+            }));
+
+        drag_input(target, drag, cx)
     }
 
     fn chart_hover_update(
@@ -729,7 +726,7 @@ fn keyboard_second(selection: &KeyboardSelection, delta: i64, catalog: &Value) -
 }
 
 fn chart_hover_second(
-    snapshot: Option<&Snapshot>,
+    window: Option<charts::TimeWindow>,
     bounds: Bounds<gpui::Pixels>,
     position: gpui::Point<gpui::Pixels>,
 ) -> Option<u64> {
@@ -739,7 +736,7 @@ fn chart_hover_second(
     }
 
     let fraction = f32::from(position.x - rect.origin.x) / f32::from(rect.size.width);
-    crate::live_projection::sample_second(&snapshot?.selection, fraction)
+    window?.second_at(fraction)
 }
 
 /// The selected App's disk chart, one line of the bytes read and written together as the
@@ -843,24 +840,48 @@ fn chart_cursor(fraction: Option<f32>, dashed: bool) -> impl IntoElement {
     .size_full()
 }
 
-fn cursor_fraction(panel: &Panel, snapshot: &Snapshot, hover: Option<u64>) -> Option<f32> {
+/// Lets a press on the plot start a drag, and its release anywhere end it.
+fn drag_input(
+    plot: gpui::Stateful<gpui::Div>,
+    (source, measured): (SharedString, Rc<Cell<Bounds<gpui::Pixels>>>),
+    cx: &mut Context<LiveDashboard>,
+) -> gpui::Stateful<gpui::Div> {
+    let (down_source, down_bounds) = (source.clone(), Rc::clone(&measured));
+    let (up_source, up_bounds) = (source.clone(), Rc::clone(&measured));
+
+    plot.on_mouse_down(
+        gpui::MouseButton::Left,
+        cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+            window.prevent_default();
+            this.drag_begin(&down_source, (down_bounds.get(), event), cx);
+        }),
+    )
+    .on_mouse_up(
+        gpui::MouseButton::Left,
+        cx.listener(move |this, event: &gpui::MouseUpEvent, _, cx| {
+            this.drag_end(&up_source, (up_bounds.get(), event), cx);
+        }),
+    )
+    .on_mouse_up_out(
+        gpui::MouseButton::Left,
+        cx.listener(move |this, event: &gpui::MouseUpEvent, _, cx| {
+            this.drag_end(&source, (measured.get(), event), cx);
+        }),
+    )
+}
+
+fn cursor_fraction(
+    panel: &Panel,
+    snapshot: &Snapshot,
+    view: Option<charts::TimeWindow>,
+    hover: Option<u64>,
+) -> Option<f32> {
     let second = hover?;
     if let Some(index) = inspection_index(panel, snapshot, Some(second)) {
         return panel.positions.as_ref()?.get(index).copied();
     }
-    let selected = snapshot.selection["second"].as_u64()?;
-    let first = selected.saturating_sub(899);
-    let end = selected.checked_add(1)?;
-    if !(first..end).contains(&second) {
-        return None;
-    }
-    let Ok(offset) = u16::try_from(second - first) else {
-        return None;
-    };
-    let Ok(span) = u16::try_from(end - first) else {
-        return None;
-    };
-    Some((f32::from(offset) + 0.5) / f32::from(span))
+
+    view?.fraction_of(second)
 }
 
 impl Render for ChartHelp {
@@ -988,12 +1009,20 @@ fn chart_time_row(
 
 /// Inspects the hovered reading, else the selected second, else the newest reading.
 fn chart_inspection(panel: &Panel, index: Option<usize>) -> Inspection {
-    let upper = panel
+    let newest = panel
         .lines
         .first()
         .map_or(0, |line| line.values.len().saturating_sub(1));
+    let (lower, upper) = match &panel.positions {
+        Some(positions) if panel.window.is_some() => {
+            let (lower, upper) = crate::time_range::visible(positions);
+            (lower, upper.min(newest))
+        }
+        _ => (0, newest),
+    };
+    assert!(lower <= upper);
     Inspection {
-        lower: 0,
+        lower,
         selected: index.or(panel.selected_index).unwrap_or(upper),
         upper,
     }
@@ -1095,6 +1124,26 @@ mod tests {
         assert_eq!(keyboard_second(&selection, -1, &catalog), Some(900));
     }
 
+    #[test]
+    fn a_zoomed_chart_inspects_only_the_readings_inside_its_view() {
+        // Goal: a chart zoomed to part of the history paints and scales to the readings it shows.
+        // Method: place readings on both sides of the plot and read the inspected index range.
+        let panel = json!({
+            "selectedIndex": 1, "positions": [-0.5, 0.2, 0.6, 1.2], "segments": [0, 0, 0, 0],
+            "id": "p", "title": "P", "unit": "%", "kind": "line",
+            "lines": [{"name": "a", "color": "#fff", "values": [1.0, 2.0, 3.0, 4.0]}],
+        });
+        let mut panel: Panel = serde_json::from_value(panel).unwrap();
+        panel.window = Some(crate::chart_axes::TimeWindow { first: 0, span: 60 });
+
+        let inspection = chart_inspection(&panel, None);
+
+        assert_eq!(
+            (inspection.lower, inspection.selected, inspection.upper),
+            (1, 1, 2)
+        );
+    }
+
     fn snapshot() -> Snapshot {
         Snapshot {
             generation: 1,
@@ -1160,7 +1209,14 @@ mod tests {
         assert_eq!(inspection_index(&panel, &snapshot, Some(1000)), Some(2));
         assert_eq!(inspection_index(&panel, &snapshot, Some(998)), Some(0));
         assert_eq!(inspection_index(&panel, &snapshot, Some(999)), None);
-        let fraction = cursor_fraction(&panel, &snapshot, Some(999)).unwrap();
+        let full = charts::TimeWindow::live(1000);
+        let zoomed = charts::TimeWindow {
+            first: 900,
+            span: 101,
+        };
+        let fraction = cursor_fraction(&panel, &snapshot, Some(full), Some(999)).unwrap();
         assert!((fraction - 898.5 / 900.0).abs() < f32::EPSILON);
+        let fraction = cursor_fraction(&panel, &snapshot, Some(zoomed), Some(999)).unwrap();
+        assert!((fraction - 99.5 / 101.0).abs() < f32::EPSILON);
     }
 }

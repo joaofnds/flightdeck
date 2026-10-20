@@ -32,6 +32,8 @@ mod live_presentation;
 mod live_probe;
 mod live_process_history;
 mod live_projection;
+mod live_range;
+mod live_range_menu;
 mod live_rankings;
 mod live_resident_history;
 mod live_row_splice;
@@ -52,6 +54,7 @@ mod replay_dashboard;
 mod self_monitoring;
 mod self_reports;
 mod summary;
+mod time_range;
 
 #[cfg(test)]
 mod allocation_tests;

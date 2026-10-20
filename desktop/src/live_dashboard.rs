@@ -107,6 +107,18 @@ pub struct LiveDashboard {
     pub(crate) self_reports: Rc<crate::self_reports::SelfReports>,
     /// The second of the ten-second report the Self charts inspect, or none for the newest.
     pub(crate) self_inspected: Option<u64>,
+    /// The stretch of time the charts show.
+    pub(crate) range: crate::time_range::Range,
+    /// The selection a drag across a chart is making.
+    pub(crate) drag: Option<Drag>,
+}
+
+/// A drag across one chart: the seconds under the pointer when it went down and where it is now.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Drag {
+    pub(crate) chart: String,
+    pub(crate) from: u64,
+    pub(crate) to: u64,
 }
 
 pub struct ChartHover {
@@ -239,6 +251,8 @@ impl LiveDashboard {
             rendered_source: None,
             self_reports: Rc::default(),
             self_inspected: None,
+            range: crate::time_range::Range::default(),
+            drag: None,
         };
         if dashboard.request.route == "computer" {
             dashboard.inventory = crate::live_inventory::rows();
@@ -357,9 +371,10 @@ impl LiveDashboard {
 
         self.request = presentation.request;
         self.panels = presentation.panels;
-        self.refresh_chart_inspector();
         self.executables = presentation.executables;
         self.snapshot = Some(presentation.snapshot);
+        self.zoom_panels();
+        self.refresh_chart_inspector();
         self.received_at = SystemTime::now();
         self.pending_snapshot = None;
         self.error = None;
@@ -535,6 +550,80 @@ impl LiveDashboard {
         self.request.cpu_offset = 0;
         self.submit();
         cx.notify();
+    }
+
+    /// The seconds the charts show, which is the whole history unless a range narrows it.
+    pub(crate) fn view_window(&self) -> Option<crate::chart_axes::TimeWindow> {
+        let second = self.snapshot.as_deref()?.selection["second"].as_u64()?;
+
+        Some(self.range.window(second))
+    }
+
+    /// Spreads the view across every chart that is drawn against the clock.
+    fn zoom_panels(&mut self) {
+        let Some(view) = self.view_window() else {
+            return;
+        };
+        for panel in &mut self.panels {
+            if panel.window.is_some_and(|window| window != view) {
+                crate::time_range::zoom(Rc::make_mut(panel), view);
+            }
+        }
+    }
+
+    /// Shows `range`, which a menu choice or a drag picked, without asking for another reading.
+    pub(crate) fn set_range(&mut self, range: crate::time_range::Range, cx: &mut Context<Self>) {
+        self.range = range;
+        self.drag = None;
+        self.zoom_panels();
+        self.rebuild();
+        cx.notify();
+    }
+
+    /// Shows a stretch the reader selected, and holds the view at the newest second so the
+    /// stretch stays where it was drawn.
+    pub(crate) fn select_range(&mut self, range: crate::time_range::Range, cx: &mut Context<Self>) {
+        self.hold_second();
+        self.set_range(range, cx);
+    }
+
+    /// Goes back to the whole history, following the newest second.
+    pub(crate) fn reset_range(&mut self, cx: &mut Context<Self>) {
+        self.set_range(crate::time_range::Range::History, cx);
+        if self.request.second.is_some() {
+            self.request.second = None;
+            self.request.identity = None;
+            self.request_reading();
+        }
+    }
+
+    /// Asks for the second now shown, so the view stops following without blanking.
+    fn hold_second(&mut self) {
+        if self.request.second.is_some() {
+            return;
+        }
+        let Some(snapshot) = self.snapshot.as_deref() else {
+            return;
+        };
+        let identity = snapshot.selection["selected"].clone();
+        self.request.second = snapshot.selection["second"].as_u64();
+        self.request.identity = if identity.is_null() {
+            None
+        } else {
+            Some(identity)
+        };
+        self.request_reading();
+    }
+
+    /// Asks the worker for the request as it stands, leaving the reading shown until the reply.
+    fn request_reading(&mut self) {
+        match self.worker.request(self.request.clone()) {
+            Ok(generation) => {
+                self.generation = generation;
+                self.reply_pending = true;
+            }
+            Err(error) => self.error = Some(error),
+        }
     }
 
     pub fn status(&self) -> String {

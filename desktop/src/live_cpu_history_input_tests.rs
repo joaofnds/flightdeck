@@ -47,6 +47,20 @@ fn clicking_a_history_interval_changes_nothing(cx: &mut TestAppContext) {
     harness.teardown();
 }
 
+#[gpui::test]
+fn hovering_a_zoomed_history_inspects_the_interval_under_the_pointer(cx: &mut TestAppContext) {
+    // Goal: once a range narrows the view, the pointer inspects the interval drawn under it
+    // and not the one at the same fraction of the whole history.
+    // Method: view only second 1001, hover a fifth across the cells, and read the publication.
+    let mut harness = CPUHistoryHarness::setup(cx);
+    harness.driver.view_only_second(1001);
+
+    harness.driver.hover_cells(0.2);
+
+    assert_eq!(harness.driver.inspected_publication(), Some(3));
+    harness.teardown();
+}
+
 struct CPUHistoryHarness {
     driver: CPUHistoryDriver,
 }
@@ -185,6 +199,28 @@ impl CPUHistoryDriver {
             bounds.center().y,
         );
         self.context.simulate_click(position, Modifiers::none());
+    }
+
+    fn view_only_second(&mut self, second: u64) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            dashboard.range = crate::time_range::Range::Between {
+                first: second,
+                last: second,
+            };
+            cx.notify();
+        });
+        self.context.run_until_parked();
+    }
+
+    fn hover_cells(&mut self, fraction: f32) {
+        let bounds = self.context.debug_bounds("cpu-history-cells").unwrap();
+        let position = gpui::point(
+            bounds.origin.x + bounds.size.width * fraction,
+            bounds.center().y,
+        );
+        self.context
+            .simulate_mouse_move(position, None, Modifiers::none());
+        self.context.run_until_parked();
     }
 
     fn inspected_publication(&self) -> Option<u64> {

@@ -19,6 +19,36 @@ impl TimeWindow {
             span: 900,
         }
     }
+
+    /// The second under `fraction` of the window's width, where the right edge belongs to the
+    /// last second.
+    #[must_use]
+    pub fn second_at(self, fraction: f32) -> Option<u64> {
+        if !(0.0..=1.0).contains(&fraction) {
+            return None;
+        }
+        let Ok(span) = u16::try_from(self.span) else {
+            return None;
+        };
+        let offset = num_traits::ToPrimitive::to_u64(&(fraction * f32::from(span)).floor())?;
+
+        self.first
+            .checked_add(offset.min(self.span.checked_sub(1)?))
+    }
+
+    /// Where `second` sits across the window, at the middle of that second.
+    #[must_use]
+    pub fn fraction_of(self, second: u64) -> Option<f32> {
+        let offset = second.checked_sub(self.first)?;
+        if offset >= self.span {
+            return None;
+        }
+        let (Ok(offset), Ok(span)) = (u16::try_from(offset), u16::try_from(self.span)) else {
+            return None;
+        };
+
+        Some((f32::from(offset) + 0.5) / f32::from(span))
+    }
 }
 
 /// Labelled ticks of one value axis, with the gutter width their longest label needs.
@@ -40,7 +70,9 @@ const TIME_LABEL_TOP: f32 = 8.5;
 pub const TIME_ROW_HEIGHT: f32 = 28.0;
 const LABEL_LINE: f32 = 15.0;
 const TIME_LABEL_WIDTH: f32 = 60.0;
-const TIME_INTERVALS: [u64; 8] = [60, 120, 300, 600, 900, 1800, 3600, 7200];
+const TIME_INTERVALS: [u64; 14] = [
+    1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200,
+];
 
 #[must_use]
 pub fn axis_labels(scale: Scale, unit: &str) -> AxisLabels {
@@ -129,9 +161,9 @@ pub fn time_labels_between(
             };
 
             let plot_width = bounds.size.width - left - right;
-            for (fraction, second) in time_ticks(time, f32::from(plot_width)) {
+            let ticks = time_ticks(time, f32::from(plot_width));
+            for (fraction, label) in tick_labels(&ticks) {
                 let x = bounds.origin.x + left + plot_width * fraction;
-                let label = clock(second, false);
                 paint_label(
                     &label,
                     point(x, bounds.origin.y),
@@ -217,8 +249,19 @@ fn paint_label(
     }
 }
 
+/// The clock label of each tick, with seconds when any tick falls between two minutes.
+#[must_use]
+pub fn tick_labels(ticks: &[(f32, u64)]) -> Vec<(f32, String)> {
+    let seconds = ticks.iter().any(|(_, second)| second % 60 != 0);
+
+    ticks
+        .iter()
+        .map(|(fraction, second)| (*fraction, clock(*second, seconds)))
+        .collect()
+}
+
 /// Picks the prototype's tick interval for about one label per 60 pixels, aligned to local
-/// minutes, and returns each tick's fraction of the window with its second.
+/// time, and returns each tick's fraction of the window with its second.
 #[must_use]
 pub fn time_ticks(time: TimeWindow, width: f32) -> Vec<(f32, u64)> {
     let mut ticks = Vec::with_capacity(16);
@@ -497,6 +540,45 @@ mod tests {
             assert_eq!(second % 60, 0);
         }
         assert_eq!(narrow[1].1 - narrow[0].1, 300);
+    }
+
+    #[test]
+    fn time_ticks_of_a_short_window_land_on_whole_seconds() {
+        // Goal: a zoomed-in chart still gets a label about every 60 pixels.
+        // Method: tick a one-minute window 600 pixels wide and check the spacing and bounds.
+        let time = TimeWindow {
+            first: 1_792_410_000,
+            span: 60,
+        };
+
+        let ticks = time_ticks(time, 600.0);
+
+        assert!(ticks.len() >= 6);
+        for (fraction, second) in &ticks {
+            assert!((0.0..=1.0).contains(fraction));
+            assert!((time.first..=time.first + time.span).contains(second));
+        }
+        assert_eq!(ticks[1].1 - ticks[0].1, 10);
+    }
+
+    #[test]
+    fn tick_labels_show_seconds_only_when_ticks_fall_between_minutes() {
+        // Goal: labels stay HH:MM across minutes and gain seconds when ticks are closer.
+        // Method: label the ticks of a 15-minute window and of a one-minute window.
+        let long = TimeWindow {
+            first: 1_792_410_000,
+            span: 900,
+        };
+        let short = TimeWindow {
+            first: 1_792_410_000,
+            span: 60,
+        };
+
+        let minutes = tick_labels(&time_ticks(long, 600.0));
+        let seconds = tick_labels(&time_ticks(short, 600.0));
+
+        assert!(minutes.iter().all(|(_, label)| label.len() == 5));
+        assert!(seconds.iter().all(|(_, label)| label.len() == 8));
     }
 
     #[test]

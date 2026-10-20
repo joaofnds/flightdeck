@@ -426,19 +426,6 @@ fn history_projection_reads_decimal_stamps_and_partial_measurements() {
 }
 
 #[test]
-fn clicks_use_the_exact_nine_hundred_second_domain() {
-    // Goal: selecting a chart second respects the elapsed window including its endpoints.
-    // Method: probe both endpoints, its midpoint, a short initial window and invalid inputs.
-    assert_eq!(sample_second(&selection(), 0.0), Some(101));
-    assert_eq!(sample_second(&selection(), 0.5), Some(551));
-    assert_eq!(sample_second(&selection(), 1.0), Some(1000));
-    assert_eq!(sample_second(&json!({"second": 4}), 0.5), Some(2));
-    assert_eq!(sample_second(&selection(), f32::NAN), None);
-    assert_eq!(sample_second(&selection(), -0.1), None);
-    assert_eq!(sample_second(&Value::Null, 0.5), None);
-}
-
-#[test]
 fn missing_selected_second_keeps_context_but_has_no_current_readout() {
     // Goal: a recording gap retains neighboring history without borrowing its latest value.
     // Method: clear the selection and summary while keeping the backend's actual trend points.

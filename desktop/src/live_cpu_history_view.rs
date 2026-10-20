@@ -10,9 +10,11 @@ use gpui::{
 use num_traits::ToPrimitive;
 
 use super::{CPUHistory, CPUInspection, CPUStep};
+use crate::chart_axes::TimeWindow;
 use crate::charts::{GRID, MUTED, PANEL, TEXT};
 use crate::live_dashboard::LiveDashboard;
 use crate::live_hover::{Origin, Target};
+use crate::time_range::Lens;
 
 /// The prototype's heatmap: a 244 pixel plot whose rows share 204 of them, below a 10 pixel
 /// margin, with the row labels to the left of the cells and the time labels under them.
@@ -74,10 +76,7 @@ impl LiveDashboard {
         let Some(focus) = self.cpu_history_focus.as_ref() else {
             unreachable!("Dashboard initializes the CPU history focus before rendering rows");
         };
-        let time = crate::chart_axes::TimeWindow {
-            first: history.wire.first_ns / super::NS,
-            span: (history.wire.end_ns - history.wire.first_ns) / super::NS,
-        };
+        let (time, _) = self.cpu_history_zoom(history);
         let plot = div()
             .id(HOVER_SOURCE)
             .debug_selector(|| HOVER_SOURCE.into())
@@ -109,6 +108,19 @@ impl LiveDashboard {
         self.cpu_history_accessibility(plot, history, cx)
     }
 
+    /// The window the history's plot shows and the lens from the history's own to it.
+    fn cpu_history_zoom(&self, history: &CPUHistory) -> (TimeWindow, Lens) {
+        let full = TimeWindow {
+            first: history.wire.first_ns / super::NS,
+            span: (history.wire.end_ns - history.wire.first_ns) / super::NS,
+        };
+        let zoom = self
+            .view_window()
+            .and_then(|view| Lens::new(full, view).map(|lens| (view, lens)));
+
+        zoom.unwrap_or((full, Lens::identity()))
+    }
+
     fn cpu_history_cells(
         &self,
         history: &Arc<CPUHistory>,
@@ -116,7 +128,8 @@ impl LiveDashboard {
     ) -> impl IntoElement {
         let measured = Rc::new(Cell::new(Bounds::default()));
         let inspection = self.cpu_history_inspection(history);
-        let plot = cpu_history_cells_plot(history, inspection, Rc::clone(&measured));
+        let (_, lens) = self.cpu_history_zoom(history);
+        let plot = cpu_history_cells_plot(history, inspection, lens, Rc::clone(&measured));
         let move_history = Arc::clone(history);
         let move_bounds = Rc::clone(&measured);
         let hover_history = Arc::clone(history);
@@ -311,6 +324,7 @@ impl LiveDashboard {
             return false;
         }
 
+        let (_, lens) = self.cpu_history_zoom(history);
         let fraction = f32::from(position.x - bounds.origin.x) / f32::from(bounds.size.width);
         let Some(rows) = history.cpus().len().to_f32() else {
             return false;
@@ -320,7 +334,7 @@ impl LiveDashboard {
             .floor()
             .to_usize();
         let inspection = row
-            .and_then(|row| history.inspect(row, f64::from(fraction)))
+            .and_then(|row| history.inspect(row, f64::from(lens.to_full(fraction))))
             .unwrap_or(CPUInspection::Gap);
         let target = if let Some((second, identity)) = history.target(inspection) {
             match Target::exact(second, &identity) {
@@ -332,7 +346,9 @@ impl LiveDashboard {
                 }
             }
         } else {
-            let Some(second) = crate::live_projection::sample_second(&snapshot.selection, fraction)
+            let Some(second) = self
+                .view_window()
+                .and_then(|window| window.second_at(fraction))
             else {
                 return false;
             };
@@ -566,6 +582,7 @@ fn cpu_history_reading(history: &CPUHistory, inspection: Option<CPUInspection>) 
 fn cpu_history_paint(
     history: &CPUHistory,
     inspection: Option<CPUInspection>,
+    lens: Lens,
     bounds: Bounds<Pixels>,
     window: &mut Window,
 ) {
@@ -588,6 +605,11 @@ fn cpu_history_paint(
                 let (Some(first), Some(end)) = (first, end) else {
                     unreachable!("Validated CPU history fractions fit f32");
                 };
+                let first = lens.to_view(first).clamp(0.0, 1.0);
+                let end = lens.to_view(end).clamp(0.0, 1.0);
+                if end <= first {
+                    continue;
+                }
                 let rectangle = Bounds::new(
                     point(bounds.origin.x + bounds.size.width * first, top),
                     size(bounds.size.width * (end - first), height),
@@ -608,6 +630,7 @@ fn cpu_history_paint(
     };
     cpu_history_cursor(
         history,
+        lens,
         inspected.unwrap_or(history.wire.observation.wall_ns),
         bounds,
         window,
@@ -625,6 +648,7 @@ const CURSOR_CORE_WIDTH: f32 = 1.0;
 /// A solid white line with a dark edge on each side, so it reads over every cell colour.
 fn cpu_history_cursor(
     history: &CPUHistory,
+    lens: Lens,
     wall_ns: u64,
     bounds: Bounds<Pixels>,
     window: &mut Window,
@@ -632,6 +656,10 @@ fn cpu_history_cursor(
     let Some(fraction) = history.fraction(wall_ns).to_f32() else {
         unreachable!("Validated CPU history fractions fit f32");
     };
+    let fraction = lens.to_view(fraction);
+    if !(0.0..=1.0).contains(&fraction) {
+        return;
+    }
     let center = bounds.origin.x + bounds.size.width * fraction;
     for (color, width) in [
         (
@@ -654,13 +682,14 @@ fn cpu_history_cursor(
 fn cpu_history_cells_plot(
     history: &Arc<CPUHistory>,
     inspection: Option<CPUInspection>,
+    lens: Lens,
     measured: Rc<Cell<Bounds<Pixels>>>,
 ) -> impl IntoElement + use<> {
     let paint_history = Arc::clone(history);
     canvas(
         move |bounds, _, _| measured.set(bounds),
         move |bounds, (), window, _| {
-            cpu_history_paint(&paint_history, inspection, bounds, window);
+            cpu_history_paint(&paint_history, inspection, lens, bounds, window);
         },
     )
     .size_full()

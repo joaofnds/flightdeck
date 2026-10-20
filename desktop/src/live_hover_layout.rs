@@ -282,7 +282,9 @@ impl LiveDashboard {
 
         let fraction =
             f32::from(window.mouse_position().x - bounds.left()) / f32::from(bounds.size.width);
-        let Some(second) = crate::live_projection::sample_second(&snapshot.selection, fraction)
+        let Some(second) = self
+            .view_window()
+            .and_then(|window| window.second_at(fraction))
         else {
             return;
         };

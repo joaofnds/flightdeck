@@ -159,27 +159,6 @@ pub fn hardware_reading(summary: &Value, key: &str, suffix: &str, digits: usize)
     }
 }
 
-#[must_use]
-pub fn sample_second(selection: &Value, fraction: f32) -> Option<u64> {
-    if !fraction.is_finite() {
-        return None;
-    }
-    if !(0.0..=1.0).contains(&fraction) {
-        return None;
-    }
-    let Ok(domain) = Domain::read(selection) else {
-        return None;
-    };
-    let offset = fraction * f32::from(domain.span);
-    // The right edge belongs to the selected second, not the next second.
-    for second in (0..domain.span).rev() {
-        if f32::from(second) <= offset {
-            return domain.first.checked_add(u64::from(second));
-        }
-    }
-    None
-}
-
 struct Domain {
     first: u64,
     end: u64,

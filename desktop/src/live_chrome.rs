@@ -218,7 +218,8 @@ impl LiveDashboard {
         if matches!(self.request.route.as_str(), "computer" | "self") {
             return controls;
         }
-        controls.child(self.time_controls(self.latest_button(cx).into_any_element(), cx))
+        let latest = self.latest_button(cx).into_any_element();
+        controls.child(self.time_controls(self.range_buttons(latest, cx).into_any_element(), cx))
     }
 
     /// Returns to the latest reading, and is disabled while the charts already follow it.
@@ -279,7 +280,7 @@ impl LiveDashboard {
                 cx.notify();
             }))
             .child(icon(Icon::Calendar))
-            .child("Last 15 minutes")
+            .child(self.range_label())
             .child(icon(Icon::Chevron));
 
         div()
@@ -316,34 +317,7 @@ impl LiveDashboard {
                 cx.notify();
             }))
             .child(menu_heading("Quick ranges"))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .min_h(px(44.0))
-                            .p(px(8.0))
-                            .rounded(px(5.0))
-                            .bg(charts::alpha(SELECTED, 0.15))
-                            .text_color(rgb(BLUE))
-                            .child("Last 15 minutes")
-                            .child("✓"),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .min_h(px(44.0))
-                            .p(px(8.0))
-                            .opacity(0.4)
-                            .child("Last 1 hour"),
-                    ),
-            )
+            .child(self.range_choices(cx))
             .child(self.time_menu_range())
             .child(
                 div()
@@ -353,8 +327,8 @@ impl LiveDashboard {
                     .line_height(px(16.5))
                     .text_color(rgb(MUTED))
                     .child(
-                        "Ranges end at the latest captured sample. Hover a chart or use its \
-                         arrow keys to inspect.",
+                        "Drag across a chart to zoom to that stretch. Ranges end at the latest \
+                         captured sample. Hover a chart or use its arrow keys to inspect.",
                     ),
             );
 
@@ -365,6 +339,7 @@ impl LiveDashboard {
         let second = self
             .reading_snapshot()
             .and_then(|snapshot| snapshot.selection["second"].as_u64());
+        let view = self.view_window();
         let entry = |label: &'static str, value: String| {
             div()
                 .flex()
@@ -392,11 +367,11 @@ impl LiveDashboard {
             .border_color(charts::alpha(TEXT, 0.12))
             .text_size(px(12.0))
             .line_height(px(18.0))
+            .child(entry("From", clock(view.map(|window| window.first))))
             .child(entry(
-                "From",
-                clock(second.map(|second| second.saturating_sub(899))),
+                "To",
+                clock(view.map(|window| window.first + window.span - 1)),
             ))
-            .child(entry("To", clock(second)))
             .child(entry("Date", date))
     }
 }

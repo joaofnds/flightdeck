@@ -32,6 +32,8 @@ mod disk_attribution;
 mod hardware;
 #[path = "live_layout_input_tests.rs"]
 mod layout;
+#[path = "live_range_input_tests.rs"]
+mod range;
 #[path = "live_rankings_input_tests.rs"]
 mod rankings;
 #[path = "live_resource_input_tests.rs"]
