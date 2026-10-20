@@ -432,10 +432,8 @@ impl LiveDashboard {
             .on_a11y_action(gpui::AccessibleAction::Increment, {
                 let entity = cx.entity().downgrade();
                 move |_, window, cx| {
-                    // Focus lets moving it away end the step, as it ends an arrow key's.
                     let stepped = entity.update(cx, |this, cx| {
-                        this.chart_step(1, cx);
-                        this.focus_inspection(window, cx);
+                        this.chart_accessible_step(1, window, cx);
                     });
                     if let Err(error) = stepped {
                         eprintln!("Chart accessibility action: {error}");
@@ -445,10 +443,8 @@ impl LiveDashboard {
             .on_a11y_action(gpui::AccessibleAction::Decrement, {
                 let entity = cx.entity().downgrade();
                 move |_, window, cx| {
-                    // Focus lets moving it away end the step, as it ends an arrow key's.
                     let stepped = entity.update(cx, |this, cx| {
-                        this.chart_step(-1, cx);
-                        this.focus_inspection(window, cx);
+                        this.chart_accessible_step(-1, window, cx);
                     });
                     if let Err(error) = stepped {
                         eprintln!("Chart accessibility action: {error}");
@@ -502,6 +498,13 @@ impl LiveDashboard {
 
         window.prevent_default();
         cx.stop_propagation();
+    }
+
+    /// Steps as an arrow key does, for a screen reader, and focuses the charts as a key press on
+    /// them does, so that moving focus away ends the step.
+    fn chart_accessible_step(&mut self, delta: i64, window: &mut Window, cx: &mut Context<Self>) {
+        self.chart_step(delta, cx);
+        self.focus_inspection(window, cx);
     }
 
     pub(crate) fn focus_inspection(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -572,11 +575,15 @@ impl LiveDashboard {
         self.inspect(second, cx);
     }
 
-    /// Watches the charts' focus, so a step ends when the charts lose it, as a keyboard
+    /// The charts' focus, watched so a step ends when the charts lose it, as a keyboard
     /// inspection of the CPU history does.
-    pub(crate) fn install_inspection_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.inspection_focus.is_some() {
-            return;
+    pub(crate) fn install_inspection_focus(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::FocusHandle {
+        if let Some(focus) = &self.inspection_focus {
+            return focus.clone();
         }
 
         let focus = cx.focus_handle();
@@ -586,7 +593,9 @@ impl LiveDashboard {
             }
         })
         .detach();
-        self.inspection_focus = Some(focus);
+        self.inspection_focus = Some(focus.clone());
+
+        focus
     }
 
     /// The second an arrow step on a chart shows, while it shows one.

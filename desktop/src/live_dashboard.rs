@@ -717,11 +717,11 @@ impl LiveDashboard {
         self.rebuild_anchored(layout);
     }
 
-    fn inspection_body(&mut self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
-        let focus = self
-            .inspection_focus
-            .get_or_insert_with(|| cx.focus_handle())
-            .clone();
+    fn inspection_body(
+        &mut self,
+        focus: &gpui::FocusHandle,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
         let body = list(
             self.list.clone(),
             cx.processor(|this, index: usize, _, cx| this.row(index, cx)),
@@ -737,7 +737,7 @@ impl LiveDashboard {
                 "Left and right inspect adjacent seconds, Enter selects the one shown and \
                  Escape returns to the selection",
             )
-            .track_focus(&focus)
+            .track_focus(focus)
             .tab_stop(false)
             .on_key_down(cx.listener(Self::inspection_keyboard))
             .flex()
@@ -794,7 +794,7 @@ impl Render for LiveDashboard {
         self.install_section_focus(cx);
         self.reading_viewport(window.viewport_size());
         self.install_cpu_focus(window, cx);
-        self.install_inspection_focus(window, cx);
+        let inspection_focus = self.install_inspection_focus(window, cx);
         let root_focus = self.install_root_focus(window, cx);
         self.hardware_state.begin_frame();
         self.renders += 1;
@@ -808,7 +808,7 @@ impl Render for LiveDashboard {
             });
         }
 
-        let body = self.inspection_body(cx);
+        let body = self.inspection_body(&inspection_focus, cx);
 
         div()
             .id("flightdeck-live")
