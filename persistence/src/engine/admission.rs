@@ -28,7 +28,8 @@ const FILE_BYTES_MAX: u64 = 512 * 1024 * 1024;
 const FOOTER_BYTES_MAX: u64 = 4 * 1024 * 1024;
 const PAGE_BYTES_MAX: u64 = 64 * 1024 * 1024;
 const PAGE_HEADER_BYTES_MAX: u64 = 64 * 1024;
-const EXPANDED_BYTES_MAX: u64 = 512 * 1024 * 1024;
+/// What a file may expand to once its pages are uncompressed, and what decoding them may take.
+pub const EXPANDED_BYTES_MAX: u64 = 512 * 1024 * 1024;
 const ROWS_MAX: u64 = 8_388_608;
 /// Above the widest table, the 79 columns of the App parts a window derives as it seals.
 pub const COLUMNS_MAX: usize = 96;

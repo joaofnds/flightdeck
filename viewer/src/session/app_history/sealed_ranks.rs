@@ -4,9 +4,9 @@ use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
 
-use polars::prelude::{Column, DataFrame};
+use polars::prelude::DataFrame;
 
-use super::sealed::{Kept, kind_code, kind_of, observed_in};
+use super::sealed::{Kept, columns, kind_code, kind_of, observed_in};
 use super::{ContextRange, Session, TICKS_PER_WINDOW_MAX};
 use crate::live_app_response::{
     METRICS, Metric, Observation, RANKS_MAX, Rank, RankedApp, Ranking, Ranks,
@@ -60,17 +60,9 @@ impl<'ranks> RankRow<'ranks> {
     }
 }
 
-macro_rules! rank_columns {
-    ($rows:ident; $($name:literal => $value:expr),+ $(,)?) => {
-        vec![$(
-            Column::new($name.into(), $rows.iter().map($value).collect::<Vec<_>>())
-        ),+]
-    };
-}
-
 fn sealed_ranks_frame(ranks: &[Ranks]) -> Result<DataFrame> {
     let rows = sealed_ranks_rows(ranks)?;
-    let columns = rank_columns!(rows;
+    let columns = columns!(rows;
         "version" => |_| VERSION,
         "publication" => |row| row.ranks.selected.stamp.publication,
         "run_tick" => |row| row.ranks.selected.run_tick,

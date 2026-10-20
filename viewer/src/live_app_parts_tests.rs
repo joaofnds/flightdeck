@@ -2,7 +2,7 @@ use serde_json::Value;
 
 use super::*;
 use crate::live::identity_fixture::Fixture;
-use crate::live::window::fixture::{observation_key, saved_only};
+use crate::live::window::fixture::{observation_key, saved_only, saved_with_apps};
 use crate::live_app_response::{Key, KeyKind, PAGE_ROWS_MAX, Page};
 
 #[test]
@@ -21,6 +21,30 @@ fn part_window_gives_each_saved_second_the_detail_its_sample_gives() {
 
     session.part_window(app.kind, &app.bytes).unwrap();
 
+    let parts = session.app_parts();
+    let part = parts.get(&observation_key(&sibling)).unwrap();
+    assert_eq!(part.detail(first_page()).unwrap(), expected);
+}
+
+#[test]
+fn part_window_takes_the_parts_a_window_keeps_without_a_replay() {
+    // Goal: a window whose sealed minutes keep its Apps' parts gives a hover the selected App's
+    // detail at a saved second without replaying them.
+    // Method: read the App's detail at the earlier of two seconds a saved minute keeps the parts
+    // of, read it at the later one as the page does before a hover, keep the App's parts of
+    // their window, and count the saved source reads.
+    let fixture = saved_with_apps();
+    let mut session = LiveSession::open(&fixture.root).unwrap();
+    let sibling = session.select(1000, 0).unwrap()["selected"].clone();
+    let app = selected_app(&session);
+    let expected = session.app_detail(app.kind, &app.bytes, 0).unwrap();
+    session.select(1001, 0).unwrap();
+    session.app_detail(app.kind, &app.bytes, 0).unwrap();
+    let before = session.history.as_ref().unwrap().source_reads.get();
+
+    session.part_window(app.kind, &app.bytes).unwrap();
+
+    assert_eq!(session.history.as_ref().unwrap().source_reads.get(), before);
     let parts = session.app_parts();
     let part = parts.get(&observation_key(&sibling)).unwrap();
     assert_eq!(part.detail(first_page()).unwrap(), expected);

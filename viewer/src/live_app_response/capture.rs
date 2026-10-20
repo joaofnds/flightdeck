@@ -31,16 +31,12 @@ pub(super) fn validate(aggregate: &apps::Aggregate<'_>) -> Result<()> {
 
 pub(super) fn apps(aggregate: &apps::Aggregate<'_>, output: &mut Vec<App>) -> Result<()> {
     for (key, totals) in &aggregate.apps {
-        let bytes = key_bytes(*key);
+        let kind = match key {
+            AppKey::Bundle(_) => KeyKind::Bundle,
+            AppKey::Executable(_) => KeyKind::Executable,
+        };
         output.push(App {
-            key: Key {
-                kind: match key {
-                    AppKey::Bundle(_) => KeyKind::Bundle,
-                    AppKey::Executable(_) => KeyKind::Executable,
-                },
-                bytes: bytes.to_vec(),
-                display: display(bytes)?,
-            },
+            key: Key::new(kind, key_bytes(*key).to_vec())?,
             display_name: display(app_name(*key))?,
             members: totals.members,
             live_members: totals.live_members,
@@ -75,12 +71,7 @@ pub(super) fn processes(
             }),
             executable_name: process
                 .executable_name
-                .map(|name| -> Result<Bytes> {
-                    Ok(Bytes {
-                        bytes: name.to_vec(),
-                        display: display(name)?,
-                    })
-                })
+                .map(|name| Bytes::new(name.to_vec()))
                 .transpose()?,
             program_unavailable: process.program_unavailable,
             cpu_ns: process.cpu_ns,
@@ -133,7 +124,7 @@ fn validate_bytes(bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn display(bytes: &[u8]) -> Result<String> {
+pub(super) fn display(bytes: &[u8]) -> Result<String> {
     validate_bytes(bytes)?;
 
     let mut text = String::with_capacity(bytes.len() * 4);

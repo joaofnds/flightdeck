@@ -20,6 +20,7 @@ mod resident;
 mod sealed;
 mod sealed_apps;
 pub use sealed_apps::SealedApps;
+mod sealed_parts;
 mod sealed_ranks;
 
 pub(super) struct Cache {

@@ -14,7 +14,8 @@ use persistence::worker::{Derivation, Derive};
 use persistence::{Error, Result, TableManifest};
 
 /// Samples each observation of a window as it seals, from the tables the persister wrote for
-/// it, by the rule the replay of its minute samples it, and keeps the Apps' ranks.
+/// it, by the rule the replay of its minute samples it, and keeps the Apps' ranks and every
+/// App's part.
 pub struct SealedApps;
 
 impl Derive for SealedApps {
@@ -42,7 +43,7 @@ impl Derive for SealedApps {
             }
         }
 
-        let mut ranks = Vec::with_capacity(readings.len());
+        let mut samples = Vec::with_capacity(readings.len());
         replayer.frames(derivation.pending, &readings, |reading, frame| {
             let previous = super::sample_predecessor(
                 projection.reading.as_ref(),
@@ -52,16 +53,21 @@ impl Derive for SealedApps {
             );
             let mut sample = None;
             Sample::capture(&frame, previous, &mut sample)?;
-            ranks.push(sample.ok_or(Error::Bound("sealed Apps sample"))?.ranks()?);
+            samples.push(sample.ok_or(Error::Bound("sealed Apps sample"))?);
             projection.previous = Some(frame);
             projection.reading = Some(*reading);
             Ok(())
         })?;
 
-        Ok(vec![super::sealed_ranks::encode(
-            &ranks,
-            derivation.pending,
-        )?])
+        let ranks = samples
+            .iter()
+            .map(|sample| sample.ranks())
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(vec![
+            super::sealed_ranks::encode(&ranks, derivation.pending)?,
+            super::sealed_parts::encode(&samples, derivation.pending)?,
+        ])
     }
 }
 

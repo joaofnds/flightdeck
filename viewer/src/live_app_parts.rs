@@ -33,14 +33,13 @@ impl WindowValue for AppPart {
         AppPart::bytes(self)
     }
 
-    /// No sealed minute keeps an App's parts, so the replay gives them all.
     fn visit_kept(
-        _history: &crate::Session,
-        _app: &PartsApp,
-        _range: ContextRange,
-        _consume: impl FnMut(Self) -> Result<()>,
+        history: &crate::Session,
+        app: &PartsApp,
+        range: ContextRange,
+        consume: impl FnMut(Self) -> Result<()>,
     ) -> Result<()> {
-        Ok(())
+        history.visit_sealed_parts(range, app.kind, &app.bytes, consume)
     }
 }
 

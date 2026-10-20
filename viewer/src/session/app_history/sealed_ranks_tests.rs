@@ -1,6 +1,8 @@
+use super::super::sealed::fixture::{range, rewrite};
 use super::*;
 use crate::live::identity_fixture::Fixture;
 use crate::live_app_response::{Metric, Sample};
+use polars::prelude::Column;
 
 #[test]
 fn a_window_keeps_the_ranks_the_replay_of_its_minute_gives() {
@@ -69,7 +71,7 @@ fn a_window_keeps_no_ranks_from_a_table_of_another_version() {
     fixture.publish_with_system_rows(1001);
     fixture.seal_derived(&[], &crate::SealedApps);
     let session = Session::open(&fixture.root).unwrap();
-    rewrite_ranks(&session, |frame| {
+    rewrite(&session, APP_RANKS, |frame| {
         let version = vec![VERSION + 1; frame.height()];
         frame
             .replace("version", Column::new("version".into(), version))
@@ -90,7 +92,7 @@ fn a_window_whose_ranks_lack_a_row_its_seal_counted_is_refused() {
     fixture.publish_with_system_rows(1001);
     fixture.seal_derived(&[], &crate::SealedApps);
     let session = Session::open(&fixture.root).unwrap();
-    rewrite_ranks(&session, |frame| {
+    rewrite(&session, APP_RANKS, |frame| {
         *frame = frame.head(Some(frame.height() - 1));
     });
 
@@ -110,7 +112,7 @@ fn a_window_whose_ranks_skip_a_position_is_refused() {
     fixture.publish_with_system_rows(1001);
     fixture.seal_derived(&[], &crate::SealedApps);
     let session = Session::open(&fixture.root).unwrap();
-    rewrite_ranks(&session, |frame| {
+    rewrite(&session, APP_RANKS, |frame| {
         let positions: Vec<Option<u8>> = (0..frame.height())
             .map(|index| {
                 let position: Option<u8> = Row::new(frame, index).unwrap().get(13).unwrap();
@@ -159,28 +161,4 @@ fn replayed_ranks(session: &Session, selected: &Ranks) -> Vec<Ranks> {
         .unwrap();
 
     replayed
-}
-
-fn range(second: u64) -> ContextRange {
-    ContextRange {
-        first_ns: (second - 899) * 1_000_000_000,
-        end_ns: (second + 1) * 1_000_000_000,
-    }
-}
-
-/// Rewrites the only sealed window's ranks in place through `change`.
-fn rewrite_ranks(session: &Session, change: impl FnOnce(&mut DataFrame)) {
-    let path = session
-        .root
-        .join(&session.windows[0].data_directory)
-        .join(format!("{APP_RANKS}.parquet"));
-    let mut frame = persistence::engine::scan(&path).unwrap().collect().unwrap();
-    change(&mut frame);
-    let staging = session.root.with_extension("ranks");
-    std::fs::create_dir(&staging).unwrap();
-
-    persistence::encode_derived(APP_RANKS, &mut frame, &staging).unwrap();
-
-    std::fs::copy(staging.join(format!("{APP_RANKS}.parquet")), &path).unwrap();
-    std::fs::remove_dir_all(&staging).unwrap();
 }

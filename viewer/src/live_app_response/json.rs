@@ -7,16 +7,16 @@ use crate::apps;
 
 /// The facts of a sample that every page of it carries.
 #[derive(Clone, Copy)]
-pub(super) struct Header {
-    selected: super::Observation,
-    previous: Option<Stamp>,
-    elapsed_ns: Option<u64>,
-    membership_complete: bool,
-    ungrouped_members: u32,
-    usage_refused: u32,
-    usage_gone: u32,
-    app_count: usize,
-    process_count: usize,
+pub(crate) struct Header {
+    pub(crate) selected: super::Observation,
+    pub(crate) previous: Option<Stamp>,
+    pub(crate) elapsed_ns: Option<u64>,
+    pub(crate) membership_complete: bool,
+    pub(crate) ungrouped_members: u32,
+    pub(crate) usage_refused: u32,
+    pub(crate) usage_gone: u32,
+    pub(crate) app_count: usize,
+    pub(crate) process_count: usize,
 }
 
 impl Header {

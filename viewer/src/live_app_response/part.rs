@@ -17,10 +17,10 @@ pub struct AppPart {
 }
 
 /// The App's row and processes at a second it ran.
-struct Present {
-    app_index: usize,
-    app: App,
-    processes: Vec<Process>,
+pub(crate) struct Present {
+    pub(crate) app_index: usize,
+    pub(crate) app: App,
+    pub(crate) processes: Vec<Process>,
 }
 
 impl Sample {
@@ -61,6 +61,26 @@ impl Sample {
 }
 
 impl AppPart {
+    /// The part of the App with this key that a sealed minute keeps of a sample now gone.
+    pub(crate) fn kept(
+        header: Header,
+        kind: KeyKind,
+        bytes: Box<[u8]>,
+        present: Option<Present>,
+    ) -> Self {
+        if let Some(present) = &present {
+            assert_eq!(present.app.key.kind, kind);
+            assert_eq!(*present.app.key.bytes, *bytes);
+        }
+
+        Self {
+            header,
+            kind,
+            bytes,
+            present,
+        }
+    }
+
     /// The App's detail page at its second, which is null where the App did not run.
     pub fn detail(&self, page: Page) -> Result<Value> {
         let Some(present) = &self.present else {

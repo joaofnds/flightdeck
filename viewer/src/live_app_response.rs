@@ -6,8 +6,9 @@ use serde_json::Value;
 use crate::apps::{self, Amount, AppKey, ProcessCreation, ProcessState, Stamp, Unavailable};
 use crate::live_apps::Frame;
 
-pub(crate) use json::bounded;
+pub(crate) use json::{Header, bounded};
 pub use part::AppPart;
+pub(crate) use part::Present;
 pub(crate) use ranks::METRICS;
 pub use ranks::{Metric, RANKS_MAX, Rank, RankedApp, Ranking, Ranks};
 
@@ -127,6 +128,33 @@ impl App {
     /// The capacity of the strings and vectors the App row holds.
     fn heap_bytes(&self) -> usize {
         self.key.bytes.capacity() + self.key.display.capacity() + self.display_name.capacity()
+    }
+}
+
+impl Key {
+    /// The key of the App with these bytes, displayed as its sample displays it.
+    pub(crate) fn new(kind: KeyKind, bytes: Vec<u8>) -> Result<Self> {
+        let display = capture::display(&bytes)?;
+
+        Ok(Self {
+            kind,
+            bytes,
+            display,
+        })
+    }
+
+    /// The name the App of this key shows.
+    pub(crate) fn display_name(&self) -> Result<String> {
+        capture::display_name(self.kind, &self.bytes)
+    }
+}
+
+impl Bytes {
+    /// These bytes, displayed as a sample displays them.
+    pub(crate) fn new(bytes: Vec<u8>) -> Result<Self> {
+        let display = capture::display(&bytes)?;
+
+        Ok(Self { bytes, display })
     }
 }
 

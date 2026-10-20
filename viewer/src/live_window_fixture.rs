@@ -18,8 +18,8 @@ pub fn saved_only() -> Fixture {
     fixture
 }
 
-/// The two sealed seconds of `saved_only`, sealed with the ranks of their minute.
-pub fn saved_ranked() -> Fixture {
+/// The two sealed seconds of `saved_only`, sealed with what the persister keeps of their Apps.
+pub fn saved_with_apps() -> Fixture {
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(1000);
     fixture.publish_with_system_rows(1001);

@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 use super::*;
 use crate::live::identity_fixture::Fixture;
 use crate::live::window::fixture::{
-    damage, observation_key, saved_in_two_minutes, saved_only, saved_ranked,
+    damage, observation_key, saved_in_two_minutes, saved_only, saved_with_apps,
 };
 
 #[test]
@@ -40,7 +40,7 @@ fn rank_window_takes_the_ranks_a_window_keeps_without_a_replay() {
     // Goal: a window whose sealed minutes keep its ranks ranks without replaying them.
     // Method: select the later of two seconds a saved minute keeps the ranks of, rank its
     // window, and count the saved source reads.
-    let fixture = saved_ranked();
+    let fixture = saved_with_apps();
     let mut session = LiveSession::open(&fixture.root).unwrap();
     let selected = session.select(1001, 0).unwrap()["selected"].clone();
     let expected = selected_ranks(&session);
@@ -66,7 +66,7 @@ fn rank_window_kept_takes_the_ranks_a_window_keeps_without_a_replay() {
     // no saved minute.
     // Method: select the later of two seconds a saved minute keeps the ranks of, rank its
     // window from what it keeps, and count the saved source reads.
-    let fixture = saved_ranked();
+    let fixture = saved_with_apps();
     let mut session = LiveSession::open(&fixture.root).unwrap();
     let selected = session.select(1001, 0).unwrap()["selected"].clone();
     let expected = selected_ranks(&session);
@@ -168,7 +168,7 @@ fn rank_window_does_not_read_a_window_whose_kept_ranks_failed() {
     // does, and not one on every read.
     // Method: damage the ranks a saved minute keeps, rank its window twice, and count the saved
     // source reads of the second time.
-    let fixture = saved_ranked();
+    let fixture = saved_with_apps();
     let mut session = LiveSession::open(&fixture.root).unwrap();
     session.select(1001, 0).unwrap();
     let window = &session.history.as_ref().unwrap().windows[0];
