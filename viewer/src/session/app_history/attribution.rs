@@ -128,17 +128,12 @@ impl Session {
         consume: &mut impl FnMut(&Frame, Option<&Frame>, [Option<WindowIdentity>; 2]) -> Result<()>,
     ) -> Result<()> {
         if reading.plotted {
-            let previous = projection.reading.as_ref().and_then(|previous| {
-                if previous.adjacent(reading) {
-                    if super::super::committed_apps::with_app_sample_predecessor(
-                        &previous.endpoint(),
-                        Some(&current),
-                    ) {
-                        return projection.previous.as_deref();
-                    }
-                }
-                None
-            });
+            let previous = super::sample_predecessor(
+                projection.reading.as_ref(),
+                projection.previous.as_deref(),
+                reading,
+                &current,
+            );
             let previous_window = if previous.is_some() {
                 projection
                     .reading

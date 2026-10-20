@@ -421,25 +421,13 @@ impl Session {
 
         #[cfg(test)]
         self.tick_queries.set(self.tick_queries.get() + 1);
-        let limit = TICKS_PER_WINDOW_MAX + 1;
-        let frame = self.connection.query(&format!(
-            "SELECT publication, run_tick, wall_ns, continuous_ns, awake_ns, processes_refused, \
-            processes_gone, events_first, events_end FROM {source} \
-            ORDER BY publication LIMIT {limit}"
-        ))?;
-        if frame.height() > TICKS_PER_WINDOW_MAX {
-            return Err(Error::Bound("committed App history tick rows"));
-        }
-        let mut readings = Vec::with_capacity(frame.height());
-        for index in 0..frame.height() {
-            self.operation.check()?;
-            let row = persistence::engine::Row::new(&frame, index)?;
-            readings.push(app_history_reading(
-                &row,
-                window,
-                &self.windows[window].identity.run,
-            )?);
-        }
+        let readings = app_history_readings(
+            &self.connection,
+            &self.operation,
+            source,
+            window,
+            &self.windows[window].identity.run,
+        )?;
 
         let mut ticks = self.app_history_ticks.borrow_mut();
         if ticks.windows.len() == TICKS_WINDOWS_MAX {
@@ -718,17 +706,12 @@ fn app_history_capture(
         reading.observation.stamp.publication
     );
     if reading.plotted {
-        let previous = projection.reading.as_ref().and_then(|previous| {
-            if previous.adjacent(reading) {
-                if super::committed_apps::with_app_sample_predecessor(
-                    &previous.endpoint(),
-                    Some(&current),
-                ) {
-                    return projection.previous.as_deref();
-                }
-            }
-            None
-        });
+        let previous = sample_predecessor(
+            projection.reading.as_ref(),
+            projection.previous.as_deref(),
+            reading,
+            &current,
+        );
         projection
             .points
             .push(TracePoint::capture(&current, previous, projection.target)?);
@@ -737,6 +720,54 @@ fn app_history_capture(
     projection.reading = Some(*reading);
 
     Ok(())
+}
+
+/// The frame a sample of `reading` takes its rates from: the frame of the reading just before
+/// it, when that is the observation before it in its run and the collector took both on
+/// consecutive ticks.
+fn sample_predecessor<'frame>(
+    previous: Option<&Reading>,
+    previous_frame: Option<&'frame Frame>,
+    reading: &Reading,
+    current: &Frame,
+) -> Option<&'frame Frame> {
+    let previous = previous?;
+    if previous.adjacent(reading) {
+        if super::committed_apps::with_app_sample_predecessor(&previous.endpoint(), Some(current)) {
+            return previous_frame;
+        }
+    }
+
+    None
+}
+
+/// The readings of a sealed window's ticks, which the relation `source` holds, in publication
+/// order.
+fn app_history_readings(
+    connection: &persistence::engine::Engine,
+    operation: &crate::cancellation::Operation,
+    source: &str,
+    window: usize,
+    run: &RunIdentity,
+) -> Result<Vec<Reading>> {
+    let limit = TICKS_PER_WINDOW_MAX + 1;
+    let frame = connection.query(&format!(
+        "SELECT publication, run_tick, wall_ns, continuous_ns, awake_ns, processes_refused, \
+        processes_gone, events_first, events_end FROM {source} \
+        ORDER BY publication LIMIT {limit}"
+    ))?;
+    if frame.height() > TICKS_PER_WINDOW_MAX {
+        return Err(Error::Bound("committed App history tick rows"));
+    }
+
+    let mut readings = Vec::with_capacity(frame.height());
+    for index in 0..frame.height() {
+        operation.check()?;
+        let row = persistence::engine::Row::new(&frame, index)?;
+        readings.push(app_history_reading(&row, window, run)?);
+    }
+
+    Ok(readings)
 }
 
 fn app_history_reading(
