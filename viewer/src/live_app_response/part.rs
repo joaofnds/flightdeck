@@ -106,7 +106,7 @@ impl AppPart {
 
     #[must_use]
     pub fn selected(&self) -> &Observation {
-        self.header.selected()
+        &self.header.selected
     }
 
     /// The facts of its second's sample.

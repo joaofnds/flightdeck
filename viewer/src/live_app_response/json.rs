@@ -33,10 +33,6 @@ impl Header {
             process_count: sample.processes.len(),
         }
     }
-
-    pub(super) fn selected(&self) -> &super::Observation {
-        &self.selected
-    }
 }
 
 /// One App and its processes, from a sample or from the App's part of it.
