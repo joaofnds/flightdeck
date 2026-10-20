@@ -82,6 +82,9 @@ pub struct LiveDashboard {
     pub(crate) preview_submissions: u64,
     pub(crate) row_heights:
         Rc<std::cell::RefCell<std::collections::BTreeMap<String, gpui::Pixels>>>,
+    /// The key and room of each row the page shows as a placeholder while a request replaces its
+    /// readings, empty otherwise.
+    pub(crate) placeholders: Vec<(String, gpui::Pixels)>,
     pub(crate) header_height: Rc<std::cell::Cell<gpui::Pixels>>,
     pub(crate) viewport_size: gpui::Size<gpui::Pixels>,
     /// The Apps page's picker whose choices are open, if any.
@@ -162,6 +165,9 @@ pub enum Row {
     Executable(usize),
     Inventory,
     Spacer(gpui::Pixels),
+    /// The room a row took, under the row's own key, kept while a request replaces the
+    /// readings it showed so the page does not move before the reply arrives.
+    Placeholder(String, gpui::Pixels),
 }
 
 impl LiveDashboard {
@@ -210,6 +216,7 @@ impl LiveDashboard {
             received_at: SystemTime::now(),
             preview_submissions: 0,
             row_heights: Rc::new(std::cell::RefCell::new(std::collections::BTreeMap::new())),
+            placeholders: Vec::new(),
             header_height: Rc::new(std::cell::Cell::new(px(0.0))),
             viewport_size: gpui::size(px(0.0), px(0.0)),
             picker: None,
@@ -343,6 +350,7 @@ impl LiveDashboard {
         self.pending_snapshot = None;
         self.error = None;
         self.updates += 1;
+        self.placeholders.clear();
 
         self.rebuild();
         if self.reveal_hardware {
@@ -362,7 +370,15 @@ impl LiveDashboard {
 
     pub fn submit(&mut self) {
         self.native.alternative_page = 0;
-        self.clear_presentation();
+        // A page whose readings are shown keeps its rows' room until the reply replaces them.
+        let placeholders = if self.snapshot.is_some() {
+            self.placeholder_rows()
+        } else {
+            Vec::new()
+        };
+        self.clear_readings();
+        self.placeholders = placeholders;
+        self.rebuild();
         self.error = None;
         self.generation = 0;
         match self.worker.request(self.request.clone()) {
@@ -378,6 +394,12 @@ impl LiveDashboard {
     }
 
     fn clear_presentation(&mut self) {
+        self.placeholders.clear();
+        self.clear_readings();
+        self.rebuild();
+    }
+
+    fn clear_readings(&mut self) {
         if let Some(snapshot) = self.snapshot.take() {
             self.pending_snapshot = Some(snapshot);
         }
@@ -388,7 +410,6 @@ impl LiveDashboard {
         self.chart_inspector = None;
         self.preview = None;
         self.cpu_inspection = None;
-        self.rebuild();
     }
 
     pub fn navigate(&mut self, route: &str, cx: &mut Context<Self>) {

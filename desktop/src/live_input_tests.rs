@@ -36,6 +36,8 @@ mod layout;
 mod rankings;
 #[path = "live_resource_input_tests.rs"]
 mod resource;
+#[path = "live_scroll_input_tests.rs"]
+mod scroll;
 #[path = "live_section_input_tests.rs"]
 mod sections;
 #[path = "live_source_mode_input_tests.rs"]

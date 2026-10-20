@@ -73,6 +73,31 @@ impl Row {
             Self::Executable(index) => format!("executable-{index}"),
             Self::Inventory => "inventory".into(),
             Self::Spacer(_) => "hover-spacing".into(),
+            Self::Placeholder(key, _) => key.clone(),
+        }
+    }
+
+    /// The layout keys of everything the row shows, so a row the column count regroups is found
+    /// by what it holds. The first is the row's own layout key.
+    pub(crate) fn layout_members(&self) -> Vec<String> {
+        match self {
+            Self::Charts { panels, .. } => panels
+                .iter()
+                .map(|panel| format!("charts-{}", panel.id))
+                .collect(),
+            Self::ContextCharts { panels, .. } => panels
+                .iter()
+                .map(|panel| format!("context-charts-{}", panel.id))
+                .collect(),
+            Self::OverviewRankings(slots) => slots
+                .iter()
+                .map(|slot| format!("overview-rankings-{slot}"))
+                .collect(),
+            Self::OverviewAppHistories(slots) => slots
+                .iter()
+                .map(|slot| format!("overview-app-histories-{slot}"))
+                .collect(),
+            _ => vec![self.layout_key()],
         }
     }
 
@@ -113,7 +138,7 @@ impl Row {
 
     fn measured_height(&self, heights: &BTreeMap<String, Pixels>) -> Option<Pixels> {
         match self {
-            Self::Spacer(height) => Some(*height),
+            Self::Spacer(height) | Self::Placeholder(_, height) => Some(*height),
             Self::App(_) | Self::Executable(_) => {
                 heights.get(&self.layout_key()).copied().or(Some(px(26.0)))
             }
@@ -292,51 +317,53 @@ impl LiveDashboard {
         })
     }
 
+    /// The key of each row and the room it took when last drawn. A row never drawn takes none,
+    /// which only rows outside the viewport can be.
+    pub(crate) fn placeholder_rows(&self) -> Vec<(String, Pixels)> {
+        let mut heights = self.row_heights.borrow().clone();
+        for (index, row) in self.rows.iter().enumerate().take(4096) {
+            if let Some(bounds) = self.list.bounds_for_item(index) {
+                heights.insert(row.layout_key(), bounds.size.height);
+            }
+        }
+        self.rows
+            .iter()
+            .take(4096)
+            .map(|row| {
+                let height = row.measured_height(&heights).unwrap_or(px(0.0));
+                (row.layout_key(), height)
+            })
+            .collect()
+    }
+
     pub(crate) fn reading_row_height(&self, row: &Row) -> Option<Pixels> {
         let layout = self.preview.as_ref()?.layout.as_ref()?;
         row.measured_height(&layout.heights)
     }
 
+    /// Rebuilds the rows in place, keeping the row the user reads at the top of the viewport, or
+    /// with a `layout`, keeping the chart it measured where it was on screen.
     pub(crate) fn rebuild_anchored(&mut self, layout: Option<Layout>) {
-        let previous = self.rows.len();
-        let rows = self.reading_rows();
-        let focus_changed = self
-            .rows
-            .iter()
-            .map(Row::disclosure_section)
-            .ne(rows.iter().map(Row::disclosure_section));
-
-        self.rows = rows;
-        if let Some(layout) = layout {
-            if let Some(offset) = self.reading_layout_offset(&layout) {
-                self.splice_section_rows(previous);
-                self.list.scroll_to(offset);
-                return;
-            }
-        }
-        if previous == self.rows.len() {
-            if focus_changed {
-                let offset = self.list.logical_scroll_top();
-                self.splice_section_rows(previous);
-                self.list.scroll_to(offset);
-            }
-        } else {
-            self.reset_section_rows();
-        }
+        let mut rows = self.reading_rows();
+        let anchor = layout.and_then(|layout| self.reading_layout_offset(&layout, &mut rows));
+        let top = self.replace_rows(rows);
+        self.list.scroll_to(anchor.unwrap_or(top));
     }
 
-    fn reading_layout_offset(&mut self, layout: &Layout) -> Option<ListOffset> {
-        let mut index = self
-            .rows
+    fn reading_layout_offset(&self, layout: &Layout, rows: &mut Vec<Row>) -> Option<ListOffset> {
+        let chart = rows
             .iter()
             .take(4096)
             .position(|row| row.owns_plot(&layout.source))?;
+        let mut index = chart;
         let mut offset = self.list.viewport_bounds().top() - layout.source_top;
         for _ in 0..4096 {
             if offset >= px(0.0) {
                 if self.preview.is_some() {
-                    self.rows
-                        .push(Row::Spacer(self.list.viewport_bounds().size.height));
+                    let tail = self.reading_layout_tail(layout, rows, index, offset);
+                    if tail > px(0.0) {
+                        rows.push(Row::Spacer(tail));
+                    }
                 }
                 return Some(ListOffset {
                     item_ix: index,
@@ -345,14 +372,11 @@ impl LiveDashboard {
             }
             if index == 0 {
                 if self.preview.is_some() {
-                    let chart = self
-                        .rows
-                        .iter()
-                        .take(4096)
-                        .position(|row| row.owns_plot(&layout.source))?;
-                    self.rows.insert(chart, Row::Spacer(-offset));
-                    self.rows
-                        .push(Row::Spacer(self.list.viewport_bounds().size.height));
+                    rows.insert(chart, Row::Spacer(-offset));
+                    let tail = self.reading_layout_tail(layout, rows, 0, px(0.0));
+                    if tail > px(0.0) {
+                        rows.push(Row::Spacer(tail));
+                    }
                 }
                 return Some(ListOffset {
                     item_ix: 0,
@@ -360,9 +384,27 @@ impl LiveDashboard {
                 });
             }
             index -= 1;
-            offset += self.rows[index].measured_height(&layout.heights)?;
+            offset += rows[index].measured_height(&layout.heights)?;
         }
 
         None
+    }
+
+    /// The space the page needs after its last row so the list can hold the chart in place,
+    /// which is the part of the viewport the rows from the anchor down do not fill. A row not
+    /// measured yet counts as empty, so the chart never moves, at the cost of some blank space.
+    fn reading_layout_tail(
+        &self,
+        layout: &Layout,
+        rows: &[Row],
+        index: usize,
+        offset: Pixels,
+    ) -> Pixels {
+        let below: Pixels = rows[index..]
+            .iter()
+            .take(4096)
+            .map(|row| row.measured_height(&layout.heights).unwrap_or(px(0.0)))
+            .sum();
+        self.list.viewport_bounds().size.height - (below - offset)
     }
 }

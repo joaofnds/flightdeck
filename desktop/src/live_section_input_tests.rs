@@ -381,7 +381,7 @@ impl InputDriver {
         self.context.run_until_parked();
     }
 
-    fn prepare_sections(&mut self) {
+    pub(super) fn prepare_sections(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = accepted_snapshot(dashboard.generation);
             for (index, point) in snapshot.selection["trends"]

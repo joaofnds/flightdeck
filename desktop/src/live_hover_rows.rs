@@ -20,6 +20,19 @@ impl LiveDashboard {
     }
 
     pub(crate) fn reading_rows(&self) -> Vec<Row> {
+        if !self.placeholders.is_empty() {
+            return self
+                .placeholders
+                .iter()
+                .map(|(key, height)| Row::Placeholder(key.clone(), *height))
+                .collect();
+        }
+
+        self.reading_rows_page()
+    }
+
+    /// The rows of the current route's page.
+    fn reading_rows_page(&self) -> Vec<Row> {
         if self.request.route == "self" {
             return crate::live_diagnostics::SelfPart::ALL
                 .into_iter()

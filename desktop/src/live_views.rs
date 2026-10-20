@@ -23,7 +23,7 @@ pub(crate) use summary::matching_summary;
 
 impl LiveDashboard {
     pub fn row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
-        if let Row::Spacer(height) = &self.rows[index] {
+        if let Row::Spacer(height) | Row::Placeholder(_, height) = &self.rows[index] {
             return div().h(*height).into_any_element();
         }
 
@@ -195,7 +195,9 @@ impl LiveDashboard {
             Row::App(index) => self.app_row(*index, cx),
             Row::Executable(index) => self.executable_row(*index, cx),
             Row::Inventory => self.computer(cx).into_any_element(),
-            Row::Spacer(height) => div().h(*height).into_any_element(),
+            Row::Spacer(height) | Row::Placeholder(_, height) => {
+                div().h(*height).into_any_element()
+            }
         }
     }
 

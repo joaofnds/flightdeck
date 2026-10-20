@@ -141,6 +141,23 @@ impl LiveDashboard {
         );
     }
 
+    /// Replaces the rows with `rows`, splicing only the run that changed so the list keeps every
+    /// other row's measured height, and returns where the row at the top of the viewport is now.
+    pub(crate) fn replace_rows(&mut self, rows: Vec<Row>) -> ListOffset {
+        let splice =
+            crate::live_row_splice::row_splice(&self.rows, &rows, self.list.logical_scroll_top());
+        self.rows = rows;
+        self.list.splice_focusable(
+            splice.source,
+            self.rows[splice.target].iter().map(|row| {
+                row.disclosure_section()
+                    .and_then(|section| self.sections.focus[section.index()].clone())
+            }),
+        );
+
+        splice.top
+    }
+
     pub(crate) fn reset_section_rows(&self) {
         self.list.reset(0);
         self.splice_section_rows(0);
@@ -216,12 +233,6 @@ impl LiveDashboard {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let offset = self.list.logical_scroll_top();
-        let anchor = self
-            .rows
-            .get(offset.item_ix)
-            .map(crate::live_dashboard::Row::layout_key);
-
         self.sections.collapsed[section.index()] = self.sections.expanded(section);
         let mut rows = self.reading_rows();
         if self
@@ -239,20 +250,8 @@ impl LiveDashboard {
         self.row_heights.borrow_mut().remove("memory-attribution");
         self.row_heights.borrow_mut().remove("inventory");
 
-        let previous = self.rows.len();
-        self.rows = rows;
-        self.splice_section_rows(previous);
-
-        let index = anchor.and_then(|anchor| {
-            self.rows
-                .iter()
-                .take(4096)
-                .position(|row| row.layout_key() == anchor)
-        });
-        self.list.scroll_to(ListOffset {
-            item_ix: index.unwrap_or_else(|| offset.item_ix.min(self.rows.len().saturating_sub(1))),
-            offset_in_item: offset.offset_in_item,
-        });
+        let top = self.replace_rows(rows);
+        self.list.scroll_to(top);
 
         if let Some(focus) = &self.sections.focus[section.index()] {
             window.focus(focus, cx);
