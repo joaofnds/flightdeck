@@ -536,14 +536,16 @@ fn clicking_a_chart_leaves_the_view_where_it_was(cx: &mut TestAppContext) {
 fn an_arrow_step_shows_the_adjacent_second_the_page_holds(cx: &mut TestAppContext) {
     // Goal: an arrow step on a focused chart shows the adjacent second from the readings the
     // page holds, as a hover does, and asks the reader for no selection.
-    // Method: step left from the accepted second 1000 through the rendered chart, then read
-    // the chart's accessible reading and the page's request.
+    // Method: step left from the accepted second 1000, whose 8 W differs from the 90 W of
+    // 999, through the rendered chart, then read the chart and the page's request.
     let mut harness = InputHarness::setup(cx);
+    harness.driver.seed_repeated_second();
     harness.driver.focus_chart();
 
     harness.driver.press("left");
 
     assert_eq!(harness.driver.shown_second(), Some(999));
+    assert!(harness.driver.reading_is_visible("90 W"));
     assert_eq!(harness.driver.requested_second(), Some(1000));
     assert!(!harness.driver.readings_are_hidden());
     assert!(harness.driver.inspection_has_focus());
@@ -670,15 +672,18 @@ fn moving_focus_off_the_charts_returns_an_arrow_step_to_the_selected_second(
 #[gpui::test]
 fn escape_returns_an_arrow_step_to_the_selected_second(cx: &mut TestAppContext) {
     // Goal: Escape leaves the stepped second and shows the selection again, sending nothing.
-    // Method: step left to 999, press Escape, then read the chart and the page's request.
+    // Method: step left to 999, press Escape, then read the chart and compare the page's
+    // request generation before and after Escape.
     let mut harness = InputHarness::setup(cx);
     harness.driver.focus_chart();
     harness.driver.press("left");
+    let stepped = harness.driver.request_generation();
 
     harness.driver.press("escape");
 
     assert_eq!(harness.driver.shown_second(), Some(1000));
-    assert_eq!(harness.driver.requested_second(), Some(1000));
+    assert_eq!(harness.driver.request_generation(), stepped);
+    assert!(!harness.driver.readings_are_hidden());
     harness.teardown();
 }
 
