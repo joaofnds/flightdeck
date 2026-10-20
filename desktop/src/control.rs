@@ -275,6 +275,7 @@ fn execute(
             Ok(Value::Null)
         }
         "help" => Ok(json!(HELP)),
+        "drag" => drag(words, window, cx),
         _ => pointer(words, window, cx),
     }
 }
@@ -290,6 +291,7 @@ const HELP: &[&str] = &[
     "resize WIDTH HEIGHT",
     "move X Y",
     "click X Y",
+    "drag X Y TO_X TO_Y",
     "scroll X Y DELTA_Y",
     "exit X Y",
     "key KEYSTROKE",
@@ -328,6 +330,39 @@ fn pointer(words: &[&str], window: &mut Window, cx: &mut App) -> Result<Value, S
     if action == "click" {
         events.extend(click(position, modifiers));
     }
+
+    let mut handled = false;
+    for event in events {
+        handled |= !window.dispatch_event(event, cx).propagate;
+    }
+    Ok(json!({"handled": handled}))
+}
+
+/// Presses at one point, moves to another with the button down, and releases there.
+fn drag(words: &[&str], window: &mut Window, cx: &mut App) -> Result<Value, String> {
+    let from = point(px(number(words, 1)?), px(number(words, 2)?));
+    let to = point(px(number(words, 3)?), px(number(words, 4)?));
+    let modifiers = Modifiers::default();
+    let events = [
+        PlatformInput::MouseDown(gpui::MouseDownEvent {
+            button: MouseButton::Left,
+            position: from,
+            modifiers,
+            click_count: 1,
+            first_mouse: false,
+        }),
+        PlatformInput::MouseMove(gpui::MouseMoveEvent {
+            position: to,
+            pressed_button: Some(MouseButton::Left),
+            modifiers,
+        }),
+        PlatformInput::MouseUp(gpui::MouseUpEvent {
+            button: MouseButton::Left,
+            position: to,
+            modifiers,
+            click_count: 1,
+        }),
+    ];
 
     let mut handled = false;
     for event in events {
