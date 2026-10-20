@@ -6,6 +6,7 @@ use std::rc::Rc;
 
 use crate::charts::{self, BLUE, GREEN, MUTED, PANEL, TEXT};
 use crate::live_dashboard::{LiveDashboard, NAVIGATION, ROUTES};
+use crate::live_source_mode::SourceMode;
 
 /// The window bar's height, which also places the macOS window buttons inside it.
 pub const BRAND_HEIGHT: f32 = 48.0;
@@ -33,34 +34,31 @@ pub fn route_subtitle(route: &str) -> &'static str {
     }
 }
 
-/// The prototype's note at the right of the window bar.
-fn chrome_note(route: &str) -> &'static str {
-    if route == "self" {
-        "Interactive prototype · Saved Flightdeck diagnostics"
-    } else {
-        "Interactive prototype · Captured sysmon data"
+/// The note at the right of the window bar, which names where the readings come from. The
+/// prototype's wording describes a captured file, so it is not used for a live collector.
+fn chrome_note(route: &str, source: SourceMode) -> &'static str {
+    match (route, source) {
+        ("computer", _) => "Live system information",
+        ("self", SourceMode::Live) => "Live Flightdeck diagnostics",
+        ("self", SourceMode::Recorded) => "Saved Flightdeck diagnostics",
+        (_, SourceMode::Live) => "Live data from the collector",
+        (_, SourceMode::Recorded) => "Saved recording",
     }
 }
 
-/// What the source pill reads. The prototype names its source in every healthy state, so the
-/// states that only tell where the readings come from read as it does, and the states that
-/// say the readings stopped or cannot be trusted keep their words.
+/// What the source pill reads. It tells the state of the readings, as `Live` or `Paused`, and
+/// the Self-monitoring page names the run it shows where the reader is connected.
 fn pill_label(route: &str, status: &str) -> String {
-    let healthy = matches!(
-        status,
-        "Live" | "Paused" | "Recorded" | "System snapshot" | "Reader connected"
-    );
-    match (healthy, route) {
-        (false, _) => status.to_owned(),
-        (true, "self") => "Flightdeck diagnostic run".to_owned(),
-        (true, _) => "sysmon snapshot".to_owned(),
+    if route == "self" && status == "Reader connected" {
+        return "Flightdeck diagnostic run".to_owned();
     }
+    status.to_owned()
 }
 
 impl LiveDashboard {
     /// The window bar, which holds the macOS window buttons and moves the window when dragged.
     pub fn brandbar(&self) -> impl IntoElement {
-        let source = chrome_note(&self.request.route);
+        let source = chrome_note(&self.request.route, self.native.source);
 
         div()
             .id("window-bar")
@@ -533,4 +531,23 @@ fn icon_latest(path: &mut PathBuilder, at: impl Fn(f32, f32) -> Point<Pixels>, u
     path.move_to(at(3.0, 4.0));
     path.line_to(at(3.0, 11.0));
     path.line_to(at(10.0, 11.0));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pill_label;
+
+    #[test]
+    fn the_source_pill_reads_the_state_of_the_readings_and_never_a_snapshot_name() {
+        // Goal: a live page's pill says Live, as the status does, and not the prototype's
+        // "sysmon snapshot". Method: label each healthy status on a page and on Self.
+        assert_eq!(pill_label("cpu", "Live"), "Live");
+        assert_eq!(pill_label("cpu", "Paused"), "Paused");
+        assert_eq!(pill_label("cpu", "Recorded"), "Recorded");
+        assert_eq!(pill_label("cpu", "Waiting"), "Waiting");
+        assert_eq!(
+            pill_label("self", "Reader connected"),
+            "Flightdeck diagnostic run"
+        );
+    }
 }

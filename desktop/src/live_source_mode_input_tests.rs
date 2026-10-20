@@ -25,12 +25,34 @@ fn opening_a_saved_recording_updates_the_existing_window_and_rendered_source_con
     harness.driver.await_source(SourceMode::Recorded);
 
     assert_eq!(harness.driver.source_title(), "Flightdeck · Recorded");
+    assert!(harness.driver.visible("source-sidebar:Saved recording"));
+    assert!(harness.driver.visible("source-status:Recorded"));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn the_window_bar_names_live_diagnostics_on_the_self_page(cx: &mut TestAppContext) {
+    // Goal: a live window never says its readings are a captured file, as the prototype does.
+    // Method: open the live Self-monitoring page and read the window bar's note.
+    let mut harness = InputHarness::setup_route(cx, "self");
     assert!(
         harness
             .driver
-            .visible("source-sidebar:Interactive prototype · Captured sysmon data")
+            .visible("source-sidebar:Live Flightdeck diagnostics")
     );
-    assert!(harness.driver.visible("source-status:Recorded"));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn the_window_bar_names_live_system_information_on_the_computer_page(cx: &mut TestAppContext) {
+    // Goal: the Computer page, which reads this Mac and no recording, says so in the window bar.
+    // Method: open the Computer page and read the window bar's note.
+    let mut harness = InputHarness::setup_route(cx, "computer");
+    assert!(
+        harness
+            .driver
+            .visible("source-sidebar:Live system information")
+    );
     harness.teardown();
 }
 
@@ -51,7 +73,7 @@ fn failing_to_open_a_recording_retains_the_existing_window_source_and_selection(
     assert!(
         harness
             .driver
-            .visible("source-sidebar:Interactive prototype · Captured sysmon data")
+            .visible("source-sidebar:Live data from the collector")
     );
     assert!(harness.driver.visible("source-follow:Live"));
     harness.teardown();
@@ -74,7 +96,7 @@ fn canceling_the_recording_picker_retains_the_existing_window_source_and_selecti
     assert!(
         harness
             .driver
-            .visible("source-sidebar:Interactive prototype · Captured sysmon data")
+            .visible("source-sidebar:Live data from the collector")
     );
     assert!(harness.driver.visible("source-follow:Live"));
     harness.teardown();
