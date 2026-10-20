@@ -257,6 +257,12 @@ impl RecordingHarness {
             .rows
     }
 
+    pub fn old_window_tables(&self, window: u64) -> Vec<&'static str> {
+        let manifest =
+            persistence::read_committed(&self.root, &self.marker(&self.old_run, window)).unwrap();
+        manifest.tables.iter().map(|table| table.name).collect()
+    }
+
     pub fn refuse_second_worker(&mut self) {
         let spawns = spawns();
         let mut worker = Command::new(env!("CARGO_BIN_EXE_persister"))

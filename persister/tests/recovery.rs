@@ -82,6 +82,19 @@ mod tests {
     }
 
     #[test]
+    fn seals_each_window_with_the_app_ranks_of_its_observations() {
+        // Goal: the persister binary keeps each window's App ranks, so the viewer need not
+        // replay the window to rank it.
+        // Method: seal one window of a running process and list the tables it commits.
+        let mut recording = RecordingHarness::start();
+
+        recording.record_reused_process_identity();
+        recording.wait_for_worker_exit();
+
+        assert!(recording.old_window_tables(0).contains(&"app_ranks"));
+    }
+
+    #[test]
     fn records_the_exact_overwritten_publication_count_with_surviving_readings() {
         // Goal: overwritten history is explicit while recoverable observations stay exact.
         // Method: overfill the bounded ring before starting persistence and read the seal.

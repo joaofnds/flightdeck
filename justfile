@@ -13,7 +13,7 @@ dev: bundle
 
 # Build the app with its collector and persister helpers, and package them as one bundle.
 bundle:
-    cargo build --locked --release -p collector -p persistence --bin collector --bin persister
+    cargo build --locked --release -p collector -p persister --bin collector --bin persister
     cargo build --locked --release --manifest-path desktop/Cargo.toml --bin flightdeck
     desktop/target/release/flightdeck --bundle
     desktop/target/Flightdeck.app/Contents/MacOS/flightdeck --bundle --check

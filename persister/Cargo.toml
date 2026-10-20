@@ -1,0 +1,16 @@
+[package]
+name = "persister"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+collector = { path = "../collector" }
+persistence = { path = "../persistence" }
+viewer = { path = "../viewer" }
+
+[dev-dependencies]
+polars = { workspace = true }
+
+[lints]
+workspace = true

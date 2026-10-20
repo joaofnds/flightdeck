@@ -96,7 +96,7 @@ jobs:
       - run: >-
           cargo run --locked --manifest-path desktop/Cargo.toml
           --bin text_backend_check -- --check
-      - run: cargo build --locked --release -p collector -p persistence --bin collector --bin persister
+      - run: cargo build --locked --release -p collector -p persister --bin collector --bin persister
       - run: >-
           cargo build --locked --release --manifest-path desktop/Cargo.toml
           --bin flightdeck

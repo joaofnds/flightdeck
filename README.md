@@ -19,7 +19,7 @@ and persistence together; compare it with the 5% budget. The source-cost report'
 budget share and power in mW describe the collector alone. Build both sibling executables:
 
 ```sh
-cargo build --release -p collector -p persistence --bin collector --bin persister
+cargo build --release -p collector -p persister --bin collector --bin persister
 ./target/release/collector --seconds 300
 ```
 
