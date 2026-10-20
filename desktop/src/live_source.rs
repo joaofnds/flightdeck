@@ -100,6 +100,9 @@ pub struct Snapshot {
     /// The top Apps of each observation of the selected window the viewer has ranked, so a
     /// hover shows its observation's at once.
     pub app_ranks: Option<Arc<viewer::WindowRanks>>,
+    /// The selected App's part of each observation of the selected window the viewer has kept,
+    /// so a hover on the Apps page shows its observation's App at once.
+    pub app_parts: Option<Arc<viewer::WindowParts>>,
     /// The page's App histories are still being read, and a later snapshot carries them.
     pub histories_pending: bool,
     pub read_ms: f64,
@@ -472,6 +475,7 @@ fn reader_snapshot_new(generation: u64, catalog: Value, selection: Value) -> Box
         process_history: None,
         rankings: None,
         app_ranks: None,
+        app_parts: None,
         read_ms: 0.0,
     })
 }
@@ -504,6 +508,7 @@ fn reader_computer(reader: &mut Reader, command: &Command) -> Option<Box<Snapsho
         process_history: None,
         rankings: None,
         app_ranks: None,
+        app_parts: None,
         read_ms: 0.0,
     }))
 }
@@ -609,11 +614,16 @@ fn reader_payload(
     }
     if !snapshot.histories_pending {
         reader_payload_histories(session, request, snapshot);
-        // Ranking replays the window's saved minutes, so it follows the histories the page
-        // shows, and a hover's own read never ranks.
+        // Ranking and keeping App parts replay the window's saved minutes, so they follow the
+        // histories the page shows, and a hover's own read does neither.
         if ranked {
             if request.load_app_attribution_history {
                 reader_app_ranks(session, snapshot);
+            }
+        }
+        if request.route == "apps" {
+            if request.load_process_history {
+                reader_app_parts(session, request, snapshot)?;
             }
         }
     }
@@ -631,6 +641,30 @@ fn reader_app_ranks(session: &mut LiveSession, snapshot: &mut Snapshot) {
         Err(error) => eprintln!("App ranks of the selected window unavailable: {error}"),
     }
     snapshot.app_ranks = Some(session.app_ranks());
+}
+
+/// Keeps the selected App's part of each observation of the selected window, so a hover on
+/// the Apps page shows any of their App details at once. A window kept in part still serves
+/// the observations it holds, and the next read goes on from them.
+fn reader_app_parts(
+    session: &mut LiveSession,
+    request: &Request,
+    snapshot: &mut Snapshot,
+) -> Result<(), String> {
+    let Some(key) = &request.app else {
+        return Ok(());
+    };
+
+    let kind = app_key_kind(&key.kind)?;
+    let bytes = app_key_bytes(&key.bytes_hex)?;
+    match session.part_window(kind, &bytes) {
+        Ok(()) => {}
+        Err(persistence::Error::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted => {}
+        Err(error) => eprintln!("App parts of the selected window unavailable: {error}"),
+    }
+    snapshot.app_parts = Some(session.app_parts());
+
+    Ok(())
 }
 
 fn reader_payload_histories(session: &LiveSession, request: &Request, snapshot: &mut Snapshot) {
@@ -763,20 +797,12 @@ fn reader_apps(
     if let Some(key) = &request.app {
         let kind = app_key_kind(&key.kind)?;
         let bytes = app_key_bytes(&key.bytes_hex)?;
-        let mut detail = session
-            .app_detail(kind, &bytes, 0)
-            .map_err(|error| error.to_string())?;
+        let detail = clamped_page(request.members_offset, |offset| {
+            session
+                .app_detail(kind, &bytes, offset)
+                .map_err(|error| error.to_string())
+        })?;
         if !detail.is_null() {
-            let offset = page_offset(u64::from(request.members_offset), &detail["page"]["total"])?;
-            if offset > 0 {
-                detail = session
-                    .app_detail(
-                        kind,
-                        &bytes,
-                        u32::try_from(offset).map_err(|error| error.to_string())?,
-                    )
-                    .map_err(|error| error.to_string())?;
-            }
             identity_validate(&detail["selected"], &snapshot.selection["selected"])?;
         }
         if !snapshot.histories_pending {
@@ -861,14 +887,27 @@ fn reader_page(session: &LiveSession, table: &str, offset: u64) -> Result<Value,
 }
 
 fn reader_apps_page(session: &LiveSession, offset: u32) -> Result<Value, String> {
-    let first = session.apps_page(0).map_err(|error| error.to_string())?;
-    let offset = page_offset(u64::from(offset), &first["page"]["total"])?;
+    clamped_page(offset, |offset| {
+        session.apps_page(offset).map_err(|error| error.to_string())
+    })
+}
+
+/// The page `read` gives at `requested`, or its first page where `requested` lies past the
+/// end. A null page, the detail of an App absent from its second, has no end.
+pub(crate) fn clamped_page(
+    requested: u32,
+    read: impl Fn(u32) -> Result<Value, String>,
+) -> Result<Value, String> {
+    let first = read(0)?;
+    if first.is_null() {
+        return Ok(first);
+    }
+
+    let offset = page_offset(u64::from(requested), &first["page"]["total"])?;
     if offset == 0 {
         return Ok(first);
     }
-    session
-        .apps_page(u32::try_from(offset).map_err(|error| error.to_string())?)
-        .map_err(|error| error.to_string())
+    read(u32::try_from(offset).map_err(|error| error.to_string())?)
 }
 
 fn page_offset(requested: u64, total: &Value) -> Result<u64, String> {

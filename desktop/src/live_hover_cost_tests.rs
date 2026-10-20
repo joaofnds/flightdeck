@@ -69,6 +69,7 @@ fn snapshot() -> Snapshot {
         process_history: None,
         rankings: None,
         app_ranks: None,
+        app_parts: None,
         read_ms: 0.0,
     }
 }

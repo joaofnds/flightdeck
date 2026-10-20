@@ -17,9 +17,11 @@ mod session;
 
 pub use cancellation::Cancellation;
 pub use live::LiveSession;
-pub use live::app_ranks::{ObservationKey, WindowRanks};
+pub use live::app_parts::WindowParts;
+pub use live::app_ranks::WindowRanks;
 pub(crate) use live::attribution_history as app_attribution_history;
 pub use live::attribution_history::{
     APP_ATTRIBUTION_HISTORIES_RESPONSE_BYTES_MAX, AppAttributionHistories, AppAttributionMetric,
 };
+pub use live::window::{ObservationKey, Window};
 pub use session::Session;

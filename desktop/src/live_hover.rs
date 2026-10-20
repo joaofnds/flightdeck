@@ -97,7 +97,26 @@ impl Preview {
         request: &crate::live_source::Request,
         target: Target,
     ) -> Self {
-        let reading = resident_reading(snapshot, &target);
+        let mut reading = resident_reading(snapshot, &target);
+        let mut preview_request = crate::live_source::Request {
+            second: Some(target.second),
+            identity: target.identity.clone(),
+            load_resident_history: false,
+            load_app_attribution_history: false,
+            load_process_history: false,
+            ..request.clone()
+        };
+        let mut executables = Vec::new();
+        if request.route == "apps" {
+            match resident_app(snapshot, &target, &mut preview_request, &mut reading) {
+                Ok(groups) => executables = groups,
+                Err(error) => {
+                    eprintln!("Hover App details unavailable: {error}");
+                    reading.apps = None;
+                    reading.detail = None;
+                }
+            }
+        }
         let matched = target.matches(&snapshot.selection["selected"]);
         let complete = resident_complete(&request.route, matched, &reading);
 
@@ -106,22 +125,23 @@ impl Preview {
             origin: Origin::Pointer,
             reading,
             complete,
-            request: crate::live_source::Request {
-                second: Some(target.second),
-                identity: target.identity.clone(),
-                load_resident_history: false,
-                load_app_attribution_history: false,
-                load_process_history: false,
-                ..request.clone()
-            },
+            request: preview_request,
             base_request: request.clone(),
             target,
             generation: None,
             failure: None,
-            executables: Vec::new(),
+            executables,
             layout: None,
             header_height: None,
             retarget_geometry: false,
+        }
+    }
+
+    /// Leaves the preview to a read of its target, since the open App picker lists the
+    /// target's Apps and only a read gives them.
+    pub fn list_apps(&mut self, committed: &Snapshot) {
+        if !self.target.matches(&committed.selection["selected"]) {
+            self.complete = false;
         }
     }
 }
@@ -210,6 +230,7 @@ fn resident_reading(snapshot: &Snapshot, target: &Target) -> Box<Snapshot> {
         histories_pending: snapshot.histories_pending,
         rankings: resident_rankings(snapshot, target),
         app_ranks: None,
+        app_parts: None,
         read_ms: 0.0,
     })
 }
@@ -230,9 +251,69 @@ fn resident_complete(route: &str, matched: bool, reading: &Snapshot) -> bool {
 
             reading.cpu_detail.is_some()
         }
-        "apps" => false,
+        "apps" => reading.detail.is_some(),
         _ => true,
     }
+}
+
+/// Reads the hovered second's App detail and Apps page from the selected App's part the
+/// committed snapshot holds, paged as a read of that second pages them, and gives its process
+/// groups. Leaves `reading` without them where no part of that App is held.
+fn resident_app(
+    snapshot: &Snapshot,
+    target: &Target,
+    request: &mut crate::live_source::Request,
+    reading: &mut Snapshot,
+) -> Result<Vec<crate::live_executables::Executable>, String> {
+    let Some(part) = resident_app_part(snapshot, target, request)? else {
+        return Ok(Vec::new());
+    };
+
+    let page = |offset| viewer::live_app_response::Page {
+        offset,
+        limit: viewer::live_app_response::PAGE_ROWS_MAX,
+    };
+    let apps = crate::live_source::clamped_page(request.apps_offset, |offset| {
+        part.apps_paging(page(offset))
+            .map_err(|error| error.to_string())
+    })?;
+    let detail = crate::live_source::clamped_page(request.members_offset, |offset| {
+        part.detail(page(offset)).map_err(|error| error.to_string())
+    })?;
+    let executables = crate::live_executables::groups(Some(&detail))?;
+    reading.apps = Some(apps);
+    reading.detail = Some(detail);
+    crate::live_acceptance::normalize_offsets(request, reading)?;
+
+    Ok(executables)
+}
+
+/// The selected App's part of the hovered second, where the committed snapshot holds it.
+fn resident_app_part<'a>(
+    snapshot: &'a Snapshot,
+    target: &Target,
+    request: &crate::live_source::Request,
+) -> Result<Option<&'a viewer::live_app_response::AppPart>, String> {
+    let Some(parts) = snapshot.app_parts.as_deref() else {
+        return Ok(None);
+    };
+    let Some(identity) = target.identity.as_ref() else {
+        return Ok(None);
+    };
+    let Some(key) = request.app.as_ref() else {
+        return Ok(None);
+    };
+
+    let Some(part) = parts.get(&crate::live_rankings::observation_key(identity)?) else {
+        return Ok(None);
+    };
+    let kind = crate::live_source::app_key_kind(&key.kind)?;
+    let bytes = crate::live_source::app_key_bytes(&key.bytes_hex)?;
+    if !part.is_of(kind, &bytes) {
+        return Ok(None);
+    }
+
+    Ok(Some(part))
 }
 
 fn resident_rankings(

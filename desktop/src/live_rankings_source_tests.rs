@@ -13,6 +13,8 @@ use crate::live_hover::{Preview, Target};
 use crate::live_rankings::{Rankings, TopApps};
 use crate::live_source::{Request, Snapshot};
 
+#[path = "live_app_parts_source_tests.rs"]
+mod app_parts;
 #[path = "live_overview_app_history_source_tests.rs"]
 mod overview_history;
 

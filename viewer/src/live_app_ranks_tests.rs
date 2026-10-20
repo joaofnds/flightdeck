@@ -2,6 +2,7 @@ use serde_json::{Value, json};
 
 use super::*;
 use crate::live::identity_fixture::Fixture;
+use crate::live::window::fixture::{observation_key, saved_only};
 
 #[test]
 fn rank_window_ranks_the_saved_observations_of_the_window() {
@@ -12,12 +13,22 @@ fn rank_window_ranks_the_saved_observations_of_the_window() {
     let mut session = LiveSession::open(&fixture.root).unwrap();
     let selected = session.select(1001, 0).unwrap()["selected"].clone();
     let expected = selected_ranks(&session);
-    assert!(session.app_ranks().get(&key(&selected)).is_none());
+    assert!(
+        session
+            .app_ranks()
+            .get(&observation_key(&selected))
+            .is_none()
+    );
 
     session.rank_window().unwrap();
 
     assert_eq!(
-        summary(session.app_ranks().get(&key(&selected)).unwrap()),
+        summary(
+            session
+                .app_ranks()
+                .get(&observation_key(&selected))
+                .unwrap()
+        ),
         expected
     );
 }
@@ -66,11 +77,11 @@ fn rank_window_ranks_the_cached_live_observations_of_a_window_it_returns_to() {
     session.select(1000, 0).unwrap();
     session.rank_window().unwrap();
     let latest = session.follow_latest().unwrap()["selected"].clone();
-    assert!(session.app_ranks().get(&key(&latest)).is_none());
+    assert!(session.app_ranks().get(&observation_key(&latest)).is_none());
 
     session.rank_window().unwrap();
 
-    assert!(session.app_ranks().get(&key(&latest)).is_some());
+    assert!(session.app_ranks().get(&observation_key(&latest)).is_some());
 }
 
 #[test]
@@ -86,7 +97,12 @@ fn poll_ranks_each_live_observation_from_its_sample() {
 
     let selected = session.follow_latest().unwrap()["selected"].clone();
     assert_eq!(
-        summary(session.app_ranks().get(&key(&selected)).unwrap()),
+        summary(
+            session
+                .app_ranks()
+                .get(&observation_key(&selected))
+                .unwrap()
+        ),
         selected_ranks(&session)
     );
 }
@@ -99,29 +115,12 @@ fn poll_ranks_drops_observations_older_than_the_window() {
     fixture.publish_with_system_rows(1000);
     let mut session = LiveSession::open(&fixture.root).unwrap();
     let first = session.follow_latest().unwrap()["selected"].clone();
-    assert!(session.app_ranks().get(&key(&first)).is_some());
+    assert!(session.app_ranks().get(&observation_key(&first)).is_some());
     fixture.publish_with_system_rows(1900);
 
     session.poll().unwrap();
 
-    assert!(session.app_ranks().get(&key(&first)).is_none());
-}
-
-/// Two sealed seconds of a recording whose registry lists no live run, so a session reads
-/// them only from their saved minute.
-fn saved_only() -> Fixture {
-    let mut fixture = Fixture::new();
-    fixture.publish_with_system_rows(1000);
-    fixture.publish_with_system_rows(1001);
-    fixture.seal();
-    collector::recording::Registry {
-        runs: Vec::new(),
-        evictions: 0,
-    }
-    .write(&fixture.root)
-    .unwrap();
-
-    fixture
+    assert!(session.app_ranks().get(&observation_key(&first)).is_none());
 }
 
 fn selected_ranks(session: &LiveSession) -> Value {
@@ -154,16 +153,4 @@ fn summary(ranks: &Ranks) -> Value {
         .collect::<Vec<_>>();
 
     json!({"app_count":ranks.app_count,"metrics":metrics})
-}
-
-fn key(selected: &Value) -> ObservationKey {
-    ObservationKey {
-        run: collector::recording::parse_identity(selected["run"].as_str().unwrap())
-            .unwrap()
-            .0,
-        boot: collector::recording::parse_identity(selected["boot"].as_str().unwrap())
-            .unwrap()
-            .0,
-        publication: selected["publication"].as_u64().unwrap(),
-    }
 }

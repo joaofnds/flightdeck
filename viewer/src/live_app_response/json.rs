@@ -5,16 +5,66 @@ use serde_json::{Value, json};
 use super::{Amount, App, Detail, Error, Measure, Page, Process, Result, Sample, Stamp};
 use crate::apps;
 
+/// The facts of a sample that every page of it carries.
+#[derive(Clone, Copy)]
+pub(super) struct Header {
+    selected: super::Observation,
+    previous: Option<Stamp>,
+    elapsed_ns: Option<u64>,
+    membership_complete: bool,
+    ungrouped_members: u32,
+    usage_refused: u32,
+    usage_gone: u32,
+    app_count: usize,
+    process_count: usize,
+}
+
+impl Header {
+    pub(super) fn of(sample: &Sample) -> Self {
+        Self {
+            selected: sample.selected,
+            previous: sample.previous,
+            elapsed_ns: sample.elapsed_ns,
+            membership_complete: sample.membership_complete,
+            ungrouped_members: sample.ungrouped_members,
+            usage_refused: sample.usage_refused,
+            usage_gone: sample.usage_gone,
+            app_count: sample.apps.len(),
+            process_count: sample.processes.len(),
+        }
+    }
+
+    pub(super) fn selected(&self) -> &super::Observation {
+        &self.selected
+    }
+}
+
+/// One App and its processes, from a sample or from the App's part of it.
+pub(super) struct AppMembers<'a> {
+    pub header: &'a Header,
+    pub app: &'a App,
+    pub app_index: usize,
+    pub processes: &'a [&'a Process],
+}
+
 pub(super) fn apps_page(sample: &Sample, page: Page) -> Result<Value> {
+    let mut result = apps_paging(&Header::of(sample), page)?;
     let range = page_range(page, sample.apps.len())?;
-    let mut result = header(sample);
     let values: Vec<_> = sample.apps[range.clone()]
         .iter()
         .enumerate()
         .map(|(index, value)| app(value, range.start + index, sample.elapsed_ns))
         .collect();
     result["apps"] = Value::Array(values);
-    result["page"] = page_json(page, range.end, sample.apps.len());
+
+    bounded(result)
+}
+
+/// An Apps page without the Apps it lists, the same whether its sample or a part gives it.
+pub(super) fn apps_paging(header: &Header, page: Page) -> Result<Value> {
+    let range = page_range(page, header.app_count)?;
+    let mut result = header_json(header);
+    result["page"] = page_json(page, range.end, header.app_count);
 
     bounded(result)
 }
@@ -25,45 +75,65 @@ pub(super) fn app_detail(sample: &Sample, detail: &Detail<'_>) -> Result<Value> 
         .apps
         .get(index)
         .ok_or(Error::Bound("live App index"))?;
-    let mut result = members_page(sample, Some(detail.app_index), detail.page)?;
-    result["app"] = app(value, index, sample.elapsed_ns);
+    let processes = members(sample, Some(detail.app_index));
+
+    app_members_page(
+        &AppMembers {
+            header: &Header::of(sample),
+            app: value,
+            app_index: index,
+            processes: &processes,
+        },
+        detail.page,
+    )
+}
+
+/// The detail page of one App, the same whether its sample or its part gives it.
+pub(super) fn app_members_page(members: &AppMembers<'_>, page: Page) -> Result<Value> {
+    let mut result = processes_page(members.header, members.processes, page)?;
+    result["app"] = app(members.app, members.app_index, members.header.elapsed_ns);
 
     bounded(result)
 }
 
 pub(super) fn members_page(sample: &Sample, app_index: Option<u32>, page: Page) -> Result<Value> {
-    let count = sample
+    let processes = members(sample, app_index);
+
+    processes_page(&Header::of(sample), &processes, page)
+}
+
+fn members(sample: &Sample, app_index: Option<u32>) -> Vec<&Process> {
+    sample
         .processes
         .iter()
         .filter(|value| value.app_index == app_index)
-        .count();
-    let range = page_range(page, count)?;
-    let values: Vec<_> = sample
-        .processes
+        .collect()
+}
+
+fn processes_page(header: &Header, processes: &[&Process], page: Page) -> Result<Value> {
+    let range = page_range(page, processes.len())?;
+    let values: Vec<_> = processes[range.clone()]
         .iter()
-        .filter(|value| value.app_index == app_index)
-        .skip(range.start)
-        .take(range.len())
-        .map(|value| process(value, sample.elapsed_ns))
+        .map(|value| process(value, header.elapsed_ns))
         .collect();
-    let mut result = header(sample);
+    let mut result = header_json(header);
     result["processes"] = Value::Array(values);
-    result["page"] = page_json(page, range.end, count);
+    result["page"] = page_json(page, range.end, processes.len());
 
     bounded(result)
 }
 
-fn header(sample: &Sample) -> Value {
+fn header_json(header: &Header) -> Value {
     json!({
-        "selected": observation(&sample.selected),
-        "previous": sample.previous.as_ref().map(stamp),
-        "elapsed_ns": sample.elapsed_ns.map(|value| value.to_string()),
-        "membership_complete": sample.membership_complete,
-        "ungrouped_members": sample.ungrouped_members,
-        "usage_refused": sample.usage_refused,
-        "usage_gone": sample.usage_gone,
-        "app_count": sample.apps.len(),
-        "process_count": sample.processes.len(),
+        "selected": observation(&header.selected),
+        "previous": header.previous.as_ref().map(stamp),
+        "elapsed_ns": header.elapsed_ns.map(|value| value.to_string()),
+        "membership_complete": header.membership_complete,
+        "ungrouped_members": header.ungrouped_members,
+        "usage_refused": header.usage_refused,
+        "usage_gone": header.usage_gone,
+        "app_count": header.app_count,
+        "process_count": header.process_count,
     })
 }
 

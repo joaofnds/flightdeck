@@ -1,7 +1,7 @@
 use gpui::{Context, SharedString};
 
 use super::{Origin, Preview, Target};
-use crate::live_dashboard::{ChartHover, LiveDashboard};
+use crate::live_dashboard::{ChartHover, LiveDashboard, Picker};
 use crate::live_source::{Snapshot, Update};
 
 #[cfg(test)]
@@ -43,6 +43,9 @@ impl LiveDashboard {
                 .and_then(|preview| preview.layout.clone())
                 .or_else(|| self.reading_layout(&source));
             let mut preview = Preview::resident(snapshot, &self.request, target);
+            if self.picker == Some(Picker::App) {
+                preview.list_apps(snapshot);
+            }
             preview.layout = layout;
             preview.header_height = self
                 .preview

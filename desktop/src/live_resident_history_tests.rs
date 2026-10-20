@@ -218,6 +218,7 @@ fn resident_decode_failure_preserves_machine_panels_and_selected_app_rankings() 
         process_history: None,
         rankings: Some(std::sync::Arc::clone(&rankings)),
         app_ranks: None,
+        app_parts: None,
         read_ms: 0.0,
     });
     let request = crate::live_source::Request {

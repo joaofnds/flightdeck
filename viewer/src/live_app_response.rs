@@ -7,6 +7,7 @@ use crate::apps::{self, Amount, AppKey, ProcessCreation, ProcessState, Stamp, Un
 use crate::live_apps::Frame;
 
 pub(crate) use json::bounded;
+pub use part::AppPart;
 pub use ranks::{Metric, RANKS_MAX, Rank, RankedApp, Ranking, Ranks};
 
 pub const SAMPLE_BYTES_MAX: usize = 8 * 1024 * 1024;
@@ -35,6 +36,7 @@ pub struct Observation {
     pub wall_ns: Option<u64>,
 }
 
+#[derive(Clone)]
 pub struct App {
     pub key: Key,
     pub display_name: String,
@@ -51,6 +53,7 @@ pub struct App {
     pub footprint_bytes: Measure,
 }
 
+#[derive(Clone)]
 pub struct Key {
     pub kind: KeyKind,
     pub bytes: Vec<u8>,
@@ -71,6 +74,7 @@ pub struct Measure {
     pub overflowed: bool,
 }
 
+#[derive(Clone)]
 pub struct Process {
     pub pid: i32,
     pub creation: Option<ProcessCreation>,
@@ -93,6 +97,7 @@ pub struct Process {
     pub state: ProcessState,
 }
 
+#[derive(Clone)]
 pub struct Bytes {
     pub bytes: Vec<u8>,
     pub display: String,
@@ -114,6 +119,24 @@ impl Observation {
     #[must_use]
     pub fn json(&self) -> Value {
         json::observation(self)
+    }
+}
+
+impl App {
+    /// The capacity of the strings and vectors the App row holds.
+    fn heap_bytes(&self) -> usize {
+        self.key.bytes.capacity() + self.key.display.capacity() + self.display_name.capacity()
+    }
+}
+
+impl Process {
+    /// The capacity of the strings and vectors the process row holds.
+    fn heap_bytes(&self) -> usize {
+        let Some(name) = &self.executable_name else {
+            return 0;
+        };
+
+        name.bytes.capacity() + name.display.capacity()
     }
 }
 
@@ -223,13 +246,10 @@ impl Sample {
             + self.apps.capacity() * size_of::<App>()
             + self.processes.capacity() * size_of::<Process>();
         for app in &self.apps {
-            bytes +=
-                app.key.bytes.capacity() + app.key.display.capacity() + app.display_name.capacity();
+            bytes += app.heap_bytes();
         }
         for process in &self.processes {
-            if let Some(name) = &process.executable_name {
-                bytes += name.bytes.capacity() + name.display.capacity();
-            }
+            bytes += process.heap_bytes();
         }
 
         bytes
@@ -270,6 +290,9 @@ mod capture_tests;
 #[cfg(test)]
 mod disk_history_tests;
 mod json;
+mod part;
+#[cfg(test)]
+mod part_tests;
 mod ranks;
 #[cfg(test)]
 mod ranks_tests;

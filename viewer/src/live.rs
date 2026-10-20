@@ -23,10 +23,14 @@ pub(crate) mod resident_history;
 #[path = "app_attribution_history.rs"]
 pub(crate) mod attribution_history;
 
+#[path = "live_app_parts.rs"]
+pub(crate) mod app_parts;
 #[path = "live_app_ranks.rs"]
 pub(crate) mod app_ranks;
 #[path = "live_storage_merge.rs"]
 mod storage_merge;
+#[path = "live_window.rs"]
+pub(crate) mod window;
 
 #[path = "live_process_groups.rs"]
 mod process_groups;
@@ -63,6 +67,8 @@ pub struct LiveSession {
     inspected: Option<LiveObservation>,
     cache_bytes: usize,
     app_ranks: Arc<app_ranks::WindowRanks>,
+    parts_app: Option<app_parts::PartsApp>,
+    app_parts: Arc<app_parts::WindowParts>,
     #[cfg(test)]
     before_projection: Option<Box<dyn FnOnce()>>,
     #[cfg(test)]
@@ -165,6 +171,8 @@ impl LiveSession {
             inspected: None,
             cache_bytes: 0,
             app_ranks: Arc::default(),
+            parts_app: None,
+            app_parts: Arc::default(),
             #[cfg(test)]
             before_projection: None,
             #[cfg(test)]
@@ -1144,6 +1152,7 @@ impl LiveSession {
         self.poll_evict(first)?;
         self.poll_cpu_history()?;
         self.poll_ranks(first)?;
+        self.poll_parts(first)?;
         self.app_history
             .push(app_point.unwrap_or_else(|| unreachable!()), first);
 

@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 use crate::charts::{BLUE, MUTED, PANEL, TEXT};
 use crate::live_dashboard::LiveDashboard;
 
+#[derive(Debug, PartialEq)]
 pub struct Executable {
     pub key: String,
     pub name: String,

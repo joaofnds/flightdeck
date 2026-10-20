@@ -699,6 +699,7 @@ mod selection_tests {
             process_history: None,
             rankings: None,
             app_ranks: None,
+            app_parts: None,
             read_ms: 0.0,
         }));
         dashboard.expanded = Some(("ticks".into(), 0));
