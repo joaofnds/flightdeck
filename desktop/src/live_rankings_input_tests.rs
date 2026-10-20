@@ -504,6 +504,36 @@ fn historical_hover_shows_the_kept_ranks_of_its_second_in_the_frame_of_the_move(
 }
 
 #[gpui::test]
+fn an_arrow_step_to_a_second_whose_ranks_are_kept_shows_them_and_reads_nothing(
+    cx: &mut TestAppContext,
+) {
+    // Goal: an arrow step to a second whose ranks the page keeps shows them in the frame that
+    // handles the key, with no loading notice, and leaves the worker to the page's own reads.
+    // Method: keep a sealed recording's window ranks beside a committed Overview, step left on
+    // the CPU chart to the earlier second, publication one of the same run and boot, whose
+    // largest App, App00600, held 600 KiB of resident memory, and tick the step.
+    let mut harness = InputHarness::setup_route(cx, "overview");
+    harness.driver.seed_ranked_overview();
+    harness.driver.keep_window_ranks(kept_window_ranks());
+
+    harness.driver.step_left_on("live-cpu-plot");
+
+    assert!(
+        !harness
+            .driver
+            .reading_is_visible("Loading exact App totals")
+    );
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("ranking:Resident memory:App00600:0.59 MiB")
+    );
+    harness.driver.tick_hover();
+    assert_eq!(harness.driver.hover_reads(), 0);
+    harness.teardown();
+}
+
+#[gpui::test]
 fn a_hover_that_waits_for_the_pages_app_histories_is_timed_once_they_complete_it(
     cx: &mut TestAppContext,
 ) {
@@ -821,15 +851,20 @@ impl InputDriver {
     }
 
     pub(super) fn inspect_ranked_history_with_keyboard_on(&mut self, selector: &'static str) {
+        self.step_left_on(selector);
+        self.press("enter");
+        assert_eq!(self.requested_second(), Some(999));
+        assert_eq!(self.requested_publication(), Some(1));
+    }
+
+    /// Focuses the chart with a right click, which selects nothing, and steps it left.
+    fn step_left_on(&mut self, selector: &'static str) {
         let bounds = self.chart_bounds(selector);
         self.context
             .simulate_mouse_down(bounds.center(), MouseButton::Right, Modifiers::none());
         self.context
             .simulate_mouse_up(bounds.center(), MouseButton::Right, Modifiers::none());
         self.press("left");
-        self.press("enter");
-        assert_eq!(self.requested_second(), Some(999));
-        assert_eq!(self.requested_publication(), Some(1));
     }
 
     pub(super) fn complete_ranked_selection(&mut self) {
