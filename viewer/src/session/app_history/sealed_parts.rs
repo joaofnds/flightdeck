@@ -883,7 +883,26 @@ fn size_of_count(value: u64) -> Result<usize> {
     usize::try_from(value).map_err(|_| Error::Bound("sealed parts count"))
 }
 
-fn unavailable_code(reason: Unavailable) -> u8 {
+/// A table keeps each reason and state by these codes, so a build that changed one would
+/// misread the tables earlier builds wrote at the same version.
+const _: () = {
+    assert!(unavailable_code(Unavailable::Refused) == 0);
+    assert!(unavailable_code(Unavailable::Gone) == 1);
+    assert!(unavailable_code(Unavailable::Unknown) == 2);
+    assert!(unavailable_code(Unavailable::Interval) == 3);
+    assert!(unavailable_code(Unavailable::Creation) == 4);
+    assert!(unavailable_code(Unavailable::Baseline) == 5);
+    assert!(unavailable_code(Unavailable::CounterReset) == 6);
+    assert!(unavailable_code(Unavailable::Overflow) == 7);
+    assert!(unavailable_code(Unavailable::Exec) == 8);
+    assert!(unavailable_code(Unavailable::Program) == 9);
+    assert!(unavailable_code(Unavailable::ExitUnverified) == 10);
+    assert!(state_code(ProcessState::Live) == 0);
+    assert!(state_code(ProcessState::ExitedVerified) == 1);
+    assert!(state_code(ProcessState::ExitedUnverified) == 2);
+};
+
+const fn unavailable_code(reason: Unavailable) -> u8 {
     match reason {
         Unavailable::Refused => 0,
         Unavailable::Gone => 1,
@@ -939,7 +958,7 @@ fn identity_of(code: u8) -> Result<IdentityUnavailable> {
     }
 }
 
-fn state_code(state: ProcessState) -> u8 {
+const fn state_code(state: ProcessState) -> u8 {
     match state {
         ProcessState::Live => 0,
         ProcessState::ExitedVerified => 1,

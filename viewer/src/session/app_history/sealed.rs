@@ -84,7 +84,14 @@ pub(super) fn observed_in(range: ContextRange, observation: &Observation) -> boo
         .is_some_and(|wall| (range.first_ns..range.end_ns).contains(&wall))
 }
 
-pub(super) fn kind_code(kind: KeyKind) -> u8 {
+/// A table keeps an App's kind by these codes, so a build that changed one would misread the
+/// tables earlier builds wrote at the same version.
+const _: () = {
+    assert!(kind_code(KeyKind::Bundle) == 0);
+    assert!(kind_code(KeyKind::Executable) == 1);
+};
+
+pub(super) const fn kind_code(kind: KeyKind) -> u8 {
     match kind {
         KeyKind::Bundle => 0,
         KeyKind::Executable => 1,
