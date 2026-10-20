@@ -632,7 +632,6 @@ impl LiveDashboard {
             .aria_description("Left and right inspect adjacent seconds while readings load")
             .track_focus(&focus)
             .tab_stop(false)
-            .focus(crate::charts::focus_ring)
             .on_key_down(cx.listener(Self::inspection_keyboard))
             .flex()
             .flex_col()

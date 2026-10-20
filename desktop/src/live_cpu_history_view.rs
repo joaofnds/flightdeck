@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use gpui::{
-    Bounds, Context, IntoElement, MouseButton, Pixels, Window, canvas, div, fill, point,
-    prelude::*, px, rgb, size,
+    Bounds, Context, IntoElement, Pixels, Window, canvas, div, fill, point, prelude::*, px, rgb,
+    size,
 };
 use num_traits::ToPrimitive;
 
@@ -119,8 +119,6 @@ impl LiveDashboard {
         let plot = cpu_history_cells_plot(history, inspection, Rc::clone(&measured));
         let move_history = Arc::clone(history);
         let move_bounds = Rc::clone(&measured);
-        let click_history = Arc::clone(history);
-        let click_bounds = Rc::clone(&measured);
         let hover_history = Arc::clone(history);
         div()
             .id("cpu-history-cells")
@@ -164,20 +162,6 @@ impl LiveDashboard {
                     }
                 }
             }))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
-                    if this.cpu_history_hover(
-                        &click_history,
-                        click_bounds.get(),
-                        event.position,
-                        Instant::now(),
-                        cx,
-                    ) {
-                        this.cpu_history_select(window, cx);
-                    }
-                }),
-            )
     }
 
     fn cpu_history_inspection(&self, history: &CPUHistory) -> Option<CPUInspection> {

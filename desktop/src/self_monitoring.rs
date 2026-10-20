@@ -246,7 +246,6 @@ fn card(label: &'static str, reading: String, note: String) -> Card {
         reading,
         note,
         color: TEXT,
-        route: "self",
     }
 }
 

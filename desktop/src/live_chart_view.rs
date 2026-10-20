@@ -4,8 +4,8 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use gpui::{
-    Bounds, Context, IntoElement, MouseButton, Render, SharedString, Window, canvas, div, fill,
-    point, prelude::*, px, rgb, size,
+    Bounds, Context, IntoElement, Render, SharedString, Window, canvas, div, fill, point,
+    prelude::*, px, rgb, size,
 };
 use serde_json::Value;
 
@@ -288,7 +288,7 @@ impl LiveDashboard {
         panel: &Rc<Panel>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let hover = self.chart_hover_target(panel, Rc::clone(&measured), cx);
+        let hover = self.chart_hover_target(panel, measured, cx);
         let chart = self.chart_accessibility(chart, panel, cx);
         chart
             .focusable()
@@ -296,22 +296,6 @@ impl LiveDashboard {
             .focus(crate::charts::focus_ring)
             .on_key_down(cx.listener(Self::chart_keyboard))
             .child(hover)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
-                    let second = this.snapshot.as_ref().and_then(|snapshot| {
-                        let rect = charts::plot_bounds(measured.get());
-                        let fraction = f32::from(event.position.x - rect.origin.x)
-                            / f32::from(rect.size.width);
-                        crate::live_projection::sample_second(&snapshot.selection, fraction)
-                    });
-                    if let Some(second) = second {
-                        this.inspect(second, cx);
-                        this.focus_inspection(window, cx);
-                        window.prevent_default();
-                    }
-                }),
-            )
     }
 
     fn chart_hover_target(

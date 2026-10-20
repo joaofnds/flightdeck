@@ -423,25 +423,26 @@ fn scrolling_the_plot_back_under_the_pointer_restores_synchronized_hover(cx: &mu
 }
 
 #[gpui::test]
-fn hovering_a_repeated_second_shows_the_observation_requested_by_click(cx: &mut TestAppContext) {
-    // Hover and click the same repeated second, reading the headline from GPUI's rendered frame.
+fn clicking_a_chart_leaves_the_view_where_it_was(cx: &mut TestAppContext) {
+    // Goal: a plain click on a plot neither pauses the view nor requests another second, since
+    // only a drag acts on a chart. Method: click the previous second of a chart that repeats a
+    // second, then read the request and whether any reading was hidden.
     let mut harness = InputHarness::setup(cx);
     harness.driver.seed_repeated_second();
+    let before = (
+        harness.driver.requested_second(),
+        harness.driver.requested_publication(),
+    );
 
     harness.driver.hover_previous_second();
-    let latest_reading_visible = harness.driver.reading_is_visible("90 W");
-    let previous_reading_visible = harness.driver.reading_is_visible("10 W");
     harness.driver.click_previous_second();
 
-    assert!(
-        latest_reading_visible,
-        "90 W visible: {latest_reading_visible}; 10 W visible: {previous_reading_visible}; \
-         clicked publication: {:?}",
-        harness.driver.requested_publication()
+    let after = (
+        harness.driver.requested_second(),
+        harness.driver.requested_publication(),
     );
-    assert!(!previous_reading_visible);
-    assert_eq!(harness.driver.requested_second(), Some(999));
-    assert_eq!(harness.driver.requested_publication(), Some(3));
+    assert_eq!(after, before);
+    assert!(!harness.driver.readings_are_hidden());
     harness.teardown();
 }
 
@@ -461,22 +462,6 @@ fn repeated_arrows_keep_inspecting_after_pending_readings_disappear(cx: &mut Tes
     assert_eq!(harness.driver.requested_second(), Some(1001));
     assert!(harness.driver.readings_are_hidden());
     assert!(harness.driver.copy_selected().is_err());
-    assert!(harness.driver.inspection_has_focus());
-    harness.teardown();
-}
-
-#[gpui::test]
-fn clicking_history_keeps_inspection_available_while_readings_load(cx: &mut TestAppContext) {
-    // A chart click must keep its keyboard owner mounted after the selected values are hidden.
-    let mut harness = InputHarness::setup(cx);
-
-    harness.driver.click_selected_second();
-    assert_eq!(harness.driver.requested_second(), Some(1000));
-    harness.driver.render_pending();
-    harness.driver.press("right");
-
-    assert_eq!(harness.driver.requested_second(), Some(1001));
-    assert!(harness.driver.readings_are_hidden());
     assert!(harness.driver.inspection_has_focus());
     harness.teardown();
 }
@@ -911,13 +896,6 @@ impl InputDriver {
         self.view.read_with(&self.context, |dashboard, _| {
             dashboard.request.identity.as_ref()?["publication"].as_u64()
         })
-    }
-
-    fn click_selected_second(&mut self) {
-        let bounds = self.context.debug_bounds("live-energy-plot").unwrap();
-        let plot = crate::charts::plot_bounds(bounds);
-        let selected = gpui::point(plot.right() - gpui::px(0.1), plot.center().y);
-        self.context.simulate_click(selected, Modifiers::none());
     }
 
     fn render_pending(&mut self) {

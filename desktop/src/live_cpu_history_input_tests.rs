@@ -4,7 +4,7 @@ use std::sync::Arc;
 use gpui::{Entity, Modifiers, MouseButton, TestAppContext, VisualTestContext, WindowOptions};
 use serde_json::{Value, json};
 
-use super::{CPUHistory, CPUInspection, NS};
+use super::{CPUHistory, NS};
 use crate::live_dashboard::LiveDashboard;
 use crate::live_source::{Snapshot, Worker};
 
@@ -33,34 +33,17 @@ fn keyboard_history_inspection_selects_the_exact_same_second_observation(cx: &mu
 }
 
 #[gpui::test]
-fn clicking_an_unavailable_interval_cannot_reselect_the_previous_reading(cx: &mut TestAppContext) {
-    // Goal: a blank history interval cannot act as a selected measured observation.
-    // Method: click the empty half-second after the final measured interval.
+fn clicking_a_history_interval_changes_nothing(cx: &mut TestAppContext) {
+    // Goal: a plain click on the CPU history never requests another second, since only a drag
+    // acts on a chart. Method: click a measured interval and a blank one, then read the request.
     let mut harness = CPUHistoryHarness::setup(cx);
     let previous = harness.driver.requested_selection();
 
+    harness.driver.click_at(1000 * NS + NS * 9 / 10);
     harness.driver.click_at(1001 * NS + NS * 3 / 4);
 
     assert_eq!(harness.driver.requested_selection(), previous);
-    assert_eq!(harness.driver.inspection(), Some(CPUInspection::Gap));
     assert!(!harness.driver.readings_are_hidden());
-    harness.teardown();
-}
-
-#[gpui::test]
-fn clicking_a_measured_interval_selects_its_exact_observation(cx: &mut TestAppContext) {
-    // Goal: a pointer hit and the keyboard use the same exact observation target.
-    // Method: click the interval belonging to the earlier same-second publication.
-    let mut harness = CPUHistoryHarness::setup(cx);
-
-    harness.driver.click_at(1000 * NS + NS * 9 / 10);
-
-    assert_eq!(harness.driver.requested_selection().0, Some(1001));
-    assert_eq!(
-        harness.driver.requested_selection().1.unwrap()["publication"],
-        2
-    );
-    assert!(harness.driver.readings_are_hidden());
     harness.teardown();
 }
 
@@ -210,11 +193,6 @@ impl CPUHistoryDriver {
             let inspection = dashboard.cpu_inspection.or_else(|| history.selected())?;
             history.target(inspection)?.1["publication"].as_u64()
         })
-    }
-
-    fn inspection(&self) -> Option<CPUInspection> {
-        self.view
-            .read_with(&self.context, |dashboard, _| dashboard.cpu_inspection)
     }
 
     fn requested_selection(&self) -> (Option<u64>, Option<Value>) {

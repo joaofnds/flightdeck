@@ -18,13 +18,7 @@ fn overview_disk_ranking_activates_the_exact_historical_app(cx: &mut TestAppCont
             .reading_is_visible("ranking:Disk I/O:Current:80 B/s")
     );
 
-    let position = harness
-        .driver
-        .second_position("live-cpu-plot", 898.5 / 900.0);
-    harness
-        .driver
-        .context
-        .simulate_click(position, gpui::Modifiers::none());
+    harness.driver.select_second(999);
     harness.driver.complete_ranked_selection();
     harness
         .driver

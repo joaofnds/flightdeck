@@ -305,12 +305,11 @@ pub fn selected_detail<'a>(
 /// per-App source, and GPU time exists only for the seconds the app sampled while it ran.
 pub(crate) fn app_cards(app: Option<&Value>, selection: &Value) -> Vec<summary::Card> {
     let reading = |read: fn(&Value) -> String| app.map_or_else(|| "Unavailable".into(), read);
-    let card = |label, reading, note: &str, color, route| summary::Card {
+    let card = |label, reading, note: &str, color| summary::Card {
         label,
         reading,
         note: note.into(),
         color,
-        route,
     };
     vec![
         card(
@@ -318,42 +317,31 @@ pub(crate) fn app_cards(app: Option<&Value>, selection: &Value) -> Vec<summary::
             reading(|app| value_rate(&app["cpu_percent_one_core"], "%")),
             "100% = one core",
             BLUE,
-            "cpu",
         ),
         card(
             "Resident memory",
             reading(|app| measure_memory(&app["resident_bytes"])),
             "Resident; includes shared pages",
             GREEN,
-            "memory",
         ),
-        card(
-            "Network",
-            "Unavailable".into(),
-            "Selected app",
-            CYAN,
-            "network",
-        ),
+        card("Network", "Unavailable".into(), "Selected app", CYAN),
         card(
             "Disk I/O",
             reading(measure_disk_rate),
             "Selected app",
             YELLOW,
-            "storage",
         ),
         card(
             "GPU time",
             app.map_or_else(|| "Unavailable".into(), |app| app_gpu_time(app, selection)),
             "Selected app",
             PURPLE,
-            "gpu",
         ),
         card(
             "Process power",
             reading(|app| value_quantity(&app["energy_watts"], "W")),
             "Selected app",
             ORANGE,
-            "energy",
         ),
     ]
 }

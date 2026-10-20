@@ -152,7 +152,7 @@ impl LiveDashboard {
 
     fn row_content(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
         match &self.rows[index] {
-            Row::Summary => self.summary(cx).into_any_element(),
+            Row::Summary => self.summary().into_any_element(),
             Row::SelfPart(part) => self.self_part(*part, cx),
             Row::CPUTop(panel) => self.cpu_top(panel.as_ref(), cx).into_any_element(),
             Row::CPUActivity => self.cpu_activity().into_any_element(),
@@ -253,14 +253,14 @@ impl LiveDashboard {
         cards
     }
 
-    fn summary(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn summary(&self) -> impl IntoElement {
         let cards = self.summary_cards();
         let mut tiles = div()
             .grid()
             .grid_cols(summary_columns(self.viewport_size.width, cards.len()))
             .gap(px(8.0));
         for card in cards {
-            tiles = tiles.child(Self::summary_card(&card, cx));
+            tiles = tiles.child(Self::summary_card(&card));
         }
 
         div()
@@ -270,23 +270,14 @@ impl LiveDashboard {
             .child(tiles)
     }
 
-    fn summary_card(card: &summary::Card, cx: &mut Context<Self>) -> impl IntoElement {
-        let route = card.route;
+    fn summary_card(card: &summary::Card) -> impl IntoElement {
         let selector = format!("summary-card:{}:{}", card.label, card.reading);
         div()
             .id(gpui::SharedString::from(format!("summary-{}", card.label)))
             .debug_selector(move || selector.clone())
             .accessibility_id(format!("flightdeck.summary.{}", card.label))
-            .role(gpui::Role::Button)
-            .aria_label(format!(
-                "{}: {}; {}. Open {}",
-                card.label, card.reading, card.note, route
-            ))
-            .cursor_pointer()
-            .focusable()
-            .tab_stop(true)
-            .focus(crate::charts::focus_ring)
-            .hover(|style| style.bg(rgb(0x20_29_36)))
+            .role(gpui::Role::Group)
+            .aria_label(format!("{}: {}; {}", card.label, card.reading, card.note))
             .flex()
             .flex_col()
             .gap(px(3.0))
@@ -296,16 +287,6 @@ impl LiveDashboard {
             .border_1()
             .border_color(rgb(GRID))
             .bg(rgb(PANEL))
-            .on_click(cx.listener(move |this, _, _, cx| this.summary_navigate(route, cx)))
-            .on_key_down(
-                cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
-                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                        this.summary_navigate(route, cx);
-                        window.prevent_default();
-                        cx.stop_propagation();
-                    }
-                }),
-            )
             .child(
                 div()
                     .debug_selector(|| format!("summary-label:{}", card.label))
@@ -330,14 +311,6 @@ impl LiveDashboard {
                     .text_color(rgb(MUTED))
                     .child(card.note.clone()),
             )
-    }
-
-    fn summary_navigate(&mut self, route: &str, cx: &mut Context<Self>) {
-        if let Some(target) = self.reading_target().cloned() {
-            self.request.second = Some(target.second);
-            self.request.identity = target.identity;
-        }
-        self.navigate(route, cx);
     }
 
     pub(crate) fn memory_quantities(&self) -> impl IntoElement {

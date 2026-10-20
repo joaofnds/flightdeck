@@ -4,8 +4,10 @@ use serde_json::json;
 use super::{InputDriver, InputHarness, accepted_snapshot};
 
 #[gpui::test]
-fn overview_summary_cards_show_selected_resources_and_navigate_to_them(cx: &mut TestAppContext) {
-    // Display the prototype's overview readings and open CPU through its installed summary card.
+fn overview_summary_cards_show_selected_resources_and_open_nothing(cx: &mut TestAppContext) {
+    // Goal: the summary cards show the selected readings and a click on one changes nothing,
+    // since only the sidebar navigates. Method: seed the readings, click the CPU card and read
+    // the route.
     let mut harness = InputHarness::setup_route(cx, "overview");
     harness.driver.seed_summary_readings();
 
@@ -18,7 +20,7 @@ fn overview_summary_cards_show_selected_resources_and_navigate_to_them(cx: &mut 
     );
     harness.driver.click_summary_card("summary-card:CPU:25%");
 
-    harness.driver.assert_summary_destination("cpu");
+    harness.driver.assert_summary_destination("overview");
     harness.teardown();
 }
 
