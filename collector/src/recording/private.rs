@@ -12,6 +12,19 @@ pub struct FileLock {
     file: File,
 }
 
+/// `struct flock` of `<sys/fcntl.h>`, its `l_` prefix dropped. macOS reports a `flock`
+/// lock through it too.
+#[repr(C)]
+struct Flock {
+    start: i64,
+    len: i64,
+    pid: i32,
+    r#type: i16,
+    whence: i16,
+}
+
+const _: () = assert!(size_of::<Flock>() == 24);
+
 const O_NOFOLLOW: c_int = 0x0100;
 const O_RDONLY: c_int = 0;
 const O_RDWR: c_int = 2;
@@ -23,6 +36,10 @@ const NAME_MAX: usize = 255;
 const LOCK_EX: c_int = 2;
 const LOCK_NB: c_int = 4;
 const F_FULLFSYNC: c_int = 51;
+const F_GETLK: c_int = 7;
+const F_UNLCK: i16 = 2;
+const F_WRLCK: i16 = 3;
+const SEEK_SET: i16 = 0;
 const SHORT_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 const SHORT_LOCK_RETRY: Duration = Duration::from_millis(20);
 const SHORT_LOCK_ATTEMPTS_MAX: usize = 101;
@@ -174,23 +191,6 @@ impl FileLock {
         &self.file
     }
 }
-
-/// `struct flock` of `<sys/fcntl.h>`, its `l_` prefix dropped. macOS reports a `flock`
-/// lock through it too.
-#[repr(C)]
-struct Flock {
-    start: i64,
-    len: i64,
-    pid: i32,
-    r#type: i16,
-    whence: i16,
-}
-
-const _: () = assert!(size_of::<Flock>() == 24);
-const F_GETLK: c_int = 7;
-const F_UNLCK: i16 = 2;
-const F_WRLCK: i16 = 3;
-const SEEK_SET: i16 = 0;
 
 pub fn create_private_dir(path: &Path) -> io::Result<()> {
     match create_directory(path) {

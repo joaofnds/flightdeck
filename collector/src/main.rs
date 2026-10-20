@@ -260,8 +260,15 @@ fn start_recording_ring(
         "identity, battery and disks ring bytes={size_bytes} reader_limit_bytes=1073741824"
     )?;
 
-    let (ring, registered) =
-        Registration::start_with_disks(root, place, shape, capacity, start_ns)?.into_parts();
+    let started = Registration::start_with_disks(root, place, shape, capacity, start_ns)?;
+    if let Some(error) = started.announcement_error() {
+        writeln!(
+            out,
+            "recording announcement failed: {error}; collection and saving continue; \
+            another Flightdeck cannot attach"
+        )?;
+    }
+    let (ring, registered) = started.into_parts();
 
     match registered {
         Ok(()) => Ok((ring, true)),

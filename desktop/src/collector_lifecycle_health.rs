@@ -2,14 +2,14 @@ use std::io;
 use std::path::Path;
 
 use collector::recording::{BUILD, Holder, Registry, holder, identity_text, read_identity};
-use collector::ring::{RingReader, RunIdentity};
+use collector::ring::{Identity, RingReader, RunIdentity};
 
 use super::policy::{Build, Observation, RecordingStatus, Source};
 
 pub(super) struct Health(Box<Storage>);
 
 struct Storage {
-    registry: Box<[u8]>,
+    registry: Box<[u8; 4097]>,
     readers: [Option<Box<Reader>>; READERS_MAX],
 }
 
@@ -25,7 +25,7 @@ const _: () = assert!(size_of::<Health>() <= 16);
 impl Health {
     pub fn new() -> Self {
         Self(Box::new(Storage {
-            registry: vec![0; 4097].into_boxed_slice(),
+            registry: Box::new([0; 4097]),
             readers: [None, None],
         }))
     }
@@ -38,19 +38,17 @@ impl Health {
             }
             Err(error) => return Err(error),
         };
-        let buffer: &mut [u8; 4097] = self
-            .0
-            .registry
-            .as_mut()
-            .try_into()
-            .map_err(io::Error::other)?;
-        let registry = Registry::read_into(&root.join("runs"), buffer)?;
+        // A collector registers its run before it announces it, so the registry read after
+        // the holder lists any run the holder announces.
         let holder = holder(root)?;
+        let registry = Registry::read_into(&root.join("runs"), &mut self.0.registry)?;
+        let newest = registry
+            .runs()
+            .last()
+            .transpose()?
+            .map(|run| run.identity.run);
+        let (mut source, announced) = read_holder(holder, newest);
         let mut previous = std::mem::take(&mut self.0.readers);
-        let mut source = Source {
-            recording: RecordingStatus::Ready,
-            ..Source::default()
-        };
         for (index, registered) in registry.runs().enumerate().take(READERS_MAX) {
             let registered = registered?;
             if registered.identity.recording != recording {
@@ -59,15 +57,16 @@ impl Health {
                 ));
             }
 
-            let owned = owned_pid.is_none_or(|pid| pid == registered.collector_pid);
-            let alive = match holder {
-                Holder::Announced { run, build } if run == registered.identity.run => {
+            let followed = owned_pid.is_none_or(|pid| pid == registered.collector_pid);
+            let alive = match announced {
+                Some((run, build)) if run == registered.identity.run => {
                     if build != BUILD {
-                        if owned {
+                        if followed {
                             source.build = Build::Other(build);
                         }
                         continue;
                     }
+
                     true
                 }
                 _ => false,
@@ -80,10 +79,15 @@ impl Health {
                 }
                 continue;
             };
+
             if alive {
-                if !reader.ring.completed() {
+                if reader.ring.completed() {
+                    // The run ended, and the collector now holding the recording has yet to
+                    // withdraw the announcement its run left.
+                    source.recording = RecordingStatus::Pending;
+                } else {
                     source.producer_alive = true;
-                    if owned {
+                    if followed {
                         source.observation = read_observation(&reader, registered.collector_pid)?;
                     }
                 }
@@ -91,15 +95,36 @@ impl Health {
             self.0.readers[index] = Some(reader);
         }
 
-        if holder == Holder::Unannounced {
-            source.recording = RecordingStatus::Pending;
-            source.build = Build::Unannounced;
-        }
         Ok(source)
     }
 
     pub fn clear(&mut self) {
         self.0.readers = [None, None];
+    }
+}
+
+/// Starts the source from what the holder says, and returns the run it announces when that
+/// is the newest registered run, the only one the holder can be writing.
+fn read_holder(holder: Holder, newest: Option<Identity>) -> (Source, Option<(Identity, u64)>) {
+    let mut source = Source {
+        recording: RecordingStatus::Ready,
+        ..Source::default()
+    };
+    match holder {
+        Holder::Absent => (source, None),
+        Holder::Announced { run, build } if Some(run) == newest => (source, Some((run, build))),
+        // An announcement naming an older run outlives its collector until the next holder
+        // withdraws it, so that holder has not announced itself yet.
+        Holder::Announced { .. } | Holder::Unannounced => {
+            source.recording = RecordingStatus::Pending;
+            source.build = Build::Unannounced;
+            (source, None)
+        }
+        Holder::Unrecognized => {
+            source.recording = RecordingStatus::Pending;
+            source.build = Build::Unrecognized;
+            (source, None)
+        }
     }
 }
 

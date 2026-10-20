@@ -43,6 +43,9 @@ pub struct Registration {
 pub struct StartedRecording {
     writer: Writer,
     registered: io::Result<()>,
+    /// Why a registered run went unannounced. Its readings are still saved, but no other
+    /// Flightdeck attaches to it.
+    announcement: Option<io::Error>,
 }
 
 #[derive(Clone, Copy)]
@@ -56,6 +59,11 @@ enum RingLayout {
 impl StartedRecording {
     pub fn into_parts(self) -> (Writer, io::Result<()>) {
         (self.writer, self.registered)
+    }
+
+    #[must_use]
+    pub fn announcement_error(&self) -> Option<&io::Error> {
+        self.announcement.as_ref()
     }
 }
 
@@ -218,9 +226,21 @@ impl Registration {
         };
 
         writer.retain_recording_ownership(ownership);
-        let registered = registration.register(writer.name());
+        Ok(registration.start_registered(writer))
+    }
 
-        Ok(StartedRecording { writer, registered })
+    fn start_registered(&self, writer: Writer) -> StartedRecording {
+        let registered = self.register(writer.name());
+        let announcement = match registered {
+            Ok(()) => holder::announce(&self.root, self.identity.run).err(),
+            Err(_) => None,
+        };
+
+        StartedRecording {
+            writer,
+            registered,
+            announcement,
+        }
     }
 
     fn start_ownership(root: &Path) -> io::Result<File> {
@@ -248,6 +268,7 @@ impl Registration {
         Ok(StartedRecording {
             writer,
             registered: Err(error),
+            announcement: None,
         })
     }
 
@@ -285,7 +306,7 @@ impl Registration {
         )?;
         registry.write(&self.root)?;
         drop(lock);
-        holder::announce(&self.root, self.identity.run)
+        Ok(())
     }
 }
 

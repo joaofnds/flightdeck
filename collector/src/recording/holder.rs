@@ -8,20 +8,34 @@ use super::{BUILD, identity_text, parse_identity, private};
 use crate::ring::Identity;
 
 const ANNOUNCEMENT: &str = "collector.announcement";
+/// The start every version of the header shares, so a reader tells a format it cannot read
+/// from a damaged file.
+const HEADER_FAMILY: &str = "flightdeck-collector-";
 const HEADER: &str = "flightdeck-collector-1";
+const RUN_DIGITS: usize = 32;
+const BUILD_DIGITS: usize = 16;
+const RUN_START: usize = HEADER.len() + 1;
+const BUILD_START: usize = RUN_START + RUN_DIGITS + 1;
 /// The header, the run's identity and the build, each on a line of its own.
-const ANNOUNCEMENT_BYTES: usize = HEADER.len() + 1 + 32 + 1 + 16 + 1;
+const ANNOUNCEMENT_BYTES: usize = BUILD_START + BUILD_DIGITS + 1;
+
+const _: () = assert!(HEADER.len() > HEADER_FAMILY.len());
+const _: () = assert!(RUN_DIGITS == 2 * size_of::<Identity>());
+const _: () = assert!(BUILD_DIGITS == 2 * size_of::<u64>());
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Holder {
     Absent,
-    /// A collector holds the recording but names no run, since it is starting or predates
-    /// announcements.
+    /// A collector holds the recording but names no run, since it is starting, could not
+    /// register its run, or predates announcements.
     Unannounced,
     Announced {
         run: Identity,
         build: u64,
     },
+    /// A collector holds the recording and announces it in a format another version of
+    /// Flightdeck writes, so it is another build.
+    Unrecognized,
 }
 
 /// Reads who holds the recording at `root` without taking its lock.
@@ -50,27 +64,47 @@ pub fn holder(root: &Path) -> io::Result<Holder> {
         }
         length += count;
     }
+    let bytes = &bytes[..length];
+
+    if !bytes.starts_with(HEADER_FAMILY.as_bytes()) {
+        return Err(invalid());
+    }
+
+    if !bytes.starts_with(HEADER.as_bytes()) {
+        return Ok(Holder::Unrecognized);
+    }
+
+    // A later header that begins with this one, such as version 10, is still another format.
+    if bytes.get(HEADER.len()) != Some(&b'\n') {
+        return Ok(Holder::Unrecognized);
+    }
 
     if length != ANNOUNCEMENT_BYTES {
         return Err(invalid());
     }
-    holder_parse(&bytes[..length])
+
+    holder_parse(bytes)
 }
 
+/// Parses an announcement of this format, whose every field lies at a fixed offset.
 fn holder_parse(bytes: &[u8]) -> io::Result<Holder> {
-    let text = std::str::from_utf8(bytes).map_err(|_| invalid())?;
-    let mut lines = text.lines();
-    if lines.next() != Some(HEADER) {
+    assert_eq!(ANNOUNCEMENT_BYTES, bytes.len());
+    if bytes[BUILD_START - 1] != b'\n' {
         return Err(invalid());
     }
-    let run = parse_identity(lines.next().ok_or_else(invalid)?)?;
-    let build = lines.next().ok_or_else(invalid)?;
-    if build.len() != 16 {
+
+    if bytes[ANNOUNCEMENT_BYTES - 1] != b'\n' {
         return Err(invalid());
     }
-    if !build.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+
+    let run = std::str::from_utf8(&bytes[RUN_START..BUILD_START - 1]).map_err(|_| invalid())?;
+    let run = parse_identity(run)?;
+    let build = &bytes[BUILD_START..ANNOUNCEMENT_BYTES - 1];
+    if !build.iter().all(u8::is_ascii_hexdigit) {
         return Err(invalid());
     }
+
+    let build = std::str::from_utf8(build).map_err(|_| invalid())?;
     let build = u64::from_str_radix(build, 16).map_err(|_| invalid())?;
     Ok(Holder::Announced { run, build })
 }
@@ -86,7 +120,11 @@ pub(super) fn withdraw(root: &Path) -> io::Result<()> {
 
 /// Announces the registered `run` of the collector that holds the lock.
 pub(super) fn announce(root: &Path, run: Identity) -> io::Result<()> {
-    let text = format!("{HEADER}\n{}\n{BUILD:016x}\n", identity_text(run));
+    let text = format!(
+        "{HEADER}\n{}\n{BUILD:0digits$x}\n",
+        identity_text(run),
+        digits = BUILD_DIGITS
+    );
     assert_eq!(ANNOUNCEMENT_BYTES, text.len());
     private::atomic_write(root, ANNOUNCEMENT, text.as_bytes())
 }
@@ -97,10 +135,16 @@ fn invalid() -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+
     use super::*;
     use crate::recording::discovery::tests::allocator_calls_in;
     use crate::recording::{Registration, private};
     use crate::ring::{Place, Shape, Writer, unlink_generation};
+
+    /// A run identity and a build in this format, which tests corrupt one field at a time.
+    const RUN: &str = "00000000000000010000000000000002";
+    const BUILD_TEXT: &str = "0000000000000003";
 
     #[test]
     fn a_started_recording_announces_its_run_and_build() {
@@ -113,7 +157,6 @@ mod tests {
         let holder = holder(&fixture.root).unwrap();
 
         assert_eq!(Holder::Announced { run, build: BUILD }, holder);
-        Fixture::finish(writer);
     }
 
     #[test]
@@ -121,14 +164,11 @@ mod tests {
         // Goal: a pid macOS gave another process cannot pass for the exited collector.
         // Method: stop a registered collector, whose registry entry and announcement stay.
         let fixture = Fixture::new("exited");
-        let writer = fixture.start();
-        let name = writer.name().to_owned();
-        drop(writer);
+        drop(fixture.start());
 
         let holder = holder(&fixture.root).unwrap();
 
         assert_eq!(Holder::Absent, holder);
-        unlink_generation(&name).unwrap();
     }
 
     #[test]
@@ -145,19 +185,19 @@ mod tests {
     }
 
     #[test]
-    fn taking_the_recording_withdraws_the_last_announcement() {
+    fn a_collector_that_cannot_register_withdraws_the_last_announcement() {
         // Goal: a new holder is never read as the run its predecessor announced.
-        // Method: stop one collector, then take its recording without registering a run.
+        // Method: stop one collector, then start another whose registration fails after it
+        // takes the recording, since the recording's identity no longer reads.
         let fixture = Fixture::new("withdrawn");
-        let writer = fixture.start();
-        let name = writer.name().to_owned();
-        drop(writer);
+        drop(fixture.start());
+        private::atomic_write(&fixture.root, "identity", b"damaged\n").unwrap();
 
-        let ownership = Registration::start_ownership(&fixture.root).unwrap();
+        let (writer, registered) = fixture.started();
 
+        assert!(registered.is_err());
         assert_eq!(Holder::Unannounced, holder(&fixture.root).unwrap());
-        drop(ownership);
-        unlink_generation(&name).unwrap();
+        drop(writer);
     }
 
     #[test]
@@ -165,7 +205,7 @@ mod tests {
         // Goal: a reader can poll the holder from fixed storage.
         // Method: count allocations while reading a registered recording's holder.
         let fixture = Fixture::new("allocations");
-        let writer = fixture.start();
+        let _writer = fixture.start();
 
         let calls = allocator_calls_in(|| {
             assert!(matches!(
@@ -175,31 +215,100 @@ mod tests {
         });
 
         assert_eq!(0, calls);
-        Fixture::finish(writer);
     }
 
     #[test]
-    fn refuses_a_malformed_announcement() {
-        // Goal: an announcement no collector wrote is never read as a run and build.
-        // Method: hold the lock beside an announcement whose build is not hexadecimal.
-        let fixture = Fixture::new("malformed");
-        let lock = private::FileLock::try_lock(&fixture.root.join("collector.lock")).unwrap();
-        let text = concat!(
-            "flightdeck-collector-1\n",
-            "00000000000000010000000000000002\n",
-            "000000000000000x\n"
+    fn reads_an_announcement_of_this_format() {
+        // Goal: the fields a collector writes come back as it wrote them.
+        // Method: hold the lock beside an announcement written by hand in this format.
+        let fixture = Fixture::new("format");
+        let _lock = fixture.announced(&format!("{HEADER}\n{RUN}\n{BUILD_TEXT}\n"));
+
+        let holder = holder(&fixture.root).unwrap();
+
+        let run = parse_identity(RUN).unwrap();
+        assert_eq!(Holder::Announced { run, build: 3 }, holder);
+    }
+
+    #[test]
+    fn an_announcement_in_another_format_names_another_build() {
+        // Goal: a later format reads as another build, never as a damaged file.
+        // Method: announce under the next header version, with lines this format lacks.
+        let fixture = Fixture::new("unrecognized");
+        let _lock = fixture.announced(&format!("{HEADER_FAMILY}2\n{RUN}\nmore\nlines\n"));
+
+        let holder = holder(&fixture.root).unwrap();
+
+        assert_eq!(Holder::Unrecognized, holder);
+    }
+
+    #[test]
+    fn refuses_a_build_that_is_not_hexadecimal() {
+        // Goal: an announcement no collector wrote is never read as a build.
+        let fixture = Fixture::new("not-hex");
+        let _lock = fixture.announced(&format!("{HEADER}\n{RUN}\n000000000000000x\n"));
+
+        assert_eq!(
+            io::ErrorKind::InvalidData,
+            holder(&fixture.root).unwrap_err().kind()
         );
-        private::atomic_write(&fixture.root, "collector.announcement", text.as_bytes()).unwrap();
+    }
 
-        let error = holder(&fixture.root).unwrap_err();
+    #[test]
+    fn refuses_a_signed_build() {
+        // Goal: only the digits a collector writes are a build, though Rust's parse takes a
+        // sign too.
+        let fixture = Fixture::new("signed");
+        let _lock = fixture.announced(&format!("{HEADER}\n{RUN}\n+00000000000000f\n"));
 
-        assert_eq!(io::ErrorKind::InvalidData, error.kind());
-        drop(lock);
+        assert_eq!(
+            io::ErrorKind::InvalidData,
+            holder(&fixture.root).unwrap_err().kind()
+        );
+    }
+
+    #[test]
+    fn refuses_an_announcement_with_another_line() {
+        // Goal: a file longer than this format is not read as its first three lines.
+        let fixture = Fixture::new("long");
+        let _lock = fixture.announced(&format!("{HEADER}\n{RUN}\n{BUILD_TEXT}\nmore\n"));
+
+        assert_eq!(
+            io::ErrorKind::InvalidData,
+            holder(&fixture.root).unwrap_err().kind()
+        );
+    }
+
+    #[test]
+    fn refuses_an_announcement_with_a_carriage_return() {
+        // Goal: only the line ending a collector writes separates the fields.
+        // Method: end the run with a carriage return and drop the last newline, keeping the
+        // length of this format.
+        let fixture = Fixture::new("carriage");
+        let _lock = fixture.announced(&format!("{HEADER}\n{RUN}\r\n{BUILD_TEXT}"));
+
+        assert_eq!(
+            io::ErrorKind::InvalidData,
+            holder(&fixture.root).unwrap_err().kind()
+        );
+    }
+
+    #[test]
+    fn refuses_a_file_that_is_no_announcement() {
+        // Goal: a damaged file is reported, never read as another build.
+        let fixture = Fixture::new("damaged");
+        let _lock = fixture.announced("damaged\n");
+
+        assert_eq!(
+            io::ErrorKind::InvalidData,
+            holder(&fixture.root).unwrap_err().kind()
+        );
     }
 
     struct Fixture {
         root: std::path::PathBuf,
         place: Place,
+        rings: RefCell<Vec<String>>,
     }
 
     impl Fixture {
@@ -216,10 +325,14 @@ mod tests {
                 lock_path: root.join("ring.lock"),
                 name_prefix: "/fdh.".into(),
             };
-            Self { root, place }
+            Self {
+                root,
+                place,
+                rings: RefCell::new(Vec::new()),
+            }
         }
 
-        fn start(&self) -> Writer {
+        fn started(&self) -> (Writer, io::Result<()>) {
             let shape = Shape {
                 slot_count: 2,
                 cpu_capacity: 1,
@@ -231,22 +344,35 @@ mod tests {
                 coalition_capacity: 1,
                 event_capacity: 2,
             };
-            let (writer, registered) = Registration::start(&self.root, &self.place, shape, 0)
-                .unwrap()
-                .into_parts();
+            let started = Registration::start(&self.root, &self.place, shape, 0).unwrap();
+            let (writer, registered) = started.into_parts();
+            self.rings.borrow_mut().push(writer.name().to_owned());
+            (writer, registered)
+        }
+
+        fn start(&self) -> Writer {
+            let (writer, registered) = self.started();
             registered.unwrap();
             writer
         }
 
-        fn finish(writer: Writer) {
-            let name = writer.name().to_owned();
-            drop(writer);
-            unlink_generation(&name).unwrap();
+        /// Holds the recording's lock beside an announcement of exactly `text`.
+        fn announced(&self, text: &str) -> private::FileLock {
+            let lock = private::FileLock::try_lock(&self.root.join("collector.lock")).unwrap();
+            private::atomic_write(&self.root, ANNOUNCEMENT, text.as_bytes()).unwrap();
+            lock
         }
     }
 
     impl Drop for Fixture {
         fn drop(&mut self) {
+            for ring in self.rings.borrow().iter() {
+                match unlink_generation(ring) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => panic!("Fixture cleanup failed: {error}"),
+                }
+            }
             match std::fs::remove_dir_all(&self.root) {
                 Ok(()) => {}
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}

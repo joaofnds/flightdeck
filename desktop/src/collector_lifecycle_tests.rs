@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use collector::recording::{Registration, identity_text, random_identity};
-use collector::ring::{Place, Readings, Shape, Writer};
+use collector::recording::{BUILD, Registration, identity_text, random_identity};
+use collector::ring::{Identity, Place, Readings, Shape, Writer};
 use serde_json::json;
 
 use super::*;
@@ -185,17 +185,34 @@ fn a_registered_pid_is_not_alive_once_its_collector_lets_go_of_the_recording() {
     assert!(source.recording == RecordingStatus::Ready);
 }
 
+/// A build no code of this repository fingerprints to, standing for another checkout's.
+const OTHER_BUILD: u64 = 7;
+
 #[test]
 fn a_collector_announcing_another_build_is_reported_and_not_read() {
     // Goal: the app learns that the running collector's code differs before reading its ring.
     // Method: replace the fixture's announcement with one naming its run and another build.
     let fixture = Recording::new();
-    fixture.announce(7);
+    fixture.announce(fixture.run(), OTHER_BUILD);
 
     let source = health::Health::new().read(&fixture.root, None).unwrap();
 
-    assert_eq!(policy::Build::Other(7), source.build);
+    assert_eq!(policy::Build::Other(OTHER_BUILD), source.build);
     assert!(!source.producer_alive);
+}
+
+#[test]
+fn the_owned_collector_announcing_another_build_is_reported() {
+    // Goal: the app learns at once that the collector it started is a stale executable.
+    // Method: announce another build while owning the pid that registered the run.
+    let fixture = Recording::new();
+    fixture.announce(fixture.run(), OTHER_BUILD);
+
+    let source = health::Health::new()
+        .read(&fixture.root, Some(std::process::id()))
+        .unwrap();
+
+    assert_eq!(policy::Build::Other(OTHER_BUILD), source.build);
 }
 
 #[test]
@@ -203,7 +220,7 @@ fn another_builds_announcement_is_ignored_while_this_app_starts_its_own_collecto
     // Goal: an announcement left by an earlier holder cannot fail this app's own startup.
     // Method: read another build's announcement while owning a child of another pid.
     let fixture = Recording::new();
-    fixture.announce(7);
+    fixture.announce(fixture.run(), OTHER_BUILD);
 
     let source = health::Health::new()
         .read(&fixture.root, Some(std::process::id() + 1))
@@ -213,8 +230,50 @@ fn another_builds_announcement_is_ignored_while_this_app_starts_its_own_collecto
 }
 
 #[test]
-fn a_held_recording_without_an_announcement_waits_without_spawning() {
-    // Goal: a starting or older collector holding the recording never meets a competing spawn.
+fn an_announcement_of_an_older_run_reads_as_a_holder_yet_to_announce() {
+    // Goal: an announcement the next holder has yet to withdraw cannot pass for that holder.
+    // Method: roll over to a second run, then announce the first run under the second's lock.
+    let mut fixture = Recording::new();
+    let older = fixture.run();
+    fixture.rollover();
+    fixture.announce(older, BUILD);
+
+    let source = health::Health::new().read(&fixture.root, None).unwrap();
+
+    assert_eq!(policy::Build::Unannounced, source.build);
+    assert!(source.recording == RecordingStatus::Pending);
+    assert!(!source.producer_alive);
+}
+
+#[test]
+fn a_completed_run_announced_under_a_held_recording_is_pending() {
+    // Goal: a run that ended reads as a holder still starting, never as a recording to restart.
+    // Method: finish the announced run's ring while its writer keeps holding the recording.
+    let mut fixture = Recording::new();
+    fixture.writer.as_mut().unwrap().finish();
+
+    let source = health::Health::new().read(&fixture.root, None).unwrap();
+
+    assert!(source.recording == RecordingStatus::Pending);
+    assert!(!source.producer_alive);
+}
+
+#[test]
+fn a_holder_announcing_in_another_format_is_unrecognized() {
+    // Goal: a collector of a version that changed the announcement is refused, never misread.
+    // Method: replace the fixture's announcement with a later version's header.
+    let fixture = Recording::new();
+    fixture.announce_text("flightdeck-collector-2\n");
+
+    let source = health::Health::new().read(&fixture.root, None).unwrap();
+
+    assert_eq!(policy::Build::Unrecognized, source.build);
+    assert!(source.recording == RecordingStatus::Pending);
+}
+
+#[test]
+fn a_held_recording_without_an_announcement_is_pending() {
+    // Goal: a starting or older collector holding the recording reads as one yet to announce.
     // Method: remove the fixture's announcement while its writer holds the recording.
     let fixture = Recording::new();
     std::fs::remove_file(fixture.root.join("collector.announcement")).unwrap();
@@ -321,12 +380,18 @@ impl Recording {
         })
     }
 
-    fn announce(&self, build: u64) {
-        let run = self.writer.as_ref().unwrap().identity().unwrap().run;
-        let text = format!(
+    fn run(&self) -> Identity {
+        self.writer.as_ref().unwrap().identity().unwrap().run
+    }
+
+    fn announce(&self, run: Identity, build: u64) {
+        self.announce_text(&format!(
             "flightdeck-collector-1\n{}\n{build:016x}\n",
             identity_text(run)
-        );
+        ));
+    }
+
+    fn announce_text(&self, text: &str) {
         collector::recording::private::atomic_write(
             &self.root,
             "collector.announcement",

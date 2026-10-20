@@ -5,7 +5,10 @@ pub(super) const STARTUP_LIMIT: Duration = Duration::from_secs(20);
 pub(super) const SHUTDOWN_LIMIT: Duration = Duration::from_secs(125);
 pub(super) const KILL_LIMIT: Duration = Duration::from_secs(2);
 pub(super) const UNANNOUNCED_FAILURE: &str = "A collector holds this recording without naming \
-     its build, so it predates this Flightdeck. Quit the Flightdeck that started it, then retry.";
+     its build, since it predates this Flightdeck or could not register its run. Quit the \
+     Flightdeck that started it, then retry.";
+pub(super) const UNRECOGNIZED_FAILURE: &str = "The running collector announces itself in a \
+     format another version of Flightdeck writes. Quit the Flightdeck that started it, then retry.";
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Mode {
@@ -58,10 +61,14 @@ pub(super) struct Source {
 /// What the collector holding the recording says built it.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(super) enum Build {
-    /// No collector is announced, or the announced one is built from this app's code.
+    /// No collector holds the recording, or the collector this app follows is built from its
+    /// code.
     #[default]
     Expected,
+    /// A collector holds the recording without announcing the newest registered run.
     Unannounced,
+    /// A collector holds the recording and announces it in another version's format.
+    Unrecognized,
     Other(u64),
 }
 
@@ -69,6 +76,15 @@ pub(super) fn other_build_failure(build: u64) -> String {
     format!(
         "The running collector is built from other code than this Flightdeck (build {build:016x}, \
          expected {:016x}). Quit the Flightdeck that started it, then retry.",
+        collector::recording::BUILD
+    )
+}
+
+/// The collector this app started is a stale executable, which only a rebuild replaces.
+pub(super) fn owned_build_failure(build: u64) -> String {
+    format!(
+        "The collector beside this Flightdeck is built from other code (build {build:016x}, \
+         expected {:016x}). Rebuild it together with this Flightdeck, then retry.",
         collector::recording::BUILD
     )
 }
@@ -153,6 +169,12 @@ impl Policy {
             self.fail(&other_build_failure(build));
             return Action::None;
         }
+
+        if source.build == Build::Unrecognized {
+            self.fail(UNRECOGNIZED_FAILURE);
+            return Action::None;
+        }
+
         if self.expired(now, DISCOVERY_LIMIT) {
             if source.build == Build::Unannounced {
                 self.fail(UNANNOUNCED_FAILURE);
@@ -220,9 +242,15 @@ impl Policy {
     fn starting(&mut self, now: Duration, source: &Source) -> Action {
         assert!(self.since.is_some());
         if let Build::Other(build) = source.build {
-            self.failure = Some(other_build_failure(build));
+            self.failure = Some(owned_build_failure(build));
             return self.stop(now);
         }
+
+        if source.build == Build::Unrecognized {
+            self.failure = Some(UNRECOGNIZED_FAILURE.into());
+            return self.stop(now);
+        }
+
         if self.expired(now, STARTUP_LIMIT) {
             self.failure =
                 Some("Owned collector readings did not advance within 20 seconds".into());

@@ -1,5 +1,8 @@
 use super::*;
 
+/// A build no code of this repository fingerprints to, standing for another checkout's.
+const OTHER_BUILD: u64 = 7;
+
 fn existing(publication: u64) -> Source {
     Source {
         recording_route: true,
@@ -332,7 +335,7 @@ fn a_collector_built_from_other_code_fails_discovery_without_spawning() {
     let source = Source {
         recording_route: true,
         recording: RecordingStatus::Ready,
-        build: Build::Other(7),
+        build: Build::Other(OTHER_BUILD),
         ..Source::default()
     };
 
@@ -340,13 +343,52 @@ fn a_collector_built_from_other_code_fails_discovery_without_spawning() {
 
     assert_eq!(action, Action::None);
     assert_eq!(policy.state, State::Failed);
-    assert_eq!(policy.failure, Some(other_build_failure(7)));
+    assert_eq!(policy.failure, Some(other_build_failure(OTHER_BUILD)));
     assert!(policy.can_retry());
 }
 
 #[test]
-fn an_unannounced_holder_names_an_older_build_at_the_discovery_deadline() {
-    // Goal: a collector that never announces itself is reported as one from an older build.
+fn a_collector_announcing_another_format_fails_discovery_without_spawning() {
+    // Goal: the app never reads a ring of a version whose announcement it cannot read.
+    // Method: report a holder announcing another format on the first discovery step.
+    let mut policy = Policy::new(Mode::Auto);
+    let source = Source {
+        recording_route: true,
+        build: Build::Unrecognized,
+        ..Source::default()
+    };
+
+    let action = policy.step(Duration::ZERO, &source);
+
+    assert_eq!(action, Action::None);
+    assert_eq!(policy.state, State::Failed);
+    assert_eq!(policy.failure.as_deref(), Some(UNRECOGNIZED_FAILURE));
+}
+
+#[test]
+fn another_builds_failure_names_both_builds() {
+    // Goal: the user can tell which code built each side.
+    // Method: look for both fingerprints in the failure for another build.
+    let failure = other_build_failure(OTHER_BUILD);
+
+    assert!(failure.contains(&format!("{OTHER_BUILD:016x}")));
+    assert!(failure.contains(&format!("{:016x}", collector::recording::BUILD)));
+}
+
+#[test]
+fn the_owned_build_failure_names_both_builds_and_the_rebuild() {
+    // Goal: the user can tell a stale collector executable from another app's collector.
+    // Method: look for both fingerprints and the remedy in the failure for an owned child.
+    let failure = owned_build_failure(OTHER_BUILD);
+
+    assert!(failure.contains(&format!("{OTHER_BUILD:016x}")));
+    assert!(failure.contains(&format!("{:016x}", collector::recording::BUILD)));
+    assert!(failure.contains("Rebuild"));
+}
+
+#[test]
+fn an_unannounced_holder_fails_discovery_at_its_deadline() {
+    // Goal: a collector that never announces itself fails discovery, and never meets a spawn.
     // Method: hold the recording without an announcement through the discovery deadline.
     let mut policy = Policy::new(Mode::Auto);
     let source = Source {
@@ -370,7 +412,7 @@ fn an_owned_collector_built_from_other_code_is_stopped() {
     let mut policy = Policy::new(Mode::Explicit);
     policy.launched(42, Duration::ZERO);
     let source = Source {
-        build: Build::Other(7),
+        build: Build::Other(OTHER_BUILD),
         ..Source::default()
     };
 
@@ -378,5 +420,23 @@ fn an_owned_collector_built_from_other_code_is_stopped() {
 
     assert_eq!(action, Action::Terminate);
     assert_eq!(policy.state, State::Stopping);
-    assert_eq!(policy.failure, Some(other_build_failure(7)));
+    assert_eq!(policy.failure, Some(owned_build_failure(OTHER_BUILD)));
+}
+
+#[test]
+fn an_owned_collector_announcing_another_format_is_stopped() {
+    // Goal: a collector executable of another version beside this app fails at once.
+    // Method: report a holder announcing another format on the child's first startup step.
+    let mut policy = Policy::new(Mode::Explicit);
+    policy.launched(42, Duration::ZERO);
+    let source = Source {
+        build: Build::Unrecognized,
+        ..Source::default()
+    };
+
+    let action = policy.step(Duration::from_secs(1), &source);
+
+    assert_eq!(action, Action::Terminate);
+    assert_eq!(policy.state, State::Stopping);
+    assert_eq!(policy.failure.as_deref(), Some(UNRECOGNIZED_FAILURE));
 }
