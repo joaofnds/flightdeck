@@ -1,8 +1,9 @@
 use polars::prelude::Column;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use super::super::sealed::fixture::{range, rewrite};
 use super::*;
+use crate::live::app_process_groups_history_tests::{named, usage};
 use crate::live::identity_fixture::Fixture;
 use crate::live_app_response::{PAGE_ROWS_MAX, Page};
 
@@ -29,6 +30,33 @@ fn a_window_keeps_the_parts_the_replay_of_its_minute_gives_every_app() {
     assert_eq!(replayed.len(), 3);
     assert!(keys.len() > 1);
     assert_eq!(kept, replayed_parts(&replayed, &keys));
+}
+
+#[test]
+fn a_window_keeps_the_state_and_reasons_of_each_process_the_replay_gives() {
+    // Goal: a window keeps a process that exited, one that replaced its program and one whose
+    // usage macOS refused, as the replay of its minute shows them.
+    // Method: seal three observations of an App whose processes exit, replace their program and
+    // are refused, and compare the parts the window keeps of each App with those a replay
+    // gives.
+    let mut fixture = Fixture::new();
+    publish_changing_processes(&mut fixture);
+    fixture.seal_derived(&[], &crate::SealedApps);
+    let session = Session::open(&fixture.root).unwrap();
+    let replayed = replayed_samples(&session, 1003);
+    let keys = app_keys(&replayed[2]);
+    let expected = replayed_parts(&replayed, &keys);
+
+    let kept: Vec<Vec<Shown>> = keys
+        .iter()
+        .map(|key| kept_parts(&session, 1003, key))
+        .collect();
+
+    assert!(shown(&expected, "state").contains(&json!("exited_verified")));
+    assert!(shown(&expected, "app_attribution").contains(&json!("exec")));
+    let refused = json!({ "known": null, "unavailable": "refused" });
+    assert!(shown(&expected, "cpu_ns").contains(&refused));
+    assert_eq!(kept, expected);
 }
 
 #[test]
@@ -323,6 +351,37 @@ fn kept_order(session: &Session) -> Vec<RowOrder> {
                 row.get(const { fixed("publication") }).unwrap(),
             )
         })
+        .collect()
+}
+
+/// Publishes run ticks 1 to 3 of an App whose "worker" replaces its program at tick 2 and has
+/// its usage refused at tick 3, and whose "helper" exits at tick 2.
+fn publish_changing_processes(fixture: &mut Fixture) {
+    let usage = usage();
+    let process = |pid, name: &'static [u8]| named::member(pid, name, b"/A.app", usage);
+    let replaced = || {
+        let mut worker = process(7, b"worker");
+        worker.version = 2;
+        worker
+    };
+    let mut exited = process(8, b"helper");
+    exited.exited = true;
+    let mut refused = replaced();
+    refused.usage = None;
+
+    named::publish(fixture, 1, &[process(7, b"worker"), process(8, b"helper")]);
+    named::publish(fixture, 2, &[replaced(), exited]);
+    named::publish(fixture, 3, &[refused]);
+}
+
+/// The value of `field` of each process that `parts` show.
+fn shown(parts: &[Vec<Shown>], field: &str) -> Vec<Value> {
+    parts
+        .iter()
+        .flatten()
+        .filter_map(|part| part.detail["processes"].as_array())
+        .flatten()
+        .map(|process| process[field].clone())
         .collect()
 }
 

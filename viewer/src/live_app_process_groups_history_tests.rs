@@ -357,7 +357,7 @@ fn retire(fixture: &Fixture) {
     .unwrap();
 }
 
-fn usage() -> Usage {
+pub(crate) fn usage() -> Usage {
     Usage {
         awake_ns_at_start: 0,
         user_ns: 100,
