@@ -527,25 +527,40 @@ impl LiveDashboard {
     }
 
     /// Shows the second `delta` seconds from the one shown, from the readings the page holds,
-    /// as a hover does, so a step reads nothing from the recording until Enter selects it.
+    /// as a hover does, so a step to a held second reads nothing until Enter selects it. A step
+    /// to a second the page does not show selects that second, which reads it.
     pub(crate) fn chart_step(&mut self, delta: i64, cx: &mut Context<Self>) {
-        let Some(snapshot) = self.snapshot.as_deref() else {
+        let Some(context) = self.context_snapshot() else {
             return;
         };
 
         let selection = KeyboardSelection {
             stepped: self.chart_stepped_second(),
-            accepted: snapshot.selection["second"].as_u64(),
+            accepted: self.request.second.or(context.selection["second"].as_u64()),
         };
-        let Some(next) = keyboard_second(&selection, delta, &snapshot.catalog) else {
+        let Some(next) = keyboard_second(&selection, delta, &context.catalog) else {
             return;
         };
         if Some(next) == selection.stepped.or(selection.accepted) {
             return;
         }
 
-        let target = crate::live_hover::Target::regular(snapshot, next);
-        self.set_reading_target(CHART_STEP_SOURCE.into(), target, Origin::Keyboard, cx);
+        match self.chart_step_target(next) {
+            Some(target) => {
+                self.set_reading_target(CHART_STEP_SOURCE.into(), target, Origin::Keyboard, cx);
+            }
+            None => self.inspect(next, cx),
+        }
+    }
+
+    /// The target of a step to `second` when the page shows readings that hold it.
+    fn chart_step_target(&self, second: u64) -> Option<crate::live_hover::Target> {
+        let snapshot = self.snapshot.as_deref()?;
+        if !crate::live_projection::holds_second(&snapshot.selection, second) {
+            return None;
+        }
+
+        Some(crate::live_hover::Target::regular(snapshot, second))
     }
 
     /// Selects the second an arrow step shows, which then reads it with its context.

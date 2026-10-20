@@ -1103,3 +1103,20 @@ fn an_older_second_is_inspected_as_the_second_of_its_reading() {
     assert_eq!(inspection_second(&selection, 4101), 4101);
     assert_eq!(inspection_second(&selection, 3000), 3000);
 }
+
+#[test]
+fn a_selection_holds_the_seconds_its_charts_hold() {
+    // Goal: a step reads a second only when the page's charts do not hold it.
+    // Method: ask for the seconds at both edges of a full-detail context and of one that
+    // carries an older tail.
+    let recent = json!({"second": 5000, "trends": []});
+    let longer = long_selection();
+
+    assert!(!holds_second(&recent, 4100));
+    assert!(holds_second(&recent, 4101));
+    assert!(holds_second(&recent, 5000));
+    assert!(!holds_second(&recent, 5001));
+    assert!(!holds_second(&longer, 1400));
+    assert!(holds_second(&longer, 1401));
+    assert!(!holds_second(&longer, 5001));
+}

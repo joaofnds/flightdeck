@@ -551,6 +551,56 @@ fn an_arrow_step_shows_the_adjacent_second_the_page_holds(cx: &mut TestAppContex
 }
 
 #[gpui::test]
+fn a_step_past_the_selected_second_asks_the_reader_for_it(cx: &mut TestAppContext) {
+    // Goal: a step to a second the page's context does not hold reads that second, since the
+    // page holds no readings of it to show.
+    // Method: step right from the accepted second 1000, the last second its context holds, in
+    // a recording that runs to 1100, then read the page's request.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.focus_chart();
+
+    harness.driver.press("right");
+
+    assert_eq!(harness.driver.requested_second(), Some(1001));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_step_while_a_selection_is_read_moves_from_the_second_it_asks_for(cx: &mut TestAppContext) {
+    // Goal: steps past the context keep moving while the page waits on the read the last one
+    // sent, as they did before a step showed held readings.
+    // Method: step right twice from 1000 with no reply between the steps, then read the
+    // page's request and the charts' focus.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.focus_chart();
+    harness.driver.press("right");
+
+    harness.driver.press("right");
+
+    assert_eq!(harness.driver.requested_second(), Some(1002));
+    assert!(harness.driver.inspection_has_focus());
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_step_on_a_page_that_follows_the_recording_moves_from_the_newest_second(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a page that follows the newest second, which selects no second of its own, steps
+    // from the second it shows.
+    // Method: show 1000 as the newest second, step left, then read the chart and the request.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.seed_followed_selection();
+    harness.driver.focus_chart();
+
+    harness.driver.press("left");
+
+    assert_eq!(harness.driver.shown_second(), Some(999));
+    assert_eq!(harness.driver.requested_second(), None);
+    harness.teardown();
+}
+
+#[gpui::test]
 fn a_second_arrow_step_moves_from_the_second_the_first_showed(cx: &mut TestAppContext) {
     // Goal: arrow steps walk from the second shown, not from the accepted selection.
     // Method: step left to 999 and back right, which reaches 1000 from the shown second and
@@ -863,6 +913,19 @@ impl InputDriver {
             let snapshot = accepted_snapshot(dashboard.generation);
             dashboard.request.second = Some(1000);
             dashboard.request.identity = Some(snapshot.selection["selected"].clone());
+            dashboard.accept(snapshot);
+            assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
+            cx.notify();
+        });
+        self.context.run_until_parked();
+    }
+
+    /// Shows the accepted snapshot as the newest second of a page that follows the recording.
+    fn seed_followed_selection(&mut self) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            let snapshot = accepted_snapshot(dashboard.generation);
+            dashboard.request.second = None;
+            dashboard.request.identity = None;
             dashboard.accept(snapshot);
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();

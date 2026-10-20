@@ -13,6 +13,9 @@ mod resource_projection;
 
 pub const OBSERVATIONS_MAX: usize = 4096;
 const LOADED_SECONDS: u64 = viewer::LOADED_SECONDS;
+/// The seconds of full-detail readings a selection holds, which end at the selected second.
+const DETAIL_SECONDS: u64 = 900;
+const _: () = assert!(DETAIL_SECONDS < LOADED_SECONDS);
 pub const OVERVIEW_PRIMARY_PANELS: usize = 6;
 /// The Overview chart that sets load, power and heat side by side.
 pub const CORRELATION_ID: &str = "live-correlation";
@@ -78,6 +81,28 @@ pub fn inspection_second(selection: &Value, second: u64) -> u64 {
     inspection_identity(selection, second)
         .and_then(|identity| wall_second_of(&identity))
         .unwrap_or(second)
+}
+
+/// Whether the selection holds `second`, as a reading or a gap, so the page shows that second
+/// without a read: the seconds its charts hold, which end at the selected second.
+#[must_use]
+pub fn holds_second(selection: &Value, second: u64) -> bool {
+    let Some(selected) = selection["second"].as_u64() else {
+        return false;
+    };
+
+    let first = first_held_second(selected, selection["earlier_trends"].is_array());
+    (first..=selected).contains(&second)
+}
+
+/// The first second the charts hold for a selection of `second`: the first of its full-detail
+/// 900, or of the whole loaded hour when the selection carries an older tail.
+fn first_held_second(second: u64, longer: bool) -> u64 {
+    if longer {
+        return second.saturating_sub(LOADED_SECONDS - 1);
+    }
+
+    second.saturating_sub(DETAIL_SECONDS - 1)
 }
 
 fn wall_second_of(point: &Value) -> Option<u64> {
@@ -288,12 +313,8 @@ impl Domain {
     /// selection carries an older tail.
     fn read(selection: &Value, longer: bool) -> Result<Self, String> {
         let second = integer(&selection["second"])?;
-        let recent_first = second.saturating_sub(899);
-        let first = if longer {
-            second.saturating_sub(LOADED_SECONDS - 1)
-        } else {
-            recent_first
-        };
+        let recent_first = first_held_second(second, false);
+        let first = first_held_second(second, longer);
         let end = second.checked_add(1).ok_or("Live chart time overflow")?;
         let span = u16::try_from(end - first).map_err(|error| error.to_string())?;
         assert!(span > 0);
