@@ -15,7 +15,7 @@ use polars_parquet_format::{
 };
 
 use super::protocol::BoundedProtocol;
-use super::{FOOTER_BYTES_MAX, PAGE_BYTES_MAX, ROWS_MAX, validate};
+use super::{COLUMNS_MAX, FOOTER_BYTES_MAX, PAGE_BYTES_MAX, ROWS_MAX, validate};
 use crate::Error;
 
 struct Directory(PathBuf);
@@ -74,6 +74,35 @@ fn admits_current_native_parquet_without_decoding_values() {
     let result = validate(&path);
 
     result.unwrap();
+}
+
+#[test]
+fn admits_a_file_as_wide_as_the_widest_table() {
+    // Goal: a table with as many columns as admission allows stays readable.
+    // Method: write a real Polars file of that many columns and admit it.
+    let directory = Directory::new();
+    let path = directory.file();
+    write_columns(&path, COLUMNS_MAX);
+
+    let result = validate(&path);
+
+    result.unwrap();
+}
+
+#[test]
+fn refuses_a_file_wider_than_the_widest_table() {
+    // Goal: a file of more columns than any table has is refused before its schema is walked.
+    // Method: write a real Polars file of one column more than admission allows and admit it.
+    let directory = Directory::new();
+    let path = directory.file();
+    write_columns(&path, COLUMNS_MAX + 1);
+
+    let result = validate(&path);
+
+    assert!(matches!(
+        result,
+        Err(Error::Bound("parquet schema columns"))
+    ));
 }
 
 #[test]
@@ -243,6 +272,17 @@ pub(super) fn page_header(values: i32) -> PageHeader {
         None,
         None,
     )
+}
+
+/// Writes a file of one row and `count` columns.
+fn write_columns(path: &Path, count: usize) {
+    let columns = (0..count)
+        .map(|index| Column::new(format!("column_{index}").into(), [0u64]))
+        .collect();
+    let mut frame = DataFrame::new(1, columns).unwrap();
+    ParquetWriter::new(std::fs::File::create(path).unwrap())
+        .finish(&mut frame)
+        .unwrap();
 }
 
 fn write_declared_file(path: &Path, header: &PageHeader, declared: &DeclaredFile) {
