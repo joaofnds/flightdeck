@@ -124,3 +124,19 @@ fn nonexecutable_collector_cannot_be_packaged() {
     assert!(result.is_err());
     assert!(!fixture.inputs.output.exists());
 }
+
+#[test]
+fn bundle_launch_starts_with_every_thread_default() {
+    // Goal: a launch from Finder or the Dock needs no startup re-exec, which would leave
+    // macOS attributing the menu bar item to the replaced program and never showing it.
+    // Method: read the packaged environment and look up each default persistence fills in.
+    let plist = std::str::from_utf8(super::RESOURCES[0].1).unwrap();
+    let start = plist.find("<key>LSEnvironment</key><dict>").unwrap();
+    let length = plist[start..].find("</dict>").unwrap();
+    let environment = &plist[start..start + length];
+
+    for (option, default) in persistence::engine::THREAD_DEFAULTS {
+        let entry = format!("<key>{option}</key><string>{default}</string>");
+        assert!(environment.contains(&entry), "{entry} is missing");
+    }
+}

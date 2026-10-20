@@ -8,4 +8,8 @@
     <key>CFBundleShortVersionString</key><string>0.1.0</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
+    <key>LSEnvironment</key><dict>
+        <key>POLARS_MAX_THREADS</key><string>1</string>
+        <key>POLARS_ASYNC_THREAD_COUNT</key><string>1</string>
+    </dict>
 </dict></plist>

@@ -3,7 +3,11 @@ use std::process::Command;
 
 use crate::{Error, Result};
 
-const THREAD_OPTIONS: [&str; 2] = ["POLARS_MAX_THREADS", "POLARS_ASYNC_THREAD_COUNT"];
+/// Each Polars thread setting and the value it starts with when the environment lacks it.
+pub const THREAD_DEFAULTS: [(&str, &str); 2] = [
+    ("POLARS_MAX_THREADS", "1"),
+    ("POLARS_ASYNC_THREAD_COUNT", "1"),
+];
 const THREADS_MAX: u32 = 64;
 
 /// Establishes the application thread defaults before any engine or UI initialization.
@@ -11,7 +15,7 @@ const THREADS_MAX: u32 = 64;
 /// Explicit settings from 1 through 64 are preserved; other values return an error.
 /// Library callers choose their own startup policy.
 pub fn initialize_process() -> Result<()> {
-    let settings = THREAD_OPTIONS.map(std::env::var_os);
+    let settings = THREAD_DEFAULTS.map(|(option, _)| std::env::var_os(option));
     for value in settings.iter().flatten() {
         initialize_process_validate(value)?;
     }
@@ -21,10 +25,10 @@ pub fn initialize_process() -> Result<()> {
 
     let mut command = Command::new(std::env::current_exe()?);
     command.args(std::env::args_os().skip(1));
-    for (option, value) in THREAD_OPTIONS.into_iter().zip(settings) {
+    for ((option, default), value) in THREAD_DEFAULTS.into_iter().zip(settings) {
         match value {
             Some(value) => command.env(option, value),
-            None => command.env(option, "1"),
+            None => command.env(option, default),
         };
     }
 
