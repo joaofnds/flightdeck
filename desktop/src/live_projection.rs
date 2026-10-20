@@ -1055,16 +1055,16 @@ fn power_breakdown() -> Specification {
 
 fn fan_specification(points: &[Value]) -> Result<Specification, String> {
     const CHANNELS: [(&str, &str); 10] = [
-        ("Fan 0", "#5794f2"),
-        ("Fan 1", "#ff9830"),
-        ("Fan 2", "#b877d9"),
-        ("Fan 3", "#73bf69"),
+        ("Fan 0", "#73bf69"),
+        ("Fan 1", "#f2cc0c"),
+        ("Fan 2", "#5794f2"),
+        ("Fan 3", "#ff9830"),
         ("Fan 4", "#f2495c"),
-        ("Fan 5", "#f2cc0c"),
-        ("Fan 6", "#56b9c3"),
-        ("Fan 7", "#f28eb9"),
-        ("Fan 8", "#d1d1de"),
-        ("Fan 9", "#9d8bd2"),
+        ("Fan 5", "#b877d9"),
+        ("Fan 6", "#37872d"),
+        ("Fan 7", "#e0b400"),
+        ("Fan 8", "#1f60c4"),
+        ("Fan 9", "#c15c17"),
     ];
     let mut channels = 0;
 
@@ -1085,12 +1085,10 @@ fn fan_specification(points: &[Value]) -> Result<Specification, String> {
     for (channel, (name, color)) in CHANNELS.into_iter().take(channels).enumerate() {
         let mut line = reading("fan_rpm", name, color, 1.0);
         line.channel = Some(channel);
-        line.dashed = channel % 2 == 1;
         lines.push(line);
     }
 
     let mut specification = specification("live-fans", "Fan speed", "rpm", lines);
-    specification.fill = 0.0;
     specification.help = "SMC channels retain their numeric indices, without physical-side \
         attribution. Zero means measured stopped; unavailable channels remain gaps. \
         Channel count can change between observations.";

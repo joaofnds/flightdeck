@@ -611,6 +611,23 @@ fn energy_exposes_temperature_and_channel_indexed_fan_history() {
 }
 
 #[test]
+fn energy_draws_fan_channels_in_the_prototypes_classic_palette() {
+    // Goal: the Fan speed chart styles its channels as the prototype does: classic palette in
+    // channel order, solid lines and the prototype's default fill.
+    // Method: project three channels of fan readings and read the panel's styling back.
+    let mut selection = selection();
+    selection["trends"][0]["fan_rpm"] = json!([1000.0, 1100.0, 1200.0]);
+
+    let energy = panels("energy", &selection, None).unwrap();
+
+    let fans = energy.iter().find(|panel| panel.id == "live-fans").unwrap();
+    let colors: Vec<_> = fans.lines.iter().map(|line| line.color.as_str()).collect();
+    assert_eq!(colors, ["#73bf69", "#f2cc0c", "#5794f2"]);
+    assert!(fans.lines.iter().all(|line| line.dashed == Some(false)));
+    assert_eq!(fans.fill, Some(0.1));
+}
+
+#[test]
 fn energy_rejects_fan_arrays_beyond_the_recording_bound() {
     // Goal: an oversized channel array cannot create unbounded series or lose channels silently.
     // Method: supply eleven channels where the recording permits at most ten.
