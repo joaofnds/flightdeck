@@ -14,7 +14,7 @@ mod lifecycle;
 #[path = "collector_lifecycle_readiness.rs"]
 mod readiness;
 
-pub use collection::{collector_status, request_quit, retry_collector};
+pub use collection::{collector_status, poll_quickly, request_quit, retry_collector};
 
 pub fn probe(options: &Options) -> Result<(), Box<dyn std::error::Error>> {
     let root = recording(options)?;

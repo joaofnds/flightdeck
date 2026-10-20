@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use gpui::{App, Context, Entity, Global, WeakEntity};
 
 use super::lifecycle::CollectorSession;
@@ -8,9 +10,15 @@ use crate::live_timer::Timer;
 #[path = "collector_lifecycle_application_tests.rs"]
 mod tests;
 
+/// How often the app asks the worker for its answer while one is owed, so a page opens within a
+/// frame of the worker finishing its read.
+const QUICK_POLL_INTERVAL: Duration = Duration::from_millis(8);
+
 struct Collection {
     session: CollectorSession,
     timer: Option<Timer>,
+    /// Runs only while the worker owes an answer, and is suspended the rest of the time.
+    quick_timer: Option<Timer>,
     quitting: bool,
     quit_dispatched: bool,
 }
@@ -21,6 +29,7 @@ pub(super) fn install(session: CollectorSession, cx: &mut App) {
     cx.set_global(Collection {
         session,
         timer: None,
+        quick_timer: None,
         quitting: false,
         quit_dispatched: false,
     });
@@ -45,11 +54,42 @@ pub(super) fn install(session: CollectorSession, cx: &mut App) {
 pub(super) fn start_timer(entity: &Entity<LiveDashboard>, cx: &mut App) -> Result<(), String> {
     let entity = entity.downgrade();
     let application = cx.to_async();
+    let quick_entity = entity.clone();
+    let quick_application = application.clone();
     let timer = Timer::start(move || {
         application.update(|cx| tick(&entity, cx));
     })?;
-    cx.global_mut::<Collection>().timer = Some(timer);
+    let quick_timer = Timer::with_interval(QUICK_POLL_INTERVAL, move || {
+        quick_application.update(|cx| quick_tick(&quick_entity, cx));
+    })?;
+    quick_timer.set_running(false);
+    let collection = cx.global_mut::<Collection>();
+    collection.timer = Some(timer);
+    collection.quick_timer = Some(quick_timer);
     Ok(())
+}
+
+/// Starts polling the worker every few milliseconds, until it has answered the last request.
+pub fn poll_quickly(cx: &App) {
+    if let Some(collection) = cx.try_global::<Collection>() {
+        if let Some(timer) = &collection.quick_timer {
+            timer.set_running(true);
+        }
+    }
+}
+
+fn quick_tick(entity: &WeakEntity<LiveDashboard>, cx: &mut App) {
+    let settled = entity
+        .update(cx, |dashboard, cx| {
+            dashboard.tick(cx);
+            !dashboard.awaiting_reply()
+        })
+        .unwrap_or(true);
+    if settled {
+        if let Some(timer) = &cx.global::<Collection>().quick_timer {
+            timer.set_running(false);
+        }
+    }
 }
 
 fn tick(entity: &WeakEntity<LiveDashboard>, cx: &mut App) {

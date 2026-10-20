@@ -177,6 +177,7 @@ impl SnapshotReader {
                     request: None,
                     output: None,
                 }),
+                wake: Condvar::new(),
                 stopped: AtomicBool::new(false),
                 cancellation: Arc::new(Cancellation::default()),
             },
@@ -497,7 +498,7 @@ fn the_default_app_survives_a_new_first_row_and_an_empty_page() {
 }
 
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use super::{
@@ -642,6 +643,7 @@ fn refuses_superseded_results_after_accepting_a_new_request() {
                 request: None,
                 output: None,
             }),
+            wake: Condvar::new(),
             stopped: AtomicBool::new(false),
             cancellation: Arc::new(Cancellation::default()),
         }),
@@ -687,4 +689,36 @@ fn refuses_superseded_results_after_accepting_a_new_request() {
 
     assert!(superseded.is_none());
     assert!(matches!(accepted, Some(Update::Failed { generation, .. }) if generation == latest));
+}
+
+#[test]
+fn a_new_request_is_read_while_the_worker_waits_between_polls() {
+    // Goal: opening a page does not wait out the worker's poll interval, since every page of
+    // the app reads local files and should show at once. Method: let the worker read one page
+    // and settle into its pause, request another page, and time the reply.
+    let recording = SealedRecording::new();
+    let mut worker = Worker::start(recording.root.clone()).unwrap();
+    let first = worker.request(SealedRecording::request()).unwrap();
+    await_ready(&mut worker, first);
+    std::thread::sleep(Duration::from_millis(60));
+    let mut request = SealedRecording::request();
+    request.route = "cpu".into();
+
+    let started = std::time::Instant::now();
+    let second = worker.request(request).unwrap();
+    await_ready(&mut worker, second);
+
+    let waited = started.elapsed();
+    assert!(waited < Duration::from_millis(100), "{waited:?}");
+}
+
+fn await_ready(worker: &mut Worker, generation: u64) {
+    for _attempt in 0..5000 {
+        match worker.take().unwrap() {
+            Some(Update::Ready(snapshot)) if snapshot.generation == generation => return,
+            Some(Update::Failed { message, .. }) => panic!("{message}"),
+            _ => std::thread::sleep(Duration::from_millis(1)),
+        }
+    }
+    panic!("The fixture reader exceeded five seconds");
 }

@@ -53,8 +53,13 @@ pub struct LiveDashboard {
     pub request: Request,
     pub snapshot: Option<Box<Snapshot>>,
     pending_snapshot: Option<Box<Snapshot>>,
+    /// The last live reading of each page the reader has left, shown again at once when the
+    /// page is opened while the worker reads a fresh one. At most one for each route.
+    visited: std::collections::BTreeMap<String, Box<crate::live_acceptance::Presentation>>,
     pub panels: Vec<Rc<Panel>>,
     pub generation: u64,
+    /// The worker has not yet answered the last request, so the app polls it quickly.
+    reply_pending: bool,
     pub error: Option<String>,
     pub rows: Vec<Row>,
     pub expanded: Option<(String, usize)>,
@@ -192,8 +197,10 @@ impl LiveDashboard {
             },
             snapshot: None,
             pending_snapshot: None,
+            visited: std::collections::BTreeMap::new(),
             panels: Vec::with_capacity(8),
             generation: 0,
+            reply_pending: false,
             error: None,
             rows: Vec::with_capacity(4096),
             expanded: None,
@@ -261,6 +268,7 @@ impl LiveDashboard {
                     preview.complete = true;
                     self.hover_timed();
                 } else {
+                    self.reply_pending = false;
                     self.clear_presentation();
                     self.error = Some(error);
                 }
@@ -307,6 +315,7 @@ impl LiveDashboard {
                     return false;
                 }
 
+                self.reply_pending = false;
                 self.accept(snapshot);
             }
             Update::Failed {
@@ -317,6 +326,7 @@ impl LiveDashboard {
                     return false;
                 }
 
+                self.reply_pending = false;
                 self.clear_presentation();
                 self.error = Some(message);
             }
@@ -386,9 +396,27 @@ impl LiveDashboard {
         self.error = None;
         self.generation = 0;
         match self.worker.request(self.request.clone()) {
-            Ok(generation) => self.generation = generation,
+            Ok(generation) => {
+                self.generation = generation;
+                self.reply_pending = true;
+            }
             Err(error) => self.error = Some(error),
         }
+    }
+
+    /// Whether the page has no reading to show yet and the worker is still reading it, which
+    /// takes a few milliseconds and is not a failure.
+    pub(crate) fn is_opening(&self) -> bool {
+        let opening = self.reply_pending && self.error.is_none();
+
+        opening
+            && self.snapshot.is_none()
+            && !matches!(self.request.route.as_str(), "self" | "computer")
+    }
+
+    /// Whether the worker still owes an answer to the last request.
+    pub(crate) fn awaiting_reply(&self) -> bool {
+        self.reply_pending
     }
 
     pub(crate) fn context_snapshot(&self) -> Option<&Snapshot> {
@@ -417,9 +445,35 @@ impl LiveDashboard {
     }
 
     pub fn navigate(&mut self, route: &str, cx: &mut Context<Self>) {
+        self.switch_route(route);
+        crate::live_launch::poll_quickly(cx);
+        cx.notify();
+    }
+
+    /// Keeps the live reading of the page being left, so a page opened again shows it at once.
+    fn keep_page(&mut self) {
+        if self.request.second.is_some() || self.preview.is_some() {
+            return;
+        }
+        let Some(snapshot) = self.snapshot.take() else {
+            return;
+        };
+        let presentation = Box::new(crate::live_acceptance::Presentation {
+            request: self.request.clone(),
+            snapshot,
+            panels: std::mem::take(&mut self.panels),
+            executables: std::mem::take(&mut self.executables),
+        });
+        self.visited
+            .insert(self.request.route.clone(), presentation);
+        assert!(self.visited.len() <= ROUTES.len());
+    }
+
+    pub(crate) fn switch_route(&mut self, route: &str) {
         if self.request.route != route {
             self.sections.reset();
         }
+        self.keep_page();
         self.chart_hover = None;
         self.chart_inspector = None;
         self.preview = None;
@@ -438,7 +492,12 @@ impl LiveDashboard {
         }
         self.rebuild();
         self.submit();
-        cx.notify();
+        if self.request.second.is_none() {
+            if let Some(mut kept) = self.visited.remove(route) {
+                kept.request = self.request.clone();
+                self.accept_presentation(kept);
+            }
+        }
     }
 
     pub fn pause(&mut self, cx: &mut Context<Self>) {
@@ -709,6 +768,70 @@ mod selection_tests {
         dashboard.expanded = Some(("ticks".into(), 0));
         dashboard.rebuild();
         dashboard
+    }
+
+    #[test]
+    fn a_request_awaits_its_reply_until_the_worker_answers() {
+        // Goal: the app polls the worker quickly exactly while an answer is owed. Method:
+        // submit a request, then deliver the worker's answer to it.
+        let mut dashboard = dashboard();
+
+        dashboard.submit();
+        assert!(dashboard.awaiting_reply());
+        let answered = dashboard.generation;
+        dashboard.receive(Update::Failed {
+            generation: answered,
+            message: "Recording read failed".into(),
+        });
+
+        assert!(!dashboard.awaiting_reply());
+    }
+
+    #[test]
+    fn a_page_opened_for_the_first_time_draws_nothing_until_its_reading_arrives() {
+        // Goal: the first frame of a page the worker is still reading shows no "Unavailable",
+        // which would flash for the few milliseconds the read takes. Method: open a page with
+        // no kept reading, then fail its read.
+        let mut dashboard = dashboard();
+
+        dashboard.switch_route("cpu");
+        assert!(dashboard.reading_rows().is_empty());
+        let failed = dashboard.generation;
+        dashboard.receive(Update::Failed {
+            generation: failed,
+            message: "Recording read failed".into(),
+        });
+
+        assert!(!dashboard.reading_rows().is_empty());
+    }
+
+    #[test]
+    fn a_page_left_and_opened_again_shows_its_last_reading_at_once() {
+        // Goal: switching pages never blanks a page the reader has already seen, since every
+        // reading is local and the app must feel instant. Method: leave a page that has a
+        // reading for one that has none, then return, with no reply from the worker between.
+        let mut dashboard = dashboard();
+
+        dashboard.switch_route("cpu");
+        assert!(dashboard.snapshot.is_none());
+        dashboard.switch_route("overview");
+
+        let shown = dashboard.snapshot.as_ref().unwrap();
+        assert_eq!(shown.selection["second"], 1000);
+        assert_eq!(dashboard.request.route, "overview");
+    }
+
+    #[test]
+    fn a_page_opened_while_paused_does_not_show_a_reading_of_another_second() {
+        // Goal: a reading kept from the live view is never shown as the paused second's.
+        // Method: leave a live page, pause on another second, then return.
+        let mut dashboard = dashboard();
+        dashboard.switch_route("cpu");
+
+        dashboard.request.second = Some(1001);
+        dashboard.switch_route("overview");
+
+        assert!(dashboard.snapshot.is_none());
     }
 
     #[test]

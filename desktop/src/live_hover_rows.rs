@@ -28,6 +28,10 @@ impl LiveDashboard {
                 .collect();
         }
 
+        if self.is_opening() {
+            return Vec::new();
+        }
+
         self.reading_rows_page()
     }
 

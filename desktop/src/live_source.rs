@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -115,6 +115,8 @@ pub enum Update {
 
 struct Shared {
     mailbox: Mutex<Mailbox>,
+    /// Wakes the worker from its pause when a request or a stop arrives.
+    wake: Condvar,
     stopped: AtomicBool,
     cancellation: Arc<Cancellation>,
 }
@@ -176,6 +178,7 @@ impl Worker {
                 request: None,
                 output: None,
             }),
+            wake: Condvar::new(),
             stopped: AtomicBool::new(false),
             cancellation: Arc::new(Cancellation::default()),
         });
@@ -218,6 +221,7 @@ impl Worker {
             mode: self.mode,
             request,
         });
+        self.shared.wake.notify_one();
 
         Ok(generation)
     }
@@ -265,6 +269,7 @@ impl Worker {
         if let Err(error) = self.shared.cancellation.cancel() {
             eprintln!("flightdeck GPUI reader cancellation: {error}");
         }
+        self.shared.wake.notify_one();
     }
 }
 
@@ -312,7 +317,7 @@ fn worker_run(root: &std::path::Path, shared: &Shared) {
             }
             None => POLL_INTERVAL,
         };
-        thread::sleep(pause);
+        worker_pause_for(shared, pause);
     }
     if let Some(command) = command {
         worker_publish(
@@ -336,6 +341,26 @@ fn worker_pause(reader: &Reader, command: &Command) -> Duration {
         }
     }
     POLL_INTERVAL
+}
+
+/// Pauses the worker for `pause`, or until a request or a stop arrives, so a page the reader
+/// asks for is read at once.
+fn worker_pause_for(shared: &Shared, pause: Duration) {
+    match shared.mailbox.lock() {
+        Ok(mailbox) => {
+            if mailbox.request.is_some() || shared.stopped.load(Ordering::Acquire) {
+                return;
+            }
+            if let Err(error) = shared.wake.wait_timeout(mailbox, pause) {
+                eprintln!("flightdeck GPUI reader pause: {error}");
+                shared.stopped.store(true, Ordering::Release);
+            }
+        }
+        Err(error) => {
+            eprintln!("flightdeck GPUI reader mailbox: {error}");
+            shared.stopped.store(true, Ordering::Release);
+        }
+    }
 }
 
 /// Samples the readings the collector does not record, once in each wall-clock second.
