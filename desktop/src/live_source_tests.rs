@@ -8,7 +8,7 @@ mod hover;
 #[path = "live_process_history_source_tests.rs"]
 pub(crate) mod process_history;
 #[path = "live_rankings_source_tests.rs"]
-mod rankings;
+pub(crate) mod rankings;
 
 #[test]
 fn an_empty_recording_reports_absence_without_requiring_a_live_ring() {

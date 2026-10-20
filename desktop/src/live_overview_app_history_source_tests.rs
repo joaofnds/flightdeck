@@ -164,8 +164,10 @@ fn overview_exact_history_lookup_reports_its_frontend_cost() {
 
 #[test]
 fn real_overview_warm_reader_prepares_one_attribution_and_one_resident_context() {
-    // A real warm Reader must gather two saved contexts even though it installs four histories,
-    // once the window's App ranks are in place.
+    // Goal: a warm read of the Overview gathers two saved contexts though it installs four
+    // histories, once the window's App ranks are kept.
+    // Method: read the Overview twice through a real Reader to warm it, then count the saved
+    // contexts a third read prepares.
     let recording = SealedRecording::with_ranked_apps();
     let mut reader = super::super::SnapshotReader::new();
     reader.command.request = exact_ranked_request("overview");

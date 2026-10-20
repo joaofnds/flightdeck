@@ -14,7 +14,7 @@ use crate::live_rankings::{Rankings, TopApps};
 use crate::live_source::{Request, Snapshot};
 
 #[path = "live_app_parts_source_tests.rs"]
-mod app_parts;
+pub(crate) mod app_parts;
 #[path = "live_overview_app_history_source_tests.rs"]
 mod overview_history;
 
@@ -197,6 +197,31 @@ fn hover_preview_on_the_cpu_page_shows_a_ranked_sibling_with_its_cores() {
 }
 
 #[test]
+fn hover_preview_from_kept_ranks_bounds_its_allocations() {
+    // Goal: a hover takes its top Apps from the kept ranks in a bounded number of allocations,
+    // so a change that makes the frame of a pointer move allocate more fails here.
+    // Method: preview publication two over a committed Overview at publication three of 600
+    // saved Apps, and count the allocations of the preview alone.
+    let recording = SealedRecording::with_ranked_apps();
+    let request = ranked_request_at("overview", 3);
+    let committed = recording.read(request.clone()).unwrap();
+    let target = Target::exact(1001, &ranked_identity(2)).unwrap();
+    let started = std::time::Instant::now();
+
+    let (preview, counts) =
+        crate::allocation_tests::measure(|| Preview::resident(&committed, &request, target));
+
+    println!(
+        "{}",
+        json!({"case":"overview_kept_ranks_preview", "allocation_calls":counts.calls,
+        "requested_bytes":counts.bytes, "elapsed_ns":started.elapsed().as_nanos()})
+    );
+    assert!(preview.complete);
+    // About a quarter above the 420 calls measured when this test was written.
+    assert!(counts.calls <= 525, "{counts:?}");
+}
+
+#[test]
 fn hover_preview_on_the_cpu_page_reads_cores_the_window_lacks() {
     // Goal: the CPU page never shows a hovered observation's top Apps without its cores.
     // Method: drop the CPU history from a committed CPU page and preview a ranked sibling.
@@ -215,17 +240,21 @@ fn hover_preview_on_the_cpu_page_reads_cores_the_window_lacks() {
 #[test]
 fn hover_reads_leave_the_window_unranked() {
     // Goal: a read for a hovered observation never waits on ranking its whole window.
-    // Method: read a saved observation the way a hover does, without its histories.
+    // Method: read a saved observation through the worker the way a hover does, without its
+    // histories, and ask the session it read through for a sibling's ranks.
     let recording = SealedRecording::with_ranked_apps();
-    let mut request = exact_ranked_request("overview");
-    request.load_resident_history = false;
-    request.load_app_attribution_history = false;
-    request.load_process_history = false;
+    let mut reader = super::SnapshotReader::new();
+    reader.command.request = exact_ranked_request("overview");
+    reader.command.request.load_resident_history = false;
+    reader.command.request.load_app_attribution_history = false;
+    reader.command.request.load_process_history = false;
 
-    let snapshot = recording.read(request).unwrap();
+    let snapshot = reader.read_complete(&recording);
 
     assert!(snapshot.rankings.is_some());
-    assert!(snapshot.app_ranks.is_none());
+    let sibling = crate::live_rankings::observation_key(&ranked_identity(3)).unwrap();
+    let session = reader.reader.session.as_ref().unwrap();
+    assert!(session.app_ranks().get(&sibling).is_none());
 }
 
 #[test]
@@ -266,6 +295,16 @@ fn a_newly_opened_cpu_page_brings_the_cores_of_its_window() {
 
     assert!(opened.histories_pending);
     assert!(Preview::resident(&opened, &reader.command.request, target).complete);
+}
+
+/// The ranks a page keeps of the window of a sealed recording whose observations share the run
+/// and boot of the input tests' snapshots.
+pub(crate) fn kept_window_ranks() -> std::sync::Arc<viewer::WindowRanks> {
+    let recording = SealedRecording::with_ranked_apps();
+
+    let snapshot = recording.read(ranked_request_at("overview", 3)).unwrap();
+
+    snapshot.app_ranks.unwrap()
 }
 
 fn exact_ranked_request(route: &str) -> Request {

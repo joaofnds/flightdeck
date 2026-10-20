@@ -5,6 +5,7 @@ use gpui::{Modifiers, MouseButton, TestAppContext, px};
 use serde_json::json;
 
 use super::{InputDriver, InputHarness, PlotExit, accepted_snapshot};
+use crate::live_source::tests::rankings::kept_window_ranks;
 use crate::live_source::{Snapshot, Update};
 
 #[path = "live_overview_app_history_input_tests.rs"]
@@ -475,6 +476,50 @@ fn historical_hover_hides_current_ranks_until_its_exact_payload_arrives(cx: &mut
 }
 
 #[gpui::test]
+fn historical_hover_shows_the_kept_ranks_of_its_second_in_the_frame_of_the_move(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a hover on a second whose ranks the page keeps shows them as the pointer moves, with
+    // no loading notice.
+    // Method: keep a sealed recording's window ranks beside a committed Overview, and hover the
+    // earlier second, publication one of the same run and boot, whose largest App, App00600,
+    // held 600 KiB of resident memory.
+    let mut harness = InputHarness::setup_route(cx, "overview");
+    harness.driver.seed_ranked_overview();
+    harness.driver.keep_window_ranks(kept_window_ranks());
+
+    harness.driver.hover_previous_second_on("live-cpu-plot");
+
+    assert!(
+        !harness
+            .driver
+            .reading_is_visible("Loading exact App totals")
+    );
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("ranking:Resident memory:App00600:0.59 MiB")
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn historical_hover_on_a_second_whose_ranks_are_kept_reads_nothing(cx: &mut TestAppContext) {
+    // Goal: a hover the kept ranks complete leaves the worker to the page's own reads.
+    // Method: keep a sealed recording's window ranks beside a committed Overview, hover the
+    // earlier second, publication one of the same run and boot, and tick the hover.
+    let mut harness = InputHarness::setup_route(cx, "overview");
+    harness.driver.seed_ranked_overview();
+    harness.driver.keep_window_ranks(kept_window_ranks());
+
+    harness.driver.hover_previous_second_on("live-cpu-plot");
+    harness.driver.tick_hover();
+
+    assert_eq!(harness.driver.hover_reads(), 0);
+    harness.teardown();
+}
+
+#[gpui::test]
 fn failed_historical_rankings_cannot_restore_current_app_links(cx: &mut TestAppContext) {
     // Deliver a worker error for the exact hover generation and inspect the composed failure.
     let mut harness = InputHarness::setup_route(cx, "overview");
@@ -617,6 +662,14 @@ impl InputDriver {
         });
         self.context
             .simulate_resize(gpui::size(px(1320.0), px(3500.0)));
+        self.context.run_until_parked();
+    }
+
+    fn keep_window_ranks(&mut self, ranks: Arc<viewer::WindowRanks>) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            dashboard.snapshot.as_mut().unwrap().app_ranks = Some(ranks);
+            cx.notify();
+        });
         self.context.run_until_parked();
     }
 

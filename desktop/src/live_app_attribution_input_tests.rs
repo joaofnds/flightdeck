@@ -264,27 +264,41 @@ fn the_pages_app_histories_arriving_during_a_hover_show_at_the_hovered_second(
 }
 
 #[gpui::test]
-fn a_hover_that_outlives_the_pages_app_history_read_holds_its_place_and_ends_on_leaving(
-    cx: &mut TestAppContext,
-) {
-    // Goal: the App histories arriving during a hover neither move the hovered plot nor keep
-    // the hover once the pointer leaves it.
+fn app_histories_arriving_during_a_hover_leave_the_hovered_plot_in_place(cx: &mut TestAppContext) {
+    // Goal: the App histories arriving during a hover do not move the hovered plot.
     // Method: hover the CPU temperature plot, below the App history card, while the App
-    // histories are pending, deliver them, then move the pointer to the sidebar.
+    // histories are pending, then deliver them.
     let mut harness = InputHarness::setup_route(cx, "cpu");
     harness.driver.seed_pending_histories();
     harness
         .driver
         .hover_previous_second_on("live-cpu-temperature-plot");
     let hovered = harness.driver.chart_bounds("live-cpu-temperature-plot");
+
     harness.driver.finish_pending_histories(Metric::Cpu);
 
     let held = harness.driver.chart_bounds("live-cpu-temperature-plot");
+    assert_eq!(held, hovered);
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_hover_that_outlives_the_pages_app_history_read_ends_on_leaving(cx: &mut TestAppContext) {
+    // Goal: the App histories arriving during a hover do not keep the hover once the pointer
+    // leaves the plot.
+    // Method: hover the CPU temperature plot while the App histories are pending, deliver
+    // them, then move the pointer to the sidebar.
+    let mut harness = InputHarness::setup_route(cx, "cpu");
+    harness.driver.seed_pending_histories();
+    harness
+        .driver
+        .hover_previous_second_on("live-cpu-temperature-plot");
+    harness.driver.finish_pending_histories(Metric::Cpu);
+
     harness
         .driver
         .leave_plot("live-cpu-temperature-plot", PlotExit::Sidebar);
 
-    assert_eq!(held, hovered);
     assert!(harness.driver.reading_is_visible("87%"));
     assert!(!harness.driver.reading_is_visible("13%"));
     harness.teardown();
@@ -300,8 +314,9 @@ fn another_requests_reading_during_a_hover_on_a_loading_page_is_dropped(cx: &mut
     harness.driver.seed_pending_histories();
     harness.driver.hover_previous_second_on("live-cpu-plot");
 
-    harness.driver.deliver_later_requests_histories(Metric::Cpu);
+    let received = harness.driver.deliver_later_requests_histories(Metric::Cpu);
 
+    assert!(!received);
     assert!(harness.driver.reading_is_visible("Reading App history"));
     harness.teardown();
 }
@@ -359,8 +374,9 @@ fn a_live_reading_arriving_during_a_hover_leaves_the_hovered_second_shown(cx: &m
     harness.driver.seed_attribution(Metric::Cpu);
     harness.driver.hover_previous_second_on("live-cpu-plot");
 
-    harness.driver.deliver_live_reading(Metric::Cpu);
+    let received = harness.driver.deliver_live_reading(Metric::Cpu);
 
+    assert!(!received);
     assert!(harness.driver.reading_is_visible("13%"));
     assert!(!harness.driver.reading_is_visible("21%"));
     harness.teardown();
@@ -460,14 +476,14 @@ fn attribution_arrow_inspection_and_app_navigation_keep_the_exact_target(cx: &mu
 }
 
 impl InputDriver {
-    fn tick_hover(&mut self) {
+    pub(super) fn tick_hover(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
             dashboard.preview_tick_at(Instant::now(), cx);
         });
         self.context.run_until_parked();
     }
 
-    fn hover_reads(&self) -> u64 {
+    pub(super) fn hover_reads(&self) -> u64 {
         self.view
             .read_with(&self.context, |dashboard, _| dashboard.preview_submissions)
     }
@@ -505,13 +521,18 @@ impl InputDriver {
         self.context.run_until_parked();
     }
 
-    fn deliver_later_requests_histories(&mut self, metric: Metric) {
-        self.view.update(&mut self.context, |dashboard, cx| {
+    /// Delivers a later request's snapshot with its App histories, and returns whether the
+    /// hover took it.
+    fn deliver_later_requests_histories(&mut self, metric: Metric) -> bool {
+        let received = self.view.update(&mut self.context, |dashboard, cx| {
             let snapshot = attributed_snapshot(dashboard.generation + 1, metric);
-            assert!(!dashboard.preview_receive(Update::Ready(snapshot)));
+            let received = dashboard.preview_receive(Update::Ready(snapshot));
             cx.notify();
+            received
         });
         self.context.run_until_parked();
+
+        received
     }
 
     fn fail_pending_histories(&mut self) {
@@ -530,14 +551,18 @@ impl InputDriver {
             .read_with(&self.context, |dashboard, _| dashboard.error.clone())
     }
 
-    fn deliver_live_reading(&mut self, metric: Metric) {
-        self.view.update(&mut self.context, |dashboard, cx| {
+    /// Delivers the page's next live snapshot, and returns whether the hover took it.
+    fn deliver_live_reading(&mut self, metric: Metric) -> bool {
+        let received = self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = attributed_snapshot(dashboard.generation, metric);
             snapshot.selection["trends"][0]["cpu_percent"] = json!(21);
-            assert!(!dashboard.preview_receive(Update::Ready(snapshot)));
+            let received = dashboard.preview_receive(Update::Ready(snapshot));
             cx.notify();
+            received
         });
         self.context.run_until_parked();
+
+        received
     }
 
     fn complete_attribution_preview(&mut self) {

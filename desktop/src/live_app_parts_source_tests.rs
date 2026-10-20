@@ -29,6 +29,32 @@ fn hover_preview_on_the_apps_page_shows_a_saved_sibling_as_the_worker_reads_it()
 }
 
 #[test]
+fn hover_preview_from_a_kept_app_part_bounds_its_allocations() {
+    // Goal: a hover on the Apps page shows the selected App from its kept part in a bounded
+    // number of allocations, so a change that makes the frame of a pointer move allocate more
+    // fails here.
+    // Method: select App00600 on a committed Apps page at publication three of 600 saved Apps,
+    // preview publication two, and count the allocations of the preview alone.
+    let recording = SealedRecording::with_ranked_apps();
+    let request = apps_request_at(3, "App00600", 512);
+    let committed = recording.read(request.clone()).unwrap();
+    let target = Target::exact(1001, &ranked_identity(2)).unwrap();
+    let started = std::time::Instant::now();
+
+    let (preview, counts) =
+        crate::allocation_tests::measure(|| Preview::resident(&committed, &request, target));
+
+    println!(
+        "{}",
+        serde_json::json!({"case":"apps_kept_part_preview", "allocation_calls":counts.calls,
+        "requested_bytes":counts.bytes, "elapsed_ns":started.elapsed().as_nanos()})
+    );
+    assert!(preview.complete);
+    // About a quarter above the 1037 calls measured when this test was written.
+    assert!(counts.calls <= 1_300, "{counts:?}");
+}
+
+#[test]
 fn hover_preview_on_the_apps_page_moves_past_the_end_pages_to_the_first_as_the_worker_does() {
     // Goal: a hover pages a second with fewer Apps or processes as a read of it does.
     // Method: preview a saved sibling with offsets past the end of its Apps and its App's
@@ -48,6 +74,28 @@ fn hover_preview_on_the_apps_page_moves_past_the_end_pages_to_the_first_as_the_w
     assert_eq!(preview.reading.apps, Some(apps_paging(&worker)));
     assert_eq!(preview.request.apps_offset, 0);
     assert_eq!(preview.request.members_offset, 0);
+}
+
+#[test]
+fn hover_preview_on_the_apps_page_shows_an_app_absent_from_its_second_as_the_worker_does() {
+    // Goal: a hover on a second the selected App did not run in shows it absent at once, as a
+    // read of that second does.
+    // Method: keep the parts of an App no saved second holds, past the end of its processes,
+    // then preview a sibling and read it through the worker.
+    let recording = SealedRecording::with_ranked_apps();
+    let mut request = apps_request_at(3, "Absent", 0);
+    request.members_offset = 512;
+    let committed = recording.read(request.clone()).unwrap();
+    let mut exact = apps_request_at(2, "Absent", 0);
+    exact.members_offset = 512;
+    let worker = recording.read(exact).unwrap();
+    let target = Target::exact(1001, &ranked_identity(2)).unwrap();
+
+    let preview = Preview::resident(&committed, &request, target);
+
+    assert_eq!(worker.detail, Some(Value::Null));
+    assert!(preview.complete);
+    assert_eq!(preview.reading.detail, worker.detail);
 }
 
 #[test]
@@ -95,6 +143,16 @@ fn hover_reads_on_the_apps_page_keep_no_app_parts() {
 
     assert!(snapshot.detail.is_some());
     assert!(snapshot.app_parts.is_none());
+}
+
+/// The parts a page keeps of the App `app` names in the window of a sealed recording whose
+/// observations share the run and boot of the input tests' snapshots.
+pub(crate) fn kept_window_parts(app: &str) -> std::sync::Arc<viewer::WindowParts> {
+    let recording = SealedRecording::with_ranked_apps();
+
+    let snapshot = recording.read(apps_request_at(3, app, 0)).unwrap();
+
+    snapshot.app_parts.unwrap()
 }
 
 fn apps_request_at(publication: u64, app: &str, apps_offset: u32) -> Request {

@@ -1,9 +1,11 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, WindowOptions};
 use serde_json::{Value, json};
 
 use crate::live_dashboard::LiveDashboard;
+use crate::live_source::tests::rankings::app_parts::kept_window_parts;
 use crate::live_source::{AppKey, Snapshot, Update, Worker};
 
 #[path = "live_app_disk_input_tests.rs"]
@@ -47,6 +49,26 @@ fn hovering_an_app_replaces_current_details_with_the_exact_historical_page(
     );
     assert!(!harness.driver.text_is_visible("Accepted worker"));
     assert!(!harness.driver.text_is_visible("Accepted helper"));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn hovering_with_the_app_picker_open_reads_a_second_whose_app_part_is_kept(
+    cx: &mut TestAppContext,
+) {
+    // Goal: the open App picker lists the hovered second's Apps, which only a read gives, even
+    // where the page keeps the selected App's part of that second.
+    // Method: with the picker open, select a sealed recording's App whose window parts the page
+    // keeps, then hover the earlier second and tick the hover.
+    let mut harness = AppHoverHarness::setup(cx);
+    harness
+        .driver
+        .keep_app_parts("App00600", kept_window_parts("App00600"));
+
+    harness.driver.hover_previous_second();
+    harness.driver.tick_hover();
+
+    assert_eq!(harness.driver.hover_reads(), 1);
     harness.teardown();
 }
 
@@ -464,6 +486,30 @@ impl AppHoverDriver {
         );
         self.context
             .simulate_mouse_move(position, None, Modifiers::none());
+    }
+
+    fn keep_app_parts(&mut self, app: &str, parts: Arc<viewer::WindowParts>) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            dashboard.request.app = Some(AppKey {
+                kind: "executable".into(),
+                bytes_hex: crate::live_source::app_key_bytes_hex(app.as_bytes()),
+            });
+            dashboard.snapshot.as_mut().unwrap().app_parts = Some(parts);
+            cx.notify();
+        });
+        self.context.run_until_parked();
+    }
+
+    fn tick_hover(&mut self) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            dashboard.preview_tick(cx);
+        });
+        self.context.run_until_parked();
+    }
+
+    fn hover_reads(&self) -> u64 {
+        self.view
+            .read_with(&self.context, |dashboard, _| dashboard.preview_submissions)
     }
 
     fn deliver_historical_details(&mut self) {
