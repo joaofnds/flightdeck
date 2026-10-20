@@ -34,9 +34,9 @@ mod tests {
 
         assert_eq!(encoded.len(), 3904);
         assert_eq!(decoded, snapshot);
-        assert_eq!(normalized.query("SELECT * FROM normalized").width(), 32);
+        assert_eq!(normalized.query("SELECT * FROM normalized").width(), 34);
         let legacy = table_source(&self::tables(), Table::Ticks, TableSource::Staged).unwrap();
-        assert_eq!(legacy.query("SELECT * FROM normalized").width(), 32);
+        assert_eq!(legacy.query("SELECT * FROM normalized").width(), 34);
     }
 
     fn tables() -> Tables {
@@ -74,7 +74,7 @@ mod tests {
 
     #[test]
     fn preserves_battery_columns_when_disk_extension_is_absent() {
-        // Goal: disk normalization preserves every preexisting Battery field within 32 columns.
+        // Goal: disk normalization preserves every preexisting Battery field within the tick bound.
         // Method: normalize a complete Battery tick and inspect its exact high unsigned count.
         let tables = tables();
         for (name, kind) in BATTERY_FIELDS {

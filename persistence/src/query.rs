@@ -23,7 +23,8 @@ pub enum TableSource<'a> {
     Staged,
 }
 
-/// Validates optional identity and battery columns before exposing them to queries.
+/// Validates optional identity, battery, disk and temperature columns before exposing them to
+/// queries.
 /// Legacy process/event sources gain typed unavailable metadata; counters remain unchanged.
 /// Extended sources scan at most 1,048,577 rows, rejecting more than 1,048,576.
 /// Battery tick validation scans at most 62 rows, rejecting more than 61.
@@ -47,7 +48,8 @@ fn table_source_normalize(connection: &Engine, table: Table, source: &str) -> Re
 
     if matches!(table, Table::Ticks) {
         let source = crate::battery::normalize(connection, source)?;
-        return crate::disks::normalize(connection, &source);
+        let source = crate::disks::normalize(connection, &source)?;
+        return crate::temperatures::normalize(connection, &source);
     }
 
     Ok(source.to_owned())

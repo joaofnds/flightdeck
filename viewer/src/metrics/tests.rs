@@ -143,15 +143,37 @@ fn ticks(current: bool) -> Table {
             "gpu_energy_nj",
             "power_watts",
             "soc_celsius",
+            "cpu_celsius",
+            "gpu_celsius",
             "ioreport_read",
             "gpu_state_count",
             "publication",
             "smc_read",
         ],
         &[if current {
-            &["5000000000", "0", "45", "true", "2", "2", "true"]
+            &[
+                "5000000000",
+                "0",
+                "45",
+                "61.5",
+                "52.25",
+                "true",
+                "2",
+                "2",
+                "true",
+            ]
         } else {
-            &["1000000000", "0", "45", "true", "2", "1", "true"]
+            &[
+                "1000000000",
+                "0",
+                "45",
+                "60.5",
+                "NULL",
+                "true",
+                "2",
+                "1",
+                "true",
+            ]
         }],
     )
 }
@@ -591,16 +613,39 @@ fn preserves_independent_memory_and_network_counter_availability() {
     assert_eq!(value["network_tx_bps"], 512.0);
 }
 
-const POINT_FIELDS: [&str; 44] = [
+#[test]
+fn reports_the_recorded_cpu_and_gpu_temperatures() {
+    // Goal: a point carries the temperature of each die beside the chip's, as recorded.
+    // Method: project a tick that recorded both, then one whose GPU sensor gave no reading.
+    let mut fixture = Fixture::new();
+    let both = fixture.point();
+    let ticks = fixture.row("ticks", 2);
+    let gpu = ticks
+        .columns
+        .iter()
+        .position(|name| name == "gpu_celsius")
+        .unwrap();
+    ticks.rows[0][gpu] = None;
+    let cpu_only = fixture.point();
+
+    assert_eq!(both["cpu_celsius"], 61.5);
+    assert_eq!(both["gpu_celsius"], 52.25);
+    assert_eq!(cpu_only["cpu_celsius"], 61.5);
+    assert!(cpu_only["gpu_celsius"].is_null());
+}
+
+const POINT_FIELDS: [&str; 46] = [
     "battery",
     "boot",
     "continuous_ns",
+    "cpu_celsius",
     "cpu_level_ghz",
     "cpu_level_percent",
     "cpu_percent",
     "cpu_percent_one_core",
     "fan_rpm",
     "gpu_active_percent",
+    "gpu_celsius",
     "gpu_watts",
     "interval_unavailable",
     "memory_active_bytes",
@@ -690,7 +735,7 @@ fn measures_scalar_selection_response_sizes_at_both_context_limits() {
         fields.keys().map(String::as_str).collect::<Vec<_>>(),
         POINT_FIELDS
     );
-    assert_eq!(fields.values().filter(|value| value.is_f64()).count(), 17);
+    assert_eq!(fields.values().filter(|value| value.is_f64()).count(), 19);
     assert_eq!(fields.values().filter(|value| value.is_u64()).count(), 18);
     assert_eq!(u64::MAX.to_string().len(), 20);
     let identity = &internal["observation"];

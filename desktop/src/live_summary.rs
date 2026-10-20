@@ -17,6 +17,8 @@ enum Reading {
     /// A quantity of one resource's readings, such as the battery's.
     Resource(&'static str, &'static str, &'static str, f32),
     Charging,
+    /// The temperature of one die, noted with the share of its time spent busy.
+    DieTemperature(&'static str, &'static str),
     Health,
     /// The busy share of one performance level, by its index fastest first.
     Level(usize),
@@ -36,6 +38,18 @@ const GPU: Specification = (
     "GPU",
     Reading::Quantity("gpu_active_percent", "%", 1.0),
     "Active time",
+    PURPLE,
+);
+const OVERVIEW_CPU: Specification = (
+    "CPU",
+    Reading::DieTemperature("cpu_celsius", "cpu_percent"),
+    "",
+    BLUE,
+);
+const OVERVIEW_GPU: Specification = (
+    "GPU",
+    Reading::DieTemperature("gpu_celsius", "gpu_active_percent"),
+    "",
     PURPLE,
 );
 const PRESSURE: Specification = ("Memory pressure", Reading::Pressure, "macOS verdict", GREEN);
@@ -179,7 +193,14 @@ const HEALTH: Specification = ("Health", Reading::Health, "", GREEN);
 pub fn cards(route: &str, selection: &Value) -> Vec<Card> {
     let summary = matching_summary(selection);
     let definitions = match route {
-        "overview" => &[CPU, GPU, PRESSURE, POWER, DISK_READ, RECEIVE][..],
+        "overview" => &[
+            OVERVIEW_CPU,
+            OVERVIEW_GPU,
+            PRESSURE,
+            POWER,
+            DISK_READ,
+            RECEIVE,
+        ][..],
         "cpu" => &[CPU, PERFORMANCE, SUPER, LOAD][..],
         "gpu" => &[GPU, GPU_FREQUENCY, GPU_MEMORY, GPU_PAGE_POWER][..],
         "memory" => &[PRESSURE, IN_USE, COMPRESSED, SWAP][..],
@@ -216,6 +237,10 @@ fn card(summary: &Value, definition: &Specification) -> Card {
             crate::live_projection::quantity(&summary[resource], key, unit, divisor)
         }
         Reading::Charging => card_charging(summary).into(),
+        Reading::DieTemperature(temperature, utilization) => {
+            note = card_utilization(summary, utilization);
+            crate::live_projection::hardware_reading(summary, temperature, " °C", 1)
+        }
         Reading::Health => {
             note = match summary["battery"]["cycle_count"].as_u64() {
                 Some(cycles) => format!("{cycles} cycles"),
@@ -237,12 +262,7 @@ fn card(summary: &Value, definition: &Specification) -> Card {
             card_memory_in_use(summary)
         }
         Reading::Pressure => {
-            color = match summary["pressure"].as_u64() {
-                Some(0) => GREEN,
-                Some(1) => YELLOW,
-                Some(2) => RED,
-                _ => MUTED,
-            };
+            color = pressure_color(summary);
             crate::live_views::pressure(&summary["pressure"]).into()
         }
         Reading::LoadAverage => {
@@ -267,11 +287,27 @@ fn card(summary: &Value, definition: &Specification) -> Card {
     }
 }
 
+/// The note under a temperature card: how busy the same die is.
+fn card_utilization(summary: &Value, key: &str) -> String {
+    let load = crate::live_projection::quantity(summary, key, "%", 1.0);
+    format!("Utilization {load}")
+}
+
 fn card_charging(summary: &Value) -> &'static str {
     match summary["battery"]["charging"].as_bool() {
         Some(true) => "Yes",
         Some(false) => "No",
         None => "Unavailable",
+    }
+}
+
+/// Green at normal memory pressure, yellow at warning and red at critical.
+fn pressure_color(summary: &Value) -> u32 {
+    match summary["pressure"].as_u64() {
+        Some(0) => GREEN,
+        Some(1) => YELLOW,
+        Some(2) => RED,
+        _ => MUTED,
     }
 }
 

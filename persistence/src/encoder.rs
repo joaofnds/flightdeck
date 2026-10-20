@@ -188,6 +188,17 @@ pub fn table_columns(table: Table, window: &Window) -> String {
         }
     }
 
+    if window.temperatures_captured() {
+        if matches!(table, Table::Ticks) {
+            for (name, kind) in crate::schema::TEMPERATURE_FIELDS {
+                columns.push_str(", ");
+                columns.push_str(name);
+                columns.push(' ');
+                columns.push_str(kind);
+            }
+        }
+    }
+
     if window.programs.is_some() {
         if matches!(table, Table::Processes | Table::Events) {
             for (name, kind) in crate::schema::IDENTITY_FIELDS {

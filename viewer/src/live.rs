@@ -2315,6 +2315,8 @@ mod tests {
                     smc: Some(collector::ring::SmcReadings {
                         power_watts: 5.0,
                         soc_celsius: 40.0,
+                        cpu_celsius: Some(61.5),
+                        gpu_celsius: Some(52.25),
                         fan_rpm: &fan_rpm,
                     }),
                     processes: &[],

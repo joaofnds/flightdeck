@@ -102,6 +102,8 @@ impl Publication {
         let smc = collector.smc.as_ref().map(|smc| SmcReadings {
             power_watts: smc.power_watts(),
             soc_celsius: smc.soc_celsius(),
+            cpu_celsius: smc.cpu_celsius(),
+            gpu_celsius: smc.gpu_celsius(),
             fan_rpm: smc.fan_rpm(),
         });
         let counts = collector.counts_tick();

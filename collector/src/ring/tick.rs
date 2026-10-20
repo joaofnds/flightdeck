@@ -59,6 +59,10 @@ pub struct IOReportReadings<'a> {
 pub struct SmcReadings<'a> {
     pub power_watts: f32,
     pub soc_celsius: f32,
+    /// The hottest sensor of the CPU's cores, or `None` where the SMC lists none.
+    pub cpu_celsius: Option<f32>,
+    /// The hottest sensor of the GPU, or `None` where the SMC lists none.
+    pub gpu_celsius: Option<f32>,
     pub fan_rpm: &'a [f32],
 }
 
@@ -84,6 +88,8 @@ pub struct Tick {
     pub smc_read: bool,
     pub power_watts: f32,
     pub soc_celsius: f32,
+    pub cpu_celsius: Option<f32>,
+    pub gpu_celsius: Option<f32>,
     pub fan_rpm: Vec<f32>,
     pub processes: Vec<Process>,
     pub processes_refused: u32,
@@ -115,6 +121,8 @@ impl Tick {
             smc_read: false,
             power_watts: 0.0,
             soc_celsius: 0.0,
+            cpu_celsius: None,
+            gpu_celsius: None,
             fan_rpm: buffers.fan_rpm,
             processes: buffers.processes,
             processes_refused: 0,
@@ -168,6 +176,8 @@ impl Tick {
             smc_read: false,
             power_watts: 0.0,
             soc_celsius: 0.0,
+            cpu_celsius: None,
+            gpu_celsius: None,
             fan_rpm: Vec::with_capacity(layout.fans.capacity),
             processes: Vec::with_capacity(layout.processes.capacity),
             processes_refused: 0,
@@ -242,15 +252,7 @@ pub(super) fn store_tick(
         store_tick_ioreport(slot, layout, ioreport);
     }
     if let Some(smc) = &readings.smc {
-        store(slot, SLOT_POWER_WATTS, u64::from(smc.power_watts.to_bits()));
-        store(slot, SLOT_SOC_CELSIUS, u64::from(smc.soc_celsius.to_bits()));
-        for (index, rpm) in smc.fan_rpm.iter().enumerate() {
-            store(
-                slot,
-                layout.fans.record(index).start,
-                u64::from(rpm.to_bits()),
-            );
-        }
+        store_tick_smc(slot, layout, smc);
     }
     for (index, process) in readings.processes.iter().enumerate() {
         store_words(
@@ -262,6 +264,27 @@ pub(super) fn store_tick(
         store_words(
             &slot[layout.coalitions.record(index)],
             &coalition_words(coalition),
+        );
+    }
+}
+
+/// Stores the SMC's power, chip and die temperatures and fan speeds into `slot`.
+fn store_tick_smc(slot: &[AtomicU64], layout: &Layout, smc: &SmcReadings<'_>) {
+    store(
+        slot,
+        SLOT_POWER_WATTS,
+        reading_with_celsius(smc.power_watts, smc.gpu_celsius),
+    );
+    store(
+        slot,
+        SLOT_SOC_CELSIUS,
+        reading_with_celsius(smc.soc_celsius, smc.cpu_celsius),
+    );
+    for (index, rpm) in smc.fan_rpm.iter().enumerate() {
+        store(
+            slot,
+            layout.fans.record(index).start,
+            u64::from(rpm.to_bits()),
         );
     }
 }
@@ -467,6 +490,8 @@ fn load_tick_clear_sources(tick: &mut Tick) {
     tick.core_state_counts.clear();
     tick.power_watts = 0.0;
     tick.soc_celsius = 0.0;
+    tick.cpu_celsius = None;
+    tick.gpu_celsius = None;
     tick.fan_rpm.clear();
 }
 
@@ -522,6 +547,8 @@ fn load_tick_smc(slot: &[AtomicU64], layout: &Layout, tick: &mut Tick) -> bool {
 
     tick.power_watts = f32::from_bits(load_half(slot, SLOT_POWER_WATTS));
     tick.soc_celsius = f32::from_bits(load_half(slot, SLOT_SOC_CELSIUS));
+    tick.gpu_celsius = celsius_of(slot[SLOT_POWER_WATTS].load(Ordering::Relaxed));
+    tick.cpu_celsius = celsius_of(slot[SLOT_SOC_CELSIUS].load(Ordering::Relaxed));
     for index in 0..fans {
         let word = load_half(slot, layout.fans.record(index).start);
         push_without_growing(&mut tick.fan_rpm, f32::from_bits(word));
@@ -571,6 +598,26 @@ pub(super) fn load_words<const N: usize>(source: &[AtomicU64]) -> [u64; N] {
         *word = source.load(Ordering::Relaxed);
     }
     words
+}
+
+/// The word that holds `reading` in its low half and `celsius`, a temperature of the CPU or
+/// the GPU, in its high half, where a half of 0 means the SMC lists no such sensor. A writer
+/// that predates the temperatures left the high half 0, so its ticks read as having none.
+fn reading_with_celsius(reading: f32, celsius: Option<f32>) -> u64 {
+    let high = celsius
+        .and_then(crate::smc::usable_celsius)
+        .map_or(0, f32::to_bits);
+
+    u64::from(reading.to_bits()) | (u64::from(high) << 32)
+}
+
+/// The temperature the high half of `word` holds, or `None` where it is 0 or holds no usable
+/// temperature, since a word in shared memory may hold any bits.
+fn celsius_of(word: u64) -> Option<f32> {
+    match high_half(word) {
+        0 => None,
+        bits => crate::smc::usable_celsius(f32::from_bits(bits)),
+    }
 }
 
 /// The low half of the word at `index`, which holds a 32-bit value.
@@ -1094,6 +1141,8 @@ mod tests {
             smc: Some(SmcReadings {
                 power_watts: 12.5,
                 soc_celsius: 48.25,
+                cpu_celsius: Some(71.5),
+                gpu_celsius: Some(63.75),
                 fan_rpm: &[1200.0],
             }),
             ..empty_readings(&memory)
@@ -1114,7 +1163,53 @@ mod tests {
         assert!(tick.smc_read);
         assert_eq!(12.5_f32.to_bits(), tick.power_watts.to_bits());
         assert_eq!(48.25_f32.to_bits(), tick.soc_celsius.to_bits());
+        assert_eq!(Some(71.5), tick.cpu_celsius);
+        assert_eq!(Some(63.75), tick.gpu_celsius);
         assert_eq!(vec![1200.0], tick.fan_rpm);
+    }
+
+    #[test]
+    fn a_tick_whose_smc_lists_no_cpu_or_gpu_sensor_loads_back_without_them() {
+        // Goal: a missing sensor reads back as none, never as 0 degrees, and leaves the
+        // power and the chip's temperature beside it as they were.
+        // Method: store a tick with the CPU's sensor and no GPU sensor after one with both,
+        // into the same tick, and compare each reading.
+        let memory = Memory::default();
+        let both = Readings {
+            smc: Some(SmcReadings {
+                power_watts: 9.5,
+                soc_celsius: 50.0,
+                cpu_celsius: Some(60.0),
+                gpu_celsius: Some(55.0),
+                fan_rpm: &[],
+            }),
+            ..empty_readings(&memory)
+        };
+        let cpu_only = Readings {
+            smc: Some(SmcReadings {
+                power_watts: 9.5,
+                soc_celsius: 50.0,
+                cpu_celsius: Some(61.0),
+                gpu_celsius: None,
+                fan_rpm: &[],
+            }),
+            ..empty_readings(&memory)
+        };
+        let layout = Layout::new(shape_for(&both, 1)).unwrap();
+        let mut tick = Tick::new(&layout);
+        let first = slot_of(&layout);
+        store_tick(&first, &layout, &both, 1..1, None);
+        assert!(load_tick(&first, &layout, &mut tick));
+        let second = slot_of(&layout);
+
+        store_tick(&second, &layout, &cpu_only, 1..1, None);
+        let loaded = load_tick(&second, &layout, &mut tick);
+
+        assert!(loaded);
+        assert_eq!(9.5_f32.to_bits(), tick.power_watts.to_bits());
+        assert_eq!(50.0_f32.to_bits(), tick.soc_celsius.to_bits());
+        assert_eq!(Some(61.0), tick.cpu_celsius);
+        assert_eq!(None, tick.gpu_celsius);
     }
 
     #[test]
@@ -1160,6 +1255,8 @@ mod tests {
             smc: Some(SmcReadings {
                 power_watts: 1.0,
                 soc_celsius: 2.0,
+                cpu_celsius: Some(4.0),
+                gpu_celsius: Some(5.0),
                 fan_rpm: &[3.0],
             }),
             ..empty_readings(&memory)
@@ -1188,6 +1285,8 @@ mod tests {
         assert!(!tick.smc_read);
         assert_eq!(0.0_f32.to_bits(), tick.power_watts.to_bits());
         assert_eq!(0.0_f32.to_bits(), tick.soc_celsius.to_bits());
+        assert_eq!(None, tick.cpu_celsius);
+        assert_eq!(None, tick.gpu_celsius);
         assert!(tick.fan_rpm.is_empty());
     }
 

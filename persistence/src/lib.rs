@@ -13,6 +13,7 @@ mod reader;
 pub mod resources;
 pub mod schema;
 mod store;
+mod temperatures;
 mod window;
 pub mod worker;
 

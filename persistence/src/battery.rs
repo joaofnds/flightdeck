@@ -1,12 +1,12 @@
 //! Optional tick columns preserve independent raw battery fields and source time.
 use crate::engine::{Engine, Row};
-use crate::schema::{BATTERY_FIELDS, BATTERY_ROWS_MAX, BATTERY_VERSION};
+use crate::schema::{BATTERY_FIELDS, BATTERY_ROWS_MAX, BATTERY_VERSION, TICK_COLUMNS_MAX};
 use crate::{Error, Result};
 use polars::prelude::{AnyValue, DataType};
 
 pub(crate) fn normalize(connection: &Engine, source: &str) -> Result<String> {
     let schema = connection.schema(source)?;
-    if schema.len() > 32 {
+    if schema.len() > TICK_COLUMNS_MAX {
         return Err(Error::Bound("tick column count"));
     }
 
@@ -17,7 +17,7 @@ pub(crate) fn normalize(connection: &Engine, source: &str) -> Result<String> {
 
     let present = fields.into_iter().filter(|present| *present).count();
     if present == 0 {
-        if schema.len() + BATTERY_FIELDS.len() > 32 {
+        if schema.len() + BATTERY_FIELDS.len() > TICK_COLUMNS_MAX {
             return Err(Error::Bound("normalized tick column count"));
         }
 

@@ -22,7 +22,17 @@ pub const BATTERY_FIELDS: [(&str, &str); 12] = [
     ("battery_current_ma", "BIGINT"),
     ("battery_adapter_watts", "UBIGINT"),
 ];
-const _: () = assert!(19 + BATTERY_FIELDS.len() <= 32);
+
+/// Optional tick columns for the temperature of the CPU and of the GPU, in degrees Celsius. A
+/// window that captured neither carries neither column, and one that captured either carries
+/// both, so a reader finds the pair whole or absent. A reading the SMC did not give is NULL.
+pub const TEMPERATURE_FIELDS: [(&str, &str); 2] =
+    [("cpu_celsius", "FLOAT"), ("gpu_celsius", "FLOAT")];
+pub(crate) const TEMPERATURE_ROWS_MAX: u64 = 61;
+
+/// The most columns a tick source has once every optional extension is in it.
+pub const TICK_COLUMNS_MAX: usize = 40;
+const _: () = assert!(19 + BATTERY_FIELDS.len() + 1 + TEMPERATURE_FIELDS.len() <= TICK_COLUMNS_MAX);
 
 /// Optional process/event columns; the original schema-1 tables and seal remain unchanged.
 /// A complete extension uses this version on every row. Absent columns mean legacy data.

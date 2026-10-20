@@ -180,6 +180,8 @@ fn tick(current: bool) -> Tick {
     tick.smc_read = true;
     tick.power_watts = 0.0;
     tick.soc_celsius = 45.0;
+    tick.cpu_celsius = current.then_some(61.5);
+    tick.gpu_celsius = current.then_some(52.25);
     tick
 }
 
@@ -223,6 +225,10 @@ fn keeps_the_unsealed_encoder_projection_equal_to_saved_resource_scalars() {
     assert_eq!(response["summary"]["fan_rpm"], json!([]));
     assert_eq!(response["summary"]["gpu_active_percent"], 40.0);
     assert_eq!(response["summary"]["gpu_watts"], 2.0);
+    assert_eq!(response["summary"]["cpu_celsius"], 61.5);
+    assert_eq!(response["summary"]["gpu_celsius"], 52.25);
+    assert_eq!(response["trends"][0]["cpu_celsius"], Value::Null);
+    assert_eq!(response["trends"][1]["gpu_celsius"], 52.25);
     assert_eq!(response["summary"]["memory_pageins_per_second"], 3.0);
     assert_eq!(response["summary"]["network_rx_bps"], 0.0);
     assert_eq!(

@@ -61,6 +61,8 @@ fn fan_publish(fixture: &mut RingFixture, sample: &FanSample<'_>) {
             smc: sample.channels.map(|fan_rpm| collector::ring::SmcReadings {
                 power_watts: 5.0,
                 soc_celsius: 40.0,
+                cpu_celsius: Some(61.5),
+                gpu_celsius: Some(52.25),
                 fan_rpm,
             }),
             processes: &[],
@@ -316,6 +318,8 @@ fn fan_publish_processes(
         smc: Some(collector::ring::SmcReadings {
             power_watts: 5.0,
             soc_celsius: 40.0,
+            cpu_celsius: Some(61.5),
+            gpu_celsius: Some(52.25),
             fan_rpm: &[f32::from(u16::try_from(tick).unwrap()), 0.0],
         }),
         processes,
@@ -611,6 +615,8 @@ fn assert_fan_publication(session: &mut LiveSession, expected: &FanExpectation) 
     assert_eq!(following["summary"]["soc_celsius"], 40.0);
     assert_eq!(selected["summary"]["power_watts"], 5.0);
     assert_eq!(selected["summary"]["soc_celsius"], 40.0);
+    assert_eq!(following["summary"]["cpu_celsius"], 61.5);
+    assert_eq!(selected["summary"]["gpu_celsius"], 52.25);
     assert_eq!(
         session.catalog()["latest_observation"]["publication"],
         expected.publication

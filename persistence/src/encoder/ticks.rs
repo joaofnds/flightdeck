@@ -45,6 +45,13 @@ pub(super) fn frame(window: &Window) -> Result<DataFrame> {
         columns.push(Column::new("physical_disks".into(), disks));
     }
 
+    if window.temperatures_captured() {
+        columns.extend(columns!(rows;
+            "cpu_celsius" => |tick| tick.cpu_celsius,
+            "gpu_celsius" => |tick| tick.gpu_celsius,
+        ));
+    }
+
     Ok(DataFrame::new(rows.len(), columns)?)
 }
 

@@ -15,7 +15,7 @@ mod tests {
     use collector::battery::BatteryReading;
     use collector::ring::{Identity, RunIdentity, Shape};
     use persistence::query::TableSource;
-    use persistence::schema::{BATTERY_FIELDS, TABLES, Table};
+    use persistence::schema::{BATTERY_FIELDS, TABLES, TICK_COLUMNS_MAX, Table};
     use persistence::{Encoder, Limits, Observation, Window, WindowIdentity};
     use polars::prelude::{AnyValue, DataFrame, DataType};
     use std::path::PathBuf;
@@ -193,8 +193,11 @@ mod tests {
     malformed_extension!(
         rejects_extended_tick_tables_exceeding_the_column_bound,
         |tables| {
-            tables.add_column("ticks", "extra_one", "UBIGINT");
-            tables.add_column("ticks", "extra_two", "UBIGINT");
+            for extra in
+                0..=TICK_COLUMNS_MAX - TABLES[0].1.split(',').count() - BATTERY_FIELDS.len()
+            {
+                tables.add_column("ticks", &format!("extra_{extra}"), "UBIGINT");
+            }
         }
     );
 
@@ -221,10 +224,12 @@ mod tests {
     #[test]
     fn refuses_legacy_projection_that_would_exceed_the_column_bound() {
         // Goal: typed normalization fits the same bounded column set as captured extensions.
-        // Method: add two unrelated columns to an original table before typed projection.
+        // Method: add enough unrelated columns to an original table that the battery's no
+        // longer fit.
         let tables = tables();
-        tables.add_column("ticks", "extra_one", "UBIGINT");
-        tables.add_column("ticks", "extra_two", "UBIGINT");
+        for extra in 0..=TICK_COLUMNS_MAX - TABLES[0].1.split(',').count() - BATTERY_FIELDS.len() {
+            tables.add_column("ticks", &format!("extra_{extra}"), "UBIGINT");
+        }
 
         let result = table_source(&tables, Table::Ticks, TableSource::Staged);
 

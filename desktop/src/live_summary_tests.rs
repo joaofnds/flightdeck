@@ -58,6 +58,43 @@ fn a_sibling_or_retimed_observation_cannot_lend_its_cards() {
     }
 }
 
+#[test]
+fn the_overview_cpu_and_gpu_cards_lead_with_temperature_and_keep_utilization_below() {
+    // Goal: each die's card reads its temperature, with the load beneath it, on the Overview.
+    // Method: build the Overview and the two resource pages from one selection that has both.
+    let selection = selection(&json!({"cpu_celsius": 71.5, "gpu_celsius": 63.25,
+        "cpu_percent": 25.0, "gpu_active_percent": 40.0}));
+
+    let overview = cards("overview", &selection);
+    let cpu_page = cards("cpu", &selection);
+    let gpu_page = cards("gpu", &selection);
+
+    assert_eq!(
+        readings(&overview[..2]),
+        vec![("CPU", "71.5 °C".into()), ("GPU", "63.2 °C".into())]
+    );
+    assert_eq!(overview[0].note, "Utilization 25%");
+    assert_eq!(overview[1].note, "Utilization 40%");
+    assert_eq!(cpu_page[0].reading, "25%");
+    assert_eq!(gpu_page[0].reading, "40%");
+}
+
+#[test]
+fn an_overview_card_without_a_die_temperature_stays_unavailable_and_keeps_its_load() {
+    // Goal: a die with no reading shows none rather than the chip's sensor or its load.
+    // Method: build the Overview from a selection with a chip temperature and loads only.
+    let selection = selection(&json!({"soc_celsius": 58.1, "cpu_celsius": null,
+        "cpu_percent": 25.0, "gpu_active_percent": 40.0}));
+
+    let overview = cards("overview", &selection);
+
+    assert_eq!(overview[0].reading, "Unavailable");
+    assert_eq!(overview[0].color, crate::charts::MUTED);
+    assert_eq!(overview[0].note, "Utilization 25%");
+    assert_eq!(overview[1].reading, "Unavailable");
+    assert_eq!(overview[1].note, "Utilization 40%");
+}
+
 fn readings(cards: &[super::Card]) -> Vec<(&'static str, String)> {
     cards
         .iter()

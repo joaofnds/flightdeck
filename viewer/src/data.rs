@@ -64,7 +64,7 @@ pub(crate) fn query(
         .iter()
         .map(|column| column.name().to_string())
         .collect();
-    if columns.len() > 32 {
+    if columns.len() > persistence::schema::TICK_COLUMNS_MAX {
         return Err(Error::Bound("column count"));
     }
 
@@ -101,7 +101,7 @@ fn query_frame(
 ) -> Result<DataFrame> {
     assert!(maximum <= ROWS_MAX);
     let mut plan = connection.plan(sql)?;
-    if plan.collect_schema()?.len() > 32 {
+    if plan.collect_schema()?.len() > persistence::schema::TICK_COLUMNS_MAX {
         return Err(Error::Bound("column count"));
     }
 

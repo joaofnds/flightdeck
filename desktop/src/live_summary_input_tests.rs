@@ -11,14 +11,24 @@ fn overview_summary_cards_show_selected_resources_and_open_nothing(cx: &mut Test
     let mut harness = InputHarness::setup_route(cx, "overview");
     harness.driver.seed_summary_readings();
 
-    assert!(harness.driver.reading_is_visible("summary-card:CPU:25%"));
-    assert!(harness.driver.reading_is_visible("summary-card:GPU:40%"));
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("summary-card:CPU:71.5 °C")
+    );
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("summary-card:GPU:63.2 °C")
+    );
     assert!(
         harness
             .driver
             .reading_is_visible("summary-card:Memory pressure:Warning")
     );
-    harness.driver.click_summary_card("summary-card:CPU:25%");
+    harness
+        .driver
+        .click_summary_card("summary-card:CPU:71.5 °C");
 
     harness.driver.assert_summary_destination("overview");
     harness.teardown();
@@ -70,7 +80,7 @@ fn summary_cards_keep_reference_padding_reading_height_and_note_spacing(cx: &mut
     let card = harness
         .driver
         .context
-        .debug_bounds("summary-card:CPU:25%")
+        .debug_bounds("summary-card:CPU:71.5 °C")
         .unwrap();
     let label = harness
         .driver
@@ -143,8 +153,8 @@ impl InputDriver {
 
     fn overview_summary_bounds(&mut self) -> [Bounds<Pixels>; 6] {
         [
-            "summary-card:CPU:25%",
-            "summary-card:GPU:40%",
+            "summary-card:CPU:71.5 °C",
+            "summary-card:GPU:63.2 °C",
             "summary-card:Memory pressure:Warning",
             "summary-card:System power:8 W",
             "summary-card:Disk read:Unavailable",
@@ -185,6 +195,8 @@ impl InputDriver {
             snapshot.selection["trends"][0]["pressure"] = json!(0);
             snapshot.selection["trends"][1]["cpu_percent"] = json!(25);
             snapshot.selection["trends"][1]["gpu_active_percent"] = json!(40);
+            snapshot.selection["trends"][1]["cpu_celsius"] = json!(71.5);
+            snapshot.selection["trends"][1]["gpu_celsius"] = json!(63.25);
             snapshot.selection["trends"][1]["pressure"] = json!(1);
             snapshot.selection["summary"] = snapshot.selection["trends"][1].clone();
             dashboard.accept(snapshot);

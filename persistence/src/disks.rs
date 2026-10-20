@@ -3,6 +3,7 @@ use crate::engine::{Engine, Row};
 use collector::disks::{DiskSnapshot, encoding};
 use polars::prelude::{AnyValue, DataType};
 
+use crate::schema::TICK_COLUMNS_MAX;
 use crate::{Error, Result};
 
 const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -10,7 +11,6 @@ const HEX: &[u8; 16] = b"0123456789abcdef";
 pub const FIELD: &str = "physical_disks";
 pub const HEX_BYTES_MAX: usize = encoding::WORDS_MAX * 16;
 const _: () = assert!(HEX_BYTES_MAX == 3904);
-const _: () = assert!(19 + crate::schema::BATTERY_FIELDS.len() + 1 == 32);
 
 pub fn encode(snapshot: &DiskSnapshot) -> Result<String> {
     let mut words = [0; encoding::WORDS_MAX];
@@ -65,7 +65,7 @@ fn decode_digit(byte: u8) -> Result<u8> {
 
 pub(crate) fn normalize(connection: &Engine, source: &str) -> Result<String> {
     let schema = connection.schema(source)?;
-    if schema.len() > 32 {
+    if schema.len() > TICK_COLUMNS_MAX {
         return Err(Error::Bound("tick column count"));
     }
 
@@ -89,7 +89,7 @@ pub(crate) fn normalize(connection: &Engine, source: &str) -> Result<String> {
         return Ok(source.to_owned());
     }
 
-    if schema.len() == 32 {
+    if schema.len() + 1 > TICK_COLUMNS_MAX {
         return Err(Error::Bound("normalized tick column count"));
     }
 

@@ -9,9 +9,13 @@ pub struct Smc {
     power: FloatKey,
     fans: Vec<FloatKey>,
     soc_sensor: FloatKey,
+    cpu_sensor: Option<FloatKey>,
+    gpu_sensor: Option<FloatKey>,
     power_watts: f32,
     fan_rpm: Vec<f32>,
     soc_celsius: f32,
+    cpu_celsius: Option<f32>,
+    gpu_celsius: Option<f32>,
 }
 
 /// A key the SMC holds as a float, as its info showed when the key was checked, so a read of
@@ -114,11 +118,11 @@ impl Connection {
         Ok(Self(port))
     }
 
-    fn hottest_soc_sensor(&self) -> io::Result<FloatKey> {
+    fn hottest_sensors(&self) -> io::Result<Sensors> {
         let key_count = self.key_count()?;
         assert!(key_count <= KEYS_MAX);
 
-        let mut hottest = None;
+        let mut hottest = Hottest::default();
         for index in 0..key_count {
             let key = self.key_at(index)?;
             if !key.is_soc_temperature() {
@@ -129,19 +133,10 @@ impl Connection {
             }
 
             let sensor = FloatKey(key);
-            hottest = hottest_soc_sensor_of(hottest, (sensor, self.read_float(sensor)?));
+            hottest = hottest.with((sensor, self.read_float(sensor)?));
         }
 
-        let Some((sensor, celsius)) = hottest else {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "the SMC has no SoC temperature sensor",
-            ));
-        };
-
-        assert!(sensor.0.is_soc_temperature());
-        assert!(celsius.is_finite());
-        Ok(sensor)
+        hottest.sensors()
     }
 
     fn fan_count(&self) -> io::Result<u8> {
@@ -278,9 +273,16 @@ const FAN_COUNT: Key = Key::named(*b"FNum");
 const SYSTEM_POWER: Key = Key::named(*b"PSTR");
 /// The prefixes of the keys of the chip's CPU, GPU and fabric temperature sensors, as
 /// sysmon-exporter's `sensors.go` groups them on Apple silicon, since Apple documents no SMC key.
-const SOC_TEMPERATURE_PREFIXES: [[u8; 2]; 8] = [
-    *b"TC", *b"Tp", *b"Tf", *b"Ts", *b"Te", *b"TR", *b"Tg", *b"TP",
+const SOC_TEMPERATURE_PREFIXES: [[u8; 2]; 9] = [
+    *b"TC", *b"Tp", *b"Tf", *b"Ts", *b"Te", *b"TR", *b"Tg", *b"TP", *b"Tm",
 ];
+/// The prefixes of the keys of the CPU's cores, the performance cores' `Tp` and the super
+/// cores' `Tm`, and of the GPU's die. A probe on an M5 Pro read every float `T` key before and
+/// after a GPU load and a CPU load as the user. Each `Tg` key rose most under the GPU load, and
+/// each `Tm` and `Tp` key under the CPU load, which the other keys did not show. Which cluster a
+/// prefix names is inferred from the size of its rise, never read from the SMC.
+const CPU_TEMPERATURE_PREFIXES: [[u8; 2]; 2] = [*b"Tp", *b"Tm"];
+const GPU_TEMPERATURE_PREFIXES: [[u8; 2]; 1] = [*b"Tg"];
 
 /// The first letter of a fan's speed key.
 const FAN_SPEED_KEY_FIRST: u8 = b'F';
@@ -322,6 +324,16 @@ impl Key {
     fn is_soc_temperature(self) -> bool {
         let [first, second, _, _] = self.0.to_be_bytes();
         SOC_TEMPERATURE_PREFIXES.contains(&[first, second])
+    }
+
+    fn is_cpu_temperature(self) -> bool {
+        let [first, second, _, _] = self.0.to_be_bytes();
+        CPU_TEMPERATURE_PREFIXES.contains(&[first, second])
+    }
+
+    fn is_gpu_temperature(self) -> bool {
+        let [first, second, _, _] = self.0.to_be_bytes();
+        GPU_TEMPERATURE_PREFIXES.contains(&[first, second])
     }
 }
 
@@ -442,17 +454,21 @@ impl Smc {
         let fans = (0..fan_count)
             .map(|fan_index| connection.float_key(Key::fan_speed(fan_index)))
             .collect::<io::Result<Vec<FloatKey>>>()?;
-        let soc_sensor = connection.hottest_soc_sensor()?;
+        let sensors = connection.hottest_sensors()?;
         let fan_rpm = Vec::with_capacity(fans.len());
 
         Ok(Self {
             connection,
             power,
             fans,
-            soc_sensor,
+            soc_sensor: sensors.soc,
+            cpu_sensor: sensors.cpu,
+            gpu_sensor: sensors.gpu,
             power_watts: 0.0,
             fan_rpm,
             soc_celsius: 0.0,
+            cpu_celsius: None,
+            gpu_celsius: None,
         })
     }
 
@@ -466,6 +482,16 @@ impl Smc {
             push_without_growing(&mut self.fan_rpm, self.connection.read_float(fan)?);
         }
         self.soc_celsius = self.connection.read_float(self.soc_sensor)?;
+        self.cpu_celsius = self
+            .cpu_sensor
+            .map(|sensor| self.connection.read_float(sensor))
+            .transpose()?
+            .and_then(usable_celsius);
+        self.gpu_celsius = self
+            .gpu_sensor
+            .map(|sensor| self.connection.read_float(sensor))
+            .transpose()?
+            .and_then(usable_celsius);
 
         Ok(())
     }
@@ -492,6 +518,95 @@ impl Smc {
         assert!(self.soc_sensor.0.is_soc_temperature());
 
         self.soc_celsius
+    }
+
+    /// The temperature at the last read of the hottest sensor of the CPU's cores open picked,
+    /// in degrees Celsius, or `None` where the SMC lists no such sensor.
+    #[must_use]
+    pub fn cpu_celsius(&self) -> Option<f32> {
+        if let Some(sensor) = self.cpu_sensor {
+            assert!(sensor.0.is_cpu_temperature());
+        }
+
+        self.cpu_celsius
+    }
+
+    /// The temperature at the last read of the hottest sensor of the GPU open picked, in
+    /// degrees Celsius, or `None` where the SMC lists no such sensor.
+    #[must_use]
+    pub fn gpu_celsius(&self) -> Option<f32> {
+        if let Some(sensor) = self.gpu_sensor {
+            assert!(sensor.0.is_gpu_temperature());
+        }
+
+        self.gpu_celsius
+    }
+}
+
+/// `celsius` where a CPU or GPU sensor read a temperature a die can have, which is above 0, and
+/// `None` for a reading of 0, which the ring keeps for a sensor the SMC does not list, or a
+/// negative one or one that is not a number.
+#[must_use]
+pub fn usable_celsius(celsius: f32) -> Option<f32> {
+    if celsius.is_finite() && celsius > 0.0 {
+        return Some(celsius);
+    }
+
+    None
+}
+
+/// The sensors open picked: the hottest of the chip, and the hottest of the CPU's cores and of
+/// the GPU where the SMC lists any.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Sensors {
+    soc: FloatKey,
+    cpu: Option<FloatKey>,
+    gpu: Option<FloatKey>,
+}
+
+/// The hottest reading so far of the chip's sensors, of the CPU's cores and of the GPU, each
+/// with its sensor.
+#[derive(Clone, Copy, Debug, Default)]
+struct Hottest {
+    soc: Option<(FloatKey, f32)>,
+    cpu: Option<(FloatKey, f32)>,
+    gpu: Option<(FloatKey, f32)>,
+}
+
+impl Hottest {
+    /// What is hottest once `reading`, of a sensor of the chip, is counted.
+    fn with(self, reading: (FloatKey, f32)) -> Self {
+        let (sensor, _) = reading;
+        assert!(sensor.0.is_soc_temperature());
+
+        let mut hottest = self;
+        hottest.soc = hottest_soc_sensor_of(self.soc, reading);
+        if sensor.0.is_cpu_temperature() {
+            hottest.cpu = hottest_soc_sensor_of(self.cpu, reading);
+        }
+        if sensor.0.is_gpu_temperature() {
+            hottest.gpu = hottest_soc_sensor_of(self.gpu, reading);
+        }
+
+        hottest
+    }
+
+    /// The sensors of the readings, or an error where the SMC has no sensor of the chip. A Mac
+    /// may lack the CPU's or the GPU's, which is not an error.
+    fn sensors(self) -> io::Result<Sensors> {
+        let Some((soc, celsius)) = self.soc else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "the SMC has no SoC temperature sensor",
+            ));
+        };
+
+        assert!(celsius.is_finite());
+        Ok(Sensors {
+            soc,
+            cpu: self.cpu.map(|(sensor, _)| sensor),
+            gpu: self.gpu.map(|(sensor, _)| sensor),
+        })
     }
 }
 
@@ -625,6 +740,77 @@ mod tests {
         let hottest = readings.into_iter().fold(None, hottest_soc_sensor_of);
 
         assert_eq!(Some((FloatKey(Key::named(*b"Tg05")), 63.5)), hottest);
+    }
+
+    #[test]
+    fn picks_a_hottest_sensor_for_the_cpu_and_one_for_the_gpu() {
+        // Goal: the CPU's and the GPU's sensors are each the hottest of their own keys, though
+        // a sensor of the other, or of the fabric, reads hotter.
+        // Method: pick among a CPU core sensor at 70, another at 80, a GPU sensor at 60,
+        // another at 65 and a fabric sensor at 90 degrees.
+        let readings = [
+            (FloatKey(Key::named(*b"Tm00")), 70.0),
+            (FloatKey(Key::named(*b"Tp04")), 80.0),
+            (FloatKey(Key::named(*b"Tg08")), 60.0),
+            (FloatKey(Key::named(*b"Tg0C")), 65.0),
+            (FloatKey(Key::named(*b"Tf00")), 90.0),
+        ];
+
+        let hottest = readings.into_iter().fold(Hottest::default(), Hottest::with);
+
+        assert_eq!(Some((FloatKey(Key::named(*b"Tf00")), 90.0)), hottest.soc);
+        assert_eq!(Some((FloatKey(Key::named(*b"Tp04")), 80.0)), hottest.cpu);
+        assert_eq!(Some((FloatKey(Key::named(*b"Tg0C")), 65.0)), hottest.gpu);
+    }
+
+    #[test]
+    fn leaves_the_cpu_and_gpu_without_a_sensor_where_the_smc_has_none() {
+        // Goal: a Mac whose SMC lists no CPU or GPU sensor picks none, rather than a sensor of
+        // another part.
+        // Method: pick among one fabric sensor.
+        let readings = [(FloatKey(Key::named(*b"Tf00")), 50.0)];
+
+        let hottest = readings.into_iter().fold(Hottest::default(), Hottest::with);
+
+        assert_eq!(None, hottest.cpu);
+        assert_eq!(None, hottest.gpu);
+    }
+
+    #[test]
+    fn names_the_keys_of_the_cpu_cores_and_of_the_gpu() {
+        // Goal: the CPU's keys are the super and performance cores' and the GPU's are the GPU
+        // die's, with no key in both.
+        // Method: classify one key of each prefix the probe on an M5 Pro tied to a part.
+        let super_cores = Key::named(*b"Tm0K");
+        let performance_cores = Key::named(*b"Tp0C");
+        let gpu = Key::named(*b"Tg1c");
+        let fabric = Key::named(*b"Tf00");
+
+        assert!(super_cores.is_cpu_temperature());
+        assert!(performance_cores.is_cpu_temperature());
+        assert!(!gpu.is_cpu_temperature());
+        assert!(gpu.is_gpu_temperature());
+        assert!(!super_cores.is_gpu_temperature());
+        assert!(!fabric.is_cpu_temperature());
+        assert!(!fabric.is_gpu_temperature());
+    }
+
+    #[test]
+    fn keeps_a_temperature_above_zero() {
+        // Goal: a temperature a die can have is kept as read.
+        // Method: keep 71.5 degrees.
+        assert_eq!(Some(71.5), usable_celsius(71.5));
+    }
+
+    #[test]
+    fn drops_a_reading_that_is_no_temperature_of_a_die() {
+        // Goal: a zero, which the ring keeps for no sensor, a negative reading and a reading
+        // that is not a number are all no temperature.
+        // Method: keep each.
+        assert_eq!(None, usable_celsius(0.0));
+        assert_eq!(None, usable_celsius(-3.0));
+        assert_eq!(None, usable_celsius(f32::NAN));
+        assert_eq!(None, usable_celsius(f32::INFINITY));
     }
 
     #[test]
@@ -954,6 +1140,22 @@ mod tests {
             assert!(rpm >= 0.0, "{rpm} rpm");
             assert!(rpm < 10_000.0, "{rpm} rpm");
         }
+    }
+
+    #[test]
+    fn reads_the_temperature_of_the_cpu_and_of_the_gpu() {
+        // Goal: the CPU's and the GPU's sensors read as temperatures a running chip can have,
+        // and no hotter than the hottest sensor of the chip.
+        // Method: one read, each held above 15 and below 115 degrees. The probe of an M5 Pro
+        // under load read up to 95.
+        let mut smc = Smc::open().unwrap();
+
+        smc.read().unwrap();
+
+        let cpu = smc.cpu_celsius().unwrap();
+        let gpu = smc.gpu_celsius().unwrap();
+        assert!(cpu > 15.0 && cpu < 115.0, "{cpu} °C");
+        assert!(gpu > 15.0 && gpu < 115.0, "{gpu} °C");
     }
 
     #[test]

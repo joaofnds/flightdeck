@@ -88,12 +88,15 @@ impl LiveDashboard {
 }
 
 fn live_readings(summary: &Value, speeds: [Option<f32>; 2]) -> Result<Readings, String> {
-    let chip = live_number(&summary["soc_celsius"], 1.0)?;
     Ok(Readings {
         speeds,
-        // The collector records one chip temperature, the hottest sensor, so the CPU and GPU
-        // callouts share it.
-        temperatures: [chip, chip, None],
+        // A recording made before the collector read each die has only the chip's hottest
+        // sensor, which belongs to neither callout, so those callouts show no temperature.
+        temperatures: [
+            live_number(&summary["cpu_celsius"], 1.0)?,
+            live_number(&summary["gpu_celsius"], 1.0)?,
+            None,
+        ],
         utilization: [
             live_number(&summary["cpu_percent"], 1.0)?,
             live_number(&summary["gpu_active_percent"], 1.0)?,
@@ -462,26 +465,31 @@ mod projection_boundary_tests {
     }
 
     #[test]
-    fn the_cpu_and_gpu_callouts_read_the_chip_temperature() {
-        // Goal: the CPU and GPU callouts lead with a temperature and keep utilization below.
-        // Method: project one summary with the chip's hottest sensor and both utilizations.
-        let summary = json!({"soc_celsius":58.1,"cpu_percent":25,"gpu_active_percent":40});
+    fn the_cpu_and_gpu_callouts_read_their_own_temperatures() {
+        // Goal: each callout leads with its own die temperature and keeps utilization below.
+        // Method: project one summary with a chip, a CPU and a GPU temperature and both loads.
+        let summary = json!({"soc_celsius":58.1,"cpu_celsius":71.5,"gpu_celsius":63.25,
+            "cpu_percent":25,"gpu_active_percent":40});
 
         let readings = live_readings(&summary, [None, None]).unwrap();
 
-        assert_eq!(readings.temperatures[..2], [Some(58.1), Some(58.1)]);
+        assert_eq!(readings.temperatures[..2], [Some(71.5), Some(63.25)]);
         assert_eq!(readings.utilization, [Some(25.0), Some(40.0)]);
     }
 
     #[test]
-    fn the_callouts_stay_unavailable_without_a_chip_temperature() {
-        // Goal: a missing sensor reads as no temperature rather than a made-up zero.
-        // Method: project a summary that has utilization and no sensor.
-        let summary = json!({"soc_celsius":null,"cpu_percent":25});
+    fn the_callouts_stay_unavailable_without_a_die_temperature() {
+        // Goal: a die with no reading shows none, rather than the chip's hottest sensor or a zero.
+        // Method: project a summary that has a chip temperature and one die temperature only.
+        let summary = json!({"soc_celsius":58.1,"cpu_celsius":71.5,"gpu_celsius":null,
+            "cpu_percent":25});
+        let legacy = json!({"soc_celsius":58.1,"cpu_percent":25});
 
         let readings = live_readings(&summary, [None, None]).unwrap();
+        let recorded_before = live_readings(&legacy, [None, None]).unwrap();
 
-        assert_eq!(readings.temperatures, [None, None, None]);
+        assert_eq!(readings.temperatures, [Some(71.5), None, None]);
+        assert_eq!(recorded_before.temperatures, [None, None, None]);
     }
 
     #[test]

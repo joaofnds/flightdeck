@@ -114,6 +114,16 @@ fn get<'a>(tables: &'a Tables, observation: &Observation, name: &'static str) ->
         .ok_or(Error::Bound("missing required recorded table rows"))
 }
 
+/// The temperature of a die. A window that captured none holds neither column, which leaves the
+/// reading unavailable the way a sensor that gave none does.
+fn celsius(ticks: &Table, tick: &[Option<String>], name: &str) -> Result<Option<f64>> {
+    if ticks.columns.iter().any(|column| column == name) {
+        ticks.number(tick, name)
+    } else {
+        Ok(None)
+    }
+}
+
 pub(crate) fn point(
     tables: &Tables,
     current: &Observation,
@@ -135,7 +145,9 @@ pub(crate) fn point(
         "cpu_level_percent": null, "cpu_level_ghz": null,
         "gpu_active_percent": null, "gpu_watts": null,
         "power_watts": ticks.number(tick, "power_watts")?,
-        "soc_celsius": ticks.number(tick, "soc_celsius")?, "fan_rpm": fan_rpm,
+        "soc_celsius": ticks.number(tick, "soc_celsius")?,
+        "cpu_celsius": celsius(ticks, tick, "cpu_celsius")?,
+        "gpu_celsius": celsius(ticks, tick, "gpu_celsius")?, "fan_rpm": fan_rpm,
         "interval_unavailable": "Requires consecutive compatible counter samples"});
     value["battery"] = battery::point(ticks, tick, current.continuous)?;
     value["storage"] = storage::point(tables, current, previous)?;

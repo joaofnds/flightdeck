@@ -73,6 +73,8 @@ pub(crate) struct StagedTick {
     pub smc_read: bool,
     pub power_watts: f32,
     pub soc_celsius: f32,
+    pub cpu_celsius: Option<f32>,
+    pub gpu_celsius: Option<f32>,
     pub fan_rpm: Vec<f32>,
     pub processes: Vec<collector::processes::Process>,
     pub coalitions: Vec<Coalition>,
@@ -159,6 +161,12 @@ impl Window {
 
     pub(crate) fn disks_captured(&self) -> bool {
         self.ticks.iter().any(|tick| tick.disks.is_some())
+    }
+
+    pub(crate) fn temperatures_captured(&self) -> bool {
+        self.ticks
+            .iter()
+            .any(|tick| tick.cpu_celsius.is_some() || tick.gpu_celsius.is_some())
     }
 
     #[must_use]
@@ -441,6 +449,8 @@ impl StagedTick {
             smc_read: tick.smc_read,
             power_watts: tick.power_watts,
             soc_celsius: tick.soc_celsius,
+            cpu_celsius: tick.cpu_celsius,
+            gpu_celsius: tick.gpu_celsius,
             fan_rpm: tick.fan_rpm.clone(),
             processes: tick.processes.clone(),
             coalitions: tick.coalitions.clone(),
