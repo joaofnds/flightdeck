@@ -415,13 +415,7 @@ impl LiveDashboard {
         self.rebuild();
         self.error = None;
         self.generation = 0;
-        match self.worker.request(self.request.clone()) {
-            Ok(generation) => {
-                self.generation = generation;
-                self.reply_pending = true;
-            }
-            Err(error) => self.error = Some(error),
-        }
+        self.request_reading();
     }
 
     /// Whether the page has no reading to show yet and the worker is still reading it, which
