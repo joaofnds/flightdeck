@@ -83,7 +83,7 @@ impl LiveDashboard {
             .debug_selector(|| HOVER_SOURCE.into())
             .track_focus(focus)
             .tab_stop(true)
-            .focus(|style| style.bg(rgb(0x20_30_41)))
+            .focus(crate::charts::focus_ring)
             .relative()
             .h(px(PLOT_HEIGHT))
             .child(cpu_history_rows(

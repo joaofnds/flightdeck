@@ -192,7 +192,7 @@ impl Dashboard {
                     .cursor_pointer()
                     .focusable()
                     .tab_stop(true)
-                    .focus(|style| style.bg(rgb(0x32_46_61)))
+                    .focus(crate::charts::focus_ring)
                     .bg(rgb(if self.route == *route {
                         0x1c_2b_40
                     } else {
@@ -438,7 +438,7 @@ impl Dashboard {
                     .cursor_pointer()
                     .focusable()
                     .tab_stop(true)
-                    .focus(|style| style.bg(rgb(0x32_46_61)))
+                    .focus(crate::charts::focus_ring)
                     .hover(|style| style.bg(rgb(GRID)))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.app.clone_from(&selected_app);
@@ -497,7 +497,7 @@ impl Dashboard {
                             .cursor_pointer()
                             .focusable()
                             .tab_stop(true)
-                            .focus(|style| style.bg(rgb(0x32_46_61)))
+                            .focus(crate::charts::focus_ring)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.process = Some(process_name.clone());
                                 cx.notify();
@@ -808,7 +808,7 @@ pub fn control(label: &str) -> gpui::Stateful<gpui::Div> {
         .cursor_pointer()
         .focusable()
         .tab_stop(true)
-        .focus(|style| style.bg(rgb(0x32_46_61)))
+        .focus(crate::charts::focus_ring)
         .hover(|style| style.bg(rgb(0x2c_2f_35)))
         .child(label.to_owned())
 }

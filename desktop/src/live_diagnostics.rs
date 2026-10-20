@@ -354,7 +354,7 @@ impl LiveDashboard {
             .mr(px(PLOT_RIGHT) - charts::PLOT_INSETS.right)
             .focusable()
             .tab_stop(true)
-            .focus(|style| style.bg(rgb(0x20_30_41)))
+            .focus(crate::charts::focus_ring)
             .child(quarter_grid(measured))
             .children(plot)
             .child(overlay(budget, cursor))

@@ -319,7 +319,7 @@ fn table_row(id: String, last: bool, scroll: &gpui::ScrollHandle) -> gpui::State
         .cursor_pointer()
         .focusable()
         .tab_stop(true)
-        .focus(|style| style.bg(rgb(0x32_46_61)))
+        .focus(crate::charts::focus_ring)
 }
 
 impl LiveDashboard {

@@ -14,9 +14,11 @@ pub const GREEN: u32 = 0x0073_bf69;
 pub const GRID: u32 = 0x0028_2a2e;
 /// Card and divider borders: the prototype's text colour at 12% over its panels.
 pub const LINE: u32 = 0x002a_2c33;
-pub const MUTED: u32 = 0x0089_8995;
+pub const MUTED: u32 = 0x009a_9aa6;
 pub const ORANGE: u32 = 0x00ff_9830;
 pub const PANEL: u32 = 0x0018_1b1f;
+/// The ring drawn around a focused control, which holds 3:1 over every fill beneath it.
+pub const FOCUS_RING: u32 = 0x008a_b4ff;
 pub const PURPLE: u32 = 0x00b8_77d9;
 pub const RED: u32 = 0x00f2_495c;
 pub const TEXT: u32 = 0x00cc_ccdc;
@@ -1003,6 +1005,19 @@ fn paint_path(builder: PathBuilder, color: impl Into<Background>, window: &mut W
 
 pub fn clip_plot(bounds: Bounds<Pixels>, window: &mut Window, paint: impl FnOnce(&mut Window)) {
     window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| paint(window));
+}
+
+/// The focus indicator: a ring outside the element, so that focusing it moves nothing and
+/// the text inside keeps the contrast it has unfocused.
+#[must_use]
+pub fn focus_ring(style: gpui::StyleRefinement) -> gpui::StyleRefinement {
+    style.shadow(vec![gpui::BoxShadow {
+        color: rgb(FOCUS_RING).into(),
+        offset: point(px(0.0), px(0.0)),
+        blur_radius: px(0.0),
+        spread_radius: px(2.0),
+        inset: false,
+    }])
 }
 
 /// The inspection cursor, a brighter line than any gridline so the two never read alike.

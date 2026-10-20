@@ -81,7 +81,7 @@ impl Dashboard {
             .id(SharedString::from(format!("{}-plot", panel.id)))
             .focusable()
             .tab_stop(true)
-            .focus(|style| style.bg(rgb(0x20_30_41)))
+            .focus(crate::charts::focus_ring)
             .on_key_down(
                 cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
                     let Some(delta) = crate::dashboard::keyboard_step(event) else {
@@ -252,7 +252,7 @@ impl Dashboard {
                     .cursor_pointer()
                     .focusable()
                     .tab_stop(true)
-                    .focus(|style| style.bg(rgb(0x32_46_61)))
+                    .focus(crate::charts::focus_ring)
                     .py(px(5.0))
                     .opacity(opacity)
                     .text_color(rgb(charts::color(&line.color)))

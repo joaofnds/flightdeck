@@ -293,7 +293,7 @@ impl LiveDashboard {
         chart
             .focusable()
             .tab_stop(true)
-            .focus(|style| style.bg(rgb(0x20_30_41)))
+            .focus(crate::charts::focus_ring)
             .on_key_down(cx.listener(Self::chart_keyboard))
             .child(hover)
             .on_mouse_down(
@@ -647,7 +647,7 @@ impl LiveDashboard {
                     .cursor_pointer()
                     .focusable()
                     .tab_stop(true)
-                    .focus(|style| style.bg(rgb(0x32_46_61)))
+                    .focus(crate::charts::focus_ring)
                     .py(px(2.0))
                     .opacity(if self.hidden.contains(&key) {
                         0.35
@@ -716,7 +716,7 @@ pub(crate) fn chart_head_button(id: String, label: &'static str) -> gpui::Statef
         .cursor_pointer()
         .focusable()
         .tab_stop(true)
-        .focus(|style| style.bg(rgb(0x32_46_61)))
+        .focus(crate::charts::focus_ring)
         .hover(|style| style.bg(rgb(0x2c_2f_35)))
         .child(label)
 }

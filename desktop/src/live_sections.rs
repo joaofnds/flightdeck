@@ -186,7 +186,7 @@ impl LiveDashboard {
             .track_focus(focus)
             .tab_stop(true)
             .cursor_pointer()
-            .focus(|style| style.bg(rgb(0x32_46_61)))
+            .focus(crate::charts::focus_ring)
             .hover(|style| style.bg(rgb(0x22_25_2b)))
             .flex()
             .items_center()

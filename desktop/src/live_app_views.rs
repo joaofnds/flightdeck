@@ -237,7 +237,7 @@ impl LiveDashboard {
             .cursor_pointer()
             .focusable()
             .tab_stop(true)
-            .focus(|style| style.bg(rgb(0x32_46_61)))
+            .focus(crate::charts::focus_ring)
             .bg(rgb(if selected { 0x20_30_41 } else { 0x14_19_24 }))
             .hover(|style| style.bg(rgb(0x20_29_36)))
             .on_click(cx.listener(move |this, _, _, cx| {

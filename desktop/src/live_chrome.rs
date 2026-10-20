@@ -134,7 +134,7 @@ impl LiveDashboard {
             .cursor_pointer()
             .focusable()
             .tab_stop(true)
-            .focus(|style| style.bg(rgb(0x0032_4661)))
+            .focus(crate::charts::focus_ring)
             .when(selected, |item| {
                 item.bg(charts::alpha(SELECTED, 0.15)).text_color(rgb(BLUE))
             })
@@ -446,7 +446,7 @@ pub(crate) fn select(label: &str, width: f32) -> gpui::Stateful<Div> {
         .cursor_pointer()
         .focusable()
         .tab_stop(true)
-        .focus(|style| style.bg(rgb(0x32_46_61)))
+        .focus(crate::charts::focus_ring)
         .child(div().truncate().child(label.to_owned()))
         .child(icon(Icon::Chevron))
 }

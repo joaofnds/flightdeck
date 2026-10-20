@@ -272,7 +272,7 @@ impl LiveDashboard {
             .cursor_pointer()
             .focusable()
             .tab_stop(true)
-            .focus(|style| style.bg(rgb(0x32_46_61)))
+            .focus(crate::charts::focus_ring)
             .hover(|style| style.bg(rgb(0x20_29_36)))
             .when(!last, |row| {
                 row.border_b_1().border_color(rgb(crate::charts::LINE))
