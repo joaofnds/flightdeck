@@ -552,6 +552,61 @@ mod tests {
         assert_eq!(std::io::ErrorKind::InvalidData, result.unwrap_err().kind());
     }
 
+    #[test]
+    fn a_window_reopens_with_the_app_ranks_it_derived_when_it_sealed() {
+        // Goal: a window seals the table it derives beside its own, and a reader finds it.
+        // Method: commit a window that lists app ranks after its tables, then read its marker.
+        let recording = Recording::new();
+        let store = Store::open(&recording.0).unwrap();
+        let mut original = manifest(identity(&store));
+        original.tables.push(app_ranks());
+        let pending = stage(&store, &original);
+
+        let committed = store.commit(pending, original).unwrap();
+
+        assert_complete_fixture(&recording.0, &store, &committed);
+        assert_eq!(Some(&app_ranks()), committed.tables.last());
+    }
+
+    #[test]
+    fn a_window_listing_app_ranks_in_place_of_one_of_its_tables_is_refused() {
+        // Goal: a derived table never stands in for a table every window holds.
+        // Method: list app ranks in place of the events table, so the count of tables holds.
+        let recording = Recording::new();
+        let store = Store::open(&recording.0).unwrap();
+        let mut original = manifest(identity(&store));
+        assert_eq!("events", original.tables.pop().unwrap().name);
+        original.tables.push(app_ranks());
+        let pending = stage(&store, &original);
+
+        let result = store.commit(pending, original);
+
+        assert_eq!(std::io::ErrorKind::InvalidData, result.unwrap_err().kind());
+    }
+
+    #[test]
+    fn a_window_listing_app_ranks_twice_is_refused() {
+        // Goal: a window holds each derived table at most once.
+        // Method: stage app ranks once, then list them twice in the manifest committed.
+        let recording = Recording::new();
+        let store = Store::open(&recording.0).unwrap();
+        let mut original = manifest(identity(&store));
+        original.tables.push(app_ranks());
+        let pending = stage(&store, &original);
+        original.tables.push(app_ranks());
+
+        let result = store.commit(pending, original);
+
+        assert_eq!(std::io::ErrorKind::InvalidData, result.unwrap_err().kind());
+    }
+
+    fn app_ranks() -> TableManifest {
+        TableManifest {
+            name: "app_ranks",
+            rows: 40,
+        }
+    }
+
     fn parquet_privacy(other_user: bool, test: &str) {
         const CHILD_ROOT: &str = "FLIGHTDECK_STORE_TEST_PARQUET_ROOT";
         if let Some(root) = std::env::var_os(CHILD_ROOT) {

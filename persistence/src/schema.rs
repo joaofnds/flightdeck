@@ -74,6 +74,12 @@ pub mod pressure {
     pub const CRITICAL: u8 = 2;
 }
 
+/// Tables a window derives from its own tables when it seals, which a reader can rebuild from
+/// them. A window holds each at most once, and a window sealed before one existed lacks it.
+pub const DERIVED_TABLES: [&str; 1] = [APP_RANKS];
+/// The Apps that used the most of each resource in each of the window's observations.
+pub const APP_RANKS: &str = "app_ranks";
+
 #[derive(Clone, Copy)]
 pub enum Table {
     Ticks,

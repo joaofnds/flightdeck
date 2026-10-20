@@ -33,6 +33,9 @@ const ENCODING_VERSION: u64 = 1;
 const METADATA_BYTES_MAX: u64 = 4096;
 const TABLES_MAX: usize = 16;
 const DIRECTORY_BYTES_MAX: usize = 256;
+const _: () = {
+    assert!(crate::schema::TABLES.len() + crate::schema::DERIVED_TABLES.len() <= TABLES_MAX);
+};
 
 impl Manifest {
     pub(crate) fn write(&self, file: &mut File) -> io::Result<()> {
@@ -128,12 +131,7 @@ impl Manifest {
             return Err(invalid("table count"));
         }
         for _index in 0..count {
-            let name = decoder.string()?;
-            let name = crate::schema::TABLES
-                .iter()
-                .find(|table| table.0.name() == name)
-                .map(|table| table.0.name())
-                .ok_or_else(|| invalid("unknown table"))?;
+            let name = table_name(decoder.string()?).ok_or_else(|| invalid("unknown table"))?;
             manifest.tables.push(TableManifest {
                 name,
                 rows: decoder.word()?,
@@ -164,17 +162,11 @@ impl Manifest {
         if self.data_directory.len() > DIRECTORY_BYTES_MAX {
             return Err(invalid("directory length"));
         }
-        if self.tables.len() != crate::schema::TABLES.len() {
-            return Err(invalid("incomplete tables"));
-        }
         if self.tables.len() > TABLES_MAX {
             return Err(invalid("table count"));
         }
         for (index, table) in self.tables.iter().enumerate() {
-            if !crate::schema::TABLES
-                .iter()
-                .any(|known| known.0.name() == table.name)
-            {
+            if table_name(table.name).is_none() {
                 return Err(invalid("unknown table"));
             }
             if self.tables[..index]
@@ -184,8 +176,26 @@ impl Manifest {
                 return Err(invalid("duplicate table"));
             }
         }
+        for (table, _columns, _order) in crate::schema::TABLES {
+            if !self.tables.iter().any(|held| held.name == table.name()) {
+                return Err(invalid("incomplete tables"));
+            }
+        }
         Ok(())
     }
+}
+
+/// The name of a table a window holds or derives, as the schema spells it.
+fn table_name(name: &str) -> Option<&'static str> {
+    let held = crate::schema::TABLES
+        .iter()
+        .map(|table| table.0.name())
+        .find(|held| *held == name);
+    held.or_else(|| {
+        crate::schema::DERIVED_TABLES
+            .into_iter()
+            .find(|derived| *derived == name)
+    })
 }
 
 struct Decoder<'a> {

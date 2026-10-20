@@ -75,6 +75,12 @@ pub enum CommitBoundary {
 
 const PARTITION_ENTRIES_MAX: usize = 1442;
 const WINDOW_FILES_MAX: usize = 17;
+const _: () = {
+    // An enumeration reads every table, held or derived, the metadata, and then its end.
+    assert!(
+        crate::schema::TABLES.len() + crate::schema::DERIVED_TABLES.len() + 1 < WINDOW_FILES_MAX
+    );
+};
 
 impl Store {
     pub fn open(root: &Path) -> io::Result<Self> {
