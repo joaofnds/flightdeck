@@ -7,6 +7,7 @@ use crate::apps::{self, Amount, AppKey, ProcessCreation, ProcessState, Stamp, Un
 use crate::live_apps::Frame;
 
 pub(crate) use json::bounded;
+pub use ranks::{Metric, RANKS_MAX, Rank, RankedApp, Ranking, Ranks};
 
 pub const SAMPLE_BYTES_MAX: usize = 8 * 1024 * 1024;
 pub const RESPONSE_BYTES_MAX: usize = 8 * 1024 * 1024;
@@ -269,5 +270,8 @@ mod capture_tests;
 #[cfg(test)]
 mod disk_history_tests;
 mod json;
+mod ranks;
+#[cfg(test)]
+mod ranks_tests;
 #[cfg(test)]
 mod tests;

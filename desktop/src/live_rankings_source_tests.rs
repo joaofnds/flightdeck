@@ -9,6 +9,7 @@ use collector::ring::{
 use serde_json::json;
 
 use super::SealedRecording;
+use crate::live_hover::{Preview, Target};
 use crate::live_rankings::{Rankings, TopApps};
 use crate::live_source::{Request, Snapshot};
 
@@ -159,14 +160,88 @@ fn failed_ranked_app_setup_retires_its_created_generation() {
     assert_eq!(error_kind, Some(std::io::ErrorKind::NotFound), "{name}");
 }
 
+#[test]
+fn hover_preview_ranks_a_saved_sibling_as_the_worker_reads_it() {
+    // Goal: a hover shows another observation's top Apps at once, the ones the worker reads.
+    // Method: preview publication two over a committed publication three of 600 saved Apps,
+    // and read publication two through the worker.
+    let recording = SealedRecording::with_ranked_apps();
+    let request = ranked_request_at("overview", 3);
+    let committed = recording.read(request.clone()).unwrap();
+    let worker = recording.read(exact_ranked_request("overview")).unwrap();
+    let target = Target::exact(1001, &ranked_identity(2)).unwrap();
+
+    let preview = Preview::resident(&committed, &request, target);
+
+    assert!(preview.complete);
+    assert_eq!(preview.reading.rankings, worker.rankings);
+    assert_exact_ranked_snapshot(&worker);
+}
+
+#[test]
+fn hover_preview_on_the_cpu_page_shows_a_ranked_sibling_with_its_cores() {
+    // Goal: the CPU page shows a hovered observation at once when it has both its top Apps
+    // and its cores.
+    // Method: preview publication two over a committed CPU page at publication three.
+    let recording = SealedRecording::with_ranked_apps();
+    let request = ranked_request_at("cpu", 3);
+    let committed = recording.read(request.clone()).unwrap();
+    let target = Target::exact(1001, &ranked_identity(2)).unwrap();
+
+    let preview = Preview::resident(&committed, &request, target);
+
+    assert!(preview.reading.cpu_detail.is_some());
+    assert!(preview.complete);
+}
+
+#[test]
+fn hover_preview_on_the_cpu_page_reads_cores_the_window_lacks() {
+    // Goal: the CPU page never shows a hovered observation's top Apps without its cores.
+    // Method: drop the CPU history from a committed CPU page and preview a ranked sibling.
+    let recording = SealedRecording::with_ranked_apps();
+    let request = ranked_request_at("cpu", 3);
+    let mut committed = recording.read(request.clone()).unwrap();
+    committed.cpu_history = None;
+    let target = Target::exact(1001, &ranked_identity(2)).unwrap();
+
+    let preview = Preview::resident(&committed, &request, target);
+
+    assert!(preview.reading.rankings.is_some());
+    assert!(!preview.complete);
+}
+
+#[test]
+fn hover_reads_leave_the_window_unranked() {
+    // Goal: a read for a hovered observation never waits on ranking its whole window.
+    // Method: read a saved observation the way a hover does, without its histories.
+    let recording = SealedRecording::with_ranked_apps();
+    let mut request = exact_ranked_request("overview");
+    request.load_resident_history = false;
+    request.load_app_attribution_history = false;
+    request.load_process_history = false;
+
+    let snapshot = recording.read(request).unwrap();
+
+    assert!(snapshot.rankings.is_some());
+    assert!(snapshot.app_ranks.is_none());
+}
+
 fn exact_ranked_request(route: &str) -> Request {
+    ranked_request_at(route, 2)
+}
+
+fn ranked_request_at(route: &str, publication: u64) -> Request {
     let mut request = SealedRecording::request();
     request.route = route.into();
     request.second = Some(1001);
-    request.identity = Some(json!({"run":"00000000000000010000000000000002",
-        "boot":"00000000000000030000000000000004","publication":2}));
+    request.identity = Some(ranked_identity(publication));
 
     request
+}
+
+fn ranked_identity(publication: u64) -> serde_json::Value {
+    json!({"run":"00000000000000010000000000000002",
+        "boot":"00000000000000030000000000000004","publication":publication})
 }
 
 fn assert_exact_ranked_snapshot(snapshot: &Snapshot) -> &TopApps {

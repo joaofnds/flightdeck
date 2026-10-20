@@ -457,6 +457,7 @@ fn snapshot() -> Box<Snapshot> {
         histories_pending: false,
         process_history: None,
         rankings: None,
+        app_ranks: None,
         read_ms: 0.0,
     })
 }

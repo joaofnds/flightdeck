@@ -23,6 +23,8 @@ pub(crate) mod resident_history;
 #[path = "app_attribution_history.rs"]
 pub(crate) mod attribution_history;
 
+#[path = "live_app_ranks.rs"]
+pub(crate) mod app_ranks;
 #[path = "live_storage_merge.rs"]
 mod storage_merge;
 
@@ -60,6 +62,7 @@ pub struct LiveSession {
     cpu_history: Option<crate::cpu_history::History>,
     inspected: Option<LiveObservation>,
     cache_bytes: usize,
+    app_ranks: Arc<app_ranks::WindowRanks>,
     #[cfg(test)]
     before_projection: Option<Box<dyn FnOnce()>>,
     #[cfg(test)]
@@ -161,6 +164,7 @@ impl LiveSession {
             cpu_history: None,
             inspected: None,
             cache_bytes: 0,
+            app_ranks: Arc::default(),
             #[cfg(test)]
             before_projection: None,
             #[cfg(test)]
@@ -1139,6 +1143,7 @@ impl LiveSession {
         self.observations.push_back(current);
         self.poll_evict(first)?;
         self.poll_cpu_history()?;
+        self.poll_ranks(first)?;
         self.app_history
             .push(app_point.unwrap_or_else(|| unreachable!()), first);
 

@@ -74,15 +74,9 @@ impl GpuApp {
     }
 
     pub fn key(&self) -> AppKey {
-        let mut bytes_hex = String::with_capacity(self.bytes.len() * 2);
-        for byte in &self.bytes {
-            for nibble in [byte >> 4, byte & 0x0f] {
-                bytes_hex.push(char::from(b"0123456789abcdef"[usize::from(nibble)]));
-            }
-        }
         AppKey {
             kind: if self.bundle { "bundle" } else { "executable" }.into(),
-            bytes_hex,
+            bytes_hex: crate::live_source::app_key_bytes_hex(&self.bytes),
         }
     }
 }

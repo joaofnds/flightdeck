@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use serde_json::{Value, json};
 
@@ -96,38 +97,15 @@ impl Preview {
         request: &crate::live_source::Request,
         target: Target,
     ) -> Self {
-        let summary = resident_summary(snapshot, &target).clone();
-        let selected = target.identity.clone().unwrap_or(Value::Null);
+        let reading = resident_reading(snapshot, &target);
+        let matched = target.matches(&snapshot.selection["selected"]);
+        let complete = resident_complete(&request.route, matched, &reading);
+
         Self {
             source: gpui::SharedString::default(),
             origin: Origin::Pointer,
-            reading: Box::new(Snapshot {
-                generation: snapshot.generation,
-                catalog: snapshot.catalog.clone(),
-                selection: json!({"second":target.second,"selected":selected,
-                    "summary":summary,"alternatives":[],"trends":[]}),
-                pages: BTreeMap::new(),
-                apps: None,
-                detail: None,
-                history: None,
-                cpu_detail: resident_cpu_detail(snapshot, &target),
-                cpu_history: None,
-                resident_history: snapshot.resident_history.clone(),
-                app_attribution_history: snapshot.app_attribution_history.clone(),
-                overview_app_histories: snapshot.overview_app_histories.clone(),
-                process_history: snapshot.process_history.clone(),
-                histories_pending: snapshot.histories_pending,
-                rankings: None,
-                read_ms: 0.0,
-            }),
-            complete: if matches!(
-                request.route.as_str(),
-                "overview" | "cpu" | "apps" | "storage" | "memory" | "energy"
-            ) {
-                target.matches(&snapshot.selection["selected"])
-            } else {
-                true
-            },
+            reading,
+            complete,
             request: crate::live_source::Request {
                 second: Some(target.second),
                 identity: target.identity.clone(),
@@ -205,6 +183,73 @@ fn resident_cpu_detail(
         Ok(activity) => activity,
         Err(error) => {
             eprintln!("Hover CPU readings unavailable: {error}");
+            None
+        }
+    }
+}
+
+/// The readings of `target` the committed snapshot already holds.
+fn resident_reading(snapshot: &Snapshot, target: &Target) -> Box<Snapshot> {
+    let summary = resident_summary(snapshot, target).clone();
+    let selected = target.identity.clone().unwrap_or(Value::Null);
+    Box::new(Snapshot {
+        generation: snapshot.generation,
+        catalog: snapshot.catalog.clone(),
+        selection: json!({"second":target.second,"selected":selected,
+            "summary":summary,"alternatives":[],"trends":[]}),
+        pages: BTreeMap::new(),
+        apps: None,
+        detail: None,
+        history: None,
+        cpu_detail: resident_cpu_detail(snapshot, target),
+        cpu_history: None,
+        resident_history: snapshot.resident_history.clone(),
+        app_attribution_history: snapshot.app_attribution_history.clone(),
+        overview_app_histories: snapshot.overview_app_histories.clone(),
+        process_history: snapshot.process_history.clone(),
+        histories_pending: snapshot.histories_pending,
+        rankings: resident_rankings(snapshot, target),
+        app_ranks: None,
+        read_ms: 0.0,
+    })
+}
+
+/// Whether the preview holds every reading of its target the page shows, so the page reads
+/// nothing for it.
+fn resident_complete(route: &str, matched: bool, reading: &Snapshot) -> bool {
+    if matched {
+        return true;
+    }
+
+    match route {
+        "overview" | "storage" | "memory" | "energy" => reading.rankings.is_some(),
+        "cpu" => {
+            if reading.rankings.is_none() {
+                return false;
+            }
+
+            reading.cpu_detail.is_some()
+        }
+        "apps" => false,
+        _ => true,
+    }
+}
+
+fn resident_rankings(
+    snapshot: &Snapshot,
+    target: &Target,
+) -> Option<Arc<crate::live_rankings::Rankings>> {
+    let window = snapshot.app_ranks.as_ref()?;
+    let identity = target.identity.as_ref()?;
+    match crate::live_rankings::observation_key(identity) {
+        Ok(key) => {
+            let ranks = window.get(&key)?;
+            Some(Arc::new(crate::live_rankings::Rankings::Ready(Box::new(
+                crate::live_rankings::from_ranks(ranks),
+            ))))
+        }
+        Err(error) => {
+            eprintln!("Hover App ranks unavailable: {error}");
             None
         }
     }

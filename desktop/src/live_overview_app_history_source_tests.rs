@@ -164,10 +164,13 @@ fn overview_exact_history_lookup_reports_its_frontend_cost() {
 
 #[test]
 fn real_overview_warm_reader_prepares_one_attribution_and_one_resident_context() {
-    // A real warm Reader must gather two saved contexts even though it installs four histories.
+    // A real warm Reader must gather two saved contexts even though it installs four histories,
+    // once the window's App ranks are in place.
     let recording = SealedRecording::with_ranked_apps();
     let mut reader = super::super::SnapshotReader::new();
     reader.command.request = exact_ranked_request("overview");
+    assert!(reader.read(&recording).unwrap().is_some());
+    reader.command.generation += 1;
     assert!(reader.read(&recording).unwrap().is_some());
     let before = reader
         .reader
@@ -191,6 +194,35 @@ fn real_overview_warm_reader_prepares_one_attribution_and_one_resident_context()
     assert_eq!(power.captured_amount(1, power.index(None)), Some(600_000));
     let resident = snapshot.resident_history.as_ref().unwrap();
     assert_eq!(resident.amount(1, resident.index(None)), Some(1_228_800));
+}
+
+#[test]
+fn real_overview_reader_ranks_a_new_window_in_one_more_saved_context() {
+    // Goal: ranking a window's Apps for hovers costs the first full read of the window one
+    // saved context beside its histories' two, and never a second time.
+    // Method: open the Overview, then count the saved contexts its first full read prepares.
+    let recording = SealedRecording::with_ranked_apps();
+    let mut reader = super::super::SnapshotReader::new();
+    reader.command.request = exact_ranked_request("overview");
+    assert!(reader.read(&recording).unwrap().is_some());
+    let before = reader
+        .reader
+        .session
+        .as_ref()
+        .unwrap()
+        .saved_history_context_preparations();
+    reader.command.generation += 1;
+
+    let snapshot = reader.read(&recording).unwrap().unwrap();
+
+    let after = reader
+        .reader
+        .session
+        .as_ref()
+        .unwrap()
+        .saved_history_context_preparations();
+    assert_eq!(after - before, 3);
+    assert!(snapshot.app_ranks.is_some());
 }
 
 #[test]

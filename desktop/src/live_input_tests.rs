@@ -1039,6 +1039,7 @@ fn accepted_snapshot(generation: u64) -> Box<Snapshot> {
         histories_pending: false,
         process_history: None,
         rankings: None,
+        app_ranks: None,
         read_ms: 0.0,
     })
 }

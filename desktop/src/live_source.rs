@@ -39,6 +39,18 @@ pub struct AppKey {
     pub bytes_hex: String,
 }
 
+/// The lowercase hexadecimal text of an App key's bytes.
+pub fn app_key_bytes_hex(bytes: &[u8]) -> String {
+    let mut bytes_hex = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        for nibble in [byte >> 4, byte & 0x0f] {
+            bytes_hex.push(char::from(b"0123456789abcdef"[usize::from(nibble)]));
+        }
+    }
+
+    bytes_hex
+}
+
 pub fn app_key_from_json(app: &Value) -> Result<AppKey, String> {
     let kind = app["key"]["kind"]
         .as_str()
@@ -85,6 +97,9 @@ pub struct Snapshot {
         Option<Arc<crate::live_overview_app_histories::OverviewAppHistories>>,
     pub process_history: Option<Arc<crate::live_process_history::ProcessHistory>>,
     pub rankings: Option<Arc<crate::live_rankings::Rankings>>,
+    /// The top Apps of each observation of the selected window the viewer has ranked, so a
+    /// hover shows its observation's at once.
+    pub app_ranks: Option<Arc<viewer::WindowRanks>>,
     /// The page's App histories are still being read, and a later snapshot carries them.
     pub histories_pending: bool,
     pub read_ms: f64,
@@ -456,6 +471,7 @@ fn reader_snapshot_new(generation: u64, catalog: Value, selection: Value) -> Box
         histories_pending: false,
         process_history: None,
         rankings: None,
+        app_ranks: None,
         read_ms: 0.0,
     })
 }
@@ -487,6 +503,7 @@ fn reader_computer(reader: &mut Reader, command: &Command) -> Option<Box<Snapsho
         histories_pending: false,
         process_history: None,
         rankings: None,
+        app_ranks: None,
         read_ms: 0.0,
     }))
 }
@@ -570,10 +587,11 @@ fn reader_payload(
     if request.route == "apps" {
         reader_apps(session, request, snapshot)?;
     }
-    if matches!(
+    let ranked = matches!(
         request.route.as_str(),
         "overview" | "storage" | "cpu" | "memory" | "energy"
-    ) {
+    );
+    if ranked {
         snapshot.rankings = Some(Arc::new(crate::live_rankings::read(
             &snapshot.selection["selected"],
             |offset| session.apps_page(offset).map_err(|error| error.to_string()),
@@ -591,9 +609,28 @@ fn reader_payload(
     }
     if !snapshot.histories_pending {
         reader_payload_histories(session, request, snapshot);
+        // Ranking replays the window's saved minutes, so it follows the histories the page
+        // shows, and a hover's own read never ranks.
+        if ranked {
+            if request.load_app_attribution_history {
+                reader_app_ranks(session, snapshot);
+            }
+        }
     }
 
     Ok(())
+}
+
+/// Ranks the selected window's observations, so a hover shows any of their top Apps at once.
+/// A window ranked in part still serves the observations it holds, and the next read goes on
+/// from them.
+fn reader_app_ranks(session: &mut LiveSession, snapshot: &mut Snapshot) {
+    match session.rank_window() {
+        Ok(()) => {}
+        Err(persistence::Error::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted => {}
+        Err(error) => eprintln!("App ranks of the selected window unavailable: {error}"),
+    }
+    snapshot.app_ranks = Some(session.app_ranks());
 }
 
 fn reader_payload_histories(session: &LiveSession, request: &Request, snapshot: &mut Snapshot) {
