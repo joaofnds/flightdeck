@@ -920,15 +920,31 @@ mod selection_tests {
     fn a_page_awaits_the_app_histories_its_first_readings_leave_pending() {
         // Goal: the app polls the worker quickly while a newly opened page's App histories are
         // read, which the worker starts at once, so its charts appear as soon as they are read
-        // rather than at the next tick a quarter second later. Method: show readings that leave
-        // the histories pending, then readings that bring them.
+        // rather than at the next tick a quarter second later. Method: receive the answer to
+        // the page's request, its first readings with the histories still pending.
         let mut dashboard = dashboard();
-        dashboard.reply_pending = false;
+        let mut first = dashboard.snapshot.take().unwrap();
+        dashboard.submit();
+        first.generation = dashboard.generation;
+        first.histories_pending = true;
 
-        dashboard.snapshot.as_mut().unwrap().histories_pending = true;
+        assert!(dashboard.receive(Update::Ready(first)));
 
         assert!(dashboard.awaiting_reply());
-        dashboard.snapshot.as_mut().unwrap().histories_pending = false;
+    }
+
+    #[test]
+    fn a_page_awaits_nothing_once_its_readings_bring_the_app_histories() {
+        // Goal: the quick poll stops once the page holds every reading it asked for. Method:
+        // receive the answer to the page's request with its histories read.
+        let mut dashboard = dashboard();
+        let mut complete = dashboard.snapshot.take().unwrap();
+        dashboard.submit();
+        complete.generation = dashboard.generation;
+        complete.histories_pending = false;
+
+        assert!(dashboard.receive(Update::Ready(complete)));
+
         assert!(!dashboard.awaiting_reply());
     }
 

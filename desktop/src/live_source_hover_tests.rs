@@ -85,6 +85,7 @@ fn a_hover_holds_the_page_awaiting_its_read_until_the_reply(cx: &mut TestAppCont
     // whether the page awaits a reply before the read is sent, while it is out, and once it
     // has arrived.
     let mut harness = ReaderHoverHarness::setup(cx);
+    harness.driver.await_state(Await::Settled);
 
     harness.driver.preview_publication(2);
 
@@ -148,6 +149,11 @@ struct ReaderHoverDriver {
 #[derive(Clone, Copy)]
 enum Await {
     Initial,
+    /// The page holds the answer to its last request, its App histories included.
+    Settled,
+    /// The hover's read is out and its reply untaken, since a tick takes the worker's reply
+    /// before it submits a hover's read.
+    Submitted,
     Preview,
     FollowAfter(u64),
 }
@@ -172,23 +178,8 @@ impl ReaderHoverDriver {
         self.context.run_until_parked();
     }
 
-    /// Ticks until the hover's read is out, which leaves its reply untaken, since a tick takes
-    /// the worker's reply before it submits a hover's read.
     fn submit_preview(&mut self) {
-        for _attempt in 0..200 {
-            self.poll_once();
-            let submitted = self.view.read_with(&self.context, |dashboard, _| {
-                let preview = dashboard.preview.as_ref().unwrap();
-                assert!(!preview.complete);
-                preview.generation.is_some()
-            });
-            if submitted {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-
-        panic!("The hover's read was never submitted");
+        self.await_state(Await::Submitted);
     }
 
     fn awaiting_reply(&self) -> bool {
@@ -226,6 +217,8 @@ impl ReaderHoverDriver {
                 }
                 match target {
                     Await::Initial => dashboard.snapshot.is_some(),
+                    Await::Settled => settled(dashboard),
+                    Await::Submitted => submitted(dashboard),
                     Await::Preview => dashboard
                         .preview
                         .as_ref()
@@ -283,6 +276,25 @@ impl ReaderHoverDriver {
             dashboard.request.second.is_none()
         })
     }
+}
+
+fn settled(dashboard: &LiveDashboard) -> bool {
+    let Some(snapshot) = &dashboard.snapshot else {
+        return false;
+    };
+
+    if snapshot.generation == dashboard.generation {
+        !snapshot.histories_pending
+    } else {
+        false
+    }
+}
+
+fn submitted(dashboard: &LiveDashboard) -> bool {
+    let preview = dashboard.preview.as_ref().unwrap();
+    assert!(!preview.complete);
+
+    preview.generation.is_some()
 }
 
 #[derive(Debug, PartialEq)]
