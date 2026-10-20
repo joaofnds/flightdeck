@@ -75,6 +75,7 @@ impl Session {
         target: &Target<'_>,
         mut consume: impl FnMut(&AppPart) -> Result<()>,
     ) -> Result<()> {
+        let mut visited = BTreeSet::new();
         self.visit_sealed_parts_by_window(
             replay.range,
             target.kind,
@@ -84,9 +85,15 @@ impl Session {
                     return Err(Error::Bound("process group kept windows"));
                 }
 
+                visited.insert(window);
                 consume(&part)
             },
-        )
+        )?;
+        if visited != replay.kept {
+            return Err(Error::Bound("process group kept windows"));
+        }
+
+        Ok(())
     }
 
     pub(crate) fn visit_process_groups(

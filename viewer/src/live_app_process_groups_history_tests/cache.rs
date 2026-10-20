@@ -339,6 +339,40 @@ fn refuses_the_parts_of_a_window_whose_groups_were_replayed() {
     ));
 }
 
+#[test]
+fn refuses_a_window_whose_parts_become_unreadable_while_its_groups_are_read() {
+    // Goal: a window chosen to give an App's groups from its parts gives them, so parts that
+    // become unreadable while the groups are read are refused, not read as groups with no
+    // members.
+    // Method: seal two observations with their Apps' parts, turn those parts to a version the
+    // session does not read before the groups are projected, and ask for the groups.
+    let cold = kept_cold();
+    let path = cold
+        .fixture
+        .root
+        .join(&cold.saved.windows[0].data_directory)
+        .join("app_parts.parquet");
+    let readable = std::fs::read(&path).unwrap();
+    cold.saved.unread_kept_parts();
+    let unreadable = std::fs::read(&path).unwrap();
+    std::fs::write(&path, readable).unwrap();
+    BEFORE_PROJECT.with(|hook| {
+        assert!(
+            hook.replace(Some(Box::new(
+                move || std::fs::write(&path, unreadable).unwrap()
+            )))
+            .is_none()
+        );
+    });
+
+    let result = call(&cold, 2, BYTES_MAX);
+
+    assert!(matches!(
+        result,
+        Err(persistence::Error::Bound("process group kept windows"))
+    ));
+}
+
 /// A recording of two observations of an App running two executables, sealed with its Apps'
 /// parts.
 fn kept_cold() -> Box<Cold> {
