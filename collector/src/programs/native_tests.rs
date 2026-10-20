@@ -13,7 +13,7 @@ fn acquires_this_process_with_real_numeric_data_without_allocating() {
     // Method: warm the calls, repeat inside the existing allocator counter and inspect output.
     let pid = i32::try_from(std::process::id()).unwrap();
     let timebase = crate::clock::Timebase::read().unwrap();
-    let expected_path = std::env::current_exe().unwrap();
+    let expected_path = std::env::current_exe().unwrap().canonicalize().unwrap();
     let mut scratch = [0; 4096];
     let mut output = Acquisition::EMPTY;
     let mut numeric = None;
