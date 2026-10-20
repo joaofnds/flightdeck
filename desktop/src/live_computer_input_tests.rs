@@ -267,6 +267,53 @@ fn computer_header_keeps_its_source_as_far_down_as_on_a_page_with_time_controls(
 }
 
 #[gpui::test]
+fn self_latest_report_button_is_as_tall_as_the_prototypes(cx: &mut TestAppContext) {
+    // Goal: the button that returns to the latest report is 44 px tall, as the prototype's is.
+    // Method: open Self-monitoring with a run started long ago and measure the button.
+    let mut harness = InputHarness::setup_route(cx, "self");
+    harness.driver.seed_self_run();
+
+    let button = harness.driver.context.debug_bounds("self-latest-report");
+    assert_eq!(button.unwrap().size.height, px(44.0));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn self_plot_sits_where_the_prototypes_does_in_its_card(cx: &mut TestAppContext) {
+    // Goal: the plot is 180 px tall, starts 54 px of value labels in and ends 12 px short of the
+    // card's padding, as the prototype's does. Method: open Self-monitoring with a run started
+    // long ago and compare the plot's bounds with its card's.
+    let mut harness = InputHarness::setup_route(cx, "self");
+    harness.driver.seed_self_run();
+
+    let card = harness.driver.context.debug_bounds("chart-card:self-late");
+    let plot = harness.driver.context.debug_bounds("self-plot:self-late");
+
+    let (card, plot) = (card.unwrap(), plot.unwrap());
+    assert_eq!(plot.size.height, px(180.0));
+    assert_eq!(plot.left() - card.left(), px(13.0 + 54.0));
+    assert_eq!(card.right() - plot.right(), px(13.0 + 4.0));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn self_budget_label_ends_at_the_plot_in_the_prototypes_size(cx: &mut TestAppContext) {
+    // Goal: the budget line's label is 12 px text ending at the plot's right edge, above the
+    // line, as the prototype's is. Method: open Self-monitoring and compare the label's bounds
+    // with the plot's.
+    let mut harness = InputHarness::setup_route(cx, "self");
+    harness.driver.seed_self_run();
+
+    let plot = harness.driver.context.debug_bounds("self-plot:self-budget");
+    let label = harness.driver.context.debug_bounds("self-budget-label");
+
+    let (plot, label) = (plot.unwrap(), label.unwrap());
+    assert_eq!(label.size.height, px(15.0));
+    assert_eq!(label.right(), plot.right() - px(8.0));
+    harness.teardown();
+}
+
+#[gpui::test]
 fn self_header_keeps_its_source_without_time_controls(cx: &mut TestAppContext) {
     // Goal: Self-monitoring shows no time selection, as in the prototype, since its readings
     // do not follow chart inspection. Method: open Self-monitoring and read the header.
@@ -282,4 +329,18 @@ fn self_header_keeps_its_source_without_time_controls(cx: &mut TestAppContext) {
     assert!(!harness.driver.reading_is_visible("time-range"));
     assert!(!harness.driver.reading_is_visible("reading-selected"));
     harness.teardown();
+}
+
+impl InputDriver {
+    fn seed_self_run(&mut self) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            let mut reports = crate::self_reports::SelfReports::default();
+            reports.begin(1);
+            dashboard.self_reports = std::rc::Rc::new(reports);
+            cx.notify();
+        });
+        self.context
+            .simulate_resize(gpui::size(px(1200.0), px(2000.0)));
+        self.context.run_until_parked();
+    }
 }

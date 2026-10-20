@@ -53,7 +53,13 @@ impl SelfPart {
     }
 }
 
-const CHART_HEIGHT: f32 = 190.0;
+/// The prototype's Self-monitoring plot: 180 px of plot, 54 px of value labels to its left and
+/// 12 px of margin right of it, over 30 px of elapsed-time labels.
+const CHART_HEIGHT: f32 = 180.0;
+const PLOT_LEFT: f32 = 54.0;
+const PLOT_RIGHT: f32 = 12.0;
+const TIME_LABELS_HEIGHT: f32 = 30.0;
+const TIME_LABELS_DROP: f32 = 4.0;
 
 /// The page background, which the pipeline's stages sit on.
 const BACKGROUND: u32 = 0x0011_1217;
@@ -228,17 +234,28 @@ impl LiveDashboard {
                                     .child(report.clone()),
                             ),
                     )
-                    .child(
-                        crate::dashboard::control("Latest report")
-                            .text_size(px(12.0))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.self_inspected = None;
-                                cx.notify();
-                            })),
-                    ),
+                    .child(Self::latest_report_button(cx)),
             )
             .child(grid)
             .into_any_element()
+    }
+
+    /// Returns the inspection to the latest report, as tall as the prototype's buttons are.
+    fn latest_report_button(cx: &mut Context<Self>) -> impl IntoElement {
+        crate::dashboard::control("Latest report")
+            .debug_selector(|| "self-latest-report".into())
+            .flex()
+            .items_center()
+            .min_h(px(44.0))
+            .p(px(8.0))
+            .border_1()
+            .border_color(rgb(LINE))
+            .bg(gpui::transparent_black())
+            .text_size(px(12.0))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.self_inspected = None;
+                cx.notify();
+            }))
     }
 
     fn self_chart(
@@ -247,7 +264,8 @@ impl LiveDashboard {
         cursor: Option<f32>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let axis = labels(self_monitoring::axis(chart));
+        let mut axis = labels(self_monitoring::axis(chart));
+        axis.width = px(PLOT_LEFT);
         let gutter = axis.width;
         let id = chart.panel.id.clone();
         let title = chart.panel.title.clone();
@@ -277,8 +295,8 @@ impl LiveDashboard {
                             .child(title),
                     )
                     .child(
-                        crate::dashboard::control("ⓘ")
-                            .text_color(rgb(MUTED))
+                        crate::live_chart_view::chart_head_button(format!("about-{id}"), "ⓘ")
+                            .px(px(8.0))
                             .tooltip(move |_, cx| cx.new(|_| ChartHelp(help.clone())).into()),
                     ),
             )
@@ -288,11 +306,17 @@ impl LiveDashboard {
                     .child(axis_column(axis, px(CHART_HEIGHT), AxisSide::Leading))
                     .child(div().flex_1().min_w_0().child(plot)),
             )
-            .child(div().pl(gutter).h(px(20.0)).child(elapsed_labels(
-                window.span,
-                charts::PLOT_INSETS.left,
-                charts::PLOT_INSETS.right,
-            )))
+            .child(
+                div()
+                    .pl(gutter)
+                    .pt(px(TIME_LABELS_DROP))
+                    .h(px(TIME_LABELS_HEIGHT))
+                    .child(elapsed_labels(
+                        window.span,
+                        charts::PLOT_INSETS.left,
+                        px(PLOT_RIGHT),
+                    )),
+            )
             .child(self_legend(chart))
             .child(caption(&caption_text))
     }
@@ -324,8 +348,10 @@ impl LiveDashboard {
 
         div()
             .id(gpui::SharedString::from(format!("{}-plot", chart.panel.id)))
+            .debug_selector(|| format!("self-plot:{}", chart.panel.id))
             .relative()
             .h(px(CHART_HEIGHT))
+            .mr(px(PLOT_RIGHT) - charts::PLOT_INSETS.right)
             .focusable()
             .tab_stop(true)
             .focus(|style| style.bg(rgb(0x20_30_41)))
@@ -941,13 +967,15 @@ fn overlay(budget: Option<f32>, cursor: Option<f32>) -> impl IntoElement {
 fn budget_label(budget: f32) -> impl IntoElement {
     let plot =
         CHART_HEIGHT - f32::from(charts::PLOT_INSETS.top) - f32::from(charts::PLOT_INSETS.bottom);
-    let top = f32::from(charts::PLOT_INSETS.top) + plot * (1.0 - budget) - 16.0;
+    let top = f32::from(charts::PLOT_INSETS.top) + plot * (1.0 - budget) - 17.0;
     div()
+        .debug_selector(|| "self-budget-label".into())
         .absolute()
         .top(px(top.max(0.0)))
         .right(px(8.0))
-        .text_size(px(11.0))
-        .text_color(rgb(MUTED))
+        .text_size(px(12.0))
+        .line_height(px(15.0))
+        .text_color(rgb(TEXT))
         .child("5% budget")
 }
 
