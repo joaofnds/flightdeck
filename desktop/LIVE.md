@@ -251,9 +251,13 @@ or alternate input tool substitutes for that denied access.
    system clipboard for exact identities, counter strings and nulls.
 5. Use Tab/Shift-Tab and VoiceOver through navigation, time input, charts, CPU rows
    and observation choices. Check labels, focus and actions without pointer input.
-6. With an isolated owned recording, test the app's Quit command, last-window close
-   and Dock Quit. Confirm final save and helper exit. Repeat while attaching to an
-   independently running collector and confirm that producer continues.
+6. With an isolated owned recording, close the last window and confirm the Dock icon
+   leaves, the menu bar item stays and the collector keeps advancing. Click the item
+   and confirm the window returns over the readings collected while it was shut, then
+   close it again and use Open Flightdeck from the item's right-click menu. Test Quit
+   from that menu, the app's Quit command and Dock Quit. Confirm final save and helper
+   exit. Repeat while attaching to an independently running collector and confirm that
+   producer continues.
 
 Successful TestPlatform dispatch and command-line lifecycle probes establish their
 own paths only. They do not close this native event, accessibility or pixel checklist.

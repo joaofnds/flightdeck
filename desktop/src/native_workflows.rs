@@ -30,13 +30,24 @@ pub fn create_dashboard(
         dashboard
     });
 
-    install_application_actions(cx);
-    install_live_actions(&entity, cx);
+    let installed = cx.has_global::<ActionTarget>();
+    cx.set_global(ActionTarget(entity.downgrade()));
+    if !installed {
+        install_application_actions(cx);
+        install_live_actions(cx);
+    }
 
     entity
 }
 
-pub fn install_application_actions(cx: &mut gpui::App) {
+/// The dashboard the application's actions act on, the one opened last. The actions are
+/// installed once, since GPUI keeps every listener and key binding it is given and a window
+/// may open again after it closed.
+struct ActionTarget(gpui::WeakEntity<LiveDashboard>);
+
+impl gpui::Global for ActionTarget {}
+
+fn install_application_actions(cx: &mut gpui::App) {
     cx.bind_keys([
         gpui::KeyBinding::new("cmd-q", Quit, None),
         gpui::KeyBinding::new("cmd-w", CloseWindow, None),
@@ -72,9 +83,9 @@ fn application_menus() -> Vec<gpui::Menu> {
     ]
 }
 
-pub fn install_live_actions(entity: &Entity<LiveDashboard>, cx: &mut gpui::App) {
-    let view = entity.downgrade();
-    cx.on_action(move |_: &OpenRecording, cx| {
+fn install_live_actions(cx: &mut gpui::App) {
+    cx.on_action(|_: &OpenRecording, cx| {
+        let view = cx.global::<ActionTarget>().0.clone();
         if let Err(error) = view.update(cx, LiveDashboard::open_recording) {
             eprintln!("Open recording action: {error}");
         }

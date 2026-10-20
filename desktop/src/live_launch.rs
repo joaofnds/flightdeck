@@ -7,6 +7,8 @@ use crate::live_dashboard::{LiveDashboard, ROUTES};
 use crate::live_source::Worker;
 use crate::performance::Options;
 
+#[path = "live_background.rs"]
+mod background;
 #[path = "collector_lifecycle_application.rs"]
 mod collection;
 #[path = "collector_lifecycle.rs"]
@@ -75,52 +77,118 @@ pub fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
         options.source.recording.is_some(),
         options.source.start_collector,
     ) {
-        (true, false) => Worker::start_recorded(root)?,
-        _ => Worker::start(root)?,
+        (true, false) => Worker::start_recorded(root.clone())?,
+        _ => Worker::start(root.clone())?,
     };
-    let title = worker.mode().title();
+    let reopening = reopening(root, &options, control.is_some());
+    let opening = Opening {
+        worker,
+        start: Start {
+            page: options.page,
+            seconds: options.seconds,
+            hardware: options.hardware,
+        },
+        control,
+    };
     let application = crate::diagnostics::application();
     crate::diagnostics::verify_text_backend(&application.text_system())?;
+    if reopening.is_some() {
+        application.on_reopen(background::show);
+    }
     application.run(move |cx: &mut App| {
         collection::install(collector, cx);
-        cx.on_window_closed(|cx, _window_id| {
-            if cx.windows().is_empty() {
-                request_quit(cx);
-            }
-        })
-        .detach();
-        let bounds = Bounds::centered(None, size(px(1320.0), px(900.0)), cx);
-        let window = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            // A window under the control socket stays off the screen and never takes focus.
-            show: control.is_none(),
-            focus: control.is_none(),
-            // The window bar draws the title row itself, with the window buttons inside it as
-            // the approved prototype shows them.
-            titlebar: Some(gpui::TitlebarOptions {
-                title: Some(title.into()),
-                appears_transparent: true,
-                traffic_light_position: Some(gpui::point(px(18.0), px(17.0))),
-            }),
-            ..Default::default()
-        };
-        let hidden = control.is_some();
-        match cx.open_window(window, move |window, cx| {
-            let dashboard = create_dashboard(worker, options, cx);
-            install_control(control, &dashboard, window, cx);
-            dashboard
-        }) {
-            Ok(_) => {
-                if !hidden {
-                    cx.activate(true);
+        if let Some(reopening) = reopening {
+            background::install(reopening, cx);
+            background::install_menu_bar(cx);
+        } else {
+            cx.on_window_closed(|cx, _window_id| {
+                if cx.windows().is_empty() {
+                    request_quit(cx);
                 }
-            }
-            Err(error) => {
-                eprintln!("Live window failed: {error}");
-                request_quit(cx);
-            }
+            })
+            .detach();
+        }
+        if let Err(error) = open_window(opening, cx) {
+            eprintln!("Live window failed: {error}");
+            request_quit(cx);
         }
     });
+    Ok(())
+}
+
+/// What the window opens on.
+struct Start {
+    page: String,
+    seconds: Option<u32>,
+    hardware: bool,
+}
+
+/// What a live window is made of when it opens.
+struct Opening {
+    worker: Worker,
+    start: Start,
+    control: Option<Control>,
+}
+
+/// Collection outlives the window only for a launch that follows the live readings on the
+/// screen. A recording opened read-only collects nothing, a timed run quits by itself, and a
+/// window under the control socket is never on the screen.
+fn reopening(root: PathBuf, options: &Options, controlled: bool) -> Option<background::Reopening> {
+    if controlled {
+        return None;
+    }
+
+    if options.seconds.is_some() {
+        return None;
+    }
+
+    if options.source.recording.is_some() {
+        if !options.source.start_collector {
+            return None;
+        }
+    }
+
+    Some(background::Reopening {
+        root,
+        page: options.page.clone(),
+        hardware: options.hardware,
+    })
+}
+
+fn open_window(opening: Opening, cx: &mut App) -> Result<(), String> {
+    let Opening {
+        worker,
+        start,
+        control,
+    } = opening;
+    let title = worker.mode().title();
+    let hidden = control.is_some();
+    let bounds = Bounds::centered(None, size(px(1320.0), px(900.0)), cx);
+    let window = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        // A window under the control socket stays off the screen and never takes focus.
+        show: !hidden,
+        focus: !hidden,
+        // The window bar draws the title row itself, with the window buttons inside it as
+        // the approved prototype shows them.
+        titlebar: Some(gpui::TitlebarOptions {
+            title: Some(title.into()),
+            appears_transparent: true,
+            traffic_light_position: Some(gpui::point(px(18.0), px(17.0))),
+        }),
+        ..Default::default()
+    };
+
+    cx.open_window(window, move |window, cx| {
+        let dashboard = create_dashboard(worker, start, cx);
+        install_control(control, &dashboard, window, cx);
+        dashboard
+    })
+    .map_err(|error| error.to_string())?;
+
+    if !hidden {
+        cx.activate(true);
+    }
     Ok(())
 }
 
@@ -170,12 +238,11 @@ fn install_control(
     }
 }
 
-fn create_dashboard(worker: Worker, options: Options, cx: &mut App) -> gpui::Entity<LiveDashboard> {
-    let entity =
-        crate::native_workflows::create_dashboard(worker, options.page, options.seconds, cx);
+fn create_dashboard(worker: Worker, start: Start, cx: &mut App) -> gpui::Entity<LiveDashboard> {
+    let entity = crate::native_workflows::create_dashboard(worker, start.page, start.seconds, cx);
     entity.update(cx, |dashboard, _| {
         dashboard.animate = true;
-        dashboard.reveal_hardware = options.hardware;
+        dashboard.reveal_hardware = start.hardware;
     });
     if let Err(error) = collection::start_timer(&entity, cx) {
         entity.update(cx, |dashboard, _| dashboard.error = Some(error));

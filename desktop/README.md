@@ -79,10 +79,14 @@ Neither mode opens a window or measures rendering performance.
 `flightdeck` ring; an explicit `--recording PATH` starts an isolated ring. Only one
 collector can own a ring. Startup and child-exit failures appear with a Retry
 control. The app sends signals only to the collector it started; attaching to
-another collector does not give it shutdown ownership. Closing the final window
-or quitting stops owned collection and waits for its final save. The save budget
-is 125 seconds, followed by a two-second forced-exit budget. Background collection
-after closing the app is a separate product feature.
+another collector does not give it shutdown ownership. A live launch keeps running
+once its window closes, with no Dock icon, so collection goes on and no reading is
+missed. Its item in the menu bar brings the window back, as does opening the app
+again, and a right click or Control-click on the item opens a menu with Quit. A
+launch that opens a recording read-only, runs for `--seconds` or listens on
+`--control` still quits with its last window. Quitting stops owned collection and
+waits for its final save. The save budget is 125 seconds, followed by a two-second
+forced-exit budget.
 Xcode and its command-line tools are required. GPUI and its macOS backend are pinned
 to upstream revision `56934ec0560bce8929025497411de7f5322fb6ca`. The direct macOS
 backend includes AccessKit and avoids resolving unused platform backends. It uses

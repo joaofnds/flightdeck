@@ -22,6 +22,29 @@ libc = "0.2"
 log = "0.4"
 image = "=0.25.10"
 num-traits = "0.2"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString"] }
+
+[dependencies.objc2-app-kit]
+version = "0.3.2"
+default-features = false
+features = [
+    "std",
+    "NSApplication",
+    "NSButton",
+    "NSCell",
+    "NSControl",
+    "NSEvent",
+    "NSImage",
+    "NSMenu",
+    "NSMenuItem",
+    "NSResponder",
+    "NSStatusBar",
+    "NSStatusBarButton",
+    "NSStatusItem",
+    "NSView",
+    "objc2-core-foundation",
+]
 
 [dev-dependencies.gpui]
 git = "https://github.com/zed-industries/zed"
