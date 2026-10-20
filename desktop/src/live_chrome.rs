@@ -33,10 +33,43 @@ pub fn route_subtitle(route: &str) -> &'static str {
     }
 }
 
+/// The prototype's note at the right of the window bar.
+fn chrome_note(route: &str) -> &'static str {
+    if route == "self" {
+        "Interactive prototype · Saved Flightdeck diagnostics"
+    } else {
+        "Interactive prototype · Captured sysmon data"
+    }
+}
+
+/// The prototype's note at the left of the footer.
+fn footer_note(route: &str) -> &'static str {
+    if route == "self" {
+        "Saved Flightdeck diagnostics · report intervals vary · not live"
+    } else {
+        "Captured from the Mac system dashboard · rates use 1-minute windows"
+    }
+}
+
+/// What the source pill reads. The prototype names its source in every healthy state, so the
+/// states that only tell where the readings come from read as it does, and the states that
+/// say the readings stopped or cannot be trusted keep their words.
+fn pill_label(route: &str, status: &str) -> String {
+    let healthy = matches!(
+        status,
+        "Live" | "Paused" | "Recorded" | "System snapshot" | "Reader connected"
+    );
+    match (healthy, route) {
+        (false, _) => status.to_owned(),
+        (true, "self") => "Flightdeck diagnostic run".to_owned(),
+        (true, _) => "sysmon snapshot".to_owned(),
+    }
+}
+
 impl LiveDashboard {
     /// The window bar, which holds the macOS window buttons and moves the window when dragged.
     pub fn brandbar(&self) -> impl IntoElement {
-        let source = self.native.source.sidebar();
+        let source = chrome_note(&self.request.route);
 
         div()
             .id("window-bar")
@@ -148,7 +181,7 @@ impl LiveDashboard {
             .text_color(rgb(MUTED))
             .border_t_1()
             .border_color(charts::alpha(TEXT, 0.12))
-            .child(self.native.source.footer())
+            .child(footer_note(&self.request.route))
             .child(div().debug_selector(|| "capture-range".into()).child(range))
     }
 
@@ -257,7 +290,7 @@ impl LiveDashboard {
             } else {
                 MUTED
             })))
-            .child(status)
+            .child(pill_label(&self.request.route, &status))
     }
 
     /// The prototype's range picker and go-to-latest button. The picker opens a menu that also

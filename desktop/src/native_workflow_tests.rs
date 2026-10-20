@@ -612,10 +612,6 @@ fn a_saved_source_becomes_recorded_only_when_its_open_commits() {
         crate::live_source_mode::SourceMode::Recorded
     );
     assert_eq!(dashboard.native.source.following_label(true), "Latest");
-    assert_eq!(
-        dashboard.native.source.sidebar(),
-        "Recorded system readings"
-    );
     assert_eq!(dashboard.native.source.title(), "Flightdeck · Recorded");
 }
 

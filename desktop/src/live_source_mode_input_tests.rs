@@ -28,7 +28,7 @@ fn opening_a_saved_recording_updates_the_existing_window_and_rendered_source_con
     assert!(
         harness
             .driver
-            .visible("source-sidebar:Recorded system readings")
+            .visible("source-sidebar:Interactive prototype · Captured sysmon data")
     );
     assert!(harness.driver.visible("source-status:Recorded"));
     harness.teardown();
@@ -51,7 +51,7 @@ fn failing_to_open_a_recording_retains_the_existing_window_source_and_selection(
     assert!(
         harness
             .driver
-            .visible("source-sidebar:Live system readings")
+            .visible("source-sidebar:Interactive prototype · Captured sysmon data")
     );
     assert!(harness.driver.visible("source-follow:Live"));
     harness.teardown();
@@ -74,7 +74,7 @@ fn canceling_the_recording_picker_retains_the_existing_window_source_and_selecti
     assert!(
         harness
             .driver
-            .visible("source-sidebar:Live system readings")
+            .visible("source-sidebar:Interactive prototype · Captured sysmon data")
     );
     assert!(harness.driver.visible("source-follow:Live"));
     harness.teardown();
