@@ -538,7 +538,7 @@ impl LiveDashboard {
             stepped: self.chart_stepped_second(),
             accepted: self.request.second.or(context.selection["second"].as_u64()),
         };
-        let Some(next) = keyboard_second(&selection, delta, &context.catalog) else {
+        let Some(next) = keyboard_second(&selection, delta, context) else {
             return;
         };
         if Some(next) == selection.stepped.or(selection.accepted) {
@@ -790,9 +790,11 @@ struct KeyboardSelection {
     accepted: Option<u64>,
 }
 
-fn keyboard_second(selection: &KeyboardSelection, delta: i64, catalog: &Value) -> Option<u64> {
-    let second = selection.stepped.or(selection.accepted)?;
-    let mut next = second.saturating_add_signed(delta);
+/// The second a step of `delta` shows from the one shown, held to the recording's edges.
+fn keyboard_second(keys: &KeyboardSelection, delta: i64, snapshot: &Snapshot) -> Option<u64> {
+    let second = keys.stepped.or(keys.accepted)?;
+    let mut next = crate::live_projection::stepped_second(&snapshot.selection, second, delta);
+    let catalog = &snapshot.catalog;
     if let Some(first) = catalog["first_second"].as_u64() {
         next = next.max(first);
     }
@@ -1210,19 +1212,21 @@ mod tests {
 
     #[test]
     fn keyboard_steps_walk_from_the_stepped_second_within_the_recording() {
-        // The second a step shows is the next step's input, held to the recording's edges.
-        let catalog = json!({"first_second":900,"last_second":1100});
+        // Goal: the second a step shows is the next step's input, held to the recording's edges.
+        // Method: step both ways from a stepped second, then outward from each edge.
+        let mut snapshot = snapshot();
+        snapshot.catalog = json!({"first_second":900,"last_second":1100});
         let mut selection = KeyboardSelection {
             stepped: None,
             accepted: Some(1000),
         };
-        selection.stepped = keyboard_second(&selection, 1, &catalog);
-        assert_eq!(keyboard_second(&selection, 1, &catalog), Some(1002));
-        assert_eq!(keyboard_second(&selection, -1, &catalog), Some(1000));
+        selection.stepped = keyboard_second(&selection, 1, &snapshot);
+        assert_eq!(keyboard_second(&selection, 1, &snapshot), Some(1002));
+        assert_eq!(keyboard_second(&selection, -1, &snapshot), Some(1000));
         selection.stepped = Some(1100);
-        assert_eq!(keyboard_second(&selection, 1, &catalog), Some(1100));
+        assert_eq!(keyboard_second(&selection, 1, &snapshot), Some(1100));
         selection.stepped = Some(900);
-        assert_eq!(keyboard_second(&selection, -1, &catalog), Some(900));
+        assert_eq!(keyboard_second(&selection, -1, &snapshot), Some(900));
     }
 
     #[test]

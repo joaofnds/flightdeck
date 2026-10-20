@@ -83,6 +83,24 @@ pub fn inspection_second(selection: &Value, second: u64) -> u64 {
         .unwrap_or(second)
 }
 
+/// The second a step of `delta` from `second` shows: the first second in that direction that
+/// shows another reading than `second` does, or a gap, since every second of an older stretch
+/// shows the one reading that stands for it.
+#[must_use]
+pub fn stepped_second(selection: &Value, second: u64, delta: i64) -> u64 {
+    let shown = inspection_second(selection, second);
+    let mut next = second;
+    // A stretch spans the viewer's stride, so a step that far always leaves it.
+    for _ in 0..viewer::EARLIER_STRIDE_SECONDS {
+        next = next.saturating_add_signed(delta);
+        if inspection_second(selection, next) != shown {
+            return next;
+        }
+    }
+
+    next
+}
+
 /// Whether the selection holds `second`, as a reading or a gap, so the page shows that second
 /// without a read: the seconds its charts hold, which end at the selected second.
 #[must_use]

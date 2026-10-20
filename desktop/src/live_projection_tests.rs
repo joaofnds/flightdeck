@@ -1120,3 +1120,18 @@ fn a_selection_holds_the_seconds_its_charts_hold() {
     assert!(holds_second(&longer, 1401));
     assert!(!holds_second(&longer, 5001));
 }
+
+#[test]
+fn a_step_leaves_the_older_stretch_it_shows() {
+    // Goal: steps move through the older tail, where every second of a stretch shows the one
+    // reading that stands for it, so a right step by one second would show the same reading.
+    // Method: step both ways from the older readings of a tail with a 10-second stride, from
+    // its last stretch into the gap after it, and from a recent reading.
+    let selection = long_selection();
+
+    assert_eq!(stepped_second(&selection, 2000, 1), 2010);
+    assert_eq!(stepped_second(&selection, 2010, -1), 2009);
+    assert_eq!(stepped_second(&selection, 2010, 1), 2020);
+    assert_eq!(stepped_second(&selection, 4101, 1), 4102);
+    assert_eq!(stepped_second(&selection, 4101, -1), 4100);
+}
