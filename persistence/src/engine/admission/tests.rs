@@ -77,7 +77,7 @@ fn admits_current_native_parquet_without_decoding_values() {
 }
 
 #[test]
-fn admits_a_file_as_wide_as_the_widest_table() {
+fn admits_a_file_as_wide_as_admission_allows() {
     // Goal: a table with as many columns as admission allows stays readable.
     // Method: write a real Polars file of that many columns and admit it.
     let directory = Directory::new();
@@ -90,8 +90,8 @@ fn admits_a_file_as_wide_as_the_widest_table() {
 }
 
 #[test]
-fn refuses_a_file_wider_than_the_widest_table() {
-    // Goal: a file of more columns than any table has is refused before its schema is walked.
+fn refuses_a_file_wider_than_admission_allows() {
+    // Goal: a file of more columns than admission allows is refused before its schema is walked.
     // Method: write a real Polars file of one column more than admission allows and admit it.
     let directory = Directory::new();
     let path = directory.file();

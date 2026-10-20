@@ -139,8 +139,8 @@ fn a_window_keeps_the_rates_its_first_observation_takes_from_the_minute_before()
 fn a_window_sealed_without_parts_keeps_none() {
     // Goal: a window sealed before the persister derived Apps' parts leaves its observations
     // to the replay.
-    // Method: seal two observations without their Apps' parts and read the parts of an App of
-    // theirs that their window keeps.
+    // Method: seal two observations without their Apps' parts, and read the parts their window
+    // keeps of an executable.
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(1000);
     fixture.publish_with_system_rows(1001);

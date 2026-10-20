@@ -135,16 +135,17 @@ fn restores_a_replayed_minute_after_a_minute_that_keeps_parts() {
     // Method: seal run tick 59 with its Apps' parts and tick 60 without, and compare the
     // history of tick 60 with the history a replay of both minutes gives.
     let mut fixture = Fixture::new();
-    fixture.start_at_run_tick(59);
+    let run_tick = 60;
+    fixture.start_at_run_tick(run_tick - 1);
     fixture.publish_with_system_rows(1001);
     fixture.publish_with_system_rows(1002);
     fixture.seal_minute_derived(0, &SealedApps);
     fixture.seal_minute(1);
     let session = Session::open(&fixture.root).unwrap();
     let mut selected = selected(&session, 1002);
-    selected.run_tick = 60;
-    selected.stamp.continuous_ns = Some(60_000_000_000);
-    selected.stamp.awake_ns = Some(60_000_000_000);
+    selected.run_tick = run_tick;
+    selected.stamp.continuous_ns = Some(run_tick * 1_000_000_000);
+    selected.stamp.awake_ns = Some(run_tick * 1_000_000_000);
 
     let restored = session
         .with_app_history(&selected, &CURRENT, points)
