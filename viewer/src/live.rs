@@ -378,13 +378,7 @@ impl LiveSession {
             .ok_or(Error::Bound("latest live raw observation unavailable"))?;
         let second = current.observation.wall / NANOSECONDS_PER_SECOND;
         let selected = current.json();
-        let range = ContextRange {
-            first_ns: second.saturating_sub(899) * NANOSECONDS_PER_SECOND,
-            end_ns: second
-                .checked_add(1)
-                .and_then(|value| value.checked_mul(NANOSECONDS_PER_SECOND))
-                .ok_or(Error::Bound("context end"))?,
-        };
+        let range = context_range(second)?;
 
         if let Err(error) = self.follow_restore(range) {
             self.history_failure(error)?;
@@ -2010,6 +2004,19 @@ fn refresh_history_before(windows: &[persistence::Manifest], through_ns: u64) ->
         .iter()
         .filter(|window| window.wall_ns.is_none_or(|wall| wall.min < through_ns))
         .count()
+}
+
+/// The wall clock range of the 900 seconds that end at `second`.
+fn context_range(second: u64) -> Result<ContextRange> {
+    let end_ns = second
+        .checked_add(1)
+        .and_then(|value| value.checked_mul(NANOSECONDS_PER_SECOND))
+        .ok_or(Error::Bound("context end"))?;
+
+    Ok(ContextRange {
+        first_ns: second.saturating_sub(899) * NANOSECONDS_PER_SECOND,
+        end_ns,
+    })
 }
 
 fn context_contains(range: ContextRange, point: &Value) -> Result<bool> {

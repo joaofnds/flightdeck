@@ -2,15 +2,17 @@
 //! second at once. Live observations give theirs as the session polls them, and saved ones in
 //! one replay of the window's saved minutes.
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
 use persistence::{Error, Result};
 use serde_json::Value;
 
+use super::{LiveObservation, NANOSECONDS_PER_SECOND, context_range};
 use crate::LiveSession;
 use crate::cpu_history_sample::Identity;
 use crate::live_app_response::{Observation, Sample};
+use crate::session::ContextRange;
 
 /// What a window keeps of one observation's sample.
 pub trait WindowValue {
@@ -30,6 +32,12 @@ pub struct Window<T> {
     bytes: usize,
 }
 
+struct Held<T> {
+    wall_ns: u64,
+    bytes: usize,
+    value: Option<Arc<T>>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ObservationKey {
     pub run: [u64; 2],
@@ -37,15 +45,8 @@ pub struct ObservationKey {
     pub publication: u64,
 }
 
-struct Held<T> {
-    wall_ns: u64,
-    bytes: usize,
-    value: Option<Arc<T>>,
-}
-
 /// A window and the live observations after it, at one or more observations a second.
 const OBSERVATIONS_MAX: usize = 4096;
-const NS: u64 = 1_000_000_000;
 const _: () = {
     assert!(OBSERVATIONS_MAX == crate::session::OBSERVATIONS_MAX);
 };
@@ -123,11 +124,11 @@ impl<T: WindowValue> Window<T> {
         Ok(())
     }
 
-    /// Drops the observations outside the wall clock range `first_ns..end_ns`.
-    fn retain(&mut self, first_ns: u64, end_ns: u64) {
+    /// Drops the observations outside the wall clock range.
+    fn retain(&mut self, range: ContextRange) {
         let mut freed = 0;
         self.observations.retain(|_key, held| {
-            let kept = (first_ns..end_ns).contains(&held.wall_ns);
+            let kept = (range.first_ns..range.end_ns).contains(&held.wall_ns);
             if !kept {
                 freed += held.bytes;
             }
@@ -136,12 +137,12 @@ impl<T: WindowValue> Window<T> {
         self.bytes -= freed;
     }
 
-    /// Whether these are the values of exactly the window `first_ns..end_ns` and its `context`.
-    fn covers(&self, first_ns: u64, end_ns: u64, context: &[Identity]) -> Result<bool> {
+    /// Whether these are the values of exactly the window `range` and its `context`.
+    fn covers(&self, range: ContextRange, context: &[Identity]) -> Result<bool> {
         let outside = self
             .observations
             .values()
-            .any(|held| !(first_ns..end_ns).contains(&held.wall_ns));
+            .any(|held| !(range.first_ns..range.end_ns).contains(&held.wall_ns));
         if outside {
             return Ok(false);
         }
@@ -213,27 +214,17 @@ impl LiveSession {
             Ok(Value::Null)
         })?;
         let selected = selected.ok_or(Error::Bound("window selection"))?;
-        let second = selected.wall_ns.ok_or(Error::Bound("window clock"))? / NS;
-        let first_ns = second.saturating_sub(899) * NS;
-        let end_ns = second
-            .checked_add(1)
-            .and_then(|value| value.checked_mul(NS))
-            .ok_or(Error::Bound("window end"))?;
-        if window.covers(first_ns, end_ns, &self.selected_context)? {
+        let second = selected.wall_ns.ok_or(Error::Bound("window clock"))? / NANOSECONDS_PER_SECOND;
+        let range = context_range(second)?;
+
+        if window.covers(range, &self.selected_context)? {
             return Ok(());
         }
 
         let held = Arc::make_mut(window);
-        held.retain(first_ns, end_ns);
-        for observation in &self.observations {
-            if (first_ns..end_ns).contains(&observation.observation.wall) {
-                if let Some(sample) = &observation.app_sample {
-                    if !held.holds(&ObservationKey::of(&sample.selected)) {
-                        held.insert(project(sample)?)?;
-                    }
-                }
-            }
-        }
+        held.retain(range);
+        fill_window_live(&self.observations, range, held, &project)?;
+
         if let Some(history) = &self.history {
             if let Err(error) = fill_window_saved(history, &selected, held, &project) {
                 // A cancelled replay goes on at the next read from the values it gave. A failed
@@ -261,9 +252,33 @@ pub(super) fn poll<T: WindowValue>(
     value: T,
 ) -> Result<()> {
     let held = Arc::make_mut(window);
-    held.retain(first_ns, u64::MAX);
+    held.retain(ContextRange {
+        first_ns,
+        end_ns: u64::MAX,
+    });
 
     held.insert(value)
+}
+
+/// Gives the live observations of the window `range` that hold no value yet theirs, from their
+/// cached samples.
+fn fill_window_live<T: WindowValue>(
+    observations: &VecDeque<LiveObservation>,
+    range: ContextRange,
+    window: &mut Window<T>,
+    project: &impl Fn(&Sample) -> Result<T>,
+) -> Result<()> {
+    for observation in observations {
+        if (range.first_ns..range.end_ns).contains(&observation.observation.wall) {
+            if let Some(sample) = &observation.app_sample {
+                if !window.holds(&ObservationKey::of(&sample.selected)) {
+                    window.insert(project(sample)?)?;
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn fill_window_saved<T: WindowValue>(

@@ -35,14 +35,15 @@ impl Sample {
         });
         let present = match index {
             Some(index) => {
-                let app_index = u32::try_from(index).map_err(|_| Error::Bound("live App index"))?;
+                let process_app_index =
+                    u32::try_from(index).map_err(|_| Error::Bound("live App index"))?;
                 Some(Present {
                     app_index: index,
                     app: self.apps[index].clone(),
                     processes: self
                         .processes
                         .iter()
-                        .filter(|process| process.app_index == Some(app_index))
+                        .filter(|process| process.app_index == Some(process_app_index))
                         .cloned()
                         .collect(),
                 })

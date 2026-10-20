@@ -1,6 +1,6 @@
 use persistence::Error;
 
-use super::{NS, ObservationKey, Window, WindowValue};
+use super::{ContextRange, NANOSECONDS_PER_SECOND, ObservationKey, Window, WindowValue};
 use crate::apps::Stamp;
 use crate::live_app_response::Observation;
 
@@ -43,7 +43,10 @@ fn frees_the_bytes_of_an_observation_it_drops() {
     // Method: drop a value of sixty bytes from a window of one hundred, then insert another.
     let mut window = Window::default();
     window.insert(weighed(1, 60)).unwrap();
-    window.retain(2 * NS, 3 * NS);
+    window.retain(ContextRange {
+        first_ns: 2 * NANOSECONDS_PER_SECOND,
+        end_ns: 3 * NANOSECONDS_PER_SECOND,
+    });
 
     window.insert(weighed(2, 60)).unwrap();
 
@@ -79,11 +82,11 @@ fn weighed(second: u64, bytes: usize) -> Weighed {
                 boot: [3, 4],
                 run: [5, 6],
                 publication: second,
-                continuous_ns: Some(second * NS),
-                awake_ns: Some(second * NS),
+                continuous_ns: Some(second * NANOSECONDS_PER_SECOND),
+                awake_ns: Some(second * NANOSECONDS_PER_SECOND),
             },
             run_tick: second,
-            wall_ns: Some(second * NS),
+            wall_ns: Some(second * NANOSECONDS_PER_SECOND),
         },
         bytes,
     }

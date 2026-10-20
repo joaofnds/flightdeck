@@ -279,6 +279,7 @@ fn resident_app(
         part.detail(page(offset)).map_err(|error| error.to_string())
     })?;
     let executables = crate::live_executables::groups(Some(&detail))?;
+
     reading.apps = Some(apps);
     reading.detail = Some(detail);
     crate::live_acceptance::normalize_offsets(request, reading)?;
