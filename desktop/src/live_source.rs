@@ -303,12 +303,16 @@ fn worker_run(root: &std::path::Path, shared: &Shared) {
             }
         }
         worker_sample(&mut reader.system);
-        if let Some(command) = &mut command {
-            if let Some(output) = reader_read(&mut reader, root, command, shared) {
-                worker_publish(shared, command.generation, output);
+        let pause = match &mut command {
+            Some(command) => {
+                if let Some(output) = reader_read(&mut reader, root, command, shared) {
+                    worker_publish(shared, command.generation, output);
+                }
+                worker_pause(&reader, command)
             }
-        }
-        thread::sleep(POLL_INTERVAL);
+            None => POLL_INTERVAL,
+        };
+        thread::sleep(pause);
     }
     if let Some(command) = command {
         worker_publish(
@@ -321,6 +325,17 @@ fn worker_run(root: &std::path::Path, shared: &Shared) {
         );
     }
     shared.stopped.store(true, Ordering::Release);
+}
+
+/// How long the worker waits before its next step. A page whose readings were just published
+/// with its App histories pending has them read at once, since it shows them as being read.
+fn worker_pause(reader: &Reader, command: &Command) -> Duration {
+    if reader.last_generation == command.generation {
+        if reader.pending_generation == Some(command.generation) {
+            return Duration::ZERO;
+        }
+    }
+    POLL_INTERVAL
 }
 
 /// Samples the readings the collector does not record, once in each wall-clock second.

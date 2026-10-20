@@ -106,6 +106,47 @@ fn a_route_without_app_histories_publishes_one_complete_snapshot() {
     assert!(second.is_none());
 }
 
+#[test]
+fn a_newly_opened_page_reads_its_app_histories_without_a_pause() {
+    // Goal: the worker reads a page's App histories straight after publishing its readings,
+    // since the page shows them as being read until then.
+    // Method: read Overview once through the reader over a real sealed recording.
+    let recording = SealedRecording::new();
+    let mut reader = SnapshotReader::new();
+
+    reader.read(&recording).unwrap().unwrap();
+
+    assert_eq!(reader.pause(), Duration::ZERO);
+}
+
+#[test]
+fn the_worker_pauses_once_a_page_has_all_it_asked_for() {
+    // Goal: the worker polls at its own pace once the page's App histories are read.
+    // Method: read Overview until complete through the reader over a real sealed recording.
+    let recording = SealedRecording::new();
+    let mut reader = SnapshotReader::new();
+
+    reader.read_complete(&recording);
+
+    assert_eq!(reader.pause(), super::POLL_INTERVAL);
+}
+
+#[test]
+fn a_failed_read_of_a_pages_app_histories_pauses_before_its_retry() {
+    // Goal: a failed read of a page's App histories never sets the worker spinning until the
+    // read is retried.
+    // Method: publish Overview's readings, make the real store invalid, then step the reader.
+    let recording = SealedRecording::new();
+    let mut reader = SnapshotReader::new();
+    reader.read(&recording).unwrap().unwrap();
+    std::fs::write(recording.root.join("identity"), b"invalid").unwrap();
+
+    let failed = reader.step(&recording);
+
+    assert!(matches!(failed, Some(Update::Failed { .. })));
+    assert_eq!(reader.pause(), super::POLL_INTERVAL);
+}
+
 struct SnapshotReader {
     reader: super::Reader,
     command: super::Command,
@@ -152,6 +193,19 @@ impl SnapshotReader {
             &mut self.command,
             &self.shared,
         )
+    }
+
+    fn step(&mut self, recording: &SealedRecording) -> Option<Update> {
+        super::reader_read(
+            &mut self.reader,
+            &recording.root,
+            &mut self.command,
+            &self.shared,
+        )
+    }
+
+    fn pause(&self) -> Duration {
+        super::worker_pause(&self.reader, &self.command)
     }
 
     fn read_complete(&mut self, recording: &SealedRecording) -> Box<super::Snapshot> {
@@ -412,6 +466,7 @@ fn the_default_app_survives_a_new_first_row_and_an_empty_page() {
 
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use super::{
     Cancellation, Mailbox, Request, Shared, Update, Worker, app_key_bytes, identity_signature,
