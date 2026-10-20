@@ -21,6 +21,7 @@ mod sealed;
 mod sealed_apps;
 pub use sealed_apps::SealedApps;
 mod sealed_parts;
+pub(crate) use sealed_parts::PartsRead;
 mod sealed_ranks;
 
 pub(super) struct Cache {
@@ -306,7 +307,7 @@ impl Session {
                 }
 
                 restore.plotted += 1;
-                output.push(TracePoint::from_part(&part, target));
+                output.push(TracePoint::from_part(part, target));
                 windows.insert(window);
                 Ok(())
             },

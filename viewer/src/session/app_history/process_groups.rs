@@ -86,7 +86,7 @@ impl Session {
                 }
 
                 visited.insert(window);
-                consume(&part)
+                consume(part)
             },
         )?;
         if visited != replay.kept {

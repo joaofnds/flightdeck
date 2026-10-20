@@ -1,12 +1,13 @@
 //! Every App's part of each observation of a sealed window: its row, its processes, and the
 //! facts of the observation's sample every page shows. The persister derives them as the window
 //! seals, so the viewer shows a saved second's App without replaying its minute.
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use polars::prelude::{Column, DataFrame, LazyFrame, SortMultipleOptions, col, lit};
 
 use super::sealed::{Kept, columns, kind_code, kind_of, observed_in};
-use super::{ContextRange, Session, TICKS_PER_WINDOW_MAX};
+use super::{ContextRange, Session, TICKS_PER_WINDOW_MAX, WINDOWS_MAX};
 use crate::apps::{Amount, ProcessCreation, ProcessState, Stamp, Unavailable};
 use crate::live_app_response::{
     App, AppPart, Bytes, Header, Key, KeyKind, MEMBERS_MAX, Measure, Observation, Present, Process,
@@ -533,7 +534,83 @@ const fn same(left: &str, right: &str) -> bool {
     true
 }
 
+/// What a read keeps of the parts it decodes. A read of the selected App's histories visits
+/// the parts of its window five times, and an App of about 250 processes at every second of a
+/// full window takes this.
+const READ_BYTES_MAX: usize = 64 * 1024 * 1024;
+
+/// The parts of one App that a read decoded from each window, so its later visits of the window
+/// take them from memory. The read holds them only while it runs, since what it builds from
+/// them keeps what the page shows.
+pub(crate) struct PartsRead {
+    kind: KeyKind,
+    app_bytes: Box<[u8]>,
+    windows: Vec<(PathBuf, Rc<Vec<AppPart>>)>,
+    windows_bytes: usize,
+}
+
+impl PartsRead {
+    fn new(kind: KeyKind, app_bytes: &[u8]) -> Self {
+        Self {
+            kind,
+            app_bytes: app_bytes.into(),
+            windows: Vec::new(),
+            windows_bytes: 0,
+        }
+    }
+
+    /// The parts the read decoded from the table at `path`, where they are the App's of `key`.
+    fn parts(&self, key: &PartKey<'_>, path: &Path) -> Option<Rc<Vec<AppPart>>> {
+        if !self.is(key) {
+            return None;
+        }
+
+        self.windows
+            .iter()
+            .find(|(kept, _parts)| kept == path)
+            .map(|(_kept, parts)| Rc::clone(parts))
+    }
+
+    /// Keeps the parts decoded from the table at `path`, where they are the App's of `key` and
+    /// fit the read's bound. Parts past the bound are decoded again at each visit.
+    fn keep(&mut self, key: &PartKey<'_>, path: &Path, parts: &Rc<Vec<AppPart>>) {
+        if !self.is(key) {
+            return;
+        }
+
+        let parts_bytes: usize = parts.iter().map(AppPart::bytes).sum();
+        if parts_bytes > READ_BYTES_MAX - self.windows_bytes {
+            return;
+        }
+
+        assert!(self.windows.len() < WINDOWS_MAX);
+        self.windows_bytes += parts_bytes;
+        self.windows.push((path.to_owned(), Rc::clone(parts)));
+    }
+
+    fn is(&self, key: &PartKey<'_>) -> bool {
+        if self.kind != key.kind {
+            return false;
+        }
+
+        *self.app_bytes == *key.bytes
+    }
+}
+
 impl Session {
+    /// Begins a read of the App with this key, whose visits of a window's parts decode them
+    /// once, rather than once a visit.
+    pub(crate) fn parts_read_begin(&self, kind: KeyKind, app_bytes: &[u8]) {
+        let mut read = self.parts_read.borrow_mut();
+        assert!(read.is_none());
+        *read = Some(PartsRead::new(kind, app_bytes));
+    }
+
+    /// Ends the read, and drops the parts it decoded.
+    pub(crate) fn parts_read_end(&self) {
+        *self.parts_read.borrow_mut() = None;
+    }
+
     /// Gives `consume` the parts of the App of this key that the windows of `range` keep of
     /// their observations in it, from the table the persister derived as each window sealed. A
     /// window sealed without the table, or with a version of it this build does not read, gives
@@ -543,7 +620,7 @@ impl Session {
         range: ContextRange,
         kind: KeyKind,
         bytes: &[u8],
-        mut consume: impl FnMut(AppPart) -> Result<()>,
+        mut consume: impl FnMut(&AppPart) -> Result<()>,
     ) -> Result<()> {
         self.visit_sealed_parts_by_window(range, kind, bytes, |_window, part| consume(part))
     }
@@ -555,20 +632,42 @@ impl Session {
         range: ContextRange,
         kind: KeyKind,
         bytes: &[u8],
-        mut consume: impl FnMut(usize, AppPart) -> Result<()>,
+        mut consume: impl FnMut(usize, &AppPart) -> Result<()>,
     ) -> Result<()> {
         let key = PartKey { kind, bytes };
         self.visit_derived(
             range,
             APP_PARTS,
-            |kept| self.visit_sealed_parts_read(kept, &key),
-            |window, part| {
-                if observed_in(range, part.selected()) {
-                    consume(window, part)?;
+            |kept| self.visit_sealed_parts_window(kept, &key),
+            |window, parts| {
+                for part in parts.iter() {
+                    if observed_in(range, part.selected()) {
+                        consume(window, part)?;
+                    }
                 }
                 Ok(())
             },
         )
+    }
+
+    /// The parts of the window that the read decoded already, or else those its table gives.
+    fn visit_sealed_parts_window(
+        &self,
+        kept: &Kept<'_>,
+        key: &PartKey<'_>,
+    ) -> Result<Rc<Vec<AppPart>>> {
+        if let Some(read) = &*self.parts_read.borrow() {
+            if let Some(parts) = read.parts(key, kept.path) {
+                return Ok(parts);
+            }
+        }
+
+        let parts = Rc::new(self.visit_sealed_parts_read(kept, key)?);
+        if let Some(read) = &mut *self.parts_read.borrow_mut() {
+            read.keep(key, kept.path, &parts);
+        }
+
+        Ok(parts)
     }
 
     fn visit_sealed_parts_read(&self, kept: &Kept<'_>, key: &PartKey<'_>) -> Result<Vec<AppPart>> {

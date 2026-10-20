@@ -9,6 +9,7 @@ use super::{App, KeyKind, Observation, Page, Process, Sample};
 /// The App with one key at one second, its processes, and the facts of that second's sample
 /// every page shows. An App that did not run at that second has no detail there, as a read of
 /// that second has none.
+#[derive(Clone)]
 pub struct AppPart {
     header: Header,
     kind: KeyKind,
@@ -17,6 +18,7 @@ pub struct AppPart {
 }
 
 /// The App's row and processes at a second it ran.
+#[derive(Clone)]
 pub(crate) struct Present {
     pub(crate) app_index: usize,
     pub(crate) app: App,

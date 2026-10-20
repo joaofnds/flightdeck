@@ -24,7 +24,7 @@ impl Session {
         &self,
         range: ContextRange,
         name: &str,
-        mut read: impl FnMut(&Kept<'_>) -> Result<Vec<T>>,
+        mut read: impl FnMut(&Kept<'_>) -> Result<T>,
         mut consume: impl FnMut(usize, T) -> Result<()>,
     ) -> Result<()> {
         self.operation.attach(&self.connection)?;
@@ -44,7 +44,7 @@ impl Session {
             };
 
             self.validate_commitment(window)?;
-            let values = read(&Kept {
+            let value = read(&Kept {
                 path: &self
                     .root
                     .join(&manifest.data_directory)
@@ -55,9 +55,7 @@ impl Session {
             })?;
             self.validate_commitment(window)?;
 
-            for value in values {
-                consume(window, value)?;
-            }
+            consume(window, value)?;
         }
 
         self.operation.check()

@@ -251,6 +251,106 @@ fn every_code_a_part_is_written_with_reads_back_as_what_it_was_written_from() {
     assert_eq!(codes_read_back(state_of, state_code), 3);
 }
 
+#[test]
+fn a_read_decodes_the_parts_of_each_window_once_for_all_its_visits() {
+    // Goal: one read of an App's histories visits the selected window's parts several times,
+    // and decodes each window once, rather than once a visit.
+    // Method: begin a read of an App, visit its parts, rewrite the window's parts to a version
+    // this build does not read, and visit them again within the read.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(1000);
+    fixture.publish_with_system_rows(1001);
+    fixture.seal_derived(&[], &crate::SealedApps);
+    let session = Session::open(&fixture.root).unwrap();
+    let key = app_keys(&replayed_samples(&session, 1001)[1]).remove(0);
+    session.parts_read_begin(key.kind, &key.bytes);
+    let decoded = kept_parts(&session, 1001, &key);
+    session.unread_kept_parts();
+
+    let visited = kept_parts(&session, 1001, &key);
+
+    assert_eq!(decoded.len(), 2);
+    assert_eq!(visited, decoded);
+}
+
+#[test]
+fn a_visit_after_its_read_ends_decodes_the_window_again() {
+    // Goal: a read holds the parts it decoded only while it runs, so a window rewritten since
+    // gives what its table now holds.
+    // Method: visit an App's parts within a read and end it, rewrite the window's parts to a
+    // version this build does not read, and visit them again.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(1000);
+    fixture.publish_with_system_rows(1001);
+    fixture.seal_derived(&[], &crate::SealedApps);
+    let session = Session::open(&fixture.root).unwrap();
+    let key = app_keys(&replayed_samples(&session, 1001)[1]).remove(0);
+    session.parts_read_begin(key.kind, &key.bytes);
+    let decoded = kept_parts(&session, 1001, &key);
+    session.parts_read_end();
+    session.unread_kept_parts();
+
+    let visited = kept_parts(&session, 1001, &key);
+
+    assert_eq!(decoded.len(), 2);
+    assert!(visited.is_empty());
+}
+
+#[test]
+fn a_read_decodes_again_the_parts_of_an_app_other_than_its_own() {
+    // Goal: a read keeps the parts of the App it reads, and no other App's.
+    // Method: begin a read of one App, visit another App's parts, rewrite the window's parts
+    // to a version this build does not read, and visit the other App's parts again.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(1000);
+    fixture.publish_with_system_rows(1001);
+    fixture.seal_derived(&[], &crate::SealedApps);
+    let session = Session::open(&fixture.root).unwrap();
+    let keys = app_keys(&replayed_samples(&session, 1001)[1]);
+    session.parts_read_begin(keys[0].kind, &keys[0].bytes);
+    let decoded = kept_parts(&session, 1001, &keys[1]);
+    session.unread_kept_parts();
+
+    let visited = kept_parts(&session, 1001, &keys[1]);
+
+    assert_eq!(decoded.len(), 2);
+    assert!(visited.is_empty());
+}
+
+#[test]
+fn a_read_decodes_again_the_parts_past_its_bound() {
+    // Goal: a read keeps no more of the parts it decodes than its bound, and decodes the rest
+    // again at each visit.
+    // Method: keep a window's parts in a read that holds parts up to their size, then those of
+    // a second window, and ask the read for each.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(1000);
+    fixture.seal_derived(&[], &crate::SealedApps);
+    let session = Session::open(&fixture.root).unwrap();
+    let key = app_keys(&replayed_samples(&session, 1000)[0]).remove(0);
+    let mut parts = Vec::new();
+    session
+        .visit_sealed_parts(range(1000), key.kind, &key.bytes, |part| {
+            parts.push(part.clone());
+            Ok(())
+        })
+        .unwrap();
+    let parts = Rc::new(parts);
+    let part_key = PartKey {
+        kind: key.kind,
+        bytes: &key.bytes,
+    };
+    let parts_bytes: usize = parts.iter().map(AppPart::bytes).sum();
+    let mut read = PartsRead::new(key.kind, &key.bytes);
+    read.windows_bytes = READ_BYTES_MAX - parts_bytes;
+
+    read.keep(&part_key, Path::new("first"), &parts);
+    read.keep(&part_key, Path::new("second"), &parts);
+
+    assert!(read.parts(&part_key, Path::new("first")).is_some());
+    assert!(read.parts(&part_key, Path::new("second")).is_none());
+}
+
 /// What a page shows of a part: its second, the App's detail, and the paging of the Apps page.
 #[derive(Debug, PartialEq)]
 struct Shown {
@@ -280,7 +380,7 @@ fn kept_parts(session: &Session, second: u64, key: &Key) -> Vec<Shown> {
     let mut kept = Vec::new();
     session
         .visit_sealed_parts(range(second), key.kind, &key.bytes, |part| {
-            kept.push(Shown::of(&part));
+            kept.push(Shown::of(part));
             Ok(())
         })
         .unwrap();

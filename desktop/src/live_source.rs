@@ -721,7 +721,28 @@ fn reader_latest(session: &mut LiveSession) -> Result<Value, String> {
     )
 }
 
+/// Reads the payload of the page. The page's App histories visit the selected App's saved parts
+/// of the window several times, so the payload that reads them decodes each window once.
 fn reader_payload(
+    session: &mut LiveSession,
+    request: &mut Request,
+    context: Context,
+    snapshot: &mut Snapshot,
+) -> Result<(), String> {
+    if !snapshot.histories_pending {
+        if let Some(key) = &request.app {
+            let kind = app_key_kind(&key.kind)?;
+            let bytes = app_key_bytes(&key.bytes_hex)?;
+            return session.with_parts_read(kind, &bytes, |session| {
+                reader_payload_read(session, request, context, snapshot)
+            });
+        }
+    }
+
+    reader_payload_read(session, request, context, snapshot)
+}
+
+fn reader_payload_read(
     session: &mut LiveSession,
     request: &mut Request,
     context: Context,

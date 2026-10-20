@@ -37,9 +37,9 @@ impl WindowValue for AppPart {
         history: &crate::Session,
         app: &PartsApp,
         range: ContextRange,
-        consume: impl FnMut(Self) -> Result<()>,
+        mut consume: impl FnMut(Self) -> Result<()>,
     ) -> Result<()> {
-        history.visit_sealed_parts(range, app.kind, &app.bytes, consume)
+        history.visit_sealed_parts(range, app.kind, &app.bytes, |part| consume(part.clone()))
     }
 }
 
@@ -48,6 +48,27 @@ impl LiveSession {
     #[must_use]
     pub fn app_parts(&self) -> Arc<WindowParts> {
         Arc::clone(&self.app_parts)
+    }
+
+    /// Runs `read` as one read of the histories of the App with this key, whose several visits
+    /// of the selected window's saved parts decode each window once, rather than once a visit.
+    pub fn with_parts_read<T>(
+        &mut self,
+        kind: KeyKind,
+        bytes: &[u8],
+        read: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        if let Some(history) = &self.history {
+            history.parts_read_begin(kind, bytes);
+        }
+
+        let result = read(self);
+
+        if let Some(history) = &self.history {
+            history.parts_read_end();
+        }
+
+        result
     }
 
     /// Keeps the part of the App with this key for every observation of the selected window

@@ -34,6 +34,7 @@ pub struct Session {
     app_history_cache: std::cell::RefCell<Option<app_history::Cache>>,
     app_process_history_cache: std::cell::RefCell<Option<app_history::Cache>>,
     app_history_ticks: std::cell::RefCell<app_history::Ticks>,
+    parts_read: std::cell::RefCell<Option<app_history::PartsRead>>,
     pub(crate) saved_history_context_preparations: std::cell::Cell<u64>,
     operation: Operation,
     #[cfg(test)]
@@ -140,6 +141,7 @@ impl Session {
             app_history_cache: std::cell::RefCell::new(None),
             app_process_history_cache: std::cell::RefCell::new(None),
             app_history_ticks: std::cell::RefCell::new(app_history::Ticks::new()),
+            parts_read: std::cell::RefCell::new(None),
             saved_history_context_preparations: std::cell::Cell::new(0),
             operation,
             #[cfg(test)]
