@@ -392,19 +392,7 @@ impl LiveSession {
             return Ok(response);
         }
 
-        if let Some(inspected) = self.select_rehydrate(identity)? {
-            let response = json!({"second": second, "selected": inspected.json(),
-                "summary": inspect_summary(&inspected.point)?});
-            if response["selected"]["wall_ns"]
-                .as_u64()
-                .map(|wall| wall / NANOSECONDS_PER_SECOND)
-                != Some(second)
-            {
-                return Err(Error::Bound("inspected observation second"));
-            }
-            self.cache_bytes += inspected.bytes;
-            self.inspected = Some(inspected);
-            self.poll_evict(0)?;
+        if let Some(response) = self.inspect_ring(second, identity)? {
             return Ok(response);
         }
 
@@ -414,6 +402,33 @@ impl LiveSession {
         self.refresh_history()?;
         self.inspect_history(second, identity)?
             .ok_or(Error::Bound("inspected observation"))
+    }
+
+    /// The observation `identity` names at `second`, with its summary, read again from the ring
+    /// that still holds it. A hover names an observation by its run, boot and publication
+    /// alone, so the ring is read with the observation its point keeps, which holds the losses
+    /// the reader had met when it read it.
+    fn inspect_ring(&mut self, second: u64, identity: &Value) -> Result<Option<Value>> {
+        let Some(point) = self.points.iter().find(|point| same(point, identity)) else {
+            return Ok(None);
+        };
+        let Some(inspected) = self.select_rehydrate(&point["observation"])? else {
+            return Ok(None);
+        };
+
+        let response = json!({"second": second, "selected": inspected.json(),
+            "summary": inspect_summary(&inspected.point)?});
+        if response["selected"]["wall_ns"]
+            .as_u64()
+            .map(|wall| wall / NANOSECONDS_PER_SECOND)
+            != Some(second)
+        {
+            return Err(Error::Bound("inspected observation second"));
+        }
+        self.cache_bytes += inspected.bytes;
+        self.inspected = Some(inspected);
+        self.poll_evict(0)?;
+        Ok(Some(response))
     }
 
     /// The live observation `identity` names at `second`, with its summary. The first
