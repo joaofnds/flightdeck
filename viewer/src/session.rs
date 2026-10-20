@@ -237,9 +237,11 @@ impl Session {
             "summary": summary, "trends": points, "context_seconds": 900}))
     }
 
-    /// Selects the observation of `second` that `named` picks out of its JSON, or none where the
-    /// saved minutes hold no such observation. Unlike `select` it builds no context, so it reads
-    /// one window's ticks, and it leaves the context the last selection read.
+    /// Selects the observation of `second` that `named` picks out of its JSON, with its summary,
+    /// or none where the saved minutes hold no such observation. Unlike `select` it builds no
+    /// context, so it reads the observation's window and its predecessor's, and it leaves the
+    /// context the last selection read. The summary carries no segment, which only a context
+    /// numbers.
     pub(crate) fn inspect(
         &mut self,
         second: u64,
@@ -271,8 +273,18 @@ impl Session {
         };
 
         let selected = chosen.json(self);
+        let mut points = Vec::with_capacity(1);
+        self.context_points(std::slice::from_ref(&chosen), &mut points)?;
+        assert_eq!(points.len(), 1);
+        let mut summary = points.swap_remove(0);
+        summary
+            .as_object_mut()
+            .ok_or(Error::Bound("point shape"))?
+            .remove("segment");
         self.selected = Some(chosen);
-        Ok(Some(selected))
+        Ok(Some(
+            json!({"second": second, "selected": selected, "summary": summary}),
+        ))
     }
 
     pub(crate) fn context(&self, range: ContextRange, output: &mut Vec<Value>) -> Result<()> {

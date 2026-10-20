@@ -12,33 +12,56 @@ fn context_point(selection: &Value, second: u64) -> Value {
         .clone()
 }
 
+/// A selection's summary without the segment its context numbers, which an inspection of the
+/// same observation brings.
+fn unsegmented(summary: &Value) -> Value {
+    let mut summary = summary.clone();
+    assert!(summary.as_object_mut().unwrap().remove("segment").is_some());
+    summary
+}
+
 #[test]
 fn inspect_reads_a_saved_second_without_its_context() {
-    // Goal: a hover's read of a saved second reads that second, never the 900 seconds around it.
-    // Method: commit to the last of three sealed seconds the session holds only as saved,
-    // inspect the first by the identity its trend point carries, and count the saved tables the
-    // inspection reads.
+    // Goal: a hover's read of a saved second reads that second's window, never the 900 seconds
+    // around it, and brings the summary a selection of it brings.
+    // Method: seal one second in each of seven run minutes, which the session holds only as
+    // saved, commit to the first, inspect the last by the identity its trend point carries, and
+    // count the saved tables the inspection reads against those a selection of it reads.
     let mut fixture = Fixture::new();
-    fixture.publish_with_system_rows(1000);
-    fixture.publish_with_system_rows(1001);
-    fixture.publish_with_system_rows(1002);
-    fixture.seal();
+    for minute in 0..7 {
+        if minute > 0 {
+            fixture.skip_run_ticks(59);
+        }
+        fixture.publish_with_system_rows(1000 + minute * 60);
+        fixture.seal_minute(minute);
+    }
+    let identity = context_point(
+        &LiveSession::open(&fixture.root)
+            .unwrap()
+            .select(1360, 0)
+            .unwrap(),
+        1360,
+    );
     let mut live = LiveSession::open(&fixture.root).unwrap();
     live.poll().unwrap();
     live.poll_evict(u64::MAX).unwrap();
-    let committed = live.select(1002, 0).unwrap();
-    let identity = context_point(&committed, 1000);
+    live.select(1000, 0).unwrap();
     let reads = live.history.as_ref().unwrap().source_reads.get();
 
-    let inspected = live.inspect(1000, &identity).unwrap();
+    let inspected = live.inspect(1360, &identity).unwrap();
 
-    assert_eq!(live.history.as_ref().unwrap().source_reads.get() - reads, 1);
-    assert_eq!(inspected["second"], 1000);
+    let inspect_reads = live.history.as_ref().unwrap().source_reads.get() - reads;
     assert!(same(&inspected["selected"], &identity));
     assert!(same(
         &live.page("ticks", 0).unwrap()["observation"],
         &identity
     ));
+    let reads = live.history.as_ref().unwrap().source_reads.get();
+    let selected = live.select(1360, 0).unwrap();
+    let select_reads = live.history.as_ref().unwrap().source_reads.get() - reads;
+    assert_eq!(inspected["second"], 1360);
+    assert_eq!(inspected["summary"], unsegmented(&selected["summary"]));
+    assert!(inspect_reads * 2 < select_reads);
 }
 
 #[test]
@@ -111,4 +134,8 @@ fn inspect_reads_a_live_second_without_the_saved_minutes() {
         &live.page("ticks", 0).unwrap()["observation"],
         &identity
     ));
+    assert_eq!(
+        inspected["summary"],
+        unsegmented(&live.select(1000, 0).unwrap()["summary"])
+    );
 }

@@ -369,7 +369,8 @@ impl LiveSession {
     /// Selects the observation `identity` names at `second`, for a read of that second alone, as
     /// a hover's is. It builds no context, which costs `select` hundreds of milliseconds on a
     /// full window, and leaves the context the last `select` read, so only reads of the selected
-    /// second may follow it, never a history.
+    /// second may follow it, never a history. The summary carries no segment, which only a
+    /// context numbers.
     pub fn inspect(&mut self, second: u64, identity: &Value) -> Result<Value> {
         self.selected = None;
         self.follows_live = false;
@@ -378,14 +379,14 @@ impl LiveSession {
         }
         self.operation.check()?;
 
-        let selected = self.inspect_selected(second, identity)?;
-        self.selected = Some(selected.clone());
-        Ok(json!({"second": second, "selected": selected}))
+        let response = self.inspect_selected(second, identity)?;
+        self.selected = Some(response["selected"].clone());
+        Ok(response)
     }
 
-    /// The observation `identity` names at `second`, from the newest live readings, then the
-    /// ring, then the saved minutes, which are opened again once where the session's copy of
-    /// them is older than the observation.
+    /// The observation `identity` names at `second`, with its summary, from the newest live
+    /// readings, then the ring, then the saved minutes, which are opened again once where the
+    /// session's copy of them is older than the observation.
     fn inspect_selected(&mut self, second: u64, identity: &Value) -> Result<Value> {
         if let Some(observation) = self
             .observations
@@ -393,12 +394,14 @@ impl LiveSession {
             .filter(|observation| observation.observation.wall / NANOSECONDS_PER_SECOND == second)
             .find(|observation| same(&observation.json(), identity))
         {
-            return Ok(observation.json());
+            return Ok(json!({"second": second, "selected": observation.json(),
+                "summary": inspect_summary(&observation.point)?}));
         }
 
         if let Some(inspected) = self.select_rehydrate(identity)? {
-            let selected = inspected.json();
-            if selected["wall_ns"]
+            let response = json!({"second": second, "selected": inspected.json(),
+                "summary": inspect_summary(&inspected.point)?});
+            if response["selected"]["wall_ns"]
                 .as_u64()
                 .map(|wall| wall / NANOSECONDS_PER_SECOND)
                 != Some(second)
@@ -408,11 +411,11 @@ impl LiveSession {
             self.cache_bytes += inspected.bytes;
             self.inspected = Some(inspected);
             self.poll_evict(0)?;
-            return Ok(selected);
+            return Ok(response);
         }
 
-        if let Some(selected) = self.inspect_history(second, identity)? {
-            return Ok(selected);
+        if let Some(response) = self.inspect_history(second, identity)? {
+            return Ok(response);
         }
         self.refresh_history()?;
         self.inspect_history(second, identity)?
@@ -2041,6 +2044,17 @@ fn table_bytes(table: &Table) -> usize {
                         .sum::<usize>()
             })
             .sum::<usize>()
+}
+
+/// The summary of a live observation a hover inspects, which carries neither the observation
+/// it names, as a selection's summary does not, nor a segment, which only a context numbers.
+fn inspect_summary(point: &Value) -> Result<Value> {
+    let mut summary = metrics::public_point(point)?;
+    summary
+        .as_object_mut()
+        .ok_or(Error::Bound("point shape"))?
+        .remove("segment");
+    Ok(summary)
 }
 
 fn same(left: &Value, right: &Value) -> bool {
