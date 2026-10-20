@@ -1052,8 +1052,9 @@ pub fn clip_plot(bounds: Bounds<Pixels>, window: &mut Window, paint: impl FnOnce
     window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| paint(window));
 }
 
-/// The focus indicator: a ring outside the element, so that focusing it moves nothing and
-/// the text inside keeps the contrast it has unfocused.
+/// The focus indicator: a ring along the element's inner edge, so that focusing it moves
+/// nothing, the text inside keeps the contrast it has unfocused, and an element with no
+/// background of its own is outlined rather than filled.
 #[must_use]
 pub fn focus_ring(style: gpui::StyleRefinement) -> gpui::StyleRefinement {
     style.shadow(vec![gpui::BoxShadow {
@@ -1061,7 +1062,7 @@ pub fn focus_ring(style: gpui::StyleRefinement) -> gpui::StyleRefinement {
         offset: point(px(0.0), px(0.0)),
         blur_radius: px(0.0),
         spread_radius: px(2.0),
-        inset: false,
+        inset: true,
     }])
 }
 
@@ -1081,6 +1082,19 @@ pub fn alpha(value: u32, opacity: f32) -> gpui::Rgba {
 #[cfg(test)]
 mod live_tests {
     use super::*;
+
+    #[test]
+    fn the_focus_ring_is_drawn_inside_the_element_so_a_transparent_one_stays_unfilled() {
+        // Goal: a focused control with no background of its own shows a ring and nothing else.
+        // Method: read the shadows of the ring's style and check the one it adds is inset, since
+        // a shadow outside the element fills the element's own bounds too.
+        let style = focus_ring(gpui::StyleRefinement::default());
+
+        let shadows = style.box_shadow.unwrap();
+
+        assert_eq!(shadows.len(), 1);
+        assert!(shadows[0].inset);
+    }
 
     #[test]
     fn prepared_lines_keep_stack_bases_through_hidden_negative_and_missing_readings() {
