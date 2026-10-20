@@ -1,4 +1,6 @@
-use super::{axis, cards, charts, minute_rows, nearest, report_rows, seal_rows, sources};
+use super::{
+    axis, cards, charts, minute_rows, nearest, report_rows, run_status, seal_rows, sources,
+};
 use crate::chart_axes::TimeWindow;
 use crate::self_reports::{MinuteReport, Seal, SealTotals, SelfReports, TickReport};
 
@@ -334,5 +336,21 @@ fn a_single_report_and_window_read_in_the_singular() {
             "Across the 1 ten-second report",
             "1 full window + 0 partial windows"
         ]
+    );
+}
+
+#[test]
+fn the_run_status_says_the_reports_come_from_the_collector_this_app_started() {
+    // Goal: the Self page does not call its reports a saved run with no live connection, since
+    // the app reads them from the collector it started while that runs. Method: build the
+    // status line of a run 74 seconds old and look for the stale wording.
+    let status = run_status("1:14");
+
+    assert!(!status.contains("Saved"), "{status}");
+    assert!(!status.contains("No live connection"), "{status}");
+    assert_eq!(
+        status,
+        "Flightdeck diagnostic run · 1:14 elapsed · 10-second reports from the collector this \
+         app started."
     );
 }

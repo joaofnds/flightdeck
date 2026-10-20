@@ -629,6 +629,16 @@ pub fn elapsed(started: u64, now: u64) -> String {
     format!("{}:{:02}", seconds / 60, seconds % 60)
 }
 
+/// The line under the Self page's title. The reports are read while the collector this app
+/// started runs, so the line names that run and never a saved one.
+#[must_use]
+pub fn run_status(elapsed: &str) -> String {
+    format!(
+        "Flightdeck diagnostic run · {elapsed} elapsed · 10-second reports from the collector \
+         this app started."
+    )
+}
+
 #[cfg(test)]
 #[path = "self_monitoring_tests.rs"]
 mod tests;

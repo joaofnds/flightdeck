@@ -111,9 +111,9 @@ const SIGNALS: [(&str, &str); 5] = [
          memory. The query API exists; this run did not exercise it.",
     ),
     (
-        "Native viewer · Not implemented",
+        "Native viewer · Not captured",
         "Viewer CPU/footprint, time to display a selected second, rendering cost and live \
-         ring-reader lag. These are design targets, not measured zeroes.",
+         ring-reader lag. The collector's reports do not carry them, so none is a measured zero.",
     ),
 ];
 
@@ -138,10 +138,7 @@ impl LiveDashboard {
                     || "Unavailable".into(),
                     |now| self_monitoring::elapsed(started, now),
                 );
-                format!(
-                    "Saved Flightdeck diagnostic run · {elapsed} elapsed · 10-second reports. \
-                     No live connection."
-                )
+                self_monitoring::run_status(&elapsed)
             },
         );
         let columns = if self.viewport_size.width < px(640.0) {
@@ -660,8 +657,8 @@ fn self_pipeline() -> impl IntoElement {
         .child(
             paragraph(
                 "Sealed recording → disk query API (implemented, not sampled here) → native \
-                 viewer (not yet implemented). Planned live viewing also reads the ring. Neither \
-                 path uses a metrics server or a dashboard service.",
+                 viewer. Live viewing also reads the ring. Neither path uses a metrics server or \
+                 a dashboard service.",
             )
             .py(px(12.0))
             .border_t_1()
