@@ -220,10 +220,15 @@ impl Worker {
 
     /// Reads the observation `request` names at its second alone, keeping the context the last
     /// request read, so a hover shows its second without rebuilding the 900 seconds around it.
-    /// The snapshot carries the second's readings and none of the histories over a context.
+    /// The snapshot carries the second's readings and none of the histories over a context,
+    /// since a history read over the kept context would mix it with the inspected second.
     pub fn inspect(&mut self, request: Request) -> Result<u64, String> {
         assert!(request.second.is_some());
         assert!(request.identity.is_some());
+        assert!(!request.load_resident_history);
+        assert!(!request.load_app_attribution_history);
+        assert!(!request.load_process_history);
+        assert_eq!(request.earlier, Earlier::Skip);
         self.submit(request, Context::Keep)
     }
 
