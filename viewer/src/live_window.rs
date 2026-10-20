@@ -19,14 +19,19 @@ pub trait WindowValue: Sized {
     /// The bytes the values of one window may hold together.
     const BYTES_MAX: usize;
 
+    /// What picks the value of an observation from its sample, such as the App whose parts a
+    /// window keeps.
+    type Selection;
+
     fn selected(&self) -> &Observation;
 
     fn bytes(&self) -> usize;
 
-    /// Gives `consume` the values the sealed minutes of the window `range` keep, so the
-    /// observations they hold need no replay.
+    /// Gives `consume` the values of `selection` the sealed minutes of the window `range` keep,
+    /// so the observations they hold need no replay.
     fn visit_kept(
         history: &crate::Session,
+        selection: &Self::Selection,
         range: ContextRange,
         consume: impl FnMut(Self) -> Result<()>,
     ) -> Result<()>;
@@ -208,12 +213,13 @@ impl ObservationKey {
 
 impl LiveSession {
     /// Gives every observation of the selected window that holds no value yet the value
-    /// `project` takes from its sample: the live ones from their cached samples, the saved ones
-    /// from what their sealed minutes keep, and the rest in one replay of the window's saved
-    /// minutes. A window it covers already stays the one its holders share.
+    /// `project` takes from its sample for `selection`: the live ones from their cached samples,
+    /// the saved ones from what their sealed minutes keep, and the rest in one replay of the
+    /// window's saved minutes. A window it covers already stays the one its holders share.
     pub(super) fn fill_window<T: WindowValue>(
         &self,
         window: &mut Arc<Window<T>>,
+        selection: &T::Selection,
         project: impl Fn(&Sample) -> Result<T>,
     ) -> Result<()> {
         let selected = self.window_selected()?;
@@ -227,7 +233,7 @@ impl LiveSession {
         fill_window_live(&self.observations, range, held, &project)?;
 
         if let Some(history) = &self.history {
-            let mut saved = T::visit_kept(history, range, |value| held.insert(value));
+            let mut saved = T::visit_kept(history, selection, range, |value| held.insert(value));
             if saved.is_ok() {
                 if !held.covers(range, &self.selected_context)? {
                     saved = fill_window_saved(history, &selected, held, &project);
@@ -256,6 +262,7 @@ impl LiveSession {
     pub(super) fn fill_window_kept<T: WindowValue>(
         &self,
         window: &mut Arc<Window<T>>,
+        selection: &T::Selection,
         project: impl Fn(&Sample) -> Result<T>,
     ) -> Result<()> {
         let range = window_range(&self.window_selected()?)?;
@@ -267,7 +274,7 @@ impl LiveSession {
         held.retain(range);
         fill_window_live(&self.observations, range, held, &project)?;
         if let Some(history) = &self.history {
-            T::visit_kept(history, range, |value| held.insert(value))?;
+            T::visit_kept(history, selection, range, |value| held.insert(value))?;
         }
 
         Ok(())

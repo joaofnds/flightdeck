@@ -16,6 +16,9 @@ impl WindowValue for Ranks {
     /// A few kibibytes of ranks for each of the most observations a window holds.
     const BYTES_MAX: usize = 32 * 1024 * 1024;
 
+    /// Every App ranks, so the ranks of an observation need no selection.
+    type Selection = ();
+
     fn selected(&self) -> &Observation {
         &self.selected
     }
@@ -37,6 +40,7 @@ impl WindowValue for Ranks {
 
     fn visit_kept(
         history: &crate::Session,
+        _selection: &(),
         range: ContextRange,
         consume: impl FnMut(Self) -> Result<()>,
     ) -> Result<()> {
@@ -68,7 +72,7 @@ impl LiveSession {
         let operation = self.operation.begin(self.operation.epoch())?;
         operation.run(|| {
             let mut ranks = std::mem::take(&mut self.app_ranks);
-            let ranked = self.fill_window(&mut ranks, Sample::ranks);
+            let ranked = self.fill_window(&mut ranks, &(), Sample::ranks);
             self.app_ranks = ranks;
 
             ranked
@@ -82,7 +86,7 @@ impl LiveSession {
         let operation = self.operation.begin(self.operation.epoch())?;
         operation.run(|| {
             let mut ranks = std::mem::take(&mut self.app_ranks);
-            let ranked = self.fill_window_kept(&mut ranks, Sample::ranks);
+            let ranked = self.fill_window_kept(&mut ranks, &(), Sample::ranks);
             self.app_ranks = ranks;
 
             ranked

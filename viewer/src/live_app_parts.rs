@@ -12,7 +12,7 @@ use crate::session::ContextRange;
 pub type WindowParts = Window<AppPart>;
 
 /// The App whose parts the session keeps.
-pub(super) struct PartsApp {
+pub struct PartsApp {
     kind: KeyKind,
     bytes: Box<[u8]>,
 }
@@ -22,6 +22,8 @@ impl WindowValue for AppPart {
     /// window. A larger App keeps a part for only some of the window's seconds, and a hover
     /// reads the others.
     const BYTES_MAX: usize = 64 * 1024 * 1024;
+
+    type Selection = PartsApp;
 
     fn selected(&self) -> &Observation {
         AppPart::selected(self)
@@ -34,6 +36,7 @@ impl WindowValue for AppPart {
     /// No sealed minute keeps an App's parts, so the replay gives them all.
     fn visit_kept(
         _history: &crate::Session,
+        _app: &PartsApp,
         _range: ContextRange,
         _consume: impl FnMut(Self) -> Result<()>,
     ) -> Result<()> {
@@ -53,21 +56,22 @@ impl LiveSession {
     pub fn part_window(&mut self, kind: KeyKind, bytes: &[u8]) -> Result<()> {
         let operation = self.operation.begin(self.operation.epoch())?;
         operation.run(|| {
+            let app = PartsApp {
+                kind,
+                bytes: bytes.into(),
+            };
+            let mut parts = std::mem::take(&mut self.app_parts);
             if !self
                 .parts_app
                 .as_ref()
-                .is_some_and(|app| app.is(kind, bytes))
+                .is_some_and(|kept| kept.is(kind, bytes))
             {
-                self.parts_app = Some(PartsApp {
-                    kind,
-                    bytes: bytes.into(),
-                });
-                self.app_parts = Arc::default();
+                parts = Arc::default();
             }
 
-            let mut parts = std::mem::take(&mut self.app_parts);
-            let parted = self.fill_window(&mut parts, |sample| sample.app_part(kind, bytes));
+            let parted = self.fill_window(&mut parts, &app, |sample| sample.app_part(kind, bytes));
             self.app_parts = parts;
+            self.parts_app = Some(app);
 
             parted
         })

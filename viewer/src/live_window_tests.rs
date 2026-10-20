@@ -13,6 +13,8 @@ struct Weighed {
 impl WindowValue for Weighed {
     const BYTES_MAX: usize = 100;
 
+    type Selection = ();
+
     fn selected(&self) -> &Observation {
         &self.selected
     }
@@ -23,6 +25,7 @@ impl WindowValue for Weighed {
 
     fn visit_kept(
         _history: &crate::Session,
+        _selection: &(),
         _range: ContextRange,
         _consume: impl FnMut(Self) -> persistence::Result<()>,
     ) -> persistence::Result<()> {
