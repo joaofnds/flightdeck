@@ -34,6 +34,9 @@ pub struct NumberedEvent<'a> {
 const WINDOW_TICKS_MAX: usize = 61;
 const _: () = assert!(WINDOW_TICKS_MAX == 60 + 1);
 
+/// What a window may stage, its ticks, their events and identities, before it seals.
+pub const STAGED_BYTES_MAX: u64 = 768 * 1024 * 1024;
+
 /// Validated per-tick section bounds for one elapsed minute.
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
@@ -208,7 +211,7 @@ impl Window {
             .bytes
             .checked_add(bytes)
             .ok_or(Error::Bound("staging bytes"))?;
-        if total > 768 * 1024 * 1024 {
+        if total > STAGED_BYTES_MAX {
             return Err(Error::Bound("staging bytes"));
         }
 
@@ -246,7 +249,7 @@ impl Window {
             + staging_bytes(tick, events.len())
             + collector::u64_from_usize(row_bytes + dictionary_bytes);
         let peak = total + collector::u64_from_usize(Prepared::peak_bytes(source));
-        if peak > 768 * 1024 * 1024 {
+        if peak > STAGED_BYTES_MAX {
             return Err(Error::Bound("staging bytes"));
         }
 

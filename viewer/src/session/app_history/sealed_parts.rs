@@ -28,7 +28,7 @@ const ROWS_MAX: usize = 1 << 19;
 /// decodes to at most 8 bytes a column, 16 more for each of its two columns of bytes and what
 /// parquet adds to each, and the bytes of its App's key and its executable's name, so long
 /// keys may refuse a window before its rows reach their bound.
-const DECODED_BYTES_MAX: u64 = 384 * 1024 * 1024;
+pub(super) const DECODED_BYTES_MAX: u64 = 384 * 1024 * 1024;
 const ROW_DECODED_BYTES: usize = COLUMNS * 8 + 2 * 24;
 
 /// A row holds the facts of an observation's sample, one of its Apps, or one of an App's

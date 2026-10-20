@@ -27,7 +27,7 @@ pub use store::{
 
 pub use encoder::{Encoder, TableManifest, encode_derived, frame, table_columns};
 pub use schema::SCHEMA_VERSION;
-pub use window::{Limits, NumberedEvent, Observation, Window, WindowIdentity};
+pub use window::{Limits, NumberedEvent, Observation, STAGED_BYTES_MAX, Window, WindowIdentity};
 
 pub type Result<T> = std::result::Result<T, Error>;
 

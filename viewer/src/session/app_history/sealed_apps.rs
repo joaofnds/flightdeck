@@ -13,6 +13,21 @@ use persistence::schema::{APP_PARTS, Table};
 use persistence::worker::{Derivation, Derive};
 use persistence::{Error, Result, TableManifest};
 
+/// What the samples a derivation holds for its window's App parts may take.
+const SAMPLES_BYTES_MAX: u64 = 256 * 1024 * 1024;
+
+/// The window staged for its seal, the engine's read of one of its tables, the samples held for
+/// its parts and the table built from them fit the persister's working bound together.
+const _: () = {
+    assert!(
+        persistence::STAGED_BYTES_MAX
+            + persistence::engine::PARQUET_EXPANDED_BYTES_MAX
+            + super::sealed_parts::DECODED_BYTES_MAX
+            + SAMPLES_BYTES_MAX
+            <= persistence::resources::WORKING_BYTES_MAX
+    );
+};
+
 /// Samples each observation of a window as it seals, from the tables the persister wrote for
 /// it, by the rule the replay of its minute samples it, and keeps the Apps' ranks and every
 /// App's part.
@@ -43,7 +58,9 @@ impl Derive for SealedApps {
             }
         }
 
-        let mut samples = Vec::with_capacity(readings.len());
+        let mut ranks = Vec::with_capacity(readings.len());
+        let mut samples: Result<Vec<Box<Sample>>> = Ok(Vec::with_capacity(readings.len()));
+        let mut samples_bytes = 0;
         replayer.frames(derivation.pending, &readings, |reading, frame| {
             let previous = super::sample_predecessor(
                 projection.reading.as_ref(),
@@ -53,28 +70,32 @@ impl Derive for SealedApps {
             );
             let mut sample = None;
             Sample::capture(&frame, previous, &mut sample)?;
-            samples.push(sample.ok_or(Error::Bound("sealed Apps sample"))?);
+            let sample = sample.ok_or(Error::Bound("sealed Apps sample"))?;
+            ranks.push(sample.ranks()?);
+            samples_bytes += collector::u64_from_usize(sample.bytes());
+            if samples_bytes > SAMPLES_BYTES_MAX {
+                samples = Err(Error::Bound("sealed parts samples"));
+            }
+            if let Ok(held) = &mut samples {
+                held.push(sample);
+            }
             projection.previous = Some(frame);
             projection.reading = Some(*reading);
             Ok(())
         })?;
 
-        let ranks = samples
-            .iter()
-            .map(|sample| sample.ranks())
-            .collect::<Result<Vec<_>>>()?;
-
         let mut tables = vec![super::sealed_ranks::encode(&ranks, derivation.pending)?];
-        let parts = super::sealed_parts::encode(&samples, derivation.pending);
+        let parts =
+            samples.and_then(|samples| super::sealed_parts::encode(&samples, derivation.pending));
         tables.extend(derive_parts(parts, derivation)?);
 
         Ok(tables)
     }
 }
 
-/// The table of the window's App parts, or none when the window's parts are more than the table
-/// holds or writing them failed, since its ranks stand without them and the replay of its
-/// minute gives its parts.
+/// The table of the window's App parts, or none when its samples are more than the derivation
+/// holds, its parts are more than the table holds or writing them failed, since its ranks stand
+/// without them and the replay of its minute gives its parts.
 fn derive_parts(
     parts: Result<TableManifest>,
     derivation: &Derivation<'_>,
