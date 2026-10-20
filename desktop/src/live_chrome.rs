@@ -42,15 +42,6 @@ fn chrome_note(route: &str) -> &'static str {
     }
 }
 
-/// The prototype's note at the left of the footer.
-fn footer_note(route: &str) -> &'static str {
-    if route == "self" {
-        "Saved Flightdeck diagnostics · report intervals vary · not live"
-    } else {
-        "Captured from the Mac system dashboard · rates use 1-minute windows"
-    }
-}
-
 /// What the source pill reads. The prototype names its source in every healthy state, so the
 /// states that only tell where the readings come from read as it does, and the states that
 /// say the readings stopped or cannot be trusted keep their words.
@@ -152,40 +143,6 @@ impl LiveDashboard {
             .when(!selected, |item| item.hover(|style| style.bg(rgb(RAISED))))
             .on_click(cx.listener(move |this, _, _, cx| this.navigate(route, cx)))
             .child(title)
-    }
-
-    /// The window of seconds the charts show. It follows the held live reading and not a
-    /// hovered second, since a hover moves the cursor and never the charted window.
-    pub(crate) fn capture_range(&self) -> String {
-        if self.request.route == "self" {
-            return self.self_run_range();
-        }
-        self.snapshot
-            .as_deref()
-            .and_then(|snapshot| snapshot.selection["second"].as_u64())
-            .map_or_else(String::new, |second| {
-                crate::chart_axes::range_label(second.saturating_sub(899), second)
-            })
-    }
-
-    /// The page's last row: where the readings come from and the window the charts show.
-    pub fn footer(&self) -> impl IntoElement {
-        let range = self.capture_range();
-
-        div()
-            .flex()
-            .flex_wrap()
-            .justify_between()
-            .gap(px(12.0))
-            .px(px(18.0))
-            .py(px(14.0))
-            .mt(px(16.0))
-            .text_size(px(11.0))
-            .text_color(rgb(MUTED))
-            .border_t_1()
-            .border_color(charts::alpha(TEXT, 0.12))
-            .child(footer_note(&self.request.route))
-            .child(div().debug_selector(|| "capture-range".into()).child(range))
     }
 
     pub fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {

@@ -285,24 +285,6 @@ pub fn date_with_zone(second: u64) -> String {
     format!("{date} {}", zone(&parts))
 }
 
-/// The local window from `first` to `last`, as in `15 Oct 2026 · 22:13:00–23:13:00 CEST`.
-#[must_use]
-pub fn range_label(first: u64, last: u64) -> String {
-    let Some(parts) = local_parts(last) else {
-        return "Unavailable".into();
-    };
-    let Some(date) = date(&parts) else {
-        return "Unavailable".into();
-    };
-
-    format!(
-        "{date} · {}–{} {}",
-        clock(first, true),
-        clock(last, true),
-        zone(&parts)
-    )
-}
-
 fn date(parts: &libc::tm) -> Option<String> {
     let index = usize::try_from(parts.tm_mon).ok()?;
     let month = MONTHS.get(index)?;

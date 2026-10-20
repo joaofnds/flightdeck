@@ -202,19 +202,6 @@ fn the_source_status_stays_live_while_a_hover_holds_the_view(cx: &mut TestAppCon
 }
 
 #[gpui::test]
-fn the_capture_range_stays_on_the_charted_window_during_a_hover(cx: &mut TestAppContext) {
-    // Goal: the footer names the window the charts show, not one ending at the hovered second.
-    // Method: read the footer range, hover an older second and read it again.
-    let mut harness = HoverHarness::setup(cx, Route::Cpu, Mode::Follow);
-    let before = harness.driver.capture_range();
-
-    harness.driver.hover(Epoch::Historical);
-
-    assert_eq!(harness.driver.capture_range(), before);
-    harness.teardown();
-}
-
-#[gpui::test]
 fn pointer_exit_restores_the_paused_selection_after_a_late_failure(cx: &mut TestAppContext) {
     // A failed hover cannot unpause or overwrite the committed paused observation.
     let mut harness = HoverHarness::setup(cx, Route::Cpu, Mode::Paused);
@@ -510,11 +497,6 @@ impl HoverDriver {
     fn status(&self) -> String {
         self.view
             .read_with(&self.context, |dashboard, _| dashboard.status())
-    }
-
-    fn capture_range(&self) -> String {
-        self.view
-            .read_with(&self.context, |dashboard, _| dashboard.capture_range())
     }
 
     fn status_at(&self, now: std::time::SystemTime) -> String {

@@ -72,7 +72,6 @@ impl Row {
             Self::App(index) => format!("app-{index}"),
             Self::Executable(index) => format!("executable-{index}"),
             Self::Inventory => "inventory".into(),
-            Self::Footer => "footer".into(),
             Self::Spacer(_) => "hover-spacing".into(),
         }
     }

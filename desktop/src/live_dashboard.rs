@@ -161,8 +161,6 @@ pub enum Row {
     App(usize),
     Executable(usize),
     Inventory,
-    /// The page's last row, which reports where the readings come from.
-    Footer,
     Spacer(gpui::Pixels),
 }
 

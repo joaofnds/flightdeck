@@ -124,15 +124,6 @@ impl LiveDashboard {
         }
     }
 
-    /// The footer's range for the Self page, which has the run's elapsed time and no wall time.
-    pub(crate) fn self_run_range(&self) -> String {
-        let elapsed = self.self_reports.started.zip(wall_second()).map_or_else(
-            || "Unavailable".into(),
-            |(started, now)| self_monitoring::elapsed(started, now),
-        );
-        format!("Elapsed run 0:00–{elapsed} · wall time unavailable")
-    }
-
     fn self_overview(&self) -> impl IntoElement {
         let status = self.self_reports.started.map_or_else(
             || "This app did not start the collector, so its reports are not captured.".into(),

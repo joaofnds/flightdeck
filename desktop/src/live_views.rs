@@ -52,11 +52,7 @@ impl LiveDashboard {
                     gpui::StatefulInteractiveElement::overflow_y_scroll,
                 )
             })
-            .px(px(if matches!(&self.rows[index], Row::Footer) {
-                0.0
-            } else {
-                24.0
-            }))
+            .px(px(24.0))
             .pt(px(if framed.is_some_and(|f| !f.top) {
                 0.0
             } else {
@@ -198,7 +194,6 @@ impl LiveDashboard {
             Row::App(index) => self.app_row(*index, cx),
             Row::Executable(index) => self.executable_row(*index, cx),
             Row::Inventory => self.computer(cx).into_any_element(),
-            Row::Footer => self.footer().into_any_element(),
             Row::Spacer(height) => div().h(*height).into_any_element(),
         }
     }
