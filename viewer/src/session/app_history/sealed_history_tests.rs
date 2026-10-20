@@ -105,6 +105,30 @@ fn restores_the_process_group_history_a_replay_gives_from_the_parts_a_window_kee
 }
 
 #[test]
+fn restores_a_process_group_of_a_window_that_keeps_parts_without_reading_its_saved_sources() {
+    // Goal: a process group's history reads none of the ticks, processes or events of a window
+    // that keeps its Apps' parts, all of which a replay of its minute reads.
+    // Method: seal two observations with their Apps' parts, restore the history of the group
+    // of an App's processes named "current", and count the saved sources the restore read.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(1001);
+    fixture.publish_with_system_rows(1002);
+    fixture.seal_derived(&[], &SealedApps);
+    let session = Session::open(&fixture.root).unwrap();
+    let selected = selected(&session, 1002);
+    let group = GroupTarget {
+        app: CURRENT,
+        executable: b"current",
+    };
+
+    session
+        .with_app_history(&selected, &group, group_points)
+        .unwrap();
+
+    assert_eq!(session.source_reads.get(), 0);
+}
+
+#[test]
 fn restores_a_replayed_minute_after_a_minute_that_keeps_parts() {
     // Goal: the first observation of a minute sealed without parts takes its rates from the
     // last observation of the minute before, which keeps its parts, as a replay of both gives.
