@@ -99,6 +99,7 @@ impl LiveDashboard {
             | Row::OverviewStatus
             | Row::BatteryState(_)
             | Row::Temperature(_, _, _)
+            | Row::AppAttribution(_, _)
             | Row::GpuApps(_)
             | Row::NetworkApps(_)
             | Row::CPUTop(_) => (4.0, 4.0),
@@ -467,4 +468,26 @@ fn details_frame(frame: Frame, content: AnyElement) -> AnyElement {
         .when(frame.bottom, |panel| panel.border_b_1().rounded_b(px(12.0)))
         .child(content)
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::live_app_attribution_history::Metric;
+
+    #[test]
+    fn a_heading_sits_as_far_below_an_app_chart_row_as_below_the_gpu_apps_row() {
+        // Goal: the prototype puts a section heading the same distance below every row of App
+        // charts, so the Storage page's Disk I/O by app has the room GPU time by app has.
+        // Method: add the padding below each row to the room above a heading.
+        let heading = Row::Heading("Storage temperature".into());
+
+        let below =
+            |row: &Row| LiveDashboard::row_padding(row).1 + LiveDashboard::row_padding(&heading).0;
+
+        assert!(
+            (below(&Row::AppAttribution(Metric::Disk, None)) - below(&Row::GpuApps(None))).abs()
+                < f32::EPSILON
+        );
+    }
 }
