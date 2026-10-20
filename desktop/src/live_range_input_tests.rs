@@ -145,3 +145,61 @@ fn choosing_a_shorter_range_shows_the_last_minutes_of_history(cx: &mut TestAppCo
     );
     harness.teardown();
 }
+
+#[gpui::test]
+fn choosing_thirty_minutes_or_an_hour_shows_all_the_history_there_is(cx: &mut TestAppContext) {
+    // Goal: the longer ranges of the menu can be chosen, and a recording shorter than the range
+    // shows what it has. Method: choose 30 minutes and then 60 minutes on a 1000-second
+    // recording, and read the view after each.
+    let mut harness = InputHarness::setup(cx);
+
+    for selector in ["time-range-30m", "time-range-60m"] {
+        harness.driver.click_control(selector);
+
+        assert_eq!(
+            harness.driver.view_window(),
+            Some(TimeWindow {
+                first: 0,
+                span: 1001
+            })
+        );
+    }
+    harness.teardown();
+}
+
+#[gpui::test]
+fn the_custom_stepper_goes_beyond_fifteen_minutes(cx: &mut TestAppContext) {
+    // Goal: the stepper adds a minute to the default fifteen. Method: press plus once.
+    let mut harness = InputHarness::setup(cx);
+
+    harness.driver.click_control("time-custom-more");
+
+    assert_eq!(
+        harness.driver.view_window(),
+        Some(TimeWindow {
+            first: 41,
+            span: 960
+        })
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn dragging_across_a_range_longer_than_fifteen_minutes_selects_inside_it(cx: &mut TestAppContext) {
+    // Goal: drag-to-zoom works on the longer windows. Method: widen the range to 16 minutes,
+    // drag from a quarter to three quarters of the plot, and read the stretch it holds.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.follow_live();
+    harness.driver.click_control("time-custom-more");
+
+    harness.driver.drag_plot(0.25, 0.75);
+
+    assert_eq!(
+        harness.driver.view_window(),
+        Some(TimeWindow {
+            first: 281,
+            span: 481
+        })
+    );
+    harness.teardown();
+}

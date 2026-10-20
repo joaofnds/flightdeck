@@ -562,6 +562,113 @@ mod tests {
     }
 
     #[test]
+    fn thins_the_hour_before_the_full_detail_context_to_one_reading_per_stretch() {
+        // Goal: charts over 30 and 60 minutes get readings older than the 900 full-detail seconds
+        // without the viewer sending every second of them. Method: seal 70 minutes of three
+        // readings each, ask for the older tail at the newest second, and read what it keeps.
+        let base = 100_000;
+        let mut recording = Recording::new();
+        for minute in 0..70 {
+            recording.elapsed = minute * 60;
+            for offset in 0..3 {
+                recording.publish(base + minute * 60 + offset);
+            }
+            recording.seal_window(minute);
+        }
+        let mut session = LiveSession::open(&recording.root).unwrap();
+        let second = base + 69 * 60 + 2;
+
+        let tail = session.earlier_context(second).unwrap();
+
+        assert_eq!(
+            tail["earlier_stride_seconds"],
+            viewer::EARLIER_STRIDE_SECONDS
+        );
+        let seconds: Vec<u64> = tail["earlier_trends"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|point| point["wall_ns"].as_u64().unwrap() / 1_000_000_000)
+            .collect();
+        let expected: Vec<u64> = (10..54).map(|minute| base + minute * 60).collect();
+        assert_eq!(seconds, expected);
+        assert!(seconds.iter().all(|kept| *kept >= second - 3599));
+        assert!(seconds.iter().all(|kept| *kept < second - 899));
+        let segments: std::collections::BTreeSet<u64> = tail["earlier_trends"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|point| point["segment"].as_u64().unwrap())
+            .collect();
+        assert_eq!(segments.len(), expected.len());
+    }
+
+    #[test]
+    fn draws_one_line_from_the_older_tail_into_the_full_detail_context_when_readings_are_unbroken()
+    {
+        // Goal: the tail and the context share a segment where no reading is missing between
+        // them, so a chart has no notch at the join. Method: seal consecutive seconds across the
+        // limit of the tail, then again with a gap at the limit, and read the tail's segment.
+        let limit = 200_000;
+        let newest = limit + 899 + 5;
+        for gap in [false, true] {
+            let mut recording = Recording::new();
+            for second in limit - 4..limit {
+                recording.publish(second);
+            }
+            if gap {
+                recording.elapsed += 1;
+            }
+            for second in limit..limit + 4 {
+                recording.publish(second);
+            }
+            recording.seal_window(0);
+            let mut session = LiveSession::open(&recording.root).unwrap();
+
+            let tail = session.earlier_context(newest).unwrap();
+
+            let points = tail["earlier_trends"].as_array().unwrap();
+            assert_eq!(points.len(), 1);
+            assert_eq!(points[0]["wall_ns"], (limit - 4) * 1_000_000_000);
+            assert_eq!(points[0]["segment"] == 1, !gap);
+        }
+    }
+
+    #[test]
+    fn reads_the_older_tail_once_for_each_stretch_the_context_moves_through() {
+        // Goal: following the newest second does not query saved history every second.
+        // Method: read the tail, remove the saved data, and read it for later seconds.
+        let limit = 200_000;
+        let newest = limit + 899;
+        let mut recording = Recording::new();
+        for second in limit - 4..limit {
+            recording.publish(second);
+        }
+        recording.seal_window(0);
+        let mut session = LiveSession::open(&recording.root).unwrap();
+        let tail = session.earlier_context(newest).unwrap();
+        assert_eq!(tail["earlier_trends"].as_array().unwrap().len(), 1);
+        std::fs::remove_dir_all(recording.root.join("data")).unwrap();
+
+        assert_eq!(session.earlier_context(newest + 9).unwrap(), tail);
+        assert!(session.earlier_context(newest + 10).is_err());
+    }
+
+    #[test]
+    fn has_no_older_tail_while_the_recording_is_younger_than_the_full_detail_context() {
+        // Goal: a young recording needs no older tail. Method: ask for it with one sealed minute.
+        let mut recording = Recording::new();
+        recording.publish(1000);
+        recording.publish(1001);
+        recording.seal();
+        let mut session = LiveSession::open(&recording.root).unwrap();
+
+        let tail = session.earlier_context(1001).unwrap();
+
+        assert_eq!(tail["earlier_trends"], serde_json::json!([]));
+    }
+
+    #[test]
     fn rejects_a_canceled_follow_and_retries_only_after_beginning_the_new_epoch() {
         // Goal: a stale follow produces neither a usable response nor an old page.
         // Method: cancel a selected session, reject its epoch, then explicitly begin and retry.

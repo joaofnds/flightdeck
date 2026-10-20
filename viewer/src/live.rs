@@ -14,7 +14,10 @@ use crate::data::{self, Table};
 use crate::live_app_history::{GroupTarget, History, Selection, Target};
 use crate::live_app_response::{Detail, KeyKind, Page, Sample};
 use crate::live_apps::{Frame, Publication, PublicationEvents};
-use crate::session::{ContextRange, OBSERVATIONS_MAX, Observation, PAGE_ROWS};
+use crate::session::{
+    ContextRange, DETAIL_SECONDS, EARLIER_STRIDE_SECONDS, LOADED_SECONDS, OBSERVATIONS_MAX,
+    Observation, PAGE_ROWS, Tail,
+};
 use crate::{Cancellation, Session, metrics};
 
 #[path = "app_resident_history.rs"]
@@ -54,6 +57,7 @@ pub struct LiveSession {
     history: Option<Session>,
     history_error: Option<String>,
     restored: Option<ScalarContext>,
+    earlier: Option<EarlierCache>,
     sources: Vec<Source>,
     observations: VecDeque<LiveObservation>,
     points: VecDeque<Value>,
@@ -84,6 +88,13 @@ struct ScalarContext {
     /// at or after it, so a later follow reads only the history past it.
     through_ns: u64,
     points: Vec<Value>,
+}
+
+/// The older tail, read once for every stretch of seconds the full-detail context moves through.
+struct EarlierCache {
+    limit_second: u64,
+    windows: usize,
+    tail: Tail,
 }
 
 type PointIndex<'a> = BTreeMap<(Option<&'a str>, Option<&'a str>, Option<u64>), usize>;
@@ -161,6 +172,7 @@ impl LiveSession {
             history: None,
             history_error: None,
             restored: None,
+            earlier: None,
             sources: Vec::with_capacity(SOURCES_MAX),
             observations: VecDeque::new(),
             points: VecDeque::new(),
@@ -352,6 +364,56 @@ impl LiveSession {
         self.selected_context = context;
 
         Ok(response)
+    }
+
+    /// The saved readings older than `second`'s full-detail context, back to the loaded hour,
+    /// one in every stretch of seconds. Read again only when the context moves into another
+    /// stretch or a minute is sealed, so following the newest second costs one read in
+    /// every `EARLIER_STRIDE_SECONDS`.
+    pub fn earlier_context(&mut self, second: u64) -> Result<Value> {
+        let detail_first = second.saturating_sub(DETAIL_SECONDS - 1);
+        let limit_second = detail_first / EARLIER_STRIDE_SECONDS * EARLIER_STRIDE_SECONDS;
+        let first_second = second.saturating_sub(LOADED_SECONDS - 1);
+        let windows = self
+            .history
+            .as_ref()
+            .map_or(0, |history| history.windows.len());
+        let current = self
+            .earlier
+            .as_ref()
+            .is_some_and(|cache| cache.limit_second == limit_second && cache.windows == windows);
+        if !current {
+            let tail = match &mut self.history {
+                Some(history) => {
+                    history.begin(self.operation.epoch())?;
+                    history.earlier_tail(
+                        limit_second.saturating_sub(LOADED_SECONDS - DETAIL_SECONDS),
+                        limit_second,
+                    )?
+                }
+                None => Tail { points: Vec::new() },
+            };
+            self.earlier = Some(EarlierCache {
+                limit_second,
+                windows,
+                tail,
+            });
+        }
+        let cache = self.earlier.as_ref().ok_or(Error::Bound("older tail"))?;
+        let points: Vec<&Value> = cache
+            .tail
+            .points
+            .iter()
+            .filter(|point| {
+                point["wall_ns"]
+                    .as_u64()
+                    .is_some_and(|wall| wall / NANOSECONDS_PER_SECOND >= first_second)
+            })
+            .collect();
+        context_bytes_of(&points)?;
+
+        Ok(json!({"earlier_trends": points,
+            "earlier_stride_seconds": EARLIER_STRIDE_SECONDS}))
     }
 
     /// Restores committed context once, then follows live points without repeating its queries.
@@ -2024,6 +2086,22 @@ fn context_contains(range: ContextRange, point: &Value) -> Result<bool> {
         .as_u64()
         .ok_or(Error::Bound("point clock"))?;
     Ok((range.first_ns..range.end_ns).contains(&wall))
+}
+
+fn context_bytes_of(points: &[&Value]) -> Result<()> {
+    if points.len() > OBSERVATIONS_MAX {
+        return Err(Error::Bound("context observations"));
+    }
+
+    if serde_json::to_vec(points)
+        .map_err(std::io::Error::other)?
+        .len()
+        > CONTEXT_BYTES_MAX
+    {
+        return Err(Error::Bound("context bytes"));
+    }
+
+    Ok(())
 }
 
 fn context_bytes(points: &[Value]) -> Result<()> {

@@ -11,6 +11,7 @@ use crate::live_inventory::PerformanceLevel;
 mod resource_projection;
 
 pub const OBSERVATIONS_MAX: usize = 4096;
+const LOADED_SECONDS: u64 = viewer::LOADED_SECONDS;
 pub const OVERVIEW_PRIMARY_PANELS: usize = 6;
 /// The Overview chart that sets load, power and heat side by side.
 pub const CORRELATION_ID: &str = "live-correlation";
@@ -27,16 +28,61 @@ pub fn inspection_identity(selection: &Value, second: u64) -> Option<Value> {
             return Some(selection["selected"].clone());
         }
     }
-    selection["trends"]
+    let recent = selection["trends"]
         .as_array()?
         .iter()
         .take(OBSERVATIONS_MAX)
-        .rfind(|point| {
-            point["wall_ns"]
-                .as_u64()
-                .is_some_and(|wall| wall / NANOSECONDS_PER_SECOND == second)
+        .rfind(|point| wall_second_of(point) == Some(second));
+    if recent.is_some() {
+        return recent.map(observation_identity);
+    }
+
+    older_reading(selection, second).map(observation_identity)
+}
+
+/// The older reading that stands for `second`, since the older tail keeps one reading in every
+/// stretch of seconds.
+fn older_reading(selection: &Value, second: u64) -> Option<&Value> {
+    selection["earlier_trends"]
+        .as_array()?
+        .get(older_index(selection, second)?)
+}
+
+/// The index among the older readings of the one that stands for `second`.
+#[must_use]
+pub fn older_index(selection: &Value, second: u64) -> Option<usize> {
+    let stride = selection["earlier_stride_seconds"].as_u64()?;
+    selection["earlier_trends"]
+        .as_array()?
+        .iter()
+        .take(OBSERVATIONS_MAX)
+        .rposition(|point| {
+            wall_second_of(point).is_some_and(|first| (first..first + stride).contains(&second))
         })
-        .map(observation_identity)
+}
+
+/// How many older readings sit before the recent ones in every chart, so an index among the
+/// recent readings plus this count is the index in a chart.
+#[must_use]
+pub fn older_count(selection: &Value) -> usize {
+    selection["earlier_trends"]
+        .as_array()
+        .map_or(0, |older| older.len().min(OBSERVATIONS_MAX))
+}
+
+/// The second `second` is inspected as: the second its observation was made, which differs
+/// from `second` only inside an older stretch that one reading stands for.
+#[must_use]
+pub fn inspection_second(selection: &Value, second: u64) -> u64 {
+    inspection_identity(selection, second)
+        .and_then(|identity| wall_second_of(&identity))
+        .unwrap_or(second)
+}
+
+fn wall_second_of(point: &Value) -> Option<u64> {
+    point["wall_ns"]
+        .as_u64()
+        .map(|wall| wall / NANOSECONDS_PER_SECOND)
 }
 
 /// The fields of a trend point that name its observation, which the reader accepts as the
@@ -77,16 +123,29 @@ pub fn panels(
         selection
     };
     let key = if route == "apps" { "points" } else { "trends" };
-    let Some(points) = source[key].as_array() else {
+    let Some(recent) = source[key].as_array() else {
         return Ok(Vec::new());
     };
-    if points.is_empty() {
+    if recent.is_empty() {
         return Ok(Vec::new());
     }
+    let earlier = if route == "apps" {
+        None
+    } else {
+        selection["earlier_trends"].as_array()
+    };
+    let joined;
+    let points: &[Value] = match earlier {
+        Some(older) if !older.is_empty() => {
+            joined = [older.as_slice(), recent].concat();
+            &joined
+        }
+        _ => recent,
+    };
     if points.len() > OBSERVATIONS_MAX {
         return Err("Live chart exceeds 4096 observations".to_owned());
     }
-    let domain = Domain::read(selection)?;
+    let domain = Domain::read(selection, earlier.is_some())?;
     let coordinates = coordinates(points, &domain, route == "apps", &source["selected"])?;
     let process = source["scope"] == "selected_named_process_group";
     let limit = if process {
@@ -163,6 +222,10 @@ struct Domain {
     first: u64,
     end: u64,
     span: u16,
+    /// The first second of the full-detail readings. Seconds before it hold older readings that
+    /// each stand for `stride` seconds.
+    recent_first: u64,
+    stride: u64,
 }
 
 struct Coordinates {
@@ -202,14 +265,33 @@ struct Reading {
 }
 
 impl Domain {
-    fn read(selection: &Value) -> Result<Self, String> {
+    /// The seconds the charts hold: the full-detail 900, or the whole loaded hour when the
+    /// selection carries an older tail.
+    fn read(selection: &Value, longer: bool) -> Result<Self, String> {
         let second = integer(&selection["second"])?;
-        let first = second.saturating_sub(899);
+        let recent_first = second.saturating_sub(899);
+        let first = if longer {
+            second.saturating_sub(LOADED_SECONDS - 1)
+        } else {
+            recent_first
+        };
         let end = second.checked_add(1).ok_or("Live chart time overflow")?;
         let span = u16::try_from(end - first).map_err(|error| error.to_string())?;
         assert!(span > 0);
-        assert!(span <= 900);
-        Ok(Self { first, end, span })
+        assert!(u64::from(span) <= LOADED_SECONDS);
+        let stride = if longer {
+            integer(&selection["earlier_stride_seconds"])?
+        } else {
+            1
+        };
+        assert!(stride > 0);
+        Ok(Self {
+            first,
+            end,
+            span,
+            recent_first,
+            stride,
+        })
     }
 
     fn position(&self, wall_ns: u64) -> Result<f32, String> {
@@ -1180,7 +1262,14 @@ fn timeline_cells(
         let cell = usize::try_from(second - domain.first).map_err(|error| error.to_string())?;
         assert!(cell < span);
         if Some(cell) != selected {
-            cells[cell] = state(panel.lines[0].values[index]);
+            let value = state(panel.lines[0].values[index]);
+            if second < domain.recent_first {
+                let stretch = domain.stride.min(domain.recent_first - second);
+                let stretch = usize::try_from(stretch).map_err(|error| error.to_string())?;
+                cells[cell..cell + stretch].fill(value);
+            } else {
+                cells[cell] = value;
+            }
         }
         if Some(index) == coordinates.selected_index {
             selected = Some(cell);

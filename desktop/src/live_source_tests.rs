@@ -25,6 +25,37 @@ fn an_empty_recording_reports_absence_without_requiring_a_live_ring() {
 }
 
 #[test]
+fn a_chart_request_carries_the_older_tail_and_a_hover_request_does_not() {
+    // Goal: charts get the saved readings older than the full-detail context so a range of 30 or
+    // 60 minutes has something to show, while a hover's preview stays cheap. Method: read a
+    // recording with a minute sealed long before its newest second, with and without the tail.
+    let recording = SealedRecording::with_an_older_minute();
+    let mut request = SealedRecording::request();
+    request.earlier = crate::live_source::Earlier::Load;
+
+    let charts = recording.read(request.clone()).unwrap();
+    request.earlier = crate::live_source::Earlier::Skip;
+    let hover = recording.read(request).unwrap();
+
+    let tail = charts.selection["earlier_trends"].as_array().unwrap();
+    assert_eq!(tail.len(), 1);
+    assert_eq!(tail[0]["wall_ns"], 1_000_000_000_000_u64);
+    assert_eq!(
+        charts.selection["earlier_stride_seconds"],
+        viewer::EARLIER_STRIDE_SECONDS
+    );
+    assert!(hover.selection.get("earlier_trends").is_none());
+    let panels = crate::live_projection::panels("cpu", &charts.selection, None).unwrap();
+    assert_eq!(
+        panels[0].window,
+        Some(crate::chart_axes::TimeWindow {
+            first: 0,
+            span: 2201
+        })
+    );
+}
+
+#[test]
 fn reader_diagnostics_returns_catalog_without_reading_a_selected_gap() {
     // Goal: diagnostics remains available without projecting a historical selection or trends.
     // Method: use a real sealed store while the committed inspection points into a gap.
@@ -329,6 +360,28 @@ impl SealedRecording {
         recording
     }
 
+    /// Readings at second 1000 and two at second 2200, which are more than 900 seconds apart.
+    fn with_an_older_minute() -> Self {
+        let recording = Self::empty();
+        let store = persistence::Store::open(&recording.root).unwrap();
+        let identity = persistence::WindowIdentity {
+            run: collector::ring::RunIdentity {
+                recording: store.recording(),
+                run: collector::ring::Identity([1, 2]),
+                boot: collector::ring::Identity([3, 4]),
+            },
+            window: 0,
+        };
+        let mut window = Self::window(identity);
+        Self::append(&mut window, 1, 1000);
+        Self::append(&mut window, 2, 2200);
+        Self::append(&mut window, 3, 2200);
+        Self::commit(&store, identity, &window);
+        drop(store);
+
+        recording
+    }
+
     fn window(identity: persistence::WindowIdentity) -> persistence::Window {
         persistence::Window::new(
             identity,
@@ -425,6 +478,7 @@ impl SealedRecording {
             load_resident_history: true,
             load_app_attribution_history: true,
             load_process_history: true,
+            earlier: crate::live_source::Earlier::Skip,
             executable: None,
             app: None,
             apps_offset: 0,
@@ -482,6 +536,7 @@ fn the_default_app_survives_a_new_first_row_and_an_empty_page() {
         load_resident_history: true,
         load_app_attribution_history: true,
         load_process_history: true,
+        earlier: crate::live_source::Earlier::Skip,
         executable: None,
         app: None,
         apps_offset: 0,
@@ -660,6 +715,7 @@ fn refuses_superseded_results_after_accepting_a_new_request() {
         load_resident_history: true,
         load_app_attribution_history: true,
         load_process_history: true,
+        earlier: crate::live_source::Earlier::Skip,
         executable: None,
         app: None,
         apps_offset: 0,

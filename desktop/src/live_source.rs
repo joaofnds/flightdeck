@@ -16,6 +16,13 @@ pub struct Worker {
     mode: SourceMode,
 }
 
+/// Whether a selection carries the readings older than its full-detail context.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Earlier {
+    Load,
+    Skip,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Request {
     pub route: String,
@@ -30,6 +37,9 @@ pub struct Request {
     pub load_resident_history: bool,
     pub load_app_attribution_history: bool,
     pub load_process_history: bool,
+    /// Whether the selection carries the older tail the charts need to span the loaded hour,
+    /// which a hover's preview of one observation does without.
+    pub earlier: Earlier,
     pub executable: Option<String>,
 }
 
@@ -456,6 +466,7 @@ fn reader_snapshot(
         }
     }
     let mut selection = reader_selection(session, &command.request)?;
+    reader_earlier(session, &command.request, &mut selection);
     reader.system.annotate(&mut selection);
     let mut snapshot = reader_snapshot_new(command.generation, catalog, selection);
     // A newly opened page publishes its readings first, since replaying its App histories
@@ -578,6 +589,28 @@ fn reader_selection(session: &mut LiveSession, request: &Request) -> Result<Valu
     }
 
     Ok(selection)
+}
+
+/// Adds the saved readings older than the selection's full-detail context, which the charts of
+/// a longer range draw. A failed read leaves the charts at their full-detail context and says
+/// why beside it.
+fn reader_earlier(session: &mut LiveSession, request: &Request, selection: &mut Value) {
+    if request.earlier == Earlier::Skip || request.route == "apps" {
+        return;
+    }
+    let Some(second) = selection["second"].as_u64() else {
+        return;
+    };
+    let Some(fields) = selection.as_object_mut() else {
+        return;
+    };
+    match session.earlier_context(second) {
+        Ok(Value::Object(tail)) => fields.extend(tail),
+        Ok(_) => unreachable!("The older tail is an object"),
+        Err(error) => {
+            fields.insert("earlier_error".into(), error.to_string().into());
+        }
+    }
 }
 
 fn reader_latest(session: &mut LiveSession) -> Result<Value, String> {

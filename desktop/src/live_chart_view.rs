@@ -792,15 +792,27 @@ fn target_index(
     if panel.kind == "timeline" {
         return inspection_index(panel, snapshot, Some(target.second));
     }
-    let points = if is_process_history(panel) {
-        process_history_payload(panel, snapshot)?["points"].as_array()?
-    } else {
-        snapshot.selection["trends"].as_array()?
-    };
-    points
+    if is_process_history(panel) {
+        return process_history_payload(panel, snapshot)?["points"]
+            .as_array()?
+            .iter()
+            .take(crate::data::LIVE_SAMPLE_LIMIT)
+            .rposition(|point| target.matches(point.get("observation").unwrap_or(point)));
+    }
+    let recent = snapshot.selection["trends"]
+        .as_array()?
         .iter()
         .take(crate::data::LIVE_SAMPLE_LIMIT)
-        .rposition(|point| target.matches(point.get("observation").unwrap_or(point)))
+        .rposition(|point| target.matches(point));
+    if let Some(index) = recent {
+        return Some(index + crate::live_projection::older_count(&snapshot.selection));
+    }
+
+    snapshot.selection["earlier_trends"]
+        .as_array()?
+        .iter()
+        .take(crate::data::LIVE_SAMPLE_LIMIT)
+        .rposition(|point| target.matches(point))
 }
 
 /// The cursor over a chart. A state timeline draws it dashed and always, as the prototype does,
@@ -1068,25 +1080,37 @@ fn inspection_index(panel: &Panel, snapshot: &Snapshot, second: Option<u64>) -> 
     }
 
     if panel.kind == "timeline" {
-        let first = snapshot.selection["second"].as_u64()?.saturating_sub(899);
+        let first = match panel.window {
+            Some(window) => window.first,
+            None => snapshot.selection["second"].as_u64()?.saturating_sub(899),
+        };
         let Ok(offset) = usize::try_from(second.checked_sub(first)?) else {
             return None;
         };
         return (offset < panel.lines.first()?.values.len()).then_some(offset);
     }
 
-    let points = if is_process_history(panel) {
-        process_history_payload(panel, snapshot)?["points"].as_array()?
-    } else {
-        snapshot.selection["trends"].as_array()?
+    let at_second = |point: &Value| {
+        let stamp = point.get("observation").unwrap_or(point);
+        wall_second(&stamp["wall_ns"]) == Some(second)
     };
-    points
+    if is_process_history(panel) {
+        return process_history_payload(panel, snapshot)?["points"]
+            .as_array()?
+            .iter()
+            .take(crate::data::LIVE_SAMPLE_LIMIT)
+            .rposition(at_second);
+    }
+    let recent = snapshot.selection["trends"]
+        .as_array()?
         .iter()
         .take(crate::data::LIVE_SAMPLE_LIMIT)
-        .rposition(|point| {
-            let stamp = point.get("observation").unwrap_or(point);
-            wall_second(&stamp["wall_ns"]) == Some(second)
-        })
+        .rposition(at_second);
+    if let Some(index) = recent {
+        return Some(index + crate::live_projection::older_count(&snapshot.selection));
+    }
+
+    crate::live_projection::older_index(&snapshot.selection, second)
 }
 
 fn wall_second(value: &Value) -> Option<u64> {
@@ -1218,5 +1242,61 @@ mod tests {
         assert!((fraction - 898.5 / 900.0).abs() < f32::EPSILON);
         let fraction = cursor_fraction(&panel, &snapshot, Some(zoomed), Some(999)).unwrap();
         assert!((fraction - 99.5 / 101.0).abs() < f32::EPSILON);
+    }
+
+    fn long_snapshot() -> Snapshot {
+        let point = |second: u64, publication: u64| {
+            json!({"run": "00000000000000010000000000000002",
+                "boot": "00000000000000030000000000000004", "segment": 1,
+                "wall_ns": second * 1_000_000_000, "publication": publication})
+        };
+        let mut snapshot = snapshot();
+        snapshot.selection = json!({"second": 5000, "earlier_stride_seconds": 10,
+            "earlier_trends": [point(2000, 1), point(2010, 2)],
+            "trends": [point(4101, 3), point(5000, 4)]});
+        snapshot
+    }
+
+    fn long_panel(kind: &str, readings: usize) -> Panel {
+        let mut panel: Panel = serde_json::from_value(json!({"id":"live-cpu","title":"CPU",
+            "kind":kind,"unit":"%","lines":[{"name":"a","color":"#fff",
+            "values":vec![1.0; readings]}], "selectedIndex": readings - 1}))
+        .unwrap();
+        panel.window = Some(charts::TimeWindow {
+            first: 1401,
+            span: 3600,
+        });
+        panel
+    }
+
+    #[test]
+    fn hover_finds_older_readings_after_the_tail_offset_of_every_index() {
+        // Goal: a chart over the whole hour hovers the reading its pointer is over, whether it is
+        // an older thinned reading or a recent one. Method: ask for seconds in the older tail,
+        // between its readings, and in the recent context of a chart that holds both.
+        let snapshot = long_snapshot();
+        let panel = long_panel("line", 4);
+
+        assert_eq!(inspection_index(&panel, &snapshot, Some(2013)), Some(1));
+        assert_eq!(inspection_index(&panel, &snapshot, Some(2000)), Some(0));
+        assert_eq!(inspection_index(&panel, &snapshot, Some(2020)), None);
+        assert_eq!(inspection_index(&panel, &snapshot, Some(4101)), Some(2));
+        assert_eq!(inspection_index(&panel, &snapshot, Some(5000)), Some(3));
+        let target = crate::live_hover::Target::regular(&snapshot, 2013);
+        assert_eq!(target.second, 2010);
+        assert_eq!(target_index(&panel, &snapshot, &target), Some(1));
+        let target = crate::live_hover::Target::regular(&snapshot, 4101);
+        assert_eq!(target_index(&panel, &snapshot, &target), Some(2));
+    }
+
+    #[test]
+    fn a_timeline_over_the_whole_hour_hovers_the_cell_of_the_second() {
+        // Goal: a state timeline holds a cell per second of the hour, so hover names the cell
+        // from the chart's own first second. Method: ask for an older and a recent second.
+        let snapshot = long_snapshot();
+        let panel = long_panel("timeline", 3600);
+
+        assert_eq!(inspection_index(&panel, &snapshot, Some(2013)), Some(612));
+        assert_eq!(inspection_index(&panel, &snapshot, Some(4101)), Some(2700));
     }
 }

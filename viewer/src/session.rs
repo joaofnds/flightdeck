@@ -649,6 +649,9 @@ pub(crate) use app_history::AttributionReplay;
 pub(crate) use app_history::ProcessGroupsReplay;
 pub use app_history::SealedApps;
 mod committed_apps;
+mod earlier;
 #[cfg(test)]
 mod reopen_tests;
 mod selection;
+pub(crate) use earlier::{DETAIL_SECONDS, Tail};
+pub use earlier::{EARLIER_STRIDE_SECONDS, LOADED_SECONDS};

@@ -161,6 +161,7 @@ pub(crate) fn request() -> Request {
         cpu_offset: 0,
         executable: Some("hex:61".into()),
         load_process_history: true,
+        earlier: crate::live_source::Earlier::Skip,
         load_resident_history: true,
         load_app_attribution_history: true,
     }

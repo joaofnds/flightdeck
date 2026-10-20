@@ -99,6 +99,7 @@ fn probe_request(route: &str) -> Request {
         load_resident_history: true,
         load_app_attribution_history: true,
         load_process_history: true,
+        earlier: crate::live_source::Earlier::Skip,
         executable: None,
         app: None,
         apps_offset: 0,

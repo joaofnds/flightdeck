@@ -992,3 +992,114 @@ fn an_inspected_second_names_its_observation_without_carrying_its_readings() {
     assert!(identity.get("per_core_percent").is_none());
     assert!(identity.to_string().len() < 4096);
 }
+
+fn long_selection() -> Value {
+    // The newest second is 5000, so the full-detail context starts at 4101 and the older tail
+    // holds every tenth second before it.
+    let point = |second: u64, publication: u64, cpu: f64, pressure: u64| {
+        json!({"run": "00000000000000010000000000000002",
+            "boot": "00000000000000030000000000000004", "segment": 1,
+            "wall_ns": second * 1_000_000_000, "publication": publication,
+            "cpu_percent": cpu, "pressure": pressure})
+    };
+    json!({"second": 5000, "selected": {"publication": 4,
+        "run": "00000000000000010000000000000002",
+        "boot": "00000000000000030000000000000004"},
+        "earlier_stride_seconds": 10,
+        "earlier_trends": [point(2000, 1, 10.0, 1), point(2010, 2, 11.0, 2)],
+        "trends": [point(4101, 3, 20.0, 0), point(5000, 4, 30.0, 0)]})
+}
+
+#[test]
+fn an_older_tail_widens_the_chart_to_the_whole_loaded_hour() {
+    // Goal: charts hold the hour the viewer loaded, so a 30 or 60 minute range has readings.
+    // Method: project a selection with an older tail and read the window and the positions.
+    let panels = panels("cpu", &long_selection(), None).unwrap();
+
+    assert_eq!(
+        panels[0].window,
+        Some(crate::chart_axes::TimeWindow {
+            first: 1401,
+            span: 3600
+        })
+    );
+    let positions = panels[0].positions.as_ref().unwrap();
+    assert_eq!(positions.len(), 4);
+    assert!((positions[0] - 599.0 / 3600.0).abs() < 0.000_001);
+    assert!((positions[1] - 609.0 / 3600.0).abs() < 0.000_001);
+    assert!((positions[2] - 2700.0 / 3600.0).abs() < 0.000_001);
+    assert!((positions[3] - 3599.0 / 3600.0).abs() < 0.000_001);
+    assert_eq!(
+        panels[0].lines[0].values,
+        [Some(10.0), Some(11.0), Some(20.0), Some(30.0)]
+    );
+}
+
+#[test]
+fn a_selection_without_an_older_tail_keeps_the_default_history() {
+    // Goal: a recording younger than the tail, or a route that has none, keeps its 900 seconds.
+    // Method: project the same selection with its tail removed.
+    let mut selection = long_selection();
+    selection.as_object_mut().unwrap().remove("earlier_trends");
+
+    let panels = panels("cpu", &selection, None).unwrap();
+
+    assert_eq!(
+        panels[0].window,
+        Some(crate::chart_axes::TimeWindow {
+            first: 4101,
+            span: 900
+        })
+    );
+    assert_eq!(panels[0].positions.as_ref().unwrap().len(), 2);
+}
+
+#[test]
+fn an_older_reading_fills_the_seconds_it_stands_for_on_a_timeline() {
+    // Goal: a state timeline has no blank stripes between the thinned older readings.
+    // Method: project pressure over the tail and read the cells each older reading covers.
+    let overview = panels("overview", &long_selection(), None).unwrap();
+    let pressure = overview
+        .iter()
+        .find(|panel| panel.id == "live-memory-pressure")
+        .unwrap();
+
+    let cells = &pressure.lines[0].values;
+    assert_eq!(cells.len(), 3600);
+    assert!(cells[598].is_none());
+    assert!(cells[599..609].iter().all(|cell| *cell == Some(1.0)));
+    assert!(cells[609..619].iter().all(|cell| *cell == Some(2.0)));
+    assert!(cells[619].is_none());
+    assert_eq!(cells[2700], Some(0.0));
+    assert_eq!(cells[3599], Some(0.0));
+}
+
+#[test]
+fn a_second_between_thinned_readings_inspects_the_reading_that_stands_for_it() {
+    // Goal: pointing at an older second names an observation, though only every tenth is kept.
+    // Method: ask for a second inside a reading's stretch, and for one no reading stands for.
+    let selection = long_selection();
+
+    assert_eq!(
+        inspection_identity(&selection, 2013).unwrap()["publication"],
+        2
+    );
+    assert_eq!(
+        inspection_identity(&selection, 2000).unwrap()["publication"],
+        1
+    );
+    assert!(inspection_identity(&selection, 2020).is_none());
+    assert!(inspection_identity(&selection, 3000).is_none());
+}
+
+#[test]
+fn an_older_second_is_inspected_as_the_second_of_its_reading() {
+    // Goal: inspecting a second inside a thinned stretch asks the viewer for the observation that
+    // stands for it, which it can find by its own second. Method: ask for seconds inside a
+    // stretch, in the recent context and outside both.
+    let selection = long_selection();
+
+    assert_eq!(inspection_second(&selection, 2013), 2010);
+    assert_eq!(inspection_second(&selection, 4101), 4101);
+    assert_eq!(inspection_second(&selection, 3000), 3000);
+}

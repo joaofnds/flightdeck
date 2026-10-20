@@ -262,6 +262,7 @@ impl LiveDashboard {
             load_resident_history: true,
             load_app_attribution_history: true,
             load_process_history: true,
+            earlier: crate::live_source::Earlier::Load,
             executable: None,
         }
     }
@@ -544,6 +545,9 @@ impl LiveDashboard {
     }
 
     pub fn inspect(&mut self, second: u64, cx: &mut Context<Self>) {
+        let second = self.context_snapshot().map_or(second, |snapshot| {
+            crate::live_projection::inspection_second(&snapshot.selection, second)
+        });
         self.request.second = Some(second);
         self.request.identity = self.context_snapshot().and_then(|snapshot| {
             crate::live_projection::inspection_identity(&snapshot.selection, second)

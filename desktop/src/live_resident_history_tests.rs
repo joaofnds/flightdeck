@@ -234,6 +234,7 @@ fn resident_decode_failure_preserves_machine_panels_and_selected_app_rankings() 
         load_resident_history: true,
         load_app_attribution_history: true,
         load_process_history: true,
+        earlier: crate::live_source::Earlier::Skip,
         executable: None,
     };
 

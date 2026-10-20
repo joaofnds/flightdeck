@@ -63,6 +63,7 @@ impl Target {
         if let Some(identity) =
             crate::live_projection::inspection_identity(&snapshot.selection, second)
         {
+            let second = crate::live_projection::inspection_second(&snapshot.selection, second);
             match Self::exact(second, &identity) {
                 Ok(target) => return target,
                 Err(error) => eprintln!("Hover observation identity unavailable: {error}"),
@@ -109,6 +110,7 @@ impl Preview {
             load_resident_history: false,
             load_app_attribution_history: false,
             load_process_history: false,
+            earlier: crate::live_source::Earlier::Skip,
             ..request.clone()
         };
         let mut executables = Vec::new();
