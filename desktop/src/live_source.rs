@@ -627,19 +627,24 @@ fn reader_payload(
             reader_cpu_history(session, request, snapshot)?;
         }
     }
+    // Ranking and keeping App parts replay the window's saved minutes, so they follow the
+    // histories the page shows, and a hover's own read does neither.
     if !snapshot.histories_pending {
         reader_payload_histories(session, request, snapshot);
-        // Ranking and keeping App parts replay the window's saved minutes, so they follow the
-        // histories the page shows, and a hover's own read does neither.
-        if ranked {
-            if request.load_app_attribution_history {
-                reader_app_ranks(session, snapshot);
-            }
-        }
         if request.route == "apps" {
             if request.load_process_history {
                 reader_app_parts(session, request, snapshot)?;
             }
+        }
+    }
+    // A newly opened page brings the ranks its window already keeps with its first readings,
+    // so a hover during its history read shows the top Apps they hold at once.
+    if ranked {
+        if request.load_app_attribution_history {
+            if !snapshot.histories_pending {
+                reader_app_ranks(session);
+            }
+            snapshot.app_ranks = Some(session.app_ranks());
         }
     }
 
@@ -649,13 +654,12 @@ fn reader_payload(
 /// Ranks the selected window's observations, so a hover shows any of their top Apps at once.
 /// A window ranked in part still serves the observations it holds, and the next read goes on
 /// from them.
-fn reader_app_ranks(session: &mut LiveSession, snapshot: &mut Snapshot) {
+fn reader_app_ranks(session: &mut LiveSession) {
     match session.rank_window() {
         Ok(()) => {}
         Err(persistence::Error::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted => {}
         Err(error) => eprintln!("App ranks of the selected window unavailable: {error}"),
     }
-    snapshot.app_ranks = Some(session.app_ranks());
 }
 
 /// Keeps the selected App's part of each observation of the selected window, so a hover on

@@ -228,6 +228,26 @@ fn hover_reads_leave_the_window_unranked() {
     assert!(snapshot.app_ranks.is_none());
 }
 
+#[test]
+fn a_newly_opened_page_brings_the_ranks_its_window_keeps() {
+    // Goal: a hover on a page still reading its App histories shows another observation's top
+    // Apps at once, from the ranks its window already keeps.
+    // Method: rank the window on a full Overview read at publication three, open the Memory
+    // page, and preview publication two over its first readings.
+    let recording = SealedRecording::with_ranked_apps();
+    let mut reader = super::SnapshotReader::new();
+    reader.command.request = ranked_request_at("overview", 3);
+    reader.read_complete(&recording);
+    reader.command.request.route = "memory".into();
+    reader.command.generation += 1;
+    let target = Target::exact(1001, &ranked_identity(2)).unwrap();
+
+    let opened = reader.read(&recording).unwrap().unwrap();
+
+    assert!(opened.histories_pending);
+    assert!(Preview::resident(&opened, &reader.command.request, target).complete);
+}
+
 fn exact_ranked_request(route: &str) -> Request {
     ranked_request_at(route, 2)
 }
