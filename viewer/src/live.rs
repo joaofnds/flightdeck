@@ -484,18 +484,8 @@ impl LiveSession {
     /// stretch or a minute is sealed, so following the newest second costs one read in
     /// every `EARLIER_STRIDE_SECONDS`.
     pub fn earlier_context(&mut self, second: u64) -> Result<Value> {
-        let detail_first = second.saturating_sub(DETAIL_SECONDS - 1);
-        let limit_second = detail_first / EARLIER_STRIDE_SECONDS * EARLIER_STRIDE_SECONDS;
-        let first_second = second.saturating_sub(LOADED_SECONDS - 1);
-        let windows = self
-            .history
-            .as_ref()
-            .map_or(0, |history| history.windows.len());
-        let current = self
-            .earlier
-            .as_ref()
-            .is_some_and(|cache| cache.limit_second == limit_second && cache.windows == windows);
-        if !current {
+        let limit_second = earlier_limit_second(second);
+        if !self.earlier_current(limit_second) {
             let tail = match &mut self.history {
                 Some(history) => {
                     history.begin(self.operation.epoch())?;
@@ -508,10 +498,23 @@ impl LiveSession {
             };
             self.earlier = Some(EarlierCache {
                 limit_second,
-                windows,
+                windows: self.earlier_windows(),
                 tail,
             });
         }
+
+        self.earlier_context_kept(second)?
+            .ok_or(Error::Bound("older tail"))
+    }
+
+    /// The older tail `earlier_context` gives for `second`, when the tail it read last still
+    /// answers it, and `None` when answering would read saved history.
+    pub fn earlier_context_kept(&self, second: u64) -> Result<Option<Value>> {
+        if !self.earlier_current(earlier_limit_second(second)) {
+            return Ok(None);
+        }
+
+        let first_second = second.saturating_sub(LOADED_SECONDS - 1);
         let cache = self.earlier.as_ref().ok_or(Error::Bound("older tail"))?;
         let points: Vec<&Value> = cache
             .tail
@@ -525,8 +528,22 @@ impl LiveSession {
             .collect();
         context_bytes_of(&points)?;
 
-        Ok(json!({"earlier_trends": points,
-            "earlier_stride_seconds": EARLIER_STRIDE_SECONDS}))
+        Ok(Some(json!({"earlier_trends": points,
+            "earlier_stride_seconds": EARLIER_STRIDE_SECONDS})))
+    }
+
+    /// Whether the older tail read last ends at `limit_second` and saw every sealed minute.
+    fn earlier_current(&self, limit_second: u64) -> bool {
+        let windows = self.earlier_windows();
+        self.earlier
+            .as_ref()
+            .is_some_and(|cache| cache.limit_second == limit_second && cache.windows == windows)
+    }
+
+    fn earlier_windows(&self) -> usize {
+        self.history
+            .as_ref()
+            .map_or(0, |history| history.windows.len())
     }
 
     /// Restores committed context once, then follows live points without repeating its queries.
@@ -2203,6 +2220,13 @@ fn context_range(second: u64) -> Result<ContextRange> {
         first_ns: second.saturating_sub(899) * NANOSECONDS_PER_SECOND,
         end_ns,
     })
+}
+
+/// The first second of the stretch that holds the first second of `second`'s full-detail
+/// context, where its older tail ends. The division floors.
+fn earlier_limit_second(second: u64) -> u64 {
+    let detail_first = second.saturating_sub(DETAIL_SECONDS - 1);
+    detail_first / EARLIER_STRIDE_SECONDS * EARLIER_STRIDE_SECONDS
 }
 
 fn context_contains(range: ContextRange, point: &Value) -> Result<bool> {

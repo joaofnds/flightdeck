@@ -151,6 +151,47 @@ fn a_newly_opened_page_reads_its_app_histories_without_a_pause() {
 }
 
 #[test]
+fn a_newly_opened_page_publishes_its_readings_before_an_older_tail_it_has_to_read() {
+    // Goal: an opened page shows its readings without waiting for an older tail its session
+    // would read from saved minutes, and the worker reads that tail straight after.
+    // Method: read the GPU page, which has no App histories, over a recording with a minute
+    // sealed long before its newest second, one step at a time.
+    let recording = SealedRecording::with_an_older_minute();
+    let mut reader = SnapshotReader::new();
+    reader.command.request.route = "gpu".into();
+    reader.command.request.earlier = crate::live_source::Earlier::Load;
+
+    let first = reader.read(&recording).unwrap().unwrap();
+    let pause = reader.pause();
+    let second = reader.read(&recording).unwrap().unwrap();
+
+    assert!(first.histories_pending);
+    assert!(first.selection.get("earlier_trends").is_none());
+    assert_eq!(pause, Duration::ZERO);
+    assert!(!second.histories_pending);
+    let tail = second.selection["earlier_trends"].as_array().unwrap();
+    assert_eq!(tail.len(), 1);
+}
+
+#[test]
+fn a_newly_opened_page_brings_the_older_tail_its_session_keeps_with_its_readings() {
+    // Goal: a page opened after another read the same older tail shows it at once.
+    // Method: read the GPU page to the end, then open Memory at the same newest second.
+    let recording = SealedRecording::with_an_older_minute();
+    let mut reader = SnapshotReader::new();
+    reader.command.request.route = "gpu".into();
+    reader.command.request.earlier = crate::live_source::Earlier::Load;
+    reader.read_complete(&recording);
+    reader.command.generation += 1;
+    reader.command.request.route = "memory".into();
+
+    let opened = reader.read(&recording).unwrap().unwrap();
+
+    let tail = opened.selection["earlier_trends"].as_array().unwrap();
+    assert_eq!(tail.len(), 1);
+}
+
+#[test]
 fn the_worker_pauses_once_a_page_has_all_it_asked_for() {
     // Goal: the worker polls at its own pace once the page's App histories are read.
     // Method: read Overview until complete through the reader over a real sealed recording.

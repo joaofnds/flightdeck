@@ -655,6 +655,30 @@ mod tests {
     }
 
     #[test]
+    fn gives_the_older_tail_it_keeps_only_while_the_context_stays_in_its_stretch() {
+        // Goal: a page can show its readings at once with the tail already read, and leave a
+        // tail it would have to read for later. Method: ask for the kept tail before reading
+        // it, then for seconds inside and past the stretch it was read for.
+        let limit = 200_000;
+        let newest = limit + 899;
+        let mut recording = Recording::new();
+        for second in limit - 4..limit {
+            recording.publish(second);
+        }
+        recording.seal_window(0);
+        let mut session = LiveSession::open(&recording.root).unwrap();
+        assert_eq!(session.earlier_context_kept(newest).unwrap(), None);
+
+        let tail = session.earlier_context(newest).unwrap();
+
+        assert_eq!(
+            session.earlier_context_kept(newest + 9).unwrap(),
+            Some(tail)
+        );
+        assert_eq!(session.earlier_context_kept(newest + 10).unwrap(), None);
+    }
+
+    #[test]
     fn has_no_older_tail_while_the_recording_is_younger_than_the_full_detail_context() {
         // Goal: a young recording needs no older tail. Method: ask for it with one sealed minute.
         let mut recording = Recording::new();

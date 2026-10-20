@@ -113,7 +113,8 @@ pub struct Snapshot {
     /// The selected App's part of each observation of the selected window the viewer has kept,
     /// so a hover on the Apps page shows its observation's App at once.
     pub app_parts: Option<Arc<viewer::WindowParts>>,
-    /// The page's App histories are still being read, and a later snapshot carries them.
+    /// The page's App histories, or the older tail its charts draw, are still being read, and
+    /// a later snapshot carries them.
     pub histories_pending: bool,
     pub read_ms: f64,
 }
@@ -492,14 +493,19 @@ fn reader_snapshot(
         }
     }
     let mut selection = reader_selection(session, &command.request, command.context)?;
-    reader_earlier(session, &command.request, &mut selection);
+    // A newly opened page publishes its readings first, since replaying its App histories
+    // from saved minutes, or reading an older tail its session does not keep, can take
+    // seconds, and the next step reads them.
+    let opened = reader.last_route != command.request.route;
+    let mut pending = reader_earlier(session, &command.request, opened, &mut selection);
+    if opened {
+        if reader_route_has_histories(&command.request.route) {
+            pending = true;
+        }
+    }
     reader.system.annotate(&mut selection);
     let mut snapshot = reader_snapshot_new(command.generation, catalog, selection);
-    // A newly opened page publishes its readings first, since replaying its App histories
-    // from saved minutes can take seconds, and the next step reads them.
-    if reader.last_route != command.request.route {
-        snapshot.histories_pending = reader_route_has_histories(&command.request.route);
-    }
+    snapshot.histories_pending = pending;
     reader_payload(
         session,
         &mut command.request,
@@ -669,25 +675,40 @@ fn reader_selection_kept(session: &mut LiveSession, request: &Request) -> Result
 }
 
 /// Adds the saved readings older than the selection's full-detail context, which the charts of
-/// a longer range draw. A failed read leaves the charts at their full-detail context and says
+/// a longer range draw, and returns whether the page still waits for them. A newly `opened`
+/// page takes only a tail its session keeps, and leaves one it would read from saved minutes
+/// to the next step. A failed read leaves the charts at their full-detail context and says
 /// why beside it.
-fn reader_earlier(session: &mut LiveSession, request: &Request, selection: &mut Value) {
+fn reader_earlier(
+    session: &mut LiveSession,
+    request: &Request,
+    opened: bool,
+    selection: &mut Value,
+) -> bool {
     if request.earlier == Earlier::Skip || request.route == "apps" {
-        return;
+        return false;
     }
     let Some(second) = selection["second"].as_u64() else {
-        return;
+        return false;
     };
     let Some(fields) = selection.as_object_mut() else {
-        return;
+        return false;
     };
-    match session.earlier_context(second) {
-        Ok(Value::Object(tail)) => fields.extend(tail),
-        Ok(_) => unreachable!("The older tail is an object"),
+    let tail = if opened {
+        session.earlier_context_kept(second)
+    } else {
+        session.earlier_context(second).map(Some)
+    };
+    match tail {
+        Ok(Some(Value::Object(tail))) => fields.extend(tail),
+        Ok(Some(_)) => unreachable!("The older tail is an object"),
+        Ok(None) => return true,
         Err(error) => {
             fields.insert("earlier_error".into(), error.to_string().into());
         }
     }
+
+    false
 }
 
 fn reader_latest(session: &mut LiveSession) -> Result<Value, String> {
