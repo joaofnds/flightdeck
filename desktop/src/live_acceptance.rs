@@ -57,6 +57,9 @@ impl Presentation {
                 }
             }
         }
+        if request.route == "overview" {
+            prepare_overview_titles(&mut panels)?;
+        }
         let mut presentation = Box::new(Self {
             request: request.clone(),
             snapshot,
@@ -110,6 +113,24 @@ fn prepare_app_names(
             line.name.clone_from(&name);
         }
     }
+    Ok(())
+}
+
+/// Names the App history charts as the Overview does, which differs from the pages that own them.
+fn prepare_overview_titles(panels: &mut [Rc<Panel>]) -> Result<(), String> {
+    for panel in panels {
+        let Some(title) = crate::live_overview_app_histories::overview_app_history_title(&panel.id)
+        else {
+            continue;
+        };
+        if panel.title == title {
+            continue;
+        }
+        let panel =
+            Rc::get_mut(panel).ok_or("Overview App history projection is already shared")?;
+        panel.title = title.into();
+    }
+
     Ok(())
 }
 

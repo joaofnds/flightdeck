@@ -260,6 +260,42 @@ fn overview_history_data_and_legend_keep_each_resource_reading(cx: &mut TestAppC
 }
 
 /// The card of one history slot: its chart, or the card that says it is not recorded.
+#[test]
+fn overview_titles_its_app_histories_as_the_prototype_does() {
+    // Goal: the Overview names its memory, disk and energy histories as the prototype does,
+    // while the pages that own them keep their own titles.
+    // Method: prepare the Overview presentation and read the title of each App history panel.
+    let mut request = crate::process_history_tests::request();
+    request.route = "overview".into();
+    request.app = None;
+    request.executable = None;
+
+    let presentation =
+        crate::live_acceptance::Presentation::prepare(&request, overview_history_snapshot(1))
+            .unwrap();
+
+    let title = |id: &str| {
+        presentation
+            .panels
+            .iter()
+            .find(|panel| panel.id == id)
+            .map(|panel| panel.title.clone())
+    };
+    assert_eq!(
+        title(crate::live_resident_history::PANEL_ID).as_deref(),
+        Some("Memory by app")
+    );
+    assert_eq!(
+        title(Metric::Disk.panel_id()).as_deref(),
+        Some("Disk by app")
+    );
+    assert_eq!(
+        title(Metric::Power.panel_id()).as_deref(),
+        Some("Energy by app")
+    );
+    assert_eq!(title(Metric::Cpu.panel_id()).as_deref(), Some("CPU by app"));
+}
+
 fn history_card(driver: &mut InputDriver, id: &'static str) -> gpui::Bounds<gpui::Pixels> {
     // Selectors are static strings, so the few this builds are leaked for the test's life.
     let chart: &'static str = Box::leak(format!("chart-card:{id}").into_boxed_str());

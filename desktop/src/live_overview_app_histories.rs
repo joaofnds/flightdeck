@@ -129,16 +129,22 @@ pub(crate) const OVERVIEW_APP_HISTORY_SLOTS: usize = 6;
 pub(crate) fn overview_app_history_slot(slot: usize) -> (&'static str, &'static str) {
     match slot {
         0 => (Metric::Cpu.panel_id(), Metric::Cpu.title()),
-        1 => (
-            crate::live_resident_history::PANEL_ID,
-            crate::live_resident_history::TITLE,
-        ),
+        1 => (crate::live_resident_history::PANEL_ID, "Memory by app"),
         2 => (NETWORK_APPS_ID, "Network by app"),
-        3 => (Metric::Disk.panel_id(), Metric::Disk.title()),
+        3 => (Metric::Disk.panel_id(), "Disk by app"),
         4 => (crate::live_projection::GPU_APPS_ID, "GPU by app"),
-        5 => (Metric::Power.panel_id(), Metric::Power.title()),
+        5 => (Metric::Power.panel_id(), "Energy by app"),
         _ => unreachable!("Overview App history has six fixed resource slots"),
     }
+}
+
+/// The title the Overview gives the panel `id`, which the page that owns the panel may name
+/// otherwise.
+pub(crate) fn overview_app_history_title(id: &str) -> Option<&'static str> {
+    (0..OVERVIEW_APP_HISTORY_SLOTS)
+        .map(overview_app_history_slot)
+        .find(|(slot, _)| *slot == id)
+        .map(|(_, title)| title)
 }
 
 /// The collector does not record network traffic per app, so no panel carries this id.
