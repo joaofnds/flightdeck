@@ -98,10 +98,7 @@ fn a_window_keeps_the_facts_of_each_second_for_an_app_that_ran_at_none() {
     // Method: seal two observations with their Apps' parts, and compare the parts the window
     // keeps of an App neither ran with those a replay of its minute gives.
     let mut fixture = Fixture::new();
-    fixture.publish_with_system_rows(1000);
-    fixture.publish_with_system_rows(1001);
-    fixture.seal_derived(&[], &crate::SealedApps);
-    let session = Session::open(&fixture.root).unwrap();
+    let session = sealed_seconds_with_parts(&mut fixture);
     let replayed = replayed_samples(&session, 1001);
     let absent = Key::new(KeyKind::Bundle, b"/Applications/Absent.app".to_vec()).unwrap();
 
@@ -160,10 +157,7 @@ fn a_window_keeps_no_parts_from_a_table_of_another_version() {
     // Method: rewrite a sealed window's parts with the next version, keeping its rows, and read
     // the parts the window keeps of an App it holds.
     let mut fixture = Fixture::new();
-    fixture.publish_with_system_rows(1000);
-    fixture.publish_with_system_rows(1001);
-    fixture.seal_derived(&[], &crate::SealedApps);
-    let session = Session::open(&fixture.root).unwrap();
+    let session = sealed_seconds_with_parts(&mut fixture);
     let key = app_keys(&replayed_samples(&session, 1001)[1]).remove(0);
     rewrite(&session, APP_PARTS, |frame| {
         let version = vec![VERSION + 1; frame.height()];
@@ -183,10 +177,7 @@ fn a_window_whose_parts_lack_a_row_its_seal_counted_is_refused() {
     // processes.
     // Method: rewrite a sealed window's parts without their last row, and read them.
     let mut fixture = Fixture::new();
-    fixture.publish_with_system_rows(1000);
-    fixture.publish_with_system_rows(1001);
-    fixture.seal_derived(&[], &crate::SealedApps);
-    let session = Session::open(&fixture.root).unwrap();
+    let session = sealed_seconds_with_parts(&mut fixture);
     let key = app_keys(&replayed_samples(&session, 1001)[1]).remove(0);
     rewrite(&session, APP_PARTS, |frame| {
         *frame = frame.head(Some(frame.height() - 1));
@@ -204,10 +195,7 @@ fn a_window_whose_app_lost_a_process_to_another_key_is_refused() {
     // Method: rewrite a sealed window's parts with a process of one App under another App's
     // key, and read the parts of the App that lost it.
     let mut fixture = Fixture::new();
-    fixture.publish_with_system_rows(1000);
-    fixture.publish_with_system_rows(1001);
-    fixture.seal_derived(&[], &crate::SealedApps);
-    let session = Session::open(&fixture.root).unwrap();
+    let session = sealed_seconds_with_parts(&mut fixture);
     let keys = app_keys(&replayed_samples(&session, 1001)[1]);
     let own = &keys[0];
     let other = keys
@@ -230,10 +218,7 @@ fn a_window_whose_app_counts_more_members_in_a_measure_than_it_has_is_refused() 
     // Method: rewrite a sealed window's parts with one more unavailable member in each App's
     // CPU measure than the App has, and read the parts of one of its Apps.
     let mut fixture = Fixture::new();
-    fixture.publish_with_system_rows(1000);
-    fixture.publish_with_system_rows(1001);
-    fixture.seal_derived(&[], &crate::SealedApps);
-    let session = Session::open(&fixture.root).unwrap();
+    let session = sealed_seconds_with_parts(&mut fixture);
     let key = app_keys(&replayed_samples(&session, 1001)[1]).remove(0);
     rewrite(&session, APP_PARTS, overcount_members);
 
@@ -258,10 +243,7 @@ fn a_read_decodes_the_parts_of_each_window_once_for_all_its_visits() {
     // Method: begin a read of an App, visit its parts, rewrite the window's parts to a version
     // this build does not read, and visit them again within the read.
     let mut fixture = Fixture::new();
-    fixture.publish_with_system_rows(1000);
-    fixture.publish_with_system_rows(1001);
-    fixture.seal_derived(&[], &crate::SealedApps);
-    let session = Session::open(&fixture.root).unwrap();
+    let session = sealed_seconds_with_parts(&mut fixture);
     let key = app_keys(&replayed_samples(&session, 1001)[1]).remove(0);
     session.parts_read_begin(key.kind, &key.bytes);
     let decoded = kept_parts(&session, 1001, &key);
@@ -280,10 +262,7 @@ fn a_visit_after_its_read_ends_decodes_the_window_again() {
     // Method: visit an App's parts within a read and end it, rewrite the window's parts to a
     // version this build does not read, and visit them again.
     let mut fixture = Fixture::new();
-    fixture.publish_with_system_rows(1000);
-    fixture.publish_with_system_rows(1001);
-    fixture.seal_derived(&[], &crate::SealedApps);
-    let session = Session::open(&fixture.root).unwrap();
+    let session = sealed_seconds_with_parts(&mut fixture);
     let key = app_keys(&replayed_samples(&session, 1001)[1]).remove(0);
     session.parts_read_begin(key.kind, &key.bytes);
     let decoded = kept_parts(&session, 1001, &key);
@@ -298,57 +277,51 @@ fn a_visit_after_its_read_ends_decodes_the_window_again() {
 
 #[test]
 fn a_read_decodes_again_the_parts_of_an_app_other_than_its_own() {
-    // Goal: a read keeps the parts of the App it reads, and no other App's.
+    // Goal: a read keeps the parts of the App it reads, and no other App's, so neither App is
+    // later given what the read decoded of the other.
     // Method: begin a read of one App, visit another App's parts, rewrite the window's parts
-    // to a version this build does not read, and visit the other App's parts again.
+    // to a version this build does not read, and visit both Apps' parts again.
     let mut fixture = Fixture::new();
-    fixture.publish_with_system_rows(1000);
-    fixture.publish_with_system_rows(1001);
-    fixture.seal_derived(&[], &crate::SealedApps);
-    let session = Session::open(&fixture.root).unwrap();
+    let session = sealed_seconds_with_parts(&mut fixture);
     let keys = app_keys(&replayed_samples(&session, 1001)[1]);
     session.parts_read_begin(keys[0].kind, &keys[0].bytes);
     let decoded = kept_parts(&session, 1001, &keys[1]);
     session.unread_kept_parts();
 
-    let visited = kept_parts(&session, 1001, &keys[1]);
+    let own = kept_parts(&session, 1001, &keys[0]);
+    let other = kept_parts(&session, 1001, &keys[1]);
 
     assert_eq!(decoded.len(), 2);
-    assert!(visited.is_empty());
+    assert!(own.is_empty());
+    assert!(other.is_empty());
 }
 
 #[test]
 fn a_read_decodes_again_the_parts_past_its_bound() {
     // Goal: a read keeps no more of the parts it decodes than its bound, and decodes the rest
     // again at each visit.
-    // Method: keep a window's parts in a read that holds parts up to their size, then those of
-    // a second window, and ask the read for each.
+    // Method: seal two minutes with their Apps' parts, read an App with a bound that holds
+    // the first minute's parts alone, rewrite both minutes' parts to a version this build does
+    // not read, and visit them again within the read.
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(1000);
-    fixture.seal_derived(&[], &crate::SealedApps);
+    fixture.publish_with_system_rows(1001);
+    fixture.skip_run_ticks(58);
+    fixture.publish_with_system_rows(1060);
+    fixture.publish_with_system_rows(1061);
+    fixture.seal_minute_derived(0, &crate::SealedApps);
+    fixture.seal_minute_derived(1, &crate::SealedApps);
     let session = Session::open(&fixture.root).unwrap();
-    let key = app_keys(&replayed_samples(&session, 1000)[0]).remove(0);
-    let mut parts = Vec::new();
-    session
-        .visit_sealed_parts(range(1000), key.kind, &key.bytes, |part| {
-            parts.push(part.clone());
-            Ok(())
-        })
-        .unwrap();
-    let parts = Rc::new(parts);
-    let part_key = PartKey {
-        kind: key.kind,
-        bytes: &key.bytes,
-    };
-    let parts_bytes: usize = parts.iter().map(AppPart::bytes).sum();
-    let mut read = PartsRead::new(key.kind, &key.bytes);
-    read.windows_bytes = READ_BYTES_MAX - parts_bytes;
+    let key = app_keys(&replayed_samples(&session, 1001)[1]).remove(0);
+    let first_minute = kept_parts_bytes(&session, 1001, &key);
+    session.parts_read_begin_bounded(key.kind, &key.bytes, first_minute);
+    let decoded = kept_parts(&session, 1061, &key);
+    session.unread_kept_parts();
 
-    read.keep(&part_key, Path::new("first"), &parts);
-    read.keep(&part_key, Path::new("second"), &parts);
+    let visited = kept_parts(&session, 1061, &key);
 
-    assert!(read.parts(&part_key, Path::new("first")).is_some());
-    assert!(read.parts(&part_key, Path::new("second")).is_none());
+    assert_eq!(decoded.len(), 4);
+    assert_eq!(visited, decoded[..2]);
 }
 
 /// What a page shows of a part: its second, the App's detail, and the paging of the Apps page.
@@ -372,6 +345,28 @@ impl Shown {
             paging: part.apps_paging(page).unwrap(),
         }
     }
+}
+
+/// Seals seconds 1000 and 1001 with their Apps' parts, and opens their recording.
+fn sealed_seconds_with_parts(fixture: &mut Fixture) -> Session {
+    fixture.publish_with_system_rows(1000);
+    fixture.publish_with_system_rows(1001);
+    fixture.seal_derived(&[], &crate::SealedApps);
+
+    Session::open(&fixture.root).unwrap()
+}
+
+/// The bytes of the parts the windows of second `second`'s context keep of the App with `key`.
+fn kept_parts_bytes(session: &Session, second: u64, key: &Key) -> usize {
+    let mut bytes = 0;
+    session
+        .visit_sealed_parts(range(second), key.kind, &key.bytes, |part| {
+            bytes += part.bytes();
+            Ok(())
+        })
+        .unwrap();
+
+    bytes
 }
 
 /// What a page shows of the parts of the App with `key` that the windows of second `second`'s

@@ -547,15 +547,17 @@ pub(crate) struct PartsRead {
     app_bytes: Box<[u8]>,
     windows: Vec<(PathBuf, Rc<Vec<AppPart>>)>,
     windows_bytes: usize,
+    windows_bytes_max: usize,
 }
 
 impl PartsRead {
-    fn new(kind: KeyKind, app_bytes: &[u8]) -> Self {
+    fn new(kind: KeyKind, app_bytes: &[u8], windows_bytes_max: usize) -> Self {
         Self {
             kind,
             app_bytes: app_bytes.into(),
             windows: Vec::new(),
             windows_bytes: 0,
+            windows_bytes_max,
         }
     }
 
@@ -579,7 +581,7 @@ impl PartsRead {
         }
 
         let parts_bytes: usize = parts.iter().map(AppPart::bytes).sum();
-        if parts_bytes > READ_BYTES_MAX - self.windows_bytes {
+        if parts_bytes > self.windows_bytes_max - self.windows_bytes {
             return;
         }
 
@@ -601,9 +603,14 @@ impl Session {
     /// Begins a read of the App with this key, whose visits of a window's parts decode them
     /// once, rather than once a visit.
     pub(crate) fn parts_read_begin(&self, kind: KeyKind, app_bytes: &[u8]) {
+        self.parts_read_begin_bounded(kind, app_bytes, READ_BYTES_MAX);
+    }
+
+    /// Begins a read that keeps at most `windows_bytes_max` of the parts it decodes.
+    fn parts_read_begin_bounded(&self, kind: KeyKind, app_bytes: &[u8], windows_bytes_max: usize) {
         let mut read = self.parts_read.borrow_mut();
         assert!(read.is_none());
-        *read = Some(PartsRead::new(kind, app_bytes));
+        *read = Some(PartsRead::new(kind, app_bytes, windows_bytes_max));
     }
 
     /// Ends the read, and drops the parts it decoded.
