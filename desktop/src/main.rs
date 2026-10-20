@@ -56,6 +56,8 @@ mod summary;
 #[cfg(test)]
 mod allocation_tests;
 #[cfg(test)]
+mod contrast_tests;
+#[cfg(test)]
 #[path = "live_process_history_tests.rs"]
 pub(crate) mod process_history_tests;
 #[cfg(test)]

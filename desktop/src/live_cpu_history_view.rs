@@ -23,12 +23,6 @@ const PLOT_RIGHT: f32 = 8.0;
 const LABEL_COLUMN: f32 = 104.0;
 /// A row label ends this far left of the cells.
 const LABEL_GAP: f32 = 9.0;
-/// Green at 0%, yellow at 50% and red at 100%, as the prototype blends them.
-const SCALE: [(f32, f32, f32); 3] = [
-    (115.0, 191.0, 105.0),
-    (250.0, 222.0, 42.0),
-    (242.0, 73.0, 92.0),
-];
 const HOVER_SOURCE: &str = "cpu-history-plot";
 
 impl LiveDashboard {
@@ -614,7 +608,7 @@ fn cpu_history_paint(
                     point(bounds.origin.x + bounds.size.width * first, top),
                     size(bounds.size.width * (end - first), height),
                 );
-                window.paint_quad(fill(rectangle, cpu_history_color(value)));
+                window.paint_quad(fill(rectangle, crate::charts::utilization_color(value)));
             }
         }
     }
@@ -636,29 +630,15 @@ fn cpu_history_paint(
     );
 }
 
-/// Green through yellow to red, blended between the prototype's three stops.
-fn cpu_history_color(value: f64) -> gpui::Rgba {
-    let Some(position) = (value.clamp(0.0, 100.0) / 50.0).to_f32() else {
-        unreachable!("A clamped percentage fits f32");
-    };
-    let stop = position.floor().min(1.0);
-    let fraction = position - stop;
-    let (from, to) = if stop < 1.0 {
-        (SCALE[0], SCALE[1])
-    } else {
-        (SCALE[1], SCALE[2])
-    };
-    let channel = |from: f32, to: f32| {
-        (from + (to - from) * fraction)
-            .round()
-            .to_u32()
-            .unwrap_or_default()
-    };
+/// The cursor's dark edge and light core. Cells run from light green to red and the plot
+/// behind a gap is dark, so neither colour alone holds 3:1 against both.
+pub(crate) const CURSOR_EDGE: u32 = 0x0011_1217;
+pub(crate) const CURSOR_EDGE_OPACITY: f32 = 0.9;
+pub(crate) const CURSOR_CORE: u32 = 0x00ff_ffff;
+const CURSOR_EDGE_WIDTH: f32 = 3.0;
+const CURSOR_CORE_WIDTH: f32 = 1.0;
 
-    rgb(channel(from.0, to.0) << 16 | channel(from.1, to.1) << 8 | channel(from.2, to.2))
-}
-
-/// The prototype's cursor over the cells: a dashed line of three pixels and a gap of three.
+/// A solid white line with a dark edge on each side, so it reads over every cell colour.
 fn cpu_history_cursor(
     history: &CPUHistory,
     wall_ns: u64,
@@ -668,16 +648,21 @@ fn cpu_history_cursor(
     let Some(fraction) = history.fraction(wall_ns).to_f32() else {
         unreachable!("Validated CPU history fractions fit f32");
     };
-    let x = bounds.origin.x + bounds.size.width * fraction;
-    let bottom = bounds.origin.y + bounds.size.height;
-    let dash = px(3.0);
-    let mut top = bounds.origin.y;
-    while top < bottom {
+    let center = bounds.origin.x + bounds.size.width * fraction;
+    for (color, width) in [
+        (
+            crate::charts::alpha(CURSOR_EDGE, CURSOR_EDGE_OPACITY),
+            CURSOR_EDGE_WIDTH,
+        ),
+        (rgb(CURSOR_CORE), CURSOR_CORE_WIDTH),
+    ] {
         window.paint_quad(fill(
-            Bounds::new(point(x, top), size(px(1.0), dash.min(bottom - top))),
-            crate::charts::alpha(TEXT, 0.7),
+            Bounds::new(
+                point(center - px(width / 2.0), bounds.origin.y),
+                size(px(width), bounds.size.height),
+            ),
+            color,
         ));
-        top += dash * 2.0;
     }
 }
 

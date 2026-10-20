@@ -348,7 +348,7 @@ fn activity_observation(observation: &CPUObservation) -> Value {
 mod validation;
 
 #[path = "live_cpu_history_view.rs"]
-mod view;
+pub(crate) mod view;
 
 #[cfg(test)]
 #[path = "live_cpu_history_tests.rs"]

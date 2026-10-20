@@ -21,6 +21,39 @@ pub const PURPLE: u32 = 0x00b8_77d9;
 pub const RED: u32 = 0x00f2_495c;
 pub const TEXT: u32 = 0x00cc_ccdc;
 pub const YELLOW: u32 = 0x00f2_cc0c;
+/// Green at 0%, yellow at 50% and red at 100%, as the prototype blends them.
+const UTILIZATION_SCALE: [(f32, f32, f32); 3] = [
+    (115.0, 191.0, 105.0),
+    (250.0, 222.0, 42.0),
+    (242.0, 73.0, 92.0),
+];
+
+/// The colour of a utilization percentage, which every CPU chart takes from here so that a
+/// core's bar and the heatmap cell for the same reading are the same colour.
+#[must_use]
+pub fn utilization_color(percent: f64) -> gpui::Rgba {
+    let Some(position) = num_traits::ToPrimitive::to_f32(&(percent.clamp(0.0, 100.0) / 50.0))
+    else {
+        unreachable!("A clamped percentage fits f32");
+    };
+    let stop = position.floor().min(1.0);
+    let fraction = position - stop;
+    let (from, to) = if stop < 1.0 {
+        (UTILIZATION_SCALE[0], UTILIZATION_SCALE[1])
+    } else {
+        (UTILIZATION_SCALE[1], UTILIZATION_SCALE[2])
+    };
+    let channel = |from: f32, to: f32| {
+        let Some(value) = num_traits::ToPrimitive::to_u32(&(from + (to - from) * fraction).round())
+        else {
+            unreachable!("A blend of two channels stays within 0 to 255");
+        };
+        value
+    };
+
+    rgb(channel(from.0, to.0) << 16 | channel(from.1, to.1) << 8 | channel(from.2, to.2))
+}
+
 pub const PLOT_INSETS: gpui::Edges<Pixels> = gpui::Edges {
     top: px(12.0),
     right: px(8.0),

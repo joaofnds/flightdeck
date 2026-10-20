@@ -4,7 +4,7 @@ use gpui::{
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::charts::{GREEN, ORANGE, PANEL, RED, TEXT};
+use crate::charts::{PANEL, TEXT};
 use crate::live_dashboard::LiveDashboard;
 use crate::live_source::{identity_signature, identity_validate};
 
@@ -274,11 +274,6 @@ fn cpu_activity_paint(
     let width = (bounds.size.width - px(2.0 * PLOT_INSET)) / f32::from(columns);
     for (index, value) in (0_u8..18).zip(cpus) {
         for segment in 0..SEGMENTS {
-            let opacity = if segment_lit(*value, segment) {
-                0.9
-            } else {
-                0.12
-            };
             let rectangle = Bounds::new(
                 point(
                     bounds.origin.x + px(PLOT_INSET) + width * f32::from(index),
@@ -286,13 +281,7 @@ fn cpu_activity_paint(
                 ),
                 size((width - px(2.0)).max(px(1.0)), px(8.8)),
             );
-            window.paint_quad(
-                fill(
-                    rectangle,
-                    crate::charts::alpha(segment_color(segment), opacity),
-                )
-                .corner_radii(px(1.5)),
-            );
+            window.paint_quad(fill(rectangle, segment_fill(*value, segment)).corner_radii(px(1.5)));
         }
     }
 }
@@ -312,19 +301,18 @@ fn segment_lit(value: Option<f32>, segment: u8) -> bool {
     false
 }
 
-fn segment_color(segment: u8) -> u32 {
+/// A lit segment takes the colour the heatmap gives its core's reading, so a bar and the cell
+/// for the same reading agree. A dark segment keeps a faint tint of the level it stands for.
+fn segment_fill(value: Option<f32>, segment: u8) -> gpui::Rgba {
     assert!(segment < SEGMENTS);
-    let level = (SEGMENTS - segment) * 5 - 1;
-    if level >= 90 {
-        return RED;
+    if let Some(value) = value {
+        if segment_lit(Some(value), segment) {
+            return crate::charts::utilization_color(f64::from(value));
+        }
     }
-    if level >= 80 {
-        return ORANGE;
-    }
-    if level >= 60 {
-        return 0xf2_cc_0d;
-    }
-    GREEN
+    let mut tint = crate::charts::utilization_color(f64::from(SEGMENTS - segment) * 5.0 - 2.5);
+    tint.a = 0.12;
+    tint
 }
 
 fn observation_number(observation: &Value, field: &str) -> Result<u64, String> {
@@ -460,6 +448,23 @@ mod tests {
         assert!(!segment_lit(Some(99.0), 0));
         assert!(segment_lit(Some(100.0), 0));
         assert!(!segment_lit(None, 19));
+    }
+
+    #[test]
+    fn colors_a_lit_segment_as_the_heatmap_colors_the_same_reading() {
+        // Goal: a core's bar and its heatmap cell never disagree about the reading's colour.
+        // Method: compare every lit segment with the shared scale, and a dark one with it.
+        for value in [3.0_f32, 42.0, 61.0, 75.0, 88.0, 100.0] {
+            let expected = crate::charts::utilization_color(f64::from(value));
+            for segment in 0..SEGMENTS {
+                if segment_lit(Some(value), segment) {
+                    assert_eq!(segment_fill(Some(value), segment), expected);
+                } else {
+                    assert!(segment_fill(Some(value), segment).a < 0.2);
+                }
+            }
+        }
+        assert!(segment_fill(None, 0).a < 0.2);
     }
 
     #[test]
