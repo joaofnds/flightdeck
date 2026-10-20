@@ -1,13 +1,8 @@
 //! The histories of an App and of its process groups that the parts a window keeps give.
-use polars::prelude::Column;
-
-use super::sealed::fixture::rewrite;
-use super::sealed_parts::VERSION;
 use super::tests::{points, selected};
 use super::*;
 use crate::live::identity_fixture::Fixture;
 use crate::live_app_history::GroupTarget;
-use persistence::schema::APP_PARTS;
 
 const CURRENT: Target<'static> = Target {
     kind: KeyKind::Bundle,
@@ -179,12 +174,7 @@ fn replayed_history(
     target: &dyn Selection,
     consume: fn(&[TracePoint]) -> Result<Value>,
 ) -> Value {
-    rewrite(&session, APP_PARTS, |frame| {
-        let version = vec![VERSION + 1; frame.height()];
-        frame
-            .replace("version", Column::new("version".into(), version))
-            .unwrap();
-    });
+    session.unread_kept_parts();
     let root = session.root.clone();
     drop(session);
     let replaying = Session::open(&root).unwrap();

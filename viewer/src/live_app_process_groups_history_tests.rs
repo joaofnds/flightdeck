@@ -11,6 +11,9 @@ use crate::{Cancellation, LiveSession};
 #[path = "live_app_process_groups_history_tests/fixture.rs"]
 pub(crate) mod named;
 
+#[path = "live_app_process_groups_history_tests/kept.rs"]
+mod kept;
+
 #[test]
 fn retains_two_names_and_exact_directional_measures_after_cold_reopen() {
     // Odd read and write intervals above 2^53 survive live, sealed cold and warm queries.

@@ -4,7 +4,7 @@ use crate::app_process_groups_history::ProcessGroupReading;
 use crate::app_process_groups_history::reduce::{Capture, Phase, Reduction};
 use crate::cancellation::Operation;
 use crate::live_app_history::{History, Point, Target, key};
-use crate::live_app_response::{Observation, Sample};
+use crate::live_app_response::{AppPart, Observation, Process, Sample};
 use crate::live_apps::Frame;
 
 struct SavedGroup<'name> {
@@ -69,11 +69,66 @@ pub(crate) fn capture(
 
         app.key.bytes.as_slice() == target.bytes
     });
+    let mut snapshot = Box::new(Snapshot {
+        observation: sample.selected,
+        elapsed_ns: sample.elapsed_ns,
+        membership_complete: sample.membership_complete,
+        unnamed_members: Some(0),
+        groups: Vec::new(),
+    });
 
+    if let Some(app_index) = app_index {
+        let process_app_index =
+            u32::try_from(app_index).map_err(|_| Error::Bound("process cohort saved App index"))?;
+        capture_members(
+            &mut snapshot,
+            sample.apps()[app_index].members,
+            sample
+                .processes()
+                .iter()
+                .filter(|process| process.app_index == Some(process_app_index)),
+            operation,
+        )?;
+    }
+
+    Ok(snapshot)
+}
+
+/// The snapshot of the App of a part a sealed window keeps, as `capture` gives it from the
+/// sample the part was taken from.
+pub(crate) fn capture_part(part: &AppPart, operation: &Operation) -> Result<Box<Snapshot>> {
+    operation.check()?;
+    let header = part.header();
+    let mut snapshot = Box::new(Snapshot {
+        observation: header.selected,
+        elapsed_ns: header.elapsed_ns,
+        membership_complete: header.membership_complete,
+        unnamed_members: Some(0),
+        groups: Vec::new(),
+    });
+
+    if let Some(present) = part.present() {
+        capture_members(
+            &mut snapshot,
+            present.app.members,
+            present.processes.iter(),
+            operation,
+        )?;
+    }
+
+    Ok(snapshot)
+}
+
+/// Gives `snapshot` the groups of an App's `members`, whose processes are `processes`.
+fn capture_members<'sample>(
+    snapshot: &mut Snapshot,
+    members: u32,
+    processes: impl Iterator<Item = &'sample Process>,
+    operation: &Operation,
+) -> Result<()> {
     let mut groups = Vec::new();
-    capture_groups(&sample, app_index, &mut groups, operation)?;
+    capture_groups(members, processes, &mut groups, operation)?;
     let named: u32 = groups.iter().map(|group| group.totals.members).sum();
-    let members = app_index.map_or(0, |index| sample.apps()[index].members);
     let unnamed = members
         .checked_sub(named)
         .ok_or(Error::Bound("process cohort saved unnamed members"))?;
@@ -84,17 +139,9 @@ pub(crate) fn capture(
         return Err(Error::Bound("process cohort snapshot bytes"));
     }
 
-    let mut snapshot = Box::new(Snapshot {
-        observation: sample.selected,
-        elapsed_ns: sample.elapsed_ns,
-        membership_complete: sample.membership_complete,
-        unnamed_members: Some(unnamed),
-        groups: Vec::with_capacity(groups.len()),
-    });
-
-    capture_readings(&mut snapshot, &mut groups, operation)?;
-
-    Ok(snapshot)
+    snapshot.unnamed_members = Some(unnamed);
+    snapshot.groups = Vec::with_capacity(groups.len());
+    capture_readings(snapshot, &mut groups, operation)
 }
 
 fn capture_readings(
@@ -143,12 +190,11 @@ impl Snapshot {
 }
 
 fn capture_groups<'sample>(
-    sample: &'sample Sample,
-    app_index: Option<usize>,
+    members: u32,
+    processes: impl Iterator<Item = &'sample Process>,
     groups: &mut Vec<SavedGroup<'sample>>,
     operation: &Operation,
 ) -> Result<()> {
-    let members = app_index.map_or(0, |index| sample.apps()[index].members);
     let capacity =
         usize::try_from(members).map_err(|_| Error::Bound("process cohort saved member count"))?;
     *groups = Vec::with_capacity(capacity);
@@ -156,20 +202,8 @@ fn capture_groups<'sample>(
         return Err(Error::Bound("process cohort saved work bytes"));
     }
 
-    let app_index = app_index
-        .map(u32::try_from)
-        .transpose()
-        .map_err(|_| Error::Bound("process cohort saved App index"))?;
-    let Some(app_index) = app_index else {
-        return Ok(());
-    };
-
-    for process in sample.processes() {
+    for process in processes {
         operation.check()?;
-        if process.app_index != Some(app_index) {
-            continue;
-        }
-
         let Some(name) = &process.executable_name else {
             continue;
         };
@@ -202,10 +236,7 @@ fn capture_groups<'sample>(
     Ok(())
 }
 
-fn capture_groups_add(
-    totals: &mut crate::apps::AppTotals,
-    process: &crate::live_app_response::Process,
-) {
+fn capture_groups_add(totals: &mut crate::apps::AppTotals, process: &Process) {
     super::add(
         totals,
         &super::Member {

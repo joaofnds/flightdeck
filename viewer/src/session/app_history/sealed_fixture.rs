@@ -1,7 +1,9 @@
 //! The range and the rewrite the tests of a sealed window's derived tables share.
-use polars::prelude::DataFrame;
+use polars::prelude::{Column, DataFrame};
 
+use super::super::sealed_parts::VERSION;
 use super::{ContextRange, Session};
+use persistence::schema::APP_PARTS;
 
 /// The window of the context of second `second`.
 pub fn range(second: u64) -> ContextRange {
@@ -32,5 +34,18 @@ pub fn rewrite(session: &Session, name: &'static str, mut change: impl FnMut(&mu
             std::fs::write(&path, encoded).unwrap();
             std::fs::remove_dir_all(&staging).unwrap();
         }
+    }
+}
+
+impl Session {
+    /// Rewrites the parts each sealed window keeps to a version this build does not read, so a
+    /// session opened afterwards replays their minutes.
+    pub(crate) fn unread_kept_parts(&self) {
+        rewrite(self, APP_PARTS, |frame| {
+            let version = vec![VERSION + 1; frame.height()];
+            frame
+                .replace("version", Column::new("version".into(), version))
+                .unwrap();
+        });
     }
 }

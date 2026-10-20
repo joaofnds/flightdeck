@@ -1,13 +1,19 @@
-use super::{BTreeMap, BTreeSet, Frame, Key, Observation, Reading, Restore, Session, Source};
+use super::{
+    BTreeMap, BTreeSet, ContextRange, Frame, Key, Observation, Reading, Restore, Session, Source,
+};
 use crate::app_process_groups_history::AppProcessGroupsHistory;
 use crate::app_process_groups_history::cache::{Cache, Point};
-use crate::live_app_history::{PIN_BYTES_MAX, ResidentFile, ResidentPin};
+use crate::live_app_history::{PIN_BYTES_MAX, ResidentFile, ResidentPin, Target};
+use crate::live_app_response::AppPart;
 use persistence::{Error, Result};
 
 pub(crate) struct Replay {
     restore: Restore,
     readings: Vec<Reading>,
     context: Vec<Key>,
+    range: ContextRange,
+    /// The windows whose parts give the selected App's groups, which the replay leaves out.
+    kept: BTreeSet<usize>,
 }
 
 struct Projection {
@@ -19,6 +25,7 @@ impl Session {
     pub(crate) fn with_process_groups_replay(
         &self,
         selected: &Observation,
+        target: &Target<'_>,
         consume: impl FnOnce(&mut Replay) -> Result<Box<AppProcessGroupsHistory>>,
     ) -> Result<Box<AppProcessGroupsHistory>> {
         self.operation.attach(&self.connection)?;
@@ -35,7 +42,12 @@ impl Session {
             plotted: 0,
         };
 
-        self.app_history_gather(&range, &BTreeSet::new(), &mut restore)?;
+        let mut kept = BTreeSet::new();
+        self.visit_sealed_parts_by_window(range, target.kind, target.bytes, |window, _part| {
+            kept.insert(window);
+            Ok(())
+        })?;
+        self.app_history_gather(&range, &kept, &mut restore)?;
         let context = restore.readings.keys().copied().collect();
         self.app_history_predecessors(&mut restore)?;
         let readings = Vec::with_capacity(super::READINGS_MAX);
@@ -43,6 +55,8 @@ impl Session {
             restore,
             readings,
             context,
+            range,
+            kept,
         };
 
         self.process_groups_validate(&replay)?;
@@ -51,6 +65,28 @@ impl Session {
         self.process_groups_validate(&replay)?;
 
         Ok(result)
+    }
+
+    /// Gives `consume` the part of `target`'s App at each observation of the windows whose
+    /// parts give its groups.
+    pub(crate) fn visit_process_groups_kept(
+        &self,
+        replay: &Replay,
+        target: &Target<'_>,
+        mut consume: impl FnMut(&AppPart) -> Result<()>,
+    ) -> Result<()> {
+        self.visit_sealed_parts_by_window(
+            replay.range,
+            target.kind,
+            target.bytes,
+            |window, part| {
+                if !replay.kept.contains(&window) {
+                    return Err(Error::Bound("process group kept windows"));
+                }
+
+                consume(&part)
+            },
+        )
     }
 
     pub(crate) fn visit_process_groups(

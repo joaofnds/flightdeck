@@ -308,6 +308,54 @@ fn replacement_between_warm_observe_and_project_is_refused_after_projection() {
     );
 }
 
+#[test]
+fn refuses_the_parts_of_a_window_whose_groups_were_replayed() {
+    // Goal: a window gives an App's groups from its parts or from a replay of its minute, never
+    // both, so parts that become readable while the groups are read are refused.
+    // Method: seal two observations with their Apps' parts of a version the session does not
+    // read, make those parts readable before the groups are projected, and ask for the groups.
+    let cold = kept_cold();
+    let path = cold
+        .fixture
+        .root
+        .join(&cold.saved.windows[0].data_directory)
+        .join("app_parts.parquet");
+    let readable = std::fs::read(&path).unwrap();
+    cold.saved.unread_kept_parts();
+    BEFORE_PROJECT.with(|hook| {
+        assert!(
+            hook.replace(Some(Box::new(
+                move || std::fs::write(&path, readable).unwrap()
+            )))
+            .is_none()
+        );
+    });
+
+    let result = call(&cold, 2, BYTES_MAX);
+
+    assert!(matches!(
+        result,
+        Err(persistence::Error::Bound("process group kept windows"))
+    ));
+}
+
+/// A recording of two observations of an App running two executables, sealed with its Apps'
+/// parts.
+fn kept_cold() -> Box<Cold> {
+    let mut fixture = Fixture::new();
+    publish_workers(&mut fixture, 1, 2);
+    publish_workers(&mut fixture, 2, 2);
+    fixture.seal_derived(&[], &crate::SealedApps);
+    let cancellation = Arc::new(Cancellation::default());
+    let saved = Session::open_with(&fixture.root, Arc::clone(&cancellation), 0).unwrap();
+    Box::new(Cold {
+        fixture,
+        saved,
+        history: History::new(),
+        cancellation,
+    })
+}
+
 fn cold() -> Box<Cold> {
     let mut fixture = named::dense();
     publish(&mut fixture, 1);
@@ -324,7 +372,12 @@ fn cold() -> Box<Cold> {
 }
 
 fn publish(fixture: &mut Fixture, publication: u64) {
-    let names: Vec<_> = (1..=9).map(|index| format!("worker{index}")).collect();
+    publish_workers(fixture, publication, 9);
+}
+
+/// Publishes `count` processes of one App, each running an executable of its own.
+fn publish_workers(fixture: &mut Fixture, publication: u64, count: usize) {
+    let names: Vec<_> = (1..=count).map(|index| format!("worker{index}")).collect();
     let rows: Vec<_> = names
         .iter()
         .enumerate()

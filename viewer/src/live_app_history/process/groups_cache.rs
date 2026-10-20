@@ -62,7 +62,7 @@ impl History {
     fn process_groups_response_saved(
         &self,
         query: &Query<'_, '_>,
-        mut reduction: Box<Reduction<'_>>,
+        reduction: Box<Reduction<'_>>,
     ) -> Result<Box<AppProcessGroupsHistory>> {
         let mut lease = Box::new(Lease {
             history: self,
@@ -73,59 +73,64 @@ impl History {
         });
 
         lease.prepare(query.target, query.available);
-        let result = query
-            .saved
-            .with_process_groups_replay(query.selected, |replay| {
-                let cached = self.process_groups_response_saved_restore(
-                    query,
-                    replay,
-                    &mut lease,
-                    &mut reduction,
-                )?;
-                reduction.context(query.context)?;
-                reduction.choose()?;
-                #[cfg(test)]
-                BEFORE_PROJECT.with(|hook| {
-                    if let Some(hook) = hook.borrow_mut().take() {
-                        hook();
-                    }
-                });
-
-                query.operation.check()?;
-                self.process_groups_visit(query.target, &mut reduction, Phase::Project)?;
-                if cached {
-                    let cache = lease
-                        .groups
-                        .as_ref()
-                        .ok_or(Error::Bound("process group cache owner"))?;
-                    for point in cache.points() {
-                        point.visit(&mut reduction, Phase::Project)?;
-                    }
-                } else {
-                    // Overflow may have removed facts used during Observe. Restore the entire plan.
-                    query
-                        .saved
-                        .process_groups_plan(replay, |observation| self.groups_live(observation))?;
-                    query
-                        .saved
-                        .visit_process_groups(replay, |frame, previous, _predecessor| {
-                            super::cohort::capture(frame, previous, query.target, query.operation)?
-                                .visit(&mut reduction, Phase::Project)
-                        })?;
-                }
-
-                if let Some(cache) = &lease.groups {
-                    query.saved.process_groups_cache_validate(cache)?;
-                }
-
-                query.operation.check()?;
-                reduction.finish()
-            })?;
+        let result =
+            query
+                .saved
+                .with_process_groups_replay(query.selected, query.target, |replay| {
+                    self.process_groups_response_saved_replay(query, replay, &mut lease, reduction)
+                })?;
 
         query.operation.check()?;
         lease.committed = true;
 
         Ok(result)
+    }
+
+    /// The groups of the selected App, observed and then projected from the live history, the
+    /// cache, the replay of the saved minutes and the parts sealed windows keep.
+    fn process_groups_response_saved_replay(
+        &self,
+        query: &Query<'_, '_>,
+        replay: &mut crate::session::ProcessGroupsReplay,
+        lease: &mut Lease<'_>,
+        mut reduction: Box<Reduction<'_>>,
+    ) -> Result<Box<AppProcessGroupsHistory>> {
+        let cached =
+            self.process_groups_response_saved_restore(query, replay, lease, &mut reduction)?;
+        Self::process_groups_response_saved_kept(query, replay, &mut reduction, Phase::Observe)?;
+        reduction.context(query.context)?;
+        reduction.choose()?;
+        #[cfg(test)]
+        BEFORE_PROJECT.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().take() {
+                hook();
+            }
+        });
+
+        query.operation.check()?;
+        self.process_groups_visit(query.target, &mut reduction, Phase::Project)?;
+        if cached {
+            Self::process_groups_response_saved_cached(lease, &mut reduction, Phase::Project)?;
+        } else {
+            // Overflow may have removed facts used during Observe. Restore the entire plan.
+            query
+                .saved
+                .process_groups_plan(replay, |observation| self.groups_live(observation))?;
+            query
+                .saved
+                .visit_process_groups(replay, |frame, previous, _predecessor| {
+                    super::cohort::capture(frame, previous, query.target, query.operation)?
+                        .visit(&mut reduction, Phase::Project)
+                })?;
+        }
+        Self::process_groups_response_saved_kept(query, replay, &mut reduction, Phase::Project)?;
+
+        if let Some(cache) = &lease.groups {
+            query.saved.process_groups_cache_validate(cache)?;
+        }
+
+        query.operation.check()?;
+        reduction.finish()
     }
 
     fn process_groups_response_saved_restore(
@@ -161,7 +166,7 @@ impl History {
         })?;
 
         if cached {
-            Self::process_groups_response_saved_restore_observe(lease, reduction)?;
+            Self::process_groups_response_saved_cached(lease, reduction, Phase::Observe)?;
         }
 
         query
@@ -199,9 +204,25 @@ impl History {
         Ok(cached)
     }
 
-    fn process_groups_response_saved_restore_observe(
+    /// Visits in `phase` the groups of the selected App at each second of the windows whose
+    /// parts keep them.
+    fn process_groups_response_saved_kept(
+        query: &Query<'_, '_>,
+        replay: &crate::session::ProcessGroupsReplay,
+        reduction: &mut Reduction<'_>,
+        phase: Phase,
+    ) -> Result<()> {
+        query
+            .saved
+            .visit_process_groups_kept(replay, query.target, |part| {
+                super::cohort::capture_part(part, query.operation)?.visit(reduction, phase)
+            })
+    }
+
+    fn process_groups_response_saved_cached(
         lease: &Lease<'_>,
         reduction: &mut Reduction<'_>,
+        phase: Phase,
     ) -> Result<()> {
         let cache = lease
             .groups
@@ -209,7 +230,7 @@ impl History {
             .ok_or(Error::Bound("process group cache owner"))?;
 
         for point in cache.points() {
-            point.visit(reduction, Phase::Observe)?;
+            point.visit(reduction, phase)?;
         }
 
         Ok(())
