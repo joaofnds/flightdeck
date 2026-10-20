@@ -60,35 +60,8 @@ impl LiveDashboard {
         }
         self.reading_rows_charts(&mut rows);
         match self.request.route.as_str() {
-            "cpu" => {
-                let metric = crate::live_app_attribution_history::Metric::Cpu;
-                self.reading_rows_attribution(metric, &mut rows);
-                self.reading_rows_system_files(&mut rows);
-                rows.push(Row::Heading("CPU temperature".into()));
-                let panel = self.named_panels(&[crate::live_projection::CPU_TEMPERATURE_ID]);
-                rows.push(Row::Temperature(
-                    "cpu",
-                    "Hottest CPU-area sensor",
-                    panel.into_iter().next(),
-                ));
-            }
-            "memory" => {
-                rows.push(Row::Heading(crate::live_resident_history::TITLE.into()));
-                rows.push(Row::MemoryAttribution(
-                    self.panels
-                        .iter()
-                        .find(|panel| panel.id == crate::live_resident_history::PANEL_ID)
-                        .cloned(),
-                ));
-                self.reading_rows_memory_quantities(&mut rows);
-                rows.push(Row::Heading("Memory temperature".into()));
-                let panel = self.named_panels(&[crate::live_projection::MEMORY_TEMPERATURE_ID]);
-                rows.push(Row::Temperature(
-                    "memory",
-                    "Hottest Memory-area sensor",
-                    panel.into_iter().next(),
-                ));
-            }
+            "cpu" => self.reading_rows_cpu_sections(&mut rows),
+            "memory" => self.reading_rows_memory_sections(&mut rows),
             "storage" => self.reading_rows_storage(&mut rows),
             "network" => {
                 rows.push(Row::Heading("Network by app".into()));
@@ -103,6 +76,40 @@ impl LiveDashboard {
         assert!(rows.len() <= 4096);
 
         rows
+    }
+
+    /// CPU by app, the system files, then the CPU temperature, as the prototype orders them.
+    fn reading_rows_cpu_sections(&self, rows: &mut Vec<Row>) {
+        let metric = crate::live_app_attribution_history::Metric::Cpu;
+        self.reading_rows_attribution(metric, rows);
+        self.reading_rows_system_files(rows);
+        rows.push(Row::Heading("CPU temperature".into()));
+        let panel = self.named_panels(&[crate::live_projection::CPU_TEMPERATURE_ID]);
+        rows.push(Row::Temperature(
+            "cpu",
+            "Hottest CPU-area sensor",
+            panel.into_iter().next(),
+        ));
+    }
+
+    /// Memory by app, the memory quantities, then the memory temperature, as the prototype
+    /// orders them.
+    fn reading_rows_memory_sections(&self, rows: &mut Vec<Row>) {
+        rows.push(Row::Heading(crate::live_resident_history::TITLE.into()));
+        rows.push(Row::MemoryAttribution(
+            self.panels
+                .iter()
+                .find(|panel| panel.id == crate::live_resident_history::PANEL_ID)
+                .cloned(),
+        ));
+        self.reading_rows_memory_quantities(rows);
+        rows.push(Row::Heading("Memory temperature".into()));
+        let panel = self.named_panels(&[crate::live_projection::MEMORY_TEMPERATURE_ID]);
+        rows.push(Row::Temperature(
+            "memory",
+            "Hottest Memory-area sensor",
+            panel.into_iter().next(),
+        ));
     }
 
     /// Disk I/O by app, then the storage temperature, as the prototype orders them.
@@ -155,22 +162,7 @@ impl LiveDashboard {
         }
 
         if self.request.route == "cpu" {
-            rows.push(Row::Heading("Frequency and scheduling".into()));
-            let panels: Vec<_> = [
-                crate::live_projection::FREQUENCY_ID,
-                crate::live_projection::LOAD_AVERAGE_ID,
-            ]
-            .iter()
-            .filter_map(|id| self.panels.iter().take(16).find(|panel| panel.id == *id))
-            .cloned()
-            .collect();
-            let columns = self.reading_chart_columns().min(panels.len().max(1));
-            for panels in panels.chunks(columns) {
-                rows.push(Row::Charts {
-                    panels: panels.to_vec(),
-                    columns,
-                });
-            }
+            self.reading_rows_charts_cpu(rows);
             return;
         }
 
@@ -199,6 +191,26 @@ impl LiveDashboard {
         for panels in
             self.panels[first.min(primary_panel_count)..primary_panel_count].chunks(columns)
         {
+            rows.push(Row::Charts {
+                panels: panels.to_vec(),
+                columns,
+            });
+        }
+    }
+
+    /// The CPU's frequency and load average in the grid under their own heading.
+    fn reading_rows_charts_cpu(&self, rows: &mut Vec<Row>) {
+        rows.push(Row::Heading("Frequency and scheduling".into()));
+        let panels: Vec<_> = [
+            crate::live_projection::FREQUENCY_ID,
+            crate::live_projection::LOAD_AVERAGE_ID,
+        ]
+        .iter()
+        .filter_map(|id| self.panels.iter().take(16).find(|panel| panel.id == *id))
+        .cloned()
+        .collect();
+        let columns = self.reading_chart_columns().min(panels.len().max(1));
+        for panels in panels.chunks(columns) {
             rows.push(Row::Charts {
                 panels: panels.to_vec(),
                 columns,
