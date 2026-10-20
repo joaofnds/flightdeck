@@ -194,7 +194,8 @@ fn app_of(pid: i32, path: &mut [u8; 4096]) -> Option<GpuApp> {
 /// Adds each App's GPU share to the trend points and the selected summary. The chart's
 /// leaders are the eight Apps with the most GPU time over the points the app sampled, written
 /// as `gpu_app_cohort`, and each sampled point gets `gpu_app_percent`, Other first and then
-/// each leader. The summary gets every App of its second as `gpu_apps`, the most first.
+/// each leader. Each sampled point and the summary get every App of their second as
+/// `gpu_apps`, the most first, so a hover ranks the hovered second from its point.
 pub fn annotate<'samples>(
     selection: &mut Value,
     sample_at: impl Fn(u64) -> Option<&'samples GpuAppSample>,
@@ -223,6 +224,7 @@ pub fn annotate<'samples>(
         {
             if let Some(sample) = point_second(point).and_then(&sample_at) {
                 point["gpu_app_percent"] = json!(cohort_percent(sample, &cohort));
+                point["gpu_apps"] = summary_apps(sample);
             }
         }
     }
@@ -411,6 +413,39 @@ mod tests {
             selection["summary"]["gpu_apps"].as_array().unwrap().len(),
             9
         );
+    }
+
+    #[test]
+    fn annotate_gives_each_sampled_point_the_apps_of_its_own_second() {
+        // Goal: a hover takes the hovered trend point as its summary, so each sampled point
+        // ranks the Apps of its own second and an unsampled point ranks none.
+        // Method: two sampled seconds with different Apps around an unsampled one, each point
+        // ranked as a summary.
+        let browser = app("browser");
+        let editor = app("editor");
+        let samples = [
+            (100, sample(&[(&browser, 300_000_000)])),
+            (102, sample(&[(&editor, 200_000_000)])),
+        ];
+        let mut selection = json!({
+            "trends": [
+                {"wall_ns": 100_000_000_000_u64},
+                {"wall_ns": 101_000_000_000_u64},
+                {"wall_ns": 102_000_000_000_u64},
+            ],
+        });
+
+        annotate(&mut selection, |second| {
+            samples
+                .iter()
+                .find(|(at, _)| *at == second)
+                .map(|(_, sample)| sample)
+        });
+
+        let ranked = |index: usize| ranking(&json!({"summary": selection["trends"][index]}));
+        assert_eq!(ranked(0).unwrap().entries[0].app.name, "browser");
+        assert!(ranked(1).is_err());
+        assert_eq!(ranked(2).unwrap().entries[0].app.name, "editor");
     }
 
     #[test]
