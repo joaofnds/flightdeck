@@ -586,7 +586,7 @@ impl LiveDashboard {
 
     fn chart_heading(panel: &Rc<Panel>, cx: &mut Context<Self>) -> impl IntoElement {
         let help = panel.help.clone().unwrap_or_else(|| {
-            "Unavailable readings remain gaps. Click a chart to pause at that second.".into()
+            "Unavailable readings remain gaps. Drag across a chart to zoom to that stretch.".into()
         });
         let inspector_panel = Rc::clone(panel);
         let keyboard_panel = Rc::clone(panel);
