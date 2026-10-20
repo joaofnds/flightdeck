@@ -249,8 +249,25 @@ impl LiveDashboard {
             .text_size(px(12.0))
             .child(div().mb(px(4.0)).child(clock(second, true)));
         tooltip = chart_tooltip_place(tooltip, self.chart_plot_width, fraction);
-        for (rank, line_index) in indices.into_iter().take(16).enumerate() {
+        indices.truncate(16);
+        let unreadable: Vec<usize> = indices
+            .iter()
+            .copied()
+            .filter(|line| {
+                self.chart_line_reading(panel, *line, index)
+                    .starts_with("Unavailable")
+            })
+            .collect();
+        let (shown, folded) = fold_unreadable(&indices, &unreadable);
+        for (rank, line_index) in shown.into_iter().enumerate() {
             tooltip = tooltip.child(self.chart_tooltip_row(panel, line_index, index, rank));
+        }
+        if !folded.is_empty() {
+            let names: Vec<&str> = folded
+                .iter()
+                .map(|line| panel.lines[*line].name.as_str())
+                .collect();
+            tooltip = tooltip.child(tooltip_unreadable(&panel.id, &names));
         }
 
         Some(tooltip)
@@ -315,33 +332,109 @@ impl LiveDashboard {
     ) -> gpui::Div {
         let line = &panel.lines[line_index];
         let reading = self.chart_line_reading(panel, line_index, index);
-        div()
-            .debug_selector(|| {
-                format!(
-                    "chart-tooltip-row:{}:{rank}:{}:{reading}",
-                    panel.id, line.name
-                )
-            })
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .py(px(2.0))
-            .child(
-                div()
-                    .w(px(12.0))
-                    .h(px(3.0))
-                    .flex_shrink_0()
-                    .bg(rgb(crate::charts::color(&line.color))),
+        tooltip_row(crate::charts::color(&line.color), &line.name, &reading).debug_selector(|| {
+            format!(
+                "chart-tooltip-row:{}:{rank}:{}:{reading}",
+                panel.id, line.name
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_ellipsis()
-                    .child(line.name.clone()),
-            )
-            .child(div().child(reading))
+        })
     }
+}
+
+/// One series in a tooltip: its swatch, name and value on a line, and the coverage that
+/// qualifies the value, if any, muted on a line under the name.
+fn tooltip_row(color: u32, name: &str, reading: &str) -> gpui::Div {
+    let (value, detail) = split_reading(reading);
+    let headline = div()
+        .flex()
+        .items_center()
+        .gap(px(TOOLTIP_GAP))
+        .child(
+            div()
+                .w(px(TOOLTIP_SWATCH))
+                .h(px(3.0))
+                .flex_shrink_0()
+                .bg(rgb(color)),
+        )
+        .child(
+            div()
+                .debug_selector(|| "tooltip-row-name".into())
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(name.to_owned()),
+        )
+        .child(
+            div()
+                .flex_shrink_0()
+                .whitespace_nowrap()
+                .child(value.to_owned()),
+        );
+
+    div()
+        .py(px(2.0))
+        .child(headline)
+        .children(detail.map(|detail| {
+            div()
+                .debug_selector(|| "tooltip-row-detail".into())
+                .pl(px(TOOLTIP_SWATCH + TOOLTIP_GAP))
+                .text_size(px(11.0))
+                .line_height(px(15.0))
+                .text_color(rgb(MUTED))
+                .child(detail.to_owned())
+        }))
+}
+
+/// Splits the tooltip's series into those that get a row and those folded into one line. Several
+/// series without a reading fold, so they do not push the readings that exist out of the plot;
+/// a lone one, or all of them, keep their rows.
+fn fold_unreadable(indices: &[usize], unreadable: &[usize]) -> (Vec<usize>, Vec<usize>) {
+    if unreadable.len() < 2 || unreadable.len() == indices.len() {
+        return (indices.to_vec(), Vec::new());
+    }
+    let shown = indices
+        .iter()
+        .copied()
+        .filter(|line| !unreadable.contains(line))
+        .collect();
+
+    (shown, unreadable.to_vec())
+}
+
+/// The series that have no reading at the inspected second, named on one wrapping line.
+fn tooltip_unreadable(panel_id: &str, names: &[&str]) -> gpui::Div {
+    let text = format!("No reading: {}", names.join(", "));
+    div()
+        .debug_selector(|| format!("chart-tooltip-unreadable:{panel_id}:{text}"))
+        .mt(px(4.0))
+        .pt(px(6.0))
+        .border_t_1()
+        .border_color(rgb(GRID))
+        .text_size(px(11.0))
+        .line_height(px(15.0))
+        .text_color(rgb(MUTED))
+        .child(text.clone())
+}
+
+const TOOLTIP_GAP: f32 = 8.0;
+const TOOLTIP_SWATCH: f32 = 12.0;
+
+/// Splits a reading into its value and the coverage that qualifies it, so a long qualifier
+/// sits on a line of its own under the series name and never squeezes the name out.
+fn split_reading(reading: &str) -> (&str, Option<&str>) {
+    let separators = [" · ", " known subtotal"];
+    let Some(at) = separators
+        .iter()
+        .filter_map(|separator| reading.find(separator))
+        .min()
+    else {
+        return (reading, None);
+    };
+    let (value, rest) = reading.split_at(at);
+
+    (value, Some(rest.trim_start_matches(" · ").trim()))
 }
 
 fn chart_data_row(values: [String; 5]) -> gpui::Div {
@@ -432,4 +525,98 @@ fn chart_tooltip_place(tooltip: gpui::Div, width: gpui::Pixels, fraction: f32) -
     }
     assert!(left >= px(MARGIN));
     tooltip.left(left)
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{Context, Render, TestAppContext, Window, div, prelude::*, px};
+
+    use super::{fold_unreadable, split_reading, tooltip_row, tooltip_unreadable};
+
+    struct Probe;
+
+    impl Render for Probe {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .debug_selector(|| "probe-tooltip".into())
+                .w(px(252.0))
+                .p(px(10.0))
+                .text_size(px(12.0))
+                .child(tooltip_row(
+                    0x00f2_cc0c,
+                    "rustc",
+                    "44.4 W known subtotal · 5 measured · 3 unavailable",
+                ))
+                .child(tooltip_unreadable(
+                    "probe",
+                    &[
+                        "rm",
+                        "persister",
+                        "Xcode",
+                        "clippy-driver",
+                        "viewer-bd715b676b3",
+                    ],
+                ))
+        }
+    }
+
+    #[gpui::test]
+    fn a_long_reading_keeps_the_series_name_and_stays_inside_the_tooltip(cx: &mut TestAppContext) {
+        // Goal: coverage text under a series never squeezes its name out or spills past the
+        // tooltip, as it did when the whole reading shared the name's line. Method: lay out a
+        // 252 pixel tooltip with a long reading and measure the name, detail and tooltip.
+        let (_, cx) = cx.add_window_view(|_, _| Probe);
+        let tooltip = cx.debug_bounds("probe-tooltip").unwrap();
+        let name = cx.debug_bounds("tooltip-row-name").unwrap();
+        let detail = cx.debug_bounds("tooltip-row-detail").unwrap();
+
+        assert!(name.size.width >= px(60.0), "{name:?}");
+        assert!(detail.right() <= tooltip.right(), "{detail:?} {tooltip:?}");
+        assert!(detail.top() >= name.bottom());
+        let folded = cx
+            .debug_bounds(
+                "chart-tooltip-unreadable:probe:No reading: rm, persister, Xcode, clippy-driver, \
+                 viewer-bd715b676b3",
+            )
+            .unwrap();
+        assert!(folded.right() <= tooltip.right(), "{folded:?} {tooltip:?}");
+    }
+
+    #[test]
+    fn folds_several_series_without_a_reading_into_one_line() {
+        // Goal: unavailable series stop padding the tooltip, yet a lone one or an all-empty
+        // chart still shows its rows. Method: fold three cases of four series.
+        let lines = [0, 1, 2, 3];
+
+        assert_eq!(fold_unreadable(&lines, &[2, 3]), (vec![0, 1], vec![2, 3]));
+        assert_eq!(fold_unreadable(&lines, &[3]), (vec![0, 1, 2, 3], vec![]));
+        assert_eq!(fold_unreadable(&lines, &lines), (vec![0, 1, 2, 3], vec![]));
+        assert_eq!(fold_unreadable(&lines, &[]), (vec![0, 1, 2, 3], vec![]));
+    }
+
+    #[test]
+    fn splits_a_reading_from_the_coverage_that_qualifies_it() {
+        // Goal: the tooltip puts a long coverage note under the series, not beside it.
+        // Method: split each reading form the charts produce.
+        assert_eq!(
+            split_reading("44.4 W known subtotal · 5 measured · 3 unavailable"),
+            (
+                "44.4 W",
+                Some("known subtotal · 5 measured · 3 unavailable")
+            )
+        );
+        assert_eq!(
+            split_reading("2.5 MiB/s · known subtotal · 5 measured · 1 unavailable"),
+            (
+                "2.5 MiB/s",
+                Some("known subtotal · 5 measured · 1 unavailable")
+            )
+        );
+        assert_eq!(
+            split_reading("3 W · coverage unavailable"),
+            ("3 W", Some("coverage unavailable"))
+        );
+        assert_eq!(split_reading("Unavailable"), ("Unavailable", None));
+        assert_eq!(split_reading("12.5 W"), ("12.5 W", None));
+    }
 }
