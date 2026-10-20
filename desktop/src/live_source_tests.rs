@@ -503,7 +503,7 @@ use std::time::Duration;
 
 use super::{
     Cancellation, Mailbox, Request, Shared, Update, Worker, app_key_bytes, identity_signature,
-    identity_validate, selection_alternative, worker_publish,
+    identity_validate, selection_alternative, worker_pause_for, worker_publish,
 };
 
 #[test]
@@ -692,33 +692,35 @@ fn refuses_superseded_results_after_accepting_a_new_request() {
 }
 
 #[test]
-fn a_new_request_is_read_while_the_worker_waits_between_polls() {
+fn a_new_request_ends_the_pause_between_polls() {
     // Goal: opening a page does not wait out the worker's poll interval, since every page of
-    // the app reads local files and should show at once. Method: let the worker read one page
-    // and settle into its pause, request another page, and time the reply.
-    let recording = SealedRecording::new();
-    let mut worker = Worker::start(recording.root.clone()).unwrap();
-    let first = worker.request(SealedRecording::request()).unwrap();
-    await_ready(&mut worker, first);
-    std::thread::sleep(Duration::from_millis(60));
-    let mut request = SealedRecording::request();
-    request.route = "cpu".into();
+    // the app reads local files and should show at once. Method: pause a thread for a minute on
+    // the real mailbox, send a request, and wait up to ten seconds for the pause to end, which
+    // keeps the verdict independent of how busy the machine is.
+    let mut worker = Worker {
+        shared: Arc::new(Shared {
+            mailbox: Mutex::new(Mailbox {
+                generation: 0,
+                request: None,
+                output: None,
+            }),
+            wake: Condvar::new(),
+            stopped: AtomicBool::new(false),
+            cancellation: Arc::new(Cancellation::default()),
+        }),
+        thread: None,
+        mode: crate::live_source_mode::SourceMode::Live,
+    };
+    let (ended, ending) = std::sync::mpsc::channel();
+    let shared = Arc::clone(&worker.shared);
+    let pausing = std::thread::spawn(move || {
+        worker_pause_for(&shared, Duration::from_secs(60));
+        ended.send(()).unwrap();
+    });
+    std::thread::sleep(Duration::from_millis(50));
 
-    let started = std::time::Instant::now();
-    let second = worker.request(request).unwrap();
-    await_ready(&mut worker, second);
+    worker.request(SealedRecording::request()).unwrap();
 
-    let waited = started.elapsed();
-    assert!(waited < Duration::from_millis(100), "{waited:?}");
-}
-
-fn await_ready(worker: &mut Worker, generation: u64) {
-    for _attempt in 0..5000 {
-        match worker.take().unwrap() {
-            Some(Update::Ready(snapshot)) if snapshot.generation == generation => return,
-            Some(Update::Failed { message, .. }) => panic!("{message}"),
-            _ => std::thread::sleep(Duration::from_millis(1)),
-        }
-    }
-    panic!("The fixture reader exceeded five seconds");
+    ending.recv_timeout(Duration::from_secs(10)).unwrap();
+    pausing.join().unwrap();
 }
