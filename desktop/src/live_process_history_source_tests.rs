@@ -623,7 +623,8 @@ pub(crate) fn all_history() -> Box<viewer::app_process_groups_history::AppProces
 
 #[test]
 fn captured_process_sources_project_all_history_cards() {
-    // The real saved worker supplies eight captured cards for named groups and twelve for All groups.
+    // The real saved worker supplies eight captured cards for named groups and twelve for All
+    // groups.
     let recording = named_recording();
     let named = named_request();
     let mut all = named.clone();
