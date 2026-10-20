@@ -1,4 +1,5 @@
 use super::*;
+use crate::live::window::WindowValue;
 
 const NS: u64 = 1_000_000_000;
 
@@ -121,6 +122,23 @@ fn ranks_a_bundle_before_an_executable_with_an_equal_total() {
 }
 
 #[test]
+fn ranks_an_app_tied_with_the_tenth_by_its_key_after_ten_have_filled_the_ranks() {
+    // Goal: an App whose total equals the tenth rank's takes that rank when its key sorts
+    // first, wherever it sits in the sample.
+    // Method: rank ten equal Apps, then an eleventh with their total whose key sorts first.
+    let mut apps = (2..=11).map(tied_app).collect::<Vec<App>>();
+    apps.push(tied_app(1));
+
+    let ranks = sample(apps).ranks().unwrap();
+
+    let first_ten = (1..=10).map(|byte| vec![byte]).collect::<Vec<Vec<u8>>>();
+    assert_eq!(
+        ranks.metrics.iter().map(keys).collect::<Vec<_>>(),
+        vec![first_ten; 4]
+    );
+}
+
+#[test]
 fn ranks_by_exact_totals_where_their_rates_are_equal() {
     // Goal: a difference of one above float precision still decides the order.
     // Method: rank two CPU totals that differ by one past the 53-bit mantissa.
@@ -158,7 +176,20 @@ fn keeps_measured_zero_partial_unmeasured_and_overflowed_totals_apart() {
     assert_eq!(amounts(cpu), vec![3, 0]);
     assert_eq!(cpu.entries[0].unavailable_members, 2);
     assert_eq!(cpu.entries[1].rate, Some(0.0));
-    assert_eq!(amounts(&ranks.metrics[1]), vec![3, 2, 1, 0]);
+}
+
+#[test]
+fn ranks_an_app_in_one_metric_whatever_another_metric_could_not_measure() {
+    // Goal: a CPU total that could not be ranked leaves the App's other totals ranked.
+    // Method: rank an overflowed and an unmeasured CPU total, and read resident memory.
+    let mut overflowed = app(1);
+    overflowed.cpu_ns.overflowed = true;
+    let mut unmeasured = app(2);
+    unmeasured.cpu_ns.measured_members = 0;
+
+    let ranks = sample(vec![overflowed, unmeasured]).ranks().unwrap();
+
+    assert_eq!(amounts(&ranks.metrics[1]), vec![2, 1]);
 }
 
 #[test]
@@ -195,8 +226,29 @@ fn keeps_the_samples_membership_coverage() {
     assert_eq!(ranks.ungrouped_members, 7);
 }
 
+#[test]
+fn counts_the_name_of_each_app_it_ranks_in_its_bytes() {
+    // Goal: the bound on a window's ranks sees the names they keep, once in each ranking.
+    // Method: rank one App under its eight-byte name and under a name a kibibyte long.
+    let short = sample(vec![app(1)]).ranks().unwrap();
+    let mut named = app(1);
+    named.display_name = "A".repeat(1024);
+
+    let long = sample(vec![named]).ranks().unwrap();
+
+    assert_eq!(long.bytes() - short.bytes(), 4 * (1024 - 8));
+}
+
 fn amounts(ranking: &Ranking) -> Vec<u64> {
     ranking.entries.iter().map(|rank| rank.amount).collect()
+}
+
+fn keys(ranking: &Ranking) -> Vec<Vec<u8>> {
+    ranking
+        .entries
+        .iter()
+        .map(|rank| rank.app.bytes.clone())
+        .collect()
 }
 
 fn names(ranking: &Ranking) -> Vec<&str> {
@@ -230,6 +282,14 @@ fn sample(apps: Vec<App>) -> Sample {
         apps,
         processes: Vec::new(),
     }
+}
+
+/// An App with the total every tied App shares, told apart by its one key byte.
+fn tied_app(byte: u8) -> App {
+    let mut app = app(7);
+    app.key.bytes = vec![byte];
+
+    app
 }
 
 fn app(amount: u64) -> App {

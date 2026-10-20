@@ -294,3 +294,7 @@ fn fill_window_saved<T: WindowValue>(
 #[cfg(test)]
 #[path = "live_window_fixture.rs"]
 pub(super) mod fixture;
+
+#[cfg(test)]
+#[path = "live_window_tests.rs"]
+mod tests;
