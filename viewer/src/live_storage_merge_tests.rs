@@ -131,3 +131,28 @@ fn retains_valid_live_storage_when_its_sealed_copy_has_no_baseline() {
     assert_eq!(followed["summary"]["storage"], expected);
     assert_eq!(selected["summary"]["storage"], expected);
 }
+
+#[test]
+fn inspects_committed_storage_rates_over_a_cold_live_tail() {
+    // Goal: a hover's read of the first live second holds the rates its saved minute keeps.
+    // Method: retain raw publications2..3 after sealing1..3, then inspect 2 as select reads it.
+    let mut fixture = storage_fixture_with_slots(2);
+    let mut window = storage_merge_window(&fixture, 0);
+    storage_publish(&mut fixture, 1, Some(&storage_snapshot(1)));
+    storage_merge_stage(&fixture, &mut window, 1);
+    storage_publish(&mut fixture, 2, Some(&storage_snapshot(2)));
+    storage_merge_stage(&fixture, &mut window, 2);
+    storage_publish(&mut fixture, 3, Some(&storage_snapshot(3)));
+    storage_merge_stage(&fixture, &mut window, 3);
+    seal_window(&fixture.root, &window);
+    let mut saved = Session::open(&fixture.root).unwrap();
+    let expected = saved.select(1002, 0).unwrap()["summary"]["storage"].clone();
+    let mut cold = LiveSession::open(&fixture.root).unwrap();
+    let identity = cold.select(1002, 0).unwrap()["selected"].clone();
+    cold.select(1003, 0).unwrap();
+
+    let inspected = cold.inspect(1002, &identity).unwrap();
+
+    assert_eq!(expected["read_bps"], 4096.0);
+    assert_eq!(inspected["summary"]["storage"], expected);
+}

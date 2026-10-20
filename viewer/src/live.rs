@@ -388,14 +388,8 @@ impl LiveSession {
     /// readings, then the ring, then the saved minutes, which are opened again once where the
     /// session's copy of them is older than the observation.
     fn inspect_selected(&mut self, second: u64, identity: &Value) -> Result<Value> {
-        if let Some(observation) = self
-            .observations
-            .iter()
-            .filter(|observation| observation.observation.wall / NANOSECONDS_PER_SECOND == second)
-            .find(|observation| same(&observation.json(), identity))
-        {
-            return Ok(json!({"second": second, "selected": observation.json(),
-                "summary": inspect_summary(&observation.point)?}));
+        if let Some(response) = self.inspect_live(second, identity)? {
+            return Ok(response);
         }
 
         if let Some(inspected) = self.select_rehydrate(identity)? {
@@ -420,6 +414,45 @@ impl LiveSession {
         self.refresh_history()?;
         self.inspect_history(second, identity)?
             .ok_or(Error::Bound("inspected observation"))
+    }
+
+    /// The live observation `identity` names at `second`, with its summary. The first
+    /// observation of its run the session holds was read with no predecessor, so its interval
+    /// readings come from the saved minute that keeps it, as a selection's do.
+    fn inspect_live(&mut self, second: u64, identity: &Value) -> Result<Option<Value>> {
+        let Some(index) = self
+            .observations
+            .iter()
+            .enumerate()
+            .filter(|(_, observation)| {
+                observation.observation.wall / NANOSECONDS_PER_SECOND == second
+            })
+            .find(|(_, observation)| same(&observation.json(), identity))
+            .map(|(index, _)| index)
+        else {
+            return Ok(None);
+        };
+
+        let observation = &self.observations[index];
+        let selected = observation.json();
+        let mut summary = inspect_summary(&observation.point)?;
+        let predecessor_held = self
+            .observations
+            .iter()
+            .take(index)
+            .any(|earlier| earlier.identity == observation.identity);
+
+        if !predecessor_held {
+            if let Some(saved) = self.inspect_history(second, identity)? {
+                follow_merge_point(PointMerge {
+                    live: &mut summary,
+                    committed: &saved["summary"],
+                })?;
+            }
+        }
+        Ok(Some(
+            json!({"second": second, "selected": selected, "summary": summary}),
+        ))
     }
 
     fn inspect_history(&mut self, second: u64, identity: &Value) -> Result<Option<Value>> {
