@@ -160,7 +160,8 @@ impl<'sample> PartRow<'sample> {
         }
     }
 
-    fn header(&self) -> Option<&'sample Sample> {
+    /// The observation of a row of its facts.
+    fn described_sample(&self) -> Option<&'sample Sample> {
         match self {
             Self::Header { sample } => Some(sample),
             Self::App { .. } | Self::Process { .. } => None,
@@ -176,7 +177,8 @@ impl<'sample> PartRow<'sample> {
         }
     }
 
-    fn app_row(&self) -> Option<&'sample App> {
+    /// The App of an App row, which a process row of the App does not describe.
+    fn described_app(&self) -> Option<&'sample App> {
         match self {
             Self::App { app, .. } => Some(app),
             Self::Header { .. } | Self::Process { .. } => None,
@@ -191,13 +193,14 @@ impl<'sample> PartRow<'sample> {
         }
     }
 
-    fn process_row(&self) -> Option<&'sample Process> {
+    /// The process of a process row.
+    fn described_process(&self) -> Option<&'sample Process> {
         self.process().map(|(_index, process)| process)
     }
 
-    fn place(&self) -> RowPlace<'sample> {
-        let process = self.process_row();
-        RowPlace {
+    fn order(&self) -> RowOrder<'sample> {
+        let process = self.described_process();
+        RowOrder {
             app: self
                 .app()
                 .map(|(_index, app)| (kind_code(app.key.kind), app.key.bytes.as_slice())),
@@ -214,10 +217,10 @@ impl<'sample> PartRow<'sample> {
     }
 }
 
-/// Where a row sits in the table, by its fields in this order: every observation's facts
+/// The order of the rows in the table, by these fields in turn: every observation's facts
 /// first, then each App's own rows, then those of each of its processes, second after second.
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
-struct RowPlace<'sample> {
+struct RowOrder<'sample> {
     app: Option<(u8, &'sample [u8])>,
     kind: u8,
     executable: Option<&'sample [u8]>,
@@ -278,7 +281,7 @@ fn sealed_parts_rows(samples: &[Box<Sample>]) -> Result<Vec<PartRow<'_>>> {
             if let Some(app_index) = process.app_index {
                 let app = sample
                     .apps()
-                    .get(count_of(app_index)?)
+                    .get(collector::usize_from_u32(app_index))
                     .ok_or(Error::Bound("sealed parts process App"))?;
                 rows.push(PartRow::Process {
                     sample,
@@ -293,7 +296,7 @@ fn sealed_parts_rows(samples: &[Box<Sample>]) -> Result<Vec<PartRow<'_>>> {
     assert!(rows.len() <= count);
     // A row changes little from the row of the same App or process a second before, so keeping
     // them side by side halves the table. The reader orders the rows it reads by observation.
-    rows.sort_by_key(PartRow::place);
+    rows.sort_by_key(PartRow::order);
 
     Ok(rows)
 }
@@ -304,7 +307,7 @@ fn sealed_parts_decoded_bytes(rows: &[PartRow<'_>]) -> u64 {
         .map(|row| {
             let key = row.app().map_or(0, |(_index, app)| app.key.bytes.len());
             let name = row
-                .process_row()
+                .described_process()
                 .and_then(|process| process.executable_name.as_ref())
                 .map_or(0, |name| name.bytes.len());
             collector::u64_from_usize(ROW_DECODED_BYTES + key + name)
@@ -313,31 +316,35 @@ fn sealed_parts_decoded_bytes(rows: &[PartRow<'_>]) -> u64 {
 }
 
 fn sealed_parts_header_columns(rows: &[PartRow<'_>]) -> Vec<Column> {
-    let previous = |row: &PartRow<'_>| row.header().and_then(|sample| sample.previous);
+    let previous = |row: &PartRow<'_>| row.described_sample().and_then(|sample| sample.previous);
 
     columns!(rows;
         "version" => |_| VERSION,
         "publication" => |row| row.sample().selected.stamp.publication,
         "row_kind" => PartRow::kind,
-        "run_tick" => |row| row.header().map(|sample| sample.selected.run_tick),
-        "wall_ns" => |row| row.header().and_then(|sample| sample.selected.wall_ns),
+        "run_tick" => |row| row.described_sample().map(|sample| sample.selected.run_tick),
+        "wall_ns" => |row| row.described_sample().and_then(|sample| sample.selected.wall_ns),
         "continuous_ns" => |row| {
-            row.header().and_then(|sample| sample.selected.stamp.continuous_ns)
+            row.described_sample().and_then(|sample| sample.selected.stamp.continuous_ns)
         },
-        "awake_ns" => |row| row.header().and_then(|sample| sample.selected.stamp.awake_ns),
+        "awake_ns" => |row| {
+            row.described_sample().and_then(|sample| sample.selected.stamp.awake_ns)
+        },
         "previous_publication" => |row| previous(row).map(|stamp| stamp.publication),
         "previous_continuous_ns" => |row| previous(row).and_then(|stamp| stamp.continuous_ns),
         "previous_awake_ns" => |row| previous(row).and_then(|stamp| stamp.awake_ns),
-        "elapsed_ns" => |row| row.header().and_then(|sample| sample.elapsed_ns),
-        "membership_complete" => |row| row.header().map(|sample| sample.membership_complete),
-        "ungrouped_members" => |row| row.header().map(|sample| sample.ungrouped_members),
-        "usage_refused" => |row| row.header().map(|sample| sample.usage_refused),
-        "usage_gone" => |row| row.header().map(|sample| sample.usage_gone),
+        "elapsed_ns" => |row| row.described_sample().and_then(|sample| sample.elapsed_ns),
+        "membership_complete" => |row| {
+            row.described_sample().map(|sample| sample.membership_complete)
+        },
+        "ungrouped_members" => |row| row.described_sample().map(|sample| sample.ungrouped_members),
+        "usage_refused" => |row| row.described_sample().map(|sample| sample.usage_refused),
+        "usage_gone" => |row| row.described_sample().map(|sample| sample.usage_gone),
         "app_count" => |row| {
-            row.header().map(|sample| collector::u64_from_usize(sample.apps().len()))
+            row.described_sample().map(|sample| collector::u64_from_usize(sample.apps().len()))
         },
         "process_count" => |row| {
-            row.header().map(|sample| collector::u64_from_usize(sample.processes().len()))
+            row.described_sample().map(|sample| collector::u64_from_usize(sample.processes().len()))
         },
     )
 }
@@ -347,45 +354,47 @@ fn sealed_parts_member_columns(rows: &[PartRow<'_>]) -> Vec<Column> {
         "app_index" => |row| row.app().map(|(index, _app)| index),
         "app_kind" => |row| row.app().map(|(_index, app)| kind_code(app.key.kind)),
         "app_key" => |row| row.app().map(|(_index, app)| app.key.bytes.as_slice()),
-        "members" => |row| row.app_row().map(|app| app.members),
-        "live_members" => |row| row.app_row().map(|app| app.live_members),
-        "app_membership_complete" => |row| row.app_row().map(|app| app.membership_complete),
+        "members" => |row| row.described_app().map(|app| app.members),
+        "live_members" => |row| row.described_app().map(|app| app.live_members),
+        "app_membership_complete" => |row| row.described_app().map(|app| app.membership_complete),
         "process_index" => |row| row.process().map(|(index, _process)| index),
-        "pid" => |row| row.process_row().map(|process| process.pid),
+        "pid" => |row| row.described_process().map(|process| process.pid),
         "unique_id" => |row| {
-            row.process_row()
+            row.described_process()
                 .and_then(|process| process.creation)
                 .map(|creation| creation.unique_id)
         },
         "pid_version" => |row| {
-            row.process_row()
+            row.described_process()
                 .and_then(|process| process.creation)
                 .map(|creation| creation.pid_version)
         },
         "executable_name" => |row| {
-            row.process_row()
+            row.described_process()
                 .and_then(|process| process.executable_name.as_ref())
                 .map(|name| name.bytes.as_slice())
         },
         "program_unavailable" => |row| {
-            row.process_row()
+            row.described_process()
                 .and_then(|process| process.program_unavailable)
                 .map(identity_code)
         },
         "app_attribution" => |row| {
-            row.process_row()
+            row.described_process()
                 .and_then(|process| process.app_attribution)
                 .map(unavailable_code)
         },
-        "state" => |row| row.process_row().map(|process| state_code(process.state)),
+        "state" => |row| row.described_process().map(|process| state_code(process.state)),
     )
 }
 
 fn sealed_parts_measure_columns(rows: &[PartRow<'_>]) -> Vec<Column> {
     let mut columns = Vec::with_capacity(MEASURES.len() * MEASURE_FIELDS.len());
     for (measure, value) in MEASURES {
-        let values: Vec<Option<Measure>> =
-            rows.iter().map(|row| row.app_row().map(value)).collect();
+        let values: Vec<Option<Measure>> = rows
+            .iter()
+            .map(|row| row.described_app().map(value))
+            .collect();
         let [known, measured, unavailable, overflowed] = measure_column_names(measure);
         columns.push(Column::new(
             known.into(),
@@ -425,7 +434,7 @@ fn sealed_parts_amount_columns(rows: &[PartRow<'_>]) -> Vec<Column> {
     for (amount, value) in AMOUNTS {
         let values: Vec<Option<Amount>> = rows
             .iter()
-            .map(|row| row.process_row().map(value))
+            .map(|row| row.described_process().map(value))
             .collect();
         let [known, unavailable] = amount_column_names(amount);
         columns.push(Column::new(
@@ -598,7 +607,7 @@ impl Session {
             kept,
             key,
             output: Vec::with_capacity(TICKS_PER_WINDOW_MAX),
-            open: None,
+            observation: None,
         };
         for index in 0..frame.height() {
             self.operation.check()?;
@@ -647,7 +656,7 @@ struct Decoder<'read> {
     output: Vec<AppPart>,
     /// The facts of the observation the last row of facts opened, and the App's row and
     /// processes there so far.
-    open: Option<(Header, Option<Present>)>,
+    observation: Option<(Header, Option<Present>)>,
 }
 
 impl Decoder<'_> {
@@ -658,7 +667,7 @@ impl Decoder<'_> {
             return self.open(kept_header(row, self.kept.run)?);
         }
 
-        let Some((header, present)) = &mut self.open else {
+        let Some((header, present)) = &mut self.observation else {
             return Err(Error::Bound("sealed parts header"));
         };
         let publication: u64 = row.get(const { fixed("publication") })?;
@@ -678,7 +687,7 @@ impl Decoder<'_> {
             }
             *present = Some(Present {
                 app_index,
-                processes: Vec::with_capacity(count_of(app.members)?),
+                processes: Vec::with_capacity(collector::usize_from_u32(app.members)),
                 app,
             });
         } else {
@@ -690,10 +699,10 @@ impl Decoder<'_> {
             let app_index = process
                 .app_index
                 .ok_or(Error::Bound("sealed parts process App"))?;
-            if count_of(app_index)? != present.app_index {
+            if collector::usize_from_u32(app_index) != present.app_index {
                 return Err(Error::Bound("sealed parts process App"));
             }
-            if present.processes.len() == count_of(present.app.members)? {
+            if present.processes.len() == collector::usize_from_u32(present.app.members) {
                 return Err(Error::Bound("sealed parts members"));
             }
             present.processes.push(process);
@@ -716,18 +725,18 @@ impl Decoder<'_> {
             return Err(Error::Bound("sealed parts observations"));
         }
 
-        self.open = Some((header, None));
+        self.observation = Some((header, None));
 
         Ok(())
     }
 
     /// Ends the observation open last, whose App must have all its processes.
     fn close(&mut self) -> Result<()> {
-        let Some((header, present)) = self.open.take() else {
+        let Some((header, present)) = self.observation.take() else {
             return Ok(());
         };
         if let Some(present) = &present {
-            if present.processes.len() != count_of(present.app.members)? {
+            if present.processes.len() != collector::usize_from_u32(present.app.members) {
                 return Err(Error::Bound("sealed parts members"));
             }
         }
@@ -777,8 +786,8 @@ fn kept_header(row: &Row<'_>, run: &RunIdentity) -> Result<Header> {
         ungrouped_members: row.get(const { fixed("ungrouped_members") })?,
         usage_refused: row.get(const { fixed("usage_refused") })?,
         usage_gone: row.get(const { fixed("usage_gone") })?,
-        app_count: size_of_count(row.get(const { fixed("app_count") })?)?,
-        process_count: size_of_count(row.get(const { fixed("process_count") })?)?,
+        app_count: count_of(row.get(const { fixed("app_count") })?)?,
+        process_count: count_of(row.get(const { fixed("process_count") })?)?,
     })
 }
 
@@ -789,7 +798,7 @@ fn kept_app(row: &Row<'_>) -> Result<(usize, App)> {
         row.get(const { fixed("app_key") })?,
     )?;
     let members: u32 = row.get(const { fixed("members") })?;
-    if count_of(members)? > MEMBERS_MAX {
+    if collector::usize_from_u32(members) > MEMBERS_MAX {
         return Err(Error::Bound("sealed parts members"));
     }
     let measure = |place: usize| -> Result<Measure> {
@@ -827,7 +836,10 @@ fn kept_app(row: &Row<'_>) -> Result<(usize, App)> {
         footprint_bytes: measure(const { place(&MEASURES, "footprint_bytes") })?,
     };
 
-    Ok((count_of(row.get(const { fixed("app_index") })?)?, app))
+    Ok((
+        collector::usize_from_u32(row.get(const { fixed("app_index") })?),
+        app,
+    ))
 }
 
 fn kept_process(row: &Row<'_>) -> Result<Process> {
@@ -875,11 +887,7 @@ fn kept_process(row: &Row<'_>) -> Result<Process> {
     })
 }
 
-fn count_of(value: u32) -> Result<usize> {
-    usize::try_from(value).map_err(|_| Error::Bound("sealed parts count"))
-}
-
-fn size_of_count(value: u64) -> Result<usize> {
+fn count_of(value: u64) -> Result<usize> {
     usize::try_from(value).map_err(|_| Error::Bound("sealed parts count"))
 }
 
