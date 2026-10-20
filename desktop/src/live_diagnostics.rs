@@ -8,7 +8,7 @@ use gpui::{
 use num_traits::ToPrimitive;
 
 use crate::chart_axes::{AxisSide, TimeWindow, axis_column, clock, labels, time_labels};
-use crate::charts::{self, BLUE, GRID, Inspection, LINE, MUTED, PANEL, RED, TEXT};
+use crate::charts::{self, BLUE, GRID, Inspection, LINE, MUTED, ORANGE, PANEL, RED, TEXT};
 
 use crate::live_chart_view::ChartHelp;
 use crate::live_dashboard::LiveDashboard;
@@ -55,6 +55,9 @@ impl SelfPart {
 
 const CHART_HEIGHT: f32 = 190.0;
 
+/// The page background, which the pipeline's stages sit on.
+const BACKGROUND: u32 = 0x0011_1217;
+
 /// The shade of the prototype's table headings.
 const RAISED: u32 = 0x002c_2f35;
 
@@ -83,7 +86,7 @@ const PIPELINE: [(&str, &str); 4] = [
 const SIGNALS: [(&str, &str); 5] = [
     (
         "Collector memory · Not captured",
-        "Collector resident memory and physical footprint are not reported. The persister \
+        "Collector resident memory and physical footprint were not logged. The persister \
          footprint chart does not include the collector.",
     ),
     (
@@ -99,12 +102,12 @@ const SIGNALS: [(&str, &str); 5] = [
     (
         "Query performance · Not captured",
         "Selected-second query latency, result coverage, decoded bytes, failures and query \
-         memory. The viewer queries the recording but does not report these.",
+         memory. The query API exists; this run did not exercise it.",
     ),
     (
-        "Native viewer · Not captured",
+        "Native viewer · Not implemented",
         "Viewer CPU/footprint, time to display a selected second, rendering cost and live \
-         ring-reader lag. These are not measured here, which is not a measured zero.",
+         ring-reader lag. These are design targets, not measured zeroes.",
     ),
 ];
 
@@ -146,9 +149,11 @@ impl LiveDashboard {
                 div()
                     .debug_selector(|| format!("self-status:{status}"))
                     .text_size(px(12.0))
+                    .line_height(px(18.0))
                     .text_color(rgb(MUTED))
                     .child(status.clone()),
             )
+            .child(self_notice())
             .child(
                 div()
                     .grid()
@@ -164,7 +169,7 @@ impl LiveDashboard {
         let Some(window) = self_window() else {
             return div()
                 .child(heading)
-                .child(note(
+                .child(caption(
                     "The wall clock is unavailable, so no report can be placed.",
                 ))
                 .into_any_element();
@@ -195,13 +200,14 @@ impl LiveDashboard {
         div()
             .flex()
             .flex_col()
-            .gap(px(8.0))
+            .gap(px(10.0))
             .child(heading)
             .child(
                 div()
                     .flex()
                     .items_center()
                     .justify_between()
+                    .mb(px(2.0))
                     .child(
                         div()
                             .debug_selector(|| format!("self-run:{run}"))
@@ -232,7 +238,7 @@ impl LiveDashboard {
         let gutter = axis.width;
         let id = chart.panel.id.clone();
         let title = chart.panel.title.clone();
-        let caption = chart.panel.caption.clone().unwrap_or_default();
+        let caption_text = chart.panel.caption.clone().unwrap_or_default();
         let help = chart.panel.help.clone().unwrap_or_default();
         let plot = Self::self_plot(chart, window, cursor, cx);
 
@@ -244,14 +250,13 @@ impl LiveDashboard {
             .border_color(rgb(LINE))
             .bg(rgb(PANEL))
             .px(px(12.0))
-            .pt(px(8.0))
-            .pb(px(10.0))
+            .py(px(8.0))
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(4.0))
-                    .min_h(px(40.0))
+                    .min_h(px(44.0))
                     .child(
                         div()
                             .text_size(px(14.0))
@@ -277,14 +282,7 @@ impl LiveDashboard {
                     .child(time_labels(Some(window))),
             )
             .child(self_legend(chart))
-            .child(
-                div()
-                    .mt(px(4.0))
-                    .text_size(px(11.0))
-                    .line_height(px(16.0))
-                    .text_color(rgb(MUTED))
-                    .child(caption),
-            )
+            .child(caption(&caption_text))
     }
 
     fn self_plot(
@@ -391,7 +389,13 @@ impl LiveDashboard {
         let inspected = self_monitoring::inspected(&self.self_reports, self.self_inspected);
         let sources = inspected.map(self_monitoring::sources).unwrap_or_default();
         let largest = sources.first().map_or(0.0, |(_, value)| *value);
-        let mut bars = div().flex().flex_col().gap(px(4.0)).text_size(px(12.0));
+        let mut bars = div()
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .py(px(8.0))
+            .text_size(px(12.0))
+            .line_height(px(18.0));
         for (name, value) in sources.iter().take(32) {
             bars = bars.child(source_bar(name, *value, largest));
         }
@@ -406,12 +410,12 @@ impl LiveDashboard {
         div()
             .flex()
             .flex_col()
-            .gap(px(8.0))
+            .gap(px(10.0))
             .child(crate::live_views::heading("Where collector CPU goes"))
             .child(
                 self_panel("CPU time by collection source")
                     .child(bars)
-                    .child(note(
+                    .child(caption(
                         "Milliseconds of CPU per elapsed second. Source values are rounded \
                      independently; unattributed covers remaining collector work. This is CPU \
                      cost, not sensor-read wall time.",
@@ -424,11 +428,11 @@ impl LiveDashboard {
         div()
             .flex()
             .flex_col()
-            .gap(px(8.0))
+            .gap(px(10.0))
             .child(crate::live_views::heading("Recording integrity"))
             .child(
                 self_panel("Sealed windows")
-                    .child(note(
+                    .child(caption(
                         "Completed seals, including the stop/drain window. Publication ranges \
                          are half-open. Seal time includes encoding and commit; staged bytes are \
                          uncompressed in-memory window data, not disk bytes.",
@@ -464,7 +468,7 @@ impl LiveDashboard {
                         &rows,
                         "No ten-second report yet.",
                     ))
-                    .child(note(
+                    .child(caption(
                         "Collector power is its reported process energy divided by the report \
                          interval, in mW. It excludes the persister, viewer and whole-machine \
                          power.",
@@ -494,7 +498,7 @@ impl LiveDashboard {
                         &rows,
                         "No complete minute yet.",
                     ))
-                    .child(note(
+                    .child(caption(
                         "Read from the output of the collector this app started, as it runs. \
                          Report ends are the wall-clock seconds the app read each report; minute \
                          CPU calculations use each reported elapsed_ns. No values are \
@@ -511,9 +515,9 @@ fn self_card(card: &Card) -> impl IntoElement {
         .debug_selector(move || selector.clone())
         .flex()
         .flex_col()
-        .gap(px(3.0))
         .min_w_0()
-        .p(px(12.0))
+        .px(px(16.0))
+        .py(px(14.0))
         .rounded(px(8.0))
         .border_1()
         .border_color(rgb(GRID))
@@ -521,13 +525,14 @@ fn self_card(card: &Card) -> impl IntoElement {
         .child(
             div()
                 .text_size(px(12.0))
+                .line_height(px(18.0))
                 .text_color(rgb(MUTED))
                 .child(card.label),
         )
         .child(
             div()
-                .text_size(px(22.0))
-                .line_height(px(30.0))
+                .text_size(px(23.0))
+                .line_height(px(36.0))
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(rgb(card.color))
                 .child(card.reading.clone()),
@@ -535,47 +540,99 @@ fn self_card(card: &Card) -> impl IntoElement {
         .child(
             div()
                 .text_size(px(11.0))
-                .line_height(px(16.0))
+                .line_height(px(16.5))
                 .text_color(rgb(MUTED))
                 .child(card.note.clone()),
         )
 }
 
-fn self_pipeline() -> impl IntoElement {
-    let mut stages = div().flex().items_center().gap(px(8.0));
-    for (index, (title, text)) in PIPELINE.iter().enumerate() {
-        if index > 0 {
-            stages = stages.child(div().text_color(rgb(MUTED)).child("→"));
-        }
-        stages = stages.child(
+/// The run-end estimate of processes the collector missed. The collector reports none, so the
+/// notice says it is not captured where the prototype gives the count.
+fn self_notice() -> impl IntoElement {
+    div()
+        .debug_selector(|| "self-notice".into())
+        .flex()
+        .overflow_hidden()
+        .rounded(px(6.0))
+        .border_t_1()
+        .border_r_1()
+        .border_b_1()
+        .border_color(rgb(LINE))
+        .child(div().w(px(3.0)).flex_shrink_0().bg(rgb(ORANGE)))
+        .child(
             div()
                 .flex_1()
                 .min_w_0()
-                .self_stretch()
-                .p(px(12.0))
-                .rounded(px(6.0))
-                .border_1()
-                .border_color(rgb(GRID))
+                .px(px(16.0))
+                .py(px(12.0))
                 .child(
                     div()
                         .text_size(px(13.0))
+                        .line_height(px(19.5))
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .child("Processes missed during this run · Not captured"),
+                )
+                .child(
+                    paragraph(
+                        "The collector reports no run-end PID-sequence estimate. Query and \
+                         viewer health were not captured.",
+                    )
+                    .mt(px(4.0)),
+                ),
+        )
+}
+
+fn self_pipeline() -> impl IntoElement {
+    let mut stages = div().flex().gap(px(24.0)).my(px(12.0));
+    for (index, (title, text)) in PIPELINE.iter().enumerate() {
+        stages = stages.child(
+            div()
+                .relative()
+                .flex_1()
+                .min_w_0()
+                .p(px(12.0))
+                .rounded(px(6.0))
+                .border_1()
+                .border_color(rgb(LINE))
+                .bg(rgb(BACKGROUND))
+                .child(
+                    div()
+                        .mb(px(5.0))
+                        .text_size(px(14.0))
+                        .line_height(px(21.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .child(*title),
                 )
-                .child(note(text)),
+                .child(paragraph(text))
+                .when(index + 1 < PIPELINE.len(), |stage| {
+                    stage.child(
+                        div()
+                            .absolute()
+                            .right(px(-20.0))
+                            .top(gpui::relative(0.5))
+                            .text_color(rgb(MUTED))
+                            .child("→"),
+                    )
+                }),
         );
     }
 
     self_panel("Flightdeck recording pipeline")
         .child(stages)
-        .child(note(
-            "Sealed recording → disk query API → this viewer's history. The viewer reads the ring \
-         for live readings. Neither path uses a metrics server or a dashboard service.",
-        ))
+        .child(
+            paragraph(
+                "Sealed recording → disk query API (implemented, not sampled here) → native \
+                 viewer (not yet implemented). Planned live viewing also reads the ring. Neither \
+                 path uses a metrics server or a dashboard service.",
+            )
+            .py(px(12.0))
+            .border_t_1()
+            .border_color(rgb(LINE)),
+        )
 }
 
 fn self_signals() -> impl IntoElement {
-    let mut signals = div().grid().grid_cols(2).gap(px(12.0));
+    let mut signals = div().grid().grid_cols(2).gap(px(12.0)).my(px(12.0));
     for (title, text) in SIGNALS {
         signals = signals.child(
             div()
@@ -586,28 +643,32 @@ fn self_signals() -> impl IntoElement {
                 .child(
                     div()
                         .text_size(px(13.0))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .line_height(px(19.5))
+                        .font_weight(gpui::FontWeight::BOLD)
                         .child(title),
                 )
-                .child(note(text)),
+                .child(paragraph(text).mt(px(4.0))),
         );
     }
 
     div()
         .flex()
         .flex_col()
-        .gap(px(8.0))
+        .gap(px(10.0))
         .child(crate::live_views::heading("Signals still to connect"))
         .child(self_panel_plain().child(signals))
 }
 
 fn self_panel(title: &'static str) -> gpui::Div {
     self_panel_plain().child(
-        div()
-            .debug_selector(move || title.into())
-            .text_size(px(14.0))
-            .font_weight(gpui::FontWeight::SEMIBOLD)
-            .child(title),
+        div().flex().items_center().min_h(px(40.0)).child(
+            div()
+                .debug_selector(move || title.into())
+                .text_size(px(14.0))
+                .line_height(px(21.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .child(title),
+        ),
     )
 }
 
@@ -615,31 +676,33 @@ fn self_panel_plain() -> gpui::Div {
     div()
         .flex()
         .flex_col()
-        .gap(px(12.0))
-        .p(px(16.0))
-        .rounded(px(8.0))
+        .px(px(12.0))
+        .py(px(8.0))
+        .rounded(px(12.0))
         .border_1()
-        .border_color(rgb(GRID))
+        .border_color(rgb(LINE))
         .bg(rgb(PANEL))
 }
 
 fn disclosure_panel() -> gpui::Div {
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(8.0))
-        .p(px(12.0))
-        .rounded(px(8.0))
-        .border_1()
-        .border_color(rgb(GRID))
-        .bg(rgb(PANEL))
+    self_panel_plain()
 }
 
-fn note(text: &str) -> gpui::Div {
+/// A caption under a chart or table, as the prototype sets it.
+fn caption(text: &str) -> gpui::Div {
     div()
-        .mt(px(4.0))
+        .mt(px(7.0))
         .text_size(px(11.0))
-        .line_height(px(16.0))
+        .line_height(px(17.0))
+        .text_color(rgb(MUTED))
+        .child(text.to_owned())
+}
+
+/// A paragraph of a panel's body text.
+fn paragraph(text: &str) -> gpui::Div {
+    div()
+        .text_size(px(12.0))
+        .line_height(px(18.0))
         .text_color(rgb(MUTED))
         .child(text.to_owned())
 }
@@ -658,26 +721,48 @@ fn source_bar(name: &str, value: f32, largest: f32) -> impl IntoElement {
         .flex()
         .items_center()
         .gap(px(12.0))
-        .child(div().w(px(110.0)).flex_shrink_0().child(name.to_owned()))
+        .child(div().w(px(112.0)).flex_shrink_0().child(name.to_owned()))
         .child(
-            div().flex_1().h(px(6.0)).child(
+            div().flex_1().min_w_0().h(px(6.0)).child(
                 div()
                     .h_full()
                     .w(gpui::relative(share))
-                    .rounded(px(3.0))
+                    .rounded(px(2.0))
                     .bg(rgb(BLUE)),
             ),
         )
         .child(
             div()
-                .w(px(48.0))
+                .w(px(60.0))
                 .flex_shrink_0()
                 .text_right()
+                .font_weight(gpui::FontWeight::MEDIUM)
                 .child(reading),
         )
 }
 
+/// The weight of each column: the width of its longest text plus the cell padding, so the
+/// columns share the table's width as the prototype's auto-sized columns do.
+fn column_weights(headings: &[&str], rows: &[Vec<String>]) -> Vec<f32> {
+    headings
+        .iter()
+        .enumerate()
+        .map(|(index, heading)| {
+            let longest = rows
+                .iter()
+                .filter_map(|row| row.get(index))
+                .map(|text| text.chars().count())
+                .max()
+                .unwrap_or(0);
+            let heading = heading.chars().count().to_f32().unwrap_or(0.0) * 6.0;
+            let cells = longest.to_f32().unwrap_or(0.0) * 6.6;
+            heading.max(cells) + 28.0
+        })
+        .collect()
+}
+
 fn table(id: &str, headings: &[&str], rows: &[Vec<String>], empty: &str) -> gpui::Div {
+    let weights = column_weights(headings, rows);
     let mut table = div().flex().flex_col().text_size(px(12.0)).child(
         div()
             .flex()
@@ -686,13 +771,14 @@ fn table(id: &str, headings: &[&str], rows: &[Vec<String>], empty: &str) -> gpui
             .border_color(rgb(GRID))
             .bg(rgb(RAISED))
             .text_size(px(11.0))
+            .line_height(px(16.5))
             .font_weight(gpui::FontWeight::MEDIUM)
             .text_color(rgb(MUTED))
             .children(
                 headings
                     .iter()
                     .enumerate()
-                    .map(|(index, heading)| cell(index, heading).whitespace_normal()),
+                    .map(|(index, heading)| cell(index, heading, weights[index])),
             ),
     );
     let shown = rows.len().min(128);
@@ -703,13 +789,14 @@ fn table(id: &str, headings: &[&str], rows: &[Vec<String>], empty: &str) -> gpui
                 .debug_selector(move || selector.clone())
                 .flex()
                 .py(px(10.0))
+                .line_height(px(18.0))
                 .when(index + 1 < shown, |row| {
                     row.border_b_1().border_color(rgb(GRID))
                 })
                 .children(
                     row.iter()
                         .enumerate()
-                        .map(|(index, value)| cell(index, value)),
+                        .map(|(index, value)| cell(index, value, weights[index])),
                 ),
         );
     }
@@ -717,21 +804,28 @@ fn table(id: &str, headings: &[&str], rows: &[Vec<String>], empty: &str) -> gpui
         table = table.child(
             div()
                 .py(px(6.0))
+                .px(px(14.0))
                 .text_color(rgb(MUTED))
                 .child(empty.to_owned()),
         );
     }
-    table
+    div()
+        .overflow_hidden()
+        .border_1()
+        .border_color(rgb(LINE))
+        .bg(rgb(PANEL))
+        .rounded(px(7.0))
+        .child(table)
 }
 
-fn cell(index: usize, text: &str) -> gpui::Div {
+fn cell(index: usize, text: &str, weight: f32) -> gpui::Div {
     let cell = div()
-        .flex_1()
+        .flex_basis(px(weight))
+        .flex_grow(weight)
         .min_w_0()
         .px(px(14.0))
         .whitespace_nowrap()
         .overflow_hidden()
-        .text_ellipsis()
         .child(text.to_owned());
     if index == 0 { cell } else { cell.text_right() }
 }
@@ -741,18 +835,19 @@ fn self_legend(chart: &Chart) -> impl IntoElement {
     div()
         .flex()
         .flex_wrap()
-        .gap_x(px(12.0))
-        .mt(px(2.0))
+        .gap_x(px(16.0))
+        .gap_y(px(8.0))
+        .my(px(8.0))
+        .min_h(px(24.0))
         .text_size(px(12.0))
-        .line_height(px(20.0))
+        .line_height(px(18.0))
         .children(chart.legend.iter().map(|legend| {
             let selector = format!("chart-legend:{id}:{}:{}", legend.name, legend.reading);
             div()
                 .debug_selector(move || selector.clone())
                 .flex()
                 .items_center()
-                .gap(px(8.0))
-                .py(px(4.0))
+                .gap(px(6.0))
                 .child(
                     div()
                         .flex_shrink_0()
@@ -764,7 +859,7 @@ fn self_legend(chart: &Chart) -> impl IntoElement {
                 .child(legend.name)
                 .child(
                     div()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .font_weight(gpui::FontWeight::BOLD)
                         .child(legend.reading.clone()),
                 )
         }))

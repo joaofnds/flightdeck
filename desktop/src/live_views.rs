@@ -4,6 +4,7 @@ use std::rc::Rc;
 
 use crate::charts::{GRID, MUTED, PANEL};
 use crate::live_dashboard::{LiveDashboard, Row};
+use crate::live_diagnostics::SelfPart;
 use crate::live_sections::Section;
 
 #[path = "live_chrome.rs"]
@@ -107,7 +108,9 @@ impl LiveDashboard {
             | Row::CPUTop(_) => (4.0, 4.0),
             Row::OverviewRankings(_) => (6.0, 6.0),
             Row::Heading(_) => (16.0, 8.0),
-            Row::App(_)
+            Row::SelfPart(SelfPart::Overview) => (8.0, 0.0),
+            Row::SelfPart(_)
+            | Row::App(_)
             | Row::Executable(_)
             | Row::AppColumns("executables")
             | Row::Disclosure(Section::AppTotals)
@@ -121,6 +124,8 @@ impl LiveDashboard {
     /// paddings alone would not give it.
     fn spacing_above(above: &Row, row: &Row) -> Option<f32> {
         match (above, row) {
+            (Row::SelfPart(_), Row::SelfPart(SelfPart::Reports | SelfPart::Minutes)) => Some(12.0),
+            (Row::SelfPart(_), Row::SelfPart(_)) => Some(20.0),
             (Row::Heading(_), _) => Some(10.0),
             (Row::ProcessGroupingAbout, Row::ProcessGroupBar)
             | (Row::Charts { .. }, Row::Disclosure(Section::AppTotals)) => Some(14.0),
@@ -440,7 +445,7 @@ fn heading_note(title: &str) -> &'static str {
         return "Grouped by process name, not PID";
     }
     if title == "Where collector CPU goes" {
-        return "Ten-second report ending at the inspected time";
+        return "Ten-second report ending at the inspected run time";
     }
     ""
 }
