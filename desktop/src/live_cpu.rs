@@ -23,6 +23,74 @@ pub struct LogicalCPU {
     pub busy_percent: Option<f32>,
 }
 
+/// A run of adjacent logical CPUs that share a performance level.
+#[derive(Debug, PartialEq, Eq)]
+struct CoreGroup {
+    title: String,
+    cpus: u8,
+}
+
+/// The performance levels of `cpu_count` logical CPUs in index order, which is the slower level
+/// first. Empty when the levels are unknown or do not cover the CPUs exactly.
+fn core_groups(
+    cpu_count: usize,
+    levels: Option<&[crate::live_inventory::PerformanceLevel; 2]>,
+) -> Vec<CoreGroup> {
+    let Some([fastest, slower]) = levels else {
+        return Vec::new();
+    };
+    let (Ok(fastest_cpus), Ok(slower_cpus)) = (
+        u8::try_from(fastest.logical_cpus),
+        u8::try_from(slower.logical_cpus),
+    ) else {
+        return Vec::new();
+    };
+    let covered = usize::from(fastest_cpus) + usize::from(slower_cpus);
+    if covered != cpu_count {
+        return Vec::new();
+    }
+
+    vec![
+        CoreGroup {
+            title: slower.cores.clone(),
+            cpus: slower_cpus,
+        },
+        CoreGroup {
+            title: fastest.cores.clone(),
+            cpus: fastest_cpus,
+        },
+    ]
+}
+
+/// The names of the performance levels above the bars, each as wide as its bars.
+fn core_group_headings(groups: &[CoreGroup]) -> impl IntoElement {
+    let total: u8 = groups.iter().map(|group| group.cpus).sum();
+    assert!(total > 0);
+    let mut row = div()
+        .flex()
+        .mx(px(PLOT_INSET))
+        .mb(px(6.0))
+        .text_size(px(11.0))
+        .text_color(rgb(crate::charts::MUTED));
+    for (index, group) in groups.iter().enumerate() {
+        let share = f32::from(group.cpus) / f32::from(total);
+        row = row.child(
+            div()
+                .w(gpui::relative(share))
+                .when(index > 0, |heading| {
+                    heading.border_l_1().border_color(rgb(crate::charts::LINE))
+                })
+                .pb(px(3.0))
+                .border_b_1()
+                .border_color(rgb(crate::charts::LINE))
+                .px(px(4.0))
+                .truncate()
+                .child(format!("{} · {}", group.title, group.cpus)),
+        );
+    }
+    row
+}
+
 const CPUS_MAX: usize = 1024;
 const COLUMNS_MAX: usize = 18;
 const SEGMENTS: u8 = 20;
@@ -185,6 +253,13 @@ impl LiveDashboard {
             return panel.child(unavailable());
         }
         let columns = activity.cpus.len().min(COLUMNS_MAX);
+        let groups = core_groups(
+            activity.cpus.len(),
+            crate::live_inventory::performance_levels(),
+        );
+        if !groups.is_empty() {
+            panel = panel.child(core_group_headings(&groups));
+        }
         for cpus in activity.rows() {
             panel = panel.child(cpu_activity_row(cpus, columns));
         }
@@ -337,6 +412,48 @@ mod tests {
                 "run_tick":1,"wall_ns":1_000_000_000},
             "interval_available":true,"unavailable_reason":null,
             "cpus":[{"cpu":0,"busy_percent":25.0}]})
+    }
+
+    fn level(name: &str, logical_cpus: u32) -> crate::live_inventory::PerformanceLevel {
+        crate::live_inventory::PerformanceLevel {
+            name: name.into(),
+            cores: format!("{name} cores"),
+            cluster_cores: format!("{} cores", name.to_lowercase()),
+            logical_cpus,
+        }
+    }
+
+    #[test]
+    fn cores_are_grouped_by_performance_level_in_index_order() {
+        // Goal: the bars name the slower cores first, since macOS numbers them first.
+        // Method: group 18 logical CPUs of a Mac with 6 super and 12 performance cores.
+        let levels = [level("Super", 6), level("Performance", 12)];
+
+        let groups = core_groups(18, Some(&levels));
+
+        assert_eq!(
+            groups,
+            [
+                CoreGroup {
+                    title: "Performance cores".into(),
+                    cpus: 12
+                },
+                CoreGroup {
+                    title: "Super cores".into(),
+                    cpus: 6
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn cores_stay_ungrouped_when_the_levels_do_not_cover_them() {
+        // Goal: a count that disagrees with macOS never labels a core with the wrong type.
+        // Method: group 17 CPUs against 18 cores of levels, then group with no levels.
+        let levels = [level("Super", 6), level("Performance", 12)];
+
+        assert!(core_groups(17, Some(&levels)).is_empty());
+        assert!(core_groups(18, None).is_empty());
     }
 
     #[test]
