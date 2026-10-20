@@ -17,8 +17,9 @@ pub(crate) use attribution::AttributionReplay;
 mod process_groups;
 pub(crate) use process_groups::Replay as ProcessGroupsReplay;
 mod resident;
+mod sealed_apps;
+pub use sealed_apps::SealedApps;
 mod sealed_ranks;
-pub use sealed_ranks::SealedRanks;
 
 pub(super) struct Cache {
     recording: [u64; 2],

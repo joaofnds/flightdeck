@@ -13,7 +13,7 @@ fn main() -> ExitCode {
     }
     let options = collector::arguments("persister").and_then(|words| options(&words));
     match options {
-        Ok((root, memory)) => match persistence::worker::run(&root, memory, &viewer::SealedRanks) {
+        Ok((root, memory)) => match persistence::worker::run(&root, memory, &viewer::SealedApps) {
             Ok(persistence::worker::Outcome::Complete) => ExitCode::SUCCESS,
             Ok(persistence::worker::Outcome::Owned) => {
                 eprintln!("recording owned by surviving persister; CPU not measured");

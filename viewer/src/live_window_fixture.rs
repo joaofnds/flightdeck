@@ -23,7 +23,7 @@ pub fn saved_ranked() -> Fixture {
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(1000);
     fixture.publish_with_system_rows(1001);
-    fixture.seal_derived(&[], &crate::SealedRanks);
+    fixture.seal_derived(&[], &crate::SealedApps);
     forget_live_runs(&fixture.root);
 
     fixture
