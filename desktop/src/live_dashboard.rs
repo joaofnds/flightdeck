@@ -296,7 +296,7 @@ impl LiveDashboard {
         }
     }
 
-    fn receive(&mut self, update: Update) -> bool {
+    pub(crate) fn receive(&mut self, update: Update) -> bool {
         match update {
             Update::Ready(snapshot) => {
                 if snapshot.generation != self.generation {

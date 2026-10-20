@@ -25,9 +25,9 @@ impl LiveDashboard {
         origin: Origin,
         cx: &mut Context<Self>,
     ) {
-        let Some(snapshot) = self.snapshot.as_deref() else {
+        if self.snapshot.is_none() {
             return;
-        };
+        }
 
         let changed = !self.preview.as_ref().is_some_and(|preview| {
             preview.target == target && preview.base_request == self.request
@@ -37,22 +37,7 @@ impl LiveDashboard {
             .as_ref()
             .is_some_and(|preview| preview.source == source && preview.origin == origin);
         if changed {
-            let layout = self
-                .preview
-                .as_ref()
-                .and_then(|preview| preview.layout.clone())
-                .or_else(|| self.reading_layout(&source));
-            let mut preview = Preview::resident(snapshot, &self.request, target);
-            if self.picker == Some(Picker::App) {
-                preview.list_apps(snapshot);
-            }
-            preview.layout = layout;
-            preview.header_height = self
-                .preview
-                .as_ref()
-                .and_then(|preview| preview.header_height)
-                .or_else(|| Some(self.header_height.get()));
-            self.preview = Some(preview);
+            self.preview_retarget(&source, target);
         }
         if let Some(preview) = &mut self.preview {
             preview.source = source;
@@ -136,6 +121,14 @@ impl LiveDashboard {
             return;
         }
 
+        // A hover's read would cancel the page's read of its App histories, so the hover waits
+        // for that read and shows the hovered second from what it brings.
+        if let Some(snapshot) = &self.snapshot {
+            if snapshot.histories_pending {
+                return;
+            }
+        }
+
         if now < self.preview_ready_at {
             return;
         }
@@ -192,7 +185,7 @@ impl LiveDashboard {
             Update::Failed { generation, .. } => *generation,
         };
         if preview.generation != Some(generation) {
-            return false;
+            return self.preview_receive_histories(update);
         }
 
         match update {
@@ -206,6 +199,62 @@ impl LiveDashboard {
         self.rebuild();
 
         true
+    }
+
+    /// Takes the page's read of its App histories arriving during a hover, which waited for it,
+    /// and shows the hovered second again from what it brings. Every other reading of the page
+    /// waits for the hover to end, so the charts hold still under the pointer.
+    fn preview_receive_histories(&mut self, update: Update) -> bool {
+        if !self
+            .snapshot
+            .as_ref()
+            .is_some_and(|committed| committed.histories_pending)
+        {
+            return false;
+        }
+
+        if !self.receive(update) {
+            return false;
+        }
+
+        if let Some(previous) = &self.preview {
+            let source = previous.source.clone();
+            let origin = previous.origin;
+            self.preview_retarget(&source, previous.target.clone());
+            if let Some(preview) = &mut self.preview {
+                preview.source = source;
+                preview.origin = origin;
+            }
+        }
+        self.rebuild();
+
+        true
+    }
+
+    /// Resolves the hover at `target` from the committed snapshot, holding the hovered plot
+    /// where the hover before it held it.
+    fn preview_retarget(&mut self, source: &SharedString, target: Target) {
+        let Some(snapshot) = self.snapshot.as_deref() else {
+            return;
+        };
+
+        let layout = self
+            .preview
+            .as_ref()
+            .and_then(|preview| preview.layout.clone())
+            .or_else(|| self.reading_layout(source));
+        let header_height = self
+            .preview
+            .as_ref()
+            .and_then(|preview| preview.header_height)
+            .or_else(|| Some(self.header_height.get()));
+        let mut preview = Preview::resident(snapshot, &self.request, target);
+        if self.picker == Some(Picker::App) {
+            preview.list_apps(snapshot);
+        }
+        preview.layout = layout;
+        preview.header_height = header_height;
+        self.preview = Some(preview);
     }
 }
 

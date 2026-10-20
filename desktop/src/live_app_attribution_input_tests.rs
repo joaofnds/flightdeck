@@ -227,6 +227,146 @@ fn a_pending_app_history_is_shown_as_being_read(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_hover_while_the_page_reads_its_app_histories_leaves_that_read_running(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a hover asks the reader for nothing while the page reads its App histories, since a
+    // hover's read would cancel the page's own.
+    // Method: hover the CPU plot of a page whose App histories are pending, then tick the hover.
+    let mut harness = InputHarness::setup_route(cx, "cpu");
+    harness.driver.seed_pending_histories();
+    harness.driver.hover_previous_second_on("live-cpu-plot");
+
+    harness.driver.tick_hover();
+
+    assert_eq!(harness.driver.hover_reads(), 0);
+    harness.teardown();
+}
+
+#[gpui::test]
+fn the_pages_app_histories_arriving_during_a_hover_show_at_the_hovered_second(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a page that finishes reading its App histories during a hover shows them at once, at
+    // the hovered second.
+    // Method: hover the CPU plot while the App histories are pending, then deliver the page's
+    // completed snapshot as the reader publishes it.
+    let mut harness = InputHarness::setup_route(cx, "cpu");
+    harness.driver.seed_pending_histories();
+    harness.driver.hover_previous_second_on("live-cpu-plot");
+
+    harness.driver.finish_pending_histories(Metric::Cpu);
+
+    assert!(!harness.driver.reading_is_visible("Reading App history"));
+    assert!(harness.driver.reading_is_visible("130% captured"));
+    assert!(harness.driver.reading_is_visible("13%"));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_hover_that_outlives_the_pages_app_history_read_holds_its_place_and_ends_on_leaving(
+    cx: &mut TestAppContext,
+) {
+    // Goal: the App histories arriving during a hover neither move the hovered plot nor keep
+    // the hover once the pointer leaves it.
+    // Method: hover the CPU temperature plot, below the App history card, while the App
+    // histories are pending, deliver them, then move the pointer to the sidebar.
+    let mut harness = InputHarness::setup_route(cx, "cpu");
+    harness.driver.seed_pending_histories();
+    harness
+        .driver
+        .hover_previous_second_on("live-cpu-temperature-plot");
+    let hovered = harness.driver.chart_bounds("live-cpu-temperature-plot");
+    harness.driver.finish_pending_histories(Metric::Cpu);
+
+    let held = harness.driver.chart_bounds("live-cpu-temperature-plot");
+    harness
+        .driver
+        .leave_plot("live-cpu-temperature-plot", PlotExit::Sidebar);
+
+    assert_eq!(held, hovered);
+    assert!(harness.driver.reading_is_visible("87%"));
+    assert!(!harness.driver.reading_is_visible("13%"));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn another_requests_reading_during_a_hover_on_a_loading_page_is_dropped(cx: &mut TestAppContext) {
+    // Goal: while a hover waits for the page's App histories, only the page's own read can end
+    // the wait.
+    // Method: hover during the pending read, then deliver a completed snapshot of a later
+    // request.
+    let mut harness = InputHarness::setup_route(cx, "cpu");
+    harness.driver.seed_pending_histories();
+    harness.driver.hover_previous_second_on("live-cpu-plot");
+
+    harness.driver.deliver_later_requests_histories(Metric::Cpu);
+
+    assert!(harness.driver.reading_is_visible("Reading App history"));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_failed_app_history_read_during_a_hover_is_reported_in_place_of_the_page(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a page whose App history read fails during a hover reports it as any failed read of
+    // the page is reported, rather than leaving the hover waiting for that read.
+    // Method: hover during the pending read, then deliver the page's read as failed.
+    let mut harness = InputHarness::setup_route(cx, "cpu");
+    harness.driver.seed_pending_histories();
+    harness.driver.hover_previous_second_on("live-cpu-plot");
+
+    harness.driver.fail_pending_histories();
+
+    assert!(harness.driver.readings_are_hidden());
+    assert_eq!(
+        harness.driver.page_error().as_deref(),
+        Some("App history read failed")
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_hover_reads_what_the_pages_finished_app_histories_leave_out(cx: &mut TestAppContext) {
+    // Goal: once the page has read its App histories, a hover reads the hovered second's App
+    // totals the page keeps no window of.
+    // Method: hover during the pending read, deliver the completed snapshot without ranked
+    // seconds, then tick the hover.
+    let mut harness = InputHarness::setup_route(cx, "cpu");
+    harness.driver.seed_pending_histories();
+    harness.driver.hover_previous_second_on("live-cpu-plot");
+    harness.driver.finish_pending_histories(Metric::Cpu);
+
+    harness.driver.tick_hover();
+
+    assert_eq!(harness.driver.hover_reads(), 1);
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("Loading exact App totals")
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_live_reading_arriving_during_a_hover_leaves_the_hovered_second_shown(cx: &mut TestAppContext) {
+    // Goal: a hover holds the page at the hovered second while live readings arrive, once the
+    // page has read its App histories.
+    // Method: hover a page whose App histories are read, then deliver the page's next live
+    // snapshot, which gives the hovered second another reading.
+    let mut harness = InputHarness::setup_route(cx, "cpu");
+    harness.driver.seed_attribution(Metric::Cpu);
+    harness.driver.hover_previous_second_on("live-cpu-plot");
+
+    harness.driver.deliver_live_reading(Metric::Cpu);
+
+    assert!(harness.driver.reading_is_visible("13%"));
+    assert!(!harness.driver.reading_is_visible("21%"));
+    harness.teardown();
+}
+
+#[gpui::test]
 fn cpu_attribution_and_ranking_share_a_wide_row_and_stack_narrow(cx: &mut TestAppContext) {
     // Read installed geometry across the same responsive breakpoint used by resident history.
     let mut harness = InputHarness::setup_route(cx, "cpu");
@@ -320,6 +460,18 @@ fn attribution_arrow_inspection_and_app_navigation_keep_the_exact_target(cx: &mu
 }
 
 impl InputDriver {
+    fn tick_hover(&mut self) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            dashboard.preview_tick_at(Instant::now(), cx);
+        });
+        self.context.run_until_parked();
+    }
+
+    fn hover_reads(&self) -> u64 {
+        self.view
+            .read_with(&self.context, |dashboard, _| dashboard.preview_submissions)
+    }
+
     fn seed_pending_histories(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = attribution_snapshot(dashboard.generation);
@@ -335,18 +487,56 @@ impl InputDriver {
 
     fn seed_attribution(&mut self, metric: Metric) {
         self.view.update(&mut self.context, |dashboard, cx| {
-            let mut snapshot = attribution_snapshot(dashboard.generation);
-            snapshot.rankings = Some(route_ranked_payload(&snapshot, RouteReading::Current));
-            let history =
-                AppAttributionHistory::prepare(metric, &fixture(metric), &snapshot.selection);
-            assert!(history.panel().is_some(), "{}", history.coverage(None));
-            snapshot.app_attribution_history = Some(Arc::new(history));
-            dashboard.accept(snapshot);
+            dashboard.accept(attributed_snapshot(dashboard.generation, metric));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();
         });
         self.context
             .simulate_resize(gpui::size(px(1320.0), px(3500.0)));
+        self.context.run_until_parked();
+    }
+
+    fn finish_pending_histories(&mut self, metric: Metric) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            let snapshot = attributed_snapshot(dashboard.generation, metric);
+            assert!(dashboard.preview_receive(Update::Ready(snapshot)));
+            cx.notify();
+        });
+        self.context.run_until_parked();
+    }
+
+    fn deliver_later_requests_histories(&mut self, metric: Metric) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            let snapshot = attributed_snapshot(dashboard.generation + 1, metric);
+            assert!(!dashboard.preview_receive(Update::Ready(snapshot)));
+            cx.notify();
+        });
+        self.context.run_until_parked();
+    }
+
+    fn fail_pending_histories(&mut self) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            assert!(dashboard.preview_receive(Update::Failed {
+                generation: dashboard.generation,
+                message: "App history read failed".into(),
+            }));
+            cx.notify();
+        });
+        self.context.run_until_parked();
+    }
+
+    fn page_error(&self) -> Option<String> {
+        self.view
+            .read_with(&self.context, |dashboard, _| dashboard.error.clone())
+    }
+
+    fn deliver_live_reading(&mut self, metric: Metric) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            let mut snapshot = attributed_snapshot(dashboard.generation, metric);
+            snapshot.selection["trends"][0]["cpu_percent"] = json!(21);
+            assert!(!dashboard.preview_receive(Update::Ready(snapshot)));
+            cx.notify();
+        });
         self.context.run_until_parked();
     }
 
@@ -427,6 +617,17 @@ impl InputDriver {
             assert_eq!(wrapper.left() - card.right(), gpui::px(8.0));
         }
     }
+}
+
+/// The page's snapshot once its App history of `metric` is read, with the current App totals.
+fn attributed_snapshot(generation: u64, metric: Metric) -> Box<Snapshot> {
+    let mut snapshot = attribution_snapshot(generation);
+    snapshot.rankings = Some(route_ranked_payload(&snapshot, RouteReading::Current));
+    let history = AppAttributionHistory::prepare(metric, &fixture(metric), &snapshot.selection);
+    assert!(history.panel().is_some(), "{}", history.coverage(None));
+    snapshot.app_attribution_history = Some(Arc::new(history));
+
+    snapshot
 }
 
 fn attribution_snapshot(generation: u64) -> Box<Snapshot> {
