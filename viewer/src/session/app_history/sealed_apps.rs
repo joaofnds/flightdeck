@@ -9,7 +9,7 @@ use crate::live_app_response::Sample;
 use collector::ring::RunIdentity;
 use persistence::engine::Engine;
 use persistence::query::{TableSource, table_source};
-use persistence::schema::Table;
+use persistence::schema::{APP_PARTS, Table};
 use persistence::worker::{Derivation, Derive};
 use persistence::{Error, Result, TableManifest};
 
@@ -64,10 +64,35 @@ impl Derive for SealedApps {
             .map(|sample| sample.ranks())
             .collect::<Result<Vec<_>>>()?;
 
-        Ok(vec![
-            super::sealed_ranks::encode(&ranks, derivation.pending)?,
-            super::sealed_parts::encode(&samples, derivation.pending)?,
-        ])
+        let mut tables = vec![super::sealed_ranks::encode(&ranks, derivation.pending)?];
+        let parts = super::sealed_parts::encode(&samples, derivation.pending);
+        tables.extend(derive_parts(parts, derivation)?);
+
+        Ok(tables)
+    }
+}
+
+/// The table of the window's App parts, or none when the window's parts are more than the table
+/// holds or writing them failed, since its ranks stand without them and the replay of its
+/// minute gives its parts.
+fn derive_parts(
+    parts: Result<TableManifest>,
+    derivation: &Derivation<'_>,
+) -> Result<Option<TableManifest>> {
+    match parts {
+        Ok(table) => Ok(Some(table)),
+        Err(error) => {
+            eprintln!(
+                "persister derived no App parts window={}: {error}",
+                derivation.identity.window
+            );
+            let path = derivation.pending.join(format!("{APP_PARTS}.parquet"));
+            match std::fs::remove_file(path) {
+                Ok(()) => Ok(None),
+                Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(problem) => Err(problem.into()),
+            }
+        }
     }
 }
 

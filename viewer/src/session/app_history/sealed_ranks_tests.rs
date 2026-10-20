@@ -2,6 +2,8 @@ use super::super::sealed::fixture::{range, rewrite};
 use super::*;
 use crate::live::identity_fixture::Fixture;
 use crate::live_app_response::{Metric, Sample};
+use persistence::schema::APP_PARTS;
+use persistence::worker::{Derivation, Derive};
 use polars::prelude::Column;
 
 #[test]
@@ -42,6 +44,31 @@ fn a_window_keeps_the_rates_its_first_observation_takes_from_the_minute_before()
     assert_eq!(kept[1].metrics[0].metric, Metric::Cpu);
     assert!(!kept[1].metrics[0].entries.is_empty());
     assert_eq!(kept, replayed_ranks(&session, &kept[1]));
+}
+
+#[test]
+fn a_window_whose_parts_fail_to_write_keeps_its_ranks() {
+    // Goal: a window whose App parts the persister fails to write keeps its ranks, and seals
+    // without the parts' table or its file, so the replay gives its parts.
+    // Method: seal three observations through a derivation that first puts a file where the
+    // parts go, and read the ranks, the tables and the files the window keeps.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(1000);
+    fixture.publish_with_system_rows(1001);
+    fixture.publish_with_system_rows(1002);
+    fixture.seal_derived(&[], &Occupied);
+    let session = Session::open(&fixture.root).unwrap();
+
+    let kept = kept_ranks(&session, 1002);
+
+    assert_eq!(kept.len(), 3);
+    assert_eq!(kept, replayed_ranks(&session, &kept[2]));
+    let window = &session.windows[0];
+    let tables: Vec<_> = window.tables.iter().map(|table| table.name).collect();
+    assert!(tables.contains(&APP_RANKS));
+    assert!(!tables.contains(&APP_PARTS));
+    let data = session.root.join(&window.data_directory);
+    assert!(!data.join(format!("{APP_PARTS}.parquet")).exists());
 }
 
 #[test]
@@ -127,6 +154,19 @@ fn a_window_whose_ranks_skip_a_position_is_refused() {
     let result = session.visit_sealed_ranks(range(1001), |_ranks| Ok(()));
 
     assert!(matches!(result, Err(Error::Bound("sealed ranks position"))));
+}
+
+/// Derives a window's Apps as the persister does, after putting a file where their parts go, so
+/// writing the parts fails.
+struct Occupied;
+
+impl Derive for Occupied {
+    fn derive(&self, derivation: &Derivation<'_>) -> Result<Vec<TableManifest>> {
+        let path = derivation.pending.join(format!("{APP_PARTS}.parquet"));
+        std::fs::write(path, b"occupied").unwrap();
+
+        crate::SealedApps.derive(derivation)
+    }
 }
 
 /// The ranks the windows of second `second`'s context keep, in publication order.
