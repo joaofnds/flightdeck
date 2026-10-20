@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use polars::prelude::Column;
 use serde_json::{Value, json};
 
@@ -64,21 +66,29 @@ fn a_window_keeps_the_rows_of_each_app_side_by_side_across_its_observations() {
     // Goal: a window keeps each App's rows of all its observations together, the App's own and
     // then each process's second after second, since a row there changes little from the row
     // before it and the table compresses to about half of what it takes second by second.
-    // Method: seal three observations with their Apps' parts, and read the App, kind, process
-    // and publication of each row of the window's table in the order the table holds them.
+    // Method: seal three observations of an App running two processes with their Apps' parts,
+    // and read the runs of adjacent rows of the window's table that belong to one series, the
+    // observations' facts, the App's own or one process's.
     let mut fixture = Fixture::new();
-    fixture.publish_with_system_rows(1000);
-    fixture.publish_with_system_rows(1001);
-    fixture.publish_with_system_rows(1002);
+    for tick in 1..=3 {
+        let rows = [
+            named::member(7, b"worker", b"/A.app", usage()),
+            named::member(8, b"helper", b"/A.app", usage()),
+        ];
+        named::publish(&mut fixture, tick, &rows);
+    }
     fixture.seal_derived(&[], &crate::SealedApps);
     let session = Session::open(&fixture.root).unwrap();
 
-    let kept = kept_order(&session);
+    let runs = kept_runs(&session);
 
-    let mut ordered = kept.clone();
-    ordered.sort();
-    assert!(kept.iter().filter(|row| row.1.is_some()).count() > 3);
-    assert_eq!(kept, ordered);
+    let series: BTreeSet<&RowSeries> = runs.iter().map(|(series, _)| series).collect();
+    assert_eq!(runs.len(), 4);
+    assert_eq!(series.len(), runs.len());
+    assert!(
+        runs.iter()
+            .all(|(_, publications)| publications == &[1, 2, 3])
+    );
 }
 
 #[test]
@@ -319,39 +329,53 @@ fn replayed_samples(session: &Session, second: u64) -> Vec<Sample> {
     replayed
 }
 
-/// The App's kind and key, the row's kind, and the process's name, pid and pid version of each
-/// row of the window's table, with its publication, in the order the table holds them.
-type RowOrder = (
+/// The series a row of the window's table belongs to: the App's kind and key, the row's kind,
+/// and the process's name, pid and pid version.
+type RowSeries = (
     Option<u8>,
     Option<Vec<u8>>,
     u8,
     Option<Vec<u8>>,
     Option<i32>,
     Option<i32>,
-    u64,
 );
 
-fn kept_order(session: &Session) -> Vec<RowOrder> {
+/// Each run of adjacent rows of the window's table that belong to one series, with the
+/// publication of each row of the run, in the order the table holds them.
+fn kept_runs(session: &Session) -> Vec<(RowSeries, Vec<u64>)> {
     let path = session
         .root
         .join(&session.windows[0].data_directory)
         .join(format!("{APP_PARTS}.parquet"));
     let frame = persistence::engine::scan(&path).unwrap().collect().unwrap();
 
-    (0..frame.height())
-        .map(|index| {
-            let row = Row::new(&frame, index).unwrap();
-            (
-                row.get(const { fixed("app_kind") }).unwrap(),
-                row.get(const { fixed("app_key") }).unwrap(),
-                row.get(const { fixed("row_kind") }).unwrap(),
-                row.get(const { fixed("executable_name") }).unwrap(),
-                row.get(const { fixed("pid") }).unwrap(),
-                row.get(const { fixed("pid_version") }).unwrap(),
-                row.get(const { fixed("publication") }).unwrap(),
-            )
-        })
-        .collect()
+    let mut runs: Vec<(RowSeries, Vec<u64>)> = Vec::new();
+    for index in 0..frame.height() {
+        let row = Row::new(&frame, index).unwrap();
+        let series = (
+            row.get(const { fixed("app_kind") }).unwrap(),
+            row.get(const { fixed("app_key") }).unwrap(),
+            row.get(const { fixed("row_kind") }).unwrap(),
+            row.get(const { fixed("executable_name") }).unwrap(),
+            row.get(const { fixed("pid") }).unwrap(),
+            row.get(const { fixed("pid_version") }).unwrap(),
+        );
+        let publication = row.get(const { fixed("publication") }).unwrap();
+        kept_runs_add(&mut runs, series, publication);
+    }
+
+    runs
+}
+
+fn kept_runs_add(runs: &mut Vec<(RowSeries, Vec<u64>)>, series: RowSeries, publication: u64) {
+    if let Some((last, publications)) = runs.last_mut() {
+        if *last == series {
+            publications.push(publication);
+            return;
+        }
+    }
+
+    runs.push((series, vec![publication]));
 }
 
 /// Publishes run ticks 1 to 3 of an App whose "worker" replaces its program at tick 2 and has
