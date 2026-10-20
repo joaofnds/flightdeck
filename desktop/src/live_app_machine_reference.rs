@@ -114,7 +114,7 @@ impl History {
 
         lines.push(Line {
             name,
-            color: "#d8d9da".into(),
+            color: "#ccccdc".into(),
             values: self
                 .points
                 .iter()

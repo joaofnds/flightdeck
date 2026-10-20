@@ -627,6 +627,84 @@ fn energy_draws_fan_channels_in_the_prototypes_classic_palette() {
     assert_eq!(fans.fill, Some(0.1));
 }
 
+/// The color of the `name` line of the `id` panel among `panels`.
+fn line_color<'a>(panels: &'a [std::rc::Rc<Panel>], id: &str, name: &str) -> &'a str {
+    let panel = panels.iter().find(|panel| panel.id == id).unwrap();
+
+    panel
+        .lines
+        .iter()
+        .find(|line| line.name == name)
+        .unwrap()
+        .color
+        .as_str()
+}
+
+#[test]
+fn storage_draws_disk_reads_in_the_prototypes_yellow() {
+    // Goal: the Storage page and the selected App's Disk I/O use the prototype's yellow, which
+    // is lighter than its classic palette's yellow.
+    // Method: project the Storage route and the Apps route, and read each line's color back.
+    let storage = panels("storage", &selection(), None).unwrap();
+    let observation = json!({"wall_ns": "1000750000000", "stamp": {
+        "run": ["1", "2"], "boot": ["3", "4"], "publication": "3"}});
+    let history = json!({"points": [{"observation": observation, "segment": "1"}]});
+    let apps = panels("apps", &selection(), Some(&history)).unwrap();
+
+    assert_eq!(
+        line_color(&storage, "live-storage-throughput", "Read"),
+        "#fade2a"
+    );
+    assert_eq!(
+        line_color(&storage, "live-storage-operations", "Read"),
+        "#fade2a"
+    );
+    assert_eq!(line_color(&storage, "live-storage-mean", "Read"), "#fade2a");
+    assert_eq!(
+        line_color(&storage, "live-storage-temperature", "Storage"),
+        "#fade2a"
+    );
+    assert_eq!(line_color(&apps, "live-app-disk", "Disk I/O"), "#fade2a");
+}
+
+#[test]
+fn energy_draws_system_area_maxima_in_the_prototypes_colors() {
+    // Goal: the System area maxima chart colors its sensors as the prototype does.
+    // Method: project the Energy route and read each line's color back by name.
+    let energy = panels("energy", &selection(), None).unwrap();
+    let id = "live-area-maxima";
+
+    assert_eq!(line_color(&energy, id, "Source SoC group max"), "#5794f2");
+    assert_eq!(line_color(&energy, id, "Voltage regulators"), "#ff9830");
+    assert_eq!(line_color(&energy, id, "Display"), "#8ab8ff");
+    assert_eq!(line_color(&energy, id, "Board"), "#37872d");
+    assert_eq!(line_color(&energy, id, "Wireless"), "#ca95e5");
+    assert_eq!(line_color(&energy, id, "Ambient"), "#ccccdc");
+}
+
+#[test]
+fn reference_lines_are_drawn_in_the_prototypes_text_color() {
+    // Goal: the capacity and total lines that the prototype draws in its text color are drawn
+    // in it, not in a near grey.
+    // Method: project the pages that carry them and read each line's color back.
+    let cpu = panels("cpu", &selection(), None).unwrap();
+    let memory = panels("memory", &selection(), None).unwrap();
+    let gpu = panels("gpu", &selection(), None).unwrap();
+
+    assert_eq!(line_color(&cpu, "live-load-average", "Cores"), "#ccccdc");
+    assert_eq!(
+        line_color(&cpu, "live-open-files", "Share of limit"),
+        "#ccccdc"
+    );
+    assert_eq!(line_color(&memory, "live-memory", "Installed"), "#ccccdc");
+    assert_eq!(line_color(&memory, "live-swap", "Allocated"), "#ccccdc");
+    assert_eq!(
+        line_color(&gpu, "live-gpu-frequency", "Frequency"),
+        "#ccccdc"
+    );
+    assert_eq!(line_color(&gpu, "live-gpu-memory", "Allocated"), "#ccccdc");
+}
+
 #[test]
 fn energy_rejects_fan_arrays_beyond_the_recording_bound() {
     // Goal: an oversized channel array cannot create unbounded series or lose channels silently.

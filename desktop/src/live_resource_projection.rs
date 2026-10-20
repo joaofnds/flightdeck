@@ -86,7 +86,7 @@ pub(super) fn storage() -> Vec<Specification> {
             unit: "ops/s",
             keys: ["read_ops_per_second", "write_ops_per_second"],
             names: ["Read", "Write"],
-            colors: ["#f2cc0c", "#ff9830"],
+            colors: ["#fade2a", "#ff9830"],
             mirrored: true,
             help: "Completed block-driver requests per second. Writes are mirrored below zero; \
              inspected values remain positive. These are separate from process I/O calls.",
@@ -97,7 +97,7 @@ pub(super) fn storage() -> Vec<Specification> {
             unit: "ms",
             keys: ["read_mean_ms", "write_mean_ms"],
             names: ["Read", "Write"],
-            colors: ["#f2cc0c", "#ff9830"],
+            colors: ["#fade2a", "#ff9830"],
             mirrored: false,
             help: "Total completed-request duration divided by completed operations, weighted \
              across devices. This is not queue wait, a latency percentile or busy percentage. \
@@ -122,7 +122,7 @@ pub(super) fn throughput() -> Specification {
         source: "storage",
         key: "read_bps",
         name: "Read",
-        color: "#f2cc0c",
+        color: "#fade2a",
     });
     read.divisor = 1_000_000.0;
     let mut write = resource_reading(&ResourceReading {

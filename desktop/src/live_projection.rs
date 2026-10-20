@@ -568,7 +568,7 @@ fn gpu_apps_panel(
     }
     lines.push(Line {
         name: "GPU busy".into(),
-        color: "#d8d9da".into(),
+        color: "#ccccdc".into(),
         values: busy,
         stack: Some(false),
         negative: Some(false),
@@ -777,7 +777,7 @@ fn load_average() -> Specification {
         line.channel = Some(channel);
         lines.push(line);
     }
-    let mut cores = reading("logical_cpu_count", "Cores", "#d1d1de", 1.0);
+    let mut cores = reading("logical_cpu_count", "Cores", "#ccccdc", 1.0);
     cores.dashed = true;
     lines.push(cores);
     let mut specification = specification(LOAD_AVERAGE_ID, "Load average", "work items", lines);
@@ -791,7 +791,7 @@ fn load_average() -> Specification {
 /// The file entries open across the system, with their share of the most macOS allows on
 /// its own axis.
 fn open_files() -> Specification {
-    let mut share = reading("open_files_percent", "Share of limit", "#d1d1de", 1.0);
+    let mut share = reading("open_files_percent", "Share of limit", "#ccccdc", 1.0);
     share.unit = Some("%");
     share.axis = Some("right1");
     share.dashed = true;
@@ -817,7 +817,7 @@ fn cpu_level_name(level: &'static PerformanceLevel) -> &'static str {
 }
 
 fn memory() -> Specification {
-    let mut installed = reading("memory_total_bytes", "Installed", "#d1d1de", GIBIBYTE);
+    let mut installed = reading("memory_total_bytes", "Installed", "#ccccdc", GIBIBYTE);
     installed.dashed = true;
     installed.stack = Some(false);
     installed.fill = Some(0.0);
@@ -872,7 +872,7 @@ fn gpu_memory() -> Specification {
     let mut allocated = reading(
         "gpu_memory_allocated_bytes",
         "Allocated",
-        "#d1d1de",
+        "#ccccdc",
         GIBIBYTE,
     );
     allocated.dashed = true;
@@ -914,7 +914,7 @@ fn gpu_frequency() -> Specification {
         GPU_FREQUENCY_ID,
         "GPU active frequency",
         "GHz",
-        vec![reading("gpu_frequency_ghz", "Frequency", "#d1d1de", 1.0)],
+        vec![reading("gpu_frequency_ghz", "Frequency", "#ccccdc", 1.0)],
     );
     specification.help = "The GPU's cycles divided by its active time. This collector does \
         not record it yet, so no readings are shown.";
@@ -1016,9 +1016,9 @@ fn area_maxima() -> Specification {
                 1.0,
             ),
             reading("display_celsius", "Display", "#8ab8ff", 1.0),
-            reading("board_celsius", "Board", "#73bf69", 1.0),
-            reading("wireless_celsius", "Wireless", "#b877d9", 1.0),
-            reading("ambient_celsius", "Ambient", "#d1d1de", 1.0),
+            reading("board_celsius", "Board", "#37872d", 1.0),
+            reading("wireless_celsius", "Wireless", "#ca95e5", 1.0),
+            reading("ambient_celsius", "Ambient", "#ccccdc", 1.0),
         ],
     );
     specification.maximum = Some(125.0);
@@ -1214,7 +1214,7 @@ fn overview() -> Vec<Specification> {
 /// The prototype's overlay of load, power and heat. Power and temperature read on their own
 /// right-hand axes, and the fans share a hidden axis, so each keeps its own shape.
 fn correlation() -> Specification {
-    let mut fans = reading(FAN_MEAN_KEY, "Fans", "#d1d1de", 1.0);
+    let mut fans = reading(FAN_MEAN_KEY, "Fans", "#ccccdc", 1.0);
     fans.unit = Some("rpm");
     fans.axis = Some("hidden");
     fans.dashed = true;
@@ -1295,7 +1295,7 @@ fn storage_temperature() -> Specification {
         STORAGE_TEMPERATURE_ID,
         "Storage area maximum",
         "°C",
-        vec![reading("storage_area_celsius", "Storage", "#f2cc0c", 1.0)],
+        vec![reading("storage_area_celsius", "Storage", "#fade2a", 1.0)],
     );
     specification.maximum = Some(80.0);
     specification.help = "The hottest measured sensor in the storage area. This collector does \
@@ -1328,7 +1328,7 @@ fn memory_pressure() -> Specification {
 }
 
 fn memory_swap() -> Specification {
-    let mut allocated = reading("swap_total_bytes", "Allocated", "#d1d1de", GIBIBYTE);
+    let mut allocated = reading("swap_total_bytes", "Allocated", "#ccccdc", GIBIBYTE);
     allocated.dashed = true;
     allocated.fill = Some(0.0);
 
@@ -1420,7 +1420,7 @@ fn network_apps() -> Specification {
         vec![reading(
             "network_apps_bytes_per_second",
             "All traffic",
-            "#d8d9da",
+            "#ccccdc",
             1_000_000.0,
         )],
     );
@@ -1561,7 +1561,7 @@ fn app_specifications() -> Vec<Specification> {
         "live-app-disk",
         "Disk I/O",
         "MB/s",
-        vec![reading("disk_io_bps", "Disk I/O", "#f2cc0c", 1_000_000.0)],
+        vec![reading("disk_io_bps", "Disk I/O", "#fade2a", 1_000_000.0)],
     );
     disk.help = APP_DISK_HELP;
     let mut gpu = specification(
