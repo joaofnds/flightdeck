@@ -194,6 +194,36 @@ impl<'sample> PartRow<'sample> {
     fn process_row(&self) -> Option<&'sample Process> {
         self.process().map(|(_index, process)| process)
     }
+
+    fn place(&self) -> RowPlace<'sample> {
+        let process = self.process_row();
+        RowPlace {
+            app: self
+                .app()
+                .map(|(_index, app)| (kind_code(app.key.kind), app.key.bytes.as_slice())),
+            kind: self.kind(),
+            executable: process
+                .and_then(|process| process.executable_name.as_ref())
+                .map(|name| name.bytes.as_slice()),
+            pid: process.map(|process| process.pid),
+            pid_version: process
+                .and_then(|process| process.creation)
+                .map(|creation| creation.pid_version),
+            publication: self.sample().selected.stamp.publication,
+        }
+    }
+}
+
+/// Where a row sits in the table, by its fields in this order: every observation's facts
+/// first, then each App's own rows, then those of each of its processes, second after second.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+struct RowPlace<'sample> {
+    app: Option<(u8, &'sample [u8])>,
+    kind: u8,
+    executable: Option<&'sample [u8]>,
+    pid: Option<i32>,
+    pid_version: Option<i32>,
+    publication: u64,
 }
 
 fn sealed_parts_frame(samples: &[Box<Sample>]) -> Result<DataFrame> {
@@ -261,6 +291,9 @@ fn sealed_parts_rows(samples: &[Box<Sample>]) -> Result<Vec<PartRow<'_>>> {
         }
     }
     assert!(rows.len() <= count);
+    // A row changes little from the row of the same App or process a second before, so keeping
+    // them side by side halves the table. The reader orders the rows it reads by observation.
+    rows.sort_by_key(PartRow::place);
 
     Ok(rows)
 }

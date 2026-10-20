@@ -32,6 +32,28 @@ fn a_window_keeps_the_parts_the_replay_of_its_minute_gives_every_app() {
 }
 
 #[test]
+fn a_window_keeps_the_rows_of_each_app_side_by_side_across_its_observations() {
+    // Goal: a window keeps each App's rows of all its observations together, the App's own and
+    // then each process's second after second, since a row there changes little from the row
+    // before it and the table compresses to about half of what it takes second by second.
+    // Method: seal three observations with their Apps' parts, and read the App, kind, process
+    // and publication of each row of the window's table in the order the table holds them.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(1000);
+    fixture.publish_with_system_rows(1001);
+    fixture.publish_with_system_rows(1002);
+    fixture.seal_derived(&[], &crate::SealedApps);
+    let session = Session::open(&fixture.root).unwrap();
+
+    let kept = kept_order(&session);
+
+    let mut ordered = kept.clone();
+    ordered.sort();
+    assert!(kept.iter().filter(|row| row.1.is_some()).count() > 3);
+    assert_eq!(kept, ordered);
+}
+
+#[test]
 fn a_window_keeps_the_facts_of_each_second_for_an_app_that_ran_at_none() {
     // Goal: an App that did not run at a second has no detail there, and the page still shows
     // that second's facts, as the replay gives them.
@@ -267,6 +289,41 @@ fn replayed_samples(session: &Session, second: u64) -> Vec<Sample> {
         .unwrap();
 
     replayed
+}
+
+/// The App's kind and key, the row's kind, and the process's name, pid and pid version of each
+/// row of the window's table, with its publication, in the order the table holds them.
+type RowOrder = (
+    Option<u8>,
+    Option<Vec<u8>>,
+    u8,
+    Option<Vec<u8>>,
+    Option<i32>,
+    Option<i32>,
+    u64,
+);
+
+fn kept_order(session: &Session) -> Vec<RowOrder> {
+    let path = session
+        .root
+        .join(&session.windows[0].data_directory)
+        .join(format!("{APP_PARTS}.parquet"));
+    let frame = persistence::engine::scan(&path).unwrap().collect().unwrap();
+
+    (0..frame.height())
+        .map(|index| {
+            let row = Row::new(&frame, index).unwrap();
+            (
+                row.get(const { fixed("app_kind") }).unwrap(),
+                row.get(const { fixed("app_key") }).unwrap(),
+                row.get(const { fixed("row_kind") }).unwrap(),
+                row.get(const { fixed("executable_name") }).unwrap(),
+                row.get(const { fixed("pid") }).unwrap(),
+                row.get(const { fixed("pid_version") }).unwrap(),
+                row.get(const { fixed("publication") }).unwrap(),
+            )
+        })
+        .collect()
 }
 
 fn app_keys(sample: &Sample) -> Vec<Key> {
