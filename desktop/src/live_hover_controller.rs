@@ -187,7 +187,7 @@ impl LiveDashboard {
             return;
         }
 
-        match self.worker.request(preview.request.clone()) {
+        match self.worker.inspect(preview.request.clone()) {
             Ok(generation) => {
                 preview.generation = Some(generation);
                 self.preview_submissions += 1;

@@ -201,6 +201,7 @@ impl SnapshotReader {
                 epoch: 0,
                 mode: crate::live_source_mode::SourceMode::Recorded,
                 request: SealedRecording::request(),
+                context: super::Context::Select,
             },
             shared: Shared {
                 mailbox: Mutex::new(Mailbox {
@@ -305,6 +306,33 @@ fn a_sealed_recording_keeps_an_explicit_same_second_observation() {
         snapshot.selection["alternatives"].as_array().unwrap().len(),
         2
     );
+}
+
+#[test]
+fn a_hover_read_brings_its_second_alone_and_keeps_the_context() {
+    // Goal: a hover's read brings the hovered observation's readings without the 900 seconds
+    // around it or the CPU history over them, which the page's charts already hold.
+    // Method: read the second of three CPU observations as a hover's read asks for it.
+    let recording = SealedRecording::with_cpu_history();
+    let mut request = SealedRecording::request();
+    request.route = "cpu".into();
+    request.second = Some(1001);
+    request.identity = Some(json!({"run":"00000000000000010000000000000002",
+        "boot":"00000000000000030000000000000004", "publication":2}));
+    request.load_resident_history = false;
+    request.load_app_attribution_history = false;
+    request.load_process_history = false;
+
+    let snapshot = recording.inspect(request).unwrap();
+
+    assert_eq!(snapshot.selection["selected"]["publication"], 2);
+    assert_eq!(snapshot.selection["summary"]["publication"], 2);
+    assert!(snapshot.selection.get("trends").is_none());
+    assert_eq!(
+        snapshot.cpu_detail.as_ref().unwrap().observation["publication"],
+        2
+    );
+    assert!(snapshot.cpu_history.is_none());
 }
 
 #[test]
@@ -487,8 +515,21 @@ impl SealedRecording {
     }
 
     fn read(&self, request: Request) -> Result<Box<super::Snapshot>, String> {
+        self.read_with(request, Worker::request)
+    }
+
+    /// Reads `request` as a hover's read of its second alone.
+    fn inspect(&self, request: Request) -> Result<Box<super::Snapshot>, String> {
+        self.read_with(request, Worker::inspect)
+    }
+
+    fn read_with(
+        &self,
+        request: Request,
+        submit: fn(&mut Worker, Request) -> Result<u64, String>,
+    ) -> Result<Box<super::Snapshot>, String> {
         let mut worker = Worker::start(self.root.clone()).unwrap();
-        let generation = worker.request(request)?;
+        let generation = submit(&mut worker, request)?;
         for _attempt in 0..1000 {
             match worker.take()? {
                 Some(Update::Ready(snapshot)) if snapshot.generation == generation => {

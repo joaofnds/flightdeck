@@ -142,6 +142,15 @@ struct Command {
     epoch: u64,
     mode: SourceMode,
     request: Request,
+    context: Context,
+}
+
+/// Whether a read of a chosen second builds the 900 seconds around it, which the page's charts
+/// draw, or keeps the context the page read last, as a hover's read of that second alone does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Context {
+    Select,
+    Keep,
 }
 
 struct Reader {
@@ -206,6 +215,19 @@ impl Worker {
     }
 
     pub fn request(&mut self, request: Request) -> Result<u64, String> {
+        self.submit(request, Context::Select)
+    }
+
+    /// Reads the observation `request` names at its second alone, keeping the context the last
+    /// request read, so a hover shows its second without rebuilding the 900 seconds around it.
+    /// The snapshot carries the second's readings and none of the histories over a context.
+    pub fn inspect(&mut self, request: Request) -> Result<u64, String> {
+        assert!(request.second.is_some());
+        assert!(request.identity.is_some());
+        self.submit(request, Context::Keep)
+    }
+
+    fn submit(&mut self, request: Request, context: Context) -> Result<u64, String> {
         request_validate(&request)?;
         if self.shared.stopped.load(Ordering::Acquire) {
             return Err("Live reader has stopped".to_owned());
@@ -230,6 +252,7 @@ impl Worker {
             epoch: self.shared.cancellation.epoch(),
             mode: self.mode,
             request,
+            context,
         });
         self.shared.wake.notify_one();
 
@@ -463,7 +486,7 @@ fn reader_snapshot(
             return Ok(None);
         }
     }
-    let mut selection = reader_selection(session, &command.request)?;
+    let mut selection = reader_selection(session, &command.request, command.context)?;
     reader_earlier(session, &command.request, &mut selection);
     reader.system.annotate(&mut selection);
     let mut snapshot = reader_snapshot_new(command.generation, catalog, selection);
@@ -472,7 +495,12 @@ fn reader_snapshot(
     if reader.last_route != command.request.route {
         snapshot.histories_pending = reader_route_has_histories(&command.request.route);
     }
-    reader_payload(session, &mut command.request, &mut snapshot)?;
+    reader_payload(
+        session,
+        &mut command.request,
+        command.context,
+        &mut snapshot,
+    )?;
     reader_snapshot_annotate_app(&reader.system, &command.request, &mut snapshot);
     snapshot.read_ms = started.elapsed().as_secs_f64() * 1000.0;
     reader_snapshot_record(reader, command, &snapshot);
@@ -588,9 +616,16 @@ fn reader_computer(reader: &mut Reader, command: &Command) -> Option<Box<Snapsho
     }))
 }
 
-fn reader_selection(session: &mut LiveSession, request: &Request) -> Result<Value, String> {
+fn reader_selection(
+    session: &mut LiveSession,
+    request: &Request,
+    context: Context,
+) -> Result<Value, String> {
     if matches!(request.route.as_str(), "computer" | "self") {
         return Ok(Value::Null);
+    }
+    if context == Context::Keep {
+        return reader_selection_kept(session, request);
     }
     let selection = match request.second {
         Some(second) => session.select(second, 0).map_err(|error| error.to_string()),
@@ -606,6 +641,24 @@ fn reader_selection(session: &mut LiveSession, request: &Request) -> Result<Valu
             return Ok(exact);
         }
     }
+
+    Ok(selection)
+}
+
+/// Selects the observation a hover names at its second, without the context around it.
+fn reader_selection_kept(session: &mut LiveSession, request: &Request) -> Result<Value, String> {
+    let second = request
+        .second
+        .ok_or("A kept context reads a chosen second")?;
+    let identity = request
+        .identity
+        .as_ref()
+        .ok_or("A kept context reads a named observation")?;
+
+    let selection = session
+        .inspect(second, identity)
+        .map_err(|error| error.to_string())?;
+    identity_validate(&selection["selected"], identity)?;
 
     Ok(selection)
 }
@@ -671,6 +724,7 @@ fn reader_latest(session: &mut LiveSession) -> Result<Value, String> {
 fn reader_payload(
     session: &mut LiveSession,
     request: &mut Request,
+    context: Context,
     snapshot: &mut Snapshot,
 ) -> Result<(), String> {
     // A missing second has no raw payload, and must never borrow a sibling observation.
@@ -687,7 +741,7 @@ fn reader_payload(
         snapshot.pages.insert((*table).to_owned(), page);
     }
     if request.route == "apps" {
-        reader_apps(session, request, snapshot)?;
+        reader_apps(session, request, context, snapshot)?;
     }
     let ranked = route_ranks_apps(&request.route);
     if ranked {
@@ -701,7 +755,9 @@ fn reader_payload(
             detail,
             &snapshot.selection["selected"],
         )?);
-        reader_cpu_history(session, request, snapshot)?;
+        if context == Context::Select {
+            reader_cpu_history(session, request, snapshot)?;
+        }
     }
     // Keeping App parts replays the saved minutes of each window that keeps none, so it follows
     // the histories the page shows, and a hover's own read keeps none.
@@ -888,6 +944,7 @@ fn reader_cpu_history(
 fn reader_apps(
     session: &LiveSession,
     request: &mut Request,
+    context: Context,
     snapshot: &mut Snapshot,
 ) -> Result<(), String> {
     let apps = reader_apps_page(session, request.apps_offset)?;
@@ -904,12 +961,14 @@ fn reader_apps(
         if !detail.is_null() {
             identity_validate(&detail["selected"], &snapshot.selection["selected"])?;
         }
-        if !snapshot.histories_pending {
-            let history = session
-                .app_history(kind, &bytes)
-                .map_err(|error| error.to_string())?;
-            identity_validate(&history["selected"], &snapshot.selection["selected"])?;
-            snapshot.history = Some(history);
+        if context == Context::Select {
+            if !snapshot.histories_pending {
+                let history = session
+                    .app_history(kind, &bytes)
+                    .map_err(|error| error.to_string())?;
+                identity_validate(&history["selected"], &snapshot.selection["selected"])?;
+                snapshot.history = Some(history);
+            }
         }
         snapshot.detail = Some(detail);
     }
