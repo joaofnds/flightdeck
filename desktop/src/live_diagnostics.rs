@@ -538,7 +538,7 @@ impl LiveDashboard {
                     ))
                     .child(caption(
                         "Read from the output of the collector this app started, as it runs. \
-                         Report ends are the wall-clock seconds the app read each report; minute \
+                         Report ends are the run's elapsed time at each report; minute \
                          CPU calculations use each reported elapsed_ns. No values are \
                          interpolated. Source report values are retained; displayed precision \
                          follows each metric.",

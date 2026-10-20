@@ -292,6 +292,18 @@ fn the_report_table_keeps_each_measure_in_its_digits() {
 }
 
 #[test]
+fn a_table_row_ends_at_the_elapsed_time_of_its_report() {
+    // Goal: a report and a minute end at the run's elapsed time, as the prototype's tables write
+    // them. Method: format one of each, started at second 1,000, and read the first cell.
+    let mut reports = started();
+    reports.ticks.push_back(tick(1_010));
+    reports.minutes.push_back(minute(1_060));
+
+    assert_eq!(report_rows(&reports)[0][0], "0:10");
+    assert_eq!(minute_rows(&reports)[0][0], "1:00");
+}
+
+#[test]
 fn the_minute_table_splits_the_budget_between_collector_and_persister() {
     // Goal: a minute row reads each share of one core to three digits.
     // Method: format one minute and compare every cell after its clock.

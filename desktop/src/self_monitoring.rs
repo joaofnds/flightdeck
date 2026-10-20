@@ -561,7 +561,7 @@ pub fn report_rows(reports: &SelfReports) -> Vec<Vec<String>> {
         .iter()
         .map(|tick| {
             vec![
-                crate::chart_axes::clock(tick.second, true),
+                row_end(reports, tick.second),
                 value(Some(tick.collector_cpu_percent.into()), "%", 2),
                 value(Some(tick.collector_milliwatts.into()), " mW", 2),
                 value(Some(tick.late_average_ms.into()), " ms", 1),
@@ -593,7 +593,7 @@ pub fn minute_rows(reports: &SelfReports) -> Vec<Vec<String>> {
         .map(|minute| {
             let percent = |field| minute_value(field, minute).map(f64::from);
             vec![
-                crate::chart_axes::clock(minute.second, true),
+                row_end(reports, minute.second),
                 value(percent(Field::MinuteCollector), "%", 3),
                 value(percent(Field::MinutePersister), "%", 3),
                 value(percent(Field::MinuteCombined), "%", 3),
@@ -602,6 +602,15 @@ pub fn minute_rows(reports: &SelfReports) -> Vec<Vec<String>> {
             ]
         })
         .collect()
+}
+
+/// When a report ends, as the prototype's tables write it: the run's elapsed time, or the wall
+/// clock where this app did not start the run.
+fn row_end(reports: &SelfReports, second: u64) -> String {
+    reports.started.map_or_else(
+        || crate::chart_axes::clock(second, true),
+        |started| elapsed(started, second),
+    )
 }
 
 /// The prototype's `selfValue`: fixed digits and the unit, or Unavailable.
