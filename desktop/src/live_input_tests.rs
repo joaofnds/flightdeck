@@ -43,7 +43,7 @@ mod scroll;
 #[path = "live_section_input_tests.rs"]
 mod sections;
 #[path = "live_source_mode_input_tests.rs"]
-mod source_mode;
+pub(crate) mod source_mode;
 #[path = "live_summary_input_tests.rs"]
 mod summary;
 

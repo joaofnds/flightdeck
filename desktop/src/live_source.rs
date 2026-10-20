@@ -136,6 +136,9 @@ struct Mailbox {
     generation: u64,
     request: Option<Command>,
     output: Option<Update>,
+    /// The window reading through the worker closed, so the worker drops its page and keeps its
+    /// session following the recording until the next window asks for one.
+    rest: bool,
 }
 
 struct Command {
@@ -169,11 +172,14 @@ struct Reader {
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const WORKER_STEPS_MAX: u64 = 7 * 24 * 60 * 60 * 4;
+// Bounds the windows one reader serves, each of which gets WORKER_STEPS_MAX steps.
+const WORKER_LEASES_MAX: u64 = 1 << 20;
 const ALTERNATIVES_MAX: usize = 4096;
 // Match the recording format's maximum captured program path length.
 const APP_KEY_BYTES_MAX: usize = 4095;
 const _: () = {
     assert!(WORKER_STEPS_MAX > 0);
+    assert!(WORKER_LEASES_MAX > 0);
     assert!(APP_KEY_BYTES_MAX > 0);
     assert!(ALTERNATIVES_MAX <= 4096);
 };
@@ -191,17 +197,24 @@ impl Worker {
         self.mode
     }
 
+    /// Whether the reader still answers requests.
+    pub fn running(&self) -> bool {
+        if self.shared.stopped.load(Ordering::Acquire) {
+            return false;
+        }
+
+        self.thread
+            .as_ref()
+            .is_some_and(|thread| !thread.is_finished())
+    }
+
+    #[cfg(test)]
+    pub fn thread_id(&self) -> Option<thread::ThreadId> {
+        self.thread.as_ref().map(|thread| thread.thread().id())
+    }
+
     fn start_mode(root: PathBuf, mode: SourceMode) -> std::io::Result<Self> {
-        let shared = Arc::new(Shared {
-            mailbox: Mutex::new(Mailbox {
-                generation: 0,
-                request: None,
-                output: None,
-            }),
-            wake: Condvar::new(),
-            stopped: AtomicBool::new(false),
-            cancellation: Arc::new(Cancellation::default()),
-        });
+        let shared = Arc::new(Shared::new());
         let control = Arc::clone(&shared);
         let thread = thread::Builder::new()
             .name("flightdeck-live".to_owned())
@@ -238,11 +251,7 @@ impl Worker {
         if self.shared.stopped.load(Ordering::Acquire) {
             return Err("Live reader has stopped".to_owned());
         }
-        let mut mailbox = self
-            .shared
-            .mailbox
-            .lock()
-            .map_err(|error| error.to_string())?;
+        let mut mailbox = self.mailbox()?;
         let generation = mailbox
             .generation
             .checked_add(1)
@@ -266,11 +275,7 @@ impl Worker {
     }
 
     pub fn take(&mut self) -> Result<Option<Update>, String> {
-        let mut mailbox = self
-            .shared
-            .mailbox
-            .lock()
-            .map_err(|error| error.to_string())?;
+        let mut mailbox = self.mailbox()?;
         let output = mailbox.output.take();
         if output.is_none() {
             if self.thread.as_ref().is_some_and(JoinHandle::is_finished) {
@@ -298,6 +303,53 @@ impl Worker {
         }
     }
 
+    /// Hands the reader to a new handle, so the window opened next reads through it. The reader
+    /// drops the page it read and keeps its session following the recording until a request
+    /// arrives, and this handle refuses requests from then on.
+    pub fn hand_over(&mut self) -> Result<Option<Worker>, String> {
+        // A recording the user opened in the window is read-only, and the window opened again
+        // follows the live recording.
+        if self.mode != SourceMode::Live {
+            return Ok(None);
+        }
+        if self.shared.stopped.load(Ordering::Acquire) {
+            return Err("Live reader has stopped".to_owned());
+        }
+        {
+            let mut mailbox = self.mailbox()?;
+            // A read the closed window asked for publishes under an older generation, which the
+            // mailbox refuses.
+            let generation = mailbox
+                .generation
+                .checked_add(1)
+                .ok_or_else(|| "Live request generation exhausted".to_owned())?;
+            self.shared
+                .cancellation
+                .cancel()
+                .map_err(|error| error.to_string())?;
+            mailbox.generation = generation;
+            mailbox.request = None;
+            mailbox.output = None;
+            mailbox.rest = true;
+            self.shared.wake.notify_one();
+        }
+
+        let refusing = Shared::new();
+        refusing.stopped.store(true, Ordering::Release);
+        Ok(Some(Worker {
+            shared: std::mem::replace(&mut self.shared, Arc::new(refusing)),
+            thread: self.thread.take(),
+            mode: self.mode,
+        }))
+    }
+
+    fn mailbox(&self) -> Result<std::sync::MutexGuard<'_, Mailbox>, String> {
+        self.shared
+            .mailbox
+            .lock()
+            .map_err(|error| error.to_string())
+    }
+
     pub fn retire(mut self) -> Option<JoinHandle<()>> {
         self.signal_stop();
         self.thread.take()
@@ -309,6 +361,22 @@ impl Worker {
             eprintln!("flightdeck GPUI reader cancellation: {error}");
         }
         self.shared.wake.notify_one();
+    }
+}
+
+impl Shared {
+    fn new() -> Self {
+        Self {
+            mailbox: Mutex::new(Mailbox {
+                generation: 0,
+                request: None,
+                output: None,
+                rest: false,
+            }),
+            wake: Condvar::new(),
+            stopped: AtomicBool::new(false),
+            cancellation: Arc::new(Cancellation::default()),
+        }
     }
 }
 
@@ -329,33 +397,42 @@ fn worker_run(root: &std::path::Path, shared: &Shared) {
         pending_generation: None,
         retry_after: Instant::now(),
     };
-    for _step in 0..WORKER_STEPS_MAX {
+    for _lease in 0..WORKER_LEASES_MAX {
+        let lease = worker_lease(root, shared, &mut reader, &mut command, WORKER_STEPS_MAX);
+        if lease == Lease::Ended {
+            break;
+        }
+    }
+    shared.stopped.store(true, Ordering::Release);
+}
+
+/// How a run of the worker's steps ended.
+#[derive(Debug, PartialEq, Eq)]
+enum Lease {
+    /// A window took the resting reader, which gives that window the full step limit rather
+    /// than what the windows before it left.
+    Renewed,
+    Ended,
+}
+
+/// Steps the worker at most `steps_max` times, until a window takes the resting reader.
+fn worker_lease(
+    root: &std::path::Path,
+    shared: &Shared,
+    reader: &mut Reader,
+    command: &mut Option<Command>,
+    steps_max: u64,
+) -> Lease {
+    for _step in 0..steps_max {
         if shared.stopped.load(Ordering::Acquire) {
-            return;
+            return Lease::Ended;
         }
-        match shared.mailbox.lock() {
-            Ok(mut mailbox) => {
-                if let Some(next) = mailbox.request.take() {
-                    command = Some(next);
-                    reader.retry_after = Instant::now();
-                }
-            }
-            Err(error) => {
-                eprintln!("flightdeck GPUI reader mailbox: {error}");
-                shared.stopped.store(true, Ordering::Release);
-                return;
-            }
+        match worker_receive(shared, reader, command) {
+            Received::Continued => {}
+            Received::Taken => return Lease::Renewed,
+            Received::Broken => return Lease::Ended,
         }
-        worker_sample(&mut reader.system);
-        let pause = match &mut command {
-            Some(command) => {
-                if let Some(output) = reader_read(&mut reader, root, command, shared) {
-                    worker_publish(shared, command.generation, output);
-                }
-                worker_pause(&reader, command)
-            }
-            None => POLL_INTERVAL,
-        };
+        let pause = worker_step(root, shared, reader, command);
         worker_pause_for(shared, pause);
     }
     if let Some(command) = command {
@@ -368,7 +445,66 @@ fn worker_run(root: &std::path::Path, shared: &Shared) {
             },
         );
     }
-    shared.stopped.store(true, Ordering::Release);
+    Lease::Ended
+}
+
+/// What the worker found in its mailbox at the top of a step.
+#[derive(Debug, PartialEq, Eq)]
+enum Received {
+    /// The worker goes on with the page it reads, or with resting.
+    Continued,
+    /// A request reached the resting reader, so a window took it.
+    Taken,
+    /// The mailbox failed, so the worker stops.
+    Broken,
+}
+
+fn worker_receive(shared: &Shared, reader: &mut Reader, command: &mut Option<Command>) -> Received {
+    match shared.mailbox.lock() {
+        Ok(mut mailbox) => {
+            if mailbox.rest {
+                mailbox.rest = false;
+                *command = None;
+                reader_rest(reader);
+            }
+            let Some(next) = mailbox.request.take() else {
+                return Received::Continued;
+            };
+            let resting = command.is_none();
+            *command = Some(next);
+            reader.retry_after = Instant::now();
+            if resting {
+                Received::Taken
+            } else {
+                Received::Continued
+            }
+        }
+        Err(error) => {
+            eprintln!("flightdeck GPUI reader mailbox: {error}");
+            shared.stopped.store(true, Ordering::Release);
+            Received::Broken
+        }
+    }
+}
+
+/// Reads the page the worker reads, or keeps a resting reader following the recording, and
+/// returns how long the worker waits before its next step.
+fn worker_step(
+    root: &std::path::Path,
+    shared: &Shared,
+    reader: &mut Reader,
+    command: &mut Option<Command>,
+) -> Duration {
+    worker_sample(&mut reader.system);
+    if let Some(command) = command {
+        if let Some(output) = reader_read(reader, root, command, shared) {
+            worker_publish(shared, command.generation, output);
+        }
+        worker_pause(reader, command)
+    } else {
+        reader_follow(reader, root, shared);
+        POLL_INTERVAL
+    }
 }
 
 /// How long the worker waits before its next step. A page whose readings were just published
@@ -382,12 +518,18 @@ fn worker_pause(reader: &Reader, command: &Command) -> Duration {
     POLL_INTERVAL
 }
 
-/// Pauses the worker for `pause`, or until a request or a stop arrives, so a page the reader
-/// asks for is read at once.
+/// Pauses the worker for `pause`, or until a request, a rest or a stop arrives, so a page the
+/// reader asks for is read at once.
 fn worker_pause_for(shared: &Shared, pause: Duration) {
     match shared.mailbox.lock() {
         Ok(mailbox) => {
-            if mailbox.request.is_some() || shared.stopped.load(Ordering::Acquire) {
+            if mailbox.request.is_some() {
+                return;
+            }
+            if mailbox.rest {
+                return;
+            }
+            if shared.stopped.load(Ordering::Acquire) {
                 return;
             }
             if let Err(error) = shared.wake.wait_timeout(mailbox, pause) {
@@ -421,6 +563,51 @@ fn worker_publish(shared: &Shared, generation: u64, output: Update) {
         Err(error) => {
             eprintln!("flightdeck GPUI reader publication: {error}");
             shared.stopped.store(true, Ordering::Release);
+        }
+    }
+}
+
+/// Drops the page the closed window read, so the next window's page reads as newly opened and
+/// shows its readings before its App histories.
+fn reader_rest(reader: &mut Reader) {
+    reader.last_route.clear();
+}
+
+/// Keeps a resting reader's session following the recording, so the next page reads only what
+/// arrived since this step rather than everything since its window closed. A reader without a
+/// session opens one, and a session that fails to follow is dropped for the next step to open.
+fn reader_follow(reader: &mut Reader, root: &std::path::Path, shared: &Shared) {
+    let Some(session) = &mut reader.session else {
+        reader_follow_open(reader, root, shared);
+        return;
+    };
+
+    let followed = session
+        .begin(shared.cancellation.epoch())
+        .and_then(|()| session.poll());
+    match followed {
+        Ok(_changed) => {}
+        Err(persistence::Error::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted => {}
+        Err(error) => {
+            eprintln!("Kept Flightdeck reader stopped following the recording: {error}");
+            reader.session = None;
+        }
+    }
+}
+
+/// Opens the resting reader's session, at most once each retry interval, since a window closed
+/// before its reader opened the recording would otherwise reopen over none.
+fn reader_follow_open(reader: &mut Reader, root: &std::path::Path, shared: &Shared) {
+    if Instant::now() < reader.retry_after {
+        return;
+    }
+    let epoch = shared.cancellation.epoch();
+    match LiveSession::open_with(root, Arc::clone(&shared.cancellation), epoch) {
+        Ok(session) => reader.session = Some(session),
+        Err(persistence::Error::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted => {}
+        Err(error) => {
+            eprintln!("Kept Flightdeck reader could not open the recording: {error}");
+            reader.retry_after = Instant::now() + RETRY_INTERVAL;
         }
     }
 }

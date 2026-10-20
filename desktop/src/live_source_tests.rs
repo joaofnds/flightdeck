@@ -192,6 +192,154 @@ fn a_newly_opened_page_brings_the_older_tail_its_session_keeps_with_its_readings
 }
 
 #[test]
+fn a_handed_over_reader_reads_the_next_windows_page_as_newly_opened() {
+    // Goal: a window opened over a kept reader shows its readings before its App histories, as
+    // it would over a new reader, whatever page the closed window showed last.
+    // Method: read Overview to the end, hand the reader over, request Overview through the
+    // kept handle, and step the reader's mailbox and read.
+    let recording = SealedRecording::new();
+    let mut reader = SnapshotReader::new();
+    reader.read_complete(&recording);
+    let mut kept = reader.hand_over();
+    kept.request(SealedRecording::request()).unwrap();
+
+    let received = reader.receive();
+    let reopened = reader.read(&recording).unwrap().unwrap();
+
+    assert_eq!(received, (super::Received::Taken, true));
+    assert!(reopened.histories_pending);
+}
+
+#[test]
+fn a_handed_over_reader_follows_the_ring_while_no_page_reads() {
+    // Goal: a window opened over a kept reader reads only the ticks since the reader's last
+    // step, rather than every tick published since its window closed.
+    // Method: read a live ring, hand the reader over, publish a tick, and step the reader as
+    // the worker does.
+    let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
+    recording.publish();
+    let mut reader = SnapshotReader::new();
+    reader.command.mode = crate::live_source_mode::SourceMode::Live;
+    reader.read_at(&recording.root).unwrap().unwrap();
+    let _kept = reader.hand_over();
+    recording.publish();
+
+    let received = reader.receive();
+    let pause = reader.step_resting(&recording.root);
+
+    assert_eq!(received, (super::Received::Continued, false));
+    assert_eq!(pause, super::POLL_INTERVAL);
+    let last_second = reader.session().catalog()["last_second"].as_u64();
+    assert_eq!(last_second, Some(recording.last_second()));
+}
+
+#[test]
+fn a_resting_reader_without_a_session_opens_one() {
+    // Goal: a window closed before its reader opened the recording still opens again at once.
+    // Method: step a reader that never read a page as the worker steps a resting one.
+    let recording = SealedRecording::new();
+    let mut reader = SnapshotReader::new();
+
+    let pause = reader.step_resting(&recording.root);
+
+    assert_eq!(pause, super::POLL_INTERVAL);
+    assert_eq!(reader.session().catalog()["last_second"], 1002);
+}
+
+#[test]
+fn a_window_that_takes_the_resting_reader_renews_its_step_limit() {
+    // Goal: a reader kept across windows gives each window the full step limit, so a window
+    // opened days after the app started never finds its reader at the limit.
+    // Method: request a page from a resting reader, and run the worker's steps over it.
+    let recording = SealedRecording::new();
+    let mut reader = SnapshotReader::new();
+    let mut kept = reader.hand_over();
+    kept.request(SealedRecording::request()).unwrap();
+
+    let lease = reader.lease(&recording.root, None, 1);
+
+    assert_eq!(lease, super::Lease::Renewed);
+}
+
+#[test]
+fn a_window_that_reads_to_the_step_limit_is_told_so() {
+    // Goal: a window whose reader reached its limit reports it rather than going quiet.
+    // Method: run no steps over a reader with a page to read, and take the worker's output.
+    let recording = SealedRecording::new();
+    let mut reader = SnapshotReader::new();
+    let command = SnapshotReader::command();
+
+    let lease = reader.lease(&recording.root, Some(command), 0);
+
+    assert_eq!(lease, super::Lease::Ended);
+    let output = reader.shared.mailbox.lock().unwrap().output.take();
+    let Some(Update::Failed { message, .. }) = output else {
+        panic!("The worker published no failure");
+    };
+    assert_eq!(message, "Live reader reached its seven-day session limit");
+}
+
+#[test]
+fn a_read_the_closed_window_asked_for_never_reaches_the_next_window() {
+    // Goal: the window opened over a kept reader never shows the page the closed window read.
+    // Method: hand the reader over, then publish a read under the closed window's generation.
+    let recording = SealedRecording::new();
+    let mut reader = SnapshotReader::new();
+    let mut kept = reader.hand_over();
+    let read = reader.step(&recording).unwrap();
+
+    super::worker_publish(&reader.shared, reader.command.generation, read);
+
+    assert!(kept.take().unwrap().is_none());
+}
+
+#[test]
+fn a_kept_reader_answers_requests_after_the_closed_window_drops_its_handle() {
+    // Goal: closing the window that handed its reader on leaves the reader running.
+    // Method: read Overview through a worker, hand its reader over, drop the handle left
+    // behind, and read Overview through the kept handle.
+    let recording = SealedRecording::new();
+    let mut worker = Worker::start(recording.root.clone()).unwrap();
+    SealedRecording::read_through(&mut worker, SealedRecording::request(), Worker::request)
+        .unwrap();
+    let mut kept = worker.hand_over().unwrap().unwrap();
+    drop(worker);
+
+    let snapshot =
+        SealedRecording::read_through(&mut kept, SealedRecording::request(), Worker::request);
+
+    assert_eq!(snapshot.unwrap().selection["second"], 1002);
+}
+
+#[test]
+fn a_handle_that_handed_its_reader_over_refuses_requests() {
+    // Goal: a closed window's handle can never steer the reader the next window reads through.
+    // Method: hand a worker's reader over and send a request through the handle left behind.
+    let recording = SealedRecording::new();
+    let mut worker = Worker::start(recording.root.clone()).unwrap();
+    let kept = worker.hand_over().unwrap();
+
+    let refused = worker.request(SealedRecording::request());
+
+    assert!(kept.is_some());
+    assert!(refused.is_err());
+}
+
+#[test]
+fn a_handle_that_handed_its_reader_over_hands_nothing_more() {
+    // Goal: the reader the next window reads through is never lost to a second hand-over.
+    // Method: hand a worker's reader over twice.
+    let recording = SealedRecording::new();
+    let mut worker = Worker::start(recording.root.clone()).unwrap();
+    let kept = worker.hand_over().unwrap();
+
+    let again = worker.hand_over();
+
+    assert!(kept.is_some());
+    assert!(again.is_err());
+}
+
+#[test]
 fn the_worker_pauses_once_a_page_has_all_it_asked_for() {
     // Goal: the worker polls at its own pace once the page's App histories are read.
     // Method: read Overview until complete through the reader over a real sealed recording.
@@ -222,7 +370,7 @@ fn a_failed_read_of_a_pages_app_histories_pauses_before_its_retry() {
 struct SnapshotReader {
     reader: super::Reader,
     command: super::Command,
-    shared: Shared,
+    shared: Arc<Shared>,
 }
 
 impl SnapshotReader {
@@ -237,23 +385,28 @@ impl SnapshotReader {
                 pending_generation: None,
                 retry_after: std::time::Instant::now(),
             },
-            command: super::Command {
-                generation: 1,
-                epoch: 0,
-                mode: crate::live_source_mode::SourceMode::Recorded,
-                request: SealedRecording::request(),
-                context: super::Context::Select,
-            },
-            shared: Shared {
+            command: Self::command(),
+            shared: Arc::new(Shared {
                 mailbox: Mutex::new(Mailbox {
                     generation: 1,
                     request: None,
                     output: None,
+                    rest: false,
                 }),
                 wake: Condvar::new(),
                 stopped: AtomicBool::new(false),
                 cancellation: Arc::new(Cancellation::default()),
-            },
+            }),
+        }
+    }
+
+    fn command() -> super::Command {
+        super::Command {
+            generation: 1,
+            epoch: 0,
+            mode: crate::live_source_mode::SourceMode::Recorded,
+            request: SealedRecording::request(),
+            context: super::Context::Select,
         }
     }
 
@@ -261,12 +414,58 @@ impl SnapshotReader {
         &mut self,
         recording: &SealedRecording,
     ) -> Result<Option<Box<super::Snapshot>>, String> {
-        super::reader_snapshot(
-            &mut self.reader,
-            &recording.root,
-            &mut self.command,
+        self.read_at(&recording.root)
+    }
+
+    fn read_at(&mut self, root: &std::path::Path) -> Result<Option<Box<super::Snapshot>>, String> {
+        super::reader_snapshot(&mut self.reader, root, &mut self.command, &self.shared)
+    }
+
+    /// Hands the reader over as a closing window does, through a handle without a thread, so
+    /// the test steps the reader itself.
+    fn hand_over(&self) -> Worker {
+        let mut closing = Worker {
+            shared: Arc::clone(&self.shared),
+            thread: None,
+            mode: crate::live_source_mode::SourceMode::Live,
+        };
+        closing.hand_over().unwrap().unwrap()
+    }
+
+    /// Takes the mailbox as the worker does at the top of a step, and tells whether the reader
+    /// is left with a page to read.
+    fn receive(&mut self) -> (super::Received, bool) {
+        let mut command = Some(std::mem::replace(&mut self.command, Self::command()));
+        let received = super::worker_receive(&self.shared, &mut self.reader, &mut command);
+        let reading = command.is_some();
+        if let Some(command) = command {
+            self.command = command;
+        }
+        (received, reading)
+    }
+
+    /// Steps the reader as the worker does while no page reads, and returns its pause.
+    fn step_resting(&mut self, root: &std::path::Path) -> Duration {
+        super::worker_step(root, &self.shared, &mut self.reader, &mut None)
+    }
+
+    fn lease(
+        &mut self,
+        root: &std::path::Path,
+        mut command: Option<super::Command>,
+        steps_max: u64,
+    ) -> super::Lease {
+        super::worker_lease(
+            root,
             &self.shared,
+            &mut self.reader,
+            &mut command,
+            steps_max,
         )
+    }
+
+    fn session(&self) -> &viewer::LiveSession {
+        self.reader.session.as_ref().unwrap()
     }
 
     fn step(&mut self, recording: &SealedRecording) -> Option<Update> {
@@ -570,7 +769,16 @@ impl SealedRecording {
         submit: fn(&mut Worker, Request) -> Result<u64, String>,
     ) -> Result<Box<super::Snapshot>, String> {
         let mut worker = Worker::start(self.root.clone()).unwrap();
-        let generation = submit(&mut worker, request)?;
+        Self::read_through(&mut worker, request, submit)
+    }
+
+    /// Reads `request` through `worker` until the snapshot leaves nothing pending.
+    fn read_through(
+        worker: &mut Worker,
+        request: Request,
+        submit: fn(&mut Worker, Request) -> Result<u64, String>,
+    ) -> Result<Box<super::Snapshot>, String> {
+        let generation = submit(worker, request)?;
         for _attempt in 0..1000 {
             match worker.take()? {
                 Some(Update::Ready(snapshot)) if snapshot.generation == generation => {
@@ -774,16 +982,7 @@ fn refuses_superseded_results_after_accepting_a_new_request() {
     // Goal: an old worker result cannot replace the latest requested generation.
     // Method: publish both generations through the real mailbox without a background thread.
     let mut worker = Worker {
-        shared: Arc::new(Shared {
-            mailbox: Mutex::new(Mailbox {
-                generation: 0,
-                request: None,
-                output: None,
-            }),
-            wake: Condvar::new(),
-            stopped: AtomicBool::new(false),
-            cancellation: Arc::new(Cancellation::default()),
-        }),
+        shared: Arc::new(Shared::new()),
         thread: None,
         mode: crate::live_source_mode::SourceMode::Live,
     };
@@ -836,16 +1035,7 @@ fn a_new_request_ends_the_pause_between_polls() {
     // the real mailbox, send a request, and wait up to ten seconds for the pause to end, which
     // keeps the verdict independent of how busy the machine is.
     let mut worker = Worker {
-        shared: Arc::new(Shared {
-            mailbox: Mutex::new(Mailbox {
-                generation: 0,
-                request: None,
-                output: None,
-            }),
-            wake: Condvar::new(),
-            stopped: AtomicBool::new(false),
-            cancellation: Arc::new(Cancellation::default()),
-        }),
+        shared: Arc::new(Shared::new()),
         thread: None,
         mode: crate::live_source_mode::SourceMode::Live,
     };

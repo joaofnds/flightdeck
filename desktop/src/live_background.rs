@@ -4,8 +4,9 @@
 
 use std::path::PathBuf;
 
-use gpui::{ActivationPolicy, App, Global};
+use gpui::{ActivationPolicy, App, Entity, Global};
 
+use crate::live_dashboard::LiveDashboard;
 use crate::live_source::Worker;
 use crate::menu_bar::{Command, MenuBarItem};
 
@@ -22,6 +23,10 @@ pub(super) struct Reopening {
 
 struct Background {
     reopening: Reopening,
+    /// The reader of the live window the user closed, which the window opened again reads
+    /// through.
+    kept: Option<Worker>,
+    quitting: bool,
 }
 
 impl Global for Background {}
@@ -34,7 +39,18 @@ struct MenuBar {
 impl Global for MenuBar {}
 
 pub(super) fn install(reopening: Reopening, cx: &mut App) {
-    cx.set_global(Background { reopening });
+    cx.set_global(Background {
+        reopening,
+        kept: None,
+        quitting: false,
+    });
+    cx.on_app_quit(|cx| {
+        let background = cx.global_mut::<Background>();
+        background.quitting = true;
+        drop(background.kept.take());
+        async {}
+    })
+    .detach();
     cx.on_window_closed(|cx, _window_id| {
         if cx.windows().is_empty() {
             cx.set_activation_policy(ActivationPolicy::Accessory);
@@ -58,6 +74,28 @@ pub(super) fn install_menu_bar(cx: &mut App) {
     }
 }
 
+/// Keeps the reader of a live window when the user closes it, so the window opened again reads
+/// through it and shows its readings at once, rather than after the seconds a new reader takes
+/// to replay the recording.
+pub(super) fn keep_reader(dashboard: &Entity<LiveDashboard>, cx: &mut App) {
+    if !cx.has_global::<Background>() {
+        return;
+    }
+
+    cx.observe_release(dashboard, |dashboard, cx| {
+        let background = cx.global_mut::<Background>();
+        // Quitting stops the reader with its window, since no window opens again.
+        if background.quitting {
+            return;
+        }
+        match dashboard.worker.hand_over() {
+            Ok(kept) => background.kept = kept,
+            Err(error) => eprintln!("Keep Flightdeck reader: {error}"),
+        }
+    })
+    .detach();
+}
+
 /// Brings the live window forward, and opens it again when the user closed it.
 pub fn show(cx: &mut App) {
     cx.set_activation_policy(ActivationPolicy::Regular);
@@ -74,13 +112,18 @@ pub fn show(cx: &mut App) {
 }
 
 fn reopen(cx: &mut App) -> Result<(), String> {
-    let reopening = &cx.global::<Background>().reopening;
+    let background = cx.global_mut::<Background>();
+    let kept = background.kept.take().filter(Worker::running);
+    let reopening = &background.reopening;
     let start = super::Start {
         page: reopening.page.clone(),
         seconds: None,
         hardware: reopening.hardware,
     };
-    let worker = Worker::start(reopening.root.clone()).map_err(|error| error.to_string())?;
+    let worker = match kept {
+        Some(worker) => worker,
+        None => Worker::start(reopening.root.clone()).map_err(|error| error.to_string())?,
+    };
     super::open_window(
         super::Opening {
             worker,

@@ -295,15 +295,15 @@ impl Drop for SavedRecording {
     }
 }
 
-struct LiveRecording {
-    root: PathBuf,
+pub(crate) struct LiveRecording {
+    pub(crate) root: PathBuf,
     lock_path: PathBuf,
     writer: Writer,
     publication: u64,
 }
 
 impl LiveRecording {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let root = unique_root("live");
         let place = Place::for_user(root.file_name().unwrap().to_str().unwrap()).unwrap();
         let shape = Shape {
@@ -329,7 +329,7 @@ impl LiveRecording {
         }
     }
 
-    fn publish(&mut self) {
+    pub(crate) fn publish(&mut self) {
         let readings = Readings {
             run_tick: self.publication,
             cpus: &[collector::machine::CPUTicks::default()],
@@ -353,6 +353,12 @@ impl LiveRecording {
             },
         );
         self.publication += 1;
+    }
+
+    /// The wall-clock second of the newest tick published.
+    pub(crate) fn last_second(&self) -> u64 {
+        assert!(self.publication > 0);
+        1000 + self.publication - 1
     }
 }
 

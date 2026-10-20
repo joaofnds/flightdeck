@@ -181,6 +181,7 @@ fn open_window(opening: Opening, cx: &mut App) -> Result<(), String> {
 
     cx.open_window(window, move |window, cx| {
         let dashboard = create_dashboard(worker, start, cx);
+        background::keep_reader(&dashboard, cx);
         install_control(control, &dashboard, window, cx);
         dashboard
     })
