@@ -1,5 +1,8 @@
+use std::time::Instant;
+
 use gpui::{Context, SharedString};
 
+use super::timings::{HoverTiming, HoverTimings};
 use super::{Origin, Preview, Target};
 use crate::live_dashboard::{ChartHover, LiveDashboard, Picker};
 use crate::live_source::{Snapshot, Update};
@@ -18,15 +21,35 @@ pub(crate) enum PointerPlace {
 }
 
 impl LiveDashboard {
+    /// Shows the readings of the second the pointer hovers, and times the hover from
+    /// `hovered_at`, when the app began handling what put the pointer over that second.
+    pub(crate) fn hover_reading_target(
+        &mut self,
+        source: SharedString,
+        target: Target,
+        hovered_at: Instant,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.set_reading_target(source, target, Origin::Pointer, cx) {
+            return;
+        }
+
+        if let Some(preview) = &mut self.preview {
+            preview.hovered_at = Some(hovered_at);
+        }
+        self.hover_timed();
+    }
+
+    /// Shows the readings of `target`, and answers whether the target changed.
     pub(crate) fn set_reading_target(
         &mut self,
         source: SharedString,
         target: Target,
         origin: Origin,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         if self.snapshot.is_none() {
-            return;
+            return false;
         }
 
         let changed = !self.preview.as_ref().is_some_and(|preview| {
@@ -37,6 +60,9 @@ impl LiveDashboard {
             .as_ref()
             .is_some_and(|preview| preview.source == source && preview.origin == origin);
         if changed {
+            if let Some(replaced) = &self.preview {
+                hover_unfinished(&mut self.hover_timings, replaced);
+            }
             self.preview_retarget(&source, target);
         }
         if let Some(preview) = &mut self.preview {
@@ -57,6 +83,32 @@ impl LiveDashboard {
                 cx.notify();
             }
         }
+        changed
+    }
+
+    /// Ends the hover's timing once the page holds its second's complete readings, or once the
+    /// read of them failed.
+    pub(crate) fn hover_timed(&mut self) {
+        let Some(preview) = &mut self.preview else {
+            return;
+        };
+        if !preview.complete {
+            return;
+        }
+        let Some(hovered_at) = preview.hovered_at.take() else {
+            return;
+        };
+
+        let complete = if preview.failure.is_some() {
+            None
+        } else {
+            Some(hovered_at.elapsed())
+        };
+        self.hover_timings.push(HoverTiming {
+            route: preview.base_request.route.clone(),
+            second: preview.target.second,
+            complete,
+        });
     }
 
     pub(crate) fn clear_reading_target(&mut self, source: &SharedString, cx: &mut Context<Self>) {
@@ -84,6 +136,7 @@ impl LiveDashboard {
             return;
         };
 
+        hover_unfinished(&mut self.hover_timings, &preview);
         self.chart_hover = None;
         match self.worker.request(self.request.clone()) {
             Ok(generation) => self.generation = generation,
@@ -117,6 +170,7 @@ impl LiveDashboard {
 
         if preview.target.identity.is_none() {
             preview.complete = true;
+            self.hover_timed();
             cx.notify();
             return;
         }
@@ -144,6 +198,7 @@ impl LiveDashboard {
                 preview.complete = true;
             }
         }
+        self.hover_timed();
         cx.notify();
     }
 
@@ -197,6 +252,7 @@ impl LiveDashboard {
         }
         preview.complete = true;
         self.rebuild();
+        self.hover_timed();
 
         true
     }
@@ -220,13 +276,16 @@ impl LiveDashboard {
         if let Some(previous) = &self.preview {
             let source = previous.source.clone();
             let origin = previous.origin;
+            let hovered_at = previous.hovered_at;
             self.preview_retarget(&source, previous.target.clone());
             if let Some(preview) = &mut self.preview {
                 preview.source = source;
                 preview.origin = origin;
+                preview.hovered_at = hovered_at;
             }
         }
         self.rebuild();
+        self.hover_timed();
 
         true
     }
@@ -256,6 +315,20 @@ impl LiveDashboard {
         preview.header_height = header_height;
         self.preview = Some(preview);
     }
+}
+
+/// Records the hover of `preview` as ended before the page held its readings, where its timing
+/// still runs.
+fn hover_unfinished(timings: &mut HoverTimings, preview: &Preview) {
+    if preview.hovered_at.is_none() {
+        return;
+    }
+
+    timings.push(HoverTiming {
+        route: preview.base_request.route.clone(),
+        second: preview.target.second,
+        complete: None,
+    });
 }
 
 fn preview_accept(preview: &mut Preview, mut snapshot: Box<Snapshot>) -> Result<(), String> {

@@ -57,7 +57,9 @@ Timed interactive live windows accept `--seconds 1..1800`. Run
 `target/release/flightdeck --seconds 900`
 to observe a full fifteen-minute history interval in the window, or use `1800` to
 observe a second interval. Captured reference windows and `--live-check` retain
-their 300-second maximum.
+their 300-second maximum. When its time is up a timed live window prints one JSON line of
+what it saw, with the `hovers` report under that name, so a build without the `automation`
+feature also shows how long the hovers made in it took.
 
 `--live-check` exercises live routes, selection identity, CPU intervals and App history
 endpoints. It also rejects an invalid recording from Computer, reads the original

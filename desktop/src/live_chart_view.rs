@@ -1,6 +1,7 @@
 use num_traits::ToPrimitive;
 use std::cell::Cell;
 use std::rc::Rc;
+use std::time::Instant;
 
 use gpui::{
     Bounds, Context, IntoElement, MouseButton, Render, SharedString, Window, canvas, div, fill,
@@ -336,6 +337,7 @@ impl LiveDashboard {
             .children(self.reading_membership_observer(move_source.clone(), cx))
             .on_mouse_move(
                 cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {
+                    let hovered_at = Instant::now();
                     if !this.chart_anchor_matches(&move_panel) {
                         return;
                     }
@@ -346,10 +348,11 @@ impl LiveDashboard {
                         move_bounds.get(),
                         event.position,
                     );
-                    this.chart_hover_update(&move_source, second, cx);
+                    this.chart_hover_update(&move_source, second, hovered_at, cx);
                 }),
             )
             .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
+                let hovered_at = Instant::now();
                 if !this.chart_anchor_matches(&hover_panel) {
                     return;
                 }
@@ -377,7 +380,7 @@ impl LiveDashboard {
                 } else {
                     None
                 };
-                this.chart_hover_update(&source, second, cx);
+                this.chart_hover_update(&source, second, hovered_at, cx);
             }))
     }
 
@@ -385,6 +388,7 @@ impl LiveDashboard {
         &mut self,
         source: &SharedString,
         second: Option<u64>,
+        hovered_at: Instant,
         cx: &mut Context<Self>,
     ) {
         if let Some(second) = second {
@@ -393,12 +397,7 @@ impl LiveDashboard {
             };
 
             let target = crate::live_hover::Target::regular(snapshot, second);
-            self.set_reading_target(
-                source.clone(),
-                target,
-                crate::live_hover::Origin::Pointer,
-                cx,
-            );
+            self.hover_reading_target(source.clone(), target, hovered_at, cx);
         } else {
             self.clear_reading_target(source, cx);
         }

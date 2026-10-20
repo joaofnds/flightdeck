@@ -16,6 +16,8 @@ pub(crate) mod controller;
 pub(crate) mod layout;
 #[path = "live_hover_rows.rs"]
 mod rows;
+#[path = "live_hover_timings.rs"]
+pub(crate) mod timings;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Origin {
@@ -43,6 +45,9 @@ pub struct Preview {
     pub layout: Option<layout::Layout>,
     pub header_height: Option<gpui::Pixels>,
     pub retarget_geometry: bool,
+    /// When the app began handling what put the pointer over the target, while the hover's
+    /// timing runs.
+    pub hovered_at: Option<std::time::Instant>,
 }
 
 impl Target {
@@ -134,6 +139,7 @@ impl Preview {
             layout: None,
             header_height: None,
             retarget_geometry: false,
+            hovered_at: None,
         }
     }
 

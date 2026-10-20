@@ -1,6 +1,7 @@
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Instant;
 
 use gpui::{
     Bounds, Context, IntoElement, MouseButton, Pixels, Window, canvas, div, fill, point,
@@ -139,7 +140,13 @@ impl LiveDashboard {
             .children(self.reading_membership_observer(HOVER_SOURCE.into(), cx))
             .on_mouse_move(
                 cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {
-                    this.cpu_history_hover(&move_history, move_bounds.get(), event.position, cx);
+                    this.cpu_history_hover(
+                        &move_history,
+                        move_bounds.get(),
+                        event.position,
+                        Instant::now(),
+                        cx,
+                    );
                 }),
             )
             .on_hover(cx.listener(move |this, hovered, window, cx| {
@@ -151,6 +158,7 @@ impl LiveDashboard {
                         &hover_history,
                         measured.get(),
                         window.mouse_position(),
+                        Instant::now(),
                         cx,
                     );
                 } else {
@@ -169,6 +177,7 @@ impl LiveDashboard {
                         &click_history,
                         click_bounds.get(),
                         event.position,
+                        Instant::now(),
                         cx,
                     ) {
                         this.cpu_history_select(window, cx);
@@ -304,6 +313,7 @@ impl LiveDashboard {
         history: &Arc<CPUHistory>,
         bounds: Bounds<Pixels>,
         position: gpui::Point<Pixels>,
+        hovered_at: Instant,
         cx: &mut Context<Self>,
     ) -> bool {
         let Some(snapshot) = self.snapshot.as_deref() else {
@@ -353,7 +363,7 @@ impl LiveDashboard {
         };
         let changed = self.cpu_inspection != Some(inspection);
         self.cpu_inspection = Some(inspection);
-        self.set_reading_target(HOVER_SOURCE.into(), target, Origin::Pointer, cx);
+        self.hover_reading_target(HOVER_SOURCE.into(), target, hovered_at, cx);
         if changed {
             cx.notify();
         }

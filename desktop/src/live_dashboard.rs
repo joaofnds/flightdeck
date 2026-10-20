@@ -80,6 +80,7 @@ pub struct LiveDashboard {
     /// shown the source status is judged at this moment instead of now.
     received_at: SystemTime,
     pub(crate) preview_submissions: u64,
+    pub(crate) hover_timings: crate::live_hover::timings::HoverTimings,
     pub(crate) row_heights:
         Rc<std::cell::RefCell<std::collections::BTreeMap<String, gpui::Pixels>>>,
     /// The key and room of each row the page shows as a placeholder while a request replaces its
@@ -215,6 +216,7 @@ impl LiveDashboard {
             preview_ready_at: Instant::now(),
             received_at: SystemTime::now(),
             preview_submissions: 0,
+            hover_timings: crate::live_hover::timings::HoverTimings::new(),
             row_heights: Rc::new(std::cell::RefCell::new(std::collections::BTreeMap::new())),
             placeholders: Vec::new(),
             header_height: Rc::new(std::cell::Cell::new(px(0.0))),
@@ -257,6 +259,7 @@ impl LiveDashboard {
                 if let Some(preview) = &mut self.preview {
                     preview.failure = Some(error);
                     preview.complete = true;
+                    self.hover_timed();
                 } else {
                     self.clear_presentation();
                     self.error = Some(error);
@@ -289,6 +292,7 @@ impl LiveDashboard {
                         .map(|history| serde_json::json!({"rows":history.cpus().len(),
                             "total":history.total(),"observations":history.observation_count()})),
                     "selected":self.snapshot.as_ref().map(|s| &s.selection["selected"]),
+                    "hovers":self.hover_timings.report(),
                     "error":self.error})
                 );
                 crate::live_launch::request_quit(cx);

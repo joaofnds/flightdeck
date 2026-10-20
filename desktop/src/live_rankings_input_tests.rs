@@ -5,6 +5,7 @@ use gpui::{Modifiers, MouseButton, TestAppContext, px};
 use serde_json::json;
 
 use super::{InputDriver, InputHarness, PlotExit, accepted_snapshot};
+use crate::live_hover::timings::tests::TimedHover;
 use crate::live_source::tests::rankings::kept_window_ranks;
 use crate::live_source::{Snapshot, Update};
 
@@ -504,6 +505,29 @@ fn historical_hover_shows_the_kept_ranks_of_its_second_in_the_frame_of_the_move(
 }
 
 #[gpui::test]
+fn a_hover_that_waits_for_the_pages_app_histories_is_timed_once_they_complete_it(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a hover that waits for the page's App histories keeps its timing while it waits,
+    // and ends it once the ranks they bring complete its readings.
+    // Method: hover the earlier second of an Overview whose App histories are pending, then
+    // deliver the page's read with the window's kept ranks.
+    let mut harness = InputHarness::setup_route(cx, "overview");
+    harness.driver.seed_ranked_overview_reading_histories();
+    harness.driver.hover_previous_second_on("live-cpu-plot");
+
+    harness
+        .driver
+        .finish_histories_with_ranks(kept_window_ranks());
+
+    assert_eq!(
+        harness.driver.timed_hovers(),
+        [TimedHover::complete("overview", 999)]
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
 fn historical_hover_on_a_second_whose_ranks_are_kept_reads_nothing(cx: &mut TestAppContext) {
     // Goal: a hover the kept ranks complete leaves the worker to the page's own reads.
     // Method: keep a sealed recording's window ranks beside a committed Overview, hover the
@@ -651,11 +675,21 @@ impl InputDriver {
 
     fn seed_ranked_overview(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
-            let mut snapshot = accepted_snapshot(dashboard.generation);
-            snapshot.selection["trends"][0]["cpu_percent"] = json!(13);
-            snapshot.selection["trends"][1]["cpu_percent"] = json!(87);
-            snapshot.selection["summary"] = snapshot.selection["trends"][1].clone();
-            snapshot.rankings = Some(ranked_payload(&snapshot, "Current", "41", 80));
+            dashboard.accept(ranked_overview(dashboard.generation));
+            assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
+            cx.notify();
+        });
+        self.context
+            .simulate_resize(gpui::size(px(1320.0), px(3500.0)));
+        self.context.run_until_parked();
+    }
+
+    /// Seeds the Overview's first readings, which leave its App histories, and the window's
+    /// ranks with them, to the page's next read.
+    fn seed_ranked_overview_reading_histories(&mut self) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            let mut snapshot = ranked_overview(dashboard.generation);
+            snapshot.histories_pending = true;
             dashboard.accept(snapshot);
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();
@@ -663,6 +697,23 @@ impl InputDriver {
         self.context
             .simulate_resize(gpui::size(px(1320.0), px(3500.0)));
         self.context.run_until_parked();
+    }
+
+    /// Delivers the page's read of its App histories, which brings the window's kept ranks.
+    fn finish_histories_with_ranks(&mut self, ranks: Arc<viewer::WindowRanks>) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            let mut snapshot = ranked_overview(dashboard.generation);
+            snapshot.app_ranks = Some(ranks);
+            assert!(dashboard.preview_receive(Update::Ready(snapshot)));
+            cx.notify();
+        });
+        self.context.run_until_parked();
+    }
+
+    fn timed_hovers(&self) -> Vec<TimedHover> {
+        self.view.read_with(&self.context, |dashboard, _| {
+            TimedHover::latest(&dashboard.hover_timings)
+        })
     }
 
     fn keep_window_ranks(&mut self, ranks: Arc<viewer::WindowRanks>) {
@@ -796,6 +847,17 @@ impl InputDriver {
             assert!(dashboard.preview.is_none());
         });
     }
+}
+
+/// The Overview's readings of its committed second, ranked, at 87% CPU after 13%.
+fn ranked_overview(generation: u64) -> Box<Snapshot> {
+    let mut snapshot = accepted_snapshot(generation);
+    snapshot.selection["trends"][0]["cpu_percent"] = json!(13);
+    snapshot.selection["trends"][1]["cpu_percent"] = json!(87);
+    snapshot.selection["summary"] = snapshot.selection["trends"][1].clone();
+    snapshot.rankings = Some(ranked_payload(&snapshot, "Current", "41", 80));
+
+    snapshot
 }
 
 fn ranked_payload(

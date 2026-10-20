@@ -5,6 +5,7 @@ use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, WindowOptions};
 use serde_json::{Value, json};
 
 use crate::live_dashboard::LiveDashboard;
+use crate::live_hover::timings::tests::TimedHover;
 use crate::live_source::{Snapshot, Update, Worker};
 
 const NS: u64 = 1_000_000_000;
@@ -276,6 +277,131 @@ fn superseded_lookups_wait_for_the_next_quarter_second_before_new_details_can_ap
     harness.teardown();
 }
 
+#[gpui::test]
+fn a_hover_the_page_holds_at_once_is_timed_in_the_frame_of_its_move(cx: &mut TestAppContext) {
+    // Goal: the app times a hover whose readings the page already holds, so the control socket
+    // can report it. Method: hover the committed second, which needs no read, and read the
+    // timings without a tick.
+    let mut harness = HoverHarness::setup(cx, Route::Cpu, Mode::Follow);
+
+    harness.driver.hover(Epoch::Accepted);
+
+    assert_eq!(harness.driver.hovers(), [TimedHover::complete("cpu", 1000)]);
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_hover_waiting_for_its_read_is_not_timed_before_the_read_answers(cx: &mut TestAppContext) {
+    // Goal: a hover counts as complete only once the page holds its readings. Method: hover a
+    // second only a read gives the CPU page and send that read without answering it.
+    let mut harness = HoverHarness::setup(cx, Route::Cpu, Mode::Follow);
+    harness.driver.hover(Epoch::Historical);
+
+    harness.driver.begin_lookup();
+
+    assert_eq!(harness.driver.hovers(), []);
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_hover_waiting_for_its_read_is_timed_when_the_read_answers(cx: &mut TestAppContext) {
+    // Goal: a hover a read completes is timed to the moment the page holds the read's readings.
+    // Method: hover a second only a read gives the CPU page, then answer the read.
+    let mut harness = HoverHarness::setup(cx, Route::Cpu, Mode::Follow);
+    harness.driver.hover(Epoch::Historical);
+    let lookup = harness.driver.begin_lookup();
+
+    harness.driver.deliver(lookup, Epoch::Historical);
+
+    assert_eq!(harness.driver.hovers(), [TimedHover::complete("cpu", 999)]);
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_hover_on_a_second_without_readings_is_timed_when_the_page_shows_the_gap(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a hover over a missed tick completes without a read. Method: hover a second the
+    // window has no observation for, then let the hover's tick find that it has none.
+    let mut harness = HoverHarness::setup(cx, Route::Cpu, Mode::Follow);
+    harness.driver.hover_second(997);
+
+    harness.driver.tick_after(Duration::ZERO);
+
+    assert_eq!(harness.driver.hovers(), [TimedHover::complete("cpu", 997)]);
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_hover_replaced_before_its_readings_is_reported_unfinished(cx: &mut TestAppContext) {
+    // Goal: a hover the next move replaces before the page holds its readings does not drop out
+    // of the report, where it would hide a slow page. Method: hover a second only a read gives,
+    // then hover the committed second before the read answers.
+    let mut harness = HoverHarness::setup(cx, Route::Cpu, Mode::Follow);
+    harness.driver.hover(Epoch::Historical);
+
+    harness.driver.hover(Epoch::Accepted);
+
+    assert_eq!(
+        harness.driver.hovers(),
+        [
+            TimedHover::unfinished("cpu", 999),
+            TimedHover::complete("cpu", 1000)
+        ]
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_hover_the_pointer_leaves_before_its_readings_is_reported_unfinished(cx: &mut TestAppContext) {
+    // Goal: a hover the pointer ends before the page holds its readings is reported as such.
+    // Method: hover a second only a read gives, then move the pointer off the plot.
+    let mut harness = HoverHarness::setup(cx, Route::Cpu, Mode::Follow);
+    harness.driver.hover(Epoch::Historical);
+
+    harness.driver.leave_plot();
+
+    assert_eq!(
+        harness.driver.hovers(),
+        [TimedHover::unfinished("cpu", 999)]
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_hover_whose_read_fails_is_reported_unfinished(cx: &mut TestAppContext) {
+    // Goal: a failed read does not pass for a hover whose readings arrived. Method: hover a
+    // second only a read gives, then fail that read.
+    let mut harness = HoverHarness::setup(cx, Route::Cpu, Mode::Follow);
+    harness.driver.hover(Epoch::Historical);
+    let lookup = harness.driver.begin_lookup();
+
+    harness.driver.fail(lookup, "hover read failed");
+
+    assert_eq!(
+        harness.driver.hovers(),
+        [TimedHover::unfinished("cpu", 999)]
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_hover_whose_read_cannot_be_sent_is_reported_unfinished(cx: &mut TestAppContext) {
+    // Goal: a hover the reader refuses to read for does not pass for a complete one. Method:
+    // hover a second only a read gives, stop the reader, then let the hover's tick ask it.
+    let mut harness = HoverHarness::setup(cx, Route::Cpu, Mode::Follow);
+    harness.driver.hover(Epoch::Historical);
+    harness.driver.stop_reader();
+
+    harness.driver.tick_after(Duration::ZERO);
+
+    assert_eq!(
+        harness.driver.hovers(),
+        [TimedHover::unfinished("cpu", 999)]
+    );
+    harness.teardown();
+}
+
 struct HoverHarness {
     driver: HoverDriver,
 }
@@ -528,6 +654,11 @@ impl HoverDriver {
         Lookup { generation }
     }
 
+    fn stop_reader(&mut self) {
+        self.view
+            .update(&mut self.context, |dashboard, _| dashboard.worker.stop());
+    }
+
     fn tick_after(&mut self, elapsed: Duration) {
         self.now += elapsed;
         self.view.update(&mut self.context, |dashboard, cx| {
@@ -572,6 +703,13 @@ impl HoverDriver {
             }
         });
         self.context.run_until_parked();
+    }
+
+    /// The hovers the control socket reports, oldest first.
+    fn hovers(&self) -> Vec<TimedHover> {
+        self.view.read_with(&self.context, |dashboard, _| {
+            TimedHover::latest(&dashboard.hover_timings)
+        })
     }
 
     fn text_is_visible(&mut self, text: &'static str) -> bool {

@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::rc::Rc;
+use std::time::Instant;
 
 use gpui::{ListOffset, Pixels, SharedString, px};
 
@@ -254,6 +255,7 @@ impl LiveDashboard {
             return;
         }
 
+        let hovered_at = Instant::now();
         let layout = self.reading_layout(source);
         if let Some(preview) = &mut self.preview {
             preview.layout = layout;
@@ -266,7 +268,7 @@ impl LiveDashboard {
                 .as_ref()
                 .and_then(|snapshot| snapshot.cpu_history.clone())
             {
-                self.cpu_history_hover(&history, bounds, window.mouse_position(), cx);
+                self.cpu_history_hover(&history, bounds, window.mouse_position(), hovered_at, cx);
             }
             return;
         }
@@ -283,7 +285,7 @@ impl LiveDashboard {
         };
 
         let target = super::Target::regular(snapshot, second);
-        self.set_reading_target(source.clone(), target, Origin::Pointer, cx);
+        self.hover_reading_target(source.clone(), target, hovered_at, cx);
     }
 
     pub(crate) fn reading_layout_scrolled(&mut self) {
