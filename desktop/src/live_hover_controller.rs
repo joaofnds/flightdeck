@@ -146,6 +146,17 @@ impl LiveDashboard {
         cx.notify();
     }
 
+    /// Whether a hover's read is out and its reply not yet taken.
+    pub(crate) fn preview_awaiting_reply(&self) -> bool {
+        self.preview.as_ref().is_some_and(|preview| {
+            if preview.complete {
+                return false;
+            }
+
+            preview.generation.is_some()
+        })
+    }
+
     pub(crate) fn preview_tick(&mut self, cx: &mut Context<Self>) {
         self.preview_tick_at(std::time::Instant::now(), cx);
     }
@@ -192,6 +203,7 @@ impl LiveDashboard {
                 preview.generation = Some(generation);
                 self.preview_submissions += 1;
                 self.preview_ready_at = now + std::time::Duration::from_millis(250);
+                crate::live_launch::poll_quickly(cx);
             }
             Err(error) => {
                 preview.failure = Some(error);

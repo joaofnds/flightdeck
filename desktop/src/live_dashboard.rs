@@ -434,9 +434,13 @@ impl LiveDashboard {
             && !matches!(self.request.route.as_str(), "self" | "computer")
     }
 
-    /// Whether the worker still owes an answer to the last request.
+    /// Whether the worker still owes an answer to the last request, the page's or a hover's.
     pub(crate) fn awaiting_reply(&self) -> bool {
-        self.reply_pending
+        if self.reply_pending {
+            return true;
+        }
+
+        self.preview_awaiting_reply()
     }
 
     pub(crate) fn context_snapshot(&self) -> Option<&Snapshot> {

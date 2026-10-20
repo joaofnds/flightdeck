@@ -76,6 +76,23 @@ fn a_saved_gap_cannot_retain_the_previous_exact_cpu_details(cx: &mut TestAppCont
     harness.teardown();
 }
 
+#[gpui::test]
+fn a_hover_read_holds_the_page_awaiting_its_reply(cx: &mut TestAppContext) {
+    // Goal: the app polls the worker quickly while a hover's read is out, so the hovered second
+    // shows as soon as it is read rather than at the next tick a quarter second later.
+    // Method: submit a hover's read through the production controller and ask whether the page
+    // awaits a reply while it is out and once it has arrived.
+    let mut harness = ReaderHoverHarness::setup(cx);
+    harness.driver.preview_publication(2);
+
+    harness.driver.submit_preview();
+
+    assert!(harness.driver.awaiting_reply());
+    harness.driver.await_preview();
+    assert!(!harness.driver.awaiting_reply());
+    harness.teardown();
+}
+
 struct ReaderHoverHarness {
     driver: ReaderHoverDriver,
     recording: SealedRecording,
@@ -150,6 +167,30 @@ impl ReaderHoverDriver {
             dashboard.set_reading_target("reader-contract".into(), target, Origin::Keyboard, cx);
         });
         self.context.run_until_parked();
+    }
+
+    /// Ticks until the hover's read is out, which leaves its reply untaken, since a tick takes
+    /// the worker's reply before it submits a hover's read.
+    fn submit_preview(&mut self) {
+        for _attempt in 0..200 {
+            self.poll_once();
+            let submitted = self.view.read_with(&self.context, |dashboard, _| {
+                let preview = dashboard.preview.as_ref().unwrap();
+                assert!(!preview.complete);
+                preview.generation.is_some()
+            });
+            if submitted {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        panic!("The hover's read was never submitted");
+    }
+
+    fn awaiting_reply(&self) -> bool {
+        self.view
+            .read_with(&self.context, |dashboard, _| dashboard.awaiting_reply())
     }
 
     fn await_preview(&mut self) {
