@@ -369,8 +369,8 @@ fn regrouping_a_hovered_first_plot_recomputes_its_reading_at_the_stationary_poin
     assert_eq!(harness.driver.pointer_position(), pointer);
     let fraction = f32::from(pointer.x - plot.left()) / f32::from(plot.size.width);
     let second = 101 + (fraction * 900.0).floor().to_u64().unwrap();
-    assert_eq!(second, 366);
-    harness.driver.assert_cpu_inspection(second, "66%");
+    assert_eq!(second, 364);
+    harness.driver.assert_cpu_inspection(second, "64%");
     assert_eq!(
         harness.driver.accepted_selection().unwrap()["selected"],
         selected

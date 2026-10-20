@@ -247,7 +247,7 @@ impl LiveDashboard {
         cursor: Option<f32>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let axis = labels(self_monitoring::axis(chart), cx.text_system());
+        let axis = labels(self_monitoring::axis(chart));
         let gutter = axis.width;
         let id = chart.panel.id.clone();
         let title = chart.panel.title.clone();

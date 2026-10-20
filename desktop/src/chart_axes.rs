@@ -1,4 +1,4 @@
-use gpui::{App, Hsla, IntoElement, Pixels, TextRun, TextSystem, Window, canvas, div, font, point};
+use gpui::{App, Hsla, IntoElement, Pixels, TextRun, Window, canvas, div, font, point};
 use gpui::{prelude::*, px, rgb};
 
 use crate::charts::{PLOT_INSETS, Scale, TEXT};
@@ -17,6 +17,11 @@ pub struct AxisLabels {
 }
 
 const LABEL_SIZE: f32 = 12.0;
+/// A label character's width as a share of the label size, as the prototype estimates it.
+const GLYPH_WIDTH: f32 = 0.62;
+const GUTTER_PADDING: f32 = 16.0;
+const GUTTER_MIN: f32 = 28.0;
+const GUTTER_MAX: f32 = 128.0;
 /// The gap between a value label and the plot it labels, and the margin beyond the labels.
 const LABEL_GAP: f32 = 7.0;
 /// Where a time label's line starts below the plot, in a row `TIME_ROW_HEIGHT` tall.
@@ -27,41 +32,35 @@ const TIME_LABEL_WIDTH: f32 = 60.0;
 const TIME_INTERVALS: [u64; 8] = [60, 120, 300, 600, 900, 1800, 3600, 7200];
 
 #[must_use]
-pub fn axis_labels(scale: Scale, unit: &str, text: &TextSystem) -> AxisLabels {
+pub fn axis_labels(scale: Scale, unit: &str) -> AxisLabels {
     labels(
         scale
             .ticks()
             .map(|value| (scale.fraction(value), axis_label(value, unit)))
             .collect(),
-        text,
     )
 }
 
 /// Value labels at the given fractions of the plot's height, the lowest first.
 #[must_use]
-pub fn labels(entries: Vec<(f32, String)>, text: &TextSystem) -> AxisLabels {
-    let widest = entries
+pub fn labels(entries: Vec<(f32, String)>) -> AxisLabels {
+    let longest = entries
         .iter()
-        .map(|(_, label)| text_width(text, label))
-        .fold(px(0.0), Pixels::max);
+        .map(|(_, label)| label.chars().count())
+        .max()
+        .unwrap_or(0);
     AxisLabels {
-        width: widest + px(2.0 * LABEL_GAP),
+        width: gutter_width(longest),
         entries,
     }
 }
 
-/// How wide `label` sets at the axis label size, as the sum of its glyph advances.
-fn text_width(text: &TextSystem, label: &str) -> Pixels {
-    let face = text.resolve_font(&font(".SystemUIFont"));
-    let mut width = px(0.0);
-    for character in label.chars() {
-        match text.advance(face, px(LABEL_SIZE), character) {
-            Ok(advance) => width += advance.width,
-            Err(error) => eprintln!("axis label glyph: {error}"),
-        }
-    }
+/// The prototype's gutter for a value axis: its longest label's characters at 0.62 of the label
+/// size, plus 16 pixels, kept between 28 and 128 pixels.
+fn gutter_width(characters: usize) -> Pixels {
+    let characters = u16::try_from(characters).map_or(f32::from(u16::MAX), f32::from);
 
-    width
+    px((characters * LABEL_SIZE * GLYPH_WIDTH + GUTTER_PADDING).clamp(GUTTER_MIN, GUTTER_MAX))
 }
 
 /// The side of the plot an axis column stands on.
@@ -487,5 +486,31 @@ mod tests {
             assert_eq!(second % 60, 0);
         }
         assert_eq!(narrow[1].1 - narrow[0].1, 300);
+    }
+
+    #[test]
+    fn axis_gutters_take_the_prototypes_width_from_the_longest_label() {
+        // Goal: a value axis gutter is as wide as the prototype draws it, so plots and their
+        // time labels line up with it.
+        // Method: build axes from labels of known length and check the width the prototype's
+        // rule gives, which is 7.44 pixels per character plus 16, between 28 and 128.
+        let entries = |texts: &[&str]| -> Vec<(f32, String)> {
+            texts
+                .iter()
+                .map(|text| (0.0, (*text).to_string()))
+                .collect()
+        };
+
+        let files = labels(entries(&["0 files", "20 k files"]));
+        let share = labels(entries(&["0%", "5%"]));
+        let none = labels(Vec::new());
+        let long = labels(entries(&[
+            "a label far longer than any axis would carry, surely",
+        ]));
+
+        assert!((files.width - px(90.4)).abs() < px(0.01));
+        assert!((share.width - px(30.88)).abs() < px(0.01));
+        assert_eq!(none.width, px(28.0));
+        assert_eq!(long.width, px(128.0));
     }
 }

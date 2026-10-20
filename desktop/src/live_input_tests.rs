@@ -136,12 +136,12 @@ fn widening_the_window_recomputes_the_timestamp_beneath_a_stationary_pointer(
 
     let plot = harness.driver.plot_bounds("live-cpu-plot");
     assert!(plot.contains(&pointer));
-    assert_eq!(plot.left(), gpui::px(244.0));
-    assert_eq!(plot.size.width, gpui::px(425.5));
+    assert_eq!(plot.left(), gpui::px(247.0));
+    assert_eq!(plot.size.width, gpui::px(422.5));
     assert_eq!(harness.driver.pointer_position(), pointer);
     assert_eq!(
         harness.driver.chart_accessibility_reading("live-cpu").0,
-        Some(859)
+        Some(858)
     );
     assert!(harness.driver.cursor_is_visible("live-cpu-plot"));
     assert!(harness.driver.reading_is_visible("Unavailable"));

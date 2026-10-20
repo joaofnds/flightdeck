@@ -33,11 +33,7 @@ impl Dashboard {
         let axis = if panel.kind == "timeline" {
             None
         } else {
-            Some(charts::axis_labels(
-                scale,
-                charts::axis_unit(panel, "left"),
-                cx.text_system(),
-            ))
+            Some(charts::axis_labels(scale, charts::axis_unit(panel, "left")))
         };
         let gutter = axis.as_ref().map_or(px(0.0), |labels| labels.width);
         let label = if is_diagnostic {

@@ -28,8 +28,7 @@ impl LiveDashboard {
         let inspection = chart_inspection(panel, index);
         let hidden = self.chart_hidden(panel);
         let scale = charts::axis_scale(panel, inspection, &hidden, "left");
-        let text = cx.text_system().clone();
-        let trailing = trailing_axes(panel, inspection, &hidden, &text);
+        let trailing = trailing_axes(panel, inspection, &hidden);
         let time = self.chart_time_window();
         let measured = Rc::new(Cell::new(Bounds::default()));
         let plot = charts::plot_without_cursor(
@@ -59,7 +58,7 @@ impl LiveDashboard {
             )
             .into_any_element();
         let axes = PlotAxes {
-            leading: charts::axis_labels(scale, charts::axis_unit(panel, "left"), &text),
+            leading: charts::axis_labels(scale, charts::axis_unit(panel, "left")),
             trailing,
             height,
         };
@@ -946,7 +945,6 @@ fn trailing_axes(
     panel: &Panel,
     inspection: charts::Inspection,
     hidden: &[String],
-    text: &gpui::TextSystem,
 ) -> Vec<crate::chart_axes::AxisLabels> {
     let mut axes = Vec::new();
     for axis in ["right1", "right2"] {
@@ -958,11 +956,7 @@ fn trailing_axes(
         });
         if visible {
             let scale = charts::axis_scale(panel, inspection, hidden, axis);
-            axes.push(charts::axis_labels(
-                scale,
-                charts::axis_unit(panel, axis),
-                text,
-            ));
+            axes.push(charts::axis_labels(scale, charts::axis_unit(panel, axis)));
         }
     }
     axes
