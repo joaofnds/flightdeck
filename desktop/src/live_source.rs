@@ -636,14 +636,16 @@ fn reader_payload(
             }
         }
     }
-    // Ranking the window replays its saved minutes too, so it comes with the page's App
-    // histories, which a hover's own read leaves out. A newly opened page brings the ranks its
-    // window already keeps with its first readings, so a hover during its history read shows
-    // the top Apps they hold at once.
+    // Ranking the window replays the saved minutes that keep no ranks, so it comes with the
+    // page's App histories, which a hover's own read leaves out. A newly opened page brings the
+    // ranks its window keeps, in memory or in its sealed minutes, with its first readings, so a
+    // hover during its history read shows the top Apps they hold at once.
     if ranked {
         if request.load_app_attribution_history {
-            if !snapshot.histories_pending {
-                reader_app_ranks(session);
+            if snapshot.histories_pending {
+                reader_app_ranks(session.rank_window_kept());
+            } else {
+                reader_app_ranks(session.rank_window());
             }
             snapshot.app_ranks = Some(session.app_ranks());
         }
@@ -652,11 +654,11 @@ fn reader_payload(
     Ok(())
 }
 
-/// Ranks the selected window's observations, so a hover shows any of their top Apps at once.
+/// Reports a failed ranking of the selected window's observations, which a hover shows at once.
 /// A window ranked in part still serves the observations it holds, and the next read goes on
 /// from them.
-fn reader_app_ranks(session: &mut LiveSession) {
-    match session.rank_window() {
+fn reader_app_ranks(ranking: persistence::Result<()>) {
+    match ranking {
         Ok(()) => {}
         Err(persistence::Error::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted => {}
         Err(error) => eprintln!("App ranks of the selected window unavailable: {error}"),

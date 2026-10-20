@@ -297,6 +297,40 @@ fn a_newly_opened_cpu_page_brings_the_cores_of_its_window() {
     assert!(Preview::resident(&opened, &reader.command.request, target).complete);
 }
 
+#[test]
+fn a_newly_opened_page_brings_the_ranks_its_saved_minutes_keep() {
+    // Goal: a hover on a page still reading its App histories shows another observation's top
+    // Apps at once, from the ranks the window's sealed minutes keep, with no ranking before.
+    // Method: open the Overview at publication three of a recording sealed with its App ranks,
+    // and preview publication two over the page's first readings.
+    let recording = SealedRecording::with_kept_ranks();
+    let mut reader = super::SnapshotReader::new();
+    reader.command.request = ranked_request_at("overview", 3);
+    let target = Target::exact(1001, &ranked_identity(2)).unwrap();
+
+    let opened = reader.read(&recording).unwrap().unwrap();
+
+    assert!(opened.histories_pending);
+    assert!(Preview::resident(&opened, &reader.command.request, target).complete);
+}
+
+#[test]
+fn a_newly_opened_page_leaves_a_window_sealed_without_ranks_to_its_next_read() {
+    // Goal: the first readings of a page never wait on replaying a window whose sealed minutes
+    // keep no ranks, as a recording sealed before they kept them.
+    // Method: open the Overview at publication three of a recording sealed without App ranks,
+    // and preview publication two over the page's first readings.
+    let recording = SealedRecording::with_ranked_apps();
+    let mut reader = super::SnapshotReader::new();
+    reader.command.request = ranked_request_at("overview", 3);
+    let target = Target::exact(1001, &ranked_identity(2)).unwrap();
+
+    let opened = reader.read(&recording).unwrap().unwrap();
+
+    assert!(opened.histories_pending);
+    assert!(!Preview::resident(&opened, &reader.command.request, target).complete);
+}
+
 /// The ranks a page keeps of the window of a sealed recording whose observations share the run
 /// and boot of the input tests' snapshots.
 pub(crate) fn kept_window_ranks() -> std::sync::Arc<viewer::WindowRanks> {
@@ -305,6 +339,20 @@ pub(crate) fn kept_window_ranks() -> std::sync::Arc<viewer::WindowRanks> {
     let snapshot = recording.read(ranked_request_at("overview", 3)).unwrap();
 
     snapshot.app_ranks.unwrap()
+}
+
+/// The ranks the first read of a newly opened Overview brings from a sealed recording whose
+/// minutes keep their App ranks, and whose observations share the run and boot of the input
+/// tests' snapshots.
+pub(crate) fn opened_window_ranks() -> std::sync::Arc<viewer::WindowRanks> {
+    let recording = SealedRecording::with_kept_ranks();
+    let mut reader = super::SnapshotReader::new();
+    reader.command.request = ranked_request_at("overview", 3);
+
+    let opened = reader.read(&recording).unwrap().unwrap();
+
+    assert!(opened.histories_pending);
+    opened.app_ranks.unwrap()
 }
 
 fn exact_ranked_request(route: &str) -> Request {
@@ -345,6 +393,19 @@ impl SealedRecording {
     }
 
     fn with_ranked_apps_after_create(after_create: impl FnOnce(&str)) -> Self {
+        Self::with_ranked_apps_sealed(after_create, &super::Underived)
+    }
+
+    /// The recording of `with_ranked_apps`, sealed as the persister seals a window now, with the
+    /// App ranks of each of its observations.
+    fn with_kept_ranks() -> Self {
+        Self::with_ranked_apps_sealed(|_| {}, &viewer::SealedRanks)
+    }
+
+    fn with_ranked_apps_sealed(
+        after_create: impl FnOnce(&str),
+        derive: &dyn persistence::worker::Derive,
+    ) -> Self {
         let recording = Self::empty();
         let store = persistence::Store::open(&recording.root).unwrap();
         let identity = persistence::WindowIdentity {
@@ -391,7 +452,7 @@ impl SealedRecording {
                 publication,
             );
         }
-        Self::commit(&store, identity, &window);
+        Self::commit_derived(&store, identity, &window, derive);
         drop(reader);
         drop(generation);
         drop(store);

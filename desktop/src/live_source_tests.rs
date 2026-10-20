@@ -367,10 +367,30 @@ impl SealedRecording {
         identity: persistence::WindowIdentity,
         window: &persistence::Window,
     ) {
+        Self::commit_derived(store, identity, window, &Underived);
+    }
+
+    /// Commits the run's first window with the tables `derive` derives from it, as the persister
+    /// seals a window.
+    fn commit_derived(
+        store: &persistence::Store,
+        identity: persistence::WindowIdentity,
+        window: &persistence::Window,
+        derive: &dyn persistence::worker::Derive,
+    ) {
         let persistence::Begin::Pending(pending) = store.begin(&identity).unwrap() else {
             panic!("Fixture window already committed");
         };
-        let tables = persistence::Encoder.encode(window, pending.path()).unwrap();
+        let mut tables = persistence::Encoder.encode(window, pending.path()).unwrap();
+        tables.extend(
+            derive
+                .derive(&persistence::worker::Derivation {
+                    identity,
+                    pending: pending.path(),
+                    predecessor: None,
+                })
+                .unwrap(),
+        );
         let publications = window.publication_range();
         let events = window.event_range();
         store
@@ -433,6 +453,18 @@ impl SealedRecording {
 impl Drop for SealedRecording {
     fn drop(&mut self) {
         std::fs::remove_dir_all(&self.root).unwrap();
+    }
+}
+
+/// Derives no table, as a persister from before windows kept their App ranks sealed them.
+struct Underived;
+
+impl persistence::worker::Derive for Underived {
+    fn derive(
+        &self,
+        _derivation: &persistence::worker::Derivation<'_>,
+    ) -> persistence::Result<Vec<persistence::TableManifest>> {
+        Ok(Vec::new())
     }
 }
 

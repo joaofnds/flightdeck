@@ -6,7 +6,7 @@ use serde_json::json;
 
 use super::{InputDriver, InputHarness, PlotExit, accepted_snapshot};
 use crate::live_hover::timings::tests::TimedHover;
-use crate::live_source::tests::rankings::kept_window_ranks;
+use crate::live_source::tests::rankings::{kept_window_ranks, opened_window_ranks};
 use crate::live_source::{Snapshot, Update};
 
 #[path = "live_overview_app_history_input_tests.rs"]
@@ -540,6 +540,34 @@ fn historical_hover_on_a_second_whose_ranks_are_kept_reads_nothing(cx: &mut Test
     harness.driver.tick_hover();
 
     assert_eq!(harness.driver.hover_reads(), 0);
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_first_hover_on_a_newly_opened_page_shows_the_ranks_its_saved_minutes_keep(
+    cx: &mut TestAppContext,
+) {
+    // Goal: the first hover on a newly opened page shows a saved second's top Apps as the pointer
+    // moves, from the ranks the window's sealed minutes keep, with no loading notice.
+    // Method: open an Overview whose App histories are pending with the ranks the first read of
+    // a recording sealed with its App ranks brings, and hover the earlier second, publication
+    // one of the same run and boot, whose largest App, App00600, held 600 KiB of resident memory.
+    let mut harness = InputHarness::setup_route(cx, "overview");
+    harness.driver.seed_ranked_overview_reading_histories();
+    harness.driver.keep_window_ranks(opened_window_ranks());
+
+    harness.driver.hover_previous_second_on("live-cpu-plot");
+
+    assert!(
+        !harness
+            .driver
+            .reading_is_visible("Loading exact App totals")
+    );
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("ranking:Resident memory:App00600:0.59 MiB")
+    );
     harness.teardown();
 }
 
