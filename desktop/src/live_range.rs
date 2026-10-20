@@ -15,7 +15,19 @@ impl LiveDashboard {
         (bounds, event): (Bounds<Pixels>, &MouseDownEvent),
         cx: &mut Context<Self>,
     ) {
-        let Some(second) = self.second_under(bounds, event.position.x) else {
+        let second = self.second_under(bounds, event.position.x);
+
+        self.drag_begin_at(chart, second, cx);
+    }
+
+    /// Starts selecting a stretch on `chart`, from `second`.
+    pub(crate) fn drag_begin_at(
+        &mut self,
+        chart: &str,
+        second: Option<u64>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(second) = second else {
             return;
         };
         self.drag = Some(Drag {
@@ -34,7 +46,19 @@ impl LiveDashboard {
         x: Pixels,
         cx: &mut Context<Self>,
     ) {
-        let Some(second) = self.second_under(bounds, x) else {
+        let second = self.second_under(bounds, x);
+
+        self.drag_move_at(chart, second, cx);
+    }
+
+    /// Stretches the selection on `chart` to `second`.
+    pub(crate) fn drag_move_at(
+        &mut self,
+        chart: &str,
+        second: Option<u64>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(second) = second else {
             return;
         };
         let Some(drag) = &mut self.drag else {
@@ -54,11 +78,18 @@ impl LiveDashboard {
         (bounds, event): (Bounds<Pixels>, &MouseUpEvent),
         cx: &mut Context<Self>,
     ) {
+        let second = self.second_under(bounds, event.position.x);
+
+        self.drag_end_at(chart, second, cx);
+    }
+
+    /// Ends the selection on `chart` at `second`, and shows the stretch it covers.
+    pub(crate) fn drag_end_at(&mut self, chart: &str, second: Option<u64>, cx: &mut Context<Self>) {
         // Every chart is told of a release outside it, so only the chart being dragged ends it.
         if self.drag.as_ref().is_none_or(|drag| drag.chart != chart) {
             return;
         }
-        self.drag_move(chart, bounds, event.position.x, cx);
+        self.drag_move_at(chart, second, cx);
         let Some(drag) = self.drag.take() else {
             return;
         };
@@ -78,8 +109,12 @@ impl LiveDashboard {
 
     /// The band that marks the stretch being selected on `chart`.
     pub(crate) fn drag_band(&self, chart: &str) -> Option<Div> {
+        self.drag_band_in(chart, self.view_window()?)
+    }
+
+    /// The band that marks the stretch being selected on `chart`, which draws `window`.
+    pub(crate) fn drag_band_in(&self, chart: &str, window: TimeWindow) -> Option<Div> {
         let drag = self.drag.as_ref().filter(|drag| drag.chart == chart)?;
-        let window = self.view_window()?;
         let (left, right) = band_edges(window, drag)?;
 
         Some(

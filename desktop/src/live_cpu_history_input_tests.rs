@@ -61,6 +61,38 @@ fn hovering_a_zoomed_history_inspects_the_interval_under_the_pointer(cx: &mut Te
     harness.teardown();
 }
 
+#[gpui::test]
+fn dragging_across_the_history_selects_that_stretch_of_time(cx: &mut TestAppContext) {
+    // Goal: a drag over the cells selects the stretch of time it covers, like a drag over a
+    // line chart. Method: press a quarter across the cells, release at three quarters of the
+    // 900 seconds the history spans, then read the range.
+    let mut harness = CPUHistoryHarness::setup(cx);
+
+    harness.driver.drag_cells(0.25, 0.75);
+
+    assert_eq!(
+        harness.driver.range(),
+        crate::time_range::Range::Between {
+            first: 327,
+            last: 777
+        }
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn pressing_on_the_cells_leaves_the_plot_unfocused(cx: &mut TestAppContext) {
+    // Goal: a press that starts a drag does not focus the plot, since a focused plot draws
+    // its focus ring as a solid fill over the cells. Method: press on the cells and ask the
+    // plot's focus handle whether the window focuses it.
+    let mut harness = CPUHistoryHarness::setup(cx);
+
+    harness.driver.press_cells(0.5);
+
+    assert!(!harness.driver.plot_is_focused());
+    harness.teardown();
+}
+
 struct CPUHistoryHarness {
     driver: CPUHistoryDriver,
 }
@@ -199,6 +231,47 @@ impl CPUHistoryDriver {
             bounds.center().y,
         );
         self.context.simulate_click(position, Modifiers::none());
+    }
+
+    fn drag_cells(&mut self, from: f32, to: f32) {
+        let bounds = self.context.debug_bounds("cpu-history-cells").unwrap();
+        let at = |fraction: f32| {
+            gpui::point(
+                bounds.origin.x + bounds.size.width * fraction,
+                bounds.center().y,
+            )
+        };
+        self.context
+            .simulate_mouse_down(at(from), MouseButton::Left, Modifiers::none());
+        self.context
+            .simulate_mouse_move(at(to), Some(MouseButton::Left), Modifiers::none());
+        self.context
+            .simulate_mouse_up(at(to), MouseButton::Left, Modifiers::none());
+        self.context.run_until_parked();
+    }
+
+    fn press_cells(&mut self, fraction: f32) {
+        let bounds = self.context.debug_bounds("cpu-history-cells").unwrap();
+        let position = gpui::point(
+            bounds.origin.x + bounds.size.width * fraction,
+            bounds.center().y,
+        );
+        self.context
+            .simulate_mouse_down(position, MouseButton::Left, Modifiers::none());
+        self.context.run_until_parked();
+    }
+
+    fn plot_is_focused(&mut self) -> bool {
+        let focus = self.view.read_with(&self.context, |dashboard, _| {
+            dashboard.cpu_history_focus.clone().unwrap()
+        });
+
+        self.context.update(|window, _| focus.is_focused(window))
+    }
+
+    fn range(&self) -> crate::time_range::Range {
+        self.view
+            .read_with(&self.context, |dashboard, _| dashboard.range)
     }
 
     fn view_only_second(&mut self, second: u64) {

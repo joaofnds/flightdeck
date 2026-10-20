@@ -128,12 +128,13 @@ impl LiveDashboard {
     ) -> impl IntoElement {
         let measured = Rc::new(Cell::new(Bounds::default()));
         let inspection = self.cpu_history_inspection(history);
-        let (_, lens) = self.cpu_history_zoom(history);
+        let (time, lens) = self.cpu_history_zoom(history);
         let plot = cpu_history_cells_plot(history, inspection, lens, Rc::clone(&measured));
         let move_history = Arc::clone(history);
         let move_bounds = Rc::clone(&measured);
         let hover_history = Arc::clone(history);
-        div()
+        let drag_bounds = Rc::clone(&measured);
+        let cells = div()
             .id("cpu-history-cells")
             .debug_selector(|| "cpu-history-cells".into())
             .absolute()
@@ -174,7 +175,55 @@ impl LiveDashboard {
                         this.cpu_history_leave(cx);
                     }
                 }
-            }))
+            }));
+
+        self.cpu_history_cells_drag(cells, (time, drag_bounds), cx)
+    }
+
+    /// Lets a press on the cells start a drag, and its release anywhere end it.
+    fn cpu_history_cells_drag(
+        &self,
+        cells: gpui::Stateful<gpui::Div>,
+        (time, measured): (TimeWindow, Rc<Cell<Bounds<gpui::Pixels>>>),
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let (down_bounds, move_bounds, up_bounds) = (
+            Rc::clone(&measured),
+            Rc::clone(&measured),
+            Rc::clone(&measured),
+        );
+        let band = self.drag_band_in(HOVER_SOURCE, time);
+
+        cells
+            .children(band)
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                    window.prevent_default();
+                    let second = cell_second(time, down_bounds.get(), event.position.x);
+                    this.drag_begin_at(HOVER_SOURCE, second, cx);
+                }),
+            )
+            .on_mouse_move(
+                cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {
+                    let second = cell_second(time, move_bounds.get(), event.position.x);
+                    this.drag_move_at(HOVER_SOURCE, second, cx);
+                }),
+            )
+            .on_mouse_up(
+                gpui::MouseButton::Left,
+                cx.listener(move |this, event: &gpui::MouseUpEvent, _, cx| {
+                    let second = cell_second(time, up_bounds.get(), event.position.x);
+                    this.drag_end_at(HOVER_SOURCE, second, cx);
+                }),
+            )
+            .on_mouse_up_out(
+                gpui::MouseButton::Left,
+                cx.listener(move |this, event: &gpui::MouseUpEvent, _, cx| {
+                    let second = cell_second(time, measured.get(), event.position.x);
+                    this.drag_end_at(HOVER_SOURCE, second, cx);
+                }),
+            )
     }
 
     fn cpu_history_inspection(&self, history: &CPUHistory) -> Option<CPUInspection> {
@@ -480,6 +529,13 @@ impl LiveDashboard {
         window.prevent_default();
         cx.notify();
     }
+}
+
+/// The second drawn under `x` across the cells, held to the cells' edges.
+fn cell_second(time: TimeWindow, bounds: Bounds<gpui::Pixels>, x: gpui::Pixels) -> Option<u64> {
+    let fraction = f32::from(x - bounds.origin.x) / f32::from(bounds.size.width);
+
+    time.second_at(fraction.clamp(0.0, 1.0))
 }
 
 /// The row labels, each as tall as its row of cells.
