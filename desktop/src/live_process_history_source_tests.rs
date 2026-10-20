@@ -118,6 +118,27 @@ fn real_named_process_preview_retains_context_without_reloading_the_group() {
 }
 
 #[test]
+fn an_apps_hover_read_brings_the_apps_detail_without_its_history() {
+    // Goal: a hover on the Apps page reads the hovered second's App detail and leaves the App's
+    // history unread, since the page's charts already hold it.
+    // Method: read the second of three saved observations of a named App as a hover's read
+    // asks for it, through the worker over a real sealed recording.
+    let recording = named_recording();
+    let mut request = named_request();
+    request.load_resident_history = false;
+    request.load_app_attribution_history = false;
+    request.load_process_history = false;
+
+    let snapshot = recording.inspect(request).unwrap();
+
+    assert_eq!(snapshot.selection["selected"]["publication"], 2);
+    let detail = snapshot.detail.as_ref().unwrap();
+    assert_eq!(detail["processes"].as_array().unwrap().len(), 2);
+    assert!(snapshot.history.is_none());
+    assert!(snapshot.process_history.is_none());
+}
+
+#[test]
 fn real_named_process_history_includes_members_outside_the_loaded_page() {
     // Read page two containing only b, while a's captured history comes from page one.
     let recording = named_recording_with_members(513);
