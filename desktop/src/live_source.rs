@@ -463,6 +463,11 @@ fn reader_published(reader: &Reader, generation: u64) -> bool {
     reader.pending_generation != Some(generation)
 }
 
+/// Whether the route's pages show the selected second's top Apps.
+pub(crate) fn route_ranks_apps(route: &str) -> bool {
+    matches!(route, "overview" | "storage" | "cpu" | "memory" | "energy")
+}
+
 /// Whether the route's payload replays App histories from saved minutes.
 fn reader_route_has_histories(route: &str) -> bool {
     matches!(
@@ -607,10 +612,7 @@ fn reader_payload(
     if request.route == "apps" {
         reader_apps(session, request, snapshot)?;
     }
-    let ranked = matches!(
-        request.route.as_str(),
-        "overview" | "storage" | "cpu" | "memory" | "energy"
-    );
+    let ranked = route_ranks_apps(&request.route);
     if ranked {
         snapshot.rankings = Some(Arc::new(crate::live_rankings::from_selected(
             session.selected_ranks().map_err(|error| error.to_string()),
@@ -624,8 +626,8 @@ fn reader_payload(
         )?);
         reader_cpu_history(session, request, snapshot)?;
     }
-    // Ranking and keeping App parts replay the window's saved minutes, so they follow the
-    // histories the page shows, and a hover's own read does neither.
+    // Keeping App parts replays the window's saved minutes, so it follows the histories the
+    // page shows, and a hover's own read keeps none.
     if !snapshot.histories_pending {
         reader_payload_histories(session, request, snapshot);
         if request.route == "apps" {
@@ -634,8 +636,10 @@ fn reader_payload(
             }
         }
     }
-    // A newly opened page brings the ranks its window already keeps with its first readings,
-    // so a hover during its history read shows the top Apps they hold at once.
+    // Ranking the window replays its saved minutes too, so it comes with the page's App
+    // histories, which a hover's own read leaves out. A newly opened page brings the ranks its
+    // window already keeps with its first readings, so a hover during its history read shows
+    // the top Apps they hold at once.
     if ranked {
         if request.load_app_attribution_history {
             if !snapshot.histories_pending {

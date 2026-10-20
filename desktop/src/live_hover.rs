@@ -242,15 +242,13 @@ fn resident_complete(route: &str, matched: bool, reading: &Snapshot) -> bool {
         return true;
     }
 
-    match route {
-        "overview" | "storage" | "memory" | "energy" => reading.rankings.is_some(),
-        "cpu" => {
-            if reading.rankings.is_none() {
-                return false;
-            }
-
-            reading.cpu_detail.is_some()
+    if crate::live_source::route_ranks_apps(route) {
+        if reading.rankings.is_none() {
+            return false;
         }
+    }
+    match route {
+        "cpu" => reading.cpu_detail.is_some(),
         "apps" => reading.detail.is_some(),
         _ => true,
     }
