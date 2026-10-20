@@ -23,7 +23,9 @@ use persistence::{Error, Result, TableManifest};
 pub(super) const VERSION: u8 = 1;
 /// The rows a window keeps. About 1,100 processes in a few hundred Apps a second make some
 /// 85,000 rows a window, a sixth of this.
-const ROWS_MAX: usize = 1 << 19;
+const ROWS_MAX: u32 = 1 << 19;
+/// The rows the read takes of a window, one past what it keeps so a longer table is refused.
+const ROWS_TAKEN: u32 = ROWS_MAX + 1;
 /// What the engine may decode of a window's table, below what it admits of a file. A row
 /// decodes to at most 8 bytes a column, 16 more for each of its two columns of bytes and what
 /// parquet adds to each, and the bytes of its App's key and its executable's name, so long
@@ -260,7 +262,7 @@ fn sealed_parts_rows(samples: &[Box<Sample>]) -> Result<Vec<PartRow<'_>>> {
     for sample in samples {
         count += 1 + sample.apps().len() + sample.processes().len();
     }
-    if count > ROWS_MAX {
+    if count > collector::usize_from_u32(ROWS_MAX) {
         return Err(Error::Bound("sealed parts rows"));
     }
 
@@ -582,7 +584,7 @@ impl Session {
         if rows == 0 {
             return Err(Error::Bound("sealed parts rows"));
         }
-        if rows > collector::u64_from_usize(ROWS_MAX) {
+        if rows > u64::from(ROWS_MAX) {
             return Err(Error::Bound("sealed parts rows"));
         }
         let version: u8 = summary.get(0)?;
@@ -599,8 +601,8 @@ impl Session {
                 column_names().join(", ")
             ))?,
             key,
-        )?)?;
-        if frame.height() > ROWS_MAX {
+        ))?;
+        if frame.height() > collector::usize_from_u32(ROWS_MAX) {
             return Err(Error::Bound("sealed parts rows"));
         }
         let mut decoder = Decoder {
@@ -628,14 +630,12 @@ struct PartKey<'key> {
 /// The rows of every observation's facts and of the App of this key, in the order the decoder
 /// takes them: by publication, then the facts, the App and its processes in their sample's
 /// order.
-fn sealed_parts_plan(plan: LazyFrame, key: &PartKey<'_>) -> Result<LazyFrame> {
+fn sealed_parts_plan(plan: LazyFrame, key: &PartKey<'_>) -> LazyFrame {
     let app = col("app_kind")
         .eq(lit(kind_code(key.kind)))
         .and(col("app_key").eq(lit(key.bytes)));
-    let limit = u32::try_from(ROWS_MAX + 1).map_err(|_| Error::Bound("sealed parts rows"))?;
 
-    Ok(plan
-        .filter(col("row_kind").eq(lit(ROW_HEADER)).or(app))
+    plan.filter(col("row_kind").eq(lit(ROW_HEADER)).or(app))
         .sort(
             ["publication", "row_kind", "process_index"],
             SortMultipleOptions {
@@ -646,7 +646,7 @@ fn sealed_parts_plan(plan: LazyFrame, key: &PartKey<'_>) -> Result<LazyFrame> {
                 limit: None,
             },
         )
-        .limit(limit))
+        .limit(ROWS_TAKEN)
 }
 
 /// Rebuilds one App's parts of a window's observations from the rows `sealed_parts_plan` gives.
