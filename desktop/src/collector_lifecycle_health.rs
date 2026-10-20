@@ -1,10 +1,10 @@
 use std::io;
 use std::path::Path;
 
-use collector::recording::{Registry, identity_text, read_identity};
+use collector::recording::{BUILD, Holder, Registry, holder, identity_text, read_identity};
 use collector::ring::{RingReader, RunIdentity};
 
-use super::policy::{Observation, RecordingStatus, Source};
+use super::policy::{Build, Observation, RecordingStatus, Source};
 
 pub(super) struct Health(Box<Storage>);
 
@@ -45,6 +45,7 @@ impl Health {
             .try_into()
             .map_err(io::Error::other)?;
         let registry = Registry::read_into(&root.join("runs"), buffer)?;
+        let holder = holder(root)?;
         let mut previous = std::mem::take(&mut self.0.readers);
         let mut source = Source {
             recording: RecordingStatus::Ready,
@@ -58,8 +59,19 @@ impl Health {
                 ));
             }
 
-            let alive =
-                super::producer_alive(registered.collector_pid).map_err(io::Error::other)?;
+            let owned = owned_pid.is_none_or(|pid| pid == registered.collector_pid);
+            let alive = match holder {
+                Holder::Announced { run, build } if run == registered.identity.run => {
+                    if build != BUILD {
+                        if owned {
+                            source.build = Build::Other(build);
+                        }
+                        continue;
+                    }
+                    true
+                }
+                _ => false,
+            };
             let reader = read_reader(&mut previous, &registered.identity, registered.ring_name)?;
             let Some(reader) = reader else {
                 if alive {
@@ -71,7 +83,7 @@ impl Health {
             if alive {
                 if !reader.ring.completed() {
                     source.producer_alive = true;
-                    if owned_pid.is_none_or(|pid| pid == registered.collector_pid) {
+                    if owned {
                         source.observation = read_observation(&reader, registered.collector_pid)?;
                     }
                 }
@@ -79,6 +91,10 @@ impl Health {
             self.0.readers[index] = Some(reader);
         }
 
+        if holder == Holder::Unannounced {
+            source.recording = RecordingStatus::Pending;
+            source.build = Build::Unannounced;
+        }
         Ok(source)
     }
 

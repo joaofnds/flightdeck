@@ -5,6 +5,7 @@ fn existing(publication: u64) -> Source {
         recording_route: true,
         recording: RecordingStatus::Ready,
         producer_alive: true,
+        build: Build::Expected,
         observation: Some(Observation {
             pid: 42,
             run: "00000000000000000000000000000001".into(),
@@ -321,4 +322,61 @@ fn discovery_deadline_survives_computer_navigation() {
     assert_eq!(action, Action::None);
     assert_eq!(policy.state, State::Failed);
     assert_eq!(policy.owned_pid, None);
+}
+
+#[test]
+fn a_collector_built_from_other_code_fails_discovery_without_spawning() {
+    // Goal: the app never reads a ring its own code may misread, nor competes with its writer.
+    // Method: report a holder announcing another build on the first discovery step.
+    let mut policy = Policy::new(Mode::Auto);
+    let source = Source {
+        recording_route: true,
+        recording: RecordingStatus::Ready,
+        build: Build::Other(7),
+        ..Source::default()
+    };
+
+    let action = policy.step(Duration::ZERO, &source);
+
+    assert_eq!(action, Action::None);
+    assert_eq!(policy.state, State::Failed);
+    assert_eq!(policy.failure, Some(other_build_failure(7)));
+    assert!(policy.can_retry());
+}
+
+#[test]
+fn an_unannounced_holder_names_an_older_build_at_the_discovery_deadline() {
+    // Goal: a collector that never announces itself is reported as one from an older build.
+    // Method: hold the recording without an announcement through the discovery deadline.
+    let mut policy = Policy::new(Mode::Auto);
+    let source = Source {
+        recording_route: true,
+        build: Build::Unannounced,
+        ..Source::default()
+    };
+    policy.step(Duration::ZERO, &source);
+
+    let action = policy.step(DISCOVERY_LIMIT, &source);
+
+    assert_eq!(action, Action::None);
+    assert_eq!(policy.state, State::Failed);
+    assert_eq!(policy.failure.as_deref(), Some(UNANNOUNCED_FAILURE));
+}
+
+#[test]
+fn an_owned_collector_built_from_other_code_is_stopped() {
+    // Goal: a stale collector executable beside this app fails at once, not at the deadline.
+    // Method: report the owned child announcing another build on its first startup step.
+    let mut policy = Policy::new(Mode::Explicit);
+    policy.launched(42, Duration::ZERO);
+    let source = Source {
+        build: Build::Other(7),
+        ..Source::default()
+    };
+
+    let action = policy.step(Duration::from_secs(1), &source);
+
+    assert_eq!(action, Action::Terminate);
+    assert_eq!(policy.state, State::Stopping);
+    assert_eq!(policy.failure, Some(other_build_failure(7)));
 }

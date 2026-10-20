@@ -171,6 +171,60 @@ fn a_stalled_shared_collector_offers_recovery_even_while_on_computer() {
     assert_eq!(session.owned_pid(), None);
 }
 
+#[test]
+fn a_registered_pid_is_not_alive_once_its_collector_lets_go_of_the_recording() {
+    // Goal: a pid macOS gave another process cannot pass for the collector it registered.
+    // Method: drop the writer unfinished, so the registered pid, this test's own, stays alive.
+    let mut fixture = Recording::new();
+    fixture.publish();
+    drop(fixture.writer.take());
+
+    let source = health::Health::new().read(&fixture.root, None).unwrap();
+
+    assert!(!source.producer_alive);
+    assert!(source.recording == RecordingStatus::Ready);
+}
+
+#[test]
+fn a_collector_announcing_another_build_is_reported_and_not_read() {
+    // Goal: the app learns that the running collector's code differs before reading its ring.
+    // Method: replace the fixture's announcement with one naming its run and another build.
+    let fixture = Recording::new();
+    fixture.announce(7);
+
+    let source = health::Health::new().read(&fixture.root, None).unwrap();
+
+    assert_eq!(policy::Build::Other(7), source.build);
+    assert!(!source.producer_alive);
+}
+
+#[test]
+fn another_builds_announcement_is_ignored_while_this_app_starts_its_own_collector() {
+    // Goal: an announcement left by an earlier holder cannot fail this app's own startup.
+    // Method: read another build's announcement while owning a child of another pid.
+    let fixture = Recording::new();
+    fixture.announce(7);
+
+    let source = health::Health::new()
+        .read(&fixture.root, Some(std::process::id() + 1))
+        .unwrap();
+
+    assert_eq!(policy::Build::Expected, source.build);
+}
+
+#[test]
+fn a_held_recording_without_an_announcement_waits_without_spawning() {
+    // Goal: a starting or older collector holding the recording never meets a competing spawn.
+    // Method: remove the fixture's announcement while its writer holds the recording.
+    let fixture = Recording::new();
+    std::fs::remove_file(fixture.root.join("collector.announcement")).unwrap();
+
+    let source = health::Health::new().read(&fixture.root, None).unwrap();
+
+    assert_eq!(policy::Build::Unannounced, source.build);
+    assert!(source.recording == RecordingStatus::Pending);
+}
+
 struct Recording {
     root: PathBuf,
     lock_paths: Vec<PathBuf>,
@@ -267,6 +321,20 @@ impl Recording {
         })
     }
 
+    fn announce(&self, build: u64) {
+        let run = self.writer.as_ref().unwrap().identity().unwrap().run;
+        let text = format!(
+            "flightdeck-collector-1\n{}\n{build:016x}\n",
+            identity_text(run)
+        );
+        collector::recording::private::atomic_write(
+            &self.root,
+            "collector.announcement",
+            text.as_bytes(),
+        )
+        .unwrap();
+    }
+
     fn rollover(&mut self) {
         let mut previous = self.writer.take().unwrap();
         previous.finish();
@@ -285,7 +353,9 @@ impl Recording {
 
 impl Drop for Recording {
     fn drop(&mut self) {
-        self.writer.as_mut().unwrap().finish();
+        if let Some(writer) = self.writer.as_mut() {
+            writer.finish();
+        }
         let registry = collector::recording::Registry::read(&self.root).unwrap();
         for registered in registry.runs.iter().take(2) {
             match collector::ring::unlink_generation(&registered.ring_name) {

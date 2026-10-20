@@ -353,24 +353,6 @@ impl Drop for CollectorSession {
     }
 }
 
-fn producer_alive(pid: u32) -> Result<bool, String> {
-    let pid = i32::try_from(pid).map_err(|error| error.to_string())?;
-    if pid <= 0 {
-        return Err("Collector identity contains an invalid PID".into());
-    }
-
-    if unsafe { libc::kill(pid, 0) } == 0 {
-        return Ok(true);
-    }
-
-    let error = io::Error::last_os_error();
-    match error.raw_os_error() {
-        Some(libc::ESRCH) => Ok(false),
-        Some(libc::EPERM) => Ok(true),
-        _ => Err(error.to_string()),
-    }
-}
-
 pub(super) fn binary(executable: &Path) -> io::Result<PathBuf> {
     let directory = executable.parent().ok_or(io::ErrorKind::InvalidInput)?;
     if directory.file_name() == Some(std::ffi::OsStr::new("MacOS")) {

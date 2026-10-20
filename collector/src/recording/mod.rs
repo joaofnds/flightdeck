@@ -2,10 +2,15 @@
 
 pub mod child;
 pub mod discovery;
+mod holder;
 pub mod private;
 mod registry;
 
+pub use holder::{Holder, holder};
 pub use registry::{RegisteredRun, Registry};
+
+/// The fingerprint of the code this collector is built from.
+pub const BUILD: u64 = include!(concat!(env!("OUT_DIR"), "/build"));
 
 use std::ffi::{c_char, c_int, c_void};
 use std::fs::File;
@@ -221,6 +226,7 @@ impl Registration {
     fn start_ownership(root: &Path) -> io::Result<File> {
         create_private_dir(root)?;
         let ownership = FileLock::try_lock(&root.join("collector.lock"))?;
+        holder::withdraw(root)?;
         ownership.file().try_clone()
     }
 
@@ -279,7 +285,7 @@ impl Registration {
         )?;
         registry.write(&self.root)?;
         drop(lock);
-        Ok(())
+        holder::announce(&self.root, self.identity.run)
     }
 }
 

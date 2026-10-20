@@ -4,6 +4,8 @@ pub(super) const DISCOVERY_LIMIT: Duration = Duration::from_secs(20);
 pub(super) const STARTUP_LIMIT: Duration = Duration::from_secs(20);
 pub(super) const SHUTDOWN_LIMIT: Duration = Duration::from_secs(125);
 pub(super) const KILL_LIMIT: Duration = Duration::from_secs(2);
+pub(super) const UNANNOUNCED_FAILURE: &str = "A collector holds this recording without naming \
+     its build, so it predates this Flightdeck. Quit the Flightdeck that started it, then retry.";
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Mode {
@@ -49,7 +51,26 @@ pub(super) struct Source {
     pub recording_route: bool,
     pub recording: RecordingStatus,
     pub producer_alive: bool,
+    pub build: Build,
     pub observation: Option<Observation>,
+}
+
+/// What the collector holding the recording says built it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(super) enum Build {
+    /// No collector is announced, or the announced one is built from this app's code.
+    #[default]
+    Expected,
+    Unannounced,
+    Other(u64),
+}
+
+pub(super) fn other_build_failure(build: u64) -> String {
+    format!(
+        "The running collector is built from other code than this Flightdeck (build {build:016x}, \
+         expected {:016x}). Quit the Flightdeck that started it, then retry.",
+        collector::recording::BUILD
+    )
 }
 
 #[derive(Clone, Copy, Default, PartialEq)]
@@ -128,15 +149,24 @@ impl Policy {
         if self.since.is_none() {
             self.since = Some(now);
         }
+        if let Build::Other(build) = source.build {
+            self.fail(&other_build_failure(build));
+            return Action::None;
+        }
         if self.expired(now, DISCOVERY_LIMIT) {
-            if source.producer_alive {
-                self.fail(
-                    "Existing collector is alive but readings did not advance within 20 seconds",
-                );
+            if source.build == Build::Unannounced {
+                self.fail(UNANNOUNCED_FAILURE);
             } else {
-                self.fail(
-                    "Recording discovery did not finish within 20 seconds; retry to reconnect",
-                );
+                if source.producer_alive {
+                    self.fail(
+                        "Existing collector is alive but readings did not advance within \
+                         20 seconds",
+                    );
+                } else {
+                    self.fail(
+                        "Recording discovery did not finish within 20 seconds; retry to reconnect",
+                    );
+                }
             }
             return Action::None;
         }
@@ -189,6 +219,10 @@ impl Policy {
 
     fn starting(&mut self, now: Duration, source: &Source) -> Action {
         assert!(self.since.is_some());
+        if let Build::Other(build) = source.build {
+            self.failure = Some(other_build_failure(build));
+            return self.stop(now);
+        }
         if self.expired(now, STARTUP_LIMIT) {
             self.failure =
                 Some("Owned collector readings did not advance within 20 seconds".into());

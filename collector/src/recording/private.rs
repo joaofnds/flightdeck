@@ -146,11 +146,51 @@ impl FileLock {
         Ok(Self { file })
     }
 
+    /// Asks whether another open of `path` holds its lock, without taking the lock, so the
+    /// question never keeps a starting collector from taking it.
+    pub fn held(path: &Path) -> io::Result<bool> {
+        let file = match open_private_file(path, false) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let mut lock = Flock {
+            start: 0,
+            len: 0,
+            pid: 0,
+            r#type: F_WRLCK,
+            whence: SEEK_SET,
+        };
+
+        if unsafe { fcntl(file.as_raw_fd(), F_GETLK, &raw mut lock) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        Ok(lock.r#type != F_UNLCK)
+    }
+
     #[must_use]
     pub fn file(&self) -> &File {
         &self.file
     }
 }
+
+/// `struct flock` of `<sys/fcntl.h>`, its `l_` prefix dropped. macOS reports a `flock`
+/// lock through it too.
+#[repr(C)]
+struct Flock {
+    start: i64,
+    len: i64,
+    pid: i32,
+    r#type: i16,
+    whence: i16,
+}
+
+const _: () = assert!(size_of::<Flock>() == 24);
+const F_GETLK: c_int = 7;
+const F_UNLCK: i16 = 2;
+const F_WRLCK: i16 = 3;
+const SEEK_SET: i16 = 0;
 
 pub fn create_private_dir(path: &Path) -> io::Result<()> {
     match create_directory(path) {

@@ -16,7 +16,11 @@ packaging. It can be moved outside the checkout.
 
 Default launch uses `~/Library/Application Support/Flightdeck/flightdeck.recording`.
 It attaches to an advancing existing collector or starts its own when collection
-is absent. Initial Computer-only entry defers automatic collection until a
+is absent. It attaches only to a collector built from the same collector code, and
+otherwise fails with both builds named, so an app never reads a ring another build
+wrote. A collector counts as running only while it holds the recording's lifetime
+lock, which macOS releases when it exits, so a pid given to another process never
+passes for it. Initial Computer-only entry defers automatic collection until a
 recording route is opened. A recording supplied with `--recording PATH` opens as
 Recorded and reads on navigation or Refresh, without idle polling. Add
 `--start-collector` to collect into that root and follow Live readings. The

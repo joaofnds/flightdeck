@@ -709,7 +709,11 @@ can stall it. The ring's event log overwrites its oldest records, and a reader l
 what it missed from the gap. The writer holds a startup exclusion lock file, and a
 process of the same user that takes that lock keeps a new collector from starting.
 The recording also has a lifetime `collector.lock`; another process of the same user
-holding it prevents persistence for a new collector, which continues collection.
+holding it prevents persistence for a new collector, which continues collection. The
+collector that takes it removes the last holder's `collector.announcement`, and once its
+run is registered writes a new one naming that run and a fingerprint of the collector's
+source, so a reader asks the kernel whether the lock is held, without taking it, and
+reads which run and which build hold it.
 
 Every user shares the names of shared-memory objects, so each ring's name carries 60
 random bits that the collector writes nowhere but its lock file. The lock file is
