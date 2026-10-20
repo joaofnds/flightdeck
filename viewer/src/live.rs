@@ -69,6 +69,9 @@ pub struct LiveSession {
     app_ranks: Arc<app_ranks::WindowRanks>,
     parts_app: Option<app_parts::PartsApp>,
     app_parts: Arc<app_parts::WindowParts>,
+    /// Whether the selection follows the latest live second, so a poll ranks it and keeps its
+    /// part. A selected earlier second keeps its window's, which a poll would drop.
+    follows_live: bool,
     #[cfg(test)]
     before_projection: Option<Box<dyn FnOnce()>>,
     #[cfg(test)]
@@ -173,6 +176,7 @@ impl LiveSession {
             app_ranks: Arc::default(),
             parts_app: None,
             app_parts: Arc::default(),
+            follows_live: true,
             #[cfg(test)]
             before_projection: None,
             #[cfg(test)]
@@ -292,6 +296,7 @@ impl LiveSession {
 
     pub fn select(&mut self, second: u64, alternative: usize) -> Result<Value> {
         self.selected = None;
+        self.follows_live = false;
         if let Some(inspected) = self.inspected.take() {
             self.cache_bytes -= inspected.bytes;
         }
@@ -414,6 +419,7 @@ impl LiveSession {
             "context_seconds": 900, "context_error": self.history_error});
         self.selected = Some(selected);
         self.selected_context = context;
+        self.follows_live = true;
 
         Ok(response)
     }
@@ -1151,8 +1157,10 @@ impl LiveSession {
         self.observations.push_back(current);
         self.poll_evict(first)?;
         self.poll_cpu_history()?;
-        self.poll_ranks(first)?;
-        self.poll_parts(first)?;
+        if self.follows_live {
+            self.poll_ranks(first)?;
+            self.poll_parts(first)?;
+        }
         self.app_history
             .push(app_point.unwrap_or_else(|| unreachable!()), first);
 

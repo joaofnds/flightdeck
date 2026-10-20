@@ -140,6 +140,32 @@ fn poll_ranks_drops_observations_older_than_the_window() {
     assert!(session.app_ranks().get(&observation_key(&first)).is_none());
 }
 
+#[test]
+fn poll_keeps_the_ranks_of_a_selected_earlier_window() {
+    // Goal: a page that polls live while an earlier second is selected, such as
+    // Self-monitoring, leaves that window's ranks, so returning to it replays nothing.
+    // Method: rank a saved window, publish a live second over fifteen minutes past it, poll,
+    // and look the selected second up.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(1000);
+    fixture.publish_with_system_rows(1001);
+    fixture.seal();
+    fixture.publish_with_system_rows(3000);
+    let mut session = LiveSession::open(&fixture.root).unwrap();
+    let selected = session.select(1001, 0).unwrap()["selected"].clone();
+    session.rank_window().unwrap();
+    fixture.publish_with_system_rows(3001);
+
+    session.poll().unwrap();
+
+    assert!(
+        session
+            .app_ranks()
+            .get(&observation_key(&selected))
+            .is_some()
+    );
+}
+
 fn selected_ranks(session: &LiveSession) -> Value {
     let ranks = summary(&session.selected_ranks().unwrap());
     assert!(

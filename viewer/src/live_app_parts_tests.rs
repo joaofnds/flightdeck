@@ -99,6 +99,33 @@ fn poll_parts_keeps_nothing_until_an_app_is_kept() {
     assert!(session.app_parts().get(&observation_key(&latest)).is_none());
 }
 
+#[test]
+fn poll_keeps_the_parts_of_a_selected_earlier_window() {
+    // Goal: a page that polls live while an earlier second is selected leaves the kept App's
+    // parts of that window, so returning to it replays nothing.
+    // Method: keep an App's parts of a saved window, publish a live second over fifteen
+    // minutes past it, poll, and look the selected second up.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(1000);
+    fixture.publish_with_system_rows(1001);
+    fixture.seal();
+    fixture.publish_with_system_rows(3000);
+    let mut session = LiveSession::open(&fixture.root).unwrap();
+    let selected = session.select(1001, 0).unwrap()["selected"].clone();
+    let app = selected_app(&session);
+    session.part_window(app.kind, &app.bytes).unwrap();
+    fixture.publish_with_system_rows(3001);
+
+    session.poll().unwrap();
+
+    assert!(
+        session
+            .app_parts()
+            .get(&observation_key(&selected))
+            .is_some()
+    );
+}
+
 /// Keeps the selected App's parts of a saved window, then those of the App `other` names, and
 /// asserts the selected second holds only the other App's part, which has no detail there.
 fn assert_part_window_drops_the_parts_kept_before(other: impl FnOnce(&Key) -> (KeyKind, Vec<u8>)) {
