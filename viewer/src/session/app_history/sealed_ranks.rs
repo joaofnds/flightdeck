@@ -6,9 +6,10 @@ use std::sync::Arc;
 
 use polars::prelude::{Column, DataFrame};
 
+use super::sealed::{Kept, kind_code, kind_of, observed_in};
 use super::{ContextRange, Session, TICKS_PER_WINDOW_MAX};
 use crate::live_app_response::{
-    KeyKind, METRICS, Metric, Observation, RANKS_MAX, Rank, RankedApp, Ranking, Ranks,
+    METRICS, Metric, Observation, RANKS_MAX, Rank, RankedApp, Ranking, Ranks,
 };
 use collector::ring::RunIdentity;
 use persistence::engine::Row;
@@ -135,48 +136,21 @@ impl Session {
         range: ContextRange,
         mut consume: impl FnMut(Ranks) -> Result<()>,
     ) -> Result<()> {
-        self.operation.attach(&self.connection)?;
-        assert!(self.windows.len() <= super::super::WINDOWS_MAX);
-        for (window, manifest) in self.windows.iter().enumerate() {
-            self.operation.check()?;
-            if let Some(bounds) = manifest.wall_ns {
-                if bounds.max < range.first_ns {
-                    continue;
-                }
-                if bounds.min >= range.end_ns {
-                    continue;
-                }
-            }
-            let Some(table) = manifest.tables.iter().find(|table| table.name == APP_RANKS) else {
-                continue;
-            };
-
-            self.validate_commitment(window)?;
-            let mut ranks = Vec::with_capacity(TICKS_PER_WINDOW_MAX);
-            let kept = Kept {
-                path: &self
-                    .root
-                    .join(&manifest.data_directory)
-                    .join(format!("{APP_RANKS}.parquet")),
-                run: &manifest.identity.run,
-                publications: manifest.publication_first..manifest.publication_end,
-                rows: table.rows,
-            };
-            self.visit_sealed_ranks_read(&kept, &mut ranks)?;
-            self.validate_commitment(window)?;
-
-            for observation in ranks {
-                let inside = observation
-                    .selected
-                    .wall_ns
-                    .is_some_and(|wall| (range.first_ns..range.end_ns).contains(&wall));
-                if inside {
+        self.visit_derived(
+            range,
+            APP_RANKS,
+            |kept| {
+                let mut ranks = Vec::with_capacity(TICKS_PER_WINDOW_MAX);
+                self.visit_sealed_ranks_read(kept, &mut ranks)?;
+                Ok(ranks)
+            },
+            |observation| {
+                if observed_in(range, &observation.selected) {
                     consume(observation)?;
                 }
-            }
-        }
-
-        self.operation.check()
+                Ok(())
+            },
+        )
     }
 
     fn visit_sealed_ranks_read(&self, kept: &Kept<'_>, output: &mut Vec<Ranks>) -> Result<()> {
@@ -213,14 +187,6 @@ impl Session {
 
         decoder.close()
     }
-}
-
-/// A sealed window's table of ranks, and what its seal recorded of it.
-struct Kept<'manifest> {
-    path: &'manifest Path,
-    run: &'manifest RunIdentity,
-    publications: Range<u64>,
-    rows: u64,
 }
 
 /// One row of the table as read.
@@ -411,21 +377,6 @@ const fn metric_code(metric: Metric) -> u8 {
         Metric::Resident => 1,
         Metric::Power => 2,
         Metric::Disk => 3,
-    }
-}
-
-fn kind_code(kind: KeyKind) -> u8 {
-    match kind {
-        KeyKind::Bundle => 0,
-        KeyKind::Executable => 1,
-    }
-}
-
-fn kind_of(code: u8) -> Result<KeyKind> {
-    match code {
-        0 => Ok(KeyKind::Bundle),
-        1 => Ok(KeyKind::Executable),
-        _ => Err(Error::Bound("sealed ranks App kind")),
     }
 }
 
