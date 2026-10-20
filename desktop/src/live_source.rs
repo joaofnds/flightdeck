@@ -475,13 +475,7 @@ fn reader_snapshot(
         snapshot.histories_pending = reader_route_has_histories(&command.request.route);
     }
     reader_payload(session, &mut command.request, &mut snapshot)?;
-    if command.request.route == "apps" {
-        if let Some(app) = &command.request.app {
-            if let Some(history) = &mut snapshot.history {
-                reader.system.annotate_app(history, app);
-            }
-        }
-    }
+    reader_snapshot_annotate_app(&reader.system, &command.request, &mut snapshot);
     snapshot.read_ms = started.elapsed().as_secs_f64() * 1000.0;
     reader.last_catalog = Some(snapshot.catalog.clone());
     reader.last_generation = command.generation;
@@ -489,6 +483,22 @@ fn reader_snapshot(
     reader.pending_generation = snapshot.histories_pending.then_some(command.generation);
 
     Ok(Some(snapshot))
+}
+
+/// Marks the selected App's history with the machine's own samples on the Apps page.
+fn reader_snapshot_annotate_app(
+    system: &crate::live_system::SystemSamples,
+    request: &Request,
+    snapshot: &mut Snapshot,
+) {
+    if request.route != "apps" {
+        return;
+    }
+    if let Some(app) = &request.app {
+        if let Some(history) = &mut snapshot.history {
+            system.annotate_app(history, app);
+        }
+    }
 }
 
 /// Whether the reader has published everything `generation` asks for.

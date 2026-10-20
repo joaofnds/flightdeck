@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
@@ -109,6 +110,14 @@ const OBSERVATION_FIELDS: [&str; 7] = [
     "reader_losses",
 ];
 
+/// The older tail followed by the recent readings, which every index of a chart counts through.
+fn joined_points<'a>(earlier: Option<&'a [Value]>, recent: &'a [Value]) -> Cow<'a, [Value]> {
+    match earlier {
+        Some(older) if !older.is_empty() => Cow::Owned([older, recent].concat()),
+        _ => Cow::Borrowed(recent),
+    }
+}
+
 pub fn panels(
     route: &str,
     selection: &Value,
@@ -134,14 +143,8 @@ pub fn panels(
     } else {
         selection["earlier_trends"].as_array()
     };
-    let joined;
-    let points: &[Value] = match earlier {
-        Some(older) if !older.is_empty() => {
-            joined = [older.as_slice(), recent].concat();
-            &joined
-        }
-        _ => recent,
-    };
+    let joined = joined_points(earlier.map(Vec::as_slice), recent);
+    let points: &[Value] = &joined;
     if points.len() > OBSERVATIONS_MAX {
         return Err("Live chart exceeds 4096 observations".to_owned());
     }
