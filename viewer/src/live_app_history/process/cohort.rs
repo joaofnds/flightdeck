@@ -230,32 +230,10 @@ fn capture_groups<'sample>(
             }
         };
 
-        capture_groups_add(&mut groups[index].totals, process);
+        super::add_process(&mut groups[index].totals, process);
     }
 
     Ok(())
-}
-
-fn capture_groups_add(totals: &mut crate::apps::AppTotals, process: &Process) {
-    super::add(
-        totals,
-        &super::Member {
-            attribution: process.app_attribution,
-            live: process.state == crate::apps::ProcessState::Live,
-            amounts: [
-                process.cpu_ns,
-                process.energy_nj,
-                process.disk_read_bytes,
-                process.disk_written_bytes,
-                process.disk_io_bytes,
-                process.resident_bytes,
-                process.footprint_bytes,
-                process.idle_wakeups,
-                process.pageins,
-                process.threads,
-            ],
-        },
-    );
 }
 
 fn process_groups_visit_point(
