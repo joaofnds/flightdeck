@@ -194,7 +194,7 @@ impl LiveDashboard {
             } => self.energy_cooling(&[fans, thermal, maxima], cx),
             Row::Heading(title) => heading(title).into_any_element(),
             Row::Disclosure(section) => self.disclosure(*section, cx).into_any_element(),
-            Row::Hardware => self.live_hardware(cx).into_any_element(),
+            Row::Hardware => self.live_hardware().into_any_element(),
             Row::App(index) => self.app_row(*index, cx),
             Row::Executable(index) => self.executable_row(*index, cx),
             Row::Inventory => self.computer(cx).into_any_element(),

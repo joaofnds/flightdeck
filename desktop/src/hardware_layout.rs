@@ -112,16 +112,6 @@ impl Callout {
     pub fn left(self) -> bool {
         matches!(self, Self::Fan0 | Self::Cpu | Self::Memory)
     }
-    /// Which of the QA controls overrides this callout's reading, if any.
-    pub fn simulation_slot(self) -> Option<usize> {
-        match self {
-            Self::Cpu => Some(0),
-            Self::Gpu => Some(1),
-            Self::Fan0 => Some(2),
-            Self::Fan1 => Some(3),
-            Self::Memory | Self::Battery => None,
-        }
-    }
     pub fn title(self) -> &'static str {
         match self {
             Self::Fan0 => "FAN 0",

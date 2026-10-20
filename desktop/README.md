@@ -207,7 +207,7 @@ The schematic shows the selected Battery charge and signed power independently;
 missing Battery readings remain unavailable. Invalid Battery input reports its
 diagnostic while preserving valid CPU, GPU, installed-memory and fan readings.
 The schematic uses the shared chassis and rotor assets,
-anchored callouts, illustrative airflow and explicit QA simulation. Its 30 Hz clock
+anchored callouts and illustrative airflow. Its 30 Hz clock
 suspends while inactive or offscreen. The macOS text backend is enabled and checked
 at startup; the earlier blank-text builds are unsuitable performance baselines.
 Overview defers the schematic until its first real snapshot, avoiding artwork

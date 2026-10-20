@@ -10,7 +10,6 @@ mod data;
 mod diagnostics;
 mod hardware;
 mod hardware_clock;
-mod hardware_controls;
 mod hardware_layout;
 mod hardware_motion;
 mod live_acceptance;

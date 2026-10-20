@@ -61,34 +61,17 @@ impl Dashboard {
                     .flex()
                     .justify_between()
                     .items_center()
-                    .child(if self.hardware_state.qa.get() {
-                        "Readings · Simulated".to_owned()
-                    } else {
-                        format!("Thermal state · {}", readings.thermal)
-                    })
+                    .child(format!("Thermal state · {}", readings.thermal))
                     .child(
-                        div()
-                            .flex()
-                            .gap(px(8.0))
-                            .child(
-                                control(if self.animate {
-                                    "Pause animation"
-                                } else {
-                                    "Animate fans"
-                                })
-                                .on_click(cx.listener(
-                                    |this, _, _, cx| {
-                                        this.animate = !this.animate;
-                                        cx.notify();
-                                    },
-                                )),
-                            )
-                            .child(control("QA: 3000 rpm / 80°C").on_click(cx.listener(
-                                |this, _, _, cx| {
-                                    this.hardware_state.qa.set(!this.hardware_state.qa.get());
-                                    cx.notify();
-                                },
-                            ))),
+                        control(if self.animate {
+                            "Pause animation"
+                        } else {
+                            "Animate fans"
+                        })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.animate = !this.animate;
+                            cx.notify();
+                        })),
                     ),
             )
             .child(hardware_stage(
@@ -96,25 +79,17 @@ impl Dashboard {
                 Rc::clone(&self.hardware_state),
                 self.animate,
             ))
-            .child(hardware_caption(self.hardware_state.qa.get()))
+            .child(hardware_caption())
     }
 }
 
-pub fn hardware_caption(qa: bool) -> impl IntoElement {
-    let scope = if qa {
-        "QA simulated fans / CPU / GPU temperatures; charts keep source data. "
-    } else {
-        ""
-    };
+pub fn hardware_caption() -> impl IntoElement {
     div()
         .text_size(px(11.0))
         .text_color(rgb(MUTED))
-        .child(format!(
-            "{scope}{}",
-            concat!(
-                "MacBook Pro 16-inch assembly illustration; bottom cover removed, hinge at top. ",
-                "Airflow is illustrative; fan channel sides are unverified."
-            )
+        .child(concat!(
+            "MacBook Pro 16-inch assembly illustration; bottom cover removed, hinge at top. ",
+            "Airflow is illustrative; fan channel sides are unverified."
         ))
 }
 
@@ -208,17 +183,6 @@ impl Element for HardwareStage {
         } else {
             false
         };
-        if self.state.qa.get() {
-            self.readings.temperatures[0] = Some(80.0);
-            self.readings.temperatures[1] = Some(80.0);
-            self.readings.speeds = [Some(3000.0); 2];
-        }
-        let simulation = self.state.simulation.get();
-        let [cpu, gpu, fan0, fan1] = simulation;
-        self.readings.temperatures[0] = cpu.or(self.readings.temperatures[0]);
-        self.readings.temperatures[1] = gpu.or(self.readings.temperatures[1]);
-        self.readings.speeds[0] = fan0.or(self.readings.speeds[0]);
-        self.readings.speeds[1] = fan1.or(self.readings.speeds[1]);
         if !visible {
             self.state.frame(self.readings.speeds, false);
             self.state.acknowledge_visibility(&visibility);
@@ -234,8 +198,7 @@ impl Element for HardwareStage {
             }
             Err(error) => paint_text(error, bounds.origin, 12.0, rgb(ORANGE).into(), window, cx),
         }
-        let simulated = simulation.map(|value| value.is_some() || self.state.qa.get());
-        paint_callouts(bounds, &layout, &self.readings, simulated, window, cx);
+        paint_callouts(bounds, &layout, &self.readings, window, cx);
     }
 }
 
@@ -605,7 +568,6 @@ fn paint_callouts(
     bounds: Bounds<Pixels>,
     layout: &Layout,
     readings: &Readings,
-    simulated: [bool; 4],
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -639,7 +601,7 @@ fn paint_callouts(
             Vector::new(4.0, 4.0),
         );
         window.paint_quad(fill(anchor, rgb(tint)).corner_radii(px(2.0)));
-        paint_label(bounds, layout, callout, readings, simulated, window, cx);
+        paint_label(bounds, layout, callout, readings, window, cx);
     }
 }
 
@@ -651,18 +613,11 @@ fn paint_label(
     layout: &Layout,
     callout: Callout,
     readings: &Readings,
-    simulated: [bool; 4],
     window: &mut Window,
     cx: &mut App,
 ) {
     let (primary, secondary) = label_values(callout, readings);
-    let mut title = callout.title().to_owned();
-    if callout
-        .simulation_slot()
-        .is_some_and(|slot| simulated[slot])
-    {
-        title.push_str(" · QA");
-    }
+    let title = callout.title().to_owned();
     let origin = layout.label(callout);
     let at = |offset: f32, x: f32| {
         point(

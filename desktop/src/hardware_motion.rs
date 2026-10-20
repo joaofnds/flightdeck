@@ -5,13 +5,6 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use num_traits::ToPrimitive;
 
 pub struct HardwareState {
-    pub qa: Cell<bool>,
-    /// The readings the QA controls override, in the controls' order: CPU temperature, GPU
-    /// temperature, then the two fans' speeds. None leaves the recording's reading.
-    pub simulation: Cell<[Option<f32>; 4]>,
-    pub controls_open: Cell<bool>,
-    /// Where each QA slider's track was last painted, for the pointer to map onto a value.
-    pub tracks: Cell<[gpui::Bounds<gpui::Pixels>; 4]>,
     pub clock: RefCell<Option<crate::live_timer::Timer>>,
     started: Instant,
     painted: Cell<bool>,
@@ -49,10 +42,6 @@ struct VisibilitySignature {
 impl HardwareState {
     pub fn new() -> Self {
         Self {
-            qa: Cell::new(false),
-            simulation: Cell::new([None; 4]),
-            controls_open: Cell::new(true),
-            tracks: Cell::new([gpui::Bounds::default(); 4]),
             clock: RefCell::new(None),
             started: Instant::now(),
             painted: Cell::new(false),
