@@ -694,8 +694,8 @@ fn reader_payload(
         )?);
         reader_cpu_history(session, request, snapshot)?;
     }
-    // Keeping App parts replays the window's saved minutes, so it follows the histories the
-    // page shows, and a hover's own read keeps none.
+    // Keeping App parts replays the saved minutes of each window that keeps none, so it follows
+    // the histories the page shows, and a hover's own read keeps none.
     if !snapshot.histories_pending {
         reader_payload_histories(session, request, snapshot);
         if request.route == "apps" {
