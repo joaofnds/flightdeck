@@ -114,6 +114,11 @@ fn tick(entity: &WeakEntity<LiveDashboard>, cx: &mut App) {
 
 fn dashboard_tick(dashboard: &mut LiveDashboard, cx: &mut Context<LiveDashboard>) {
     dashboard.tick(cx);
+    // A request sent with no quick poll, such as the page's first at launch, is still taken
+    // within a frame of its answer from the next tick on.
+    if dashboard.awaiting_reply() {
+        poll_quickly(cx);
+    }
     let collection = cx.global_mut::<Collection>();
     let previous = collection.session.status();
     collection

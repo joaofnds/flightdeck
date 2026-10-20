@@ -436,10 +436,17 @@ impl LiveDashboard {
             && !matches!(self.request.route.as_str(), "self" | "computer")
     }
 
-    /// Whether the worker still owes an answer to the last request, the page's or a hover's.
+    /// Whether the worker still owes an answer to the last request, the page's or a hover's,
+    /// or the App histories the page's first readings left pending, which it reads at once.
     pub(crate) fn awaiting_reply(&self) -> bool {
         if self.reply_pending {
             return true;
+        }
+
+        if let Some(snapshot) = &self.snapshot {
+            if snapshot.histories_pending {
+                return true;
+            }
         }
 
         self.preview_awaiting_reply()
@@ -908,6 +915,22 @@ mod selection_tests {
             message: "Recording read failed".into(),
         });
 
+        assert!(!dashboard.awaiting_reply());
+    }
+
+    #[test]
+    fn a_page_awaits_the_app_histories_its_first_readings_leave_pending() {
+        // Goal: the app polls the worker quickly while a newly opened page's App histories are
+        // read, which the worker starts at once, so its charts appear as soon as they are read
+        // rather than at the next tick a quarter second later. Method: show readings that leave
+        // the histories pending, then readings that bring them.
+        let mut dashboard = dashboard();
+        dashboard.reply_pending = false;
+
+        dashboard.snapshot.as_mut().unwrap().histories_pending = true;
+
+        assert!(dashboard.awaiting_reply());
+        dashboard.snapshot.as_mut().unwrap().histories_pending = false;
         assert!(!dashboard.awaiting_reply());
     }
 
