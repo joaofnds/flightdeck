@@ -62,6 +62,7 @@ impl LiveDashboard {
                     .items_center()
                     .gap(px(8.0))
                     .w(px(340.0))
+                    .flex_shrink_0()
                     .text_size(px(13.0))
                     .child("App")
                     .child(
@@ -75,6 +76,8 @@ impl LiveDashboard {
             .child(
                 div()
                     .ml(px(12.0))
+                    .min_w_0()
+                    .truncate()
                     .text_size(px(11.0))
                     .text_color(rgb(MUTED))
                     .debug_selector(move || selector.clone())
