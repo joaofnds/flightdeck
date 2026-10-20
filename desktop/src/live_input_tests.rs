@@ -286,6 +286,90 @@ fn moving_above_the_plot_hides_both_inspection_cursors(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
+fn leaving_a_chart_on_a_paused_page_reads_nothing_again(cx: &mut TestAppContext) {
+    // Goal: a paused page already holds its selected second, so ending a hover there does not
+    // make the reader select that second again. Method: hover the previous second of the
+    // seeded selection, leave the plot, and compare the page's request generation.
+    let mut harness = InputHarness::setup(cx);
+    let paused = harness.driver.request_generation();
+    harness.driver.hover_previous_second();
+
+    harness.driver.leave_plot("live-energy-plot", PlotExit::Top);
+
+    assert_eq!(harness.driver.request_generation(), paused);
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_reply_a_hover_kept_from_the_page_is_asked_for_again_when_it_ends(cx: &mut TestAppContext) {
+    // Goal: a hover keeps the page's readings still, so a reply to the page's request that
+    // arrives during it is never shown and the page asks again once the hover ends. Method:
+    // hover the previous second, hand the page a reply to its request, then leave the plot.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.hover_previous_second();
+    let kept = harness.driver.deliver_page_reply();
+
+    harness.driver.leave_plot("live-energy-plot", PlotExit::Top);
+
+    assert!(harness.driver.request_generation() > kept);
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_reply_to_a_request_sent_during_a_hover_is_asked_for_again_when_it_ends(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a hover keeps the page's readings still even when the page asks for others under
+    // it, so that reply is never shown and the page asks again once the hover ends. Method:
+    // hover the previous second, go back to the newest second, hand the page that reply, then
+    // let the page take its next tick, which ends a hover begun over the old request.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.hover_previous_second();
+    harness.driver.follow_latest();
+    let kept = harness.driver.deliver_page_reply();
+
+    harness.driver.preview_tick();
+
+    assert!(harness.driver.request_generation() > kept);
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_hover_after_the_page_asked_again_reads_nothing_again(cx: &mut TestAppContext) {
+    // Goal: asking again settles what an earlier hover kept from the page, so the next hover
+    // on the paused page ends without a read. Method: keep a reply from the page with one
+    // hover, leave, then hover and leave again, comparing the generation across the second.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.hover_previous_second();
+    harness.driver.deliver_page_reply();
+    harness.driver.leave_plot("live-energy-plot", PlotExit::Top);
+    let asked = harness.driver.request_generation();
+    harness.driver.hover_previous_second();
+
+    harness.driver.leave_plot("live-energy-plot", PlotExit::Top);
+
+    assert_eq!(harness.driver.request_generation(), asked);
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_request_the_page_sends_during_a_hover_settles_the_reply_it_kept(cx: &mut TestAppContext) {
+    // Goal: once the page asks again during a hover, the reply it will get replaces the one
+    // the hover kept, so the hover ends without another read. Method: keep a reply from the
+    // page, go back to the newest second, which asks again, then leave the plot.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.hover_previous_second();
+    harness.driver.deliver_page_reply();
+    harness.driver.follow_latest();
+    let asked = harness.driver.request_generation();
+
+    harness.driver.leave_plot("live-energy-plot", PlotExit::Top);
+
+    assert_eq!(harness.driver.request_generation(), asked);
+    harness.teardown();
+}
+
+#[gpui::test]
 fn moving_below_the_plot_hides_both_inspection_cursors(cx: &mut TestAppContext) {
     // Leave the bottom edge while remaining in the larger chart wrapper.
     let mut harness = InputHarness::setup(cx);
@@ -1029,6 +1113,23 @@ impl InputDriver {
     fn request_generation(&self) -> u64 {
         self.view
             .read_with(&self.context, |dashboard, _| dashboard.generation)
+    }
+
+    /// Goes back to following the newest second, as the range's reset does.
+    fn follow_latest(&mut self) {
+        self.view
+            .update(&mut self.context, LiveDashboard::reset_range);
+    }
+
+    /// Hands the page a reply to its own request the way the worker's reply reaches it, and
+    /// returns that request's generation.
+    fn deliver_page_reply(&mut self) -> u64 {
+        self.view.update(&mut self.context, |dashboard, _| {
+            let generation = dashboard.generation;
+            let reply = crate::live_source::Update::Ready(accepted_snapshot(generation));
+            assert!(!dashboard.preview_receive(reply));
+            generation
+        })
     }
 
     fn preview_tick(&mut self) {

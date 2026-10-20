@@ -6,7 +6,8 @@ use super::{InputDriver, InputHarness};
 fn collapsing_the_hover_owner_restores_committed_readings_with_existing_leave_behavior(
     cx: &mut TestAppContext,
 ) {
-    // Goal: remove orphaned hover. Method: fold its owner before any exact-reading submission.
+    // Goal: remove orphaned hover, leaving the page's request alone since no read replaced it.
+    // Method: fold its owner before any exact-reading submission.
     let mut harness = InputHarness::setup_route(cx, "energy");
     harness.driver.prepare_sections();
     harness.driver.seed_energy_breakdown();
@@ -27,7 +28,7 @@ fn collapsing_the_hover_owner_restores_committed_readings_with_existing_leave_be
             .driver
             .reading_is_visible("chart-reading:live-energy:15 W")
     );
-    assert!(harness.driver.section_generation() > generation);
+    assert_eq!(harness.driver.section_generation(), generation);
     assert_eq!(harness.driver.section_request(), request);
     harness.driver.move_section_pointer_to_sidebar();
     assert!(!harness.driver.has_section_preview());

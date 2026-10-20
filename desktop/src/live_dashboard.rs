@@ -629,6 +629,9 @@ impl LiveDashboard {
 
     /// Asks the worker for the request as it stands, leaving the reading shown until the reply.
     pub(crate) fn request_reading(&mut self) {
+        if let Some(preview) = &mut self.preview {
+            preview.page_reply_kept = false;
+        }
         match self.worker.request(self.request.clone()) {
             Ok(generation) => {
                 self.generation = generation;

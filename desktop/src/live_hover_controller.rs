@@ -138,7 +138,10 @@ impl LiveDashboard {
 
         hover_unfinished(&mut self.hover_timings, &preview);
         self.chart_hover = None;
-        self.request_reading();
+        // The page holds the reply to its request unless the hover kept that reply from it.
+        if preview.page_reply_kept {
+            self.request_reading();
+        }
         self.rebuild_anchored(preview.layout);
         cx.notify();
     }
@@ -188,6 +191,7 @@ impl LiveDashboard {
             Ok(generation) => {
                 preview.generation = Some(generation);
                 self.preview_submissions += 1;
+                preview.page_reply_kept = true;
             }
             Err(error) => {
                 preview.failure = Some(error);
@@ -227,16 +231,28 @@ impl LiveDashboard {
             return false;
         };
 
-        if preview.base_request != self.request {
-            return false;
-        }
-
         let generation = match &update {
             Update::Ready(snapshot) => snapshot.generation,
             Update::Failed { generation, .. } => *generation,
         };
+        if preview.base_request != self.request {
+            if generation == self.generation {
+                preview.page_reply_kept = true;
+            }
+            return false;
+        }
+
         if preview.generation != Some(generation) {
-            return self.preview_receive_histories(update);
+            if generation != self.generation {
+                return false;
+            }
+            if self.preview_receive_histories(update) {
+                return true;
+            }
+            if let Some(preview) = &mut self.preview {
+                preview.page_reply_kept = true;
+            }
+            return false;
         }
 
         match update {
@@ -303,7 +319,12 @@ impl LiveDashboard {
             .as_ref()
             .and_then(|preview| preview.header_height)
             .or_else(|| Some(self.header_height.get()));
+        let page_reply_kept = self
+            .preview
+            .as_ref()
+            .is_some_and(|preview| preview.page_reply_kept);
         let mut preview = Preview::resident(snapshot, &self.request, target);
+        preview.page_reply_kept = page_reply_kept;
         if self.picker == Some(Picker::App) {
             preview.list_apps(snapshot);
         }

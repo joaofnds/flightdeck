@@ -45,6 +45,9 @@ pub struct Preview {
     pub layout: Option<layout::Layout>,
     pub header_height: Option<gpui::Pixels>,
     pub retarget_geometry: bool,
+    /// The hover kept a reply to the page's request from the page, or had the worker read its
+    /// second in place of that request, so the page asks again when the hover ends.
+    pub page_reply_kept: bool,
     /// When the app began handling what put the pointer over the target, while the hover's
     /// timing runs.
     pub hovered_at: Option<std::time::Instant>,
@@ -141,6 +144,7 @@ impl Preview {
             layout: None,
             header_height: None,
             retarget_geometry: false,
+            page_reply_kept: false,
             hovered_at: None,
         }
     }
