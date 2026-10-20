@@ -36,8 +36,32 @@ pub fn inspection_identity(selection: &Value, second: u64) -> Option<Value> {
                 .as_u64()
                 .is_some_and(|wall| wall / NANOSECONDS_PER_SECOND == second)
         })
-        .cloned()
+        .map(observation_identity)
 }
+
+/// The fields of a trend point that name its observation, which the reader accepts as the
+/// selection. The rest of the point holds the observation's readings and is far larger than
+/// the reader's bound on an identity.
+fn observation_identity(point: &Value) -> Value {
+    let mut identity = serde_json::Map::with_capacity(OBSERVATION_FIELDS.len());
+    for field in OBSERVATION_FIELDS {
+        if let Some(value) = point.get(field) {
+            identity.insert(field.to_owned(), value.clone());
+        }
+    }
+
+    Value::Object(identity)
+}
+
+const OBSERVATION_FIELDS: [&str; 7] = [
+    "run",
+    "boot",
+    "publication",
+    "run_tick",
+    "wall_ns",
+    "window_losses",
+    "reader_losses",
+];
 
 pub fn panels(
     route: &str,

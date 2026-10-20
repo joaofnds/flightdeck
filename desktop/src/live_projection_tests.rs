@@ -987,3 +987,21 @@ fn quantity_text_writes_numbers_as_the_prototype_does() {
 
     assert_eq!(texts, cases.map(|(_, _, text)| text.to_owned()));
 }
+
+#[test]
+fn an_inspected_second_names_its_observation_without_carrying_its_readings() {
+    // Goal: selecting a second on a chart stays within the identity bound the reader accepts,
+    // however many readings the observation's trend point carries, since an oversized identity
+    // made every page read Unavailable. Method: select the second of a trend point that holds
+    // a thousand readings and validate the request that carries its identity.
+    let mut selection = selection();
+    selection["selected"] = Value::Null;
+    selection["trends"][1]["per_core_percent"] = json!(vec![12.345_678_f64; 1000]);
+
+    let identity = inspection_identity(&selection, 550).unwrap();
+
+    assert_eq!(identity["publication"], 2);
+    assert_eq!(identity["wall_ns"], 550_000_000_000_u64);
+    assert!(identity.get("per_core_percent").is_none());
+    assert!(identity.to_string().len() < 4096);
+}
