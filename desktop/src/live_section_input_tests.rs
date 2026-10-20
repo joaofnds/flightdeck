@@ -147,7 +147,7 @@ fn overview_primary_context_precedes_rankings_and_survives_supplemental_folds(
 
     for selector in [
         "live-memory-pressure-plot",
-        "overview-context:thermal",
+        "live-thermal-plot",
         "overview-context:cooling-battery",
     ] {
         let bounds = harness.driver.chart_bounds(selector);

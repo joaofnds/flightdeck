@@ -132,7 +132,10 @@ impl Row {
                 }
             }
             Self::CPUHistory => source == "cpu-history-plot",
-            Self::OverviewStatus => source == "live-memory-pressure",
+            Self::OverviewStatus => {
+                source == "live-memory-pressure"
+                    || source == crate::live_projection::THERMAL_STATE_ID
+            }
             _ => false,
         }
     }

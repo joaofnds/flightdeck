@@ -2,10 +2,8 @@ use gpui::{Context, IntoElement, div, prelude::*, px, rgb};
 use num_traits::ToPrimitive;
 use serde_json::Value;
 
-use crate::charts::{self, GRID, MUTED, PANEL, TEXT};
-use crate::live_chart_view::timeline::{
-    self, timeline_caption_text, timeline_heading_text, timeline_label,
-};
+use crate::charts::{GRID, MUTED, PANEL, TEXT};
+use crate::live_chart_view::timeline::{self, timeline_heading_text};
 use crate::live_dashboard::LiveDashboard;
 use crate::live_projection::{hardware_reading, quantity};
 
@@ -27,6 +25,12 @@ impl LiveDashboard {
             .take(64)
             .find(|panel| panel.id == "live-memory-pressure")
             .map(|panel| self.live_timeline(panel, timeline::BAND_COMPACT, cx));
+        let thermal = self
+            .panels
+            .iter()
+            .take(64)
+            .find(|panel| panel.id == crate::live_projection::THERMAL_STATE_ID)
+            .map(|panel| self.live_timeline(panel, timeline::BAND_COMPACT, cx));
 
         div()
             .grid()
@@ -37,51 +41,8 @@ impl LiveDashboard {
             })
             .gap(px(8.0))
             .child(div().flex().min_w_0().children(pressure))
-            .child(self.overview_thermal())
+            .child(div().flex().min_w_0().children(thermal))
             .child(overview_cooling(summary))
-    }
-
-    /// Thermal state as the compact timeline will draw it. The collector records no thermal
-    /// state yet, so the band says so instead of showing a state nobody measured.
-    fn overview_thermal(&self) -> gpui::Div {
-        let gutter = self.timeline_gutter();
-        let second = self
-            .reading_snapshot()
-            .and_then(|snapshot| snapshot.selection["second"].as_u64());
-        let time = second.map_or_else(|| "Unavailable".into(), |second| clock(second, true));
-        let band = div()
-            .debug_selector(|| "overview-context:thermal:Uncaptured".into())
-            .flex_1()
-            .min_w_0()
-            .mt(timeline::BAND_TOP + charts::PLOT_INSETS.top)
-            .h(timeline::BAND_COMPACT)
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(2.0))
-            .border_1()
-            .border_color(rgb(GRID))
-            .text_size(px(11.0))
-            .text_color(rgb(MUTED))
-            .child("Uncaptured");
-
-        overview_context_card("thermal")
-            .child(timeline_heading_text(
-                "Thermal state",
-                THERMAL_HELP.into(),
-                "ⓘ",
-            ))
-            .child(
-                div()
-                    .flex()
-                    .items_start()
-                    .child(timeline_label(gutter, "Thermal", timeline::BAND_COMPACT))
-                    .child(band),
-            )
-            .child(self.timeline_bounds(gutter))
-            .child(timeline_caption_text(format!(
-                "{time} · Uncaptured · Nominal / Fair / Serious / Critical"
-            )))
     }
 
     /// The prototype's battery state row: the compact charging timeline and a details card
@@ -242,9 +203,6 @@ impl LiveDashboard {
             .into_any_element()
     }
 }
-
-const THERMAL_HELP: &str = "macOS's own verdict on heat, from nominal through fair and \
-    serious to critical. This collector does not record it yet, so no state is shown.";
 
 const AREA_HELP: &str = "The hottest measured sensor of each area and each fan channel's speed \
     at the selected second. The collector records only the SoC temperature and the fans so far.";

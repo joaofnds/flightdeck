@@ -14,7 +14,7 @@ pub const OBSERVATIONS_MAX: usize = 4096;
 pub const OVERVIEW_PRIMARY_PANELS: usize = 6;
 /// The Overview chart that sets load, power and heat side by side.
 pub const CORRELATION_ID: &str = "live-correlation";
-pub const OVERVIEW_PANELS_MAX: usize = 8;
+pub const OVERVIEW_PANELS_MAX: usize = 9;
 pub const ROUTE_PANELS_MAX: usize = 7;
 const _: () = assert!(OVERVIEW_PRIMARY_PANELS < OVERVIEW_PANELS_MAX);
 const GIBIBYTE: f32 = 1_073_741_824.0;
@@ -195,6 +195,7 @@ struct Reading {
     channel: Option<usize>,
     resource: Option<&'static str>,
     axis: Option<&'static str>,
+    follows: Option<&'static str>,
 }
 
 impl Domain {
@@ -496,6 +497,7 @@ fn panel(
             negative: Some(reading.negative),
             dashed: Some(reading.dashed),
             axis: reading.axis.map(str::to_owned),
+            follows: reading.follows.map(str::to_owned),
             unit: Some(
                 reading
                     .unit
@@ -580,6 +582,7 @@ fn gpu_apps_panel(
         negative: Some(false),
         dashed: Some(true),
         axis: None,
+        follows: None,
         unit: Some("%".into()),
         fill: Some(0.0),
     });
@@ -622,6 +625,7 @@ fn gpu_apps_panel_line(name: &str, channel: usize, points: &[Value]) -> Result<L
         negative: Some(false),
         dashed: Some(false),
         axis: None,
+        follows: None,
         unit: Some("%".into()),
         fill: None,
     })
@@ -704,6 +708,7 @@ fn reading(key: &'static str, name: &'static str, color: &'static str, divisor: 
         channel: None,
         resource: None,
         axis: None,
+        follows: None,
     }
 }
 
@@ -801,6 +806,7 @@ fn open_files() -> Specification {
     let mut share = reading("open_files_percent", "Share of limit", "#ccccdc", 1.0);
     share.unit = Some("%");
     share.axis = Some("right1");
+    share.follows = Some("Open");
     share.dashed = true;
     share.fill = Some(0.0);
     let mut specification = specification(
@@ -1209,6 +1215,7 @@ fn overview() -> Vec<Specification> {
         network,
         memory_pressure(),
         correlation(),
+        thermal_state(),
     ];
     for specification in &mut result {
         if !specification.stack {

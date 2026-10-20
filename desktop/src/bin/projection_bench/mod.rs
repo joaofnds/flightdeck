@@ -128,7 +128,7 @@ mod tests {
         let transcript = bits(&panels);
 
         let panels = transcript.as_array().unwrap();
-        assert_eq!(panels.len(), 8);
+        assert_eq!(panels.len(), 9);
         let activity = panels
             .iter()
             .find(|panel| panel["id"] == "live-gpu-activity")

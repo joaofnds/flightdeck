@@ -645,6 +645,51 @@ pub fn axis_domain(
 
 #[must_use]
 pub fn axis_scale(panel: &Panel, inspection: Inspection, hidden: &[String], axis: &str) -> Scale {
+    followed_scale(panel, inspection, hidden, axis)
+        .unwrap_or_else(|| own_scale(panel, inspection, hidden, axis))
+}
+
+/// The scale of an axis whose line restates another line in another unit: the leading line's
+/// range times the ratio between the two, so both axes mark the same heights. It is the
+/// ratio at the newest second in view that both lines read.
+fn followed_scale(
+    panel: &Panel,
+    inspection: Inspection,
+    hidden: &[String],
+    axis: &str,
+) -> Option<Scale> {
+    let restating = panel
+        .lines
+        .iter()
+        .find(|line| line.axis.as_deref() == Some(axis) && !hidden.contains(&line.name))?;
+    let name = restating.follows.as_deref()?;
+    let leader = panel
+        .lines
+        .iter()
+        .find(|line| line.name == name && !hidden.contains(&line.name))?;
+    let ratio = (inspection.lower..=inspection.upper)
+        .rev()
+        .find_map(|index| {
+            let led = leader.values.get(index).copied().flatten()?;
+            let restated = restating.values.get(index).copied().flatten()?;
+            (led > 0.0 && restated > 0.0).then(|| restated / led)
+        })?;
+    let leading = own_scale(
+        panel,
+        inspection,
+        hidden,
+        leader.axis.as_deref().unwrap_or("left"),
+    );
+    let minimum = leading.minimum * ratio;
+    let maximum = leading.maximum * ratio;
+    Some(Scale {
+        minimum,
+        maximum,
+        step: decimal_step(maximum - minimum),
+    })
+}
+
+fn own_scale(panel: &Panel, inspection: Inspection, hidden: &[String], axis: &str) -> Scale {
     let (low, high) = axis_extent(panel, inspection, hidden, axis);
     let fixed = if axis == "left" {
         panel.maximum.filter(|maximum| *maximum > 0.0)

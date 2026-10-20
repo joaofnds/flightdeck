@@ -40,6 +40,9 @@ pub struct Line {
     pub negative: Option<bool>,
     pub dashed: Option<bool>,
     pub axis: Option<String>,
+    /// The name of the line whose values this one restates in another unit, so the two axes
+    /// mark the same heights.
+    pub follows: Option<String>,
     pub unit: Option<String>,
     pub fill: Option<f32>,
 }

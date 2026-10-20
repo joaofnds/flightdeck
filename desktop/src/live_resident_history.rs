@@ -279,6 +279,7 @@ impl History {
                 negative: Some(false),
                 dashed: Some(false),
                 axis: None,
+                follows: None,
                 unit: Some("GiB".into()),
                 fill: None,
             });

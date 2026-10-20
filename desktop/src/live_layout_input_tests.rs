@@ -459,7 +459,7 @@ impl InputDriver {
 
     fn assert_overview_context_columns(&mut self) {
         let pressure = self.chart_bounds("chart-card:live-memory-pressure");
-        let thermal = self.chart_bounds("overview-context:thermal");
+        let thermal = self.chart_bounds("chart-card:live-thermal");
         let cooling = self.chart_bounds("overview-context:cooling-battery");
         assert_eq!(pressure.top(), thermal.top());
         assert_eq!(thermal.top(), cooling.top());
@@ -471,7 +471,7 @@ impl InputDriver {
 
     fn assert_overview_context_two_columns(&mut self) {
         let pressure = self.chart_bounds("chart-card:live-memory-pressure");
-        let thermal = self.chart_bounds("overview-context:thermal");
+        let thermal = self.chart_bounds("chart-card:live-thermal");
         let cooling = self.chart_bounds("overview-context:cooling-battery");
         assert_eq!(pressure.top(), thermal.top());
         assert_eq!(thermal.left() - pressure.right(), px(8.0));
@@ -482,7 +482,7 @@ impl InputDriver {
 
     fn assert_overview_context_stacked(&mut self) {
         let pressure = self.chart_bounds("chart-card:live-memory-pressure");
-        let thermal = self.chart_bounds("overview-context:thermal");
+        let thermal = self.chart_bounds("chart-card:live-thermal");
         let cooling = self.chart_bounds("overview-context:cooling-battery");
         assert_eq!(pressure.left(), thermal.left());
         assert_eq!(thermal.left(), cooling.left());
@@ -492,7 +492,6 @@ impl InputDriver {
     }
 
     fn assert_overview_context_selected(&mut self) {
-        assert!(self.reading_is_visible("overview-context:thermal:Uncaptured"));
         self.assert_overview_context([
             "overview-context:soc:60.0 °C",
             "overview-context:fan0:2,000 rpm",

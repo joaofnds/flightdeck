@@ -91,7 +91,7 @@ fn overview_stacks_captured_memory_categories_below_an_independent_installed_gui
 
     let overview = panels("overview", &selection, None).unwrap();
 
-    assert_eq!(overview.len(), 8);
+    assert_eq!(overview.len(), 9);
     assert_memory_composition(&overview[2]);
 }
 
@@ -838,6 +838,52 @@ fn cpu_charts_scheduling_and_open_files_only_where_sampled() {
     assert_eq!(files.lines[0].values, [None, Some(12_000.0), None]);
     assert_eq!(files.lines[1].axis.as_deref(), Some("right1"));
     assert_eq!(quantity_text(12_000.0, "files"), "12 k files");
+}
+
+#[test]
+fn open_files_share_axis_marks_the_same_heights_as_the_count_axis() {
+    // Goal: a height on the open files chart reads as one value on both axes, so the share of
+    // the limit at a gridline is the share the files there make up.
+    // Method: sample 10,000 files as 2.5 percent of the limit, which is 0.00025 percent a
+    // file, and compare the top of the share axis with the top of the count axis.
+    let mut selection = selection();
+    let point = &mut selection["trends"][1];
+    point["open_files"] = json!(10_000);
+    point["open_files_percent"] = json!(2.5);
+    let panels = panels("cpu", &selection, None).unwrap();
+    let files = panels
+        .iter()
+        .find(|panel| panel.id == OPEN_FILES_ID)
+        .unwrap();
+    let inspection = crate::charts::Inspection {
+        lower: 0,
+        selected: 1,
+        upper: 2,
+    };
+
+    let count = crate::charts::axis_scale(files, inspection, &[], "left");
+    let share = crate::charts::axis_scale(files, inspection, &[], "right1");
+
+    assert!((share.maximum - count.maximum * 0.000_25).abs() < 0.000_1);
+}
+
+#[test]
+fn overview_projects_the_thermal_state_the_energy_page_draws() {
+    // Goal: the Overview's thermal state timeline reads the same readings as the Energy
+    // page's, not a placeholder that claims nothing was captured.
+    // Method: record the middle point of three as thermal pressure Moderate and project the
+    // Overview.
+    let mut selection = selection();
+    selection["trends"][1]["thermal_pressure"] = json!(1);
+
+    let panels = panels("overview", &selection, None).unwrap();
+
+    let thermal = panels
+        .iter()
+        .find(|panel| panel.id == THERMAL_STATE_ID)
+        .unwrap();
+    let readings: Vec<_> = thermal.lines[0].values.iter().flatten().copied().collect();
+    assert_eq!(readings, [1.0]);
 }
 
 #[test]

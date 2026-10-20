@@ -372,6 +372,7 @@ fn panels_panel_line(
         negative: Some(matches!(metric, ProcessGroupMetric::DiskWritten)),
         dashed: Some(false),
         axis: None,
+        follows: None,
         unit: None,
         fill: None,
     }
@@ -394,6 +395,7 @@ fn panels_panel_line_missing(
         negative: Some(suffix == " sent"),
         dashed: Some(false),
         axis: None,
+        follows: None,
         unit: None,
         fill: None,
     }

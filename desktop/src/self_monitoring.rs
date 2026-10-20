@@ -406,6 +406,7 @@ fn chart_panel(
             negative: None,
             dashed: None,
             axis: None,
+            follows: None,
             unit: None,
             fill: None,
         })

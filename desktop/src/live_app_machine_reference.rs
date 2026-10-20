@@ -127,6 +127,7 @@ impl History {
             negative: Some(false),
             dashed: Some(true),
             axis: None,
+            follows: None,
             unit: Some(self.metric.unit().into()),
             fill: Some(0.0),
         });
