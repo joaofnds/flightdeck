@@ -48,6 +48,46 @@ fn retains_selected_group_rates_and_exact_bytes_across_sealing() {
     assert_eq!(point["disk_io_bps"], 2560.0);
 }
 
+#[test]
+fn keeps_a_group_apart_from_the_other_executables_of_its_app_across_sealing() {
+    // Goal: a group's history from the parts a sealed window keeps counts only the processes
+    // of its App that run the group's executable, as the live history does.
+    // Method: publish an App running two executables, seal the window with its Apps' parts,
+    // and compare the history of one executable's group before and after sealing.
+    let mut fixture = Fixture::new();
+    let rows = [
+        named::member(7, b"worker", b"/A.app", usage()),
+        named::member(8, b"helper", b"/A.app", usage()),
+    ];
+    let mut session = LiveSession::open(&fixture.root).unwrap();
+    named::publish(&mut fixture, 1, &rows);
+    session.poll().unwrap();
+    named::publish(&mut fixture, 2, &rows);
+    session.poll().unwrap();
+    let live = worker(&mut session);
+    drop(session);
+    fixture.seal_derived(&[], &crate::SealedApps);
+    collector::recording::Registry {
+        runs: Vec::new(),
+        evictions: 0,
+    }
+    .write(&fixture.root)
+    .unwrap();
+    let mut reopened = LiveSession::open(&fixture.root).unwrap();
+
+    let saved = worker(&mut reopened);
+
+    assert_eq!(live["points"][1]["members"], 1);
+    assert_eq!(saved["points"], live["points"]);
+}
+
+fn worker(session: &mut LiveSession) -> Value {
+    session.select(1002, 0).unwrap();
+    session
+        .app_process_history(KeyKind::Bundle, b"/A.app", b"worker")
+        .unwrap()
+}
+
 fn selected(session: &mut LiveSession) -> Value {
     session.select(1002, 0).unwrap();
     session

@@ -11,19 +11,26 @@ pub fn range(second: u64) -> ContextRange {
     }
 }
 
-/// Rewrites the only sealed window's derived table `name` in place through `change`.
-pub fn rewrite(session: &Session, name: &'static str, change: impl FnOnce(&mut DataFrame)) {
-    let path = session
-        .root
-        .join(&session.windows[0].data_directory)
-        .join(format!("{name}.parquet"));
-    let mut frame = persistence::engine::scan(&path).unwrap().collect().unwrap();
-    change(&mut frame);
-    let staging = session.root.with_extension("rewrite");
-    std::fs::create_dir(&staging).unwrap();
+/// Rewrites the derived table `name` of each sealed window that holds it in place through
+/// `change`.
+pub fn rewrite(session: &Session, name: &'static str, mut change: impl FnMut(&mut DataFrame)) {
+    for manifest in &session.windows {
+        if manifest.tables.iter().any(|table| table.name == name) {
+            let path = session
+                .root
+                .join(&manifest.data_directory)
+                .join(format!("{name}.parquet"));
+            let mut frame = persistence::engine::scan(&path).unwrap().collect().unwrap();
+            change(&mut frame);
+            let staging = session.root.with_extension("rewrite");
+            std::fs::create_dir(&staging).unwrap();
 
-    persistence::encode_derived(name, &mut frame, &staging).unwrap();
+            persistence::encode_derived(name, &mut frame, &staging).unwrap();
 
-    std::fs::copy(staging.join(format!("{name}.parquet")), &path).unwrap();
-    std::fs::remove_dir_all(&staging).unwrap();
+            // Writing into the sealed file keeps the private mode a session checks on open.
+            let encoded = std::fs::read(staging.join(format!("{name}.parquet"))).unwrap();
+            std::fs::write(&path, encoded).unwrap();
+            std::fs::remove_dir_all(&staging).unwrap();
+        }
+    }
 }

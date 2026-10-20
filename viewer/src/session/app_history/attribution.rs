@@ -28,7 +28,7 @@ impl Session {
             source_bytes: 0,
             plotted: 0,
         };
-        self.app_history_gather(&range, &mut restore)?;
+        self.app_history_gather(&range, &BTreeSet::new(), &mut restore)?;
         let count = restore.plotted;
         for reading in restore.readings.values_mut() {
             self.operation.check()?;
@@ -248,7 +248,7 @@ impl Session {
             readings: Vec::with_capacity(super::READINGS_MAX),
             prepared: None,
         });
-        self.app_history_gather(&range, &mut replay.restore)?;
+        self.app_history_gather(&range, &BTreeSet::new(), &mut replay.restore)?;
         for key in replay.restore.readings.keys() {
             replay.context.push(*key);
         }

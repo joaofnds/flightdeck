@@ -109,6 +109,16 @@ impl AppPart {
         self.header.selected()
     }
 
+    /// The facts of its second's sample.
+    pub(crate) fn header(&self) -> &Header {
+        &self.header
+    }
+
+    /// The App's row and processes, where the App ran at its second.
+    pub(crate) fn present(&self) -> Option<&Present> {
+        self.present.as_ref()
+    }
+
     #[must_use]
     pub fn is_of(&self, kind: KeyKind, bytes: &[u8]) -> bool {
         if self.kind != kind {

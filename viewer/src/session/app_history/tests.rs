@@ -3,7 +3,7 @@ use crate::live::identity_fixture::Fixture;
 use crate::live_app_response::KeyKind;
 use serde_json::json;
 
-fn selected(session: &Session, second: u64) -> Observation {
+pub(super) fn selected(session: &Session, second: u64) -> Observation {
     let run = session.windows[0].identity.run;
     Observation {
         recording: run.recording.0,
@@ -19,7 +19,7 @@ fn selected(session: &Session, second: u64) -> Observation {
     }
 }
 
-fn points(values: &[TracePoint]) -> Result<Value> {
+pub(super) fn points(values: &[TracePoint]) -> Result<Value> {
     crate::live_app_response::bounded(json!(
         values
             .iter()

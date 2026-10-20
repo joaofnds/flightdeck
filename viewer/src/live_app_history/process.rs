@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 
 use super::trace::Totals;
 use super::{App, BYTES_MAX, History, Point, Target, TracePoint, apps, key};
-use crate::live_app_response::Sample;
+use crate::live_app_response::{Process, Sample};
 
 pub(crate) mod cohort;
 mod groups_cache;
@@ -109,26 +109,7 @@ pub(super) fn capture(sample: &Sample, previous: Option<&Point>, apps: &[App]) -
             continue;
         };
 
-        let totals = grouped.entry((app, &name.bytes)).or_default();
-        add(
-            totals,
-            &Member {
-                attribution: process.app_attribution,
-                live: process.state == apps::ProcessState::Live,
-                amounts: [
-                    process.cpu_ns,
-                    process.energy_nj,
-                    process.disk_read_bytes,
-                    process.disk_written_bytes,
-                    process.disk_io_bytes,
-                    process.resident_bytes,
-                    process.footprint_bytes,
-                    process.idle_wakeups,
-                    process.pageins,
-                    process.threads,
-                ],
-            },
-        );
+        add_process(grouped.entry((app, &name.bytes)).or_default(), process);
     }
 
     let mut output = Vec::with_capacity(grouped.len());
@@ -270,6 +251,29 @@ impl History {
     }
 }
 
+/// The totals of the processes of a part's App that run the executable named `executable`,
+/// or none where none does, as `aggregate_totals` gives them from the part's sample.
+pub(super) fn part_totals(
+    processes: &[Process],
+    executable: &[u8],
+    membership_complete: bool,
+    output: &mut Option<apps::AppTotals>,
+) {
+    let totals = output.insert(apps::AppTotals::default());
+    for process in processes {
+        if let Some(name) = &process.executable_name {
+            if name.bytes == executable {
+                add_process(totals, process);
+            }
+        }
+    }
+
+    totals.membership_complete = membership_complete;
+    if totals.members == 0 {
+        *output = None;
+    }
+}
+
 pub(super) fn aggregate_totals(
     aggregate: &apps::Aggregate<'_>,
     target: &Target<'_>,
@@ -323,6 +327,29 @@ pub(super) fn aggregate_totals(
     if totals.members == 0 {
         *output = None;
     }
+}
+
+/// Adds a process of a sample to the totals of its group.
+fn add_process(totals: &mut apps::AppTotals, process: &Process) {
+    add(
+        totals,
+        &Member {
+            attribution: process.app_attribution,
+            live: process.state == apps::ProcessState::Live,
+            amounts: [
+                process.cpu_ns,
+                process.energy_nj,
+                process.disk_read_bytes,
+                process.disk_written_bytes,
+                process.disk_io_bytes,
+                process.resident_bytes,
+                process.footprint_bytes,
+                process.idle_wakeups,
+                process.pageins,
+                process.threads,
+            ],
+        },
+    );
 }
 
 fn add(totals: &mut apps::AppTotals, member: &Member) {

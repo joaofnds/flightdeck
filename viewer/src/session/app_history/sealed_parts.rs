@@ -20,7 +20,7 @@ use persistence::{Error, Result, TableManifest};
 /// The version of the table's columns. A reader takes no parts from a table of another version
 /// and leaves its window to the replay, so a later build may change the columns and an older
 /// one still reads the recording.
-const VERSION: u8 = 1;
+pub(super) const VERSION: u8 = 1;
 /// The rows a window keeps. About 1,100 processes in a few hundred Apps a second make some
 /// 85,000 rows a window, a sixth of this.
 const ROWS_MAX: usize = 1 << 19;
@@ -501,14 +501,26 @@ impl Session {
         bytes: &[u8],
         mut consume: impl FnMut(AppPart) -> Result<()>,
     ) -> Result<()> {
+        self.visit_sealed_parts_by_window(range, kind, bytes, |_window, part| consume(part))
+    }
+
+    /// Gives `consume` each part `visit_sealed_parts` gives, with the index of the window that
+    /// keeps it.
+    pub(super) fn visit_sealed_parts_by_window(
+        &self,
+        range: ContextRange,
+        kind: KeyKind,
+        bytes: &[u8],
+        mut consume: impl FnMut(usize, AppPart) -> Result<()>,
+    ) -> Result<()> {
         let key = PartKey { kind, bytes };
         self.visit_derived(
             range,
             APP_PARTS,
             |kept| self.visit_sealed_parts_read(kept, &key),
-            |part| {
+            |window, part| {
                 if observed_in(range, part.selected()) {
-                    consume(part)?;
+                    consume(window, part)?;
                 }
                 Ok(())
             },
@@ -749,12 +761,22 @@ fn kept_app(row: &Row<'_>) -> Result<(usize, App)> {
     }
     let measure = |place: usize| -> Result<Measure> {
         let first = MEASURE_FIRST + place * MEASURE_FIELDS.len();
-        Ok(Measure {
+        let measure = Measure {
             known: row.get(first)?,
             measured_members: row.get(first + 1)?,
             unavailable_members: row.get(first + 2)?,
             overflowed: row.get(first + 3)?,
-        })
+        };
+        // Each member adds to one count at most, and a history holds counts up to the members.
+        let counted = measure
+            .measured_members
+            .checked_add(measure.unavailable_members)
+            .ok_or(Error::Bound("sealed parts measure"))?;
+        if counted > members {
+            return Err(Error::Bound("sealed parts measure"));
+        }
+
+        Ok(measure)
     };
 
     let app = App {

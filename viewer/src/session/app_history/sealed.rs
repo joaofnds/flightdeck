@@ -18,14 +18,14 @@ pub(super) struct Kept<'manifest> {
 
 impl Session {
     /// Gives `read` each window of `range` the persister sealed with the derived table `name`,
-    /// and `consume` what `read` takes from it once the window's commitment still holds, so a
-    /// window replaced during the read gives nothing.
+    /// and `consume` what `read` takes from it, with the window's index, once the window's
+    /// commitment still holds, so a window replaced during the read gives nothing.
     pub(super) fn visit_derived<T>(
         &self,
         range: ContextRange,
         name: &str,
         mut read: impl FnMut(&Kept<'_>) -> Result<Vec<T>>,
-        mut consume: impl FnMut(T) -> Result<()>,
+        mut consume: impl FnMut(usize, T) -> Result<()>,
     ) -> Result<()> {
         self.operation.attach(&self.connection)?;
         assert!(self.windows.len() <= super::super::WINDOWS_MAX);
@@ -56,7 +56,7 @@ impl Session {
             self.validate_commitment(window)?;
 
             for value in values {
-                consume(value)?;
+                consume(window, value)?;
             }
         }
 

@@ -1,4 +1,4 @@
-use super::{BTreeMap, Frame, Observation, Reading, Restore, Session, Source};
+use super::{BTreeMap, BTreeSet, Frame, Observation, Reading, Restore, Session, Source};
 use crate::live_app_history::{
     PIN_BYTES_MAX, ResidentCache, ResidentFile, ResidentPin, ResidentPoint,
 };
@@ -29,7 +29,7 @@ impl Session {
             source_bytes: 0,
             plotted: 0,
         };
-        self.app_history_gather(&range, &mut restore)?;
+        self.app_history_gather(&range, &BTreeSet::new(), &mut restore)?;
         let readings: Vec<_> = restore.readings.values().copied().collect();
         let mut replay = Replay { restore, readings };
         self.app_resident_validate(&replay)?;

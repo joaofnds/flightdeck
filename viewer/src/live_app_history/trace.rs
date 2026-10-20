@@ -1,6 +1,6 @@
 use super::{App, CompactMeasure, Selection, apps, count, key};
 use crate::app_process_groups_history::ProcessGroupReading;
-use crate::live_app_response::{Measure, Observation};
+use crate::live_app_response::{self as response, AppPart, Measure, Observation};
 use crate::live_apps::Frame;
 use persistence::{Error, Result};
 use serde_json::{Value, json};
@@ -65,6 +65,35 @@ impl TracePoint {
         })?;
 
         output.ok_or(Error::Bound("App history aggregate output"))
+    }
+
+    /// The point of `target` that a window keeps in the part of its App at one second.
+    pub(crate) fn from_part(part: &AppPart, target: &dyn Selection) -> Self {
+        let header = part.header();
+        let mut totals = None;
+        if let Some(present) = part.present() {
+            if let Some(executable) = target.executable() {
+                let mut group = None;
+                super::process::part_totals(
+                    &present.processes,
+                    executable,
+                    header.membership_complete,
+                    &mut group,
+                );
+                if let Some(group) = &group {
+                    Totals::capture(group, &mut totals);
+                }
+            } else {
+                totals = Some(Totals::of_app(&present.app));
+            }
+        }
+
+        Self {
+            observation: header.selected,
+            elapsed_ns: header.elapsed_ns,
+            totals,
+            captured: true,
+        }
     }
 
     pub(super) fn from_group(
@@ -231,6 +260,23 @@ impl Totals {
                 self.threads.measure(),
             ],
         };
+    }
+
+    /// The totals of an App's row, without the counts only a process group's history shows,
+    /// as a live point gives them.
+    fn of_app(app: &response::App) -> Self {
+        Self {
+            members: count(app.members),
+            membership_complete: app.membership_complete,
+            cpu_ns: CompactMeasure::capture(&app.cpu_ns),
+            energy_nj: CompactMeasure::capture(&app.energy_nj),
+            disk_read_bytes: CompactMeasure::capture(&app.disk_read_bytes),
+            disk_written_bytes: CompactMeasure::capture(&app.disk_written_bytes),
+            disk_io_bytes: CompactMeasure::capture(&app.disk_io_bytes),
+            resident_bytes: CompactMeasure::capture(&app.resident_bytes),
+            footprint_bytes: CompactMeasure::capture(&app.footprint_bytes),
+            ..Self::default()
+        }
     }
 
     pub(super) fn capture(app: &apps::AppTotals, output: &mut Option<Self>) {

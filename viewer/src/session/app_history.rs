@@ -249,15 +249,18 @@ impl Session {
             source_bytes: 0,
             plotted: 0,
         };
-        self.app_history_gather(range, &mut restore)?;
+        let mut points = Vec::new();
+        let kept = self.app_history_kept(range, target, &mut restore, &mut points)?;
+        self.app_history_gather(range, &kept, &mut restore)?;
         self.app_history_predecessors(&mut restore)?;
-        let mut points = Vec::with_capacity(restore.plotted);
+        points.reserve_exact(restore.plotted - points.len());
         self.app_history_points(&mut restore, target, &mut points)?;
         points.sort_by_key(|point| (point.observation.wall_ns, Key::new(&point.observation)));
         let pins: BTreeSet<_> = restore
             .sources
             .keys()
             .map(|(window, _source)| *window)
+            .chain(kept)
             .collect();
         if pins.len() > READINGS_MAX {
             return Err(Error::Bound("committed App history pins"));
@@ -282,7 +285,43 @@ impl Session {
         Ok(cache)
     }
 
-    fn app_history_gather(&self, range: &ContextRange, restore: &mut Restore) -> Result<()> {
+    /// Gives `output` the points of `target` that the windows of `range` keep in their Apps'
+    /// parts, each counted as plotted, and returns the windows that keep them, which need no
+    /// replay.
+    fn app_history_kept(
+        &self,
+        range: &ContextRange,
+        target: &dyn Selection,
+        restore: &mut Restore,
+        output: &mut Vec<TracePoint>,
+    ) -> Result<BTreeSet<usize>> {
+        let mut windows = BTreeSet::new();
+        self.visit_sealed_parts_by_window(
+            *range,
+            target.app().kind,
+            target.app().bytes,
+            |window, part| {
+                if restore.plotted == OBSERVATIONS_MAX {
+                    return Err(Error::Bound("committed App history observations"));
+                }
+
+                restore.plotted += 1;
+                output.push(TracePoint::from_part(&part, target));
+                windows.insert(window);
+                Ok(())
+            },
+        )?;
+
+        assert_eq!(output.len(), restore.plotted);
+        Ok(windows)
+    }
+
+    fn app_history_gather(
+        &self,
+        range: &ContextRange,
+        kept: &BTreeSet<usize>,
+        restore: &mut Restore,
+    ) -> Result<()> {
         self.saved_history_context_preparations.set(
             self.saved_history_context_preparations
                 .get()
@@ -291,6 +330,9 @@ impl Session {
         assert!(self.windows.len() <= WINDOWS_MAX);
         for (window, manifest) in self.windows.iter().enumerate() {
             self.operation.check()?;
+            if kept.contains(&window) {
+                continue;
+            }
             if let Some(bounds) = manifest.wall_ns {
                 if bounds.max < range.first_ns {
                     continue;
@@ -816,6 +858,9 @@ fn app_history_reading(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod sealed_history_tests;
 
 #[cfg(test)]
 mod source_cache_tests {

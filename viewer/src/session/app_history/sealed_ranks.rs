@@ -136,7 +136,7 @@ impl Session {
                 self.visit_sealed_ranks_read(kept, &mut ranks)?;
                 Ok(ranks)
             },
-            |observation| {
+            |_window, observation| {
                 if observed_in(range, &observation.selected) {
                     consume(observation)?;
                 }

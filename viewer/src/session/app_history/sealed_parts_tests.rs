@@ -164,6 +164,25 @@ fn a_window_whose_app_lost_a_process_to_another_key_is_refused() {
 }
 
 #[test]
+fn a_window_whose_app_counts_more_members_in_a_measure_than_it_has_is_refused() {
+    // Goal: a measure that counts more members than its App has is an error, not a count the
+    // App's history cannot hold.
+    // Method: rewrite a sealed window's parts with one more unavailable member in each App's
+    // CPU measure than the App has, and read the parts of one of its Apps.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(1000);
+    fixture.publish_with_system_rows(1001);
+    fixture.seal_derived(&[], &crate::SealedApps);
+    let session = Session::open(&fixture.root).unwrap();
+    let key = app_keys(&replayed_samples(&session, 1001)[1]).remove(0);
+    rewrite(&session, APP_PARTS, overcount_members);
+
+    let result = session.visit_sealed_parts(range(1001), key.kind, &key.bytes, |_part| Ok(()));
+
+    assert!(matches!(result, Err(Error::Bound("sealed parts measure"))));
+}
+
+#[test]
 fn every_code_a_part_is_written_with_reads_back_as_what_it_was_written_from() {
     // Goal: no reason, cause or state a part keeps reads back as another.
     // Method: read every byte as each kind of code, and write back each that reads.
@@ -278,6 +297,24 @@ fn move_process(frame: &mut DataFrame, own: &Key, other: &Key) {
     let keys: Vec<Option<&[u8]>> = keys.iter().map(Option::as_deref).collect();
     frame
         .replace("app_key", Column::new("app_key".into(), keys))
+        .unwrap();
+}
+
+/// Counts one more unavailable member in each App row's CPU measure than the App has.
+fn overcount_members(frame: &mut DataFrame) {
+    let unavailable: Vec<Option<u32>> = (0..frame.height())
+        .map(|index| {
+            let members: Option<u32> = Row::new(frame, index)
+                .unwrap()
+                .get(const { fixed("members") })
+                .unwrap();
+            members.map(|members| members + 1)
+        })
+        .collect();
+    let name = "app_cpu_ns_unavailable_members";
+
+    frame
+        .replace(name, Column::new(name.into(), unavailable))
         .unwrap();
 }
 

@@ -1,4 +1,4 @@
-use super::{BTreeMap, Frame, Key, Observation, Reading, Restore, Session, Source};
+use super::{BTreeMap, BTreeSet, Frame, Key, Observation, Reading, Restore, Session, Source};
 use crate::app_process_groups_history::AppProcessGroupsHistory;
 use crate::app_process_groups_history::cache::{Cache, Point};
 use crate::live_app_history::{PIN_BYTES_MAX, ResidentFile, ResidentPin};
@@ -35,7 +35,7 @@ impl Session {
             plotted: 0,
         };
 
-        self.app_history_gather(&range, &mut restore)?;
+        self.app_history_gather(&range, &BTreeSet::new(), &mut restore)?;
         let context = restore.readings.keys().copied().collect();
         self.app_history_predecessors(&mut restore)?;
         let readings = Vec::with_capacity(super::READINGS_MAX);
