@@ -449,22 +449,102 @@ fn clicking_a_chart_leaves_the_view_where_it_was(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn repeated_arrows_keep_inspecting_after_pending_readings_disappear(cx: &mut TestAppContext) {
-    // Dispatch through the rendered chart while withholding the reader's subsequent output.
+fn an_arrow_step_shows_the_adjacent_second_the_page_holds(cx: &mut TestAppContext) {
+    // Goal: an arrow step on a focused chart shows the adjacent second from the readings the
+    // page holds, as a hover does, and asks the reader for no selection.
+    // Method: step left from the accepted second 1000 through the rendered chart, then read
+    // the chart's accessible reading and the page's request.
     let mut harness = InputHarness::setup(cx);
     harness.driver.focus_chart();
 
-    harness.driver.press("right");
-    assert_eq!(harness.driver.requested_second(), Some(1001));
-    harness.driver.render_pending();
-    harness.driver.press("right");
-    assert_eq!(harness.driver.requested_second(), Some(1002));
     harness.driver.press("left");
 
-    assert_eq!(harness.driver.requested_second(), Some(1001));
-    assert!(harness.driver.readings_are_hidden());
-    assert!(harness.driver.copy_selected().is_err());
+    assert_eq!(harness.driver.shown_second(), Some(999));
+    assert_eq!(harness.driver.requested_second(), Some(1000));
+    assert!(!harness.driver.readings_are_hidden());
     assert!(harness.driver.inspection_has_focus());
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_second_arrow_step_moves_from_the_second_the_first_showed(cx: &mut TestAppContext) {
+    // Goal: arrow steps walk from the second shown, not from the accepted selection.
+    // Method: step left to 999 and back right, which reaches 1000 from the shown second and
+    // would reach 1001 from the accepted one.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.focus_chart();
+    harness.driver.press("left");
+
+    harness.driver.press("right");
+
+    assert_eq!(harness.driver.shown_second(), Some(1000));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn enter_selects_the_second_an_arrow_step_showed(cx: &mut TestAppContext) {
+    // Goal: Enter makes the stepped second the page's selection, as Enter does on the CPU
+    // history. Method: step left to 999, press Enter, then read the page's request.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.focus_chart();
+    harness.driver.press("left");
+
+    harness.driver.press("enter");
+
+    assert_eq!(harness.driver.requested_second(), Some(999));
+    assert_eq!(harness.driver.requested_publication(), Some(1));
+    assert!(harness.driver.inspection_has_focus());
+    harness.teardown();
+}
+
+#[gpui::test]
+fn enter_asks_for_the_stepped_second_once(cx: &mut TestAppContext) {
+    // Goal: the selection Enter sends is the only request, so the reader is not made to start
+    // the selected second's read again. Method: step left, press Enter, let the page take its
+    // next tick, and compare the page's request generation before and after it.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.focus_chart();
+    harness.driver.press("left");
+    harness.driver.press("enter");
+    let selected = harness.driver.request_generation();
+
+    harness.driver.preview_tick();
+
+    assert_eq!(harness.driver.request_generation(), selected);
+    harness.teardown();
+}
+
+#[gpui::test]
+fn moving_focus_off_the_charts_returns_an_arrow_step_to_the_selected_second(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a step lasts while the charts hold focus, as a keyboard inspection of the CPU
+    // history does, so the page does not stay on a second nobody is inspecting.
+    // Method: step left to 999, move focus to the next control with Tab, then read the chart.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.activate_window();
+    harness.driver.focus_chart();
+    harness.driver.press("left");
+
+    harness.driver.dispatch_tab();
+
+    assert!(!harness.driver.inspection_has_focus());
+    assert_eq!(harness.driver.shown_second(), Some(1000));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn escape_returns_an_arrow_step_to_the_selected_second(cx: &mut TestAppContext) {
+    // Goal: Escape leaves the stepped second and shows the selection again, sending nothing.
+    // Method: step left to 999, press Escape, then read the chart and the page's request.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.focus_chart();
+    harness.driver.press("left");
+
+    harness.driver.press("escape");
+
+    assert_eq!(harness.driver.shown_second(), Some(1000));
+    assert_eq!(harness.driver.requested_second(), Some(1000));
     harness.teardown();
 }
 
@@ -932,6 +1012,29 @@ impl InputDriver {
         self.view.read_with(&self.context, |dashboard, _| {
             dashboard.request.identity.as_ref()?["publication"].as_u64()
         })
+    }
+
+    /// Makes the window the active one, since GPUI tells a view its focus moved only in an
+    /// active window.
+    fn activate_window(&mut self) {
+        self.context.update(|window, _| window.activate_window());
+        self.context.run_until_parked();
+    }
+
+    /// The second the energy chart reads out, which is the second the page shows.
+    fn shown_second(&self) -> Option<u64> {
+        self.chart_accessibility_reading("live-energy").0
+    }
+
+    fn request_generation(&self) -> u64 {
+        self.view
+            .read_with(&self.context, |dashboard, _| dashboard.generation)
+    }
+
+    fn preview_tick(&mut self) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            dashboard.preview_tick(cx);
+        });
     }
 
     fn render_pending(&mut self) {

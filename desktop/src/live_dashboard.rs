@@ -730,7 +730,10 @@ impl LiveDashboard {
             .id("flightdeck-inspection")
             .role(gpui::Role::Group)
             .aria_label("History inspection")
-            .aria_description("Left and right inspect adjacent seconds while readings load")
+            .aria_description(
+                "Left and right inspect adjacent seconds, Enter selects the one shown and \
+                 Escape returns to the selection",
+            )
             .track_focus(&focus)
             .tab_stop(false)
             .on_key_down(cx.listener(Self::inspection_keyboard))
@@ -788,6 +791,7 @@ impl Render for LiveDashboard {
         self.install_section_focus(cx);
         self.reading_viewport(window.viewport_size());
         self.install_cpu_focus(window, cx);
+        self.install_inspection_focus(window, cx);
         let root_focus = self.install_root_focus(window, cx);
         self.hardware_state.begin_frame();
         self.renders += 1;

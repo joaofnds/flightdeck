@@ -12,8 +12,12 @@ use serde_json::Value;
 use crate::charts::{self, GRID, Inspection, MUTED, PANEL};
 use crate::data::Panel;
 use crate::live_dashboard::LiveDashboard;
+use crate::live_hover::Origin;
 use crate::live_presentation::clock;
 use crate::live_source::Snapshot;
+
+/// The source of the readings an arrow step on a chart shows.
+const CHART_STEP_SOURCE: &str = "chart-step";
 
 #[cfg(test)]
 #[path = "live_hover_cost_tests.rs"]
@@ -413,7 +417,8 @@ impl LiveDashboard {
             .role(gpui::Role::Slider)
             .aria_label(format!("{} history inspection", panel.title))
             .aria_description(
-                "Left and right inspect adjacent seconds; unavailable readings are gaps",
+                "Left and right inspect adjacent seconds and Enter selects the one shown; \
+                 unavailable readings are gaps",
             )
             .when_some(second.and_then(|value| value.to_f64()), |chart, value| {
                 chart.aria_numeric_value(value).aria_numeric_value_step(1.0)
@@ -426,16 +431,26 @@ impl LiveDashboard {
             })
             .on_a11y_action(gpui::AccessibleAction::Increment, {
                 let entity = cx.entity().downgrade();
-                move |_, _, cx| {
-                    if let Err(error) = entity.update(cx, |this, cx| this.chart_step(1, cx)) {
+                move |_, window, cx| {
+                    // Focus lets moving it away end the step, as it ends an arrow key's.
+                    let stepped = entity.update(cx, |this, cx| {
+                        this.chart_step(1, cx);
+                        this.focus_inspection(window, cx);
+                    });
+                    if let Err(error) = stepped {
                         eprintln!("Chart accessibility action: {error}");
                     }
                 }
             })
             .on_a11y_action(gpui::AccessibleAction::Decrement, {
                 let entity = cx.entity().downgrade();
-                move |_, _, cx| {
-                    if let Err(error) = entity.update(cx, |this, cx| this.chart_step(-1, cx)) {
+                move |_, window, cx| {
+                    // Focus lets moving it away end the step, as it ends an arrow key's.
+                    let stepped = entity.update(cx, |this, cx| {
+                        this.chart_step(-1, cx);
+                        this.focus_inspection(window, cx);
+                    });
+                    if let Err(error) = stepped {
                         eprintln!("Chart accessibility action: {error}");
                     }
                 }
@@ -471,11 +486,18 @@ impl LiveDashboard {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(delta) = crate::dashboard::keyboard_step(event) else {
-            return;
-        };
-
-        self.chart_step(delta, cx);
+        if let Some(delta) = crate::dashboard::keyboard_step(event) {
+            self.chart_step(delta, cx);
+        } else {
+            if self.chart_stepped_second().is_none() {
+                return;
+            }
+            match event.keystroke.key.as_str() {
+                "enter" => self.chart_step_select(cx),
+                "escape" => self.end_reading_preview(cx),
+                _ => return,
+            }
+        }
         self.focus_inspection(window, cx);
 
         window.prevent_default();
@@ -504,22 +526,62 @@ impl LiveDashboard {
         }
     }
 
+    /// Shows the second `delta` seconds from the one shown, from the readings the page holds,
+    /// as a hover does, so a step reads nothing from the recording until Enter selects it.
     pub(crate) fn chart_step(&mut self, delta: i64, cx: &mut Context<Self>) {
-        let Some(snapshot) = self.context_snapshot() else {
+        let Some(snapshot) = self.snapshot.as_deref() else {
             return;
         };
 
         let selection = KeyboardSelection {
-            pending: self.request.second,
+            stepped: self.chart_stepped_second(),
             accepted: snapshot.selection["second"].as_u64(),
         };
         let Some(next) = keyboard_second(&selection, delta, &snapshot.catalog) else {
             return;
         };
-
-        if Some(next) != selection.pending.or(selection.accepted) {
-            self.inspect(next, cx);
+        if Some(next) == selection.stepped.or(selection.accepted) {
+            return;
         }
+
+        let target = crate::live_hover::Target::regular(snapshot, next);
+        self.set_reading_target(CHART_STEP_SOURCE.into(), target, Origin::Keyboard, cx);
+    }
+
+    /// Selects the second an arrow step shows, which then reads it with its context.
+    fn chart_step_select(&mut self, cx: &mut Context<Self>) {
+        let Some(second) = self.chart_stepped_second() else {
+            return;
+        };
+
+        self.inspect(second, cx);
+    }
+
+    /// Watches the charts' focus, so a step ends when the charts lose it, as a keyboard
+    /// inspection of the CPU history does.
+    pub(crate) fn install_inspection_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.inspection_focus.is_some() {
+            return;
+        }
+
+        let focus = cx.focus_handle();
+        cx.on_blur(&focus, window, |this, _, cx| {
+            if this.chart_stepped_second().is_some() {
+                this.end_reading_preview(cx);
+            }
+        })
+        .detach();
+        self.inspection_focus = Some(focus);
+    }
+
+    /// The second an arrow step on a chart shows, while it shows one.
+    fn chart_stepped_second(&self) -> Option<u64> {
+        let preview = self.preview.as_ref()?;
+        if preview.source.as_ref() != CHART_STEP_SOURCE {
+            return None;
+        }
+
+        Some(preview.target.second)
     }
 
     fn chart_heading(panel: &Rc<Panel>, cx: &mut Context<Self>) -> impl IntoElement {
@@ -709,12 +771,12 @@ const LEGEND_VALUE_LINES_MAX: usize = 4;
 pub(crate) struct ChartHelp(pub(crate) String);
 
 struct KeyboardSelection {
-    pending: Option<u64>,
+    stepped: Option<u64>,
     accepted: Option<u64>,
 }
 
 fn keyboard_second(selection: &KeyboardSelection, delta: i64, catalog: &Value) -> Option<u64> {
-    let second = selection.pending.or(selection.accepted)?;
+    let second = selection.stepped.or(selection.accepted)?;
     let mut next = second.saturating_add_signed(delta);
     if let Some(first) = catalog["first_second"].as_u64() {
         next = next.max(first);
@@ -1132,19 +1194,19 @@ mod tests {
     use std::collections::BTreeMap;
 
     #[test]
-    fn queued_keyboard_steps_advance_and_reverse_before_a_new_snapshot_arrives() {
-        // Pending inspection remains the input until the worker publishes its accepted snapshot.
+    fn keyboard_steps_walk_from_the_stepped_second_within_the_recording() {
+        // The second a step shows is the next step's input, held to the recording's edges.
         let catalog = json!({"first_second":900,"last_second":1100});
         let mut selection = KeyboardSelection {
-            pending: None,
+            stepped: None,
             accepted: Some(1000),
         };
-        selection.pending = keyboard_second(&selection, 1, &catalog);
+        selection.stepped = keyboard_second(&selection, 1, &catalog);
         assert_eq!(keyboard_second(&selection, 1, &catalog), Some(1002));
         assert_eq!(keyboard_second(&selection, -1, &catalog), Some(1000));
-        selection.pending = Some(1100);
+        selection.stepped = Some(1100);
         assert_eq!(keyboard_second(&selection, 1, &catalog), Some(1100));
-        selection.pending = Some(900);
+        selection.stepped = Some(900);
         assert_eq!(keyboard_second(&selection, -1, &catalog), Some(900));
     }
 

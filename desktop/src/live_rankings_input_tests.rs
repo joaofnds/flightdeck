@@ -827,6 +827,7 @@ impl InputDriver {
         self.context
             .simulate_mouse_up(bounds.center(), MouseButton::Right, Modifiers::none());
         self.press("left");
+        self.press("enter");
         assert_eq!(self.requested_second(), Some(999));
         assert_eq!(self.requested_publication(), Some(1));
     }
