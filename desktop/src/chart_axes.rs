@@ -122,19 +122,58 @@ pub fn time_labels_between(
             for (fraction, second) in time_ticks(time, f32::from(plot_width)) {
                 let x = bounds.origin.x + left + plot_width * fraction;
                 let label = clock(second, false);
-                paint_label(&label, point(x, bounds.origin.y), plot_width, window, cx);
+                paint_label(
+                    &label,
+                    point(x, bounds.origin.y),
+                    plot_width,
+                    None,
+                    (window, cx),
+                );
             }
         },
     )
     .size_full()
 }
 
+/// Elapsed-time labels at five equal steps across a run of `span` seconds, the last one ending
+/// at the plot's right edge, for a plot that starts `left` pixels in from the labels' left edge
+/// and ends `right` pixels before their right edge.
+#[must_use]
+pub fn elapsed_labels(span: u64, left: Pixels, right: Pixels) -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        move |bounds, (), window, cx| {
+            let plot_width = bounds.size.width - left - right;
+            for step in 0..=5_u64 {
+                let seconds = span * step / 5;
+                let x = bounds.origin.x + left + plot_width * (number_u64(step) / 5.0);
+                let label = format!("{}:{:02}", seconds / 60, seconds % 60);
+                let anchor = (step == 5).then_some(LabelAnchor::End);
+                paint_label(
+                    &label,
+                    point(x, bounds.origin.y),
+                    plot_width,
+                    anchor,
+                    (window, cx),
+                );
+            }
+        },
+    )
+    .size_full()
+}
+
+/// Where a label sits against the point it labels, when not centered on it.
+#[derive(Clone, Copy)]
+enum LabelAnchor {
+    End,
+}
+
 fn paint_label(
     label: &str,
     center: gpui::Point<Pixels>,
     plot_width: Pixels,
-    window: &mut Window,
-    cx: &mut App,
+    anchor: Option<LabelAnchor>,
+    (window, cx): (&mut Window, &mut App),
 ) {
     let color: Hsla = rgb(TEXT).into();
     let line = window.text_system().shape_line(
@@ -152,11 +191,12 @@ fn paint_label(
     );
     let half = line.width / 2.0;
     let left = (center.x - half).min(center.x + plot_width - line.width);
+    let left = match anchor {
+        Some(LabelAnchor::End) => center.x - line.width,
+        None => left.max(center.x - line.width),
+    };
     if let Err(error) = line.paint(
-        point(
-            left.max(center.x - line.width),
-            center.y + px(TIME_LABEL_TOP),
-        ),
+        point(left, center.y + px(TIME_LABEL_TOP)),
         px(LABEL_LINE),
         gpui::TextAlign::Left,
         None,

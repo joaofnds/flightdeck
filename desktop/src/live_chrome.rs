@@ -157,6 +157,9 @@ impl LiveDashboard {
     /// The window of seconds the charts show. It follows the held live reading and not a
     /// hovered second, since a hover moves the cursor and never the charted window.
     pub(crate) fn capture_range(&self) -> String {
+        if self.request.route == "self" {
+            return self.self_run_range();
+        }
         self.snapshot
             .as_deref()
             .and_then(|snapshot| snapshot.selection["second"].as_u64())

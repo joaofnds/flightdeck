@@ -7,7 +7,7 @@ use gpui::{
 };
 use num_traits::ToPrimitive;
 
-use crate::chart_axes::{AxisSide, TimeWindow, axis_column, clock, labels, time_labels};
+use crate::chart_axes::{AxisSide, TimeWindow, axis_column, elapsed_labels, labels};
 use crate::charts::{self, BLUE, GRID, Inspection, LINE, MUTED, ORANGE, PANEL, RED, TEXT};
 
 use crate::live_chart_view::ChartHelp;
@@ -124,6 +124,15 @@ impl LiveDashboard {
         }
     }
 
+    /// The footer's range for the Self page, which has the run's elapsed time and no wall time.
+    pub(crate) fn self_run_range(&self) -> String {
+        let elapsed = self.self_reports.started.zip(wall_second()).map_or_else(
+            || "Unavailable".into(),
+            |(started, now)| self_monitoring::elapsed(started, now),
+        );
+        format!("Elapsed run 0:00–{elapsed} · wall time unavailable")
+    }
+
     fn self_overview(&self) -> impl IntoElement {
         let status = self.self_reports.started.map_or_else(
             || "This app did not start the collector, so its reports are not captured.".into(),
@@ -132,7 +141,10 @@ impl LiveDashboard {
                     || "Unavailable".into(),
                     |now| self_monitoring::elapsed(started, now),
                 );
-                format!("Collector started by this app · {elapsed} elapsed · 10-second reports.")
+                format!(
+                    "Saved Flightdeck diagnostic run · {elapsed} elapsed · 10-second reports. \
+                     No live connection."
+                )
             },
         );
         let columns = if self.viewport_size.width < px(640.0) {
@@ -166,7 +178,7 @@ impl LiveDashboard {
 
     fn self_charts(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let heading = crate::live_views::heading("Collection and overhead");
-        let Some(window) = self_window() else {
+        let Some(window) = self_window(self.self_reports.started) else {
             return div()
                 .child(heading)
                 .child(caption(
@@ -177,15 +189,18 @@ impl LiveDashboard {
         let reports = &self.self_reports;
         let inspected = self_monitoring::inspected(reports, self.self_inspected);
         let second = inspected.map(|tick| tick.second);
-        let run = second.map_or_else(
-            || "Last 15 minutes · no ten-second report yet".into(),
-            |second| {
-                format!(
-                    "Last 15 minutes · inspecting report ending {}",
-                    clock(second, true)
-                )
-            },
-        );
+        let started = reports.started.unwrap_or(window.first);
+        let span = self_monitoring::elapsed(window.first, window.first + window.span);
+        let (run, report) = match second {
+            Some(second) => (
+                format!("Run 0:00–{span} · inspecting report ending"),
+                self_monitoring::elapsed(started, second),
+            ),
+            None => (
+                format!("Run 0:00–{span} · no ten-second report yet"),
+                String::new(),
+            ),
+        };
         let cursor = second.map(|second| fraction(window, second));
         let columns = if self.viewport_size.width < px(640.0) {
             1
@@ -210,10 +225,17 @@ impl LiveDashboard {
                     .mb(px(2.0))
                     .child(
                         div()
-                            .debug_selector(|| format!("self-run:{run}"))
+                            .debug_selector(|| format!("self-run:{run} {report}"))
+                            .flex()
+                            .gap(px(3.0))
                             .text_size(px(12.0))
                             .text_color(rgb(MUTED))
-                            .child(run.clone()),
+                            .child(run.clone())
+                            .child(
+                                div()
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .child(report.clone()),
+                            ),
                     )
                     .child(
                         crate::dashboard::control("Latest report")
@@ -275,12 +297,11 @@ impl LiveDashboard {
                     .child(axis_column(axis, px(CHART_HEIGHT), AxisSide::Leading))
                     .child(div().flex_1().min_w_0().child(plot)),
             )
-            .child(
-                div()
-                    .pl(gutter)
-                    .h(px(20.0))
-                    .child(time_labels(Some(window))),
-            )
+            .child(div().pl(gutter).h(px(20.0)).child(elapsed_labels(
+                window.span,
+                charts::PLOT_INSETS.left,
+                charts::PLOT_INSETS.right,
+            )))
             .child(self_legend(chart))
             .child(caption(&caption_text))
     }
@@ -304,7 +325,7 @@ impl LiveDashboard {
                 },
                 Rc::new(Vec::new()),
                 Rc::new(Cell::new(Bounds::default())),
-                Some(window),
+                None,
             )
         });
         let budget = chart.budget;
@@ -939,18 +960,21 @@ fn budget_label(budget: f32) -> impl IntoElement {
         .child("5% budget")
 }
 
-/// The rolling fifteen minutes the Self charts span, ending at the current wall second.
-fn self_window() -> Option<TimeWindow> {
+/// The run so far, from the second the collector started to the current wall second, at least
+/// ten seconds so the first report has a place on the axis.
+fn self_window(started: Option<u64>) -> Option<TimeWindow> {
+    let now = wall_second()?;
+    let first = started.map_or(now, |started| started.min(now));
     Some(TimeWindow {
-        first: wall_second()?.saturating_sub(899),
-        span: 900,
+        first,
+        span: (now - first).max(10),
     })
 }
 
 fn fraction(window: TimeWindow, second: u64) -> f32 {
     let offset = second.saturating_sub(window.first).to_f32().unwrap_or(0.0);
     let span = window.span.to_f32().unwrap_or(1.0).max(1.0);
-    (offset + 0.5) / span
+    offset / span
 }
 
 fn wall_second() -> Option<u64> {

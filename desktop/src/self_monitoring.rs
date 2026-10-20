@@ -354,7 +354,7 @@ fn chart_rows(
     definition: &Definition,
 ) -> Vec<(u64, Vec<Option<f32>>)> {
     let end = window.first.saturating_add(window.span);
-    let within = |second: u64| (window.first..end).contains(&second);
+    let within = |second: u64| (window.first..=end).contains(&second);
     let fields = definition.fields.iter().map(|(field, _, _)| *field);
     match definition.group {
         Group::Ticks => reports
@@ -391,7 +391,7 @@ fn chart_panel(
         .iter()
         .map(|(second, _)| {
             let offset = second.saturating_sub(window.first).to_f32().unwrap_or(0.0);
-            (offset + 0.5) / span
+            offset / span
         })
         .collect();
     let lines = definition
