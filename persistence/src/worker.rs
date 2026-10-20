@@ -13,7 +13,7 @@ use collector::tracker::Event;
 use crate::resources::{WORKING_BYTES_MAX, Watchdog};
 use crate::{
     Begin, Encoder, Limits, Losses, Manifest, NumberedEvent, Observation, Result, Store,
-    TimeBounds, Window, WindowIdentity,
+    TableManifest, TimeBounds, Window, WindowIdentity,
 };
 
 const WINDOW_NS: u64 = 60_000_000_000;
@@ -23,7 +23,28 @@ pub enum Outcome {
     Owned,
 }
 
-pub fn run(root: &Path, memory_limit: u64) -> Result<Outcome> {
+/// Derives tables from those the persister wrote for a window, which seal with them.
+pub trait Derive {
+    /// Writes into the pending directory only tables `schema::DERIVED_TABLES` names.
+    fn derive(&self, derivation: &Derivation<'_>) -> Result<Vec<TableManifest>>;
+}
+
+pub struct Derivation<'path> {
+    pub identity: WindowIdentity,
+    /// The directory of the tables the persister wrote for the window.
+    pub pending: &'path Path,
+    /// The data directory of the run's sealed window holding the observation just before the
+    /// window's first, when there is one.
+    pub predecessor: Option<&'path Path>,
+}
+
+/// What writes a window's tables: the persister's own and those derived from them.
+struct Writers<'derive> {
+    encoder: Encoder,
+    derive: &'derive dyn Derive,
+}
+
+pub fn run(root: &Path, memory_limit: u64, derive: &dyn Derive) -> Result<Outcome> {
     let watchdog = Watchdog::start(memory_limit)?;
     let operation = watchdog.operation()?;
     let mut store = match Store::open(root) {
@@ -31,7 +52,10 @@ pub fn run(root: &Path, memory_limit: u64) -> Result<Outcome> {
         Err(error) if crate::ownership_contended(&error) => return Ok(Outcome::Owned),
         Err(error) => return Err(error.into()),
     };
-    let encoder = Encoder;
+    let writers = Writers {
+        encoder: Encoder,
+        derive,
+    };
     drop(operation);
     let registry_path = root.join("runs");
     let mut registry_buffer = [0_u8; 4097];
@@ -39,7 +63,7 @@ pub fn run(root: &Path, memory_limit: u64) -> Result<Outcome> {
     for _pass in 0..u64::MAX {
         let operation = watchdog.operation()?;
         let runs = run_registry(&registry_path, &mut registry_buffer, &mut recovery)?;
-        let waiting = run_pass(root, &store, &encoder, &runs, &mut recovery)?;
+        let waiting = run_pass(root, &store, &writers, &runs, &mut recovery)?;
         if !waiting {
             if let Some(owned) = run_release(root, store, &recovery.states)? {
                 store = owned;
@@ -122,7 +146,7 @@ fn run_registry(
 fn run_pass(
     root: &Path,
     store: &Store,
-    encoder: &Encoder,
+    writers: &Writers<'_>,
     runs: &[RegisteredRun],
     recovery: &mut Recovery,
 ) -> Result<bool> {
@@ -142,7 +166,7 @@ fn run_pass(
         if recovery.pending_unknown {
             state.losses.unknown = true;
         }
-        match persist_one(store, encoder, registered, closed, state)? {
+        match persist_one(store, writers, registered, closed, state)? {
             Progress::Sealed => {
                 if !state.losses.unknown {
                     recovery.pending_unknown = false;
@@ -188,6 +212,8 @@ struct RunState {
     losses: Losses,
     source: SourceState,
     loaded: bool,
+    /// The run's sealed window that ends last.
+    latest: Option<Manifest>,
 }
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
@@ -232,7 +258,7 @@ fn source_unavailable(
 
 fn persist_one(
     store: &Store,
-    encoder: &Encoder,
+    writers: &Writers<'_>,
     registered: &RegisteredRun,
     closed: bool,
     state: &mut RunState,
@@ -251,10 +277,13 @@ fn persist_one(
         return Ok(Progress::Unavailable);
     };
     if !state.loaded {
-        let progress = store.progress(&registered.identity)?;
-        state.next_publication = progress.map_or(reader.publication_first(), |manifest| {
-            manifest.publication_end
-        });
+        state.latest = store.progress(&registered.identity)?;
+        state.next_publication = state
+            .latest
+            .as_ref()
+            .map_or(reader.publication_first(), |manifest| {
+                manifest.publication_end
+            });
         state.loaded = true;
         if state.next_publication > 0 {
             reader.seek_publication(state.next_publication)?;
@@ -262,11 +291,12 @@ fn persist_one(
     }
     match persist_one_stage(reader, store, registered, closed, state)? {
         Staged::Window(window) => {
-            let committed = seal(store, encoder, &window, state.losses)?;
+            let sealed = seal(store, writers, &window, state)?;
             state.next_publication = window.publication_range().end;
-            if committed {
+            if sealed.committed {
                 state.losses = Losses::default();
             }
+            state.latest = Some(sealed.manifest);
             Ok(Progress::Sealed)
         }
         Staged::Waiting => Ok(Progress::Waiting),
@@ -316,6 +346,7 @@ fn persist_one_stage(
                 if let Some(manifest) = store.existing(&identity)? {
                     reader.seek_publication(manifest.publication_end)?;
                     state.next_publication = manifest.publication_end;
+                    state.latest = Some(manifest);
                     continue;
                 }
                 if !window_ready(&mut reader, &mut tick, &identity, closed)? {
@@ -515,40 +546,99 @@ fn read_events(
     Err(crate::Error::Bound("event scan"))
 }
 
-fn seal(store: &Store, encoder: &Encoder, window: &Window, losses: Losses) -> Result<bool> {
+/// A window the store holds sealed, and whether this seal committed it.
+struct Sealed {
+    manifest: Manifest,
+    committed: bool,
+}
+
+fn seal(store: &Store, writers: &Writers<'_>, window: &Window, state: &RunState) -> Result<Sealed> {
     let started = std::time::Instant::now();
-    match store.begin(&window.identity)? {
-        Begin::Committed(_) => Ok(false),
-        Begin::Pending(pending) => {
-            let tables = encoder.encode(window, pending.path())?;
-            let publications = window.publication_range();
-            let events = window.event_range();
-            let manifest = Manifest {
-                identity: window.identity,
-                publication_first: publications.start,
-                publication_end: publications.end,
-                events_first: events.start,
-                events_end: events.end,
-                wall_ns: bounds(window, |value| value.wall_ns),
-                continuous_ns: bounds(window, |value| value.continuous_ns),
-                awake_ns: bounds(window, |value| value.awake_ns),
-                losses,
-                data_directory: String::new(),
-                tables,
-            };
-            let committed = store.commit(pending, manifest)?;
+    let pending = match store.begin(&window.identity)? {
+        Begin::Committed(manifest) => {
+            return Ok(Sealed {
+                manifest,
+                committed: false,
+            });
+        }
+        Begin::Pending(pending) => pending,
+    };
+
+    let mut tables = writers.encoder.encode(window, pending.path())?;
+    let publications = window.publication_range();
+    let predecessor = state
+        .latest
+        .as_ref()
+        .filter(|latest| latest.publication_end == publications.start)
+        .map(|latest| store.data_path(latest));
+    tables.extend(seal_derived(
+        writers.derive,
+        &Derivation {
+            identity: window.identity,
+            pending: pending.path(),
+            predecessor: predecessor.as_deref(),
+        },
+    )?);
+
+    let events = window.event_range();
+    let manifest = Manifest {
+        identity: window.identity,
+        publication_first: publications.start,
+        publication_end: publications.end,
+        events_first: events.start,
+        events_end: events.end,
+        wall_ns: bounds(window, |value| value.wall_ns),
+        continuous_ns: bounds(window, |value| value.continuous_ns),
+        awake_ns: bounds(window, |value| value.awake_ns),
+        losses: state.losses,
+        data_directory: String::new(),
+        tables,
+    };
+    let committed = store.commit(pending, manifest)?;
+    eprintln!(
+        "persister sealed window={} publications={}..{} loss={} events_lost={} \
+        seal_ns={} staged_bytes={} tables={}",
+        committed.identity.window,
+        committed.publication_first,
+        committed.publication_end,
+        committed.losses.publications,
+        committed.losses.events,
+        started.elapsed().as_nanos(),
+        window.staged_bytes(),
+        committed.tables.len()
+    );
+
+    Ok(Sealed {
+        manifest: committed,
+        committed: true,
+    })
+}
+
+/// The tables derived for a window, or none when deriving fails, since a reader can derive
+/// them again from the tables the window seals with.
+fn seal_derived(derive: &dyn Derive, derivation: &Derivation<'_>) -> Result<Vec<TableManifest>> {
+    match derive.derive(derivation) {
+        Ok(tables) => {
+            for table in &tables {
+                assert!(crate::schema::DERIVED_TABLES.contains(&table.name));
+            }
+
+            Ok(tables)
+        }
+        Err(error) => {
             eprintln!(
-                "persister sealed window={} publications={}..{} loss={} events_lost={} \
-                seal_ns={} staged_bytes={}",
-                committed.identity.window,
-                committed.publication_first,
-                committed.publication_end,
-                committed.losses.publications,
-                committed.losses.events,
-                started.elapsed().as_nanos(),
-                window.staged_bytes()
+                "persister derived no tables window={}: {error}",
+                derivation.identity.window
             );
-            Ok(true)
+            for name in crate::schema::DERIVED_TABLES {
+                match std::fs::remove_file(derivation.pending.join(format!("{name}.parquet"))) {
+                    Ok(()) => {}
+                    Err(problem) if problem.kind() == io::ErrorKind::NotFound => {}
+                    Err(problem) => return Err(problem.into()),
+                }
+            }
+
+            Ok(Vec::new())
         }
     }
 }
@@ -673,6 +763,10 @@ mod tests {
     }
 
     fn window(recording: Identity, number: u64) -> Window {
+        window_at(recording, number, number * 60 + 1)
+    }
+
+    fn window_at(recording: Identity, number: u64, publication: u64) -> Window {
         let shape = Shape {
             slot_count: 1,
             cpu_capacity: 1,
@@ -694,7 +788,7 @@ mod tests {
         window
             .push_tick(
                 &Observation {
-                    publication: number * 60 + 1,
+                    publication,
                     wall_ns: None,
                     continuous_ns: None,
                     awake_ns: None,
@@ -743,8 +837,12 @@ mod tests {
         publish_readable_identity(&mut writer);
         writer.finish();
         let mut state = RunState::default();
+        let writers = Writers {
+            encoder: Encoder,
+            derive: &PredecessorSpy::default(),
+        };
 
-        let result = persist_one(&store, &Encoder, &registered, true, &mut state);
+        let result = persist_one(&store, &writers, &registered, true, &mut state);
 
         collector::ring::unlink_generation(writer.name()).unwrap();
         assert!(matches!(result.unwrap(), Progress::Sealed));
@@ -895,15 +993,25 @@ mod tests {
         // Method: seal, replay with new loss, then publish that status in the next key.
         let root = Directory::new();
         let store = Store::open(&root.0).unwrap();
-        let encoder = Encoder;
-        let first = window(store.recording(), 0);
-        let unknown = Losses {
-            unknown: true,
-            ..Losses::default()
+        let writers = Writers {
+            encoder: Encoder,
+            derive: &PredecessorSpy::default(),
         };
-        assert!(seal(&store, &encoder, &first, Losses::default()).unwrap());
+        let first = window(store.recording(), 0);
+        let unknown = RunState {
+            losses: Losses {
+                unknown: true,
+                ..Losses::default()
+            },
+            ..RunState::default()
+        };
+        assert!(
+            seal(&store, &writers, &first, &RunState::default())
+                .unwrap()
+                .committed
+        );
 
-        let acknowledged = seal(&store, &encoder, &first, unknown).unwrap();
+        let acknowledged = seal(&store, &writers, &first, &unknown).unwrap().committed;
 
         assert!(!acknowledged);
         assert!(
@@ -915,7 +1023,7 @@ mod tests {
                 .unknown
         );
         let next = window(store.recording(), 1);
-        assert!(seal(&store, &encoder, &next, unknown).unwrap());
+        assert!(seal(&store, &writers, &next, &unknown).unwrap().committed);
         assert!(
             store
                 .existing(&next.identity)
@@ -994,6 +1102,7 @@ mod tests {
                 },
                 source: SourceState::Unavailable,
                 loaded: true,
+                latest: None,
             },
         ];
 
@@ -1006,5 +1115,212 @@ mod tests {
         assert_eq!(states[0].source, SourceState::Unavailable);
         assert!(states[0].loaded);
         assert_eq!(states[1].identity, None);
+    }
+
+    /// Derives no table, and keeps the predecessor each window was derived from.
+    #[derive(Default)]
+    struct PredecessorSpy {
+        predecessors: std::cell::RefCell<Vec<Option<std::path::PathBuf>>>,
+    }
+
+    impl Derive for PredecessorSpy {
+        fn derive(&self, derivation: &Derivation<'_>) -> Result<Vec<TableManifest>> {
+            self.predecessors
+                .borrow_mut()
+                .push(derivation.predecessor.map(Path::to_path_buf));
+            Ok(Vec::new())
+        }
+    }
+
+    /// Writes the App ranks table, then fails when told to, as a derivation cut short does.
+    struct RanksStub {
+        fails: bool,
+    }
+
+    impl Derive for RanksStub {
+        fn derive(&self, derivation: &Derivation<'_>) -> Result<Vec<TableManifest>> {
+            std::fs::write(derivation.pending.join("app_ranks.parquet"), b"ranks")?;
+            if self.fails {
+                return Err(crate::Error::Bound("derivation test"));
+            }
+
+            Ok(vec![TableManifest {
+                name: "app_ranks",
+                rows: 3,
+            }])
+        }
+    }
+
+    #[test]
+    fn seals_the_tables_derived_from_a_window_with_it() {
+        // Goal: a derived table seals in the same commit as the tables it derives from.
+        // Method: derive a table into the pending window, then reopen the committed window.
+        let root = Directory::new();
+        let store = Store::open(&root.0).unwrap();
+        let writers = Writers {
+            encoder: Encoder,
+            derive: &RanksStub { fails: false },
+        };
+        let window = window(store.recording(), 0);
+
+        seal(&store, &writers, &window, &RunState::default()).unwrap();
+
+        let sealed = store.existing(&window.identity).unwrap().unwrap();
+        assert_eq!(sealed.tables.last().unwrap().name, "app_ranks");
+        assert_eq!(sealed.tables.len(), crate::schema::TABLES.len() + 1);
+        let path = store.data_path(&sealed).join("app_ranks.parquet");
+        assert_eq!(std::fs::read(path).unwrap(), b"ranks");
+    }
+
+    #[test]
+    fn seals_a_window_without_its_derived_tables_when_deriving_fails() {
+        // Goal: a failed derivation loses only what a reader can derive again.
+        // Method: fail after writing part of a derived table, then reopen the committed window.
+        let root = Directory::new();
+        let store = Store::open(&root.0).unwrap();
+        let writers = Writers {
+            encoder: Encoder,
+            derive: &RanksStub { fails: true },
+        };
+        let window = window(store.recording(), 0);
+
+        let sealed = seal(&store, &writers, &window, &RunState::default()).unwrap();
+
+        assert!(sealed.committed);
+        let reopened = store.existing(&window.identity).unwrap().unwrap();
+        assert_eq!(reopened.tables.len(), crate::schema::TABLES.len());
+        let path = store.data_path(&reopened).join("app_ranks.parquet");
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn derives_a_window_from_the_sealed_window_holding_the_observation_before_it() {
+        // Goal: a derivation reads the observation before its window only from where it lies.
+        // Method: seal adjacent windows, then one after a lost publication, keeping the latest.
+        let root = Directory::new();
+        let store = Store::open(&root.0).unwrap();
+        let spy = PredecessorSpy::default();
+        let writers = Writers {
+            encoder: Encoder,
+            derive: &spy,
+        };
+        let mut state = RunState::default();
+        let mut paths = Vec::new();
+
+        for (number, publication) in [(0, 1), (1, 2), (2, 4)] {
+            let window = window_at(store.recording(), number, publication);
+            let sealed = seal(&store, &writers, &window, &state).unwrap();
+            paths.push(store.data_path(&sealed.manifest));
+            state.latest = Some(sealed.manifest);
+        }
+
+        assert_eq!(
+            *spy.predecessors.borrow(),
+            [None, Some(paths[0].clone()), None]
+        );
+    }
+
+    #[test]
+    fn derives_each_window_from_the_one_before_it_across_a_restart() {
+        // Goal: the worker finds the window before the next one whether it sealed it or found
+        // it sealed after a restart, when the ring no longer holds that window's minute.
+        // Method: drain a one-slot ring minute by minute, restarting the worker before the third.
+        let root = Directory::new();
+        let store = Store::open(&root.0).unwrap();
+        let mut registered = registered(store.recording());
+        let mut writer = minutes_ring(&root, &mut registered);
+        let spy = PredecessorSpy::default();
+        let writers = Writers {
+            encoder: Encoder,
+            derive: &spy,
+        };
+        let mut state = RunState::default();
+        let mut restarted = RunState::default();
+
+        minutes_ring_publish(&mut writer, 0);
+        persist_one(&store, &writers, &registered, true, &mut state).unwrap();
+        minutes_ring_publish(&mut writer, 1);
+        persist_one(&store, &writers, &registered, true, &mut state).unwrap();
+        minutes_ring_publish(&mut writer, 2);
+        persist_one(&store, &writers, &registered, true, &mut restarted).unwrap();
+
+        collector::ring::unlink_generation(writer.name()).unwrap();
+        let path = |number| {
+            let identity = WindowIdentity {
+                run: registered.identity,
+                window: number,
+            };
+            store.data_path(&store.existing(&identity).unwrap().unwrap())
+        };
+        assert_eq!(
+            *spy.predecessors.borrow(),
+            [None, Some(path(0)), Some(path(1))]
+        );
+    }
+
+    /// A ring holding only the tick published last.
+    fn minutes_ring(root: &Directory, registered: &mut RegisteredRun) -> collector::ring::Writer {
+        let place = collector::ring::Place {
+            lock_path: root.0.join("ring.lock"),
+            name_prefix: format!("/fdminutes{}", std::process::id()),
+        };
+        let shape = Shape {
+            slot_count: 1,
+            cpu_capacity: 1,
+            interface_capacity: 1,
+            core_capacity: 1,
+            state_capacity: 1,
+            fan_capacity: 1,
+            process_capacity: 1,
+            coalition_capacity: 1,
+            event_capacity: 1,
+        };
+        let writer = collector::ring::Writer::create_with_identity(
+            &place,
+            shape,
+            collector::ring::DictionaryCapacity {
+                entries: 1,
+                arena_bytes: 32,
+            },
+            &registered.identity,
+            1,
+        )
+        .unwrap();
+        registered.ring_name = writer.name().to_owned();
+
+        writer
+    }
+
+    fn minutes_ring_publish(writer: &mut collector::ring::Writer, minute: u64) {
+        let memory = collector::machine::Memory::default();
+        let readings = collector::ring::Readings {
+            run_tick: minute + 1,
+            cpus: &[],
+            memory: &memory,
+            interfaces: &[],
+            ioreport: None,
+            smc: None,
+            processes: &[],
+            processes_refused: 0,
+            processes_gone: 0,
+            coalitions: &[],
+            events: &[],
+            dropped: collector::ring::Dropped::default(),
+        };
+
+        writer
+            .publish_with_identity(
+                &readings,
+                Some(&collector::ring::ObservationTimes {
+                    wall_ns: 1_000_000_000_000 + minute * WINDOW_NS,
+                    continuous_ns: 1 + minute * WINDOW_NS,
+                    awake_ns: 1 + minute * WINDOW_NS,
+                }),
+                &collector::ring::IdentityPublication {
+                    processes: &[],
+                    events: &[],
+                },
+            )
+            .unwrap();
     }
 }

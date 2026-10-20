@@ -13,7 +13,7 @@ fn main() -> ExitCode {
     }
     let options = collector::arguments("persister").and_then(|words| options(&words));
     match options {
-        Ok((root, memory)) => match persistence::worker::run(&root, memory) {
+        Ok((root, memory)) => match persistence::worker::run(&root, memory, &Underived) {
             Ok(persistence::worker::Outcome::Complete) => ExitCode::SUCCESS,
             Ok(persistence::worker::Outcome::Owned) => {
                 eprintln!("recording owned by surviving persister; CPU not measured");
@@ -28,6 +28,18 @@ fn main() -> ExitCode {
             eprintln!("{error}");
             ExitCode::from(2)
         }
+    }
+}
+
+/// Derives no table, so each window seals with only the tables the persister wrote.
+struct Underived;
+
+impl persistence::worker::Derive for Underived {
+    fn derive(
+        &self,
+        _derivation: &persistence::worker::Derivation<'_>,
+    ) -> persistence::Result<Vec<persistence::TableManifest>> {
+        Ok(Vec::new())
     }
 }
 

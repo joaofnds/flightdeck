@@ -162,6 +162,12 @@ impl Store {
         Ok(latest)
     }
 
+    /// The directory holding a sealed window's tables.
+    #[must_use]
+    pub fn data_path(&self, manifest: &Manifest) -> PathBuf {
+        self.root.join(&manifest.data_directory)
+    }
+
     #[must_use]
     pub fn marker_path(&self, identity: &WindowIdentity) -> PathBuf {
         WindowKey::from(identity).marker(&self.root)
