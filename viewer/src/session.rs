@@ -237,6 +237,44 @@ impl Session {
             "summary": summary, "trends": points, "context_seconds": 900}))
     }
 
+    /// Selects the observation of `second` that `named` picks out of its JSON, or none where the
+    /// saved minutes hold no such observation. Unlike `select` it builds no context, so it reads
+    /// one window's ticks, and it leaves the context the last selection read.
+    pub(crate) fn inspect(
+        &mut self,
+        second: u64,
+        named: impl Fn(&Value) -> bool,
+    ) -> Result<Option<Value>> {
+        self.operation
+            .begin(self.operation.epoch())?
+            .run(|| self.inspect_inner(second, named))
+    }
+
+    fn inspect_inner(
+        &mut self,
+        second: u64,
+        named: impl Fn(&Value) -> bool,
+    ) -> Result<Option<Value>> {
+        self.selected = None;
+        self.app_sample_cache.get_mut().take();
+        let end = second
+            .checked_add(1)
+            .and_then(|value| value.checked_mul(NS))
+            .ok_or(Error::Bound("selection time"))?;
+
+        let observations = self.observations(second * NS, end)?;
+        let Some(chosen) = observations
+            .into_iter()
+            .find(|observation| named(&observation.json(self)))
+        else {
+            return Ok(None);
+        };
+
+        let selected = chosen.json(self);
+        self.selected = Some(chosen);
+        Ok(Some(selected))
+    }
+
     pub(crate) fn context(&self, range: ContextRange, output: &mut Vec<Value>) -> Result<()> {
         assert!(range.first_ns < range.end_ns);
         assert!(output.is_empty());

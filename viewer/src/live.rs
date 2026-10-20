@@ -366,6 +366,68 @@ impl LiveSession {
         Ok(response)
     }
 
+    /// Selects the observation `identity` names at `second`, for a read of that second alone, as
+    /// a hover's is. It builds no context, which costs `select` hundreds of milliseconds on a
+    /// full window, and leaves the context the last `select` read, so only reads of the selected
+    /// second may follow it, never a history.
+    pub fn inspect(&mut self, second: u64, identity: &Value) -> Result<Value> {
+        self.selected = None;
+        self.follows_live = false;
+        if let Some(inspected) = self.inspected.take() {
+            self.cache_bytes -= inspected.bytes;
+        }
+        self.operation.check()?;
+
+        let selected = self.inspect_selected(second, identity)?;
+        self.selected = Some(selected.clone());
+        Ok(json!({"second": second, "selected": selected}))
+    }
+
+    /// The observation `identity` names at `second`, from the newest live readings, then the
+    /// ring, then the saved minutes, which are opened again once where the session's copy of
+    /// them is older than the observation.
+    fn inspect_selected(&mut self, second: u64, identity: &Value) -> Result<Value> {
+        if let Some(observation) = self
+            .observations
+            .iter()
+            .filter(|observation| observation.observation.wall / NANOSECONDS_PER_SECOND == second)
+            .find(|observation| same(&observation.json(), identity))
+        {
+            return Ok(observation.json());
+        }
+
+        if let Some(inspected) = self.select_rehydrate(identity)? {
+            let selected = inspected.json();
+            if selected["wall_ns"]
+                .as_u64()
+                .map(|wall| wall / NANOSECONDS_PER_SECOND)
+                != Some(second)
+            {
+                return Err(Error::Bound("inspected observation second"));
+            }
+            self.cache_bytes += inspected.bytes;
+            self.inspected = Some(inspected);
+            self.poll_evict(0)?;
+            return Ok(selected);
+        }
+
+        if let Some(selected) = self.inspect_history(second, identity)? {
+            return Ok(selected);
+        }
+        self.refresh_history()?;
+        self.inspect_history(second, identity)?
+            .ok_or(Error::Bound("inspected observation"))
+    }
+
+    fn inspect_history(&mut self, second: u64, identity: &Value) -> Result<Option<Value>> {
+        let Some(history) = &mut self.history else {
+            return Ok(None);
+        };
+
+        history.begin(self.operation.epoch())?;
+        history.inspect(second, |candidate| same(candidate, identity))
+    }
+
     /// The saved readings older than `second`'s full-detail context, back to the loaded hour,
     /// one in every stretch of seconds. Read again only when the context moves into another
     /// stretch or a minute is sealed, so following the newest second costs one read in
@@ -2203,6 +2265,11 @@ mod tests {
     mod commit_selection_tests {
         use super::*;
         include!("live_commit_selection_tests.rs");
+    }
+
+    mod inspect_tests {
+        use super::*;
+        include!("live_inspect_tests.rs");
     }
 
     static NEXT: AtomicU64 = AtomicU64::new(0);
