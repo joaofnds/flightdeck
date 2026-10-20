@@ -98,6 +98,7 @@ pub struct LiveDashboard {
     pub(crate) app_table_scroll: gpui::ScrollHandle,
     pub cpu_inspection: Option<crate::live_cpu_history::CPUInspection>,
     pub cpu_history_focus: Option<gpui::FocusHandle>,
+    pub(crate) root_focus: Option<gpui::FocusHandle>,
     pub native: crate::native_workflows::NativeControls,
     pub(crate) inspection_focus: Option<gpui::FocusHandle>,
     pub(crate) list: ListState,
@@ -230,6 +231,7 @@ impl LiveDashboard {
             app_table_scroll: gpui::ScrollHandle::new(),
             cpu_inspection: None,
             cpu_history_focus: None,
+            root_focus: None,
             native: crate::native_workflows::NativeControls::default(),
             inspection_focus: None,
             list: ListState::new(0, ListAlignment::Top, px(100.0)),
@@ -759,6 +761,25 @@ impl LiveDashboard {
     }
 }
 
+impl LiveDashboard {
+    /// The window's own focus, taken at the first frame so a key pressed before any control
+    /// has focus still reaches the window's key handler.
+    fn install_root_focus(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::FocusHandle {
+        if let Some(focus) = &self.root_focus {
+            return focus.clone();
+        }
+        let focus = cx.focus_handle();
+        window.focus(&focus, cx);
+        self.root_focus = Some(focus.clone());
+
+        focus
+    }
+}
+
 impl Render for LiveDashboard {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.rendered_source != Some(self.native.source) {
@@ -769,6 +790,7 @@ impl Render for LiveDashboard {
         self.install_section_focus(cx);
         self.reading_viewport(window.viewport_size());
         self.install_cpu_focus(window, cx);
+        let root_focus = self.install_root_focus(window, cx);
         self.hardware_state.begin_frame();
         self.renders += 1;
         if self.renders == 1 {
@@ -785,6 +807,8 @@ impl Render for LiveDashboard {
 
         div()
             .id("flightdeck-live")
+            .track_focus(&root_focus)
+            .tab_stop(false)
             .role(gpui::Role::Application)
             .accessibility_id("flightdeck.live")
             .aria_label("Flightdeck system monitor")

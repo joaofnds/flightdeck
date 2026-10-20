@@ -544,6 +544,21 @@ fn exact_unix_entry_can_request_a_gap_after_a_failed_selection(cx: &mut TestAppC
     harness.teardown();
 }
 
+#[gpui::test]
+fn tab_with_nothing_focused_focuses_a_control(cx: &mut TestAppContext) {
+    // Goal: the first Tab of a window that has focused nothing yet reaches a control, as it
+    // does for a keyboard user and for the control socket, which sends the same keystroke.
+    // Method: open the dashboard, send Tab through the window and ask whether it focuses
+    // anything.
+    let mut harness = InputHarness::setup(cx);
+    assert!(!harness.driver.a_control_has_focus());
+
+    harness.driver.dispatch_tab();
+
+    assert!(harness.driver.a_control_has_focus());
+    harness.teardown();
+}
+
 struct InputHarness {
     driver: InputDriver,
 }
@@ -702,6 +717,25 @@ impl InputDriver {
 
     fn press(&mut self, keys: &str) {
         self.context.simulate_keystrokes(keys);
+    }
+
+    fn dispatch_tab(&mut self) {
+        let tab = gpui::Keystroke::parse("tab").unwrap();
+        self.context.update(|window, cx| {
+            window.dispatch_keystroke(tab, cx);
+        });
+        self.context.run_until_parked();
+    }
+
+    fn a_control_has_focus(&mut self) -> bool {
+        let root = self
+            .view
+            .read_with(&self.context, |dashboard, _| dashboard.root_focus.clone());
+
+        self.context.update(|window, cx| {
+            let focused = window.focused(cx);
+            focused.is_some() && focused != root
+        })
     }
 
     fn previous_second_position(&mut self) -> gpui::Point<gpui::Pixels> {
