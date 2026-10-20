@@ -205,28 +205,13 @@ fn panels_panel(
     let mut segments = Vec::with_capacity(payload.points.len());
 
     panels_panel_positions(payload, first, span, &mut positions, &mut segments)?;
-    let order = group_order(payload);
-    let mut lines = Vec::with_capacity(order.len() * definition.metrics.len().max(2));
+    let lines = panels_panel_lines(payload, definition);
 
     // The prototype mirrors written bytes below the axis, so that chart has no zero floor.
     let mirrored = definition
         .metrics
         .iter()
         .any(|metric| matches!(metric, ProcessGroupMetric::DiskWritten));
-    for metric in definition.metrics {
-        for (position, group) in order.iter().enumerate() {
-            lines.push(panels_panel_line(payload, (position, *group), *metric));
-        }
-    }
-    for suffix in definition.missing {
-        for (position, group) in order.iter().enumerate() {
-            lines.push(panels_panel_line_missing(
-                payload,
-                (position, *group),
-                suffix,
-            ));
-        }
-    }
 
     Ok(Panel {
         id: format!("live-process-groups-{}", definition.suffix),
@@ -328,6 +313,33 @@ fn group_name(identity: &ProcessGroup) -> String {
         ProcessGroup::Named(bytes) => panels_panel_line_display(bytes),
         ProcessGroup::Other => "Other".into(),
     }
+}
+
+/// A line for each group under each of the panel's metrics, then each group's missing-reading
+/// line.
+fn panels_panel_lines(
+    payload: &AppProcessGroupsHistory,
+    definition: &PanelDefinition,
+) -> Vec<Line> {
+    let order = group_order(payload);
+    let mut lines = Vec::with_capacity(order.len() * definition.metrics.len().max(2));
+
+    for metric in definition.metrics {
+        for (position, group) in order.iter().enumerate() {
+            lines.push(panels_panel_line(payload, (position, *group), *metric));
+        }
+    }
+    for suffix in definition.missing {
+        for (position, group) in order.iter().enumerate() {
+            lines.push(panels_panel_line_missing(
+                payload,
+                (position, *group),
+                suffix,
+            ));
+        }
+    }
+
+    lines
 }
 
 /// A line of the group at `group.1` colored by its place `group.0` in the listing.
