@@ -192,21 +192,7 @@ impl LiveDashboard {
     pub fn new(worker: Worker, route: String, seconds: Option<u32>) -> Self {
         let mut dashboard = Self {
             worker,
-            request: Request {
-                route,
-                second: None,
-                identity: None,
-                table: "ticks".into(),
-                offset: 0,
-                app: None,
-                apps_offset: 0,
-                members_offset: 0,
-                cpu_offset: 0,
-                load_resident_history: true,
-                load_app_attribution_history: true,
-                load_process_history: true,
-                executable: None,
-            },
+            request: Self::new_request(route),
             snapshot: None,
             pending_snapshot: None,
             visited: std::collections::BTreeMap::new(),
@@ -260,6 +246,24 @@ impl LiveDashboard {
         dashboard.rebuild();
         dashboard.submit();
         dashboard
+    }
+
+    fn new_request(route: String) -> Request {
+        Request {
+            route,
+            second: None,
+            identity: None,
+            table: "ticks".into(),
+            offset: 0,
+            app: None,
+            apps_offset: 0,
+            members_offset: 0,
+            cpu_offset: 0,
+            load_resident_history: true,
+            load_app_attribution_history: true,
+            load_process_history: true,
+            executable: None,
+        }
     }
 
     pub fn tick(&mut self, cx: &mut Context<Self>) {
