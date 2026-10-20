@@ -47,11 +47,15 @@ target/debug/flightdeck-control --socket /tmp/flightdeck.sock \
 
 `state` reports the route, the selected and hovered seconds, the live status, the
 viewport, the scroll position and the stat cards. `rows` lists the page's rows, which
-`reveal ROW_KEY` scrolls to the top. Pointer commands take window coordinates in
-points. A screenshot renders the window's own frame offscreen, at its scale factor,
-so it shows exactly what the window draws and nothing of the desktop around it. It
-first waits up to five seconds for the page's readings and reports in `settled` whether
-they arrived. Builds without the feature refuse `--control`.
+`reveal ROW_KEY` scrolls to the top. `hovers` reports the latest 64 chart hovers, oldest
+first, each with its page, its second and `complete_ms`, the time the app measured from
+handling the pointer move to the page holding that second's complete readings. It is null
+for a hover that ended, or whose read failed, before then. `count` counts every hover since
+launch. The socket answers at the window's own pace, so its round trip cannot time a hover.
+Pointer commands take window coordinates in points. A screenshot renders the window's own
+frame offscreen, at its scale factor, so it shows exactly what the window draws and nothing
+of the desktop around it. It first waits up to five seconds for the page's readings and
+reports in `settled` whether they arrived. Builds without the feature refuse `--control`.
 
 Timed interactive live windows accept `--seconds 1..1800`. Run
 `target/release/flightdeck --seconds 900`

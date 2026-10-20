@@ -243,6 +243,7 @@ fn execute(
     match words.first().copied().unwrap_or("") {
         "state" => Ok(state(dashboard.read(cx), window)),
         "rows" => Ok(rows(dashboard.read(cx))),
+        "hovers" => Ok(dashboard.read(cx).hover_timings.report()),
         "navigate" => navigate(word(words, 1)?, dashboard, cx),
         "inspect" => {
             let second = word(words, 1)?
@@ -281,6 +282,7 @@ fn execute(
 const HELP: &[&str] = &[
     "state",
     "rows",
+    "hovers",
     "navigate ROUTE",
     "inspect SECOND",
     "live",
