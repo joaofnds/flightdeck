@@ -252,6 +252,21 @@ fn computer_header_names_its_snapshot_source_without_time_controls(cx: &mut Test
 }
 
 #[gpui::test]
+fn computer_header_keeps_its_source_as_far_down_as_on_a_page_with_time_controls(
+    cx: &mut TestAppContext,
+) {
+    // Goal: the source pill sits where it does beside the prototype's range picker, 44 px
+    // tall. Method: open Computer and measure the header's controls.
+    let mut harness = InputHarness::setup_route(cx, "computer");
+
+    harness.driver.seed_computer_inventory("Mac17,8");
+
+    let controls = harness.driver.context.debug_bounds("reading-controls");
+    assert_eq!(controls.unwrap().size.height, px(44.0));
+    harness.teardown();
+}
+
+#[gpui::test]
 fn self_header_keeps_its_source_without_time_controls(cx: &mut TestAppContext) {
     // Goal: Self-monitoring shows no time selection, as in the prototype, since its readings
     // do not follow chart inspection. Method: open Self-monitoring and read the header.

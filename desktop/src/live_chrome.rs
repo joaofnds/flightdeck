@@ -210,6 +210,7 @@ impl LiveDashboard {
             .flex_wrap()
             .items_center()
             .gap(px(8.0))
+            .min_h(px(44.0))
             .min_w_0()
             .max_w_full()
             .child(self.source_pill());
