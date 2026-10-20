@@ -235,7 +235,18 @@ impl LiveSession {
             }
         }
         if let Some(history) = &self.history {
-            fill_window_saved(history, &selected, held, &project)?;
+            if let Err(error) = fill_window_saved(history, &selected, held, &project) {
+                // A cancelled replay goes on at the next read from the values it gave. A failed
+                // one holds the rest without values, so the reads that follow replay nothing
+                // and a hover reads its own second.
+                if let Error::Io(problem) = &error {
+                    if problem.kind() == std::io::ErrorKind::Interrupted {
+                        return Err(error);
+                    }
+                }
+                held.settle(&self.selected_context)?;
+                return Err(error);
+            }
         }
 
         held.settle(&self.selected_context)

@@ -2,7 +2,7 @@ use serde_json::{Value, json};
 
 use super::*;
 use crate::live::identity_fixture::Fixture;
-use crate::live::window::fixture::{observation_key, saved_only};
+use crate::live::window::fixture::{damage, observation_key, saved_in_two_minutes, saved_only};
 
 #[test]
 fn rank_window_ranks_the_saved_observations_of_the_window() {
@@ -41,6 +41,23 @@ fn rank_window_does_not_replay_a_window_it_has_ranked() {
     let mut session = LiveSession::open(&fixture.root).unwrap();
     session.select(1001, 0).unwrap();
     session.rank_window().unwrap();
+    let before = session.history.as_ref().unwrap().source_reads.get();
+
+    session.rank_window().unwrap();
+
+    assert_eq!(session.history.as_ref().unwrap().source_reads.get(), before);
+}
+
+#[test]
+fn rank_window_does_not_replay_a_window_whose_replay_failed() {
+    // Goal: a saved minute that cannot be read costs one replay, not one on every read.
+    // Method: select a second of the later of two saved minutes, damage the earlier minute,
+    // rank the window twice, and count the saved source reads of the second time.
+    let (fixture, earlier) = saved_in_two_minutes();
+    let mut session = LiveSession::open(&fixture.root).unwrap();
+    session.select(1061, 0).unwrap();
+    damage(&earlier);
+    assert!(session.rank_window().is_err());
     let before = session.history.as_ref().unwrap().source_reads.get();
 
     session.rank_window().unwrap();
