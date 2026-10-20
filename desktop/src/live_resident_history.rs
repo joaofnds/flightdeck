@@ -30,6 +30,7 @@ pub struct History {
     points: Vec<Point>,
     cohort: Vec<String>,
     positions: Vec<f32>,
+    window: crate::chart_axes::TimeWindow,
     selected_index: usize,
     retention_limited: bool,
 }
@@ -229,6 +230,7 @@ impl History {
             points: Vec::with_capacity(values.len()),
             cohort,
             positions: Vec::with_capacity(values.len()),
+            window: crate::chart_axes::TimeWindow::live(second),
             selected_index: 0,
             retention_limited: boolean(&value["coverage"]["retention_limited"])?,
         };
@@ -308,6 +310,7 @@ impl History {
             positions: Some(self.positions.clone()),
             segments: Some(self.points.iter().map(|point| point.segment).collect()),
             selected_index: Some(self.selected_index),
+            window: Some(self.window),
         }
     }
 }

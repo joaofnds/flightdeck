@@ -10,6 +10,17 @@ pub struct TimeWindow {
     pub span: u64,
 }
 
+impl TimeWindow {
+    /// The 900 seconds a live chart shows, ending with the selected `second`.
+    #[must_use]
+    pub fn live(second: u64) -> Self {
+        Self {
+            first: second.saturating_sub(899),
+            span: 900,
+        }
+    }
+}
+
 /// Labelled ticks of one value axis, with the gutter width their longest label needs.
 pub struct AxisLabels {
     pub width: Pixels,

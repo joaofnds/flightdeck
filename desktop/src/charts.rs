@@ -31,7 +31,7 @@ pub const PLOT_INSETS: gpui::Edges<Pixels> = gpui::Edges {
 /// draws as a readable curve; inspection still reads each exact observation.
 /// Curves and axes average readings over a chart's span divided into this many buckets, thirty
 /// seconds of a 15-minute chart, which is the sampling interval of the approved prototype.
-const CURVE_BUCKETS: f32 = 30.0;
+const CURVE_BUCKETS: u8 = 30;
 
 #[derive(Clone, Copy)]
 pub struct Inspection {
@@ -253,6 +253,7 @@ pub(crate) fn prepare_lines(
             positions: panel.positions.as_deref(),
             segments: panel.segments.as_deref(),
             lower: inspection.lower,
+            window: panel.window,
         };
         paint(line, &values, &geometry);
     }
@@ -266,6 +267,8 @@ pub(crate) struct Geometry<'a> {
     pub(crate) positions: Option<&'a [f32]>,
     pub(crate) segments: Option<&'a [u64]>,
     pub(crate) lower: usize,
+    /// The wall-clock seconds the positions span, which pins the averaging buckets to the clock.
+    pub(crate) window: Option<TimeWindow>,
 }
 
 impl Geometry<'_> {
@@ -274,7 +277,7 @@ impl Geometry<'_> {
             || number(index) / number(self.count.saturating_sub(1).max(1)),
             |positions| positions[self.lower + index],
         );
-        bucket_of(fraction)
+        bucket_of(fraction, self.window)
     }
 
     pub(crate) fn point(&self, index: usize, value: f32) -> gpui::Point<Pixels> {
@@ -450,12 +453,37 @@ fn curve_points(
     curve
 }
 
-/// The bucket a reading at `fraction` of the chart's span falls in.
-fn bucket_of(fraction: f32) -> u8 {
+/// The bucket a reading at `fraction` of the chart's span falls in. With a `window` the buckets
+/// start at multiples of a thirtieth of its span on the clock, so a reading stays in its bucket
+/// with the same neighbours as the window slides, and a past bucket's mean never changes.
+fn bucket_of(fraction: f32, window: Option<TimeWindow>) -> u8 {
     assert!(fraction.is_finite());
-    match num_traits::ToPrimitive::to_u8(&(fraction.clamp(0.0, 1.0) * CURVE_BUCKETS).floor()) {
-        Some(bucket) => bucket,
-        None => panic!("a clamped fraction maps to a bucket of at most {CURVE_BUCKETS}"),
+    let fraction = fraction.clamp(0.0, 1.0);
+    let bucket = match window {
+        Some(window) => {
+            assert!(window.span > 0);
+            let buckets = u64::from(CURVE_BUCKETS);
+            let offset = match num_traits::ToPrimitive::to_f64(&window.span) {
+                Some(span) => (f64::from(fraction) * span).round(),
+                None => panic!("a u64 span converts to f64"),
+            };
+            let second = match num_traits::ToPrimitive::to_u64(&offset) {
+                Some(offset) => window.first + offset,
+                None => panic!("a clamped fraction of the span is a whole number of seconds"),
+            };
+            // Both divisions floor, so the bucket is the clock bucket's distance from the first.
+            num_traits::ToPrimitive::to_u8(
+                &(second * buckets / window.span - window.first * buckets / window.span),
+            )
+        }
+        None => num_traits::ToPrimitive::to_u8(&(fraction * f32::from(CURVE_BUCKETS)).floor()),
+    };
+    match bucket {
+        Some(bucket) => {
+            assert!(bucket <= CURVE_BUCKETS + 1);
+            bucket
+        }
+        None => panic!("a clamped fraction maps to a bucket of at most {CURVE_BUCKETS} + 1"),
     }
 }
 
@@ -643,7 +671,7 @@ fn axis_extent(panel: &Panel, inspection: Inspection, hidden: &[String], axis: &
             },
             |positions| positions[index],
         );
-        let current = bucket_of(fraction);
+        let current = bucket_of(fraction, panel.window);
         if bucket.is_some_and(|bucket| bucket != current) {
             extent = axis_extent_flush(&mut slots, extent);
         }
@@ -1075,6 +1103,7 @@ mod live_tests {
             positions: Some(&[0.0, 0.001, 0.002, 0.6, 0.9]),
             segments: None,
             lower: 0,
+            window: None,
         };
         let values = [
             Some((10.0, 0.0)),
@@ -1091,6 +1120,59 @@ mod live_tests {
         assert!((f32::from(curve[1].top) - 50.0).abs() < 0.001);
         assert!((f32::from(curve[0].x) - 0.008).abs() < 0.001);
         assert!((f32::from(curve[1].x) - 7.2).abs() < 0.001);
+    }
+
+    #[test]
+    fn curve_points_keep_past_bucket_means_as_the_window_slides() {
+        // Goal: a reading already drawn keeps its place when the next tick moves the window.
+        // Method: draw the same varying readings in windows one second apart and compare the
+        // mean of every bucket both windows hold whole, in seconds and in value.
+        let bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(900.0), px(100.0)));
+        let curve = |first: u64| {
+            let window = TimeWindow { first, span: 900 };
+            let seconds: Vec<u64> = (first..first + 900).collect();
+            let positions: Vec<f32> = (0..900_u16)
+                .map(|second| f32::from(second) / 900.0)
+                .collect();
+            let values: Vec<_> = seconds
+                .iter()
+                .map(|second| Some((f32::from(u16::try_from(second % 97).unwrap()), 0.0)))
+                .collect();
+            let geometry = Geometry {
+                bounds,
+                minimum: 0.0,
+                maximum: 100.0,
+                count: 900,
+                positions: Some(&positions),
+                segments: None,
+                lower: 0,
+                window: Some(window),
+            };
+            let curve = curve_points(&values, 0..900, &geometry);
+            let first = f32::from(u16::try_from(first - 1000).unwrap());
+            curve
+                .iter()
+                .map(|point| (first + f32::from(point.x), f32::from(point.top)))
+                .collect::<Vec<_>>()
+        };
+
+        let before = curve(1000);
+        let after = curve(1001);
+
+        let shared = |curve: &[(f32, f32)]| curve[1..curve.len() - 1].to_vec();
+        let before = shared(&before);
+        let after = shared(&after);
+        assert_eq!(before.len(), after.len());
+        for (before, after) in before.iter().zip(&after) {
+            assert!(
+                (before.0 - after.0).abs() < 0.01,
+                "{before:?} became {after:?}"
+            );
+            assert!(
+                (before.1 - after.1).abs() < 0.01,
+                "{before:?} became {after:?}"
+            );
+        }
     }
 
     #[test]

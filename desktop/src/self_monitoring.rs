@@ -431,6 +431,7 @@ fn chart_panel(
         states: None,
         table_headings: None,
         table_rows: None,
+        window: Some(window),
     }
 }
 

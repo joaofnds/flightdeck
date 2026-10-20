@@ -88,10 +88,7 @@ impl LiveDashboard {
 
     fn chart_time_window(&self) -> Option<charts::TimeWindow> {
         let second = self.snapshot.as_ref()?.selection["second"].as_u64()?;
-        Some(charts::TimeWindow {
-            first: second.saturating_sub(899),
-            span: 900,
-        })
+        Some(charts::TimeWindow::live(second))
     }
 
     fn chart_cursor_fraction(&self, panel: &Panel) -> Option<f32> {

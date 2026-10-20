@@ -46,6 +46,7 @@ impl History {
             points: Vec::with_capacity(values.len()),
             cohort: decode_cohort(&value["cohort"])?,
             positions: Vec::with_capacity(values.len()),
+            window: crate::chart_axes::TimeWindow::live(second),
             selected_index: 0,
             retention_limited: boolean(&value["coverage"]["retention_limited"])?,
         };

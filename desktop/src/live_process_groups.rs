@@ -260,6 +260,10 @@ fn panels_panel(
             .points
             .iter()
             .position(|point| point.observation == payload.selected),
+        window: Some(crate::chart_axes::TimeWindow {
+            first,
+            span: u64::from(span),
+        }),
     })
 }
 

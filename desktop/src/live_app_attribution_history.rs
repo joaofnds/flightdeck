@@ -33,6 +33,7 @@ pub struct History {
     points: Vec<Point>,
     cohort: Vec<String>,
     positions: Vec<f32>,
+    window: crate::chart_axes::TimeWindow,
     selected_index: usize,
     retention_limited: bool,
 }
@@ -348,6 +349,7 @@ impl History {
             positions: Some(self.positions.clone()),
             segments: Some(self.points.iter().map(|point| point.segment).collect()),
             selected_index: Some(self.selected_index),
+            window: Some(self.window),
         }
     }
 
