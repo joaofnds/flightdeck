@@ -173,6 +173,7 @@ fn a_stalled_shared_collector_offers_recovery_even_while_on_computer() {
 
 struct Recording {
     root: PathBuf,
+    lock_paths: Vec<PathBuf>,
     writer: Option<Writer>,
     publication: u64,
 }
@@ -188,6 +189,7 @@ impl Recording {
         registered.unwrap();
         Self {
             root,
+            lock_paths: vec![place.lock_path],
             writer: Some(writer),
             publication: 0,
         }
@@ -275,6 +277,7 @@ impl Recording {
             .unwrap()
             .into_parts();
         registered.unwrap();
+        self.lock_paths.push(place.lock_path);
         self.writer = Some(writer);
         self.publication = 0;
     }
@@ -292,5 +295,9 @@ impl Drop for Recording {
             }
         }
         std::fs::remove_dir_all(&self.root).unwrap();
+        // Each ring is new to the test, so its lock file in Application Support would stay.
+        for lock_path in &self.lock_paths {
+            std::fs::remove_file(lock_path).unwrap();
+        }
     }
 }

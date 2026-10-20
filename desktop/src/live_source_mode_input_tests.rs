@@ -297,6 +297,7 @@ impl Drop for SavedRecording {
 
 struct LiveRecording {
     root: PathBuf,
+    lock_path: PathBuf,
     writer: Writer,
     publication: u64,
 }
@@ -322,6 +323,7 @@ impl LiveRecording {
         registered.unwrap();
         Self {
             root,
+            lock_path: place.lock_path,
             writer,
             publication: 0,
         }
@@ -359,6 +361,8 @@ impl Drop for LiveRecording {
         self.writer.finish();
         collector::ring::unlink_generation(self.writer.name()).unwrap();
         std::fs::remove_dir_all(&self.root).unwrap();
+        // The ring is new to the test, so its lock file in Application Support would stay.
+        std::fs::remove_file(&self.lock_path).unwrap();
     }
 }
 
