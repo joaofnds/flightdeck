@@ -151,15 +151,7 @@ pub fn panels(
     let domain = Domain::read(selection, earlier.is_some())?;
     let coordinates = coordinates(points, &domain, route == "apps", &source["selected"])?;
     let process = source["scope"] == "selected_named_process_group";
-    let limit = if process {
-        8
-    } else {
-        if route == "overview" {
-            OVERVIEW_PANELS_MAX
-        } else {
-            ROUTE_PANELS_MAX
-        }
-    };
+    let limit = panels_limit(route, process);
     let mut result = Vec::with_capacity(limit);
     let specifications = if process {
         process_specifications()
@@ -167,16 +159,7 @@ pub fn panels(
         specifications(route, points)?
     };
     for specification in specifications {
-        let mut panel = panel(&specification, points, &coordinates)?;
-        if specification.id == "live-memory-pressure" {
-            pressure_cells(&mut panel, &domain, points, &coordinates)?;
-        }
-        if specification.id == THERMAL_STATE_ID {
-            thermal_cells(&mut panel, &domain, points, &coordinates)?;
-        }
-        if specification.id == "live-battery-charging" {
-            resource_projection::charging_cells(&mut panel, &domain, points, &coordinates)?;
-        }
+        let panel = panels_panel(&specification, &domain, points, &coordinates)?;
 
         result.push(Rc::new(panel));
     }
@@ -187,6 +170,39 @@ pub fn panels(
     }
     assert!(result.len() <= limit);
     Ok(result)
+}
+
+/// The most panels a route shows, or the most a process scope shows.
+fn panels_limit(route: &str, process: bool) -> usize {
+    if process {
+        return 8;
+    }
+    if route == "overview" {
+        OVERVIEW_PANELS_MAX
+    } else {
+        ROUTE_PANELS_MAX
+    }
+}
+
+/// The panel of `specification` with the cells its timeline kind adds.
+fn panels_panel(
+    specification: &Specification,
+    domain: &Domain,
+    points: &[Value],
+    coordinates: &Coordinates,
+) -> Result<Panel, String> {
+    let mut panel = panel(specification, points, coordinates)?;
+    if specification.id == "live-memory-pressure" {
+        pressure_cells(&mut panel, domain, points, coordinates)?;
+    }
+    if specification.id == THERMAL_STATE_ID {
+        thermal_cells(&mut panel, domain, points, coordinates)?;
+    }
+    if specification.id == "live-battery-charging" {
+        resource_projection::charging_cells(&mut panel, domain, points, coordinates)?;
+    }
+
+    Ok(panel)
 }
 
 #[must_use]

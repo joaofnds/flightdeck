@@ -435,11 +435,9 @@ fn reader_snapshot(
     if command.request.route == "computer" {
         return Ok(reader_computer(reader, command));
     }
-    if command.request.second.is_some() {
-        if command.request.route != "self" {
-            if published {
-                return Ok(None);
-            }
+    if published {
+        if reader_snapshot_is_pinned(&command.request) {
+            return Ok(None);
         }
     }
     if reader.session.is_none() {
@@ -477,12 +475,23 @@ fn reader_snapshot(
     reader_payload(session, &mut command.request, &mut snapshot)?;
     reader_snapshot_annotate_app(&reader.system, &command.request, &mut snapshot);
     snapshot.read_ms = started.elapsed().as_secs_f64() * 1000.0;
+    reader_snapshot_record(reader, command, &snapshot);
+
+    Ok(Some(snapshot))
+}
+
+/// Whether the request asks for a chosen second of a page other than `self`, which a published
+/// generation already answers.
+fn reader_snapshot_is_pinned(request: &Request) -> bool {
+    request.second.is_some() && request.route != "self"
+}
+
+/// Remembers what the reader published, so the next command can tell whether anything changed.
+fn reader_snapshot_record(reader: &mut Reader, command: &Command, snapshot: &Snapshot) {
     reader.last_catalog = Some(snapshot.catalog.clone());
     reader.last_generation = command.generation;
     reader.last_route.clone_from(&command.request.route);
     reader.pending_generation = snapshot.histories_pending.then_some(command.generation);
-
-    Ok(Some(snapshot))
 }
 
 /// Marks the selected App's history with the machine's own samples on the Apps page.
