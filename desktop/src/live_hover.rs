@@ -110,7 +110,7 @@ impl Preview {
                 apps: None,
                 detail: None,
                 history: None,
-                cpu_detail: None,
+                cpu_detail: resident_cpu_detail(snapshot, &target),
                 cpu_history: None,
                 resident_history: snapshot.resident_history.clone(),
                 app_attribution_history: snapshot.app_attribution_history.clone(),
@@ -192,6 +192,21 @@ impl LiveDashboard {
         }
 
         &self.executables
+    }
+}
+
+fn resident_cpu_detail(
+    snapshot: &Snapshot,
+    target: &Target,
+) -> Option<crate::live_cpu::CPUActivity> {
+    let history = snapshot.cpu_history.as_ref()?;
+    let identity = target.identity.as_ref()?;
+    match history.activity(identity) {
+        Ok(activity) => activity,
+        Err(error) => {
+            eprintln!("Hover CPU readings unavailable: {error}");
+            None
+        }
     }
 }
 

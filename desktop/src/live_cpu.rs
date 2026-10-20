@@ -17,7 +17,7 @@ pub struct CPUActivity {
     pub cpus: Vec<LogicalCPU>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, PartialEq)]
 pub struct LogicalCPU {
     pub cpu: u32,
     pub busy_percent: Option<f32>,

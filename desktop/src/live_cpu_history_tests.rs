@@ -1,4 +1,5 @@
 use super::*;
+use crate::live_cpu::LogicalCPU;
 use serde_json::json;
 
 #[test]
@@ -142,6 +143,89 @@ fn pages_a_partial_cpu_domain_without_relabeling_its_rows() {
         vec![32, 33, 34]
     );
     assert_eq!(history.value(history.selected().unwrap()), Some(32.0));
+}
+
+#[test]
+fn activity_gives_the_measured_cores_of_the_named_observation() {
+    // Goal: a hover shows the cores of its second from the window's history.
+    // Method: name the measured observation of a decoded history and read its cores.
+    let (mut payload, selection) = fixture();
+    payload["cpus"][0]["busy_percent"][1] = json!(37.5);
+    let history = CPUHistory::decode(payload, &selection).unwrap();
+
+    let activity = history.activity(&selection["selected"]).unwrap().unwrap();
+
+    assert!(activity.interval_available);
+    assert_eq!(
+        activity.cpus,
+        vec![LogicalCPU {
+            cpu: 0,
+            busy_percent: Some(37.5)
+        }]
+    );
+}
+
+#[test]
+fn activity_gives_unmeasured_cores_for_an_observation_without_an_interval() {
+    // Goal: a second without an interval shows no measurement rather than an idle CPU.
+    // Method: name the first observation, which has no predecessor.
+    let (payload, selection) = fixture();
+    let history = CPUHistory::decode(payload, &selection).unwrap();
+
+    let activity = history.activity(&selection["trends"][0]).unwrap().unwrap();
+
+    assert!(!activity.interval_available);
+    assert_eq!(
+        activity.cpus,
+        vec![LogicalCPU {
+            cpu: 0,
+            busy_percent: None
+        }]
+    );
+}
+
+#[test]
+fn activity_gives_nothing_for_a_page_that_lacks_some_logical_cpus() {
+    // Goal: a hover never shows part of a CPU domain as the whole of it.
+    // Method: decode the first page of a 35-CPU domain and name its selected observation.
+    let (mut payload, selection) = fixture();
+    payload["total"] = json!(35);
+    payload["observations"][0]["cpu_count"] = json!(35);
+    payload["observations"][1]["cpu_count"] = json!(35);
+    payload["cpus"] = json!(
+        (0..32)
+            .map(|cpu| json!({"cpu":cpu,"busy_percent":[null,1.0]}))
+            .collect::<Vec<_>>()
+    );
+    let history = CPUHistory::decode(payload, &selection).unwrap();
+
+    assert!(history.activity(&selection["selected"]).unwrap().is_none());
+}
+
+#[test]
+fn activity_gives_nothing_for_an_observation_outside_the_history() {
+    // Goal: a hover outside the window falls back to the worker, never to a neighbor's cores.
+    // Method: name a publication the history does not hold.
+    let (payload, selection) = fixture();
+    let history = CPUHistory::decode(payload, &selection).unwrap();
+    let mut outside = selection["selected"].clone();
+    outside["publication"] = json!(3);
+
+    assert!(history.activity(&outside).unwrap().is_none());
+}
+
+#[test]
+fn activity_gives_nothing_for_an_observation_without_a_cpu_reading() {
+    // Goal: an observation the history holds no CPU reading of falls back to the worker.
+    // Method: decode a history whose first observation acquired no logical CPUs.
+    let (mut payload, selection) = fixture();
+    payload["observations"][0]["cpu_count"] = json!(0);
+    payload["observations"][1]["previous_observation"] = Value::Null;
+    payload["observations"][1]["interval_available"] = json!(false);
+    payload["cpus"][0]["busy_percent"] = json!([null, null]);
+    let history = CPUHistory::decode(payload, &selection).unwrap();
+
+    assert!(history.activity(&selection["trends"][0]).unwrap().is_none());
 }
 
 #[test]

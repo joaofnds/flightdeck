@@ -1,5 +1,7 @@
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
+
+use crate::live_cpu::CPUActivity;
 
 #[derive(Debug)]
 pub struct CPUHistory {
@@ -135,6 +137,42 @@ impl CPUHistory {
             row: 0,
             observation_index: self.wire.selected_index,
         })
+    }
+
+    /// The cores of the observation `identity` names, as the panel of the selected second reads
+    /// them, so a hover shows its second without waiting on the worker. Nothing when this page
+    /// lacks some of the observation's logical CPUs or the history holds no reading of it.
+    pub fn activity(&self, identity: &Value) -> Result<Option<CPUActivity>, String> {
+        let total = usize::try_from(self.wire.total).map_err(|error| error.to_string())?;
+        if self.wire.cpus.len() != total {
+            return Ok(None);
+        }
+
+        let Some(CPUInspection::Sample {
+            observation_index, ..
+        }) = self.matching_inspection(identity, 0)
+        else {
+            return Ok(None);
+        };
+
+        let sample = &self.wire.observations[observation_index];
+        if sample.cpu_count != self.wire.total {
+            return Ok(None);
+        }
+
+        let cpus = self
+            .wire
+            .cpus
+            .iter()
+            .map(|row| json!({"cpu":row.cpu,"busy_percent":row.busy_percent[observation_index]}))
+            .collect::<Vec<_>>();
+        let observation = activity_observation(&sample.observation);
+        let payload = json!({"observation":observation,
+            "previous_observation":sample.previous_observation.as_ref().map(activity_observation),
+            "interval_available":sample.interval_available,"unavailable_reason":null,
+            "cpus":cpus});
+
+        CPUActivity::decode(payload, &observation).map(Some)
     }
 
     pub fn value(&self, inspection: CPUInspection) -> Option<f64> {
@@ -299,6 +337,11 @@ fn intervals_remove_occluded(intervals: &mut Vec<CPUInterval>, first_ns: u64) {
             break;
         }
     }
+}
+
+fn activity_observation(observation: &CPUObservation) -> Value {
+    json!({"run":observation.run,"boot":observation.boot,"publication":observation.publication,
+        "run_tick":observation.run_tick,"wall_ns":observation.wall_ns})
 }
 
 #[path = "live_cpu_history_validation.rs"]

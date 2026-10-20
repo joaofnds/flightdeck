@@ -85,8 +85,39 @@ fn leaves_cpu_history_absent_when_the_selected_second_has_no_observation() {
     assert!(snapshot.selection["selected"].is_null());
 }
 
+#[test]
+fn hover_preview_shows_the_hovered_seconds_cores_as_the_worker_reads_them() {
+    // Goal: a hover shows its second's cores at once, with the values the worker would read.
+    // Method: preview publication two over a committed publication three of a three-CPU
+    // recording, and read publication two through the worker.
+    let recording = SealedRecording::with_cpus(3);
+    let mut request = SealedRecording::request();
+    request.route = "cpu".into();
+    request.second = Some(1001);
+    request.identity = Some(identity(3));
+    let committed = recording.read(request.clone()).unwrap();
+    request.identity = Some(identity(2));
+    let worker = recording.read(request.clone()).unwrap();
+    let target = crate::live_hover::Target::exact(1001, &identity(2)).unwrap();
+
+    let preview = crate::live_hover::Preview::resident(&committed, &request, target);
+
+    let cores = preview.reading.cpu_detail.as_ref().unwrap();
+    assert_eq!(cores.observation["publication"], 2);
+    assert_eq!(cores.cpus, worker.cpu_detail.as_ref().unwrap().cpus);
+}
+
+fn identity(publication: u64) -> serde_json::Value {
+    json!({"run":"00000000000000010000000000000002",
+        "boot":"00000000000000030000000000000004","publication":publication})
+}
+
 impl SealedRecording {
     pub(super) fn with_cpu_history() -> Self {
+        Self::with_cpus(35)
+    }
+
+    fn with_cpus(cpus: u64) -> Self {
         let token =
             collector::recording::identity_text(collector::recording::random_identity().unwrap());
         let recording = Self {
@@ -102,7 +133,7 @@ impl SealedRecording {
             window: 0,
         };
         let mut shape = Self::shape();
-        shape.cpu_capacity = 35;
+        shape.cpu_capacity = cpus;
         let mut window =
             persistence::Window::new(identity, persistence::Limits::from_shape(&shape).unwrap());
         Self::append_cpu_history(
@@ -142,7 +173,7 @@ impl SealedRecording {
     ) {
         let mut tick = persistence::tick_buffer(shape).unwrap();
         tick.run_tick = observed.publication - 1;
-        for cpu in 0..35_u32 {
+        for cpu in 0..u32::try_from(shape.cpu_capacity).unwrap() {
             let publication = u32::try_from(observed.publication).unwrap();
             tick.cpus.push(collector::machine::CPUTicks {
                 user: cpu * publication,
