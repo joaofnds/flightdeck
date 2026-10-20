@@ -1,3 +1,4 @@
+use std::os::unix::fs::MetadataExt as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -139,4 +140,27 @@ fn bundle_launch_starts_with_every_thread_default() {
         let entry = format!("<key>{option}</key><string>{default}</string>");
         assert!(environment.contains(&entry), "{entry} is missing");
     }
+}
+
+#[test]
+fn rebuilt_bundle_replaces_each_executable_with_a_new_file() {
+    // Goal: rebuilding never rewrites an executable in place, since macOS kills a program
+    // whose file changed under the signature it read when that file last ran.
+    // Method: package twice and compare the file identity and bytes of each executable.
+    let fixture = Fixture::new();
+    create_from(&fixture.inputs).unwrap();
+    let contents = fixture.inputs.output.join("Contents");
+    let names = ["MacOS/flightdeck", "Helpers/collector", "Helpers/persister"];
+    let before = names.map(|name| std::fs::metadata(contents.join(name)).unwrap().ino());
+    write_executable(&fixture.inputs.executable, b"rebuilt app");
+
+    create_from(&fixture.inputs).unwrap();
+
+    for (name, inode) in names.into_iter().zip(before) {
+        assert_ne!(std::fs::metadata(contents.join(name)).unwrap().ino(), inode);
+    }
+    assert_eq!(
+        std::fs::read(contents.join("MacOS/flightdeck")).unwrap(),
+        b"rebuilt app"
+    );
 }

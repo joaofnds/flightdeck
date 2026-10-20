@@ -70,13 +70,23 @@ fn create_from(inputs: &Inputs) -> io::Result<()> {
     std::fs::create_dir_all(contents.join("MacOS"))?;
     std::fs::create_dir_all(contents.join("Resources"))?;
     std::fs::create_dir_all(contents.join("Helpers"))?;
-    std::fs::copy(&inputs.executable, contents.join("MacOS/flightdeck"))?;
-    std::fs::copy(&inputs.collector, contents.join("Helpers/collector"))?;
-    std::fs::copy(&inputs.persister, contents.join("Helpers/persister"))?;
+    create_from_executable(&inputs.executable, &contents.join("MacOS/flightdeck"))?;
+    create_from_executable(&inputs.collector, &contents.join("Helpers/collector"))?;
+    create_from_executable(&inputs.persister, &contents.join("Helpers/persister"))?;
     for (name, bytes) in RESOURCES {
         std::fs::write(contents.join(name), bytes)?;
     }
     validate_bundle(&contents.join("MacOS/flightdeck"))
+}
+
+/// Copies an executable beside its place and renames it over the old one. macOS kills a
+/// program whose file was rewritten after a run of it, so a copy in place would fail the
+/// packaged check whenever the bundle ran before, or still runs.
+fn create_from_executable(source: &Path, target: &Path) -> io::Result<()> {
+    let mut staged = target.as_os_str().to_owned();
+    staged.push(".staged");
+    std::fs::copy(source, &staged)?;
+    std::fs::rename(&staged, target)
 }
 
 fn validate_bundle(executable: &Path) -> io::Result<()> {
