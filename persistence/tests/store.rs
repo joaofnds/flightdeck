@@ -600,10 +600,36 @@ mod tests {
         assert_eq!(std::io::ErrorKind::InvalidData, result.unwrap_err().kind());
     }
 
+    #[test]
+    fn a_window_reopens_with_the_app_parts_it_derived_when_it_sealed() {
+        // Goal: a window seals every App's part of its observations beside its ranks, and a
+        // reader finds both.
+        // Method: commit a window that lists app ranks and app parts after its tables, then read
+        // its marker.
+        let recording = Recording::new();
+        let store = Store::open(&recording.0).unwrap();
+        let mut original = manifest(identity(&store));
+        original.tables.push(app_ranks());
+        original.tables.push(app_parts());
+        let pending = stage(&store, &original);
+
+        let committed = store.commit(pending, original).unwrap();
+
+        assert_complete_fixture(&recording.0, &store, &committed);
+        assert_eq!(Some(&app_parts()), committed.tables.last());
+    }
+
     fn app_ranks() -> TableManifest {
         TableManifest {
             name: "app_ranks",
             rows: 40,
+        }
+    }
+
+    fn app_parts() -> TableManifest {
+        TableManifest {
+            name: "app_parts",
+            rows: 9,
         }
     }
 

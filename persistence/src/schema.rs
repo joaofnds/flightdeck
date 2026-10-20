@@ -76,9 +76,11 @@ pub mod pressure {
 
 /// Tables a window derives from its own tables when it seals, which a reader can rebuild from
 /// them. A window holds each at most once, and a window sealed before one existed lacks it.
-pub const DERIVED_TABLES: [&str; 1] = [APP_RANKS];
+pub const DERIVED_TABLES: [&str; 2] = [APP_RANKS, APP_PARTS];
 /// The Apps that used the most of each resource in each of the window's observations.
 pub const APP_RANKS: &str = "app_ranks";
+/// Every App's row and processes in each of the window's observations.
+pub const APP_PARTS: &str = "app_parts";
 
 #[derive(Clone, Copy)]
 pub enum Table {
