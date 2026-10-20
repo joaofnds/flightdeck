@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use persistence::{Error, Result};
+use serde_json::Value;
 
 use super::window::{self, Window, WindowValue};
 use crate::LiveSession;
@@ -39,6 +40,18 @@ impl LiveSession {
     #[must_use]
     pub fn app_ranks(&self) -> Arc<WindowRanks> {
         Arc::clone(&self.app_ranks)
+    }
+
+    /// The ranks of the selected observation, by the rule that ranks every observation of its
+    /// window, so a hover and the selected second rank alike.
+    pub fn selected_ranks(&self) -> Result<Ranks> {
+        let mut ranks = None;
+        self.with_selected_apps(|sample| {
+            ranks = Some(sample.ranks()?);
+            Ok(Value::Null)
+        })?;
+
+        ranks.ok_or(Error::Bound("selected ranks"))
     }
 
     /// Ranks every observation of the selected window that has no ranks yet.

@@ -612,9 +612,8 @@ fn reader_payload(
         "overview" | "storage" | "cpu" | "memory" | "energy"
     );
     if ranked {
-        snapshot.rankings = Some(Arc::new(crate::live_rankings::read(
-            &snapshot.selection["selected"],
-            |offset| session.apps_page(offset).map_err(|error| error.to_string()),
+        snapshot.rankings = Some(Arc::new(crate::live_rankings::from_selected(
+            session.selected_ranks().map_err(|error| error.to_string()),
         )));
     }
     if request.route == "cpu" {

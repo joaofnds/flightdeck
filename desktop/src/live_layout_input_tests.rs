@@ -670,18 +670,14 @@ impl InputDriver {
 fn overview_context_rankings(
     snapshot: &crate::live_source::Snapshot,
 ) -> std::sync::Arc<crate::live_rankings::Rankings> {
-    let measure = json!({"known":"80","measured_members":1,
-        "unavailable_members":0,"overflowed":false});
-    let app = json!({"display_name":"Current","key":{"kind":"bundle","bytes_hex":"41"},
-        "cpu_ns":measure,"energy_nj":measure,"resident_bytes":measure,
-        "disk_read_bytes":measure,"disk_written_bytes":measure,"disk_io_bytes":measure,
-        "cpu_percent_one_core":80,"energy_watts":0.5,"disk_io_bps":80.0});
-    let page = json!({"selected":snapshot.selection["selected"],"apps":[app],
-        "app_count":1,"membership_complete":true,"ungrouped_members":0,
-        "page":{"offset":0,"limit":512,"total":1,"next_offset":null}});
-    std::sync::Arc::new(crate::live_rankings::read(
+    std::sync::Arc::new(crate::live_rankings::fixture::current_only(
         &snapshot.selection["selected"],
-        |_| Ok(page.clone()),
+        [
+            (80, Some(80.0)),
+            (80, None),
+            (80, Some(0.5)),
+            (80, Some(80.0)),
+        ],
     ))
 }
 

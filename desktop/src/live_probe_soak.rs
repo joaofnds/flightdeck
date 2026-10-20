@@ -372,13 +372,7 @@ mod tests {
     }
 
     fn snapshot(selected: &Value) -> Snapshot {
-        let rankings = crate::live_rankings::read(selected, |_| {
-            Ok(json!({
-                "selected": selected, "apps": [], "membership_complete": true,
-                "ungrouped_members": 0, "app_count": 0,
-                "page": {"offset": 0, "limit": 512, "total": 0, "next_offset": null}
-            }))
-        });
+        let rankings = crate::live_rankings::fixture::empty(selected);
         Snapshot {
             generation: 1,
             catalog: json!({"tail_ticks": 1, "tail_cache_bytes": 1024,

@@ -222,21 +222,15 @@ impl InputDriver {
 }
 
 fn disk_rankings(snapshot: &Snapshot) -> Rankings {
-    let measure = |known: u64| {
-        json!({"known":known.to_string(),"measured_members":1,
-            "unavailable_members":0,"overflowed":false})
-    };
-    let app = json!({"display_name":"Current","key":{"kind":"bundle","bytes_hex":"41"},
-        "cpu_ns":measure(1_000_000),"resident_bytes":measure(1024),
-        "energy_nj":measure(1_000_000_000),"cpu_percent_one_core":0.05,"energy_watts":0.5,
-        "disk_read_bytes":measure(2_000_000),"disk_written_bytes":measure(1_000_000),
-        "disk_io_bytes":measure(3_000_000),"disk_read_bps":1_000_000.0,
-        "disk_written_bps":500_000.0,"disk_io_bps":1_500_000.0});
-    let page = json!({"selected":snapshot.selection["selected"],"elapsed_ns":"2000000000",
-        "apps":[app],"app_count":1,"membership_complete":true,"ungrouped_members":0,
-        "page":{"offset":0,"limit":512,"total":1,"next_offset":null}});
-
-    crate::live_rankings::read(&snapshot.selection["selected"], |_| Ok(page.clone()))
+    crate::live_rankings::fixture::current_only(
+        &snapshot.selection["selected"],
+        [
+            (1_000_000, Some(0.05)),
+            (1024, None),
+            (1_000_000_000, Some(0.5)),
+            (3_000_000, Some(1_500_000.0)),
+        ],
+    )
 }
 
 #[gpui::test]

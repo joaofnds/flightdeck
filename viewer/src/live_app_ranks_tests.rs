@@ -124,9 +124,7 @@ fn poll_ranks_drops_observations_older_than_the_window() {
 }
 
 fn selected_ranks(session: &LiveSession) -> Value {
-    let ranks = session
-        .with_selected_apps(|sample| Ok(summary(&sample.ranks()?)))
-        .unwrap();
+    let ranks = summary(&session.selected_ranks().unwrap());
     assert!(
         !ranks["metrics"][0]["entries"]
             .as_array()

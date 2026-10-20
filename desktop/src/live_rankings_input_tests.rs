@@ -751,23 +751,17 @@ fn ranked_payload(
     key: &str,
     cpu: u32,
 ) -> Arc<crate::live_rankings::Rankings> {
-    let measure = json!({"known":cpu.to_string(),"measured_members":1,
-        "unavailable_members":0,"overflowed":false});
-    let app = json!({"display_name":name,"key":{"kind":"bundle","bytes_hex":key},
-        "cpu_ns":measure,"energy_nj":measure,
-        "disk_read_bytes":measure,"disk_io_bytes":measure,
-        "disk_written_bytes":{"known":"0","measured_members":1,
-            "unavailable_members":0,"overflowed":false},
-        "disk_read_bps":cpu,"disk_written_bps":0.0,"disk_io_bps":cpu,
-        "resident_bytes":{"known":"1073741824","measured_members":1,
-            "unavailable_members":0,"overflowed":false},
-        "cpu_percent_one_core":cpu,"energy_watts":0.5});
-    let page = json!({"selected":snapshot.selection["selected"],"apps":[app],
-        "app_count":1,"membership_complete":true,"ungrouped_members":0,
-        "page":{"offset":0,"limit":512,"total":1,"next_offset":null}});
-    Arc::new(crate::live_rankings::read(
+    let cpu_rate = Some(f64::from(cpu));
+    Arc::new(crate::live_rankings::fixture::one_bundle(
         &snapshot.selection["selected"],
-        |_| Ok(page.clone()),
+        name,
+        key,
+        [
+            (u64::from(cpu), cpu_rate),
+            (1_073_741_824, None),
+            (u64::from(cpu), Some(0.5)),
+            (u64::from(cpu), cpu_rate),
+        ],
     ))
 }
 
