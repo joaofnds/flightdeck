@@ -311,26 +311,60 @@ impl Fixture {
         self.seal_with_observations(&[]);
     }
 
+    /// Seals the published observations with the tables `derive` derives from them, as the
+    /// persister does.
+    pub fn seal_derived(
+        &self,
+        observations: &[persistence::Observation],
+        derive: &dyn persistence::worker::Derive,
+    ) {
+        assert!(observations.len() <= 8);
+        self.seal_window(None, observations, derive);
+    }
+
     pub fn seal_minute(&self, minute: u64) {
-        self.seal_window(Some(minute), &[]);
+        self.seal_minute_derived(minute, &Underived);
+    }
+
+    /// Seals the observations of run minute `minute` with the tables `derive` derives from
+    /// them, as the persister does.
+    pub fn seal_minute_derived(&self, minute: u64, derive: &dyn persistence::worker::Derive) {
+        self.seal_window(Some(minute), &[], derive);
     }
 
     pub fn seal_with_observations(&self, observations: &[persistence::Observation]) {
-        assert!(observations.len() <= 8);
-        self.seal_window(None, observations);
+        self.seal_derived(observations, &Underived);
     }
 
-    fn seal_window(&self, minute: Option<u64>, observations: &[persistence::Observation]) {
+    fn seal_window(
+        &self,
+        minute: Option<u64>,
+        observations: &[persistence::Observation],
+        derive: &dyn persistence::worker::Derive,
+    ) {
         let mut reader = RingReader::open_generation(self.writer.name()).unwrap();
         let window = self.seal_read(&mut reader, minute, observations);
         drop(reader);
         let store = persistence::Store::open(&self.root).unwrap();
+        let latest = store.progress(&window.identity.run).unwrap();
         let persistence::Begin::Pending(pending) = store.begin(&window.identity).unwrap() else {
             panic!("fixture already committed");
         };
-        let tables = persistence::Encoder
+        let mut tables = persistence::Encoder
             .encode(&window, pending.path())
             .unwrap();
+        let predecessor = latest
+            .filter(|latest| latest.publication_end == window.publication_range().start)
+            .map(|latest| store.data_path(&latest));
+        tables.extend(
+            derive
+                .derive(&persistence::worker::Derivation {
+                    identity: window.identity,
+                    pending: pending.path(),
+                    predecessor: predecessor.as_deref(),
+                })
+                .unwrap(),
+        );
         let publications = window.publication_range();
         let events = window.event_range();
         let first = window
@@ -486,6 +520,18 @@ fn seal_read_observation(
         wall_ns: Some(times.wall_ns),
         continuous_ns: Some(times.continuous_ns),
         awake_ns: Some(times.awake_ns),
+    }
+}
+
+/// Derives no table, as the persister of a build before derived tables sealed every window.
+struct Underived;
+
+impl persistence::worker::Derive for Underived {
+    fn derive(
+        &self,
+        _derivation: &persistence::worker::Derivation<'_>,
+    ) -> persistence::Result<Vec<persistence::TableManifest>> {
+        Ok(Vec::new())
     }
 }
 

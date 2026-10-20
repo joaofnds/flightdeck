@@ -25,7 +25,7 @@ pub use store::{
     reread_committed,
 };
 
-pub use encoder::{Encoder, TableManifest, frame, table_columns};
+pub use encoder::{Encoder, TableManifest, encode_derived, frame, table_columns};
 pub use schema::SCHEMA_VERSION;
 pub use window::{Limits, NumberedEvent, Observation, Window, WindowIdentity};
 

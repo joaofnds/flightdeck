@@ -51,7 +51,7 @@ pub struct Session {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct ContextRange {
+pub struct ContextRange {
     pub first_ns: u64,
     pub end_ns: u64,
 }
@@ -647,6 +647,7 @@ mod cpu_history_saved;
 mod app_history;
 pub(crate) use app_history::AttributionReplay;
 pub(crate) use app_history::ProcessGroupsReplay;
+pub use app_history::SealedRanks;
 mod committed_apps;
 #[cfg(test)]
 mod reopen_tests;

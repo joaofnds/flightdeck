@@ -63,6 +63,23 @@ impl Encoder {
     }
 }
 
+/// Writes a table derived from a window's own tables into its pending directory, as the window's
+/// own tables are written. The caller synchronizes and publishes it with them.
+pub fn encode_derived(
+    name: &'static str,
+    frame: &mut DataFrame,
+    pending: &Path,
+) -> Result<TableManifest> {
+    assert!(crate::schema::DERIVED_TABLES.contains(&name));
+    let rows = collector::u64_from_usize(frame.height());
+    let path = pending.join(format!("{name}.parquet"));
+
+    let file = encode_open(&path)?;
+
+    encode_write(frame, file)?;
+    Ok(TableManifest { name, rows })
+}
+
 fn encode_open(path: &Path) -> Result<std::fs::File> {
     if path.to_str().is_none() {
         return Err(Error::Bound("path encoding"));

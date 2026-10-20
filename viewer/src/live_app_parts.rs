@@ -7,6 +7,7 @@ use persistence::{Error, Result};
 use super::window::{self, Window, WindowValue};
 use crate::LiveSession;
 use crate::live_app_response::{AppPart, KeyKind, Observation};
+use crate::session::ContextRange;
 
 pub type WindowParts = Window<AppPart>;
 
@@ -28,6 +29,15 @@ impl WindowValue for AppPart {
 
     fn bytes(&self) -> usize {
         AppPart::bytes(self)
+    }
+
+    /// No sealed minute keeps an App's parts, so the replay gives them all.
+    fn visit_kept(
+        _history: &crate::Session,
+        _range: ContextRange,
+        _consume: impl FnMut(Self) -> Result<()>,
+    ) -> Result<()> {
+        Ok(())
     }
 }
 

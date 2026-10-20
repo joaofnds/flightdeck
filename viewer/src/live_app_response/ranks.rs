@@ -8,8 +8,10 @@ use super::{App, Error, KeyKind, Measure, Observation, Result, Sample};
 use crate::apps;
 
 pub const RANKS_MAX: usize = 10;
-const METRICS: [Metric; 4] = [Metric::Cpu, Metric::Resident, Metric::Power, Metric::Disk];
+pub(crate) const METRICS: [Metric; 4] =
+    [Metric::Cpu, Metric::Resident, Metric::Power, Metric::Disk];
 
+#[derive(Debug, PartialEq)]
 pub struct Ranks {
     pub selected: Observation,
     pub app_count: u32,
@@ -27,6 +29,7 @@ pub enum Metric {
     Disk,
 }
 
+#[derive(Debug, PartialEq)]
 pub struct Ranking {
     pub metric: Metric,
     /// At most `RANKS_MAX`, the largest total first.
@@ -39,6 +42,7 @@ pub struct Ranking {
     pub partial: u32,
 }
 
+#[derive(Debug, PartialEq)]
 pub struct Rank {
     pub app: Arc<RankedApp>,
     pub amount: u64,
@@ -47,6 +51,7 @@ pub struct Rank {
     pub unavailable_members: u32,
 }
 
+#[derive(Debug, PartialEq)]
 pub struct RankedApp {
     pub kind: KeyKind,
     pub bytes: Vec<u8>,
@@ -111,8 +116,21 @@ struct Reading<'app> {
     rate: Option<f64>,
 }
 
+impl RankedApp {
+    /// The App whose key is `bytes`, named as its sample names it.
+    pub(crate) fn new(kind: KeyKind, bytes: Vec<u8>) -> Result<Self> {
+        let display_name = super::capture::display_name(kind, &bytes)?;
+
+        Ok(Self {
+            kind,
+            bytes,
+            display_name,
+        })
+    }
+}
+
 impl Ranking {
-    fn new(metric: Metric) -> Self {
+    pub(crate) fn new(metric: Metric) -> Self {
         Self {
             metric,
             entries: Vec::with_capacity(RANKS_MAX + 1),

@@ -8,6 +8,7 @@ use crate::live_apps::Frame;
 
 pub(crate) use json::bounded;
 pub use part::AppPart;
+pub(crate) use ranks::METRICS;
 pub use ranks::{Metric, RANKS_MAX, Rank, RankedApp, Ranking, Ranks};
 
 pub const SAMPLE_BYTES_MAX: usize = 8 * 1024 * 1024;

@@ -24,4 +24,4 @@ pub use live::attribution_history::{
     APP_ATTRIBUTION_HISTORIES_RESPONSE_BYTES_MAX, AppAttributionHistories, AppAttributionMetric,
 };
 pub use live::window::{ObservationKey, Window};
-pub use session::Session;
+pub use session::{SealedRanks, Session};

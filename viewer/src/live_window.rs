@@ -1,6 +1,6 @@
 //! What the session keeps of every observation in the selected window, so a hover shows any
-//! second at once. Live observations give theirs as the session polls them, and saved ones in
-//! one replay of the window's saved minutes.
+//! second at once. Live observations give theirs as the session polls them, and saved ones
+//! from what their sealed minutes keep, or else in one replay of the window's saved minutes.
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
@@ -15,13 +15,21 @@ use crate::live_app_response::{Observation, Sample};
 use crate::session::ContextRange;
 
 /// What a window keeps of one observation's sample.
-pub trait WindowValue {
+pub trait WindowValue: Sized {
     /// The bytes the values of one window may hold together.
     const BYTES_MAX: usize;
 
     fn selected(&self) -> &Observation;
 
     fn bytes(&self) -> usize;
+
+    /// Gives `consume` the values the sealed minutes of the window `range` keep, so the
+    /// observations they hold need no replay.
+    fn visit_kept(
+        history: &crate::Session,
+        range: ContextRange,
+        consume: impl FnMut(Self) -> Result<()>,
+    ) -> Result<()>;
 }
 
 /// The values of the window's observations. An observation the window holds no value for,
@@ -200,23 +208,16 @@ impl ObservationKey {
 
 impl LiveSession {
     /// Gives every observation of the selected window that holds no value yet the value
-    /// `project` takes from its sample: the live ones from their cached samples, and the saved
-    /// ones in one replay of the window's saved minutes. A window it covers already stays the
-    /// one its holders share.
+    /// `project` takes from its sample: the live ones from their cached samples, the saved ones
+    /// from what their sealed minutes keep, and the rest in one replay of the window's saved
+    /// minutes. A window it covers already stays the one its holders share.
     pub(super) fn fill_window<T: WindowValue>(
         &self,
         window: &mut Arc<Window<T>>,
         project: impl Fn(&Sample) -> Result<T>,
     ) -> Result<()> {
-        let mut selected = None;
-        self.with_selected_apps(|sample| {
-            selected = Some(sample.selected);
-            Ok(Value::Null)
-        })?;
-        let selected = selected.ok_or(Error::Bound("window selection"))?;
-        let second = selected.wall_ns.ok_or(Error::Bound("window clock"))? / NANOSECONDS_PER_SECOND;
-        let range = context_range(second)?;
-
+        let selected = self.window_selected()?;
+        let range = window_range(&selected)?;
         if window.covers(range, &self.selected_context)? {
             return Ok(());
         }
@@ -226,8 +227,14 @@ impl LiveSession {
         fill_window_live(&self.observations, range, held, &project)?;
 
         if let Some(history) = &self.history {
-            if let Err(error) = fill_window_saved(history, &selected, held, &project) {
-                // A cancelled replay goes on at the next read from the values it gave. A failed
+            let mut saved = T::visit_kept(history, range, |value| held.insert(value));
+            if saved.is_ok() {
+                if !held.covers(range, &self.selected_context)? {
+                    saved = fill_window_saved(history, &selected, held, &project);
+                }
+            }
+            if let Err(error) = saved {
+                // A cancelled read goes on at the next one from the values it gave. A failed
                 // one holds the rest without values, so the reads that follow replay nothing
                 // and a hover reads its own second.
                 if let Error::Io(problem) = &error {
@@ -242,6 +249,47 @@ impl LiveSession {
 
         held.settle(&self.selected_context)
     }
+
+    /// Gives the observations of the selected window that hold no value yet the values their
+    /// cached samples and sealed minutes keep, and replays nothing. The rest stay without a
+    /// value, so `fill_window` replays them.
+    pub(super) fn fill_window_kept<T: WindowValue>(
+        &self,
+        window: &mut Arc<Window<T>>,
+        project: impl Fn(&Sample) -> Result<T>,
+    ) -> Result<()> {
+        let range = window_range(&self.window_selected()?)?;
+        if window.covers(range, &self.selected_context)? {
+            return Ok(());
+        }
+
+        let held = Arc::make_mut(window);
+        held.retain(range);
+        fill_window_live(&self.observations, range, held, &project)?;
+        if let Some(history) = &self.history {
+            T::visit_kept(history, range, |value| held.insert(value))?;
+        }
+
+        Ok(())
+    }
+
+    /// The selected observation, whose window the session fills.
+    fn window_selected(&self) -> Result<Observation> {
+        let mut selected = None;
+        self.with_selected_apps(|sample| {
+            selected = Some(sample.selected);
+            Ok(Value::Null)
+        })?;
+
+        selected.ok_or(Error::Bound("window selection"))
+    }
+}
+
+/// The wall clock range of the window of the observation `selected`.
+fn window_range(selected: &Observation) -> Result<ContextRange> {
+    let second = selected.wall_ns.ok_or(Error::Bound("window clock"))? / NANOSECONDS_PER_SECOND;
+
+    context_range(second)
 }
 
 /// Keeps the value of the observation the session polled last, and drops those older than

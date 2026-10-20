@@ -13,12 +13,18 @@ pub fn saved_only() -> Fixture {
     fixture.publish_with_system_rows(1000);
     fixture.publish_with_system_rows(1001);
     fixture.seal();
-    collector::recording::Registry {
-        runs: Vec::new(),
-        evictions: 0,
-    }
-    .write(&fixture.root)
-    .unwrap();
+    forget_live_runs(&fixture.root);
+
+    fixture
+}
+
+/// The two sealed seconds of `saved_only`, sealed with the ranks of their minute.
+pub fn saved_ranked() -> Fixture {
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(1000);
+    fixture.publish_with_system_rows(1001);
+    fixture.seal_derived(&[], &crate::SealedRanks);
+    forget_live_runs(&fixture.root);
 
     fixture
 }
@@ -49,12 +55,7 @@ pub fn saved_in_two_minutes() -> (Fixture, Vec<PathBuf>) {
     fixture.publish_with_system_rows(1060);
     fixture.publish_with_system_rows(1061);
     fixture.seal_minute(1);
-    collector::recording::Registry {
-        runs: Vec::new(),
-        evictions: 0,
-    }
-    .write(&fixture.root)
-    .unwrap();
+    forget_live_runs(&fixture.root);
 
     (fixture, earlier)
 }
@@ -65,6 +66,17 @@ pub fn damage(tables: &[PathBuf]) {
     for table in tables {
         std::fs::write(table, b"damaged").unwrap();
     }
+}
+
+/// Rewrites the recording's registry with no live run, so a session reads its seconds only
+/// from their saved minutes.
+fn forget_live_runs(root: &Path) {
+    collector::recording::Registry {
+        runs: Vec::new(),
+        evictions: 0,
+    }
+    .write(root)
+    .unwrap();
 }
 
 fn saved_tables(root: &Path) -> Vec<PathBuf> {

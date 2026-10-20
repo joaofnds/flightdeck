@@ -8,6 +8,7 @@ use serde_json::Value;
 use super::window::{self, Window, WindowValue};
 use crate::LiveSession;
 use crate::live_app_response::{Observation, Rank, RankedApp, Ranks, Sample};
+use crate::session::ContextRange;
 
 pub type WindowRanks = Window<Ranks>;
 
@@ -32,6 +33,14 @@ impl WindowValue for Ranks {
         }
 
         bytes
+    }
+
+    fn visit_kept(
+        history: &crate::Session,
+        range: ContextRange,
+        consume: impl FnMut(Self) -> Result<()>,
+    ) -> Result<()> {
+        history.visit_sealed_ranks(range, consume)
     }
 }
 
@@ -60,6 +69,20 @@ impl LiveSession {
         operation.run(|| {
             let mut ranks = std::mem::take(&mut self.app_ranks);
             let ranked = self.fill_window(&mut ranks, Sample::ranks);
+            self.app_ranks = ranks;
+
+            ranked
+        })
+    }
+
+    /// Ranks the observations of the selected window that their cached samples or sealed
+    /// minutes rank already, and replays nothing, so a newly opened page shows them with its
+    /// first readings. `rank_window` ranks the rest.
+    pub fn rank_window_kept(&mut self) -> Result<()> {
+        let operation = self.operation.begin(self.operation.epoch())?;
+        operation.run(|| {
+            let mut ranks = std::mem::take(&mut self.app_ranks);
+            let ranked = self.fill_window_kept(&mut ranks, Sample::ranks);
             self.app_ranks = ranks;
 
             ranked

@@ -143,6 +143,16 @@ fn display(bytes: &[u8]) -> Result<String> {
     Ok(text)
 }
 
+/// The name an App whose key is `bytes` shows.
+pub(super) fn display_name(kind: KeyKind, bytes: &[u8]) -> Result<String> {
+    let key = match kind {
+        KeyKind::Bundle => AppKey::Bundle(bytes),
+        KeyKind::Executable => AppKey::Executable(bytes),
+    };
+
+    display(app_name(key))
+}
+
 fn key_view(key: &Key) -> AppKey<'_> {
     match key.kind {
         KeyKind::Bundle => AppKey::Bundle(&key.bytes),

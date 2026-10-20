@@ -20,6 +20,14 @@ impl WindowValue for Weighed {
     fn bytes(&self) -> usize {
         self.bytes
     }
+
+    fn visit_kept(
+        _history: &crate::Session,
+        _range: ContextRange,
+        _consume: impl FnMut(Self) -> persistence::Result<()>,
+    ) -> persistence::Result<()> {
+        Ok(())
+    }
 }
 
 #[test]
