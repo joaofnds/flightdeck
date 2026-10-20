@@ -1,5 +1,3 @@
-use std::time::Instant;
-
 use gpui::{TestAppContext, px};
 use serde_json::{Value, json};
 
@@ -155,7 +153,7 @@ impl InputDriver {
 
     fn begin_schematic_lookup(&mut self) -> u64 {
         let generation = self.view.update(&mut self.context, |dashboard, cx| {
-            dashboard.preview_tick_at(Instant::now(), cx);
+            dashboard.preview_tick(cx);
             let preview = dashboard.preview.as_ref().unwrap();
             assert!(!preview.complete);
 

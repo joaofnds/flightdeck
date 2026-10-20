@@ -80,7 +80,6 @@ pub struct LiveDashboard {
     pub(crate) pointer: crate::live_hover::controller::PointerPlace,
     pub(crate) chart_inspector: Option<crate::live_chart_view::inspector::ChartInspector>,
     pub preview: Option<crate::live_hover::Preview>,
-    pub(crate) preview_ready_at: Instant,
     /// When the shown live reading arrived. A preview holds the live view, so while one is
     /// shown the source status is judged at this moment instead of now.
     received_at: SystemTime,
@@ -219,7 +218,6 @@ impl LiveDashboard {
             pointer: crate::live_hover::controller::PointerPlace::InsideWindow,
             chart_inspector: None,
             preview: None,
-            preview_ready_at: Instant::now(),
             received_at: SystemTime::now(),
             preview_submissions: 0,
             hover_timings: crate::live_hover::timings::HoverTimings::new(),

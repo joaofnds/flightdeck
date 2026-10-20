@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::time::{Duration, Instant};
 
 use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, WindowOptions};
 use serde_json::{Value, json};
@@ -245,7 +244,7 @@ fn repeated_moves_within_one_timestamp_preserve_the_first_pending_lookup(cx: &mu
     let first = harness.driver.begin_lookup();
 
     harness.driver.move_within_historical_second();
-    harness.driver.tick_after(Duration::from_millis(250));
+    harness.driver.tick();
     harness.driver.deliver(first, Epoch::Historical);
 
     let copied = harness.driver.copy_json();
@@ -255,25 +254,20 @@ fn repeated_moves_within_one_timestamp_preserve_the_first_pending_lookup(cx: &mu
 }
 
 #[gpui::test]
-fn superseded_lookups_wait_for_the_next_quarter_second_before_new_details_can_appear(
-    cx: &mut TestAppContext,
-) {
-    // An early response is deliverable only if production actually submitted a premature request.
+fn a_superseding_lookup_is_sent_without_waiting_on_the_one_before(cx: &mut TestAppContext) {
+    // Goal: a hover on a second the page does not hold reads it at the next frame, however
+    // recently the hover before it read its own. Method: hover A, then B, tick once, deliver B.
     let mut harness = HoverHarness::setup(cx, Route::Cpu, Mode::Follow);
     harness.driver.hover(Epoch::Historical);
     harness.driver.begin_lookup();
     harness.driver.hover(Epoch::Older);
 
-    harness.driver.tick_after(Duration::from_millis(249));
+    harness.driver.tick();
     harness.driver.deliver_if_requested(Epoch::Older);
 
-    let before = harness.driver.copy_json();
-    assert!(before["summary"]["response_marker"].is_null());
-    harness.driver.tick_after(Duration::from_millis(1));
-    harness.driver.deliver_if_requested(Epoch::Older);
-    let after = harness.driver.copy_json();
-    assert_eq!(after["summary"]["response_marker"], "older-response");
-    assert_eq!(after["observation"], Epoch::Older.observation());
+    let copied = harness.driver.copy_json();
+    assert_eq!(copied["summary"]["response_marker"], "older-response");
+    assert_eq!(copied["observation"], Epoch::Older.observation());
     harness.teardown();
 }
 
@@ -326,7 +320,7 @@ fn a_hover_on_a_second_without_readings_is_timed_when_the_page_shows_the_gap(
     let mut harness = HoverHarness::setup(cx, Route::Cpu, Mode::Follow);
     harness.driver.hover_second(997);
 
-    harness.driver.tick_after(Duration::ZERO);
+    harness.driver.tick();
 
     assert_eq!(harness.driver.hovers(), [TimedHover::complete("cpu", 997)]);
     harness.teardown();
@@ -393,7 +387,7 @@ fn a_hover_whose_read_cannot_be_sent_is_reported_unfinished(cx: &mut TestAppCont
     harness.driver.hover(Epoch::Historical);
     harness.driver.stop_reader();
 
-    harness.driver.tick_after(Duration::ZERO);
+    harness.driver.tick();
 
     assert_eq!(
         harness.driver.hovers(),
@@ -426,7 +420,6 @@ impl HoverHarness {
                 view,
                 context,
                 route,
-                now: Instant::now(),
             },
         };
         harness.driver.seed_accepted(mode);
@@ -454,7 +447,6 @@ struct HoverDriver {
     view: Entity<LiveDashboard>,
     context: VisualTestContext,
     route: Route,
-    now: Instant,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -538,7 +530,6 @@ impl HoverDriver {
         self.context
             .simulate_resize(gpui::size(gpui::px(1536.0), gpui::px(2600.0)));
         self.context.run_until_parked();
-        self.now = Instant::now();
     }
 
     fn remove_historical_free_memory(&mut self) {
@@ -647,7 +638,7 @@ impl HoverDriver {
     }
 
     fn begin_lookup(&mut self) -> Lookup {
-        self.tick_after(Duration::ZERO);
+        self.tick();
         let generation = self.view.read_with(&self.context, |dashboard, _| {
             dashboard.preview.as_ref().unwrap().generation.unwrap()
         });
@@ -659,10 +650,9 @@ impl HoverDriver {
             .update(&mut self.context, |dashboard, _| dashboard.worker.stop());
     }
 
-    fn tick_after(&mut self, elapsed: Duration) {
-        self.now += elapsed;
+    fn tick(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
-            dashboard.preview_tick_at(self.now, cx);
+            dashboard.preview_tick(cx);
         });
         self.context.run_until_parked();
     }

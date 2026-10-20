@@ -478,7 +478,7 @@ fn attribution_arrow_inspection_and_app_navigation_keep_the_exact_target(cx: &mu
 impl InputDriver {
     pub(super) fn tick_hover(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
-            dashboard.preview_tick_at(Instant::now(), cx);
+            dashboard.preview_tick(cx);
         });
         self.context.run_until_parked();
     }
@@ -567,7 +567,7 @@ impl InputDriver {
 
     fn complete_attribution_preview(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
-            dashboard.preview_tick_at(Instant::now(), cx);
+            dashboard.preview_tick(cx);
             let preview = dashboard.preview.as_ref().unwrap();
             assert!(!preview.request.load_app_attribution_history);
             let mut snapshot = attribution_snapshot(preview.generation.unwrap());

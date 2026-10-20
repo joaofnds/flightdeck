@@ -158,10 +158,6 @@ impl LiveDashboard {
     }
 
     pub(crate) fn preview_tick(&mut self, cx: &mut Context<Self>) {
-        self.preview_tick_at(std::time::Instant::now(), cx);
-    }
-
-    pub(crate) fn preview_tick_at(&mut self, now: std::time::Instant, cx: &mut Context<Self>) {
         let Some(preview) = &mut self.preview else {
             return;
         };
@@ -194,15 +190,10 @@ impl LiveDashboard {
             }
         }
 
-        if now < self.preview_ready_at {
-            return;
-        }
-
         match self.worker.inspect(preview.request.clone()) {
             Ok(generation) => {
                 preview.generation = Some(generation);
                 self.preview_submissions += 1;
-                self.preview_ready_at = now + std::time::Duration::from_millis(250);
                 crate::live_launch::poll_quickly(cx);
             }
             Err(error) => {

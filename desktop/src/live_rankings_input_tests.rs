@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::Instant;
 
 use gpui::{Modifiers, MouseButton, TestAppContext, px};
 use serde_json::json;
@@ -754,7 +753,7 @@ impl InputDriver {
 
     pub(super) fn complete_ranked_preview(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
-            dashboard.preview_tick_at(Instant::now(), cx);
+            dashboard.preview_tick(cx);
             let preview = dashboard.preview.as_ref().unwrap();
             let mut snapshot = accepted_snapshot(preview.generation.unwrap());
             snapshot.selection["second"] = json!(999);
@@ -768,7 +767,7 @@ impl InputDriver {
 
     pub(super) fn complete_unavailable_ranked_preview(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
-            dashboard.preview_tick_at(Instant::now(), cx);
+            dashboard.preview_tick(cx);
             let preview = dashboard.preview.as_ref().unwrap();
             let mut snapshot = accepted_snapshot(preview.generation.unwrap());
             snapshot.selection["second"] = json!(999);
@@ -786,7 +785,7 @@ impl InputDriver {
 
     pub(super) fn fail_ranked_preview(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
-            dashboard.preview_tick_at(Instant::now(), cx);
+            dashboard.preview_tick(cx);
             assert!(dashboard.preview_receive(Update::Failed {
                 generation: dashboard.preview.as_ref().unwrap().generation.unwrap(),
                 message: "Ranking read failed".into(),
@@ -798,7 +797,7 @@ impl InputDriver {
 
     pub(super) fn finish_missing_ranked_preview(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
-            dashboard.preview_tick_at(Instant::now(), cx);
+            dashboard.preview_tick(cx);
         });
         self.context.run_until_parked();
     }
@@ -924,7 +923,7 @@ impl InputDriver {
 
     fn complete_route_ranked_preview(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
-            dashboard.preview_tick_at(Instant::now(), cx);
+            dashboard.preview_tick(cx);
             let preview = dashboard.preview.as_ref().unwrap();
             let mut snapshot = route_ranked_snapshot(preview.generation.unwrap());
             snapshot.selection["second"] = json!(999);

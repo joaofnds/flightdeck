@@ -400,7 +400,7 @@ impl InputDriver {
 
     fn complete_overview_history_preview(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
-            dashboard.preview_tick_at(Instant::now(), cx);
+            dashboard.preview_tick(cx);
             let preview = dashboard.preview.as_ref().unwrap();
             assert!(!preview.request.load_app_attribution_history);
             assert!(!preview.request.load_resident_history);
@@ -443,7 +443,7 @@ impl InputDriver {
 
     fn deliver_late_overview_history_details(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
-            dashboard.preview_tick_at(Instant::now(), cx);
+            dashboard.preview_tick(cx);
             let preview = dashboard.preview.as_ref().unwrap();
             let mut snapshot = route_ranked_snapshot(preview.generation.unwrap() + 1);
             snapshot.selection["second"] = json!(999);
@@ -458,7 +458,7 @@ impl InputDriver {
 
     fn deliver_wrong_overview_history_details(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
-            dashboard.preview_tick_at(Instant::now(), cx);
+            dashboard.preview_tick(cx);
             let preview = dashboard.preview.as_ref().unwrap();
             let mut snapshot = route_ranked_snapshot(preview.generation.unwrap());
             snapshot.selection["second"] = json!(999);

@@ -179,7 +179,7 @@ impl InputDriver {
 
     fn submit_section_preview(&mut self) -> u64 {
         self.view.update(&mut self.context, |dashboard, cx| {
-            dashboard.preview_tick_at(std::time::Instant::now(), cx);
+            dashboard.preview_tick(cx);
             dashboard.preview.as_ref().unwrap().generation.unwrap()
         })
     }

@@ -413,7 +413,7 @@ fn disk_attribution_arrow_inspection_preserves_the_ranked_app_target(cx: &mut Te
 impl InputDriver {
     fn complete_disk_attribution_preview(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
-            dashboard.preview_tick_at(std::time::Instant::now(), cx);
+            dashboard.preview_tick(cx);
             let preview = dashboard.preview.as_ref().unwrap();
             assert!(!preview.request.load_app_attribution_history);
             let mut snapshot = accepted_snapshot(preview.generation.unwrap());
