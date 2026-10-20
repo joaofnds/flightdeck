@@ -76,6 +76,9 @@ impl LiveDashboard {
             };
         }
         if changed {
+            if self.preview_awaiting_reply() {
+                crate::live_launch::poll_quickly(cx);
+            }
             self.rebuild();
             cx.notify();
         } else {
@@ -146,15 +149,12 @@ impl LiveDashboard {
         cx.notify();
     }
 
-    /// Whether a hover's read is out and its reply not yet taken.
+    /// Whether a hover still waits on a read of its second, whether that read is out or waits
+    /// to be sent.
     pub(crate) fn preview_awaiting_reply(&self) -> bool {
-        self.preview.as_ref().is_some_and(|preview| {
-            if preview.complete {
-                return false;
-            }
-
-            preview.generation.is_some()
-        })
+        self.preview
+            .as_ref()
+            .is_some_and(|preview| !preview.complete)
     }
 
     pub(crate) fn preview_tick(&mut self, cx: &mut Context<Self>) {

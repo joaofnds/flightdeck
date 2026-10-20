@@ -77,16 +77,19 @@ fn a_saved_gap_cannot_retain_the_previous_exact_cpu_details(cx: &mut TestAppCont
 }
 
 #[gpui::test]
-fn a_hover_read_holds_the_page_awaiting_its_reply(cx: &mut TestAppContext) {
-    // Goal: the app polls the worker quickly while a hover's read is out, so the hovered second
-    // shows as soon as it is read rather than at the next tick a quarter second later.
-    // Method: submit a hover's read through the production controller and ask whether the page
-    // awaits a reply while it is out and once it has arrived.
+fn a_hover_holds_the_page_awaiting_its_read_until_the_reply(cx: &mut TestAppContext) {
+    // Goal: the app polls the worker quickly from the moment a hover needs a read until its
+    // reply is taken, so the read goes out and the hovered second shows as soon as each can,
+    // rather than at the next tick a quarter second later.
+    // Method: hover a second only a read gives through the production controller, and ask
+    // whether the page awaits a reply before the read is sent, while it is out, and once it
+    // has arrived.
     let mut harness = ReaderHoverHarness::setup(cx);
+
     harness.driver.preview_publication(2);
 
+    assert!(harness.driver.awaiting_reply());
     harness.driver.submit_preview();
-
     assert!(harness.driver.awaiting_reply());
     harness.driver.await_preview();
     assert!(!harness.driver.awaiting_reply());
