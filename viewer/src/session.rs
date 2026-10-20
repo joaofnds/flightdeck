@@ -40,6 +40,8 @@ pub struct Session {
     #[cfg(test)]
     pub(crate) source_reads: std::cell::Cell<u64>,
     #[cfg(test)]
+    pub(crate) parts_decodes: std::cell::Cell<u64>,
+    #[cfg(test)]
     pub(crate) tick_queries: std::cell::Cell<u64>,
     #[cfg(test)]
     pub(crate) before_cpu_history_install: Option<Box<dyn FnOnce()>>,
@@ -146,6 +148,8 @@ impl Session {
             operation,
             #[cfg(test)]
             source_reads: std::cell::Cell::new(0),
+            #[cfg(test)]
+            parts_decodes: std::cell::Cell::new(0),
             #[cfg(test)]
             tick_queries: std::cell::Cell::new(0),
             #[cfg(test)]

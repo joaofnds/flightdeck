@@ -678,6 +678,8 @@ impl Session {
     }
 
     fn visit_sealed_parts_read(&self, kept: &Kept<'_>, key: &PartKey<'_>) -> Result<Vec<AppPart>> {
+        #[cfg(test)]
+        self.parts_decodes.set(self.parts_decodes.get() + 1);
         let source = self.connection.parquet_source(kept.path)?;
         let summary = self.connection.query(&format!(
             "SELECT MIN(version), MAX(version), COUNT(*) FROM {source}"

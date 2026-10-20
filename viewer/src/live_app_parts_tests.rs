@@ -51,6 +51,41 @@ fn part_window_takes_the_parts_a_window_keeps_without_a_replay() {
 }
 
 #[test]
+fn a_parts_read_decodes_each_window_once_for_the_histories_of_its_app() {
+    // Goal: the read of a page's histories of an App decodes the parts each saved minute keeps
+    // of it once, for every history that visits them.
+    // Method: within a parts read of the selected App of a saved minute that keeps its parts,
+    // read the App's history, its process groups history and its parts, and count the decodes.
+    let fixture = saved_with_apps();
+    let mut session = LiveSession::open(&fixture.root).unwrap();
+    session.select(1001, 0).unwrap();
+    let app = selected_app(&session);
+
+    session.with_parts_read(app.kind, &app.bytes, |session| {
+        session.app_history(app.kind, &app.bytes).unwrap();
+        session
+            .app_process_groups_history(app.kind, &app.bytes)
+            .unwrap();
+        session.part_window(app.kind, &app.bytes).unwrap();
+    });
+
+    assert_eq!(session.history.as_ref().unwrap().parts_decodes.get(), 1);
+}
+
+#[test]
+fn a_parts_read_ends_with_the_read_it_runs() {
+    // Goal: the read of one page's histories leaves no read open for the next page's.
+    // Method: run two parts reads of the selected App one after the other.
+    let fixture = saved_with_apps();
+    let mut session = LiveSession::open(&fixture.root).unwrap();
+    session.select(1001, 0).unwrap();
+    let app = selected_app(&session);
+    session.with_parts_read(app.kind, &app.bytes, |_session| ());
+
+    session.with_parts_read(app.kind, &app.bytes, |_session| ());
+}
+
+#[test]
 fn part_window_keeps_sharing_the_parts_of_a_covered_window() {
     // Goal: reading the same App's window again replays no saved minute and copies no part.
     // Method: keep an App's parts of a saved window, take them, and keep them again.
