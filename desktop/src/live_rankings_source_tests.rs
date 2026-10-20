@@ -248,6 +248,26 @@ fn a_newly_opened_page_brings_the_ranks_its_window_keeps() {
     assert!(Preview::resident(&opened, &reader.command.request, target).complete);
 }
 
+#[test]
+fn a_newly_opened_cpu_page_brings_the_cores_of_its_window() {
+    // Goal: a hover on the CPU page while it reads its App histories shows another
+    // observation's top Apps with its cores at once.
+    // Method: rank the window on a full Overview read at publication three, open the CPU
+    // page, and preview publication two over its first readings.
+    let recording = SealedRecording::with_ranked_apps();
+    let mut reader = super::SnapshotReader::new();
+    reader.command.request = ranked_request_at("overview", 3);
+    reader.read_complete(&recording);
+    reader.command.request.route = "cpu".into();
+    reader.command.generation += 1;
+    let target = Target::exact(1001, &ranked_identity(2)).unwrap();
+
+    let opened = reader.read(&recording).unwrap().unwrap();
+
+    assert!(opened.histories_pending);
+    assert!(Preview::resident(&opened, &reader.command.request, target).complete);
+}
+
 fn exact_ranked_request(route: &str) -> Request {
     ranked_request_at(route, 2)
 }

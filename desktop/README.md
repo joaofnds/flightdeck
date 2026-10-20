@@ -113,7 +113,8 @@ reader keeps each second's top Apps for the selected window, and the selected Ap
 processes on Apps, so a hover shows them in the frame that handles the move. A
 second not kept yet, the Apps an open App picker lists, and an App too large for
 its bound show a loading state while the existing reader fetches them. A newly
-opened page brings the top Apps its window already keeps with its first readings.
+opened page brings the top Apps its window already keeps with its first readings,
+and the CPU page its logical-CPU history.
 A hover on a second not kept yet, while the page still reads its App histories,
 waits for that read, which keeps the rest, rather than cancelling it with a read
 of its own.

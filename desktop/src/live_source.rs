@@ -623,9 +623,7 @@ fn reader_payload(
             detail,
             &snapshot.selection["selected"],
         )?);
-        if !snapshot.histories_pending {
-            reader_cpu_history(session, request, snapshot)?;
-        }
+        reader_cpu_history(session, request, snapshot)?;
     }
     // Ranking and keeping App parts replay the window's saved minutes, so they follow the
     // histories the page shows, and a hover's own read does neither.
