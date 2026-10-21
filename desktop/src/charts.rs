@@ -62,8 +62,6 @@ pub const PLOT_INSETS: gpui::Edges<Pixels> = gpui::Edges {
     bottom: px(0.0),
     left: px(0.0),
 };
-/// Display averaging keeps about one curve point per this many pixels, so a 900-second history
-/// draws as a readable curve; inspection still reads each exact observation.
 /// Curves and axes average readings over a chart's span divided into this many buckets, thirty
 /// seconds of a 15-minute chart, which is the sampling interval of the approved prototype.
 const CURVE_BUCKETS: u8 = 30;
