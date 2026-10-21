@@ -37,7 +37,7 @@ pub(crate) enum Observed<'observed> {
     /// The facts and the Apps of an observation whose window keeps its Apps' parts.
     Sealed {
         header: &'observed crate::live_app_response::Header,
-        apps: &'observed [crate::live_app_response::App],
+        apps: &'observed [crate::session::KeptAttribution],
     },
 }
 
@@ -363,7 +363,7 @@ impl Point {
 
     fn capture_sealed(
         header: &crate::live_app_response::Header,
-        apps: &[crate::live_app_response::App],
+        apps: &[crate::session::KeptAttribution],
         sums: Option<&Sums<Arc<Key>>>,
         windows: [Option<WindowIdentity>; 2],
         available: usize,

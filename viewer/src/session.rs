@@ -825,9 +825,9 @@ mod cpu_history_saved;
 
 mod app_history;
 pub(crate) use app_history::AttributionReplay;
-pub(crate) use app_history::KeptResident;
 pub(crate) use app_history::ProcessGroupsReplay;
 pub use app_history::SealedApps;
+pub(crate) use app_history::{KeptAttribution, KeptResident};
 mod committed_apps;
 mod earlier;
 #[cfg(test)]

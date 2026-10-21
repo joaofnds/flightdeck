@@ -501,6 +501,12 @@ const fn fixed(name: &str) -> usize {
     column(&FIXED_COLUMNS, name)
 }
 
+/// The place of the column `name` of a read of the Apps' CPU, energy and disk, which fails the
+/// build where the read takes no column of that name.
+const fn attribution_column(name: &str) -> usize {
+    column(&ATTRIBUTION_COLUMNS, name)
+}
+
 /// The place of the column `name` of a read of the Apps' resident memory, which fails the build
 /// where the read takes no column of that name.
 const fn resident_column(name: &str) -> usize {
@@ -792,18 +798,18 @@ impl Session {
         Ok(Some(headers))
     }
 
-    /// Gives `consume` each of `headers`, in publication order, with its Apps, from the App
-    /// rows of the parts the engine holds as `source`.
+    /// Gives `consume` each of `headers`, in publication order, with the CPU, energy and disk
+    /// of each of its Apps, from the App rows of the parts the engine holds as `source`.
     pub(super) fn visit_kept_parts_apps(
         &self,
         source: &str,
         headers: &[&Header],
-        consume: impl FnMut(&Header, &[App]) -> Result<()>,
+        consume: impl FnMut(&Header, &[KeptAttribution]) -> Result<()>,
     ) -> Result<()> {
         let rows = KeptAppRows {
-            query: kept_parts_query(source),
-            publication_place: const { fixed("publication") },
-            decode: kept_app,
+            query: format!("SELECT {} FROM {source}", ATTRIBUTION_COLUMNS.join(", ")),
+            publication_place: const { attribution_column("publication") },
+            decode: kept_attribution,
         };
 
         self.visit_kept_parts_rows(&rows, headers, consume)
@@ -909,6 +915,62 @@ struct KeptAppRows<T> {
     /// What a row gives, and the place of its App among its sample's Apps.
     decode: fn(&Row<'_>) -> Result<(usize, T)>,
 }
+
+/// An App's CPU, energy and disk at an observation of a window that keeps its parts, which the
+/// histories of every App plot.
+pub(crate) struct KeptAttribution {
+    pub key: Key,
+    pub members: u32,
+    pub membership_complete: bool,
+    pub cpu_ns: Measure,
+    pub energy_nj: Measure,
+    pub disk_io_bytes: Measure,
+}
+
+/// The columns a read of the Apps' CPU, energy and disk takes: those it decodes, then the row's
+/// kind its filter reads. The read takes no more, since each column costs the engine its plan
+/// and decode on every window.
+const ATTRIBUTION_COLUMNS: [&str; 19] = [
+    "publication",
+    "app_index",
+    "app_kind",
+    "app_key",
+    "members",
+    "app_membership_complete",
+    "app_cpu_ns_known",
+    "app_cpu_ns_measured_members",
+    "app_cpu_ns_unavailable_members",
+    "app_cpu_ns_overflowed",
+    "app_energy_nj_known",
+    "app_energy_nj_measured_members",
+    "app_energy_nj_unavailable_members",
+    "app_energy_nj_overflowed",
+    "app_disk_io_bytes_known",
+    "app_disk_io_bytes_measured_members",
+    "app_disk_io_bytes_unavailable_members",
+    "app_disk_io_bytes_overflowed",
+    "row_kind",
+];
+const _: () = {
+    // Each measure's fields follow its known amount in the order a measure keeps them.
+    let cpu = attribution_column("app_cpu_ns_known");
+    assert!(attribution_column("app_cpu_ns_measured_members") == cpu + 1);
+    assert!(attribution_column("app_cpu_ns_unavailable_members") == cpu + 2);
+    assert!(attribution_column("app_cpu_ns_overflowed") == cpu + 3);
+    let energy = attribution_column("app_energy_nj_known");
+    assert!(attribution_column("app_energy_nj_measured_members") == energy + 1);
+    assert!(attribution_column("app_energy_nj_unavailable_members") == energy + 2);
+    assert!(attribution_column("app_energy_nj_overflowed") == energy + 3);
+    let disk = attribution_column("app_disk_io_bytes_known");
+    assert!(attribution_column("app_disk_io_bytes_measured_members") == disk + 1);
+    assert!(attribution_column("app_disk_io_bytes_unavailable_members") == disk + 2);
+    assert!(attribution_column("app_disk_io_bytes_overflowed") == disk + 3);
+    // Each column the read takes is one the parts table holds, under the name it gives it.
+    assert!(fixed("app_membership_complete") < FIXED_COLUMNS.len());
+    assert!(place(&MEASURES, "cpu_ns") < MEASURES.len());
+    assert!(place(&MEASURES, "energy_nj") < MEASURES.len());
+    assert!(place(&MEASURES, "disk_io_bytes") < MEASURES.len());
+};
 
 /// An App's resident memory at an observation of a window that keeps its parts.
 pub(crate) struct KeptResident {
@@ -1185,6 +1247,42 @@ fn kept_app(row: &Row<'_>) -> Result<(usize, App)> {
 
     Ok((
         collector::usize_from_u32(row.get(const { fixed("app_index") })?),
+        app,
+    ))
+}
+
+/// A row of `ATTRIBUTION_COLUMNS`'s App's CPU, energy and disk, and its place among its
+/// sample's Apps.
+fn kept_attribution(row: &Row<'_>) -> Result<(usize, KeptAttribution)> {
+    let key = Key::new(
+        kind_of(row.get(const { attribution_column("app_kind") })?)?,
+        row.get(const { attribution_column("app_key") })?,
+    )?;
+    let members = kept_members(row, const { attribution_column("members") })?;
+
+    let app = KeptAttribution {
+        key,
+        members,
+        membership_complete: row.get(const { attribution_column("app_membership_complete") })?,
+        cpu_ns: kept_measure(
+            row,
+            const { attribution_column("app_cpu_ns_known") },
+            members,
+        )?,
+        energy_nj: kept_measure(
+            row,
+            const { attribution_column("app_energy_nj_known") },
+            members,
+        )?,
+        disk_io_bytes: kept_measure(
+            row,
+            const { attribution_column("app_disk_io_bytes_known") },
+            members,
+        )?,
+    };
+
+    Ok((
+        collector::usize_from_u32(row.get(const { attribution_column("app_index") })?),
         app,
     ))
 }
