@@ -300,6 +300,7 @@ struct Domain {
 
 struct Coordinates {
     window: crate::chart_axes::TimeWindow,
+    detail_first: u64,
     positions: Vec<f32>,
     segments: Vec<u64>,
     selected_index: Option<usize>,
@@ -422,6 +423,7 @@ fn coordinates(
             first: domain.first,
             span: u64::from(domain.span),
         },
+        detail_first: domain.recent_first,
         positions,
         segments,
         selected_index,
@@ -690,6 +692,7 @@ fn panel(
         segments: Some(coordinates.segments.clone()),
         selected_index: coordinates.selected_index,
         window: Some(coordinates.window),
+        detail_first: Some(coordinates.detail_first),
     })
 }
 
@@ -758,6 +761,7 @@ fn gpu_apps_panel(
         segments: Some(coordinates.segments.clone()),
         selected_index: coordinates.selected_index,
         window: Some(coordinates.window),
+        detail_first: Some(coordinates.detail_first),
     }))
 }
 

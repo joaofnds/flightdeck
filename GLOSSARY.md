@@ -83,3 +83,7 @@ in watts.
 processes. macOS keeps CPU time, energy, disk bytes and GPU time per coalition, and a
 process's CPU time stays in those totals after it exits. A coalition and an App are
 separate groupings, so a coalition's totals are not an App's totals.
+
+**Bucket**: a stretch of the clock, such as five seconds, whose readings a chart draws as one
+point at their mean, with a band from the lowest to the highest. Buckets start at multiples of
+their length, so a reading keeps its bucket as the chart scrolls.

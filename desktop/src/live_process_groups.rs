@@ -252,6 +252,7 @@ fn panels_panel(
             first,
             span: u64::from(span),
         }),
+        detail_first: None,
     })
 }
 

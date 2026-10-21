@@ -25,9 +25,13 @@ pub struct Panel {
     pub table_headings: Option<Vec<String>>,
     pub table_rows: Option<Vec<Vec<String>>>,
     /// The wall-clock seconds the positions span, which pins the chart's display averaging to
-    /// the clock. A panel with none averages from its first position.
+    /// the clock. A panel with none draws each reading on its own.
     #[serde(skip)]
     pub window: Option<crate::chart_axes::TimeWindow>,
+    /// The first second of full-detail readings, before which each reading stands for several
+    /// seconds, so no average mixes the two.
+    #[serde(skip)]
+    pub detail_first: Option<u64>,
 }
 
 #[derive(Clone, Deserialize)]

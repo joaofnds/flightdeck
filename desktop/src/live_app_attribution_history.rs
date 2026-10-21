@@ -351,6 +351,7 @@ impl History {
             segments: Some(self.points.iter().map(|point| point.segment).collect()),
             selected_index: Some(self.selected_index),
             window: Some(self.window),
+            detail_first: None,
         }
     }
 
