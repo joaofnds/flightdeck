@@ -54,6 +54,27 @@ fn resident_history_from_the_parts_of_an_earlier_second_is_the_history_its_repla
 }
 
 #[test]
+fn resident_history_from_parts_with_a_gap_in_plotted_observations_is_their_replay() {
+    // Goal: a window that keeps its parts, whose observations in the context are not adjacent,
+    // gives the history a replay of its minute gives.
+    // Method: seal one minute of three observations whose second has a wall clock that stepped
+    // back before the context, so the history at the third plots the first and the third
+    // only, and compare it with the replay's history at the same second.
+    let mut fixture = Fixture::new();
+    for (index, second) in [1000, 10, 1002].into_iter().enumerate() {
+        fixture.publish_with_usage(second, &usage(11 + 7 * u64::try_from(index).unwrap()));
+    }
+    fixture.seal_minute_derived(0, &crate::SealedApps);
+    let session = resident_at(&fixture, 1002);
+
+    let (kept, reads) = resident_history(&session);
+
+    assert_eq!(reads, 0);
+    assert_eq!(kept["points"].as_array().unwrap().len(), 2);
+    assert_eq!(kept, replayed_at(session, &fixture, 1002).0);
+}
+
+#[test]
 fn resident_history_from_points_cached_from_parts_is_the_history_the_first_query_gave() {
     // Goal: a second query takes the points the first took from the windows' parts out of the
     // cache and gives the same history.

@@ -4,9 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use polars::prelude::{
-    Column, DataFrame, LazyFrame, NamedFrom, Series, SortMultipleOptions, col, lit,
-};
+use polars::prelude::{Column, DataFrame, LazyFrame, SortMultipleOptions, col, lit};
 
 use super::sealed::{Kept, columns, kind_code, kind_of, observed_in};
 use super::{ContextRange, Session, TICKS_PER_WINDOW_MAX, WINDOWS_MAX};
@@ -840,16 +838,20 @@ impl Session {
         headers: &[&Header],
         mut consume: impl FnMut(&Header, &[T]) -> Result<()>,
     ) -> Result<()> {
-        let publications: Vec<u64> = headers
-            .iter()
-            .map(|header| header.selected.stamp.publication)
-            .collect();
-        let publications = Series::new("publications".into(), publications);
+        let (Some(first), Some(last)) = (headers.first(), headers.last()) else {
+            return Ok(());
+        };
+
+        // The engine filters a range of publications far faster than a list of them, so the
+        // read takes the range and skips the rows of observations in it that `headers` leave
+        // out.
+        assert!(first.selected.stamp.publication <= last.selected.stamp.publication);
         let frame = self.connection.collect(kept_parts_sorted(
             self.connection.plan(&rows.query)?.filter(
                 col("row_kind")
                     .eq(lit(ROW_APP))
-                    .and(col("publication").is_in(lit(publications).implode(false), false)),
+                    .and(col("publication").gt_eq(lit(first.selected.stamp.publication)))
+                    .and(col("publication").lt_eq(lit(last.selected.stamp.publication))),
             ),
             &["publication", "app_index"],
         ))?;
@@ -872,7 +874,7 @@ impl Session {
     }
 
     /// Gives `output` what `rows` decodes of the Apps of the observation of `header`, whose
-    /// rows of `frame` start at `first`, and returns the row after them.
+    /// rows of `frame` start at or after `first`, and returns the row after them.
     fn visit_kept_parts_rows_read<T>(
         &self,
         rows: &KeptAppRows<T>,
@@ -881,8 +883,9 @@ impl Session {
         header: &Header,
         output: &mut Vec<T>,
     ) -> Result<usize> {
+        let start = self.visit_kept_parts_rows_read_start(rows, frame, first, header)?;
         output.clear();
-        for index in first..frame.height() {
+        for index in start..frame.height() {
             self.operation.check()?;
             let row = Row::new(frame, index)?;
             if row.get::<u64>(rows.publication_place)? != header.selected.stamp.publication {
@@ -901,7 +904,27 @@ impl Session {
             return Err(Error::Bound("sealed parts Apps"));
         }
 
-        Ok(first + output.len())
+        Ok(start + output.len())
+    }
+
+    /// The first row of `frame` from `first` on whose observation is not before `header`'s,
+    /// which skips the rows of the observations the read leaves out.
+    fn visit_kept_parts_rows_read_start<T>(
+        &self,
+        rows: &KeptAppRows<T>,
+        frame: &DataFrame,
+        first: usize,
+        header: &Header,
+    ) -> Result<usize> {
+        for index in first..frame.height() {
+            self.operation.check()?;
+            let publication: u64 = Row::new(frame, index)?.get(rows.publication_place)?;
+            if publication >= header.selected.stamp.publication {
+                return Ok(index);
+            }
+        }
+
+        Ok(frame.height())
     }
 }
 

@@ -334,6 +334,38 @@ fn batch_from_the_parts_of_an_earlier_second_is_the_batch_its_replay_gives() {
 }
 
 #[test]
+fn batch_from_parts_whose_plotted_observations_have_a_gap_is_the_batch_their_replay_gives() {
+    // Goal: a window that keeps its parts, whose observations in the context are not adjacent,
+    // gives the batch a replay of its minute gives.
+    // Method: seal one minute of three observations whose second has a wall clock that stepped
+    // back before the context, so the batch at the third plots the first and the third only,
+    // and compare it with the replay's batch at the same observation.
+    let mut fixture = Fixture::new();
+    for (index, second) in [1000, 10, 1002].into_iter().enumerate() {
+        fixture.publish_with_usage(second, &kept_usage(u64::try_from(index).unwrap()));
+    }
+    fixture.seal_minute_derived(0, &crate::SealedApps);
+    let kept_session = Session::open(&fixture.root).unwrap();
+    // The third observation is publication 3, at run tick 2 of the run's first minute.
+    let selected = kept_selected(&kept_session, 3, 2, 1002);
+
+    let kept = saved_batch_at(&kept_session, &History::new(), &selected, BYTES_MAX).unwrap();
+
+    assert_eq!(kept_session.source_reads.get(), 0);
+    assert_eq!(
+        kept.cpu.as_ref().unwrap()["points"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_batch(
+        &kept,
+        &replayed_batch_at(kept_session, &fixture, &selected).0,
+    );
+}
+
+#[test]
 fn batch_from_points_cached_from_parts_is_the_batch_the_first_query_gave() {
     // Goal: a second query takes the points the first took from the windows' parts out of the
     // cache and gives the same batch.
@@ -788,7 +820,8 @@ fn kept_fixture(kept: [bool; 4]) -> Fixture {
     fixture
 }
 
-/// The measured process's usage at the observation of `kept_fixture` whose index is `index`.
+/// The measured process's usage at the observation of a fixture whose index is `index`, which
+/// differs from every other observation's.
 fn kept_usage(index: u64) -> Usage {
     Usage {
         awake_ns_at_start: 0,
@@ -825,8 +858,16 @@ fn kept_batch(
     // for each minute the pairs before it crossed.
     let index = publication - 1;
     let run_tick = 59 + index / 2 * 60 + index % 2;
+    let selected = kept_selected(saved, publication, run_tick, 1000 + index);
+
+    saved_batch_at(saved, history, &selected, available)
+}
+
+/// The selection ending at the observation of `saved`'s first run whose publication is
+/// `publication`, at run tick `run_tick` and wall second `second`.
+fn kept_selected(saved: &Session, publication: u64, run_tick: u64, second: u64) -> Selected {
     let run = saved.windows[0].identity.run;
-    let selected = Selected::ending_at(Observation {
+    Selected::ending_at(Observation {
         recording: run.recording.0,
         stamp: Stamp {
             boot: run.boot.0,
@@ -836,16 +877,26 @@ fn kept_batch(
             awake_ns: Some(run_tick * 1_000_000_000),
         },
         run_tick,
-        wall_ns: Some((1000 + index) * 1_000_000_000),
+        wall_ns: Some(second * 1_000_000_000),
     })
-    .unwrap();
+    .unwrap()
+}
+
+/// The batch `history` gives at `selected` from the saved windows of `saved` alone, with at
+/// most `available` bytes of cache, or the error that refuses it.
+fn saved_batch_at(
+    saved: &Session,
+    history: &History,
+    selected: &Selected,
+    available: usize,
+) -> Result<Box<AppAttributionHistories>> {
     let cancellation = Arc::new(Cancellation::default());
     let operation = cancellation.operation(0).unwrap();
-    let mut batch = Batch::new(history, &selected, &operation).unwrap();
+    let mut batch = Batch::new(history, selected, &operation).unwrap();
 
     history.attribution_batch_saved(
         &SavedQuery {
-            selected: &selected,
+            selected,
             saved,
             operation: &operation,
             available: available.min(BYTES_MAX.saturating_sub(history.bytes)),
@@ -854,15 +905,29 @@ fn kept_batch(
     )
 }
 
-/// The batch at publication `publication` from a session opened in place of `session` once
-/// each window's parts are of a version this build does not read, and the saved sources that
-/// session read.
+/// The batch at publication `publication` of `kept_fixture` from a session opened in place of
+/// `session` once each window's parts are of a version this build does not read, and the saved
+/// sources that session read.
 fn replayed_batch(session: Session, fixture: &Fixture, publication: u64) -> ([Value; 3], u64) {
+    let index = publication - 1;
+    let run_tick = 59 + index / 2 * 60 + index % 2;
+    let selected = kept_selected(&session, publication, run_tick, 1000 + index);
+
+    replayed_batch_at(session, fixture, &selected)
+}
+
+/// The batch at `selected` from a session opened in place of `session` once each window's
+/// parts are of a version this build does not read, and the saved sources that session read.
+fn replayed_batch_at(
+    session: Session,
+    fixture: &Fixture,
+    selected: &Selected,
+) -> ([Value; 3], u64) {
     session.unread_kept_parts();
     drop(session);
     let replaying = Session::open(&fixture.root).unwrap();
 
-    let replayed = kept_batch(&replaying, &History::new(), publication, BYTES_MAX).unwrap();
+    let replayed = saved_batch_at(&replaying, &History::new(), selected, BYTES_MAX).unwrap();
 
     let reads = replaying.source_reads.get();
     assert!(reads > 0);
