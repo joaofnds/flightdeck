@@ -2,6 +2,7 @@ use gpui::{Modifiers, MouseButton, TestAppContext};
 
 use super::{InputDriver, InputHarness};
 use crate::chart_axes::TimeWindow;
+use crate::time_range::Range;
 
 const PLOT: &str = "live-energy-plot";
 
@@ -28,6 +29,13 @@ impl InputDriver {
             dashboard.request.second = None;
             dashboard.request.identity = None;
         });
+    }
+
+    fn show_range(&mut self, range: Range) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            dashboard.set_range(range, cx);
+        });
+        self.context.run_until_parked();
     }
 
     fn view_window(&self) -> Option<TimeWindow> {
@@ -141,6 +149,27 @@ fn choosing_a_shorter_range_shows_the_last_minutes_of_history(cx: &mut TestAppCo
         Some(TimeWindow {
             first: 701,
             span: 300
+        })
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_short_range_keeps_a_selected_second_with_later_seconds_in_view(cx: &mut TestAppContext) {
+    // Goal: a range shorter than the seconds the page holds after its selected second still
+    // shows that second, at its middle.
+    // Method: select 999 in a context that runs to 1100, show the last minute, and read the
+    // view.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.seed_selection_before_held_seconds(1100);
+
+    harness.driver.show_range(Range::Last(60));
+
+    assert_eq!(
+        harness.driver.view_window(),
+        Some(TimeWindow {
+            first: 970,
+            span: 60
         })
     );
     harness.teardown();

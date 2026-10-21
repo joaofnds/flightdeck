@@ -49,8 +49,8 @@ pub(crate) struct Selected {
 }
 
 impl Selected {
-    /// The context of `selected` that ends at `last_second`, which lies no earlier than the
-    /// selected second and no more than `CONTEXT_AFTER_SECONDS` after it.
+    /// The context of `observation` that ends at `context_last_second`, which lies no earlier
+    /// than the observation's second and no more than `CONTEXT_AFTER_SECONDS` after it.
     pub(crate) fn new(observation: Observation, context_last_second: u64) -> Result<Self> {
         let wall_ns = observation
             .wall_ns

@@ -631,6 +631,7 @@ impl InputDriver {
         let received = self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = attributed_snapshot(dashboard.generation, metric);
             snapshot.selection["second"] = json!(dashboard.request.second);
+            snapshot.selection["context_last_second"] = json!(dashboard.request.second);
             let received = dashboard.take_update(Update::Ready(snapshot));
             cx.notify();
             received
@@ -649,11 +650,6 @@ impl InputDriver {
             cx.notify();
         });
         self.context.run_until_parked();
-    }
-
-    fn page_error(&self) -> Option<String> {
-        self.view
-            .read_with(&self.context, |dashboard, _| dashboard.error.clone())
     }
 
     /// Delivers the page's next live snapshot, and returns whether the hover took it.

@@ -16,13 +16,22 @@ pub const SHORTEST_SECONDS: u64 = 5;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Range {
-    /// Everything loaded, ending at the selected second.
+    /// The 900 seconds of full detail around the selected second.
     #[default]
     History,
-    /// This many seconds ending at the selected second, which move on as it does.
+    /// This many seconds around the selected second, which move on as it does.
     Last(u64),
     /// A stretch of seconds that stays where it is while the selected second moves on.
     Between { first: u64, last: u64 },
+}
+
+/// The seconds a range is laid against: the selected second, and the last second the page
+/// holds readings of, which runs past the selected second where the recording holds later
+/// seconds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Anchor {
+    pub selected: u64,
+    pub context_last: u64,
 }
 
 impl Range {
@@ -52,14 +61,14 @@ impl Range {
 
     /// How the picker names the range.
     #[must_use]
-    pub fn label(self, selected: u64) -> String {
+    pub fn label(self, anchor: Anchor) -> String {
         match self {
             Self::History => "Last 15 minutes".into(),
             Self::Last(60) => "Last 1 minute".into(),
             Self::Last(seconds) if seconds % 60 == 0 => format!("Last {} minutes", seconds / 60),
             Self::Last(seconds) => format!("Last {seconds} seconds"),
             Self::Between { .. } => {
-                let window = self.window(selected);
+                let window = self.window(anchor);
                 let last = window.first + window.span - 1;
                 format!(
                     "{} to {}",
@@ -72,25 +81,25 @@ impl Range {
 
     /// The minutes the range covers, counting a part minute as a whole one.
     #[must_use]
-    pub fn whole_minutes(self, selected: u64) -> u64 {
-        self.window(selected).span.div_ceil(60)
+    pub fn whole_minutes(self, anchor: Anchor) -> u64 {
+        self.window(anchor).span.div_ceil(60)
     }
 
-    /// The seconds the range covers when `selected` is the newest, clipped to what is loaded.
+    /// The seconds the range covers, clipped to what the page holds.
     #[must_use]
-    pub fn window(self, selected: u64) -> TimeWindow {
-        let history = TimeWindow {
-            first: selected.saturating_sub(HISTORY_SECONDS - 1),
-            span: selected.min(HISTORY_SECONDS - 1) + 1,
-        };
-        let loaded_first = selected.saturating_sub(LOADED_SECONDS - 1);
+    pub fn window(self, anchor: Anchor) -> TimeWindow {
+        assert!(anchor.selected <= anchor.context_last);
+        let history = window_around(anchor, HISTORY_SECONDS);
+        let loaded_first = anchor.context_last.saturating_sub(LOADED_SECONDS - 1);
         let (first, last) = match self {
             Self::History => return history,
-            Self::Last(seconds) => (selected.saturating_sub(seconds.saturating_sub(1)), selected),
-            Self::Between { first, last } => (first, last),
+            Self::Last(seconds) => {
+                let around = window_around(anchor, seconds);
+                (around.first, around.first + around.span - 1)
+            }
+            Self::Between { first, last } => (first, last.min(anchor.context_last)),
         };
         let first = first.max(loaded_first);
-        let last = last.min(selected);
         if last < first {
             return history;
         }
@@ -99,6 +108,21 @@ impl Range {
             first,
             span: last - first + 1,
         }
+    }
+}
+
+/// The `seconds` around the selected second, which end at it while it is the newest the page
+/// holds, and hold it at their middle once the page holds half as many after it, so a step past
+/// the selected second stays in view.
+fn window_around(anchor: Anchor, seconds: u64) -> TimeWindow {
+    // The half floors, so an odd count holds one more second before the selection than after.
+    let after = anchor.selected.saturating_add(seconds / 2);
+    let last = after.min(anchor.context_last);
+    let first = last.saturating_sub(seconds.saturating_sub(1));
+
+    TimeWindow {
+        first,
+        span: last - first + 1,
     }
 }
 
@@ -214,6 +238,14 @@ fn seconds_between(from: u64, to: u64) -> Option<f32> {
 mod tests {
     use super::*;
 
+    /// Lays a range against `second` as the newest second the page holds and the selected one.
+    fn newest(second: u64) -> Anchor {
+        Anchor {
+            selected: second,
+            context_last: second,
+        }
+    }
+
     #[test]
     fn a_lens_maps_between_a_window_and_a_view_of_it() {
         // Goal: a chart that keeps its own clock can be zoomed and still answer the pointer.
@@ -250,14 +282,14 @@ mod tests {
         // Goal: the default range shows the 900 seconds the viewer loaded.
         // Method: resolve it for a long recording and for one younger than 900 seconds.
         assert_eq!(
-            Range::History.window(2000),
+            Range::History.window(newest(2000)),
             TimeWindow {
                 first: 1101,
                 span: 900
             }
         );
         assert_eq!(
-            Range::History.window(100),
+            Range::History.window(newest(100)),
             TimeWindow {
                 first: 0,
                 span: 101
@@ -270,14 +302,14 @@ mod tests {
         // Goal: "Last 5 minutes" keeps its end on the newest second as the recording grows.
         // Method: resolve it for two selected seconds one apart.
         assert_eq!(
-            Range::Last(300).window(2000),
+            Range::Last(300).window(newest(2000)),
             TimeWindow {
                 first: 1701,
                 span: 300
             }
         );
         assert_eq!(
-            Range::Last(300).window(2001),
+            Range::Last(300).window(newest(2001)),
             TimeWindow {
                 first: 1702,
                 span: 300
@@ -290,14 +322,14 @@ mod tests {
         // Goal: a range longer than the loaded hour, or one that slid out of it, shows what is
         // loaded. Method: ask for more than 3600 seconds and for a stretch that ended before it.
         assert_eq!(
-            Range::Last(7200).window(2000),
+            Range::Last(7200).window(newest(2000)),
             TimeWindow {
                 first: 0,
                 span: 2001
             }
         );
         assert_eq!(
-            Range::Last(7200).window(5000),
+            Range::Last(7200).window(newest(5000)),
             TimeWindow {
                 first: 1401,
                 span: 3600
@@ -308,15 +340,15 @@ mod tests {
                 first: 500,
                 last: 600
             }
-            .window(5000),
-            Range::History.window(5000)
+            .window(newest(5000)),
+            Range::History.window(newest(5000))
         );
         assert_eq!(
             Range::Between {
                 first: 4000,
                 last: 4500
             }
-            .window(5000),
+            .window(newest(5000)),
             TimeWindow {
                 first: 4000,
                 span: 501
@@ -329,21 +361,21 @@ mod tests {
         // Goal: "Last 30 minutes" shows 1800 seconds, which is beyond the 900 of the default view.
         // Method: resolve 30 and 60 minutes for a long recording and for a short one.
         assert_eq!(
-            Range::Last(1800).window(5000),
+            Range::Last(1800).window(newest(5000)),
             TimeWindow {
                 first: 3201,
                 span: 1800
             }
         );
         assert_eq!(
-            Range::Last(3600).window(5000),
+            Range::Last(3600).window(newest(5000)),
             TimeWindow {
                 first: 1401,
                 span: 3600
             }
         );
         assert_eq!(
-            Range::Last(1800).window(100),
+            Range::Last(1800).window(newest(100)),
             TimeWindow {
                 first: 0,
                 span: 101
@@ -360,7 +392,7 @@ mod tests {
                 first: 2600,
                 last: 2700
             }
-            .window(5000),
+            .window(newest(5000)),
             TimeWindow {
                 first: 2600,
                 span: 101
@@ -381,8 +413,59 @@ mod tests {
             span: 60,
         };
 
-        assert_eq!(range.window(1900), expected);
-        assert_eq!(range.window(1950), expected);
+        assert_eq!(range.window(newest(1900)), expected);
+        assert_eq!(range.window(newest(1950)), expected);
+    }
+
+    #[test]
+    fn the_whole_history_holds_a_selected_second_at_its_middle() {
+        // Goal: the default range shows the 900 seconds the page holds around a selected
+        // second that has 450 seconds after it.
+        // Method: resolve it for second 1000 with seconds held to 1450.
+        assert_eq!(
+            Range::History.window(Anchor {
+                selected: 1000,
+                context_last: 1450
+            }),
+            TimeWindow {
+                first: 551,
+                span: 900
+            }
+        );
+    }
+
+    #[test]
+    fn a_short_range_keeps_a_selected_second_in_view() {
+        // Goal: a range shorter than the seconds held after a selected second still shows that
+        // second, at its middle, with the seconds a step past it reaches.
+        // Method: resolve the last 60 seconds for second 1000 with seconds held to 1450.
+        assert_eq!(
+            Range::Last(60).window(Anchor {
+                selected: 1000,
+                context_last: 1450
+            }),
+            TimeWindow {
+                first: 971,
+                span: 60
+            }
+        );
+    }
+
+    #[test]
+    fn a_range_ends_where_the_held_seconds_end() {
+        // Goal: a range never reaches past the last second the page holds, so a selected second
+        // with fewer seconds after it than half the range sits right of the middle.
+        // Method: resolve the last 60 seconds for second 1000 with seconds held to 1010.
+        assert_eq!(
+            Range::Last(60).window(Anchor {
+                selected: 1000,
+                context_last: 1010
+            }),
+            TimeWindow {
+                first: 951,
+                span: 60
+            }
+        );
     }
 
     #[test]
@@ -443,7 +526,7 @@ mod tests {
             "lines": [{"name": "a", "color": "#fff", "values": [1.0, 2.0, 3.0]}],
         });
         let mut panel: crate::data::Panel = serde_json::from_value(panel).unwrap();
-        panel.window = Some(Range::History.window(2000));
+        panel.window = Some(Range::History.window(newest(2000)));
         panel
     }
 
@@ -468,7 +551,7 @@ mod tests {
         assert!(positions[1].abs() < 1e-6);
         assert!((positions[2] - 0.996).abs() < 1e-4);
 
-        zoom(&mut panel, Range::History.window(2000));
+        zoom(&mut panel, Range::History.window(newest(2000)));
 
         let restored = panel.positions.unwrap();
         assert!((restored[1] - 0.5).abs() < 1e-6);
@@ -521,31 +604,31 @@ mod tests {
     fn a_range_is_named_for_the_reader() {
         // Goal: the picker says what the charts show.
         // Method: name the whole history, whole and part minutes, and a selected stretch.
-        assert_eq!(Range::History.label(2000), "Last 15 minutes");
-        assert_eq!(Range::Last(60).label(2000), "Last 1 minute");
-        assert_eq!(Range::Last(300).label(2000), "Last 5 minutes");
-        assert_eq!(Range::Last(90).label(2000), "Last 90 seconds");
-        assert_eq!(Range::Last(1800).label(2000), "Last 30 minutes");
-        assert_eq!(Range::Last(3600).label(5000), "Last 60 minutes");
+        assert_eq!(Range::History.label(newest(2000)), "Last 15 minutes");
+        assert_eq!(Range::Last(60).label(newest(2000)), "Last 1 minute");
+        assert_eq!(Range::Last(300).label(newest(2000)), "Last 5 minutes");
+        assert_eq!(Range::Last(90).label(newest(2000)), "Last 90 seconds");
+        assert_eq!(Range::Last(1800).label(newest(2000)), "Last 30 minutes");
+        assert_eq!(Range::Last(3600).label(newest(5000)), "Last 60 minutes");
         let stretch = Range::Between {
             first: 1800,
             last: 1859,
         };
-        assert!(stretch.label(2000).contains(" to "));
+        assert!(stretch.label(newest(2000)).contains(" to "));
     }
 
     #[test]
     fn the_minutes_shown_round_up_to_a_whole_minute() {
         // Goal: the custom stepper starts from the minutes the charts now show.
         // Method: read the minutes of each kind of range.
-        assert_eq!(Range::History.whole_minutes(2000), 15);
-        assert_eq!(Range::Last(300).whole_minutes(2000), 5);
-        assert_eq!(Range::Last(90).whole_minutes(2000), 2);
-        assert_eq!(Range::Last(3600).whole_minutes(5000), 60);
+        assert_eq!(Range::History.whole_minutes(newest(2000)), 15);
+        assert_eq!(Range::Last(300).whole_minutes(newest(2000)), 5);
+        assert_eq!(Range::Last(90).whole_minutes(newest(2000)), 2);
+        assert_eq!(Range::Last(3600).whole_minutes(newest(5000)), 60);
         let stretch = Range::Between {
             first: 1800,
             last: 1859,
         };
-        assert_eq!(stretch.whole_minutes(2000), 1);
+        assert_eq!(stretch.whole_minutes(newest(2000)), 1);
     }
 }

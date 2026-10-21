@@ -626,10 +626,19 @@ impl LiveDashboard {
 
     /// The seconds the charts show, which is the whole history unless a range narrows it.
     pub(crate) fn view_window(&self) -> Option<crate::chart_axes::TimeWindow> {
-        let selection = &self.snapshot.as_deref()?.selection;
-        let last = crate::live_projection::context_last_second(selection)?;
+        let anchor = self.range_anchor()?;
 
-        Some(self.range.window(last))
+        Some(self.range.window(anchor))
+    }
+
+    /// What the range is laid against: the selected second, and the last second the charts hold.
+    pub(crate) fn range_anchor(&self) -> Option<crate::time_range::Anchor> {
+        let selection = &self.snapshot.as_deref()?.selection;
+
+        Some(crate::time_range::Anchor {
+            selected: selection["second"].as_u64()?,
+            context_last: crate::live_projection::context_last_second(selection)?,
+        })
     }
 
     /// Spreads the view across every chart that is drawn against the clock.

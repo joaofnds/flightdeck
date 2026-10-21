@@ -142,9 +142,8 @@ impl History {
         reduction: &mut Reduction<'_>,
     ) -> Result<bool> {
         let space = lease.space();
-        let second = query.selected.context_last_second;
         let mut cached =
-            self.process_groups_response_saved_restore_prepare(query, replay, lease, second)?;
+            self.process_groups_response_saved_restore_prepare(query, replay, lease)?;
 
         query.saved.process_groups_plan(replay, |observation| {
             if self.groups_live(observation)? {
@@ -178,7 +177,7 @@ impl History {
                         .as_mut()
                         .ok_or(Error::Bound("process group cache owner"))?;
                     if !cache.insert(&snapshot, predecessor, space, query.operation)? {
-                        cache.limit(space, second);
+                        cache.limit(space, query.selected.context_last_second);
                         cached = false;
                     }
                 }
@@ -193,7 +192,7 @@ impl History {
                 .ok_or(Error::Bound("process group cache owner"))?;
             let pinned = Session::process_groups_cache_pins(query.saved, replay, cache, space)?;
             if !pinned {
-                cache.limit(space, second);
+                cache.limit(space, query.selected.context_last_second);
                 cached = false;
             }
         }
@@ -238,7 +237,6 @@ impl History {
         query: &Query<'_, '_>,
         replay: &crate::session::ProcessGroupsReplay,
         lease: &mut Lease<'_>,
-        second: u64,
     ) -> Result<bool> {
         let space = lease.space();
         let Some(cache) = &mut lease.groups else {
@@ -254,9 +252,9 @@ impl History {
         })?;
 
         query.saved.process_groups_cache_validate(cache)?;
-        let cached = cache.prepare(space, second);
+        let cached = cache.prepare(space, query.selected.context_last_second);
         if !cached {
-            cache.limit(space, second);
+            cache.limit(space, query.selected.context_last_second);
         }
 
         Ok(cached)

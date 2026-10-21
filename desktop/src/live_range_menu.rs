@@ -12,7 +12,7 @@ const QUICK_MINUTES: [u64; 5] = [5, 10, 15, 30, 60];
 impl LiveDashboard {
     /// What the picker reads: the stretch the charts show.
     pub(crate) fn range_label(&self) -> String {
-        self.range.label(self.context_last_second())
+        self.range.label(self.picker_anchor())
     }
 
     /// The buttons beside the picker: back to the last 15 minutes while zoomed, and to the
@@ -66,7 +66,7 @@ impl LiveDashboard {
             .id(gpui::SharedString::from(format!("range-{minutes}")))
             .debug_selector(move || format!("time-range-{minutes}m"))
             .role(gpui::Role::Button)
-            .aria_label(range.label(0))
+            .aria_label(range.label(self.picker_anchor()))
             .flex()
             .items_center()
             .justify_between()
@@ -82,12 +82,12 @@ impl LiveDashboard {
                 this.native.time_menu_open = false;
                 this.set_range(range, cx);
             }))
-            .child(range.label(0))
+            .child(range.label(self.picker_anchor()))
             .children(chosen.then_some("✓"))
     }
 
     fn custom_range(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let minutes = self.range.whole_minutes(self.context_last_second());
+        let minutes = self.range.whole_minutes(self.picker_anchor());
         div()
             .flex()
             .items_center()
@@ -140,10 +140,11 @@ impl LiveDashboard {
             .child(glyph)
     }
 
-    fn context_last_second(&self) -> u64 {
-        self.snapshot
-            .as_deref()
-            .and_then(|snapshot| crate::live_projection::context_last_second(&snapshot.selection))
-            .unwrap_or(0)
+    /// What the picker lays the range against, which is second 0 until the page has a reading.
+    fn picker_anchor(&self) -> crate::time_range::Anchor {
+        self.range_anchor().unwrap_or(crate::time_range::Anchor {
+            selected: 0,
+            context_last: 0,
+        })
     }
 }

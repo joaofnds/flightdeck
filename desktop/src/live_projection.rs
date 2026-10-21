@@ -13,7 +13,8 @@ mod resource_projection;
 
 pub const OBSERVATIONS_MAX: usize = 4096;
 const LOADED_SECONDS: u64 = viewer::LOADED_SECONDS;
-/// The seconds of full-detail readings a selection holds, which end at the selected second.
+/// The seconds of full-detail readings a selection holds, which end at the last second of its
+/// context.
 const DETAIL_SECONDS: u64 = 900;
 const _: () = assert!(DETAIL_SECONDS < LOADED_SECONDS);
 pub const OVERVIEW_PRIMARY_PANELS: usize = 6;

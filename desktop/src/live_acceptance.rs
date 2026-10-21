@@ -13,6 +13,7 @@ pub struct Presentation {
 
 impl Presentation {
     pub fn prepare(request: &Request, mut snapshot: Box<Snapshot>) -> Result<Box<Self>, String> {
+        prepare_context(&snapshot.selection)?;
         let executables = crate::live_executables::groups(snapshot.detail.as_ref())?;
         let mut panels = crate::live_projection::panels(
             &request.route,
@@ -97,6 +98,22 @@ impl Presentation {
 
 /// Names each of the selected App's total charts and its line after the App, as
 /// "CPU · Brave Browser", so the totals read apart from the process group charts above them.
+/// Refuses a selection whose context ends before its second, since the charts are laid out
+/// around the selected second within that context.
+fn prepare_context(selection: &serde_json::Value) -> Result<(), String> {
+    let Some(last) = crate::live_projection::context_last_second(selection) else {
+        return Ok(());
+    };
+    let Some(second) = selection["second"].as_u64() else {
+        return Ok(());
+    };
+    if last < second {
+        return Err("Selection context ends before its second".into());
+    }
+
+    Ok(())
+}
+
 fn prepare_app_names(
     panels: &mut [Rc<Panel>],
     detail: Option<&serde_json::Value>,

@@ -760,6 +760,24 @@ fn the_reply_to_a_selection_shows_the_selected_second(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_reply_whose_context_ends_before_its_second_is_refused(cx: &mut TestAppContext) {
+    // Goal: the page refuses a selection whose context ends before the selected second, since
+    // it lays the charts out around that second within the context.
+    // Method: select 1001, hand the page a reply for 1001 whose context ends at 1000, then read
+    // the page's error.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.select_second(1001);
+
+    harness.driver.reply_with_context(1001, 1000);
+
+    assert_eq!(
+        harness.driver.page_error().as_deref(),
+        Some("Selection context ends before its second")
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
 fn enter_asks_for_the_stepped_second_once(cx: &mut TestAppContext) {
     // Goal: the selection Enter sends is the only request, so the reader is not made to start
     // the selected second's read again. Method: step left, press Enter, let the page take its
@@ -1044,12 +1062,19 @@ impl InputDriver {
 
     /// Selects 999 in a context that holds the second after it, 1000, at 90 W.
     fn seed_selection_before_a_held_second(&mut self) {
+        self.seed_selection_before_held_seconds(1000);
+    }
+
+    /// Selects 999 in a context that holds the seconds after it up to `context_last`, with the
+    /// reading of 1000 at 90 W.
+    fn seed_selection_before_held_seconds(&mut self, context_last: u64) {
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = accepted_snapshot(dashboard.generation);
             let selected = snapshot.selection["trends"][0].clone();
             let mut later = snapshot.selection["trends"][1].clone();
             later["power_watts"] = json!(90);
             snapshot.selection["second"] = json!(999);
+            snapshot.selection["context_last_second"] = json!(context_last);
             snapshot.selection["selected"]["publication"] = selected["publication"].clone();
             snapshot.selection["summary"] = selected.clone();
             snapshot.selection["trends"] = json!([selected, later]);
@@ -1358,10 +1383,17 @@ impl InputDriver {
 
     /// Hands the page the reader's answer to its request for `second`, the way a tick does.
     fn reply_with_second(&mut self, second: u64) {
+        self.reply_with_context(second, 1000);
+    }
+
+    /// Hands the page the reader's answer for `second` with a context that ends at
+    /// `context_last`.
+    fn reply_with_context(&mut self, second: u64, context_last: u64) {
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = accepted_snapshot(dashboard.generation);
             let identity = snapshot.selection["trends"][0].clone();
             snapshot.selection["second"] = json!(second);
+            snapshot.selection["context_last_second"] = json!(context_last);
             snapshot.selection["selected"] = json!({"run":identity["run"],
                 "boot":identity["boot"],"publication":identity["publication"]});
             snapshot.selection["trends"] = json!([identity]);
@@ -1369,6 +1401,11 @@ impl InputDriver {
             cx.notify();
         });
         self.context.run_until_parked();
+    }
+
+    fn page_error(&self) -> Option<String> {
+        self.view
+            .read_with(&self.context, |dashboard, _| dashboard.error.clone())
     }
 
     fn accepted_second(&self) -> Option<u64> {
