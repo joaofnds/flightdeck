@@ -1003,6 +1003,26 @@ mod tests {
     }
 
     #[test]
+    fn ends_a_selections_context_at_a_saved_second_the_ring_no_longer_holds() {
+        // Goal: the context reaches the newest second the recording saved, even when the ring
+        // holds only older seconds after the wall clock moved back.
+        // Method: seal 1000 and 1100, publish eight seconds before 1100 so the ring overwrites
+        // both, select 1000, then read the context's last second.
+        let mut recording = Recording::new();
+        recording.publish(1000);
+        recording.publish(1100);
+        recording.seal();
+        for second in 1001..=1008 {
+            recording.publish(second);
+        }
+        let mut session = LiveSession::open(&recording.root).unwrap();
+
+        let selected = session.select(1000, 0).unwrap();
+
+        assert_eq!(selected["context_last_second"], 1100);
+    }
+
+    #[test]
     fn keeps_repeated_wall_seconds_as_distinct_observations() {
         // Goal: a repeated wall second preserves both publications and their identities.
         // Method: publish the same fake wall clock twice and inspect both alternatives.

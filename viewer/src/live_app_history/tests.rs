@@ -147,6 +147,46 @@ fn refuses_app_history_after_its_operation_is_canceled() {
         if error.kind() == std::io::ErrorKind::Interrupted));
 }
 
+#[test]
+fn keeps_the_seconds_after_the_selection_that_its_context_holds() {
+    // Goal: a chart keeps the readings on both sides of a selected second. Method: hold three
+    // seconds, select the first with a context ending at the second, and read the publications.
+    let mut history = History::new();
+    for publication in 1..=3 {
+        history.push(point_at_second(publication, 999 + publication), 0);
+    }
+    let cancellation = Arc::new(Cancellation::default());
+    let operation = cancellation.operation(0).unwrap();
+    let key = bundle_key(0);
+    let selected = point_at_second(1, 1000).observation;
+
+    let response = history
+        .response(
+            &crate::live_app_response::Selected::new(selected, 1001).unwrap(),
+            &Target {
+                kind: KeyKind::Bundle,
+                bytes: &key,
+            },
+            &operation,
+        )
+        .unwrap();
+
+    let publications: Vec<&serde_json::Value> = response["points"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|point| &point["observation"]["stamp"]["publication"])
+        .collect();
+    assert_eq!(publications, ["1", "2"]);
+}
+
+fn point_at_second(publication: u64, second: u64) -> Box<Point> {
+    let mut point = point(publication, 1);
+    point.observation.wall_ns = Some(second * 1_000_000_000);
+
+    point
+}
+
 pub(super) fn point(publication: u64, app_count: usize) -> Box<Point> {
     let apps = (0..app_count)
         .map(|index| App {
