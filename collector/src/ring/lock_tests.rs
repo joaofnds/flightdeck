@@ -20,6 +20,10 @@ const WNOHANG: c_int = 1;
 const WUNTRACED: c_int = 2;
 const STOPPED_STATUS: c_int = 0x7f;
 const WAIT_ATTEMPTS_MAX: usize = 200;
+/// The 10 ms waits the isolated probe gets, 30 seconds, longer than `WAIT_ATTEMPTS_MAX`
+/// because it starts a whole test binary, which took over 2 seconds on a machine running
+/// the workspace's other tests at a load average of 50.
+const ISOLATED_WAIT_ATTEMPTS_MAX: usize = 3000;
 const ISOLATED_MARKER: &str = "FLIGHTDECK_NATIVE_LOCK_PROBE_ISOLATED";
 const COMPLETED_SENTINEL: &str = "flightdeck-native-lock-proof completed_cases=6";
 const TEST_NAME: &str = concat!(
@@ -153,7 +157,7 @@ fn run_isolated_probe() {
         .process_group(0)
         .spawn()
         .unwrap();
-    for _attempt in 0..WAIT_ATTEMPTS_MAX {
+    for _attempt in 0..ISOLATED_WAIT_ATTEMPTS_MAX {
         if let Some(status) = child.try_wait().unwrap() {
             assert!(status.success());
             let mut text = String::new();
