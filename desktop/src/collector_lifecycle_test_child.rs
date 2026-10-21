@@ -7,6 +7,7 @@ use super::{CollectorSession, Configuration, Mode};
 
 const HELPER: &str = "live_launch::lifecycle::test_child::delayed_shutdown_helper";
 const READY: &str = "FLIGHTDECK_LIFECYCLE_TEST_READY";
+const RELEASE: &str = "FLIGHTDECK_LIFECYCLE_TEST_RELEASE";
 static TERMINATED: AtomicBool = AtomicBool::new(false);
 
 #[repr(C)]
@@ -36,6 +37,7 @@ pub(crate) fn session() -> (CollectorSession, PathBuf, u32) {
     let child = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", HELPER, "--nocapture"])
         .env(READY, &ready)
+        .env(RELEASE, root.join("release"))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -54,6 +56,11 @@ pub(crate) fn session() -> (CollectorSession, PathBuf, u32) {
     (session, root, pid)
 }
 
+/// Lets the child under `root` exit, which it does only once asked to stop and released.
+pub(crate) fn release(root: &std::path::Path) {
+    std::fs::write(root.join("release"), b"release").unwrap();
+}
+
 fn wait_ready(path: &std::path::Path) {
     for _attempt in 0..400 {
         if path.exists() {
@@ -66,8 +73,10 @@ fn wait_ready(path: &std::path::Path) {
 
 #[test]
 fn delayed_shutdown_helper() {
-    // Goal: provide a real child which saves longer than GPUI's future timeout and then fails.
-    // Method: the explicitly spawned role installs a TERM handler and exits 17 after 350ms.
+    // Goal: provide a real child which keeps saving after it is asked to stop until the test
+    // lets it exit, so a test sees whether quitting waited for it.
+    // Method: the explicitly spawned role installs a TERM handler, and after TERM exits 0 once
+    // released.
     run_helper();
 }
 
@@ -75,6 +84,7 @@ fn run_helper() {
     let Some(path) = std::env::var_os(READY) else {
         return;
     };
+    let release = PathBuf::from(std::env::var_os(RELEASE).unwrap());
     let action = SignalAction {
         handler: Some(terminate),
         mask: 0,
@@ -88,14 +98,24 @@ fn run_helper() {
         )
     });
     std::fs::write(path, b"ready").unwrap();
+    // Each wait gives up after ten seconds, with a status naming the step that never came.
+    if !run_helper_wait(|| TERMINATED.load(Ordering::Relaxed)) {
+        std::process::exit(18);
+    }
+    if !run_helper_wait(|| release.exists()) {
+        std::process::exit(19);
+    }
+    std::process::exit(0);
+}
+
+fn run_helper_wait(condition: impl Fn() -> bool) -> bool {
     for _attempt in 0..2000 {
-        if TERMINATED.load(Ordering::Relaxed) {
-            std::thread::sleep(Duration::from_millis(350));
-            std::process::exit(17);
+        if condition() {
+            return true;
         }
         std::thread::sleep(Duration::from_millis(5));
     }
-    std::process::exit(18);
+    false
 }
 
 extern "C" fn terminate(_signal: libc::c_int) {

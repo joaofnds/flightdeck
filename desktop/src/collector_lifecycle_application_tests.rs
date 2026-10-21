@@ -1,35 +1,51 @@
 use gpui::TestAppContext;
 
+use super::super::lifecycle::test_child;
 use super::*;
 
 #[gpui::test]
-fn quitting_leaves_the_owned_collector_saving_its_last_readings(cx: &mut TestAppContext) {
-    // Goal: quitting asks the owned collector to stop and returns while it is still saving, since
-    // the collector saves its last readings and exits on its own.
-    // Method: shut down TestPlatform over a real child that exits 17 350 ms after SIGTERM and 18
-    // after ten seconds without one, and watch the child without reaping it, which the session
+fn quitting_asks_the_owned_collector_to_stop_without_waiting_for_it(cx: &mut TestAppContext) {
+    // Goal: quitting asks the owned collector to stop and returns while it still saves, since the
+    // collector saves its last readings and exits on its own.
+    // Method: shut down TestPlatform over a real child that exits only once asked to stop and
+    // then released by the test, and watch the child without reaping it, which the session
     // alone does.
-    let (session, root, pid) = super::super::lifecycle::test_child::session();
+    let (session, root, pid) = test_child::session();
     cx.update(|app| install(session, app));
 
     cx.update(App::shutdown);
 
-    let at_return = exit_status(pid, libc::WNOHANG);
-    let at_exit = exit_status(pid, 0);
-    let reaped = cx.update(|app| app.global_mut::<Collection>().session.stop_and_wait());
+    let at_return = observe(pid, libc::WNOHANG);
+    test_child::release(&root);
+    let at_exit = observe(pid, 0);
+    let reaped = cx.update(stop_and_wait);
     std::fs::remove_dir_all(root).unwrap();
 
     assert_eq!(
-        None, at_return,
-        "the collector had exited when quitting returned"
+        Observed::Running,
+        at_return,
+        "quitting waited for the collector"
     );
-    assert_eq!(Some(17), at_exit, "the collector was not asked to stop");
-    assert!(reaped.is_err());
+    assert_eq!(
+        Observed::Exited(0),
+        at_exit,
+        "the collector was not asked to stop"
+    );
+    reaped.unwrap();
 }
 
-/// The exit status of the child, or `None` while it runs under `WNOHANG`. The child stays
-/// unreaped for its session to reap.
-fn exit_status(pid: u32, options: libc::c_int) -> Option<libc::c_int> {
+/// What became of the child, seen without reaping it so that its session still can.
+#[derive(Debug, PartialEq)]
+enum Observed {
+    Running,
+    Exited(libc::c_int),
+    Signaled(libc::c_int),
+    /// The child was reaped already, which only its session does.
+    Reaped,
+}
+
+/// Waits for the child to exit, or under `WNOHANG` only looks.
+fn observe(pid: u32, options: libc::c_int) -> Observed {
     let mut information: libc::siginfo_t = unsafe { std::mem::zeroed() };
     let waited = unsafe {
         libc::waitid(
@@ -39,6 +55,18 @@ fn exit_status(pid: u32, options: libc::c_int) -> Option<libc::c_int> {
             libc::WEXITED | libc::WNOWAIT | options,
         )
     };
-    assert_eq!(0, waited, "{}", std::io::Error::last_os_error());
-    (information.si_pid != 0).then_some(information.si_status)
+    if waited != 0 {
+        let error = std::io::Error::last_os_error();
+        assert_eq!(Some(libc::ECHILD), error.raw_os_error(), "{error}");
+        return Observed::Reaped;
+    }
+
+    if information.si_pid == 0 {
+        return Observed::Running;
+    }
+    if information.si_code == libc::CLD_EXITED {
+        Observed::Exited(information.si_status)
+    } else {
+        Observed::Signaled(information.si_status)
+    }
 }

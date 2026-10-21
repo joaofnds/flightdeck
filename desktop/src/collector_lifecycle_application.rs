@@ -131,6 +131,12 @@ pub fn collector_status(cx: &App) -> Option<(String, bool)> {
         .and_then(|collection| collection.session.status())
 }
 
+/// Stops the owned collector and reaps it, which quitting leaves to the collector itself.
+#[cfg(test)]
+pub(super) fn stop_and_wait(cx: &mut App) -> Result<(), String> {
+    cx.global_mut::<Collection>().session.stop_and_wait()
+}
+
 pub fn retry_collector(cx: &mut App) {
     if cx.try_global::<Collection>().is_some() {
         cx.global_mut::<Collection>().session.retry();

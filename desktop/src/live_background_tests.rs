@@ -210,6 +210,10 @@ impl BackgroundHarness {
     fn teardown(mut self) {
         self.close_windows();
         self.quit();
+        super::super::lifecycle::test_child::release(&self.root);
+        self.cx
+            .update(super::super::collection::stop_and_wait)
+            .unwrap();
         std::fs::remove_dir_all(&self.root).unwrap();
     }
 }
