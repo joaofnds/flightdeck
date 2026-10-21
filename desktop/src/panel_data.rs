@@ -2,6 +2,10 @@ use serde::Deserialize;
 
 pub const LIVE_SAMPLE_LIMIT: usize = 4096;
 
+fn tick_seconds() -> u64 {
+    crate::charts::TICK_SECONDS
+}
+
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Panel {
@@ -32,6 +36,11 @@ pub struct Panel {
     /// seconds, so no average mixes the two.
     #[serde(skip)]
     pub detail_first: Option<u64>,
+    /// The seconds between two of the panel's readings where none is missed: a tick for the
+    /// readings of each tick, longer for reports the collector writes every few ticks. Readings
+    /// before `detail_first` stand further apart.
+    #[serde(skip, default = "tick_seconds")]
+    pub reading_seconds: u64,
     /// Whether readings still leave at the window's start and arrive at its end, as they do while
     /// the view follows the newest second. The chart holds back the curve those readings would
     /// still reshape.

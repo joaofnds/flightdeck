@@ -84,8 +84,12 @@ processes. macOS keeps CPU time, energy, disk bytes and GPU time per coalition, 
 process's CPU time stays in those totals after it exits. A coalition and an App are
 separate groupings, so a coalition's totals are not an App's totals.
 
-**Bucket**: a stretch of the clock, such as thirty seconds, at whose end a chart draws one point,
-the mean of the readings of that bucket and of the buckets just before it, so each point covers
-at least forty seconds. Buckets start at multiples of their length, so a point keeps its place as
-the chart scrolls. A chart takes the shortest length, of at least ten seconds, that leaves each
-bucket a pixel of the chart, so a wider chart or a shorter span draws shorter buckets.
+**Bucket**: a stretch of the clock, such as three seconds, at whose end a chart draws one point,
+the mean of the readings of that bucket and of the buckets just before it. A chart of readings a
+second apart takes the shortest length, of at least one second, that leaves each bucket a pixel
+of the chart, so a wider chart or a shorter span draws shorter buckets, and each point covers at
+least four seconds and a second more than its bucket. Buckets start at multiples of their length,
+so a point keeps its place as the chart scrolls. Readings further apart, such as the collector's
+ten-second reports or the older readings of a chart that reaches back more than sixteen minutes,
+which stand ten seconds apart, make buckets at least that long and points that cover at least
+four times that, so forty seconds for readings ten seconds apart.

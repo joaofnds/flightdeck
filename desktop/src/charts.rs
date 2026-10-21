@@ -323,9 +323,14 @@ fn curve_lower(panel: &Panel, inspection: Inspection) -> usize {
 /// card has been laid out.
 fn panel_buckets(panel: &Panel) -> Option<Buckets> {
     let chart_width = panel.chart_width.get().unwrap_or(CHART_WIDTH_DEFAULT);
-    panel
-        .window
-        .map(|window| Buckets::of(window, panel.detail_first, chart_width))
+    panel.window.map(|window| {
+        Buckets::of(
+            window,
+            panel.detail_first,
+            panel.reading_seconds,
+            chart_width,
+        )
+    })
 }
 
 pub(crate) struct Geometry<'a> {
@@ -483,13 +488,12 @@ fn paint_curve(
     window: &mut Window,
 ) {
     let tint = color(&line.color);
-    let curve = drawn_curve(points);
-    if curve.points.is_empty() {
+    if points.is_empty() {
         return;
     }
 
-    if curve.points.len() == 1 {
-        let position = curve.points[0].top;
+    if points.len() == 1 {
+        let position = points[0].top;
         window.paint_quad(fill(
             Bounds::new(position - point(px(1.5), px(1.5)), size(px(3.0), px(3.0))),
             rgb(tint),
@@ -504,26 +508,19 @@ fn paint_curve(
     if dashed {
         stroke = stroke.dash_array(&[px(6.0), px(4.0)]);
     }
-    let top: Vec<_> = curve.points.iter().map(|sample| sample.top).collect();
-    smooth(&mut stroke, &top, &curve.tangents_top, true);
+    let top: Vec<_> = points.iter().map(|sample| sample.top).collect();
+    smooth(&mut stroke, &top, true);
 
     let default_opacity = if stacked { 0.45 } else { 0.12 };
     let opacity = line.fill.or(panel.fill).unwrap_or(default_opacity);
     if !dashed {
         if opacity > 0.0 {
-            let bottom: Vec<_> = curve
-                .points
-                .iter()
-                .rev()
-                .map(|sample| sample.bottom)
-                .collect();
-            let tangents_bottom: Vec<f32> = curve.tangents_bottom.iter().rev().copied().collect();
+            let bottom: Vec<_> = points.iter().rev().map(|sample| sample.bottom).collect();
             let mut area = PathBuilder::fill();
-            smooth(&mut area, &top, &curve.tangents_top, true);
-            smooth(&mut area, &bottom, &tangents_bottom, false);
+            smooth(&mut area, &top, true);
+            smooth(&mut area, &bottom, false);
             area.close();
-            let span = curve
-                .points
+            let span = points
                 .iter()
                 .fold(None, |span: Option<(Pixels, Pixels)>, sample| {
                     let (low, high) = span.unwrap_or((sample.top.y, sample.bottom.y));
@@ -566,25 +563,48 @@ fn curve_fill(
     )
 }
 
-/// The fewest seconds between two points of a curve, the minimum interval of the Grafana
-/// dashboard Flightdeck is held to, which matches its scrape interval there.
-const STEP_SECONDS_MIN: u64 = 10;
-/// The fewest seconds a point averages, the floor of Grafana's `$__rate_interval`, four minimum
-/// intervals, so a 15-minute chart draws a point every ten seconds of the forty before it.
-const WINDOW_SECONDS_MIN: u64 = 40;
+/// The seconds between two ticks, a full-detail reading apart, which Grafana calls the scrape
+/// interval and takes as the fewest seconds between two points of a curve. Thinned older readings
+/// stand one for each `viewer::EARLIER_STRIDE_SECONDS`.
+pub(crate) const TICK_SECONDS: u64 = 1;
+/// The fewest scrape intervals a point averages, the floor of Grafana's `$__rate_interval`.
+const WINDOW_SCRAPES_MIN: u64 = 4;
 /// The width a chart's buckets are sized for before its card is laid out, an overview card's in
 /// the 1320-pixel window.
 const CHART_WIDTH_DEFAULT: f32 = 360.0;
 /// The bucket lengths in seconds, each dividing an hour, so buckets start on round seconds.
-const BUCKET_SECONDS: [u64; 22] = [
-    10, 12, 15, 20, 24, 30, 40, 45, 60, 75, 90, 120, 150, 180, 240, 300, 360, 450, 600, 900, 1200,
-    1800,
+const BUCKET_SECONDS: [u64; 28] = [
+    1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 24, 30, 40, 45, 60, 75, 90, 120, 150, 180, 240, 300, 360,
+    450, 600, 900, 1200, 1800,
 ];
 /// How far before the start of its second a reading's position may fall and still count in that
 /// second. A position is an f32 fraction of the window, whose rounding can put a reading taken
 /// on a whole second, as the self-monitoring reports are, a few microseconds before it, in some
 /// windows and not others, so it would hop between buckets as the window slides.
 const SECOND_TOLERANCE: f64 = 0.001;
+const _: () = {
+    assert!(TICK_SECONDS < viewer::EARLIER_STRIDE_SECONDS);
+    assert!(viewer::EARLIER_STRIDE_SECONDS <= BUCKET_SECONDS[BUCKET_SECONDS.len() - 1]);
+    assert!(3600_u64.is_multiple_of(BUCKET_SECONDS[0]));
+    let mut index = 1;
+    while index < BUCKET_SECONDS.len() {
+        assert!(BUCKET_SECONDS[index - 1] < BUCKET_SECONDS[index]);
+        assert!(3600_u64.is_multiple_of(BUCKET_SECONDS[index]));
+        index += 1;
+    }
+};
+
+/// The scrape interval of a chart of `window` whose readings come `reading_seconds` apart, or
+/// the stride of thinned readings when the window starts before `detail_first`, since a point's
+/// window shorter than four strides would hold too few of them and break the curve into dots.
+fn scrape_seconds(window: TimeWindow, detail_first: Option<u64>, reading_seconds: u64) -> u64 {
+    assert!(reading_seconds >= TICK_SECONDS);
+    if detail_first.is_some_and(|join| window.first < join) {
+        reading_seconds.max(viewer::EARLIER_STRIDE_SECONDS)
+    } else {
+        reading_seconds
+    }
+}
 
 /// The stretches of the clock a chart draws its curve on, as Grafana draws a panel: one point at
 /// the end of each bucket, the mean of the readings in the window of buckets before it, as
@@ -613,11 +633,16 @@ pub(crate) struct Buckets {
 
 impl Buckets {
     /// The buckets of `window` in a card `chart_width` pixels wide, sized as Grafana sizes its
-    /// step: the shortest length of at least `STEP_SECONDS_MIN` that leaves a pixel of card per
+    /// step: the shortest length of at least a scrape interval that leaves a pixel of card per
     /// point, or the longest length when none does. Each point averages Grafana's
-    /// `$__rate_interval`, the longer of `WINDOW_SECONDS_MIN` and a bucket and a minimum step,
-    /// rounded up to whole buckets.
-    fn of(window: TimeWindow, detail_first: Option<u64>, chart_width: f32) -> Self {
+    /// `$__rate_interval`, the longer of `WINDOW_SCRAPES_MIN` scrape intervals and a bucket and
+    /// a scrape interval, rounded up to whole buckets.
+    fn of(
+        window: TimeWindow,
+        detail_first: Option<u64>,
+        reading_seconds: u64,
+        chart_width: f32,
+    ) -> Self {
         assert!(window.span > 0);
         assert!(chart_width.is_finite());
         assert!(chart_width >= 0.0);
@@ -625,8 +650,10 @@ impl Buckets {
             Ok(span) => f64::from(span),
             Err(error) => panic!("a chart spans at most a few hours of seconds: {error}"),
         };
+        let scrape_seconds = scrape_seconds(window, detail_first, reading_seconds);
         let length_seconds = BUCKET_SECONDS
             .into_iter()
+            .filter(|length| *length >= scrape_seconds)
             .find(|length| {
                 let length = match u32::try_from(*length) {
                     Ok(length) => f64::from(length),
@@ -635,8 +662,8 @@ impl Buckets {
                 length * f64::from(chart_width) >= span
             })
             .unwrap_or(BUCKET_SECONDS[BUCKET_SECONDS.len() - 1]);
-        assert!(length_seconds >= STEP_SECONDS_MIN);
-        let window_seconds = WINDOW_SECONDS_MIN.max(length_seconds + STEP_SECONDS_MIN);
+        let window_seconds =
+            (WINDOW_SCRAPES_MIN * scrape_seconds).max(length_seconds + scrape_seconds);
         let per_point = window_seconds.div_ceil(length_seconds);
         assert!(per_point >= 2);
         let first_end = window.first.div_ceil(length_seconds) * length_seconds;
@@ -905,47 +932,9 @@ struct RunPoint {
     bottom: gpui::Point<Pixels>,
 }
 
-/// One curve as a chart draws it, with the slope of its top and bottom edges at each point. A
-/// lone point draws as a dot.
-#[derive(Debug, Default, PartialEq)]
-struct DrawnCurve {
-    points: Vec<RunPoint>,
-    tangents_top: Vec<f32>,
-    tangents_bottom: Vec<f32>,
-}
-
-/// The curve through `points` to the newest, as Grafana draws its newest step at once. The
-/// slope at each point depends on the points either side of it, so a point arriving reshapes
-/// only the stretch before it, and a point leaving only the stretch after it.
-fn drawn_curve(points: &[RunPoint]) -> DrawnCurve {
-    if points.len() < 2 {
-        return DrawnCurve {
-            points: points.to_vec(),
-            tangents_top: vec![0.0; points.len()],
-            tangents_bottom: vec![0.0; points.len()],
-        };
-    }
-
-    let tangents_of = |side: fn(&RunPoint) -> gpui::Point<Pixels>| {
-        let edge: Vec<_> = points.iter().map(side).collect();
-        monotone_tangents(&edge)
-    };
-    DrawnCurve {
-        points: points.to_vec(),
-        tangents_top: tangents_of(|sample| sample.top),
-        tangents_bottom: tangents_of(|sample| sample.bottom),
-    }
-}
-
-/// Draws a cubic through the points with the slope given at each, which `monotone_tangents`
-/// chooses so a curve never overshoots the means it joins.
-fn smooth(
-    builder: &mut PathBuilder,
-    points: &[gpui::Point<Pixels>],
-    tangents: &[f32],
-    start: bool,
-) {
-    assert_eq!(points.len(), tangents.len());
+/// Draws a curve through `points` in the order given, one stretch to each point from the one
+/// before.
+fn smooth(builder: &mut PathBuilder, points: &[gpui::Point<Pixels>], start: bool) {
     let Some(first) = points.first() else {
         return;
     };
@@ -955,48 +944,25 @@ fn smooth(
     } else {
         builder.line_to(*first);
     }
-    for (index, pair) in points.windows(2).enumerate() {
-        let (left, right) = (pair[0], pair[1]);
-        let third = (f32::from(right.x) - f32::from(left.x)) / 3.0;
-        builder.cubic_bezier_to(
-            right,
-            point(left.x + px(third), left.y + px(third * tangents[index])),
-            point(
-                right.x - px(third),
-                right.y - px(third * tangents[index + 1]),
-            ),
-        );
+    for [to, leaving, reaching] in half_step_stretches(points) {
+        builder.cubic_bezier_to(to, leaving, reaching);
     }
 }
 
-/// The slope of a curve through `points` at each of them. Each slope depends on its two
-/// neighbours alone, so a point leaving or joining the run reshapes no stretch beyond the one
-/// beside it. Fritsch and Carlson keep a cubic monotone while each end's slope is at most three
-/// times the slope it spans, so the limit holds the curve between the points it joins.
-fn monotone_tangents(points: &[gpui::Point<Pixels>]) -> Vec<f32> {
-    assert!(points.len() >= 2);
-    let slopes: Vec<f32> = points
-        .windows(2)
-        .map(|pair| {
-            let run = f32::from(pair[1].x) - f32::from(pair[0].x);
-            if run == 0.0 {
-                0.0
-            } else {
-                (f32::from(pair[1].y) - f32::from(pair[0].y)) / run
-            }
-        })
-        .collect();
-    let mut tangents = vec![0.0; points.len()];
-    tangents[0] = slopes[0];
-    tangents[points.len() - 1] = slopes[slopes.len() - 1];
-    for index in 1..points.len() - 1 {
-        let (before, after) = (slopes[index - 1], slopes[index]);
-        if before * after > 0.0 {
-            let limit = 3.0 * before.abs().min(after.abs());
-            tangents[index] = f32::midpoint(before, after).clamp(-limit, limit);
-        }
-    }
-    tangents
+/// The stretches of a curve through `points` in the order given, each as the point it reaches
+/// and its two control points, as GNOME System Monitor and Smoothie Charts draw a live curve: a
+/// stretch leaves one point level and reaches the next level, bending halfway between them. It
+/// depends on its two ends alone, so a point arriving or leaving reshapes no stretch already
+/// drawn, and it never passes above or below its ends. Drawn the other way it traces the same
+/// curve, which the bottom edge of an area relies on, since that edge runs back in time.
+fn half_step_stretches(
+    points: &[gpui::Point<Pixels>],
+) -> impl Iterator<Item = [gpui::Point<Pixels>; 3]> + '_ {
+    points.windows(2).map(|pair| {
+        let (source, target) = (pair[0], pair[1]);
+        let halfway = source.x + (target.x - source.x) / 2.0;
+        [target, point(halfway, source.y), point(halfway, target.y)]
+    })
 }
 
 /// One axis of a chart: its bounds and the spacing of its labelled ticks, chosen as the approved
@@ -1454,6 +1420,10 @@ mod live_tests {
     /// The width of an overview card in the 1320-pixel window.
     const CARD_WIDTH: f32 = 360.0;
 
+    /// The width of a card that draws 15 minutes in ten-second buckets, whose round numbers the
+    /// tests of how a curve slides read most easily.
+    const TEN_SECOND_CARD: f32 = 90.0;
+
     #[test]
     fn the_focus_ring_is_drawn_inside_the_element_so_a_transparent_one_stays_unfilled() {
         // Goal: a focused control with no background of its own shows a ring and nothing else.
@@ -1528,7 +1498,7 @@ mod live_tests {
     fn shared_chart_domain_keeps_sent_traffic_negative_and_power_unstacked() {
         // Goal: chart rendering interprets projection metadata without summing independent power.
         // Method: calculate domains from one actual projection with directional and power data,
-        // read at 1020, so the thirty-second bucket of the reading at 1000 is whole and drawn.
+        // read at 1020, so the three-second bucket of the reading at 1000 is whole and drawn.
         let selection = serde_json::json!({"second": 1020, "context_last_second": 1020,
             "selected": null, "trends": [{
             "run": "00000000000000010000000000000002",
@@ -1585,7 +1555,8 @@ mod live_tests {
             buckets: Some(Buckets::of(
                 TimeWindow { first, span: 900 },
                 None,
-                CARD_WIDTH,
+                TICK_SECONDS,
+                TEN_SECOND_CARD,
             )),
             sliding: false,
         }
@@ -1672,66 +1643,35 @@ mod live_tests {
         curves.remove(0)
     }
 
-    /// The 900-second window from `first` of varying readings, following the newest second.
-    fn sliding_curve(first: u64) -> DrawnCurve {
+    /// The 900-second window from `first` of varying readings, following the newest second, in a
+    /// card `card_width` pixels wide.
+    fn sliding_curve(first: u64, card_width: f32) -> Vec<RunPoint> {
         let positions = live_positions();
         let mut geometry = live_geometry(first, 0, &positions);
         geometry.sliding = true;
+        let window = TimeWindow { first, span: 900 };
+        geometry.buckets = Some(Buckets::of(window, None, TICK_SECONDS, card_width));
 
-        drawn_curve(&one_curve(&varying_readings(first), 0..900, &geometry))
+        one_curve(&varying_readings(first), 0..900, &geometry)
     }
 
     /// The points that window draws, each with its place on an x axis pinned to the clock rather
     /// than the window.
-    fn clock_places(first: u64) -> Vec<[f32; 3]> {
+    fn clock_places(first: u64, card_width: f32) -> Vec<[f32; 3]> {
         let clock = f32::from(u16::try_from(first - 1000).unwrap());
 
-        places(&sliding_curve(first).points)
+        places(&sliding_curve(first, card_width))
             .into_iter()
             .map(|[x, top, bottom]| [clock + x, top, bottom])
             .collect()
     }
 
-    /// Each stretch of curve that window draws, as its two ends on an x axis pinned to the clock
-    /// and the slope at each.
-    fn clock_stretches(first: u64) -> Vec<[f32; 6]> {
-        let clock = f32::from(u16::try_from(first - 1000).unwrap());
-        let curve = sliding_curve(first);
-
-        (1..curve.points.len())
-            .map(|index| {
-                let (left, right) = (curve.points[index - 1].top, curve.points[index].top);
-                [
-                    clock + f32::from(left.x),
-                    f32::from(left.y),
-                    clock + f32::from(right.x),
-                    f32::from(right.y),
-                    curve.tangents_top[index - 1],
-                    curve.tangents_top[index],
-                ]
-            })
-            .collect()
-    }
-
-    /// `count` points in a row, ten pixels apart, at heights that turn up and down.
-    fn kept_means(count: u8) -> Vec<RunPoint> {
-        (0..count)
-            .map(|index| {
-                let x = px(10.0 * f32::from(index));
-                let y = px(f32::from(index % 3) * 20.0);
-                RunPoint {
-                    top: point(x, y),
-                    bottom: point(x, px(100.0)),
-                }
-            })
-            .collect()
-    }
-
     #[test]
-    fn a_point_is_the_mean_of_the_forty_seconds_before_it_every_ten_seconds() {
-        // Goal: a 15-minute chart draws, as Grafana draws a rate over `$__rate_interval`, a
-        // point at the end of every ten seconds of the clock, the mean of the readings of the
-        // forty seconds before it, over a base that is the mean of theirs.
+    fn a_point_in_ten_second_buckets_is_the_mean_of_the_two_before_it() {
+        // Goal: a chart in ten-second buckets draws, as Grafana draws a rate over
+        // `$__rate_interval` for one-second readings, a point at the end of every bucket, the
+        // mean of the readings of the eleven seconds before it rounded up to two whole buckets,
+        // over a base that is the mean of theirs.
         // Method: in a still window from 1000, place twenty readings of 20 over a base of 0 in
         // seconds 1100 to 1119 and twenty of 60 over a base of 10 in 1120 to 1139, and read the
         // points on a chart one pixel a second and one pixel a unit. The curve ends with the
@@ -1752,8 +1692,8 @@ mod live_tests {
             &[
                 [110.0, 80.0, 100.0],
                 [120.0, 80.0, 100.0],
-                [130.0, 100.0 - 100.0 / 3.0, 100.0 - 10.0 / 3.0],
-                [140.0, 60.0, 95.0],
+                [130.0, 60.0, 95.0],
+                [140.0, 40.0, 90.0],
             ],
         );
     }
@@ -1762,8 +1702,9 @@ mod live_tests {
     fn a_gap_shorter_than_a_window_keeps_the_curve_whole() {
         // Goal: missing readings leave the windows around them with fewer readings, as a missed
         // scrape leaves Grafana's rate, and break the curve only where a window holds none.
-        // Method: in a still window from 1000, leave thirty seconds without readings between
-        // two stretches of readings, then fifty, and count the curves each draws.
+        // Method: in a still window from 1000 in ten-second buckets, whose points each average
+        // twenty seconds, leave ten seconds without readings between two stretches of readings,
+        // then thirty, and count the curves each draws.
         let positions = live_positions();
         let curves = |gap: usize| {
             let mut values = vec![None; 900];
@@ -1776,7 +1717,7 @@ mod live_tests {
             run_curves(&values, 0..900, &live_geometry(1000, 0, &positions)).len()
         };
 
-        assert_eq!([curves(30), curves(50)], [1, 2]);
+        assert_eq!([curves(10), curves(30)], [1, 2]);
     }
 
     #[test]
@@ -1784,12 +1725,13 @@ mod live_tests {
         // Goal: a point that would still lose readings to the window's oldest edge, or gain one
         // from a late tick at its newest second, is not drawn, so no drawn point changes as
         // readings come and go. Method: draw a following window from 1002 to 1901, whose whole
-        // buckets run from 1010 to 1899, and read its first and last points and their count.
-        let places = clock_places(1002);
+        // buckets run from 1010 to 1899, and read its first and last points and their count:
+        // the first ends the window of two buckets from 1010.
+        let places = clock_places(1002, TEN_SECOND_CARD);
 
-        assert_eq!(places.len(), 86);
-        assert!((places[0][0] - 50.0).abs() < 0.01, "{:?}", places[0]);
-        assert!((places[85][0] - 900.0).abs() < 0.01, "{:?}", places[85]);
+        assert_eq!(places.len(), 88);
+        assert!((places[0][0] - 30.0).abs() < 0.01, "{:?}", places[0]);
+        assert!((places[87][0] - 900.0).abs() < 0.01, "{:?}", places[87]);
     }
 
     /// A following 15-minute chart from `first` whose panel also holds the `lead_in` seconds
@@ -1809,7 +1751,7 @@ mod live_tests {
         .unwrap();
         panel.window = Some(TimeWindow { first, span: 900 });
         panel.sliding = true;
-        panel.chart_width.set(Some(CARD_WIDTH));
+        panel.chart_width.set(Some(TEN_SECOND_CARD));
         let newest = usize::from(held) - 1;
         let inspection = Inspection {
             lower: usize::from(lead_in),
@@ -1876,11 +1818,11 @@ mod live_tests {
         // Goal: a following chart holding nothing before its oldest edge, whose oldest bucket
         // still loses readings each second, draws no point whose window reaches that bucket.
         // Method: draw a following window from 1003 with no lead-in, whose oldest bucket runs
-        // from 1000 to 1009, and read where its first point sits: the end of the window of four
+        // from 1000 to 1009, and read where its first point sits: the end of the window of two
         // buckets from 1010.
         let points = led_curve(1003, 0);
 
-        assert!((f32::from(points[0].top.x) - 47.0).abs() < 0.01);
+        assert!((f32::from(points[0].top.x) - 27.0).abs() < 0.01);
     }
 
     #[test]
@@ -1889,8 +1831,8 @@ mod live_tests {
         // point whose window ends with it is drawn only once a later second has readings, and
         // then at once. Method: draw following windows whose newest seconds are 1899 and 1900,
         // and read the last point of each.
-        let waiting = clock_places(1000);
-        let drawn = clock_places(1001);
+        let waiting = clock_places(1000, TEN_SECOND_CARD);
+        let drawn = clock_places(1001, TEN_SECOND_CARD);
 
         assert!((waiting[waiting.len() - 1][0] - 890.0).abs() < 0.01);
         assert!((drawn[drawn.len() - 1][0] - 900.0).abs() < 0.01);
@@ -1900,54 +1842,58 @@ mod live_tests {
     fn a_drawn_point_stays_put_as_the_window_slides() {
         // Goal: a point once drawn keeps its place and mean while readings arrive, and leaves
         // the chart only at its oldest edge.
-        // Method: slide a following window one second at a time across seven buckets and check,
-        // for each two windows in a row, that the second draws every point of the first from
-        // the second's oldest on, and the first every point of the second to the first's newest.
-        for first in 1000..1070 {
-            let before = clock_places(first);
-            let after = clock_places(first + 1);
+        // Method: slide a following window one second at a time across seventy seconds, on
+        // cards that draw one-second, three-second and ten-second buckets, and check, for each
+        // two windows in a row, that the second draws every point of the first from the second's
+        // oldest on, and the first every point of the second to the first's newest.
+        for card_width in [900.0, CARD_WIDTH, TEN_SECOND_CARD] {
+            for first in 1000..1070 {
+                let before = clock_places(first, card_width);
+                let after = clock_places(first + 1, card_width);
 
-            let held = |place: &[f32; 3], places: &[[f32; 3]]| {
-                places.iter().any(|other| same(place, other))
-            };
-            for place in before.iter().filter(|place| place[0] >= after[0][0]) {
-                assert!(held(place, &after), "{place:?} of {first} changed");
-            }
-            let newest = before[before.len() - 1][0];
-            for place in after.iter().filter(|place| place[0] <= newest) {
-                assert!(held(place, &before), "{place:?} of {} is new", first + 1);
+                let held = |place: &[f32; 3], places: &[[f32; 3]]| {
+                    places.iter().any(|other| same(place, other))
+                };
+                for place in before.iter().filter(|place| place[0] >= after[0][0]) {
+                    assert!(held(place, &after), "{place:?} of {first} changed");
+                }
+                let newest = before[before.len() - 1][0];
+                for place in after.iter().filter(|place| place[0] <= newest) {
+                    assert!(held(place, &before), "{place:?} of {} is new", first + 1);
+                }
             }
         }
     }
 
     #[test]
-    fn a_curve_reshapes_only_beside_a_point_that_arrives_or_leaves() {
-        // Goal: as in Grafana, a curve reaches its newest point at once, and the slope at each
-        // point depends on its neighbours, so a point arriving reshapes only the stretch before
-        // it and a point leaving only the stretch after it.
-        // Method: slide a following window one second at a time across seven buckets and check,
-        // for each two windows in a row, that a stretch of one missing from the other touches
-        // the oldest point of the second or the newest point of the first.
-        for first in 1000..1070 {
-            let before = clock_stretches(first);
-            let after = clock_stretches(first + 1);
-            let oldest = after[0][0];
-            let newest = before[before.len() - 1][2];
+    fn a_stretch_of_curve_bends_halfway_between_its_ends_at_their_heights() {
+        // Goal: as GNOME System Monitor and Smoothie Charts draw a live curve, each stretch
+        // leaves one point level and reaches the next level, bending halfway between them, and
+        // drawn backwards, as an area's bottom edge is, it traces the same curve.
+        // Method: read the stretches through (10, 80), (40, 20) and (70, 50), each as the point
+        // it reaches and its two control points, and those of the same points backwards.
+        let at = |x: f32, y: f32| point(px(x), px(y));
+        let forward = [at(10.0, 80.0), at(40.0, 20.0), at(70.0, 50.0)];
+        let mut backward = forward;
+        backward.reverse();
 
-            let held = |stretch: &[f32; 6], stretches: &[[f32; 6]]| {
-                stretches.iter().any(|other| same(stretch, other))
-            };
-            for stretch in before.iter().chain(&after) {
-                if held(stretch, &before) {
-                    if held(stretch, &after) {
-                        continue;
-                    }
-                }
-                let at_oldest = stretch[0] <= oldest + 0.01;
-                let at_newest = stretch[2] >= newest - 0.01;
-                assert!(at_oldest || at_newest, "{stretch:?} of {first} changed");
-            }
-        }
+        let drawn: Vec<_> = half_step_stretches(&forward).collect();
+        let reversed: Vec<_> = half_step_stretches(&backward).collect();
+
+        assert_eq!(
+            drawn,
+            vec![
+                [at(40.0, 20.0), at(25.0, 80.0), at(25.0, 20.0)],
+                [at(70.0, 50.0), at(55.0, 20.0), at(55.0, 50.0)],
+            ]
+        );
+        assert_eq!(
+            reversed,
+            vec![
+                [at(40.0, 20.0), at(55.0, 50.0), at(55.0, 20.0)],
+                [at(10.0, 80.0), at(25.0, 20.0), at(25.0, 80.0)],
+            ]
+        );
     }
 
     #[test]
@@ -1981,7 +1927,7 @@ mod live_tests {
             for first in 4081..=4980 {
                 let offset = f32::from(u16::try_from(4980 - first).unwrap());
                 let window = TimeWindow { first, span: 900 };
-                let buckets_of_window = Buckets::of(window, None, CARD_WIDTH);
+                let buckets_of_window = Buckets::of(window, None, TICK_SECONDS, TEN_SECOND_CARD);
                 buckets.insert(buckets_of_window.bucket_index((offset + fraction) / 900.0));
 
                 // The zoom from an hour, in the arithmetic the range zoom uses.
@@ -1994,19 +1940,30 @@ mod live_tests {
         assert_eq!(buckets, [None, Some(498)].into_iter().collect());
     }
 
+    /// The seconds of the first and last points of each curve of a 30-minute window from 1000 on
+    /// the 900-pixel plot, two seconds a pixel.
+    fn half_hour_ends(curves: &[Vec<RunPoint>]) -> Vec<(f32, f32)> {
+        let seconds = |point: &RunPoint| 1000.0 + f32::from(point.top.x) * 2.0;
+        curves
+            .iter()
+            .map(|curve| (seconds(&curve[0]), seconds(&curve[curve.len() - 1])))
+            .collect()
+    }
+
     #[test]
     fn a_bucket_the_join_of_thinned_and_full_detail_readings_cuts_is_not_drawn() {
         // Goal: a bucket holding both older readings, each standing for several seconds, and
         // full-detail readings is not drawn, since the join moves a second each second.
-        // Method: in a 30-minute window from 1000, put the join at 1905 and read the buckets of
-        // readings either side of the bucket it cuts.
+        // Method: in a 30-minute window from 1000 in ten-second buckets, put the join at 1905 and
+        // read the buckets of readings either side of the bucket it cuts.
         let buckets = Buckets::of(
             TimeWindow {
                 first: 1000,
                 span: 1800,
             },
             Some(1905),
-            CARD_WIDTH,
+            TICK_SECONDS,
+            TEN_SECOND_CARD * 2.0,
         );
 
         let found: Vec<_> = [1899_u16, 1900, 1909, 1910]
@@ -2021,8 +1978,9 @@ mod live_tests {
     fn no_window_across_the_join_is_drawn_while_the_window_slides() {
         // Goal: a point whose window holds readings the moving join will still thin or cut is
         // not drawn, so the curve beside the join does not change from second to second.
-        // Method: in a following 30-minute window from 1000 with a reading each second and the
-        // join at 1905, read the points either side of the bucket the join cuts.
+        // Method: in a following 30-minute window from 1000 in ten-second buckets with a reading
+        // each second and the join at 1905, read the points either side of the bucket the join
+        // cuts.
         let positions = tick_positions(1800);
         let mut geometry = live_geometry(1000, 0, &positions);
         geometry.sliding = true;
@@ -2030,21 +1988,47 @@ mod live_tests {
             first: 1000,
             span: 1800,
         };
-        geometry.buckets = Some(Buckets::of(window, Some(1905), CARD_WIDTH));
+        geometry.buckets = Some(Buckets::of(
+            window,
+            Some(1905),
+            TICK_SECONDS,
+            TEN_SECOND_CARD * 2.0,
+        ));
         let values: Vec<_> = (1000..2800)
             .map(|second| Some((varying_reading(second), 0.0)))
             .collect();
 
         let curves = run_curves(&values, 0..1800, &geometry);
 
-        let ends: Vec<_> = curves
-            .iter()
-            .map(|curve| {
-                let seconds = |point: &RunPoint| 1000.0 + f32::from(point.top.x) * 2.0;
-                (seconds(&curve[0]), seconds(&curve[curve.len() - 1]))
+        let ends = half_hour_ends(&curves);
+        assert_eq!(ends, vec![(1050.0, 1900.0), (1950.0, 2790.0)]);
+    }
+
+    #[test]
+    fn a_chart_of_thinned_readings_takes_their_stride_as_its_scrape_interval() {
+        // Goal: a chart whose older part holds one reading in each ten seconds draws it as one
+        // unbroken curve, on a card wide enough for buckets shorter than that.
+        // Method: in a still 30-minute window from 1000 with the join at 1905, put a reading in
+        // the seventh second of each ten before the join and one each second after it, size
+        // the buckets for a card that would give three-second buckets, and read the curves.
+        let positions = tick_positions(1800);
+        let mut geometry = live_geometry(1000, 0, &positions);
+        let window = TimeWindow {
+            first: 1000,
+            span: 1800,
+        };
+        geometry.buckets = Some(Buckets::of(window, Some(1905), TICK_SECONDS, 600.0));
+        let values: Vec<_> = (1000..2800_u64)
+            .map(|second| {
+                let held = second >= 1905 || second % 10 == 7;
+                held.then(|| (varying_reading(second), 0.0))
             })
             .collect();
-        assert_eq!(ends, vec![(1050.0, 1900.0), (1950.0, 2790.0)]);
+
+        let curves = run_curves(&values, 0..1800, &geometry);
+
+        let ends = half_hour_ends(&curves);
+        assert_eq!(ends, vec![(1010.0, 2790.0)]);
     }
 
     #[test]
@@ -2068,24 +2052,25 @@ mod live_tests {
     fn a_reading_before_the_window_counts_only_for_a_point_in_view() {
         // Goal: a reading before the window's oldest edge falls in its own bucket when the window
         // of the first point in view reaches it, and in none when no point in view averages it.
-        // Method: in a window from 1000, whose first point ends at 1000 and averages the forty
-        // seconds from 960, read the buckets of readings half a second before the window,
-        // in second 960 and in second 959.
+        // Method: in a window from 1000 in ten-second buckets, whose first point ends at 1000
+        // and averages the twenty seconds from 980, read the buckets of readings half a second
+        // before the window, in second 980 and in second 979.
         let buckets = Buckets::of(
             TimeWindow {
                 first: 1000,
                 span: 900,
             },
             None,
-            CARD_WIDTH,
+            TICK_SECONDS,
+            TEN_SECOND_CARD,
         );
 
-        let found: Vec<_> = [-0.5, -39.7, -40.7]
+        let found: Vec<_> = [-0.5, -19.7, -20.7]
             .into_iter()
             .map(|offset: f32| buckets.bucket_index(offset / 900.0))
             .collect();
 
-        assert_eq!(found, vec![Some(99), Some(96), None]);
+        assert_eq!(found, vec![Some(99), Some(98), None]);
     }
 
     #[test]
@@ -2110,15 +2095,21 @@ mod live_tests {
     }
 
     /// The spacing of the points a 900-pixel plot of a reading in each second of the `span`
-    /// seconds from `first` draws, in a card `card_width` pixels wide, and their count.
-    fn point_spacing(first: u64, span: u16, card_width: f32) -> (usize, Vec<f32>) {
+    /// seconds from `first` draws, in a card `card_width` pixels wide whose full-detail readings
+    /// start at `detail_first`, and their count.
+    fn point_spacing(
+        first: u64,
+        span: u16,
+        detail_first: Option<u64>,
+        card_width: f32,
+    ) -> (usize, Vec<f32>) {
         let positions = tick_positions(span);
         let mut geometry = live_geometry(first, 0, &positions);
         let window = TimeWindow {
             first,
             span: u64::from(span),
         };
-        geometry.buckets = Some(Buckets::of(window, None, card_width));
+        geometry.buckets = Some(Buckets::of(window, detail_first, TICK_SECONDS, card_width));
         let values: Vec<_> = (first..first + u64::from(span))
             .map(|second| Some((varying_reading(second), 0.0)))
             .collect();
@@ -2133,24 +2124,120 @@ mod live_tests {
     }
 
     #[test]
-    fn a_range_of_five_minutes_draws_a_point_every_ten_seconds() {
-        // Goal: a short range draws no closer than Grafana's minimum interval, so its curve is
-        // as calm as the 15-minute chart's. Method: draw a reading in each second of a
-        // 300-second window on a 900-pixel plot and read the count and spacing of its points.
-        let (count, spacing) = point_spacing(1000, 300, CARD_WIDTH);
+    fn a_range_of_a_minute_draws_a_point_every_second() {
+        // Goal: a short range draws each second, as Grafana's step for one-second readings
+        // does, so its newest reading shows a second after it is taken. Method: draw a reading
+        // in each second of a 60-second window on a 900-pixel plot in an overview card and read
+        // the count and spacing of its points.
+        let (count, spacing) = point_spacing(1000, 60, None, CARD_WIDTH);
 
-        assert_eq!(count, 29);
+        assert_eq!(count, 59);
         for gap in spacing {
-            assert!((gap - 30.0).abs() < 0.01, "{gap}");
+            assert!((gap - 15.0).abs() < 0.01, "{gap}");
+        }
+    }
+
+    #[test]
+    fn a_range_after_the_thinned_readings_keeps_a_point_every_second() {
+        // Goal: only a chart that reaches back into the thinned older readings takes their
+        // stride as its scrape interval, so a short range of a live chart, whose older readings
+        // lie before it, still draws each second.
+        // Method: draw a 60-second window from 1000 with full detail from 940, and again with
+        // full detail from exactly 1000, and read the count and spacing of their points.
+        for detail_first in [940, 1000] {
+            let (count, spacing) = point_spacing(1000, 60, Some(detail_first), CARD_WIDTH);
+
+            assert_eq!(count, 59, "{detail_first}");
+            for gap in spacing {
+                assert!((gap - 15.0).abs() < 0.01, "{detail_first}: {gap}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_point_in_one_second_buckets_is_the_mean_of_the_four_seconds_before_it() {
+        // Goal: a chart in one-second buckets draws, as Grafana draws a rate over
+        // `$__rate_interval` for one-second readings, a point at the end of every second, the
+        // mean of the readings of the four seconds before it.
+        // Method: in a still window from 1000 on a card wide enough for one-second buckets,
+        // place ten readings of 20 in seconds 1090 to 1099 and ten of 60 in 1100 to 1109, and
+        // read the points either side of the step on a chart one pixel a second and one pixel a
+        // unit.
+        let positions = live_positions();
+        let mut geometry = live_geometry(1000, 0, &positions);
+        let window = TimeWindow {
+            first: 1000,
+            span: 900,
+        };
+        geometry.buckets = Some(Buckets::of(window, None, TICK_SECONDS, 900.0));
+        let mut values = vec![None; 900];
+        for value in &mut values[90..100] {
+            *value = Some((20.0, 0.0));
+        }
+        for value in &mut values[100..110] {
+            *value = Some((60.0, 0.0));
+        }
+
+        let points = one_curve(&values, 0..900, &geometry);
+
+        assert_places(
+            &points[9..14],
+            &[
+                [100.0, 80.0, 100.0],
+                [101.0, 70.0, 100.0],
+                [102.0, 60.0, 100.0],
+                [103.0, 50.0, 100.0],
+                [104.0, 40.0, 100.0],
+            ],
+        );
+    }
+
+    #[test]
+    fn ten_second_reports_draw_one_unbroken_curve() {
+        // Goal: a chart of reports the collector writes every ten ticks, as the Diagnostics
+        // charts are, takes their spacing as its scrape interval, so each point averages several
+        // reports and the curve does not break into dots between them.
+        // Method: place a report every ten seconds in a still 600-second window from 1000, size
+        // the buckets for a card before it is laid out, and count the curves.
+        let positions: Vec<f32> = (0..60_u16)
+            .map(|report| (f32::from(report) * 10.0 + 0.3) / 600.0)
+            .collect();
+        let mut geometry = live_geometry(1000, 0, &positions);
+        let window = TimeWindow {
+            first: 1000,
+            span: 600,
+        };
+        geometry.buckets = Some(Buckets::of(window, None, 10, CHART_WIDTH_DEFAULT));
+        let values: Vec<_> = (0..60_u64)
+            .map(|report| Some((varying_reading(report), 0.0)))
+            .collect();
+
+        let curves = run_curves(&values, 0..60, &geometry);
+
+        assert_eq!(curves.len(), 1, "{curves:?}");
+    }
+
+    #[test]
+    fn a_range_of_fifteen_minutes_draws_a_point_every_three_seconds() {
+        // Goal: a 15-minute chart in an overview card draws a point for each pixel of the card at
+        // most, as Grafana sizes its step, at the shortest bucket length on the clock's list.
+        // Method: draw a reading in each second of a 900-second window from 1200 on a 900-pixel
+        // plot in an overview card, 2.5 seconds a pixel, and read the count and spacing of its
+        // points.
+        let (count, spacing) = point_spacing(1200, 900, None, CARD_WIDTH);
+
+        assert_eq!(count, 299);
+        for gap in spacing {
+            assert!((gap - 3.0).abs() < 0.01, "{gap}");
         }
     }
 
     #[test]
     fn a_narrower_card_spaces_the_points_of_an_hour_further_apart() {
         // Goal: as Grafana sizes its step, a chart draws a point for each pixel of its card at
-        // most, and never closer than ten seconds, so a wide card shows as much detail as the
-        // readings allow and a narrow one stays calm. Method: draw an hour in cards a quarter,
-        // a half, one and three overview cards wide, and read the count and spacing of points.
+        // most, so a wide card shows as much detail as the readings allow and a narrow one stays
+        // calm. Method: draw an hour in cards a quarter, a half, one and three overview cards
+        // wide, and read the count and spacing of points.
         let widths = [
             CARD_WIDTH / 4.0,
             CARD_WIDTH / 2.0,
@@ -2158,9 +2245,9 @@ mod live_tests {
             CARD_WIDTH * 3.0,
         ];
 
-        let drawn = widths.map(|width| point_spacing(3600, 3600, width));
+        let drawn = widths.map(|width| point_spacing(3600, 3600, None, width));
 
-        let expected = [(89, 10.0), (179, 5.0), (359, 2.5), (359, 2.5)];
+        let expected = [(89, 10.0), (179, 5.0), (359, 2.5), (899, 1.0)];
         for ((count, spacing), (count_expected, gap_expected)) in drawn.into_iter().zip(expected) {
             assert_eq!(count, count_expected);
             for gap in spacing {
@@ -2170,20 +2257,20 @@ mod live_tests {
     }
 
     #[test]
-    fn bucket_lengths_stop_at_ten_seconds_and_at_half_an_hour() {
-        // Goal: a card too wide for ten-second buckets still draws ten seconds, Grafana's
-        // minimum interval, and one too narrow for any draws half an hour, never a length off
-        // the clock's list. Method: size the buckets of a 15-minute window for cards of no
-        // width, a tenth of a pixel and a million pixels.
+    fn bucket_lengths_stop_at_a_second_and_at_half_an_hour() {
+        // Goal: a card wider than its readings draws each second, the collector's tick, and one
+        // too narrow for any length draws half an hour, never a length off the clock's list.
+        // Method: size the buckets of a 15-minute window for cards of no width, a tenth of a
+        // pixel and a million pixels.
         let window = TimeWindow {
             first: 1000,
             span: 900,
         };
 
-        let lengths =
-            [0.0, 0.1, 1_000_000.0].map(|width| Buckets::of(window, None, width).length_seconds);
+        let lengths = [0.0, 0.1, 1_000_000.0]
+            .map(|width| Buckets::of(window, None, TICK_SECONDS, width).length_seconds);
 
-        assert_eq!(lengths, [1800, 1800, 10]);
+        assert_eq!(lengths, [1800, 1800, 1]);
     }
 
     #[test]
@@ -2197,28 +2284,29 @@ mod live_tests {
             span: 3600,
         };
 
-        let lengths = [180.0, 179.0].map(|width| Buckets::of(window, None, width).length_seconds);
+        let lengths = [180.0, 179.0]
+            .map(|width| Buckets::of(window, None, TICK_SECONDS, width).length_seconds);
 
         assert_eq!(lengths, [20, 24]);
     }
 
     #[test]
-    fn a_point_averages_grafanas_rate_interval_in_whole_buckets() {
-        // Goal: each point averages the longer of forty seconds and a bucket and ten seconds, as
-        // Grafana's `$__rate_interval` reaches, in whole buckets. Method: size the buckets of
-        // 15 minutes for cards that give lengths of 10, 15, 20 and 60 seconds, and read how many
-        // buckets each window holds.
+    fn a_point_averages_grafanas_rate_interval_for_one_second_readings_in_whole_buckets() {
+        // Goal: each point averages the longer of four seconds and a bucket and a second, as
+        // Grafana's `$__rate_interval` reaches for a one-second scrape interval, in whole
+        // buckets. Method: size the buckets of 15 minutes for cards that give lengths of 1, 2,
+        // 3, 10 and 60 seconds, and read how many buckets each window holds.
         let window = TimeWindow {
             first: 1000,
             span: 900,
         };
 
-        let sized = [90.0, 60.0, 45.0, 15.0].map(|width| {
-            let buckets = Buckets::of(window, None, width);
+        let sized = [900.0, 450.0, 300.0, 90.0, 15.0].map(|width| {
+            let buckets = Buckets::of(window, None, TICK_SECONDS, width);
             (buckets.length_seconds, buckets.per_point)
         });
 
-        assert_eq!(sized, [(10, 4), (15, 3), (20, 2), (60, 2)]);
+        assert_eq!(sized, [(1, 4), (2, 2), (3, 2), (10, 2), (60, 2)]);
     }
 
     #[test]
@@ -2232,44 +2320,22 @@ mod live_tests {
         panel.chart_width.set(Some(45.0));
         let after = panel_buckets(&panel).map(|buckets| buckets.length_seconds);
 
-        assert_eq!([before, after], [Some(10), Some(20)]);
-    }
-
-    #[test]
-    fn a_lone_point_draws_as_a_dot() {
-        // Goal: a curve of one point between gaps still shows. Method: draw one point.
-        let kept = kept_means(1);
-
-        let curve = drawn_curve(&kept);
-
-        assert_eq!(curve.points, kept);
-    }
-
-    #[test]
-    fn monotone_tangents_flatten_at_turning_points() {
-        // Goal: a smoothed curve never overshoots a peak, as the prototype's curve does not.
-        // Method: compute tangents through a peak and check the peak tangent is flat.
-        let points = [
-            point(px(0.0), px(10.0)),
-            point(px(1.0), px(0.0)),
-            point(px(2.0), px(10.0)),
-        ];
-        assert!(monotone_tangents(&points)[1].abs() < f32::EPSILON);
+        assert_eq!([before, after], [Some(3), Some(20)]);
     }
 
     #[test]
     fn the_value_axis_spans_the_points_the_curve_draws() {
         // Goal: the axis fits the curve through the window means, so a one-second spike that the
         // mean flattens does not shrink the curve to the bottom of the chart.
-        // Method: put one reading of 90 among readings of 10, which raises the mean of each
-        // forty-second window holding it to 10 + 80 / 40, and read the axis.
+        // Method: put one reading of 90 among readings of 10 on an overview card, which raises
+        // the mean of each six-second window holding it to 10 + 80 / 6, and read the axis.
         let values: Vec<_> = (0..900)
             .map(|offset| Some(if offset == 500 { 90.0 } else { 10.0 }))
             .collect();
 
         let (_, maximum) = domain(&live_panel(1000, &values), LIVE_INSPECTION, &[]);
 
-        assert!(maximum >= 10.0 + 80.0 / 40.0, "{maximum}");
+        assert!(maximum >= 10.0 + 80.0 / 6.0, "{maximum}");
         assert!(maximum < 90.0, "{maximum}");
     }
 

@@ -433,6 +433,10 @@ fn chart_panel(
         table_rows: None,
         window: Some(window),
         detail_first: None,
+        reading_seconds: match definition.group {
+            Group::Ticks => crate::self_reports::TICK_REPORT_SECONDS,
+            Group::Minutes => crate::self_reports::MINUTE_REPORT_SECONDS,
+        },
         sliding: false,
         chart_width: std::cell::Cell::new(None),
     }

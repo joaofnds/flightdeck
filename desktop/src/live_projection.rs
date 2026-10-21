@@ -695,6 +695,7 @@ fn panel(
         selected_index: coordinates.selected_index,
         window: Some(coordinates.window),
         detail_first: Some(coordinates.detail_first),
+        reading_seconds: crate::charts::TICK_SECONDS,
         sliding: false,
         chart_width: std::cell::Cell::new(None),
     })
@@ -766,6 +767,7 @@ fn gpu_apps_panel(
         selected_index: coordinates.selected_index,
         window: Some(coordinates.window),
         detail_first: Some(coordinates.detail_first),
+        reading_seconds: crate::charts::TICK_SECONDS,
         sliding: false,
         chart_width: std::cell::Cell::new(None),
     }))

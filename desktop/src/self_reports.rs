@@ -10,9 +10,14 @@ pub const MINUTE_REPORTS_MAX: usize = 15;
 pub const SEALS_MAX: usize = 16;
 /// The collector's cost sources and its unattributed remainder.
 pub const SOURCES_MAX: usize = 16;
+/// The seconds between two ten-second reports, ten ticks of one second.
+pub const TICK_REPORT_SECONDS: u64 = 10;
+/// The seconds between two minute reports.
+pub const MINUTE_REPORT_SECONDS: u64 = 60;
 const _: () = {
     assert!(TICK_REPORTS_MAX * 10 == 900);
     assert!(MINUTE_REPORTS_MAX * 60 == 900);
+    assert!(MINUTE_REPORT_SECONDS.is_multiple_of(TICK_REPORT_SECONDS));
 };
 
 /// One ten-second report: what collecting cost over its ticks, and what the last tick read.

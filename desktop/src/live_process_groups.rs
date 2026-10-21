@@ -251,6 +251,7 @@ fn panels_panel(
             .position(|point| point.observation == payload.selected),
         window: Some(window),
         detail_first: None,
+        reading_seconds: crate::charts::TICK_SECONDS,
         sliding: false,
         chart_width: std::cell::Cell::new(None),
     })
