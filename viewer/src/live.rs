@@ -1349,21 +1349,7 @@ impl LiveSession {
             return Err(Error::Bound("live observation bytes"));
         }
 
-        let mut tables = metrics::Tables::new();
-        for name in metrics::TABLE_NAMES {
-            let mut publications = BTreeMap::new();
-            if let Some(previous) = previous {
-                publications.insert(
-                    previous.observation.publication,
-                    previous.tables[name].clone(),
-                );
-            }
-            publications.insert(
-                current.observation.publication,
-                current.tables[name].clone(),
-            );
-            tables.insert((0, name), publications);
-        }
+        let tables = poll_store_tables(previous, &current);
         let segment = self.poll_segment(&current)?;
         current.point = metrics::point(
             &tables,
@@ -1383,8 +1369,10 @@ impl LiveSession {
             segment,
             &mut app_point,
         );
-        let first = (current.observation.wall / NANOSECONDS_PER_SECOND).saturating_sub(899)
-            * NANOSECONDS_PER_SECOND;
+        let second = current.observation.wall / NANOSECONDS_PER_SECOND;
+        let first = second.saturating_sub(899) * NANOSECONDS_PER_SECOND;
+        // The App history keeps the lead-in before the context as well, which its charts draw.
+        let charted_first = second.saturating_sub(CHARTED_SECONDS - 1) * NANOSECONDS_PER_SECOND;
         self.poll_points(&current.point, first)?;
         self.cache_bytes += current.bytes;
         self.observations.push_back(current);
@@ -1395,7 +1383,7 @@ impl LiveSession {
             self.poll_parts(first)?;
         }
         self.app_history
-            .push(app_point.unwrap_or_else(|| unreachable!()), first);
+            .push(app_point.unwrap_or_else(|| unreachable!()), charted_first);
 
         Ok(())
     }
@@ -1732,6 +1720,30 @@ impl LiveSession {
         response["summary"] = history.select_context(selection, index)?["summary"].clone();
         Ok(())
     }
+}
+
+/// The metric tables `metrics::point` reads for `current`: its own, and those of the observation
+/// before it in the same run, from which its rates come.
+fn poll_store_tables(
+    previous: Option<&LiveObservation>,
+    current: &LiveObservation,
+) -> metrics::Tables {
+    let mut tables = metrics::Tables::new();
+    for name in metrics::TABLE_NAMES {
+        let mut publications = BTreeMap::new();
+        if let Some(previous) = previous {
+            publications.insert(
+                previous.observation.publication,
+                previous.tables[name].clone(),
+            );
+        }
+        publications.insert(
+            current.observation.publication,
+            current.tables[name].clone(),
+        );
+        tables.insert((0, name), publications);
+    }
+    tables
 }
 
 /// A selection of `second` with nothing read from the saved minutes.

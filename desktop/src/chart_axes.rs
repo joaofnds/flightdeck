@@ -11,13 +11,14 @@ pub struct TimeWindow {
 }
 
 impl TimeWindow {
-    /// The 900 seconds a live chart holds, ending at `last_second`, the last second of the
-    /// selection's context.
+    /// The seconds an App chart holds, ending at `last_second`: the 900 seconds of the
+    /// selection's context and the lead-in before them, whose readings the first points in
+    /// view average.
     #[must_use]
-    pub fn live(last_second: u64) -> Self {
+    pub fn charted(last_second: u64) -> Self {
         Self {
-            first: last_second.saturating_sub(899),
-            span: 900,
+            first: last_second.saturating_sub(viewer::CHARTED_SECONDS - 1),
+            span: viewer::CHARTED_SECONDS,
         }
     }
 

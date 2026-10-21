@@ -1398,7 +1398,10 @@ mod tests {
         assert_eq!(inspection_index(&panel, &snapshot, Some(1000)), Some(2));
         assert_eq!(inspection_index(&panel, &snapshot, Some(998)), Some(0));
         assert_eq!(inspection_index(&panel, &snapshot, Some(999)), None);
-        let full = charts::TimeWindow::live(1000);
+        let full = charts::TimeWindow {
+            first: 101,
+            span: 900,
+        };
         let zoomed = charts::TimeWindow {
             first: 900,
             span: 101,

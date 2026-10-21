@@ -662,12 +662,12 @@ mod tests {
 
     context_floor_case!(
         excludes_fractional_second_before_context_start,
-        102_999_999_999,
+        42_999_999_999,
         false
     );
     context_floor_case!(
         includes_first_nanosecond_of_context_start,
-        103_000_000_000,
+        43_000_000_000,
         true
     );
     context_floor_case!(

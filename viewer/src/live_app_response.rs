@@ -43,7 +43,8 @@ pub struct Observation {
 }
 
 /// The selected observation and the last second of the context read with it, which every
-/// history of the selection spans: the 900 seconds that end at that second.
+/// history of the selection spans: the 900 seconds that end at that second, and the lead-in
+/// before them that its charts draw from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Selected {
     observation: Observation,
@@ -91,10 +92,11 @@ impl Selected {
         self.context_last_second
     }
 
-    /// The first second the context holds.
+    /// The first second the context holds, `LEAD_IN_SECONDS` before the 900 seconds, so the
+    /// first points of an App chart average whole windows as the scalar charts' do.
     pub(crate) fn first_second(&self) -> u64 {
         self.context_last_second
-            .saturating_sub(crate::session::DETAIL_SECONDS - 1)
+            .saturating_sub(crate::session::CHARTED_SECONDS - 1)
     }
 
     /// Whether the context holds `second`.

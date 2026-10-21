@@ -37,6 +37,25 @@ fn rates_hold_the_readings_after_the_selected_second() {
 }
 
 #[test]
+fn rates_place_a_lead_in_reading_at_the_left_edge() {
+    // Goal: an App rate chart holds the lead-in before the context's 900 seconds, so its first
+    // point in view averages a whole window, and it refuses a reading from before the lead-in.
+    // Method: move the first reading of a context that ends at 1000 to 41, the first second
+    // the chart holds, then to 40, and prepare each.
+    let mut value = fixture(Metric::Cpu);
+    value["points"][0]["observation"]["wall_ns"] = json!("41000000000");
+
+    let history = AppAttributionHistory::prepare(Metric::Cpu, &value, &selection());
+
+    let panel = history.panel().unwrap();
+    assert_eq!(panel.window.unwrap().first, 41);
+    assert!(panel.positions.as_ref().unwrap()[0].abs() < f32::EPSILON);
+    value["points"][0]["observation"]["wall_ns"] = json!("40000000000");
+    let history = AppAttributionHistory::prepare(Metric::Cpu, &value, &selection());
+    assert!(history.panel().is_none());
+}
+
+#[test]
 fn power_rates_preserve_fractional_watts() {
     // Keep the captured process interval's fractional power separate from machine power.
     let history =

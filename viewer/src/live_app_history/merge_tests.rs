@@ -216,14 +216,15 @@ fn emits_a_null_gap_for_a_known_context_observation_without_app_facts() {
 
 #[test]
 fn retains_the_entire_first_second_of_merged_history() {
-    // Goal: the inclusive first second keeps fractional saved observations at the 15-minute edge.
-    // Method: merge saved endpoints immediately before and inside that second with a live endpoint.
+    // Goal: the inclusive first second keeps fractional saved observations at the edge of the
+    // charted seconds, the lead-in before the 15 minutes. Method: merge saved endpoints
+    // immediately before and inside that second with a live endpoint.
     let mut history = History::new();
     history.push(live(900), 0);
     let mut first = trace(1, 7);
-    first.observation.wall_ns = Some(1_001_900_000_000);
+    first.observation.wall_ns = Some(941_900_000_000);
     let mut older = trace(0, 9);
-    older.observation.wall_ns = Some(1_000_999_999_999);
+    older.observation.wall_ns = Some(940_999_999_999);
 
     let response = response(&history, &[older, first], &observation(900)).unwrap();
 
@@ -234,7 +235,7 @@ fn retains_the_entire_first_second_of_merged_history() {
     );
     assert_eq!(
         response["points"][0]["observation"]["wall_ns"],
-        "1001900000000"
+        "941900000000"
     );
     assert_eq!(response["points"][0]["resident_bytes"]["known"], "7");
     assert_eq!(response["points"][0]["source_available"], true);

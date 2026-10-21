@@ -37,6 +37,28 @@ fn resident_history_holds_the_readings_after_the_selected_second() {
 }
 
 #[test]
+fn resident_history_places_a_lead_in_reading_at_the_left_edge() {
+    // Goal: the chart holds the lead-in before the context's 900 seconds, so its first point
+    // in view averages a whole window, and it refuses a reading from before the lead-in.
+    // Method: move the first reading of a context that ends at 1000 to 41, the first second
+    // the chart holds, then to 40, and prepare each.
+    let mut value = fixture();
+    value["points"][0]["observation"]["wall_ns"] = json!(41 * NS);
+
+    let history = ResidentHistory::prepare(&value, &selection());
+
+    let panel = history.panel().unwrap();
+    assert_eq!(panel.window.unwrap().first, 41);
+    assert!(panel.positions.as_ref().unwrap()[0].abs() < f32::EPSILON);
+    value["points"][0]["observation"]["wall_ns"] = json!(40 * NS);
+    assert!(
+        ResidentHistory::prepare(&value, &selection())
+            .panel()
+            .is_none()
+    );
+}
+
+#[test]
 fn resident_partial_zero_overflow_and_missing_measures_remain_distinct() {
     // Change one real captured measure between all availability cases and inspect exact text.
     let mut value = fixture();

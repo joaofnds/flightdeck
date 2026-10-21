@@ -160,9 +160,9 @@ fn restores_a_compatible_predecessor_across_committed_minutes() {
 #[test]
 fn reads_the_exact_predecessor_outside_the_plotted_wall_range() {
     // Goal: a predecessor outside the chart domain can still establish its first plotted rate.
-    // Method: move wall time forward 900 seconds while recorded interval clocks advance one.
+    // Method: move wall time forward 960 seconds while recorded interval clocks advance one.
     let mut fixture = Fixture::new();
-    fixture.publish_with_system_rows(1001);
+    fixture.publish_with_system_rows(941);
     fixture.publish_with_system_rows(1901);
     fixture.seal();
     let session = Session::open(&fixture.root).unwrap();

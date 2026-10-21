@@ -318,7 +318,7 @@ fn attribution_restores_a_predecessor_outside_the_visible_context_across_minutes
     // The first visible endpoint needs a real predecessor from the preceding sealed minute.
     let mut fixture = Fixture::new();
     fixture.start_at_run_tick(59);
-    fixture.publish_with_usage(1000, &usage(0));
+    fixture.publish_with_usage(940, &usage(0));
     fixture.publish_with_usage(1900, &usage(1_200_000_000));
     fixture.seal_minute(0);
     fixture.seal_minute(1);

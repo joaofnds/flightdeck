@@ -789,13 +789,14 @@ fn retains_exact_app_history_while_following_the_fifteen_minute_window() {
 }
 
 #[test]
-fn retains_fifteen_minutes_for_an_ordinary_live_app_population() {
-    // A real identity ring keeps 640 distinct Apps throughout 901 observed publications.
+fn retains_the_charted_seconds_for_an_ordinary_live_app_population() {
+    // A real identity ring keeps 640 distinct Apps throughout 961 observed publications, the 960
+    // seconds an App chart holds: the 900 of the context and the lead-in before them.
     let mut fixture = AppPopulation::new();
     fixture.publish(1);
     let mut session = LiveSession::open(&fixture.root).unwrap();
 
-    fixture.observe_through(&mut session, 901);
+    fixture.observe_through(&mut session, 961);
     let selection = session.follow_latest().unwrap();
     let history = session
         .app_history(
@@ -805,17 +806,17 @@ fn retains_fifteen_minutes_for_an_ordinary_live_app_population() {
         .unwrap();
 
     let points = history["points"].as_array().unwrap();
-    assert_eq!(points.len(), 900);
+    assert_eq!(points.len(), 960);
     assert_eq!(history["coverage"]["retention_limited"], false);
-    assert_eq!(history["coverage"]["observations_retained"], 900);
-    assert_eq!(selection["selected"]["publication"], 901);
-    assert_eq!(history["selected"]["stamp"]["publication"], "901");
+    assert_eq!(history["coverage"]["observations_retained"], 960);
+    assert_eq!(selection["selected"]["publication"], 961);
+    assert_eq!(history["selected"]["stamp"]["publication"], "961");
     assert_eq!(points[0]["observation"]["stamp"]["publication"], "2");
-    assert_eq!(points[899]["observation"]["stamp"]["publication"], "901");
+    assert_eq!(points[959]["observation"]["stamp"]["publication"], "961");
     assert_eq!(points[0]["resident_bytes"]["known"], "200");
-    assert_eq!(points[899]["resident_bytes"]["known"], "90100");
+    assert_eq!(points[959]["resident_bytes"]["known"], "96100");
     assert_eq!(points[0]["cpu_ns"]["known"], "1000000");
-    assert_eq!(points[899]["cpu_ns"]["known"], "1000000");
+    assert_eq!(points[959]["cpu_ns"]["known"], "1000000");
     assert!(history["coverage"]["cache_bytes"].as_u64().unwrap() < 64 * 1024 * 1024);
     eprintln!("ordinary App history coverage: {}", history["coverage"]);
 }

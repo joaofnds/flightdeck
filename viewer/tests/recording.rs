@@ -667,12 +667,13 @@ mod tests {
     #[test]
     fn contextual_derivation_can_read_the_exact_predecessor_outside_the_range() {
         // Goal: the first contextual rate uses its real predecessor, never a guessed zero.
-        // Method: missing second 1900 puts 1001 first in its 900-second context, excluding 1000.
+        // Method: missing second 1960 puts 1001 first in the 960 seconds it charts, the 900 of
+        // its context and the lead-in before them, excluding 1000.
         let recording = Recording::new();
         recording.write();
         let mut session = Session::open(&recording.0).unwrap();
 
-        let selection = session.select(1900, 0).unwrap();
+        let selection = session.select(1960, 0).unwrap();
 
         assert!(selection["selected"].is_null());
         assert_eq!(selection["trends"][0]["wall_ns"], 1_001_000_000_000_u64);

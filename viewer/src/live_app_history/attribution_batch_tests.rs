@@ -239,7 +239,7 @@ fn batch_keeps_a_saved_predecessor_outside_the_context_across_minutes() {
     // The visible endpoint needs its real predecessor in the preceding committed minute.
     let mut fixture = Fixture::new();
     fixture.start_at_run_tick(59);
-    fixture.publish_with_system_rows(1000);
+    fixture.publish_with_system_rows(940);
     fixture.publish_with_system_rows(1900);
     fixture.seal_minute(0);
     fixture.seal_minute(1);

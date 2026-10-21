@@ -202,8 +202,9 @@ fn panels_panel(
     definition: &PanelDefinition,
     context_last_second: u64,
 ) -> Result<Panel, String> {
-    let first = context_last_second.saturating_sub(899);
-    let span = u16::try_from(context_last_second - first + 1).map_err(|error| error.to_string())?;
+    let window = crate::chart_axes::TimeWindow::charted(context_last_second);
+    let first = window.first;
+    let span = u16::try_from(window.span).map_err(|error| error.to_string())?;
     let mut positions = Vec::with_capacity(payload.points.len());
     let mut segments = Vec::with_capacity(payload.points.len());
 
@@ -248,10 +249,7 @@ fn panels_panel(
             .points
             .iter()
             .position(|point| point.observation == payload.selected),
-        window: Some(crate::chart_axes::TimeWindow {
-            first,
-            span: u64::from(span),
-        }),
+        window: Some(window),
         detail_first: None,
         sliding: false,
         chart_width: std::cell::Cell::new(None),
@@ -272,8 +270,10 @@ fn panels_panel_positions(
             .observation
             .wall_ns
             .ok_or("Process group clock unavailable")?;
-        let seconds =
-            u16::try_from(wall / 1_000_000_000 - first).map_err(|error| error.to_string())?;
+        let seconds = (wall / 1_000_000_000)
+            .checked_sub(first)
+            .ok_or("Process group observation lies before its charted seconds")?;
+        let seconds = u16::try_from(seconds).map_err(|error| error.to_string())?;
         let fraction = u32::try_from(wall % 1_000_000_000)
             .map_err(|error| error.to_string())?
             .to_f32()

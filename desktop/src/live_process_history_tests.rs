@@ -148,7 +148,8 @@ fn process_history_empty_and_unknown_filters_have_distinct_local_reasons() {
 #[test]
 fn all_groups_place_the_readings_after_the_selected_second_inside_their_charts() {
     // Goal: the process group charts of a selected second place the readings its context
-    // holds after it within the context's 900 seconds.
+    // holds after it within the 960 seconds the charts hold, the context's 900 and the lead-in
+    // before them.
     // Method: select 999 in a context that runs to 1000, project every group chart, then read
     // where each places the reading of 1000.
     let mut history = crate::live_source::tests::process_history::all_history();
@@ -168,8 +169,44 @@ fn all_groups_place_the_readings_after_the_selected_second_inside_their_charts()
     assert!(!panels.is_empty());
     for panel in panels {
         let position = panel.positions.as_ref().unwrap()[1];
-        assert!((position - 899.0 / 900.0).abs() < f32::EPSILON);
+        assert!((position - 959.0 / 960.0).abs() < f32::EPSILON);
     }
+}
+
+#[test]
+fn all_groups_place_a_lead_in_reading_at_the_left_edge() {
+    // Goal: the process group charts hold the lead-in before the context's 900 seconds, so
+    // their first points in view average whole windows, and they refuse a reading from before
+    // the lead-in.
+    // Method: move the first reading of a context that ends at 1000 to 41, the first second
+    // the charts hold, project every group chart, then move it to 40 and project again.
+    let mut request = request();
+    request.executable = None;
+    let starting_at = |first_second: u64| {
+        let mut history = crate::live_source::tests::process_history::all_history();
+        history.points.truncate(2);
+        history.app_bytes = Box::from(b"A".as_slice());
+        history.selected.wall_ns = Some(1_000_000_000_000);
+        history.points[0].observation.wall_ns = Some(first_second * 1_000_000_000);
+        history.points[1].observation.wall_ns = history.selected.wall_ns;
+        let selection = json!({"second":1000,"context_last_second":1000,
+            "selected":history.selected.json()});
+        (
+            ProcessHistory::prepare_all(history, &request, &selection),
+            selection,
+        )
+    };
+    let (history, selection) = starting_at(41);
+
+    let panels = history.panels(&selection).unwrap();
+
+    assert!(!panels.is_empty());
+    for panel in panels {
+        assert_eq!(panel.window.unwrap().first, 41);
+        assert!(panel.positions.as_ref().unwrap()[0].abs() < f32::EPSILON);
+    }
+    let (early, selection) = starting_at(40);
+    assert!(early.panels(&selection).is_err());
 }
 
 pub(crate) fn request() -> Request {

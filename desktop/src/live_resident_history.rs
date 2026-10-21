@@ -232,7 +232,7 @@ impl History {
             points: Vec::with_capacity(values.len()),
             cohort,
             positions: Vec::with_capacity(values.len()),
-            window: crate::chart_axes::TimeWindow::live(last),
+            window: crate::chart_axes::TimeWindow::charted(last),
             selected_index: 0,
             retention_limited: boolean(&value["coverage"]["retention_limited"])?,
         };
@@ -593,16 +593,16 @@ pub(crate) fn position(wall_ns: Option<u64>, second: u64) -> Result<f32, String>
     let Some(wall_ns) = wall_ns else {
         return Ok(0.0);
     };
-    let first = second.saturating_sub(899);
+    let window = crate::chart_axes::TimeWindow::charted(second);
     let end = second
         .checked_add(1)
         .ok_or("Resident App context clock overflow")?;
-    if !(first..end).contains(&(wall_ns / NS)) {
-        return Err("Resident App observation lies outside its context".into());
+    if !(window.first..end).contains(&(wall_ns / NS)) {
+        return Err("Resident App observation lies outside its charted seconds".into());
     }
-    let seconds = u16::try_from(wall_ns / NS - first).map_err(|error| error.to_string())?;
+    let seconds = u16::try_from(wall_ns / NS - window.first).map_err(|error| error.to_string())?;
     let nanos = u32::try_from(wall_ns % NS).map_err(|error| error.to_string())?;
-    let span = u16::try_from(end - first).map_err(|error| error.to_string())?;
+    let span = u16::try_from(window.span).map_err(|error| error.to_string())?;
 
     Ok(
         (f32::from(seconds)
