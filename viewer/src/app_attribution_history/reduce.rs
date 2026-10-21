@@ -301,7 +301,7 @@ impl<'operation> Reduction<'operation> {
             "coverage":{"retention_limited":self.missing,"context_app_count":self.means.count(),
                 "context_app_count_max":24000,"context_key_bytes":self.means.bytes(),
                 "context_key_bytes_max":8_388_608}});
-        response["selected"] = self.selected.observation.json();
+        response["selected"] = self.selected.observation().json();
         response["cohort"] = Value::Array(cohort);
         response["points"] = Value::Array(points);
 
@@ -310,7 +310,7 @@ impl<'operation> Reduction<'operation> {
     }
 
     fn in_range(&self, observation: &Observation) -> Result<bool> {
-        if self.selected.observation.recording != observation.recording {
+        if self.selected.observation().recording != observation.recording {
             return Err(Error::Bound("attribution recording"));
         }
         let second = observation

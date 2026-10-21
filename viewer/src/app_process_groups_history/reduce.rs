@@ -65,7 +65,7 @@ impl<'operation> Reduction<'operation> {
         }
 
         let result = Box::new(AppProcessGroupsHistory {
-            selected: selected.observation,
+            selected: *selected.observation(),
             app_kind: kind,
             app_bytes: app_bytes.into(),
             context_seconds: 900,

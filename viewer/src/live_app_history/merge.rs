@@ -92,7 +92,7 @@ impl History {
         request.operation.check()?;
 
         let response = crate::live_app_response::bounded(json!({
-            "selected": request.selected.observation.json(), "context_seconds": 900,
+            "selected": request.selected.observation().json(), "context_seconds": 900,
             "points": points, "coverage": {"retention_limited": missing,
                 "live_retention_limited": self.retention_limited,
                 "observations_retained": count, "cache_bytes": self.total_bytes(),
@@ -139,7 +139,7 @@ fn in_range(range: Range<'_>) -> Result<bool> {
         selected,
         observation,
     } = range;
-    if selected.observation.recording != observation.recording {
+    if selected.observation().recording != observation.recording {
         return Err(Error::Bound("App history recording identity"));
     }
 
@@ -161,7 +161,7 @@ fn response_merged_context_missing(request: &Merge<'_>, points: &mut Points) -> 
     for identity in request.context {
         request.operation.check()?;
         let key = (
-            request.selected.observation.recording,
+            request.selected.observation().recording,
             parse_identity(&identity.boot)?.0,
             parse_identity(&identity.run)?.0,
             identity.observation.publication,
@@ -185,7 +185,7 @@ fn response_merged_context_missing(request: &Merge<'_>, points: &mut Points) -> 
             }
         } else {
             let observation = Observation {
-                recording: request.selected.observation.recording,
+                recording: request.selected.observation().recording,
                 stamp: crate::apps::Stamp {
                     boot: key.1,
                     run: key.2,

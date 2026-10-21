@@ -177,7 +177,7 @@ impl History {
                         .as_mut()
                         .ok_or(Error::Bound("process group cache owner"))?;
                     if !cache.insert(&snapshot, predecessor, space, query.operation)? {
-                        cache.limit(space, query.selected.context_last_second);
+                        cache.limit(space, query.selected.context_last_second());
                         cached = false;
                     }
                 }
@@ -192,7 +192,7 @@ impl History {
                 .ok_or(Error::Bound("process group cache owner"))?;
             let pinned = Session::process_groups_cache_pins(query.saved, replay, cache, space)?;
             if !pinned {
-                cache.limit(space, query.selected.context_last_second);
+                cache.limit(space, query.selected.context_last_second());
                 cached = false;
             }
         }
@@ -252,9 +252,9 @@ impl History {
         })?;
 
         query.saved.process_groups_cache_validate(cache)?;
-        let cached = cache.prepare(space, query.selected.context_last_second);
+        let cached = cache.prepare(space, query.selected.context_last_second());
         if !cached {
-            cache.limit(space, query.selected.context_last_second);
+            cache.limit(space, query.selected.context_last_second());
         }
 
         Ok(cached)

@@ -44,8 +44,8 @@ pub struct Observation {
 /// history of the selection spans: the 900 seconds that end at that second.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Selected {
-    pub observation: Observation,
-    pub context_last_second: u64,
+    observation: Observation,
+    context_last_second: u64,
 }
 
 impl Selected {
@@ -77,6 +77,16 @@ impl Selected {
             .ok_or(Error::Bound("selected context clock"))?;
 
         Self::new(observation, wall_ns / NANOSECONDS_PER_SECOND)
+    }
+
+    /// The selected observation.
+    pub(crate) fn observation(&self) -> &Observation {
+        &self.observation
+    }
+
+    /// The last second the context holds.
+    pub(crate) fn context_last_second(&self) -> u64 {
+        self.context_last_second
     }
 
     /// The first second the context holds.

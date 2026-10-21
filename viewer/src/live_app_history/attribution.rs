@@ -213,7 +213,7 @@ impl History {
     /// are that context's own.
     fn attribution_summable(&self, selected: &Selected) -> bool {
         for point in &self.points {
-            if point.observation.recording != selected.observation.recording {
+            if point.observation.recording != selected.observation().recording {
                 return false;
             }
             let Some(wall) = point.observation.wall_ns else {

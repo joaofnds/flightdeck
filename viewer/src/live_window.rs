@@ -222,7 +222,7 @@ impl LiveSession {
         project: impl Fn(&Sample) -> Result<T>,
     ) -> Result<()> {
         let selected = self.selected_in_context()?;
-        let range = ContextRange::ending_at(selected.context_last_second)?;
+        let range = ContextRange::ending_at(selected.context_last_second())?;
         if window.covers(range, &self.selected_context)? {
             return Ok(());
         }
@@ -264,7 +264,7 @@ impl LiveSession {
         selection: &T::Selection,
         project: impl Fn(&Sample) -> Result<T>,
     ) -> Result<()> {
-        let range = ContextRange::ending_at(self.selected_in_context()?.context_last_second)?;
+        let range = ContextRange::ending_at(self.selected_in_context()?.context_last_second())?;
         if window.covers(range, &self.selected_context)? {
             return Ok(());
         }

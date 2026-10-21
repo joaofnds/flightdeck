@@ -20,7 +20,7 @@ impl Session {
     ) -> Result<usize> {
         self.operation.attach(&self.connection)?;
         self.operation.check()?;
-        if collector::recording::read_identity(&self.root)?.0 != selected.observation.recording {
+        if collector::recording::read_identity(&self.root)?.0 != selected.observation().recording {
             return Err(Error::Bound("attribution saved recording"));
         }
         let range = self.app_history_range(selected)?;
@@ -238,7 +238,7 @@ impl Session {
     ) -> Result<T> {
         self.operation.attach(&self.connection)?;
         self.operation.check()?;
-        if collector::recording::read_identity(&self.root)?.0 != selected.observation.recording {
+        if collector::recording::read_identity(&self.root)?.0 != selected.observation().recording {
             return Err(Error::Bound("attribution saved recording"));
         }
 

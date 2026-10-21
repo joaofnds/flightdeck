@@ -179,7 +179,7 @@ impl Session {
                 }
 
                 if collector::recording::read_identity(&self.root)?.0
-                    != selected.observation.recording
+                    != selected.observation().recording
                 {
                     return Err(Error::Bound("committed App history recording"));
                 }
@@ -187,16 +187,16 @@ impl Session {
                 let mut cache = self.app_history_target_cache(target).borrow_mut();
                 let hit = cache
                     .as_ref()
-                    .is_some_and(|cache| cache.covers(&range, &selected.observation, target));
+                    .is_some_and(|cache| cache.covers(&range, selected.observation(), target));
                 if !hit {
                     *cache = None;
                     let restored =
-                        self.app_history_restore(&range, &selected.observation, target)?;
+                        self.app_history_restore(&range, selected.observation(), target)?;
                     #[cfg(test)]
                     if let Some(checkpoint) = self.before_app_history_install.borrow_mut().take() {
                         checkpoint();
                     }
-                    self.app_history_validate(&restored, &selected.observation)?;
+                    self.app_history_validate(&restored, selected.observation())?;
                     self.operation.check()?;
                     *cache = Some(restored);
                 }
@@ -204,7 +204,7 @@ impl Session {
                 let cache = cache
                     .as_ref()
                     .ok_or(Error::Bound("committed App history cache"))?;
-                self.app_history_validate(cache, &selected.observation)?;
+                self.app_history_validate(cache, selected.observation())?;
                 let first = cache.points.partition_point(|point| {
                     point
                         .observation
@@ -230,7 +230,7 @@ impl Session {
     fn app_history_range(&self, selected: &Selected) -> Result<ContextRange> {
         let first_ns = selected.first_second() * NS;
         let end_ns = selected
-            .context_last_second
+            .context_last_second()
             .checked_add(1)
             .and_then(|value| value.checked_mul(NS))
             .ok_or(Error::Bound("committed App history end"))?;

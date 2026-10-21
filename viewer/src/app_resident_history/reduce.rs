@@ -247,7 +247,7 @@ impl<'operation> Reduction<'operation> {
                 "retention_limited":self.missing,
                 "context_app_count":self.means.count(),"context_app_count_max":APPS_MAX,
                 "context_key_bytes":self.means.key_bytes(),"context_key_bytes_max":KEY_BYTES_MAX}});
-        response["selected"] = self.selected.observation.json();
+        response["selected"] = self.selected.observation().json();
         response["cohort"] = Value::Array(cohort);
         response["points"] = Value::Array(points);
 
@@ -301,7 +301,7 @@ impl<'operation> Reduction<'operation> {
     }
 
     fn in_range(&self, observation: &Observation) -> Result<bool> {
-        if self.selected.observation.recording != observation.recording {
+        if self.selected.observation().recording != observation.recording {
             return Err(Error::Bound("resident history recording"));
         }
 

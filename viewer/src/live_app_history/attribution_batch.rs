@@ -250,7 +250,7 @@ impl<'operation> Batch<'operation> {
         let summable = history.attribution_summable(selected);
         for point in &history.points {
             operation.check()?;
-            if point.observation.recording != selected.observation.recording {
+            if point.observation.recording != selected.observation().recording {
                 return Err(Error::Bound("attribution recording"));
             }
 

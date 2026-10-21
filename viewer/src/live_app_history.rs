@@ -218,7 +218,7 @@ impl History {
         operation.check()?;
 
         let response = crate::live_app_response::bounded(
-            json!({"selected": selected.observation.json(), "context_seconds": 900,
+            json!({"selected": selected.observation().json(), "context_seconds": 900,
             "points": points, "coverage": {"retention_limited": retention_limited,
             "observations_retained": self.points.len(), "cache_bytes": self.total_bytes(),
                 "cache_bytes_max": BYTES_MAX}}),
