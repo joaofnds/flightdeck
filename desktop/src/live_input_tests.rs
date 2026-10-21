@@ -573,7 +573,7 @@ fn a_step_past_the_selected_second_shows_the_later_second_the_context_holds(
 }
 
 #[gpui::test]
-fn a_step_past_the_selected_second_asks_the_reader_for_it(cx: &mut TestAppContext) {
+fn a_step_past_the_held_seconds_asks_the_reader_for_that_second(cx: &mut TestAppContext) {
     // Goal: a step to a second the page's context does not hold reads that second, since the
     // page holds no readings of it to show.
     // Method: step right from the accepted second 1000, the last second its context holds, in
