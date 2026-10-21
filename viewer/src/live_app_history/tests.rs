@@ -20,7 +20,7 @@ fn shortens_dense_history_at_its_byte_limit_and_reports_the_loss() {
 
     let response = history
         .response(
-            &observation(18),
+            &crate::live_app_response::Selected::ending_at(observation(18)).unwrap(),
             &Target {
                 kind: KeyKind::Bundle,
                 bytes: &key,
@@ -56,7 +56,7 @@ fn bounds_repeated_clock_observations_and_their_serialized_response() {
 
     let response = history
         .response(
-            &selected,
+            &crate::live_app_response::Selected::ending_at(selected).unwrap(),
             &Target {
                 kind: KeyKind::Bundle,
                 bytes: &key,
@@ -89,7 +89,7 @@ fn emits_a_gap_when_an_app_is_absent_in_an_observed_publication() {
 
     let response = history
         .response(
-            &observation(3),
+            &crate::live_app_response::Selected::ending_at(observation(3)).unwrap(),
             &Target {
                 kind: KeyKind::Bundle,
                 bytes: &key,
@@ -135,7 +135,7 @@ fn refuses_app_history_after_its_operation_is_canceled() {
     cancellation.cancel().unwrap();
 
     let result = history.response(
-        &observation(1),
+        &crate::live_app_response::Selected::ending_at(observation(1)).unwrap(),
         &Target {
             kind: KeyKind::Bundle,
             bytes: &key,

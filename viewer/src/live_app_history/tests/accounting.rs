@@ -414,7 +414,10 @@ fn response(history: &History, kind: KeyKind, bytes: &[u8]) -> Value {
 
     history
         .response(
-            &history.points.back().unwrap().observation,
+            &crate::live_app_response::Selected::ending_at(
+                history.points.back().unwrap().observation,
+            )
+            .unwrap(),
             &Target { kind, bytes },
             &operation,
         )

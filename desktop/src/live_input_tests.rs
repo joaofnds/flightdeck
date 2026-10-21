@@ -553,6 +553,26 @@ fn an_arrow_step_shows_the_adjacent_second_the_page_holds(cx: &mut TestAppContex
 }
 
 #[gpui::test]
+fn a_step_past_the_selected_second_shows_the_later_second_the_context_holds(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a step right from a selected second shows the next second from the readings the
+    // context holds after the selection, and asks the reader for nothing.
+    // Method: select 999 in a context that runs to 1000, whose 90 W differs from the 8 W of
+    // 999, step right through the rendered chart, then read the chart and the page's request.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.seed_selection_before_a_held_second();
+    harness.driver.focus_chart();
+
+    harness.driver.press("right");
+
+    assert_eq!(harness.driver.shown_second(), Some(1000));
+    assert!(harness.driver.reading_is_visible("90 W"));
+    assert_eq!(harness.driver.requested_second(), Some(999));
+    harness.teardown();
+}
+
+#[gpui::test]
 fn a_step_past_the_selected_second_asks_the_reader_for_it(cx: &mut TestAppContext) {
     // Goal: a step to a second the page's context does not hold reads that second, since the
     // page holds no readings of it to show.
@@ -1004,6 +1024,27 @@ impl InputDriver {
         self.context.run_until_parked();
     }
 
+    /// Selects 999 in a context that holds the second after it, 1000, at 90 W.
+    fn seed_selection_before_a_held_second(&mut self) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            let mut snapshot = accepted_snapshot(dashboard.generation);
+            let selected = snapshot.selection["trends"][0].clone();
+            let mut later = snapshot.selection["trends"][1].clone();
+            later["power_watts"] = json!(90);
+            snapshot.selection["second"] = json!(999);
+            snapshot.selection["selected"]["publication"] = selected["publication"].clone();
+            snapshot.selection["summary"] = selected.clone();
+            snapshot.selection["trends"] = json!([selected, later]);
+
+            dashboard.request.second = Some(999);
+            dashboard.request.identity = Some(snapshot.selection["selected"].clone());
+            dashboard.accept(snapshot);
+            assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
+            cx.notify();
+        });
+        self.context.run_until_parked();
+    }
+
     fn seed_accepted_selection(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
             let snapshot = accepted_snapshot(dashboard.generation);
@@ -1433,7 +1474,7 @@ fn accepted_snapshot(generation: u64) -> Box<Snapshot> {
     Box::new(Snapshot {
         generation,
         catalog: json!({"first_second":900,"last_second":1100}),
-        selection: json!({"second":1000,"selected":identity,
+        selection: json!({"second":1000,"context_last_second":1000,"selected":identity,
             "trends":[previous, selected]}),
         pages: BTreeMap::new(),
         apps: None,

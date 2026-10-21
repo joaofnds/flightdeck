@@ -7,12 +7,13 @@ use serde_json::{Value, json};
 use super::{BYTES_MAX, History, OBSERVATIONS_MAX, Observation, Selection, TracePoint};
 use crate::cancellation::Operation;
 use crate::cpu_history_sample::Identity;
+use crate::live_app_response::Selected;
 
 type PointKey = ([u64; 2], [u64; 2], [u64; 2], u64);
 type Points = BTreeMap<PointKey, (TracePoint, bool)>;
 
 pub(crate) struct Merge<'a> {
-    pub selected: &'a Observation,
+    pub selected: &'a Selected,
     pub target: &'a dyn Selection,
     pub saved: &'a [TracePoint],
     pub context: &'a [Identity],
@@ -21,7 +22,7 @@ pub(crate) struct Merge<'a> {
 
 #[derive(Clone, Copy)]
 struct Range<'a> {
-    selected: &'a Observation,
+    selected: &'a Selected,
     observation: &'a Observation,
 }
 
@@ -91,8 +92,8 @@ impl History {
         request.operation.check()?;
 
         let response = crate::live_app_response::bounded(json!({
-            "selected": request.selected.json(), "context_seconds": 900, "points": points,
-            "coverage": {"retention_limited": missing,
+            "selected": request.selected.observation.json(), "context_seconds": 900,
+            "points": points, "coverage": {"retention_limited": missing,
                 "live_retention_limited": self.retention_limited,
                 "observations_retained": count, "cache_bytes": self.total_bytes(),
                 "cache_bytes_max": BYTES_MAX, "committed_observations": request.saved.len()}
@@ -138,20 +139,16 @@ fn in_range(range: Range<'_>) -> Result<bool> {
         selected,
         observation,
     } = range;
-    if selected.recording != observation.recording {
+    if selected.observation.recording != observation.recording {
         return Err(Error::Bound("App history recording identity"));
     }
 
-    let second = selected
-        .wall_ns
-        .ok_or(Error::Bound("App history selected clock"))?
-        / 1_000_000_000;
     let wall = observation
         .wall_ns
         .ok_or(Error::Bound("App history point clock"))?
         / 1_000_000_000;
 
-    Ok((second.saturating_sub(899)..=second).contains(&wall))
+    Ok(selected.holds(wall))
 }
 
 fn response_merged_context_missing(request: &Merge<'_>, points: &mut Points) -> Result<bool> {
@@ -164,7 +161,7 @@ fn response_merged_context_missing(request: &Merge<'_>, points: &mut Points) -> 
     for identity in request.context {
         request.operation.check()?;
         let key = (
-            request.selected.recording,
+            request.selected.observation.recording,
             parse_identity(&identity.boot)?.0,
             parse_identity(&identity.run)?.0,
             identity.observation.publication,
@@ -188,7 +185,7 @@ fn response_merged_context_missing(request: &Merge<'_>, points: &mut Points) -> 
             }
         } else {
             let observation = Observation {
-                recording: request.selected.recording,
+                recording: request.selected.observation.recording,
                 stamp: crate::apps::Stamp {
                     boot: key.1,
                     run: key.2,

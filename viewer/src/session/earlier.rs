@@ -12,6 +12,10 @@ use crate::metrics;
 pub const LOADED_SECONDS: u64 = 3600;
 /// The seconds of full detail the context holds, which the older tail ends before.
 pub(crate) const DETAIL_SECONDS: u64 = 900;
+/// The seconds after a selected second its context holds, where the recording has them, so a
+/// step to a later second shows readings the page already holds. The context still holds
+/// `DETAIL_SECONDS` in all, so the rest lie before the selected second.
+pub const CONTEXT_AFTER_SECONDS: u64 = 450;
 /// The seconds one older reading stands for.
 pub const EARLIER_STRIDE_SECONDS: u64 = 10;
 /// Older segments are numbered above any the full-detail context counts, so a segment of the
@@ -19,6 +23,7 @@ pub const EARLIER_STRIDE_SECONDS: u64 = 10;
 const SEGMENT_BASE: u64 = 1 << 32;
 const _: () = {
     assert!(DETAIL_SECONDS < LOADED_SECONDS);
+    assert!(CONTEXT_AFTER_SECONDS < DETAIL_SECONDS);
     assert!(EARLIER_STRIDE_SECONDS > 0);
     assert!(LOADED_SECONDS <= 65_535);
 };

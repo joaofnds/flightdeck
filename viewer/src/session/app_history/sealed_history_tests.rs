@@ -24,7 +24,7 @@ fn restores_the_history_a_replay_gives_from_the_parts_a_window_keeps() {
     let selected = selected(&session, 1002);
 
     let kept = session
-        .with_app_history(&selected, &CURRENT, points)
+        .with_app_history(&Selected::ending_at(selected).unwrap(), &CURRENT, points)
         .unwrap();
 
     assert_eq!(kept[1]["cpu_ns"]["known"], "1");
@@ -45,7 +45,7 @@ fn restores_a_window_that_keeps_parts_without_reading_its_saved_sources() {
     let selected = selected(&session, 1002);
 
     session
-        .with_app_history(&selected, &CURRENT, points)
+        .with_app_history(&Selected::ending_at(selected).unwrap(), &CURRENT, points)
         .unwrap();
 
     assert_eq!(session.source_reads.get(), 0);
@@ -69,7 +69,7 @@ fn restores_the_history_of_an_app_that_ran_at_no_second_of_a_window_that_keeps_p
     };
 
     let kept = session
-        .with_app_history(&selected, &absent, points)
+        .with_app_history(&Selected::ending_at(selected).unwrap(), &absent, points)
         .unwrap();
 
     assert_eq!(kept[1]["members"], Value::Null);
@@ -94,7 +94,11 @@ fn restores_the_process_group_history_a_replay_gives_from_the_parts_a_window_kee
     };
 
     let kept = session
-        .with_app_history(&selected, &group, group_points)
+        .with_app_history(
+            &Selected::ending_at(selected).unwrap(),
+            &group,
+            group_points,
+        )
         .unwrap();
 
     assert_eq!(kept[1]["members"], 1);
@@ -122,7 +126,11 @@ fn restores_a_process_group_of_a_window_that_keeps_parts_without_reading_its_sav
     };
 
     session
-        .with_app_history(&selected, &group, group_points)
+        .with_app_history(
+            &Selected::ending_at(selected).unwrap(),
+            &group,
+            group_points,
+        )
         .unwrap();
 
     assert_eq!(session.source_reads.get(), 0);
@@ -148,7 +156,7 @@ fn restores_a_replayed_minute_after_a_minute_that_keeps_parts() {
     selected.stamp.awake_ns = Some(run_tick * 1_000_000_000);
 
     let restored = session
-        .with_app_history(&selected, &CURRENT, points)
+        .with_app_history(&Selected::ending_at(selected).unwrap(), &CURRENT, points)
         .unwrap();
 
     assert_eq!(restored[1]["cpu_ns"]["known"], "1");
@@ -171,13 +179,14 @@ fn rejects_a_warm_history_from_kept_parts_once_their_window_marker_disappears() 
     let session = Session::open(&fixture.root).unwrap();
     let selected = selected(&session, 1002);
     session
-        .with_app_history(&selected, &CURRENT, points)
+        .with_app_history(&Selected::ending_at(selected).unwrap(), &CURRENT, points)
         .unwrap();
     let marker =
         persistence::layout::WindowKey::from(&session.windows[0].identity).marker(&fixture.root);
     std::fs::remove_file(&marker).unwrap();
 
-    let result = session.with_app_history(&selected, &CURRENT, points);
+    let result =
+        session.with_app_history(&Selected::ending_at(selected).unwrap(), &CURRENT, points);
 
     assert!(
         matches!(result, Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound)
@@ -205,7 +214,7 @@ fn replayed_history(
     let replaying = Session::open(&root).unwrap();
 
     let replayed = replaying
-        .with_app_history(selected, target, consume)
+        .with_app_history(&Selected::ending_at(*selected).unwrap(), target, consume)
         .unwrap();
 
     assert!(replaying.source_reads.get() > 0);

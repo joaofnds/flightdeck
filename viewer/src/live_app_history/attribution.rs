@@ -3,7 +3,7 @@ mod batch;
 
 use std::cell::{Cell, RefCell};
 
-use persistence::{Error, Result};
+use persistence::Result;
 use serde_json::{Value, json};
 
 use super::{BYTES_MAX, History, Observation, Point, ResidentCache};
@@ -13,9 +13,10 @@ use crate::app_attribution_history::cache::{Cache, Point as SavedPoint};
 use crate::app_attribution_history::{Capture, Reading, Reduction};
 use crate::cancellation::Operation;
 use crate::live::resident_history::Source;
+use crate::live_app_response::Selected;
 
 struct SavedQuery<'query> {
-    selected: &'query Observation,
+    selected: &'query Selected,
     metric: AppAttributionMetric,
     saved: &'query Session,
     operation: &'query Operation,
@@ -29,12 +30,12 @@ struct Restored {
 impl History {
     pub(crate) fn attribution_response(
         &self,
-        selected: &Observation,
+        selected: &Selected,
         metric: AppAttributionMetric,
         saved: Option<&Session>,
         operation: &Operation,
     ) -> Result<Value> {
-        let mut reduction = Reduction::new(selected, metric, operation)?;
+        let mut reduction = Reduction::new(selected, metric, operation);
         self.attribution_observe(&mut reduction, metric, selected)?;
         if let Some(saved) = saved {
             return self.attribution_saved(
@@ -113,24 +114,20 @@ impl History {
 
     fn attribution_prepare(
         saved: &Session,
-        selected: &Observation,
+        selected: &Selected,
         reduction: &Reduction<'_>,
         rates: &mut Cache,
         available: usize,
         operation: &Operation,
     ) -> Result<Restored> {
-        let second = selected
-            .wall_ns
-            .ok_or(Error::Bound("attribution selected clock"))?
-            / 1_000_000_000;
         rates.retain(operation, |observation| {
             operation.check()?;
             if reduction.contains_live(observation)? {
                 return Ok(false);
             }
-            Ok(observation.wall_ns.is_some_and(|wall| {
-                (second.saturating_sub(899)..=second).contains(&(wall / 1_000_000_000))
-            }))
+            Ok(observation
+                .wall_ns
+                .is_some_and(|wall| selected.holds(wall / 1_000_000_000)))
         })?;
         rates.resume(available);
         saved.validate_attribution_cache(rates)?;
@@ -190,7 +187,7 @@ impl History {
         &self,
         reduction: &mut Reduction<'_>,
         metric: AppAttributionMetric,
-        selected: &Observation,
+        selected: &Selected,
     ) -> Result<()> {
         if self.attribution_summable(selected) {
             for point in &self.points {
@@ -210,19 +207,15 @@ impl History {
 
     /// Whether every live point lies in the context of `selected`, so that the live totals
     /// are that context's own.
-    fn attribution_summable(&self, selected: &Observation) -> bool {
-        let Some(wall) = selected.wall_ns else {
-            return false;
-        };
-        let context = (wall / 1_000_000_000).saturating_sub(899)..=wall / 1_000_000_000;
+    fn attribution_summable(&self, selected: &Selected) -> bool {
         for point in &self.points {
-            if point.observation.recording != selected.recording {
+            if point.observation.recording != selected.observation.recording {
                 return false;
             }
             let Some(wall) = point.observation.wall_ns else {
                 return false;
             };
-            if !context.contains(&(wall / 1_000_000_000)) {
+            if !selected.holds(wall / 1_000_000_000) {
                 return false;
             }
         }

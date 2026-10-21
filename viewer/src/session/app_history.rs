@@ -6,7 +6,7 @@ use crate::live_app_history::Target;
 
 use super::{ContextRange, NS, OBSERVATIONS_MAX, Session, WINDOWS_MAX};
 use crate::live_app_history::{Selection, TracePoint};
-use crate::live_app_response::{KeyKind, Observation};
+use crate::live_app_response::{KeyKind, Observation, Selected};
 use crate::live_apps::{Frame, committed::Endpoint};
 use collector::ring::{Identity, PROGRAM_PATH_BYTES_MAX, RunIdentity};
 use persistence::{Error, Result};
@@ -153,7 +153,7 @@ impl Session {
 
     pub(crate) fn with_app_history(
         &self,
-        selected: &Observation,
+        selected: &Selected,
         target: &dyn Selection,
         consume: impl FnOnce(&[TracePoint]) -> Result<Value>,
     ) -> Result<Value> {
@@ -164,22 +164,25 @@ impl Session {
                     return Err(Error::Bound("committed App history key"));
                 }
 
-                if collector::recording::read_identity(&self.root)?.0 != selected.recording {
+                if collector::recording::read_identity(&self.root)?.0
+                    != selected.observation.recording
+                {
                     return Err(Error::Bound("committed App history recording"));
                 }
 
                 let mut cache = self.app_history_target_cache(target).borrow_mut();
                 let hit = cache
                     .as_ref()
-                    .is_some_and(|cache| cache.covers(&range, selected, target));
+                    .is_some_and(|cache| cache.covers(&range, &selected.observation, target));
                 if !hit {
                     *cache = None;
-                    let restored = self.app_history_restore(&range, selected, target)?;
+                    let restored =
+                        self.app_history_restore(&range, &selected.observation, target)?;
                     #[cfg(test)]
                     if let Some(checkpoint) = self.before_app_history_install.borrow_mut().take() {
                         checkpoint();
                     }
-                    self.app_history_validate(&restored, selected)?;
+                    self.app_history_validate(&restored, &selected.observation)?;
                     self.operation.check()?;
                     *cache = Some(restored);
                 }
@@ -187,7 +190,7 @@ impl Session {
                 let cache = cache
                     .as_ref()
                     .ok_or(Error::Bound("committed App history cache"))?;
-                self.app_history_validate(cache, selected)?;
+                self.app_history_validate(cache, &selected.observation)?;
                 let first = cache.points.partition_point(|point| {
                     point
                         .observation
@@ -210,13 +213,10 @@ impl Session {
         result
     }
 
-    fn app_history_range(&self, selected: &Observation) -> Result<ContextRange> {
-        let second = selected
-            .wall_ns
-            .ok_or(Error::Bound("committed App history clock"))?
-            / NS;
-        let first_ns = second.saturating_sub(899) * NS;
-        let end_ns = second
+    fn app_history_range(&self, selected: &Selected) -> Result<ContextRange> {
+        let first_ns = selected.first_second() * NS;
+        let end_ns = selected
+            .context_last_second
             .checked_add(1)
             .and_then(|value| value.checked_mul(NS))
             .ok_or(Error::Bound("committed App history end"))?;

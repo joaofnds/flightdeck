@@ -1157,7 +1157,8 @@ mod live_tests {
     fn shared_chart_domain_keeps_sent_traffic_negative_and_power_unstacked() {
         // Goal: chart rendering interprets projection metadata without summing independent power.
         // Method: calculate domains from one actual projection with directional and power data.
-        let selection = serde_json::json!({"second": 1000, "selected": null, "trends": [{
+        let selection = serde_json::json!({"second": 1000, "context_last_second": 1000,
+            "selected": null, "trends": [{
             "run": "00000000000000010000000000000002",
             "boot": "00000000000000030000000000000004", "publication": 1, "segment": 1,
             "wall_ns": 1_000_000_000_000_u64, "network_rx_bps": 2_000_000,

@@ -18,7 +18,7 @@ fn clicking_the_selected_second_keeps_its_chosen_publication() {
 }
 
 fn selection() -> Value {
-    json!({"second": 1000, "selected": {"publication": 3,
+    json!({"second": 1000,"context_last_second": 1000, "selected": {"publication": 3,
         "run": "00000000000000050000000000000006",
         "boot": "00000000000000030000000000000004"}, "trends": [
         {"run": "00000000000000010000000000000002",
@@ -1002,7 +1002,7 @@ fn long_selection() -> Value {
             "wall_ns": second * 1_000_000_000, "publication": publication,
             "cpu_percent": cpu, "pressure": pressure})
     };
-    json!({"second": 5000, "selected": {"publication": 4,
+    json!({"second": 5000,"context_last_second": 5000, "selected": {"publication": 4,
         "run": "00000000000000010000000000000002",
         "boot": "00000000000000030000000000000004"},
         "earlier_stride_seconds": 10,
@@ -1109,7 +1109,7 @@ fn a_selection_holds_the_seconds_its_charts_hold() {
     // Goal: a step reads a second only when the page's charts do not hold it.
     // Method: ask for the seconds at both edges of a full-detail context and of one that
     // carries an older tail.
-    let recent = json!({"second": 5000, "trends": []});
+    let recent = json!({"second": 5000,"context_last_second": 5000, "trends": []});
     let longer = long_selection();
 
     assert!(!holds_second(&recent, 4100));

@@ -950,6 +950,59 @@ mod tests {
         assert_eq!(latest["summary"]["segment"], 2);
     }
     #[test]
+    fn holds_the_seconds_after_a_saved_selection_in_its_context() {
+        // Goal: a selection's context holds seconds on both sides of it, so a step to a later
+        // second shows readings the context already holds.
+        // Method: seal seconds up to 451 past 1000 and one later in the ring, select 1000,
+        // then read the context's last second and the publications its trends hold.
+        let mut recording = Recording::new();
+        for second in [1000, 1449, 1450, 1451] {
+            recording.publish(second);
+        }
+        recording.seal();
+        recording.publish(1500);
+        let mut session = LiveSession::open(&recording.root).unwrap();
+
+        let selected = session.select(1000, 0).unwrap();
+
+        let publications: Vec<_> = selected["trends"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|point| point["publication"].as_u64().unwrap())
+            .collect();
+        assert_eq!(publications, [1, 2, 3]);
+        assert_eq!(selected["context_last_second"], 1450);
+        assert_eq!(selected["second"], 1000);
+        assert_eq!(selected["selected"]["publication"], 1);
+        assert_eq!(selected["summary"]["publication"], 1);
+    }
+
+    #[test]
+    fn ends_a_selections_context_at_the_newest_second() {
+        // Goal: a selection less than 450 seconds before the newest second holds the seconds up
+        // to the newest, read from the ring that has not sealed them.
+        // Method: publish 1000 and 1100 without sealing, select 1000, then read the context's
+        // last second and the publications its trends hold.
+        let mut recording = Recording::new();
+        recording.publish(1000);
+        recording.publish(1100);
+        let mut session = LiveSession::open(&recording.root).unwrap();
+
+        let selected = session.select(1000, 0).unwrap();
+
+        let publications: Vec<_> = selected["trends"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|point| point["publication"].as_u64().unwrap())
+            .collect();
+        assert_eq!(publications, [1, 2]);
+        assert_eq!(selected["context_last_second"], 1100);
+        assert_eq!(selected["selected"]["publication"], 1);
+    }
+
+    #[test]
     fn keeps_repeated_wall_seconds_as_distinct_observations() {
         // Goal: a repeated wall second preserves both publications and their identities.
         // Method: publish the same fake wall clock twice and inspect both alternatives.
@@ -1404,7 +1457,13 @@ mod tests {
         session.begin(control.epoch()).unwrap();
         let selected = session.select(1000, 0).unwrap();
 
-        assert_rehydrated_apps(&session, 1);
+        assert_rehydrated_apps(
+            &session,
+            Rehydrated {
+                publication: 1,
+                point_count: 32,
+            },
+        );
         assert_eq!(selected["selected"], before["selected"]);
         assert_eq!(session.page("processes", 0).unwrap(), first);
         assert_eq!(session.page("processes", 11_776).unwrap(), last);
@@ -1422,7 +1481,13 @@ mod tests {
         assert_eq!(session.page("processes", 0).unwrap(), first);
         assert_eq!(session.page("events", 0).unwrap(), events);
         session.select(1001, 0).unwrap();
-        assert_rehydrated_apps(&session, 2);
+        assert_rehydrated_apps(
+            &session,
+            Rehydrated {
+                publication: 2,
+                point_count: 33,
+            },
+        );
         session.select(1032, 0).unwrap();
         assert_eq!(
             session.page("processes", 0).unwrap()["rows"][6][3],
@@ -1437,7 +1502,14 @@ mod tests {
         );
     }
 
-    fn assert_rehydrated_apps(session: &LiveSession, publication: u64) {
+    #[derive(Clone, Copy)]
+    struct Rehydrated {
+        publication: u64,
+        point_count: usize,
+    }
+
+    fn assert_rehydrated_apps(session: &LiveSession, rehydrated: Rehydrated) {
+        let publication = rehydrated.publication;
         let page = session.apps_page(0).unwrap();
         let kind = viewer::live_app_response::KeyKind::Bundle;
         let key = b"/Apps/Current.app";
@@ -1456,22 +1528,19 @@ mod tests {
         assert_eq!(detail["processes"][0]["creation"]["unique_id"], "7");
         assert_eq!(
             history["points"].as_array().unwrap().len(),
-            usize::try_from(publication).unwrap()
+            rehydrated.point_count
         );
         assert_eq!(
             history["points"][0]["cpu_percent_one_core"],
             serde_json::Value::Null
         );
-        assert_eq!(
-            history["points"].as_array().unwrap().last().unwrap()["resident_bytes"]["known"],
-            "11"
-        );
-        let latest = history["points"].as_array().unwrap().last().unwrap();
+        let selected = &history["points"][usize::try_from(publication - 1).unwrap()];
+        assert_eq!(selected["resident_bytes"]["known"], "11");
         assert_eq!(
             detail["app"]["cpu_percent_one_core"],
-            latest["cpu_percent_one_core"]
+            selected["cpu_percent_one_core"]
         );
-        assert_eq!(detail["app"]["energy_watts"], latest["energy_watts"]);
+        assert_eq!(detail["app"]["energy_watts"], selected["energy_watts"]);
     }
 
     #[test]

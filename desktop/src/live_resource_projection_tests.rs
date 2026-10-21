@@ -154,6 +154,6 @@ fn selection(resources: &Value) -> Value {
         point[key] = value.clone();
     }
 
-    json!({"second": 1000, "selected": point.clone(), "summary": point.clone(),
-        "trends": [point]})
+    json!({"second": 1000, "context_last_second": 1000, "selected": point.clone(),
+        "summary": point.clone(), "trends": [point]})
 }

@@ -1,5 +1,5 @@
 //! Bounded CPU, process-power and disk attribution over the selected App context.
-use persistence::{Error, Result};
+use persistence::Result;
 use serde_json::Value;
 
 use crate::LiveSession;
@@ -48,12 +48,7 @@ impl LiveSession {
 
     pub fn app_attribution_histories(&self) -> Result<Box<AppAttributionHistories>> {
         self.operation.run(|| {
-            let mut selected = None;
-            self.with_selected_apps(|sample| {
-                selected = Some(sample.selected);
-                Ok(Value::Null)
-            })?;
-            let selected = selected.ok_or(Error::Bound("App attribution selection"))?;
+            let selected = self.selected_in_context()?;
             self.app_history.attribution_batch_response(
                 &selected,
                 self.history.as_ref(),
@@ -64,12 +59,7 @@ impl LiveSession {
 
     pub fn app_attribution_history(&self, metric: AppAttributionMetric) -> Result<Value> {
         self.operation.run(|| {
-            let mut selected = None;
-            self.with_selected_apps(|sample| {
-                selected = Some(sample.selected);
-                Ok(Value::Null)
-            })?;
-            let selected = selected.ok_or(Error::Bound("App attribution selection"))?;
+            let selected = self.selected_in_context()?;
             self.app_history.attribution_response(
                 &selected,
                 metric,

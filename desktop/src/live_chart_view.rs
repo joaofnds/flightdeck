@@ -1173,7 +1173,8 @@ fn inspection_index(panel: &Panel, snapshot: &Snapshot, second: Option<u64>) -> 
     if panel.kind == "timeline" {
         let first = match panel.window {
             Some(window) => window.first,
-            None => snapshot.selection["second"].as_u64()?.saturating_sub(899),
+            None => crate::live_projection::context_last_second(&snapshot.selection)?
+                .saturating_sub(899),
         };
         let Ok(offset) = usize::try_from(second.checked_sub(first)?) else {
             return None;
@@ -1265,7 +1266,7 @@ mod tests {
         Snapshot {
             generation: 1,
             catalog: Value::Null,
-            selection: json!({"second":1000,"trends":[
+            selection: json!({"second":1000,"context_last_second":1000,"trends":[
                 {"wall_ns":998_100_000_000_u64},
                 {"wall_ns":1_000_100_000_000_u64},
                 {"wall_ns":1_000_200_000_000_u64}]}),
@@ -1344,7 +1345,8 @@ mod tests {
                 "wall_ns": second * 1_000_000_000, "publication": publication})
         };
         let mut snapshot = snapshot();
-        snapshot.selection = json!({"second": 5000, "earlier_stride_seconds": 10,
+        snapshot.selection = json!({"second": 5000, "context_last_second": 5000,
+            "earlier_stride_seconds": 10,
             "earlier_trends": [point(2000, 1), point(2010, 2)],
             "trends": [point(4101, 3), point(5000, 4)]});
         snapshot

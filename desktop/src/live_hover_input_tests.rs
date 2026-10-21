@@ -820,8 +820,8 @@ impl Epoch {
             generation,
             catalog: json!({"path":"/fixture/whole-page-hover",
                 "first_second":998,"last_second":1000}),
-            selection: json!({"second":self.second(),"selected":self.observation(),
-                "summary":summary,"context_seconds":900,
+            selection: json!({"second":self.second(),"context_last_second":self.second(),
+                "selected":self.observation(),"summary":summary,"context_seconds":900,
                 "trends":points}),
             pages: BTreeMap::from([(
                 "processes".into(),

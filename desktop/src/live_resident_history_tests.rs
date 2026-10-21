@@ -19,6 +19,24 @@ fn resident_amounts_preserve_exact_bytes_while_readouts_and_plot_use_gib() {
 }
 
 #[test]
+fn resident_history_holds_the_readings_after_the_selected_second() {
+    // Goal: a resident history whose context runs past the selected second keeps the later
+    // readings and ends its chart at the context's last second.
+    // Method: select 999 in a context that runs to 1000, prepare the history, then read the
+    // amount at 1000 and the chart's last second.
+    let mut value = fixture();
+    value["selected"] = observation(1);
+    let selection = json!({"selected":{"run":[1,2],"boot":[3,4],"publication":1},
+        "second":999,"context_last_second":1000});
+
+    let history = ResidentHistory::prepare(&value, &selection);
+
+    assert_eq!(history.amount(1, Some(1)), Some(9_007_199_254_740_993));
+    let window = history.panel().unwrap().window.unwrap();
+    assert_eq!(window.first + window.span - 1, 1000);
+}
+
+#[test]
 fn resident_partial_zero_overflow_and_missing_measures_remain_distinct() {
     // Change one real captured measure between all availability cases and inspect exact text.
     let mut value = fixture();
@@ -262,7 +280,8 @@ fn fixture() -> Value {
 }
 
 fn selection() -> Value {
-    json!({"selected":{"run":[1,2],"boot":[3,4],"publication":2},"second":1000})
+    json!({"selected":{"run":[1,2],"boot":[3,4],"publication":2},"second":1000,
+        "context_last_second":1000})
 }
 
 fn observation(publication: u64) -> Value {

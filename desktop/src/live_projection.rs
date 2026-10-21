@@ -102,25 +102,32 @@ pub fn stepped_second(selection: &Value, second: u64, delta: i64) -> u64 {
 }
 
 /// Whether the selection holds `second`, as a reading or a gap, so the page shows that second
-/// without a read: the seconds its charts hold, which end at the selected second.
+/// without a read: the seconds its charts hold, on both sides of the selected second.
 #[must_use]
 pub fn holds_second(selection: &Value, second: u64) -> bool {
-    let Some(selected) = selection["second"].as_u64() else {
+    let Some(last) = context_last_second(selection) else {
         return false;
     };
 
-    let first = first_held_second(selected, selection["earlier_trends"].is_array());
-    (first..=selected).contains(&second)
+    let first = first_held_second(last, selection["earlier_trends"].is_array());
+    (first..=last).contains(&second)
 }
 
-/// The first second the charts hold for a selection of `second`: the first of its full-detail
-/// 900, or of the whole loaded hour when the selection carries an older tail.
-fn first_held_second(second: u64, longer: bool) -> u64 {
+/// The last second the selection's charts hold, which runs past the selected second where the
+/// recording holds later seconds.
+#[must_use]
+pub fn context_last_second(selection: &Value) -> Option<u64> {
+    selection["context_last_second"].as_u64()
+}
+
+/// The first second the charts hold for a context that ends at `last_second`: the first of its
+/// full-detail 900, or of the whole loaded hour when the selection carries an older tail.
+fn first_held_second(last_second: u64, longer: bool) -> u64 {
     if longer {
-        return second.saturating_sub(LOADED_SECONDS - 1);
+        return last_second.saturating_sub(LOADED_SECONDS - 1);
     }
 
-    second.saturating_sub(DETAIL_SECONDS - 1)
+    last_second.saturating_sub(DETAIL_SECONDS - 1)
 }
 
 fn wall_second_of(point: &Value) -> Option<u64> {
@@ -330,10 +337,10 @@ impl Domain {
     /// The seconds the charts hold: the full-detail 900, or the whole loaded hour when the
     /// selection carries an older tail.
     fn read(selection: &Value, longer: bool) -> Result<Self, String> {
-        let second = integer(&selection["second"])?;
-        let recent_first = first_held_second(second, false);
-        let first = first_held_second(second, longer);
-        let end = second.checked_add(1).ok_or("Live chart time overflow")?;
+        let last = integer(&selection["context_last_second"])?;
+        let recent_first = first_held_second(last, false);
+        let first = first_held_second(last, longer);
+        let end = last.checked_add(1).ok_or("Live chart time overflow")?;
         let span = u16::try_from(end - first).map_err(|error| error.to_string())?;
         assert!(span > 0);
         assert!(u64::from(span) <= LOADED_SECONDS);

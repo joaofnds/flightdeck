@@ -19,6 +19,24 @@ fn cpu_rates_preserve_multicore_values_and_captured_positions() {
 }
 
 #[test]
+fn rates_hold_the_readings_after_the_selected_second() {
+    // Goal: an App rate history whose context runs past the selected second keeps the later
+    // readings and ends its chart at the context's last second.
+    // Method: select 999 in a context that runs to 1000, prepare the history, then read the
+    // rate at 1000 and the chart's last second.
+    let mut value = fixture(Metric::Cpu);
+    value["selected"] = observation(1);
+    let selection = json!({"second":999,"context_last_second":1000,
+        "selected":{"run":[1,2],"boot":[3,4],"publication":1}});
+
+    let history = AppAttributionHistory::prepare(Metric::Cpu, &value, &selection);
+
+    assert_eq!(history.reading(1, Some(1)), "240%");
+    let window = history.panel().unwrap().window.unwrap();
+    assert_eq!(window.first + window.span - 1, 1000);
+}
+
+#[test]
 fn power_rates_preserve_fractional_watts() {
     // Keep the captured process interval's fractional power separate from machine power.
     let history =
@@ -192,7 +210,8 @@ pub(crate) fn fixture(metric: Metric) -> Value {
 }
 
 pub(crate) fn selection() -> Value {
-    json!({"second":1000,"selected":{"run":[1,2],"boot":[3,4],"publication":2}})
+    json!({"second":1000,"context_last_second":1000,
+        "selected":{"run":[1,2],"boot":[3,4],"publication":2}})
 }
 
 fn observation(publication: u64) -> Value {

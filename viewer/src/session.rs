@@ -31,6 +31,7 @@ pub struct Session {
     unknown: u64,
     selected: Option<Observation>,
     selected_context: Vec<crate::cpu_history_sample::Identity>,
+    context_last_second: Option<u64>,
     pub(crate) cpu_history_cache: Option<crate::cpu_history::Cache>,
     // Separate from LiveSession's raw cache, bounded to one 8 MiB owned Sample.
     app_sample_cache: std::cell::RefCell<Option<committed_apps::Cache>>,
@@ -56,10 +57,48 @@ pub struct Session {
     pub(crate) after_process_groups_frame: std::cell::RefCell<Option<Box<dyn FnOnce()>>>,
 }
 
+/// A selected second and the last second of the context read with it, which runs past the
+/// selected second where the recording holds later seconds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContextSelection {
+    pub second: u64,
+    pub context_last_second: u64,
+}
+
+impl ContextSelection {
+    /// The selection of `second` in a recording whose newest second is `newest_second`: its
+    /// context holds up to `CONTEXT_AFTER_SECONDS` after it, and none past the newest second.
+    #[must_use]
+    pub fn of(second: u64, newest_second: Option<u64>) -> Self {
+        let after = second.saturating_add(CONTEXT_AFTER_SECONDS);
+        let context_last_second = newest_second.map_or(second, |newest| after.min(newest));
+
+        Self {
+            second,
+            context_last_second: context_last_second.max(second),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct ContextRange {
     pub first_ns: u64,
     pub end_ns: u64,
+}
+
+impl ContextRange {
+    /// The wall clock range of the full-detail context that ends at `last_second`.
+    pub(crate) fn ending_at(last_second: u64) -> Result<Self> {
+        let end_ns = last_second
+            .checked_add(1)
+            .and_then(|end| end.checked_mul(NS))
+            .ok_or(Error::Bound("context end"))?;
+
+        Ok(Self {
+            first_ns: last_second.saturating_sub(DETAIL_SECONDS - 1) * NS,
+            end_ns,
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -156,6 +195,7 @@ impl Session {
             unknown: 0,
             selected: None,
             selected_context: Vec::new(),
+            context_last_second: None,
             cpu_history_cache: None,
             app_sample_cache: std::cell::RefCell::new(None),
             app_history_cache: std::cell::RefCell::new(None),
@@ -194,6 +234,11 @@ impl Session {
         self.operation.attach(&self.connection)
     }
 
+    /// The newest second the saved minutes hold.
+    pub(crate) fn last_second(&self) -> Option<u64> {
+        self.last
+    }
+
     #[must_use]
     pub fn catalog(&self) -> Value {
         json!({"path": self.root, "first_second": self.first, "last_second": self.last,
@@ -203,21 +248,32 @@ impl Session {
 
     /// Every response belongs to one explicit saved second and optional repeated observation.
     pub fn select(&mut self, second: u64, alternative: usize) -> Result<Value> {
-        self.operation
-            .begin(self.operation.epoch())?
-            .run(|| self.select_inner(second, alternative))
+        self.select_context(ContextSelection::of(second, self.last), alternative)
     }
 
-    fn select_inner(&mut self, second: u64, alternative: usize) -> Result<Value> {
+    /// Selects `selection`'s second with the context it names.
+    pub fn select_context(
+        &mut self,
+        selection: ContextSelection,
+        alternative: usize,
+    ) -> Result<Value> {
+        assert!(selection.second <= selection.context_last_second);
+        assert!(selection.context_last_second - selection.second <= CONTEXT_AFTER_SECONDS);
+
+        self.operation
+            .begin(self.operation.epoch())?
+            .run(|| self.select_inner(selection, alternative))
+    }
+
+    fn select_inner(&mut self, selection: ContextSelection, alternative: usize) -> Result<Value> {
         self.selected = None;
+        self.context_last_second = None;
         self.app_sample_cache.get_mut().take();
         self.operation.check()?;
-        let end = second
-            .checked_add(1)
-            .and_then(|value| value.checked_mul(NS))
-            .ok_or(Error::Bound("selection time"))?;
-        let first = second.saturating_sub(899) * NS;
-        let mut observations = self.observations(first, end)?;
+        let second = selection.second;
+        let last = selection.context_last_second;
+        let range = ContextRange::ending_at(last)?;
+        let mut observations = self.observations(range.first_ns, range.end_ns)?;
         observations.sort_by_key(|value| (value.wall, value.window, value.publication));
         let alternatives: Vec<_> = observations
             .iter()
@@ -255,7 +311,8 @@ impl Session {
         crate::cpu_history::context(&points, &mut selected_context)?;
         self.selected_context = selected_context;
         self.selected = chosen;
-        Ok(json!({"second": second,
+        self.context_last_second = Some(last);
+        Ok(json!({"second": second, "context_last_second": last,
             "selected": self.selected.as_ref().map(|value| value.json(self)),
             "alternatives": alternatives.iter().map(|value| value.json(self)).collect::<Vec<_>>(),
             "summary": summary, "trends": points, "context_seconds": 900}))
@@ -735,5 +792,5 @@ mod earlier;
 #[cfg(test)]
 mod reopen_tests;
 mod selection;
+pub use earlier::{CONTEXT_AFTER_SECONDS, EARLIER_STRIDE_SECONDS, LOADED_SECONDS};
 pub(crate) use earlier::{DETAIL_SECONDS, Tail};
-pub use earlier::{EARLIER_STRIDE_SECONDS, LOADED_SECONDS};

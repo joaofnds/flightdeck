@@ -40,6 +40,30 @@ fn restores_independent_cpu_history_on_cold_open_and_reopen() {
     history_assert_saved(&fixture.root);
 }
 
+#[test]
+fn reads_cpu_history_over_a_context_that_holds_later_seconds() {
+    // Goal: CPU history of a selected second covers the seconds its context holds after it.
+    // Method: publish seconds 1001 to 1901 and seal 1001 to 1840, select 1400 live and saved,
+    // then read the range and the readings each CPU history covers.
+    let mut fixture = RingFixture::new_following();
+    history_publish_committed(&mut fixture);
+    let mut live = LiveSession::open(&fixture.root).unwrap();
+    let mut saved = Session::open(&fixture.root).unwrap();
+    live.select(1400, 0).unwrap();
+    saved.select(1400, 0).unwrap();
+
+    let live_history = live.cpu_history(0).unwrap();
+    let saved_history = saved.cpu_history(0).unwrap();
+
+    assert_eq!(live_history["observation"]["publication"], 400);
+    assert_eq!(live_history["first_ns"], 951 * NANOSECONDS_PER_SECOND);
+    assert_eq!(live_history["end_ns"], 1851 * NANOSECONDS_PER_SECOND);
+    assert_eq!(live_history["observations"].as_array().unwrap().len(), 850);
+    assert_eq!(saved_history["observation"]["publication"], 400);
+    assert_eq!(saved_history["end_ns"], 1841 * NANOSECONDS_PER_SECOND);
+    assert_eq!(saved_history["observations"].as_array().unwrap().len(), 840);
+}
+
 fn history_assert_saved(root: &Path) {
     let mut saved = Session::open(root).unwrap();
     let selected = saved.select(1840, 0).unwrap();

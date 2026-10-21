@@ -25,9 +25,13 @@ impl Session {
                 .as_ref()
                 .ok_or(Error::Bound("no selected observation"))?
                 .json(self);
-            self.cpu_history_restore(cpu_history::range(&selected)?)?;
+            let context_last_second = self
+                .context_last_second
+                .ok_or(Error::Bound("no selected context"))?;
+            self.cpu_history_restore(ContextRange::ending_at(context_last_second)?)?;
             cpu_history::project(&cpu_history::Request {
                 selected: &selected,
+                context_last_second,
                 context: &self.selected_context,
                 live: None,
                 saved: self.cpu_history_cache.as_ref(),

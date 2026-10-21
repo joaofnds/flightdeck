@@ -52,11 +52,12 @@ fn reopening_rereads_only_the_marker_of_a_window_a_read_verified() {
 fn reopening_verifies_a_window_no_read_verified_on_its_first_read() {
     // Goal: a reopen carries over only the windows a read verified, so a window the earlier
     // session listed but never read is still verified before a read uses it.
-    // Method: seal two minutes, read only the first, damage the second, then reopen and read it.
+    // Method: seal two minutes whose seconds lie further apart than a selection's context
+    // reaches, read only the first, damage the second, then reopen and read it.
     let mut fixture = Fixture::new();
     fixture.start_at_run_tick(59);
     fixture.publish(1001);
-    fixture.publish(1002);
+    fixture.publish(2001);
     fixture.seal_minute(0);
     fixture.seal_minute(1);
     let mut first = Session::open(&fixture.root).unwrap();
@@ -64,7 +65,7 @@ fn reopening_verifies_a_window_no_read_verified_on_its_first_read() {
     add_a_stray_file(&fixture.root, &first.windows[1]);
     let mut reopened = reopen(&fixture.root, &first);
 
-    let read = reopened.select(1002, 0);
+    let read = reopened.select(2001, 0);
 
     assert!(refused(&read), "{read:?}");
 }

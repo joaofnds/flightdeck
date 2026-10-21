@@ -3,6 +3,8 @@ use collector::ring::IdentityUnavailable;
 use persistence::{Error, Result};
 use serde_json::Value;
 
+const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
+
 use crate::apps::{self, Amount, AppKey, ProcessCreation, ProcessState, Stamp, Unavailable};
 use crate::live_apps::Frame;
 
@@ -36,6 +38,57 @@ pub struct Observation {
     pub stamp: Stamp,
     pub run_tick: u64,
     pub wall_ns: Option<u64>,
+}
+
+/// The selected observation and the last second of the context read with it, which every
+/// history of the selection spans: the 900 seconds that end at that second.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Selected {
+    pub observation: Observation,
+    pub context_last_second: u64,
+}
+
+impl Selected {
+    /// The context of `selected` that ends at `last_second`, which lies no earlier than the
+    /// selected second and no more than `CONTEXT_AFTER_SECONDS` after it.
+    pub(crate) fn new(observation: Observation, context_last_second: u64) -> Result<Self> {
+        let wall_ns = observation
+            .wall_ns
+            .ok_or(Error::Bound("selected context clock"))?;
+        let second = wall_ns / NANOSECONDS_PER_SECOND;
+        if context_last_second < second {
+            return Err(Error::Bound("selected context end"));
+        }
+        if context_last_second - second > crate::session::CONTEXT_AFTER_SECONDS {
+            return Err(Error::Bound("selected context end"));
+        }
+
+        Ok(Self {
+            observation,
+            context_last_second,
+        })
+    }
+
+    /// The context that ends at the selected second, as a following page's does.
+    #[cfg(test)]
+    pub(crate) fn ending_at(observation: Observation) -> Result<Self> {
+        let wall_ns = observation
+            .wall_ns
+            .ok_or(Error::Bound("selected context clock"))?;
+
+        Self::new(observation, wall_ns / NANOSECONDS_PER_SECOND)
+    }
+
+    /// The first second the context holds.
+    pub(crate) fn first_second(&self) -> u64 {
+        self.context_last_second
+            .saturating_sub(crate::session::DETAIL_SECONDS - 1)
+    }
+
+    /// Whether the context holds `second`.
+    pub(crate) fn holds(&self, second: u64) -> bool {
+        (self.first_second()..=self.context_last_second).contains(&second)
+    }
 }
 
 #[derive(Clone)]

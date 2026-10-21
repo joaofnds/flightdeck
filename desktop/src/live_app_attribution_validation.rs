@@ -32,6 +32,7 @@ impl History {
         if selected.wall_ns.map(|wall| wall / 1_000_000_000) != Some(second) {
             return Err("App rate history has a different selected timestamp".into());
         }
+        let last = integer(&selection["context_last_second"])?;
         let values = value["points"]
             .as_array()
             .ok_or("Missing App rate points")?;
@@ -46,11 +47,11 @@ impl History {
             points: Vec::with_capacity(values.len()),
             cohort: decode_cohort(&value["cohort"])?,
             positions: Vec::with_capacity(values.len()),
-            window: crate::chart_axes::TimeWindow::live(second),
+            window: crate::chart_axes::TimeWindow::live(last),
             selected_index: 0,
             retention_limited: boolean(&value["coverage"]["retention_limited"])?,
         };
-        history.decode_points(values, &selected, second)?;
+        history.decode_points(values, &selected, last)?;
         history.attach_reference(selection);
         validate_coverage(&value["coverage"])?;
 
@@ -61,7 +62,7 @@ impl History {
         &mut self,
         values: &[Value],
         selected: &Observation,
-        second: u64,
+        context_last_second: u64,
     ) -> Result<(), String> {
         assert!(values.len() <= POINTS_MAX);
         let mut selected_index = None;
@@ -88,7 +89,7 @@ impl History {
                 selected_index = Some(self.points.len());
             }
             self.positions
-                .push(position(point.observation.wall_ns, second)?);
+                .push(position(point.observation.wall_ns, context_last_second)?);
             self.points.push(point);
         }
         self.selected_index = selected_index.ok_or("Selected App rate observation missing")?;

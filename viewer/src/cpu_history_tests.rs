@@ -33,13 +33,14 @@ fn pages_a_maximum_domain_and_maximum_observation_count_inside_the_byte_bound() 
     }
     let selected = context.last().unwrap().json();
     let cache = Cache {
-        range: range(&selected).unwrap(),
+        range: ContextRange::ending_at(last_second(&selected)).unwrap(),
         entries,
     };
     assert!(cache.bytes() <= CACHE_BYTES_MAX);
 
     let response = project(&Request {
         selected: &selected,
+        context_last_second: last_second(&selected),
         context: &context,
         live: None,
         saved: Some(&cache),
@@ -111,12 +112,13 @@ fn response(entries: Vec<Entry>, offset: u32) -> Result<Value> {
         .collect::<Vec<_>>();
     let selected = context.last().unwrap().json();
     let cache = Cache {
-        range: range(&selected)?,
+        range: ContextRange::ending_at(last_second(&selected))?,
         entries,
     };
 
     project(&Request {
         selected: &selected,
+        context_last_second: last_second(&selected),
         context: &context,
         live: None,
         saved: Some(&cache),
@@ -214,6 +216,7 @@ fn rejects_more_than_4096_context_observations() {
 
     let result = project(&Request {
         selected: &selected,
+        context_last_second: last_second(&selected),
         context: &context,
         live: None,
         saved: None,
@@ -370,10 +373,12 @@ macro_rules! complementary_case {
             let mut live = None;
             History::init(&mut live);
             live.as_mut().unwrap().entries.push_back(valid);
-            let saved = Cache {range:range(&selected).unwrap(),entries:vec![missing]};
+            let context_last_second = last_second(&selected);
+            let range = ContextRange::ending_at(context_last_second).unwrap();
+            let saved = Cache {range,entries:vec![missing]};
 
-            let response = project(&Request {selected:&selected,context:&context,
-                live:live.as_ref(),saved:Some(&saved),offset:0}).unwrap();
+            let response = project(&Request {selected:&selected,context_last_second,
+                context:&context,live:live.as_ref(),saved:Some(&saved),offset:0}).unwrap();
 
             assert_eq!(response["observations"][0]["interval_available"],true);
             assert_eq!(response["cpus"],json!([{ "cpu":0,"busy_percent":[25.0]},
@@ -399,12 +404,13 @@ fn rejects_a_cpu_history_response_above_seven_mib() {
     let mut selected = context[0].json();
     selected["window_losses"] = json!("x".repeat(7 * 1024 * 1024));
     let saved = Cache {
-        range: range(&selected).unwrap(),
+        range: ContextRange::ending_at(last_second(&selected)).unwrap(),
         entries: vec![entry],
     };
 
     let result = project(&Request {
         selected: &selected,
+        context_last_second: last_second(&selected),
         context: &context,
         live: None,
         saved: Some(&saved),
@@ -459,6 +465,7 @@ fn reports_retention_limits_without_fabricating_dropped_cpu_values() {
 
     let response = project(&Request {
         selected: &selected,
+        context_last_second: last_second(&selected),
         context: &context,
         live: Some(history),
         saved: None,
@@ -473,4 +480,9 @@ fn reports_retention_limits_without_fabricating_dropped_cpu_values() {
     assert_eq!(response["cpus"][0]["busy_percent"][4095], 50.0);
     assert!(history.bytes() <= LIVE_BYTES_MAX);
     assert_eq!(history.entries.len(), 4096);
+}
+
+/// The second `selected`'s readings were taken in, where these contexts end.
+fn last_second(selected: &Value) -> u64 {
+    selected["wall_ns"].as_u64().unwrap() / NS
 }

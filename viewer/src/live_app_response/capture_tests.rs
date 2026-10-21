@@ -127,7 +127,7 @@ fn retains_a_full_rolling_disk_history_from_real_ring_publications() {
 
     let response = history
         .response(
-            &selected,
+            &crate::live_app_response::Selected::ending_at(selected).unwrap(),
             &crate::live_app_history::Target {
                 kind: super::KeyKind::Bundle,
                 bytes: b"/A.app",

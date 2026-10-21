@@ -504,6 +504,7 @@ impl InputDriver {
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = accepted_snapshot(dashboard.generation);
             snapshot.selection["second"] = json!(1001);
+            snapshot.selection["context_last_second"] = json!(1001);
             snapshot.selection["selected"]["publication"] = json!(3);
             let mut point = snapshot.selection["trends"][1].clone();
             point["publication"] = json!(3);

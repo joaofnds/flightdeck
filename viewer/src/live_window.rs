@@ -6,12 +6,11 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
 use persistence::{Error, Result};
-use serde_json::Value;
 
-use super::{LiveObservation, NANOSECONDS_PER_SECOND, context_range};
+use super::LiveObservation;
 use crate::LiveSession;
 use crate::cpu_history_sample::Identity;
-use crate::live_app_response::{Observation, Sample};
+use crate::live_app_response::{Observation, Sample, Selected};
 use crate::session::ContextRange;
 
 /// What a window keeps of one observation's sample.
@@ -222,8 +221,8 @@ impl LiveSession {
         selection: &T::Selection,
         project: impl Fn(&Sample) -> Result<T>,
     ) -> Result<()> {
-        let selected = self.window_selected()?;
-        let range = window_range(&selected)?;
+        let selected = self.selected_in_context()?;
+        let range = ContextRange::ending_at(selected.context_last_second)?;
         if window.covers(range, &self.selected_context)? {
             return Ok(());
         }
@@ -265,7 +264,7 @@ impl LiveSession {
         selection: &T::Selection,
         project: impl Fn(&Sample) -> Result<T>,
     ) -> Result<()> {
-        let range = window_range(&self.window_selected()?)?;
+        let range = ContextRange::ending_at(self.selected_in_context()?.context_last_second)?;
         if window.covers(range, &self.selected_context)? {
             return Ok(());
         }
@@ -279,24 +278,6 @@ impl LiveSession {
 
         Ok(())
     }
-
-    /// The selected observation, whose window the session fills.
-    fn window_selected(&self) -> Result<Observation> {
-        let mut selected = None;
-        self.with_selected_apps(|sample| {
-            selected = Some(sample.selected);
-            Ok(Value::Null)
-        })?;
-
-        selected.ok_or(Error::Bound("window selection"))
-    }
-}
-
-/// The wall clock range of the window of the observation `selected`.
-fn window_range(selected: &Observation) -> Result<ContextRange> {
-    let second = selected.wall_ns.ok_or(Error::Bound("window clock"))? / NANOSECONDS_PER_SECOND;
-
-    context_range(second)
 }
 
 /// Keeps the value of the observation the session polled last, and drops those older than
@@ -338,7 +319,7 @@ fn fill_window_live<T: WindowValue>(
 
 fn fill_window_saved<T: WindowValue>(
     history: &crate::Session,
-    selected: &Observation,
+    selected: &Selected,
     window: &mut Window<T>,
     project: &impl Fn(&Sample) -> Result<T>,
 ) -> Result<()> {

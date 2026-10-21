@@ -4,7 +4,7 @@ use super::{
 use crate::app_process_groups_history::AppProcessGroupsHistory;
 use crate::app_process_groups_history::cache::{Cache, Point};
 use crate::live_app_history::{PIN_BYTES_MAX, ResidentFile, ResidentPin, Target};
-use crate::live_app_response::AppPart;
+use crate::live_app_response::{AppPart, Selected};
 use persistence::{Error, Result};
 
 pub(crate) struct Replay {
@@ -24,13 +24,13 @@ struct Projection {
 impl Session {
     pub(crate) fn with_process_groups_replay(
         &self,
-        selected: &Observation,
+        selected: &Selected,
         target: &Target<'_>,
         consume: impl FnOnce(&mut Replay) -> Result<Box<AppProcessGroupsHistory>>,
     ) -> Result<Box<AppProcessGroupsHistory>> {
         self.operation.attach(&self.connection)?;
         self.operation.check()?;
-        if collector::recording::read_identity(&self.root)?.0 != selected.recording {
+        if collector::recording::read_identity(&self.root)?.0 != selected.observation.recording {
             return Err(Error::Bound("process cohort saved recording"));
         }
 

@@ -472,10 +472,15 @@ fn call(
         kind: KeyKind::Bundle,
         bytes: b"/A.app",
     };
-    let reduction = Reduction::new(&selected, target.kind, target.bytes, &operation)?;
+    let reduction = Reduction::new(
+        &crate::live_app_response::Selected::ending_at(selected).unwrap(),
+        target.kind,
+        target.bytes,
+        &operation,
+    )?;
     cold.history.process_groups_response_saved(
         &Query {
-            selected: &selected,
+            selected: &crate::live_app_response::Selected::ending_at(selected).unwrap(),
             target: &target,
             saved: &cold.saved,
             context: &[],
@@ -504,11 +509,19 @@ fn other_owners(cold: &Cold) {
     let operation = Arc::clone(&cold.cancellation).operation(0).unwrap();
     let selected = observation(&cold.fixture, 2);
     cold.history
-        .resident_response(&selected, Some(&cold.saved), &operation)
+        .resident_response(
+            &crate::live_app_response::Selected::ending_at(selected).unwrap(),
+            Some(&cold.saved),
+            &operation,
+        )
         .unwrap();
     let rates = cold
         .history
-        .attribution_batch_response(&selected, Some(&cold.saved), &operation)
+        .attribution_batch_response(
+            &crate::live_app_response::Selected::ending_at(selected).unwrap(),
+            Some(&cold.saved),
+            &operation,
+        )
         .unwrap();
     assert!(rates.cpu.is_ok());
     assert!(rates.power.is_ok());

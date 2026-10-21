@@ -180,11 +180,18 @@ const PANEL_DEFINITIONS: [PanelDefinition; 12] = [
     },
 ];
 
-pub fn panels(payload: &AppProcessGroupsHistory) -> Result<Vec<Rc<Panel>>, String> {
+pub fn panels(
+    payload: &AppProcessGroupsHistory,
+    context_last_second: u64,
+) -> Result<Vec<Rc<Panel>>, String> {
     let mut result = Vec::with_capacity(PANEL_DEFINITIONS.len());
 
     for definition in &PANEL_DEFINITIONS {
-        result.push(Rc::new(panels_panel(payload, definition)?));
+        result.push(Rc::new(panels_panel(
+            payload,
+            definition,
+            context_last_second,
+        )?));
     }
 
     Ok(result)
@@ -193,14 +200,10 @@ pub fn panels(payload: &AppProcessGroupsHistory) -> Result<Vec<Rc<Panel>>, Strin
 fn panels_panel(
     payload: &AppProcessGroupsHistory,
     definition: &PanelDefinition,
+    context_last_second: u64,
 ) -> Result<Panel, String> {
-    let selected = payload
-        .selected
-        .wall_ns
-        .ok_or("Process group selected clock unavailable")?
-        / 1_000_000_000;
-    let first = selected.saturating_sub(899);
-    let span = u16::try_from(selected - first + 1).map_err(|error| error.to_string())?;
+    let first = context_last_second.saturating_sub(899);
+    let span = u16::try_from(context_last_second - first + 1).map_err(|error| error.to_string())?;
     let mut positions = Vec::with_capacity(payload.points.len());
     let mut segments = Vec::with_capacity(payload.points.len());
 

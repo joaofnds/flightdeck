@@ -44,7 +44,7 @@ fn restores_both_committed_points_without_a_selected_sample_projection() {
     };
 
     let restored = session
-        .with_app_history(&selected, &target, points)
+        .with_app_history(&Selected::ending_at(selected).unwrap(), &target, points)
         .unwrap();
 
     assert_eq!(restored.as_array().unwrap().len(), 2);
@@ -71,7 +71,7 @@ fn normalizes_each_window_once_and_reuses_the_trace_while_the_live_end_advances(
         bytes: b"/Apps/Current.app",
     };
     let restored = session
-        .with_app_history(&selected, &target, points)
+        .with_app_history(&Selected::ending_at(selected).unwrap(), &target, points)
         .unwrap();
     let reads = session.source_reads.get();
     selected.stamp.publication = 3;
@@ -81,7 +81,7 @@ fn normalizes_each_window_once_and_reuses_the_trace_while_the_live_end_advances(
     selected.stamp.awake_ns = Some(2_000_000_000);
 
     let repeated = session
-        .with_app_history(&selected, &target, points)
+        .with_app_history(&Selected::ending_at(selected).unwrap(), &target, points)
         .unwrap();
 
     assert_eq!(reads, 3);
@@ -109,11 +109,11 @@ fn replaces_the_target_with_its_exact_non_utf8_byte_key() {
         bytes: b"/Apps/Outer\xfe.app",
     };
     session
-        .with_app_history(&selected, &current, points)
+        .with_app_history(&Selected::ending_at(selected).unwrap(), &current, points)
         .unwrap();
 
     let restored = session
-        .with_app_history(&selected, &refused, points)
+        .with_app_history(&Selected::ending_at(selected).unwrap(), &refused, points)
         .unwrap();
 
     assert_eq!(restored[1]["members"], 1);
@@ -148,7 +148,7 @@ fn restores_a_compatible_predecessor_across_committed_minutes() {
     };
 
     let restored = session
-        .with_app_history(&selected, &target, points)
+        .with_app_history(&Selected::ending_at(selected).unwrap(), &target, points)
         .unwrap();
 
     assert_eq!(restored.as_array().unwrap().len(), 2);
@@ -173,7 +173,7 @@ fn reads_the_exact_predecessor_outside_the_plotted_wall_range() {
     };
 
     let restored = session
-        .with_app_history(&selected, &target, points)
+        .with_app_history(&Selected::ending_at(selected).unwrap(), &target, points)
         .unwrap();
 
     assert_eq!(restored.as_array().unwrap().len(), 1);
@@ -203,7 +203,7 @@ fn leaves_rates_unavailable_across_a_missing_scheduled_tick() {
     };
 
     let restored = session
-        .with_app_history(&selected, &target, points)
+        .with_app_history(&Selected::ending_at(selected).unwrap(), &target, points)
         .unwrap();
 
     assert_eq!(restored[1]["elapsed_ns"], Value::Null);
@@ -227,7 +227,7 @@ fn retains_repeated_wall_second_observations_as_distinct_points() {
     };
 
     let restored = session
-        .with_app_history(&selected, &target, points)
+        .with_app_history(&Selected::ending_at(selected).unwrap(), &target, points)
         .unwrap();
 
     assert_eq!(restored.as_array().unwrap().len(), 2);
@@ -251,11 +251,11 @@ fn rejects_a_changed_selected_identity_on_a_warm_cache_hit() {
         bytes: b"/Apps/Current.app",
     };
     session
-        .with_app_history(&selected, &target, points)
+        .with_app_history(&Selected::ending_at(selected).unwrap(), &target, points)
         .unwrap();
     selected.run_tick = 99;
 
-    let result = session.with_app_history(&selected, &target, points);
+    let result = session.with_app_history(&Selected::ending_at(selected).unwrap(), &target, points);
 
     assert!(matches!(
         result,
@@ -279,14 +279,14 @@ fn rejects_a_warm_trace_when_its_committed_marker_disappears() {
         bytes: b"/Apps/Current.app",
     };
     session
-        .with_app_history(&selected, &target, points)
+        .with_app_history(&Selected::ending_at(selected).unwrap(), &target, points)
         .unwrap();
     let marker =
         persistence::layout::WindowKey::from(&session.windows[0].identity).marker(&fixture.root);
     assert!(!std::fs::read(&marker).unwrap().is_empty());
     std::fs::remove_file(&marker).unwrap();
 
-    let result = session.with_app_history(&selected, &target, points);
+    let result = session.with_app_history(&Selected::ending_at(selected).unwrap(), &target, points);
 
     assert!(
         matches!(result, Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound)
@@ -314,7 +314,7 @@ fn refuses_trace_installation_when_canceled_after_projection() {
         cancellation.cancel().unwrap();
     }));
 
-    let result = session.with_app_history(&selected, &target, points);
+    let result = session.with_app_history(&Selected::ending_at(selected).unwrap(), &target, points);
 
     assert!(
         matches!(result, Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted)
@@ -339,7 +339,7 @@ fn invalidates_a_warm_trace_when_begin_advances_the_epoch() {
         bytes: b"/Apps/Current.app",
     };
     session
-        .with_app_history(&selected, &target, points)
+        .with_app_history(&Selected::ending_at(selected).unwrap(), &target, points)
         .unwrap();
     assert!(session.app_history_cache.borrow().is_some());
     cancellation.cancel().unwrap();
@@ -370,7 +370,7 @@ fn leaves_a_clockless_predecessor_out_of_the_trace_and_its_rate_baseline() {
     };
 
     let restored = session
-        .with_app_history(&selected, &target, points)
+        .with_app_history(&Selected::ending_at(selected).unwrap(), &target, points)
         .unwrap();
 
     assert_eq!(restored.as_array().unwrap().len(), 1);
@@ -401,7 +401,7 @@ fn leaves_rates_unavailable_when_saved_awake_time_decreases() {
     };
 
     let restored = session
-        .with_app_history(&selected, &target, points)
+        .with_app_history(&Selected::ending_at(selected).unwrap(), &target, points)
         .unwrap();
 
     assert_eq!(restored[1]["elapsed_ns"], Value::Null);
@@ -429,7 +429,7 @@ fn rejects_a_warm_cross_minute_trace_after_only_the_predecessor_marker_disappear
         bytes: b"/Apps/Current.app",
     };
     session
-        .with_app_history(&selected, &target, points)
+        .with_app_history(&Selected::ending_at(selected).unwrap(), &target, points)
         .unwrap();
     let predecessor =
         persistence::layout::WindowKey::from(&session.windows[0].identity).marker(&fixture.root);
@@ -438,7 +438,7 @@ fn rejects_a_warm_cross_minute_trace_after_only_the_predecessor_marker_disappear
     assert!(!std::fs::read(&predecessor).unwrap().is_empty());
     std::fs::remove_file(&predecessor).unwrap();
 
-    let result = session.with_app_history(&selected, &target, points);
+    let result = session.with_app_history(&Selected::ending_at(selected).unwrap(), &target, points);
 
     assert!(!std::fs::read(&current).unwrap().is_empty());
     assert!(
@@ -468,7 +468,7 @@ fn revalidates_commitments_after_projection_before_installing_a_trace() {
         std::fs::remove_file(&marker).unwrap();
     }));
 
-    let result = session.with_app_history(&selected, &target, points);
+    let result = session.with_app_history(&Selected::ending_at(selected).unwrap(), &target, points);
 
     assert!(
         matches!(result, Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound)
@@ -492,7 +492,7 @@ fn refuses_an_explicit_selection_from_a_different_recording() {
         bytes: b"/Apps/Current.app",
     };
 
-    let result = session.with_app_history(&selected, &target, points);
+    let result = session.with_app_history(&Selected::ending_at(selected).unwrap(), &target, points);
 
     assert!(matches!(
         result,
@@ -518,7 +518,7 @@ fn refuses_overlapping_commitment_candidates_instead_of_choosing_one() {
         bytes: b"/Apps/Current.app",
     };
 
-    let result = session.with_app_history(&selected, &target, points);
+    let result = session.with_app_history(&Selected::ending_at(selected).unwrap(), &target, points);
 
     assert!(matches!(
         result,

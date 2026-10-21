@@ -8,6 +8,7 @@ use crate::Session;
 use crate::app_attribution_history::cache::Point as SavedPoint;
 use crate::app_attribution_history::{AppAttributionHistories, AppAttributionMetric, Reduction};
 use crate::live::resident_history::{Source, identity};
+use crate::live_app_response::Selected;
 
 struct Batch<'operation> {
     states: [MetricState<'operation>; 3],
@@ -20,7 +21,7 @@ enum MetricState<'operation> {
 }
 
 struct SavedQuery<'query> {
-    selected: &'query Observation,
+    selected: &'query Selected,
     saved: &'query Session,
     operation: &'query Operation,
     available: usize,
@@ -54,7 +55,7 @@ const _: () = {
 impl History {
     pub(crate) fn attribution_batch_response(
         &self,
-        selected: &Observation,
+        selected: &Selected,
         saved: Option<&Session>,
         operation: &Operation,
     ) -> Result<Box<AppAttributionHistories>> {
@@ -240,26 +241,22 @@ impl History {
 impl<'operation> Batch<'operation> {
     fn new(
         history: &History,
-        selected: &Observation,
+        selected: &Selected,
         operation: &'operation Operation,
     ) -> Result<Box<Self>> {
         let mut batch = Box::new(Self {
             states: [
-                MetricState::Ready(Box::new(Reduction::new(selected, METRICS[0], operation)?)),
-                MetricState::Ready(Box::new(Reduction::new(selected, METRICS[1], operation)?)),
-                MetricState::Ready(Box::new(Reduction::new(selected, METRICS[2], operation)?)),
+                MetricState::Ready(Box::new(Reduction::new(selected, METRICS[0], operation))),
+                MetricState::Ready(Box::new(Reduction::new(selected, METRICS[1], operation))),
+                MetricState::Ready(Box::new(Reduction::new(selected, METRICS[2], operation))),
             ],
             live: Vec::with_capacity(OBSERVATIONS_MAX),
         });
-        let second = selected
-            .wall_ns
-            .ok_or(Error::Bound("attribution selected clock"))?
-            / 1_000_000_000;
         assert!(history.points.len() <= OBSERVATIONS_MAX);
         let summable = history.attribution_summable(selected);
         for point in &history.points {
             operation.check()?;
-            if point.observation.recording != selected.recording {
+            if point.observation.recording != selected.observation.recording {
                 return Err(Error::Bound("attribution recording"));
             }
 
@@ -267,7 +264,7 @@ impl<'operation> Batch<'operation> {
                 .observation
                 .wall_ns
                 .ok_or(Error::Bound("attribution point clock"))?;
-            if (second.saturating_sub(899)..=second).contains(&(wall / 1_000_000_000)) {
+            if selected.holds(wall / 1_000_000_000) {
                 batch.live.push(point.observation);
             }
             if summable {
@@ -312,20 +309,15 @@ impl<'operation> Batch<'operation> {
     }
 
     fn retain(&self, rates: &mut Cache, query: &SavedQuery<'_>, available: usize) -> Result<()> {
-        let second = query
-            .selected
-            .wall_ns
-            .ok_or(Error::Bound("attribution selected clock"))?
-            / 1_000_000_000;
         rates.retain(query.operation, |observation| {
             query.operation.check()?;
             if self.contains_live(observation)? {
                 return Ok(false);
             }
 
-            Ok(observation.wall_ns.is_some_and(|wall| {
-                (second.saturating_sub(899)..=second).contains(&(wall / 1_000_000_000))
-            }))
+            Ok(observation
+                .wall_ns
+                .is_some_and(|wall| query.selected.holds(wall / 1_000_000_000)))
         })?;
         rates.resume(available);
 

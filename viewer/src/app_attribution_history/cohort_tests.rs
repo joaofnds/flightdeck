@@ -102,7 +102,11 @@ fn response(samples: &[Sample]) -> Value {
     let cancellation = Arc::new(Cancellation::default());
     let operation = cancellation.operation(0).unwrap();
     let selected = capture(samples.last().unwrap()).coverage.observation;
-    let mut reduction = Reduction::new(&selected, AppAttributionMetric::Cpu, &operation).unwrap();
+    let mut reduction = Reduction::new(
+        &crate::live_app_response::Selected::ending_at(selected).unwrap(),
+        AppAttributionMetric::Cpu,
+        &operation,
+    );
     for sample in samples {
         reduction
             .observe(&capture(sample), readings(sample), Source::Live)

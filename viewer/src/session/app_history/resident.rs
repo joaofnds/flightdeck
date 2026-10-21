@@ -2,6 +2,7 @@ use super::{BTreeMap, BTreeSet, Frame, Observation, Reading, Restore, Session, S
 use crate::live_app_history::{
     PIN_BYTES_MAX, ResidentCache, ResidentFile, ResidentPin, ResidentPoint,
 };
+use crate::live_app_response::Selected;
 use persistence::{Error, Result};
 use serde_json::Value;
 
@@ -13,12 +14,12 @@ pub(crate) struct Replay {
 impl Session {
     pub(crate) fn with_app_resident_replay(
         &self,
-        selected: &Observation,
+        selected: &Selected,
         consume: impl FnOnce(&mut Replay) -> Result<Value>,
     ) -> Result<Value> {
         self.operation.attach(&self.connection)?;
         self.operation.check()?;
-        if collector::recording::read_identity(&self.root)?.0 != selected.recording {
+        if collector::recording::read_identity(&self.root)?.0 != selected.observation.recording {
             return Err(Error::Bound("resident history saved recording"));
         }
 

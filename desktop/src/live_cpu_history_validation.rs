@@ -64,11 +64,13 @@ impl CPUHistoryWire {
             return Err("CPU history does not match the selected second".into());
         }
 
-        let end_ns = second
+        let last = crate::live_projection::context_last_second(selection)
+            .ok_or("CPU history selection has no context end")?;
+        let end_ns = last
             .checked_add(1)
             .and_then(|end| end.checked_mul(NS))
             .ok_or("CPU history context clock overflow")?;
-        if self.first_ns != second.saturating_sub(899) * NS {
+        if self.first_ns != last.saturating_sub(899) * NS {
             return Err("CPU history has a different context start".into());
         }
 

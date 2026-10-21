@@ -447,7 +447,7 @@ mod tests {
         let page = session.page("processes", 0).unwrap();
 
         assert_eq!(first["alternatives"].as_array().unwrap().len(), 2);
-        assert_eq!(second["trends"].as_array().unwrap().len(), 4);
+        assert_eq!(second["trends"].as_array().unwrap().len(), 122);
         assert_ne!(first["selected"]["run"], second["selected"]["run"]);
         assert_eq!(page["observation"]["run"], second["selected"]["run"]);
         assert_eq!(page["total"], 40);

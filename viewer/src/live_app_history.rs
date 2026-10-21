@@ -10,7 +10,7 @@ use crate::app_attribution_history::sums::{OwnedKey, Summed, Sums};
 use crate::apps::{self, AppKey};
 use crate::cancellation::Operation;
 use crate::live_app_response::Measure;
-use crate::live_app_response::{KeyKind, Observation, Sample};
+use crate::live_app_response::{KeyKind, Observation, Sample, Selected};
 use crate::session::OBSERVATIONS_MAX;
 
 mod attribution;
@@ -178,14 +178,10 @@ impl History {
 
     pub(super) fn response(
         &self,
-        selected: &Observation,
+        selected: &Selected,
         target: &dyn Selection,
         operation: &Operation,
     ) -> Result<Value> {
-        let second = selected
-            .wall_ns
-            .ok_or(Error::Bound("live App history clock"))?
-            / 1_000_000_000;
         if target.app().bytes.len() > collector::ring::PROGRAM_PATH_BYTES_MAX {
             return Err(Error::Bound("live App history key"));
         }
@@ -197,7 +193,7 @@ impl History {
                 .observation
                 .wall_ns
                 .ok_or(Error::Bound("live App history clock"))?;
-            if (second.saturating_sub(899)..=second).contains(&(wall / 1_000_000_000)) {
+            if selected.holds(wall / 1_000_000_000) {
                 points.push(point);
             }
         }
@@ -222,8 +218,8 @@ impl History {
         operation.check()?;
 
         let response = crate::live_app_response::bounded(
-            json!({"selected": selected.json(), "context_seconds": 900, "points": points,
-            "coverage": {"retention_limited": retention_limited,
+            json!({"selected": selected.observation.json(), "context_seconds": 900,
+            "points": points, "coverage": {"retention_limited": retention_limited,
             "observations_retained": self.points.len(), "cache_bytes": self.total_bytes(),
                 "cache_bytes_max": BYTES_MAX}}),
         )?;

@@ -439,7 +439,7 @@ fn snapshot() -> Box<Snapshot> {
     Box::new(Snapshot {
         generation: 1,
         catalog: json!({}),
-        selection: json!({"second":1000,"selected":{"publication":7},
+        selection: json!({"second":1000,"context_last_second":1000,"selected":{"publication":7},
             "summary":{"cpu_percent":12.5}}),
         pages: BTreeMap::from([(
             "ticks".into(),

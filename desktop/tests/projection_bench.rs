@@ -80,8 +80,9 @@ mod tests {
     }
 
     fn selection() -> Value {
-        json!({"second": 1000, "selected": {"run": [1, 2], "boot": [3, 4],
-        "publication": 1}, "trends": [{"run": [1, 2], "boot": [3, 4],
+        json!({"second": 1000, "context_last_second": 1000,
+        "selected": {"run": [1, 2], "boot": [3, 4], "publication": 1},
+        "trends": [{"run": [1, 2], "boot": [3, 4],
         "publication": 1, "segment": 0, "wall_ns": 1_000_000_000_000_u64,
         "cpu_percent": 25.0}]})
     }

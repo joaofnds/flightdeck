@@ -612,9 +612,10 @@ impl LiveDashboard {
 
     /// The seconds the charts show, which is the whole history unless a range narrows it.
     pub(crate) fn view_window(&self) -> Option<crate::chart_axes::TimeWindow> {
-        let second = self.snapshot.as_deref()?.selection["second"].as_u64()?;
+        let selection = &self.snapshot.as_deref()?.selection;
+        let last = crate::live_projection::context_last_second(selection)?;
 
-        Some(self.range.window(second))
+        Some(self.range.window(last))
     }
 
     /// Spreads the view across every chart that is drawn against the clock.
@@ -918,7 +919,7 @@ mod selection_tests {
         dashboard.snapshot = Some(Box::new(Snapshot {
             generation: dashboard.generation,
             catalog: json!({"first_second":1000,"last_second":1002}),
-            selection: json!({"second":1000,"selected":{"publication":1},
+            selection: json!({"second":1000,"context_last_second":1000,"selected":{"publication":1},
                 "summary":{"memory_total_bytes":4096},"trends":[]}),
             pages: BTreeMap::from([(
                 "ticks".into(),
@@ -1139,7 +1140,7 @@ mod selection_tests {
         dashboard.request.second = Some(1001);
         dashboard.submit();
         missing.generation = dashboard.generation;
-        missing.selection = json!({"second":1001,"selected":null,
+        missing.selection = json!({"second":1001,"context_last_second":1001,"selected":null,
             "summary":null,"trends":[]});
         missing.pages.clear();
 

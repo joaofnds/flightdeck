@@ -16,6 +16,22 @@ fn decodes_a_selected_history_without_filling_missing_activity() {
 }
 
 #[test]
+fn decodes_a_history_whose_context_runs_past_the_selected_second() {
+    // Goal: CPU history of a selected second is accepted with the context's later readings.
+    // Method: select 1000 in a context that runs to 1001, whose range the reply carries, and
+    // decode it.
+    let (mut payload, mut selection) = fixture();
+    let earlier = payload["observations"][0]["observation"].clone();
+    payload["observation"] = earlier.clone();
+    selection["second"] = json!(1000);
+    selection["selected"] = earlier;
+
+    let history = CPUHistory::decode(payload, &selection).unwrap();
+
+    assert_eq!(history.wire.observations.len(), 2);
+}
+
+#[test]
 fn retains_an_unavailable_cpu_domain_without_inventing_an_idle_cpu() {
     // Goal: an empty acquired domain is distinct from one measured idle logical CPU.
     // Method: decode a bounded context with no CPU acquisition at either observation.
@@ -321,8 +337,8 @@ fn maximum_fixture() -> (Value, Value) {
         "first_ns":second.saturating_sub(899) * NS,"end_ns":(second+1)*NS,
         "offset":992,"total":1024,"retention_limited":false,
         "observations":samples,"cpus":rows});
-    let selection = json!({"selected":selected,"second":second,"context_seconds":900,
-        "trends":trends});
+    let selection = json!({"selected":selected,"second":second,"context_last_second":second,
+        "context_seconds":900,"trends":trends});
 
     (payload, selection)
 }
@@ -524,8 +540,8 @@ pub(super) fn fixture() -> (Value, Value) {
             {"observation":selected,"previous_observation":previous,
                 "interval_available":true,"cpu_count":1}],
         "cpus":[{"cpu":0,"busy_percent":[null,0.0]}]});
-    let selection = json!({"second":1001,"context_seconds":900,"selected":selected,
-        "trends":[previous,selected]});
+    let selection = json!({"second":1001,"context_last_second":1001,"context_seconds":900,
+        "selected":selected,"trends":[previous,selected]});
 
     (payload, selection)
 }

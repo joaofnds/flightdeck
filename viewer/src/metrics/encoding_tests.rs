@@ -240,6 +240,7 @@ fn keeps_the_unsealed_encoder_projection_equal_to_saved_resource_scalars() {
             .collect::<Vec<_>>(),
         [
             "alternatives",
+            "context_last_second",
             "context_seconds",
             "second",
             "selected",

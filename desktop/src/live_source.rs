@@ -875,16 +875,16 @@ fn reader_earlier(
     if request.earlier == Earlier::Skip || request.route == "apps" {
         return false;
     }
-    let Some(second) = selection["second"].as_u64() else {
+    let Some(last) = crate::live_projection::context_last_second(selection) else {
         return false;
     };
     let Some(fields) = selection.as_object_mut() else {
         return false;
     };
     let tail = if opened {
-        session.earlier_context_kept(second)
+        session.earlier_context_kept(last)
     } else {
-        session.earlier_context(second).map(Some)
+        session.earlier_context(last).map(Some)
     };
     match tail {
         Ok(Some(Value::Object(tail))) => fields.extend(tail),
@@ -929,8 +929,8 @@ fn reader_latest(session: &mut LiveSession) -> Result<Value, String> {
     }
 
     Ok(
-        serde_json::json!({"second":null, "selected":null, "alternatives":[],
-        "summary":null, "trends":[], "context_seconds":900}),
+        serde_json::json!({"second":null, "context_last_second":null, "selected":null,
+        "alternatives":[], "summary":null, "trends":[], "context_seconds":900}),
     )
 }
 

@@ -81,7 +81,9 @@ impl ProcessHistory {
 
     pub fn panels(&self, selection: &Value) -> Result<Vec<Rc<Panel>>, String> {
         if let Self::All { payload, .. } = self {
-            return groups::panels(payload);
+            let last = crate::live_projection::context_last_second(selection)
+                .ok_or("Process groups selection has no context end")?;
+            return groups::panels(payload, last);
         }
 
         let Some(payload) = self.payload() else {

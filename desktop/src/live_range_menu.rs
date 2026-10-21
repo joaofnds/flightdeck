@@ -12,7 +12,7 @@ const QUICK_MINUTES: [u64; 5] = [5, 10, 15, 30, 60];
 impl LiveDashboard {
     /// What the picker reads: the stretch the charts show.
     pub(crate) fn range_label(&self) -> String {
-        self.range.label(self.selected_second())
+        self.range.label(self.context_last_second())
     }
 
     /// The buttons beside the picker: back to the last 15 minutes while zoomed, and to the
@@ -87,7 +87,7 @@ impl LiveDashboard {
     }
 
     fn custom_range(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let minutes = self.range.whole_minutes(self.selected_second());
+        let minutes = self.range.whole_minutes(self.context_last_second());
         div()
             .flex()
             .items_center()
@@ -140,10 +140,10 @@ impl LiveDashboard {
             .child(glyph)
     }
 
-    fn selected_second(&self) -> u64 {
+    fn context_last_second(&self) -> u64 {
         self.snapshot
             .as_deref()
-            .and_then(|snapshot| snapshot.selection["second"].as_u64())
+            .and_then(|snapshot| crate::live_projection::context_last_second(&snapshot.selection))
             .unwrap_or(0)
     }
 }

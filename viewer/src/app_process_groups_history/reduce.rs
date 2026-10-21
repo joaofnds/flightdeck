@@ -7,10 +7,11 @@ use super::{
     ProcessGroup, ProcessGroupReading, ProcessGroupsPoint, RESULT_BYTES_MAX, SERIES_GROUPS_MAX,
 };
 use crate::cancellation::Operation;
-use crate::live_app_response::{KeyKind, Observation};
+use crate::live_app_response::{KeyKind, Observation, Selected};
 
 pub(crate) struct Reduction<'operation> {
     result: Box<AppProcessGroupsHistory>,
+    selected: Selected,
     names: Vec<Mean>,
     key_bytes: usize,
     current: Option<usize>,
@@ -54,7 +55,7 @@ const _: () = {
 
 impl<'operation> Reduction<'operation> {
     pub(crate) fn new(
-        selected: &Observation,
+        selected: &Selected,
         kind: KeyKind,
         app_bytes: &[u8],
         operation: &'operation Operation,
@@ -64,7 +65,7 @@ impl<'operation> Reduction<'operation> {
         }
 
         let result = Box::new(AppProcessGroupsHistory {
-            selected: *selected,
+            selected: selected.observation,
             app_kind: kind,
             app_bytes: app_bytes.into(),
             context_seconds: 900,
@@ -77,6 +78,7 @@ impl<'operation> Reduction<'operation> {
         result.validate_bytes()?;
         let reduction = Box::new(Self {
             result,
+            selected: *selected,
             names: Vec::with_capacity(GROUPS_MAX),
             key_bytes: 0,
             current: None,
@@ -401,19 +403,13 @@ impl<'operation> Reduction<'operation> {
             return Err(Error::Bound("process cohort recording"));
         }
 
-        // Wall nanoseconds floor to the containing second for both context endpoints.
-        let selected = self
-            .result
-            .selected
-            .wall_ns
-            .ok_or(Error::Bound("process cohort selected clock"))?
-            / 1_000_000_000;
+        // Wall nanoseconds floor to the containing second.
         let second = observation
             .wall_ns
             .ok_or(Error::Bound("process cohort point clock"))?
             / 1_000_000_000;
 
-        Ok((selected.saturating_sub(899)..=selected).contains(&second))
+        Ok(self.selected.holds(second))
     }
 
     fn validate_bytes(&self) -> Result<()> {
@@ -581,8 +577,13 @@ mod tests {
         first.stamp.awake_ns = Some(1_000_000_000);
         first.run_tick = 1;
         first.wall_ns = Some(1_001_000_000_000);
-        let mut reduction =
-            Reduction::new(&selected, KeyKind::Bundle, b"/A.app", &operation).unwrap();
+        let mut reduction = Reduction::new(
+            &Selected::ending_at(selected).unwrap(),
+            KeyKind::Bundle,
+            b"/A.app",
+            &operation,
+        )
+        .unwrap();
         let mut reading = ProcessGroupReading::EMPTY;
         reading.present = true;
         reading.members = 1;
@@ -642,8 +643,13 @@ mod tests {
                     run_tick: 2,
                     wall_ns: Some(1_002_999_999_999),
                 };
-                let reduction =
-                    Reduction::new(&selected, KeyKind::Bundle, b"/A.app", &operation).unwrap();
+                let reduction = Reduction::new(
+                    &crate::live_app_response::Selected::ending_at(selected).unwrap(),
+                    KeyKind::Bundle,
+                    b"/A.app",
+                    &operation,
+                )
+                .unwrap();
                 let mut observation = selected;
                 observation.wall_ns = Some($wall_ns);
 

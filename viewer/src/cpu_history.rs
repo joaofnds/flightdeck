@@ -35,6 +35,7 @@ pub(crate) struct History {
 
 pub(crate) struct Request<'a> {
     pub selected: &'a Value,
+    pub context_last_second: u64,
     pub context: &'a [Identity],
     pub live: Option<&'a History>,
     pub saved: Option<&'a Cache>,
@@ -215,22 +216,6 @@ impl Cache {
     }
 }
 
-pub(crate) fn range(selected: &Value) -> Result<ContextRange> {
-    let second = selected["wall_ns"]
-        .as_u64()
-        .ok_or(Error::Bound("CPU selection clock"))?
-        / NS;
-    let end_ns = second
-        .checked_add(1)
-        .and_then(|end| end.checked_mul(NS))
-        .ok_or(Error::Bound("CPU context end"))?;
-
-    Ok(ContextRange {
-        first_ns: second.saturating_sub(899) * NS,
-        end_ns,
-    })
-}
-
 pub(crate) fn context(points: &[Value], output: &mut Vec<Identity>) -> Result<()> {
     assert!(output.is_empty());
     if points.len() > OBSERVATIONS_MAX {
@@ -260,7 +245,7 @@ pub(crate) fn context(points: &[Value], output: &mut Vec<Identity>) -> Result<()
 }
 
 pub(crate) fn project(request: &Request<'_>) -> Result<Value> {
-    let range = range(request.selected)?;
+    let range = ContextRange::ending_at(request.context_last_second)?;
     let mut index = Index::new();
     project_index(request, &mut index)?;
     let mut merged = Vec::with_capacity(request.context.len());

@@ -313,12 +313,16 @@ fn resident_history_releases_saved_facts_when_no_saved_reader_can_validate_them(
 
     let without_saved = session
         .app_history
-        .resident_response(&selected, None, &session.operation)
+        .resident_response(
+            &crate::live_app_response::Selected::ending_at(selected).unwrap(),
+            None,
+            &session.operation,
+        )
         .unwrap();
     let shared = session
         .app_history
         .response(
-            &selected,
+            &crate::live_app_response::Selected::ending_at(selected).unwrap(),
             &crate::live_app_history::Target {
                 kind: crate::live_app_response::KeyKind::Bundle,
                 bytes: b"/Apps/Current.app",

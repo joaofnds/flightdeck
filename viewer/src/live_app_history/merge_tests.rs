@@ -194,7 +194,7 @@ fn emits_a_null_gap_for_a_known_context_observation_without_app_facts() {
 
     let response = history
         .response_merged(&Merge {
-            selected: &observed,
+            selected: &crate::live_app_response::Selected::ending_at(observed).unwrap(),
             target: &Target {
                 kind: KeyKind::Executable,
                 bytes: b"app",
@@ -249,7 +249,7 @@ fn response(
     let operation = cancellation.operation(0).unwrap();
 
     history.response_merged(&Merge {
-        selected,
+        selected: &crate::live_app_response::Selected::ending_at(*selected).unwrap(),
         target: &Target {
             kind: KeyKind::Executable,
             bytes: b"app",

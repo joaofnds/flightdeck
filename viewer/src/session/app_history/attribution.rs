@@ -1,6 +1,7 @@
 use super::{BTreeMap, BTreeSet, Frame, Key, Observation, Reading, Restore, Session, Source};
 use crate::app_attribution_history::cache::Cache;
 use crate::live_app_history::{ResidentFile, ResidentPin};
+use crate::live_app_response::Selected;
 use persistence::{Error, Result, WindowIdentity};
 
 struct Projection {
@@ -11,14 +12,14 @@ struct Projection {
 impl Session {
     pub(crate) fn visit_app_attribution(
         &self,
-        selected: &Observation,
+        selected: &Selected,
         mut excluded: impl FnMut(&Observation) -> Result<bool>,
         mut consume: impl FnMut(&Frame, Option<&Frame>, [Option<WindowIdentity>; 2]) -> Result<()>,
         mut pin: impl FnMut(ResidentPin) -> Result<()>,
     ) -> Result<usize> {
         self.operation.attach(&self.connection)?;
         self.operation.check()?;
-        if collector::recording::read_identity(&self.root)?.0 != selected.recording {
+        if collector::recording::read_identity(&self.root)?.0 != selected.observation.recording {
             return Err(Error::Bound("attribution saved recording"));
         }
         let range = self.app_history_range(selected)?;
@@ -227,12 +228,12 @@ const _: () = {
 impl Session {
     pub(crate) fn with_app_attribution_replay<T>(
         &self,
-        selected: &Observation,
+        selected: &Selected,
         consume: impl FnOnce(&mut AttributionReplay) -> Result<T>,
     ) -> Result<T> {
         self.operation.attach(&self.connection)?;
         self.operation.check()?;
-        if collector::recording::read_identity(&self.root)?.0 != selected.recording {
+        if collector::recording::read_identity(&self.root)?.0 != selected.observation.recording {
             return Err(Error::Bound("attribution saved recording"));
         }
 

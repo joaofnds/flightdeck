@@ -432,7 +432,7 @@ fn fixture() -> Value {
     let selected = json!({"wall_ns":"1000000000000","recording":["5","6"],
         "run_tick":"2","stamp":{"run":["1","2"],"boot":["3","4"],
             "publication":"2","continuous_ns":"3000000000","awake_ns":"700000000"}});
-    let selection = json!({"second":1000,"context_seconds":900,
+    let selection = json!({"second":1000,"context_last_second":1000,"context_seconds":900,
         "selected":{"run":run,"boot":boot,"publication":2,"run_tick":2,
             "wall_ns":1_000_000_000_000_u64},
         "trends":[{"run":run,"boot":boot,"publication":2,

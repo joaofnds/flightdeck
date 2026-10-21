@@ -4,11 +4,11 @@ use serde_json::{Value, json};
 use super::means::{APPS_MAX, KEY_BYTES_MAX, Means};
 use crate::apps::AppKey;
 use crate::cancellation::Operation;
-use crate::live_app_response::{Measure, Observation};
+use crate::live_app_response::{Measure, Observation, Selected};
 use crate::session::OBSERVATIONS_MAX;
 
 pub(crate) struct Reduction<'operation> {
-    selected: Observation,
+    selected: Selected,
     operation: &'operation Operation,
     means: Means,
     cohort: Vec<u16>,
@@ -82,19 +82,15 @@ impl<'operation> Reduction<'operation> {
         }
         Ok(false)
     }
-    pub(crate) fn new(selected: &Observation, operation: &'operation Operation) -> Result<Self> {
-        if selected.wall_ns.is_none() {
-            return Err(Error::Bound("resident history selected clock"));
-        }
-
-        Ok(Self {
+    pub(crate) fn new(selected: &Selected, operation: &'operation Operation) -> Self {
+        Self {
             selected: *selected,
             operation,
             means: Means::new(),
             cohort: Vec::with_capacity(8),
             points: Vec::with_capacity(OBSERVATIONS_MAX),
             missing: false,
-        })
+        }
     }
 
     pub(crate) fn observe<'key>(
@@ -251,7 +247,7 @@ impl<'operation> Reduction<'operation> {
                 "retention_limited":self.missing,
                 "context_app_count":self.means.count(),"context_app_count_max":APPS_MAX,
                 "context_key_bytes":self.means.key_bytes(),"context_key_bytes_max":KEY_BYTES_MAX}});
-        response["selected"] = self.selected.json();
+        response["selected"] = self.selected.observation.json();
         response["cohort"] = Value::Array(cohort);
         response["points"] = Value::Array(points);
 
@@ -305,21 +301,16 @@ impl<'operation> Reduction<'operation> {
     }
 
     fn in_range(&self, observation: &Observation) -> Result<bool> {
-        if self.selected.recording != observation.recording {
+        if self.selected.observation.recording != observation.recording {
             return Err(Error::Bound("resident history recording"));
         }
 
-        let second = self
-            .selected
-            .wall_ns
-            .ok_or(Error::Bound("resident history selected clock"))?
-            / 1_000_000_000;
         let wall = observation
             .wall_ns
             .ok_or(Error::Bound("resident history point clock"))?
             / 1_000_000_000;
 
-        Ok((second.saturating_sub(899)..=second).contains(&wall))
+        Ok(self.selected.holds(wall))
     }
 }
 

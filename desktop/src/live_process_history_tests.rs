@@ -145,6 +145,33 @@ fn process_history_empty_and_unknown_filters_have_distinct_local_reasons() {
     assert!(ProcessHistory::filter_reason(Some("hex:61")).is_none());
 }
 
+#[test]
+fn all_groups_place_the_readings_after_the_selected_second_inside_their_charts() {
+    // Goal: the process group charts of a selected second place the readings its context
+    // holds after it within the context's 900 seconds.
+    // Method: select 999 in a context that runs to 1000, project every group chart, then read
+    // where each places the reading of 1000.
+    let mut history = crate::live_source::tests::process_history::all_history();
+    history.points.truncate(2);
+    history.app_bytes = Box::from(b"A".as_slice());
+    history.selected.wall_ns = Some(999_000_000_000);
+    history.points[0].observation.wall_ns = history.selected.wall_ns;
+    history.points[1].observation.wall_ns = Some(1_000_000_000_000);
+    let mut request = request();
+    request.executable = None;
+    let selection = json!({"second":999,"context_last_second":1000,
+        "selected":history.selected.json()});
+    let history = ProcessHistory::prepare_all(history, &request, &selection);
+
+    let panels = history.panels(&selection).unwrap();
+
+    assert!(!panels.is_empty());
+    for panel in panels {
+        let position = panel.positions.as_ref().unwrap()[1];
+        assert!((position - 899.0 / 900.0).abs() < f32::EPSILON);
+    }
+}
+
 pub(crate) fn request() -> Request {
     Request {
         route: "apps".into(),
@@ -168,7 +195,8 @@ pub(crate) fn request() -> Request {
 }
 
 pub(crate) fn selection() -> Value {
-    json!({"second":1000,"selected":{"run":[1,2],"boot":[3,4],"publication":2}})
+    json!({"second":1000,"context_last_second":1000,
+        "selected":{"run":[1,2],"boot":[3,4],"publication":2}})
 }
 
 pub(crate) fn payload() -> Value {

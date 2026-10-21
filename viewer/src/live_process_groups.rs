@@ -1,5 +1,4 @@
-use persistence::{Error, Result};
-use serde_json::Value;
+use persistence::Result;
 
 use super::LiveSession;
 use crate::app_process_groups_history::AppProcessGroupsHistory;
@@ -14,14 +13,7 @@ impl LiveSession {
         app_bytes: &[u8],
     ) -> Result<Box<AppProcessGroupsHistory>> {
         self.operation.run(|| {
-            let mut selected = None;
-            self.with_selected_apps(|sample| {
-                selected = Some(sample.selected);
-
-                Ok(Value::Null)
-            })?;
-
-            let selected = selected.ok_or(Error::Bound("process cohort selection"))?;
+            let selected = self.selected_in_context()?;
             let target = Target {
                 kind,
                 bytes: app_bytes,

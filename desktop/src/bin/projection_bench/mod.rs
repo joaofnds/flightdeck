@@ -120,8 +120,9 @@ mod tests {
         // Encode a real projection with the full Overview workload and exact GPU reading bits.
         let run = "00000000000000010000000000000002";
         let boot = "00000000000000030000000000000004";
-        let selection = json!({"second":1000,"selected":{"publication":1,"run":run,
-            "boot":boot},"trends":[{"wall_ns":1_000_000_000_000_u64,"publication":1,
+        let selection = json!({"second":1000,"context_last_second":1000,
+            "selected":{"publication":1,"run":run,"boot":boot},
+            "trends":[{"wall_ns":1_000_000_000_000_u64,"publication":1,
                 "run":run,"boot":boot,"segment":0,"gpu_active_percent":37.5}]});
         let panels = crate::live_projection::panels("overview", &selection, None).unwrap();
 

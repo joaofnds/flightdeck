@@ -10,7 +10,7 @@ fn selected_app_disk_history_combines_interval_rates_and_keeps_gaps() {
     let boot = "00000000000000030000000000000004";
     let selected = json!({"wall_ns":"1000000000000","stamp":{"run":run,"boot":boot,
         "publication":"2","continuous_ns":"3000000000","awake_ns":"700000000"}});
-    let selection = json!({"second":1000,"selected":selected});
+    let selection = json!({"second":1000,"context_last_second":1000,"selected":selected});
     let measure = |known: u64| {
         json!({"known":known.to_string(),"measured_members":1,
             "unavailable_members":0,"overflowed":false})

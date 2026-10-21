@@ -7,10 +7,10 @@ use super::means::{Key, Means};
 use crate::apps::AppKey;
 use crate::cancellation::Operation;
 use crate::live::resident_history::{Capture as Coverage, Interval, Source, consecutive, identity};
-use crate::live_app_response::{Measure, Observation};
+use crate::live_app_response::{Measure, Observation, Selected};
 
 pub(crate) struct Reduction<'operation> {
-    selected: Observation,
+    selected: Selected,
     metric: AppAttributionMetric,
     operation: &'operation Operation,
     means: Means,
@@ -67,14 +67,11 @@ const _: () = {
 
 impl<'operation> Reduction<'operation> {
     pub(crate) fn new(
-        selected: &Observation,
+        selected: &Selected,
         metric: AppAttributionMetric,
         operation: &'operation Operation,
-    ) -> Result<Self> {
-        if selected.wall_ns.is_none() {
-            return Err(Error::Bound("attribution selected clock"));
-        }
-        Ok(Self {
+    ) -> Self {
+        Self {
             selected: *selected,
             metric,
             operation,
@@ -82,7 +79,7 @@ impl<'operation> Reduction<'operation> {
             cohort: Vec::with_capacity(8),
             points: Vec::with_capacity(4096),
             missing: false,
-        })
+        }
     }
 
     pub(crate) fn contains_live(&self, observation: &Observation) -> Result<bool> {
@@ -304,7 +301,7 @@ impl<'operation> Reduction<'operation> {
             "coverage":{"retention_limited":self.missing,"context_app_count":self.means.count(),
                 "context_app_count_max":24000,"context_key_bytes":self.means.bytes(),
                 "context_key_bytes_max":8_388_608}});
-        response["selected"] = self.selected.json();
+        response["selected"] = self.selected.observation.json();
         response["cohort"] = Value::Array(cohort);
         response["points"] = Value::Array(points);
 
@@ -313,19 +310,14 @@ impl<'operation> Reduction<'operation> {
     }
 
     fn in_range(&self, observation: &Observation) -> Result<bool> {
-        if self.selected.recording != observation.recording {
+        if self.selected.observation.recording != observation.recording {
             return Err(Error::Bound("attribution recording"));
         }
-        let selected = self
-            .selected
-            .wall_ns
-            .ok_or(Error::Bound("attribution selected clock"))?
-            / 1_000_000_000;
         let second = observation
             .wall_ns
             .ok_or(Error::Bound("attribution point clock"))?
             / 1_000_000_000;
-        Ok((selected.saturating_sub(899)..=selected).contains(&second))
+        Ok(self.selected.holds(second))
     }
 }
 

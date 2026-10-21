@@ -4,6 +4,7 @@ use super::*;
 use crate::Cancellation;
 use crate::apps::Stamp;
 use crate::live::identity_fixture::Fixture;
+use persistence::Error;
 
 struct Pressure {
     history: History,
@@ -132,7 +133,7 @@ fn attribution_reports_zero_remaining_cache_space_without_underflow_or_losing_co
     let actual = pressure
         .history
         .attribution_response(
-            &pressure.selected,
+            &Selected::ending_at(pressure.selected).unwrap(),
             AppAttributionMetric::Cpu,
             Some(&pressure.saved),
             &pressure.operation,
@@ -157,7 +158,7 @@ impl Pressure {
         let before = saved.source_reads.get();
         let cpu = full
             .attribution_response(
-                &selected,
+                &Selected::ending_at(selected).unwrap(),
                 AppAttributionMetric::Cpu,
                 Some(&saved),
                 &operation,
@@ -166,7 +167,7 @@ impl Pressure {
         let cold_reads = saved.source_reads.get() - before;
         let power = full
             .attribution_response(
-                &selected,
+                &Selected::ending_at(selected).unwrap(),
                 AppAttributionMetric::Power,
                 Some(&saved),
                 &operation,
@@ -194,12 +195,16 @@ impl Pressure {
     fn query_budget(&self, metric: AppAttributionMetric, available: usize) -> Result<Value> {
         self.history.attribution_saved(
             &SavedQuery {
-                selected: &self.selected,
+                selected: &Selected::ending_at(self.selected).unwrap(),
                 metric,
                 saved: &self.saved,
                 operation: &self.operation,
             },
-            Reduction::new(&self.selected, metric, &self.operation)?,
+            Reduction::new(
+                &Selected::ending_at(self.selected).unwrap(),
+                metric,
+                &self.operation,
+            ),
             available,
         )
     }

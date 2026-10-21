@@ -1,19 +1,20 @@
 use persistence::Result;
 use serde_json::{Value, json};
 
-use super::{BYTES_MAX, History, Observation, Point, ResidentCache};
+use super::{BYTES_MAX, History, Point, ResidentCache};
 use crate::Session;
 use crate::cancellation::Operation;
 use crate::live::resident_history::{AppReading, Capture, Reduction, Source};
+use crate::live_app_response::Selected;
 
 impl History {
     pub(crate) fn resident_response(
         &self,
-        selected: &Observation,
+        selected: &Selected,
         saved: Option<&Session>,
         operation: &Operation,
     ) -> Result<Value> {
-        let mut reduction = Reduction::new(selected, operation)?;
+        let mut reduction = Reduction::new(selected, operation);
         for point in &self.points {
             operation.check()?;
             reduction.observe(

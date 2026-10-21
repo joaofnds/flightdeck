@@ -12,7 +12,13 @@ fn refuses_the_4097th_context_observation_after_accepting_4096() {
     // Distinct publications in one second reach the operation's count bound without a time gap.
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let selected = observation(4097);
-    let mut reduction = Reduction::new(&selected, KeyKind::Bundle, b"/A.app", &operation).unwrap();
+    let mut reduction = Reduction::new(
+        &crate::live_app_response::Selected::ending_at(selected).unwrap(),
+        KeyKind::Bundle,
+        b"/A.app",
+        &operation,
+    )
+    .unwrap();
     observe_points(&mut reduction, 4096);
     let extra = observation(4097);
 
@@ -29,7 +35,13 @@ fn refuses_the_24001st_distinct_name_across_individually_bounded_observations() 
     // Twenty-four thousand names in one observation leave no dictionary slot for a later new name.
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let selected = observation(2);
-    let mut reduction = Reduction::new(&selected, KeyKind::Bundle, b"/A.app", &operation).unwrap();
+    let mut reduction = Reduction::new(
+        &crate::live_app_response::Selected::ending_at(selected).unwrap(),
+        KeyKind::Bundle,
+        b"/A.app",
+        &operation,
+    )
+    .unwrap();
     let first = observation(1);
     assert!(reduction.begin(&capture(&first), Phase::Observe).unwrap());
     observe_names(&mut reduction, 0, 24_000, 8);
@@ -50,7 +62,13 @@ fn refuses_aggregate_key_bytes_before_the_name_count_limit() {
     // Eight batches admit 2048 maximum-length names; name 2049 exceeds eight MiB of key bytes.
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let selected = observation(9);
-    let mut reduction = Reduction::new(&selected, KeyKind::Bundle, b"/A.app", &operation).unwrap();
+    let mut reduction = Reduction::new(
+        &crate::live_app_response::Selected::ending_at(selected).unwrap(),
+        KeyKind::Bundle,
+        b"/A.app",
+        &operation,
+    )
+    .unwrap();
     observe_long_names(&mut reduction);
     assert!(
         reduction

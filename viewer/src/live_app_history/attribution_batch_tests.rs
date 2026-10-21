@@ -26,12 +26,17 @@ fn batch_keeps_distinct_eight_app_cohorts_other_and_missing_observations() {
     let operation = cancellation.operation(0).unwrap();
     let expected = METRICS.map(|metric| {
         history
-            .attribution_response(&selected, metric, None, &operation)
+            .attribution_response(
+                &Selected::ending_at(selected).unwrap(),
+                metric,
+                None,
+                &operation,
+            )
             .unwrap()
     });
 
     let batch = history
-        .attribution_batch_response(&selected, None, &operation)
+        .attribution_batch_response(&Selected::ending_at(selected).unwrap(), None, &operation)
         .unwrap();
 
     assert_batch(&batch, &expected);
@@ -115,12 +120,17 @@ fn batch_cancellation_restores_warm_facts_and_refuses_every_metric() {
     let retry = history
         .attribution_batch_saved(
             &SavedQuery {
-                selected: &fixture.selected,
+                selected: &Selected::ending_at(fixture.selected).unwrap(),
                 saved: &fixture.saved,
                 operation: &operation,
                 available: BYTES_MAX.saturating_sub(history.bytes),
             },
-            &mut Batch::new(&history, &fixture.selected, &operation).unwrap(),
+            &mut Batch::new(
+                &history,
+                &Selected::ending_at(fixture.selected).unwrap(),
+                &operation,
+            )
+            .unwrap(),
         )
         .unwrap();
     assert_batch(&retry, &fixture.expected);
@@ -188,10 +198,20 @@ fn assert_metric_failure(failed: usize) {
     let operation = cancellation.operation(0).unwrap();
     let expected = METRICS.map(|metric| {
         history
-            .attribution_response(&selected, metric, None, &operation)
+            .attribution_response(
+                &Selected::ending_at(selected).unwrap(),
+                metric,
+                None,
+                &operation,
+            )
             .unwrap()
     });
-    let mut batch = Batch::new(&history, &selected, &operation).unwrap();
+    let mut batch = Batch::new(
+        &history,
+        &Selected::ending_at(selected).unwrap(),
+        &operation,
+    )
+    .unwrap();
     batch.states[failed].apply(|_reduction| Err(Error::Bound("batch metric test failure")));
     batch.choose(&operation).unwrap();
     batch.project_live(&history, &operation).unwrap();
@@ -251,9 +271,11 @@ fn batch_rejects_more_than_the_observation_bound_in_each_metric() {
     let mut selected = observation(4097);
     selected.wall_ns = Some(1_000_000_000_000);
     let mut states = METRICS.map(|metric| {
-        MetricState::Ready(Box::new(
-            Reduction::new(&selected, metric, &operation).unwrap(),
-        ))
+        MetricState::Ready(Box::new(Reduction::new(
+            &Selected::ending_at(selected).unwrap(),
+            metric,
+            &operation,
+        )))
     });
     for publication in 1..=4097 {
         let mut selected = observation(publication);
@@ -310,7 +332,12 @@ fn assert_context_boundary(keys: &[Vec<u8>], extra: &[u8], error: &'static str) 
     let history = History::new();
     let cancellation = Arc::new(Cancellation::default());
     let operation = cancellation.operation(0).unwrap();
-    let mut batch = Batch::new(&history, &observation(3), &operation).unwrap();
+    let mut batch = Batch::new(
+        &history,
+        &Selected::ending_at(observation(3)).unwrap(),
+        &operation,
+    )
+    .unwrap();
     let mut capture = crate::app_attribution_history::Capture {
         coverage: crate::live::resident_history::Capture {
             observation: observation(1),
@@ -391,7 +418,12 @@ impl SavedFixture {
         let control = History::new();
         let expected = METRICS.map(|metric| {
             control
-                .attribution_response(&selected, metric, Some(&saved), &operation)
+                .attribution_response(
+                    &Selected::ending_at(selected).unwrap(),
+                    metric,
+                    Some(&saved),
+                    &operation,
+                )
                 .unwrap()
         });
         let rates = control.saved_residents.borrow_mut().take_attribution();
@@ -409,11 +441,15 @@ impl SavedFixture {
     }
 
     fn query(&self, history: &History, available: usize) -> Result<Box<AppAttributionHistories>> {
-        let mut batch = Batch::new(history, &self.selected, &self.operation)?;
+        let mut batch = Batch::new(
+            history,
+            &Selected::ending_at(self.selected).unwrap(),
+            &self.operation,
+        )?;
         let available = available.min(BYTES_MAX.saturating_sub(history.bytes));
         history.attribution_batch_saved(
             &SavedQuery {
-                selected: &self.selected,
+                selected: &Selected::ending_at(self.selected).unwrap(),
                 saved: &self.saved,
                 operation: &self.operation,
                 available,

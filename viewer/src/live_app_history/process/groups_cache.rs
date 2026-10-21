@@ -7,9 +7,10 @@ use crate::app_process_groups_history::reduce::{Phase, Reduction};
 use crate::cancellation::Operation;
 use crate::live_app_history::{BYTES_MAX, History, ResidentCache, Target};
 use crate::live_app_response::Observation;
+use crate::live_app_response::Selected;
 
 struct Query<'query, 'key> {
-    selected: &'query Observation,
+    selected: &'query Selected,
     target: &'query Target<'key>,
     saved: &'query Session,
     context: &'query [crate::cpu_history_sample::Identity],
@@ -28,7 +29,7 @@ struct Lease<'history> {
 impl History {
     pub(crate) fn process_groups_response(
         &self,
-        selected: &Observation,
+        selected: &Selected,
         target: &Target<'_>,
         saved: Option<&Session>,
         context: &[crate::cpu_history_sample::Identity],
@@ -141,11 +142,7 @@ impl History {
         reduction: &mut Reduction<'_>,
     ) -> Result<bool> {
         let space = lease.space();
-        let second = query
-            .selected
-            .wall_ns
-            .ok_or(Error::Bound("process group cache clock"))?
-            / 1_000_000_000; // Floor to the containing second.
+        let second = query.selected.context_last_second;
         let mut cached =
             self.process_groups_response_saved_restore_prepare(query, replay, lease, second)?;
 

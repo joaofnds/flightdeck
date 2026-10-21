@@ -15,8 +15,8 @@ use crate::live_app_history::{GroupTarget, History, Selection, Target};
 use crate::live_app_response::{Detail, KeyKind, Page, Sample};
 use crate::live_apps::{Frame, Publication, PublicationEvents};
 use crate::session::{
-    ContextRange, DETAIL_SECONDS, EARLIER_STRIDE_SECONDS, LOADED_SECONDS, OBSERVATIONS_MAX,
-    Observation, PAGE_ROWS, Tail, Verified,
+    ContextRange, ContextSelection, DETAIL_SECONDS, EARLIER_STRIDE_SECONDS, LOADED_SECONDS,
+    OBSERVATIONS_MAX, Observation, PAGE_ROWS, Tail, Verified,
 };
 use crate::{Cancellation, Session, metrics};
 
@@ -67,6 +67,8 @@ pub struct LiveSession {
     cancellation: Arc<Cancellation>,
     selected: Option<Value>,
     selected_context: Vec<crate::cpu_history_sample::Identity>,
+    /// The last second of the context the last selection read, which its histories span.
+    context_last_second: Option<u64>,
     cpu_history: Option<crate::cpu_history::History>,
     inspected: Option<LiveObservation>,
     cache_bytes: usize,
@@ -182,6 +184,7 @@ impl LiveSession {
             cancellation,
             selected: None,
             selected_context: Vec::new(),
+            context_last_second: None,
             cpu_history: None,
             inspected: None,
             cache_bytes: 0,
@@ -320,10 +323,11 @@ impl LiveSession {
         if self.select_refresh_due(second) {
             self.refresh_history()?;
         }
+        let selection = ContextSelection::of(second, self.newest_second());
         let saved = match &mut self.history {
             Some(history) => {
                 history.begin(self.operation.epoch())?;
-                Some(history.select(second, 0))
+                Some(history.select_context(selection, 0))
             }
             None => None,
         };
@@ -333,9 +337,9 @@ impl LiveSession {
             // unreadable history does at open.
             Some(Err(error)) => {
                 self.history_failure(error)?;
-                select_unsaved(second)
+                select_unsaved(selection)
             }
-            None => select_unsaved(second),
+            None => select_unsaved(selection),
         };
         let alternatives = response["alternatives"]
             .as_array_mut()
@@ -352,7 +356,7 @@ impl LiveSession {
                     .clone(),
             )
         };
-        self.select_trends(second, &mut response)?;
+        self.select_trends(selection, &mut response)?;
         self.select_observation(selected, &mut response)?;
         if let Some(selected) = &self.selected {
             response["summary"] = response["trends"]
@@ -371,6 +375,7 @@ impl LiveSession {
             &mut context,
         )?;
         self.selected_context = context;
+        self.context_last_second = Some(selection.context_last_second);
 
         Ok(response)
     }
@@ -488,12 +493,12 @@ impl LiveSession {
         history.inspect(second, |candidate| same(candidate, identity))
     }
 
-    /// The saved readings older than `second`'s full-detail context, back to the loaded hour,
-    /// one in every stretch of seconds. Read again only when the context moves into another
-    /// stretch or a minute is sealed, so following the newest second costs one read in
-    /// every `EARLIER_STRIDE_SECONDS`.
-    pub fn earlier_context(&mut self, second: u64) -> Result<Value> {
-        let limit_second = earlier_limit_second(second);
+    /// The saved readings older than the full-detail context that ends at
+    /// `context_last_second`, back to the loaded hour, one in every stretch of seconds. Read
+    /// again only when the context moves into another stretch or a minute is sealed, so
+    /// following the newest second costs one read in every `EARLIER_STRIDE_SECONDS`.
+    pub fn earlier_context(&mut self, context_last_second: u64) -> Result<Value> {
+        let limit_second = earlier_limit_second(context_last_second);
         if !self.earlier_current(limit_second) {
             let tail = match &mut self.history {
                 Some(history) => {
@@ -512,18 +517,18 @@ impl LiveSession {
             });
         }
 
-        self.earlier_context_kept(second)?
+        self.earlier_context_kept(context_last_second)?
             .ok_or(Error::Bound("older tail"))
     }
 
-    /// The older tail `earlier_context` gives for `second`, when the tail it read last still
-    /// answers it, and `None` when answering would read saved history.
-    pub fn earlier_context_kept(&self, second: u64) -> Result<Option<Value>> {
-        if !self.earlier_current(earlier_limit_second(second)) {
+    /// The older tail `earlier_context` gives for `context_last_second`, when the tail it read
+    /// last still answers it, and `None` when answering would read saved history.
+    pub fn earlier_context_kept(&self, context_last_second: u64) -> Result<Option<Value>> {
+        if !self.earlier_current(earlier_limit_second(context_last_second)) {
             return Ok(None);
         }
 
-        let first_second = second.saturating_sub(LOADED_SECONDS - 1);
+        let first_second = context_last_second.saturating_sub(LOADED_SECONDS - 1);
         let cache = self.earlier.as_ref().ok_or(Error::Bound("older tail"))?;
         let points: Vec<&Value> = cache
             .tail
@@ -579,7 +584,7 @@ impl LiveSession {
             .ok_or(Error::Bound("latest live raw observation unavailable"))?;
         let second = current.observation.wall / NANOSECONDS_PER_SECOND;
         let selected = current.json();
-        let range = context_range(second)?;
+        let range = ContextRange::ending_at(second)?;
 
         if let Err(error) = self.follow_restore(range) {
             self.history_failure(error)?;
@@ -609,11 +614,12 @@ impl LiveSession {
         crate::cpu_history::context(&trends, &mut context)?;
         self.operation.check()?;
 
-        let response = json!({"second": second, "selected": selected,
-            "alternatives": alternatives, "summary": summary, "trends": trends,
-            "context_seconds": 900, "context_error": self.history_error});
+        let response = json!({"second": second, "context_last_second": second,
+            "selected": selected, "alternatives": alternatives, "summary": summary,
+            "trends": trends, "context_seconds": 900, "context_error": self.history_error});
         self.selected = Some(selected);
         self.selected_context = context;
+        self.context_last_second = Some(second);
         self.follows_live = true;
 
         Ok(response)
@@ -759,7 +765,10 @@ impl LiveSession {
             .as_ref()
             .ok_or(Error::Bound("no selected observation"))?
             .clone();
-        let range = crate::cpu_history::range(&selected)?;
+        let context_last_second = self
+            .context_last_second
+            .ok_or(Error::Bound("no selected context"))?;
+        let range = ContextRange::ending_at(context_last_second)?;
         let mut restoration_error = None;
         if let Some(history) = &mut self.history {
             if let Err(error) = history.cpu_history_restore(range) {
@@ -775,6 +784,7 @@ impl LiveSession {
 
         let mut response = crate::cpu_history::project(&crate::cpu_history::Request {
             selected: &selected,
+            context_last_second,
             context: &self.selected_context,
             live: self.cpu_history.as_ref(),
             saved: self
@@ -946,13 +956,7 @@ impl LiveSession {
 
     fn app_history_selected(&self, target: &dyn Selection) -> Result<Value> {
         self.operation.run(|| {
-            let mut selected = None;
-            self.with_selected_apps(|sample| {
-                selected = Some(sample.selected);
-                Ok(Value::Null)
-            })?;
-
-            let selected = selected.ok_or(Error::Bound("App history selection"))?;
+            let selected = self.selected_in_context()?;
             if let Some(history) = &self.history {
                 let mut restored = false;
                 let result = history.with_app_history(&selected, target, |saved| {
@@ -996,7 +1000,7 @@ impl LiveSession {
 
     fn app_history_degraded(
         &self,
-        selected: &crate::live_app_response::Observation,
+        selected: &crate::live_app_response::Selected,
         target: &dyn Selection,
         error: Error,
     ) -> Result<Value> {
@@ -1051,6 +1055,22 @@ impl LiveSession {
         })
     }
 
+    /// The selected observation, with the last second of the context the selection read, which
+    /// its histories span.
+    fn selected_in_context(&self) -> Result<crate::live_app_response::Selected> {
+        let mut observation = None;
+        self.with_selected_apps(|sample| {
+            observation = Some(sample.selected);
+            Ok(Value::Null)
+        })?;
+        let observation = observation.ok_or(Error::Bound("history selection"))?;
+        let context_last_second = self
+            .context_last_second
+            .ok_or(Error::Bound("history selection context"))?;
+
+        crate::live_app_response::Selected::new(observation, context_last_second)
+    }
+
     fn with_selected_apps(&self, consume: impl FnOnce(&Sample) -> Result<Value>) -> Result<Value> {
         let selected = self
             .selected
@@ -1075,6 +1095,21 @@ impl LiveSession {
                 .ok_or(Error::Bound("live App raw observation unavailable"))?
                 .with_app_sample(selected, consume)
         }
+    }
+
+    /// The newest second the session holds, saved or still in the ring.
+    fn newest_second(&self) -> Option<u64> {
+        let saved = self.history.as_ref().and_then(Session::last_second);
+        let mut newest = saved;
+        for point in &self.points {
+            let second = point["wall_ns"]
+                .as_u64()
+                .map(|wall| wall / NANOSECONDS_PER_SECOND);
+            assert!(second.is_some());
+            newest = newest.max(second);
+        }
+
+        newest
     }
 
     fn select_refresh_due(&self, second: u64) -> bool {
@@ -1592,7 +1627,8 @@ impl LiveSession {
         Ok(())
     }
 
-    fn select_trends(&self, second: u64, response: &mut Value) -> Result<()> {
+    fn select_trends(&self, selection: ContextSelection, response: &mut Value) -> Result<()> {
+        let last = selection.context_last_second;
         let points = response["trends"]
             .as_array_mut()
             .ok_or(Error::Bound("trends shape"))?;
@@ -1603,7 +1639,7 @@ impl LiveSession {
                 .ok_or(Error::Bound("point clock"))?
                 / NANOSECONDS_PER_SECOND;
 
-            if (second.saturating_sub(899)..=second).contains(&current) {
+            if (last.saturating_sub(DETAIL_SECONDS - 1)..=last).contains(&current) {
                 let mut live = metrics::public_point(point)?;
                 if let Some(index) = points.iter().position(|existing| same(existing, point)) {
                     follow_merge_point(PointMerge {
@@ -1677,10 +1713,15 @@ impl LiveSession {
             .history
             .as_mut()
             .ok_or(Error::Bound("missing history"))?;
-        let second = response["second"]
-            .as_u64()
-            .ok_or(Error::Bound("selection second"))?;
-        let historical = history.select(second, 0)?;
+        let selection = ContextSelection {
+            second: response["second"]
+                .as_u64()
+                .ok_or(Error::Bound("selection second"))?,
+            context_last_second: response["context_last_second"]
+                .as_u64()
+                .ok_or(Error::Bound("selection context"))?,
+        };
+        let historical = history.select_context(selection, 0)?;
         let alternatives = historical["alternatives"]
             .as_array()
             .ok_or(Error::Bound("historical alternatives"))?;
@@ -1688,15 +1729,16 @@ impl LiveSession {
             .iter()
             .position(|observation| same(observation, selected))
             .ok_or(Error::Bound("historical observation"))?;
-        response["summary"] = history.select(second, index)?["summary"].clone();
+        response["summary"] = history.select_context(selection, index)?["summary"].clone();
         Ok(())
     }
 }
 
 /// A selection of `second` with nothing read from the saved minutes.
-fn select_unsaved(second: u64) -> Value {
-    json!({"second": second, "selected": null, "alternatives": [], "summary": null,
-        "trends": [], "context_seconds": 900})
+fn select_unsaved(selection: ContextSelection) -> Value {
+    json!({"second": selection.second, "context_last_second": selection.context_last_second,
+        "selected": null, "alternatives": [], "summary": null, "trends": [],
+        "context_seconds": 900})
 }
 
 fn select_alternative(alternatives: &mut Vec<Value>, identity: Value) {
@@ -2225,23 +2267,10 @@ fn refresh_history_before(windows: &[persistence::Manifest], through_ns: u64) ->
         .count()
 }
 
-/// The wall clock range of the 900 seconds that end at `second`.
-fn context_range(second: u64) -> Result<ContextRange> {
-    let end_ns = second
-        .checked_add(1)
-        .and_then(|value| value.checked_mul(NANOSECONDS_PER_SECOND))
-        .ok_or(Error::Bound("context end"))?;
-
-    Ok(ContextRange {
-        first_ns: second.saturating_sub(899) * NANOSECONDS_PER_SECOND,
-        end_ns,
-    })
-}
-
-/// The first second of the stretch that holds the first second of `second`'s full-detail
-/// context, where its older tail ends. The division floors.
-fn earlier_limit_second(second: u64) -> u64 {
-    let detail_first = second.saturating_sub(DETAIL_SECONDS - 1);
+/// The first second of the stretch that holds the first second of the full-detail context
+/// that ends at `context_last_second`, where its older tail ends. The division floors.
+fn earlier_limit_second(context_last_second: u64) -> u64 {
+    let detail_first = context_last_second.saturating_sub(DETAIL_SECONDS - 1);
     detail_first / EARLIER_STRIDE_SECONDS * EARLIER_STRIDE_SECONDS
 }
 
@@ -3919,13 +3948,13 @@ mod tests {
                     bytes: b"/Apps/Current.app",
                 };
                 let structural = session.app_history_degraded(
-                    &sample.selected,
+                    &crate::live_app_response::Selected::ending_at(sample.selected).unwrap(),
                     &target,
                     Error::Bound("conflicting App history observation"),
                 );
                 assert!(matches!(structural, Err(Error::Bound(_))));
                 let canceled = session.app_history_degraded(
-                    &sample.selected,
+                    &crate::live_app_response::Selected::ending_at(sample.selected).unwrap(),
                     &target,
                     std::io::Error::from(std::io::ErrorKind::Interrupted).into(),
                 );

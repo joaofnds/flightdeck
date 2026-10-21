@@ -227,7 +227,8 @@ fn resident_reading(snapshot: &Snapshot, target: &Target) -> Box<Snapshot> {
     Box::new(Snapshot {
         generation: snapshot.generation,
         catalog: snapshot.catalog.clone(),
-        selection: json!({"second":target.second,"selected":selected,
+        selection: json!({"second":target.second,
+            "context_last_second":snapshot.selection["context_last_second"],"selected":selected,
             "summary":summary,"alternatives":[],"trends":[]}),
         pages: BTreeMap::new(),
         apps: None,

@@ -188,7 +188,7 @@ fn replayed_ranks(session: &Session, selected: &Ranks) -> Vec<Ranks> {
     let mut replayed = Vec::new();
     session
         .visit_app_attribution(
-            &selected.selected,
+            &crate::live_app_response::Selected::ending_at(selected.selected).unwrap(),
             |_observation| Ok(false),
             |frame, previous, _windows| {
                 let mut sample = None;

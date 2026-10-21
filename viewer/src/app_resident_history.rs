@@ -1,5 +1,5 @@
 //! Bounded resident gauges across the selected live and saved App context.
-use persistence::{Error, Result};
+use persistence::Result;
 use serde_json::Value;
 
 use super::LiveSession;
@@ -7,12 +7,7 @@ use super::LiveSession;
 impl LiveSession {
     pub fn app_resident_history(&self) -> Result<Value> {
         self.operation.run(|| {
-            let mut selected = None;
-            self.with_selected_apps(|sample| {
-                selected = Some(sample.selected);
-                Ok(Value::Null)
-            })?;
-            let selected = selected.ok_or(Error::Bound("resident history selection"))?;
+            let selected = self.selected_in_context()?;
 
             self.app_history
                 .resident_response(&selected, self.history.as_ref(), &self.operation)

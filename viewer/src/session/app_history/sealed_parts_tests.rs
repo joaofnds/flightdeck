@@ -409,7 +409,7 @@ fn replayed_samples(session: &Session, second: u64) -> Vec<Sample> {
     let mut replayed = Vec::new();
     session
         .visit_app_attribution(
-            &selected.unwrap(),
+            &crate::live_app_response::Selected::ending_at(selected.unwrap()).unwrap(),
             |_observation| Ok(false),
             |frame, previous, _windows| {
                 let mut sample = None;

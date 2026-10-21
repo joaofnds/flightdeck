@@ -4,7 +4,8 @@ use crate::live_app_attribution_history::{AppAttributionHistory, Metric, tests};
 use crate::live_hover::Target;
 
 pub(crate) fn scalar_selection() -> Value {
-    json!({"second":1000,"selected":{"run":[1,2],"boot":[3,4],"publication":2},
+    json!({"second":1000,"context_last_second":1000,
+        "selected":{"run":[1,2],"boot":[3,4],"publication":2},
         "trends":[
             {"run":[1,2],"boot":[3,4],"publication":1,"wall_ns":999_000_000_000_u64,
                 "cpu_percent":12.5,"cpu_percent_one_core":150.0,

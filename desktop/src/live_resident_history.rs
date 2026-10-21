@@ -216,6 +216,7 @@ impl History {
         if selected.wall_ns.map(|wall| wall / NS) != Some(second) {
             return Err("Resident App history has a different selected timestamp".into());
         }
+        let last = integer(&selection["context_last_second"])?;
         let cohort = decode_cohort(&value["cohort"])?;
         let values = value["points"]
             .as_array()
@@ -230,7 +231,7 @@ impl History {
             points: Vec::with_capacity(values.len()),
             cohort,
             positions: Vec::with_capacity(values.len()),
-            window: crate::chart_axes::TimeWindow::live(second),
+            window: crate::chart_axes::TimeWindow::live(last),
             selected_index: 0,
             retention_limited: boolean(&value["coverage"]["retention_limited"])?,
         };
@@ -251,7 +252,7 @@ impl History {
                     return Err("Resident App observations are not ordered".into());
                 }
             }
-            let position = position(point.observation.wall_ns, second)?;
+            let position = position(point.observation.wall_ns, last)?;
             if point.observation == selected {
                 selected_index = Some(history.points.len());
             }
