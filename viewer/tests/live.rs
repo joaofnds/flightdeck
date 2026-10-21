@@ -1480,9 +1480,25 @@ mod tests {
         assert_eq!(session.catalog()["reader_losses"], catalog["reader_losses"]);
         assert_eq!(session.page("processes", 0).unwrap(), first);
         assert_eq!(session.page("events", 0).unwrap(), events);
+        rehydrates_captured_identity_after_real_eviction_without_disturbing_polling_later(
+            &mut session,
+        );
+        assert!(session.catalog()["tail_cache_bytes"].as_u64().unwrap() <= 128 * 1024 * 1024);
+        println!(
+            "{}",
+            serde_json::json!({"identity_observations_per_tick":12000, "publications":33,
+                "retained_tail_ticks_before_rehydration":catalog["tail_ticks"],
+                "retained_cache_bytes_before_rehydration":catalog["tail_cache_bytes"]})
+        );
+    }
+
+    /// Checks that selections after the rehydration show the Apps and rows of their own seconds.
+    fn rehydrates_captured_identity_after_real_eviction_without_disturbing_polling_later(
+        session: &mut LiveSession,
+    ) {
         session.select(1001, 0).unwrap();
         assert_rehydrated_apps(
-            &session,
+            session,
             Rehydrated {
                 publication: 2,
                 point_count: 33,
@@ -1492,13 +1508,6 @@ mod tests {
         assert_eq!(
             session.page("processes", 0).unwrap()["rows"][6][3],
             "9007199254741025"
-        );
-        assert!(session.catalog()["tail_cache_bytes"].as_u64().unwrap() <= 128 * 1024 * 1024);
-        println!(
-            "{}",
-            serde_json::json!({"identity_observations_per_tick":12000, "publications":33,
-                "retained_tail_ticks_before_rehydration":catalog["tail_ticks"],
-                "retained_cache_bytes_before_rehydration":catalog["tail_cache_bytes"]})
         );
     }
 
