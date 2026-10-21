@@ -8,10 +8,19 @@ use serde_json::Value;
 use super::{NS, Observation, Session};
 use crate::metrics;
 
-/// The seconds of history the viewer loads in all, which is the longest range a chart shows.
+/// The seconds of history the longest range a chart shows holds. The viewer loads
+/// `LEAD_IN_SECONDS` more before them.
 pub const LOADED_SECONDS: u64 = 3600;
-/// The seconds of full detail the context holds, which the older tail ends before.
+/// The seconds before the oldest second of a range whose readings the viewer also loads. A
+/// chart's point averages the forty seconds or more before it, so with them the first point
+/// stands at the range's oldest edge, as Grafana's query reaches a rate interval before its
+/// range.
+pub const LEAD_IN_SECONDS: u64 = 60;
+/// The seconds of full detail the context holds, the 15 minutes of the shortest range.
 pub(crate) const DETAIL_SECONDS: u64 = 900;
+/// The seconds of full-detail readings a selection's charts hold: the context and the lead-in
+/// before it. The older tail ends before them.
+pub const CHARTED_SECONDS: u64 = DETAIL_SECONDS + LEAD_IN_SECONDS;
 /// The seconds after a selected second its context holds, where the recording has them, so a
 /// step to a later second shows readings the page already holds. The context still holds
 /// `DETAIL_SECONDS` in all, so the rest lie before the selected second.
@@ -22,10 +31,10 @@ pub const EARLIER_STRIDE_SECONDS: u64 = 10;
 /// tail is never mistaken for one of the recent readings.
 const SEGMENT_BASE: u64 = 1 << 32;
 const _: () = {
-    assert!(DETAIL_SECONDS < LOADED_SECONDS);
+    assert!(CHARTED_SECONDS < LOADED_SECONDS);
     assert!(CONTEXT_AFTER_SECONDS < DETAIL_SECONDS);
     assert!(EARLIER_STRIDE_SECONDS > 0);
-    assert!(LOADED_SECONDS <= 65_535);
+    assert!(LOADED_SECONDS + LEAD_IN_SECONDS <= 65_535);
 };
 
 /// The thinned readings before `limit_second`, numbered in segments of their own.

@@ -534,17 +534,18 @@ mod tests {
 
     #[test]
     fn follows_the_exact_inclusive_time_window_independently_of_cache_trimming() {
-        // Goal: the 900-second follow context includes its lower bound and excludes both sides.
-        // Method: a future deque front retains an older outside point across a wall rollback.
+        // Goal: the charted follow context, the 900 seconds and the lead-in before them, includes
+        // its lower bound and excludes both sides. Method: a future deque front retains an older
+        // outside point across a wall rollback.
         let mut recording = Recording::new();
         recording.publish(2000);
-        recording.publish(1000);
-        recording.publish(1001);
+        recording.publish(940);
+        recording.publish(941);
         recording.publish(1900);
         let mut session = LiveSession::open(&recording.root).unwrap();
         let catalog = session.catalog();
         assert_eq!(catalog["tail_ticks"], 4);
-        assert_eq!(catalog["first_second"], 1000);
+        assert_eq!(catalog["first_second"], 940);
         assert_eq!(catalog["last_second"], 2000);
 
         let response = session.follow_latest().unwrap();
@@ -559,12 +560,12 @@ mod tests {
         assert_eq!(response["context_seconds"], 900);
         assert_eq!(response["second"], 1900);
         assert_eq!(response["selected"]["publication"], 4);
-        assert_eq!(response["trends"][0]["wall_ns"], 1_001_000_000_000_u64);
+        assert_eq!(response["trends"][0]["wall_ns"], 941_000_000_000_u64);
     }
 
     #[test]
     fn thins_the_hour_before_the_full_detail_context_to_one_reading_per_stretch() {
-        // Goal: charts over 30 and 60 minutes get readings older than the 900 full-detail seconds
+        // Goal: charts over 30 and 60 minutes get readings older than the full-detail seconds
         // without the viewer sending every second of them. Method: seal 70 minutes of three
         // readings each, ask for the older tail at the newest second, and read what it keeps.
         let base = 100_000;
@@ -591,10 +592,10 @@ mod tests {
             .iter()
             .map(|point| point["wall_ns"].as_u64().unwrap() / 1_000_000_000)
             .collect();
-        let expected: Vec<u64> = (10..54).map(|minute| base + minute * 60).collect();
+        let expected: Vec<u64> = (9..53).map(|minute| base + minute * 60).collect();
         assert_eq!(seconds, expected);
-        assert!(seconds.iter().all(|kept| *kept >= second - 3599));
-        assert!(seconds.iter().all(|kept| *kept < second - 899));
+        assert!(seconds.iter().all(|kept| *kept >= second - 3659));
+        assert!(seconds.iter().all(|kept| *kept < second - 959));
         let segments: std::collections::BTreeSet<u64> = tail["earlier_trends"]
             .as_array()
             .unwrap()
@@ -611,7 +612,7 @@ mod tests {
         // them, so a chart has no notch at the join. Method: seal consecutive seconds across the
         // limit of the tail, then again with a gap at the limit, and read the tail's segment.
         let limit = 200_000;
-        let newest = limit + 899 + 5;
+        let newest = limit + viewer::CHARTED_SECONDS - 1 + 5;
         for gap in [false, true] {
             let mut recording = Recording::new();
             for second in limit - 4..limit {
@@ -640,7 +641,7 @@ mod tests {
         // Goal: following the newest second does not query saved history every second.
         // Method: read the tail, remove the saved data, and read it for later seconds.
         let limit = 200_000;
-        let newest = limit + 899;
+        let newest = limit + viewer::CHARTED_SECONDS - 1;
         let mut recording = Recording::new();
         for second in limit - 4..limit {
             recording.publish(second);
@@ -661,7 +662,7 @@ mod tests {
         // tail it would have to read for later. Method: ask for the kept tail before reading
         // it, then for seconds inside and past the stretch it was read for.
         let limit = 200_000;
-        let newest = limit + 899;
+        let newest = limit + viewer::CHARTED_SECONDS - 1;
         let mut recording = Recording::new();
         for second in limit - 4..limit {
             recording.publish(second);

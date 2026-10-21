@@ -44,9 +44,10 @@ fn positions_use_wall_time_and_segments_include_run_identity() {
     // Method: project fractional, widely spaced observations sharing a segment number.
     let panels = panels("cpu", &selection(), None).unwrap();
     let positions = panels[0].positions.as_ref().unwrap();
-    assert!((positions[0] - 0.5 / 900.0).abs() < 0.000_001);
-    assert!((positions[1] - 449.0 / 900.0).abs() < 0.000_001);
-    assert!((positions[2] - 899.75 / 900.0).abs() < 0.000_001);
+    // The charts hold the 900-second context and the minute of lead-in before it.
+    assert!((positions[0] - 60.5 / 960.0).abs() < 0.000_001);
+    assert!((positions[1] - 509.0 / 960.0).abs() < 0.000_001);
+    assert!((positions[2] - 959.75 / 960.0).abs() < 0.000_001);
     assert_eq!(panels[0].segments.as_ref().unwrap(), &[0, 0, 1]);
     assert_eq!(panels[0].lines[0].values, [None, Some(25.0), None]);
     assert_eq!(panels[0].maximum, Some(100.0));
@@ -315,10 +316,11 @@ fn overview_pressure_history_keeps_normal_warning_critical_and_missing_seconds()
     selection["trends"][0]["pressure"] = json!(0);
     selection["trends"][1]["pressure"] = json!(1);
     selection["trends"][2]["pressure"] = json!(2);
-    let mut expected = vec![None; 900];
-    expected[0] = Some(0.0);
-    expected[449] = Some(1.0);
-    expected[899] = Some(2.0);
+    // The timeline holds the 900-second context and the minute of lead-in before it.
+    let mut expected = vec![None; 960];
+    expected[60] = Some(0.0);
+    expected[509] = Some(1.0);
+    expected[959] = Some(2.0);
 
     let overview = panels("overview", &selection, None).unwrap();
     let pressure = overview
@@ -328,7 +330,7 @@ fn overview_pressure_history_keeps_normal_warning_critical_and_missing_seconds()
 
     assert_eq!(pressure.kind, "timeline");
     assert_eq!(pressure.lines[0].values, expected);
-    assert_eq!(pressure.selected_index, Some(899));
+    assert_eq!(pressure.selected_index, Some(959));
     assert_eq!(
         pressure.states.as_ref().unwrap(),
         &["Normal", "Warning", "Critical"]
@@ -344,8 +346,8 @@ fn overview_pressure_history_retains_the_selected_same_second_alternative() {
     selection["trends"][1]["pressure"] = json!(1);
     selection["trends"][2]["pressure"] = json!(2);
     selection["selected"] = selection["trends"][1].clone();
-    let mut expected = vec![None; 900];
-    expected[899] = Some(1.0);
+    let mut expected = vec![None; 960];
+    expected[959] = Some(1.0);
 
     let overview = panels("overview", &selection, None).unwrap();
     let pressure = overview
@@ -354,7 +356,7 @@ fn overview_pressure_history_retains_the_selected_same_second_alternative() {
         .unwrap();
 
     assert_eq!(pressure.lines[0].values, expected);
-    assert_eq!(pressure.selected_index, Some(899));
+    assert_eq!(pressure.selected_index, Some(959));
     assert_eq!(
         inspection_identity(&selection, 1000),
         Some(selection["selected"].clone())
@@ -446,7 +448,7 @@ fn invalid_clocks_and_nonfinite_values_are_reported_instead_of_plotted() {
     // Goal: corrupt input cannot place samples outside the plot or create nonfinite geometry.
     // Method: move an observation beyond the domain, then substitute a nonfinite string reading.
     let mut selection = selection();
-    selection["trends"][0]["wall_ns"] = json!(100_000_000_000_u64);
+    selection["trends"][0]["wall_ns"] = json!(40_000_000_000_u64);
     assert!(panels("cpu", &selection, None).is_err());
     selection["trends"][0]["wall_ns"] = json!(101_000_000_000_u64);
     selection["trends"][0]["cpu_percent"] = json!("NaN");
@@ -764,10 +766,10 @@ fn pressure_timeline_uses_exact_selected_alternatives_and_blanks_unknown_states(
         .unwrap();
 
     assert_eq!(pressure.kind, "timeline");
-    assert_eq!(pressure.lines[0].values.len(), 900);
-    assert!(pressure.lines[0].values[..899].iter().all(Option::is_none));
-    assert_eq!(pressure.lines[0].values[899], Some(1.0));
-    assert_eq!(pressure.selected_index, Some(899));
+    assert_eq!(pressure.lines[0].values.len(), 960);
+    assert!(pressure.lines[0].values[..959].iter().all(Option::is_none));
+    assert_eq!(pressure.lines[0].values[959], Some(1.0));
+    assert_eq!(pressure.selected_index, Some(959));
     assert_eq!(
         pressure.states.as_ref().unwrap(),
         &["Normal", "Warning", "Critical"]
@@ -994,8 +996,9 @@ fn an_inspected_second_names_its_observation_without_carrying_its_readings() {
 }
 
 fn long_selection() -> Value {
-    // The newest second is 5000, so the full-detail context starts at 4101 and the older tail
-    // holds every tenth second before it.
+    // The newest second is 5000, so the full-detail context starts at 4101, the charts' full-detail
+    // readings a minute before it at 4041, and the older tail holds every tenth second before them
+    // back to 1341, a minute before the loaded hour.
     let point = |second: u64, publication: u64, cpu: f64, pressure: u64| {
         json!({"run": "00000000000000010000000000000002",
             "boot": "00000000000000030000000000000004", "segment": 1,
@@ -1019,16 +1022,16 @@ fn an_older_tail_widens_the_chart_to_the_whole_loaded_hour() {
     assert_eq!(
         panels[0].window,
         Some(crate::chart_axes::TimeWindow {
-            first: 1401,
-            span: 3600
+            first: 1341,
+            span: 3660
         })
     );
     let positions = panels[0].positions.as_ref().unwrap();
     assert_eq!(positions.len(), 4);
-    assert!((positions[0] - 599.0 / 3600.0).abs() < 0.000_001);
-    assert!((positions[1] - 609.0 / 3600.0).abs() < 0.000_001);
-    assert!((positions[2] - 2700.0 / 3600.0).abs() < 0.000_001);
-    assert!((positions[3] - 3599.0 / 3600.0).abs() < 0.000_001);
+    assert!((positions[0] - 659.0 / 3660.0).abs() < 0.000_001);
+    assert!((positions[1] - 669.0 / 3660.0).abs() < 0.000_001);
+    assert!((positions[2] - 2760.0 / 3660.0).abs() < 0.000_001);
+    assert!((positions[3] - 3659.0 / 3660.0).abs() < 0.000_001);
     assert_eq!(
         panels[0].lines[0].values,
         [Some(10.0), Some(11.0), Some(20.0), Some(30.0)]
@@ -1037,7 +1040,8 @@ fn an_older_tail_widens_the_chart_to_the_whole_loaded_hour() {
 
 #[test]
 fn a_selection_without_an_older_tail_keeps_the_default_history() {
-    // Goal: a recording younger than the tail, or a route that has none, keeps its 900 seconds.
+    // Goal: a recording younger than the tail, or a route that has none, keeps its full-detail
+    // seconds.
     // Method: project the same selection with its tail removed.
     let mut selection = long_selection();
     selection.as_object_mut().unwrap().remove("earlier_trends");
@@ -1047,8 +1051,8 @@ fn a_selection_without_an_older_tail_keeps_the_default_history() {
     assert_eq!(
         panels[0].window,
         Some(crate::chart_axes::TimeWindow {
-            first: 4101,
-            span: 900
+            first: 4041,
+            span: 960
         })
     );
     assert_eq!(panels[0].positions.as_ref().unwrap().len(), 2);
@@ -1065,13 +1069,13 @@ fn an_older_reading_fills_the_seconds_it_stands_for_on_a_timeline() {
         .unwrap();
 
     let cells = &pressure.lines[0].values;
-    assert_eq!(cells.len(), 3600);
-    assert!(cells[598].is_none());
-    assert!(cells[599..609].iter().all(|cell| *cell == Some(1.0)));
-    assert!(cells[609..619].iter().all(|cell| *cell == Some(2.0)));
-    assert!(cells[619].is_none());
-    assert_eq!(cells[2700], Some(0.0));
-    assert_eq!(cells[3599], Some(0.0));
+    assert_eq!(cells.len(), 3660);
+    assert!(cells[658].is_none());
+    assert!(cells[659..669].iter().all(|cell| *cell == Some(1.0)));
+    assert!(cells[669..679].iter().all(|cell| *cell == Some(2.0)));
+    assert!(cells[679].is_none());
+    assert_eq!(cells[2760], Some(0.0));
+    assert_eq!(cells[3659], Some(0.0));
 }
 
 #[test]
@@ -1112,12 +1116,12 @@ fn a_selection_holds_the_seconds_its_charts_hold() {
     let recent = json!({"second": 5000,"context_last_second": 5000, "trends": []});
     let longer = long_selection();
 
-    assert!(!holds_second(&recent, 4100));
-    assert!(holds_second(&recent, 4101));
+    assert!(!holds_second(&recent, 4040));
+    assert!(holds_second(&recent, 4041));
     assert!(holds_second(&recent, 5000));
     assert!(!holds_second(&recent, 5001));
-    assert!(!holds_second(&longer, 1400));
-    assert!(holds_second(&longer, 1401));
+    assert!(!holds_second(&longer, 1340));
+    assert!(holds_second(&longer, 1341));
     assert!(!holds_second(&longer, 5001));
 }
 

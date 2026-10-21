@@ -12,11 +12,12 @@ use crate::live_inventory::PerformanceLevel;
 mod resource_projection;
 
 pub const OBSERVATIONS_MAX: usize = 4096;
-const LOADED_SECONDS: u64 = viewer::LOADED_SECONDS;
+/// The seconds a selection with an older tail holds: the loaded hour and the lead-in before it.
+const HELD_SECONDS: u64 = viewer::LOADED_SECONDS + viewer::LEAD_IN_SECONDS;
 /// The seconds of full-detail readings a selection holds, which end at the last second of its
-/// context.
-const DETAIL_SECONDS: u64 = 900;
-const _: () = assert!(DETAIL_SECONDS < LOADED_SECONDS);
+/// context: the 15 minutes of the shortest range and their lead-in.
+const DETAIL_SECONDS: u64 = viewer::CHARTED_SECONDS;
+const _: () = assert!(DETAIL_SECONDS < HELD_SECONDS);
 pub const OVERVIEW_PRIMARY_PANELS: usize = 6;
 /// The Overview chart that sets load, power and heat side by side.
 pub const CORRELATION_ID: &str = "live-correlation";
@@ -122,10 +123,11 @@ pub fn context_last_second(selection: &Value) -> Option<u64> {
 }
 
 /// The first second the charts hold for a context that ends at `last_second`: the first of its
-/// full-detail 900, or of the whole loaded hour when the selection carries an older tail.
+/// full-detail seconds, or of the lead-in before the loaded hour when the selection carries an
+/// older tail.
 fn first_held_second(last_second: u64, longer: bool) -> u64 {
     if longer {
-        return last_second.saturating_sub(LOADED_SECONDS - 1);
+        return last_second.saturating_sub(HELD_SECONDS - 1);
     }
 
     last_second.saturating_sub(DETAIL_SECONDS - 1)
@@ -336,8 +338,8 @@ struct Reading {
 }
 
 impl Domain {
-    /// The seconds the charts hold: the full-detail 900, or the whole loaded hour when the
-    /// selection carries an older tail.
+    /// The seconds the charts hold: the full-detail ones, or the loaded hour and its lead-in
+    /// when the selection carries an older tail.
     fn read(selection: &Value, longer: bool) -> Result<Self, String> {
         let last = integer(&selection["context_last_second"])?;
         let recent_first = first_held_second(last, false);
@@ -345,7 +347,7 @@ impl Domain {
         let end = last.checked_add(1).ok_or("Live chart time overflow")?;
         let span = u16::try_from(end - first).map_err(|error| error.to_string())?;
         assert!(span > 0);
-        assert!(u64::from(span) <= LOADED_SECONDS);
+        assert!(u64::from(span) <= HELD_SECONDS);
         let stride = if longer {
             integer(&selection["earlier_stride_seconds"])?
         } else {

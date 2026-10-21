@@ -112,6 +112,29 @@ impl ContextRange {
             end_ns,
         })
     }
+
+    /// The wall clock range of the full-detail readings the charts of the context that ends at
+    /// `last_second` draw: the context and the lead-in before it.
+    pub(crate) fn charted_ending_at(last_second: u64) -> Result<Self> {
+        let context = Self::ending_at(last_second)?;
+
+        Ok(Self {
+            first_ns: last_second.saturating_sub(CHARTED_SECONDS - 1) * NS,
+            end_ns: context.end_ns,
+        })
+    }
+
+    /// The points of `points`, in time order, from the range's first second on, which leaves
+    /// out the lead-in the charts draw before the context.
+    pub(crate) fn held_points(self, points: &[Value]) -> &[Value] {
+        let first = points.partition_point(|point| {
+            point["wall_ns"]
+                .as_u64()
+                .is_some_and(|wall| wall < self.first_ns)
+        });
+
+        &points[first..]
+    }
 }
 
 #[derive(Clone)]
@@ -286,7 +309,7 @@ impl Session {
         self.context_last_second = None;
         self.app_sample_cache.get_mut().take();
         self.operation.check()?;
-        let range = ContextRange::ending_at(selection.context_last_second)?;
+        let range = ContextRange::charted_ending_at(selection.context_last_second)?;
         let mut observations = self.observations(range.first_ns, range.end_ns)?;
         observations.sort_by_key(|value| (value.wall, value.window, value.publication));
         let alternatives: Vec<_> = observations
@@ -322,7 +345,8 @@ impl Session {
             })
             .cloned();
         let mut selected_context = Vec::new();
-        crate::cpu_history::context(&points, &mut selected_context)?;
+        let context = ContextRange::ending_at(selection.context_last_second)?;
+        crate::cpu_history::context(context.held_points(&points), &mut selected_context)?;
         self.selected_context = selected_context;
         self.selected = chosen;
         self.context_last_second = Some(selection.context_last_second);
@@ -809,5 +833,7 @@ mod earlier;
 #[cfg(test)]
 mod reopen_tests;
 mod selection;
-pub use earlier::{CONTEXT_AFTER_SECONDS, EARLIER_STRIDE_SECONDS, LOADED_SECONDS};
+pub use earlier::{
+    CHARTED_SECONDS, CONTEXT_AFTER_SECONDS, EARLIER_STRIDE_SECONDS, LEAD_IN_SECONDS, LOADED_SECONDS,
+};
 pub(crate) use earlier::{DETAIL_SECONDS, Tail};

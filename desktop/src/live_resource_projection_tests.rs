@@ -48,8 +48,8 @@ fn battery_projects_charge_signed_flow_and_binary_charging_history() {
         projected[2].states.as_ref().unwrap(),
         &["Not charging", "Charging"]
     );
-    assert_eq!(projected[2].lines[0].values[899], Some(0.0));
-    assert_eq!(projected[2].selected_index, Some(899));
+    assert_eq!(projected[2].lines[0].values[959], Some(0.0));
+    assert_eq!(projected[2].selected_index, Some(959));
     assert_eq!(
         projected[2].help.as_deref(),
         Some(
@@ -90,9 +90,9 @@ fn charging_history_keeps_the_exact_selected_alternative_and_unobserved_seconds_
     let projected = panels("battery", &selection, None).unwrap();
 
     assert_eq!(projected.len(), 3);
-    assert_eq!(projected[2].lines[0].values[898], None);
-    assert_eq!(projected[2].lines[0].values[899], Some(0.0));
-    assert_eq!(projected[2].selected_index, Some(899));
+    assert_eq!(projected[2].lines[0].values[958], None);
+    assert_eq!(projected[2].lines[0].values[959], Some(0.0));
+    assert_eq!(projected[2].selected_index, Some(959));
 }
 
 #[test]
@@ -139,8 +139,8 @@ fn battery_histories_retain_wall_spacing_and_run_breaks() {
     assert_eq!(projected.len(), 3);
     assert_eq!(projected[0].segments.as_ref().unwrap(), &[0, 1]);
     let positions = projected[0].positions.as_ref().unwrap();
-    assert!((positions[0] - 449.0 / 900.0).abs() < 0.000_001);
-    assert!((positions[1] - 899.75 / 900.0).abs() < 0.000_001);
+    assert!((positions[0] - 509.0 / 960.0).abs() < 0.000_001);
+    assert!((positions[1] - 959.75 / 960.0).abs() < 0.000_001);
     assert_eq!(projected[0].selected_index, Some(1));
 }
 

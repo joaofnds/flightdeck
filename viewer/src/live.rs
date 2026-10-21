@@ -15,8 +15,8 @@ use crate::live_app_history::{GroupTarget, History, Selection, Target};
 use crate::live_app_response::{Detail, KeyKind, Page, Sample};
 use crate::live_apps::{Frame, Publication, PublicationEvents};
 use crate::session::{
-    ContextRange, ContextSelection, DETAIL_SECONDS, EARLIER_STRIDE_SECONDS, LOADED_SECONDS,
-    OBSERVATIONS_MAX, Observation, PAGE_ROWS, Tail, Verified,
+    CHARTED_SECONDS, ContextRange, ContextSelection, DETAIL_SECONDS, EARLIER_STRIDE_SECONDS,
+    LEAD_IN_SECONDS, LOADED_SECONDS, OBSERVATIONS_MAX, Observation, PAGE_ROWS, Tail, Verified,
 };
 use crate::{Cancellation, Session, metrics};
 
@@ -494,9 +494,9 @@ impl LiveSession {
     }
 
     /// The saved readings older than the full-detail context that ends at
-    /// `context_last_second`, back to the loaded hour, one in every stretch of seconds. Read
-    /// again only when the context moves into another stretch or a minute is sealed, so
-    /// following the newest second costs one read in every `EARLIER_STRIDE_SECONDS`.
+    /// `context_last_second`, back to the lead-in before the loaded hour, one in every stretch of
+    /// seconds. Read again only when the context moves into another stretch or a minute is
+    /// sealed, so following the newest second costs one read in every `EARLIER_STRIDE_SECONDS`.
     pub fn earlier_context(&mut self, context_last_second: u64) -> Result<Value> {
         let limit_second = earlier_limit_second(context_last_second);
         if !self.earlier_current(limit_second) {
@@ -504,7 +504,8 @@ impl LiveSession {
                 Some(history) => {
                     history.begin(self.operation.epoch())?;
                     history.earlier_tail(
-                        limit_second.saturating_sub(LOADED_SECONDS - DETAIL_SECONDS),
+                        limit_second
+                            .saturating_sub(LOADED_SECONDS + LEAD_IN_SECONDS - CHARTED_SECONDS),
                         limit_second,
                     )?
                 }
@@ -528,7 +529,7 @@ impl LiveSession {
             return Ok(None);
         }
 
-        let first_second = context_last_second.saturating_sub(LOADED_SECONDS - 1);
+        let first_second = context_last_second.saturating_sub(LOADED_SECONDS + LEAD_IN_SECONDS - 1);
         let cache = self.earlier.as_ref().ok_or(Error::Bound("older tail"))?;
         let points: Vec<&Value> = cache
             .tail
@@ -584,7 +585,7 @@ impl LiveSession {
             .ok_or(Error::Bound("latest live raw observation unavailable"))?;
         let second = current.observation.wall / NANOSECONDS_PER_SECOND;
         let selected = current.json();
-        let range = ContextRange::ending_at(second)?;
+        let range = ContextRange::charted_ending_at(second)?;
 
         if let Err(error) = self.follow_restore(range) {
             self.history_failure(error)?;
@@ -611,7 +612,8 @@ impl LiveSession {
             .collect::<Vec<_>>();
         alternatives.sort_by(|left, right| identity_order(left).cmp(&identity_order(right)));
         let mut context = Vec::new();
-        crate::cpu_history::context(&trends, &mut context)?;
+        let held = ContextRange::ending_at(second)?.held_points(&trends);
+        crate::cpu_history::context(held, &mut context)?;
         self.operation.check()?;
 
         let response = json!({"second": second, "context_last_second": second,
@@ -2265,11 +2267,12 @@ fn refresh_history_before(windows: &[persistence::Manifest], through_ns: u64) ->
         .count()
 }
 
-/// The first second of the stretch that holds the first second of the full-detail context
-/// that ends at `context_last_second`, where its older tail ends. The division floors.
+/// The first second of the stretch that holds the first of the full-detail seconds the charts
+/// of the context that ends at `context_last_second` hold, where its older tail ends. The
+/// division floors.
 fn earlier_limit_second(context_last_second: u64) -> u64 {
-    let detail_first = context_last_second.saturating_sub(DETAIL_SECONDS - 1);
-    detail_first / EARLIER_STRIDE_SECONDS * EARLIER_STRIDE_SECONDS
+    let charted_first = context_last_second.saturating_sub(CHARTED_SECONDS - 1);
+    charted_first / EARLIER_STRIDE_SECONDS * EARLIER_STRIDE_SECONDS
 }
 
 fn context_contains(range: ContextRange, point: &Value) -> Result<bool> {
@@ -2613,7 +2616,8 @@ mod tests {
 
     #[test]
     fn restores_fifteen_minutes_when_following_a_cold_or_reopened_live_source() {
-        // Goal: cold and reopened following includes all available last-900-second readings.
+        // Goal: cold and reopened following includes all available last-900-second readings
+        // and the lead-in before them.
         // Method: seal 840 genuine one-Hz publications and retain a 120-slot overlapping tail.
         let mut fixture = RingFixture::new_following();
         follow_restoration_publish(&mut fixture);
@@ -2624,8 +2628,8 @@ mod tests {
         follow_restoration_read(&fixture.root, "reopened", &mut reopened);
 
         assert_eq!(cold, reopened);
-        assert_eq!(cold["trends"][0]["fan_rpm"], json!([2.0, 0.0]));
-        assert_eq!(cold["trends"][700]["fan_rpm"], json!([702.0, 0.0]));
+        assert_eq!(cold["trends"][1]["fan_rpm"], json!([2.0, 0.0]));
+        assert_eq!(cold["trends"][701]["fan_rpm"], json!([702.0, 0.0]));
         assert_eq!(cold["summary"]["fan_rpm"], json!([901.0, 0.0]));
         follow_restoration_assert_window(&cold);
         follow_restoration_assert_window(&reopened);
@@ -2682,7 +2686,7 @@ mod tests {
         let reads_extended = session.history.as_ref().unwrap().source_reads.get() - before;
         let reads_restored = opened.history.as_ref().unwrap().source_reads.get();
         assert_eq!(extended["trends"], restored["trends"]);
-        assert_eq!(session.restored.as_ref().unwrap().points.len(), 899);
+        assert_eq!(session.restored.as_ref().unwrap().points.len(), 900);
         assert!(reads_extended * 7 < reads_restored);
     }
 
@@ -2961,7 +2965,7 @@ mod tests {
         follow_restoration_publish_omitting(&mut fixture, &mut missing);
         let mut session = LiveSession::open(&fixture.root).unwrap();
         let initial = session.follow_latest().unwrap();
-        assert_eq!(initial["trends"].as_array().unwrap().len(), 840);
+        assert_eq!(initial["trends"].as_array().unwrap().len(), 841);
         assert!(!session.sources[0].pending_windows.contains(&12));
         let cursor = session.sources[0].reader.next_publication();
         let losses = session.sources[0].losses;
@@ -2982,12 +2986,12 @@ mod tests {
             "windows":session.catalog()["windows"],"cursor":cursor,"polls":256})
         );
         follow_restoration_assert_window(&response);
-        assert_eq!(response["trends"][719]["publication"], 721);
-        assert_eq!(response["trends"][719]["cpu_percent"], 50.0);
-        assert_eq!(response["trends"][719]["fan_rpm"], json!([721.0, 0.0]));
-        assert_eq!(response["trends"][779]["publication"], 781);
-        assert_eq!(response["trends"][779]["cpu_percent"], 50.0);
-        assert_eq!(response["trends"][779]["fan_rpm"], json!([781.0, 0.0]));
+        assert_eq!(response["trends"][720]["publication"], 721);
+        assert_eq!(response["trends"][720]["cpu_percent"], 50.0);
+        assert_eq!(response["trends"][720]["fan_rpm"], json!([721.0, 0.0]));
+        assert_eq!(response["trends"][780]["publication"], 781);
+        assert_eq!(response["trends"][780]["cpu_percent"], 50.0);
+        assert_eq!(response["trends"][780]["fan_rpm"], json!([781.0, 0.0]));
     }
 
     fn follow_restoration_publish_omitting(
@@ -3174,12 +3178,12 @@ mod tests {
         for sample in 0..20 {
             follow_restoration_measure("warm_follow", sample, || {
                 let response = session.follow_latest().unwrap();
-                assert_eq!(response["trends"].as_array().unwrap().len(), 900);
+                assert_eq!(response["trends"].as_array().unwrap().len(), 901);
             });
         }
         assert_eq!(session.history.as_ref().unwrap().source_reads.get(), reads);
         follow_restoration_measure_context(&session, "warm_context", fan_count);
-        assert_eq!(session.restored.as_ref().unwrap().points.len(), 839);
+        assert_eq!(session.restored.as_ref().unwrap().points.len(), 840);
         let selected = session.selected.clone();
         let cursor = session.sources[0].reader.next_publication();
         seal_window(&fixture.root, pending.as_ref().unwrap());
@@ -3187,7 +3191,7 @@ mod tests {
         follow_restoration_measure("post_commit_poll", 0, || {
             assert!(!session.poll().unwrap());
         });
-        assert_eq!(session.restored.as_ref().unwrap().points.len(), 839);
+        assert_eq!(session.restored.as_ref().unwrap().points.len(), 840);
         follow_restoration_measure("post_commit_follow", 0, || {
             let response = session.follow_latest().unwrap();
             follow_restoration_assert_window(&response);
@@ -3195,7 +3199,7 @@ mod tests {
 
         assert_eq!(session.selected, selected);
         assert_eq!(session.sources[0].reader.next_publication(), cursor);
-        assert_eq!(session.restored.as_ref().unwrap().points.len(), 899);
+        assert_eq!(session.restored.as_ref().unwrap().points.len(), 900);
         follow_restoration_measure_context(&session, "late_context", fan_count);
         let restored = session.restored.as_ref().unwrap();
         println!(
@@ -3232,7 +3236,7 @@ mod tests {
         for sample in 0..20 {
             follow_restoration_measure("full_warm_follow", sample, || {
                 let response = live.follow_latest().unwrap();
-                assert_eq!(response["trends"].as_array().unwrap().len(), 900);
+                assert_eq!(response["trends"].as_array().unwrap().len(), 901);
             });
         }
 
@@ -3320,7 +3324,9 @@ mod tests {
             .iter()
             .map(|point| point["publication"].as_u64().unwrap())
             .collect::<Vec<_>>();
-        let expected = (2..=901_u64).collect::<Vec<_>>();
+        // The charts' readings hold the lead-in before the 900-second context, which reaches
+        // the first publication.
+        let expected = (1..=901_u64).collect::<Vec<_>>();
 
         assert_eq!(response["selected"]["publication"], 901);
         assert_eq!(response["selected"]["run_tick"], 901);
@@ -3329,12 +3335,12 @@ mod tests {
             1901 * NANOSECONDS_PER_SECOND
         );
         assert_eq!(response["context_seconds"], 900);
-        assert_eq!(publications.len(), 900);
+        assert_eq!(publications.len(), 901);
         assert_eq!(publications, expected);
-        assert_eq!(trends[0]["cpu_percent"], 50.0);
-        assert_eq!(trends[780]["publication"], 782);
-        assert_eq!(trends[780]["cpu_percent"], 50.0);
-        assert_eq!(trends[0]["memory_active_bytes"], 2 * 1024 * 1024);
+        assert_eq!(trends[1]["cpu_percent"], 50.0);
+        assert_eq!(trends[781]["publication"], 782);
+        assert_eq!(trends[781]["cpu_percent"], 50.0);
+        assert_eq!(trends[1]["memory_active_bytes"], 2 * 1024 * 1024);
         assert_eq!(response["summary"]["cpu_percent"], 50.0);
         for point in trends {
             assert_eq!(point["run"], response["selected"]["run"]);
