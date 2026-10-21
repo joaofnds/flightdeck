@@ -63,16 +63,16 @@ pub struct Session {
 /// A selected second and the last second of the context read with it, which runs past the
 /// selected second where the recording holds later seconds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ContextSelection {
-    pub second: u64,
-    pub context_last_second: u64,
+pub(crate) struct ContextSelection {
+    second: u64,
+    context_last_second: u64,
 }
 
 impl ContextSelection {
     /// The selection of `second` in a recording whose newest second is `newest_second`: its
     /// context holds up to `CONTEXT_AFTER_SECONDS` after it, and none past the newest second.
     #[must_use]
-    pub fn of(second: u64, newest_second: Option<u64>) -> Self {
+    pub(crate) fn of(second: u64, newest_second: Option<u64>) -> Self {
         let after = second.saturating_add(CONTEXT_AFTER_SECONDS);
         let context_last_second = newest_second.map_or(second, |newest| after.min(newest));
 
@@ -80,6 +80,16 @@ impl ContextSelection {
             second,
             context_last_second: context_last_second.max(second),
         }
+    }
+
+    /// The selected second.
+    pub(crate) fn second(self) -> u64 {
+        self.second
+    }
+
+    /// The last second of the context read with the selected second.
+    pub(crate) fn context_last_second(self) -> u64 {
+        self.context_last_second
     }
 }
 
@@ -258,7 +268,7 @@ impl Session {
     }
 
     /// Selects `selection`'s second with the context it names.
-    pub fn select_context(
+    pub(crate) fn select_context(
         &mut self,
         selection: ContextSelection,
         alternative: usize,
@@ -276,14 +286,12 @@ impl Session {
         self.context_last_second = None;
         self.app_sample_cache.get_mut().take();
         self.operation.check()?;
-        let second = selection.second;
-        let last = selection.context_last_second;
-        let range = ContextRange::ending_at(last)?;
+        let range = ContextRange::ending_at(selection.context_last_second)?;
         let mut observations = self.observations(range.first_ns, range.end_ns)?;
         observations.sort_by_key(|value| (value.wall, value.window, value.publication));
         let alternatives: Vec<_> = observations
             .iter()
-            .filter(|value| value.wall / NS == second)
+            .filter(|value| value.wall / NS == selection.second)
             .cloned()
             .collect();
         let chosen = if alternatives.is_empty() {
@@ -317,11 +325,13 @@ impl Session {
         crate::cpu_history::context(&points, &mut selected_context)?;
         self.selected_context = selected_context;
         self.selected = chosen;
-        self.context_last_second = Some(last);
-        Ok(json!({"second": second, "context_last_second": last,
+        self.context_last_second = Some(selection.context_last_second);
+        Ok(
+            json!({"second": selection.second, "context_last_second": selection.context_last_second,
             "selected": self.selected.as_ref().map(|value| value.json(self)),
             "alternatives": alternatives.iter().map(|value| value.json(self)).collect::<Vec<_>>(),
-            "summary": summary, "trends": points, "context_seconds": 900}))
+            "summary": summary, "trends": points, "context_seconds": 900}),
+        )
     }
 
     /// Selects the observation of `second` that `named` picks out of its JSON, with its summary,

@@ -357,7 +357,7 @@ impl LiveSession {
             )
         };
         self.select_trends(selection, &mut response)?;
-        self.select_observation(selected, &mut response)?;
+        self.select_observation(selection, selected, &mut response)?;
         if let Some(selected) = &self.selected {
             response["summary"] = response["trends"]
                 .as_array()
@@ -375,7 +375,7 @@ impl LiveSession {
             &mut context,
         )?;
         self.selected_context = context;
-        self.context_last_second = Some(selection.context_last_second);
+        self.context_last_second = Some(selection.context_last_second());
 
         Ok(response)
     }
@@ -1628,7 +1628,7 @@ impl LiveSession {
     }
 
     fn select_trends(&self, selection: ContextSelection, response: &mut Value) -> Result<()> {
-        let last = selection.context_last_second;
+        let last = selection.context_last_second();
         let points = response["trends"]
             .as_array_mut()
             .ok_or(Error::Bound("trends shape"))?;
@@ -1665,6 +1665,7 @@ impl LiveSession {
 
     fn select_observation(
         &mut self,
+        selection: ContextSelection,
         mut selected: Option<Value>,
         response: &mut Value,
     ) -> Result<()> {
@@ -1686,7 +1687,7 @@ impl LiveSession {
                         self.inspected = Some(inspected);
                         self.poll_evict(0)?;
                     } else {
-                        self.select_history(selected, response)?;
+                        self.select_history(selection, selected, response)?;
                     }
                 }
             } else {
@@ -1708,19 +1709,16 @@ impl LiveSession {
         Ok(())
     }
 
-    fn select_history(&mut self, selected: &Value, response: &mut Value) -> Result<()> {
+    fn select_history(
+        &mut self,
+        selection: ContextSelection,
+        selected: &Value,
+        response: &mut Value,
+    ) -> Result<()> {
         let history = self
             .history
             .as_mut()
             .ok_or(Error::Bound("missing history"))?;
-        let selection = ContextSelection {
-            second: response["second"]
-                .as_u64()
-                .ok_or(Error::Bound("selection second"))?,
-            context_last_second: response["context_last_second"]
-                .as_u64()
-                .ok_or(Error::Bound("selection context"))?,
-        };
         let historical = history.select_context(selection, 0)?;
         let alternatives = historical["alternatives"]
             .as_array()
@@ -1736,7 +1734,7 @@ impl LiveSession {
 
 /// A selection of `second` with nothing read from the saved minutes.
 fn select_unsaved(selection: ContextSelection) -> Value {
-    json!({"second": selection.second, "context_last_second": selection.context_last_second,
+    json!({"second": selection.second(), "context_last_second": selection.context_last_second(),
         "selected": null, "alternatives": [], "summary": null, "trends": [],
         "context_seconds": 900})
 }
