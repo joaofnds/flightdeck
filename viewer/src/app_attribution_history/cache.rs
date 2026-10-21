@@ -433,10 +433,14 @@ impl Point {
     ) -> Result<Self> {
         let mut count = 0;
         let mut bytes = 0;
+        let mut index_next = 0;
         for measured in apps.clone() {
             operation.check()?;
             count += 1;
-            if sums.and_then(|sums| sums.key(&measured.key)).is_none() {
+            if sums
+                .and_then(|sums| sums.key(&measured.key, &mut index_next))
+                .is_none()
+            {
                 bytes += Key::owned_bytes(&measured.key);
             }
         }
@@ -445,11 +449,13 @@ impl Point {
         }
 
         let mut output = Vec::with_capacity(count);
+        // The second pass searches the same Apps in the same order, from the first entry.
+        index_next = 0;
         for measured in apps {
             operation.check()?;
             // A key the cache already holds is shared, so each name is stored once.
             let key = sums
-                .and_then(|sums| sums.key(&measured.key))
+                .and_then(|sums| sums.key(&measured.key, &mut index_next))
                 .map_or_else(|| Arc::new(Key::capture(&measured.key)), Arc::clone);
             output.push(App {
                 key,

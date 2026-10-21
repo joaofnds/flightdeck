@@ -53,17 +53,29 @@ impl<K: SumKey> Sums<K> {
         }
     }
 
-    pub(crate) fn key(&self, key: &AppKey<'_>) -> Option<&K> {
-        let index = self.search(key).ok()?;
-        Some(&self.entries[index].key)
+    /// The key an entry keeps for `key`. A caller passing each App of one second in turn passes
+    /// the same `index_next`, which the search tries first and leaves at the entry after `key`'s,
+    /// or at the place `key` would take when no entry holds it.
+    pub(crate) fn key(&self, key: &AppKey<'_>, index_next: &mut usize) -> Option<&K> {
+        match self.search(key, *index_next) {
+            Ok(index) => {
+                *index_next = index + 1;
+                Some(&self.entries[index].key)
+            }
+            Err(index) => {
+                *index_next = index;
+                None
+            }
+        }
     }
 
     /// The bytes adding `apps` would take, their new keys and the entries they need.
     pub(crate) fn added_bytes<A: Summed<Key = K>>(&self, apps: &[A]) -> usize {
         let mut entries = 0;
         let mut keys = 0;
+        let mut index_next = 0;
         for app in apps {
-            if self.search(&app.view()).is_err() {
+            if self.key(&app.view(), &mut index_next).is_none() {
                 entries += 1;
                 keys += app.key_bytes();
             }
@@ -77,16 +89,14 @@ impl<K: SumKey> Sums<K> {
     /// beforehand.
     pub(crate) fn add<A: Summed<Key = K>>(&mut self, elapsed: Option<u64>, apps: &[A]) -> usize {
         let capacity = self.entries.capacity();
-        let missing = apps
-            .iter()
-            .filter(|app| self.search(&app.view()).is_err())
-            .count();
-        self.entries.reserve_exact(missing);
+        self.entries.reserve_exact(self.add_missing(apps));
         let mut keys = 0;
+        let mut index_next = 0;
         for app in apps {
             let totals = totals(elapsed, app.measures());
-            match self.search(&app.view()) {
+            match self.search(&app.view(), index_next) {
                 Ok(index) => {
+                    index_next = index + 1;
                     let entry = &mut self.entries[index];
                     entry.points += 1;
                     for (total, value) in entry.totals.iter_mut().zip(totals) {
@@ -95,6 +105,7 @@ impl<K: SumKey> Sums<K> {
                     }
                 }
                 Err(index) => {
+                    index_next = index + 1;
                     keys += app.key_bytes();
                     self.entries.insert(
                         index,
@@ -112,16 +123,31 @@ impl<K: SumKey> Sums<K> {
         keys + (self.entries.capacity() - capacity) * size_of::<Entry<K>>()
     }
 
+    /// How many of one second's `apps` no entry holds yet.
+    fn add_missing<A: Summed<Key = K>>(&self, apps: &[A]) -> usize {
+        let mut missing = 0;
+        let mut index_next = 0;
+        for app in apps {
+            if self.key(&app.view(), &mut index_next).is_none() {
+                missing += 1;
+            }
+        }
+
+        missing
+    }
+
     /// Removes one second's `apps`, which an earlier `add` counted, and returns the bytes it
     /// released.
     pub(crate) fn remove<A: Summed<Key = K>>(&mut self, elapsed: Option<u64>, apps: &[A]) -> usize {
         let capacity = self.entries.capacity();
         let mut keys = 0;
+        let mut index_next = 0;
         for app in apps {
             let totals = totals(elapsed, app.measures());
-            let found = self.search(&app.view());
+            let found = self.search(&app.view(), index_next);
             assert!(found.is_ok(), "a summed second's App has a total");
             let (Ok(index) | Err(index)) = found;
+            index_next = index + 1;
             let entry = &mut self.entries[index];
             entry.points -= 1;
             for (total, value) in entry.totals.iter_mut().zip(totals) {
@@ -131,6 +157,7 @@ impl<K: SumKey> Sums<K> {
             if entry.points == 0 {
                 keys += entry.key_bytes;
                 self.entries.remove(index);
+                index_next = index;
             }
         }
         if self.entries.len() < capacity {
@@ -165,7 +192,16 @@ impl<K: SumKey> Sums<K> {
             .map(move |entry| (entry.key.view(), entry.totals[index]))
     }
 
-    fn search(&self, key: &AppKey<'_>) -> Result<usize, usize> {
+    /// Searches the entries for `key` as `binary_search_by` does. The Apps of one second arrive
+    /// in key order, so the entry at `index_next`, after the last App's, usually holds the next
+    /// App, and trying it first spares the search, whose key comparisons dominate a cold history.
+    fn search(&self, key: &AppKey<'_>, index_next: usize) -> Result<usize, usize> {
+        if let Some(entry) = self.entries.get(index_next) {
+            if entry.key.view() == *key {
+                return Ok(index_next);
+            }
+        }
+
         self.entries
             .binary_search_by(|entry| entry.key.view().cmp(key))
     }

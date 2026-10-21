@@ -17,7 +17,7 @@ fn insert(cache: &mut Cache, publication: u64, names: &[&str]) {
         .map(|name| {
             cache
                 .sums
-                .key(&crate::apps::AppKey::Bundle(name.as_bytes()))
+                .key(&crate::apps::AppKey::Bundle(name.as_bytes()), &mut 0)
                 .map_or_else(
                     || {
                         Arc::new(Key {
