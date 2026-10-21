@@ -11,6 +11,11 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use gpui::{App, Entity, Modifiers, MouseButton, PlatformInput, Window, point, px, size};
+use objc2::rc::Retained;
+use objc2::runtime::AnyObject;
+use objc2::{MainThreadMarker, msg_send, sel};
+use objc2_app_kit::NSApplication;
+use objc2_foundation::NSString;
 use serde_json::{Value, json};
 
 use crate::live_dashboard::{LiveDashboard, ROUTES};
@@ -33,6 +38,9 @@ const READING_POLL: Duration = Duration::from_millis(50);
 const READING_POLLS_MAX: u32 = 100;
 /// The rows the `rows` command lists, matching the dashboard's own row bound.
 const ROWS_MAX: usize = 4096;
+/// The accessibility nodes the `accessibility` command searches, which bounds its walk of a
+/// window's tree.
+const ACCESSIBILITY_NODES_MAX: usize = 65_536;
 
 pub struct Command {
     line: String,
@@ -276,6 +284,7 @@ fn execute(
         }
         "help" => Ok(json!(HELP)),
         "drag" => drag(words, window, cx),
+        "accessibility" => accessibility(words),
         _ => pointer(words, window, cx),
     }
 }
@@ -295,6 +304,7 @@ const HELP: &[&str] = &[
     "scroll X Y DELTA_Y",
     "exit X Y",
     "key KEYSTROKE",
+    "accessibility increment|decrement TITLE",
     "screenshot PATH",
     "quit",
 ];
@@ -396,6 +406,96 @@ fn navigate(route: &str, dashboard: &Entity<LiveDashboard>, cx: &mut App) -> Res
 
     dashboard.update(cx, |dashboard, cx| dashboard.navigate(route, cx));
     Ok(Value::Null)
+}
+
+/// Performs a screen reader's increment or decrement on the first node whose title starts
+/// with the words after the action, through the window's own accessibility tree, as a screen
+/// reader reaches it. The first command turns the tree on, and GPUI fills it only on the frame
+/// after, so that command finds nothing.
+fn accessibility(words: &[&str]) -> Result<Value, String> {
+    let increment = match word(words, 1)? {
+        "increment" => true,
+        "decrement" => false,
+        other => return Err(format!("unknown accessibility action {other:?}")),
+    };
+    let title = words.get(2..).unwrap_or(&[]).join(" ");
+    if title.is_empty() {
+        return Err("accessibility needs a title".into());
+    }
+    let main = MainThreadMarker::new().ok_or("accessibility runs off the main thread")?;
+
+    let Some(node) = accessibility_node(main, &title)? else {
+        return Ok(json!({"found": false}));
+    };
+    let performed: bool = if increment {
+        // SAFETY: accessibility_node returns only nodes that answer accessibilityTitle, which
+        // the NSAccessibility protocol declares together with the perform methods.
+        unsafe { msg_send![&*node, accessibilityPerformIncrement] }
+    } else {
+        // SAFETY: as for the increment above.
+        unsafe { msg_send![&*node, accessibilityPerformDecrement] }
+    };
+    Ok(json!({"found": true, "performed": performed}))
+}
+
+/// Searches the application's windows and their accessibility descendants, depth first, for
+/// the first node whose title starts with `title`.
+fn accessibility_node(
+    main: MainThreadMarker,
+    title: &str,
+) -> Result<Option<Retained<AnyObject>>, String> {
+    let application = NSApplication::sharedApplication(main);
+    // SAFETY: NSApplication's windows returns an NSArray of its NSWindows.
+    let windows: Retained<AnyObject> = unsafe { msg_send![&application, windows] };
+    let mut pending = Vec::with_capacity(ACCESSIBILITY_NODES_MAX);
+    accessibility_push(&windows, &mut pending)?;
+
+    for _ in 0..ACCESSIBILITY_NODES_MAX {
+        let Some(node) = pending.pop() else {
+            return Ok(None);
+        };
+        // SAFETY: every NSObject answers respondsToSelector:.
+        let answers: bool =
+            unsafe { msg_send![&*node, respondsToSelector: sel!(accessibilityTitle)] };
+        if answers {
+            // SAFETY: the node answers accessibilityTitle, which returns an NSString or nil.
+            let name: Option<Retained<NSString>> = unsafe { msg_send![&*node, accessibilityTitle] };
+            if name.is_some_and(|name| name.to_string().starts_with(title)) {
+                return Ok(Some(node));
+            }
+            // SAFETY: accessibilityChildren is declared beside accessibilityTitle and returns
+            // an NSArray or nil.
+            let children: Option<Retained<AnyObject>> =
+                unsafe { msg_send![&*node, accessibilityChildren] };
+            if let Some(children) = children {
+                accessibility_push(&children, &mut pending)?;
+            }
+        }
+    }
+    Err(format!(
+        "the accessibility tree has more than {ACCESSIBILITY_NODES_MAX} nodes"
+    ))
+}
+
+/// Adds the objects of an `NSArray` to the nodes still to search, within their bound.
+fn accessibility_push(
+    array: &AnyObject,
+    pending: &mut Vec<Retained<AnyObject>>,
+) -> Result<(), String> {
+    // SAFETY: the callers pass only NSArrays, which answer count.
+    let count: usize = unsafe { msg_send![array, count] };
+    if pending.len() + count > ACCESSIBILITY_NODES_MAX {
+        return Err(format!(
+            "the accessibility tree has more than {ACCESSIBILITY_NODES_MAX} nodes"
+        ));
+    }
+
+    for index in 0..count {
+        // SAFETY: index is below the array's count.
+        let object: Retained<AnyObject> = unsafe { msg_send![array, objectAtIndex: index] };
+        pending.push(object);
+    }
+    Ok(())
 }
 
 /// Scrolls the page so the row with this layout key starts at the top.
