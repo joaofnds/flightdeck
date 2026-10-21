@@ -72,23 +72,31 @@ fn run_paced(
     for _pass in 0..u64::MAX {
         let operation = watchdog.operation()?;
         let runs = run_registry(&registry_path, &mut registry_buffer, &mut recovery)?;
-        let waiting = run_pass(root, &store, &writers, &runs, &mut recovery)?;
-        if !waiting {
-            if let Some(owned) = run_release(root, store, &recovery.states)? {
-                store = owned;
-            } else {
-                drop(operation);
-                drop(watchdog);
-                let memory = crate::resources::Footprint::read()?;
-                eprintln!(
-                    "persister finished footprint_bytes={} footprint_bytes_max={}",
-                    memory.current_bytes, memory.lifetime_bytes_max
-                );
-                return Ok(Outcome::Complete);
+        let pass = run_pass(root, &store, &writers, &runs, &mut recovery)?;
+        match pass {
+            Pass::Drained => {
+                if let Some(owned) = run_release(root, store, &recovery.states)? {
+                    store = owned;
+                } else {
+                    drop(operation);
+                    drop(watchdog);
+                    let memory = crate::resources::Footprint::read()?;
+                    eprintln!(
+                        "persister finished footprint_bytes={} footprint_bytes_max={}",
+                        memory.current_bytes, memory.lifetime_bytes_max
+                    );
+                    return Ok(Outcome::Complete);
+                }
             }
+            Pass::Sealed | Pass::Waiting => {}
         }
         drop(operation);
-        pause(Duration::from_secs(1));
+        match pass {
+            // The window after a sealed one may be ready already, and a collector that is
+            // stopping waits for the persister to seal its last window and exit.
+            Pass::Sealed => {}
+            Pass::Waiting | Pass::Drained => pause(Duration::from_secs(1)),
+        }
     }
     unreachable!("persistence polling bound exhausted")
 }
@@ -158,7 +166,7 @@ fn run_pass(
     writers: &Writers<'_>,
     runs: &[RegisteredRun],
     recovery: &mut Recovery,
-) -> Result<bool> {
+) -> Result<Pass> {
     run_states(&mut recovery.states, runs);
     for (index, registered) in runs.iter().enumerate() {
         let closed = index + 1 < runs.len();
@@ -180,9 +188,9 @@ fn run_pass(
                 if !state.losses.unknown {
                     recovery.pending_unknown = false;
                 }
-                return Ok(true);
+                return Ok(Pass::Sealed);
             }
-            Progress::Waiting => return Ok(true),
+            Progress::Waiting => return Ok(Pass::Waiting),
             Progress::Complete => Registry::retire(root, &registered.identity)?,
             Progress::Unavailable => {
                 if !unavailable {
@@ -191,12 +199,20 @@ fn run_pass(
             }
         }
     }
-    Ok(false)
+    Ok(Pass::Drained)
 }
 
 #[must_use]
 pub fn default_memory_limit() -> u64 {
     WORKING_BYTES_MAX
+}
+
+/// What one pass over the registered runs did.
+enum Pass {
+    Sealed,
+    Waiting,
+    /// Every registered run is complete or unavailable.
+    Drained,
 }
 
 enum Progress {
@@ -301,7 +317,10 @@ fn persist_one(
     match persist_one_stage(reader, store, registered, closed, state)? {
         Staged::Window(window) => {
             let sealed = seal(store, writers, &window, state)?;
-            state.next_publication = window.publication_range().end;
+            let publication_end = window.publication_range().end;
+            // The worker runs its next pass at once after a seal, so a seal must move on.
+            assert!(state.next_publication < publication_end);
+            state.next_publication = publication_end;
             if sealed.committed {
                 state.losses = Losses::default();
             }
@@ -831,6 +850,45 @@ mod tests {
         assert!(matches!(result.unwrap(), Progress::Sealed));
         assert_eq!(state.next_publication, 2);
         assert_saved_identity(&root, &store, &registered.identity);
+    }
+
+    #[test]
+    fn pauses_while_its_collector_runs_and_exits_once_the_last_window_seals() {
+        // Goal: the worker paces itself while its collector runs, and a stopping collector,
+        // which waits for the worker to exit, waits for no pause after the last window seals.
+        // Method: run the whole worker over a live collector's empty ring, and in its first pause
+        // publish a tick and finish the ring as a stopping collector does.
+        let root = Directory::new();
+        let mut registered = registered(Store::open(&root.0).unwrap().recording());
+        registered.collector_pid = std::process::id();
+        let mut writer = identity_ring(&root, "p", &mut registered);
+        let run = registered.identity;
+        Registry {
+            runs: vec![registered],
+            evictions: 0,
+        }
+        .write(&root.0)
+        .unwrap();
+        let mut pauses = Vec::new();
+
+        let outcome = run_paced(
+            &root.0,
+            WORKING_BYTES_MAX,
+            &PredecessorSpy::default(),
+            &mut |pause| {
+                pauses.push(pause);
+                assert_eq!(1, pauses.len(), "the worker paused after the ring finished");
+                publish_readable_identity(&mut writer);
+                writer.finish();
+            },
+        );
+
+        collector::ring::unlink_generation(writer.name()).unwrap();
+        assert!(matches!(outcome.unwrap(), Outcome::Complete));
+        assert_eq!(vec![Duration::from_secs(1)], pauses);
+        let store = Store::open(&root.0).unwrap();
+        let window = WindowIdentity { run, window: 0 };
+        assert!(store.existing(&window).unwrap().is_some());
     }
 
     /// Creates an empty ring of its own for the registered run. The label keeps the ring's name
