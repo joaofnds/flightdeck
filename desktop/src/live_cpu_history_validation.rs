@@ -117,6 +117,14 @@ impl CPUHistoryWire {
         let trends = selection["trends"]
             .as_array()
             .ok_or("Missing selected CPU context")?;
+        // The charted readings reach a lead-in before the context, which the history does not
+        // hold.
+        let held = trends.partition_point(|trend| {
+            trend["wall_ns"]
+                .as_u64()
+                .is_some_and(|wall_ns| wall_ns < self.first_ns)
+        });
+        let trends = &trends[held..];
         if self.observations.is_empty() {
             return Err("CPU history context is empty".into());
         }

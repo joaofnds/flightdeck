@@ -32,6 +32,22 @@ fn decodes_a_history_whose_context_runs_past_the_selected_second() {
 }
 
 #[test]
+fn decodes_a_history_whose_selection_holds_readings_before_its_context() {
+    // Goal: the selection's charted readings reach a minute before the context, which the CPU
+    // history does not hold, so those readings neither count against it nor refuse it.
+    // Method: put a reading a second before the context's first second ahead of the
+    // selection's readings, and decode the history.
+    let (payload, mut selection) = fixture();
+    let trends = selection["trends"].as_array_mut().unwrap();
+    trends.insert(0, observation(0, 101 * NS));
+
+    let history = CPUHistory::decode(payload, &selection).unwrap();
+
+    assert_eq!(history.wire.observations.len(), 2);
+    assert_eq!(history.wire.selected_index, 1);
+}
+
+#[test]
 fn retains_an_unavailable_cpu_domain_without_inventing_an_idle_cpu() {
     // Goal: an empty acquired domain is distinct from one measured idle logical CPU.
     // Method: decode a bounded context with no CPU acquisition at either observation.
