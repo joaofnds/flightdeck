@@ -88,6 +88,9 @@ pub struct LiveDashboard {
     pub(crate) hover_timings: crate::live_hover::timings::HoverTimings,
     pub(crate) row_heights:
         Rc<std::cell::RefCell<std::collections::BTreeMap<String, gpui::Pixels>>>,
+    /// How wide each chart's card was last laid out, by panel id, which sizes its buckets.
+    pub(crate) chart_widths:
+        Rc<std::cell::RefCell<std::collections::BTreeMap<String, gpui::Pixels>>>,
     /// The key and room of each row the page shows as a placeholder while a request replaces its
     /// readings, empty otherwise.
     pub(crate) placeholders: Vec<(String, gpui::Pixels)>,
@@ -223,6 +226,7 @@ impl LiveDashboard {
             preview_submissions: 0,
             hover_timings: crate::live_hover::timings::HoverTimings::new(),
             row_heights: Rc::new(std::cell::RefCell::new(std::collections::BTreeMap::new())),
+            chart_widths: Rc::new(std::cell::RefCell::new(std::collections::BTreeMap::new())),
             placeholders: Vec::new(),
             header_height: Rc::new(std::cell::Cell::new(px(0.0))),
             viewport_size: gpui::size(px(0.0), px(0.0)),

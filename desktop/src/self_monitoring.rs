@@ -434,6 +434,7 @@ fn chart_panel(
         window: Some(window),
         detail_first: None,
         sliding: false,
+        chart_width: std::cell::Cell::new(None),
     }
 }
 

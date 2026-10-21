@@ -316,6 +316,7 @@ impl History {
             window: Some(self.window),
             detail_first: None,
             sliding: false,
+            chart_width: std::cell::Cell::new(None),
         }
     }
 }

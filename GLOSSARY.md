@@ -86,4 +86,5 @@ separate groupings, so a coalition's totals are not an App's totals.
 
 **Bucket**: a stretch of the clock, such as thirty seconds, whose readings a chart draws as one
 point at their mean. Buckets start at multiples of their length, so a reading keeps its bucket
-as the chart scrolls.
+as the chart scrolls. A chart takes the shortest length whose buckets stay wide enough to read on
+screen, so a wider chart or a shorter span draws shorter buckets.

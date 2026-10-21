@@ -16,6 +16,10 @@ use crate::live_hover::Origin;
 use crate::live_presentation::clock;
 use crate::live_source::Snapshot;
 
+/// The most chart cards whose widths the dashboard remembers, well above the charts of every
+/// page together.
+const CHART_WIDTHS_MAX: usize = 4096;
+
 /// The source of the readings an arrow step on a chart shows.
 const CHART_STEP_SOURCE: &str = "chart-step";
 
@@ -32,6 +36,7 @@ pub(crate) mod timeline;
 
 impl LiveDashboard {
     pub fn live_chart(&self, panel: &Rc<Panel>, cx: &mut Context<Self>) -> impl IntoElement {
+        self.size_for_card(panel);
         let index = self.chart_inspection_index(panel);
         let inspection = chart_inspection(panel, index);
         let hidden = self.chart_hidden(panel);
@@ -79,6 +84,7 @@ impl LiveDashboard {
 
         div()
             .debug_selector(|| format!("chart-card:{}", panel.id))
+            .relative()
             .flex_1()
             .min_w_0()
             .rounded(px(12.0))
@@ -92,6 +98,51 @@ impl LiveDashboard {
             .child(time_row)
             .child(self.chart_legends(panel, index, cx))
             .children(panel.caption.clone().map(timeline::timeline_caption_text))
+            .child(self.chart_width_probe(panel, cx))
+    }
+
+    /// Tells `panel` how wide its card was last laid out, which sizes its buckets.
+    pub(crate) fn size_for_card(&self, panel: &Panel) {
+        let widths = self.chart_widths.borrow();
+        panel
+            .chart_width
+            .set(widths.get(&panel.id).copied().map(f32::from));
+    }
+
+    /// Records how wide `panel`'s card is laid out inside its border and, when that changed,
+    /// draws the charts again with buckets sized for it. The card's width follows the page's
+    /// layout and not the chart's axes, so a new size of buckets cannot change it back.
+    fn chart_width_probe(&self, panel: &Panel, cx: &mut Context<Self>) -> impl IntoElement {
+        let id = panel.id.clone();
+        let widths = Rc::clone(&self.chart_widths);
+        let view = cx.weak_entity();
+        canvas(
+            move |bounds, window, cx| {
+                let width = bounds.size.width;
+                let mut cache = widths.borrow_mut();
+                if cache.get(&id) == Some(&width) {
+                    return;
+                }
+                if cache.len() >= CHART_WIDTHS_MAX {
+                    if !cache.contains_key(&id) {
+                        return;
+                    }
+                }
+
+                cache.insert(id, width);
+                window.defer(cx, move |_, cx| {
+                    match view.update(cx, |_, cx| cx.notify()) {
+                        Ok(()) => {}
+                        Err(error) => eprintln!("Chart width observer: {error}"),
+                    }
+                });
+            },
+            |_, (), _, _| {},
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
     }
 
     fn chart_time_window(&self) -> Option<charts::TimeWindow> {

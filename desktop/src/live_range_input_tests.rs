@@ -63,6 +63,17 @@ impl InputDriver {
         })
     }
 
+    fn energy_chart_width(&self) -> Option<f32> {
+        self.view.read_with(&self.context, |dashboard, _| {
+            dashboard
+                .panels
+                .iter()
+                .find(|panel| panel.id == "live-energy")?
+                .chart_width
+                .get()
+        })
+    }
+
     fn click_control(&mut self, selector: &'static str) {
         let bounds = super::menu_control_bounds(&mut self.context, selector);
         self.context
@@ -245,5 +256,71 @@ fn dragging_across_a_range_longer_than_fifteen_minutes_selects_inside_it(cx: &mu
             span: 481
         })
     );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_chart_learns_how_wide_its_card_is_and_follows_a_resize(cx: &mut TestAppContext) {
+    // Goal: a chart sizes its buckets for the card it is drawn in, and learns the new size when
+    // the window changes.
+    // Method: lay the page out at two window widths, and compare the width the energy panel
+    // holds with the width inside its card's one-pixel border each time. Count the times the
+    // page asks to be drawn again, since a page that learns a width without that keeps the old
+    // buckets on screen until something else redraws it.
+    let mut harness = InputHarness::setup(cx);
+    let redraws = std::rc::Rc::new(std::cell::Cell::new(0_u32));
+    let counter = std::rc::Rc::clone(&redraws);
+    let view = harness.driver.view.clone();
+    let _observer = harness
+        .driver
+        .context
+        .update(|_, cx| cx.observe(&view, move |_, _| counter.set(counter.get() + 1)));
+    let mut widths = Vec::new();
+
+    for width in [1320.0, 700.0] {
+        let redraws_before = redraws.get();
+        harness
+            .driver
+            .context
+            .simulate_resize(gpui::size(gpui::px(width), gpui::px(4000.0)));
+        harness.driver.context.run_until_parked();
+        let card = harness.driver.chart_bounds("chart-card:live-energy");
+        widths.push(f32::from(card.size.width) - 2.0);
+
+        assert_eq!(harness.driver.energy_chart_width(), widths.last().copied());
+        assert!(redraws.get() > redraws_before);
+    }
+    assert!(widths[1] < widths[0]);
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_chart_kept_apart_from_the_page_draws_for_its_own_card(cx: &mut TestAppContext) {
+    // Goal: a chart the page keeps apart from its own panels, such as an app's history, still
+    // draws buckets sized for the card it is laid out in.
+    // Method: record a card width for a chart the page does not hold, size that chart for its
+    // card as the page does when it draws it, and read the width it holds.
+    let mut harness = InputHarness::setup(cx);
+    let panel: crate::data::Panel = serde_json::from_value(serde_json::json!({
+        "id":"app-history", "title":"History", "unit":"%", "kind":"line", "lines":[]}))
+    .unwrap();
+    harness
+        .driver
+        .view
+        .update(&mut harness.driver.context, |dashboard, _| {
+            let mut widths = dashboard.chart_widths.borrow_mut();
+            widths.insert("app-history".to_owned(), gpui::px(900.0));
+        });
+
+    harness
+        .driver
+        .view
+        .read_with(&harness.driver.context, |dashboard, _| {
+            dashboard.size_for_card(&panel);
+        });
+
+    let drawn = panel.chart_width.get();
+
+    assert_eq!(drawn, Some(900.0));
     harness.teardown();
 }

@@ -283,11 +283,13 @@ pub(crate) fn prepare_lines(
     }
 }
 
-/// The buckets of a panel with a clock.
+/// The buckets of a panel with a clock, sized for its card, or for an overview card until its
+/// card has been laid out.
 fn panel_buckets(panel: &Panel) -> Option<Buckets> {
+    let chart_width = panel.chart_width.get().unwrap_or(CHART_WIDTH_DEFAULT);
     panel
         .window
-        .map(|window| Buckets::of(window, panel.detail_first))
+        .map(|window| Buckets::of(window, panel.detail_first, chart_width))
 }
 
 pub(crate) struct Geometry<'a> {
@@ -470,12 +472,21 @@ fn curve_fill(
     )
 }
 
-/// The fewest buckets a chart's span divides into, thirty seconds of a 15-minute chart, which
-/// is the sampling interval of the approved prototype and keeps its curve calm. The bucket
-/// lengths below put between 30 and 75 buckets in any span of a minute or more.
-const BUCKETS_PER_SPAN_MIN: u64 = 30;
-/// The bucket lengths in seconds, each dividing an hour, so buckets start on round seconds.
-const BUCKET_SECONDS: [u64; 14] = [1, 2, 5, 10, 15, 20, 30, 60, 120, 300, 600, 900, 1800, 3600];
+/// The fewest pixels of its card's width a bucket spans, so a curve looks as calm in a wide card
+/// as in a narrow one. It gives a 15-minute chart in an overview card thirty buckets of thirty
+/// seconds, the sampling interval of the approved prototype, and a card three times as wide
+/// ten-second buckets, as Grafana draws a 15-minute panel of that width.
+const BUCKET_WIDTH_MIN: f32 = 11.0;
+/// The width a chart's buckets are sized for before its card is laid out, an overview card's in
+/// the 1320-pixel window.
+const CHART_WIDTH_DEFAULT: f32 = 360.0;
+/// The bucket lengths in seconds, each dividing an hour, so buckets start on round seconds, and
+/// each at most a third longer than the one before from 4 seconds to 10 minutes, so a bucket
+/// is drawn between 11 and about 15 pixels wide.
+const BUCKET_SECONDS: [u64; 30] = [
+    1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 24, 30, 40, 45, 60, 75, 90, 120, 150, 180, 240, 300, 360,
+    450, 600, 900, 1200, 1800, 3600,
+];
 /// How far before the start of its second a reading's position may fall and still count in that
 /// second. A position is an f32 fraction of the window, whose rounding can put a reading taken
 /// on a whole second, as the self-monitoring reports are, a few microseconds before it, in some
@@ -500,13 +511,27 @@ pub(crate) struct Buckets {
 }
 
 impl Buckets {
-    fn of(window: TimeWindow, detail_first: Option<u64>) -> Self {
+    /// The buckets of `window` in a card `chart_width` pixels wide: the shortest length that
+    /// draws each bucket at least `BUCKET_WIDTH_MIN` pixels wide, or the longest length when
+    /// none does.
+    fn of(window: TimeWindow, detail_first: Option<u64>, chart_width: f32) -> Self {
         assert!(window.span > 0);
+        assert!(chart_width.is_finite());
+        assert!(chart_width >= 0.0);
+        let span = match u32::try_from(window.span) {
+            Ok(span) => f64::from(span),
+            Err(error) => panic!("a chart spans at most a few hours of seconds: {error}"),
+        };
         let length_seconds = BUCKET_SECONDS
             .into_iter()
-            .rev()
-            .find(|length| length * BUCKETS_PER_SPAN_MIN <= window.span)
-            .unwrap_or(1);
+            .find(|length| {
+                let length = match u32::try_from(*length) {
+                    Ok(length) => f64::from(length),
+                    Err(error) => panic!("a bucket is at most an hour long: {error}"),
+                };
+                length * f64::from(chart_width) >= f64::from(BUCKET_WIDTH_MIN) * span
+            })
+            .unwrap_or(BUCKET_SECONDS[BUCKET_SECONDS.len() - 1]);
         let drawn_first = window.first.div_ceil(length_seconds) * length_seconds;
         // The window's newest second may still gain a reading from a tick that ran late, so a
         // bucket waits for the second after it. The division floors, so a bucket the window's
@@ -1316,6 +1341,9 @@ pub fn alpha(value: u32, opacity: f32) -> gpui::Rgba {
 mod live_tests {
     use super::*;
 
+    /// The width of an overview card in the 1320-pixel window.
+    const CARD_WIDTH: f32 = 360.0;
+
     #[test]
     fn the_focus_ring_is_drawn_inside_the_element_so_a_transparent_one_stays_unfilled() {
         // Goal: a focused control with no background of its own shows a ring and nothing else.
@@ -1444,7 +1472,11 @@ mod live_tests {
             positions: Some(positions),
             segments: None,
             lower,
-            buckets: Some(Buckets::of(TimeWindow { first, span: 900 }, None)),
+            buckets: Some(Buckets::of(
+                TimeWindow { first, span: 900 },
+                None,
+                CARD_WIDTH,
+            )),
             sliding: false,
         }
     }
@@ -1698,12 +1730,13 @@ mod live_tests {
             for first in 4081..=4980 {
                 let offset = f32::from(u16::try_from(4980 - first).unwrap());
                 let window = TimeWindow { first, span: 900 };
-                buckets.insert(Buckets::of(window, None).bucket_index((offset + fraction) / 900.0));
+                let buckets_of_window = Buckets::of(window, None, CARD_WIDTH);
+                buckets.insert(buckets_of_window.bucket_index((offset + fraction) / 900.0));
 
                 // The zoom from an hour, in the arithmetic the range zoom uses.
                 let hour_position = (offset + 2700.0 + fraction) / 3600.0;
                 let zoomed = (hour_position * 3600.0 - 2700.0) / 900.0;
-                buckets.insert(Buckets::of(window, None).bucket_index(zoomed));
+                buckets.insert(buckets_of_window.bucket_index(zoomed));
             }
         }
 
@@ -1722,6 +1755,7 @@ mod live_tests {
                 span: 1800,
             },
             Some(1905),
+            CARD_WIDTH,
         );
 
         let found: Vec<_> = [1859_u16, 1860, 1919, 1920]
@@ -1759,6 +1793,7 @@ mod live_tests {
                 span: 900,
             },
             None,
+            CARD_WIDTH,
         );
 
         assert_eq!(buckets.bucket_index(-0.0005 / 900.0 * 1000.0), None);
@@ -1785,16 +1820,16 @@ mod live_tests {
         );
     }
 
-    /// The spacing of the bucket means a chart of a reading in each second of the `span`
-    /// seconds from `first` draws, and their count.
-    fn mean_spacing(first: u64, span: u16) -> (usize, Vec<f32>) {
+    /// The spacing of the bucket means a 900-pixel plot of a reading in each second of the
+    /// `span` seconds from `first` draws, in a card `card_width` pixels wide, and their count.
+    fn mean_spacing(first: u64, span: u16, card_width: f32) -> (usize, Vec<f32>) {
         let positions = tick_positions(span);
         let mut geometry = live_geometry(first, 0, &positions);
         let window = TimeWindow {
             first,
             span: u64::from(span),
         };
-        geometry.buckets = Some(Buckets::of(window, None));
+        geometry.buckets = Some(Buckets::of(window, None, card_width));
         let values: Vec<_> = (first..first + u64::from(span))
             .map(|second| Some((varying_reading(second), 0.0)))
             .collect();
@@ -1810,10 +1845,10 @@ mod live_tests {
 
     #[test]
     fn a_range_of_five_minutes_draws_a_mean_every_ten_seconds() {
-        // Goal: a short range keeps to about thirty buckets, so its curve is as calm as the
-        // 15-minute chart's. Method: draw a reading in each second of a 300-second window on a
-        // 900-pixel chart and read the count and spacing of its means.
-        let (count, spacing) = mean_spacing(1000, 300);
+        // Goal: a short range keeps to about thirty buckets in an overview card, so its curve is
+        // as calm as the 15-minute chart's. Method: draw a reading in each second of a
+        // 300-second window on a 900-pixel plot and read the count and spacing of its means.
+        let (count, spacing) = mean_spacing(1000, 300, CARD_WIDTH);
 
         assert_eq!(count, 29);
         for gap in spacing {
@@ -1824,13 +1859,81 @@ mod live_tests {
     #[test]
     fn an_hour_draws_a_mean_every_two_minutes() {
         // Goal: a long range keeps to about thirty buckets too. Method: draw a reading in each
-        // second of a 3600-second window on a 900-pixel chart and read its means.
-        let (count, spacing) = mean_spacing(3600, 3600);
+        // second of a 3600-second window on a 900-pixel plot and read its means.
+        let (count, spacing) = mean_spacing(3600, 3600, CARD_WIDTH);
 
         assert_eq!(count, 29);
         for gap in spacing {
             assert!((gap - 30.0).abs() < 0.01, "{gap}");
         }
+    }
+
+    #[test]
+    fn a_wider_card_draws_shorter_buckets() {
+        // Goal: a chart keeps each bucket about as wide on screen whatever the size of its card,
+        // so a wide card shows more detail and a narrow one stays calm. Method: draw a
+        // 15-minute window in cards a half, one and three overview cards wide, and read the
+        // count and spacing of the means.
+        let widths = [CARD_WIDTH / 2.0, CARD_WIDTH, CARD_WIDTH * 3.0];
+
+        let drawn = widths.map(|width| mean_spacing(1020, 900, width));
+
+        for ((count, spacing), (count_expected, gap_expected)) in
+            drawn.into_iter().zip([(14, 60.0), (29, 30.0), (89, 10.0)])
+        {
+            assert_eq!(count, count_expected);
+            for gap in spacing {
+                assert!((gap - gap_expected).abs() < 0.01, "{gap}");
+            }
+        }
+    }
+
+    #[test]
+    fn bucket_lengths_stop_at_a_second_and_at_an_hour() {
+        // Goal: a card too wide for whole seconds draws each second, and one too narrow for an
+        // hour's bucket draws hours, never a length off the clock's list. Method: size the
+        // buckets of a 15-minute window for cards of no width, one pixel and a million pixels.
+        let window = TimeWindow {
+            first: 1000,
+            span: 900,
+        };
+
+        let lengths =
+            [0.0, 1.0, 1_000_000.0].map(|width| Buckets::of(window, None, width).length_seconds);
+
+        assert_eq!(lengths, [3600, 3600, 1]);
+    }
+
+    #[test]
+    fn a_card_exactly_wide_enough_keeps_the_shorter_bucket() {
+        // Goal: a bucket drawn exactly the narrowest width allowed is still drawn, so the length
+        // steps up only once a bucket would fall below it. Method: size the buckets of a
+        // 15-minute window for the card where 30 seconds span exactly that width, and for a card
+        // a pixel narrower.
+        let window = TimeWindow {
+            first: 1000,
+            span: 900,
+        };
+        let exact = BUCKET_WIDTH_MIN * 900.0 / 30.0;
+
+        let lengths =
+            [exact, exact - 1.0].map(|width| Buckets::of(window, None, width).length_seconds);
+
+        assert_eq!(lengths, [30, 40]);
+    }
+
+    #[test]
+    fn a_panel_sizes_its_buckets_for_its_card_once_laid_out() {
+        // Goal: a chart draws buckets for the card it is laid out in, and for an overview card
+        // before its first layout. Method: read the bucket length of a 15-minute chart before
+        // layout and after it learns of a card three overview cards wide.
+        let panel = live_panel(1000, &[]);
+        let before = panel_buckets(&panel).map(|buckets| buckets.length_seconds);
+
+        panel.chart_width.set(Some(CARD_WIDTH * 3.0));
+        let after = panel_buckets(&panel).map(|buckets| buckets.length_seconds);
+
+        assert_eq!([before, after], [Some(30), Some(10)]);
     }
 
     #[test]

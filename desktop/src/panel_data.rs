@@ -37,6 +37,12 @@ pub struct Panel {
     /// still reshape.
     #[serde(skip)]
     pub sliding: bool,
+    /// How many pixels wide the chart's card was inside its border when last laid out, which
+    /// sets how long its buckets are, or `None` before the card is first laid out. The page writes
+    /// it as it draws the chart rather than giving the chart a copy, since hover knows a chart by
+    /// the panel it holds and not by its contents.
+    #[serde(skip)]
+    pub chart_width: std::cell::Cell<Option<f32>>,
 }
 
 #[derive(Clone, Deserialize)]

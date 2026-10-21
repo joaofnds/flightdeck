@@ -254,6 +254,7 @@ fn panels_panel(
         }),
         detail_first: None,
         sliding: false,
+        chart_width: std::cell::Cell::new(None),
     })
 }
 

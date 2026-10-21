@@ -694,6 +694,7 @@ fn panel(
         window: Some(coordinates.window),
         detail_first: Some(coordinates.detail_first),
         sliding: false,
+        chart_width: std::cell::Cell::new(None),
     })
 }
 
@@ -764,6 +765,7 @@ fn gpu_apps_panel(
         window: Some(coordinates.window),
         detail_first: Some(coordinates.detail_first),
         sliding: false,
+        chart_width: std::cell::Cell::new(None),
     }))
 }
 
