@@ -82,9 +82,10 @@ impl Health {
 
             if alive {
                 if reader.ring.completed() {
-                    // The run ended, and the collector now holding the recording has yet to
-                    // withdraw the announcement its run left.
-                    source.recording = RecordingStatus::Pending;
+                    // The run ended, and either its collector still saves its last readings, or
+                    // the collector now holding the recording has yet to withdraw the
+                    // announcement the run left.
+                    source.recording = RecordingStatus::Finishing;
                 } else {
                     source.producer_alive = true;
                     if followed {

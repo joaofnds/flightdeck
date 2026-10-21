@@ -457,6 +457,57 @@ fn an_unannounced_holder_fails_discovery_at_its_deadline() {
 }
 
 #[test]
+fn a_finishing_holder_is_awaited_past_the_discovery_deadline() {
+    // Goal: a launch soon after a quit waits while the last run's collector saves its readings,
+    // however long that takes within its own deadline, and then starts collecting.
+    // Method: report a finishing holder through the discovery deadline, then a ready recording.
+    let mut policy = Policy::new(Mode::Auto);
+    let finishing = Source {
+        recording_route: true,
+        recording: RecordingStatus::Finishing,
+        ..Source::default()
+    };
+    let ready = Source {
+        recording_route: true,
+        recording: RecordingStatus::Ready,
+        ..Source::default()
+    };
+    policy.step(Duration::ZERO, &finishing);
+
+    let waiting = policy.step(DISCOVERY_LIMIT, &finishing);
+    let starting = policy.step(DISCOVERY_LIMIT + Duration::from_secs(1), &ready);
+
+    assert_eq!(waiting, Action::None);
+    assert_eq!(starting, Action::Spawn);
+}
+
+#[test]
+fn a_finishing_holder_fails_discovery_at_the_collectors_stop_deadline() {
+    // Goal: a collector that never lets go of the recording fails discovery once its own
+    // deadline has passed, and never meets a spawn.
+    // Method: report a finishing holder just before and then at that deadline.
+    let mut policy = Policy::new(Mode::Auto);
+    let finishing = Source {
+        recording_route: true,
+        recording: RecordingStatus::Finishing,
+        ..Source::default()
+    };
+    policy.step(Duration::ZERO, &finishing);
+
+    policy.step(
+        FINISHING_LIMIT.checked_sub(Duration::from_secs(1)).unwrap(),
+        &finishing,
+    );
+    let before = policy.state;
+    let action = policy.step(FINISHING_LIMIT, &finishing);
+
+    assert_eq!(before, State::Discovering);
+    assert_eq!(action, Action::None);
+    assert_eq!(policy.state, State::Failed);
+    assert!(policy.can_retry());
+}
+
+#[test]
 fn an_owned_collector_built_from_other_code_is_stopped() {
     // Goal: a stale collector executable beside this app fails at once, not at the deadline.
     // Method: report the owned child announcing another build on its first startup step.

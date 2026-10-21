@@ -246,15 +246,16 @@ fn an_announcement_of_an_older_run_reads_as_a_holder_yet_to_announce() {
 }
 
 #[test]
-fn a_completed_run_announced_under_a_held_recording_is_pending() {
-    // Goal: a run that ended reads as a holder still starting, never as a recording to restart.
+fn a_completed_run_announced_under_a_held_recording_is_finishing() {
+    // Goal: a run that ended reads as a holder still finishing, never as a recording to
+    // restart.
     // Method: finish the announced run's ring while its writer keeps holding the recording.
     let mut fixture = Recording::new();
     fixture.writer.as_mut().unwrap().finish();
 
     let source = health::Health::new().read(&fixture.root, None).unwrap();
 
-    assert!(source.recording == RecordingStatus::Pending);
+    assert!(source.recording == RecordingStatus::Finishing);
     assert!(!source.producer_alive);
 }
 

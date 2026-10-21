@@ -4,6 +4,9 @@ pub(super) const DISCOVERY_LIMIT: Duration = Duration::from_secs(20);
 pub(super) const STARTUP_LIMIT: Duration = Duration::from_secs(20);
 pub(super) const SHUTDOWN_LIMIT: Duration = Duration::from_secs(125);
 pub(super) const KILL_LIMIT: Duration = Duration::from_secs(2);
+/// How long a collector still finishing may keep the recording, which its own deadline bounds.
+pub(super) const FINISHING_LIMIT: Duration =
+    Duration::from_secs(1).saturating_mul(collector::recording::STOP_LIMIT_SECONDS);
 pub(super) const UNANNOUNCED_FAILURE: &str = "A collector holds this recording without naming \
      its build, since it predates this Flightdeck or could not register its run. Quit the \
      Flightdeck that started it, then retry.";
@@ -93,6 +96,9 @@ pub(super) fn owned_build_failure(build: u64) -> String {
 pub(super) enum RecordingStatus {
     #[default]
     Pending,
+    /// The collector of a run that ended still holds the recording while it saves the last
+    /// readings of that run.
+    Finishing,
     Missing,
     Ready,
 }
@@ -105,6 +111,8 @@ pub(super) struct Policy {
     since: Option<Duration>,
     previous: Option<Observation>,
     stopping: bool,
+    /// When discovery first found a collector still finishing.
+    finishing_since: Option<Duration>,
 }
 
 impl Policy {
@@ -121,6 +129,7 @@ impl Policy {
             since: None,
             previous: None,
             stopping: false,
+            finishing_since: None,
         }
     }
 
@@ -174,6 +183,11 @@ impl Policy {
             return Action::None;
         }
 
+        if source.recording == RecordingStatus::Finishing {
+            self.discover_finishing(now);
+            return Action::None;
+        }
+
         if self.expired(now, DISCOVERY_LIMIT) {
             if source.build == Build::Unannounced {
                 self.fail(UNANNOUNCED_FAILURE);
@@ -212,6 +226,22 @@ impl Policy {
         }
 
         Action::None
+    }
+
+    /// Waits for a collector still finishing, which saves its last readings after its app quits,
+    /// for as long as its own deadline lets it run, and counts the discovery limit from the
+    /// moment it lets go.
+    fn discover_finishing(&mut self, now: Duration) {
+        let finishing_since = *self.finishing_since.get_or_insert(now);
+        if now.saturating_sub(finishing_since) >= FINISHING_LIMIT {
+            self.fail(&format!(
+                "The last collector did not finish saving within {} seconds; retry to reconnect",
+                FINISHING_LIMIT.as_secs()
+            ));
+            return;
+        }
+
+        self.since = Some(now);
     }
 
     fn attached(&mut self, now: Duration, source: &Source) -> Action {
@@ -350,6 +380,7 @@ impl Policy {
             self.since = None;
             self.previous = None;
             self.stopping = false;
+            self.finishing_since = None;
         }
     }
 
