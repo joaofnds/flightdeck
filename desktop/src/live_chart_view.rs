@@ -380,19 +380,13 @@ impl LiveDashboard {
             .children(self.drag_band(&source))
             .on_mouse_move(
                 cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {
-                    let hovered_at = Instant::now();
-                    if !this.chart_anchor_matches(&move_panel) {
-                        return;
-                    }
-
-                    if this.chart_pointer != Some(event.position) {
-                        this.chart_pointer = Some(event.position);
-                        cx.notify();
-                    }
-                    this.drag_move(&move_source, move_bounds.get(), event.position.x, cx);
-                    let second =
-                        chart_hover_second(this.view_window(), move_bounds.get(), event.position);
-                    this.chart_hover_update(&move_source, second, hovered_at, cx);
+                    this.chart_hover_target_moved(
+                        &move_source,
+                        &move_panel,
+                        &move_bounds,
+                        event.position,
+                        cx,
+                    );
                 }),
             )
             .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
@@ -425,6 +419,28 @@ impl LiveDashboard {
             }));
 
         drag_input(target, drag, cx)
+    }
+
+    fn chart_hover_target_moved(
+        &mut self,
+        source: &SharedString,
+        panel: &Rc<Panel>,
+        measured: &Cell<Bounds<gpui::Pixels>>,
+        position: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let hovered_at = Instant::now();
+        if !self.chart_anchor_matches(panel) {
+            return;
+        }
+
+        if self.chart_pointer != Some(position) {
+            self.chart_pointer = Some(position);
+            cx.notify();
+        }
+        self.drag_move(source, measured.get(), position.x, cx);
+        let second = chart_hover_second(self.view_window(), measured.get(), position);
+        self.chart_hover_update(source, second, hovered_at, cx);
     }
 
     fn chart_hover_update(
