@@ -156,7 +156,7 @@ impl CollectorSession {
             failure.clone()
         } else {
             match self.0.policy.state {
-                State::Discovering => "Discovering the default collector".into(),
+                State::Discovering => "Looking for a running collector".into(),
                 State::Starting => "Starting collector; waiting for advancing readings".into(),
                 State::Attached | State::Running => return None,
                 State::Stopping => "Stopping collector and saving its final readings".into(),

@@ -80,12 +80,59 @@ fn initial_computer_page_defers_auto_discovery_and_collection() {
 #[test]
 fn explicit_collection_starts_even_on_the_computer_page() {
     // Goal: an explicit start command retains its authority on every launch route.
-    // Method: request explicit collection without a recording query.
+    // Method: report a recording no collector holds while no readings route is open.
     let mut policy = Policy::new(Mode::Explicit);
+    let source = Source {
+        recording_route: false,
+        recording: RecordingStatus::Ready,
+        ..Source::default()
+    };
 
-    let action = policy.step(Duration::ZERO, &Source::default());
+    let action = policy.step(Duration::ZERO, &source);
 
     assert_eq!(action, Action::Spawn);
+}
+
+#[test]
+fn explicit_collection_looks_for_a_collector_on_every_route() {
+    // Goal: an explicit start learns of a running collector before it could spawn another.
+    // Method: ask for health on Computer before the first discovery step.
+    let policy = Policy::new(Mode::Explicit);
+
+    assert!(policy.needs_health(false));
+}
+
+#[test]
+fn explicit_collection_attaches_to_an_advancing_collector_without_spawning() {
+    // Goal: a second start command shares the collector already recording, never a duplicate.
+    // Method: observe two publications of one producer before any spawn.
+    let mut policy = Policy::new(Mode::Explicit);
+    assert_eq!(policy.step(Duration::ZERO, &existing(1)), Action::None);
+
+    let action = policy.step(Duration::from_secs(1), &existing(2));
+
+    assert_eq!(action, Action::None);
+    assert_eq!(policy.state, State::Attached);
+    assert_eq!(policy.owned_pid, None);
+}
+
+#[test]
+fn explicit_collection_offers_recovery_when_its_shared_collector_stops() {
+    // Goal: a start command attached to another app's collector can resume recording itself.
+    // Method: attach, then lose the producer while the recording stays ready.
+    let mut policy = Policy::new(Mode::Explicit);
+    policy.step(Duration::ZERO, &existing(1));
+    policy.step(Duration::from_secs(1), &existing(2));
+    let stopped = Source {
+        recording: RecordingStatus::Ready,
+        ..Source::default()
+    };
+
+    let action = policy.step(Duration::from_secs(2), &stopped);
+
+    assert_eq!(action, Action::None);
+    assert_eq!(policy.state, State::Failed);
+    assert!(policy.can_retry());
 }
 
 #[test]
@@ -251,7 +298,11 @@ fn failed_collection_waits_for_an_explicit_retry() {
     );
 
     policy.retry();
-    let action = policy.step(Duration::from_secs(2), &Source::default());
+    let source = Source {
+        recording: RecordingStatus::Ready,
+        ..Source::default()
+    };
+    let action = policy.step(Duration::from_secs(2), &source);
 
     assert_eq!(action, Action::Spawn);
     assert_eq!(policy.failure, None);

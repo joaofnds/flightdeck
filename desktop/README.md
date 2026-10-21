@@ -24,8 +24,9 @@ lock, which macOS releases when it exits, so a pid given to another process neve
 passes for it. Initial Computer-only entry defers automatic collection until a
 recording route is opened. A recording supplied with `--recording PATH` opens as
 Recorded and reads on navigation or Refresh, without idle polling. Add
-`--start-collector` to collect into that root and follow Live readings. The
-following commands run from `desktop/`:
+`--start-collector` to collect into that root and follow Live readings. When a
+collector of the same build already collects there, the app attaches to it rather than
+starting a second one, on whichever page it opens. The following commands run from `desktop/`:
 
 ```sh
 target/release/flightdeck --start-collector
@@ -84,7 +85,8 @@ Neither mode opens a window or measures rendering performance.
 `flightdeck` ring; an explicit `--recording PATH` starts an isolated ring. Only one
 collector can own a ring. Startup and child-exit failures appear with a Retry
 control. The app sends signals only to the collector it started; attaching to
-another collector does not give it shutdown ownership. A live launch keeps running
+another collector does not give it shutdown ownership, so quitting leaves that collector
+running. A live launch keeps running
 once its window closes, with no Dock icon, so collection goes on and no reading is
 missed. Its item in the menu bar brings the window back, as does opening the app
 again, and a right click or Control-click on the item opens a menu with Quit. A

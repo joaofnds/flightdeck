@@ -151,14 +151,13 @@ impl Policy {
     }
 
     fn discover(&mut self, now: Duration, source: &Source) -> Action {
-        if self.mode == Mode::Explicit {
-            self.state = State::Starting;
-            return Action::Spawn;
-        }
-
+        // An explicit start collects whatever page is open, where Auto waits for a readings
+        // route.
         if self.since.is_none() {
-            if !source.recording_route {
-                return Action::None;
+            if self.mode == Mode::Auto {
+                if !source.recording_route {
+                    return Action::None;
+                }
             }
         }
 
@@ -216,7 +215,7 @@ impl Policy {
     }
 
     fn attached(&mut self, now: Duration, source: &Source) -> Action {
-        if self.mode != Mode::Auto {
+        if self.mode == Mode::Attach {
             return Action::None;
         }
 
@@ -368,11 +367,15 @@ impl Policy {
         }
 
         if self.state == State::Attached {
-            return self.mode == Mode::Auto;
+            return self.mode != Mode::Attach;
         }
 
         if self.state != State::Discovering {
             return false;
+        }
+
+        if self.mode == Mode::Explicit {
+            return true;
         }
 
         if self.mode != Mode::Auto {
