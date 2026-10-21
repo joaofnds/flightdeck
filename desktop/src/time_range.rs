@@ -26,12 +26,6 @@ pub enum Range {
 }
 
 impl Range {
-    /// Whether the range moves on with the selected second.
-    #[must_use]
-    pub fn follows(self) -> bool {
-        !matches!(self, Self::Between { .. })
-    }
-
     /// The selection a drag from one second to another makes, or none when it is too short.
     #[must_use]
     pub fn selection(from: u64, to: u64) -> Option<Self> {

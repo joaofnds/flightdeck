@@ -689,7 +689,6 @@ fn panel(
         segments: Some(coordinates.segments.clone()),
         selected_index: coordinates.selected_index,
         window: Some(coordinates.window),
-        follows: false,
     })
 }
 
@@ -758,7 +757,6 @@ fn gpu_apps_panel(
         segments: Some(coordinates.segments.clone()),
         selected_index: coordinates.selected_index,
         window: Some(coordinates.window),
-        follows: false,
     }))
 }
 

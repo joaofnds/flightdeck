@@ -28,11 +28,6 @@ pub struct Panel {
     /// the clock. A panel with none averages from its first position.
     #[serde(skip)]
     pub window: Option<crate::chart_axes::TimeWindow>,
-    /// Whether readings still leave at the window's start and arrive at its end, as they do while
-    /// the view follows the newest second. The chart holds back the curve those readings would
-    /// still reshape.
-    #[serde(skip)]
-    pub follows: bool,
 }
 
 #[derive(Clone, Deserialize)]
