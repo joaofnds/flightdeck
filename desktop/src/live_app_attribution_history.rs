@@ -181,6 +181,7 @@ impl AppAttributionHistory {
         point.reading(line)?.rate
     }
 
+    #[cfg(test)]
     pub fn captured_amount(&self, line: usize, index: Option<usize>) -> Option<u64> {
         let Self::Ready(history) = self else {
             return None;

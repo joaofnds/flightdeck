@@ -130,6 +130,7 @@ impl ResidentHistory {
         reading
     }
 
+    #[cfg(test)]
     pub fn amount(&self, line: usize, index: Option<usize>) -> Option<u64> {
         let Self::Ready(history) = self else {
             return None;

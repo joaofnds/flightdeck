@@ -1093,27 +1093,6 @@ fn memory_shows_interval_resident_leaders_separately_from_current_top_apps(
     harness.teardown();
 }
 
-#[gpui::test]
-fn resident_hover_sorts_adjacent_exact_byte_counts_above_plot_precision(cx: &mut TestAppContext) {
-    // Adjacent bytes share an f32 plot value but must retain their exact readout ordering.
-    let mut harness = InputHarness::setup_route(cx, "memory");
-    let mut history = interval_resident_history();
-    history["points"][1]["apps"][0] = resident_history_measure(16_777_217);
-    history["points"][1]["other"]["resident_bytes"] = resident_history_measure(16_777_216);
-    harness.driver.seed_resident_leaders(history);
-
-    harness
-        .driver
-        .hover_selected_second_on("live-memory-app-resident-plot");
-
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("chart-tooltip-row:live-memory-app-resident:0:App A:16 MiB")
-    );
-    harness.teardown();
-}
-
 impl InputDriver {
     fn seed_interval_resident_leaders(&mut self) {
         self.seed_resident_leaders(interval_resident_history());

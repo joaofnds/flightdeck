@@ -231,10 +231,9 @@ impl LiveDashboard {
 
         let second = self.reading_target()?.second;
         let fraction = fraction?;
-        let mut indices: Vec<_> = (0..panel.lines.len().min(16))
+        let indices: Vec<_> = (0..panel.lines.len().min(16))
             .filter(|line| self.chart_series_visible(panel, *line))
             .collect();
-        indices.sort_by(|left, right| self.chart_tooltip_order(panel, index, *left, *right));
         let mut tooltip = div()
             .debug_selector(|| format!("chart-tooltip:{}", panel.id))
             .absolute()
@@ -249,7 +248,6 @@ impl LiveDashboard {
             .text_size(px(12.0))
             .child(div().mb(px(4.0)).child(clock(second, true)));
         tooltip = chart_tooltip_place(tooltip, self.chart_plot_width, fraction);
-        indices.truncate(16);
         let unreadable: Vec<usize> = indices
             .iter()
             .copied()
@@ -271,56 +269,6 @@ impl LiveDashboard {
         }
 
         Some(tooltip)
-    }
-
-    fn chart_tooltip_order(
-        &self,
-        panel: &Panel,
-        index: Option<usize>,
-        left: usize,
-        right: usize,
-    ) -> std::cmp::Ordering {
-        if let Some(history) = self.chart_attribution_history(panel) {
-            let reference_order = history.is_reference(left).cmp(&history.is_reference(right));
-            if reference_order != std::cmp::Ordering::Equal {
-                return reference_order;
-            }
-
-            if crate::live_app_attribution_history::Metric::from_panel(&panel.id)
-                == Some(crate::live_app_attribution_history::Metric::Disk)
-            {
-                return history
-                    .captured_amount(right, index)
-                    .cmp(&history.captured_amount(left, index));
-            }
-            let left = history.amount(left, index);
-            let right = history.amount(right, index);
-            return match (left, right) {
-                (Some(left), Some(right)) => right.total_cmp(&left),
-                (Some(_), None) => std::cmp::Ordering::Less,
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                (None, None) => std::cmp::Ordering::Equal,
-            };
-        }
-        if panel.id == crate::live_resident_history::PANEL_ID {
-            let history = self
-                .snapshot
-                .as_ref()
-                .and_then(|snapshot| snapshot.resident_history.as_ref());
-            let left = history.and_then(|history| history.amount(left, index));
-            let right = history.and_then(|history| history.amount(right, index));
-
-            return right.cmp(&left);
-        }
-        let left = super::chart_line_value(panel, left, index);
-        let right = super::chart_line_value(panel, right, index);
-
-        match (left, right) {
-            (Some(left), Some(right)) => right.total_cmp(&left),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => std::cmp::Ordering::Equal,
-        }
     }
 
     fn chart_tooltip_row(

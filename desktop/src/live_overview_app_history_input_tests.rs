@@ -70,22 +70,22 @@ macro_rules! overview_history_hover_case {
 overview_history_hover_case!(
     overview_cpu_history_synchronizes_exact_readings,
     "live-cpu-apps-plot",
-    "chart-tooltip-row:live-cpu-apps:0:App A:120%"
+    "chart-tooltip-row:live-cpu-apps:1:App A:120%"
 );
 overview_history_hover_case!(
     overview_resident_history_synchronizes_exact_readings,
     "live-memory-app-resident-plot",
-    "chart-tooltip-row:live-memory-app-resident:0:Resident App:1 GiB"
+    "chart-tooltip-row:live-memory-app-resident:1:Resident App:1 GiB"
 );
 overview_history_hover_case!(
     overview_disk_history_synchronizes_exact_readings,
     "live-disk-apps-plot",
-    "chart-tooltip-row:live-disk-apps:0:Current:500 kB/s"
+    "chart-tooltip-row:live-disk-apps:1:Current:500 kB/s"
 );
 overview_history_hover_case!(
     overview_power_history_synchronizes_exact_readings,
     "live-power-apps-plot",
-    "chart-tooltip-row:live-power-apps:0:App A:1.2 W"
+    "chart-tooltip-row:live-power-apps:1:App A:1.2 W"
 );
 
 #[gpui::test]

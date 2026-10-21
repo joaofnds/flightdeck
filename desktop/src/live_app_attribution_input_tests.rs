@@ -74,7 +74,7 @@ fn power_attribution_hover_updates_machine_power_and_exact_process_rankings(
     assert!(
         harness
             .driver
-            .reading_is_visible("chart-tooltip-row:live-power-apps:0:App A:1.2 W")
+            .reading_is_visible("chart-tooltip-row:live-power-apps:1:App A:1.2 W")
     );
     assert!(
         harness

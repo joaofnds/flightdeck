@@ -374,11 +374,15 @@ fn disk_attribution_gap_clears_the_rate_and_plot_exit_restores_it(cx: &mut TestA
 }
 
 #[gpui::test]
-fn disk_attribution_tooltip_orders_exact_bytes_when_plot_values_tie(cx: &mut TestAppContext) {
-    // Adjacent counts beyond f64 integer precision remain independently sortable in the tooltip.
+fn disk_attribution_tooltip_keeps_the_legend_order_when_a_later_app_reads_higher(
+    cx: &mut TestAppContext,
+) {
+    // Hover a second where the second App reads higher, and read its row second as in the legend.
     let mut harness = InputHarness::setup_route(cx, "storage");
     harness.driver.seed_disk_storage();
-    harness.driver.seed_large_disk_attribution();
+    harness
+        .driver
+        .seed_disk_attribution_with_a_higher_second_app();
 
     harness
         .driver
@@ -387,7 +391,12 @@ fn disk_attribution_tooltip_orders_exact_bytes_when_plot_values_tie(cx: &mut Tes
     assert!(
         harness
             .driver
-            .reading_is_visible("chart-tooltip-row:live-disk-apps:0:Higher:4,503,599,616 MB/s")
+            .reading_is_visible("chart-tooltip-row:live-disk-apps:1:Lower:1 MB/s")
+    );
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("chart-tooltip-row:live-disk-apps:2:Higher:2 MB/s")
     );
     harness.teardown();
 }
@@ -477,7 +486,7 @@ impl InputDriver {
         assert!(Arc::ptr_eq(retained, &self.disk_attribution_anchor()));
     }
 
-    fn seed_large_disk_attribution(&mut self) {
+    fn seed_disk_attribution_with_a_higher_second_app(&mut self) {
         use crate::live_app_attribution_history::{
             AppAttributionHistory, Metric, tests::disk_fixture,
         };
@@ -489,10 +498,10 @@ impl InputDriver {
                 {"key":{"kind":"bundle","bytes_hex":"42","display":"Higher"}}]);
             for point in history["points"].as_array_mut().unwrap() {
                 let mut higher = point["apps"][0].clone();
-                point["apps"][0]["disk_io_bytes"]["known"] = json!("9007199254740992");
-                higher["disk_io_bytes"]["known"] = json!("9007199254740993");
-                higher["disk_io_bps"] = json!(4_503_599_627_370_496.0);
-                point["apps"][0]["disk_io_bps"] = higher["disk_io_bps"].clone();
+                point["apps"][0]["disk_io_bytes"]["known"] = json!("2000000");
+                point["apps"][0]["disk_io_bps"] = json!(1_000_000.0);
+                higher["disk_io_bytes"]["known"] = json!("4000000");
+                higher["disk_io_bps"] = json!(2_000_000.0);
                 point["apps"].as_array_mut().unwrap().push(higher);
             }
             snapshot.app_attribution_history = Some(Arc::new(AppAttributionHistory::prepare(
