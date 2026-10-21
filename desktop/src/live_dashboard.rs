@@ -323,7 +323,7 @@ impl LiveDashboard {
                     "hovers":self.hover_timings.report(),
                     "error":self.error})
                 );
-                crate::live_launch::request_quit(cx);
+                cx.quit();
             }
         }
     }

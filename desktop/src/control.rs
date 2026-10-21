@@ -279,7 +279,7 @@ fn execute(
             Ok(json!({"handled": window.dispatch_keystroke(keystroke, cx)}))
         }
         "quit" => {
-            crate::live_launch::request_quit(cx);
+            cx.quit();
             Ok(Value::Null)
         }
         "help" => Ok(json!(HELP)),

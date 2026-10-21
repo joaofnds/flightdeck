@@ -34,6 +34,7 @@ pub(super) fn install(session: CollectorSession, cx: &mut App) {
         if let Some(timer) = collection.timer.take() {
             timer.set_running(false);
         }
+
         // The collector saves its last readings and exits on its own once asked, and also when
         // the app that started it is gone, so quitting asks it and does not wait for it.
         collection.session.begin_stop();
@@ -135,8 +136,4 @@ pub fn retry_collector(cx: &mut App) {
         cx.global_mut::<Collection>().session.retry();
         cx.refresh_windows();
     }
-}
-
-pub fn request_quit(cx: &mut App) {
-    cx.quit();
 }

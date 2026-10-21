@@ -16,7 +16,7 @@ mod lifecycle;
 #[path = "collector_lifecycle_readiness.rs"]
 mod readiness;
 
-pub use collection::{collector_status, request_quit, retry_collector};
+pub use collection::{collector_status, retry_collector};
 
 pub fn probe(options: &Options) -> Result<(), Box<dyn std::error::Error>> {
     let root = recording(options)?;
@@ -103,14 +103,14 @@ pub fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
         } else {
             cx.on_window_closed(|cx, _window_id| {
                 if cx.windows().is_empty() {
-                    request_quit(cx);
+                    cx.quit();
                 }
             })
             .detach();
         }
         if let Err(error) = open_window(opening, cx) {
             eprintln!("Live window failed: {error}");
-            request_quit(cx);
+            cx.quit();
         }
     });
     Ok(())

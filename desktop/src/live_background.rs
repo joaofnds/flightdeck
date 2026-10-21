@@ -65,7 +65,7 @@ pub(super) fn install_menu_bar(cx: &mut App) {
     let item = MenuBarItem::new(move |command| {
         application.update(|cx| match command {
             Command::Show => show(cx),
-            Command::Quit => super::request_quit(cx),
+            Command::Quit => cx.quit(),
         });
     });
     match item {
