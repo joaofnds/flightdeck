@@ -38,6 +38,7 @@ pub struct Session {
     app_history_cache: std::cell::RefCell<Option<app_history::Cache>>,
     app_process_history_cache: std::cell::RefCell<Option<app_history::Cache>>,
     app_history_ticks: std::cell::RefCell<app_history::Ticks>,
+    app_history_kept_headers: std::cell::RefCell<app_history::KeptHeaders>,
     parts_read: std::cell::RefCell<Option<app_history::PartsRead>>,
     pub(crate) saved_history_context_preparations: std::cell::Cell<u64>,
     operation: Operation,
@@ -47,6 +48,8 @@ pub struct Session {
     pub(crate) parts_decodes: std::cell::Cell<u64>,
     #[cfg(test)]
     pub(crate) tick_queries: std::cell::Cell<u64>,
+    #[cfg(test)]
+    pub(crate) kept_header_queries: std::cell::Cell<u64>,
     #[cfg(test)]
     pub(crate) before_cpu_history_install: Option<Box<dyn FnOnce()>>,
     #[cfg(test)]
@@ -201,6 +204,7 @@ impl Session {
             app_history_cache: std::cell::RefCell::new(None),
             app_process_history_cache: std::cell::RefCell::new(None),
             app_history_ticks: std::cell::RefCell::new(app_history::Ticks::new()),
+            app_history_kept_headers: std::cell::RefCell::new(app_history::KeptHeaders::new()),
             parts_read: std::cell::RefCell::new(None),
             saved_history_context_preparations: std::cell::Cell::new(0),
             operation,
@@ -210,6 +214,8 @@ impl Session {
             parts_decodes: std::cell::Cell::new(0),
             #[cfg(test)]
             tick_queries: std::cell::Cell::new(0),
+            #[cfg(test)]
+            kept_header_queries: std::cell::Cell::new(0),
             #[cfg(test)]
             before_cpu_history_install: None,
             #[cfg(test)]

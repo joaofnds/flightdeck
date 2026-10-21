@@ -65,7 +65,7 @@ pub(super) fn processes(
             creation: process.creation,
             app_index: process.app.map(|key| {
                 let index = apps
-                    .binary_search_by(|app| key_view(&app.key).cmp(&key))
+                    .binary_search_by(|app| app.key.view().cmp(&key))
                     .unwrap_or_else(|_| unreachable!("aggregate member App exists"));
                 u32::try_from(index).unwrap_or_else(|_| unreachable!())
             }),
@@ -142,13 +142,6 @@ pub(super) fn display_name(kind: KeyKind, bytes: &[u8]) -> Result<String> {
     };
 
     display(app_name(key))
-}
-
-fn key_view(key: &Key) -> AppKey<'_> {
-    match key.kind {
-        KeyKind::Bundle => AppKey::Bundle(&key.bytes),
-        KeyKind::Executable => AppKey::Executable(&key.bytes),
-    }
 }
 
 fn app_name(key: AppKey<'_>) -> &[u8] {

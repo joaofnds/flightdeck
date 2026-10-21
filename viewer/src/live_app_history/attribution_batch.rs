@@ -133,10 +133,10 @@ impl History {
         if !rates.borrow().limited() {
             query.saved.visit_attribution_replay(
                 replay,
-                |frame, previous, windows| {
+                |observed, windows| {
                     rates
                         .borrow_mut()
-                        .capture(frame, previous, windows, space, query.operation)
+                        .capture(observed, windows, space, query.operation)
                 },
                 |pin| rates.borrow_mut().pin(pin, space),
             )?;
@@ -218,15 +218,9 @@ impl History {
     ) -> Result<()> {
         query.saved.visit_attribution_replay(
             replay,
-            |frame, previous, windows| {
-                let point = SavedPoint::capture(
-                    frame,
-                    previous,
-                    None,
-                    windows,
-                    BYTES_MAX,
-                    query.operation,
-                )?;
+            |observed, windows| {
+                let point =
+                    SavedPoint::capture(observed, None, windows, BYTES_MAX, query.operation)?;
                 consume(&point);
                 Ok(())
             },

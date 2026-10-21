@@ -1,5 +1,6 @@
+use super::sealed_attribution::{KeptObservation, KeptWindow};
 use super::{BTreeMap, BTreeSet, Frame, Key, Observation, Reading, Restore, Session, Source};
-use crate::app_attribution_history::cache::Cache;
+use crate::app_attribution_history::cache::{Cache, Observed};
 use crate::live_app_history::{ResidentFile, ResidentPin};
 use crate::live_app_response::Selected;
 use persistence::{Error, Result, WindowIdentity};
@@ -211,7 +212,10 @@ impl Session {
     }
 }
 
+/// The observations of a range of the histories of every App: those the windows that keep
+/// their Apps' parts give, and the readings the replay of the other windows' minutes gives.
 pub(crate) struct AttributionReplay {
+    kept_windows: Vec<KeptWindow>,
     restore: Restore,
     context: Vec<Key>,
     readings: Vec<Reading>,
@@ -219,7 +223,8 @@ pub(crate) struct AttributionReplay {
 }
 
 const REPLAY_LEDGER_BYTES_MAX: usize = size_of::<AttributionReplay>()
-    + super::super::OBSERVATIONS_MAX * size_of::<Key>()
+    + super::super::OBSERVATIONS_MAX
+        * (size_of::<Key>() + size_of::<KeptWindow>() + size_of::<KeptObservation>())
     + super::READINGS_MAX * (size_of::<Reading>() + 2 * size_of::<Key>());
 const _: () = {
     assert!(REPLAY_LEDGER_BYTES_MAX < 4 * 1024 * 1024);
@@ -239,6 +244,7 @@ impl Session {
 
         let range = self.app_history_range(selected)?;
         let mut replay = Box::new(AttributionReplay {
+            kept_windows: Vec::new(),
             restore: Restore {
                 readings: BTreeMap::new(),
                 sources: BTreeMap::new(),
@@ -249,10 +255,13 @@ impl Session {
             readings: Vec::with_capacity(super::READINGS_MAX),
             prepared: None,
         });
-        self.app_history_gather(&range, &BTreeSet::new(), &mut replay.restore)?;
+        let kept_windows =
+            self.attribution_kept(&range, &mut replay.restore, &mut replay.kept_windows)?;
+        self.app_history_gather(&range, &kept_windows, &mut replay.restore)?;
         for key in replay.restore.readings.keys() {
             replay.context.push(*key);
         }
+        assert_eq!(replay.count(), replay.restore.plotted);
         self.attribution_replay_validate(&replay)?;
         let response = consume(&mut replay)?;
         self.attribution_replay_validate(&replay)?;
@@ -279,6 +288,12 @@ impl Session {
                 .get_mut(key)
                 .ok_or(Error::Bound("attribution replay context"))?;
             reading.plotted = !excluded(&reading.observation)?;
+        }
+        for kept in &mut replay.kept_windows {
+            for observation in &mut kept.observations {
+                self.operation.check()?;
+                observation.plotted = !excluded(&observation.header.selected)?;
+            }
         }
         let needed = match &replay.prepared {
             None => self.attribution_readings(&mut replay.restore)?,
@@ -329,7 +344,7 @@ impl Session {
     pub(crate) fn visit_attribution_replay(
         &self,
         replay: &mut AttributionReplay,
-        mut consume: impl FnMut(&Frame, Option<&Frame>, [Option<WindowIdentity>; 2]) -> Result<()>,
+        mut consume: impl FnMut(Observed<'_>, [Option<WindowIdentity>; 2]) -> Result<()>,
         mut pin: impl FnMut(ResidentPin) -> Result<()>,
     ) -> Result<()> {
         let mut projection = Projection {
@@ -337,22 +352,38 @@ impl Session {
             reading: None,
         };
         let mut index = 0;
+        let mut kept_index = 0;
         for _batch in 0..super::READINGS_MAX {
             self.operation.check()?;
-            if index == replay.readings.len() {
+            // Each kept window goes before the replayed window after it in the Session's order,
+            // which can differ from the order of the readings across boots. The response sorts
+            // the points, so this order sets only the order the cache keeps them in.
+            let next_window = replay.readings.get(index).map(|reading| reading.window);
+            for kept in &replay.kept_windows[kept_index..] {
+                if let Some(next_window) = next_window {
+                    if kept.window > next_window {
+                        break;
+                    }
+                }
+                self.visit_attribution_kept_apps(kept, &mut pin, &mut consume)?;
+                kept_index += 1;
+            }
+            let Some(window) = next_window else {
                 self.attribution_pins(&replay.restore, &mut pin)?;
                 return self.attribution_replay_validate(replay);
-            }
+            };
             let count = replay.readings[index..]
                 .iter()
-                .take_while(|reading| reading.window == replay.readings[index].window)
+                .take_while(|reading| reading.window == window)
                 .count();
             let end = index + count;
             self.attribution_batch(
                 &mut replay.restore,
                 &replay.readings[index..end],
                 &mut projection,
-                &mut consume,
+                &mut |frame: &Frame, previous: Option<&Frame>, windows| {
+                    consume(Observed::Replayed { frame, previous }, windows)
+                },
                 &mut pin,
             )?;
             index = end;
@@ -363,6 +394,10 @@ impl Session {
 
     fn attribution_replay_validate(&self, replay: &AttributionReplay) -> Result<()> {
         self.operation.check()?;
+        for kept in &replay.kept_windows {
+            self.operation.check()?;
+            self.validate_commitment(kept.window)?;
+        }
         for (window, _source) in replay.restore.sources.keys() {
             self.operation.check()?;
             self.validate_commitment(*window)?;
@@ -377,7 +412,14 @@ impl Session {
 }
 
 impl AttributionReplay {
+    /// The observations of the range, each plotted unless the plan excludes it.
     pub(crate) fn count(&self) -> usize {
-        self.context.len()
+        let kept: usize = self
+            .kept_windows
+            .iter()
+            .map(|kept| kept.observations.len())
+            .sum();
+
+        self.context.len() + kept
     }
 }

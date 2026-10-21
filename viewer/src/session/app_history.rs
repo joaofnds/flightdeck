@@ -20,6 +20,8 @@ mod resident;
 mod sealed;
 mod sealed_apps;
 pub use sealed_apps::SealedApps;
+mod sealed_attribution;
+pub(super) use sealed_attribution::KeptHeaders;
 mod sealed_parts;
 pub(crate) use sealed_parts::PartsRead;
 mod sealed_ranks;
@@ -39,6 +41,18 @@ struct Restore {
     sources: BTreeMap<(usize, Source), SourceQuery>,
     source_bytes: usize,
     plotted: usize,
+}
+
+impl Restore {
+    /// Counts one more plotted observation, of which a history plots `OBSERVATIONS_MAX` at most.
+    fn plot(&mut self) -> Result<()> {
+        if self.plotted == OBSERVATIONS_MAX {
+            return Err(Error::Bound("committed App history observations"));
+        }
+
+        self.plotted += 1;
+        Ok(())
+    }
 }
 
 struct Projection<'target> {
@@ -302,11 +316,7 @@ impl Session {
             target.app().kind,
             target.app().bytes,
             |window, part| {
-                if restore.plotted == OBSERVATIONS_MAX {
-                    return Err(Error::Bound("committed App history observations"));
-                }
-
-                restore.plotted += 1;
+                restore.plot()?;
                 output.push(TracePoint::from_part(part, target));
                 windows.insert(window);
                 Ok(())
@@ -360,12 +370,8 @@ impl Session {
                     return Err(Error::Bound("committed App history window association"));
                 }
 
-                if restore.plotted == OBSERVATIONS_MAX {
-                    return Err(Error::Bound("committed App history observations"));
-                }
-
+                restore.plot()?;
                 reading.plotted = true;
-                restore.plotted += 1;
                 app_history_insert(restore, &reading)?;
             }
         }

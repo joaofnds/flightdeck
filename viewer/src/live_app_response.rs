@@ -196,6 +196,14 @@ impl Key {
         })
     }
 
+    /// The key as an aggregate of the App's processes holds it.
+    pub(crate) fn view(&self) -> AppKey<'_> {
+        match self.kind {
+            KeyKind::Bundle => AppKey::Bundle(&self.bytes),
+            KeyKind::Executable => AppKey::Executable(&self.bytes),
+        }
+    }
+
     /// The name the App of this key shows.
     pub(crate) fn display_name(&self) -> Result<String> {
         capture::display_name(self.kind, &self.bytes)

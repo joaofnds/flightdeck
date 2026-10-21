@@ -6,6 +6,7 @@ use crate::apps::Stamp;
 use crate::live::identity_fixture::Fixture;
 use crate::live_app_history::{App, CompactMeasure, compact};
 use crate::live_app_response::{Key, KeyKind, Measure};
+use collector::processes::Usage;
 
 struct SavedFixture {
     fixture: Fixture,
@@ -261,6 +262,212 @@ fn batch_keeps_a_saved_predecessor_outside_the_context_across_minutes() {
         batch.cpu.as_ref().unwrap()["points"][0]["elapsed_ns"],
         "1000000000"
     );
+}
+
+#[test]
+fn batch_from_the_parts_sealed_windows_keep_is_the_batch_their_replay_gives() {
+    // Goal: the three histories from the parts each sealed window keeps are the histories a
+    // replay of the windows' minutes gives, and read none of the windows' saved sources.
+    // Method: seal four minutes with their Apps' parts, take the batch, and compare it with
+    // the batch a session gives once the parts are of a version this build does not read.
+    let fixture = kept_fixture([true; 4]);
+    let kept_session = Session::open(&fixture.root).unwrap();
+
+    let kept = saved_batch(&kept_session);
+
+    assert_eq!(kept_session.source_reads.get(), 0);
+    assert_ne!(kept.cpu.as_ref().unwrap()["cohort"], json!([]));
+    assert_ne!(
+        kept.power.as_ref().unwrap()["points"],
+        kept.disk.as_ref().unwrap()["points"]
+    );
+    assert_batch(&kept, &replayed_batch(kept_session, &fixture, 6).0);
+}
+
+#[test]
+fn batch_replays_the_windows_sealed_without_parts_before_those_that_keep_them() {
+    // Goal: windows sealed without parts before windows that keep them give the batch a
+    // replay of them all gives, and the windows that keep them are not replayed.
+    // Method: seal the first two minutes without parts and the rest with them, and compare the
+    // batch and the saved sources it read with those a replay of every window gives.
+    let fixture = kept_fixture([false, false, true, true]);
+    let kept_session = Session::open(&fixture.root).unwrap();
+
+    let kept = saved_batch(&kept_session);
+
+    let reads = kept_session.source_reads.get();
+    let (replayed, replayed_reads) = replayed_batch(kept_session, &fixture, 6);
+    assert_batch(&kept, &replayed);
+    assert!(reads < replayed_reads);
+}
+
+#[test]
+fn batch_replays_a_window_sealed_without_parts_with_rates_from_one_that_keeps_them() {
+    // Goal: the first observation of a window sealed without parts takes its rates from the
+    // last observation of the window before it, which keeps its parts, as a replay of them
+    // all gives it, and the windows that keep them are not replayed.
+    // Method: seal the first two minutes with parts and the rest without, and compare the
+    // batch and the saved sources it read with those a replay of every window gives.
+    let fixture = kept_fixture([true, true, false, false]);
+    let kept_session = Session::open(&fixture.root).unwrap();
+
+    let kept = saved_batch(&kept_session);
+
+    let reads = kept_session.source_reads.get();
+    let (replayed, replayed_reads) = replayed_batch(kept_session, &fixture, 6);
+    assert_batch(&kept, &replayed);
+    assert!(reads < replayed_reads);
+}
+
+#[test]
+fn batch_from_the_parts_of_an_earlier_second_is_the_batch_its_replay_gives() {
+    // Goal: a batch ending inside a window that keeps its parts leaves out the observations
+    // after its end, as a replay does.
+    // Method: seal four minutes with their parts, take the batch at the fourth of six
+    // observations, and compare it with the replay's batch at the same observation.
+    let fixture = kept_fixture([true; 4]);
+    let kept_session = Session::open(&fixture.root).unwrap();
+
+    let kept = kept_batch(&kept_session, &History::new(), 4, BYTES_MAX).unwrap();
+
+    assert_batch(&kept, &replayed_batch(kept_session, &fixture, 4).0);
+}
+
+#[test]
+fn batch_from_points_cached_from_parts_is_the_batch_the_first_query_gave() {
+    // Goal: a second query takes the points the first took from the windows' parts out of the
+    // cache and gives the same batch.
+    // Method: take the batch twice with one history over windows that keep their parts.
+    let fixture = kept_fixture([true; 4]);
+    let session = Session::open(&fixture.root).unwrap();
+    let history = History::new();
+    let first = kept_batch(&session, &history, 6, BYTES_MAX).unwrap();
+
+    let second = kept_batch(&session, &history, 6, BYTES_MAX).unwrap();
+
+    assert_batch(
+        &second,
+        &[first.cpu, first.power, first.disk].map(Result::unwrap),
+    );
+}
+
+#[test]
+fn batch_reads_the_facts_of_windows_that_keep_their_parts_once_per_session() {
+    // Goal: a sealed window's facts never change, so a session reads them from its parts once
+    // and every later batch of any history takes them from the session.
+    // Method: take the batch with one history, then with a fresh one, and count the queries
+    // of the windows' facts each ran.
+    let fixture = kept_fixture([true; 4]);
+    let session = Session::open(&fixture.root).unwrap();
+    let first = saved_batch(&session);
+    let queries = session.kept_header_queries.get();
+
+    let second = saved_batch(&session);
+
+    assert_eq!(queries, 4);
+    assert_eq!(session.kept_header_queries.get(), queries);
+    assert_batch(
+        &second,
+        &[first.cpu, first.power, first.disk].map(Result::unwrap),
+    );
+}
+
+#[test]
+fn batch_reads_again_the_facts_of_parts_rewritten_since_the_session_read_them() {
+    // Goal: the session's facts of a window's parts never outlive the file they came from.
+    // Method: take the batch, rewrite each window's parts so their facts count one App more
+    // than they keep, and take the batch again on the same session.
+    let fixture = kept_fixture([true; 4]);
+    let session = Session::open(&fixture.root).unwrap();
+    saved_batch(&session);
+    Session::open(&fixture.root).unwrap().overcount_kept_apps();
+
+    let result = kept_batch(&session, &History::new(), 6, BYTES_MAX);
+
+    assert!(matches!(result, Err(Error::Bound("sealed parts Apps"))));
+}
+
+#[test]
+fn batch_from_parts_past_the_cache_budget_is_the_batch_their_replay_gives() {
+    // Goal: windows that keep their parts give the replay's batch when the cache cannot hold
+    // all their points, so the batch reads them twice.
+    // Method: find the budget one pin short of the cache a full batch fills, take the batch
+    // within it, and compare it with the replay's batch.
+    let fixture = kept_fixture([true; 4]);
+    let kept_session = Session::open(&fixture.root).unwrap();
+    let full = History::new();
+    kept_batch(&kept_session, &full, 6, BYTES_MAX).unwrap();
+    let rates = full.saved_residents.borrow_mut().take_attribution();
+    let limited = rates.bytes() - rates.pins().last().unwrap().bytes();
+
+    let kept = kept_batch(&kept_session, &History::new(), 6, limited).unwrap();
+
+    assert_eq!(
+        kept.cpu.as_ref().unwrap()["coverage"]["saved_cache_limited"],
+        true
+    );
+    assert_batch(&kept, &replayed_batch(kept_session, &fixture, 6).0);
+}
+
+#[test]
+fn batch_refuses_a_replaced_file_a_cached_point_took_its_rates_from() {
+    // Goal: a cached point whose rates came from a window that keeps its parts, replayed for
+    // its last observation, fails the next batch once that window's processes are replaced.
+    // Method: seal two minutes with parts and two without, take the batch, replace the
+    // second window's processes file with a copy, and take the batch again.
+    let fixture = kept_fixture([true, true, false, false]);
+    let session = Session::open(&fixture.root).unwrap();
+    let history = History::new();
+    kept_batch(&session, &history, 6, BYTES_MAX).unwrap();
+    let directory = fixture.root.join(&session.windows[1].data_directory);
+    let original = fixture.root.join("processes-original.parquet");
+    std::fs::rename(directory.join("processes.parquet"), &original).unwrap();
+    std::fs::copy(&original, directory.join("processes.parquet")).unwrap();
+
+    let result = kept_batch(&session, &history, 6, BYTES_MAX);
+
+    assert!(matches!(
+        result,
+        Err(Error::Bound("attribution cache file changed"))
+    ));
+}
+
+#[test]
+fn batch_refuses_replaced_parts_a_cached_point_was_taken_from() {
+    // Goal: a cached point taken from a window's parts fails the next batch once those parts
+    // are replaced.
+    // Method: seal four minutes with their parts, take the batch, replace the first window's
+    // parts with a copy, and take the batch again with the same history.
+    let fixture = kept_fixture([true; 4]);
+    let session = Session::open(&fixture.root).unwrap();
+    let history = History::new();
+    kept_batch(&session, &history, 6, BYTES_MAX).unwrap();
+    let directory = fixture.root.join(&session.windows[0].data_directory);
+    let original = fixture.root.join("app_parts-original.parquet");
+    std::fs::rename(directory.join("app_parts.parquet"), &original).unwrap();
+    std::fs::copy(&original, directory.join("app_parts.parquet")).unwrap();
+
+    let result = kept_batch(&session, &history, 6, BYTES_MAX);
+
+    assert!(matches!(
+        result,
+        Err(Error::Bound("attribution cache file changed"))
+    ));
+}
+
+#[test]
+fn batch_refuses_parts_whose_facts_count_more_apps_than_the_window_keeps() {
+    // Goal: an observation whose facts count more Apps than its window's parts keep for it
+    // fails the batch rather than giving a point that misses an App.
+    // Method: seal the minutes with their parts, raise each observation's App count, and take
+    // the batch.
+    let fixture = kept_fixture([true; 4]);
+    Session::open(&fixture.root).unwrap().overcount_kept_apps();
+    let session = Session::open(&fixture.root).unwrap();
+
+    let result = kept_batch(&session, &History::new(), 6, BYTES_MAX);
+
+    assert!(matches!(result, Err(Error::Bound("sealed parts Apps"))));
 }
 
 #[test]
@@ -553,6 +760,116 @@ fn assert_payload(actual: &Value, expected: &Value) {
         serde_json::to_vec(&actual).unwrap(),
         serde_json::to_vec(&expected).unwrap()
     );
+}
+
+/// Six observations, publications 1 to 6, whose adjacent pairs cross four run minutes, each
+/// minute sealed with its Apps' parts where `kept` says so. The measured process's energy and
+/// disk bytes grow at different paces, so its power and disk histories differ.
+fn kept_fixture(kept: [bool; 4]) -> Fixture {
+    let mut fixture = Fixture::new();
+    fixture.start_at_run_tick(59);
+    for minute in 0..3 {
+        for second in 0..2 {
+            let index = minute * 2 + second;
+            fixture.publish_with_usage(1000 + index, &kept_usage(index));
+        }
+        if minute < 2 {
+            fixture.skip_run_ticks(58);
+        }
+    }
+    for (minute, kept) in (0..).zip(kept) {
+        if kept {
+            fixture.seal_minute_derived(minute, &crate::SealedApps);
+        } else {
+            fixture.seal_minute(minute);
+        }
+    }
+
+    fixture
+}
+
+/// The measured process's usage at the observation of `kept_fixture` whose index is `index`.
+fn kept_usage(index: u64) -> Usage {
+    Usage {
+        awake_ns_at_start: 0,
+        user_ns: 1_000_000 * (index + 1),
+        system_ns: 3,
+        energy_nj: 4 + 7 * index * index,
+        instructions: 5,
+        super_instructions: 6,
+        cycles: 7,
+        idle_wakeups: 8,
+        interrupt_wakeups: 9,
+        pageins: 10,
+        resident_bytes: 11,
+        footprint_bytes: 12,
+        disk_read_bytes: 13 + 3 * index,
+        disk_written_bytes: 14 + 2 * index,
+    }
+}
+
+/// The batch at the last observation of `kept_fixture`, from its saved windows alone.
+fn saved_batch(saved: &Session) -> AppAttributionHistories {
+    *kept_batch(saved, &History::new(), 6, BYTES_MAX).unwrap()
+}
+
+/// The batch `history` gives at publication `publication` of `kept_fixture` from its saved
+/// windows alone, with at most `available` bytes of cache, or the error that refuses it.
+fn kept_batch(
+    saved: &Session,
+    history: &History,
+    publication: u64,
+    available: usize,
+) -> Result<Box<AppAttributionHistories>> {
+    // The observation of index `index` is the second `1000 + index`, at run tick 59 plus 60
+    // for each minute the pairs before it crossed.
+    let index = publication - 1;
+    let run_tick = 59 + index / 2 * 60 + index % 2;
+    let run = saved.windows[0].identity.run;
+    let selected = Selected::ending_at(Observation {
+        recording: run.recording.0,
+        stamp: Stamp {
+            boot: run.boot.0,
+            run: run.run.0,
+            publication,
+            continuous_ns: Some(run_tick * 1_000_000_000),
+            awake_ns: Some(run_tick * 1_000_000_000),
+        },
+        run_tick,
+        wall_ns: Some((1000 + index) * 1_000_000_000),
+    })
+    .unwrap();
+    let cancellation = Arc::new(Cancellation::default());
+    let operation = cancellation.operation(0).unwrap();
+    let mut batch = Batch::new(history, &selected, &operation).unwrap();
+
+    history.attribution_batch_saved(
+        &SavedQuery {
+            selected: &selected,
+            saved,
+            operation: &operation,
+            available: available.min(BYTES_MAX.saturating_sub(history.bytes)),
+        },
+        &mut batch,
+    )
+}
+
+/// The batch at publication `publication` from a session opened in place of `session` once
+/// each window's parts are of a version this build does not read, and the saved sources that
+/// session read.
+fn replayed_batch(session: Session, fixture: &Fixture, publication: u64) -> ([Value; 3], u64) {
+    session.unread_kept_parts();
+    drop(session);
+    let replaying = Session::open(&fixture.root).unwrap();
+
+    let replayed = kept_batch(&replaying, &History::new(), publication, BYTES_MAX).unwrap();
+
+    let reads = replaying.source_reads.get();
+    assert!(reads > 0);
+    (
+        [replayed.cpu, replayed.power, replayed.disk].map(Result::unwrap),
+        reads,
+    )
 }
 
 fn retire(fixture: &Fixture) {

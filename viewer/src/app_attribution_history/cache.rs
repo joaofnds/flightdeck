@@ -7,7 +7,8 @@ use super::sums::{SumKey, Summed, Sums};
 use super::{AppAttributionMetric, Capture, Reading};
 use crate::apps::AppKey;
 use crate::cancellation::Operation;
-use crate::live_app_history::{CompactMeasure, ResidentPin};
+use crate::live::resident_history::Capture as Coverage;
+use crate::live_app_history::{CompactMeasure, ResidentFile, ResidentPin};
 use crate::live_app_response::{Measure, Observation};
 use crate::live_apps::Frame;
 
@@ -25,6 +26,21 @@ pub(crate) struct Point {
     apps: Vec<App>,
 }
 
+/// What a saved point of the histories of every App is taken from.
+#[derive(Clone, Copy)]
+pub(crate) enum Observed<'observed> {
+    /// A frame the replay of its minute gives, and the frame it takes its rates from.
+    Replayed {
+        frame: &'observed Frame,
+        previous: Option<&'observed Frame>,
+    },
+    /// The facts and the Apps of an observation whose window keeps its Apps' parts.
+    Sealed {
+        header: &'observed crate::live_app_response::Header,
+        apps: &'observed [crate::live_app_response::App],
+    },
+}
+
 pub(crate) struct App {
     key: Arc<Key>,
     cpu: CompactMeasure,
@@ -37,6 +53,17 @@ pub(crate) struct App {
 pub(crate) struct Key {
     bundle: bool,
     bytes: Box<[u8]>,
+}
+
+/// One App of an observation, as the measures a point takes from it.
+#[derive(Clone, Copy)]
+struct MeasuredApp<'key> {
+    key: AppKey<'key>,
+    cpu: Measure,
+    power: Measure,
+    disk: Measure,
+    members: u32,
+    membership_complete: bool,
 }
 
 const _: () = {
@@ -97,8 +124,7 @@ impl Cache {
 
     pub(crate) fn capture(
         &mut self,
-        frame: &Frame,
-        previous: Option<&Frame>,
+        observed: Observed<'_>,
         windows: [Option<WindowIdentity>; 2],
         available: usize,
         operation: &Operation,
@@ -108,15 +134,8 @@ impl Cache {
         }
 
         let remaining = available.saturating_sub(self.bytes);
-        let captured = Point::capture(
-            frame,
-            previous,
-            Some(&self.sums),
-            windows,
-            remaining,
-            operation,
-        )
-        .and_then(|point| self.insert(point, available));
+        let captured = Point::capture(observed, Some(&self.sums), windows, remaining, operation)
+            .and_then(|point| self.insert(point, available));
         match captured {
             Ok(()) => Ok(()),
             Err(Error::Bound("attribution cache space")) => {
@@ -247,12 +266,12 @@ impl Cache {
             return Err(Error::Bound("attribution cache pin bytes"));
         }
 
-        if self
+        if let Some(index) = self
             .pins
             .iter()
-            .any(|existing| existing.manifest.identity == pin.manifest.identity)
+            .position(|existing| existing.manifest.identity == pin.manifest.identity)
         {
-            return Ok(());
+            return self.pin_files(index, pin, available);
         }
 
         if self.pins.capacity() == 0 {
@@ -280,10 +299,99 @@ impl Cache {
 
         Ok(())
     }
+
+    /// Adds to the pin at `index` each file of `pin`, of the same window, that it lacks, since a
+    /// window may give one point from its parts and another point's rates from its replay, and
+    /// the cache checks every file each point was taken from.
+    fn pin_files(&mut self, index: usize, pin: ResidentPin, available: usize) -> Result<()> {
+        let pinned = &self.pins[index];
+        let missing: Vec<ResidentFile> = pin
+            .files
+            .into_iter()
+            .filter(|file| pinned.files.iter().all(|kept| kept.path != file.path))
+            .collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+
+        let mut files = Vec::with_capacity(pinned.files.len() + missing.len());
+        let before = pinned.owned_bytes();
+        let after = before + files.capacity() * size_of::<ResidentFile>()
+            - pinned.files.capacity() * size_of::<ResidentFile>()
+            + missing
+                .iter()
+                .map(|file| file.path.capacity() + file.alias.capacity())
+                .sum::<usize>();
+        if size_of::<ResidentPin>() + after > crate::live_app_history::PIN_BYTES_MAX {
+            return Err(Error::Bound("attribution cache pin bytes"));
+        }
+        if after > before {
+            if self.bytes() + (after - before) > available {
+                self.limit(available);
+                return Ok(());
+            }
+        }
+
+        files.append(&mut self.pins[index].files);
+        files.extend(missing);
+        self.pins[index].files = files;
+        assert_eq!(self.pins[index].owned_bytes(), after);
+        self.bytes = self.bytes - before + after;
+        assert!(self.bytes() <= available);
+
+        Ok(())
+    }
 }
 
 impl Point {
     pub(crate) fn capture(
+        observed: Observed<'_>,
+        sums: Option<&Sums<Arc<Key>>>,
+        windows: [Option<WindowIdentity>; 2],
+        available: usize,
+        operation: &Operation,
+    ) -> Result<Self> {
+        match observed {
+            Observed::Replayed { frame, previous } => {
+                Self::capture_replayed(frame, previous, sums, windows, available, operation)
+            }
+            Observed::Sealed { header, apps } => {
+                Self::capture_sealed(header, apps, sums, windows, available, operation)
+            }
+        }
+    }
+
+    fn capture_sealed(
+        header: &crate::live_app_response::Header,
+        apps: &[crate::live_app_response::App],
+        sums: Option<&Sums<Arc<Key>>>,
+        windows: [Option<WindowIdentity>; 2],
+        available: usize,
+        operation: &Operation,
+    ) -> Result<Self> {
+        let capture = Capture {
+            coverage: Coverage {
+                observation: header.selected,
+                membership_complete: header.membership_complete,
+                ungrouped_members: header.ungrouped_members,
+                usage_refused: header.usage_refused,
+                usage_gone: header.usage_gone,
+            },
+            elapsed_ns: header.elapsed_ns,
+        };
+        let apps = apps.iter().map(|app| MeasuredApp {
+            key: app.key.view(),
+            cpu: app.cpu_ns,
+            power: app.energy_nj,
+            disk: app.disk_io_bytes,
+            members: app.members,
+            membership_complete: app.membership_complete,
+        });
+
+        Self::capture_measured(capture, apps, sums, windows, available, operation)
+    }
+
+    fn capture_replayed(
         frame: &Frame,
         previous: Option<&Frame>,
         sums: Option<&Sums<Arc<Key>>>,
@@ -293,46 +401,73 @@ impl Point {
     ) -> Result<Self> {
         let mut output = None;
         frame.with_aggregate(previous, |aggregate| {
-            let mut bytes = aggregate.apps.len() * size_of::<App>();
-            for key in aggregate.apps.keys() {
-                operation.check()?;
-                if sums.and_then(|sums| sums.key(key)).is_none() {
-                    bytes += Key::owned_bytes(key);
-                }
-            }
-            if bytes > available {
-                return Err(Error::Bound("attribution cache space"));
-            }
-            let mut apps = Vec::with_capacity(aggregate.apps.len());
-            for (key, app) in &aggregate.apps {
-                operation.check()?;
-                // A key the cache already holds is shared, so each name is stored once.
-                let key = sums
-                    .and_then(|sums| sums.key(key))
-                    .map_or_else(|| Arc::new(Key::capture(key)), Arc::clone);
-                apps.push(App {
-                    key,
-                    cpu: CompactMeasure::capture(&measure(&app.cpu_ns)),
-                    power: CompactMeasure::capture(&measure(&app.energy_nj)),
-                    disk: CompactMeasure::capture(&measure(&app.disk_io_bytes)),
-                    members: u16::try_from(app.members)
-                        .map_err(|_| Error::Bound("attribution App members"))?,
-                    membership_complete: app.membership_complete,
-                });
-            }
             let mut coverage = crate::live::resident_history::capture(frame, aggregate);
             coverage.ungrouped_members = aggregate.ungrouped_members;
-            output = Some(Self {
-                capture: Capture {
-                    coverage,
-                    elapsed_ns: aggregate.elapsed_ns,
-                },
-                windows,
-                apps,
+            let capture = Capture {
+                coverage,
+                elapsed_ns: aggregate.elapsed_ns,
+            };
+            let apps = aggregate.apps.iter().map(|(key, app)| MeasuredApp {
+                key: *key,
+                cpu: measure(&app.cpu_ns),
+                power: measure(&app.energy_nj),
+                disk: measure(&app.disk_io_bytes),
+                members: app.members,
+                membership_complete: app.membership_complete,
             });
+            output = Some(Self::capture_measured(
+                capture, apps, sums, windows, available, operation,
+            )?);
             Ok(())
         })?;
         output.ok_or(Error::Bound("attribution capture output"))
+    }
+
+    fn capture_measured<'key>(
+        capture: Capture,
+        apps: impl Iterator<Item = MeasuredApp<'key>> + Clone,
+        sums: Option<&Sums<Arc<Key>>>,
+        windows: [Option<WindowIdentity>; 2],
+        available: usize,
+        operation: &Operation,
+    ) -> Result<Self> {
+        let mut count = 0;
+        let mut bytes = 0;
+        for measured in apps.clone() {
+            operation.check()?;
+            count += 1;
+            if sums.and_then(|sums| sums.key(&measured.key)).is_none() {
+                bytes += Key::owned_bytes(&measured.key);
+            }
+        }
+        if count * size_of::<App>() + bytes > available {
+            return Err(Error::Bound("attribution cache space"));
+        }
+
+        let mut output = Vec::with_capacity(count);
+        for measured in apps {
+            operation.check()?;
+            // A key the cache already holds is shared, so each name is stored once.
+            let key = sums
+                .and_then(|sums| sums.key(&measured.key))
+                .map_or_else(|| Arc::new(Key::capture(&measured.key)), Arc::clone);
+            output.push(App {
+                key,
+                cpu: CompactMeasure::capture(&measured.cpu),
+                power: CompactMeasure::capture(&measured.power),
+                disk: CompactMeasure::capture(&measured.disk),
+                members: u16::try_from(measured.members)
+                    .map_err(|_| Error::Bound("attribution App members"))?,
+                membership_complete: measured.membership_complete,
+            });
+        }
+        assert_eq!(output.len(), count);
+
+        Ok(Self {
+            capture,
+            windows,
+            apps: output,
+        })
     }
 
     pub(crate) fn apps(&self, metric: AppAttributionMetric) -> impl Iterator<Item = Reading<'_>> {

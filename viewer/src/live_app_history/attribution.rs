@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use super::{BYTES_MAX, History, Observation, Point, ResidentCache};
 use crate::AppAttributionMetric;
 use crate::Session;
+use crate::app_attribution_history::cache::Observed;
 use crate::app_attribution_history::cache::{Cache, Point as SavedPoint};
 use crate::app_attribution_history::{Capture, Reading, Reduction};
 use crate::cancellation::Operation;
@@ -148,9 +149,12 @@ impl History {
                 Ok(rates.borrow().limited())
             },
             |frame, previous, windows| {
-                rates
-                    .borrow_mut()
-                    .capture(frame, previous, windows, available, operation)
+                rates.borrow_mut().capture(
+                    Observed::Replayed { frame, previous },
+                    windows,
+                    available,
+                    operation,
+                )
             },
             |pin| rates.borrow_mut().pin(pin, available),
         )?;
@@ -289,7 +293,13 @@ fn attribution_stream(
             rates.contains(observation, operation)
         },
         |frame, previous, windows| {
-            let point = SavedPoint::capture(frame, previous, None, windows, BYTES_MAX, operation)?;
+            let point = SavedPoint::capture(
+                Observed::Replayed { frame, previous },
+                None,
+                windows,
+                BYTES_MAX,
+                operation,
+            )?;
             consume(&point, &mut reduction.borrow_mut())
         },
         |pin| {

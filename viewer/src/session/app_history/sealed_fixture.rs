@@ -48,4 +48,22 @@ impl Session {
                 .unwrap();
         });
     }
+
+    /// Rewrites the parts each sealed window keeps so the facts of every observation count one
+    /// App more than the window keeps for it.
+    pub(crate) fn overcount_kept_apps(&self) {
+        rewrite(self, APP_PARTS, |frame| {
+            let raised: Vec<Option<u64>> = frame
+                .column("app_count")
+                .unwrap()
+                .u64()
+                .unwrap()
+                .iter()
+                .map(|count| count.map(|count| count + 1))
+                .collect();
+            frame
+                .replace("app_count", Column::new("app_count".into(), raised))
+                .unwrap();
+        });
+    }
 }

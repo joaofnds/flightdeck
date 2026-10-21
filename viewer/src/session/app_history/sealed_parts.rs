@@ -4,7 +4,9 @@
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use polars::prelude::{Column, DataFrame, LazyFrame, SortMultipleOptions, col, lit};
+use polars::prelude::{
+    Column, DataFrame, LazyFrame, NamedFrom, Series, SortMultipleOptions, col, lit,
+};
 
 use super::sealed::{Kept, columns, kind_code, kind_of, observed_in};
 use super::{ContextRange, Session, TICKS_PER_WINDOW_MAX, WINDOWS_MAX};
@@ -681,25 +683,7 @@ impl Session {
         #[cfg(test)]
         self.parts_decodes.set(self.parts_decodes.get() + 1);
         let source = self.connection.parquet_source(kept.path)?;
-        let summary = self.connection.query(&format!(
-            "SELECT MIN(version), MAX(version), COUNT(*) FROM {source}"
-        ))?;
-        let summary = Row::new(&summary, 0)?;
-        let rows: u64 = summary.get(2)?;
-        if rows != kept.rows {
-            return Err(Error::Bound("sealed parts rows"));
-        }
-        if rows == 0 {
-            return Err(Error::Bound("sealed parts rows"));
-        }
-        if rows > u64::from(ROWS_MAX) {
-            return Err(Error::Bound("sealed parts rows"));
-        }
-        let version: u8 = summary.get(0)?;
-        if summary.get::<u8>(1)? != version {
-            return Err(Error::Bound("sealed parts version"));
-        }
-        if version != VERSION {
+        if !self.kept_parts_readable(kept, &source)? {
             return Ok(Vec::new());
         }
 
@@ -727,6 +711,182 @@ impl Session {
 
         Ok(decoder.output)
     }
+}
+
+impl Session {
+    /// Whether this build reads the parts table of `kept`, which the engine holds as `source`,
+    /// once the table has the rows its seal counted.
+    fn kept_parts_readable(&self, kept: &Kept<'_>, source: &str) -> Result<bool> {
+        let summary = self.connection.query(&format!(
+            "SELECT MIN(version), MAX(version), COUNT(*) FROM {source}"
+        ))?;
+        let summary = Row::new(&summary, 0)?;
+        let rows: u64 = summary.get(2)?;
+        if rows != kept.rows {
+            return Err(Error::Bound("sealed parts rows"));
+        }
+        if rows == 0 {
+            return Err(Error::Bound("sealed parts rows"));
+        }
+        if rows > u64::from(ROWS_MAX) {
+            return Err(Error::Bound("sealed parts rows"));
+        }
+        let version: u8 = summary.get(0)?;
+        if summary.get::<u8>(1)? != version {
+            return Err(Error::Bound("sealed parts version"));
+        }
+
+        Ok(version == VERSION)
+    }
+
+    /// The facts of each observation the parts of `kept`, which the engine holds as `source`,
+    /// keep, in publication order, or none where this build does not read them.
+    pub(super) fn kept_parts_headers(
+        &self,
+        kept: &Kept<'_>,
+        source: &str,
+    ) -> Result<Option<Vec<Header>>> {
+        if !self.kept_parts_readable(kept, source)? {
+            return Ok(None);
+        }
+
+        #[cfg(test)]
+        self.kept_header_queries
+            .set(self.kept_header_queries.get() + 1);
+        let frame = self.connection.collect(kept_parts_sorted(
+            self.connection
+                .plan(&kept_parts_query(source))?
+                .filter(col("row_kind").eq(lit(ROW_HEADER))),
+            &["publication"],
+        ))?;
+        if frame.height() > TICKS_PER_WINDOW_MAX {
+            return Err(Error::Bound("sealed parts observations"));
+        }
+        let mut headers: Vec<Header> = Vec::with_capacity(frame.height());
+        for index in 0..frame.height() {
+            self.operation.check()?;
+            let header = kept_header(&Row::new(&frame, index)?, kept.run)?;
+            kept_publication_follows(
+                kept,
+                headers.last().map(|last| last.selected.stamp.publication),
+                header.selected.stamp.publication,
+            )?;
+            headers.push(header);
+        }
+
+        Ok(Some(headers))
+    }
+
+    /// Gives `consume` each of `headers`, in publication order, with its Apps, from the App
+    /// rows of the parts the engine holds as `source`.
+    pub(super) fn visit_kept_parts_apps(
+        &self,
+        source: &str,
+        headers: &[&Header],
+        mut consume: impl FnMut(&Header, &[App]) -> Result<()>,
+    ) -> Result<()> {
+        let publications: Vec<u64> = headers
+            .iter()
+            .map(|header| header.selected.stamp.publication)
+            .collect();
+        let publications = Series::new("publications".into(), publications);
+        let frame = self.connection.collect(kept_parts_sorted(
+            self.connection.plan(&kept_parts_query(source))?.filter(
+                col("row_kind")
+                    .eq(lit(ROW_APP))
+                    .and(col("publication").is_in(lit(publications).implode(false), false)),
+            ),
+            &["publication", "app_index"],
+        ))?;
+        if frame.height() > collector::usize_from_u32(ROWS_MAX) {
+            return Err(Error::Bound("sealed parts rows"));
+        }
+
+        let mut apps = Vec::with_capacity(crate::live_app_response::APPS_MAX);
+        let mut row = 0;
+        for header in headers {
+            self.operation.check()?;
+            row = self.visit_kept_parts_apps_read(&frame, row, header, &mut apps)?;
+            consume(header, &apps)?;
+        }
+        if row != frame.height() {
+            return Err(Error::Bound("sealed parts publication"));
+        }
+
+        Ok(())
+    }
+
+    /// Gives `output` the Apps of the observation of `header`, whose rows start at `first`, and
+    /// returns the row after them.
+    fn visit_kept_parts_apps_read(
+        &self,
+        frame: &DataFrame,
+        first: usize,
+        header: &Header,
+        output: &mut Vec<App>,
+    ) -> Result<usize> {
+        output.clear();
+        for index in first..frame.height() {
+            self.operation.check()?;
+            let row = Row::new(frame, index)?;
+            if row.get::<u64>(const { fixed("publication") })? != header.selected.stamp.publication
+            {
+                break;
+            }
+            let (app_index, app) = kept_app(&row)?;
+            if app_index != output.len() {
+                return Err(Error::Bound("sealed parts App"));
+            }
+            if output.len() == header.app_count {
+                return Err(Error::Bound("sealed parts Apps"));
+            }
+            output.push(app);
+        }
+        if output.len() != header.app_count {
+            return Err(Error::Bound("sealed parts Apps"));
+        }
+
+        Ok(first + output.len())
+    }
+}
+
+/// Every column of a parts table but the processes' amounts, which an App row and a row of an
+/// observation's facts leave empty.
+fn kept_parts_query(source: &str) -> String {
+    format!(
+        "SELECT {} FROM {source}",
+        column_names()[..AMOUNT_FIRST].join(", ")
+    )
+}
+
+/// The rows of `plan` sorted by `columns`, of which a table keeps at most `ROWS_MAX`.
+fn kept_parts_sorted(plan: LazyFrame, columns: &[&str]) -> LazyFrame {
+    plan.sort(
+        columns.to_vec(),
+        SortMultipleOptions {
+            descending: vec![false; columns.len()],
+            nulls_last: vec![false; columns.len()],
+            multithreaded: false,
+            maintain_order: true,
+            limit: None,
+        },
+    )
+    .limit(ROWS_TAKEN)
+}
+
+/// Refuses an observation of `publication` that `kept` does not count, or that does not
+/// follow the observation of `last` read before it.
+fn kept_publication_follows(kept: &Kept<'_>, last: Option<u64>, publication: u64) -> Result<()> {
+    if !kept.publications.contains(&publication) {
+        return Err(Error::Bound("sealed parts publication"));
+    }
+    if let Some(last) = last {
+        if last >= publication {
+            return Err(Error::Bound("sealed parts publication"));
+        }
+    }
+
+    Ok(())
 }
 
 /// The App whose parts a reader takes.
@@ -820,15 +980,13 @@ impl Decoder<'_> {
     }
 
     fn open(&mut self, header: Header) -> Result<()> {
-        let publication = header.selected.stamp.publication;
-        if !self.kept.publications.contains(&publication) {
-            return Err(Error::Bound("sealed parts publication"));
-        }
-        if let Some(last) = self.output.last() {
-            if last.selected().stamp.publication >= publication {
-                return Err(Error::Bound("sealed parts publication"));
-            }
-        }
+        kept_publication_follows(
+            self.kept,
+            self.output
+                .last()
+                .map(|last| last.selected().stamp.publication),
+            header.selected.stamp.publication,
+        )?;
         if self.output.len() == TICKS_PER_WINDOW_MAX {
             return Err(Error::Bound("sealed parts observations"));
         }
