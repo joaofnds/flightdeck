@@ -45,6 +45,15 @@ struct Writers<'derive> {
 }
 
 pub fn run(root: &Path, memory_limit: u64, derive: &dyn Derive) -> Result<Outcome> {
+    run_paced(root, memory_limit, derive, &mut thread::sleep)
+}
+
+fn run_paced(
+    root: &Path,
+    memory_limit: u64,
+    derive: &dyn Derive,
+    pause: &mut dyn FnMut(Duration),
+) -> Result<Outcome> {
     let watchdog = Watchdog::start(memory_limit)?;
     let operation = watchdog.operation()?;
     let mut store = match Store::open(root) {
@@ -79,7 +88,7 @@ pub fn run(root: &Path, memory_limit: u64, derive: &dyn Derive) -> Result<Outcom
             }
         }
         drop(operation);
-        thread::sleep(Duration::from_secs(1));
+        pause(Duration::from_secs(1));
     }
     unreachable!("persistence polling bound exhausted")
 }
@@ -807,33 +816,7 @@ mod tests {
         let root = Directory::new();
         let store = Store::open(&root.0).unwrap();
         let mut registered = registered(store.recording());
-        let place = collector::ring::Place {
-            lock_path: root.0.join("ring.lock"),
-            name_prefix: format!("/fdworker{}", std::process::id()),
-        };
-        let shape = Shape {
-            slot_count: 1,
-            cpu_capacity: 1,
-            interface_capacity: 1,
-            core_capacity: 1,
-            state_capacity: 1,
-            fan_capacity: 1,
-            process_capacity: 1,
-            coalition_capacity: 1,
-            event_capacity: 1,
-        };
-        let mut writer = collector::ring::Writer::create_with_identity(
-            &place,
-            shape,
-            collector::ring::DictionaryCapacity {
-                entries: 1,
-                arena_bytes: 32,
-            },
-            &registered.identity,
-            1,
-        )
-        .unwrap();
-        registered.ring_name = writer.name().to_owned();
+        let mut writer = identity_ring(&root, "i", &mut registered);
         publish_readable_identity(&mut writer);
         writer.finish();
         let mut state = RunState::default();
@@ -848,6 +831,43 @@ mod tests {
         assert!(matches!(result.unwrap(), Progress::Sealed));
         assert_eq!(state.next_publication, 2);
         assert_saved_identity(&root, &store, &registered.identity);
+    }
+
+    /// Creates an empty ring of its own for the registered run. The label keeps the ring's name
+    /// apart from another test's.
+    fn identity_ring(
+        root: &Directory,
+        label: &str,
+        registered: &mut RegisteredRun,
+    ) -> collector::ring::Writer {
+        let place = collector::ring::Place {
+            lock_path: root.0.join("ring.lock"),
+            name_prefix: format!("/fdworker{}{label}", std::process::id()),
+        };
+        let shape = Shape {
+            slot_count: 1,
+            cpu_capacity: 1,
+            interface_capacity: 1,
+            core_capacity: 1,
+            state_capacity: 1,
+            fan_capacity: 1,
+            process_capacity: 1,
+            coalition_capacity: 1,
+            event_capacity: 1,
+        };
+        let writer = collector::ring::Writer::create_with_identity(
+            &place,
+            shape,
+            collector::ring::DictionaryCapacity {
+                entries: 1,
+                arena_bytes: 32,
+            },
+            &registered.identity,
+            1,
+        )
+        .unwrap();
+        registered.ring_name = writer.name().to_owned();
+        writer
     }
 
     fn publish_readable_identity(writer: &mut collector::ring::Writer) {
