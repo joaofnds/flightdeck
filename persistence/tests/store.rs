@@ -926,6 +926,51 @@ mod tests {
     }
 
     #[test]
+    fn rereading_a_marker_refuses_its_data_directory_before_following_it() {
+        // Goal: a reread follows a marker's data directory only where the window's identity
+        // puts it, since a reader also rereads markers no full read has accepted.
+        // Method: rewrite the linked metadata to name the same directory by its absolute path,
+        // which still reaches the hard link, and reread the marker.
+        let recording = Recording::new();
+        let store = Store::open(&recording.0).unwrap();
+        let original = manifest(identity(&store));
+        let pending = stage(&store, &original);
+        let committed = store.commit(pending, original).unwrap();
+        let marker = store.marker_path(&committed.identity);
+        let relative = committed.data_directory.as_bytes();
+        let absolute = recording.0.join(&committed.data_directory);
+        let absolute = absolute.to_str().unwrap().as_bytes();
+        let mut encoded = u64::try_from(relative.len())
+            .unwrap()
+            .to_le_bytes()
+            .to_vec();
+        encoded.extend_from_slice(relative);
+        let bytes = fs::read(&marker).unwrap();
+        let at = bytes
+            .windows(encoded.len())
+            .position(|window| window == encoded.as_slice())
+            .unwrap();
+        let mut rewritten = bytes[..at].to_vec();
+        rewritten.extend_from_slice(&u64::try_from(absolute.len()).unwrap().to_le_bytes());
+        rewritten.extend_from_slice(absolute);
+        rewritten.extend_from_slice(&bytes[at + encoded.len()..]);
+        let mut file = OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&marker)
+            .unwrap();
+        file.write_all(&rewritten).unwrap();
+        drop(file);
+
+        let result = persistence::reread_committed(&recording.0, &marker);
+
+        assert_eq!(
+            std::io::ErrorKind::InvalidData,
+            result.err().unwrap().kind()
+        );
+    }
+
+    #[test]
     fn a_copied_marker_cannot_replace_the_metadata_hard_link() {
         // Goal: a matching metadata payload alone cannot claim the canonical committed set.
         // Method: replace the marker with a byte-identical independent file and query it.

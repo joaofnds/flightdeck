@@ -22,8 +22,8 @@ pub use owned_identity::IdentitySource;
 pub use metadata::{Losses, Manifest, TimeBounds};
 pub use reader::{require_numeric_source, tick_buffer};
 pub use store::{
-    Begin, CommitBoundary, PendingWindow, Store, ownership_contended, read_committed,
-    reread_committed,
+    Begin, CommitBoundary, PendingWindow, Store, list_committed, ownership_contended,
+    read_committed, reread_committed,
 };
 
 pub use encoder::{Encoder, TableManifest, encode_derived, frame, table_columns};

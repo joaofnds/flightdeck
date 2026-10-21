@@ -387,9 +387,7 @@ impl Store {
     }
 
     fn validate_window_files(root: &Path, manifest: &Manifest) -> io::Result<()> {
-        if Path::new(&manifest.data_directory) != ready_relative(manifest) {
-            return Err(invalid("data directory identity"));
-        }
+        validate_data_directory(manifest)?;
         let path = root.join(&manifest.data_directory);
         private::verify_directory(&path)?;
         Self::validate_files(&path, manifest, true)?;
@@ -510,6 +508,14 @@ fn ready_relative(manifest: &Manifest) -> PathBuf {
     WindowKey::from(&manifest.identity).ready_relative(manifest.wall_ns)
 }
 
+/// Refuses a data directory other than the one the window's identity names.
+fn validate_data_directory(manifest: &Manifest) -> io::Result<()> {
+    if Path::new(&manifest.data_directory) != ready_relative(manifest) {
+        return Err(invalid("data directory identity"));
+    }
+    Ok(())
+}
+
 pub fn read_committed(root: &Path, marker: &Path) -> io::Result<Manifest> {
     private::verify_directory(root)?;
     let (manifest, file) = read_marker(root, marker)?;
@@ -525,7 +531,24 @@ pub fn read_committed(root: &Path, marker: &Path) -> io::Result<Manifest> {
 /// sealed window's files never change, so the marker still linking the window's metadata
 /// shows its commitment stands, without verifying every file of the window again.
 pub fn reread_committed(root: &Path, marker: &Path) -> io::Result<Manifest> {
+    read_linked_marker(root, marker)
+}
+
+/// Lists a sealed window of `recording` from its marker alone, for a reader that verifies the
+/// window's files with `read_committed` before its first read of them.
+pub fn list_committed(root: &Path, marker: &Path, recording: Identity) -> io::Result<Manifest> {
+    let manifest = read_linked_marker(root, marker)?;
+    if manifest.identity.run.recording != recording {
+        return Err(invalid("recording identity mismatch"));
+    }
+    Ok(manifest)
+}
+
+/// Reads a marker that sits where its identity puts it and links the window's metadata where
+/// its identity puts that, without verifying the window's files.
+fn read_linked_marker(root: &Path, marker: &Path) -> io::Result<Manifest> {
     let (manifest, file) = read_marker(root, marker)?;
+    validate_data_directory(&manifest)?;
     Store::validate_link(root, &manifest, &file)?;
     Ok(manifest)
 }
