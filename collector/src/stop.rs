@@ -5,6 +5,8 @@ use std::io;
 use std::mem::{offset_of, size_of};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use collector::recording::STOP_LIMIT_SECONDS;
+
 pub struct Stop {
     _interrupt: SignalHandler,
     _terminate: SignalHandler,
@@ -34,10 +36,6 @@ const _: () = assert!(offset_of!(Sigaction, sa_flags) == 12);
 const SIGINT: c_int = 2;
 const SIGTERM: c_int = 15;
 const SA_RESTART: c_int = 0x0002;
-/// How long the collector may take to finish once asked to stop, after which the alarm's
-/// default action ends it. The app that asks does not wait, so without this a collector stuck
-/// in a tick would hold the recording until the next restart.
-pub const LIMIT_SECONDS: u32 = 150;
 static REQUESTED: AtomicBool = AtomicBool::new(false);
 
 unsafe extern "C" {
@@ -97,9 +95,11 @@ impl Drop for SignalHandler {
 extern "C" fn request_stop(_signal: c_int) {
     // Only the first request sets the deadline, so further signals cannot push it back.
     if !REQUESTED.swap(true, Ordering::Relaxed) {
-        // The alarm cannot fail, and what it returns is the rest of an earlier alarm, which
-        // the collector never sets.
-        unsafe { alarm(LIMIT_SECONDS) };
+        // The alarm's default action ends the collector, since the app that asked does not
+        // wait, and a collector stuck in a tick would otherwise hold the recording until the
+        // next restart. The alarm cannot fail, and what it returns is the rest of an earlier
+        // alarm, which the collector never sets.
+        unsafe { alarm(STOP_LIMIT_SECONDS) };
     }
 }
 
@@ -126,7 +126,7 @@ mod tests {
         drop(stop);
 
         assert!(Stop::requested());
-        assert_eq!(LIMIT_SECONDS, first);
+        assert_eq!(STOP_LIMIT_SECONDS, first);
         assert_eq!(0, second);
     }
 }

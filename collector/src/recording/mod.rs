@@ -12,6 +12,10 @@ pub use registry::{RegisteredRun, Registry};
 /// The fingerprint of the code this collector is built from.
 pub const BUILD: u64 = include!(concat!(env!("OUT_DIR"), "/build"));
 
+/// How long a collector may take to finish once asked to stop, after which it is ended, so a
+/// collector still finishing lets go of its recording within this many seconds.
+pub const STOP_LIMIT_SECONDS: u32 = 150;
+
 use std::ffi::{c_char, c_int, c_void};
 use std::fs::File;
 use std::io::{self, Read};

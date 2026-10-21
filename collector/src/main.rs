@@ -42,7 +42,7 @@ const PERSISTER_FINISH_LIMIT: Duration = Duration::from_mins(2);
 const _: () = assert!(
     PERSISTER_FINISH_LIMIT.as_secs() + 30
         <= Duration::from_secs(1)
-            .saturating_mul(stop::LIMIT_SECONDS)
+            .saturating_mul(recording::STOP_LIMIT_SECONDS)
             .as_secs()
 );
 
