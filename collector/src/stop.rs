@@ -34,9 +34,14 @@ const _: () = assert!(offset_of!(Sigaction, sa_flags) == 12);
 const SIGINT: c_int = 2;
 const SIGTERM: c_int = 15;
 const SA_RESTART: c_int = 0x0002;
+/// How long the collector may take to finish once asked to stop, after which the alarm's
+/// default action ends it. The app that asks does not wait, so without this a collector stuck
+/// in a tick would hold the recording until the next restart.
+pub const LIMIT_SECONDS: u32 = 150;
 static REQUESTED: AtomicBool = AtomicBool::new(false);
 
 unsafe extern "C" {
+    fn alarm(seconds: u32) -> u32;
     fn sigaction(signal: c_int, action: *const Sigaction, previous: *mut Sigaction) -> c_int;
 }
 
@@ -90,5 +95,38 @@ impl Drop for SignalHandler {
 }
 
 extern "C" fn request_stop(_signal: c_int) {
-    REQUESTED.store(true, Ordering::Relaxed);
+    // Only the first request sets the deadline, so further signals cannot push it back.
+    if !REQUESTED.swap(true, Ordering::Relaxed) {
+        // The alarm cannot fail, and what it returns is the rest of an earlier alarm, which
+        // the collector never sets.
+        unsafe { alarm(LIMIT_SECONDS) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    unsafe extern "C" {
+        fn raise(signal: c_int) -> c_int;
+    }
+
+    #[test]
+    fn a_stop_request_sets_the_deadline_once() {
+        // Goal: the first stop request starts the deadline that ends a collector stuck in its
+        // finish, and a later request does not push the deadline back.
+        // Method: raise SIGTERM in this process twice under the installed handler, and read the
+        // pending alarm after each, which also cancels it.
+        let stop = Stop::install().unwrap();
+
+        assert_eq!(0, unsafe { raise(SIGTERM) });
+        let first = unsafe { alarm(0) };
+        assert_eq!(0, unsafe { raise(SIGTERM) });
+        let second = unsafe { alarm(0) };
+        drop(stop);
+
+        assert!(Stop::requested());
+        assert_eq!(LIMIT_SECONDS, first);
+        assert_eq!(0, second);
+    }
 }
