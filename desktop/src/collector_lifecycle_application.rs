@@ -19,8 +19,6 @@ struct Collection {
     timer: Option<Timer>,
     /// Runs only while the worker owes an answer, and is suspended the rest of the time.
     quick_timer: Option<Timer>,
-    quitting: bool,
-    quit_dispatched: bool,
 }
 
 impl Global for Collection {}
@@ -30,21 +28,17 @@ pub(super) fn install(session: CollectorSession, cx: &mut App) {
         session,
         timer: None,
         quick_timer: None,
-        quitting: false,
-        quit_dispatched: false,
     });
     cx.on_app_quit(|cx| {
         let collection = cx.global_mut::<Collection>();
-        if !collection.quit_dispatched {
-            eprintln!("Flightdeck native termination requested; saving the owned collector");
-        }
         if let Some(timer) = collection.timer.take() {
             timer.set_running(false);
         }
-        // GPUI invokes this observer before timing its returned future. Native termination
-        // cannot be canceled here, so retain/reap ownership synchronously within our bound.
-        if let Err(failure) = collection.session.stop_and_wait() {
-            eprintln!("Flightdeck collector cleanup: {failure}");
+        // The collector saves its last readings and exits on its own once asked, and also when
+        // the app that started it is gone, so quitting asks it and does not wait for it.
+        collection.session.begin_stop();
+        if let Some(failure) = collection.session.failure() {
+            eprintln!("Flightdeck collector shutdown: {failure}");
         }
         std::future::ready(())
     })
@@ -104,20 +98,6 @@ fn tick(entity: &WeakEntity<LiveDashboard>, cx: &mut App) {
     if entity.update(cx, dashboard_tick).is_err() {
         cx.global_mut::<Collection>().session.tick(false);
     }
-    let collection = cx.global_mut::<Collection>();
-    if !collection.quitting {
-        return;
-    }
-    if collection.quit_dispatched {
-        return;
-    }
-    if collection.session.finished() {
-        collection.quit_dispatched = true;
-        if let Some(failure) = collection.session.failure() {
-            eprintln!("Flightdeck collector shutdown: {failure}");
-        }
-        cx.quit();
-    }
 }
 
 fn dashboard_tick(dashboard: &mut LiveDashboard, cx: &mut Context<LiveDashboard>) {
@@ -158,18 +138,5 @@ pub fn retry_collector(cx: &mut App) {
 }
 
 pub fn request_quit(cx: &mut App) {
-    if cx.try_global::<Collection>().is_none() {
-        cx.quit();
-        return;
-    }
-    let collection = cx.global_mut::<Collection>();
-    collection.quitting = true;
-    collection.session.begin_stop();
-    if collection.session.finished() {
-        collection.quit_dispatched = true;
-        if let Some(failure) = collection.session.failure() {
-            eprintln!("Flightdeck collector shutdown: {failure}");
-        }
-        cx.quit();
-    }
+    cx.quit();
 }
