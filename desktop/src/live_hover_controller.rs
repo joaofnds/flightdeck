@@ -155,6 +155,7 @@ impl LiveDashboard {
     }
 
     pub(crate) fn preview_tick(&mut self, cx: &mut Context<Self>) {
+        let page_reading = self.reply_pending();
         let Some(preview) = &mut self.preview else {
             return;
         };
@@ -183,6 +184,14 @@ impl LiveDashboard {
         // for that read and shows the hovered second from what it brings.
         if let Some(snapshot) = &self.snapshot {
             if snapshot.histories_pending {
+                return;
+            }
+        }
+
+        // A read of the second the keyboard shows would cancel the page's read of its selection,
+        // whose reply shows that second from what it brings.
+        if page_reading {
+            if preview.origin == Origin::Keyboard {
                 return;
             }
         }
@@ -246,7 +255,7 @@ impl LiveDashboard {
             if generation != self.generation {
                 return false;
             }
-            if self.preview_receive_histories(update) {
+            if self.preview_receive_page(update) {
                 return true;
             }
             if let Some(preview) = &mut self.preview {
@@ -269,15 +278,14 @@ impl LiveDashboard {
         true
     }
 
-    /// Takes the page's read of its App histories arriving during a hover, which waited for it,
-    /// and shows the hovered second again from what it brings. Every other reading of the page
-    /// waits for the hover to end, so the charts hold still under the pointer.
-    fn preview_receive_histories(&mut self, update: Update) -> bool {
-        if !self
-            .snapshot
-            .as_ref()
-            .is_some_and(|committed| committed.histories_pending)
-        {
+    /// Takes a reply to the page's request that the page waits on during a hover: its read of
+    /// its App histories, which the hover waited for, or the selection a paused page asked for
+    /// while the keyboard shows a second. The hover then shows its second again from what the
+    /// reply brings. A keyboard's ends where the reply shows that second itself or holds it no
+    /// longer. Every other reading of the page waits for the hover to end, so the charts hold
+    /// still under the pointer.
+    fn preview_receive_page(&mut self, update: Update) -> bool {
+        if !self.preview_waits_on_page() {
             return false;
         }
 
@@ -285,21 +293,69 @@ impl LiveDashboard {
             return false;
         }
 
-        if let Some(previous) = &self.preview {
-            let source = previous.source.clone();
-            let origin = previous.origin;
-            let hovered_at = previous.hovered_at;
-            self.preview_retarget(&source, previous.target.clone());
-            if let Some(preview) = &mut self.preview {
-                preview.source = source;
-                preview.origin = origin;
-                preview.hovered_at = hovered_at;
+        if let Some(previous) = self.preview.take() {
+            if self.preview_receive_page_ends(&previous) {
+                hover_unfinished(&mut self.hover_timings, &previous);
+                self.chart_hover = None;
+            } else {
+                self.preview = Some(previous);
+                self.preview_reresolve();
             }
         }
         self.rebuild();
         self.hover_timed();
 
         true
+    }
+
+    /// Whether the hover lets the page take its next reply: the page's App histories, or the
+    /// selection of a paused page while the keyboard shows a second.
+    fn preview_waits_on_page(&self) -> bool {
+        if let Some(committed) = &self.snapshot {
+            if committed.histories_pending {
+                return true;
+            }
+        }
+
+        if self.request.second.is_none() {
+            return false;
+        }
+
+        self.reading_origin() == Some(Origin::Keyboard)
+    }
+
+    /// Whether the keyboard's `preview` ends with the page's new readings, which show its second
+    /// themselves or no longer hold it.
+    fn preview_receive_page_ends(&self, preview: &Preview) -> bool {
+        if preview.origin != Origin::Keyboard {
+            return false;
+        }
+
+        let Some(committed) = self.snapshot.as_deref() else {
+            return true;
+        };
+        if preview.target.matches(&committed.selection["selected"]) {
+            return true;
+        }
+
+        !crate::live_projection::holds_second(&committed.selection, preview.target.second)
+    }
+
+    /// Shows the hovered second again from the page's readings, keeping who shows it.
+    fn preview_reresolve(&mut self) {
+        let Some(previous) = &self.preview else {
+            return;
+        };
+
+        let source = previous.source.clone();
+        let origin = previous.origin;
+        let hovered_at = previous.hovered_at;
+        self.preview_retarget(&source, previous.target.clone());
+        if let Some(preview) = &mut self.preview {
+            preview.source = source;
+            preview.origin = origin;
+            preview.hovered_at = hovered_at;
+        }
     }
 
     /// Resolves the hover at `target` from the committed snapshot, holding the hovered plot
@@ -336,7 +392,7 @@ impl LiveDashboard {
 
 /// Records the hover of `preview` as ended before the page held its readings, where its timing
 /// still runs.
-fn hover_unfinished(timings: &mut HoverTimings, preview: &Preview) {
+pub(crate) fn hover_unfinished(timings: &mut HoverTimings, preview: &Preview) {
     if preview.hovered_at.is_none() {
         return;
     }

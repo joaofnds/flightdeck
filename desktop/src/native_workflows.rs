@@ -508,6 +508,12 @@ pub fn selected_copy(
     expanded: Option<&(String, usize)>,
 ) -> Result<String, String> {
     let snapshot = snapshot.ok_or("No reading is selected")?;
+    // A page keeps the last selection's readings shown while the reader reads the next one.
+    if let Some(second) = request.second {
+        if snapshot.selection["second"].as_u64() != Some(second) {
+            return Err("The selected second is still being read".into());
+        }
+    }
     let value = if request.route == "apps" {
         let detail =
             crate::live_app_views::selected_detail(snapshot.detail.as_ref(), request.app.as_ref())

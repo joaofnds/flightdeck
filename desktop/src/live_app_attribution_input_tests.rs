@@ -365,6 +365,41 @@ fn a_hover_reads_what_the_pages_finished_app_histories_leave_out(cx: &mut TestAp
 }
 
 #[gpui::test]
+fn a_step_reads_the_app_totals_the_pages_window_leaves_out(cx: &mut TestAppContext) {
+    // Goal: a step to a second whose App totals the page keeps no window of reads them, once
+    // the page has its reply.
+    // Method: step left on a page whose App histories are read and whose window keeps no App
+    // totals of the earlier second, then tick the step.
+    let mut harness = InputHarness::setup_route(cx, "cpu");
+    harness.driver.seed_attribution(Metric::Cpu);
+    harness.driver.step_left_on("live-cpu-plot");
+
+    harness.driver.tick_hover();
+
+    assert_eq!(harness.driver.hover_reads(), 1);
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_selected_step_leaves_the_worker_to_the_selections_read(cx: &mut TestAppContext) {
+    // Goal: once Enter selects a stepped second, the step reads none of that second's App
+    // totals itself, since a read of its own would cancel the selection's read, whose reply
+    // brings them.
+    // Method: step left on a page whose App histories are read and whose window keeps no App
+    // totals of the earlier second, press Enter, then tick the step.
+    let mut harness = InputHarness::setup_route(cx, "cpu");
+    harness.driver.seed_attribution(Metric::Cpu);
+    harness.driver.step_left_on("live-cpu-plot");
+    harness.driver.press("enter");
+
+    harness.driver.tick_hover();
+
+    assert_eq!(harness.driver.requested_second(), Some(999));
+    assert_eq!(harness.driver.hover_reads(), 0);
+    harness.teardown();
+}
+
+#[gpui::test]
 fn a_live_reading_arriving_during_a_hover_leaves_the_hovered_second_shown(cx: &mut TestAppContext) {
     // Goal: a hover holds the page at the hovered second while live readings arrive, once the
     // page has read its App histories.
@@ -503,7 +538,8 @@ impl InputDriver {
 
     fn seed_attribution(&mut self, metric: Metric) {
         self.view.update(&mut self.context, |dashboard, cx| {
-            dashboard.accept(attributed_snapshot(dashboard.generation, metric));
+            let snapshot = attributed_snapshot(dashboard.generation, metric);
+            assert!(dashboard.take_update(Update::Ready(snapshot)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();
         });

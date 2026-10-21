@@ -878,7 +878,7 @@ impl InputDriver {
                 .truncate(1);
             snapshot.selection["summary"] = snapshot.selection["trends"][0].clone();
             snapshot.rankings = Some(ranked_payload(&snapshot, "Historical", "42", 20));
-            dashboard.accept(snapshot);
+            assert!(dashboard.take_update(crate::live_source::Update::Ready(snapshot)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();
         });
@@ -1033,7 +1033,7 @@ impl InputDriver {
                 .unwrap()
                 .truncate(1);
             snapshot.rankings = Some(route_ranked_payload(&snapshot, RouteReading::Historical));
-            dashboard.accept(snapshot);
+            assert!(dashboard.take_update(crate::live_source::Update::Ready(snapshot)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();
         });

@@ -19,6 +19,9 @@ use crate::live_source::Snapshot;
 /// The source of the readings an arrow step on a chart shows.
 const CHART_STEP_SOURCE: &str = "chart-step";
 
+/// The source of the readings a selection shows of its second while the reader reads it.
+pub(crate) const SELECTION_SOURCE: &str = "selection";
+
 #[cfg(test)]
 #[path = "live_hover_cost_tests.rs"]
 mod cost_tests;
@@ -548,7 +551,7 @@ impl LiveDashboard {
             return;
         }
 
-        match self.chart_step_target(next) {
+        match self.held_target(next) {
             Some(target) => {
                 self.set_reading_target(CHART_STEP_SOURCE.into(), target, Origin::Keyboard, cx);
             }
@@ -556,8 +559,8 @@ impl LiveDashboard {
         }
     }
 
-    /// The target of a step to `second` when the page shows readings that hold it.
-    fn chart_step_target(&self, second: u64) -> Option<crate::live_hover::Target> {
+    /// The target of `second` when the page shows readings that hold it.
+    pub(crate) fn held_target(&self, second: u64) -> Option<crate::live_hover::Target> {
         let snapshot = self.snapshot.as_deref()?;
         if !crate::live_projection::holds_second(&snapshot.selection, second) {
             return None;

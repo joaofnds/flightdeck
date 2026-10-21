@@ -568,6 +568,55 @@ fn a_step_past_the_selected_second_asks_the_reader_for_it(cx: &mut TestAppContex
 }
 
 #[gpui::test]
+fn a_step_past_the_held_seconds_keeps_the_pages_readings_shown(cx: &mut TestAppContext) {
+    // Goal: a step to a second the page holds no readings of leaves the page's readings shown
+    // while the reader reads that second, so the page never goes blank between seconds.
+    // Method: step right from 1000, the last second the context holds, then read the request,
+    // the chart and the readings before any reply.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.focus_chart();
+
+    harness.driver.press("right");
+
+    assert_eq!(harness.driver.requested_second(), Some(1001));
+    assert_eq!(harness.driver.shown_second(), Some(1000));
+    assert!(!harness.driver.readings_are_hidden());
+    harness.teardown();
+}
+
+#[gpui::test]
+fn pausing_keeps_the_pages_readings_shown(cx: &mut TestAppContext) {
+    // Goal: pausing a page that follows the recording selects the second it shows without
+    // blanking the page while the reader reads that second.
+    // Method: show 1000 as the newest second, pause, then read the request and the readings
+    // before any reply.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.seed_followed_selection();
+
+    harness.driver.pause();
+
+    assert_eq!(harness.driver.requested_second(), Some(1000));
+    assert!(!harness.driver.readings_are_hidden());
+    harness.teardown();
+}
+
+#[gpui::test]
+fn going_to_the_latest_reading_keeps_the_pages_readings_shown(cx: &mut TestAppContext) {
+    // Goal: leaving a selected second for the newest one keeps the selected second's readings
+    // shown until the reader answers with the newest.
+    // Method: from the accepted second 1000, go to the latest reading, then read the request,
+    // the chart and the readings before any reply.
+    let mut harness = InputHarness::setup(cx);
+
+    harness.driver.pause();
+
+    assert_eq!(harness.driver.requested_second(), None);
+    assert_eq!(harness.driver.shown_second(), Some(1000));
+    assert!(!harness.driver.readings_are_hidden());
+    harness.teardown();
+}
+
+#[gpui::test]
 fn a_step_while_a_selection_is_read_moves_from_the_second_it_asks_for(cx: &mut TestAppContext) {
     // Goal: steps past the context keep moving while the page waits on the read the last one
     // sent, as they did before a step showed held readings.
@@ -630,6 +679,45 @@ fn enter_selects_the_second_an_arrow_step_showed(cx: &mut TestAppContext) {
     assert_eq!(harness.driver.requested_second(), Some(999));
     assert_eq!(harness.driver.requested_publication(), Some(1));
     assert!(harness.driver.inspection_has_focus());
+    harness.teardown();
+}
+
+#[gpui::test]
+fn enter_keeps_the_stepped_seconds_readings_shown_while_it_is_read(cx: &mut TestAppContext) {
+    // Goal: Enter selects the stepped second without blanking the page, which goes on showing
+    // that second from the readings it holds until the reader answers.
+    // Method: step left from 1000 to 999, whose 90 W differs from the 8 W of 1000, press Enter,
+    // then read the request, the chart and the readings before any reply.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.seed_repeated_second();
+    harness.driver.focus_chart();
+    harness.driver.press("left");
+
+    harness.driver.press("enter");
+
+    assert_eq!(harness.driver.requested_second(), Some(999));
+    assert_eq!(harness.driver.shown_second(), Some(999));
+    assert!(harness.driver.reading_is_visible("90 W"));
+    assert!(!harness.driver.readings_are_hidden());
+    harness.teardown();
+}
+
+#[gpui::test]
+fn the_reply_to_a_selection_shows_the_selected_second(cx: &mut TestAppContext) {
+    // Goal: the reader's answer to Enter becomes the page's readings, so the page shows the
+    // selected second from its own reading and no longer from the step.
+    // Method: step left to 999, press Enter, hand the page the reply for 999, then read the
+    // accepted second and the second the chart shows.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.focus_chart();
+    harness.driver.press("left");
+    harness.driver.press("enter");
+
+    harness.driver.reply_with_second(999);
+
+    assert_eq!(harness.driver.accepted_second(), Some(999));
+    assert_eq!(harness.driver.shown_second(), Some(999));
+    assert!(!harness.driver.shows_a_step());
     harness.teardown();
 }
 
@@ -717,7 +805,10 @@ fn installed_command_o_requests_one_recording_directory(cx: &mut TestAppContext)
 
 #[gpui::test]
 fn local_clock_entry_can_replace_a_pending_selection(cx: &mut TestAppContext) {
-    // Retained context resolves a valid local time without restoring stale presented values.
+    // Goal: a typed time replaces a selection still being read and keeps the page's readings
+    // shown until its reply, while a copy refuses the second it has not read yet.
+    // Method: select 1001, type the local time of 999 before any reply, then read the request,
+    // the readings and the copy.
     let mut harness = InputHarness::setup(cx);
     harness.driver.select_second(1001);
 
@@ -726,7 +817,7 @@ fn local_clock_entry_can_replace_a_pending_selection(cx: &mut TestAppContext) {
         .enter_time(&crate::live_presentation::clock(999, true));
 
     assert_eq!(harness.driver.requested_second(), Some(999));
-    assert!(harness.driver.readings_are_hidden());
+    assert!(!harness.driver.readings_are_hidden());
     assert!(harness.driver.copy_selected().is_err());
     harness.teardown();
 }
@@ -935,6 +1026,12 @@ impl InputDriver {
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();
         });
+        self.context.run_until_parked();
+    }
+
+    /// Pauses a page that follows the recording, or returns a paused one to the latest reading.
+    fn pause(&mut self) {
+        self.view.update(&mut self.context, LiveDashboard::pause);
         self.context.run_until_parked();
     }
 
@@ -1198,6 +1295,31 @@ impl InputDriver {
             assert!(!dashboard.preview_receive(reply));
             generation
         })
+    }
+
+    /// Hands the page the reader's answer to its request for `second`, the way a tick does.
+    fn reply_with_second(&mut self, second: u64) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            let mut snapshot = accepted_snapshot(dashboard.generation);
+            let identity = snapshot.selection["trends"][0].clone();
+            snapshot.selection["second"] = json!(second);
+            snapshot.selection["selected"] = json!({"run":identity["run"],
+                "boot":identity["boot"],"publication":identity["publication"]});
+            snapshot.selection["trends"] = json!([identity]);
+            assert!(dashboard.take_update(Update::Ready(snapshot)));
+            cx.notify();
+        });
+        self.context.run_until_parked();
+    }
+
+    fn accepted_second(&self) -> Option<u64> {
+        self.accepted_selection()?["second"].as_u64()
+    }
+
+    /// Whether the page shows a second an arrow step reached rather than its own selection.
+    fn shows_a_step(&self) -> bool {
+        self.view
+            .read_with(&self.context, |dashboard, _| dashboard.preview.is_some())
     }
 
     fn preview_tick(&mut self) {

@@ -3,6 +3,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::charts::TEXT;
 use crate::data::Panel;
+use crate::live_hover::Origin;
 use crate::live_source::{Request, Snapshot, Update, Worker};
 use gpui::{
     Context, ListAlignment, ListOffset, ListState, Render, Window, div, list, prelude::*, px, rgb,
@@ -271,12 +272,7 @@ impl LiveDashboard {
         self.native_tick(cx);
         match self.worker.take() {
             Ok(Some(update)) => {
-                let changed = if self.preview.is_some() {
-                    self.preview_receive(update)
-                } else {
-                    self.receive(update)
-                };
-                if changed {
+                if self.take_update(update) {
                     cx.notify();
                 }
             }
@@ -325,6 +321,15 @@ impl LiveDashboard {
                 crate::live_launch::request_quit(cx);
             }
         }
+    }
+
+    /// Takes the worker's answer to the page or to a hover, and answers whether the page changed.
+    pub(crate) fn take_update(&mut self, update: Update) -> bool {
+        if self.preview.is_some() {
+            return self.preview_receive(update);
+        }
+
+        self.receive(update)
     }
 
     pub(crate) fn receive(&mut self, update: Update) -> bool {
@@ -416,6 +421,11 @@ impl LiveDashboard {
         self.error = None;
         self.generation = 0;
         self.request_reading();
+    }
+
+    /// Whether the worker has not yet answered the page's last request.
+    pub(crate) fn reply_pending(&self) -> bool {
+        self.reply_pending
     }
 
     /// Whether the page has no reading to show yet and the worker is still reading it, which
@@ -544,8 +554,7 @@ impl LiveDashboard {
         self.request.apps_offset = 0;
         self.request.members_offset = 0;
         self.request.cpu_offset = 0;
-        self.submit();
-        cx.notify();
+        self.select(cx);
     }
 
     pub fn inspect(&mut self, second: u64, cx: &mut Context<Self>) {
@@ -560,8 +569,45 @@ impl LiveDashboard {
         self.request.apps_offset = 0;
         self.request.members_offset = 0;
         self.request.cpu_offset = 0;
-        self.submit();
-        cx.notify();
+        self.select(cx);
+    }
+
+    /// Asks for the request's second and keeps the page's readings shown until the reply, which
+    /// takes the reader hundreds of milliseconds. Where those readings hold the second, the page
+    /// shows it from them at once, as an arrow step does. A page with nothing shown asks as any
+    /// other request does.
+    fn select(&mut self, cx: &mut Context<Self>) {
+        if self.snapshot.is_none() {
+            self.submit();
+            cx.notify();
+            return;
+        }
+
+        self.native.alternative_page = 0;
+        self.error = None;
+        self.request_reading();
+        if let Some(replaced) = self.preview.take() {
+            crate::live_hover::controller::hover_unfinished(&mut self.hover_timings, &replaced);
+            self.chart_hover = None;
+        }
+        let target = self
+            .request
+            .second
+            .and_then(|second| self.held_target(second))
+            .filter(|target| {
+                !self
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| target.matches(&snapshot.selection["selected"]))
+            });
+        let shown = target.is_some_and(|target| {
+            let source = crate::live_chart_view::SELECTION_SOURCE.into();
+            self.set_reading_target(source, target, Origin::Keyboard, cx)
+        });
+        if !shown {
+            self.rebuild();
+            cx.notify();
+        }
     }
 
     /// The seconds the charts show, which is the whole history unless a range narrows it.
