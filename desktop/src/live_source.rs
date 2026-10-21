@@ -656,23 +656,7 @@ fn reader_snapshot(
             return Ok(None);
         }
     }
-    if reader.session.is_none() {
-        reader.session = Some(
-            LiveSession::open_with(root, Arc::clone(&shared.cancellation), command.epoch)
-                .map_err(|error| error.to_string())?,
-        );
-    }
-    let session = reader.session.as_mut().ok_or("Live session did not open")?;
-    session
-        .begin(command.epoch)
-        .map_err(|error| error.to_string())?;
-    let poll = match command.request.route.as_str() {
-        "self" => true,
-        _ => command.request.second.is_none(),
-    };
-    if poll {
-        session.poll().map_err(|error| error.to_string())?;
-    }
+    let session = reader_snapshot_session(&mut reader.session, root, command, shared)?;
     let catalog = session.catalog();
     if published {
         if reader.last_catalog.as_ref() == Some(&catalog) {
@@ -704,6 +688,35 @@ fn reader_snapshot(
     reader_snapshot_record(reader, command, &snapshot);
 
     Ok(Some(snapshot))
+}
+
+/// The reader's session, opened on the first read, begun for the command's epoch, and polled
+/// for new readings unless a page other than `self` asks for a chosen second.
+fn reader_snapshot_session<'session>(
+    slot: &'session mut Option<LiveSession>,
+    root: &std::path::Path,
+    command: &Command,
+    shared: &Shared,
+) -> Result<&'session mut LiveSession, String> {
+    let session = match slot {
+        Some(session) => session,
+        None => slot.insert(
+            LiveSession::open_with(root, Arc::clone(&shared.cancellation), command.epoch)
+                .map_err(|error| error.to_string())?,
+        ),
+    };
+    session
+        .begin(command.epoch)
+        .map_err(|error| error.to_string())?;
+    let poll = match command.request.route.as_str() {
+        "self" => true,
+        _ => command.request.second.is_none(),
+    };
+    if poll {
+        session.poll().map_err(|error| error.to_string())?;
+    }
+
+    Ok(session)
 }
 
 /// Whether the request asks for a chosen second of a page other than `self`, which a published
