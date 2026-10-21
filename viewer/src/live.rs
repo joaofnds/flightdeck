@@ -16,7 +16,7 @@ use crate::live_app_response::{Detail, KeyKind, Page, Sample};
 use crate::live_apps::{Frame, Publication, PublicationEvents};
 use crate::session::{
     ContextRange, DETAIL_SECONDS, EARLIER_STRIDE_SECONDS, LOADED_SECONDS, OBSERVATIONS_MAX,
-    Observation, PAGE_ROWS, Tail,
+    Observation, PAGE_ROWS, Tail, Verified,
 };
 use crate::{Cancellation, Session, metrics};
 
@@ -320,13 +320,22 @@ impl LiveSession {
         if self.select_refresh_due(second) {
             self.refresh_history()?;
         }
-        let mut response = match &mut self.history {
+        let saved = match &mut self.history {
             Some(history) => {
                 history.begin(self.operation.epoch())?;
-                history.select(second, 0)?
+                Some(history.select(second, 0))
             }
-            None => json!({"second": second, "selected": null, "alternatives": [],
-                "summary": null, "trends": [], "context_seconds": 900}),
+            None => None,
+        };
+        let mut response = match saved {
+            Some(Ok(response)) => response,
+            // A saved minute that fails its read leaves the readings the ring holds, as an
+            // unreadable history does at open.
+            Some(Err(error)) => {
+                self.history_failure(error)?;
+                select_unsaved(second)
+            }
+            None => select_unsaved(second),
         };
         let alternatives = response["alternatives"]
             .as_array_mut()
@@ -1076,16 +1085,17 @@ impl LiveSession {
 
     fn refresh_history(&mut self) -> Result<()> {
         if self.root.join("commits").try_exists()? {
-            // The windows the last session's reads verified need only their markers read again.
-            let accepted = self
+            // The windows the previous `Session` verified on a read need only their markers read
+            // again.
+            let verified = self
                 .history
                 .as_ref()
-                .map_or_else(Vec::new, Session::verified);
+                .map_or_else(Verified::default, Session::verified_windows);
             let mut history = Session::reopen(
                 &self.root,
                 self.cancellation.clone(),
                 self.operation.epoch(),
-                &accepted,
+                &verified,
             )?;
 
             if let Some(previous) = &self.history {
@@ -1681,6 +1691,12 @@ impl LiveSession {
         response["summary"] = history.select(second, index)?["summary"].clone();
         Ok(())
     }
+}
+
+/// A selection of `second` with nothing read from the saved minutes.
+fn select_unsaved(second: u64) -> Value {
+    json!({"second": second, "selected": null, "alternatives": [], "summary": null,
+        "trends": [], "context_seconds": 900})
 }
 
 fn select_alternative(alternatives: &mut Vec<Value>, identity: Value) {
@@ -2837,6 +2853,28 @@ mod tests {
             session.page("memory", 0).unwrap()["observation"],
             response["selected"]
         );
+    }
+
+    #[test]
+    fn selecting_a_live_second_keeps_its_readings_when_a_saved_minute_fails_verification() {
+        // Goal: a damaged saved minute cannot hide the readings the ring still holds, as an
+        // unreadable history cannot at open.
+        // Method: put a stray file beside a sealed minute's tables, then select a second whose
+        // context reads that minute.
+        let mut fixture = RingFixture::new_following();
+        follow_restoration_short(&mut fixture);
+        let sealed = Session::open(&fixture.root).unwrap().windows.remove(0);
+        let stray = fixture
+            .root
+            .join(&sealed.data_directory)
+            .join("stray.parquet");
+        std::fs::write(stray, b"stray").unwrap();
+        let mut session = LiveSession::open(&fixture.root).unwrap();
+
+        let response = session.select(1062, 0).unwrap();
+
+        assert_eq!(response["selected"]["publication"], 62);
+        assert!(session.catalog()["history_error"].is_string());
     }
 
     #[test]

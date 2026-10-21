@@ -445,7 +445,8 @@ mod tests {
         let mut session = LiveSession::open(&recording.root).unwrap();
         assert_eq!(session.catalog()["windows"], 1);
         std::fs::remove_dir_all(recording.root.join("data")).unwrap();
-        assert!(session.select(1000, 0).is_err());
+        session.select(1000, 0).unwrap();
+        assert!(session.catalog()["history_error"].is_string());
 
         let response = session.follow_latest().unwrap();
 

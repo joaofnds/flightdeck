@@ -7,7 +7,7 @@ use collector::recording::{identity_text, private};
 use collector::ring::Identity;
 use persistence::engine::{Engine, Row};
 use persistence::layout::{self, Kind};
-use persistence::{Error, Manifest, Result, read_committed, reread_committed};
+use persistence::{Error, Manifest, Result, list_committed, read_committed, reread_committed};
 use serde_json::{Value, json};
 
 use crate::Cancellation;
@@ -98,6 +98,11 @@ impl Observation {
     }
 }
 
+/// The windows a session's reads verified. Only `Session::verified_windows` makes one, so a
+/// reopen can never take a listed window for a verified one.
+#[derive(Default)]
+pub(crate) struct Verified(Vec<Manifest>);
+
 impl Session {
     /// Opens only existing committed history. Never creates, locks or repairs a recording.
     pub fn open(root: &Path) -> Result<Self> {
@@ -105,28 +110,28 @@ impl Session {
     }
 
     pub fn open_with(root: &Path, cancellation: Arc<Cancellation>, epoch: u64) -> Result<Self> {
-        Self::reopen(root, cancellation, epoch, &[])
+        Self::reopen(root, cancellation, epoch, &Verified::default())
     }
 
     /// Opens the recording again. It reads each window's marker and leaves the window's files
-    /// to its first read, which verifies them unless the window is in `accepted`, which an
-    /// earlier session verified. A sealed window's files never change, so rereading its marker
-    /// shows its commitment stands, as `validate_commitment` does around every read.
-    pub fn reopen(
+    /// to its first read, which verifies them unless an earlier session's read verified them.
+    /// A sealed window's files never change, so rereading its marker shows its commitment
+    /// stands, as `validate_commitment` does around every read.
+    pub(crate) fn reopen(
         root: &Path,
         cancellation: Arc<Cancellation>,
         epoch: u64,
-        accepted: &[Manifest],
+        earlier: &Verified,
     ) -> Result<Self> {
         let operation = cancellation.operation(epoch)?;
         persistence::query::validate_root(root)?;
         private::verify_directory(root)?;
         let recording = collector::recording::read_identity(root)?;
-        let mut accepted_markers = BTreeMap::new();
-        for manifest in accepted {
+        let mut earlier_markers = BTreeMap::new();
+        for manifest in &earlier.0 {
             if manifest.identity.run.recording == recording {
                 let marker = layout::WindowKey::from(&manifest.identity).marker(root);
-                accepted_markers.insert(marker, manifest);
+                earlier_markers.insert(marker, manifest);
             }
         }
         let mut windows = Vec::new();
@@ -135,8 +140,8 @@ impl Session {
             .iter()
             .map(|manifest| {
                 let marker = layout::WindowKey::from(&manifest.identity).marker(root);
-                let accepted = accepted_markers.get(&marker).copied();
-                std::cell::Cell::new(accepted == Some(manifest))
+                let kept = earlier_markers.get(&marker).copied();
+                std::cell::Cell::new(kept == Some(manifest))
             })
             .collect();
         let connection = data::connection();
@@ -531,10 +536,11 @@ impl Session {
     fn validate_commitment(&self, window: usize) -> Result<()> {
         self.operation.check()?;
 
+        assert_eq!(self.verified.len(), self.windows.len());
         let manifest = &self.windows[window];
         let marker = layout::WindowKey::from(&manifest.identity).marker(&self.root);
-        let verified = &self.verified[window];
-        let committed = if verified.get() {
+        let flag = &self.verified[window];
+        let committed = if flag.get() {
             reread_committed(&self.root, &marker)?
         } else {
             read_committed(&self.root, &marker)?
@@ -543,19 +549,21 @@ impl Session {
             return Err(Error::Bound("changed commitment"));
         }
 
-        verified.set(true);
+        flag.set(true);
         Ok(())
     }
 
-    /// The windows a read verified, which a reopen need not verify again.
-    pub(crate) fn verified(&self) -> Vec<Manifest> {
+    /// The windows this session's reads verified, which a reopen need not verify again.
+    pub(crate) fn verified_windows(&self) -> Verified {
         assert_eq!(self.verified.len(), self.windows.len());
-        self.windows
-            .iter()
-            .zip(&self.verified)
-            .filter(|(_, verified)| verified.get())
-            .map(|(manifest, _)| manifest.clone())
-            .collect()
+        Verified(
+            self.windows
+                .iter()
+                .zip(&self.verified)
+                .filter(|(_, flag)| flag.get())
+                .map(|(manifest, _)| manifest.clone())
+                .collect(),
+        )
     }
 
     pub(crate) fn table(&self, window: usize, name: &str) -> Result<Table> {
@@ -705,26 +713,14 @@ fn discover(
                     return Err(Error::Bound("catalog windows"));
                 }
                 let marker = run_path.join(day).join(name);
-                windows.push(discover_window(root, &marker, recording)?);
+                // The window's files are left to `validate_commitment` on its first read.
+                windows.push(list_committed(root, &marker, recording)?);
                 Ok(())
             })
         })
     })?;
     windows.sort_by_key(|manifest| (manifest.identity.run.run.0, manifest.publication_first));
     Ok(())
-}
-
-/// Lists a sealed window from its marker alone, which still links the window's metadata,
-/// and leaves the window's files to `validate_commitment` on its first read.
-fn discover_window(root: &Path, marker: &Path, recording: Identity) -> Result<Manifest> {
-    let manifest = reread_committed(root, marker)?;
-    if manifest.identity.run.recording != recording {
-        return Err(
-            io::Error::new(io::ErrorKind::InvalidData, "recording identity mismatch").into(),
-        );
-    }
-
-    Ok(manifest)
 }
 
 #[path = "cpu_history_saved.rs"]

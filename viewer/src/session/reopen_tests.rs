@@ -1,7 +1,8 @@
 use std::io::ErrorKind;
+use std::path::Path;
 use std::sync::Arc;
 
-use persistence::Error;
+use persistence::{Error, Manifest};
 
 use super::Session;
 use crate::Cancellation;
@@ -9,7 +10,7 @@ use crate::live::identity_fixture::Fixture;
 
 #[test]
 fn reopening_adds_a_newly_sealed_minute_as_a_fresh_open_would() {
-    // Goal: a reopen lists every committed window, the accepted ones and the new one.
+    // Goal: a reopen lists every committed window, the earlier ones and the new one.
     // Method: open after the first minute seals, seal the second, and compare with a fresh open.
     let mut fixture = Fixture::new();
     fixture.start_at_run_tick(59);
@@ -19,13 +20,7 @@ fn reopening_adds_a_newly_sealed_minute_as_a_fresh_open_would() {
     let first = Session::open(&fixture.root).unwrap();
     fixture.seal_minute(1);
 
-    let reopened = Session::reopen(
-        &fixture.root,
-        Arc::new(Cancellation::default()),
-        0,
-        &first.windows,
-    )
-    .unwrap();
+    let reopened = reopen(&fixture.root, &first);
 
     assert_eq!(first.windows.len(), 1);
     assert_eq!(
@@ -45,23 +40,33 @@ fn reopening_rereads_only_the_marker_of_a_window_a_read_verified() {
     fixture.seal();
     let mut first = Session::open(&fixture.root).unwrap();
     first.select(1001, 0).unwrap();
-    add_a_stray_file(&fixture.root.join("data"));
+    add_a_stray_file(&fixture.root, &first.windows[0]);
+    let mut reopened = reopen(&fixture.root, &first);
 
-    let mut reopened = Session::reopen(
-        &fixture.root,
-        Arc::new(Cancellation::default()),
-        0,
-        &first.verified(),
-    )
-    .unwrap();
+    let read = reopened.select(1001, 0);
 
-    assert!(reopened.select(1001, 0).is_ok());
-    assert!(
-        Session::open(&fixture.root)
-            .unwrap()
-            .select(1001, 0)
-            .is_err()
-    );
+    assert!(read.is_ok(), "{read:?}");
+}
+
+#[test]
+fn reopening_verifies_a_window_no_read_verified_on_its_first_read() {
+    // Goal: a reopen carries over only the windows a read verified, so a window the earlier
+    // session listed but never read is still verified before a read uses it.
+    // Method: seal two minutes, read only the first, damage the second, then reopen and read it.
+    let mut fixture = Fixture::new();
+    fixture.start_at_run_tick(59);
+    fixture.publish(1001);
+    fixture.publish(1002);
+    fixture.seal_minute(0);
+    fixture.seal_minute(1);
+    let mut first = Session::open(&fixture.root).unwrap();
+    first.select(1001, 0).unwrap();
+    add_a_stray_file(&fixture.root, &first.windows[1]);
+    let mut reopened = reopen(&fixture.root, &first);
+
+    let read = reopened.select(1002, 0);
+
+    assert!(refused(&read), "{read:?}");
 }
 
 #[test]
@@ -72,13 +77,48 @@ fn opening_leaves_a_window_s_files_to_its_first_read() {
     let mut fixture = Fixture::new();
     fixture.publish(1001);
     fixture.seal();
-    add_a_stray_file(&fixture.root.join("data"));
+    let sealed = Session::open(&fixture.root).unwrap().windows.remove(0);
+    add_a_stray_file(&fixture.root, &sealed);
 
     let mut session = Session::open(&fixture.root).unwrap();
     let read = session.select(1001, 0);
 
+    assert!(refused(&read), "{read:?}");
+}
+
+#[test]
+fn a_window_that_fails_verification_fails_every_read() {
+    // Goal: a window refused on its first read is never served by a marker reread afterwards.
+    // Method: put a stray file beside a sealed window's tables, then read the window twice.
+    let mut fixture = Fixture::new();
+    fixture.publish(1001);
+    fixture.seal();
+    let mut session = Session::open(&fixture.root).unwrap();
+    add_a_stray_file(&fixture.root, &session.windows[0]);
+    assert!(refused(&session.select(1001, 0)));
+
+    let read = session.select(1001, 0);
+
+    assert!(refused(&read), "{read:?}");
+}
+
+#[test]
+fn a_verified_window_stops_being_readable_once_its_marker_is_gone() {
+    // Goal: a read of a window a read verified still checks that the window stays committed.
+    // Method: read the window, remove its marker, then read it again.
+    let mut fixture = Fixture::new();
+    fixture.publish(1001);
+    fixture.seal();
+    let mut session = Session::open(&fixture.root).unwrap();
+    session.select(1001, 0).unwrap();
+    let identity = &session.windows[0].identity;
+    let marker = persistence::layout::WindowKey::from(identity).marker(&fixture.root);
+    std::fs::remove_file(marker).unwrap();
+
+    let read = session.select(1001, 0);
+
     assert!(
-        matches!(&read, Err(Error::Io(error)) if error.kind() == ErrorKind::InvalidData),
+        matches!(&read, Err(Error::Io(error)) if error.kind() == ErrorKind::NotFound),
         "{read:?}"
     );
 }
@@ -86,11 +126,12 @@ fn opening_leaves_a_window_s_files_to_its_first_read() {
 #[test]
 fn opening_refuses_a_window_sealed_for_another_recording() {
     // Goal: reading only markers at open still refuses a window from another recording.
-    // Method: seal a window, give the recording a new identity, then open it.
+    // Method: seal a window, give the recording another identity, then open it.
     let mut fixture = Fixture::new();
     fixture.publish(1001);
     fixture.seal();
-    let other = collector::recording::random_identity().unwrap();
+    let mut other = collector::recording::read_identity(&fixture.root).unwrap();
+    other.0[0] ^= 1;
     let text = collector::recording::identity_text(other);
     std::fs::write(fixture.root.join("identity"), format!("{text}\n")).unwrap();
 
@@ -103,18 +144,17 @@ fn opening_refuses_a_window_sealed_for_another_recording() {
     );
 }
 
-fn add_a_stray_file(directory: &std::path::Path) {
-    let mut pending = vec![directory.to_owned()];
-    while let Some(path) = pending.pop() {
-        for entry in std::fs::read_dir(&path).unwrap() {
-            let entry = entry.unwrap();
-            if entry.file_type().unwrap().is_dir() {
-                pending.push(entry.path());
-            } else {
-                std::fs::write(path.join("stray.parquet"), b"stray").unwrap();
-                return;
-            }
-        }
-    }
-    panic!("the sealed window has a data file");
+fn reopen(root: &Path, earlier: &Session) -> Session {
+    let cancellation = Arc::new(Cancellation::default());
+    Session::reopen(root, cancellation, 0, &earlier.verified_windows()).unwrap()
+}
+
+/// A read refused because the window's files failed verification.
+fn refused<T>(read: &persistence::Result<T>) -> bool {
+    matches!(read, Err(Error::Io(error)) if error.kind() == ErrorKind::InvalidData)
+}
+
+fn add_a_stray_file(root: &Path, window: &Manifest) {
+    let directory = root.join(&window.data_directory);
+    std::fs::write(directory.join("stray.parquet"), b"stray").unwrap();
 }
