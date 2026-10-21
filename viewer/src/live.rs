@@ -1076,16 +1076,16 @@ impl LiveSession {
 
     fn refresh_history(&mut self) -> Result<()> {
         if self.root.join("commits").try_exists()? {
-            // The windows the last open verified need only their markers read again.
+            // The windows the last session's reads verified need only their markers read again.
             let accepted = self
                 .history
                 .as_ref()
-                .map_or(&[][..], |previous| previous.windows.as_slice());
+                .map_or_else(Vec::new, Session::verified);
             let mut history = Session::reopen(
                 &self.root,
                 self.cancellation.clone(),
                 self.operation.epoch(),
-                accepted,
+                &accepted,
             )?;
 
             if let Some(previous) = &self.history {

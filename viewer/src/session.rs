@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use collector::recording::{identity_text, private};
+use collector::ring::Identity;
 use persistence::engine::{Engine, Row};
 use persistence::layout::{self, Kind};
 use persistence::{Error, Manifest, Result, read_committed, reread_committed};
@@ -22,6 +23,8 @@ const NS: u64 = 1_000_000_000;
 pub struct Session {
     root: PathBuf,
     pub(crate) windows: Vec<Manifest>,
+    /// Whether each window's files were verified, which its first read does.
+    verified: Vec<std::cell::Cell<bool>>,
     connection: Engine,
     first: Option<u64>,
     last: Option<u64>,
@@ -105,8 +108,9 @@ impl Session {
         Self::reopen(root, cancellation, epoch, &[])
     }
 
-    /// Opens the recording again, verifying in full only the windows not in `accepted`, which
-    /// an earlier open verified. A sealed window's files never change, so rereading its marker
+    /// Opens the recording again. It reads each window's marker and leaves the window's files
+    /// to its first read, which verifies them unless the window is in `accepted`, which an
+    /// earlier session verified. A sealed window's files never change, so rereading its marker
     /// shows its commitment stands, as `validate_commitment` does around every read.
     pub fn reopen(
         root: &Path,
@@ -126,12 +130,21 @@ impl Session {
             }
         }
         let mut windows = Vec::new();
-        discover(root, &accepted_markers, &mut windows, &operation)?;
+        discover(root, recording, &mut windows, &operation)?;
+        let verified = windows
+            .iter()
+            .map(|manifest| {
+                let marker = layout::WindowKey::from(&manifest.identity).marker(root);
+                let accepted = accepted_markers.get(&marker).copied();
+                std::cell::Cell::new(accepted == Some(manifest))
+            })
+            .collect();
         let connection = data::connection();
         operation.attach(&connection)?;
         let mut session = Self {
             root: root.to_owned(),
             windows,
+            verified,
             connection,
             first: None,
             last: None,
@@ -512,18 +525,37 @@ impl Session {
         )
     }
 
-    /// Checks that a window read in full by `discover` is still committed unchanged. Readers
-    /// call it around every read, so it rereads the marker rather than every file.
+    /// Checks that a window `discover` listed is still committed unchanged. Readers call it
+    /// around every read, so it verifies the window's files on the first and rereads the marker
+    /// after.
     fn validate_commitment(&self, window: usize) -> Result<()> {
         self.operation.check()?;
 
         let manifest = &self.windows[window];
         let marker = layout::WindowKey::from(&manifest.identity).marker(&self.root);
-        if reread_committed(&self.root, &marker)? != *manifest {
+        let verified = &self.verified[window];
+        let committed = if verified.get() {
+            reread_committed(&self.root, &marker)?
+        } else {
+            read_committed(&self.root, &marker)?
+        };
+        if committed != *manifest {
             return Err(Error::Bound("changed commitment"));
         }
 
+        verified.set(true);
         Ok(())
+    }
+
+    /// The windows a read verified, which a reopen need not verify again.
+    pub(crate) fn verified(&self) -> Vec<Manifest> {
+        assert_eq!(self.verified.len(), self.windows.len());
+        self.windows
+            .iter()
+            .zip(&self.verified)
+            .filter(|(_, verified)| verified.get())
+            .map(|(manifest, _)| manifest.clone())
+            .collect()
     }
 
     pub(crate) fn table(&self, window: usize, name: &str) -> Result<Table> {
@@ -648,7 +680,7 @@ pub(crate) fn partition(table: &Table) -> Result<BTreeMap<u64, Table>> {
 
 fn discover(
     root: &Path,
-    accepted: &BTreeMap<PathBuf, &Manifest>,
+    recording: Identity,
     windows: &mut Vec<Manifest>,
     operation: &Operation,
 ) -> Result<()> {
@@ -673,11 +705,7 @@ fn discover(
                     return Err(Error::Bound("catalog windows"));
                 }
                 let marker = run_path.join(day).join(name);
-                windows.push(discover_window(
-                    root,
-                    &marker,
-                    accepted.get(&marker).copied(),
-                )?);
+                windows.push(discover_window(root, &marker, recording)?);
                 Ok(())
             })
         })
@@ -686,15 +714,17 @@ fn discover(
     Ok(())
 }
 
-fn discover_window(root: &Path, marker: &Path, accepted: Option<&Manifest>) -> Result<Manifest> {
-    if let Some(accepted) = accepted {
-        let manifest = reread_committed(root, marker)?;
-        if manifest == *accepted {
-            return Ok(manifest);
-        }
+/// Lists a sealed window from its marker alone, which still links the window's metadata,
+/// and leaves the window's files to `validate_commitment` on its first read.
+fn discover_window(root: &Path, marker: &Path, recording: Identity) -> Result<Manifest> {
+    let manifest = reread_committed(root, marker)?;
+    if manifest.identity.run.recording != recording {
+        return Err(
+            io::Error::new(io::ErrorKind::InvalidData, "recording identity mismatch").into(),
+        );
     }
 
-    Ok(read_committed(root, marker)?)
+    Ok(manifest)
 }
 
 #[path = "cpu_history_saved.rs"]
