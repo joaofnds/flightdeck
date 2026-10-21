@@ -28,7 +28,22 @@ fn keyboard_history_inspection_selects_the_exact_same_second_observation(cx: &mu
         "boot":"00000000000000030000000000000004","publication":2}))
         )
     );
-    assert!(harness.driver.readings_are_hidden());
+    harness.teardown();
+}
+
+#[gpui::test]
+fn keyboard_history_selection_keeps_the_pages_readings_shown(cx: &mut TestAppContext) {
+    // Goal: Return on the CPU history selects the inspected second without blanking the page
+    // while the reader reads that second.
+    // Method: step left on the focused history, press Return, then read the page's readings
+    // before any reply.
+    let mut harness = CPUHistoryHarness::setup(cx);
+    harness.driver.focus_plot();
+    harness.driver.press("left");
+
+    harness.driver.press("enter");
+
+    assert!(!harness.driver.readings_are_hidden());
     harness.teardown();
 }
 

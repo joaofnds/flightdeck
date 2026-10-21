@@ -524,7 +524,7 @@ impl LiveDashboard {
         self.request.apps_offset = 0;
         self.request.members_offset = 0;
         self.request.cpu_offset = 0;
-        self.submit();
+        self.select(cx);
         self.focus_inspection(window, cx);
         window.prevent_default();
         cx.notify();
