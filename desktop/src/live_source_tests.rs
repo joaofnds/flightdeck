@@ -163,7 +163,10 @@ fn a_newly_opened_page_publishes_its_readings_before_an_older_tail_it_has_to_rea
 
     let first = reader.read(&recording).unwrap().unwrap();
     let pause = reader.pause();
-    let second = reader.read(&recording).unwrap().unwrap();
+    let second = reader
+        .read(&recording)
+        .unwrap()
+        .expect("The reader left the older tail unread");
 
     assert!(first.histories_pending);
     assert!(first.selection.get("earlier_trends").is_none());
@@ -171,6 +174,95 @@ fn a_newly_opened_page_publishes_its_readings_before_an_older_tail_it_has_to_rea
     assert!(!second.histories_pending);
     let tail = second.selection["earlier_trends"].as_array().unwrap();
     assert_eq!(tail.len(), 1);
+}
+
+#[test]
+fn a_newly_opened_page_publishes_its_app_histories_before_an_older_tail_it_has_to_read() {
+    // Goal: an opened page fills its App charts without waiting for an older tail its charts
+    // draw only over a longer range, and the worker reads that tail straight after.
+    // Method: read Overview over a recording with a minute sealed long before its newest
+    // second, one step at a time.
+    let recording = SealedRecording::with_an_older_minute();
+    let mut reader = SnapshotReader::new();
+    reader.command.request.earlier = crate::live_source::Earlier::Load;
+    reader.read(&recording).unwrap().unwrap();
+
+    let histories = reader.read(&recording).unwrap().unwrap();
+    let pause = reader.pause();
+    let tail = reader
+        .read(&recording)
+        .unwrap()
+        .expect("The reader left the older tail unread");
+
+    assert!(histories.overview_app_histories.is_some());
+    assert!(histories.resident_history.is_some());
+    assert!(histories.selection.get("earlier_trends").is_none());
+    assert!(histories.histories_pending);
+    assert_eq!(pause, Duration::ZERO);
+    assert!(tail.overview_app_histories.is_some());
+    assert_eq!(
+        tail.selection["earlier_trends"].as_array().unwrap().len(),
+        1
+    );
+    assert!(!tail.histories_pending);
+}
+
+#[test]
+fn a_new_request_of_a_page_still_reads_its_app_histories_before_an_older_tail_it_has_to_read() {
+    // Goal: a page asked for again before its App histories arrive, as a window that settles
+    // its size at launch asks, still fills its App charts before reading the older tail.
+    // Method: read Overview once over a recording with a minute sealed long before its newest
+    // second, ask for it again under a new generation, and read one step at a time.
+    let recording = SealedRecording::with_an_older_minute();
+    let mut reader = SnapshotReader::new();
+    reader.command.request.earlier = crate::live_source::Earlier::Load;
+    reader.read(&recording).unwrap().unwrap();
+    reader.command.generation += 1;
+
+    let histories = reader.read(&recording).unwrap().unwrap();
+    let tail = reader
+        .read(&recording)
+        .unwrap()
+        .expect("The reader left the older tail unread");
+
+    assert!(histories.overview_app_histories.is_some());
+    assert!(histories.selection.get("earlier_trends").is_none());
+    assert!(histories.histories_pending);
+    assert_eq!(
+        tail.selection["earlier_trends"].as_array().unwrap().len(),
+        1
+    );
+    assert!(!tail.histories_pending);
+}
+
+#[test]
+fn a_newly_opened_page_completes_with_its_app_histories_where_its_session_keeps_the_tail() {
+    // Goal: a page whose older tail its session already keeps takes no step past its App
+    // histories.
+    // Method: read the GPU page to the end, then open Memory at the same newest second and read
+    // two steps.
+    let recording = SealedRecording::with_an_older_minute();
+    let mut reader = SnapshotReader::new();
+    reader.command.request.route = "gpu".into();
+    reader.command.request.earlier = crate::live_source::Earlier::Load;
+    reader.read_complete(&recording);
+    reader.command.generation += 1;
+    reader.command.request.route = "memory".into();
+    reader.read(&recording).unwrap().unwrap();
+
+    let histories = reader.read(&recording).unwrap().unwrap();
+    let pause = reader.pause();
+
+    assert!(histories.resident_history.is_some());
+    assert_eq!(
+        histories.selection["earlier_trends"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(!histories.histories_pending);
+    assert_eq!(pause, super::POLL_INTERVAL);
 }
 
 #[test]
@@ -382,7 +474,7 @@ impl SnapshotReader {
                 last_catalog: None,
                 last_generation: 0,
                 last_route: String::new(),
-                pending_generation: None,
+                pending: None,
                 retry_after: std::time::Instant::now(),
             },
             command: Self::command(),

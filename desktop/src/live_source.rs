@@ -164,9 +164,24 @@ struct Reader {
     last_generation: u64,
     /// The route of the last published snapshot, so a newly opened page is told apart.
     last_route: String,
-    /// The generation whose last snapshot left its App histories pending.
-    pending_generation: Option<u64>,
+    /// What the last published snapshot left pending, which the worker reads at once.
+    pending: Option<Pending>,
     retry_after: Instant,
+}
+
+/// A published snapshot that left its App histories, or the older tail its charts draw, to a
+/// later step.
+#[derive(Clone, Copy)]
+struct Pending {
+    generation: u64,
+    histories: Histories,
+}
+
+/// Whether a step reads the page's App histories or leaves them to the next step.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Histories {
+    Read,
+    Defer,
 }
 
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -394,7 +409,7 @@ fn worker_run(root: &std::path::Path, shared: &Shared) {
         last_catalog: None,
         last_generation: 0,
         last_route: String::new(),
-        pending_generation: None,
+        pending: None,
         retry_after: Instant::now(),
     };
     for _lease in 0..WORKER_LEASES_MAX {
@@ -508,10 +523,11 @@ fn worker_step(
 }
 
 /// How long the worker waits before its next step. A page whose readings were just published
-/// with its App histories pending has them read at once, since it shows them as being read.
+/// with its App histories or its older tail pending has them read at once, since it shows them
+/// as being read.
 fn worker_pause(reader: &Reader, command: &Command) -> Duration {
     if reader.last_generation == command.generation {
-        if reader.pending_generation == Some(command.generation) {
+        if reader_pending(reader, command.generation) {
             return Duration::ZERO;
         }
     }
@@ -656,6 +672,10 @@ fn reader_snapshot(
             return Ok(None);
         }
     }
+    let Plan {
+        histories,
+        kept_tail_only,
+    } = reader_snapshot_plan(reader, &command.request.route);
     let session = reader_snapshot_session(&mut reader.session, root, command, shared)?;
     let catalog = session.catalog();
     if published {
@@ -664,30 +684,57 @@ fn reader_snapshot(
         }
     }
     let mut selection = reader_selection(session, &command.request, command.context)?;
-    // A newly opened page publishes its readings first, since replaying its App histories
-    // from saved minutes, or reading an older tail its session does not keep, can take
-    // seconds, and the next step reads them.
-    let opened = reader.last_route != command.request.route;
-    let mut pending = reader_earlier(session, &command.request, opened, &mut selection);
-    if opened {
-        if reader_route_has_histories(&command.request.route) {
-            pending = true;
-        }
-    }
+    let tail_pending = reader_earlier(session, &command.request, kept_tail_only, &mut selection);
     reader.system.annotate(&mut selection);
     let mut snapshot = reader_snapshot_new(command.generation, catalog, selection);
-    snapshot.histories_pending = pending;
     reader_payload(
         session,
         &mut command.request,
         command.context,
+        histories,
         &mut snapshot,
     )?;
+    if histories == Histories::Defer {
+        snapshot.histories_pending = true;
+    }
+    if tail_pending {
+        snapshot.histories_pending = true;
+    }
     reader_snapshot_annotate_app(&reader.system, &command.request, &mut snapshot);
     snapshot.read_ms = started.elapsed().as_secs_f64() * 1000.0;
-    reader_snapshot_record(reader, command, &snapshot);
+    reader_snapshot_record(reader, command, &snapshot, histories);
 
     Ok(Some(snapshot))
+}
+
+/// What a step of the page reads, and what it leaves to a later step.
+struct Plan {
+    histories: Histories,
+    /// Whether the step takes only an older tail its session keeps.
+    kept_tail_only: bool,
+}
+
+/// What this step of the page `route` reads. A newly opened page publishes its readings first,
+/// since replaying its App histories from saved minutes, or reading an older tail its session
+/// does not keep, can take seconds. A page with App histories reads them next, whatever request
+/// of the page comes next, and an older tail it has to read after them, since its charts draw
+/// the tail only over a range longer than their full detail.
+fn reader_snapshot_plan(reader: &Reader, route: &str) -> Plan {
+    let opened = reader.last_route != route;
+    let histories_due = reader
+        .pending
+        .is_some_and(|pending| pending.histories == Histories::Defer);
+    let mut histories = Histories::Read;
+    if opened {
+        if reader_route_has_histories(route) {
+            histories = Histories::Defer;
+        }
+    }
+
+    Plan {
+        histories,
+        kept_tail_only: opened || histories_due,
+    }
 }
 
 /// The reader's session, opened on the first read, begun for the command's epoch, and polled
@@ -726,11 +773,23 @@ fn reader_snapshot_is_pinned(request: &Request) -> bool {
 }
 
 /// Remembers what the reader published, so the next command can tell whether anything changed.
-fn reader_snapshot_record(reader: &mut Reader, command: &Command, snapshot: &Snapshot) {
+fn reader_snapshot_record(
+    reader: &mut Reader,
+    command: &Command,
+    snapshot: &Snapshot,
+    histories: Histories,
+) {
+    // A snapshot that leaves its App histories to the next step shows them as being read.
+    if histories == Histories::Defer {
+        assert!(snapshot.histories_pending);
+    }
     reader.last_catalog = Some(snapshot.catalog.clone());
     reader.last_generation = command.generation;
     reader.last_route.clone_from(&command.request.route);
-    reader.pending_generation = snapshot.histories_pending.then_some(command.generation);
+    reader.pending = snapshot.histories_pending.then_some(Pending {
+        generation: command.generation,
+        histories,
+    });
 }
 
 /// Marks the selected App's history with the machine's own samples on the Apps page.
@@ -754,7 +813,14 @@ fn reader_published(reader: &Reader, generation: u64) -> bool {
     if reader.last_generation != generation {
         return false;
     }
-    reader.pending_generation != Some(generation)
+    !reader_pending(reader, generation)
+}
+
+/// Whether the last published snapshot of `generation` left part of its page to a later step.
+fn reader_pending(reader: &Reader, generation: u64) -> bool {
+    reader
+        .pending
+        .is_some_and(|pending| pending.generation == generation)
 }
 
 /// Whether the route's pages show the selected second's top Apps.
@@ -804,7 +870,7 @@ fn reader_computer(reader: &mut Reader, command: &Command) -> Option<Box<Snapsho
         .map_or(Value::Null, LiveSession::catalog);
     reader.last_generation = command.generation;
     reader.last_route.clone_from(&command.request.route);
-    reader.pending_generation = None;
+    reader.pending = None;
     Some(Box::new(Snapshot {
         generation: command.generation,
         catalog,
@@ -875,14 +941,14 @@ fn reader_selection_kept(session: &mut LiveSession, request: &Request) -> Result
 }
 
 /// Adds the saved readings older than the selection's full-detail context, which the charts of
-/// a longer range draw, and returns whether the page still waits for them. A newly `opened`
-/// page takes only a tail its session keeps, and leaves one it would read from saved minutes
-/// to the next step. A failed read leaves the charts at their full-detail context and says
-/// why beside it.
+/// a longer range draw, and returns whether the page still waits for them. A step with
+/// `kept_tail_only` takes only a tail its session keeps, and leaves one it would read from saved
+/// minutes to a later step. A failed read leaves the charts at their full-detail context and
+/// says why beside it.
 fn reader_earlier(
     session: &mut LiveSession,
     request: &Request,
-    opened: bool,
+    kept_tail_only: bool,
     selection: &mut Value,
 ) -> bool {
     if request.earlier == Earlier::Skip || request.route == "apps" {
@@ -894,7 +960,7 @@ fn reader_earlier(
     let Some(fields) = selection.as_object_mut() else {
         return false;
     };
-    let tail = if opened {
+    let tail = if kept_tail_only {
         session.earlier_context_kept(last)
     } else {
         session.earlier_context(last).map(Some)
@@ -953,25 +1019,27 @@ fn reader_payload(
     session: &mut LiveSession,
     request: &mut Request,
     context: Context,
+    histories: Histories,
     snapshot: &mut Snapshot,
 ) -> Result<(), String> {
-    if !snapshot.histories_pending {
+    if histories == Histories::Read {
         if let Some(key) = &request.app {
             let kind = app_key_kind(&key.kind)?;
             let bytes = app_key_bytes(&key.bytes_hex)?;
             return session.with_parts_read(kind, &bytes, |session| {
-                reader_payload_read(session, request, context, snapshot)
+                reader_payload_read(session, request, context, histories, snapshot)
             });
         }
     }
 
-    reader_payload_read(session, request, context, snapshot)
+    reader_payload_read(session, request, context, histories, snapshot)
 }
 
 fn reader_payload_read(
     session: &mut LiveSession,
     request: &mut Request,
     context: Context,
+    histories: Histories,
     snapshot: &mut Snapshot,
 ) -> Result<(), String> {
     // A missing second has no raw payload, and must never borrow a sibling observation.
@@ -988,7 +1056,7 @@ fn reader_payload_read(
         snapshot.pages.insert((*table).to_owned(), page);
     }
     if request.route == "apps" {
-        reader_apps(session, request, context, snapshot)?;
+        reader_apps(session, request, context, histories, snapshot)?;
     }
     let ranked = route_ranks_apps(&request.route);
     if ranked {
@@ -1008,7 +1076,7 @@ fn reader_payload_read(
     }
     // Keeping App parts replays the saved minutes of each window that keeps none, so it follows
     // the histories the page shows, and a hover's own read keeps none.
-    if !snapshot.histories_pending {
+    if histories == Histories::Read {
         reader_payload_histories(session, request, snapshot);
         if request.route == "apps" {
             if request.load_process_history {
@@ -1022,7 +1090,7 @@ fn reader_payload_read(
     // hover during its history read shows the top Apps they hold at once.
     if ranked {
         if request.load_app_attribution_history {
-            if snapshot.histories_pending {
+            if histories == Histories::Defer {
                 reader_app_ranks(session.rank_window_kept());
             } else {
                 reader_app_ranks(session.rank_window());
@@ -1192,6 +1260,7 @@ fn reader_apps(
     session: &LiveSession,
     request: &mut Request,
     context: Context,
+    histories: Histories,
     snapshot: &mut Snapshot,
 ) -> Result<(), String> {
     let apps = reader_apps_page(session, request.apps_offset)?;
@@ -1209,7 +1278,7 @@ fn reader_apps(
             identity_validate(&detail["selected"], &snapshot.selection["selected"])?;
         }
         if context == Context::Select {
-            if !snapshot.histories_pending {
+            if histories == Histories::Read {
                 let history = session
                     .app_history(kind, &bytes)
                     .map_err(|error| error.to_string())?;
@@ -1220,7 +1289,7 @@ fn reader_apps(
         snapshot.detail = Some(detail);
     }
     if request.load_process_history {
-        if !snapshot.histories_pending {
+        if histories == Histories::Read {
             reader_process_history(session, request, snapshot);
         }
     }
