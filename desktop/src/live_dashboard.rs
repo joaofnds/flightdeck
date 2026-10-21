@@ -418,14 +418,25 @@ impl LiveDashboard {
         self.clear_readings();
         self.placeholders = placeholders;
         self.rebuild();
+        self.submit_request();
+    }
+
+    /// Asks for the request in place of whatever the page asked before, so no reply to an
+    /// earlier request is taken if this one cannot be sent.
+    fn submit_request(&mut self) {
         self.error = None;
         self.generation = 0;
         self.request_reading();
     }
 
-    /// Whether the worker has not yet answered the page's last request.
-    pub(crate) fn reply_pending(&self) -> bool {
-        self.reply_pending
+    /// Whether the worker still reads the second the page selected, whose reply the page waits
+    /// on with the readings it shows. A read of any other second would cancel it.
+    pub(crate) fn selection_reading(&self) -> bool {
+        if !self.reply_pending {
+            return false;
+        }
+
+        self.request.second.is_some()
     }
 
     /// Whether the page has no reading to show yet and the worker is still reading it, which
@@ -576,7 +587,7 @@ impl LiveDashboard {
     /// takes the reader hundreds of milliseconds. Where those readings hold the second, the page
     /// shows it from them at once, as an arrow step does. A page with nothing shown asks as any
     /// other request does.
-    fn select(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn select(&mut self, cx: &mut Context<Self>) {
         if self.snapshot.is_none() {
             self.submit();
             cx.notify();
@@ -584,30 +595,33 @@ impl LiveDashboard {
         }
 
         self.native.alternative_page = 0;
-        self.error = None;
-        self.request_reading();
+        self.submit_request();
         if let Some(replaced) = self.preview.take() {
-            crate::live_hover::controller::hover_unfinished(&mut self.hover_timings, &replaced);
-            self.chart_hover = None;
+            self.hover_ended(&replaced);
         }
-        let target = self
-            .request
-            .second
-            .and_then(|second| self.held_target(second))
-            .filter(|target| {
-                !self
-                    .snapshot
-                    .as_ref()
-                    .is_some_and(|snapshot| target.matches(&snapshot.selection["selected"]))
-            });
-        let shown = target.is_some_and(|target| {
-            let source = crate::live_chart_view::SELECTION_SOURCE.into();
-            self.set_reading_target(source, target, Origin::Keyboard, cx)
-        });
-        if !shown {
+        if !self.show_held_selection(cx) {
             self.rebuild();
             cx.notify();
         }
+    }
+
+    /// Shows the selected second from the readings the page holds, as an arrow step does, where
+    /// they hold it and do not already show it, and answers whether it shows it.
+    pub(crate) fn show_held_selection(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(second) = self.request.second else {
+            return false;
+        };
+        let Some(target) = self.held_target(second) else {
+            return false;
+        };
+        if let Some(snapshot) = &self.snapshot {
+            if target.matches(&snapshot.selection["selected"]) {
+                return false;
+            }
+        }
+
+        let source = crate::live_chart_view::SELECTION_SOURCE.into();
+        self.set_reading_target(source, target, Origin::Keyboard, cx)
     }
 
     /// The seconds the charts show, which is the whole history unless a range narrows it.

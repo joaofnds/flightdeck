@@ -488,7 +488,7 @@ impl HoverDriver {
             let mut snapshot = Epoch::Accepted.snapshot(dashboard.generation, false);
             snapshot.selection["trends"][1]["wall_ns"] = json!(1000 * NS);
             snapshot.pages.clear();
-            dashboard.accept(snapshot);
+            assert!(dashboard.take_update(Update::Ready(snapshot)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             let target =
                 crate::live_hover::Target::exact(1000, &Epoch::Historical.identity()).unwrap();
@@ -523,7 +523,7 @@ impl HoverDriver {
             if matches!(self.route, Route::Memory) {
                 snapshot.pages.clear();
             }
-            dashboard.accept(snapshot);
+            assert!(dashboard.take_update(Update::Ready(snapshot)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();
         });
@@ -537,7 +537,7 @@ impl HoverDriver {
             let mut snapshot = Epoch::Accepted.snapshot(dashboard.generation, false);
             snapshot.selection["trends"][1]["memory_free_bytes"] = Value::Null;
             snapshot.pages.clear();
-            dashboard.accept(snapshot);
+            assert!(dashboard.take_update(Update::Ready(snapshot)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();
         });

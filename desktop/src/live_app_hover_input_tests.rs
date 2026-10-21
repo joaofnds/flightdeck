@@ -419,7 +419,7 @@ impl AppHoverDriver {
             let detail = snapshot.detail.as_mut().unwrap();
             detail["app"]["energy_watts"] = json!(watts);
             snapshot.apps.as_mut().unwrap()["apps"][0] = detail["app"].clone();
-            dashboard.accept(snapshot);
+            assert!(dashboard.take_update(Update::Ready(snapshot)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();
         });
@@ -441,7 +441,7 @@ impl AppHoverDriver {
             detail["app"]["live_members"] = json!(53);
             detail["page"]["total"] = json!(53);
             snapshot.apps.as_mut().unwrap()["apps"][0] = detail["app"].clone();
-            dashboard.accept(snapshot);
+            assert!(dashboard.take_update(Update::Ready(snapshot)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();
         });
@@ -469,7 +469,7 @@ impl AppHoverDriver {
             dashboard.picker = Some(crate::live_dashboard::Picker::App);
             let mut snapshot = AppEpoch::Accepted.snapshot(dashboard.generation);
             snapshot.history.as_mut().unwrap()["points"][0] = historical.history_point();
-            dashboard.accept(snapshot);
+            assert!(dashboard.take_update(Update::Ready(snapshot)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();
         });

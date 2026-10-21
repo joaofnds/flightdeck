@@ -259,7 +259,7 @@ impl AppHoverDriver {
                 &dashboard.request,
                 &snapshot.selection,
             )));
-            dashboard.accept(snapshot);
+            assert!(dashboard.take_update(Update::Ready(snapshot)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();
         });
@@ -288,7 +288,7 @@ impl AppHoverDriver {
                 _ => {}
             }
             snapshot.process_history = Some(std::sync::Arc::new(history));
-            dashboard.accept(snapshot);
+            assert!(dashboard.take_update(Update::Ready(snapshot)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();
         });
@@ -319,7 +319,7 @@ impl AppHoverDriver {
             let mut snapshot = AppEpoch::Accepted.snapshot(dashboard.generation);
             snapshot.detail.as_mut().unwrap()["processes"] = json!([]);
             snapshot.process_history = retained;
-            dashboard.accept(snapshot);
+            assert!(dashboard.take_update(Update::Ready(snapshot)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();
         });
@@ -328,7 +328,8 @@ impl AppHoverDriver {
 
     fn deliver_all_processes(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
-            dashboard.accept(AppEpoch::Accepted.snapshot(dashboard.generation));
+            let snapshot = AppEpoch::Accepted.snapshot(dashboard.generation);
+            assert!(dashboard.take_update(Update::Ready(snapshot)));
             cx.notify();
         });
         self.context.run_until_parked();
@@ -480,7 +481,7 @@ fn captured_process_table_cells_keep_metric_order_and_exact_thread_counts(cx: &m
             helper["threads"] = json!({"known":"44","unavailable":null});
             helper["idle_wakeups_per_second"] = json!(42.0);
             helper["pageins_per_second"] = json!(43.0);
-            dashboard.accept(snapshot);
+            assert!(dashboard.take_update(Update::Ready(snapshot)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();
         });

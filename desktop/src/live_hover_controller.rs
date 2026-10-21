@@ -136,14 +136,26 @@ impl LiveDashboard {
             return;
         };
 
-        hover_unfinished(&mut self.hover_timings, &preview);
-        self.chart_hover = None;
+        self.hover_ended(&preview);
         // The page holds the reply to its request unless the hover kept that reply from it.
         if preview.page_reply_kept {
             self.request_reading();
         }
+        // The page's readings still show the second it showed before it selected another.
+        if self.selection_reading() {
+            if self.show_held_selection(cx) {
+                return;
+            }
+        }
         self.rebuild_anchored(preview.layout);
         cx.notify();
+    }
+
+    /// Takes the cursor of `preview`, which the page no longer shows, off the charts, and
+    /// records its hover as ended before the page held its readings where its timing still runs.
+    pub(crate) fn hover_ended(&mut self, preview: &Preview) {
+        hover_unfinished(&mut self.hover_timings, preview);
+        self.chart_hover = None;
     }
 
     /// Whether a hover still waits on a read of its second, whether that read is out or waits
@@ -155,7 +167,7 @@ impl LiveDashboard {
     }
 
     pub(crate) fn preview_tick(&mut self, cx: &mut Context<Self>) {
-        let page_reading = self.reply_pending();
+        let selection_reading = self.selection_reading();
         let Some(preview) = &mut self.preview else {
             return;
         };
@@ -188,12 +200,10 @@ impl LiveDashboard {
             }
         }
 
-        // A read of the second the keyboard shows would cancel the page's read of its selection,
-        // whose reply shows that second from what it brings.
-        if page_reading {
-            if preview.origin == Origin::Keyboard {
-                return;
-            }
+        // A hover's read would cancel the page's read of its selection, whose reply shows the
+        // hovered second again from what it brings.
+        if selection_reading {
+            return;
         }
 
         match self.worker.inspect(preview.request.clone()) {
@@ -279,8 +289,8 @@ impl LiveDashboard {
     }
 
     /// Takes a reply to the page's request that the page waits on during a hover: its read of
-    /// its App histories, which the hover waited for, or the selection a paused page asked for
-    /// while the keyboard shows a second. The hover then shows its second again from what the
+    /// its App histories, which the hover waited for, or the second the page selected, which the
+    /// hover read nothing in place of. The hover then shows its second again from what the
     /// reply brings. A keyboard's ends where the reply shows that second itself or holds it no
     /// longer. Every other reading of the page waits for the hover to end, so the charts hold
     /// still under the pointer.
@@ -295,8 +305,7 @@ impl LiveDashboard {
 
         if let Some(previous) = self.preview.take() {
             if self.preview_receive_page_ends(&previous) {
-                hover_unfinished(&mut self.hover_timings, &previous);
-                self.chart_hover = None;
+                self.hover_ended(&previous);
             } else {
                 self.preview = Some(previous);
                 self.preview_reresolve();
@@ -309,7 +318,7 @@ impl LiveDashboard {
     }
 
     /// Whether the hover lets the page take its next reply: the page's App histories, or the
-    /// selection of a paused page while the keyboard shows a second.
+    /// second the page selected.
     fn preview_waits_on_page(&self) -> bool {
         if let Some(committed) = &self.snapshot {
             if committed.histories_pending {
@@ -317,11 +326,7 @@ impl LiveDashboard {
             }
         }
 
-        if self.request.second.is_none() {
-            return false;
-        }
-
-        self.reading_origin() == Some(Origin::Keyboard)
+        self.selection_reading()
     }
 
     /// Whether the keyboard's `preview` ends with the page's new readings, which show its second
@@ -392,7 +397,7 @@ impl LiveDashboard {
 
 /// Records the hover of `preview` as ended before the page held its readings, where its timing
 /// still runs.
-pub(crate) fn hover_unfinished(timings: &mut HoverTimings, preview: &Preview) {
+fn hover_unfinished(timings: &mut HoverTimings, preview: &Preview) {
     if preview.hovered_at.is_none() {
         return;
     }

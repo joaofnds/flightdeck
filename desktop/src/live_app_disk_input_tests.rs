@@ -374,11 +374,8 @@ impl AppHoverDriver {
 
     fn seed_disk_readout(&mut self, readout: DiskReadout) {
         self.view.update(&mut self.context, |dashboard, cx| {
-            dashboard.accept(disk_readout_snapshot(
-                dashboard.generation,
-                AppEpoch::Accepted,
-                readout,
-            ));
+            let snapshot = disk_readout_snapshot(dashboard.generation, AppEpoch::Accepted, readout);
+            assert!(dashboard.take_update(Update::Ready(snapshot)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();
         });
@@ -442,7 +439,8 @@ impl AppHoverDriver {
 
     fn seed_disk_interval(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
-            dashboard.accept(disk_snapshot(dashboard.generation));
+            let snapshot = disk_snapshot(dashboard.generation);
+            assert!(dashboard.take_update(Update::Ready(snapshot)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();
         });

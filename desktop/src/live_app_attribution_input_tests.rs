@@ -400,6 +400,60 @@ fn a_selected_step_leaves_the_worker_to_the_selections_read(cx: &mut TestAppCont
 }
 
 #[gpui::test]
+fn a_hover_during_a_selections_read_leaves_the_worker_to_that_read(cx: &mut TestAppContext) {
+    // Goal: a pointer hover while the page reads a selected second reads nothing itself, since
+    // a read of its own would cancel the selection's read.
+    // Method: select 1001, which the page holds no readings of, hover a second whose App totals
+    // the page keeps no window of, then tick the hover.
+    let mut harness = InputHarness::setup_route(cx, "cpu");
+    harness.driver.seed_attribution(Metric::Cpu);
+    harness.driver.select_second(1001);
+    harness.driver.hover_previous_second_on("live-cpu-plot");
+
+    harness.driver.tick_hover();
+
+    assert_eq!(harness.driver.hover_reads(), 0);
+    harness.teardown();
+}
+
+#[gpui::test]
+fn the_reply_to_a_selection_reaches_the_page_under_a_hover(cx: &mut TestAppContext) {
+    // Goal: the page takes the reply to its selection while the pointer hovers a chart, so
+    // the hover never holds the page at the readings of the second it left.
+    // Method: select 1001, hover a second whose App totals the page keeps no window of, tick
+    // the hover, then hand the page the reply to its selection.
+    let mut harness = InputHarness::setup_route(cx, "cpu");
+    harness.driver.seed_attribution(Metric::Cpu);
+    harness.driver.select_second(1001);
+    harness.driver.hover_previous_second_on("live-cpu-plot");
+    harness.driver.tick_hover();
+
+    let taken = harness.driver.deliver_selection_reply(Metric::Cpu);
+
+    assert!(taken);
+    assert_eq!(harness.driver.accepted_second(), Some(1001));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_step_on_a_page_that_follows_the_recording_reads_before_its_reply(cx: &mut TestAppContext) {
+    // Goal: a step on a page that follows the newest second reads the App totals its window
+    // leaves out while the page's own read is still out, since that read selects no second.
+    // Method: go back to the newest second, step left before the page's reply, then tick the
+    // step.
+    let mut harness = InputHarness::setup_route(cx, "cpu");
+    harness.driver.seed_attribution(Metric::Cpu);
+    harness.driver.follow_latest();
+    harness.driver.step_left_on("live-cpu-plot");
+
+    harness.driver.tick_hover();
+
+    assert_eq!(harness.driver.requested_second(), None);
+    assert_eq!(harness.driver.hover_reads(), 1);
+    harness.teardown();
+}
+
+#[gpui::test]
 fn a_live_reading_arriving_during_a_hover_leaves_the_hovered_second_shown(cx: &mut TestAppContext) {
     // Goal: a hover holds the page at the hovered second while live readings arrive, once the
     // page has read its App histories.
@@ -563,6 +617,21 @@ impl InputDriver {
         let received = self.view.update(&mut self.context, |dashboard, cx| {
             let snapshot = attributed_snapshot(dashboard.generation + 1, metric);
             let received = dashboard.preview_receive(Update::Ready(snapshot));
+            cx.notify();
+            received
+        });
+        self.context.run_until_parked();
+
+        received
+    }
+
+    /// Hands the page the reader's answer to its selected second, and returns whether the page
+    /// took it.
+    fn deliver_selection_reply(&mut self, metric: Metric) -> bool {
+        let received = self.view.update(&mut self.context, |dashboard, cx| {
+            let mut snapshot = attributed_snapshot(dashboard.generation, metric);
+            snapshot.selection["second"] = json!(dashboard.request.second);
+            let received = dashboard.take_update(Update::Ready(snapshot));
             cx.notify();
             received
         });

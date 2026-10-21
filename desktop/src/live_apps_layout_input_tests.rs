@@ -298,7 +298,8 @@ impl AppHoverDriver {
     fn prepare_overview_grid_context(&mut self, width: f32) {
         self.view.update(&mut self.context, |dashboard, cx| {
             dashboard.request.route = "overview".into();
-            dashboard.accept(AppEpoch::Accepted.snapshot(dashboard.generation));
+            let snapshot = AppEpoch::Accepted.snapshot(dashboard.generation);
+            assert!(dashboard.take_update(Update::Ready(snapshot)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();
         });

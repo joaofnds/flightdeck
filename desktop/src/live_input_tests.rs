@@ -723,6 +723,24 @@ fn enter_keeps_the_stepped_seconds_readings_shown_while_it_is_read(cx: &mut Test
 }
 
 #[gpui::test]
+fn a_hover_ending_during_a_selections_read_shows_the_selected_second(cx: &mut TestAppContext) {
+    // Goal: a hover that ends while the page reads its selected second returns the page to that
+    // second from the readings it holds, and not to the second the page showed before.
+    // Method: select 999, whose 90 W differs from the 8 W of 1000, hover 1000, leave the plot
+    // before any reply, then read the chart.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.seed_repeated_second();
+    harness.driver.select_second(999);
+    harness.driver.hover_selected_second_on("live-energy-plot");
+
+    harness.driver.leave_plot("live-energy-plot", PlotExit::Top);
+
+    assert_eq!(harness.driver.shown_second(), Some(999));
+    assert!(harness.driver.reading_is_visible("90 W"));
+    harness.teardown();
+}
+
+#[gpui::test]
 fn the_reply_to_a_selection_shows_the_selected_second(cx: &mut TestAppContext) {
     // Goal: the reader's answer to Enter becomes the page's readings, so the page shows the
     // selected second from its own reading and no longer from the step.
@@ -988,7 +1006,7 @@ impl InputDriver {
             snapshot.selection["summary"] = current.clone();
             snapshot.selection["trends"] = json!([historical, current]);
 
-            dashboard.accept(snapshot);
+            assert!(dashboard.take_update(Update::Ready(snapshot)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();
         });
@@ -1017,7 +1035,7 @@ impl InputDriver {
             snapshot.selection["trends"] = json!([previous, latest, selected]);
 
             dashboard.request.identity = Some(snapshot.selection["selected"].clone());
-            dashboard.accept(snapshot);
+            assert!(dashboard.take_update(Update::Ready(snapshot)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();
         });
@@ -1038,7 +1056,7 @@ impl InputDriver {
 
             dashboard.request.second = Some(999);
             dashboard.request.identity = Some(snapshot.selection["selected"].clone());
-            dashboard.accept(snapshot);
+            assert!(dashboard.take_update(Update::Ready(snapshot)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();
         });
@@ -1050,7 +1068,7 @@ impl InputDriver {
             let snapshot = accepted_snapshot(dashboard.generation);
             dashboard.request.second = Some(1000);
             dashboard.request.identity = Some(snapshot.selection["selected"].clone());
-            dashboard.accept(snapshot);
+            assert!(dashboard.take_update(Update::Ready(snapshot)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();
         });
@@ -1063,7 +1081,7 @@ impl InputDriver {
             let snapshot = accepted_snapshot(dashboard.generation);
             dashboard.request.second = None;
             dashboard.request.identity = None;
-            dashboard.accept(snapshot);
+            assert!(dashboard.take_update(Update::Ready(snapshot)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();
         });
