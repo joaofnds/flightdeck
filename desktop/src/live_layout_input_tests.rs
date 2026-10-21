@@ -186,28 +186,35 @@ fn overview_top_apps_are_a_three_by_two_grid_in_the_prototype_order(cx: &mut Tes
 }
 
 #[gpui::test]
-fn chart_tooltips_stay_inside_their_card_at_both_plot_edges(cx: &mut TestAppContext) {
-    // Goal: a hover tooltip never spills past its chart card, where neighbours would cover it.
-    // Method: hover a 900-second plot near its left edge, middle and right edge, and compare
-    // the tooltip's bounds with the card's.
+fn chart_tooltips_stay_in_the_window_beside_the_pointer_at_both_plot_edges(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a hover tooltip floats beside the pointer and flips at the window's edge, as Grafana
+    // and Datadog place theirs, so it neither covers the pointer nor leaves the window. Method:
+    // hover a 900-second plot near its left edge, middle and right edge, and compare the
+    // tooltip's bounds with the pointer and the window.
     let mut harness = InputHarness::setup_route(cx, "overview");
     harness.driver.seed_rolling_selection();
     harness.driver.resize_charts(1320.0);
+    let viewport = harness
+        .driver
+        .context
+        .update(|window, _| window.viewport_size());
 
     for fraction in [0.01, 0.3, 0.7, 0.99] {
         let position = harness.driver.second_position("live-power-plot", fraction);
         harness.driver.hover_position(position);
         harness.driver.context.run_until_parked();
-        let card = harness.driver.chart_bounds("chart-card:live-power");
         let tooltip = harness.driver.chart_bounds("chart-tooltip:live-power");
 
         assert!(
-            tooltip.left() >= card.left(),
-            "{fraction}: {tooltip:?} {card:?}"
+            !tooltip.contains(&position),
+            "{fraction}: {tooltip:?} {position:?}"
         );
+        assert!(tooltip.left() >= px(0.0), "{fraction}: {tooltip:?}");
         assert!(
-            tooltip.right() <= card.right(),
-            "{fraction}: {tooltip:?} {card:?}"
+            tooltip.right() <= viewport.width,
+            "{fraction}: {tooltip:?} {viewport:?}"
         );
     }
     harness.teardown();

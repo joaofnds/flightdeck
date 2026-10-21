@@ -1,6 +1,8 @@
 use std::rc::Rc;
 
-use gpui::{Context, FocusHandle, SharedString, Window, div, prelude::*, px, rgb};
+use gpui::{
+    Context, FocusHandle, SharedString, Window, anchored, deferred, div, prelude::*, px, rgb,
+};
 use num_traits::ToPrimitive;
 
 use crate::charts::{GRID, MUTED, PANEL};
@@ -236,10 +238,7 @@ impl LiveDashboard {
             .collect();
         let mut tooltip = div()
             .debug_selector(|| format!("chart-tooltip:{}", panel.id))
-            .absolute()
-            .top(px(8.0))
             .w(px(252.0))
-            .max_w_full()
             .p(px(10.0))
             .rounded(px(3.0))
             .border_1()
@@ -247,12 +246,23 @@ impl LiveDashboard {
             .bg(rgb(0x11_12_17))
             .text_size(px(12.0))
             .child(div().mb(px(4.0)).child(clock(second, true)));
-        tooltip = chart_tooltip_place(tooltip, self.chart_plot_width, fraction);
         for (rank, line_index) in indices.into_iter().enumerate() {
             tooltip = tooltip.child(self.chart_tooltip_row(panel, line_index, index, rank));
         }
 
-        Some(tooltip)
+        // The padding keeps the pointer clear of the tooltip on whichever side it flips to.
+        let mut overlay = anchored().child(div().p(px(TOOLTIP_POINTER_GAP)).child(tooltip));
+        if let Some(pointer) = self.chart_pointer {
+            overlay = overlay.position(pointer);
+        }
+
+        Some(
+            div()
+                .absolute()
+                .top(crate::charts::PLOT_INSETS.top)
+                .left(gpui::relative(fraction))
+                .child(deferred(overlay)),
+        )
     }
 
     fn chart_tooltip_row(
@@ -320,6 +330,7 @@ fn tooltip_row(color: u32, name: &str, reading: &str) -> gpui::Div {
 }
 
 const TOOLTIP_GAP: f32 = 8.0;
+const TOOLTIP_POINTER_GAP: f32 = 12.0;
 const TOOLTIP_SWATCH: f32 = 12.0;
 
 /// Splits a reading into its value and the coverage that qualifies it, so a long qualifier
@@ -392,40 +403,6 @@ fn chart_summaries(panel: &Panel) -> Vec<SampleSummary> {
             }
         })
         .collect()
-}
-
-/// Places a tooltip beside the cursor and inside its plot, as the prototype does: right of the
-/// cursor where it fits, otherwise left of it, and never past either edge. Before the pointer
-/// has measured a plot, as during keyboard inspection, it falls back to the cursor's side.
-fn chart_tooltip_place(tooltip: gpui::Div, width: gpui::Pixels, fraction: f32) -> gpui::Div {
-    const TOOLTIP_WIDTH: f32 = 252.0;
-    const MARGIN: f32 = 6.0;
-    const OFFSET: f32 = 12.0;
-
-    if width <= px(0.0) {
-        if fraction > 0.5 {
-            return tooltip.right(gpui::relative((1.0 - fraction).max(0.02)));
-        }
-        return tooltip.left(gpui::relative(fraction.max(0.02)));
-    }
-    if width <= px(TOOLTIP_WIDTH + 2.0 * MARGIN) {
-        // The tooltip's full-width cap keeps it inside a plot this narrow.
-        return tooltip.left_0();
-    }
-
-    let cursor = width * fraction;
-    let mut left = cursor + px(OFFSET);
-    if left + px(TOOLTIP_WIDTH) > width - px(MARGIN) {
-        left = cursor - px(OFFSET + TOOLTIP_WIDTH);
-    }
-    if left < px(MARGIN) {
-        left = px(MARGIN);
-    }
-    if left + px(TOOLTIP_WIDTH) > width - px(MARGIN) {
-        left = width - px(MARGIN + TOOLTIP_WIDTH);
-    }
-    assert!(left >= px(MARGIN));
-    tooltip.left(left)
 }
 
 #[cfg(test)]

@@ -385,7 +385,10 @@ impl LiveDashboard {
                         return;
                     }
 
-                    this.chart_plot_width = move_bounds.get().size.width;
+                    if this.chart_pointer != Some(event.position) {
+                        this.chart_pointer = Some(event.position);
+                        cx.notify();
+                    }
                     this.drag_move(&move_source, move_bounds.get(), event.position.x, cx);
                     let second =
                         chart_hover_second(this.view_window(), move_bounds.get(), event.position);
@@ -403,6 +406,7 @@ impl LiveDashboard {
                         return;
                     }
                 } else {
+                    this.chart_pointer = None;
                     if this.reading_keyboard_hover_retained(
                         charts::plot_bounds(measured.get()),
                         window,
@@ -412,7 +416,7 @@ impl LiveDashboard {
                 }
 
                 let second = if *hovered {
-                    this.chart_plot_width = measured.get().size.width;
+                    this.chart_pointer = Some(window.mouse_position());
                     chart_hover_second(this.view_window(), measured.get(), window.mouse_position())
                 } else {
                     None

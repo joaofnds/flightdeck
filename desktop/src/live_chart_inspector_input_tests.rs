@@ -65,6 +65,39 @@ fn separate_power_plots_share_inspection_and_remove_the_tooltip_on_exit(cx: &mut
     harness.teardown();
 }
 
+#[gpui::test]
+fn the_tooltip_follows_the_pointer_and_never_covers_it(cx: &mut TestAppContext) {
+    // Goal: the tooltip sits beside the pointer, as Grafana and Datadog place theirs, so the
+    // lines under the pointer stay visible. Method: move the pointer down within one second and
+    // measure the tooltip against the pointer at both heights.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.seed_chart_sample_gaps();
+    let upper = harness
+        .driver
+        .second_position("live-gpu-power-plot", 898.5 / 900.0);
+    let lower = gpui::point(upper.x, upper.y + gpui::px(30.0));
+
+    harness.driver.hover_position(upper);
+    let upper_tooltip = harness.driver.tooltip_bounds();
+    harness.driver.hover_position(lower);
+    let lower_tooltip = harness.driver.tooltip_bounds();
+
+    assert_eq!(
+        lower_tooltip.top() - upper_tooltip.top(),
+        gpui::px(30.0),
+        "{upper:?} {upper_tooltip:?} {lower:?} {lower_tooltip:?}"
+    );
+    assert!(
+        !upper_tooltip.contains(&upper),
+        "{upper_tooltip:?} {upper:?}"
+    );
+    assert!(
+        !lower_tooltip.contains(&lower),
+        "{lower_tooltip:?} {lower:?}"
+    );
+    harness.teardown();
+}
+
 impl InputDriver {
     fn seed_chart_sample_gaps(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
@@ -87,6 +120,12 @@ impl InputDriver {
             cx.notify();
         });
         self.context.run_until_parked();
+    }
+
+    fn tooltip_bounds(&mut self) -> gpui::Bounds<gpui::Pixels> {
+        self.context
+            .debug_bounds("chart-tooltip:live-gpu-power")
+            .unwrap()
     }
 
     fn chart_control(&mut self, selector: &'static str) {
