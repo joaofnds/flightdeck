@@ -641,14 +641,22 @@ impl LiveDashboard {
         })
     }
 
-    /// Spreads the view across every chart that is drawn against the clock.
+    /// Spreads the view across every chart that is drawn against the clock, and tells each
+    /// whether its readings still move on with the newest second.
     fn zoom_panels(&mut self) {
         let Some(view) = self.view_window() else {
             return;
         };
+        let sliding = self.request.second.is_none() && self.range.slides();
         for panel in &mut self.panels {
-            if panel.window.is_some_and(|window| window != view) {
+            let Some(window) = panel.window else {
+                continue;
+            };
+            if window != view {
                 crate::time_range::zoom(Rc::make_mut(panel), view);
+            }
+            if panel.sliding != sliding {
+                Rc::make_mut(panel).sliding = sliding;
             }
         }
     }
@@ -671,10 +679,12 @@ impl LiveDashboard {
 
     /// Goes back to the whole history, following the newest second.
     pub(crate) fn reset_range(&mut self, cx: &mut Context<Self>) {
-        self.set_range(crate::time_range::Range::History, cx);
-        if self.request.second.is_some() {
-            self.request.second = None;
+        let held = self.request.second.take().is_some();
+        if held {
             self.request.identity = None;
+        }
+        self.set_range(crate::time_range::Range::History, cx);
+        if held {
             self.request_reading();
         }
     }

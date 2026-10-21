@@ -253,6 +253,7 @@ fn panels_panel(
             span: u64::from(span),
         }),
         detail_first: None,
+        sliding: false,
     })
 }
 

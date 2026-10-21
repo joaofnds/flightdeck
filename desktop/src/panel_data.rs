@@ -32,6 +32,11 @@ pub struct Panel {
     /// seconds, so no average mixes the two.
     #[serde(skip)]
     pub detail_first: Option<u64>,
+    /// Whether readings still leave at the window's start and arrive at its end, as they do while
+    /// the view follows the newest second. The chart holds back the curve those readings would
+    /// still reshape.
+    #[serde(skip)]
+    pub sliding: bool,
 }
 
 #[derive(Clone, Deserialize)]

@@ -693,6 +693,7 @@ fn panel(
         selected_index: coordinates.selected_index,
         window: Some(coordinates.window),
         detail_first: Some(coordinates.detail_first),
+        sliding: false,
     })
 }
 
@@ -762,6 +763,7 @@ fn gpu_apps_panel(
         selected_index: coordinates.selected_index,
         window: Some(coordinates.window),
         detail_first: Some(coordinates.detail_first),
+        sliding: false,
     }))
 }
 

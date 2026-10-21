@@ -433,6 +433,7 @@ fn chart_panel(
         table_rows: None,
         window: Some(window),
         detail_first: None,
+        sliding: false,
     }
 }
 
