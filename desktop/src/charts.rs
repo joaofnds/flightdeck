@@ -145,13 +145,7 @@ fn plot_cursor(
                     return;
                 }
             }
-            let fraction = panel.positions.as_ref().map_or_else(
-                || {
-                    number(inspection.selected - inspection.lower)
-                        / number((inspection.upper - inspection.lower).max(1))
-                },
-                |positions| positions[inspection.selected],
-            );
+            let fraction = fraction_in_view(&panel, &inspection, inspection.selected);
             let x = chart.origin.x + chart.size.width * fraction;
             window.paint_quad(fill(
                 Bounds::new(point(x, chart.origin.y), size(px(1.0), chart.size.height)),
@@ -289,6 +283,7 @@ pub(crate) fn prepare_lines(
             segments: panel.segments.as_deref(),
             lower: inspection.lower,
             window: panel.window,
+            follows: panel.follows,
         };
         paint(line, &values, &geometry);
     }
@@ -304,6 +299,8 @@ pub(crate) struct Geometry<'a> {
     pub(crate) lower: usize,
     /// The wall-clock seconds the positions span, which pins the averaging buckets to the clock.
     pub(crate) window: Option<TimeWindow>,
+    /// Whether readings still leave at the window's start and arrive at its end.
+    pub(crate) follows: bool,
 }
 
 impl Geometry<'_> {
@@ -337,14 +334,35 @@ fn paint_line_runs(
     geometry: &Geometry<'_>,
     window: &mut Window,
 ) {
+    let present = |offset: usize| values[offset].is_some();
+    for_each_run(
+        values.len(),
+        geometry.segments,
+        geometry.lower,
+        present,
+        |run| {
+            paint_run(line, panel, values, run, geometry, window);
+        },
+    );
+}
+
+/// Calls `visit` with each run of the `count` readings in view from `lower` that `present`
+/// finds, as offsets from `lower`. A missing reading or a change of segment ends a run.
+fn for_each_run(
+    count: usize,
+    segments: Option<&[u64]>,
+    lower: usize,
+    present: impl Fn(usize) -> bool,
+    mut visit: impl FnMut(std::ops::Range<usize>),
+) {
     let mut start = 0;
-    for end in 0..=values.len() {
-        if end < values.len() {
-            if values[end].is_some() {
+    for end in 0..=count {
+        if end < count {
+            if present(end) {
                 if end > start {
-                    if let Some(segments) = geometry.segments {
-                        if segments[geometry.lower + end] != segments[geometry.lower + end - 1] {
-                            paint_run(line, panel, values, start..end, geometry, window);
+                    if let Some(segments) = segments {
+                        if segments[lower + end] != segments[lower + end - 1] {
+                            visit(start..end);
                             start = end;
                         }
                     }
@@ -353,7 +371,7 @@ fn paint_line_runs(
             }
         }
         if end > start {
-            paint_run(line, panel, values, start..end, geometry, window);
+            visit(start..end);
         }
         start = end + 1;
     }
@@ -368,9 +386,13 @@ fn paint_run(
     window: &mut Window,
 ) {
     let tint = color(&line.color);
-    let curve = curve_points(values, range, geometry);
-    if curve.len() == 1 {
-        let position = point(curve[0].x, curve[0].top);
+    let curve = drawn_curve(values, range, geometry);
+    if curve.points.is_empty() {
+        return;
+    }
+
+    if curve.points.len() == 1 {
+        let position = point(curve.points[0].x, curve.points[0].top);
         window.paint_quad(fill(
             Bounds::new(position - point(px(1.5), px(1.5)), size(px(3.0), px(3.0))),
             rgb(tint),
@@ -386,17 +408,20 @@ fn paint_run(
     }
     let mut area = PathBuilder::fill();
     let top: Vec<_> = curve
+        .points
         .iter()
         .map(|sample| point(sample.x, sample.top))
         .collect();
     let bottom: Vec<_> = curve
+        .points
         .iter()
         .rev()
         .map(|sample| point(sample.x, sample.bottom))
         .collect();
-    smooth(&mut stroke, &top, true);
-    smooth(&mut area, &top, true);
-    smooth(&mut area, &bottom, false);
+    let tangents_bottom: Vec<f32> = curve.tangents_bottom.iter().rev().copied().collect();
+    smooth(&mut stroke, &top, &curve.tangents_top, true);
+    smooth(&mut area, &top, &curve.tangents_top, true);
+    smooth(&mut area, &bottom, &tangents_bottom, false);
     area.close();
 
     let default_opacity = if stacked { 0.45 } else { 0.12 };
@@ -404,6 +429,7 @@ fn paint_run(
     if line.dashed != Some(true) {
         if opacity > 0.0 {
             let span = curve
+                .points
                 .iter()
                 .fold(None, |span: Option<(Pixels, Pixels)>, sample| {
                     let (low, high) = span.unwrap_or((sample.top, sample.bottom));
@@ -451,6 +477,131 @@ struct CurvePoint {
     x: Pixels,
     top: Pixels,
     bottom: Pixels,
+    bucket: u8,
+}
+
+/// The stretch of one run's curve that a chart draws, with the tangent of its top and bottom
+/// edges at each point. A lone point draws as a dot.
+#[derive(Default)]
+struct DrawnCurve {
+    points: Vec<CurvePoint>,
+    tangents_top: Vec<f32>,
+    tangents_bottom: Vec<f32>,
+}
+
+/// The stretch of one run's curve that no later reading can change, so a curve once drawn keeps
+/// its shape as the window slides, and leaves the chart only whole, at its oldest edge.
+fn drawn_curve(
+    values: &[Option<(f32, f32)>],
+    range: std::ops::Range<usize>,
+    geometry: &Geometry<'_>,
+) -> DrawnCurve {
+    let ends = RunEnds::of(&range, values.len(), geometry.follows);
+    let curve = curve_points(values, range, geometry);
+    let buckets: Vec<u8> = curve.iter().map(|sample| sample.bucket).collect();
+    let trim = trim(&buckets, ends);
+    if trim.drawn.is_empty() {
+        return DrawnCurve::default();
+    }
+
+    let kept = &curve[trim.kept.clone()];
+    if kept.len() == 1 {
+        return DrawnCurve {
+            points: kept.to_vec(),
+            tangents_top: vec![0.0],
+            tangents_bottom: vec![0.0],
+        };
+    }
+
+    let tangents_of = |side: fn(&CurvePoint) -> Pixels| {
+        let points: Vec<_> = kept
+            .iter()
+            .map(|sample| point(sample.x, side(sample)))
+            .collect();
+        monotone_tangents(&points)
+    };
+    let tangents_top = tangents_of(|sample| sample.top);
+    let tangents_bottom = tangents_of(|sample| sample.bottom);
+    let drawn = trim.drawn.start - trim.kept.start..trim.drawn.end - trim.kept.start;
+    DrawnCurve {
+        points: kept[drawn.clone()].to_vec(),
+        tangents_top: tangents_top[drawn.clone()].to_vec(),
+        tangents_bottom: tangents_bottom[drawn].to_vec(),
+    }
+}
+
+/// Whether each end of a run meets an edge of the view beyond which readings still leave or
+/// arrive, which only a view that follows the newest second has.
+#[derive(Clone, Copy)]
+struct RunEnds {
+    head_open: bool,
+    tail_open: bool,
+}
+
+impl RunEnds {
+    /// The ends of `run`, as offsets into the `count` readings in view.
+    fn of(run: &std::ops::Range<usize>, count: usize, follows: bool) -> Self {
+        if !follows {
+            return Self {
+                head_open: false,
+                tail_open: false,
+            };
+        }
+
+        Self {
+            head_open: run.start == 0,
+            tail_open: run.end == count,
+        }
+    }
+}
+
+/// The points of a run, as ranges of its points in time order, that a chart keeps and the
+/// ones it draws.
+struct Trim {
+    kept: std::ops::Range<usize>,
+    drawn: std::ops::Range<usize>,
+}
+
+/// Which points of a run, from the bucket of each, keep the shape they are drawn with.
+///
+/// At an open head, a point in the window's first bucket has lost readings to the slide, so its
+/// mean changes each second and it is not kept. The kept point after it has lost the neighbour
+/// its tangent was shaped with, so it shapes the next stretch without drawing its own. At an
+/// open tail, a point in the bucket after the window's last whole one is still filling and is
+/// not kept, and the last kept point waits for the neighbour still to come before its stretch
+/// is drawn. A run that would draw one point of several draws none, since that point ends a
+/// stretch still to come.
+fn trim(buckets: &[u8], ends: RunEnds) -> Trim {
+    let mut kept = 0..buckets.len();
+    let mut head_cut = false;
+    if ends.head_open {
+        if buckets.first() == Some(&0) {
+            kept.start += 1;
+            head_cut = true;
+        }
+    }
+    if ends.tail_open {
+        if buckets.last() == Some(&CURVE_BUCKETS) {
+            kept.end -= 1;
+        }
+    }
+    assert!(kept.start <= kept.end);
+
+    let mut drawn = kept.clone();
+    if head_cut {
+        drawn.start = (drawn.start + 1).min(drawn.end);
+    }
+    if ends.tail_open {
+        drawn.end = drawn.end.saturating_sub(1).max(drawn.start);
+    }
+    if drawn.len() == 1 {
+        if kept.len() > 1 {
+            drawn.end = drawn.start;
+        }
+    }
+    assert!(kept.start <= drawn.start);
+    assert!(drawn.end <= kept.end);
+    Trim { kept, drawn }
 }
 
 /// Averages the measured readings in each bucket of one run, so the drawn curve carries no
@@ -470,8 +621,8 @@ fn curve_points(
         };
 
         let current = geometry.bucket(index);
-        if bucket.is_some_and(|bucket| bucket != current) {
-            curve.push(curve_point(sum, count));
+        if let Some(bucket) = bucket.filter(|bucket| *bucket != current) {
+            curve.push(curve_point(sum, count, bucket));
             sum = (0.0, 0.0, 0.0);
             count = 0.0;
         }
@@ -482,8 +633,8 @@ fn curve_points(
         sum.2 += f32::from(geometry.point(index, bottom).y);
         count += 1.0;
     }
-    if count > 0.0 {
-        curve.push(curve_point(sum, count));
+    if let Some(bucket) = bucket {
+        curve.push(curve_point(sum, count, bucket));
     }
     curve
 }
@@ -522,18 +673,25 @@ fn bucket_of(fraction: f32, window: Option<TimeWindow>) -> u8 {
     }
 }
 
-fn curve_point(sum: (f32, f32, f32), count: f32) -> CurvePoint {
+fn curve_point(sum: (f32, f32, f32), count: f32, bucket: u8) -> CurvePoint {
     assert!(count > 0.0);
     CurvePoint {
         x: px(sum.0 / count),
         top: px(sum.1 / count),
         bottom: px(sum.2 / count),
+        bucket,
     }
 }
 
-/// Draws a monotone cubic through the points, as the approved prototype does, so a curve never
-/// overshoots the readings it joins.
-fn smooth(builder: &mut PathBuilder, points: &[gpui::Point<Pixels>], start: bool) {
+/// Draws a cubic through the points with the tangent given at each, which `monotone_tangents`
+/// chooses so a curve never overshoots the readings it joins.
+fn smooth(
+    builder: &mut PathBuilder,
+    points: &[gpui::Point<Pixels>],
+    tangents: &[f32],
+    start: bool,
+) {
+    assert_eq!(points.len(), tangents.len());
     let Some(first) = points.first() else {
         return;
     };
@@ -547,7 +705,6 @@ fn smooth(builder: &mut PathBuilder, points: &[gpui::Point<Pixels>], start: bool
         return;
     }
 
-    let tangents = monotone_tangents(points);
     for (index, pair) in points.windows(2).enumerate() {
         let (left, right) = (pair[0], pair[1]);
         let third = (f32::from(right.x) - f32::from(left.x)) / 3.0;
@@ -578,25 +735,15 @@ fn monotone_tangents(points: &[gpui::Point<Pixels>]) -> Vec<f32> {
     let mut tangents = vec![0.0; points.len()];
     tangents[0] = slopes[0];
     tangents[points.len() - 1] = slopes[slopes.len() - 1];
+    // Each tangent depends on its two neighbours alone, so a point leaving or joining the run
+    // reshapes no stretch beyond the one beside it. Fritsch and Carlson keep a cubic monotone
+    // while each end's tangent is at most three times the slope it spans, so the limit holds
+    // the curve between the readings it joins without the prototype's pass along the run.
     for index in 1..points.len() - 1 {
         let (before, after) = (slopes[index - 1], slopes[index]);
         if before * after > 0.0 {
-            tangents[index] = f32::midpoint(before, after);
-        }
-    }
-    for (index, slope) in slopes.iter().enumerate() {
-        if *slope == 0.0 {
-            tangents[index] = 0.0;
-            tangents[index + 1] = 0.0;
-            continue;
-        }
-
-        let a = tangents[index] / slope;
-        let b = tangents[index + 1] / slope;
-        let length = a.hypot(b);
-        if length > 3.0 {
-            tangents[index] = 3.0 * a / length * slope;
-            tangents[index + 1] = 3.0 * b / length * slope;
+            let limit = 3.0 * before.abs().min(after.abs());
+            tangents[index] = f32::midpoint(before, after).clamp(-limit, limit);
         }
     }
     tangents
@@ -732,7 +879,8 @@ pub fn axis_unit<'a>(panel: &'a Panel, axis: &str) -> &'a str {
 }
 
 /// The range of the bucket means the curves draw, so the axis spans what is drawn rather than a
-/// one-second spike the averaged curve does not reach.
+/// one-second spike the averaged curve does not reach, or a reading the curve does not draw yet
+/// whose rescaling would move the curve already drawn.
 fn axis_extent(panel: &Panel, inspection: Inspection, hidden: &[String], axis: &str) -> (f32, f32) {
     let floor = if axis == "left" {
         panel.minimum.unwrap_or(0.0).min(0.0)
@@ -740,25 +888,69 @@ fn axis_extent(panel: &Panel, inspection: Inspection, hidden: &[String], axis: &
         0.0
     };
     let mut extent = (floor, 0.0_f32);
+    let drawn = drawn_readings(panel, &inspection);
+    let count = inspection.upper - inspection.lower + 1;
     // One mean per line, then the stacked positive and negative totals.
     let mut slots = vec![(0.0_f32, 0.0_f32); panel.lines.len() + 2];
     let mut bucket = None;
     for index in inspection.lower..=inspection.upper {
-        let fraction = panel.positions.as_deref().map_or_else(
-            || {
-                number(index - inspection.lower)
-                    / number((inspection.upper - inspection.lower).max(1))
-            },
-            |positions| positions[index],
-        );
-        let current = bucket_of(fraction, panel.window);
+        let current = bucket_of(fraction_in_view(panel, &inspection, index), panel.window);
         if bucket.is_some_and(|bucket| bucket != current) {
             extent = axis_extent_flush(&mut slots, extent);
         }
         bucket = Some(current);
-        axis_extent_add(panel, hidden, axis, index, &mut slots);
+        let offset = index - inspection.lower;
+        let shown = |slot: usize| drawn[slot * count + offset];
+        axis_extent_add(panel, hidden, axis, index, shown, &mut slots);
     }
     axis_extent_flush(&mut slots, extent)
+}
+
+/// Marks each reading in view that its line's curve draws, at `slot * count + offset` for the
+/// line in `slot` and the `count` readings from `inspection.lower`, so the axis spans the drawn
+/// curves and no reading they hold back.
+fn drawn_readings(panel: &Panel, inspection: &Inspection) -> Vec<bool> {
+    let count = inspection.upper - inspection.lower + 1;
+    let mut drawn = vec![false; panel.lines.len() * count];
+    let mut buckets: Vec<u8> = Vec::with_capacity(usize::from(CURVE_BUCKETS) + 1);
+    let bucket = |offset: usize| {
+        let fraction = fraction_in_view(panel, inspection, inspection.lower + offset);
+        bucket_of(fraction, panel.window)
+    };
+    for (slot, line) in panel.lines.iter().enumerate() {
+        let present = |offset: usize| {
+            let value = line.values.get(inspection.lower + offset).copied();
+            value.flatten().is_some()
+        };
+        let segments = panel.segments.as_deref();
+        for_each_run(count, segments, inspection.lower, present, |run| {
+            buckets.clear();
+            for offset in run.clone() {
+                let current = bucket(offset);
+                if buckets.last() != Some(&current) {
+                    buckets.push(current);
+                }
+            }
+            let trim = trim(&buckets, RunEnds::of(&run, count, panel.follows));
+            if trim.drawn.is_empty() {
+                return;
+            }
+
+            let shown = buckets[trim.drawn.start]..=buckets[trim.drawn.end - 1];
+            for offset in run {
+                drawn[slot * count + offset] = shown.contains(&bucket(offset));
+            }
+        });
+    }
+    drawn
+}
+
+/// Where the reading at `index` sits across the plot, from 0 at its left to 1 at its right.
+fn fraction_in_view(panel: &Panel, inspection: &Inspection, index: usize) -> f32 {
+    panel.positions.as_deref().map_or_else(
+        || number(index - inspection.lower) / number((inspection.upper - inspection.lower).max(1)),
+        |positions| positions[index],
+    )
 }
 
 fn axis_extent_add(
@@ -766,6 +958,7 @@ fn axis_extent_add(
     hidden: &[String],
     axis: &str,
     index: usize,
+    shown: impl Fn(usize) -> bool,
     slots: &mut [(f32, f32)],
 ) {
     let stacks = panel.lines.len();
@@ -776,6 +969,9 @@ fn axis_extent_add(
             continue;
         }
         if line.axis.as_deref().unwrap_or("left") != axis {
+            continue;
+        }
+        if !shown(slot) {
             continue;
         }
         let Some(value) = line.values.get(index).copied().flatten() else {
@@ -1212,6 +1408,7 @@ mod live_tests {
             segments: None,
             lower: 0,
             window: None,
+            follows: false,
         };
         let values = [
             Some((10.0, 0.0)),
@@ -1255,6 +1452,7 @@ mod live_tests {
                 segments: None,
                 lower: 0,
                 window: Some(window),
+                follows: false,
             };
             let curve = curve_points(&values, 0..900, &geometry);
             let first = f32::from(u16::try_from(first - 1000).unwrap());
@@ -1281,6 +1479,333 @@ mod live_tests {
                 "{before:?} became {after:?}"
             );
         }
+    }
+
+    /// A reading that turns often, so the curve has peaks and troughs to keep.
+    fn varying_reading(second: u64) -> f32 {
+        f32::from(u16::try_from(second * 7919 % 101).unwrap())
+    }
+
+    /// The geometry of a 900-pixel chart of the 900 seconds from `first`, one pixel a second,
+    /// with each reading 0.3 seconds into its second as a tick lands.
+    fn live_geometry(first: u64, positions: &[f32], follows: bool) -> Geometry<'_> {
+        Geometry {
+            bounds: Bounds::new(point(px(0.0), px(0.0)), size(px(900.0), px(100.0))),
+            minimum: 0.0,
+            maximum: 100.0,
+            count: positions.len(),
+            positions: Some(positions),
+            segments: None,
+            lower: 0,
+            window: Some(TimeWindow { first, span: 900 }),
+            follows,
+        }
+    }
+
+    /// Where readings sit across a 900-second chart from `offset` seconds into it onwards.
+    fn live_positions(offsets: std::ops::Range<u16>) -> Vec<f32> {
+        offsets
+            .map(|offset| (f32::from(offset) + 0.3) / 900.0)
+            .collect()
+    }
+
+    /// The drawn curve of the readings of the 900 seconds from `first`, in a view that follows
+    /// the newest second or one held still.
+    fn live_curve(first: u64, follows: bool) -> DrawnCurve {
+        let positions = live_positions(0..900);
+        let values: Vec<_> = (first..first + 900)
+            .map(|second| Some((varying_reading(second), 0.0)))
+            .collect();
+
+        drawn_curve(&values, 0..900, &live_geometry(first, &positions, follows))
+    }
+
+    /// Each drawn stretch of the curve of the window from `first`, as its two ends and their
+    /// tangents, on an x axis pinned to the clock rather than to the window.
+    fn drawn_stretches(first: u64) -> Vec<[f32; 6]> {
+        let curve = live_curve(first, true);
+        let clock = f32::from(u16::try_from(first - 1000).unwrap());
+
+        (1..curve.points.len())
+            .map(|index| {
+                let (left, right) = (curve.points[index - 1], curve.points[index]);
+                [
+                    clock + f32::from(left.x),
+                    f32::from(left.top),
+                    curve.tangents_top[index - 1],
+                    clock + f32::from(right.x),
+                    f32::from(right.top),
+                    curve.tangents_top[index],
+                ]
+            })
+            .collect()
+    }
+
+    fn same_stretch(stretch: &[f32; 6], other: &[f32; 6]) -> bool {
+        stretch
+            .iter()
+            .zip(other)
+            .all(|(value, other)| (value - other).abs() < 0.01)
+    }
+
+    /// A one-line CPU chart of `values` across the 900 seconds from 1010, which follows the
+    /// newest second.
+    fn live_panel(values: &[Option<f32>]) -> Panel {
+        let mut panel: Panel = serde_json::from_value(serde_json::json!({
+            "id":"cpu", "title":"CPU", "unit":"%", "kind":"line",
+            "positions": live_positions(0..900), "lines":[
+                {"name":"All cores", "color":"#5794f2", "values": values}]}))
+        .unwrap();
+        panel.window = Some(TimeWindow {
+            first: 1010,
+            span: 900,
+        });
+        panel.follows = true;
+        panel
+    }
+
+    const LIVE_INSPECTION: Inspection = Inspection {
+        lower: 0,
+        selected: 899,
+        upper: 899,
+    };
+
+    #[test]
+    fn a_drawn_curve_keeps_every_stretch_it_drew_as_the_window_slides() {
+        // Goal: a stretch of curve once drawn stays exactly as drawn while readings arrive, and
+        // leaves the chart only whole, at its oldest edge.
+        // Method: slide a window one second at a time across five buckets of turning readings
+        // and check, for each two windows in a row, that at most the oldest stretch of the
+        // first and the newest of the second are drawn by only one of them.
+        for first in 1000..1150 {
+            let before = drawn_stretches(first);
+            let after = drawn_stretches(first + 1);
+
+            assert!(!before.is_empty());
+            let held = |stretch: &[f32; 6], curve: &[[f32; 6]]| {
+                curve.iter().any(|other| same_stretch(stretch, other))
+            };
+            let gone = before.iter().take_while(|s| !held(s, &after)).count();
+            let added = after.iter().rev().take_while(|s| !held(s, &before)).count();
+            assert!(gone <= 1, "{gone} stretches of {first} left");
+            assert!(added <= 1, "{added} stretches of {} came", first + 1);
+            for stretch in &before[gone..] {
+                assert!(held(stretch, &after), "{stretch:?} of {first} changed");
+            }
+            for stretch in &after[..after.len() - added] {
+                assert!(
+                    held(stretch, &before),
+                    "{stretch:?} of {} is new",
+                    first + 1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_live_window_that_starts_inside_a_bucket_draws_its_third_to_third_last_bucket() {
+        // Goal: a following curve holds back the cut first bucket, the filling last one, and
+        // the bucket beside each, whose stretch those shape.
+        // Method: draw a full window from 1010, whose 31 buckets run from 990 to 1919, and read
+        // the places of its first and last drawn points, the mean places of 1050 to 1079 and of
+        // 1830 to 1859.
+        let curve = live_curve(1010, true);
+
+        assert_eq!(curve.points.len(), 27);
+        assert!((f32::from(curve.points[0].x) - 54.8).abs() < 0.01);
+        assert!((f32::from(curve.points[26].x) - 834.8).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_live_window_that_starts_on_a_bucket_draws_its_third_to_second_last_bucket() {
+        // Goal: a following curve holds back its oldest two buckets, which the next second cuts,
+        // and its newest whole bucket, whose stretch waits for the next.
+        // Method: draw a full window from 1020, whose 30 buckets run from 1020 to 1919, and read
+        // the places of its first and last drawn points, the mean places of 1080 to 1109 and of
+        // 1860 to 1889.
+        let curve = live_curve(1020, true);
+
+        assert_eq!(curve.points.len(), 27);
+        assert!((f32::from(curve.points[0].x) - 74.8).abs() < 0.01);
+        assert!((f32::from(curve.points[26].x) - 854.8).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_held_window_draws_every_bucket() {
+        // Goal: a view that no longer follows the newest second loses and gains no reading, so
+        // its curve shows every bucket.
+        // Method: draw the window from 1010 held still and count its 31 bucket points.
+        let curve = live_curve(1010, false);
+
+        assert_eq!(curve.points.len(), 31);
+    }
+
+    #[test]
+    fn a_short_held_selection_draws_every_reading() {
+        // Goal: a five-second selection, where each second is a bucket of its own, shows all
+        // five readings.
+        // Method: draw five readings across a held window of five seconds.
+        let positions: Vec<f32> = (0..5_u16)
+            .map(|offset| (f32::from(offset) + 0.3) / 5.0)
+            .collect();
+        let values: Vec<_> = (0..5_u16)
+            .map(|offset| Some((f32::from(offset) * 10.0, 0.0)))
+            .collect();
+        let mut geometry = live_geometry(2000, &positions, false);
+        geometry.window = Some(TimeWindow {
+            first: 2000,
+            span: 5,
+        });
+
+        let curve = drawn_curve(&values, 0..5, &geometry);
+
+        assert_eq!(curve.points.len(), 5);
+    }
+
+    #[test]
+    fn a_new_recording_draws_from_its_first_bucket() {
+        // Goal: the first readings of a recording slid out of nowhere and have no neighbour
+        // still to lose, so the curve starts at once from their bucket.
+        // Method: draw a following window from 1020 whose readings begin 600 seconds in, and
+        // read its first drawn point, the mean place of 1620 to 1649, and its point count, the
+        // buckets from 1620 to 1889.
+        let positions = live_positions(600..900);
+        let values: Vec<_> = (1620..1920_u64)
+            .map(|second| Some((varying_reading(second), 0.0)))
+            .collect();
+
+        let curve = drawn_curve(&values, 0..300, &live_geometry(1020, &positions, true));
+
+        assert_eq!(curve.points.len(), 9);
+        assert!((f32::from(curve.points[0].x) - 614.8).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_curve_draws_up_to_the_last_reading_before_a_gap() {
+        // Goal: a run that a gap ends cannot change, so its stretch reaches its last bucket.
+        // Method: end the readings 600 seconds into a window and compare the last drawn point
+        // with the mean place of its bucket's readings, 570.3 to 599.3 seconds in.
+        let positions = live_positions(0..900);
+        let values: Vec<_> = (1020..1920_u64)
+            .map(|second| (second < 1620).then(|| (varying_reading(second), 0.0)))
+            .collect();
+
+        let curve = drawn_curve(&values, 0..600, &live_geometry(1020, &positions, true));
+
+        assert!((f32::from(curve.points.last().unwrap().x) - 584.8).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_curve_draws_from_the_first_reading_after_a_gap() {
+        // Goal: a run that a gap starts lost nothing to the slide, so it draws from its first
+        // bucket even where that is the window's first.
+        // Method: leave the first five seconds of the window from 1010 empty and compare the
+        // first drawn point with the mean place of the rest of its bucket, 1015 to 1019.
+        let positions = live_positions(0..900);
+        let values: Vec<_> = (1010..1910_u64)
+            .map(|second| (second >= 1015).then(|| (varying_reading(second), 0.0)))
+            .collect();
+
+        let curve = drawn_curve(&values, 5..900, &live_geometry(1010, &positions, true));
+
+        assert!((f32::from(curve.points[0].x) - 7.3).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_lone_reading_between_gaps_draws_as_a_dot() {
+        // Goal: a reading with gaps on both sides is final, so it shows at once.
+        // Method: draw the one-reading run 450 seconds into a window of gaps.
+        let positions = live_positions(0..900);
+        let values: Vec<_> = (0..900)
+            .map(|offset| (offset == 450).then_some((40.0, 0.0)))
+            .collect();
+
+        let curve = drawn_curve(&values, 450..451, &live_geometry(1020, &positions, true));
+
+        assert_eq!(curve.points.len(), 1);
+        assert!((f32::from(curve.points[0].x) - 450.3).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_stacked_curve_shapes_its_lower_edge_from_its_own_readings() {
+        // Goal: the lower edge of a stacked area bends with the line beneath it, not with the
+        // line's own top.
+        // Method: draw a turning top over a flat base and check every base tangent is flat.
+        let positions = live_positions(0..900);
+        let values: Vec<_> = (1020..1920_u64)
+            .map(|second| Some((varying_reading(second) + 5.0, 5.0)))
+            .collect();
+
+        let curve = drawn_curve(&values, 0..900, &live_geometry(1020, &positions, true));
+
+        assert!(
+            curve
+                .tangents_top
+                .iter()
+                .any(|tangent| tangent.abs() > 0.01)
+        );
+        assert!(
+            curve
+                .tangents_bottom
+                .iter()
+                .all(|tangent| tangent.abs() < 0.001)
+        );
+    }
+
+    #[test]
+    fn the_value_axis_ignores_readings_the_curve_does_not_draw_yet() {
+        // Goal: a reading the curve does not draw yet cannot rescale the curve already drawn.
+        // Method: put a spike in 1860 to 1889, the newest whole bucket of the window from 1010,
+        // whose stretch waits for the next, and read the axis of a steady chart.
+        let values: Vec<_> = (0..900)
+            .map(|offset| {
+                Some(if (850..880).contains(&offset) {
+                    90.0
+                } else {
+                    10.0
+                })
+            })
+            .collect();
+
+        let (_, maximum) = domain(&live_panel(&values), LIVE_INSPECTION, &[]);
+
+        assert!((maximum - 12.5).abs() < f32::EPSILON, "{maximum}");
+    }
+
+    #[test]
+    fn the_value_axis_spans_a_stretch_that_a_gap_ends_beside_the_newest_edge() {
+        // Goal: a run a gap has closed draws its newest bucket at once, so the axis rises to
+        // hold it rather than clip it.
+        // Method: end a line with a spike over 1860 to 1889 and no readings after it, and read
+        // the axis.
+        let values: Vec<_> = (0..900)
+            .map(|offset| match offset {
+                0..850 => Some(10.0),
+                850..880 => Some(90.0),
+                _ => None,
+            })
+            .collect();
+
+        let (_, maximum) = domain(&live_panel(&values), LIVE_INSPECTION, &[]);
+
+        assert!(maximum >= 90.0, "{maximum}");
+    }
+
+    #[test]
+    fn a_tangent_depends_on_its_two_neighbours_alone() {
+        // Goal: dropping the oldest point of a run reshapes only the stretch beside it, so the
+        // rest of a drawn curve stays put as its oldest bucket leaves.
+        // Method: compute tangents through slopes that shrink tenfold each step, with and
+        // without the first point, and compare every tangent the dropped point does not touch.
+        let heights = [0.0, 1000.0, 1100.0, 1110.0, 1111.0, 1111.1];
+        let points: Vec<_> = (0..6_u8)
+            .map(|index| point(px(f32::from(index)), px(heights[usize::from(index)])))
+            .collect();
+
+        let whole = monotone_tangents(&points);
+        let cut = monotone_tangents(&points[1..]);
+
+        assert_eq!(whole[2..], cut[1..]);
     }
 
     #[test]

@@ -45,6 +45,16 @@ impl InputDriver {
         })
     }
 
+    fn energy_follows(&self) -> bool {
+        self.view.read_with(&self.context, |dashboard, _| {
+            dashboard
+                .panels
+                .iter()
+                .find(|panel| panel.id == "live-energy")
+                .is_some_and(|panel| panel.follows)
+        })
+    }
+
     fn click_control(&mut self, selector: &'static str) {
         let bounds = super::menu_control_bounds(&mut self.context, selector);
         self.context
@@ -56,9 +66,11 @@ impl InputDriver {
 #[gpui::test]
 fn dragging_across_a_chart_zooms_the_charts_to_that_stretch_and_holds_it(cx: &mut TestAppContext) {
     // Goal: a drag selects a stretch of time, the charts show only that stretch, and the view
-    // stops following the newest second so the stretch stays where it was drawn.
+    // stops following the newest second so the stretch stays where it was drawn, with every
+    // reading in it drawn.
     // Method: follow the live second, drag from a quarter to three quarters of the plot, then
-    // read the view, the chart's own window and the second the reader asks for.
+    // read the view, the chart's own window, whether it follows, and the second the reader asks
+    // for.
     let mut harness = InputHarness::setup(cx);
     harness.driver.follow_live();
 
@@ -70,6 +82,7 @@ fn dragging_across_a_chart_zooms_the_charts_to_that_stretch_and_holds_it(cx: &mu
     };
     assert_eq!(harness.driver.view_window(), Some(stretch));
     assert_eq!(harness.driver.energy_window(), Some(stretch));
+    assert!(!harness.driver.energy_follows());
     assert_eq!(harness.driver.requested_second(), Some(1000));
     assert!(harness.driver.drag_is_over());
     harness.teardown();
@@ -110,7 +123,8 @@ fn a_click_or_a_tiny_drag_leaves_the_range_alone(cx: &mut TestAppContext) {
 #[gpui::test]
 fn the_reset_button_returns_to_the_latest_fifteen_minutes(cx: &mut TestAppContext) {
     // Goal: one press undoes a zoom and goes back to following the newest second.
-    // Method: zoom with a drag, press the reset button, and read the view and the request.
+    // Method: zoom with a drag, press the reset button, and read the view, the request and
+    // whether the chart follows.
     let mut harness = InputHarness::setup(cx);
     harness.driver.follow_live();
     harness.driver.drag_plot(0.25, 0.75);
@@ -125,6 +139,7 @@ fn the_reset_button_returns_to_the_latest_fifteen_minutes(cx: &mut TestAppContex
         })
     );
     assert_eq!(harness.driver.requested_second(), None);
+    assert!(harness.driver.energy_follows());
     harness.teardown();
 }
 
