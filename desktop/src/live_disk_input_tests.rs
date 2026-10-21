@@ -402,6 +402,26 @@ fn disk_attribution_tooltip_keeps_the_legend_order_when_a_later_app_reads_higher
 }
 
 #[gpui::test]
+fn disk_attribution_tooltip_keeps_rows_for_apps_without_a_reading(cx: &mut TestAppContext) {
+    // Hover a second where both Apps lack a reading, and read each in its own legend row.
+    let mut harness = InputHarness::setup_route(cx, "storage");
+    harness.driver.seed_disk_storage();
+    harness.driver.seed_disk_attribution_without_app_readings();
+
+    harness
+        .driver
+        .hover_selected_second_on("live-disk-apps-plot");
+
+    assert!(harness.driver.reading_is_visible(
+        "chart-tooltip-row:live-disk-apps:1:Lower:Unavailable · 1 unavailable"
+    ));
+    assert!(harness.driver.reading_is_visible(
+        "chart-tooltip-row:live-disk-apps:2:Higher:Unavailable · 1 unavailable"
+    ));
+    harness.teardown();
+}
+
+#[gpui::test]
 fn disk_attribution_arrow_inspection_preserves_the_ranked_app_target(cx: &mut TestAppContext) {
     // Activate the App reached through the actual new plot's historical keyboard inspection.
     let mut harness = InputHarness::setup_route(cx, "storage");
@@ -487,26 +507,28 @@ impl InputDriver {
     }
 
     fn seed_disk_attribution_with_a_higher_second_app(&mut self) {
-        use crate::live_app_attribution_history::{
-            AppAttributionHistory, Metric, tests::disk_fixture,
-        };
+        self.seed_disk_attribution(&two_disk_apps_history());
+    }
+
+    fn seed_disk_attribution_without_app_readings(&mut self) {
+        let mut history = two_disk_apps_history();
+        for point in history["points"].as_array_mut().unwrap() {
+            for app in point["apps"].as_array_mut().unwrap() {
+                app["disk_io_bps"] = serde_json::Value::Null;
+                app["disk_io_bytes"]["measured_members"] = json!(0);
+                app["disk_io_bytes"]["unavailable_members"] = json!(1);
+            }
+        }
+        self.seed_disk_attribution(&history);
+    }
+
+    fn seed_disk_attribution(&mut self, history: &serde_json::Value) {
+        use crate::live_app_attribution_history::{AppAttributionHistory, Metric};
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = accepted_snapshot(dashboard.generation);
-            let mut history = disk_fixture();
-            history["cohort"] = json!([
-                {"key":{"kind":"bundle","bytes_hex":"41","display":"Lower"}},
-                {"key":{"kind":"bundle","bytes_hex":"42","display":"Higher"}}]);
-            for point in history["points"].as_array_mut().unwrap() {
-                let mut higher = point["apps"][0].clone();
-                point["apps"][0]["disk_io_bytes"]["known"] = json!("2000000");
-                point["apps"][0]["disk_io_bps"] = json!(1_000_000.0);
-                higher["disk_io_bytes"]["known"] = json!("4000000");
-                higher["disk_io_bps"] = json!(2_000_000.0);
-                point["apps"].as_array_mut().unwrap().push(higher);
-            }
             snapshot.app_attribution_history = Some(Arc::new(AppAttributionHistory::prepare(
                 Metric::Disk,
-                &history,
+                history,
                 &snapshot.selection,
             )));
             dashboard.accept(snapshot);
@@ -605,4 +627,22 @@ impl InputDriver {
         });
         self.context.run_until_parked();
     }
+}
+
+/// Two Apps, Lower reading 1 MB/s and Higher 2 MB/s at every second.
+fn two_disk_apps_history() -> serde_json::Value {
+    let mut history = crate::live_app_attribution_history::tests::disk_fixture();
+    history["cohort"] = json!([
+        {"key":{"kind":"bundle","bytes_hex":"41","display":"Lower"}},
+        {"key":{"kind":"bundle","bytes_hex":"42","display":"Higher"}}]);
+    for point in history["points"].as_array_mut().unwrap() {
+        let mut higher = point["apps"][0].clone();
+        point["apps"][0]["disk_io_bytes"]["known"] = json!("2000000");
+        point["apps"][0]["disk_io_bps"] = json!(1_000_000.0);
+        higher["disk_io_bytes"]["known"] = json!("4000000");
+        higher["disk_io_bps"] = json!(2_000_000.0);
+        point["apps"].as_array_mut().unwrap().push(higher);
+    }
+
+    history
 }

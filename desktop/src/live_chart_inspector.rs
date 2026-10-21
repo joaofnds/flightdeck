@@ -248,24 +248,8 @@ impl LiveDashboard {
             .text_size(px(12.0))
             .child(div().mb(px(4.0)).child(clock(second, true)));
         tooltip = chart_tooltip_place(tooltip, self.chart_plot_width, fraction);
-        let unreadable: Vec<usize> = indices
-            .iter()
-            .copied()
-            .filter(|line| {
-                self.chart_line_reading(panel, *line, index)
-                    .starts_with("Unavailable")
-            })
-            .collect();
-        let (shown, folded) = fold_unreadable(&indices, &unreadable);
-        for (rank, line_index) in shown.into_iter().enumerate() {
+        for (rank, line_index) in indices.into_iter().enumerate() {
             tooltip = tooltip.child(self.chart_tooltip_row(panel, line_index, index, rank));
-        }
-        if !folded.is_empty() {
-            let names: Vec<&str> = folded
-                .iter()
-                .map(|line| panel.lines[*line].name.as_str())
-                .collect();
-            tooltip = tooltip.child(tooltip_unreadable(&panel.id, &names));
         }
 
         Some(tooltip)
@@ -333,37 +317,6 @@ fn tooltip_row(color: u32, name: &str, reading: &str) -> gpui::Div {
                 .text_color(rgb(MUTED))
                 .child(detail.to_owned())
         }))
-}
-
-/// Splits the tooltip's series into those that get a row and those folded into one line. Several
-/// series without a reading fold, so they do not push the readings that exist out of the plot;
-/// a lone one, or all of them, keep their rows.
-fn fold_unreadable(indices: &[usize], unreadable: &[usize]) -> (Vec<usize>, Vec<usize>) {
-    if unreadable.len() < 2 || unreadable.len() == indices.len() {
-        return (indices.to_vec(), Vec::new());
-    }
-    let shown = indices
-        .iter()
-        .copied()
-        .filter(|line| !unreadable.contains(line))
-        .collect();
-
-    (shown, unreadable.to_vec())
-}
-
-/// The series that have no reading at the inspected second, named on one wrapping line.
-fn tooltip_unreadable(panel_id: &str, names: &[&str]) -> gpui::Div {
-    let text = format!("No reading: {}", names.join(", "));
-    div()
-        .debug_selector(|| format!("chart-tooltip-unreadable:{panel_id}:{text}"))
-        .mt(px(4.0))
-        .pt(px(6.0))
-        .border_t_1()
-        .border_color(rgb(GRID))
-        .text_size(px(11.0))
-        .line_height(px(15.0))
-        .text_color(rgb(MUTED))
-        .child(text.clone())
 }
 
 const TOOLTIP_GAP: f32 = 8.0;
@@ -479,7 +432,7 @@ fn chart_tooltip_place(tooltip: gpui::Div, width: gpui::Pixels, fraction: f32) -
 mod tests {
     use gpui::{Context, Render, TestAppContext, Window, div, prelude::*, px};
 
-    use super::{fold_unreadable, split_reading, tooltip_row, tooltip_unreadable};
+    use super::{split_reading, tooltip_row};
 
     struct Probe;
 
@@ -494,16 +447,6 @@ mod tests {
                     0x00f2_cc0c,
                     "rustc",
                     "44.4 W known subtotal · 5 measured · 3 unavailable",
-                ))
-                .child(tooltip_unreadable(
-                    "probe",
-                    &[
-                        "rm",
-                        "persister",
-                        "Xcode",
-                        "clippy-driver",
-                        "viewer-bd715b676b3",
-                    ],
                 ))
         }
     }
@@ -521,25 +464,6 @@ mod tests {
         assert!(name.size.width >= px(60.0), "{name:?}");
         assert!(detail.right() <= tooltip.right(), "{detail:?} {tooltip:?}");
         assert!(detail.top() >= name.bottom());
-        let folded = cx
-            .debug_bounds(
-                "chart-tooltip-unreadable:probe:No reading: rm, persister, Xcode, clippy-driver, \
-                 viewer-bd715b676b3",
-            )
-            .unwrap();
-        assert!(folded.right() <= tooltip.right(), "{folded:?} {tooltip:?}");
-    }
-
-    #[test]
-    fn folds_several_series_without_a_reading_into_one_line() {
-        // Goal: unavailable series stop padding the tooltip, yet a lone one or an all-empty
-        // chart still shows its rows. Method: fold three cases of four series.
-        let lines = [0, 1, 2, 3];
-
-        assert_eq!(fold_unreadable(&lines, &[2, 3]), (vec![0, 1], vec![2, 3]));
-        assert_eq!(fold_unreadable(&lines, &[3]), (vec![0, 1, 2, 3], vec![]));
-        assert_eq!(fold_unreadable(&lines, &lines), (vec![0, 1, 2, 3], vec![]));
-        assert_eq!(fold_unreadable(&lines, &[]), (vec![0, 1, 2, 3], vec![]));
     }
 
     #[test]
