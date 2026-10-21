@@ -26,6 +26,8 @@ pub struct Sample {
     pub elapsed_ns: Option<u64>,
     pub membership_complete: bool,
     pub ungrouped_members: u32,
+    /// The ungrouped members live at the selected tick, which an exited process does not join.
+    pub live_ungrouped_members: u32,
     pub usage_refused: u32,
     pub usage_gone: u32,
     apps: Vec<App>,
@@ -319,6 +321,7 @@ impl Sample {
             elapsed_ns: aggregate.elapsed_ns,
             membership_complete: aggregate.membership_complete,
             ungrouped_members: aggregate.ungrouped_members,
+            live_ungrouped_members: aggregate.live_ungrouped_members,
             usage_refused: 0,
             usage_gone: 0,
             apps: Vec::with_capacity(aggregate.apps.len()),

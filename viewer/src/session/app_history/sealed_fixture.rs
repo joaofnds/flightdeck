@@ -49,6 +49,18 @@ impl Session {
         });
     }
 
+    /// Rewrites the parts each sealed window keeps to the version before this build's, which
+    /// kept no count of the live processes outside every App.
+    pub(crate) fn previous_version_kept_parts(&self) {
+        rewrite(self, APP_PARTS, |frame| {
+            let version = vec![VERSION - 1; frame.height()];
+            frame
+                .replace("version", Column::new("version".into(), version))
+                .unwrap();
+            frame.drop_in_place("live_ungrouped_members").unwrap();
+        });
+    }
+
     /// Rewrites the parts each sealed window keeps so the facts of every observation count one
     /// App more than the window keeps for it.
     pub(crate) fn overcount_kept_apps(&self) {

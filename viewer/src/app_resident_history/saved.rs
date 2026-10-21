@@ -1,21 +1,79 @@
 use persistence::Result;
 
 use super::{AppReading, Capture, Reduction, Source};
-use crate::live_app_response::{Measure, Observation};
+use crate::live_app_response::{Header, Measure, Observation};
 use crate::live_apps::Frame;
+use crate::session::KeptResident;
+
+/// The resident memory of an observation's Apps as the recording gives it: from a replay of its
+/// minute, or from the parts its sealed window keeps.
+pub(crate) enum SavedResidents<'saved> {
+    Replayed(&'saved Frame),
+    Sealed {
+        header: &'saved Header,
+        apps: &'saved [KeptResident],
+    },
+}
+
+impl SavedResidents<'_> {
+    /// The observation whose Apps' resident memory this is.
+    pub(crate) fn observation(&self) -> Observation {
+        match self {
+            Self::Replayed(frame) => Observation {
+                recording: frame.identity().recording.0,
+                stamp: *frame.stamp(),
+                run_tick: frame.run_tick(),
+                wall_ns: frame.wall_ns(),
+            },
+            Self::Sealed { header, .. } => header.selected,
+        }
+    }
+}
 
 impl Reduction<'_> {
-    pub(crate) fn observe_frame(&mut self, frame: &Frame) -> Result<()> {
-        frame.with_aggregate(None, |aggregate| {
-            self.observe(&capture(frame, aggregate), apps(aggregate), Source::Saved)
-        })
+    pub(crate) fn observe_saved(&mut self, saved: &SavedResidents<'_>) -> Result<()> {
+        match saved {
+            SavedResidents::Replayed(frame) => frame.with_aggregate(None, |aggregate| {
+                self.observe(&capture(frame, aggregate), apps(aggregate), Source::Saved)
+            }),
+            SavedResidents::Sealed { header, apps } => {
+                self.observe(&capture_header(header), kept_readings(apps), Source::Saved)
+            }
+        }
     }
 
-    pub(crate) fn project_frame(&mut self, frame: &Frame) -> Result<()> {
-        frame.with_aggregate(None, |aggregate| {
-            self.project(&capture(frame, aggregate), apps(aggregate), Source::Saved)
-        })
+    pub(crate) fn project_saved(&mut self, saved: &SavedResidents<'_>) -> Result<()> {
+        match saved {
+            SavedResidents::Replayed(frame) => frame.with_aggregate(None, |aggregate| {
+                self.project(&capture(frame, aggregate), apps(aggregate), Source::Saved)
+            }),
+            SavedResidents::Sealed { header, apps } => {
+                self.project(&capture_header(header), kept_readings(apps), Source::Saved)
+            }
+        }
     }
+}
+
+/// The facts of an observation the parts of its sealed window keep.
+pub(crate) fn capture_header(header: &Header) -> Capture {
+    Capture {
+        observation: header.selected,
+        membership_complete: header.membership_complete,
+        ungrouped_members: header.live_ungrouped_members,
+        usage_refused: header.usage_refused,
+        usage_gone: header.usage_gone,
+    }
+}
+
+/// The Apps with resident memory of an observation the parts of its sealed window keep, which
+/// are the Apps a replay of its minute gives.
+pub(crate) fn kept_readings(apps: &[KeptResident]) -> impl Iterator<Item = AppReading<'_>> {
+    apps.iter()
+        .map(|app| AppReading {
+            key: app.key.view(),
+            resident: app.resident,
+        })
+        .filter(|app| super::has_resident(&app.resident))
 }
 
 pub(crate) fn capture(frame: &Frame, aggregate: &crate::apps::Aggregate<'_>) -> Capture {
@@ -27,16 +85,7 @@ pub(crate) fn capture(frame: &Frame, aggregate: &crate::apps::Aggregate<'_>) -> 
             wall_ns: frame.wall_ns(),
         },
         membership_complete: aggregate.membership_complete,
-        ungrouped_members: u32::try_from(
-            aggregate
-                .processes
-                .iter()
-                .filter(|process| {
-                    process.state == crate::apps::ProcessState::Live && process.app.is_none()
-                })
-                .count(),
-        )
-        .unwrap_or_else(|_| unreachable!("bounded resident process count fits u32")),
+        ungrouped_members: aggregate.live_ungrouped_members,
         usage_refused: frame.usage_refused,
         usage_gone: frame.usage_gone,
     }

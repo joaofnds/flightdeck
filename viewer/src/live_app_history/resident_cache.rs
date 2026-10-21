@@ -4,7 +4,9 @@ use persistence::{Error, Manifest, Result, WindowIdentity};
 
 use super::{CompactMeasure, Observation};
 use crate::apps::AppKey;
-use crate::live::resident_history::{AppReading, Capture};
+use crate::live::resident_history::{
+    AppReading, Capture, SavedResidents, capture_header, kept_readings,
+};
 use crate::live_app_response::KeyKind;
 use crate::session::OBSERVATIONS_MAX;
 
@@ -216,7 +218,66 @@ fn retained_window(
 }
 
 impl ResidentPoint {
+    /// The point of `saved` in `window`, or none where it takes more than `available` bytes.
     pub(crate) fn capture(
+        saved: &SavedResidents<'_>,
+        window: &WindowIdentity,
+        available: usize,
+        operation: &crate::cancellation::Operation,
+    ) -> Result<Option<Self>> {
+        match saved {
+            SavedResidents::Replayed(frame) => {
+                Self::capture_replayed(frame, window, available, operation)
+            }
+            SavedResidents::Sealed { header, apps } => {
+                Self::capture_sealed(header, apps, window, available, operation)
+            }
+        }
+    }
+
+    fn capture_sealed(
+        header: &crate::live_app_response::Header,
+        apps: &[crate::session::KeptResident],
+        window: &WindowIdentity,
+        available: usize,
+        operation: &crate::cancellation::Operation,
+    ) -> Result<Option<Self>> {
+        let mut bytes = size_of::<Self>();
+        let mut count = 0;
+        for app in kept_readings(apps) {
+            operation.check()?;
+            bytes += size_of::<ResidentApp>()
+                + match app.key {
+                    AppKey::Bundle(bytes) | AppKey::Executable(bytes) => bytes.len(),
+                };
+            count += 1;
+        }
+        if bytes > available {
+            return Ok(None);
+        }
+
+        let mut point = Self {
+            capture: capture_header(header),
+            window: *window,
+            apps: Vec::with_capacity(count),
+        };
+        for app in kept_readings(apps) {
+            operation.check()?;
+            let (kind, bytes) = match app.key {
+                AppKey::Bundle(bytes) => (KeyKind::Bundle, bytes),
+                AppKey::Executable(bytes) => (KeyKind::Executable, bytes),
+            };
+            point.apps.push(ResidentApp {
+                kind,
+                bytes: bytes.into(),
+                resident: CompactMeasure::capture(&app.resident),
+            });
+        }
+        assert!(point.bytes() <= available);
+        Ok(Some(point))
+    }
+
+    fn capture_replayed(
         frame: &crate::live_apps::Frame,
         window: &WindowIdentity,
         available: usize,

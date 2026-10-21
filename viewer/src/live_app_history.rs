@@ -61,7 +61,7 @@ pub(super) struct Point {
     apps: Vec<App>,
     groups: Option<Vec<process::Group>>,
     membership_complete: bool,
-    resident_ungrouped_members: u32,
+    live_ungrouped_members: u32,
     ungrouped_members: u32,
     usage_refused: u32,
     usage_gone: u32,
@@ -271,16 +271,7 @@ impl Point {
             groups: None,
             membership_complete: sample.membership_complete,
             ungrouped_members: sample.ungrouped_members,
-            resident_ungrouped_members: u32::try_from(
-                sample
-                    .processes()
-                    .iter()
-                    .filter(|process| {
-                        process.state == apps::ProcessState::Live && process.app_index.is_none()
-                    })
-                    .count(),
-            )
-            .unwrap_or_else(|_| unreachable!("bounded resident process count fits u32")),
+            live_ungrouped_members: sample.live_ungrouped_members,
             usage_refused: sample.usage_refused,
             usage_gone: sample.usage_gone,
         });

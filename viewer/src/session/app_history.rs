@@ -23,7 +23,7 @@ pub use sealed_apps::SealedApps;
 mod sealed_attribution;
 pub(super) use sealed_attribution::KeptHeaders;
 mod sealed_parts;
-pub(crate) use sealed_parts::PartsRead;
+pub(crate) use sealed_parts::{KeptResident, PartsRead};
 mod sealed_ranks;
 
 pub(super) struct Cache {

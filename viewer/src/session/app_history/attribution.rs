@@ -256,7 +256,7 @@ impl Session {
             prepared: None,
         });
         let kept_windows =
-            self.attribution_kept(&range, &mut replay.restore, &mut replay.kept_windows)?;
+            self.every_app_kept(&range, &mut replay.restore, &mut replay.kept_windows)?;
         self.app_history_gather(&range, &kept_windows, &mut replay.restore)?;
         for key in replay.restore.readings.keys() {
             replay.context.push(*key);
@@ -414,12 +414,6 @@ impl Session {
 impl AttributionReplay {
     /// The observations of the range, each plotted unless the plan excludes it.
     pub(crate) fn count(&self) -> usize {
-        let kept: usize = self
-            .kept_windows
-            .iter()
-            .map(|kept| kept.observations.len())
-            .sum();
-
-        self.context.len() + kept
+        self.context.len() + KeptWindow::observation_count(&self.kept_windows)
     }
 }

@@ -54,7 +54,7 @@ fn resident_history_keeps_exit_only_population_identical_after_cold_reopen() {
     assert_eq!(after["points"][1]["other"]["app_count"], 0);
 }
 
-fn publish_exit_only(fixture: &mut Fixture) {
+pub(super) fn publish_exit_only(fixture: &mut Fixture) {
     use collector::ring::{
         IdentityObservation, ProcessCreation, ProcessIdentity, UsageAvailability,
     };
@@ -137,7 +137,7 @@ fn resident_history_keeps_unknown_program_exit_coverage_identical_after_reopen()
     assert_eq!(after["cohort"], before["cohort"]);
 }
 
-fn publish_unknown_program(fixture: &mut Fixture) {
+pub(super) fn publish_unknown_program(fixture: &mut Fixture) {
     use collector::ring::{
         IdentityObservation, ProcessCreation, ProcessIdentity, UsageAvailability,
     };

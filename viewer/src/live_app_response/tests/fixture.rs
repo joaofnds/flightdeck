@@ -226,6 +226,7 @@ pub fn populated(count: usize, name: &[u8]) -> persistence::Result<Box<Sample>> 
         apps,
         processes,
         ungrouped_members: 0,
+        live_ungrouped_members: 0,
         membership_complete: false,
         elapsed_ns: None,
     };

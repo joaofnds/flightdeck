@@ -1,4 +1,6 @@
-use super::{BTreeMap, BTreeSet, Frame, Observation, Reading, Restore, Session, Source};
+use super::sealed_attribution::KeptWindow;
+use super::{BTreeMap, Frame, Observation, Reading, Restore, Session, Source};
+use crate::live::resident_history::SavedResidents;
 use crate::live_app_history::{
     PIN_BYTES_MAX, ResidentCache, ResidentFile, ResidentPin, ResidentPoint,
 };
@@ -9,6 +11,8 @@ use serde_json::Value;
 pub(crate) struct Replay {
     restore: Restore,
     readings: Vec<Reading>,
+    /// The windows whose parts give their observations' resident memory in place of a replay.
+    kept_windows: Vec<KeptWindow>,
 }
 
 impl Session {
@@ -30,9 +34,15 @@ impl Session {
             source_bytes: 0,
             plotted: 0,
         };
-        self.app_history_gather(&range, &BTreeSet::new(), &mut restore)?;
+        let mut kept_windows = Vec::new();
+        let kept_indexes = self.every_app_kept(&range, &mut restore, &mut kept_windows)?;
+        self.app_history_gather(&range, &kept_indexes, &mut restore)?;
         let readings: Vec<_> = restore.readings.values().copied().collect();
-        let mut replay = Replay { restore, readings };
+        let mut replay = Replay {
+            restore,
+            readings,
+            kept_windows,
+        };
         self.app_resident_validate(&replay)?;
 
         let response = consume(&mut replay)?;
@@ -41,11 +51,17 @@ impl Session {
         Ok(response)
     }
 
+    /// Gives `consume` the resident memory of each plotted observation of `replay`: first those
+    /// of the windows that keep their parts, then those of the windows it replays.
     pub(crate) fn visit_app_resident(
         &self,
         replay: &mut Replay,
-        mut consume: impl FnMut(&Frame) -> Result<()>,
+        mut consume: impl FnMut(&SavedResidents<'_>) -> Result<()>,
     ) -> Result<()> {
+        for kept in &replay.kept_windows {
+            self.visit_app_resident_kept(kept, &mut consume)?;
+        }
+
         let mut index = 0;
         for _batch in 0..super::READINGS_MAX {
             self.operation.check()?;
@@ -66,11 +82,31 @@ impl Session {
         Err(Error::Bound("resident history saved batches"))
     }
 
+    /// Gives `consume` the resident memory of each plotted observation of `kept`, from the App
+    /// rows of its window's parts.
+    fn visit_app_resident_kept(
+        &self,
+        kept: &KeptWindow,
+        consume: &mut impl FnMut(&SavedResidents<'_>) -> Result<()>,
+    ) -> Result<()> {
+        let plotted_headers = kept.plotted_headers();
+        if plotted_headers.is_empty() {
+            return Ok(());
+        }
+
+        self.validate_commitment(kept.window)?;
+        self.visit_kept_parts_residents(&kept.source, &plotted_headers, |header, apps| {
+            consume(&SavedResidents::Sealed { header, apps })
+        })?;
+
+        self.validate_commitment(kept.window)
+    }
+
     fn app_resident_batch(
         &self,
         replay: &mut Replay,
         range: std::ops::Range<usize>,
-        consume: &mut impl FnMut(&Frame) -> Result<()>,
+        consume: &mut impl FnMut(&SavedResidents<'_>) -> Result<()>,
     ) -> Result<()> {
         let readings: Vec<_> = replay.readings[range]
             .iter()
@@ -104,7 +140,7 @@ impl Session {
                     return Err(Error::Bound("resident history saved association"));
                 }
 
-                consume(&frame)?;
+                consume(&SavedResidents::Replayed(&frame))?;
                 index += 1;
                 Ok(())
             },
@@ -119,6 +155,10 @@ impl Session {
         for (window, _source) in replay.restore.sources.keys() {
             self.operation.check()?;
             self.validate_commitment(*window)?;
+        }
+        for kept in &replay.kept_windows {
+            self.operation.check()?;
+            self.validate_commitment(kept.window)?;
         }
         for source in replay.restore.sources.values() {
             source.refresh(&self.connection)?;
@@ -142,6 +182,16 @@ impl Replay {
                 }
             }
         }
+        for kept in &mut self.kept_windows {
+            for observation in &mut kept.observations {
+                operation.check()?;
+                if observation.plotted {
+                    if covered(&observation.header.selected)? {
+                        observation.plotted = false;
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -158,17 +208,41 @@ impl Replay {
                 }
             }
         }
+        for kept in &self.kept_windows {
+            for kept_observation in &kept.observations {
+                operation.check()?;
+                if kept_observation.plotted {
+                    if kept_observation.header.selected == *observation {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
         Ok(false)
+    }
+
+    /// Whether an observation of the replay is still to plot.
+    fn plots(&self) -> bool {
+        if self.readings.iter().any(|reading| reading.plotted) {
+            return true;
+        }
+
+        self.kept_windows.iter().any(KeptWindow::plots)
     }
 
     pub(crate) fn reset(&mut self) {
         for reading in &mut self.readings {
             reading.plotted = true;
         }
+        for kept in &mut self.kept_windows {
+            for observation in &mut kept.observations {
+                observation.plotted = true;
+            }
+        }
     }
 
     pub(crate) fn count(&self) -> usize {
-        self.readings.len()
+        self.readings.len() + KeptWindow::observation_count(&self.kept_windows)
     }
 }
 
@@ -260,7 +334,7 @@ impl Session {
         replay.exclude(&self.operation, |observation| {
             cache.contains(observation, &self.operation)
         })?;
-        if !replay.readings.iter().any(|reading| reading.plotted) {
+        if !replay.plots() {
             return Ok(true);
         }
         if !cache.prepare(available) {
@@ -271,8 +345,8 @@ impl Session {
         let result = self
             .prepare_resident_pins(replay, cache, available)
             .and_then(|()| {
-                self.visit_app_resident(replay, |frame| {
-                    self.prepare_resident_capture(frame, cache, available)
+                self.visit_app_resident(replay, |saved| {
+                    self.prepare_resident_capture(saved, cache, available)
                 })
             });
         match result {
@@ -290,21 +364,15 @@ impl Session {
 
     fn prepare_resident_capture(
         &self,
-        frame: &Frame,
+        saved: &SavedResidents<'_>,
         cache: &mut ResidentCache,
         available: usize,
     ) -> Result<()> {
-        let observation = Observation {
-            recording: frame.identity().recording.0,
-            stamp: *frame.stamp(),
-            run_tick: frame.run_tick(),
-            wall_ns: frame.wall_ns(),
-        };
-        let window = self.resident_cache_window(&observation)?;
+        let window = self.resident_cache_window(&saved.observation())?;
         let remaining = available
             .checked_sub(cache.bytes())
             .ok_or(Error::Bound("resident cache space"))?;
-        let point = ResidentPoint::capture(frame, &window, remaining, &self.operation)?
+        let point = ResidentPoint::capture(saved, &window, remaining, &self.operation)?
             .ok_or(Error::Bound("resident cache space"))?;
         assert!(cache.has_pin(&window));
         cache.insert(point);
@@ -318,6 +386,7 @@ impl Session {
         cache: &mut ResidentCache,
         available: usize,
     ) -> Result<()> {
+        self.prepare_resident_pins_kept(replay, cache, available)?;
         for index in 0..replay.readings.len() {
             self.operation.check()?;
             let reading = replay.readings[index];
@@ -332,6 +401,35 @@ impl Session {
             }
             self.app_history_source(&mut replay.restore, reading.window, Source::Apps)?;
             cache.insert_pin(self.resident_cache_pin(replay, &reading.observation)?);
+            assert!(cache.bytes() <= available);
+        }
+        Ok(())
+    }
+
+    /// Pins the parts of each window of `replay` that keeps them and gives a plotted
+    /// observation, which the points taken from them stay pinned to.
+    fn prepare_resident_pins_kept(
+        &self,
+        replay: &Replay,
+        cache: &mut ResidentCache,
+        available: usize,
+    ) -> Result<()> {
+        for kept in &replay.kept_windows {
+            self.operation.check()?;
+            if !kept.plots() {
+                continue;
+            }
+            if cache.has_pin(&self.windows[kept.window].identity) {
+                continue;
+            }
+            if available.saturating_sub(cache.bytes()) < PIN_BYTES_MAX {
+                return Err(Error::Bound("resident cache space"));
+            }
+            let pin = self.kept_pin(kept);
+            if pin.bytes() > PIN_BYTES_MAX {
+                return Err(Error::Bound("resident cache pin bytes"));
+            }
+            cache.insert_pin(pin);
             assert!(cache.bytes() <= available);
         }
         Ok(())

@@ -15,8 +15,34 @@ use persistence::{Result, WindowIdentity};
 /// observations in the range, of which it holds one at least.
 pub(super) struct KeptWindow {
     pub window: usize,
-    path: PathBuf,
+    pub path: PathBuf,
+    /// The source the facts of its observations were read from, which a later read of its
+    /// parts reads too, so a file replaced since is refused.
+    pub source: String,
     pub observations: Vec<KeptObservation>,
+}
+
+impl KeptWindow {
+    /// How many observations of a range the windows `kept` keep.
+    pub fn observation_count(kept: &[Self]) -> usize {
+        kept.iter().map(|kept| kept.observations.len()).sum()
+    }
+
+    /// Whether the histories plot an observation of the window.
+    pub fn plots(&self) -> bool {
+        self.observations
+            .iter()
+            .any(|observation| observation.plotted)
+    }
+
+    /// The facts of each observation of the window the histories plot.
+    pub fn plotted_headers(&self) -> Vec<&Header> {
+        self.observations
+            .iter()
+            .filter(|observation| observation.plotted)
+            .map(|observation| &observation.header)
+            .collect()
+    }
 }
 
 pub(super) struct KeptObservation {
@@ -49,7 +75,7 @@ impl Session {
     /// Gives `output` each window of `range` whose parts this build reads and that keeps an
     /// observation in `range`, with the facts of those observations, each counted as plotted
     /// in `restore`. Returns every window whose parts this build reads, which needs no replay.
-    pub(super) fn attribution_kept(
+    pub(super) fn every_app_kept(
         &self,
         range: &ContextRange,
         restore: &mut Restore,
@@ -59,8 +85,8 @@ impl Session {
         self.visit_derived(
             *range,
             APP_PARTS,
-            |kept| Ok((kept.path.to_owned(), self.attribution_kept_headers(kept)?)),
-            |window, (path, headers)| {
+            |kept| Ok((kept.path.to_owned(), self.every_app_kept_headers(kept)?)),
+            |window, (path, (source, headers))| {
                 let Some(headers) = headers else {
                     return Ok(());
                 };
@@ -81,6 +107,7 @@ impl Session {
                     output.push(KeptWindow {
                         window,
                         path,
+                        source,
                         observations,
                     });
                 }
@@ -91,14 +118,14 @@ impl Session {
         Ok(kept_windows)
     }
 
-    /// The facts of each observation the parts of `kept` keep, in publication order, or none
-    /// where this build does not read its parts.
-    fn attribution_kept_headers(&self, kept: &Kept<'_>) -> Result<Option<Vec<Header>>> {
+    /// The source of the parts of `kept`, and the facts of each observation they keep, in
+    /// publication order, or none where this build does not read its parts.
+    fn every_app_kept_headers(&self, kept: &Kept<'_>) -> Result<(String, Option<Vec<Header>>)> {
         let source = self.connection.parquet_source(kept.path)?;
         if let Some(file) = self.app_history_kept_headers.borrow().files.get(kept.path) {
             // A file replaced since its facts were read registers as another source.
             if file.source == source {
-                return Ok(file.headers.clone());
+                return Ok((source, file.headers.clone()));
             }
         }
 
@@ -111,11 +138,22 @@ impl Session {
         cache.files.insert(
             kept.path.to_owned(),
             KeptHeadersFile {
-                source,
+                source: source.clone(),
                 headers: headers.clone(),
             },
         );
-        Ok(headers)
+        Ok((source, headers))
+    }
+
+    /// The pin of the window `kept` and of the parts its observations' facts were read from.
+    pub(super) fn kept_pin(&self, kept: &KeptWindow) -> ResidentPin {
+        ResidentPin {
+            manifest: self.windows[kept.window].clone(),
+            files: vec![ResidentFile {
+                path: kept.path.clone(),
+                alias: kept.source.clone(),
+            }],
+        }
     }
 
     /// Gives `consume` the facts and the Apps of each plotted observation of `kept`, from the
@@ -126,27 +164,15 @@ impl Session {
         pin: &mut impl FnMut(ResidentPin) -> Result<()>,
         consume: &mut impl FnMut(Observed<'_>, [Option<WindowIdentity>; 2]) -> Result<()>,
     ) -> Result<()> {
-        let plotted_headers: Vec<&Header> = kept
-            .observations
-            .iter()
-            .filter(|observation| observation.plotted)
-            .map(|observation| &observation.header)
-            .collect();
+        let plotted_headers = kept.plotted_headers();
         if plotted_headers.is_empty() {
             return Ok(());
         }
 
         self.validate_commitment(kept.window)?;
-        let source = self.connection.parquet_source(&kept.path)?;
-        pin(ResidentPin {
-            manifest: self.windows[kept.window].clone(),
-            files: vec![ResidentFile {
-                path: kept.path.clone(),
-                alias: source.clone(),
-            }],
-        })?;
+        pin(self.kept_pin(kept))?;
         let windows = [Some(self.windows[kept.window].identity), None];
-        self.visit_kept_parts_apps(&source, &plotted_headers, |header, apps| {
+        self.visit_kept_parts_apps(&kept.source, &plotted_headers, |header, apps| {
             consume(Observed::Sealed { header, apps }, windows)
         })?;
 

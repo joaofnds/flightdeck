@@ -676,7 +676,7 @@ fn distinct_history() -> Box<History> {
             apps: Vec::with_capacity(12),
             groups: None,
             membership_complete: true,
-            resident_ungrouped_members: 0,
+            live_ungrouped_members: 0,
             ungrouped_members: 0,
             usage_refused: 0,
             usage_gone: 0,

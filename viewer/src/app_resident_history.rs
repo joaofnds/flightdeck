@@ -22,7 +22,7 @@ mod reduce;
 #[path = "app_resident_history/saved.rs"]
 mod saved;
 pub(crate) use reduce::{AppReading, Capture, Interval, Reduction, Source, consecutive, identity};
-pub(crate) use saved::capture;
+pub(crate) use saved::{SavedResidents, capture, capture_header, kept_readings};
 
 pub(crate) fn has_resident(measure: &crate::live_app_response::Measure) -> bool {
     if measure.known > 0 {

@@ -277,6 +277,7 @@ fn sample(apps: Vec<App>) -> Sample {
         elapsed_ns: Some(NS),
         membership_complete: true,
         ungrouped_members: 0,
+        live_ungrouped_members: 0,
         usage_refused: 0,
         usage_gone: 0,
         apps,

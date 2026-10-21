@@ -61,6 +61,8 @@ pub struct Aggregate<'bytes> {
     pub apps: BTreeMap<AppKey<'bytes>, AppTotals>,
     pub processes: Vec<ProcessTotals<'bytes>>,
     pub ungrouped_members: u32,
+    /// The ungrouped members live at the selected tick, which an exited process does not join.
+    pub live_ungrouped_members: u32,
     /// Completeness of membership only; metric availability is carried by each subtotal.
     pub membership_complete: bool,
     pub elapsed_ns: Option<u64>,
@@ -229,6 +231,7 @@ impl<'bytes> Aggregate<'bytes> {
             apps: BTreeMap::new(),
             processes: Vec::new(),
             ungrouped_members: 0,
+            live_ungrouped_members: 0,
             membership_complete: false,
             elapsed_ns: None,
         }));
@@ -244,6 +247,7 @@ impl<'bytes> Aggregate<'bytes> {
         self.apps.clear();
         self.processes.clear();
         self.ungrouped_members = 0;
+        self.live_ungrouped_members = 0;
         self.membership_complete = false;
         self.elapsed_ns = None;
         validate(interval, processes)?;
@@ -317,6 +321,9 @@ impl<'bytes> Aggregate<'bytes> {
             }
         } else {
             self.ungrouped_members += 1;
+            if selected.state == ProcessState::Live {
+                self.live_ungrouped_members += 1;
+            }
             self.membership_complete = false;
         }
     }

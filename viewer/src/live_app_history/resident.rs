@@ -14,6 +14,23 @@ impl History {
         saved: Option<&Session>,
         operation: &Operation,
     ) -> Result<Value> {
+        // The history may fill all but a few bytes of its bound, which leaves no room for saved
+        // points rather than a negative room.
+        let available = BYTES_MAX.saturating_sub(self.bytes + size_of::<ResidentCache>());
+        self.resident_response_within(selected, saved, operation, available)
+    }
+
+    /// The resident response whose points from the recording take at most `available` bytes
+    /// of the cache.
+    pub(crate) fn resident_response_within(
+        &self,
+        selected: &Selected,
+        saved: Option<&Session>,
+        operation: &Operation,
+        available: usize,
+    ) -> Result<Value> {
+        assert!(available <= BYTES_MAX.saturating_sub(self.bytes + size_of::<ResidentCache>()));
+
         let mut reduction = Reduction::new(selected, operation);
         for point in &self.points {
             operation.check()?;
@@ -25,7 +42,6 @@ impl History {
         }
         if let Some(saved) = saved {
             let mut cache = self.saved_residents.replace(ResidentCache::new());
-            let available = BYTES_MAX - self.bytes - size_of::<ResidentCache>();
             if cache.bytes() > available {
                 cache = ResidentCache::new();
             }
@@ -43,7 +59,7 @@ impl History {
                     replay.exclude(operation, |observation| {
                         reduction.contains_live(observation)
                     })?;
-                    saved.visit_app_resident(replay, |frame| reduction.observe_frame(frame))?;
+                    saved.visit_app_resident(replay, |saved| reduction.observe_saved(saved))?;
                 }
                 reduction.choose()?;
                 self.resident_project(&mut reduction, operation)?;
@@ -52,7 +68,7 @@ impl History {
                         reduction.project(&point.capture, point.apps(), Source::Saved)?;
                     }
                 } else {
-                    saved.visit_app_resident(replay, |frame| reduction.project_frame(frame))?;
+                    saved.visit_app_resident(replay, |saved| reduction.project_saved(saved))?;
                 }
                 saved.resident_cache_validate(&cache)?;
                 self.resident_response_finish(reduction, replay.count(), cache.bytes())
@@ -110,7 +126,7 @@ impl Point {
         Capture {
             observation: self.observation,
             membership_complete: self.membership_complete,
-            ungrouped_members: self.resident_ungrouped_members,
+            ungrouped_members: self.live_ungrouped_members,
             usage_refused: self.usage_refused,
             usage_gone: self.usage_gone,
         }

@@ -23,7 +23,7 @@ use persistence::{Error, Result, TableManifest};
 /// The version of the table's columns. A reader takes no parts from a table of another version
 /// and leaves its window to the replay, so a later build may change the columns and an older
 /// one still reads the recording.
-pub(super) const VERSION: u8 = 1;
+pub(super) const VERSION: u8 = 2;
 /// The rows a window keeps. About 1,100 processes in a few hundred Apps a second make some
 /// 85,000 rows a window, a sixth of this.
 const ROWS_MAX: u32 = 1 << 19;
@@ -45,7 +45,7 @@ const ROW_PROCESS: u8 = 2;
 /// The columns before the measures and amounts, in their order: those of every row, those only
 /// a row of an observation's facts fills, those of an App and of a process row, those only an
 /// App row fills, and those only a process row fills.
-const FIXED_COLUMNS: [&str; 31] = [
+const FIXED_COLUMNS: [&str; 32] = [
     "version",
     "publication",
     "row_kind",
@@ -59,6 +59,7 @@ const FIXED_COLUMNS: [&str; 31] = [
     "elapsed_ns",
     "membership_complete",
     "ungrouped_members",
+    "live_ungrouped_members",
     "usage_refused",
     "usage_gone",
     "app_count",
@@ -343,6 +344,9 @@ fn sealed_parts_header_columns(rows: &[PartRow<'_>]) -> Vec<Column> {
             row.described_sample().map(|sample| sample.membership_complete)
         },
         "ungrouped_members" => |row| row.described_sample().map(|sample| sample.ungrouped_members),
+        "live_ungrouped_members" => |row| {
+            row.described_sample().map(|sample| sample.live_ungrouped_members)
+        },
         "usage_refused" => |row| row.described_sample().map(|sample| sample.usage_refused),
         "usage_gone" => |row| row.described_sample().map(|sample| sample.usage_gone),
         "app_count" => |row| {
@@ -494,15 +498,26 @@ fn amount_column_names(amount: &str) -> [String; 2] {
 
 /// The place of the fixed column `name`, which fails the build where no fixed column has it.
 const fn fixed(name: &str) -> usize {
+    column(&FIXED_COLUMNS, name)
+}
+
+/// The place of the column `name` of a read of the Apps' resident memory, which fails the build
+/// where the read takes no column of that name.
+const fn resident_column(name: &str) -> usize {
+    column(&RESIDENT_COLUMNS, name)
+}
+
+/// The place of the column `name` among `columns`, which fails the build where none has it.
+const fn column(columns: &[&str], name: &str) -> usize {
     let mut index = 0;
-    while index < FIXED_COLUMNS.len() {
-        if same(FIXED_COLUMNS[index], name) {
+    while index < columns.len() {
+        if same(columns[index], name) {
             return index;
         }
         index += 1;
     }
 
-    panic!("no fixed column has this name");
+    panic!("no column has this name");
 }
 
 /// The place of the entry `name` among `entries`, which fails the build where none has it.
@@ -783,7 +798,41 @@ impl Session {
         &self,
         source: &str,
         headers: &[&Header],
-        mut consume: impl FnMut(&Header, &[App]) -> Result<()>,
+        consume: impl FnMut(&Header, &[App]) -> Result<()>,
+    ) -> Result<()> {
+        let rows = KeptAppRows {
+            query: kept_parts_query(source),
+            publication_place: const { fixed("publication") },
+            decode: kept_app,
+        };
+
+        self.visit_kept_parts_rows(&rows, headers, consume)
+    }
+
+    /// Gives `consume` each of `headers`, in publication order, with the resident memory of
+    /// each of its Apps, from the App rows of the parts the engine holds as `source`.
+    pub(super) fn visit_kept_parts_residents(
+        &self,
+        source: &str,
+        headers: &[&Header],
+        consume: impl FnMut(&Header, &[KeptResident]) -> Result<()>,
+    ) -> Result<()> {
+        let rows = KeptAppRows {
+            query: format!("SELECT {} FROM {source}", RESIDENT_COLUMNS.join(", ")),
+            publication_place: const { resident_column("publication") },
+            decode: kept_resident,
+        };
+
+        self.visit_kept_parts_rows(&rows, headers, consume)
+    }
+
+    /// Gives `consume` each of `headers`, in publication order, with what `rows` decodes of
+    /// each of its Apps.
+    fn visit_kept_parts_rows<T>(
+        &self,
+        rows: &KeptAppRows<T>,
+        headers: &[&Header],
+        mut consume: impl FnMut(&Header, &[T]) -> Result<()>,
     ) -> Result<()> {
         let publications: Vec<u64> = headers
             .iter()
@@ -791,7 +840,7 @@ impl Session {
             .collect();
         let publications = Series::new("publications".into(), publications);
         let frame = self.connection.collect(kept_parts_sorted(
-            self.connection.plan(&kept_parts_query(source))?.filter(
+            self.connection.plan(&rows.query)?.filter(
                 col("row_kind")
                     .eq(lit(ROW_APP))
                     .and(col("publication").is_in(lit(publications).implode(false), false)),
@@ -806,7 +855,7 @@ impl Session {
         let mut row = 0;
         for header in headers {
             self.operation.check()?;
-            row = self.visit_kept_parts_apps_read(&frame, row, header, &mut apps)?;
+            row = self.visit_kept_parts_rows_read(rows, &frame, row, header, &mut apps)?;
             consume(header, &apps)?;
         }
         if row != frame.height() {
@@ -816,24 +865,24 @@ impl Session {
         Ok(())
     }
 
-    /// Gives `output` the Apps of the observation of `header`, whose rows start at `first`, and
-    /// returns the row after them.
-    fn visit_kept_parts_apps_read(
+    /// Gives `output` what `rows` decodes of the Apps of the observation of `header`, whose
+    /// rows of `frame` start at `first`, and returns the row after them.
+    fn visit_kept_parts_rows_read<T>(
         &self,
+        rows: &KeptAppRows<T>,
         frame: &DataFrame,
         first: usize,
         header: &Header,
-        output: &mut Vec<App>,
+        output: &mut Vec<T>,
     ) -> Result<usize> {
         output.clear();
         for index in first..frame.height() {
             self.operation.check()?;
             let row = Row::new(frame, index)?;
-            if row.get::<u64>(const { fixed("publication") })? != header.selected.stamp.publication
-            {
+            if row.get::<u64>(rows.publication_place)? != header.selected.stamp.publication {
                 break;
             }
-            let (app_index, app) = kept_app(&row)?;
+            let (app_index, app) = (rows.decode)(&row)?;
             if app_index != output.len() {
                 return Err(Error::Bound("sealed parts App"));
             }
@@ -849,6 +898,56 @@ impl Session {
         Ok(first + output.len())
     }
 }
+
+/// The App rows a read of a window's parts takes, and how it reads each.
+struct KeptAppRows<T> {
+    /// The query of the rows, which selects the columns `row_kind` and `publication` the read
+    /// filters on.
+    query: String,
+    /// The place of `publication` among the columns the query selects.
+    publication_place: usize,
+    /// What a row gives, and the place of its App among its sample's Apps.
+    decode: fn(&Row<'_>) -> Result<(usize, T)>,
+}
+
+/// An App's resident memory at an observation of a window that keeps its parts.
+pub(crate) struct KeptResident {
+    pub key: Key,
+    pub resident: Measure,
+}
+
+/// The columns a read of the Apps' resident memory takes: those it decodes, then the row's
+/// kind its filter reads.
+const RESIDENT_COLUMNS: [&str; 10] = [
+    "publication",
+    "app_index",
+    "app_kind",
+    "app_key",
+    "members",
+    "app_resident_bytes_known",
+    "app_resident_bytes_measured_members",
+    "app_resident_bytes_unavailable_members",
+    "app_resident_bytes_overflowed",
+    "row_kind",
+];
+const _: () = {
+    let known = resident_column("app_resident_bytes_known");
+    assert!(resident_column("app_resident_bytes_measured_members") == known + 1);
+    assert!(resident_column("app_resident_bytes_unavailable_members") == known + 2);
+    assert!(resident_column("app_resident_bytes_overflowed") == known + 3);
+    // Each column the read takes is one the parts table holds, under the name it gives it.
+    assert!(fixed("publication") < FIXED_COLUMNS.len());
+    assert!(fixed("app_index") < FIXED_COLUMNS.len());
+    assert!(fixed("app_kind") < FIXED_COLUMNS.len());
+    assert!(fixed("app_key") < FIXED_COLUMNS.len());
+    assert!(fixed("members") < FIXED_COLUMNS.len());
+    assert!(fixed("row_kind") < FIXED_COLUMNS.len());
+    assert!(place(&MEASURES, "resident_bytes") < MEASURES.len());
+    assert!(same(MEASURE_FIELDS[0], "known"));
+    assert!(same(MEASURE_FIELDS[1], "measured_members"));
+    assert!(same(MEASURE_FIELDS[2], "unavailable_members"));
+    assert!(same(MEASURE_FIELDS[3], "overflowed"));
+};
 
 /// Every column of a parts table but the processes' amounts, which an App row and a row of an
 /// observation's facts leave empty.
@@ -1050,6 +1149,7 @@ fn kept_header(row: &Row<'_>, run: &RunIdentity) -> Result<Header> {
         elapsed_ns: row.get(const { fixed("elapsed_ns") })?,
         membership_complete: row.get(const { fixed("membership_complete") })?,
         ungrouped_members: row.get(const { fixed("ungrouped_members") })?,
+        live_ungrouped_members: row.get(const { fixed("live_ungrouped_members") })?,
         usage_refused: row.get(const { fixed("usage_refused") })?,
         usage_gone: row.get(const { fixed("usage_gone") })?,
         app_count: count_of(row.get(const { fixed("app_count") })?)?,
@@ -1063,28 +1163,9 @@ fn kept_app(row: &Row<'_>) -> Result<(usize, App)> {
         kind_of(row.get(const { fixed("app_kind") })?)?,
         row.get(const { fixed("app_key") })?,
     )?;
-    let members: u32 = row.get(const { fixed("members") })?;
-    if collector::usize_from_u32(members) > MEMBERS_MAX {
-        return Err(Error::Bound("sealed parts members"));
-    }
+    let members = kept_members(row, const { fixed("members") })?;
     let measure = |place: usize| -> Result<Measure> {
-        let first = MEASURE_FIRST + place * MEASURE_FIELDS.len();
-        let measure = Measure {
-            known: row.get(first)?,
-            measured_members: row.get(first + 1)?,
-            unavailable_members: row.get(first + 2)?,
-            overflowed: row.get(first + 3)?,
-        };
-        // Each member adds to one count at most, and a history holds counts up to the members.
-        let counted = measure
-            .measured_members
-            .checked_add(measure.unavailable_members)
-            .ok_or(Error::Bound("sealed parts measure"))?;
-        if counted > members {
-            return Err(Error::Bound("sealed parts measure"));
-        }
-
-        Ok(measure)
+        kept_measure(row, MEASURE_FIRST + place * MEASURE_FIELDS.len(), members)
     };
 
     let app = App {
@@ -1106,6 +1187,55 @@ fn kept_app(row: &Row<'_>) -> Result<(usize, App)> {
         collector::usize_from_u32(row.get(const { fixed("app_index") })?),
         app,
     ))
+}
+
+/// A row of `RESIDENT_COLUMNS`'s App's resident memory and its place among its sample's Apps.
+fn kept_resident(row: &Row<'_>) -> Result<(usize, KeptResident)> {
+    let key = Key::new(
+        kind_of(row.get(const { resident_column("app_kind") })?)?,
+        row.get(const { resident_column("app_key") })?,
+    )?;
+    let members = kept_members(row, const { resident_column("members") })?;
+    let resident = kept_measure(
+        row,
+        const { resident_column("app_resident_bytes_known") },
+        members,
+    )?;
+
+    Ok((
+        collector::usize_from_u32(row.get(const { resident_column("app_index") })?),
+        KeptResident { key, resident },
+    ))
+}
+
+/// The members of a row's App, from its column at `place`.
+fn kept_members(row: &Row<'_>, place: usize) -> Result<u32> {
+    let members: u32 = row.get(place)?;
+    if collector::usize_from_u32(members) > MEMBERS_MAX {
+        return Err(Error::Bound("sealed parts members"));
+    }
+
+    Ok(members)
+}
+
+/// The measure of an App of `members` members whose fields a row holds from column `first`.
+fn kept_measure(row: &Row<'_>, first: usize, members: u32) -> Result<Measure> {
+    let measure = Measure {
+        known: row.get(first)?,
+        measured_members: row.get(first + 1)?,
+        unavailable_members: row.get(first + 2)?,
+        overflowed: row.get(first + 3)?,
+    };
+    // Each member adds to one count at most, and a history holds counts up to the members.
+    let counted = measure
+        .measured_members
+        .checked_add(measure.unavailable_members)
+        .ok_or(Error::Bound("sealed parts measure"))?;
+    if counted > members {
+        return Err(Error::Bound("sealed parts measure"));
+    }
+
+    Ok(measure)
 }
 
 fn kept_process(row: &Row<'_>) -> Result<Process> {

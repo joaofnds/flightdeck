@@ -9,6 +9,8 @@ mod cache;
 mod cases;
 #[path = "tests/fixture.rs"]
 mod fixture;
+#[path = "tests/sealed.rs"]
+mod sealed;
 
 #[test]
 fn resident_history_keeps_exact_gauge_bytes_without_a_counter_baseline() {
