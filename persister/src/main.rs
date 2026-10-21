@@ -1,3 +1,4 @@
+use std::ffi::c_int;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -10,6 +11,13 @@ fn main() -> ExitCode {
     // Every file the persister creates, recording windows included, is private to its user.
     unsafe {
         umask(0o077);
+    }
+    // At logout and shutdown macOS terminates every process, this one too, while it seals the
+    // minute its collector left. It exits once that collector is gone, and the collector kills
+    // it after two minutes, so it never needs the signal to stop.
+    if unsafe { signal(SIGTERM, SIG_IGN) } == SIG_ERR {
+        eprintln!("persister startup: {}", std::io::Error::last_os_error());
+        return ExitCode::FAILURE;
     }
     let options = collector::arguments("persister").and_then(|words| options(&words));
     match options {
@@ -31,7 +39,12 @@ fn main() -> ExitCode {
     }
 }
 
+const SIGTERM: c_int = 15;
+const SIG_IGN: usize = 1;
+const SIG_ERR: usize = usize::MAX;
+
 unsafe extern "C" {
+    fn signal(signal: c_int, handler: usize) -> usize;
     fn umask(mask: u16) -> u16;
 }
 

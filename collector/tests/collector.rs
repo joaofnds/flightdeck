@@ -94,6 +94,24 @@ mod tests {
             assert_eq!(0, unsafe { kill(-pid, SIGINT) });
         }
 
+        /// Sends SIGTERM to the collector and to each child it started, as macOS does to every
+        /// process at logout or shutdown.
+        fn terminate_with_children(&self) {
+            const SIGTERM: c_int = 15;
+            let pid = self.0.as_ref().unwrap().id();
+            let children = Command::new("/usr/bin/pgrep")
+                .args(["-P", &pid.to_string()])
+                .output()
+                .unwrap();
+            let children = String::from_utf8(children.stdout).unwrap();
+            assert_eq!(1, children.lines().count(), "{children}");
+
+            for child in children.lines() {
+                assert_eq!(0, unsafe { kill(child.parse().unwrap(), SIGTERM) });
+            }
+            assert_eq!(0, unsafe { kill(i32::try_from(pid).unwrap(), SIGTERM) });
+        }
+
         fn finish(&mut self) -> Output {
             for _attempt in 0..2_000 {
                 if self.0.as_mut().unwrap().try_wait().unwrap().is_some() {
@@ -296,5 +314,28 @@ mod tests {
             committed_range(&ring.recording)
         );
         assert!(stdout(&output).contains("persister_status=0"));
+    }
+
+    #[test]
+    fn drains_its_partial_recording_when_every_process_is_terminated() {
+        // Goal: the tail is sealed when macOS terminates every process at logout or shutdown,
+        // which the persister outside the collector's group meets too.
+        // Method: terminate a real collector and its persister after publications, then inspect
+        // disk.
+        let ring = TestRing::new("terminate");
+        let mut collector = RunningCollector::start(&ring);
+        wait_for_publications(&ring);
+
+        collector.terminate_with_children();
+        let output = collector.finish();
+
+        assert!(output.status.success(), "{output:?}");
+        assert!(stdout(&output).contains("persister_status=0"), "{output:?}");
+        let reader = collector::ring::RingReader::open(&ring.place.lock_path).unwrap();
+        assert!(reader.completed());
+        assert_eq!(
+            reader.publication_first()..reader.publication_newest().unwrap() + 1,
+            committed_range(&ring.recording)
+        );
     }
 }
