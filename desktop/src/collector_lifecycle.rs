@@ -18,6 +18,8 @@ mod tests;
 #[path = "collector_lifecycle_test_child.rs"]
 pub(super) mod test_child;
 
+use collector::recording::Registry;
+use collector::ring::{Place, previous_generation, unlink_generation};
 use diagnostics::Output;
 pub(super) use policy::Mode;
 use policy::{Action, Policy, RecordingStatus, Source, State};
@@ -223,7 +225,7 @@ impl CollectorSession {
     fn spawn(&mut self) -> io::Result<()> {
         assert!(self.0.child.is_none());
         let ring = if self.0.configuration.isolated {
-            format!("flightdeck-{}", std::process::id())
+            isolated_ring()
         } else {
             "flightdeck".into()
         };
@@ -288,10 +290,22 @@ impl CollectorSession {
                 &format!("Collector exited ({status}). {diagnostic} {standard}"),
                 status.success(),
             );
+            if self.0.configuration.isolated {
+                self.remove_isolated_ring();
+            }
             return drained.and(final_drained);
         }
 
         drained
+    }
+
+    /// Reports a failed removal and goes on, since the run it follows has ended either way.
+    fn remove_isolated_ring(&self) {
+        let removed = Place::for_user(&isolated_ring())
+            .and_then(|place| remove_finished_ring(&self.0.configuration.root, &place));
+        if let Err(error) = removed {
+            eprintln!("Flightdeck isolated ring cleanup: {error}");
+        }
     }
 
     fn drain_outputs(&mut self) -> io::Result<()> {
@@ -357,6 +371,56 @@ pub(super) fn binary(executable: &Path) -> io::Result<PathBuf> {
     }
 
     Ok(Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/release/collector"))
+}
+
+/// The ring of a collector this app starts on a recording of its own, named for this app's
+/// process so that no two such apps contend for one lock file.
+fn isolated_ring() -> String {
+    format!("flightdeck-{}", std::process::id())
+}
+
+/// Removes each ring of `place` whose readings the recording at `root` has saved, and the lock
+/// file once its newest ring is gone, since a ring outlives its collector with about 800 MB of
+/// address space. A ring the recording may still need stays, with its lock file, where the user
+/// can find it.
+fn remove_finished_ring(root: &Path, place: &Place) -> io::Result<()> {
+    let Some(newest) = previous_generation(place)? else {
+        return Ok(());
+    };
+    let newest = newest.as_str();
+    // Every ring of one lock file shares the lock's token and ends in a generation number.
+    let Some(dot) = newest.rfind('.') else {
+        unreachable!("ring {newest} holds a generation, as previous_generation parsed it");
+    };
+    let stem = &newest[..=dot];
+
+    let registry = Registry::read(root)?;
+    let mut newest_kept = true;
+    for run in &registry.runs {
+        if run.ring_name.starts_with(stem) {
+            if Registry::completed(root, &run.identity, &run.ring_name)? {
+                match unlink_generation(&run.ring_name) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+                if run.ring_name == newest {
+                    newest_kept = false;
+                }
+            } else {
+                eprintln!(
+                    "Kept ring {}, whose readings are not saved yet",
+                    run.ring_name
+                );
+            }
+        }
+    }
+
+    if newest_kept {
+        return Ok(());
+    }
+
+    std::fs::remove_file(&place.lock_path)
 }
 
 fn wall_second() -> io::Result<u64> {

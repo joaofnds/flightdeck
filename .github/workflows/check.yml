@@ -80,6 +80,10 @@ jobs:
           --skip smc::tests::refuses_a_float_key_the_smc_holds_as_another_type
           --skip smc::tests::refuses_a_key_read_as_a_type_it_does_not_hold
           --skip system::tests::reads_the_readings_of_this_mac
+      # A lock file left in Application Support names a ring that stays in memory after its
+      # writer exits, about 800 MB of address space, so whatever ran above removes both.
+      - name: Refuse ring lock files left in Application Support
+        run: '! find "$HOME/Library/Application Support/Flightdeck" -name "*.lock" | grep .'
   desktop:
     # Build the GPUI desktop client with its separate UI dependency lockfile.
     runs-on: macos-26
@@ -125,6 +129,10 @@ jobs:
       - run: >-
           cargo run --locked --manifest-path desktop/Cargo.toml
           --bin text_backend_check -- --check
+      # A lock file left in Application Support names a ring that stays in memory after its
+      # writer exits, about 800 MB of address space, so whatever ran above removes both.
+      - name: Refuse ring lock files left in Application Support
+        run: '! find "$HOME/Library/Application Support/Flightdeck" -name "*.lock" | grep .'
       - run: cargo build --locked --release -p collector -p persister --bin collector --bin persister
       - run: >-
           cargo build --locked --release --manifest-path desktop/Cargo.toml

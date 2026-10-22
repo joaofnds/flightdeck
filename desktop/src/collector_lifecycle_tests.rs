@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use collector::recording::{BUILD, Registration, identity_text, random_identity};
-use collector::ring::{Identity, Place, Readings, Shape, Writer};
+use collector::recording::{BUILD, Registration, Registry, identity_text, random_identity};
+use collector::ring::{Identity, Place, Readings, RingReader, Shape, Writer};
 use serde_json::json;
 
 use super::*;
@@ -266,8 +266,67 @@ fn a_held_recording_without_an_announcement_is_pending() {
     assert!(source.recording == RecordingStatus::Pending);
 }
 
+#[test]
+fn a_saved_ring_goes_with_its_lock_file() {
+    // Goal: a ring whose readings the recording saved leaves nothing in Application Support,
+    // where each ring would hold about 800 MB of address space until someone removed it.
+    // Method: retire a registered ring as the persister does, then remove it as the app does
+    // once its isolated collector exits.
+    let mut fixture = Recording::new();
+    let ring = fixture.retire();
+
+    remove_finished_ring(&fixture.root, &fixture.place()).unwrap();
+
+    assert!(!fixture.place().lock_path.exists());
+    let opened = RingReader::open_generation(&ring);
+    assert_eq!(
+        std::io::ErrorKind::NotFound,
+        opened.err().map(|error| error.kind()).unwrap()
+    );
+}
+
+#[test]
+fn an_unsaved_ring_stays_with_its_lock_file() {
+    // Goal: a ring may hold readings the recording never saved, so it stays where the user
+    // can find it through its lock file.
+    // Method: finish a registered ring without retiring it, then remove it as the app does.
+    let mut fixture = Recording::new();
+    let ring = fixture.finish();
+
+    remove_finished_ring(&fixture.root, &fixture.place()).unwrap();
+
+    assert!(fixture.place().lock_path.exists());
+    assert!(RingReader::open_generation(&ring).is_ok());
+}
+
+#[test]
+fn an_isolated_session_removes_its_saved_ring_once_its_collector_exits() {
+    // Goal: every run of the app on a recording of its own cleans up after its collector, as
+    // runs on scratch recordings once left hundreds of rings behind.
+    // Method: retire a ring under the name the app gives its isolated collector, then let the
+    // session see a child process exit.
+    let mut fixture = Recording::with_ring(&isolated_ring());
+    fixture.retire();
+    let mut session = fixture.session(Mode::Explicit);
+    let child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+    session.0.policy.launched(child.id(), Duration::ZERO);
+    session.0.child = Some(child);
+
+    for _attempt in 0..400 {
+        session.poll_child().unwrap();
+        if session.0.child.is_none() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    assert!(session.0.child.is_none());
+    assert!(!fixture.place().lock_path.exists());
+}
+
 struct Recording {
     root: PathBuf,
+    ring: String,
     lock_paths: Vec<PathBuf>,
     writer: Option<Writer>,
     publication: u64,
@@ -276,14 +335,20 @@ struct Recording {
 impl Recording {
     fn new() -> Self {
         let token = identity_text(random_identity().unwrap());
+        Self::with_ring(&format!("gpui-health-{token}"))
+    }
+
+    fn with_ring(ring: &str) -> Self {
+        let token = identity_text(random_identity().unwrap());
         let root = std::env::temp_dir().join(format!("flightdeck-lifecycle-{token}"));
-        let place = Place::for_user(&format!("gpui-health-{token}")).unwrap();
+        let place = Place::for_user(ring).unwrap();
         let (writer, registered) = Registration::start(&root, &place, Self::shape(), 1)
             .unwrap()
             .into_parts();
         registered.unwrap();
         Self {
             root,
+            ring: ring.to_owned(),
             lock_paths: vec![place.lock_path],
             writer: Some(writer),
             publication: 0,
@@ -362,6 +427,26 @@ impl Recording {
         })
     }
 
+    fn place(&self) -> Place {
+        Place::for_user(&self.ring).unwrap()
+    }
+
+    /// Ends the ring's run and returns the ring's name, as its collector does at exit.
+    fn finish(&mut self) -> String {
+        let mut writer = self.writer.take().unwrap();
+        writer.finish();
+        writer.name().to_owned()
+    }
+
+    /// Ends the ring's run and marks it saved, as the persister does once it has sealed the
+    /// run's last readings, and returns the ring's name.
+    fn retire(&mut self) -> String {
+        let identity = self.writer.as_ref().unwrap().identity().unwrap();
+        let ring = self.finish();
+        Registry::retire(&self.root, &identity).unwrap();
+        ring
+    }
+
     fn run(&self) -> Identity {
         self.writer.as_ref().unwrap().identity().unwrap().run
     }
@@ -387,7 +472,8 @@ impl Recording {
         previous.finish();
         drop(previous);
         let token = identity_text(random_identity().unwrap());
-        let place = Place::for_user(&format!("gpui-health-{token}")).unwrap();
+        self.ring = format!("gpui-health-{token}");
+        let place = Place::for_user(&self.ring).unwrap();
         let (writer, registered) = Registration::start(&self.root, &place, Self::shape(), 1)
             .unwrap()
             .into_parts();
@@ -412,9 +498,14 @@ impl Drop for Recording {
             }
         }
         std::fs::remove_dir_all(&self.root).unwrap();
-        // Each ring is new to the test, so its lock file in Application Support would stay.
+        // Each ring is new to the test, so its lock file in Application Support would stay,
+        // unless the test removed it as the app does.
         for lock_path in &self.lock_paths {
-            std::fs::remove_file(lock_path).unwrap();
+            match std::fs::remove_file(lock_path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => panic!("Fixture lock file cleanup failed: {error}"),
+            }
         }
     }
 }

@@ -81,8 +81,9 @@ then waits five seconds before exiting; this does not prove a blocked worker joi
 Neither mode opens a window or measures rendering performance.
 
 `--start-collector` writes new observations. The default recording uses the shared
-`flightdeck` ring; an explicit `--recording PATH` starts an isolated ring. Only one
-collector can own a ring. Startup and child-exit failures appear with a Retry
+`flightdeck` ring; an explicit `--recording PATH` starts an isolated ring. Once that
+collector exits and its readings are saved, the app removes the isolated ring and its lock
+file, so a scratch recording leaves no ring behind. Only one collector can own a ring. Startup and child-exit failures appear with a Retry
 control. The app sends signals only to the collector it started; attaching to
 another collector does not give it shutdown ownership, so quitting leaves that collector
 running. A live launch keeps running
