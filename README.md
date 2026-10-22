@@ -135,3 +135,6 @@ steps under that toolchain. `just fmt`, `just clippy` and `just test` run one pa
 ```sh
 just check
 ```
+
+`just coverage` reports the lines the tests run, and `just mutants --file PATH` the changes
+to that file no test notices, with the cargo-llvm-cov and cargo-mutants that `mise.toml` pins.

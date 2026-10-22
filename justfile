@@ -39,3 +39,14 @@ test:
     cargo test --locked --manifest-path desktop/Cargo.toml
     cargo run --locked --manifest-path desktop/Cargo.toml --bin flightdeck -- --check
     cargo run --locked --manifest-path desktop/Cargo.toml --bin text_backend_check -- --check
+
+# Report the lines the tests of each workspace run, as HTML under its target/llvm-cov/html.
+coverage:
+    cargo llvm-cov --locked --workspace --html
+    cargo llvm-cov --locked --manifest-path desktop/Cargo.toml --html
+
+# Report the changes to the code that no test of its package notices, into target/mutants.out.
+# A whole workspace takes days, so name a file: just mutants --file viewer/src/byte_display.rs
+[positional-arguments]
+mutants *arguments:
+    cargo mutants --output target "$@"
