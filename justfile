@@ -17,3 +17,25 @@ bundle:
     cargo build --locked --release --manifest-path desktop/Cargo.toml --bin flightdeck
     desktop/target/release/flightdeck --bundle
     desktop/target/Flightdeck.app/Contents/MacOS/flightdeck --bundle --check
+
+# Run the steps of the CI check on this Mac, with no test skipped for lack of hardware.
+check: fmt clippy test bundle
+
+# Check the formatting of both workspaces.
+fmt:
+    cargo fmt --all --check
+    cargo fmt --manifest-path desktop/Cargo.toml --check
+
+# Lint both workspaces, and the desktop app again with the control socket built in.
+clippy:
+    cargo clippy --locked --workspace --all-targets -- --deny warnings
+    cargo clippy --locked --manifest-path desktop/Cargo.toml --all-targets -- --deny warnings
+    cargo clippy --locked --manifest-path desktop/Cargo.toml --all-targets --features automation \
+        -- --deny warnings
+
+# Test both workspaces, then run the desktop app's own checks.
+test:
+    cargo test --locked --workspace
+    cargo test --locked --manifest-path desktop/Cargo.toml
+    cargo run --locked --manifest-path desktop/Cargo.toml --bin flightdeck -- --check
+    cargo run --locked --manifest-path desktop/Cargo.toml --bin text_backend_check -- --check

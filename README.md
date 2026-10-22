@@ -130,14 +130,8 @@ request, with the steps and the toolchain `.github/workflows/check.yml` names. T
 repository installs no git hook, so nothing runs on your machine unless you run it. A clone
 that set `core.hooksPath` for the hook this repository once carried can drop it with
 `git config --unset core.hooksPath`. To get the check's verdict before you push, run its
-steps under that toolchain:
+steps under that toolchain. `just fmt`, `just clippy` and `just test` run one part of it.
 
 ```sh
-cargo fmt --all --check
-cargo clippy --locked --workspace --all-targets -- --deny warnings
-cargo test --locked --workspace
-cargo fmt --manifest-path desktop/Cargo.toml --check
-cargo clippy --locked --manifest-path desktop/Cargo.toml --all-targets -- --deny warnings
-cargo test --locked --manifest-path desktop/Cargo.toml
-cargo run --locked --manifest-path desktop/Cargo.toml --bin flightdeck -- --check
+just check
 ```
