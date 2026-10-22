@@ -7,9 +7,12 @@ use crate::schema::{
 };
 use crate::{Error, Result};
 
+/// The most columns a process or event source has once every optional extension is in it.
+pub(crate) const COLUMNS_MAX: usize = 32;
+
 pub(crate) fn normalize(connection: &Engine, table: Table, source: &str) -> Result<String> {
     let schema = connection.schema(source)?;
-    if schema.len() > 32 {
+    if schema.len() > COLUMNS_MAX {
         return Err(Error::Bound("table column count"));
     }
 
@@ -36,7 +39,7 @@ pub(crate) fn normalize(connection: &Engine, table: Table, source: &str) -> Resu
 
     let present = fields.into_iter().filter(|present| *present).count();
     if present == 0 {
-        if schema.len() + IDENTITY_FIELDS.len() > 32 {
+        if schema.len() + IDENTITY_FIELDS.len() > COLUMNS_MAX {
             return Err(Error::Bound("normalized table column count"));
         }
 

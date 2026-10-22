@@ -300,7 +300,8 @@ mod tests {
                 "10039",
                 "4",
                 "worker\\xff",
-                "/Applications/Engine.app"
+                "/Applications/Engine.app",
+                null
             ])
             .as_array()
             .unwrap()
@@ -349,7 +350,8 @@ mod tests {
                 "10599",
                 "4",
                 "worker\\xff",
-                "/Applications/Engine.app"
+                "/Applications/Engine.app",
+                null
             ])
             .as_array()
             .unwrap()
@@ -397,14 +399,15 @@ mod tests {
                 "process_unique_id",
                 "pid_version",
                 "executable_name",
-                "app_path"
+                "app_path",
+                "gpu_ns"
             ])
             .as_array()
             .unwrap()
         );
         assert_eq!(
             &page["rows"][0].as_array().unwrap()[21..],
-            serde_json::json!([null, "3", "0", null, null, null, null])
+            serde_json::json!([null, "3", "0", null, null, null, null, null])
                 .as_array()
                 .unwrap()
         );
@@ -529,6 +532,7 @@ mod tests {
                 null,
                 "3",
                 "0",
+                null,
                 null,
                 null,
                 null,

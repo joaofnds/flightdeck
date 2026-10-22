@@ -34,9 +34,9 @@ mod tests {
 
         assert_eq!(encoded.len(), 3904);
         assert_eq!(decoded, snapshot);
-        assert_eq!(normalized.query("SELECT * FROM normalized").width(), 34);
+        assert_eq!(normalized.query("SELECT * FROM normalized").width(), 53);
         let legacy = table_source(&self::tables(), Table::Ticks, TableSource::Staged).unwrap();
-        assert_eq!(legacy.query("SELECT * FROM normalized").width(), 34);
+        assert_eq!(legacy.query("SELECT * FROM normalized").width(), 53);
     }
 
     fn tables() -> Tables {

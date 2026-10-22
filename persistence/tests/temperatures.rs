@@ -12,7 +12,7 @@ mod tests {
     use persistence::engine::Row;
     use persistence::query::TableSource;
     use persistence::schema::{
-        BATTERY_FIELDS, TABLES, TEMPERATURE_FIELDS, TICK_COLUMNS_MAX, Table,
+        BATTERY_FIELDS, SYSTEM_FIELDS, TABLES, TEMPERATURE_FIELDS, TICK_COLUMNS_MAX, Table,
     };
 
     #[test]
@@ -51,8 +51,8 @@ mod tests {
 
         let extended = table_source(&extended, Table::Ticks, TableSource::Staged).unwrap();
 
-        assert_eq!(legacy.query("SELECT * FROM normalized").width(), 34);
-        assert_eq!(extended.query("SELECT * FROM normalized").width(), 34);
+        assert_eq!(legacy.query("SELECT * FROM normalized").width(), 53);
+        assert_eq!(extended.query("SELECT * FROM normalized").width(), 53);
     }
 
     #[test]
@@ -223,14 +223,15 @@ mod tests {
     #[test]
     fn admits_temperatures_that_fill_the_column_bound() {
         // Goal: the bound refuses one column too many and no earlier.
-        // Method: fill a source that has the other extensions to exactly the room that is left.
+        // Method: fill a source that has the other extensions to exactly the room the
+        // temperatures and the system readings leave.
         let tables = tables();
         for (name, kind) in BATTERY_FIELDS {
             tables.add_column("ticks", name, kind);
         }
         tables.add_column("ticks", "physical_disks", "VARCHAR");
         let used = TABLES[0].1.split(',').count() + BATTERY_FIELDS.len() + 1;
-        for extra in 0..TICK_COLUMNS_MAX - used - TEMPERATURE_FIELDS.len() {
+        for extra in 0..TICK_COLUMNS_MAX - used - TEMPERATURE_FIELDS.len() - SYSTEM_FIELDS.len() {
             tables.add_column("ticks", &format!("extra_{extra}"), "UBIGINT");
         }
 

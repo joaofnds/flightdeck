@@ -5,7 +5,7 @@ use std::path::Path;
 
 use crate::engine::{Engine, Row};
 use crate::layout::{self, DirectoryNames, Kind, WindowLocation};
-use crate::schema::Table;
+use crate::schema::{CORE_STATE_FREQUENCY_FIELD, PROCESS_GPU_FIELD, Table};
 use collector::recording::discovery::Selection;
 use polars::prelude::DataType;
 
@@ -23,11 +23,11 @@ pub enum TableSource<'a> {
     Staged,
 }
 
-/// Validates optional identity, battery, disk and temperature columns before exposing them to
-/// queries.
+/// Validates optional identity, battery, disk, temperature, system, core clock and GPU time
+/// columns before exposing them to queries.
 /// Legacy process/event sources gain typed unavailable metadata; counters remain unchanged.
 /// Extended sources scan at most 1,048,577 rows, rejecting more than 1,048,576.
-/// Battery tick validation scans at most 62 rows, rejecting more than 61.
+/// Battery and system tick validation each scan at most 62 rows, rejecting more than 61.
 /// A saved source is validated once while the engine retains its registration, so saved
 /// files must not change after they are first read.
 pub fn table_source(connection: &Engine, table: Table, source: TableSource<'_>) -> Result<String> {
@@ -42,18 +42,41 @@ pub fn table_source(connection: &Engine, table: Table, source: TableSource<'_>) 
 }
 
 fn table_source_normalize(connection: &Engine, table: Table, source: &str) -> Result<String> {
-    if matches!(table, Table::Processes | Table::Events) {
+    if matches!(table, Table::Processes) {
+        let source = crate::identity::normalize(connection, table, source)?;
+        return crate::optional_column::normalize(
+            connection,
+            &source,
+            PROCESS_GPU_FIELD,
+            crate::identity::COLUMNS_MAX,
+        );
+    }
+
+    if matches!(table, Table::Events) {
         return crate::identity::normalize(connection, table, source);
     }
 
     if matches!(table, Table::Ticks) {
         let source = crate::battery::normalize(connection, source)?;
         let source = crate::disks::normalize(connection, &source)?;
-        return crate::temperatures::normalize(connection, &source);
+        let source = crate::temperatures::normalize(connection, &source)?;
+        return crate::system::normalize(connection, &source);
+    }
+
+    if matches!(table, Table::CoreStates) {
+        return crate::optional_column::normalize(
+            connection,
+            source,
+            CORE_STATE_FREQUENCY_FIELD,
+            CORE_STATE_COLUMNS_MAX,
+        );
     }
 
     Ok(source.to_owned())
 }
+
+/// The four original columns of `core_states` and its clock.
+const CORE_STATE_COLUMNS_MAX: usize = 5;
 
 /// Errors preserve incomplete enumeration rather than returning a complete empty answer.
 pub fn processes_at_second(root: &Path, second: u64) -> Result<Second> {

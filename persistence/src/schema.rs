@@ -30,9 +30,47 @@ pub const TEMPERATURE_FIELDS: [(&str, &str); 2] =
     [("cpu_celsius", "FLOAT"), ("gpu_celsius", "FLOAT")];
 pub(crate) const TEMPERATURE_ROWS_MAX: u64 = 61;
 
+/// Optional tick columns for the Mac's readings that belong to no process, core or device,
+/// and for the machine's facts. A window that captured none carries none of them, and one
+/// that captured any carries all, so a reader finds the group whole or absent. A reading the
+/// collector did not get is NULL.
+pub const SYSTEM_FIELDS: [(&str, &str); 19] = [
+    ("load_average_1", "DOUBLE"),
+    ("load_average_5", "DOUBLE"),
+    ("load_average_15", "DOUBLE"),
+    ("open_files", "UBIGINT"),
+    ("open_files_limit", "UBIGINT"),
+    ("thermal_pressure", "UTINYINT"),
+    ("gpu_memory_in_use_bytes", "UBIGINT"),
+    ("gpu_memory_allocated_bytes", "UBIGINT"),
+    ("boot_wall_ns", "UBIGINT"),
+    ("machine_model", "VARCHAR"),
+    ("machine_chip", "VARCHAR"),
+    ("machine_architecture", "VARCHAR"),
+    ("machine_cpu_cores", "UINTEGER"),
+    ("machine_gpu_cores", "UINTEGER"),
+    ("machine_memory_bytes", "UBIGINT"),
+    ("machine_performance_level0_name", "VARCHAR"),
+    ("machine_performance_level0_logical_cpus", "UINTEGER"),
+    ("machine_performance_level1_name", "VARCHAR"),
+    ("machine_performance_level1_logical_cpus", "UINTEGER"),
+];
+pub(crate) const SYSTEM_ROWS_MAX: u64 = 61;
+
+/// The optional column of `core_states` for the clock of each core's state, in kHz. A window
+/// that knew no clock for a state holds NULL there, and one sealed before it lacks it.
+pub const CORE_STATE_FREQUENCY_FIELD: (&str, &str) = ("frequency_khz", "UINTEGER");
+
+/// The optional column of `processes` for each process's GPU time, in nanoseconds, NULL for a
+/// process that held no GPU client.
+pub const PROCESS_GPU_FIELD: (&str, &str) = ("gpu_ns", "UBIGINT");
+
 /// The most columns a tick source has once every optional extension is in it.
-pub const TICK_COLUMNS_MAX: usize = 40;
-const _: () = assert!(19 + BATTERY_FIELDS.len() + 1 + TEMPERATURE_FIELDS.len() <= TICK_COLUMNS_MAX);
+pub const TICK_COLUMNS_MAX: usize = 64;
+const _: () = assert!(
+    19 + BATTERY_FIELDS.len() + 1 + TEMPERATURE_FIELDS.len() + SYSTEM_FIELDS.len()
+        <= TICK_COLUMNS_MAX
+);
 
 /// Optional process/event columns; the original schema-1 tables and seal remain unchanged.
 /// A complete extension uses this version on every row. Absent columns mean legacy data.
