@@ -5,6 +5,11 @@
 //! ```sh
 //! cargo run -p collector --bin smc_fixture -- --keys collector/fixtures/smc/m5_pro_keys.bin
 //! ```
+//!
+//! The tests in `smc::tests` hold what the recorded M5 Pro gave as literals: its 3,626 keys,
+//! its two fans' speeds, its power, its hottest sensors and the key TR0Z it holds as another
+//! type than a float. A new recording, even on the same Mac, fails those tests until each
+//! literal is read again from it.
 
 use std::process::ExitCode;
 

@@ -903,6 +903,7 @@ mod tests {
             value_callbacks: *const c_void,
         ) -> CFTypeRef;
         fn CFDataCreate(allocator: CFTypeRef, bytes: *const u8, size: isize) -> CFTypeRef;
+        fn CFArrayRemoveValueAtIndex(array: CFTypeRef, index: isize);
         fn CFPropertyListCreateWithData(
             allocator: CFTypeRef,
             data: CFTypeRef,
@@ -1470,23 +1471,20 @@ mod tests {
 
     #[test]
     fn learns_only_the_active_states_of_a_core() {
-        // Goal: the states learned as active are those the filter counts as active, so a read
-        // adds no idle time and leaves out no active time.
-        // Method: learn a core's channel of the M5 Pro's sample, against the filter asked
-        // about each of its states.
+        // Goal: the states learned as active are a core's performance states, so a read adds no
+        // idle time and leaves out no active time.
+        // Method: learn the first core's channel of the M5 Pro's sample, MCPU00, whose 17
+        // states are DOWN, IDLE, then V0P14 to V14P0 at indices 2 to 16.
         let samples = m5_pro_sample();
         let core = first_channel(&samples, Kind::CoreStates);
         let mut states = States::new(ACTIVE_STATES_MAX);
 
         learn_active_states(core, &mut states).unwrap();
 
-        let active: Vec<i32> = (0..states.state_count)
-            .filter(|&index| {
-                learn_active_states_is_active(unsafe { IOReportStateGetNameForIndex(core, index) })
-                    .unwrap()
-            })
-            .collect();
-        assert_eq!(active, states.active_indices);
+        assert_eq!(
+            [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+            states.active_indices[..]
+        );
     }
 
     #[test]
@@ -1510,12 +1508,15 @@ mod tests {
     fn refuses_a_read_that_finds_other_channels_than_open() {
         // Goal: a read that finds another count of channels than open found is an error, so a
         // channel missing from a sample never leaves the read before standing.
-        // Method: learn the M5 Pro's sample with room for one core more than it holds, record
-        // that open found that core too, and read the sample.
+        // Method: learn the M5 Pro's sample, then read it with its last channel, a core's,
+        // taken out.
         let mut reader = learned_from_m5_pro(19);
-        reader.counts.core_states += 1;
+        let samples = m5_pro_sample();
+        let channels = ChannelsKey::new().unwrap().channels_of(&samples).unwrap();
+        let last_index = unsafe { CFArrayGetCount(channels) } - 1;
+        unsafe { CFArrayRemoveValueAtIndex(channels, last_index) };
 
-        let read = reader.read(&m5_pro_sample());
+        let read = reader.read(&samples);
 
         assert_eq!(io::ErrorKind::InvalidData, read.unwrap_err().kind());
     }

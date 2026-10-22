@@ -8,6 +8,11 @@
 //!   --groups collector/fixtures/ioreport/m5_pro_groups.plist \
 //!   --sample collector/fixtures/ioreport/m5_pro_sample.plist
 //! ```
+//!
+//! The tests in `ioreport::tests` hold what the recorded M5 Pro gave as literals: its 18 cores,
+//! the 20 channels a read keeps, the GPU's energy and the time each state of the first core
+//! and of the GPU held. A new recording, even on the same Mac, fails those tests until each
+//! literal is read again from it.
 
 use std::process::ExitCode;
 
@@ -50,16 +55,21 @@ struct Paths {
     sample: String,
 }
 
+const USAGE: &str = "usage: ioreport_fixture --groups PATH --sample PATH";
+
 fn paths_from(arguments: &[String]) -> Result<Paths, String> {
-    match arguments {
-        [groups_flag, groups, sample_flag, sample]
-            if groups_flag == "--groups" && sample_flag == "--sample" =>
-        {
-            Ok(Paths {
-                groups: groups.clone(),
-                sample: sample.clone(),
-            })
-        }
-        _ => Err("usage: ioreport_fixture --groups PATH --sample PATH".to_owned()),
+    let [groups_flag, groups, sample_flag, sample] = arguments else {
+        return Err(USAGE.to_owned());
+    };
+    if groups_flag != "--groups" {
+        return Err(USAGE.to_owned());
     }
+    if sample_flag != "--sample" {
+        return Err(USAGE.to_owned());
+    }
+
+    Ok(Paths {
+        groups: groups.clone(),
+        sample: sample.clone(),
+    })
 }
