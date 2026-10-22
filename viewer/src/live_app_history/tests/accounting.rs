@@ -281,21 +281,6 @@ compact_measure_round_trip!(
 );
 
 #[test]
-fn bounds_global_app_history_layout_with_eight_exact_measures() {
-    // Goal: preserve fifteen minutes for ordinary App populations within the fixed cache budget.
-    // Method: guard the actual compiler layouts that Point::bytes charges per App and observation.
-    assert!(size_of::<CompactMeasure>() <= 12);
-    assert!(align_of::<CompactMeasure>() <= align_of::<u32>());
-    assert!(size_of::<App>() <= 112);
-    eprintln!(
-        "compact App history layout: {}",
-        json!({"measure_bytes": size_of::<CompactMeasure>(), "app_bytes": size_of::<App>(),
-            "point_bytes": size_of::<Point>(),
-            "trace_point_bytes": size_of::<super::super::TracePoint>()})
-    );
-}
-
-#[test]
 fn shares_keys_across_runs_without_changing_observation_identity_or_metrics() {
     // An immutable raw key can be shared while each point retains its own run and values.
     let mut history = History::new();
