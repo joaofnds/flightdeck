@@ -904,6 +904,7 @@ mod tests {
         ) -> CFTypeRef;
         fn CFDataCreate(allocator: CFTypeRef, bytes: *const u8, size: isize) -> CFTypeRef;
         fn CFArrayRemoveValueAtIndex(array: CFTypeRef, index: isize);
+        fn CFNumberCreate(allocator: CFTypeRef, kind: isize, value: *const c_void) -> CFTypeRef;
         fn CFPropertyListCreateWithData(
             allocator: CFTypeRef,
             data: CFTypeRef,
@@ -915,6 +916,12 @@ mod tests {
 
     /// `kCFPropertyListMutableContainersAndLeaves`.
     const MUTABLE_CONTAINERS_AND_LEAVES: c_ulong = 2;
+    /// `kCFNumberSInt64Type`.
+    const SINT64_TYPE: isize = 4;
+    /// `kIOReportUnit_uJ`, energy at a scale of 10^-6, which IOReportTypes.h makes from
+    /// `kIOReportQuantityEnergy`, 3, in the top byte and the exponent -6 offset by 127 in the
+    /// byte below the low 32 bits.
+    const UNIT_UJ: i64 = 0x0300_0079_0000_0000;
 
     /// The object the binary property list `bytes` holds, every container and leaf of it
     /// mutable, as `IOReport` gives its dictionaries.
@@ -953,6 +960,19 @@ mod tests {
         let mut reader = Reader::new(Timebase::NANOSECOND_TICKS, cpu_limit).unwrap();
         reader.learn(&m5_pro_sample()).unwrap();
         reader
+    }
+
+    /// Makes `channel` give its values in `unit`, as `IOReport` encodes a unit.
+    fn with_unit(channel: CFTypeRef, unit: i64) {
+        let info_key = string(c"IOReportChannelInfo").unwrap();
+        let unit_key = string(c"IOReportChannelUnit").unwrap();
+        let info = unsafe { CFDictionaryGetValue(channel, info_key.0) };
+        assert!(!info.is_null());
+
+        let number = unsafe { CFNumberCreate(ptr::null(), SINT64_TYPE, (&raw const unit).cast()) };
+        let number = Owned::new(number, "creating a number").unwrap();
+
+        unsafe { CFDictionarySetValue(info, unit_key.0, number.0) };
     }
 
     /// The first channel of `kind` among the channels `samples` holds.
@@ -1422,6 +1442,23 @@ mod tests {
         reader.read(&m5_pro_sample()).unwrap();
 
         assert_eq!(54_424_081_490_739, reader.gpu_energy_nj());
+    }
+
+    #[test]
+    fn reads_the_gpus_energy_in_the_unit_its_channel_gives() {
+        // Goal: a read scales the GPU's energy by the unit open learned from its channel, so a
+        // chip that counts microjoules reads a thousand times the nanojoules of one that counts
+        // nanojoules.
+        // Method: give the GPU's energy channel of the M5 Pro's sample, 54424081490739 nJ, the
+        // unit uJ, then learn and read it.
+        let samples = m5_pro_sample();
+        with_unit(first_channel(&samples, Kind::GPUEnergy), UNIT_UJ);
+        let mut reader = Reader::new(Timebase::NANOSECOND_TICKS, 19).unwrap();
+        reader.learn(&samples).unwrap();
+
+        reader.read(&samples).unwrap();
+
+        assert_eq!(54_424_081_490_739_000, reader.gpu_energy_nj());
     }
 
     #[test]
