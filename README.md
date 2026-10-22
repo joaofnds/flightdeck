@@ -14,9 +14,11 @@ the app and reading it from Grafana are weighed in
 ## Collector
 
 `collector` reads process and system counters once a second without root and starts a separate
-persister. Each `recording minute` reports `combined_percent` of one core for collection
-and persistence together; compare it with the 5% budget. The source-cost report's
-budget share and power in mW describe the collector alone. Build both sibling executables:
+persister. [How the collector works](docs/collector.md) describes its parts, one tick, and why
+each part is built the way it is. Each `recording minute` reports `combined_percent` of one
+core for collection and persistence together; compare it with the 5% budget. The source-cost
+report's budget share and power in mW describe the collector alone. Build both sibling
+executables:
 
 ```sh
 cargo build --release -p collector -p persister --bin collector --bin persister
