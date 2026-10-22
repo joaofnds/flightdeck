@@ -367,16 +367,13 @@ impl Fixture {
         );
         let publications = window.publication_range();
         let events = window.event_range();
-        let first = window
-            .observations()
-            .filter_map(|value| value.wall_ns)
-            .min()
-            .unwrap();
-        let last = window
-            .observations()
-            .filter_map(|value| value.wall_ns)
-            .max()
-            .unwrap();
+        // An observation of unknown wall time leaves the window's bounds unknown, as the
+        // persister seals it.
+        let walls: Option<Vec<u64>> = window.observations().map(|value| value.wall_ns).collect();
+        let wall_ns = walls.map(|walls| persistence::TimeBounds {
+            min: *walls.iter().min().unwrap(),
+            max: *walls.iter().max().unwrap(),
+        });
         store
             .commit(
                 pending,
@@ -386,10 +383,7 @@ impl Fixture {
                     publication_end: publications.end,
                     events_first: events.start,
                     events_end: events.end,
-                    wall_ns: Some(persistence::TimeBounds {
-                        min: first,
-                        max: last,
-                    }),
+                    wall_ns,
                     continuous_ns: None,
                     awake_ns: None,
                     losses: persistence::Losses::default(),

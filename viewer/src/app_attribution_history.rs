@@ -57,6 +57,19 @@ impl LiveSession {
         })
     }
 
+    /// Whether the Overview's App histories and the resident history of the selected observation
+    /// replay no saved minute, so a page can read them with its first readings. The history of
+    /// one metric replays every saved minute of its range, so this does not answer for it.
+    pub fn app_histories_replay_nothing(&self) -> Result<bool> {
+        self.operation.run(|| {
+            let Some(history) = &self.history else {
+                return Ok(true);
+            };
+
+            history.app_histories_replay_nothing(&self.selected_in_context()?)
+        })
+    }
+
     pub fn app_attribution_history(&self, metric: AppAttributionMetric) -> Result<Value> {
         self.operation.run(|| {
             let selected = self.selected_in_context()?;

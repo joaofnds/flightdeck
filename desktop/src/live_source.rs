@@ -177,10 +177,17 @@ struct Pending {
     histories: Histories,
 }
 
-/// Whether a step reads the page's App histories or leaves them to the next step.
+/// Whether a step reads the page's App histories or leaves them to the next step, and how far it
+/// ranks the Apps of the selected window.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Histories {
+    /// Reads them, and ranks every observation of the window.
     Read,
+    /// Reads them with a newly opened page's first readings, which the session found replay no
+    /// saved minute. Ranks only what the window keeps, as `Defer` does, since ranking the rest
+    /// replays the minutes that keep no ranks, and leaves the rest to a `Read` step after it.
+    Early,
+    /// Leaves them to the next step, and ranks only what the window keeps.
     Defer,
 }
 
@@ -673,7 +680,8 @@ fn reader_snapshot(
         }
     }
     let Plan {
-        histories,
+        mut histories,
+        early,
         kept_tail_only,
     } = reader_snapshot_plan(reader, &command.request.route);
     let session = reader_snapshot_session(&mut reader.session, root, command, shared)?;
@@ -687,6 +695,9 @@ fn reader_snapshot(
     let tail_pending = reader_earlier(session, &command.request, kept_tail_only, &mut selection);
     reader.system.annotate(&mut selection);
     let mut snapshot = reader_snapshot_new(command.generation, catalog, selection);
+    if early {
+        histories = reader_snapshot_histories(session, &snapshot);
+    }
     reader_payload(
         session,
         &mut command.request,
@@ -710,30 +721,59 @@ fn reader_snapshot(
 /// What a step of the page reads, and what it leaves to a later step.
 struct Plan {
     histories: Histories,
+    /// Whether the step asks the session if the App histories it leaves would replay a saved
+    /// minute, and reads them with its first readings where they would not.
+    early: bool,
     /// Whether the step takes only an older tail its session keeps.
     kept_tail_only: bool,
 }
 
 /// What this step of the page `route` reads. A newly opened page publishes its readings first,
 /// since replaying its App histories from saved minutes, or reading an older tail its session
-/// does not keep, can take seconds. A page with App histories reads them next, whatever request
-/// of the page comes next, and an older tail it has to read after them, since its charts draw
-/// the tail only over a range longer than their full detail.
+/// does not keep, can take seconds. A page whose App histories read the parts its saved minutes
+/// keep reads them with its first readings where they replay no saved minute, and the others
+/// read them next, whatever request of the page comes next. An older tail it has to read comes
+/// after them, since its charts draw the tail only over a range longer than their full detail.
 fn reader_snapshot_plan(reader: &Reader, route: &str) -> Plan {
     let opened = reader.last_route != route;
     let histories_due = reader
         .pending
         .is_some_and(|pending| pending.histories == Histories::Defer);
     let mut histories = Histories::Read;
+    let mut early = false;
     if opened {
         if reader_route_has_histories(route) {
             histories = Histories::Defer;
+            early = reader_route_reads_kept_histories(route);
         }
     }
 
     Plan {
         histories,
+        early,
         kept_tail_only: opened || histories_due,
+    }
+}
+
+/// What a step planned to read the App histories early reads: them, where they replay no saved
+/// minute, or else nothing of them, as a step that defers them. A failed check defers them, so
+/// the next step reads them and shows the failure.
+fn reader_snapshot_histories(session: &LiveSession, snapshot: &Snapshot) -> Histories {
+    // A missing second has no payload, which the next step reads as a deferring step does.
+    if snapshot.selection["selected"].is_null() {
+        return Histories::Defer;
+    }
+
+    match session.app_histories_replay_nothing() {
+        Ok(true) => Histories::Early,
+        Ok(false) => Histories::Defer,
+        Err(persistence::Error::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted => {
+            Histories::Defer
+        }
+        Err(error) => {
+            eprintln!("App histories' saved minutes unchecked: {error}");
+            Histories::Defer
+        }
     }
 }
 
@@ -786,7 +826,9 @@ fn reader_snapshot_record(
     reader.last_catalog = Some(snapshot.catalog.clone());
     reader.last_generation = command.generation;
     reader.last_route.clone_from(&command.request.route);
-    reader.pending = snapshot.histories_pending.then_some(Pending {
+    // A step that read the histories early leaves the window's other ranks to a `Read` step.
+    let ranks_pending = histories == Histories::Early;
+    reader.pending = (snapshot.histories_pending || ranks_pending).then_some(Pending {
         generation: command.generation,
         histories,
     });
@@ -826,6 +868,13 @@ fn reader_pending(reader: &Reader, generation: u64) -> bool {
 /// Whether the route's pages show the selected second's top Apps.
 pub(crate) fn route_ranks_apps(route: &str) -> bool {
     matches!(route, "overview" | "storage" | "cpu" | "memory" | "energy")
+}
+
+/// Whether the route's App histories read the parts its saved minutes keep and replay only the
+/// minutes that keep none. The App history of the CPU, energy and storage pages replays every
+/// saved minute of its range, so it never reads with a page's first readings.
+fn reader_route_reads_kept_histories(route: &str) -> bool {
+    matches!(route, "overview" | "memory")
 }
 
 /// Whether the route's payload replays App histories from saved minutes.
@@ -1076,7 +1125,7 @@ fn reader_payload_read(
     }
     // Keeping App parts replays the saved minutes of each window that keeps none, so it follows
     // the histories the page shows, and a hover's own read keeps none.
-    if histories == Histories::Read {
+    if histories != Histories::Defer {
         reader_payload_histories(session, request, snapshot);
         if request.route == "apps" {
             if request.load_process_history {
@@ -1090,10 +1139,10 @@ fn reader_payload_read(
     // hover during its history read shows the top Apps they hold at once.
     if ranked {
         if request.load_app_attribution_history {
-            if histories == Histories::Defer {
-                reader_app_ranks(session.rank_window_kept());
-            } else {
+            if histories == Histories::Read {
                 reader_app_ranks(session.rank_window());
+            } else {
+                reader_app_ranks(session.rank_window_kept());
             }
             snapshot.app_ranks = Some(session.app_ranks());
         }
@@ -1263,6 +1312,9 @@ fn reader_apps(
     histories: Histories,
     snapshot: &mut Snapshot,
 ) -> Result<(), String> {
+    // The Apps page ranks no App, so it never reads its histories early, and reads its App's
+    // history and process history only in a step that reads them all.
+    assert!(matches!(histories, Histories::Read | Histories::Defer));
     let apps = reader_apps_page(session, request.apps_offset)?;
     identity_validate(&apps["selected"], &snapshot.selection["selected"])?;
     reader_apps_remember(request, &apps)?;

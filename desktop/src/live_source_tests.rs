@@ -118,8 +118,133 @@ fn a_history_route_publishes_its_readings_before_its_app_histories() {
     assert!(first.resident_history.is_none());
     assert!(!second.histories_pending);
     assert_eq!(second.selection["second"], 1002);
-    assert!(second.overview_app_histories.is_some());
-    assert!(second.resident_history.is_some());
+    assert!(overview_ready(&second));
+    assert!(resident_ready(&second));
+}
+
+#[test]
+fn a_page_opened_over_minutes_that_keep_their_app_parts_publishes_its_app_histories_at_once() {
+    // Goal: a newly opened page whose saved minutes keep their Apps' parts fills its App charts
+    // with its first readings, since reading them replays no saved minute.
+    // Method: read Overview once over a sealed recording whose minute keeps its App parts.
+    let recording = SealedRecording::with_kept_parts();
+    let mut reader = SnapshotReader::new();
+
+    let opened = reader.read(&recording).unwrap().unwrap();
+
+    assert!(!opened.histories_pending);
+    assert_eq!(opened.selection["second"], 1002);
+    assert!(overview_ready(&opened));
+    assert!(resident_ready(&opened));
+}
+
+#[test]
+fn a_page_opened_before_any_minute_is_saved_publishes_its_app_histories_at_once() {
+    // Goal: a launch over a recording that has saved no minute yet fills its App charts with
+    // its first readings, since reading them replays no saved minute.
+    // Method: publish two ticks to a live ring with no saved history and open Overview.
+    let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
+    recording.publish();
+    recording.publish();
+    let mut reader = SnapshotReader::new();
+    reader.command.mode = crate::live_source_mode::SourceMode::Live;
+
+    let opened = reader.read_at(&recording.root).unwrap().unwrap();
+
+    assert!(!opened.histories_pending);
+    assert!(overview_ready(&opened));
+}
+
+#[test]
+fn a_memory_page_opened_over_minutes_that_keep_their_app_parts_publishes_its_history_at_once() {
+    // Goal: the Memory page fills its resident chart with its first readings where its saved
+    // minutes keep their Apps' parts, as Overview does.
+    // Method: read the Memory page once over a sealed recording whose minute keeps its parts.
+    let recording = SealedRecording::with_kept_parts();
+    let mut reader = SnapshotReader::new();
+    reader.command.request.route = "memory".into();
+
+    let opened = reader.read(&recording).unwrap().unwrap();
+
+    assert!(!opened.histories_pending);
+    assert!(resident_ready(&opened));
+}
+
+#[test]
+fn a_page_that_reads_its_app_histories_early_ranks_the_rest_of_its_window_next() {
+    // Goal: a page whose first readings brought its App histories still ranks the observations
+    // its window keeps no ranks for, in a step straight after, even in a recording no new
+    // reading reaches.
+    // Method: open Overview over a sealed recording whose minute keeps its parts, then step the
+    // reader again.
+    let recording = SealedRecording::with_kept_parts();
+    let mut reader = SnapshotReader::new();
+    reader.read(&recording).unwrap().unwrap();
+    let pause = reader.pause();
+
+    let ranked = reader.read(&recording).unwrap();
+
+    assert_eq!(pause, Duration::ZERO);
+    assert!(ranked.is_some_and(|snapshot| !snapshot.histories_pending));
+}
+
+#[test]
+fn a_page_whose_saved_minutes_cannot_be_checked_leaves_its_app_histories_to_its_next_read() {
+    // Goal: a failed check of the saved minutes never fails a page's first readings, and the
+    // page's next step reads the App histories, which shows the failure.
+    // Method: corrupt the App parts of a sealed recording whose minute keeps them, then open
+    // Overview.
+    let recording = SealedRecording::with_kept_parts();
+    recording.corrupt_app_parts();
+    let mut reader = SnapshotReader::new();
+
+    let opened = reader.read(&recording).unwrap().unwrap();
+
+    assert!(opened.histories_pending);
+    assert!(opened.overview_app_histories.is_none());
+}
+
+#[test]
+fn pages_of_one_metric_leave_their_app_history_to_their_next_read() {
+    // Goal: the first readings of the CPU, energy and storage pages never wait on their App
+    // history, since it replays every saved minute of its range, parts kept or not.
+    // Method: open each page over a sealed recording whose minute keeps its App parts.
+    let recording = SealedRecording::with_kept_parts();
+    for route in ["cpu", "energy", "storage"] {
+        let mut reader = SnapshotReader::new();
+        reader.command.request.route = route.into();
+
+        let opened = reader.read(&recording).unwrap().unwrap();
+
+        assert!(opened.histories_pending, "{route}");
+        assert!(opened.app_attribution_history.is_none(), "{route}");
+    }
+}
+
+#[test]
+fn a_page_that_reads_its_app_histories_early_reads_an_older_tail_next() {
+    // Goal: an opened page whose first readings brought its App histories reads an older tail
+    // its session does not keep straight after them.
+    // Method: open Overview over a recording whose minutes keep their parts and one of which
+    // was sealed long before its newest second, one step at a time.
+    let recording = SealedRecording::with_an_older_kept_minute();
+    let mut reader = SnapshotReader::new();
+    reader.command.request.earlier = crate::live_source::Earlier::Load;
+
+    let first = reader.read(&recording).unwrap().unwrap();
+    let pause = reader.pause();
+    let second = reader
+        .read(&recording)
+        .unwrap()
+        .expect("The reader left the older tail unread");
+
+    assert!(overview_ready(&first));
+    assert!(first.histories_pending);
+    assert!(first.selection.get("earlier_trends").is_none());
+    assert_eq!(pause, Duration::ZERO);
+    assert!(!second.histories_pending);
+    let tail = second.selection["earlier_trends"].as_array().unwrap();
+    assert_eq!(tail.len(), 1);
 }
 
 #[test]
@@ -194,12 +319,12 @@ fn a_newly_opened_page_publishes_its_app_histories_before_an_older_tail_it_has_t
         .unwrap()
         .expect("The reader left the older tail unread");
 
-    assert!(histories.overview_app_histories.is_some());
-    assert!(histories.resident_history.is_some());
+    assert!(overview_ready(&histories));
+    assert!(resident_ready(&histories));
     assert!(histories.selection.get("earlier_trends").is_none());
     assert!(histories.histories_pending);
     assert_eq!(pause, Duration::ZERO);
-    assert!(tail.overview_app_histories.is_some());
+    assert!(overview_ready(&tail));
     assert_eq!(
         tail.selection["earlier_trends"].as_array().unwrap().len(),
         1
@@ -225,7 +350,7 @@ fn a_new_request_of_a_page_still_reads_its_app_histories_before_an_older_tail_it
         .unwrap()
         .expect("The reader left the older tail unread");
 
-    assert!(histories.overview_app_histories.is_some());
+    assert!(overview_ready(&histories));
     assert!(histories.selection.get("earlier_trends").is_none());
     assert!(histories.histories_pending);
     assert_eq!(
@@ -253,7 +378,7 @@ fn a_newly_opened_page_completes_with_its_app_histories_where_its_session_keeps_
     let histories = reader.read(&recording).unwrap().unwrap();
     let pause = reader.pause();
 
-    assert!(histories.resident_history.is_some());
+    assert!(resident_ready(&histories));
     assert_eq!(
         histories.selection["earlier_trends"]
             .as_array()
@@ -457,6 +582,28 @@ fn a_failed_read_of_a_pages_app_histories_pauses_before_its_retry() {
 
     assert!(matches!(failed, Some(Update::Failed { .. })));
     assert_eq!(reader.pause(), super::POLL_INTERVAL);
+}
+
+/// Whether the snapshot carries the Overview's App histories, each read rather than failed.
+fn overview_ready(snapshot: &super::Snapshot) -> bool {
+    use crate::live_app_attribution_history::AppAttributionHistory;
+    let Some(histories) = &snapshot.overview_app_histories else {
+        return false;
+    };
+    let ready =
+        |history: &AppAttributionHistory| matches!(history, AppAttributionHistory::Ready(_));
+
+    ready(&histories.cpu) && ready(&histories.power) && ready(&histories.disk)
+}
+
+/// Whether the snapshot carries the resident history, read rather than failed.
+fn resident_ready(snapshot: &super::Snapshot) -> bool {
+    snapshot.resident_history.as_deref().is_some_and(|history| {
+        matches!(
+            history,
+            crate::live_resident_history::ResidentHistory::Ready(_)
+        )
+    })
 }
 
 struct SnapshotReader {
@@ -688,6 +835,27 @@ struct SealedRecording {
 }
 
 impl SealedRecording {
+    /// Overwrites the App parts every sealed window of the recording keeps with bytes no
+    /// Parquet reader reads.
+    fn corrupt_app_parts(&self) {
+        let mut directories = vec![self.root.clone()];
+        let mut corrupted = 0;
+        while let Some(directory) = directories.pop() {
+            for entry in std::fs::read_dir(directory).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    directories.push(path);
+                } else {
+                    if path.file_name() == Some("app_parts.parquet".as_ref()) {
+                        std::fs::write(&path, b"corrupt").unwrap();
+                        corrupted += 1;
+                    }
+                }
+            }
+        }
+        assert!(corrupted > 0);
+    }
+
     fn empty() -> Self {
         let token =
             collector::recording::identity_text(collector::recording::random_identity().unwrap());
@@ -700,6 +868,17 @@ impl SealedRecording {
     }
 
     fn new() -> Self {
+        Self::sealed(&Underived)
+    }
+
+    /// The recording of `new`, sealed as the persister seals a window now, with the App parts
+    /// and ranks of each of its observations.
+    fn with_kept_parts() -> Self {
+        Self::sealed(&viewer::SealedApps)
+    }
+
+    /// Readings at seconds 1000 and 1002 in one window sealed with the tables `derive` derives.
+    fn sealed(derive: &dyn persistence::worker::Derive) -> Self {
         let recording = Self::empty();
         let store = persistence::Store::open(&recording.root).unwrap();
         let identity = persistence::WindowIdentity {
@@ -714,7 +893,7 @@ impl SealedRecording {
         Self::append(&mut window, 1, 1000);
         Self::append(&mut window, 2, 1002);
         Self::append(&mut window, 3, 1002);
-        Self::commit(&store, identity, &window);
+        Self::commit_derived(&store, identity, &window, derive);
         drop(store);
 
         recording
@@ -722,6 +901,18 @@ impl SealedRecording {
 
     /// Readings at second 1000 and two at second 2200, which are more than 900 seconds apart.
     fn with_an_older_minute() -> Self {
+        Self::older_minute(&Underived)
+    }
+
+    /// The recording of `with_an_older_minute`, sealed with the App parts and ranks of each of
+    /// its observations.
+    fn with_an_older_kept_minute() -> Self {
+        Self::older_minute(&viewer::SealedApps)
+    }
+
+    /// Readings at second 1000 and two at second 2200 in one window sealed with the tables
+    /// `derive` derives.
+    fn older_minute(derive: &dyn persistence::worker::Derive) -> Self {
         let recording = Self::empty();
         let store = persistence::Store::open(&recording.root).unwrap();
         let identity = persistence::WindowIdentity {
@@ -736,7 +927,7 @@ impl SealedRecording {
         Self::append(&mut window, 1, 1000);
         Self::append(&mut window, 2, 2200);
         Self::append(&mut window, 3, 2200);
-        Self::commit(&store, identity, &window);
+        Self::commit_derived(&store, identity, &window, derive);
         drop(store);
 
         recording

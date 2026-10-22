@@ -31,13 +31,8 @@ impl Session {
         assert!(self.windows.len() <= super::super::WINDOWS_MAX);
         for (window, manifest) in self.windows.iter().enumerate() {
             self.operation.check()?;
-            if let Some(bounds) = manifest.wall_ns {
-                if bounds.max < range.first_ns {
-                    continue;
-                }
-                if bounds.min >= range.end_ns {
-                    continue;
-                }
+            if !super::window_overlaps(manifest, &range) {
+                continue;
             }
             let Some(table) = manifest.tables.iter().find(|table| table.name == name) else {
                 continue;

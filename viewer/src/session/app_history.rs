@@ -9,6 +9,7 @@ use crate::live_app_history::{Selection, TracePoint};
 use crate::live_app_response::{KeyKind, Observation, Selected};
 use crate::live_apps::{Frame, committed::Endpoint};
 use collector::ring::{Identity, PROGRAM_PATH_BYTES_MAX, RunIdentity};
+use persistence::schema::APP_PARTS;
 use persistence::{Error, Result};
 use serde_json::Value;
 
@@ -327,6 +328,66 @@ impl Session {
         Ok(windows)
     }
 
+    /// Whether the App histories that read the parts sealed minutes keep, the Overview's and
+    /// the resident history, read every reading of the range of `selected` from those parts, so
+    /// reading them replays no minute. A window sealed without parts answers before any parts
+    /// are read, since this check runs before the first readings show.
+    pub(crate) fn app_histories_replay_nothing(&self, selected: &Selected) -> Result<bool> {
+        self.operation.attach(&self.connection)?;
+        self.operation.check()?;
+        let range = self.app_history_range(selected)?;
+        let mut restore = Restore {
+            readings: BTreeMap::new(),
+            sources: BTreeMap::new(),
+            source_bytes: 0,
+            plotted: 0,
+        };
+        let listed: BTreeSet<usize> = self
+            .windows
+            .iter()
+            .enumerate()
+            .filter(|(_, manifest)| manifest.tables.iter().any(|table| table.name == APP_PARTS))
+            .map(|(window, _)| window)
+            .collect();
+        if self.app_history_replays_any(&range, &listed, &mut restore)? {
+            return Ok(false);
+        }
+
+        let mut kept_windows = Vec::new();
+        let kept = self.every_app_kept(&range, &mut restore, &mut kept_windows)?;
+        Ok(!self.app_history_replays_any(&range, &kept, &mut restore)?)
+    }
+
+    /// Whether the replay of the App histories of `range` plots a reading of any window, where
+    /// it reads the parts of the windows `kept` instead. A window whose wall clock bounds are
+    /// unknown overlaps every range, so its readings answer for it, as they do in the replay.
+    fn app_history_replays_any(
+        &self,
+        range: &ContextRange,
+        kept: &BTreeSet<usize>,
+        restore: &mut Restore,
+    ) -> Result<bool> {
+        assert!(self.windows.len() <= WINDOWS_MAX);
+        for (window, manifest) in self.windows.iter().enumerate() {
+            self.operation.check()?;
+            if app_history_replays(window, manifest, range, kept) {
+                let mut readings = Vec::with_capacity(TICKS_PER_WINDOW_MAX);
+                self.app_history_ticks(
+                    restore,
+                    window,
+                    TICKS_PER_WINDOW_MAX,
+                    &mut readings,
+                    |reading| sealed::observed_in(*range, &reading.observation),
+                )?;
+                if !readings.is_empty() {
+                    return Ok(true);
+                }
+            }
+        }
+
+        Ok(false)
+    }
+
     fn app_history_gather(
         &self,
         range: &ContextRange,
@@ -341,16 +402,8 @@ impl Session {
         assert!(self.windows.len() <= WINDOWS_MAX);
         for (window, manifest) in self.windows.iter().enumerate() {
             self.operation.check()?;
-            if kept.contains(&window) {
+            if !app_history_replays(window, manifest, range, kept) {
                 continue;
-            }
-            if let Some(bounds) = manifest.wall_ns {
-                if bounds.max < range.first_ns {
-                    continue;
-                }
-                if bounds.min >= range.end_ns {
-                    continue;
-                }
             }
             let mut readings = Vec::with_capacity(TICKS_PER_WINDOW_MAX);
             self.app_history_ticks(
@@ -358,12 +411,7 @@ impl Session {
                 window,
                 TICKS_PER_WINDOW_MAX,
                 &mut readings,
-                |reading| {
-                    reading
-                        .observation
-                        .wall_ns
-                        .is_some_and(|wall| (range.first_ns..range.end_ns).contains(&wall))
-                },
+                |reading| sealed::observed_in(*range, &reading.observation),
             )?;
             for mut reading in readings {
                 if self.app_history_window(&reading.observation)? != Some(window) {
@@ -732,6 +780,36 @@ impl Reading {
         self.observation.stamp.publication.checked_add(1)
             == Some(selected.observation.stamp.publication)
     }
+}
+
+/// Whether the replay of the App histories of `range` reads `window`, the window of
+/// `manifest`, where it reads the parts of the windows `kept` instead.
+fn app_history_replays(
+    window: usize,
+    manifest: &persistence::Manifest,
+    range: &ContextRange,
+    kept: &BTreeSet<usize>,
+) -> bool {
+    if kept.contains(&window) {
+        return false;
+    }
+
+    window_overlaps(manifest, range)
+}
+
+/// Whether the window of `manifest` may hold a second of `range`, as one whose wall clock
+/// bounds are unknown may.
+fn window_overlaps(manifest: &persistence::Manifest, range: &ContextRange) -> bool {
+    if let Some(bounds) = manifest.wall_ns {
+        if bounds.max < range.first_ns {
+            return false;
+        }
+        if bounds.min >= range.end_ns {
+            return false;
+        }
+    }
+
+    true
 }
 
 fn app_history_insert(restore: &mut Restore, reading: &Reading) -> Result<()> {

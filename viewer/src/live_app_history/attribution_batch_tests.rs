@@ -590,6 +590,117 @@ fn batch_reports_the_cell_of_an_app_row_out_of_order() {
 }
 
 #[test]
+fn app_histories_are_kept_where_every_minute_of_their_range_keeps_its_parts() {
+    // Goal: a session tells a page that it reads a selection's App histories without replaying
+    // a saved minute where every minute of their range keeps its Apps' parts.
+    // Method: seal every minute with its parts and ask at the last observation.
+    let fixture = kept_fixture([true; 4]);
+    let saved = Session::open(&fixture.root).unwrap();
+
+    let kept = saved.app_histories_replay_nothing(&kept_selected(&saved, 6, 180, 1005));
+
+    assert!(kept.unwrap());
+}
+
+#[test]
+fn app_histories_are_not_kept_where_a_minute_of_their_range_keeps_no_parts() {
+    // Goal: App histories that would replay a saved minute are not kept.
+    // Method: seal the middle minute without its parts and ask at the last observation.
+    let fixture = kept_fixture([true, false, true, true]);
+    let saved = Session::open(&fixture.root).unwrap();
+
+    let kept = saved.app_histories_replay_nothing(&kept_selected(&saved, 6, 180, 1005));
+
+    assert!(!kept.unwrap());
+}
+
+#[test]
+fn app_histories_are_not_kept_where_a_minute_keeps_parts_this_build_does_not_read() {
+    // Goal: parts sealed at an earlier version, which reading the App histories replays, hold
+    // them back as a minute sealed without parts does.
+    // Method: seal every minute with its parts, rewrite them to the earlier version, and ask
+    // at the last observation of a session opened afterwards.
+    let fixture = kept_fixture([true; 4]);
+    Session::open(&fixture.root)
+        .unwrap()
+        .previous_version_kept_parts();
+    let saved = Session::open(&fixture.root).unwrap();
+
+    let kept = saved.app_histories_replay_nothing(&kept_selected(&saved, 6, 180, 1005));
+
+    assert!(!kept.unwrap());
+}
+
+#[test]
+fn app_histories_are_kept_where_only_a_minute_past_their_range_keeps_no_parts() {
+    // Goal: a minute the App histories do not plot never holds them back.
+    // Method: seal the two minutes after the second observation without their parts, and ask
+    // at that observation, whose range ends before them.
+    let fixture = kept_fixture([true, true, false, false]);
+    let saved = Session::open(&fixture.root).unwrap();
+
+    let kept = saved.app_histories_replay_nothing(&kept_selected(&saved, 2, 60, 1001));
+
+    assert!(kept.unwrap());
+}
+
+#[test]
+fn app_histories_are_kept_where_only_a_minute_before_their_range_keeps_no_parts() {
+    // Goal: a minute older than the App histories' range never holds them back.
+    // Method: seal a minute without its parts more than the charted seconds before the last
+    // observation, seal the minutes after it with their parts, and ask at that observation.
+    let mut fixture = Fixture::new();
+    fixture.start_at_run_tick(59);
+    fixture.publish_with_usage(1000, &kept_usage(0));
+    fixture.publish_with_usage(1001, &kept_usage(1));
+    fixture.skip_run_ticks(58);
+    fixture.publish_with_usage(3000, &kept_usage(2));
+    fixture.publish_with_usage(3001, &kept_usage(3));
+    fixture.seal_minute(0);
+    fixture.seal_minute_derived(1, &crate::SealedApps);
+    fixture.seal_minute_derived(2, &crate::SealedApps);
+    let saved = Session::open(&fixture.root).unwrap();
+
+    let kept = saved.app_histories_replay_nothing(&kept_selected(&saved, 4, 120, 3001));
+
+    assert!(kept.unwrap());
+}
+
+#[test]
+fn app_histories_are_kept_where_a_minute_of_unknown_bounds_holds_no_second_of_their_range() {
+    // Goal: a minute whose wall clock bounds are unknown holds the App histories back only
+    // where one of its observations falls in their range, since the replay reads no other.
+    // Method: seal a minute without its parts, one of its observations of unknown wall time
+    // and the other more than the charted seconds before the last observation, seal the
+    // minutes after it with their parts, and ask at that observation.
+    let fixture = unbounded_fixture(1000);
+    fixture.seal_minute_derived(1, &crate::SealedApps);
+    fixture.seal_minute_derived(2, &crate::SealedApps);
+    let saved = Session::open(&fixture.root).unwrap();
+
+    let kept = saved.app_histories_replay_nothing(&kept_selected(&saved, 5, 120, 3001));
+
+    assert!(kept.unwrap());
+}
+
+#[test]
+fn app_histories_are_not_kept_where_a_minute_of_unknown_bounds_holds_a_second_of_their_range() {
+    // Goal: a minute whose wall clock bounds are unknown and that holds a second of the App
+    // histories' range holds them back.
+    // Method: seal the first minute without its parts, one of its observations of unknown wall
+    // time and the other in the range of the last observation, seal the minutes after it with
+    // their parts, and ask at that observation.
+    let fixture = unbounded_fixture(2400);
+    fixture.seal_minute_derived(1, &crate::SealedApps);
+    fixture.seal_minute_derived(2, &crate::SealedApps);
+    let saved = Session::open(&fixture.root).unwrap();
+
+    let kept = saved.app_histories_replay_nothing(&kept_selected(&saved, 5, 120, 3001));
+
+    assert!(!kept.unwrap());
+}
+
+#[test]
 fn batch_rejects_more_than_the_observation_bound_in_each_metric() {
     // A full ledger is accepted; the next observation fails instead of growing a result.
     let cancellation = Arc::new(Cancellation::default());
@@ -905,6 +1016,34 @@ fn kept_fixture(kept: [bool; 4]) -> Fixture {
     }
 
     fixture
+}
+
+/// Five observations, publications 1 to 5 at run ticks 58 to 60, 119 and 120, with run minute
+/// 0, the first two, sealed without its parts. Its first observation has no wall time, so its
+/// wall clock bounds are unknown, and its second falls at `second`. The others fall at seconds
+/// 2500, 3000 and 3001 and are left to seal.
+fn unbounded_fixture(second: u64) -> Fixture {
+    let mut fixture = Fixture::new();
+    fixture.start_at_run_tick(58);
+    fixture.publish_with_usage(1, &kept_usage(0));
+    fixture.publish_with_usage(second, &kept_usage(1));
+    fixture.seal_with_observations(&[no_wall_time(1)]);
+    fixture.publish_with_usage(2500, &kept_usage(2));
+    fixture.skip_run_ticks(58);
+    fixture.publish_with_usage(3000, &kept_usage(3));
+    fixture.publish_with_usage(3001, &kept_usage(4));
+
+    fixture
+}
+
+/// The observation of `publication` as a collector that knew none of its times sealed it.
+fn no_wall_time(publication: u64) -> persistence::Observation {
+    persistence::Observation {
+        publication,
+        wall_ns: None,
+        continuous_ns: None,
+        awake_ns: None,
+    }
 }
 
 /// The measured process's usage at the observation of a fixture whose index is `index`, which

@@ -301,8 +301,26 @@ fn a_newly_opened_cpu_page_brings_the_cores_of_its_window() {
 fn a_newly_opened_page_brings_the_ranks_its_saved_minutes_keep() {
     // Goal: a hover on a page still reading its App histories shows another observation's top
     // Apps at once, from the ranks the window's sealed minutes keep, with no ranking before.
-    // Method: open the Overview at publication three of a recording sealed with its App ranks,
-    // and preview publication two over the page's first readings.
+    // Method: open the CPU page, whose App history always waits for its next read, at
+    // publication three of a recording sealed with its App ranks, and preview publication two
+    // over the page's first readings.
+    let recording = SealedRecording::with_kept_ranks();
+    let mut reader = super::SnapshotReader::new();
+    reader.command.request = ranked_request_at("cpu", 3);
+    let target = Target::exact(1001, &ranked_identity(2)).unwrap();
+
+    let opened = reader.read(&recording).unwrap().unwrap();
+
+    assert!(opened.histories_pending);
+    assert!(Preview::resident(&opened, &reader.command.request, target).complete);
+}
+
+#[test]
+fn a_page_that_reads_its_app_histories_early_brings_the_ranks_its_saved_minutes_keep() {
+    // Goal: a hover on a page whose first readings brought its App histories shows another
+    // observation's top Apps at once, from the ranks the window's sealed minutes keep.
+    // Method: open the Overview at publication three of a recording sealed with its App ranks
+    // and parts, and preview publication two over the page's first readings.
     let recording = SealedRecording::with_kept_ranks();
     let mut reader = super::SnapshotReader::new();
     reader.command.request = ranked_request_at("overview", 3);
@@ -310,7 +328,6 @@ fn a_newly_opened_page_brings_the_ranks_its_saved_minutes_keep() {
 
     let opened = reader.read(&recording).unwrap().unwrap();
 
-    assert!(opened.histories_pending);
     assert!(Preview::resident(&opened, &reader.command.request, target).complete);
 }
 
@@ -341,13 +358,13 @@ pub(crate) fn kept_window_ranks() -> std::sync::Arc<viewer::WindowRanks> {
     snapshot.app_ranks.unwrap()
 }
 
-/// The ranks the first read of a newly opened Overview brings from a sealed recording whose
-/// minutes keep their App ranks, and whose observations share the run and boot of the input
-/// tests' snapshots.
+/// The ranks the first read of a newly opened page brings from a sealed recording whose
+/// minutes keep their App ranks, while its App histories wait for its next read, and whose
+/// observations share the run and boot of the input tests' snapshots.
 pub(crate) fn opened_window_ranks() -> std::sync::Arc<viewer::WindowRanks> {
     let recording = SealedRecording::with_kept_ranks();
     let mut reader = super::SnapshotReader::new();
-    reader.command.request = ranked_request_at("overview", 3);
+    reader.command.request = ranked_request_at("cpu", 3);
 
     let opened = reader.read(&recording).unwrap().unwrap();
 
