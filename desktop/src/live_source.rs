@@ -139,8 +139,8 @@ struct Mailbox {
     /// The window reading through the worker closed, so the worker drops its page and keeps its
     /// session following the recording until the next window asks for one.
     rest: bool,
-    /// The worker reads no page, so its step opens or follows the session a request reads
-    /// through, which cancelling would throw away.
+    /// The worker reads no page, so its step opens the session a request reads through, or polls
+    /// it, and cancelling would discard the open or cut the poll short for the request to redo.
     resting: bool,
 }
 
