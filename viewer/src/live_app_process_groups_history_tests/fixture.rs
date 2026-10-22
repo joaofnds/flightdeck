@@ -393,7 +393,7 @@ fn seal_window(
     tables.extend(
         derive
             .derive(&persistence::worker::Derivation {
-                identity: window.identity,
+                window,
                 pending: pending.path(),
                 predecessor: None,
             })
