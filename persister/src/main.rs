@@ -20,8 +20,9 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     let options = collector::arguments("persister").and_then(|words| options(&words));
+    let derive = viewer::SealedApps::default();
     match options {
-        Ok((root, memory)) => match persistence::worker::run(&root, memory, &viewer::SealedApps) {
+        Ok((root, memory)) => match persistence::worker::run(&root, memory, &derive) {
             Ok(persistence::worker::Outcome::Complete) => ExitCode::SUCCESS,
             Ok(persistence::worker::Outcome::Owned) => {
                 eprintln!("recording owned by surviving persister; CPU not measured");

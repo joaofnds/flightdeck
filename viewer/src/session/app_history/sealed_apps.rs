@@ -1,5 +1,6 @@
 //! What the persister derives of the Apps of each observation of a window as it seals, so the
 //! viewer shows a saved second's Apps without replaying its minute.
+use std::cell::RefCell;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -33,7 +34,19 @@ const _: () = {
 /// Samples each observation of a window as it seals, from the tables the persister wrote for
 /// it, by the rule the replay of its minute samples it, and keeps the Apps' ranks and every
 /// App's part.
-pub struct SealedApps;
+#[derive(Default)]
+pub struct SealedApps {
+    /// The last observation the derivation sampled, which the next window's first sample takes
+    /// its rates from without replaying the window that holds it.
+    last: RefCell<Option<Sampled>>,
+}
+
+/// An observation a derivation sampled, its frame, and the run it belongs to.
+struct Sampled {
+    run: RunIdentity,
+    reading: Reading,
+    frame: Box<Frame>,
+}
 
 impl Derive for SealedApps {
     fn derive(&self, derivation: &Derivation<'_>) -> Result<Vec<TableManifest>> {
@@ -44,19 +57,14 @@ impl Derive for SealedApps {
         };
         let readings = replayer.readings(derivation.pending)?;
         let first = readings.first().ok_or(Error::Bound("sealed Apps ticks"))?;
+        let last = self.last.take();
         let mut projection = Projection {
             previous: None,
             reading: None,
         };
         if let Some(directory) = derivation.predecessor {
             if let Some(publication) = first.observation.stamp.publication.checked_sub(1) {
-                let mut before = replayer.readings(directory)?;
-                before.retain(|reading| reading.observation.stamp.publication == publication);
-                replayer.frames(directory, &before, |reading, frame| {
-                    projection.previous = Some(frame);
-                    projection.reading = Some(*reading);
-                    Ok(())
-                })?;
+                projection = replayer.predecessor(directory, publication, last)?;
             }
         }
 
@@ -85,6 +93,15 @@ impl Derive for SealedApps {
             projection.reading = Some(*reading);
             Ok(())
         })?;
+        if let Some(frame) = projection.previous {
+            if let Some(reading) = projection.reading {
+                self.last.replace(Some(Sampled {
+                    run: derivation.identity.run,
+                    reading,
+                    frame,
+                }));
+            }
+        }
 
         let mut tables = vec![super::sealed_ranks::encode(&ranks, derivation.pending)?];
         let parts =
@@ -134,6 +151,39 @@ struct Projection {
 }
 
 impl Replayer {
+    /// The observation of `publication` in the predecessor's `directory`, from `last` when the
+    /// derivation sampled it there, since a frame is the same however its run is replayed.
+    fn predecessor(
+        &self,
+        directory: &Path,
+        publication: u64,
+        last: Option<Sampled>,
+    ) -> Result<Projection> {
+        let mut projection = Projection {
+            previous: None,
+            reading: None,
+        };
+        if let Some(last) = last {
+            if last.run == self.run {
+                if last.reading.observation.stamp.publication == publication {
+                    projection.previous = Some(last.frame);
+                    projection.reading = Some(last.reading);
+                    return Ok(projection);
+                }
+            }
+        }
+
+        let mut before = self.readings(directory)?;
+        before.retain(|reading| reading.observation.stamp.publication == publication);
+        self.frames(directory, &before, |reading, frame| {
+            projection.previous = Some(frame);
+            projection.reading = Some(*reading);
+            Ok(())
+        })?;
+
+        Ok(projection)
+    }
+
     fn readings(&self, directory: &Path) -> Result<Vec<Reading>> {
         let ticks = self.source(directory, Table::Ticks)?;
 

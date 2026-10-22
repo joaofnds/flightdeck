@@ -23,7 +23,7 @@ pub fn saved_with_apps() -> Fixture {
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(1000);
     fixture.publish_with_system_rows(1001);
-    fixture.seal_derived(&[], &crate::SealedApps);
+    fixture.seal_derived(&[], &crate::SealedApps::default());
     forget_live_runs(&fixture.root);
 
     fixture

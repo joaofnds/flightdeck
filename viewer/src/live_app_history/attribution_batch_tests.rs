@@ -344,7 +344,7 @@ fn batch_from_parts_whose_plotted_observations_have_a_gap_is_the_batch_their_rep
     for (index, second) in [1000, 10, 1002].into_iter().enumerate() {
         fixture.publish_with_usage(second, &kept_usage(u64::try_from(index).unwrap()));
     }
-    fixture.seal_minute_derived(0, &crate::SealedApps);
+    fixture.seal_minute_derived(0, &crate::SealedApps::default());
     let kept_session = Session::open(&fixture.root).unwrap();
     // The third observation is publication 3, at run tick 2 of the run's first minute.
     let selected = kept_selected(&kept_session, 3, 2, 1002);
@@ -657,8 +657,8 @@ fn app_histories_are_kept_where_only_a_minute_before_their_range_keeps_no_parts(
     fixture.publish_with_usage(3000, &kept_usage(2));
     fixture.publish_with_usage(3001, &kept_usage(3));
     fixture.seal_minute(0);
-    fixture.seal_minute_derived(1, &crate::SealedApps);
-    fixture.seal_minute_derived(2, &crate::SealedApps);
+    fixture.seal_minute_derived(1, &crate::SealedApps::default());
+    fixture.seal_minute_derived(2, &crate::SealedApps::default());
     let saved = Session::open(&fixture.root).unwrap();
 
     let kept = saved.app_histories_replay_nothing(&kept_selected(&saved, 4, 120, 3001));
@@ -674,8 +674,8 @@ fn app_histories_are_kept_where_a_minute_of_unknown_bounds_holds_no_second_of_th
     // and the other more than the charted seconds before the last observation, seal the
     // minutes after it with their parts, and ask at that observation.
     let fixture = unbounded_fixture(1000);
-    fixture.seal_minute_derived(1, &crate::SealedApps);
-    fixture.seal_minute_derived(2, &crate::SealedApps);
+    fixture.seal_minute_derived(1, &crate::SealedApps::default());
+    fixture.seal_minute_derived(2, &crate::SealedApps::default());
     let saved = Session::open(&fixture.root).unwrap();
 
     let kept = saved.app_histories_replay_nothing(&kept_selected(&saved, 5, 120, 3001));
@@ -691,8 +691,8 @@ fn app_histories_are_not_kept_where_a_minute_of_unknown_bounds_holds_a_second_of
     // time and the other in the range of the last observation, seal the minutes after it with
     // their parts, and ask at that observation.
     let fixture = unbounded_fixture(2400);
-    fixture.seal_minute_derived(1, &crate::SealedApps);
-    fixture.seal_minute_derived(2, &crate::SealedApps);
+    fixture.seal_minute_derived(1, &crate::SealedApps::default());
+    fixture.seal_minute_derived(2, &crate::SealedApps::default());
     let saved = Session::open(&fixture.root).unwrap();
 
     let kept = saved.app_histories_replay_nothing(&kept_selected(&saved, 5, 120, 3001));
@@ -1009,7 +1009,7 @@ fn kept_fixture(kept: [bool; 4]) -> Fixture {
     }
     for (minute, kept) in (0..).zip(kept) {
         if kept {
-            fixture.seal_minute_derived(minute, &crate::SealedApps);
+            fixture.seal_minute_derived(minute, &crate::SealedApps::default());
         } else {
             fixture.seal_minute(minute);
         }

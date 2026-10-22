@@ -15,7 +15,7 @@ fn a_window_keeps_the_ranks_the_replay_of_its_minute_gives() {
     fixture.publish_with_system_rows(1000);
     fixture.publish_with_system_rows(1001);
     fixture.publish_with_system_rows(1002);
-    fixture.seal_derived(&[], &crate::SealedApps);
+    fixture.seal_derived(&[], &crate::SealedApps::default());
     let session = Session::open(&fixture.root).unwrap();
 
     let kept = kept_ranks(&session, 1002);
@@ -34,8 +34,8 @@ fn a_window_keeps_the_rates_its_first_observation_takes_from_the_minute_before()
     fixture.start_at_run_tick(59);
     fixture.publish_with_system_rows(1059);
     fixture.publish_with_system_rows(1060);
-    fixture.seal_minute_derived(0, &crate::SealedApps);
-    fixture.seal_minute_derived(1, &crate::SealedApps);
+    fixture.seal_minute_derived(0, &crate::SealedApps::default());
+    fixture.seal_minute_derived(1, &crate::SealedApps::default());
     let session = Session::open(&fixture.root).unwrap();
 
     let kept = kept_ranks(&session, 1060);
@@ -96,7 +96,7 @@ fn a_window_keeps_no_ranks_from_a_table_of_another_version() {
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(1000);
     fixture.publish_with_system_rows(1001);
-    fixture.seal_derived(&[], &crate::SealedApps);
+    fixture.seal_derived(&[], &crate::SealedApps::default());
     let session = Session::open(&fixture.root).unwrap();
     rewrite(&session, APP_RANKS, |frame| {
         let version = vec![VERSION + 1; frame.height()];
@@ -117,7 +117,7 @@ fn a_window_whose_ranks_lack_a_row_its_seal_counted_is_refused() {
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(1000);
     fixture.publish_with_system_rows(1001);
-    fixture.seal_derived(&[], &crate::SealedApps);
+    fixture.seal_derived(&[], &crate::SealedApps::default());
     let session = Session::open(&fixture.root).unwrap();
     rewrite(&session, APP_RANKS, |frame| {
         *frame = frame.head(Some(frame.height() - 1));
@@ -137,7 +137,7 @@ fn a_window_whose_ranks_skip_a_position_is_refused() {
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(1000);
     fixture.publish_with_system_rows(1001);
-    fixture.seal_derived(&[], &crate::SealedApps);
+    fixture.seal_derived(&[], &crate::SealedApps::default());
     let session = Session::open(&fixture.root).unwrap();
     rewrite(&session, APP_RANKS, |frame| {
         let positions: Vec<Option<u8>> = (0..frame.height())
@@ -165,7 +165,7 @@ impl Derive for Occupied {
         let path = derivation.pending.join(format!("{APP_PARTS}.parquet"));
         std::fs::write(path, b"occupied").unwrap();
 
-        crate::SealedApps.derive(derivation)
+        crate::SealedApps::default().derive(derivation)
     }
 }
 

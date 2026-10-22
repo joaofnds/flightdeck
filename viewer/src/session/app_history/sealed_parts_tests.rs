@@ -19,7 +19,7 @@ fn a_window_keeps_the_parts_the_replay_of_its_minute_gives_every_app() {
     fixture.publish_with_system_rows(1000);
     fixture.publish_with_system_rows(1001);
     fixture.publish_with_system_rows(1002);
-    fixture.seal_derived(&[], &crate::SealedApps);
+    fixture.seal_derived(&[], &crate::SealedApps::default());
     let session = Session::open(&fixture.root).unwrap();
     let replayed = replayed_samples(&session, 1002);
     let keys = app_keys(&replayed[2]);
@@ -43,7 +43,7 @@ fn a_window_keeps_the_state_and_reasons_of_each_process_the_replay_gives() {
     // gives.
     let mut fixture = Fixture::new();
     publish_changing_processes(&mut fixture);
-    fixture.seal_derived(&[], &crate::SealedApps);
+    fixture.seal_derived(&[], &crate::SealedApps::default());
     let session = Session::open(&fixture.root).unwrap();
     let replayed = replayed_samples(&session, 1003);
     let keys = app_keys(&replayed[2]);
@@ -77,7 +77,7 @@ fn a_window_keeps_the_rows_of_each_app_side_by_side_across_its_observations() {
         ];
         named::publish(&mut fixture, tick, &rows);
     }
-    fixture.seal_derived(&[], &crate::SealedApps);
+    fixture.seal_derived(&[], &crate::SealedApps::default());
     let session = Session::open(&fixture.root).unwrap();
 
     let runs = kept_runs(&session);
@@ -119,8 +119,36 @@ fn a_window_keeps_the_rates_its_first_observation_takes_from_the_minute_before()
     fixture.start_at_run_tick(59);
     fixture.publish_with_system_rows(1059);
     fixture.publish_with_system_rows(1060);
-    fixture.seal_minute_derived(0, &crate::SealedApps);
-    fixture.seal_minute_derived(1, &crate::SealedApps);
+    fixture.seal_minute_derived(0, &crate::SealedApps::default());
+    fixture.seal_minute_derived(1, &crate::SealedApps::default());
+    let session = Session::open(&fixture.root).unwrap();
+    let replayed = replayed_samples(&session, 1060);
+    let keys = app_keys(&replayed[1]);
+
+    let kept = kept_parts(&session, 1060, &keys[0]);
+
+    assert_eq!(kept.len(), 2);
+    assert_ne!(kept[1].paging["previous"], Value::Null);
+    assert_eq!(vec![kept], replayed_parts(&replayed, &keys[..1]));
+}
+
+#[test]
+fn a_window_takes_the_minute_before_from_the_derivation_that_sealed_it() {
+    // Goal: a derivation gives the first observation of a window its rates from the last
+    // observation it sampled of the minute before, without reading that minute again, as the
+    // replay of both minutes gives them.
+    // Method: seal run ticks 59 and 60 in two minutes with one derivation while the first
+    // minute's tables are hidden from it, restore them, and compare the parts of tick 60 with
+    // those a replay gives.
+    let mut fixture = Fixture::new();
+    fixture.start_at_run_tick(59);
+    fixture.publish_with_system_rows(1059);
+    fixture.publish_with_system_rows(1060);
+    let derivation = crate::SealedApps::default();
+    fixture.seal_minute_derived(0, &derivation);
+    let hidden = hide_saved_tables(&fixture.root);
+    fixture.seal_minute_derived(1, &derivation);
+    restore_saved_tables(&hidden);
     let session = Session::open(&fixture.root).unwrap();
     let replayed = replayed_samples(&session, 1060);
     let keys = app_keys(&replayed[1]);
@@ -309,8 +337,8 @@ fn a_read_decodes_again_the_parts_past_its_bound() {
     fixture.skip_run_ticks(58);
     fixture.publish_with_system_rows(1060);
     fixture.publish_with_system_rows(1061);
-    fixture.seal_minute_derived(0, &crate::SealedApps);
-    fixture.seal_minute_derived(1, &crate::SealedApps);
+    fixture.seal_minute_derived(0, &crate::SealedApps::default());
+    fixture.seal_minute_derived(1, &crate::SealedApps::default());
     let session = Session::open(&fixture.root).unwrap();
     let key = app_keys(&replayed_samples(&session, 1001)[1]).remove(0);
     let first_minute = kept_parts_bytes(&session, 1001, &key);
@@ -351,7 +379,7 @@ impl Shown {
 fn sealed_seconds_with_parts(fixture: &mut Fixture) -> Session {
     fixture.publish_with_system_rows(1000);
     fixture.publish_with_system_rows(1001);
-    fixture.seal_derived(&[], &crate::SealedApps);
+    fixture.seal_derived(&[], &crate::SealedApps::default());
 
     Session::open(&fixture.root).unwrap()
 }
@@ -422,6 +450,69 @@ fn replayed_samples(session: &Session, second: u64) -> Vec<Sample> {
         .unwrap();
 
     replayed
+}
+
+#[test]
+fn a_window_replays_the_minute_before_when_its_derivation_sealed_an_earlier_one() {
+    // Goal: a derivation whose last sampled observation is not the one before the window's
+    // first takes that one from the minute before, as the replay of the minutes gives it.
+    // Method: seal run ticks 59, 60 and 119, and 120 in three minutes, the second with another
+    // derivation, and compare the parts of tick 120 with those a replay gives.
+    let mut fixture = Fixture::new();
+    fixture.start_at_run_tick(59);
+    fixture.publish_with_system_rows(1059);
+    fixture.publish_with_system_rows(1060);
+    fixture.skip_run_ticks(58);
+    fixture.publish_with_system_rows(1119);
+    fixture.publish_with_system_rows(1120);
+    let derivation = crate::SealedApps::default();
+    fixture.seal_minute_derived(0, &derivation);
+    fixture.seal_minute_derived(1, &crate::SealedApps::default());
+    fixture.seal_minute_derived(2, &derivation);
+    let session = Session::open(&fixture.root).unwrap();
+    let replayed = replayed_samples(&session, 1120);
+    let keys = app_keys(&replayed[3]);
+
+    let kept = kept_parts(&session, 1120, &keys[0]);
+
+    assert_eq!(kept.len(), 4);
+    assert_ne!(kept[3].paging["previous"], Value::Null);
+    assert_eq!(vec![kept], replayed_parts(&replayed, &keys[..1]));
+}
+
+/// Overwrites the tables the persister wrote for the sealed minutes, keeping their App tables,
+/// so a read of them fails, and returns where outside the recording each one's bytes went.
+fn hide_saved_tables(root: &Path) -> Vec<(PathBuf, PathBuf)> {
+    let outside = root.with_extension("hidden");
+    std::fs::create_dir(&outside).unwrap();
+    let mut hidden = Vec::new();
+    let mut directories = vec![root.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        for entry in std::fs::read_dir(&directory).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_str().unwrap();
+            if path.is_dir() {
+                directories.push(path);
+            } else {
+                if name.ends_with(".parquet") && !name.starts_with("app_") {
+                    let aside = outside.join(hidden.len().to_string());
+                    std::fs::copy(&path, &aside).unwrap();
+                    std::fs::write(&path, b"hidden").unwrap();
+                    hidden.push((path, aside));
+                }
+            }
+        }
+    }
+    assert!(!hidden.is_empty());
+
+    hidden
+}
+
+fn restore_saved_tables(hidden: &[(PathBuf, PathBuf)]) {
+    for (path, aside) in hidden {
+        std::fs::copy(aside, path).unwrap();
+    }
+    std::fs::remove_dir_all(hidden[0].1.parent().unwrap()).unwrap();
 }
 
 /// The series a row of the window's table belongs to: the App's kind and key, the row's kind,

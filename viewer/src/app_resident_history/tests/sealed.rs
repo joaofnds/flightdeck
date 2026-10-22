@@ -64,7 +64,7 @@ fn resident_history_from_parts_with_a_gap_in_plotted_observations_is_their_repla
     for (index, second) in [1000, 10, 1002].into_iter().enumerate() {
         fixture.publish_with_usage(second, &usage(11 + 7 * u64::try_from(index).unwrap()));
     }
-    fixture.seal_minute_derived(0, &crate::SealedApps);
+    fixture.seal_minute_derived(0, &crate::SealedApps::default());
     let session = resident_at(&fixture, 1002);
 
     let (kept, reads) = resident_history(&session);
@@ -143,7 +143,7 @@ fn resident_history_from_parts_counts_only_the_live_processes_outside_every_app(
     let mut fixture = Fixture::new();
     publish_unknown_program(&mut fixture);
     publish_exit_only(&mut fixture);
-    fixture.seal_derived(&[], &crate::SealedApps);
+    fixture.seal_derived(&[], &crate::SealedApps::default());
     let session = resident_at(&fixture, 1001);
 
     let (kept, reads) = resident_history(&session);
@@ -163,7 +163,7 @@ fn resident_history_from_parts_leaves_out_the_apps_whose_members_all_exited() {
     let mut fixture = Fixture::new();
     fixture.publish_with_usage(1000, &usage(11));
     publish_exit_only(&mut fixture);
-    fixture.seal_derived(&[], &crate::SealedApps);
+    fixture.seal_derived(&[], &crate::SealedApps::default());
     let session = resident_at(&fixture, 1001);
 
     let (kept, reads) = resident_history(&session);
@@ -308,7 +308,7 @@ fn sealed_minutes(kept: [bool; 4]) -> Fixture {
     }
     for (minute, kept) in (0..).zip(kept) {
         if kept {
-            fixture.seal_minute_derived(minute, &crate::SealedApps);
+            fixture.seal_minute_derived(minute, &crate::SealedApps::default());
         } else {
             fixture.seal_minute(minute);
         }

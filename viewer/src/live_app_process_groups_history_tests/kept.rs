@@ -14,7 +14,7 @@ fn restores_the_groups_a_replay_gives_from_the_parts_a_window_keeps() {
     // version it does not read.
     let mut fixture = Fixture::new();
     publish_app(&mut fixture, &[1, 2]);
-    fixture.seal_derived(&[], &SealedApps);
+    fixture.seal_derived(&[], &SealedApps::default());
     retire(&fixture);
     let mut session = LiveSession::open(&fixture.root).unwrap();
 
@@ -33,7 +33,7 @@ fn reads_no_saved_source_for_the_groups_of_a_window_that_keeps_parts() {
     // and count the saved sources the App's process groups history reads.
     let mut fixture = Fixture::new();
     publish_app(&mut fixture, &[1, 2]);
-    fixture.seal_derived(&[], &SealedApps);
+    fixture.seal_derived(&[], &SealedApps::default());
     retire(&fixture);
     let mut session = LiveSession::open(&fixture.root).unwrap();
     session.select(1002, 0).unwrap();
@@ -55,7 +55,7 @@ fn restores_the_groups_of_an_app_that_ran_at_no_second_of_a_window_that_keeps_pa
     // neither ran with the groups a replay gives.
     let mut fixture = Fixture::new();
     publish_app(&mut fixture, &[1, 2]);
-    fixture.seal_derived(&[], &SealedApps);
+    fixture.seal_derived(&[], &SealedApps::default());
     retire(&fixture);
     let mut session = LiveSession::open(&fixture.root).unwrap();
 
@@ -74,7 +74,7 @@ fn restores_a_replayed_minute_after_a_minute_that_keeps_parts() {
     // at tick 60 with the groups a replay of both minutes gives.
     let mut fixture = Fixture::new();
     publish_app(&mut fixture, &[59, 60]);
-    fixture.seal_minute_derived(0, &SealedApps);
+    fixture.seal_minute_derived(0, &SealedApps::default());
     fixture.seal_minute(1);
     retire(&fixture);
     let mut session = LiveSession::open(&fixture.root).unwrap();
