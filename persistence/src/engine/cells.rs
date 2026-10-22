@@ -62,12 +62,17 @@ impl<'a, T: PolarsPhysicalType> Cells<'a, T> {
 
     /// The cell of row `index`, which must hold a value.
     pub fn get(&self, index: usize) -> Result<T::Physical<'a>> {
+        self.optional(index)?.ok_or(Error::Bound("query null cell"))
+    }
+
+    /// The cell of row `index`, or `None` where it holds no value.
+    pub fn optional(&self, index: usize) -> Result<Option<T::Physical<'a>>> {
         // The engine panics on a row past the end.
         if index >= self.cells.len() {
             return Err(Error::Bound("query row index"));
         }
 
-        self.cells.get(index).ok_or(Error::Bound("query null cell"))
+        Ok(self.cells.get(index))
     }
 }
 

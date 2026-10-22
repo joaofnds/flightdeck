@@ -1,5 +1,6 @@
 use super::*;
 use collector::ring::Identity;
+use polars::prelude::AnyValue;
 use std::sync::Arc;
 
 fn endpoint() -> Endpoint {

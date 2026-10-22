@@ -1,8 +1,9 @@
 //! Typed committed endpoints feed the same owned aggregate as live publications.
 use collector::processes::Usage;
-use persistence::engine::{Engine, FromCell, Row};
+use persistence::engine::{Cells, Engine, FromCell, Row};
 use polars::prelude::{
-    AnyValue, DataFrame, DataType, LazyFrame, SortMultipleOptions, col, len, lit,
+    BinaryType, DataFrame, DataType, Int32Type, LazyFrame, PolarsPhysicalType, SortMultipleOptions,
+    UInt8Type, UInt64Type, col, len, lit,
 };
 
 use super::{
@@ -457,7 +458,11 @@ fn committed_many_rows(
         source = batch.source,
         publications = batch.publications,
     ))?;
-    let mut rows = BatchRows { frame, index: 0 };
+    let mut rows = BatchCursor {
+        columns: BatchColumns::new(&frame)?,
+        row_count: frame.height(),
+        index: 0,
+    };
     for endpoint in batch.endpoints {
         operation.check()?;
         let size = committed_many_size(endpoint.stamp.publication, sizes);
@@ -467,7 +472,7 @@ fn committed_many_rows(
         operation.check()?;
         consume(frame)?;
     }
-    if rows.next()?.is_some() {
+    if rows.next().is_some() {
         return Err(Error::Bound("committed App batch changed row count"));
     }
 
@@ -475,8 +480,132 @@ fn committed_many_rows(
     operation.check()
 }
 
+/// The rows of a batch, read in the order the batch query sorts them.
+struct BatchCursor<'frame> {
+    columns: BatchColumns<'frame>,
+    row_count: usize,
+    index: usize,
+}
+
+impl BatchCursor<'_> {
+    /// The index of the next row, or `None` past the last.
+    fn next(&mut self) -> Option<usize> {
+        if self.index == self.row_count {
+            return None;
+        }
+
+        let index = self.index;
+        self.index += 1;
+
+        Some(index)
+    }
+}
+
+/// The columns of a batch's rows, each read whole in the type its normalized source holds it
+/// in, which a cell by cell read would convert once for every cell.
+struct BatchColumns<'frame> {
+    pid: Cells<'frame, Int32Type>,
+    process_unique_id: Cells<'frame, UInt64Type>,
+    pid_version: Cells<'frame, Int32Type>,
+    identity_availability: Cells<'frame, UInt8Type>,
+    executable_name: Cells<'frame, BinaryType>,
+    app_path: Cells<'frame, BinaryType>,
+    usage_availability: Cells<'frame, UInt8Type>,
+    usage: UsageColumns<'frame>,
+    publication: Cells<'frame, UInt64Type>,
+    app_origin: Cells<'frame, UInt8Type>,
+    app_event: Cells<'frame, UInt64Type>,
+    app_kind: Cells<'frame, UInt8Type>,
+    app_tick: Cells<'frame, UInt64Type>,
+    threads: Cells<'frame, Int32Type>,
+    gpu_ns: Cells<'frame, UInt64Type>,
+}
+
+impl<'frame> BatchColumns<'frame> {
+    /// The columns of `frame`, in the order the batch query selects them.
+    fn new(frame: &'frame DataFrame) -> Result<Self> {
+        Ok(Self {
+            pid: Cells::new(frame, 0)?,
+            process_unique_id: Cells::new(frame, 1)?,
+            pid_version: Cells::new(frame, 2)?,
+            identity_availability: Cells::new(frame, 3)?,
+            executable_name: Cells::new(frame, 4)?,
+            app_path: Cells::new(frame, 5)?,
+            usage_availability: Cells::new(frame, 6)?,
+            usage: UsageColumns::new(frame, 7)?,
+            publication: Cells::new(frame, 21)?,
+            app_origin: Cells::new(frame, 22)?,
+            app_event: Cells::new(frame, 23)?,
+            app_kind: Cells::new(frame, 24)?,
+            app_tick: Cells::new(frame, 25)?,
+            threads: Cells::new(frame, 26)?,
+            gpu_ns: Cells::new(frame, 27)?,
+        })
+    }
+}
+
+/// The columns of a measured `Usage`, which the batch query selects in its field order.
+struct UsageColumns<'frame> {
+    awake_ns_at_start: Cells<'frame, UInt64Type>,
+    user_ns: Cells<'frame, UInt64Type>,
+    system_ns: Cells<'frame, UInt64Type>,
+    energy_nj: Cells<'frame, UInt64Type>,
+    instructions: Cells<'frame, UInt64Type>,
+    super_instructions: Cells<'frame, UInt64Type>,
+    cycles: Cells<'frame, UInt64Type>,
+    idle_wakeups: Cells<'frame, UInt64Type>,
+    interrupt_wakeups: Cells<'frame, UInt64Type>,
+    pageins: Cells<'frame, UInt64Type>,
+    resident_bytes: Cells<'frame, UInt64Type>,
+    footprint_bytes: Cells<'frame, UInt64Type>,
+    disk_read_bytes: Cells<'frame, UInt64Type>,
+    disk_written_bytes: Cells<'frame, UInt64Type>,
+}
+
+impl<'frame> UsageColumns<'frame> {
+    /// The usage columns of `frame`, which start at column `first`.
+    fn new(frame: &'frame DataFrame, first: usize) -> Result<Self> {
+        Ok(Self {
+            awake_ns_at_start: Cells::new(frame, first)?,
+            user_ns: Cells::new(frame, first + 1)?,
+            system_ns: Cells::new(frame, first + 2)?,
+            energy_nj: Cells::new(frame, first + 3)?,
+            instructions: Cells::new(frame, first + 4)?,
+            super_instructions: Cells::new(frame, first + 5)?,
+            cycles: Cells::new(frame, first + 6)?,
+            idle_wakeups: Cells::new(frame, first + 7)?,
+            interrupt_wakeups: Cells::new(frame, first + 8)?,
+            pageins: Cells::new(frame, first + 9)?,
+            resident_bytes: Cells::new(frame, first + 10)?,
+            footprint_bytes: Cells::new(frame, first + 11)?,
+            disk_read_bytes: Cells::new(frame, first + 12)?,
+            disk_written_bytes: Cells::new(frame, first + 13)?,
+        })
+    }
+
+    /// The usage of row `row`, whose every field must hold a value.
+    fn usage(&self, row: usize) -> Result<Usage> {
+        Ok(Usage {
+            awake_ns_at_start: required_cell(&self.awake_ns_at_start, row)?,
+            user_ns: required_cell(&self.user_ns, row)?,
+            system_ns: required_cell(&self.system_ns, row)?,
+            energy_nj: required_cell(&self.energy_nj, row)?,
+            instructions: required_cell(&self.instructions, row)?,
+            super_instructions: required_cell(&self.super_instructions, row)?,
+            cycles: required_cell(&self.cycles, row)?,
+            idle_wakeups: required_cell(&self.idle_wakeups, row)?,
+            interrupt_wakeups: required_cell(&self.interrupt_wakeups, row)?,
+            pageins: required_cell(&self.pageins, row)?,
+            resident_bytes: required_cell(&self.resident_bytes, row)?,
+            footprint_bytes: required_cell(&self.footprint_bytes, row)?,
+            disk_read_bytes: required_cell(&self.disk_read_bytes, row)?,
+            disk_written_bytes: required_cell(&self.disk_written_bytes, row)?,
+        })
+    }
+}
+
 fn committed_many_members(
-    rows: &mut BatchRows,
+    rows: &mut BatchCursor<'_>,
     frame: &mut Frame,
     endpoint: &Endpoint,
     size: &FrameSize,
@@ -486,15 +615,15 @@ fn committed_many_members(
     for _index in 0..size.count {
         operation.check()?;
         let row = rows
-            .next()?
+            .next()
             .ok_or(Error::Bound("committed App batch changed row count"))?;
-        if required::<u64>(&row, 21)? != frame.stamp.publication {
+        if required_cell(&rows.columns.publication, row)? != frame.stamp.publication {
             return Err(Error::Bound("committed App batch row association"));
         }
 
-        match required::<u8>(&row, 22)? {
-            0 => committed_member(&row, frame)?,
-            1 => committed_event(&row, frame, endpoint, &mut next)?,
+        match required_cell(&rows.columns.app_origin, row)? {
+            0 => committed_member(&rows.columns, row, frame)?,
+            1 => committed_event(&rows.columns, row, frame, endpoint, &mut next)?,
             _ => return Err(Error::Bound("committed App row origin")),
         }
     }
@@ -540,19 +669,19 @@ fn committed_finish(frame: &Frame, size: &FrameSize) -> Result<()> {
     Ok(())
 }
 
-fn committed_member(row: &Row<'_>, frame: &mut Frame) -> Result<()> {
-    let pid = required(row, 0)?;
+fn committed_member(columns: &BatchColumns<'_>, row: usize, frame: &mut Frame) -> Result<()> {
+    let pid = required_cell(&columns.pid, row)?;
     if frame.members.last().is_some_and(|member| member.pid >= pid) {
         return Err(Error::Bound("duplicate committed App PID"));
     }
 
     frame.members.push(Member {
         pid,
-        creation: committed_creation(row)?,
-        program: committed_program(row, &mut frame.arena)?,
-        usage: committed_usage(row)?,
-        gpu_ns: row.get::<Option<u64>>(27)?,
-        threads: row.get::<Option<i32>>(26)?.and_then(super::threads),
+        creation: committed_creation(columns, row)?,
+        program: committed_program(columns, row, &mut frame.arena)?,
+        usage: committed_usage(columns, row)?,
+        gpu_ns: columns.gpu_ns.optional(row)?,
+        threads: columns.threads.optional(row)?.and_then(super::threads),
     });
 
     Ok(())
@@ -570,12 +699,13 @@ fn committed_many_sizes_count(row: &Row<'_>, index: usize) -> Result<usize> {
 }
 
 fn committed_event(
-    row: &Row<'_>,
+    columns: &BatchColumns<'_>,
+    row: usize,
     frame: &mut Frame,
     endpoint: &Endpoint,
     next: &mut u64,
 ) -> Result<()> {
-    let number = required::<u64>(row, 23)?;
+    let number = required_cell(&columns.app_event, row)?;
     if number < *next {
         return Err(Error::Bound("committed App event order"));
     }
@@ -584,7 +714,7 @@ fn committed_event(
         return Err(Error::Bound("committed App event range"));
     }
 
-    if required::<u64>(row, 25)? != endpoint.run_tick {
+    if required_cell(&columns.app_tick, row)? != endpoint.run_tick {
         return Err(Error::Bound("committed App event tick"));
     }
 
@@ -592,35 +722,35 @@ fn committed_event(
         .checked_add(1)
         .ok_or(Error::Bound("committed App event number"))?;
 
-    let pid = required(row, 0)?;
-    let creation = committed_creation(row)?;
+    let pid = required_cell(&columns.pid, row)?;
+    let creation = committed_creation(columns, row)?;
 
-    match required::<u8>(row, 24)? {
+    match required_cell(&columns.app_kind, row)? {
         1 => {
-            committed_event_program(row)?;
+            committed_event_program(columns, row)?;
             frame.starts.push(super::Start {
                 number,
                 pid,
                 creation,
-                program: committed_program(row, &mut frame.arena)?,
+                program: committed_program(columns, row, &mut frame.arena)?,
                 ambiguous: false,
                 exec_number: None,
             });
         }
         2 => {
-            committed_event_program(row)?;
+            committed_event_program(columns, row)?;
             frame.execs.push(super::Exec {
                 number,
                 pid,
                 creation,
-                program: committed_program(row, &mut frame.arena)?,
+                program: committed_program(columns, row, &mut frame.arena)?,
             });
         }
         3 => frame.exits.push(super::Exit {
             number,
             pid,
             creation,
-            usage: committed_usage(row)?,
+            usage: committed_usage(columns, row)?,
             ambiguous: false,
         }),
         _ => return Err(Error::Bound("committed App event kind")),
@@ -629,8 +759,8 @@ fn committed_event(
     Ok(())
 }
 
-fn committed_event_program(row: &Row<'_>) -> Result<()> {
-    if required::<u8>(row, 6)? != 3 {
+fn committed_event_program(columns: &BatchColumns<'_>, row: usize) -> Result<()> {
+    if required_cell(&columns.usage_availability, row)? != 3 {
         return Err(Error::Bound("committed App event program usage"));
     }
 
@@ -642,8 +772,20 @@ fn required<T: FromCell>(row: &Row<'_>, index: usize) -> Result<T> {
         .ok_or(Error::Bound("missing committed App field"))
 }
 
-fn committed_creation(row: &Row<'_>) -> Result<Option<ProcessCreation>> {
-    match (row.get(1)?, row.get(2)?) {
+fn required_cell<'frame, T: PolarsPhysicalType>(
+    cells: &Cells<'frame, T>,
+    row: usize,
+) -> Result<T::Physical<'frame>> {
+    cells
+        .optional(row)?
+        .ok_or(Error::Bound("missing committed App field"))
+}
+
+fn committed_creation(columns: &BatchColumns<'_>, row: usize) -> Result<Option<ProcessCreation>> {
+    match (
+        columns.process_unique_id.optional(row)?,
+        columns.pid_version.optional(row)?,
+    ) {
         (Some(unique_id), Some(pid_version)) => Ok(Some(ProcessCreation {
             unique_id,
             pid_version,
@@ -654,10 +796,11 @@ fn committed_creation(row: &Row<'_>) -> Result<Option<ProcessCreation>> {
 }
 
 fn committed_program(
-    row: &Row<'_>,
+    columns: &BatchColumns<'_>,
+    row: usize,
     arena: &mut Vec<u8>,
 ) -> Result<std::result::Result<ProgramSpan, IdentityUnavailable>> {
-    let reason = match required::<u8>(row, 3)? {
+    let reason = match required_cell(&columns.identity_availability, row)? {
         0 => None,
         1 => Some(IdentityUnavailable::Refused),
         2 => Some(IdentityUnavailable::Gone),
@@ -672,20 +815,11 @@ fn committed_program(
         return Ok(Err(reason));
     }
 
-    let executable = row.value(4)?;
-    let name = match &executable {
-        AnyValue::Binary(bytes) => *bytes,
-        AnyValue::BinaryOwned(bytes) => bytes.as_slice(),
-        _ => return Err(Error::Bound("committed App executable bytes")),
-    };
-
-    let app = row.value(5)?;
-    let app_path = match &app {
-        AnyValue::Null => None,
-        AnyValue::Binary(bytes) => Some(*bytes),
-        AnyValue::BinaryOwned(bytes) => Some(bytes.as_slice()),
-        _ => return Err(Error::Bound("committed App path bytes")),
-    };
+    let name = columns
+        .executable_name
+        .optional(row)?
+        .ok_or(Error::Bound("committed App executable bytes"))?;
+    let app_path = columns.app_path.optional(row)?;
     let app_bytes = app_path.map_or(0, <[u8]>::len);
 
     if arena.len() + name.len() + app_bytes > arena.capacity() {
@@ -701,24 +835,12 @@ fn committed_program(
     )))
 }
 
-fn committed_usage(row: &Row<'_>) -> Result<std::result::Result<Usage, Unavailable>> {
-    match required::<u8>(row, 6)? {
-        0 => Ok(Ok(Usage {
-            awake_ns_at_start: required(row, 7)?,
-            user_ns: required(row, 8)?,
-            system_ns: required(row, 9)?,
-            energy_nj: required(row, 10)?,
-            instructions: required(row, 11)?,
-            super_instructions: required(row, 12)?,
-            cycles: required(row, 13)?,
-            idle_wakeups: required(row, 14)?,
-            interrupt_wakeups: required(row, 15)?,
-            pageins: required(row, 16)?,
-            resident_bytes: required(row, 17)?,
-            footprint_bytes: required(row, 18)?,
-            disk_read_bytes: required(row, 19)?,
-            disk_written_bytes: required(row, 20)?,
-        })),
+fn committed_usage(
+    columns: &BatchColumns<'_>,
+    row: usize,
+) -> Result<std::result::Result<Usage, Unavailable>> {
+    match required_cell(&columns.usage_availability, row)? {
+        0 => Ok(Ok(columns.usage.usage(row)?)),
         1 => Ok(Err(Unavailable::Refused)),
         2 => Ok(Err(Unavailable::Gone)),
         _ => Err(Error::Bound("committed App usage availability")),

@@ -97,6 +97,18 @@ fn refuses_a_null_typed_cell() {
 }
 
 #[test]
+fn reads_a_null_typed_cell_as_absent_where_absence_is_allowed() {
+    // Goal: a nullable typed read tells a cell with no value from one that holds zero.
+    // Method: read a null cell and a zero cell of one counter column.
+    let frame = DataFrame::new(2, vec![Column::new("counter".into(), [None, Some(0u64)])]).unwrap();
+    let counters = Cells::<UInt64Type>::new(&frame, 0).unwrap();
+
+    let cells = (counters.optional(0).unwrap(), counters.optional(1).unwrap());
+
+    assert_eq!(cells, (None, Some(0)));
+}
+
+#[test]
 fn refuses_a_typed_read_of_a_column_held_in_another_type() {
     // Goal: a typed read converts no cell, so a column of another width is refused whole, even
     // one whose every value the type asked for holds, where a row read converts each cell.
@@ -126,9 +138,10 @@ fn refuses_a_typed_cell_past_the_last_row() {
     let frame = DataFrame::new(1, vec![Column::new("counter".into(), [7u64])]).unwrap();
     let counters = Cells::<UInt64Type>::new(&frame, 0).unwrap();
 
-    let result = counters.get(1);
+    let result = (counters.get(1), counters.optional(1));
 
-    assert!(matches!(result, Err(Error::Bound("query row index"))));
+    assert!(matches!(result.0, Err(Error::Bound("query row index"))));
+    assert!(matches!(result.1, Err(Error::Bound("query row index"))));
 }
 
 #[test]

@@ -1,4 +1,5 @@
 use super::*;
+use polars::prelude::AnyValue;
 
 fn event(connection: &Engine) {
     use AnyValue::{Binary, Int32, UInt64};
