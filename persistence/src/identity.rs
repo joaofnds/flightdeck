@@ -133,20 +133,20 @@ struct ValidationColumns<'frame> {
 }
 
 impl<'frame> ValidationColumns<'frame> {
-    /// The columns of `frame`, in the order the validation query selects them.
+    /// The columns of `frame`, by the names the validation query gives them.
     fn new(frame: &'frame DataFrame) -> Result<Self> {
         Ok(Self {
-            identity_version: Cells::new(frame, 0)?,
-            identity_availability: Cells::new(frame, 1)?,
-            process_unique_id: Cells::new(frame, 2)?,
-            pid_version: Cells::new(frame, 3)?,
-            executable_name: Cells::new(frame, 4)?,
-            app_path: Cells::new(frame, 5)?,
-            usage_availability: Cells::new(frame, 6)?,
-            usage_present: Cells::new(frame, 7)?,
-            usage_absent: Cells::new(frame, 8)?,
-            source_usage_availability: Cells::new(frame, 9)?,
-            observation_present: Cells::new(frame, 10)?,
+            identity_version: Cells::named(frame, "identity_version")?,
+            identity_availability: Cells::named(frame, "identity_availability")?,
+            process_unique_id: Cells::named(frame, "process_unique_id")?,
+            pid_version: Cells::named(frame, "pid_version")?,
+            executable_name: Cells::named(frame, "executable_name")?,
+            app_path: Cells::named(frame, "app_path")?,
+            usage_availability: Cells::named(frame, "usage_availability")?,
+            usage_present: Cells::named(frame, "usage_present")?,
+            usage_absent: Cells::named(frame, "usage_absent")?,
+            source_usage_availability: Cells::named(frame, "source_usage_availability")?,
+            observation_present: Cells::named(frame, "observation_present")?,
         })
     }
 }

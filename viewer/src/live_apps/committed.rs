@@ -378,13 +378,13 @@ struct SizeColumns<'frame> {
 impl<'frame> SizeColumns<'frame> {
     fn new(frame: &'frame DataFrame) -> Result<Self> {
         Ok(Self {
-            publication: Cells::new(frame, 0)?,
-            count: Cells::new(frame, 1)?,
-            bytes: Cells::new(frame, 2)?,
-            members: Cells::new(frame, 3)?,
-            starts: Cells::new(frame, 4)?,
-            execs: Cells::new(frame, 5)?,
-            exits: Cells::new(frame, 6)?,
+            publication: Cells::named(frame, "publication")?,
+            count: Cells::named(frame, "count")?,
+            bytes: Cells::named(frame, "bytes")?,
+            members: Cells::named(frame, "members")?,
+            starts: Cells::named(frame, "starts")?,
+            execs: Cells::named(frame, "execs")?,
+            exits: Cells::named(frame, "exits")?,
         })
     }
 }
@@ -529,29 +529,32 @@ struct BatchColumns<'frame> {
 }
 
 impl<'frame> BatchColumns<'frame> {
-    /// The columns of `frame`, in the order the batch query selects them.
+    /// The columns of `frame`, by the names the batch query gives them.
     fn new(frame: &'frame DataFrame) -> Result<Self> {
+        // The batch bounds its bytes by this count of columns a row.
+        assert_eq!(frame.width(), BATCH_COLUMNS);
+
         Ok(Self {
-            pid: Cells::new(frame, 0)?,
-            process_unique_id: Cells::new(frame, 1)?,
-            pid_version: Cells::new(frame, 2)?,
-            identity_availability: Cells::new(frame, 3)?,
-            executable_name: Cells::new(frame, 4)?,
-            app_path: Cells::new(frame, 5)?,
-            usage_availability: Cells::new(frame, 6)?,
-            usage: UsageColumns::new(frame, 7)?,
-            publication: Cells::new(frame, 21)?,
-            app_origin: Cells::new(frame, 22)?,
-            app_event: Cells::new(frame, 23)?,
-            app_kind: Cells::new(frame, 24)?,
-            app_tick: Cells::new(frame, 25)?,
-            threads: Cells::new(frame, 26)?,
-            gpu_ns: Cells::new(frame, 27)?,
+            pid: Cells::named(frame, "pid")?,
+            process_unique_id: Cells::named(frame, "process_unique_id")?,
+            pid_version: Cells::named(frame, "pid_version")?,
+            identity_availability: Cells::named(frame, "identity_availability")?,
+            executable_name: Cells::named(frame, "executable_name")?,
+            app_path: Cells::named(frame, "app_path")?,
+            usage_availability: Cells::named(frame, "usage_availability")?,
+            usage: UsageColumns::new(frame)?,
+            publication: Cells::named(frame, "publication")?,
+            app_origin: Cells::named(frame, "app_origin")?,
+            app_event: Cells::named(frame, "app_event")?,
+            app_kind: Cells::named(frame, "app_kind")?,
+            app_tick: Cells::named(frame, "app_tick")?,
+            threads: Cells::named(frame, "threads")?,
+            gpu_ns: Cells::named(frame, "gpu_ns")?,
         })
     }
 }
 
-/// The columns of a measured `Usage`, which the batch query selects in its field order.
+/// The columns of a measured `Usage`.
 struct UsageColumns<'frame> {
     awake_ns_at_start: Cells<'frame, UInt64Type>,
     user_ns: Cells<'frame, UInt64Type>,
@@ -570,23 +573,23 @@ struct UsageColumns<'frame> {
 }
 
 impl<'frame> UsageColumns<'frame> {
-    /// The usage columns of `frame`, which start at column `first`.
-    fn new(frame: &'frame DataFrame, first: usize) -> Result<Self> {
+    /// The usage columns of `frame`.
+    fn new(frame: &'frame DataFrame) -> Result<Self> {
         Ok(Self {
-            awake_ns_at_start: Cells::new(frame, first)?,
-            user_ns: Cells::new(frame, first + 1)?,
-            system_ns: Cells::new(frame, first + 2)?,
-            energy_nj: Cells::new(frame, first + 3)?,
-            instructions: Cells::new(frame, first + 4)?,
-            super_instructions: Cells::new(frame, first + 5)?,
-            cycles: Cells::new(frame, first + 6)?,
-            idle_wakeups: Cells::new(frame, first + 7)?,
-            interrupt_wakeups: Cells::new(frame, first + 8)?,
-            pageins: Cells::new(frame, first + 9)?,
-            resident_bytes: Cells::new(frame, first + 10)?,
-            footprint_bytes: Cells::new(frame, first + 11)?,
-            disk_read_bytes: Cells::new(frame, first + 12)?,
-            disk_written_bytes: Cells::new(frame, first + 13)?,
+            awake_ns_at_start: Cells::named(frame, "awake_ns_at_start")?,
+            user_ns: Cells::named(frame, "user_ns")?,
+            system_ns: Cells::named(frame, "system_ns")?,
+            energy_nj: Cells::named(frame, "energy_nj")?,
+            instructions: Cells::named(frame, "instructions")?,
+            super_instructions: Cells::named(frame, "super_instructions")?,
+            cycles: Cells::named(frame, "cycles")?,
+            idle_wakeups: Cells::named(frame, "idle_wakeups")?,
+            interrupt_wakeups: Cells::named(frame, "interrupt_wakeups")?,
+            pageins: Cells::named(frame, "pageins")?,
+            resident_bytes: Cells::named(frame, "resident_bytes")?,
+            footprint_bytes: Cells::named(frame, "footprint_bytes")?,
+            disk_read_bytes: Cells::named(frame, "disk_read_bytes")?,
+            disk_written_bytes: Cells::named(frame, "disk_written_bytes")?,
         })
     }
 

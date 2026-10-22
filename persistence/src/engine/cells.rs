@@ -60,6 +60,15 @@ impl<'a, T: PolarsPhysicalType> Cells<'a, T> {
         Ok(Self { cells })
     }
 
+    /// The cells of the column of `frame` named `name`, which must hold them as `T`. A reader
+    /// that names its columns reads each in its own field whatever order a query selects them in.
+    pub fn named(frame: &'a DataFrame, name: &str) -> Result<Self> {
+        let index = frame
+            .get_column_index(name)
+            .ok_or(Error::Bound("query column name"))?;
+        Self::new(frame, index)
+    }
+
     /// The cell of row `index`, which must hold a value.
     pub fn get(&self, index: usize) -> Result<T::Physical<'a>> {
         self.optional(index)?.ok_or(Error::Bound("query null cell"))
