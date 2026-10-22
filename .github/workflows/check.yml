@@ -97,6 +97,12 @@ jobs:
       - name: Refuse ring lock files left in Application Support
         run: '! find "$HOME/Library/Application Support/Flightdeck" -name "*.lock" | grep .'
       - run: cargo build --locked --release -p collector -p persister --bin collector --bin persister
+      # Seals six generated minutes through the persister's own worker and prints each window's
+      # CPU time, so this log shows what a change to sealing costs. The runner shares its machine,
+      # so the step fails only when the run does, never on a number.
+      - run: >-
+          cargo run --locked --release -p persister --bin seal_bench --
+          --windows 6 --processes 1050 --derive apps
       - run: >-
           cargo build --locked --release --manifest-path desktop/Cargo.toml
           --bin flightdeck
