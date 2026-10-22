@@ -151,7 +151,12 @@ impl LiveDashboard {
             target.second
         ))
         .child(ranking_title(metric, heading))
-        .child(Self::app_ranking_entries(ranking, &target, cx))
+        .child(Self::app_ranking_entries(
+            ranking,
+            rankings.app_count,
+            &target,
+            cx,
+        ))
         .into_any_element()
     }
 
@@ -190,16 +195,20 @@ impl LiveDashboard {
 
     fn app_ranking_entries(
         ranking: &Ranking,
+        app_count: u32,
         target: &Target,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if ranking.entries.is_empty() {
+            let text = ranking_empty_text(ranking, app_count);
+            let selector = format!("ranking-empty:{}:{text}", ranking.metric.title());
             return ranking_body()
+                .debug_selector(move || selector.clone())
                 .py(px(20.0))
                 .text_size(px(11.0))
                 .line_height(px(17.0))
                 .text_color(rgb(MUTED))
-                .child("No active app readings.")
+                .child(text)
                 .into_any_element();
         }
 
@@ -300,6 +309,26 @@ const RANKING_BODY_HEIGHT: f32 = 280.0;
 /// The room a ranking's Apps, or the notice standing for them, take in its card.
 fn ranking_body() -> gpui::Div {
     div().h(px(RANKING_BODY_HEIGHT))
+}
+
+/// What a ranking with no ranked App says: that no App ran, or how many Apps ran with no
+/// value of its metric to rank, since an unknown value is not an idle App. The viewer leaves an
+/// App out of a ranking only by counting it unavailable or overflowed, so with no entry those
+/// counts account for every App that ran.
+fn ranking_empty_text(ranking: &Ranking, app_count: u32) -> String {
+    assert!(ranking.entries.is_empty());
+    let unranked = u64::from(ranking.unavailable) + u64::from(ranking.overflowed);
+    assert_eq!(unranked, u64::from(app_count));
+
+    if app_count == 0 {
+        "No active app readings.".into()
+    } else {
+        if app_count == 1 {
+            "Unavailable for 1 app.".into()
+        } else {
+            format!("Unavailable for {app_count} apps.")
+        }
+    }
 }
 
 fn ranking_card(name: &'static str) -> gpui::Div {

@@ -51,6 +51,29 @@ pub fn empty(selected: &Value) -> Rankings {
     )
 }
 
+/// The Apps a ranking could not rank, by why: no reading, or a sum past what it holds.
+pub struct Unranked {
+    pub unavailable: u32,
+    pub overflowed: u32,
+}
+
+/// The top Apps of `selected` when the `unranked` Apps that ran have no reading of any metric,
+/// as in a window sealed before the collector recorded each process's GPU time.
+pub fn unranked(selected: &Value, unranked: &Unranked) -> Rankings {
+    let metrics = METRICS.map(|metric| {
+        let mut ranking = ranking(metric, Vec::new());
+        ranking.unavailable = unranked.unavailable;
+        ranking.overflowed = unranked.overflowed;
+        ranking
+    });
+
+    top_apps(
+        selected,
+        unranked.unavailable + unranked.overflowed,
+        metrics,
+    )
+}
+
 const METRICS: [Metric; 5] = [
     Metric::Cpu,
     Metric::Resident,

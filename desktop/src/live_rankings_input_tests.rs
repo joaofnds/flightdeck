@@ -5,6 +5,7 @@ use serde_json::json;
 
 use super::{InputDriver, InputHarness, PlotExit, accepted_snapshot};
 use crate::live_hover::timings::tests::TimedHover;
+use crate::live_rankings::fixture::{self, Unranked};
 use crate::live_source::tests::rankings::{kept_window_ranks, opened_window_ranks};
 use crate::live_source::{Snapshot, Update};
 
@@ -353,6 +354,91 @@ fn overview_rankings_show_current_measurements_and_explicit_source_limits(cx: &m
         harness
             .driver
             .reading_is_visible("ranking:GPU time:Current:25.0%")
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_ranking_whose_apps_all_lack_a_reading_says_how_many_are_unavailable(cx: &mut TestAppContext) {
+    // Goal: Top apps tells unknown readings apart from no activity, so a window sealed before
+    // per-process GPU time reads unavailable rather than idle, and an App whose sum overflowed
+    // counts as one without a reading. Method: rank two Apps with no reading and one whose sum
+    // overflowed on the Overview and read the GPU ranking's empty state.
+    let mut harness = InputHarness::setup_route(cx, "overview");
+    let unranked = Unranked {
+        unavailable: 2,
+        overflowed: 1,
+    };
+
+    harness
+        .driver
+        .seed_overview_ranked_by(|selected| fixture::unranked(selected, &unranked));
+
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("ranking-empty:GPU time:Unavailable for 3 apps.")
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_ranking_names_one_app_without_a_reading_in_the_singular(cx: &mut TestAppContext) {
+    // Goal: the unavailable count reads as English for one App. Method: rank one App with no
+    // reading of any metric on the Overview and read the GPU ranking's empty state.
+    let mut harness = InputHarness::setup_route(cx, "overview");
+    let unranked = Unranked {
+        unavailable: 1,
+        overflowed: 0,
+    };
+
+    harness
+        .driver
+        .seed_overview_ranked_by(|selected| fixture::unranked(selected, &unranked));
+
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("ranking-empty:GPU time:Unavailable for 1 app.")
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_ranking_whose_only_app_overflowed_reads_unavailable_rather_than_idle(cx: &mut TestAppContext) {
+    // Goal: an App whose sum overflowed used the resource, so a ranking left with only it never
+    // reads as though no App ran. Method: rank one App whose sum overflowed on the Overview and
+    // read the GPU ranking's empty state.
+    let mut harness = InputHarness::setup_route(cx, "overview");
+    let unranked = Unranked {
+        unavailable: 0,
+        overflowed: 1,
+    };
+
+    harness
+        .driver
+        .seed_overview_ranked_by(|selected| fixture::unranked(selected, &unranked));
+
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("ranking-empty:GPU time:Unavailable for 1 app.")
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_ranking_with_no_apps_says_no_app_has_a_reading(cx: &mut TestAppContext) {
+    // Goal: a second at which no App ran keeps its own empty state. Method: rank no Apps on
+    // the Overview and read the GPU ranking's empty state.
+    let mut harness = InputHarness::setup_route(cx, "overview");
+
+    harness.driver.seed_overview_ranked_by(fixture::empty);
+
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("ranking-empty:GPU time:No active app readings.")
     );
     harness.teardown();
 }
@@ -726,6 +812,23 @@ impl InputDriver {
         self.context
             .executor()
             .advance_clock(std::time::Duration::from_secs(1));
+        self.context.run_until_parked();
+    }
+
+    /// Seeds the Overview's readings with the top Apps `rankings` builds for its second.
+    fn seed_overview_ranked_by(
+        &mut self,
+        rankings: impl FnOnce(&serde_json::Value) -> crate::live_rankings::Rankings,
+    ) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            let mut snapshot = ranked_overview(dashboard.generation);
+            snapshot.rankings = Some(Arc::new(rankings(&snapshot.selection["selected"])));
+            dashboard.accept(snapshot);
+            assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
+            cx.notify();
+        });
+        self.context
+            .simulate_resize(gpui::size(px(1320.0), px(3500.0)));
         self.context.run_until_parked();
     }
 
