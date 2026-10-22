@@ -5,7 +5,8 @@ tick to whoever wants it. A separate persister saves those ticks as the recordin
 desktop app draws them live. This page describes how the parts fit together, what happens
 in one tick, and why each part is built the way it is. The measurements behind the choices
 are in [recording-research.md](recording-research.md), and this page names the section each
-number comes from. How to build, run and inspect the collector is in the
+number comes from. [Terms](#terms) explains the macOS calls and the parts of the ring and the
+recording that the page names. How to build, run and inspect the collector is in the
 [README](../README.md#collector).
 
 ## The parts
@@ -90,10 +91,10 @@ When the deadline fires, the collector takes the tick's clocks and reads, in thi
 battery, which it refreshes only once every 60 seconds; the disks; the system readings, such
 as the load average, open files, thermal pressure, GPU memory, each core's clocks and each
 process's GPU time; the machine's counters; the network interfaces; IOReport's frequency
-states and energy; and the SMC's temperatures and fans. Then it lists every pid, reads each
-process's usage, drains the process events of the tick, and reads the resource coalitions
-those processes belong to. Every reading of the tick carries the same tick number and the
-clocks taken at its start, so readings of one second join on equality.
+states and the GPU's energy; and the SMC's temperatures and fans. Then it lists every pid,
+reads each process's usage, drains the process events of the tick, and reads the resource
+coalitions those processes belong to. Every reading of the tick carries the same tick number
+and the clocks taken at its start, so readings of one second join on equality.
 
 It then writes the tick into the next slot of the ring and wakes any reader waiting on it.
 If the work ran past the next deadline, the next tick is the first deadline still ahead. The
@@ -304,6 +305,133 @@ collector exits, and the registry keeps at most the active ring and one earlier 
 file lost or rewritten by another program makes the next collector name its rings afresh, and
 the rings named under the old lock file stay until the Mac restarts (Security). The retention
 period is not built yet, so the recording grows until it is.
+
+## Terms
+
+The [glossary](../GLOSSARY.md) defines the words of the domain this page uses, such as tick,
+missed tick, sealed minute, recording, resource coalition and SMC. The words below name the
+machinery: the macOS calls the collector makes and the parts of the ring and the recording.
+Where a section above says more, the entry points to it.
+
+### Reading macOS
+
+**libproc.** macOS's calls that ask about one process by its pid. `proc_listallpids` lists
+every pid, `proc_pid_rusage` gives a process's usage so far, `proc_pidinfo` gives its counts of
+threads, faults, system calls and context switches and the coalitions it belongs to, and
+`proc_pidpath` gives the path of its executable. They need no root for the user's own
+processes. The usage and the counts are refused for the processes of other users, about a third
+of all processes.
+
+**`proc_pid_rusage`.** The collector asks for its sixth version (`RUSAGE_INFO_V6`), which gives
+a process's CPU time, energy, instructions and cycles, disk bytes read and written, wakeups,
+page-ins, resident memory and memory footprint, the figure Activity Monitor shows as a
+process's memory. All but the two memory readings are counters since the process started. It
+and `proc_pidinfo` together cost about 4 to 12 µs a process.
+
+**Process identity.** macOS reuses pids, so the collector names a process by its pid together
+with the time it started on the awake clock, which `proc_pid_rusage` gives. Two processes that
+held one pid differ in that start time.
+
+**sysctl.** macOS's named values about the system, such as `hw.memsize`, `vm.swapusage`,
+`kern.memorystatus_vm_pressure_level` and `kern.maxproc`, which the collector reads for the
+machine's memory, swap, memory pressure and the most processes it must make room for.
+
+**kqueue and `kevent`.** A kqueue is a queue in the kernel to which a program adds the things
+it wants to hear about. `kevent` adds them, sleeps until one fires, and returns what fired. The
+collector adds a watch on each pid for fork, exec and exit (`EVFILT_PROC`) and a timer for the
+next tick's deadline (`EVFILT_TIMER`), and with `--rescan-ms` a second timer for the delayed
+rescan, so one call waits on all of them. Following processes between ticks says how a fork is
+answered.
+
+**Reaping.** A process that exits stays in the process table, as a zombie, until its parent
+collects its exit status with `wait`. Until then its final usage can still be read.
+
+**The tick's clocks.** Each tick takes three clocks at its start. Wall time is the calendar
+time the user sees. Continuous time, `mach_continuous_time`, counts on while the Mac sleeps,
+and the tick deadlines and the kqueue timer count on it (`NOTE_MACH_CONTINUOUS_TIME`), so a
+change to the wall clock moves no deadline. Awake time, `mach_absolute_time`, stops while the
+Mac sleeps, and is the clock of process start times.
+
+**Quality of service class.** The label a thread gives macOS for how urgent its work is, from
+user-interactive down to background. The lower the class, the later the research saw the
+collector's timer fire, which is why the collector runs at the default class (Why it is built
+this way).
+
+**IOReport.** A private Apple framework, with no public header, that gives counters the
+kernel's drivers keep. The collector reads three groups of its channels: the time each CPU core
+spent in each performance state, the same for the GPU, and from the Energy Model group only the
+GPU's energy. Since each channel is a counter, the difference between two reads is what the
+second between them spent. Every read allocates inside the framework. The machine's power comes
+from the SMC instead.
+
+**IOKit.** Apple's framework for drivers and devices. Its registry holds a node for each
+device, whose properties the collector reads for the disks, the battery, the GPU and the cores'
+clocks, and it is how the collector reaches the SMC.
+
+### The ring
+
+**POSIX shared memory.** A named object the kernel keeps in memory, made with `shm_open` and
+mapped into a process with `mmap`. It is not a file on disk, and it stays until it is unlinked
+or the Mac restarts, which is why a ring outlives its collector. The collector maps it to write
+and every reader maps it read-only.
+
+**Slot.** One of the ring's 120 places for a tick, so the ring holds the last two minutes. The
+collector writes each tick into the slot after the previous one and wraps around at the end.
+
+**Publication.** The number of one write into the ring, which rises by one with each tick
+written. Publication `p` lands in slot `(p - 1) mod 120`. A new ring numbers on from the newest
+publication of the ring before it, so a reader keeps its place across collector restarts. Tick
+numbers skip when the collector slips and publication numbers never skip (The ring).
+
+**Seqlock.** How a reader copies a slot that the writer may be overwriting, without a lock.
+Each slot starts with a sequence word, which the writer sets to `2p - 1` before it writes
+publication `p` and to `2p` once it has written it. A reader that wants publication `p` reads
+the word, copies the slot and reads the word again, and keeps the copy only if both reads gave
+exactly `2p`. Anything higher means the writer is writing or has already written a later
+publication there, so the reader drops the copy. Anything lower means the ring is broken. The
+writer never waits for a reader.
+
+**Event log.** The process events, each start, exec and exit, written in order into a circle of
+120 × 16,384 records beside the slots. A start is a pid a rescan found new, so a process started
+by `posix_spawn` or found already running has a start and no fork. Each record carries its own
+sequence word, read the same way as a slot's.
+
+**Wake.** Once a slot is written the collector calls `os_sync_wake_by_address_all` on a word of
+the ring, which wakes every reader waiting in `os_sync_wait_on_address_with_timeout` on that
+word, in any process. A reader whose wait macOS refuses looks every 10 ms instead, and the
+persister does not wait at all (The ring).
+
+**Lock file.** The file that holds the current ring's name, under the path and `--ring` name the
+[README](../README.md#collector) gives. The collector holds an exclusive lock on it while it
+runs, and readers find the ring by reading the name from it (The ring).
+
+### The recording
+
+**Window.** The span of 60 elapsed seconds of a run that the persister seals together, one
+Parquet file per table, and the final window of a run may be shorter. Windows are kept by run
+and by elapsed day, 1,440 windows a day. A sealed window is what the glossary calls a sealed
+minute.
+
+**Series.** The readings of one process, coalition or other thing across a window. The persister
+sorts each table by its series, the process tables by process identity, so the values of one
+series sit together, which is what makes them compress to 0.24 bytes a value (Why it is built
+this way).
+
+**Parquet.** A file format that stores a table by column rather than by row, so the values of a
+column sit together and compress well, and a query reads only the columns it names. The
+persister compresses the columns with Zstandard at level 3 and writes groups of 16,384 rows,
+each with the minimum, maximum and null count of every column, so a query can skip a group that
+cannot match.
+
+**Polars.** A Rust library for tables in memory. The persister uses it to sort each window's
+readings, derive the per-App tables and write the Parquet files.
+
+**Commit marker.** A hard link, under the recording's `commits/` directory, to the metadata file
+of a window, made once every file of the window is synced to disk. A window belongs to the
+recording only once its marker exists (The persister and the recording).
+
+**Registry.** The `runs` file in the recording, which names the active run and at most one
+earlier run, with each one's ring and collector pid (The persister and the recording).
 
 ## Where the code is
 
