@@ -25,5 +25,6 @@ pub use live::attribution_history::{
 };
 pub use live::window::{ObservationKey, Window};
 pub use session::{
-    CHARTED_SECONDS, EARLIER_STRIDE_SECONDS, LEAD_IN_SECONDS, LOADED_SECONDS, SealedApps, Session,
+    CHARTED_SECONDS, CONTEXT_AFTER_SECONDS, EARLIER_STRIDE_SECONDS, LEAD_IN_SECONDS,
+    LOADED_SECONDS, SealedApps, Session,
 };

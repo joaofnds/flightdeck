@@ -139,7 +139,9 @@ fn run_snapshot(snapshot: &Snapshot) -> Result<Value, String> {
             return Err(format!("Live soak catalog is missing {field}"));
         }
     }
-    let coverage = workflows::history_coverage(&snapshot.selection, "trends", false)?;
+    let context_last_second = workflows::context_last_second(&snapshot.selection)?;
+    let coverage =
+        workflows::history_coverage(&snapshot.selection, "trends", false, context_last_second)?;
     let rankings = super::rankings_report(snapshot)?;
     let selected = &snapshot.selection["selected"];
     Ok(
@@ -373,11 +375,14 @@ mod tests {
 
     fn snapshot(selected: &Value) -> Snapshot {
         let rankings = crate::live_rankings::fixture::empty(selected);
+        // The viewer ends the context at the selected second when it is the newest reading.
+        let second = selected["wall_ns"].as_u64().unwrap() / 1_000_000_000;
         Snapshot {
             generation: 1,
             catalog: json!({"tail_ticks": 1, "tail_cache_bytes": 1024,
                 "tail_cache_bytes_max": 134_217_728, "collector_completed": false}),
-            selection: json!({"selected": selected, "trends": [selected]}),
+            selection: json!({"selected": selected, "context_last_second": second,
+                "trends": [selected]}),
             pages: BTreeMap::from([("fans".to_owned(), json!({"observation": selected}))]),
             apps: None,
             detail: None,
