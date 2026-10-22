@@ -147,6 +147,7 @@ const SHAPE_FIELD_MAX: u64 = 1 << 24;
 pub(super) struct Layout {
     pub(super) battery: Option<super::battery::BatteryLayout>,
     pub(super) disks: Option<super::disks::DisksLayout>,
+    pub(super) system: Option<super::system::SystemLayout>,
     pub(super) version: u64,
     pub(super) shape: Shape,
     pub(super) slot_words: usize,
@@ -259,6 +260,29 @@ impl Layout {
         Some(layout)
     }
 
+    pub(super) fn identity_system(
+        shape: Shape,
+        capacity: super::DictionaryCapacity,
+    ) -> Option<Self> {
+        let mut layout = Self::identity_disks(shape, capacity)?;
+        layout.system = Some(super::system::SystemLayout::plan(
+            layout.word_count(),
+            &layout.system_capacities(),
+        )?);
+
+        Some(layout)
+    }
+
+    /// The capacities of this base layout that size a system record.
+    pub(super) fn system_capacities(&self) -> super::system::SystemCapacities {
+        super::system::SystemCapacities {
+            slot_count: self.shape.slot_count,
+            cores: self.cores.capacity,
+            states: self.gpu_states.capacity,
+            processes: self.process_identities.capacity,
+        }
+    }
+
     fn planned(shape: Shape, version: u64, capacity: super::DictionaryCapacity) -> Option<Self> {
         if !(LAYOUT_VERSION_LEGACY..=LAYOUT_VERSION_IDENTITY).contains(&version) {
             return None;
@@ -309,6 +333,7 @@ impl Layout {
         Some(Self {
             battery: None,
             disks: None,
+            system: None,
             version,
             shape,
             slot_words: widths.slot,
@@ -329,6 +354,10 @@ impl Layout {
     }
 
     pub(super) fn word_count(&self) -> usize {
+        if let Some(system) = &self.system {
+            return system.word_count();
+        }
+
         if let Some(disks) = &self.disks {
             return disks.word_count();
         }

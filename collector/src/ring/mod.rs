@@ -14,6 +14,7 @@ mod event;
 mod identity;
 mod layout;
 mod object;
+mod system;
 mod tick;
 mod view;
 mod wake;
@@ -45,6 +46,7 @@ use object::{
     create_previous, create_unlink, create_unlink_older, open_lock_file, open_ring, place_for_user,
     ring_name,
 };
+pub use system::{SystemPublication, SystemSnapshot};
 pub use tick::{Dropped, IOReportReadings, Readings, SmcReadings, Tick};
 pub use view::{RingReader, TickBuffers};
 
@@ -260,6 +262,23 @@ impl<'place> LockedPlace<'place> {
         )
     }
 
+    pub(crate) fn create_with_system(
+        self,
+        shape: Shape,
+        capacity: DictionaryCapacity,
+        identity: &RunIdentity,
+        start_continuous_ns: u64,
+    ) -> io::Result<Writer> {
+        let layout = Layout::identity_system(shape, capacity)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+
+        Writer::create_layout(
+            self,
+            layout,
+            WriterOrigin::Identified(identity, start_continuous_ns),
+        )
+    }
+
     pub(crate) fn create_unregistered(self, shape: Shape, start_ns: u64) -> io::Result<Writer> {
         Writer::create_inner(self, shape, WriterOrigin::Unregistered(start_ns))
     }
@@ -277,6 +296,7 @@ enum WriterOrigin<'identity> {
 pub struct SupplementalReadings<'a> {
     pub battery: Option<&'a crate::battery::BatteryReading>,
     pub disks: Option<&'a crate::disks::DiskSnapshot>,
+    pub system: Option<&'a SystemPublication<'a>>,
 }
 
 impl Writer {
@@ -371,6 +391,34 @@ impl Writer {
         Ok(u64_from_usize(layout.size_bytes()))
     }
 
+    /// Creates the unchanged identity, battery and disks prefix followed by system records.
+    pub fn create_with_system(
+        place: &Place,
+        shape: Shape,
+        capacity: DictionaryCapacity,
+        identity: &RunIdentity,
+        start_continuous_ns: u64,
+    ) -> io::Result<Self> {
+        LockedPlace::acquire(place)?.create_with_system(
+            shape,
+            capacity,
+            identity,
+            start_continuous_ns,
+        )
+    }
+
+    pub fn system_size_bytes(shape: Shape, capacity: DictionaryCapacity) -> io::Result<u64> {
+        let layout = Layout::identity_system(shape, capacity)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+
+        Ok(u64_from_usize(layout.size_bytes()))
+    }
+
+    #[must_use]
+    pub fn system_supported(&self) -> bool {
+        self.layout.system.is_some()
+    }
+
     /// Whether startup reserved the optional battery records for this writer.
     #[must_use]
     pub fn battery_supported(&self) -> bool {
@@ -453,6 +501,7 @@ impl Writer {
             &SupplementalReadings {
                 battery,
                 disks: None,
+                system: None,
             },
         );
         Ok(())
@@ -473,6 +522,14 @@ impl Writer {
         if let Some(disks) = supplemental.disks {
             crate::disks::encoding::validate(disks)
                 .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+        }
+        if let Some(system) = supplemental.system {
+            if self.layout.system.is_none() {
+                return Err(io::Error::from(io::ErrorKind::Unsupported));
+            }
+            if system.process_gpu_ns.len() != identities.processes.len() {
+                return Err(io::Error::from(io::ErrorKind::InvalidInput));
+            }
         }
         identity::validate_publication(
             self.mapping.words(),
@@ -691,6 +748,18 @@ impl Writer {
         if let Some(layout) = &self.layout.disks {
             disks::store(&words[layout.record(publication)], supplemental.disks);
         }
+        if let Some(layout) = &self.layout.system {
+            let cores = readings
+                .ioreport
+                .as_ref()
+                .map_or(&[][..], |ioreport| ioreport.cores);
+            system::store(
+                &words[layout.record(publication)],
+                layout,
+                supplemental.system,
+                cores.iter().map(|core| core.active_ns().len()),
+            );
+        }
         slot[SLOT_SEQUENCE].store(2 * publication, Ordering::Release);
 
         words[HEADER_PUBLICATION_NEWEST].store(publication, Ordering::Release);
@@ -878,7 +947,10 @@ impl Opened {
                         return false;
                     }
                 }
-                load_disks(words, &self.layout, publication, tick)
+                if !load_disks(words, &self.layout, publication, tick) {
+                    return false;
+                }
+                load_system(words, &self.layout, publication, tick)
             },
             || match &self.layout.battery {
                 Some(layout) => battery::load(&words[layout.record(publication)]),
@@ -929,6 +1001,23 @@ fn store_supplemental_headers(words: &[AtomicU64], layout: &Layout) {
     }
     if let Some(disks) = &layout.disks {
         disks.store_header(words);
+    }
+    if let Some(system) = &layout.system {
+        system.store_header(words);
+    }
+}
+
+fn load_system(words: &[AtomicU64], layout: &Layout, publication: u64, tick: &mut Tick) -> bool {
+    if let Some(layout) = &layout.system {
+        system::load(
+            &words[layout.record(publication)],
+            layout,
+            &mut tick.system_load(),
+        )
+        .is_ok()
+    } else {
+        tick.system_clear();
+        true
     }
 }
 
@@ -1498,3 +1587,6 @@ mod battery_tests;
 
 #[cfg(test)]
 mod disks_tests;
+
+#[cfg(test)]
+mod system_tests;

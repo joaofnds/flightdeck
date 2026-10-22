@@ -50,10 +50,11 @@ impl Entry {
         let status = unsafe {
             IORegistryEntryGetChildIterator(self.0, c"IOService".as_ptr(), &raw mut iterator)
         };
+        // The collector reads children each tick and goes on after a failure, so the error
+        // carries no message, whose text would allocate.
         if status != 0 {
-            return Err(io::Error::other(format!(
-                "IORegistryEntryGetChildIterator failed: {status:#x}"
-            )));
+            eprintln!("collector: IORegistryEntryGetChildIterator returned {status:#x}");
+            return Err(io::Error::from(io::ErrorKind::Other));
         }
         let iterator = Self(iterator);
 
@@ -84,21 +85,30 @@ impl Entry {
         Some(value)
     }
 
-    /// The string property `key` written into `text`, or false where the entry has no such
-    /// property, it holds something other than a string, or it does not fit `text`.
-    pub(crate) fn string(&self, key: &Key, text: &mut [u8]) -> bool {
-        let Some(value) = self.property(key) else {
-            return false;
+    /// The bytes of the string or data property `name` written into `buffer`, and their
+    /// count, or none where the entry has no such property, it holds a collection, or it does
+    /// not fit `buffer`. Unlike a CoreFoundation property, it allocates nothing.
+    pub(crate) fn bytes(
+        &self,
+        name: &CStr,
+        buffer: &mut [u8; PROPERTY_BYTES_MAX],
+    ) -> Option<usize> {
+        let mut size = match u32::try_from(PROPERTY_BYTES_MAX) {
+            Ok(size) => size,
+            Err(error) => unreachable!("{error}"),
         };
-        if unsafe { CFGetTypeID(value.0) } != unsafe { CFStringGetTypeID() } {
-            return false;
+        let status = unsafe {
+            IORegistryEntryGetProperty(self.0, name.as_ptr(), buffer.as_mut_ptr(), &raw mut size)
+        };
+        if status != 0 {
+            return None;
         }
-        let Ok(length) = isize::try_from(text.len()) else {
-            return false;
-        };
-        let written =
-            unsafe { CFStringGetCString(value.0, text.as_mut_ptr().cast(), length, UTF8_ENCODING) };
-        written != 0
+
+        let count = crate::usize_from_u32(size);
+        if count > PROPERTY_BYTES_MAX {
+            return None;
+        }
+        Some(count)
     }
 
     /// The sum of the whole numbers that each dictionary of the array property `key` holds
@@ -159,20 +169,18 @@ impl Entry {
     /// one. The whole array is none where the entry has no such dictionary.
     pub(crate) fn dictionary_counts<const N: usize>(
         &self,
-        key: &str,
-        names: [&str; N],
-    ) -> io::Result<Option<[Option<u64>; N]>> {
-        let Some(dictionary) = self.property(&Key::new(key)?) else {
-            return Ok(None);
-        };
+        key: &Key,
+        names: &[Key; N],
+    ) -> Option<[Option<u64>; N]> {
+        let dictionary = self.property(key)?;
         if unsafe { CFGetTypeID(dictionary.0) } != unsafe { CFDictionaryGetTypeID() } {
-            return Ok(None);
+            return None;
         }
         let mut counts = [None; N];
-        for (name, count) in names.into_iter().zip(counts.iter_mut()) {
-            *count = dictionary_count(dictionary.0, &Key::new(name)?);
+        for (name, count) in names.iter().zip(counts.iter_mut()) {
+            *count = dictionary_count(dictionary.0, name);
         }
-        Ok(Some(counts))
+        Some(counts)
     }
 }
 
@@ -255,6 +263,9 @@ impl Drop for Owned {
     }
 }
 
+/// The most bytes `Entry::bytes` reads, the size of the `io_struct_inband_t` it fills.
+pub(crate) const PROPERTY_BYTES_MAX: usize = 4096;
+
 const UTF8_ENCODING: u32 = 0x0800_0100;
 const NUMBER_SINT64: isize = 4;
 
@@ -268,6 +279,12 @@ unsafe extern "C" {
     fn IOObjectConformsTo(object: u32, class: *const c_char) -> u32;
     fn IOIteratorNext(iterator: u32) -> u32;
     fn IOObjectRelease(object: u32) -> i32;
+    fn IORegistryEntryGetProperty(
+        entry: u32,
+        name: *const c_char,
+        buffer: *mut u8,
+        size: *mut u32,
+    ) -> i32;
     fn IORegistryEntryCreateCFProperty(
         entry: u32,
         key: *const c_void,
@@ -291,13 +308,6 @@ unsafe extern "C" {
     fn CFDictionaryGetTypeID() -> c_ulong;
     fn CFDictionaryGetValue(dictionary: *const c_void, key: *const c_void) -> *const c_void;
     fn CFNumberGetTypeID() -> c_ulong;
-    fn CFStringGetTypeID() -> c_ulong;
-    fn CFStringGetCString(
-        string: *const c_void,
-        buffer: *mut c_char,
-        size: isize,
-        encoding: u32,
-    ) -> u8;
     fn CFArrayGetTypeID() -> c_ulong;
     fn CFArrayGetCount(array: *const c_void) -> isize;
     fn CFArrayGetValueAtIndex(array: *const c_void, index: isize) -> *const c_void;

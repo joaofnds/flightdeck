@@ -18,6 +18,7 @@ mod registry;
 pub mod ring;
 pub mod schedule;
 pub mod smc;
+pub mod system;
 pub mod tracker;
 
 use std::ffi::OsString;

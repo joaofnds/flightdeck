@@ -119,6 +119,16 @@ gives these readings without root in memory the collector owns. Without root,
 exist (probed 2026-10-14 on macOS 27.0.1). No IOReport call the collector knows takes a
 sample into memory the caller passes.
 
+The GPU's memory and each process's GPU time come from the GPU accelerator's
+`PerformanceStatistics` dictionary and the `AppUsage` array of each of its user clients.
+`IORegistryEntryGetProperty`, which copies a property into the caller's buffer, returns
+kIOReturnBadArgument (0xe00002c2) for both, while it copies the 22 bytes of a client's
+`IOUserClientCreator` and the GPU's `gpu-core-count` (probed 2026-10-22 on macOS 27.0.1).
+So the collector copies the creator into its own buffer and reads the dictionary and the
+arrays with `IORegistryEntryCreateCFProperty`, which allocates on every read and falls
+under the same departure. The malloc-family calls these reads add to a tick are not
+counted yet.
+
 Handing a tick over costs 53 to 80 µs of CPU for writer and reader together, so at
 one tick a second the transport is under 0.01% of a core. The ring with a reader woken
 once a tick is the cheapest. A reader paced to the screen costs more, because it wakes

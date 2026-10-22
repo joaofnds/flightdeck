@@ -273,11 +273,7 @@ fn sample_read(
     let open_files = sample_read_keep(open_files(), &mut errors);
     let thermal_pressure =
         thermal.and_then(|thermal| sample_read_keep(thermal.level(), &mut errors));
-    let gpu_memory = gpu
-        .and_then(|gpu| {
-            sample_read_keep(gpu.read().map_err(|error| error.to_string()), &mut errors)
-        })
-        .flatten();
+    let gpu_memory = gpu.and_then(GpuMemory::read);
     let sample = SystemSample {
         second,
         load_average,

@@ -71,6 +71,15 @@ pub struct SmcReadings<'a> {
 pub struct Tick {
     pub battery: Option<crate::battery::BatteryReading>,
     pub disks: Option<crate::disks::DiskSnapshot>,
+    /// The system readings and machine facts, or none where the ring has no system tail or
+    /// the writer published none.
+    pub system: Option<super::system::SystemSnapshot>,
+    /// The clock of each core's active states in kHz, at `state_capacity` words apart, 0
+    /// where unknown.
+    core_state_khz: Vec<u32>,
+    /// The GPU time of each process the tick's identities name, in their order, or empty
+    /// where the ring has no system tail.
+    process_gpu_ns: Vec<Option<u64>>,
     pub times: Option<super::ObservationTimes>,
     pub run_tick: u64,
     pub cpus: Vec<CPUTicks>,
@@ -107,6 +116,9 @@ impl Tick {
         Self {
             battery: None,
             disks: None,
+            system: None,
+            core_state_khz: vec![0; buffers.core_active_ns.len()],
+            process_gpu_ns: Vec::with_capacity(buffers.processes.capacity()),
             times: None,
             run_tick: 0,
             cpus: buffers.cpus,
@@ -154,7 +166,30 @@ impl Tick {
         let Some(needed) = layout.cores.capacity.checked_mul(self.state_capacity) else {
             return false;
         };
+        if self.core_state_khz.len() < needed {
+            return false;
+        }
+        if self.process_gpu_ns.capacity() < layout.process_identities.capacity {
+            return false;
+        }
         self.core_active_ns.len() >= needed
+    }
+
+    /// Where a system load puts the record's clocks and GPU times.
+    pub(super) fn system_load(&mut self) -> super::system::SystemLoad<'_> {
+        super::system::SystemLoad {
+            snapshot: &mut self.system,
+            core_state_khz: &mut self.core_state_khz,
+            stride: self.state_capacity,
+            process_gpu_ns: &mut self.process_gpu_ns,
+        }
+    }
+
+    /// Clears what a ring with no system tail leaves unread.
+    pub(super) fn system_clear(&mut self) {
+        self.system = None;
+        self.core_state_khz.fill(0);
+        self.process_gpu_ns.clear();
     }
 
     pub(super) fn new(layout: &Layout) -> Self {
@@ -162,6 +197,9 @@ impl Tick {
         Self {
             battery: None,
             disks: None,
+            system: None,
+            core_state_khz: vec![0; layout.cores.capacity * state_capacity],
+            process_gpu_ns: Vec::with_capacity(layout.processes.capacity),
             times: None,
             run_tick: 0,
             cpus: Vec::with_capacity(layout.cpus.capacity),
@@ -202,6 +240,24 @@ impl Tick {
 
         let start = core * self.state_capacity;
         &self.core_active_ns[start..start + self.core_state_counts[core]]
+    }
+
+    /// The clock of each of core `core`'s active states in kHz, the slowest first, each 0
+    /// where unknown.
+    #[must_use]
+    pub fn core_state_khz(&self, core: usize) -> &[u32] {
+        assert!(core < self.core_state_counts.len());
+        assert!(self.core_state_counts[core] <= self.state_capacity);
+
+        let start = core * self.state_capacity;
+        &self.core_state_khz[start..start + self.core_state_counts[core]]
+    }
+
+    /// The GPU time of each process the tick's identities name, in their order, none for a
+    /// process with no GPU clients. Empty where the ring has no system tail.
+    #[must_use]
+    pub fn process_gpu_ns(&self) -> &[Option<u64>] {
+        &self.process_gpu_ns
     }
 }
 

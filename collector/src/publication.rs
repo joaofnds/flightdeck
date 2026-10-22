@@ -7,7 +7,7 @@ use collector::cost::Meter;
 use collector::ring::{
     Dropped, IOReportReadings, IdentityObservation, IdentityPublication, IdentityUnavailable,
     ObservationTimes, ProcessIdentity, Readings, SmcReadings, SupplementalReadings,
-    UsageAvailability, Writer,
+    SystemPublication, UsageAvailability, Writer,
 };
 use collector::tracker::{
     EVENTS_PER_TICK_MAX, Event, EventCreation, EventIdentity, WatchDiagnostics,
@@ -15,11 +15,40 @@ use collector::tracker::{
 
 pub(crate) struct Publication {
     identity_enabled: bool,
-    battery_enabled: bool,
-    disks_enabled: bool,
+    tails: Tails,
     events: Vec<IdentityObservation>,
     report: IdentityReport,
     watch_diagnostics: WatchDiagnostics,
+}
+
+/// The optional records the ring holds past its identities, in the order the ring's layouts
+/// add them, so each holds every one before it.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Tails {
+    None,
+    Battery,
+    Disks,
+    System,
+}
+
+impl Tails {
+    fn of(ring: &Writer) -> Self {
+        if ring.system_supported() {
+            assert!(ring.disks_supported());
+            Self::System
+        } else {
+            if ring.disks_supported() {
+                assert!(ring.battery_supported());
+                Self::Disks
+            } else {
+                if ring.battery_supported() {
+                    Self::Battery
+                } else {
+                    Self::None
+                }
+            }
+        }
+    }
 }
 
 impl Publication {
@@ -28,8 +57,7 @@ impl Publication {
 
         Ok(Self {
             identity_enabled,
-            battery_enabled: ring.battery_supported(),
-            disks_enabled: ring.disks_supported(),
+            tails: Tails::of(ring),
             events: Vec::with_capacity(EVENTS_PER_TICK_MAX),
             report: IdentityReport::default(),
             watch_diagnostics: WatchDiagnostics::default(),
@@ -43,15 +71,19 @@ impl Publication {
         ring: &mut Writer,
         times: Option<&ObservationTimes>,
     ) -> io::Result<()> {
-        if self.battery_enabled {
+        if self.tails >= Tails::Battery {
             if let Some(times) = times {
                 collector.read_battery(times.continuous_ns, meter)?;
             }
         }
-        if self.disks_enabled {
+        if self.tails >= Tails::Disks {
             if let Some(times) = times {
                 collector.read_disks(times.continuous_ns, meter)?;
             }
+        }
+
+        if self.tails >= Tails::System {
+            collector.read_system(meter)?;
         }
 
         if self.identity_enabled {
@@ -59,6 +91,9 @@ impl Publication {
             self.report.add(collector.identities.diagnostics());
         } else {
             collector.read(meter)?;
+        }
+        if self.tails >= Tails::System {
+            collector.observe_gpu();
         }
         self.remember_watch_diagnostics(collector.tracker.watch_diagnostics());
 
@@ -133,13 +168,25 @@ impl Publication {
             (snapshot.source_continuous_ns == times.continuous_ns).then_some(snapshot)
         });
 
+        let system = SystemPublication {
+            reading: &collector.system.reading,
+            machine: &collector.system.machine,
+            clock: collector.system.clock(),
+            process_gpu_ns: &collector.process_gpu_ns,
+        };
+        let system = (self.tails >= Tails::System).then_some(&system);
+
         self.publish_readings(
             ring,
             &readings,
             times,
             collector.identities.observations(),
             collector.event_identities(),
-            &SupplementalReadings { battery, disks },
+            &SupplementalReadings {
+                battery,
+                disks,
+                system,
+            },
         )
     }
 
@@ -159,10 +206,10 @@ impl Publication {
                 events: &self.events,
             };
 
-            if self.disks_enabled {
+            if self.tails >= Tails::Disks {
                 ring.publish_with_disks(readings, times, &identities, supplemental)
             } else {
-                if self.battery_enabled {
+                if self.tails >= Tails::Battery {
                     ring.publish_with_battery(readings, times, &identities, supplemental.battery)
                 } else {
                     ring.publish_with_identity(readings, times, &identities)

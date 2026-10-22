@@ -529,6 +529,7 @@ impl SealedRecording {
                 &SupplementalReadings {
                     battery: None,
                     disks: Some(&disks),
+                    system: None,
                 },
             )
             .unwrap();

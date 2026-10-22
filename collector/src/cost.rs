@@ -24,10 +24,14 @@ pub enum Source {
     Ring,
     Battery,
     Disks,
+    /// The load average, open files, thermal pressure, GPU memory and boot time.
+    System,
+    /// Each process's GPU time, from the GPU driver's clients.
+    GpuClients,
 }
 
 impl Source {
-    pub const ALL: [Source; 15] = [
+    pub const ALL: [Source; 17] = [
         Source::Processes,
         Source::Coalitions,
         Source::Events,
@@ -43,6 +47,8 @@ impl Source {
         Source::Ring,
         Source::Battery,
         Source::Disks,
+        Source::System,
+        Source::GpuClients,
     ];
 
     #[must_use]
@@ -63,6 +69,8 @@ impl Source {
             Source::Ring => "ring",
             Source::Battery => "battery",
             Source::Disks => "disks",
+            Source::System => "system",
+            Source::GpuClients => "gpu clients",
         }
     }
 
@@ -85,6 +93,8 @@ impl Source {
             Source::Battery => 12,
             Source::Disks => 13,
             Source::ExecReads => 14,
+            Source::System => 15,
+            Source::GpuClients => 16,
         }
     }
 }

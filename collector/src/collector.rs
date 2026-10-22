@@ -14,6 +14,7 @@ use crate::programs;
 use crate::push_without_growing;
 use crate::ring::Writer;
 use crate::smc::{FANS_MAX, Smc};
+use crate::system::System;
 use crate::tracker::{Counts, EVENTS_PER_TICK_MAX, Event, EventIdentity, Limits, Tracker};
 
 pub struct Collector {
@@ -28,6 +29,9 @@ pub struct Collector {
     pub smc: Option<Smc>,
     pub battery: Option<Battery>,
     pub disks: Option<Disks>,
+    pub system: System,
+    /// The GPU time of each process `identities` observed, in its order.
+    pub process_gpu_ns: Vec<Option<u64>>,
     pub processes: Sweep,
     pub identities: programs::sweep::Sweep,
     pub coalitions: Coalitions,
@@ -79,6 +83,8 @@ impl Collector {
             smc: new_source("SMC", Smc::open()),
             battery: new_battery(),
             disks: new_disks(),
+            system: System::open(),
+            process_gpu_ns: Vec::with_capacity(limits.process_limit),
             processes: Sweep::new(limits.process_limit),
             identities: programs::sweep::Sweep::new(limits.process_limit),
             coalitions: Coalitions::new(timebase, coalition_limit),
@@ -184,6 +190,33 @@ impl Collector {
         }
 
         Ok(())
+    }
+
+    /// Reads the system readings and each process's GPU time, for the tick whose identities
+    /// `observe_gpu` then pairs them with.
+    pub fn read_system(&mut self, meter: &mut Meter) -> io::Result<()> {
+        meter.measure(Source::System, || {
+            self.system.read();
+            Ok(())
+        })?;
+        meter.measure(Source::GpuClients, || {
+            self.system.read_gpu();
+            Ok(())
+        })
+    }
+
+    /// Pairs each process the identities observed with the GPU time `read_system` read.
+    pub fn observe_gpu(&mut self) {
+        let capacity = self.process_gpu_ns.capacity();
+        crate::system::gpu_ns_by_pid(
+            self.identities
+                .observations()
+                .iter()
+                .map(|observation| observation.pid),
+            &self.system.gpu_times,
+            &mut self.process_gpu_ns,
+        );
+        assert_eq!(self.process_gpu_ns.capacity(), capacity);
     }
 
     /// Acquires scheduled identities through the exact writer that will publish them.

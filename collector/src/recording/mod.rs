@@ -58,6 +58,7 @@ enum RingLayout {
     Identity(crate::ring::DictionaryCapacity),
     Battery(crate::ring::DictionaryCapacity),
     Disks(crate::ring::DictionaryCapacity),
+    System(crate::ring::DictionaryCapacity),
 }
 
 impl StartedRecording {
@@ -93,6 +94,32 @@ impl Registration {
             place,
             shape,
             RingLayout::Disks(capacity),
+            start_continuous_ns,
+        )
+    }
+
+    /// Reserves the system records after every optional source, within the live reader's
+    /// mapping bound.
+    pub fn start_with_system(
+        root: &Path,
+        place: &Place,
+        shape: Shape,
+        capacity: crate::ring::DictionaryCapacity,
+        start_continuous_ns: u64,
+    ) -> io::Result<StartedRecording> {
+        let size_bytes = Writer::system_size_bytes(shape, capacity)?;
+        if size_bytes > 1024 * 1024 * 1024 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("system ring requires {size_bytes} bytes, above the 1073741824-byte limit"),
+            ));
+        }
+
+        Self::start_inner(
+            root,
+            place,
+            shape,
+            RingLayout::System(capacity),
             start_continuous_ns,
         )
     }
@@ -205,32 +232,40 @@ impl Registration {
             }
         };
 
-        let mut writer = match layout {
-            RingLayout::Identity(capacity) => locked.create_with_identity(
-                shape,
-                capacity,
-                registration.identity(),
-                start_continuous_ns,
-            )?,
-            RingLayout::Battery(capacity) => locked.create_with_battery(
-                shape,
-                capacity,
-                registration.identity(),
-                start_continuous_ns,
-            )?,
-            RingLayout::Disks(capacity) => locked.create_with_disks(
-                shape,
-                capacity,
-                registration.identity(),
-                start_continuous_ns,
-            )?,
-            RingLayout::Observed => {
-                locked.create_recording(shape, registration.identity(), start_continuous_ns)?
-            }
-        };
+        let mut writer = Self::start_inner_writer(
+            locked,
+            layout,
+            shape,
+            registration.identity(),
+            start_continuous_ns,
+        )?;
 
         writer.retain_recording_ownership(ownership);
         Ok(registration.start_registered(writer))
+    }
+
+    fn start_inner_writer(
+        locked: LockedPlace<'_>,
+        layout: RingLayout,
+        shape: Shape,
+        identity: &RunIdentity,
+        start_continuous_ns: u64,
+    ) -> io::Result<Writer> {
+        match layout {
+            RingLayout::Identity(capacity) => {
+                locked.create_with_identity(shape, capacity, identity, start_continuous_ns)
+            }
+            RingLayout::Battery(capacity) => {
+                locked.create_with_battery(shape, capacity, identity, start_continuous_ns)
+            }
+            RingLayout::Disks(capacity) => {
+                locked.create_with_disks(shape, capacity, identity, start_continuous_ns)
+            }
+            RingLayout::System(capacity) => {
+                locked.create_with_system(shape, capacity, identity, start_continuous_ns)
+            }
+            RingLayout::Observed => locked.create_recording(shape, identity, start_continuous_ns),
+        }
     }
 
     fn start_registered(&self, writer: Writer) -> StartedRecording {

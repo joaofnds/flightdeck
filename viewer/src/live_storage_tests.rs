@@ -145,6 +145,7 @@ fn storage_publish(fixture: &mut RingFixture, tick: u64, disks: Option<&DiskSnap
             &SupplementalReadings {
                 battery: None,
                 disks,
+                system: None,
             },
         )
         .unwrap();

@@ -144,6 +144,7 @@ impl Fixture {
                 &SupplementalReadings {
                     battery: None,
                     disks,
+                    system: None,
                 },
             )
             .unwrap();

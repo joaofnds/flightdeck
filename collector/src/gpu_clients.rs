@@ -4,19 +4,14 @@
 
 use std::io;
 
-use crate::registry::{Entry, Key};
+use crate::registry::{Entry, Key, PROPERTY_BYTES_MAX};
 
 /// The most GPU clients read, past the hundred or so a busy Mac opens.
 pub const CLIENTS_MAX: usize = 4096;
 
-/// The longest client creator text read, past the `pid 99999, ` and the 16-byte process name
-/// macOS writes.
-const CREATOR_BYTES_MAX: usize = 64;
-
 /// The GPU driver's entry and the property names a reading looks up, made once.
 pub struct GpuClients {
     accelerator: Entry,
-    creator: Key,
     usage: Key,
     time: Key,
 }
@@ -32,7 +27,6 @@ impl GpuClients {
     pub fn new() -> io::Result<Self> {
         Ok(Self {
             accelerator: Entry::of_class(c"AGXAccelerator", "GPU accelerator")?,
-            creator: Key::new("IOUserClientCreator")?,
             usage: Key::new("AppUsage")?,
             time: Key::new("accumulatedGPUTime")?,
         })
@@ -40,18 +34,21 @@ impl GpuClients {
 
     /// Replaces `times` with each process's GPU time summed across its open clients, by pid.
     /// A client that names no process, or whose time is missing, is left out. A client that
-    /// closed took its time with it, so a process's time can fall between readings.
+    /// closed took its time with it, so a process's time can fall between readings. Each
+    /// reading allocates every client's usage array, which the I/O Registry gives only as a
+    /// CoreFoundation property, so a caller reads it at most once a second.
     pub fn read(&self, times: &mut Vec<GpuClientTime>) -> io::Result<()> {
+        assert!(times.capacity() >= CLIENTS_MAX);
+
         times.clear();
-        let mut creator = [0_u8; CREATOR_BYTES_MAX];
+        let mut creator = [0_u8; PROPERTY_BYTES_MAX];
         let limit = CLIENTS_MAX;
         self.accelerator
             .each_child_of_class(c"AGXDeviceUserClient", limit, |client| {
-                creator.fill(0);
-                if !client.string(&self.creator, &mut creator) {
+                let Some(count) = client.bytes(c"IOUserClientCreator", &mut creator) else {
                     return Ok(());
-                }
-                let Some(pid) = creator_pid(&creator) else {
+                };
+                let Some(pid) = creator_pid(&creator[..count]) else {
                     return Ok(());
                 };
                 let Some(gpu_ns) = client.array_sum(&self.usage, &self.time) else {
@@ -108,7 +105,7 @@ mod tests {
         // draws every frame through the GPU.
         // Method: read this Mac's GPU clients once.
         let clients = GpuClients::new().unwrap();
-        let mut times = Vec::new();
+        let mut times = Vec::with_capacity(CLIENTS_MAX);
 
         clients.read(&mut times).unwrap();
 
