@@ -5,7 +5,7 @@ use crate::kernel::{self, KernReturn, MachPort, kern_return_check};
 use crate::push_without_growing;
 
 pub struct Smc {
-    connection: Connection,
+    controller: Controller,
     power: FloatKey,
     fans: Vec<FloatKey>,
     soc_sensor: FloatKey,
@@ -26,6 +26,13 @@ struct FloatKey(Key);
 /// A connection to the SMC, through a port that is never 0 and that only this connection
 /// closes.
 struct Connection(MachPort);
+
+/// What `Smc` asks its questions of: the SMC, or in a test the answers an M5 Pro's SMC gave.
+enum Controller {
+    Connection(Connection),
+    #[cfg(test)]
+    Fake(tests::FakeSmc),
+}
 
 /// An `IOKit` service this holds a reference to, which it releases when it drops.
 #[derive(Debug)]
@@ -118,6 +125,27 @@ impl Connection {
         Ok(Self(port))
     }
 
+    fn ask(&self, question: &Message) -> io::Result<Message> {
+        assert_ne!(0, self.0);
+
+        let mut answer = Message::default();
+        let mut answer_size = size_of::<Message>();
+        let returned = unsafe {
+            IOConnectCallStructMethod(
+                self.0,
+                CALL_STRUCT,
+                std::ptr::from_ref(question).cast(),
+                size_of::<Message>(),
+                (&raw mut answer).cast(),
+                &raw mut answer_size,
+            )
+        };
+
+        ask_answered(question, returned, answer_size, answer)
+    }
+}
+
+impl Controller {
     fn hottest_sensors(&self) -> io::Result<Sensors> {
         let key_count = self.key_count()?;
         assert!(key_count <= KEYS_MAX);
@@ -225,7 +253,6 @@ impl Connection {
     }
 
     fn ask(&self, question: &Message) -> io::Result<Message> {
-        assert_ne!(0, self.0);
         assert!(COMMANDS.contains(&question.command));
         assert_eq!(0, question.padding);
         assert_eq!([0; 3], question.info.padding);
@@ -241,21 +268,43 @@ impl Connection {
             assert_eq!(0, question.index);
         }
 
-        let mut answer = Message::default();
-        let mut answer_size = size_of::<Message>();
-        let returned = unsafe {
-            IOConnectCallStructMethod(
-                self.0,
-                CALL_STRUCT,
-                std::ptr::from_ref(question).cast(),
-                size_of::<Message>(),
-                (&raw mut answer).cast(),
-                &raw mut answer_size,
-            )
-        };
-
-        ask_answered(question, returned, answer_size, answer)
+        match self {
+            Controller::Connection(connection) => connection.ask(question),
+            #[cfg(test)]
+            Controller::Fake(fake) => fake.ask(question),
+        }
     }
+}
+
+/// The keys this Mac's SMC lists, and the info and the bytes of each key open or a read asks
+/// about, as the SMC tests read them: the count of keys, a little-endian u32, then each key,
+/// then for each key asked about the key, its info as the SMC lays it out, and its bytes.
+pub fn fixture() -> io::Result<Vec<u8>> {
+    let controller = Controller::Connection(Connection::open()?);
+    let key_count = controller.key_count()?;
+    let fan_count = controller.fan_count()?;
+
+    let mut fixture = Vec::new();
+    fixture.extend_from_slice(&key_count.to_le_bytes());
+    let mut asked = vec![KEY_COUNT, FAN_COUNT, SYSTEM_POWER];
+    asked.extend((0..fan_count).map(Key::fan_speed));
+    for index in 0..key_count {
+        let key = controller.key_at(index)?;
+        fixture.extend_from_slice(&key.0.to_be_bytes());
+        if key.is_soc_temperature() {
+            asked.push(key);
+        }
+    }
+
+    for key in asked {
+        let info = controller.info(key)?;
+        fixture.extend_from_slice(&key.0.to_be_bytes());
+        fixture.extend_from_slice(&info.size.to_le_bytes());
+        fixture.extend_from_slice(&info.kind.to_le_bytes());
+        fixture.extend_from_slice(&[info.attributes, 0, 0, 0]);
+        fixture.extend_from_slice(&controller.bytes(key, info)?);
+    }
+    Ok(fixture)
 }
 
 /// A key, and the info the SMC holds it with.
@@ -355,14 +404,14 @@ impl std::fmt::Debug for Key {
 struct KeyInfo {
     size: u32,
     kind: u32,
-    _attributes: u8,
+    attributes: u8,
     padding: [u8; 3],
 }
 
 const _: () = assert!(size_of::<KeyInfo>() == 12);
 const _: () = assert!(std::mem::offset_of!(KeyInfo, size) == 0);
 const _: () = assert!(std::mem::offset_of!(KeyInfo, kind) == 4);
-const _: () = assert!(std::mem::offset_of!(KeyInfo, _attributes) == 8);
+const _: () = assert!(std::mem::offset_of!(KeyInfo, attributes) == 8);
 const _: () = assert!(std::mem::offset_of!(KeyInfo, padding) == 9);
 
 /// The most bytes a key's value has, the 32 a message's `bytes` hold.
@@ -389,7 +438,7 @@ impl KeyInfo {
         Self {
             size,
             kind: u32::from_be_bytes(kind),
-            _attributes: 0,
+            attributes: 0,
             padding: [0; 3],
         }
     }
@@ -448,17 +497,21 @@ const KEY_NOT_FOUND: u8 = 132;
 
 impl Smc {
     pub fn open() -> io::Result<Self> {
-        let connection = Connection::open()?;
-        let power = connection.float_key(SYSTEM_POWER)?;
-        let fan_count = connection.fan_count()?;
+        Self::open_with(Controller::Connection(Connection::open()?))
+    }
+
+    /// Opens the SMC that `controller` answers for.
+    fn open_with(controller: Controller) -> io::Result<Self> {
+        let power = controller.float_key(SYSTEM_POWER)?;
+        let fan_count = controller.fan_count()?;
         let fans = (0..fan_count)
-            .map(|fan_index| connection.float_key(Key::fan_speed(fan_index)))
+            .map(|fan_index| controller.float_key(Key::fan_speed(fan_index)))
             .collect::<io::Result<Vec<FloatKey>>>()?;
-        let sensors = connection.hottest_sensors()?;
+        let sensors = controller.hottest_sensors()?;
         let fan_rpm = Vec::with_capacity(fans.len());
 
         Ok(Self {
-            connection,
+            controller,
             power,
             fans,
             soc_sensor: sensors.soc,
@@ -476,20 +529,20 @@ impl Smc {
         assert!(self.fans.len() <= usize::from(FANS_MAX));
         assert!(self.fans.len() <= self.fan_rpm.capacity());
 
-        self.power_watts = self.connection.read_float(self.power)?;
+        self.power_watts = self.controller.read_float(self.power)?;
         self.fan_rpm.clear();
         for &fan in &self.fans {
-            push_without_growing(&mut self.fan_rpm, self.connection.read_float(fan)?);
+            push_without_growing(&mut self.fan_rpm, self.controller.read_float(fan)?);
         }
-        self.soc_celsius = self.connection.read_float(self.soc_sensor)?;
+        self.soc_celsius = self.controller.read_float(self.soc_sensor)?;
         self.cpu_celsius = self
             .cpu_sensor
-            .map(|sensor| self.connection.read_float(sensor))
+            .map(|sensor| self.controller.read_float(sensor))
             .transpose()?
             .and_then(usable_celsius);
         self.gpu_celsius = self
             .gpu_sensor
-            .map(|sensor| self.connection.read_float(sensor))
+            .map(|sensor| self.controller.read_float(sensor))
             .transpose()?
             .and_then(usable_celsius);
 
@@ -720,6 +773,7 @@ fn hottest_soc_sensor_of(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::usize_from_u32;
 
     #[link(name = "IOKit", kind = "framework")]
     unsafe extern "C" {
@@ -1061,112 +1115,274 @@ mod tests {
         assert_eq!(io::ErrorKind::InvalidData, checked.unwrap_err().kind());
     }
 
-    #[test]
-    fn refuses_a_key_read_as_a_type_it_does_not_hold() {
-        // Goal: a key read as another type than the one the SMC holds it as is an error, since
-        // the SMC answers such a read with the key's bytes.
-        // Method: read the fan count, a ui8, as a float, which the SMC of an M5 Pro answers
-        // with result 0.
-        let connection = Connection::open().unwrap();
-
-        let read = connection.read(FAN_COUNT, FLOAT);
-
-        assert_eq!(io::ErrorKind::InvalidData, read.unwrap_err().kind());
+    /// An SMC that answers with the keys, the infos and the bytes an M5 Pro's SMC gave
+    /// `smc_fixture`, and holds no answer to a question the collector does not ask.
+    pub(super) struct FakeSmc {
+        keys: Vec<Key>,
+        answers: Vec<Answer>,
     }
 
-    #[test]
-    fn refuses_a_float_key_the_smc_holds_as_another_type() {
-        // Goal: a key open would read each tick as a float, but the SMC holds as another type,
-        // is an error at open, never a float made of the key's bytes.
-        // Method: take the fan count, a ui8 on an M5 Pro, as a float key.
-        let connection = Connection::open().unwrap();
-
-        let taken = connection.float_key(FAN_COUNT);
-
-        assert_eq!(io::ErrorKind::InvalidData, taken.unwrap_err().kind());
+    /// The info and the bytes of a key the collector asks about.
+    struct Answer {
+        key: Key,
+        info: KeyInfo,
+        bytes: [u8; MESSAGE_BYTES_SIZE],
     }
 
-    #[test]
-    fn finds_no_info_for_a_key_the_smc_does_not_hold() {
-        // Goal: asking the SMC about a key it does not hold is a key not found, never a panic
-        // over the result the SMC answers with.
-        // Method: ask for the info of ZZZZ, which the SMC of an M5 Pro answers with result 132.
-        let connection = Connection::open().unwrap();
+    /// The bytes of a key and its info, then its value, in the fixture.
+    const ANSWER_SIZE: usize = 48;
 
-        let info = connection.info(Key::named(*b"ZZZZ"));
+    impl FakeSmc {
+        fn m5_pro() -> Self {
+            Self::from_fixture(include_bytes!("../fixtures/smc/m5_pro_keys.bin"))
+        }
 
-        assert_eq!(io::ErrorKind::NotFound, info.unwrap_err().kind());
-    }
+        fn from_fixture(fixture: &[u8]) -> Self {
+            let (key_count, rest) = fixture.split_at(4);
+            let key_count = u32::from_le_bytes(key_count.try_into().unwrap());
+            let (keys, answers) = rest.split_at(usize_from_u32(key_count) * 4);
 
-    #[test]
-    fn reads_the_power_the_mac_draws() {
-        // Goal: the SMC's system power reads as a draw a running Mac can have.
-        // Method: one read, held above zero and below 500 W. An idle M5 Pro on AC power has
-        // read 0.73 W, so the floor is zero.
-        let mut smc = Smc::open().unwrap();
+            let (keys, []) = keys.as_chunks::<4>() else {
+                panic!("the keys end within a key");
+            };
+            let (answers, []) = answers.as_chunks::<ANSWER_SIZE>() else {
+                panic!("the answers end within an answer");
+            };
 
-        smc.read().unwrap();
+            let keys = keys
+                .iter()
+                .map(|key| Key(u32::from_be_bytes(*key)))
+                .collect();
+            let answers = answers
+                .iter()
+                .map(|answer| Answer {
+                    key: Key(u32::from_be_bytes(answer[0..4].try_into().unwrap())),
+                    info: KeyInfo {
+                        size: u32::from_le_bytes(answer[4..8].try_into().unwrap()),
+                        kind: u32::from_le_bytes(answer[8..12].try_into().unwrap()),
+                        attributes: answer[12],
+                        padding: [0; 3],
+                    },
+                    bytes: answer[16..ANSWER_SIZE].try_into().unwrap(),
+                })
+                .collect();
+            Self { keys, answers }
+        }
 
-        assert!(smc.power_watts() > 0.0, "{} W", smc.power_watts());
-        assert!(smc.power_watts() < 500.0, "{} W", smc.power_watts());
-    }
+        /// This SMC with `key` holding `value` in its first bytes, as whatever type it holds.
+        fn with_value(mut self, key: Key, value: [u8; 4]) -> Self {
+            let answer = self.answers.iter_mut().find(|answer| answer.key == key);
+            answer.unwrap().bytes[..4].copy_from_slice(&value);
+            self
+        }
 
-    #[test]
-    fn reads_a_speed_for_every_fan() {
-        // Goal: each read takes one speed for every fan the SMC counts.
-        // Method: one read, against the fan count's byte read on a connection of the test's
-        // own.
-        let mut smc = Smc::open().unwrap();
-        let [fan_count, ..] = Connection::open()
-            .unwrap()
-            .bytes(FAN_COUNT, UNSIGNED_8)
-            .unwrap();
+        pub(super) fn ask(&self, question: &Message) -> io::Result<Message> {
+            let answer = self.answer(question);
+            ask_answered(question, kernel::KERN_SUCCESS, size_of::<Message>(), answer)
+        }
 
-        smc.read().unwrap();
-
-        assert_eq!(usize::from(fan_count), smc.fan_rpm().len());
-    }
-
-    #[test]
-    fn reads_each_fan_speed_in_rpm() {
-        // Goal: each fan's speed reads as revolutions a minute a fan can turn at.
-        // Method: one read, each speed held at or above 0, a fan standing still, and below
-        // 10,000 rpm.
-        let mut smc = Smc::open().unwrap();
-
-        smc.read().unwrap();
-
-        for &rpm in smc.fan_rpm() {
-            assert!(rpm >= 0.0, "{rpm} rpm");
-            assert!(rpm < 10_000.0, "{rpm} rpm");
+        /// What the M5 Pro's SMC answered `question` with. A key it lists that the fixture
+        /// holds no answer for is a question the collector does not ask, so it fails the test.
+        fn answer(&self, question: &Message) -> Message {
+            let key = Key(question.key);
+            let answer = self.answers.iter().find(|answer| answer.key == key);
+            match question.command {
+                READ_INDEX => Message {
+                    key: self.keys[usize_from_u32(question.index)].0,
+                    ..Message::default()
+                },
+                READ_KEY_INFO => {
+                    let Some(answer) = answer else {
+                        assert!(!self.keys.contains(&key), "no answer for {key:?}");
+                        return Message {
+                            key: key.0,
+                            result: KEY_NOT_FOUND,
+                            ..Message::default()
+                        };
+                    };
+                    Message {
+                        key: key.0,
+                        info: answer.info,
+                        ..Message::default()
+                    }
+                }
+                READ_BYTES => Message {
+                    key: key.0,
+                    info: question.info,
+                    bytes: answer.unwrap().bytes,
+                    ..Message::default()
+                },
+                command => unreachable!("the SMC has no command {command}"),
+            }
         }
     }
 
-    #[test]
-    fn reads_the_temperature_of_the_cpu_and_of_the_gpu() {
-        // Goal: the CPU's and the GPU's sensors read as temperatures a running chip can have,
-        // and no hotter than the hottest sensor of the chip.
-        // Method: one read, each held above 15 and below 115 degrees. The probe of an M5 Pro
-        // under load read up to 95.
-        let mut smc = Smc::open().unwrap();
-
-        smc.read().unwrap();
-
-        let cpu = smc.cpu_celsius().unwrap();
-        let gpu = smc.gpu_celsius().unwrap();
-        assert!(cpu > 15.0 && cpu < 115.0, "{cpu} °C");
-        assert!(gpu > 15.0 && gpu < 115.0, "{gpu} °C");
+    /// The SMC of the M5 Pro that `smc_fixture` recorded, opened.
+    fn m5_pro() -> Smc {
+        Smc::open_with(Controller::Fake(FakeSmc::m5_pro())).unwrap()
     }
 
     #[test]
-    fn reads_the_temperature_of_a_soc_sensor() {
-        // Goal: the SoC sensor reads as a temperature a running chip can have.
-        // Method: one read, held above 15 and below 115 degrees.
-        let mut smc = Smc::open().unwrap();
+    fn reads_the_speed_of_every_fan_the_smc_counts() {
+        // Goal: each read takes the speed of every fan the SMC counts, in the order it numbers
+        // them.
+        // Method: read the M5 Pro's SMC, which counts two fans, at 1787 and 1936 rpm.
+        let mut smc = m5_pro();
 
         smc.read().unwrap();
 
-        assert!(smc.soc_celsius() > 15.0, "{} °C", smc.soc_celsius());
-        assert!(smc.soc_celsius() < 115.0, "{} °C", smc.soc_celsius());
+        let read: Vec<u32> = smc.fan_rpm().iter().map(|rpm| rpm.to_bits()).collect();
+        assert_eq!([1787.0_f32.to_bits(), 1936.0_f32.to_bits()], read[..]);
+    }
+
+    #[test]
+    fn reads_the_power_the_smc_holds() {
+        // Goal: each read takes the power the Mac draws from PSTR, as the SMC holds it.
+        // Method: read the M5 Pro's SMC, whose PSTR holds 17.233929 W.
+        let mut smc = m5_pro();
+
+        smc.read().unwrap();
+
+        assert_eq!(17.233_929_f32.to_bits(), smc.power_watts().to_bits());
+    }
+
+    #[test]
+    fn reads_the_hottest_sensors_of_the_chip_its_cpu_and_its_gpu() {
+        // Goal: open picks the hottest of the chip's sensors among the 3,626 keys the SMC
+        // lists, and the hottest of the CPU's and of the GPU's, and a read takes each.
+        // Method: read the M5 Pro's SMC, whose hottest are TCMb at 60.253124, Tp0C at
+        // 54.203125 and Tg1k at 50.3125 degrees.
+        let mut smc = m5_pro();
+
+        smc.read().unwrap();
+
+        let read = (
+            smc.soc_celsius().to_bits(),
+            smc.cpu_celsius().map(f32::to_bits),
+            smc.gpu_celsius().map(f32::to_bits),
+        );
+        let recorded = (
+            60.253_124_f32.to_bits(),
+            Some(54.203_125_f32.to_bits()),
+            Some(50.3125_f32.to_bits()),
+        );
+        assert_eq!(recorded, read);
+    }
+
+    #[test]
+    fn skips_a_chip_sensor_the_smc_holds_as_another_type_than_a_float() {
+        // Goal: open looks for the hottest sensors only among the chip's keys the SMC holds as
+        // floats, since the bytes of another type read as a float are no temperature.
+        // Method: give TR0Z, which the M5 Pro's SMC holds as an ioft, bytes that read as 99
+        // degrees as a float. The hottest stays TCMb at 60.253124 degrees.
+        let fake = FakeSmc::m5_pro().with_value(Key::named(*b"TR0Z"), 99.0_f32.to_ne_bytes());
+        let mut smc = Smc::open_with(Controller::Fake(fake)).unwrap();
+
+        smc.read().unwrap();
+
+        assert_eq!(60.253_124_f32.to_bits(), smc.soc_celsius().to_bits());
+    }
+
+    /// The tests whose subject is what this Mac's SMC gives, which only a Mac with an SMC runs.
+    /// CI's virtual Mac has none, so its check skips this module.
+    mod hardware {
+        use super::*;
+
+        fn connection() -> Controller {
+            Controller::Connection(Connection::open().unwrap())
+        }
+
+        #[test]
+        fn refuses_a_key_read_as_a_type_it_does_not_hold() {
+            // Goal: a key read as another type than the one the SMC holds it as is an error, since
+            // the SMC answers such a read with the key's bytes.
+            // Method: read the fan count, a ui8, as a float, which the SMC of an M5 Pro answers
+            // with result 0.
+            let controller = connection();
+
+            let read = controller.read(FAN_COUNT, FLOAT);
+
+            assert_eq!(io::ErrorKind::InvalidData, read.unwrap_err().kind());
+        }
+
+        #[test]
+        fn refuses_a_float_key_the_smc_holds_as_another_type() {
+            // Goal: a key open would read each tick as a float, but the SMC holds as another type,
+            // is an error at open, never a float made of the key's bytes.
+            // Method: take the fan count, a ui8 on an M5 Pro, as a float key.
+            let controller = connection();
+
+            let taken = controller.float_key(FAN_COUNT);
+
+            assert_eq!(io::ErrorKind::InvalidData, taken.unwrap_err().kind());
+        }
+
+        #[test]
+        fn finds_no_info_for_a_key_the_smc_does_not_hold() {
+            // Goal: asking the SMC about a key it does not hold is a key not found, never a panic
+            // over the result the SMC answers with.
+            // Method: ask for the info of ZZZZ, which the SMC of an M5 Pro answers with result 132.
+            let controller = connection();
+
+            let info = controller.info(Key::named(*b"ZZZZ"));
+
+            assert_eq!(io::ErrorKind::NotFound, info.unwrap_err().kind());
+        }
+
+        #[test]
+        fn reads_the_power_the_mac_draws() {
+            // Goal: the SMC's system power reads as a draw a running Mac can have.
+            // Method: one read, held above zero and below 500 W. An idle M5 Pro on AC power has
+            // read 0.73 W, so the floor is zero.
+            let mut smc = Smc::open().unwrap();
+
+            smc.read().unwrap();
+
+            assert!(smc.power_watts() > 0.0, "{} W", smc.power_watts());
+            assert!(smc.power_watts() < 500.0, "{} W", smc.power_watts());
+        }
+
+        #[test]
+        fn reads_each_fan_speed_in_rpm() {
+            // Goal: each fan's speed reads as revolutions a minute a fan can turn at.
+            // Method: one read, each speed held at or above 0, a fan standing still, and below
+            // 10,000 rpm.
+            let mut smc = Smc::open().unwrap();
+
+            smc.read().unwrap();
+
+            for &rpm in smc.fan_rpm() {
+                assert!(rpm >= 0.0, "{rpm} rpm");
+                assert!(rpm < 10_000.0, "{rpm} rpm");
+            }
+        }
+
+        #[test]
+        fn reads_the_temperature_of_the_cpu_and_of_the_gpu() {
+            // Goal: the CPU's and the GPU's sensors read as temperatures a running chip can have,
+            // and no hotter than the hottest sensor of the chip.
+            // Method: one read, each held above 15 and below 115 degrees. The probe of an M5 Pro
+            // under load read up to 95.
+            let mut smc = Smc::open().unwrap();
+
+            smc.read().unwrap();
+
+            let cpu = smc.cpu_celsius().unwrap();
+            let gpu = smc.gpu_celsius().unwrap();
+            assert!(cpu > 15.0 && cpu < 115.0, "{cpu} °C");
+            assert!(gpu > 15.0 && gpu < 115.0, "{gpu} °C");
+        }
+
+        #[test]
+        fn reads_the_temperature_of_a_soc_sensor() {
+            // Goal: the SoC sensor reads as a temperature a running chip can have.
+            // Method: one read, held above 15 and below 115 degrees.
+            let mut smc = Smc::open().unwrap();
+
+            smc.read().unwrap();
+
+            assert!(smc.soc_celsius() > 15.0, "{} °C", smc.soc_celsius());
+            assert!(smc.soc_celsius() < 115.0, "{} °C", smc.soc_celsius());
+        }
     }
 }
