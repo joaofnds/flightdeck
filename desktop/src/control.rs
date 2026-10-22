@@ -118,6 +118,7 @@ pub fn install(
     cx: &mut App,
 ) {
     cx.set_global(Activity::begin());
+
     window
         .spawn(cx, async move |cx| {
             // The window starts from the real pointer's place on the screen, which would
@@ -181,9 +182,12 @@ impl Activity {
             unsafe { msg_send![objc2::class!(NSProcessInfo), processInfo] };
         // SAFETY: NSProcessInfo declares beginActivityWithOptions:reason: with a uint64_t and an
         // NSString, and returns the activity's token.
-        let options = ACTIVITY_USER_INITIATED_ALLOWING_IDLE_SYSTEM_SLEEP;
         let token: Retained<AnyObject> = unsafe {
-            msg_send![&*information, beginActivityWithOptions: options, reason: &*reason]
+            msg_send![
+                &*information,
+                beginActivityWithOptions: ACTIVITY_USER_INITIATED_ALLOWING_IDLE_SYSTEM_SLEEP,
+                reason: &*reason
+            ]
         };
 
         Self { token }
