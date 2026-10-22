@@ -10,6 +10,8 @@ use crate::{Error, Result, Window};
 mod bounds;
 mod machine;
 mod ticks;
+#[cfg(test)]
+mod write_tests;
 
 /// Native encoding state lives for one table so it cannot accumulate across seals.
 pub struct Encoder;
@@ -94,9 +96,15 @@ fn encode_open(path: &Path) -> Result<std::fs::File> {
     }
 }
 
-fn encode_write(frame: &mut DataFrame, file: std::fs::File) -> Result<()> {
+/// What a table's bytes gather in before they reach its file, the size of a data page.
+pub const WRITE_BUFFER_BYTES: u64 = 1024 * 1024;
+
+fn encode_write(frame: &mut DataFrame, file: impl std::io::Write) -> Result<()> {
     frame.rechunk_mut();
-    let mut writer = ParquetWriter::new(file)
+    // Parquet writes each header and page on its own, a system call apiece without a buffer.
+    let capacity = usize::try_from(WRITE_BUFFER_BYTES).map_err(|_| Error::Bound("write buffer"))?;
+    let mut buffer = std::io::BufWriter::with_capacity(capacity, file);
+    let mut writer = ParquetWriter::new(&mut buffer)
         .with_compression(ParquetCompression::Zstd(Some(ZstdLevel::try_new(3)?)))
         .with_statistics(StatisticsOptions {
             min_value: true,
@@ -120,6 +128,10 @@ fn encode_write(frame: &mut DataFrame, file: std::fs::File) -> Result<()> {
     let bytes = writer.finish()?;
     assert!(bytes > 0);
 
+    // Dropping the buffer would flush its last bytes and discard a failed write.
+    buffer
+        .into_inner()
+        .map_err(std::io::IntoInnerError::into_error)?;
     Ok(())
 }
 

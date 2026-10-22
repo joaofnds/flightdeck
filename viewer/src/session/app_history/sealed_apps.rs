@@ -17,13 +17,15 @@ use persistence::{Error, Result, TableManifest};
 const SAMPLES_BYTES_MAX: u64 = 256 * 1024 * 1024;
 
 /// The window staged for its seal, the engine's read of one of its tables, the samples held for
-/// its parts and the table built from them fit the persister's working bound together.
+/// its parts, the table built from them and the buffer it is written through fit the
+/// persister's working bound together.
 const _: () = {
     assert!(
         persistence::STAGED_BYTES_MAX
             + persistence::engine::PARQUET_EXPANDED_BYTES_MAX
             + super::sealed_parts::DECODED_BYTES_MAX
             + SAMPLES_BYTES_MAX
+            + persistence::WRITE_BUFFER_BYTES
             <= persistence::resources::WORKING_BYTES_MAX
     );
 };

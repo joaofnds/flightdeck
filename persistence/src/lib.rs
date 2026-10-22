@@ -28,7 +28,9 @@ pub use store::{
     read_committed, reread_committed,
 };
 
-pub use encoder::{Encoder, TableManifest, encode_derived, frame, table_columns};
+pub use encoder::{
+    Encoder, TableManifest, WRITE_BUFFER_BYTES, encode_derived, frame, table_columns,
+};
 pub use schema::SCHEMA_VERSION;
 pub use window::{Limits, NumberedEvent, Observation, STAGED_BYTES_MAX, Window, WindowIdentity};
 
