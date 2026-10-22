@@ -1,0 +1,14 @@
+version: 2
+updates:
+  # The workflows pin each action to a commit, so only a proposed bump moves them forward.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # A week's wait lets a compromised release be found and pulled before it is proposed.
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns:
+          - "*"
