@@ -41,7 +41,9 @@ pub(crate) fn observe_visibility(
     dashboard.update(cx, |dashboard, cx| {
         // macOS reports only changes, so a window it hides from the start would read its page
         // until it first showed and hid again.
-        dashboard.presence = dashboard.presence.reported(window.is_visible());
+        if !window.is_visible() {
+            dashboard.presence = Presence::Opening;
+        }
 
         cx.observe_window_visibility(window, |dashboard, visibility, _, cx| {
             dashboard.presence = dashboard.presence.reported(visibility.is_visible());
@@ -143,6 +145,9 @@ pub struct LiveDashboard {
 /// reader rests while the window is hidden and reads no page nobody sees.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Presence {
+    /// Not yet shown, and the reader reads the page until it answers. macOS reports a new window
+    /// hidden until it puts it on the screen, so a window still hidden by then is one it hides.
+    Opening,
     /// Shown, and the reader reads the page.
     Shown,
     /// Hidden, and the reader still reads the page until the next tick rests it.
@@ -158,7 +163,7 @@ impl Presence {
     fn reported(self, visible: bool) -> Self {
         if visible {
             match self {
-                Presence::Hiding => Presence::Shown,
+                Presence::Opening | Presence::Hiding => Presence::Shown,
                 Presence::Hidden => Presence::Showing,
                 Presence::Shown | Presence::Showing => self,
             }
@@ -166,7 +171,7 @@ impl Presence {
             match self {
                 Presence::Shown => Presence::Hiding,
                 Presence::Showing => Presence::Hidden,
-                Presence::Hiding | Presence::Hidden => self,
+                Presence::Opening | Presence::Hiding | Presence::Hidden => self,
             }
         }
     }
@@ -331,18 +336,6 @@ impl LiveDashboard {
 
     pub fn tick(&mut self, cx: &mut Context<Self>) {
         self.native_tick(cx);
-        match self.presence {
-            Presence::Hiding => {
-                self.end_reading_preview(cx);
-                self.tick_hidden();
-                self.presence = Presence::Hidden;
-            }
-            Presence::Showing => {
-                self.tick_shown();
-                self.presence = Presence::Shown;
-            }
-            Presence::Shown | Presence::Hidden => {}
-        }
         match self.worker.take() {
             Ok(Some(update)) => {
                 if self.take_update(update) {
@@ -363,6 +356,7 @@ impl LiveDashboard {
                 cx.notify();
             }
         }
+        self.tick_presence(cx);
         self.preview_tick(cx);
         let status = self.status();
         if self.last_status != status {
@@ -393,6 +387,27 @@ impl LiveDashboard {
                 );
                 cx.quit();
             }
+        }
+    }
+
+    /// Rests the reader of a window macOS hides, or asks for the page of a window it shows again.
+    fn tick_presence(&mut self, cx: &mut Context<Self>) {
+        if self.presence == Presence::Opening {
+            if !self.reply_pending {
+                self.presence = Presence::Hiding;
+            }
+        }
+        match self.presence {
+            Presence::Hiding => {
+                self.end_reading_preview(cx);
+                self.tick_hidden();
+                self.presence = Presence::Hidden;
+            }
+            Presence::Showing => {
+                self.tick_shown();
+                self.presence = Presence::Shown;
+            }
+            Presence::Opening | Presence::Shown | Presence::Hidden => {}
         }
     }
 

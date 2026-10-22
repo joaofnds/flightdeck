@@ -1,8 +1,11 @@
+use std::collections::BTreeMap;
+
 use gpui::{AppContext, TestAppContext, WindowHandle, WindowOptions, WindowVisibility};
+use serde_json::{Value, json};
 
 use super::SnapshotReader;
 use crate::live_dashboard::LiveDashboard;
-use crate::live_source::Received;
+use crate::live_source::{Received, Snapshot, Update};
 
 #[gpui::test]
 fn a_hidden_window_leaves_its_reader_no_page_to_read(cx: &mut TestAppContext) {
@@ -17,18 +20,53 @@ fn a_hidden_window_leaves_its_reader_no_page_to_read(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn a_window_opened_hidden_leaves_its_reader_no_page_to_read(cx: &mut TestAppContext) {
-    // Goal: a window macOS hides from the start, behind other windows or on a sleeping display,
-    // reads no page, though macOS reports no change of its visibility.
-    // Method: open a window that macOS hides before the dashboard observes it, step its
-    // dashboard, and step the reader's mailbox.
+fn a_window_opened_hidden_reads_its_first_page(cx: &mut TestAppContext) {
+    // Goal: a newly opened window reads its first page though macOS reports it hidden, since
+    // macOS reports every new window hidden until it puts it on the screen.
+    // Method: open a window that macOS reports hidden before the dashboard observes it, step
+    // its dashboard, and step the reader's mailbox.
     let mut window = VisibilityHarness::open_unobserved(cx);
     window.report(WindowVisibility::Hidden);
 
     window.observe();
     window.tick();
 
+    assert_eq!(window.reader.receive(), (Received::Continued, true));
+}
+
+#[gpui::test]
+fn a_window_still_hidden_at_its_first_page_leaves_its_reader_no_page_to_read(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a window macOS hides from the start, behind other windows or on another Space,
+    // reads no page past its first, though macOS reports no change of its visibility.
+    // Method: open a window that macOS reports hidden before the dashboard observes it, answer
+    // its first request, step its dashboard, and step the reader's mailbox.
+    let mut window = VisibilityHarness::open_unobserved(cx);
+    window.report(WindowVisibility::Hidden);
+    window.observe();
+
+    window.answer();
+    window.tick();
+
     assert_eq!(window.reader.receive(), (Received::Continued, false));
+}
+
+#[gpui::test]
+fn a_window_shown_before_its_first_page_keeps_reading_its_page(cx: &mut TestAppContext) {
+    // Goal: a window that opens as macOS puts it on the screen keeps following the recording
+    // past its first page.
+    // Method: open a window that macOS reports hidden before the dashboard observes it, show
+    // it, answer its first request, step its dashboard, and step the reader's mailbox.
+    let mut window = VisibilityHarness::open_unobserved(cx);
+    window.report(WindowVisibility::Hidden);
+    window.observe();
+    window.report(WindowVisibility::Visible);
+
+    window.answer();
+    window.tick();
+
+    assert_eq!(window.reader.receive(), (Received::Continued, true));
 }
 
 #[gpui::test]
@@ -142,6 +180,35 @@ impl VisibilityHarness {
         self.cx
             .simulate_window_visibility_change(self.window.into(), visibility);
         self.cx.run_until_parked();
+    }
+
+    /// Answers the window's last request with a page, as the reader publishes one.
+    fn answer(&mut self) {
+        let page = Box::new(Snapshot {
+            generation: self.generation(),
+            catalog: Value::Null,
+            selection: json!({}),
+            pages: BTreeMap::new(),
+            apps: None,
+            detail: None,
+            history: None,
+            cpu_detail: None,
+            cpu_history: None,
+            resident_history: None,
+            app_attribution_history: None,
+            overview_app_histories: None,
+            process_history: None,
+            rankings: None,
+            app_ranks: None,
+            app_parts: None,
+            histories_pending: false,
+            read_ms: 0.0,
+        });
+        crate::live_source::worker_publish(
+            &self.reader.shared,
+            page.generation,
+            Update::Ready(page),
+        );
     }
 
     /// The generation of the last request the window sent its reader.
