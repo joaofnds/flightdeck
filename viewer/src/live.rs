@@ -314,7 +314,7 @@ impl LiveSession {
             .checked_add(1)
             .and_then(|end| end.checked_mul(NANOSECONDS_PER_SECOND))
             .ok_or(Error::Bound("selection time"))?;
-        if self.select_refresh_due(second) {
+        if self.select_refresh_due(second)? {
             self.refresh_history()?;
         }
         let selection = ContextSelection::of(second, self.newest_second());
@@ -1087,18 +1087,21 @@ impl LiveSession {
         newest
     }
 
-    /// Whether `select` lists the saved minutes again before reading `second`, since a minute
-    /// sealed since the last listing may hold a second the ring has dropped.
-    fn select_refresh_due(&self, second: u64) -> bool {
+    /// Whether `select` lists the saved minutes again before reading `second`: the ring has
+    /// dropped it, and the saved minutes are no longer the ones listed. A launch's ring holds
+    /// nothing yet, and the session it just opened lists every saved minute.
+    fn select_refresh_due(&self, second: u64) -> Result<bool> {
         let dropped = self.observations.front().is_none_or(|observation| {
             second < observation.observation.wall / NANOSECONDS_PER_SECOND
         });
-        if dropped {
-            if let Some(history) = &self.history {
-                return !history.holds_second(second);
-            }
+        if !dropped {
+            return Ok(false);
         }
-        dropped
+
+        match &self.history {
+            Some(history) => Ok(!history.lists_every_sealed_window()?),
+            None => Ok(true),
+        }
     }
 
     fn refresh_history(&mut self) -> Result<()> {
@@ -3499,7 +3502,7 @@ mod tests {
             PENDING_WINDOWS_MAX
         );
         assert!(!session.sources[0].pending_windows.contains(&0));
-        assert!(session.select_refresh_due(0));
+        assert!(session.select_refresh_due(0).unwrap());
         assert_eq!(
             session.catalog()["commit_discovery"][0]["history_refresh_polls_max"],
             256

@@ -181,6 +181,39 @@ fn opening_refuses_a_broken_marker_after_many_sound_ones() {
     );
 }
 
+#[test]
+fn a_session_lists_every_sealed_window_until_another_is_sealed() {
+    // Goal: a walk of the markers' names tells a session whether a listing would change it.
+    // Method: open after the first minute seals, ask, seal the second minute, and ask again.
+    let mut fixture = Fixture::new();
+    fixture.publish(1001);
+    fixture.seal_minute(0);
+    let session = Session::open(&fixture.root).unwrap();
+    let before = session.lists_every_sealed_window().unwrap();
+    fixture.skip_run_ticks(59);
+    fixture.publish(1061);
+    fixture.seal_minute(1);
+
+    let after = session.lists_every_sealed_window().unwrap();
+
+    assert!(before);
+    assert!(!after);
+}
+
+#[test]
+fn a_session_no_longer_lists_every_sealed_window_once_one_is_deleted() {
+    // Goal: a window retention deleted since the listing calls for a new listing too.
+    // Method: open over two sealed minutes, delete the first one's marker, and ask.
+    let fixture = sealed_minutes(2);
+    let session = Session::open(&fixture.root).unwrap();
+    let first = persistence::layout::WindowKey::from(&session.windows[0].identity);
+    std::fs::remove_file(first.marker(&fixture.root)).unwrap();
+
+    let listed = session.lists_every_sealed_window().unwrap();
+
+    assert!(!listed);
+}
+
 /// More minutes than `discover` has reader threads, so a thread reads several markers. The
 /// fixture's reader takes at most eight.
 const MINUTES: usize = 8;

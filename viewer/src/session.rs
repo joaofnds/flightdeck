@@ -739,24 +739,26 @@ impl Session {
         Ok(bounds)
     }
 
-    /// Whether a listed window's manifest puts `second` within its wall-clock bounds. A window
-    /// whose manifest leaves its bounds unknown counts as not holding it.
-    pub(crate) fn holds_second(&self, second: u64) -> bool {
-        let Some(end) = second.checked_add(1).and_then(|end| end.checked_mul(NS)) else {
-            return false;
-        };
-        let start = end - NS;
-
-        for manifest in &self.windows {
-            if let Some(bounds) = manifest.wall_ns {
-                if start <= bounds.max {
-                    if bounds.min < end {
-                        return true;
-                    }
-                }
-            }
+    /// Whether the sealed windows on disk are the ones this session listed. A sealed window never
+    /// changes, so a walk of the markers' names shows it without reading a marker.
+    pub(crate) fn lists_every_sealed_window(&self) -> Result<bool> {
+        let base = layout::base(&self.root, Kind::Commits);
+        if !base.try_exists()? {
+            return Ok(false);
         }
-        false
+        let mut sealed = discover_markers(&base, &self.operation)?;
+        if sealed.len() != self.windows.len() {
+            return Ok(false);
+        }
+
+        let mut listed: Vec<PathBuf> = self
+            .windows
+            .iter()
+            .map(|manifest| layout::WindowKey::from(&manifest.identity).marker(&self.root))
+            .collect();
+        sealed.sort_unstable();
+        listed.sort_unstable();
+        Ok(sealed == listed)
     }
 
     fn observations(&self, first: u64, end: u64) -> Result<Vec<Observation>> {
@@ -851,8 +853,16 @@ fn discover(
     if !base.try_exists()? {
         return Err(io::Error::from(io::ErrorKind::InvalidData).into());
     }
+    let markers = discover_markers(&base, operation)?;
+    discover_read(root, recording, &markers, windows, operation)?;
+    windows.sort_by_key(|manifest| (manifest.identity.run.run.0, manifest.publication_first));
+    Ok(())
+}
+
+/// The marker of every sealed window under `base`, in the order the walk meets them.
+fn discover_markers(base: &Path, operation: &Operation) -> Result<Vec<PathBuf>> {
     let mut markers = Vec::new();
-    layout::visit_names(&base, |run| -> Result<()> {
+    layout::visit_names(base, |run| -> Result<()> {
         layout::validate_run(run)?;
         let run_path = base.join(run);
         layout::visit_names(&run_path, |day| -> Result<()> {
@@ -873,9 +883,8 @@ fn discover(
             })
         })
     })?;
-    discover_read(root, recording, &markers, windows, operation)?;
-    windows.sort_by_key(|manifest| (manifest.identity.run.run.0, manifest.publication_first));
-    Ok(())
+
+    Ok(markers)
 }
 
 /// Threads that read a catalog's markers. Each read waits on the file system for two files, and

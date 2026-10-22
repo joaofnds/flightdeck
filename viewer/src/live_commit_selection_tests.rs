@@ -213,39 +213,16 @@ fn duplicate_covering_commits_preserve_the_previous_history() {
 }
 
 #[test]
-fn selecting_a_second_a_listed_minute_holds_leaves_the_listing_as_it_is() {
-    // Goal: a second whose readings a listed minute holds needs no new listing to be read, so
-    // a launch, whose ring has nothing yet, does not list every saved minute a second time.
+fn selecting_a_dropped_second_reads_a_minute_sealed_since_the_listing() {
+    // Goal: a selection whose context reaches past the listed minutes reads the minutes sealed
+    // since, though its own second is in a listed one and the ring has dropped both.
     // Method: seal a minute the session has not listed, empty the ring's readings, then select
-    // a second of the minute the session listed and count the windows it lists.
+    // the listed minute's only second and read where its context ends.
     let (_fixture, mut live) = open_before_an_unlisted_minute();
 
-    live.select(1001, 0).unwrap();
+    let selected = live.select(1001, 0).unwrap();
 
-    assert_eq!(live.catalog()["windows"], 1);
-}
-
-#[test]
-fn selecting_a_second_no_listed_minute_holds_lists_the_saved_minutes_again() {
-    // Goal: a second the ring no longer holds is looked for in minutes sealed since the listing.
-    // Method: seal a minute the session has not listed, empty the ring's readings, then select
-    // a second of that minute and count the windows it lists.
-    let (_fixture, mut live) = open_before_an_unlisted_minute();
-
-    live.select(1061, 0).unwrap();
-
-    assert_eq!(live.catalog()["windows"], 2);
-}
-
-#[test]
-fn selecting_the_second_before_a_listed_minute_lists_the_saved_minutes_again() {
-    // Goal: a listed minute holds only the seconds its readings fall in, not the one before.
-    // Method: seal a minute the session has not listed, empty the ring's readings, then select
-    // the second before the listed minute's only reading and count the windows it lists.
-    let (_fixture, mut live) = open_before_an_unlisted_minute();
-
-    live.select(1000, 0).unwrap();
-
+    assert_eq!(selected["context_last_second"], 1061);
     assert_eq!(live.catalog()["windows"], 2);
 }
 
