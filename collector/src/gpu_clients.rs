@@ -58,17 +58,22 @@ impl GpuClients {
                 Ok(())
             })?;
 
-        times.sort_unstable_by_key(|time| time.pid);
-        times.dedup_by(|later, earlier| {
-            if later.pid != earlier.pid {
-                return false;
-            }
-            earlier.gpu_ns = earlier.gpu_ns.saturating_add(later.gpu_ns);
-            true
-        });
+        read_by_pid(times);
         assert!(times.len() <= CLIENTS_MAX);
         Ok(())
     }
+}
+
+/// Merges the times of each process's clients into one, their sum, ordered by pid.
+fn read_by_pid(times: &mut Vec<GpuClientTime>) {
+    times.sort_unstable_by_key(|time| time.pid);
+    times.dedup_by(|later, earlier| {
+        if later.pid != earlier.pid {
+            return false;
+        }
+        earlier.gpu_ns = earlier.gpu_ns.saturating_add(later.gpu_ns);
+        true
+    });
 }
 
 /// The pid of a client creator text such as `pid 426, WindowServer`, NUL-terminated.
@@ -97,6 +102,28 @@ mod tests {
         assert_eq!(creator_pid(b"pid x, WindowServer\0"), None);
         assert_eq!(creator_pid(b"pid 0, kernel\0"), None);
         assert_eq!(creator_pid(b"\0"), None);
+    }
+
+    #[test]
+    fn read_by_pid_sums_the_clients_of_one_process_into_one_time() {
+        // Goal: a process with several open clients has one time, their sum, so each pid
+        // appears once and in order.
+        // Method: merge two clients of pid 7 around one of pid 3.
+        let mut times = vec![
+            GpuClientTime { pid: 7, gpu_ns: 10 },
+            GpuClientTime { pid: 3, gpu_ns: 5 },
+            GpuClientTime { pid: 7, gpu_ns: 20 },
+        ];
+
+        read_by_pid(&mut times);
+
+        assert_eq!(
+            times,
+            [
+                GpuClientTime { pid: 3, gpu_ns: 5 },
+                GpuClientTime { pid: 7, gpu_ns: 30 },
+            ]
+        );
     }
 
     #[test]
