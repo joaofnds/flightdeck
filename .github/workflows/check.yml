@@ -53,21 +53,13 @@ jobs:
           --skip coalitions::tests::counts_the_energy_this_process_spends_in_its_coalition
           --skip gpu_clients::tests::reads_each_process_once_with_some_gpu_time
           --skip gpu_memory::tests::reads_the_gpu_memory_of_this_mac
-          --skip ioreport::tests::counts_a_busy_cpu_in_its_cores_active_time
-          --skip ioreport::tests::counts_the_energy_the_gpu_spends
-          --skip ioreport::tests::counts_time_the_gpu_spends_in_active_states
-          --skip ioreport::tests::finds_a_state_left_out_of_active_time_in_every_core_and_the_gpu
-          --skip ioreport::tests::learns_only_the_active_states_of_a_core
-          --skip ioreport::tests::reads_the_gpus_energy_as_its_counter_holds_it
-          --skip ioreport::tests::reads_the_performance_states_of_every_logical_cpu
-          --skip ioreport::tests::refuses_a_channel_whose_states_changed_since_open
-          --skip ioreport::tests::refuses_a_channel_with_more_active_states_than_its_room
-          --skip ioreport::tests::refuses_a_negative_energy_read_from_a_channel
-          --skip ioreport::tests::refuses_a_read_that_finds_other_channels_than_open
-          --skip ioreport::tests::refuses_more_cores_than_its_cpu_limit
-          --skip ioreport::tests::refuses_the_energy_unit_of_a_channel_that_gives_no_energy
-          --skip ioreport::tests::refuses_to_learn_a_channel_with_a_negative_state_count
-          --skip ioreport::tests::subscribes_only_to_the_channels_a_read_takes
+          --skip ioreport::tests::hardware::counts_a_busy_cpu_in_its_cores_active_time
+          --skip ioreport::tests::hardware::counts_the_energy_the_gpu_spends
+          --skip ioreport::tests::hardware::counts_time_the_gpu_spends_in_active_states
+          --skip ioreport::tests::hardware::finds_a_state_left_out_of_active_time_in_every_core_and_the_gpu
+          --skip ioreport::tests::hardware::reads_the_gpus_energy_as_its_counter_holds_it
+          --skip ioreport::tests::hardware::reads_the_performance_states_of_every_logical_cpu
+          --skip ioreport::tests::hardware::subscribes_only_to_the_channels_a_read_takes
           --skip machine::tests::reads_the_gpu_core_count_the_registry_reports
           --skip machine::tests::reads_the_logical_cpus_of_each_performance_level_fastest_first
           --skip processes::tests::reads_this_process_spending_energy_while_it_runs

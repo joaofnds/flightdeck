@@ -298,6 +298,8 @@ const _: () = assert!(size_of::<CFArrayCallBacks>() == 40);
 const _: () = assert!(align_of::<CFArrayCallBacks>() == 8);
 
 const UTF8: u32 = 0x0800_0100;
+/// `kCFPropertyListBinaryFormat_v1_0`.
+const BINARY_PROPERTY_LIST: isize = 200;
 
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
@@ -321,6 +323,15 @@ unsafe extern "C" {
         encoding: u32,
     ) -> CFTypeRef;
     fn CFStringGetCString(text: CFTypeRef, buffer: *mut c_char, size: isize, encoding: u32) -> u8;
+    fn CFPropertyListCreateData(
+        allocator: CFTypeRef,
+        property_list: CFTypeRef,
+        format: isize,
+        options: c_ulong,
+        error: *mut CFTypeRef,
+    ) -> CFTypeRef;
+    fn CFDataGetLength(data: CFTypeRef) -> isize;
+    fn CFDataGetBytePtr(data: CFTypeRef) -> *const u8;
 }
 
 // Apple documents none of IOReport, so the meaning of the last three arguments of
@@ -363,9 +374,7 @@ impl IOReport {
 
         let mut reader = Reader::new(timebase, cpu_limit)?;
 
-        let wanted = channels_in_group(&ENERGY_MODEL)?;
-        open_merge_group(&wanted, &GPU_PERFORMANCE_STATES)?;
-        open_merge_group(&wanted, &CPU_CORE_PERFORMANCE_STATES)?;
+        let wanted = open_groups()?;
         open_keep_read_channels(&wanted, &reader.channels_key)?;
 
         let subscription = Subscription::new(&wanted)?;
@@ -513,6 +522,60 @@ impl Reader {
 
         &self.cores[..self.counts.core_states]
     }
+}
+
+/// The channels of the groups a read takes on this Mac, and one sample of those a read keeps,
+/// each a binary property list, which a test reads as a Mac gave them.
+pub struct Fixture {
+    pub groups: Vec<u8>,
+    pub sample: Vec<u8>,
+}
+
+/// Takes the channels of the groups a read takes, and a sample of those it keeps, as open and
+/// a read take them.
+pub fn fixture() -> io::Result<Fixture> {
+    let channels_key = ChannelsKey::new()?;
+
+    let wanted = open_groups()?;
+    let groups = fixture_bytes(&wanted)?;
+    open_keep_read_channels(&wanted, &channels_key)?;
+
+    let subscription = Subscription::new(&wanted)?;
+    let sample = fixture_bytes(&subscription.sample()?)?;
+
+    Ok(Fixture { groups, sample })
+}
+
+/// The bytes of `object` as a binary property list.
+fn fixture_bytes(object: &Owned) -> io::Result<Vec<u8>> {
+    assert!(!object.0.is_null());
+
+    let data = unsafe {
+        CFPropertyListCreateData(
+            ptr::null(),
+            object.0,
+            BINARY_PROPERTY_LIST,
+            0,
+            ptr::null_mut(),
+        )
+    };
+    let data = Owned::new(data, "writing a property list")?;
+
+    let size = usize::try_from(unsafe { CFDataGetLength(data.0) })
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let bytes = unsafe { CFDataGetBytePtr(data.0) };
+    assert!(!bytes.is_null());
+
+    Ok(unsafe { std::slice::from_raw_parts(bytes, size) }.to_vec())
+}
+
+/// The channels of every group a read takes from, more than a read keeps.
+fn open_groups() -> io::Result<Owned> {
+    let wanted = channels_in_group(&ENERGY_MODEL)?;
+    open_merge_group(&wanted, &GPU_PERFORMANCE_STATES)?;
+    open_merge_group(&wanted, &CPU_CORE_PERFORMANCE_STATES)?;
+
+    Ok(wanted)
 }
 
 fn channels_in_group(group: &Group) -> io::Result<Owned> {
@@ -824,11 +887,7 @@ fn is(text: CFTypeRef, want: &CStr) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
-
     use super::*;
-    use crate::cost::spin_on_this_thread_for;
-    use crate::machine;
 
     #[link(name = "CoreFoundation", kind = "framework")]
     unsafe extern "C" {
@@ -840,20 +899,62 @@ mod tests {
             key_callbacks: *const c_void,
             value_callbacks: *const c_void,
         ) -> CFTypeRef;
+        fn CFDataCreate(allocator: CFTypeRef, bytes: *const u8, size: isize) -> CFTypeRef;
+        fn CFPropertyListCreateWithData(
+            allocator: CFTypeRef,
+            data: CFTypeRef,
+            options: c_ulong,
+            format: *mut isize,
+            error: *mut CFTypeRef,
+        ) -> CFTypeRef;
     }
 
-    fn logical_cpus() -> u32 {
-        u32::from_ne_bytes(crate::kernel::sysctl_bytes(c"hw.logicalcpu"))
+    /// `kCFPropertyListMutableContainersAndLeaves`.
+    const MUTABLE_CONTAINERS_AND_LEAVES: c_ulong = 2;
+
+    /// The object the binary property list `bytes` holds, every container and leaf of it
+    /// mutable, as `IOReport` gives its dictionaries.
+    fn property_list(bytes: &[u8]) -> Owned {
+        let size = isize::try_from(bytes.len()).unwrap();
+        let data = unsafe { CFDataCreate(ptr::null(), bytes.as_ptr(), size) };
+        let data = Owned::new(data, "creating data").unwrap();
+
+        let object = unsafe {
+            CFPropertyListCreateWithData(
+                ptr::null(),
+                data.0,
+                MUTABLE_CONTAINERS_AND_LEAVES,
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        };
+        Owned::new(object, "reading a property list").unwrap()
     }
 
-    fn open() -> IOReport {
-        IOReport::open(Timebase::read().unwrap(), machine::cpu_limit().unwrap()).unwrap()
+    /// The channels of the groups a read takes from, 383 of them, as an M5 Pro gave them to
+    /// `ioreport_fixture`.
+    fn m5_pro_groups() -> Owned {
+        property_list(include_bytes!("../fixtures/ioreport/m5_pro_groups.plist"))
     }
 
-    /// The first channel of `kind` among the channels `samples` holds, a sample of
-    /// `ioreport`'s.
-    fn first_channel(ioreport: &IOReport, samples: &Owned, kind: Kind) -> CFTypeRef {
-        each(ioreport.reader.channels_key.channels_of(samples).unwrap())
+    /// One sample of the 20 channels a read takes, the GPU's energy, its states and 18 cores,
+    /// as an M5 Pro gave it to `ioreport_fixture`.
+    fn m5_pro_sample() -> Owned {
+        property_list(include_bytes!("../fixtures/ioreport/m5_pro_sample.plist"))
+    }
+
+    /// A reader with room for the cores of `cpu_limit` CPUs that learned from the M5 Pro's
+    /// sample.
+    fn learned_from_m5_pro(cpu_limit: usize) -> Reader {
+        let mut reader = Reader::new(Timebase::read().unwrap(), cpu_limit).unwrap();
+        reader.learn(&m5_pro_sample()).unwrap();
+        reader
+    }
+
+    /// The first channel of `kind` among the channels `samples` holds.
+    fn first_channel(samples: &Owned, kind: Kind) -> CFTypeRef {
+        let channels_key = ChannelsKey::new().unwrap();
+        each(channels_key.channels_of(samples).unwrap())
             .unwrap()
             .find(|&channel| Kind::of(channel) == Some(kind))
             .unwrap()
@@ -865,10 +966,6 @@ mod tests {
         let dictionary =
             unsafe { CFDictionaryCreateMutable(ptr::null(), 0, ptr::null(), ptr::null()) };
         Owned::new(dictionary, "creating a dictionary").unwrap()
-    }
-
-    fn active_time_of_every_core(ioreport: &IOReport) -> Duration {
-        Duration::from_nanos(ioreport.cores().iter().flat_map(States::active_ns).sum())
     }
 
     #[test]
@@ -1222,10 +1319,10 @@ mod tests {
     fn refuses_to_learn_a_channel_with_a_negative_state_count() {
         // Goal: a channel whose count of states is negative, as IOReport gives for a channel
         // that is not one of states, is an error, never a channel with no active state.
-        // Method: learn the GPU's energy channel, whose state count IOReport gives as -1.
-        let ioreport = open();
-        let samples = ioreport.subscription.sample().unwrap();
-        let energy = first_channel(&ioreport, &samples, Kind::GPUEnergy);
+        // Method: learn the GPU's energy channel of the M5 Pro's sample, whose state count
+        // IOReport gives as -1.
+        let samples = m5_pro_sample();
+        let energy = first_channel(&samples, Kind::GPUEnergy);
         let mut states = States::new(ACTIVE_STATES_MAX);
 
         let learned = learn_active_states(energy, &mut states);
@@ -1234,64 +1331,65 @@ mod tests {
     }
 
     #[test]
-    fn reads_the_performance_states_of_every_logical_cpu() {
-        // Goal: every logical CPU has its performance states read, so no CPU's active time is
-        // missing.
-        // Method: read IOReport once on this Mac, and count the cores read against its
-        // logical CPUs.
-        let mut ioreport = open();
+    fn reads_every_core_of_a_sample() {
+        // Goal: a read takes the performance states of every core a sample holds, so no
+        // core's active time is missing.
+        // Method: learn and read the M5 Pro's sample, which holds 18 cores.
+        let mut reader = learned_from_m5_pro(18);
 
-        ioreport.read().unwrap();
+        reader.read(&m5_pro_sample()).unwrap();
 
-        assert_eq!(
-            usize::try_from(logical_cpus()).unwrap(),
-            ioreport.cores().len()
-        );
+        assert_eq!(18, reader.cores().len());
     }
 
     #[test]
-    fn subscribes_only_to_the_channels_a_read_takes() {
+    fn reads_the_gpus_energy_a_sample_holds() {
+        // Goal: a read takes the GPU's energy as its channel counts it, in nanojoules.
+        // Method: learn and read the M5 Pro's sample, whose channel of the GPU's energy holds
+        // 54424081490739 units of a nanojoule.
+        let mut reader = learned_from_m5_pro(18);
+
+        reader.read(&m5_pro_sample()).unwrap();
+
+        assert_eq!(54_424_081_490_739, reader.gpu_energy_nj());
+    }
+
+    #[test]
+    fn keeps_only_the_channels_a_read_takes() {
         // Goal: the subscription holds only the channels a read takes, so a sample copies no
         // channel the read throws away.
-        // Method: open IOReport on this Mac, and count the channels it subscribed to against
-        // those open found.
-        let ioreport = open();
+        // Method: keep the channels a read takes among the 383 of the M5 Pro's groups.
+        let groups = m5_pro_groups();
+        let channels_key = ChannelsKey::new().unwrap();
 
-        let subscribed = each(
-            ioreport
-                .reader
-                .channels_key
-                .channels_of(&ioreport.subscription.channels)
-                .unwrap(),
-        )
-        .unwrap()
-        .count();
+        open_keep_read_channels(&groups, &channels_key).unwrap();
 
-        let counts = ioreport.reader.counts;
-        assert_eq!(
-            counts.gpu_energy + counts.gpu_states + counts.core_states,
-            subscribed
-        );
+        let kept: Vec<CFTypeRef> = each(channels_key.channels_of(&groups).unwrap())
+            .unwrap()
+            .collect();
+        assert_eq!(20, kept.len());
+        assert!(kept.iter().all(|&channel| Kind::of(channel).is_some()));
     }
 
     #[test]
     fn refuses_more_cores_than_its_cpu_limit() {
         // Goal: IOReport reporting more cores than the CPU limit is an error.
-        // Method: open with a limit of one CPU on this Mac, which has more.
-        let opened = IOReport::open(Timebase::read().unwrap(), 1);
+        // Method: learn the M5 Pro's sample, which holds 18 cores, with a limit of one CPU.
+        let mut reader = Reader::new(Timebase::read().unwrap(), 1).unwrap();
 
-        let refused = opened.err().map(|error| error.kind());
-        assert_eq!(Some(io::ErrorKind::QuotaExceeded), refused);
+        let learned = reader.learn(&m5_pro_sample());
+
+        assert_eq!(io::ErrorKind::QuotaExceeded, learned.unwrap_err().kind());
     }
 
     #[test]
     fn refuses_a_channel_with_more_active_states_than_its_room() {
         // Goal: a channel with more active states than the room taken for them is an error, and
         // the list keeps that room.
-        // Method: learn a core's channel on this Mac, which has many states, into room for one.
-        let ioreport = open();
-        let samples = ioreport.subscription.sample().unwrap();
-        let core = first_channel(&ioreport, &samples, Kind::CoreStates);
+        // Method: learn a core's channel of the M5 Pro's sample, which has many states, into
+        // room for one.
+        let samples = m5_pro_sample();
+        let core = first_channel(&samples, Kind::CoreStates);
         let mut states = States::new(1);
         let capacity = states.active_indices.capacity();
 
@@ -1305,11 +1403,10 @@ mod tests {
     fn learns_only_the_active_states_of_a_core() {
         // Goal: the states learned as active are those the filter counts as active, so a read
         // adds no idle time and leaves out no active time.
-        // Method: learn a core's channel on this Mac, against the filter asked about each of
-        // its states.
-        let ioreport = open();
-        let samples = ioreport.subscription.sample().unwrap();
-        let core = first_channel(&ioreport, &samples, Kind::CoreStates);
+        // Method: learn a core's channel of the M5 Pro's sample, against the filter asked
+        // about each of its states.
+        let samples = m5_pro_sample();
+        let core = first_channel(&samples, Kind::CoreStates);
         let mut states = States::new(ACTIVE_STATES_MAX);
 
         learn_active_states(core, &mut states).unwrap();
@@ -1327,16 +1424,15 @@ mod tests {
     fn refuses_a_channel_whose_states_changed_since_open() {
         // Goal: a channel that reports another number of states than it did at open is an
         // error, since the active states learned at open no longer name its states.
-        // Method: learn the GPU's channel, 16 states on this Mac, and read a core's channel, 17
-        // or 22 states, with what was learned.
-        let ioreport = open();
-        let samples = ioreport.subscription.sample().unwrap();
-        let gpu = first_channel(&ioreport, &samples, Kind::GPUStates);
-        let core = first_channel(&ioreport, &samples, Kind::CoreStates);
+        // Method: learn the GPU's channel of the M5 Pro's sample, 16 states, and read
+        // its first core's channel, 17 states, with what was learned.
+        let samples = m5_pro_sample();
+        let gpu = first_channel(&samples, Kind::GPUStates);
+        let core = first_channel(&samples, Kind::CoreStates);
         let mut states = States::new(ACTIVE_STATES_MAX);
         learn_active_states(gpu, &mut states).unwrap();
 
-        let read = read_active_states(ioreport.reader.timebase, core, &mut states);
+        let read = read_active_states(Timebase::read().unwrap(), core, &mut states);
 
         assert_eq!(io::ErrorKind::InvalidData, read.unwrap_err().kind());
     }
@@ -1345,13 +1441,12 @@ mod tests {
     fn refuses_a_read_that_finds_other_channels_than_open() {
         // Goal: a read that finds another count of channels than open found is an error, so a
         // channel missing from a sample never leaves the read before standing.
-        // Method: open with room for one core more than this Mac has, record that open found
-        // that core too, and read.
-        let cpu_limit = machine::cpu_limit().unwrap();
-        let mut ioreport = IOReport::open(Timebase::read().unwrap(), cpu_limit + 1).unwrap();
-        ioreport.reader.counts.core_states += 1;
+        // Method: learn the M5 Pro's sample with room for one core more than it holds, record
+        // that open found that core too, and read the sample.
+        let mut reader = learned_from_m5_pro(19);
+        reader.counts.core_states += 1;
 
-        let read = ioreport.read();
+        let read = reader.read(&m5_pro_sample());
 
         assert_eq!(io::ErrorKind::InvalidData, read.unwrap_err().kind());
     }
@@ -1360,10 +1455,9 @@ mod tests {
     fn refuses_the_energy_unit_of_a_channel_that_gives_no_energy() {
         // Goal: a channel whose unit is not one of energy is an error where open learns the
         // GPU's energy unit, never a unit of nanojoules.
-        // Method: learn the unit of the GPU's states channel, 24Mticks on this Mac.
-        let ioreport = open();
-        let samples = ioreport.subscription.sample().unwrap();
-        let gpu = first_channel(&ioreport, &samples, Kind::GPUStates);
+        // Method: learn the unit of the GPU's states channel of the M5 Pro's sample, 24Mticks.
+        let samples = m5_pro_sample();
+        let gpu = first_channel(&samples, Kind::GPUStates);
 
         let nj_per_unit = learn_nj_per_unit(gpu);
 
@@ -1374,44 +1468,14 @@ mod tests {
     fn refuses_a_negative_energy_read_from_a_channel() {
         // Goal: a channel's value below zero is an error where a read takes it as energy, never
         // 0 nJ.
-        // Method: read the GPU's states channel as energy in nanojoules, whose value on this
-        // Mac is the least an i64 holds.
-        let ioreport = open();
-        let samples = ioreport.subscription.sample().unwrap();
-        let gpu = first_channel(&ioreport, &samples, Kind::GPUStates);
+        // Method: read the GPU's states channel of the M5 Pro's sample as energy in
+        // nanojoules, whose value is the least an i64 holds.
+        let samples = m5_pro_sample();
+        let gpu = first_channel(&samples, Kind::GPUStates);
 
         let energy = read_energy_nj(gpu, 1);
 
         assert_eq!(io::ErrorKind::InvalidData, energy.unwrap_err().kind());
-    }
-
-    #[test]
-    fn counts_a_busy_cpu_in_its_cores_active_time() {
-        // Goal: time a CPU spends running shows in the cores' active time, and never more of it
-        // than every CPU could spend in that time.
-        // Method: spin this thread for 200 ms between two reads, and bound the active time the
-        // cores gained below by the spin and above by the time passed on every logical CPU.
-        let mut ioreport = open();
-        let busy = Duration::from_millis(200);
-        let start = Instant::now();
-        ioreport.read().unwrap();
-        let before = active_time_of_every_core(&ioreport);
-
-        spin_on_this_thread_for(busy);
-
-        ioreport.read().unwrap();
-        let elapsed = start.elapsed();
-        let active = active_time_of_every_core(&ioreport)
-            .checked_sub(before)
-            .expect("the cores' active time only grows");
-        assert!(
-            active >= busy,
-            "{active:?} active across the cores in {elapsed:?}"
-        );
-        assert!(
-            active <= elapsed * logical_cpus(),
-            "{active:?} active across the cores in {elapsed:?}"
-        );
     }
 
     #[test]
@@ -1452,77 +1516,169 @@ mod tests {
         assert!(learn_active_states_is_active(string(c"P1").unwrap().0).unwrap());
     }
 
-    #[test]
-    fn finds_a_state_left_out_of_active_time_in_every_core_and_the_gpu() {
-        // Goal: a macOS that renamed the idle states would read every core as busy all the
-        // time, while the tests above on the state names still passed.
-        // Method: sample IOReport and look for a state the filter leaves out in each
-        // channel of core or GPU states.
-        let ioreport = open();
-        let samples = ioreport.subscription.sample().unwrap();
-        let channels = ioreport.reader.channels_key.channels_of(&samples).unwrap();
+    /// The tests whose subject is what this Mac's `IOReport` gives, which only a Mac with these
+    /// channels runs. CI's virtual Mac has none of them, so its check skips this module.
+    mod hardware {
+        use std::time::{Duration, Instant};
 
-        let states: Vec<CFTypeRef> = each(channels)
+        use super::*;
+        use crate::cost::spin_on_this_thread_for;
+        use crate::machine;
+
+        fn logical_cpus() -> u32 {
+            u32::from_ne_bytes(crate::kernel::sysctl_bytes(c"hw.logicalcpu"))
+        }
+
+        fn open() -> IOReport {
+            IOReport::open(Timebase::read().unwrap(), machine::cpu_limit().unwrap()).unwrap()
+        }
+
+        fn active_time_of_every_core(ioreport: &IOReport) -> Duration {
+            Duration::from_nanos(ioreport.cores().iter().flat_map(States::active_ns).sum())
+        }
+
+        #[test]
+        fn reads_the_performance_states_of_every_logical_cpu() {
+            // Goal: every logical CPU has its performance states read, so no CPU's active time is
+            // missing.
+            // Method: read IOReport once on this Mac, and count the cores read against its
+            // logical CPUs.
+            let mut ioreport = open();
+
+            ioreport.read().unwrap();
+
+            assert_eq!(
+                usize::try_from(logical_cpus()).unwrap(),
+                ioreport.cores().len()
+            );
+        }
+
+        #[test]
+        fn subscribes_only_to_the_channels_a_read_takes() {
+            // Goal: the subscription holds only the channels a read takes, so a sample copies no
+            // channel the read throws away.
+            // Method: open IOReport on this Mac, and count the channels it subscribed to against
+            // those open found.
+            let ioreport = open();
+
+            let subscribed = each(
+                ioreport
+                    .reader
+                    .channels_key
+                    .channels_of(&ioreport.subscription.channels)
+                    .unwrap(),
+            )
             .unwrap()
-            .filter(|&channel| {
-                matches!(Kind::of(channel), Some(Kind::CoreStates | Kind::GPUStates))
-            })
-            .collect();
-        let without_idle = states
-            .iter()
-            .filter(|&&channel| {
-                (0..unsafe { IOReportStateGetCount(channel) }).all(|index| {
-                    learn_active_states_is_active(unsafe {
-                        IOReportStateGetNameForIndex(channel, index)
-                    })
-                    .unwrap()
-                })
-            })
             .count();
 
-        assert_eq!(usize::try_from(logical_cpus()).unwrap() + 1, states.len());
-        assert_eq!(0, without_idle);
-    }
+            let counts = ioreport.reader.counts;
+            assert_eq!(
+                counts.gpu_energy + counts.gpu_states + counts.core_states,
+                subscribed
+            );
+        }
 
-    #[test]
-    fn counts_time_the_gpu_spends_in_active_states() {
-        // Goal: the GPU's time in its active states reads as more than none.
-        // Method: read IOReport once on this Mac, whose GPU has run since it started.
-        let mut ioreport = open();
+        #[test]
+        fn counts_a_busy_cpu_in_its_cores_active_time() {
+            // Goal: time a CPU spends running shows in the cores' active time, and never more of it
+            // than every CPU could spend in that time.
+            // Method: spin this thread for 200 ms between two reads, and bound the active time the
+            // cores gained below by the spin and above by the time passed on every logical CPU.
+            let mut ioreport = open();
+            let busy = Duration::from_millis(200);
+            let start = Instant::now();
+            ioreport.read().unwrap();
+            let before = active_time_of_every_core(&ioreport);
 
-        ioreport.read().unwrap();
+            spin_on_this_thread_for(busy);
 
-        assert!(ioreport.gpu().active_ns().iter().sum::<u64>() > 0);
-    }
+            ioreport.read().unwrap();
+            let elapsed = start.elapsed();
+            let active = active_time_of_every_core(&ioreport)
+                .checked_sub(before)
+                .expect("the cores' active time only grows");
+            assert!(
+                active >= busy,
+                "{active:?} active across the cores in {elapsed:?}"
+            );
+            assert!(
+                active <= elapsed * logical_cpus(),
+                "{active:?} active across the cores in {elapsed:?}"
+            );
+        }
 
-    #[test]
-    fn reads_the_gpus_energy_as_its_counter_holds_it() {
-        // Goal: each read takes the GPU's energy from its counter, which only grows.
-        // Method: sample the GPU's energy channel on its own between two reads, and hold what
-        // it gave between what the reads gave.
-        let mut ioreport = open();
+        #[test]
+        fn finds_a_state_left_out_of_active_time_in_every_core_and_the_gpu() {
+            // Goal: a macOS that renamed the idle states would read every core as busy all the
+            // time, while the tests above on the state names still passed.
+            // Method: sample IOReport and look for a state the filter leaves out in each
+            // channel of core or GPU states.
+            let ioreport = open();
+            let samples = ioreport.subscription.sample().unwrap();
+            let channels = ioreport.reader.channels_key.channels_of(&samples).unwrap();
 
-        ioreport.read().unwrap();
-        let before = ioreport.gpu_energy_nj();
-        let samples = ioreport.subscription.sample().unwrap();
-        let energy = first_channel(&ioreport, &samples, Kind::GPUEnergy);
-        let units = u64::try_from(unsafe { IOReportSimpleGetIntegerValue(energy, 0) }).unwrap();
-        ioreport.read().unwrap();
-        let after = ioreport.gpu_energy_nj();
+            let states: Vec<CFTypeRef> = each(channels)
+                .unwrap()
+                .filter(|&channel| {
+                    matches!(Kind::of(channel), Some(Kind::CoreStates | Kind::GPUStates))
+                })
+                .collect();
+            let without_idle = states
+                .iter()
+                .filter(|&&channel| {
+                    (0..unsafe { IOReportStateGetCount(channel) }).all(|index| {
+                        learn_active_states_is_active(unsafe {
+                            IOReportStateGetNameForIndex(channel, index)
+                        })
+                        .unwrap()
+                    })
+                })
+                .count();
 
-        let between = units * ioreport.reader.gpu_nj_per_unit;
-        assert!(before <= between, "{before} nJ, then {between} nJ");
-        assert!(between <= after, "{between} nJ, then {after} nJ");
-    }
+            assert_eq!(usize::try_from(logical_cpus()).unwrap() + 1, states.len());
+            assert_eq!(0, without_idle);
+        }
 
-    #[test]
-    fn counts_the_energy_the_gpu_spends() {
-        // Goal: the GPU's energy reads as more than none.
-        // Method: read IOReport once on this Mac, whose GPU has run since it started.
-        let mut ioreport = open();
+        #[test]
+        fn counts_time_the_gpu_spends_in_active_states() {
+            // Goal: the GPU's time in its active states reads as more than none.
+            // Method: read IOReport once on this Mac, whose GPU has run since it started.
+            let mut ioreport = open();
 
-        ioreport.read().unwrap();
+            ioreport.read().unwrap();
 
-        assert!(ioreport.gpu_energy_nj() > 0);
+            assert!(ioreport.gpu().active_ns().iter().sum::<u64>() > 0);
+        }
+
+        #[test]
+        fn reads_the_gpus_energy_as_its_counter_holds_it() {
+            // Goal: each read takes the GPU's energy from its counter, which only grows.
+            // Method: sample the GPU's energy channel on its own between two reads, and hold what
+            // it gave between what the reads gave.
+            let mut ioreport = open();
+
+            ioreport.read().unwrap();
+            let before = ioreport.gpu_energy_nj();
+            let samples = ioreport.subscription.sample().unwrap();
+            let energy = first_channel(&samples, Kind::GPUEnergy);
+            let units = u64::try_from(unsafe { IOReportSimpleGetIntegerValue(energy, 0) }).unwrap();
+            ioreport.read().unwrap();
+            let after = ioreport.gpu_energy_nj();
+
+            let between = units * ioreport.reader.gpu_nj_per_unit;
+            assert!(before <= between, "{before} nJ, then {between} nJ");
+            assert!(between <= after, "{between} nJ, then {after} nJ");
+        }
+
+        #[test]
+        fn counts_the_energy_the_gpu_spends() {
+            // Goal: the GPU's energy reads as more than none.
+            // Method: read IOReport once on this Mac, whose GPU has run since it started.
+            let mut ioreport = open();
+
+            ioreport.read().unwrap();
+
+            assert!(ioreport.gpu_energy_nj() > 0);
+        }
     }
 }
