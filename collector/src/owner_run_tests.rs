@@ -10,8 +10,19 @@ const ROLE: &str = "FLIGHTDECK_RUN_TEST_ROLE";
 const ROOT: &str = "FLIGHTDECK_RUN_TEST_ROOT";
 const RING: &str = "FLIGHTDECK_RUN_TEST_RING";
 const EXPECTED: &str = "FLIGHTDECK_RUN_TEST_PARENT";
-const POLLS_MAX: u32 = 20_000;
-const WATCHDOG_SECONDS: u32 = 20;
+/// How often a test looks again at the processes it waits for.
+const POLL_INTERVAL: Duration = Duration::from_millis(1);
+/// How long the collector runs unless its parent's departure ends it first.
+const RUN_SECONDS: u32 = 8;
+/// How long a test waits for a process it starts to connect, and then for the collector to
+/// publish its second tick. The collector promises no limit on its start, which full-syncs the
+/// recording's metadata and so waits on every other process writing to the disk, and its
+/// longest measured wait for this was 3.6 seconds.
+const START_LIMIT_SECONDS: u32 = 120;
+/// The alarm that ends a test's own processes once they outlive both of its start waits, the
+/// run and a margin for finishing it, so a failed test leaves none behind.
+const WATCHDOG_SECONDS: u32 = 2 * START_LIMIT_SECONDS + 60;
+const _: () = assert!(2 * START_LIMIT_SECONDS + RUN_SECONDS < WATCHDOG_SECONDS);
 
 macro_rules! ownership_runs {
     ($($name:ident, $bound:expr;)*) => {$(
@@ -54,7 +65,8 @@ fn exercise(test: &str, bound: bool) {
     let departed = Instant::now();
     let first = reader.publication_newest().unwrap();
     if !bound {
-        wait_condition(Duration::from_secs(3), || {
+        // The run publishes nothing past its own end, so a longer wait would show nothing more.
+        wait_condition(Duration::from_secs(u64::from(RUN_SECONDS)), || {
             reader.publication_newest().unwrap() >= first + 2
         });
         assert!(
@@ -94,8 +106,10 @@ fn parent(test: &str, root: &Path) {
         .stderr(Stdio::inherit())
         .spawn()
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    for _attempt in 0..POLLS_MAX {
+    // The test releases this parent after both of its start waits.
+    let limit = Duration::from_secs(u64::from(2 * START_LIMIT_SECONDS));
+    let start = Instant::now();
+    for _attempt in 0..attempts(limit) {
         if root.join("release").is_file() {
             // The collector is deliberately orphaned only after master observes a real tick.
             std::process::exit(0);
@@ -103,10 +117,10 @@ fn parent(test: &str, root: &Path) {
         if let Some(status) = child.try_wait().unwrap() {
             panic!("collector exited before parent release: {status}");
         }
-        if Instant::now() >= deadline {
+        if start.elapsed() >= limit {
             break;
         }
-        std::thread::sleep(Duration::from_millis(1));
+        std::thread::sleep(POLL_INTERVAL);
     }
     child.kill().unwrap();
     let status = child.wait().unwrap();
@@ -117,7 +131,7 @@ fn collect(root: &Path, bound: bool) {
     assert_eq!(0, unsafe { alarm(WATCHDOG_SECONDS) });
     let mut peer = UnixStream::connect(root.join("control")).unwrap();
     let options = super::Options {
-        seconds: std::num::NonZeroU64::new(8),
+        seconds: std::num::NonZeroU64::new(u64::from(RUN_SECONDS)),
         rescan_interval: super::DEFAULT_RESCAN_INTERVAL,
         ring_name: std::env::var(RING).unwrap(),
         recording: Some(root.join("recording")),
@@ -178,7 +192,7 @@ impl Fixture {
     }
 
     fn wait_publication(&self, minimum: u64, reader: &mut Option<RingReader>) {
-        wait_condition(Duration::from_secs(5), || {
+        wait_condition(start_limit(), || {
             match RingReader::open(&self.place.lock_path) {
                 Ok(current) => {
                     if current.publication_newest().unwrap() >= minimum {
@@ -259,7 +273,7 @@ impl Drop for Fixture {
 
 fn accept(listener: &UnixListener) -> UnixStream {
     let mut peer = None;
-    wait_condition(Duration::from_secs(5), || match listener.accept() {
+    wait_condition(start_limit(), || match listener.accept() {
         Ok((stream, _address)) => {
             peer = Some(stream);
             true
@@ -277,17 +291,26 @@ fn accept(listener: &UnixListener) -> UnixStream {
 }
 
 fn wait_condition(timeout: Duration, mut condition: impl FnMut() -> bool) {
-    let deadline = Instant::now() + timeout;
-    for _attempt in 0..POLLS_MAX {
+    let start = Instant::now();
+    for _attempt in 0..attempts(timeout) {
         if condition() {
             return;
         }
-        if Instant::now() >= deadline {
+        if start.elapsed() >= timeout {
             break;
         }
-        std::thread::sleep(Duration::from_millis(1));
+        std::thread::sleep(POLL_INTERVAL);
     }
     panic!("ownership run condition exceeded {timeout:?}");
+}
+
+/// The polls a wait of `limit` takes at most, one more than fit in it.
+fn attempts(limit: Duration) -> u128 {
+    limit.as_millis().div_ceil(POLL_INTERVAL.as_millis()) + 1
+}
+
+fn start_limit() -> Duration {
+    Duration::from_secs(u64::from(START_LIMIT_SECONDS))
 }
 
 unsafe extern "C" {
