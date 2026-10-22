@@ -131,9 +131,14 @@ impl RecordingHarness {
     pub fn evict_unsealed_history_with_surviving_worker(&mut self) -> persistence::Losses {
         self.record_old_window_and_tail();
         self.wait_for_old_full_window();
+        // A worker running between the two restarts can seal the old tail first, as it does
+        // when a busy disk slows each restart's syncs, and then the second restart evicts
+        // nothing. Paused, it leaves the old run unsealed until both restarts have registered.
+        self.pause_worker();
         self.restart_collection_with_new_window();
         let retained = self.new_run.clone();
         self.restart_collection_with_new_window();
+        self.resume_worker();
         self.wait_for_marker(&retained, 0);
         self.wait_for_new_window();
         persistence::read_committed(&self.root, &self.marker(&retained, 0))
@@ -320,6 +325,39 @@ impl RecordingHarness {
 
     pub fn wait_for_old_full_window(&self) {
         self.wait_for_marker(&self.old_run, 0);
+    }
+
+    /// Stops the worker where it holds no registration lock, since a worker stopped holding it
+    /// would hold up every registration until it resumes.
+    fn pause_worker(&self) {
+        unsafe extern "C" {
+            fn kill(pid: c_int, signal: c_int) -> c_int;
+            fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int;
+        }
+        const SIGSTOP: c_int = 17;
+        const WUNTRACED: c_int = 2;
+        let pid = c_int::try_from(self.worker.as_ref().unwrap().id()).unwrap();
+
+        let registration = collector::recording::private::FileLock::wait_short(
+            &self.root.join("registration.lock"),
+        )
+        .unwrap();
+        assert_eq!(0, unsafe { kill(pid, SIGSTOP) });
+        let mut status: c_int = 0;
+        assert_eq!(pid, unsafe { waitpid(pid, &raw mut status, WUNTRACED) });
+        drop(registration);
+
+        assert_eq!(0o177, status & 0o177, "worker did not stop: {status}");
+    }
+
+    fn resume_worker(&self) {
+        unsafe extern "C" {
+            fn kill(pid: c_int, signal: c_int) -> c_int;
+        }
+        const SIGCONT: c_int = 19;
+        let pid = c_int::try_from(self.worker.as_ref().unwrap().id()).unwrap();
+
+        assert_eq!(0, unsafe { kill(pid, SIGCONT) });
     }
 
     pub fn kill_worker(&mut self) {
