@@ -1,6 +1,6 @@
 //! Typed committed endpoints feed the same owned aggregate as live publications.
 use collector::processes::Usage;
-use persistence::engine::{Cells, Engine, FromCell, Row};
+use persistence::engine::{Cells, Engine};
 use polars::prelude::{
     BinaryType, DataFrame, DataType, Int32Type, LazyFrame, PolarsPhysicalType, SortMultipleOptions,
     UInt8Type, UInt64Type, col, len, lit,
@@ -71,24 +71,6 @@ struct Batch<'source> {
     endpoints: &'source [Endpoint],
     source: &'source str,
     publications: &'source str,
-}
-
-struct BatchRows {
-    frame: DataFrame,
-    index: usize,
-}
-
-impl BatchRows {
-    fn next(&mut self) -> Result<Option<Row<'_>>> {
-        if self.index == self.frame.height() {
-            return Ok(None);
-        }
-
-        let index = self.index;
-        self.index += 1;
-
-        Ok(Some(Row::new(&self.frame, index)?))
-    }
 }
 
 pub(crate) const ENDPOINTS_MAX: usize = 61;
@@ -337,18 +319,18 @@ fn committed_many_sizes(
 ) -> Result<()> {
     let plan = committed_many_sizes_plan(batch, connection)?;
     let frame = connection.collect(plan)?;
-    let mut rows = BatchRows { frame, index: 0 };
-    for index in 0..=batch.endpoints.len() {
+    let columns = SizeColumns::new(&frame)?;
+    for row in 0..=batch.endpoints.len() {
         operation.check()?;
-        let Some(row) = rows.next()? else {
+        if row == frame.height() {
             return Ok(());
-        };
+        }
 
-        if index == batch.endpoints.len() {
+        if row == batch.endpoints.len() {
             return Err(Error::Bound("committed App batch size rows"));
         }
 
-        let publication = required(&row, 0)?;
+        let publication = required_cell(&columns.publication, row)?;
         if batch
             .endpoints
             .binary_search_by_key(&publication, |endpoint| endpoint.stamp.publication)
@@ -365,13 +347,13 @@ fn committed_many_sizes(
         }
 
         let size = FrameSize {
-            count: usize::try_from(required::<u64>(&row, 1)?)
+            count: usize::try_from(required_cell(&columns.count, row)?)
                 .map_err(|_| Error::Bound("committed App count"))?,
-            members: committed_many_sizes_count(&row, 3)?,
-            starts: committed_many_sizes_count(&row, 4)?,
-            execs: committed_many_sizes_count(&row, 5)?,
-            exits: committed_many_sizes_count(&row, 6)?,
-            bytes: usize::try_from(required::<u64>(&row, 2)?)
+            members: committed_many_sizes_count(&columns.members, row)?,
+            starts: committed_many_sizes_count(&columns.starts, row)?,
+            execs: committed_many_sizes_count(&columns.execs, row)?,
+            exits: committed_many_sizes_count(&columns.exits, row)?,
+            bytes: usize::try_from(required_cell(&columns.bytes, row)?)
                 .map_err(|_| Error::Bound("committed App bytes"))?,
         };
         size.validate()?;
@@ -380,6 +362,31 @@ fn committed_many_sizes(
     }
 
     Err(Error::Bound("committed App batch size rows"))
+}
+
+/// The columns of a batch's size rows, in the order its size query aggregates them.
+struct SizeColumns<'frame> {
+    publication: Cells<'frame, UInt64Type>,
+    count: Cells<'frame, UInt64Type>,
+    bytes: Cells<'frame, UInt64Type>,
+    members: Cells<'frame, UInt64Type>,
+    starts: Cells<'frame, UInt64Type>,
+    execs: Cells<'frame, UInt64Type>,
+    exits: Cells<'frame, UInt64Type>,
+}
+
+impl<'frame> SizeColumns<'frame> {
+    fn new(frame: &'frame DataFrame) -> Result<Self> {
+        Ok(Self {
+            publication: Cells::new(frame, 0)?,
+            count: Cells::new(frame, 1)?,
+            bytes: Cells::new(frame, 2)?,
+            members: Cells::new(frame, 3)?,
+            starts: Cells::new(frame, 4)?,
+            execs: Cells::new(frame, 5)?,
+            exits: Cells::new(frame, 6)?,
+        })
+    }
 }
 
 fn committed_many_sizes_plan(batch: &Batch<'_>, connection: &Engine) -> Result<LazyFrame> {
@@ -687,8 +694,8 @@ fn committed_member(columns: &BatchColumns<'_>, row: usize, frame: &mut Frame) -
     Ok(())
 }
 
-fn committed_many_sizes_count(row: &Row<'_>, index: usize) -> Result<usize> {
-    let count = required::<u64>(row, index)?;
+fn committed_many_sizes_count(cells: &Cells<'_, UInt64Type>, row: usize) -> Result<usize> {
+    let count = required_cell(cells, row)?;
     let maximum = apps::PROCESS_INTERVALS_MAX + collector::tracker::EVENTS_PER_TICK_MAX;
     let count = usize::try_from(count).map_err(|_| Error::Bound("committed App count"))?;
     if count > maximum {
@@ -765,11 +772,6 @@ fn committed_event_program(columns: &BatchColumns<'_>, row: usize) -> Result<()>
     }
 
     Ok(())
-}
-
-fn required<T: FromCell>(row: &Row<'_>, index: usize) -> Result<T> {
-    row.get::<Option<T>>(index)?
-        .ok_or(Error::Bound("missing committed App field"))
 }
 
 fn required_cell<'frame, T: PolarsPhysicalType>(
