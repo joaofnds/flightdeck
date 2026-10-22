@@ -438,7 +438,7 @@ impl KeptTail {
 
 impl Session {
     /// The listed minute of the same run that holds the publication before the first of the
-    /// minute at `window`, the first of the windows `Session::predecessor_windows` names for
+    /// minute at `window`, the first of the windows `Reader::predecessor_windows` names for
     /// that reading.
     fn earlier_holder(&self, window: usize) -> Option<usize> {
         let publication = self.windows[window].publication_first.checked_sub(1)?;
@@ -483,8 +483,13 @@ impl Session {
             match earlier_minute_previous(&readings, &current, manifest, holder) {
                 Previous::Missing => first_missing = true,
                 Previous::Known(previous) => {
-                    let point =
-                        metrics::trends_point(self, &tables, &current, previous.as_ref(), 0)?;
+                    let point = metrics::trends_point(
+                        &self.reader(),
+                        &tables,
+                        &current,
+                        previous.as_ref(),
+                        0,
+                    )?;
                     points.insert(reading.publication, point);
                 }
             }
@@ -507,7 +512,7 @@ impl Session {
     fn earlier_minute_tables(&self, window: usize, tables: &mut metrics::Tables) -> Result<()> {
         let mut cell_count = metrics::trends_cell_count(tables);
         for name in metrics::TABLE_NAMES {
-            let rows = metrics::table_read(self, window, name, &mut cell_count)?;
+            let rows = metrics::table_read(&self.reader(), window, name, &mut cell_count)?;
             tables.insert((window, name), rows);
         }
 

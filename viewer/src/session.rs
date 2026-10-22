@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use collector::recording::{identity_text, private};
 use collector::ring::Identity;
@@ -31,8 +32,10 @@ pub struct Session {
     /// The older tail last assembled from these windows and the range it covers.
     earlier_tail: std::cell::RefCell<Option<(TailRange, Vec<Value>)>>,
     /// Whether each window's files were verified, which its first read does.
-    verified: Vec<std::cell::Cell<bool>>,
+    verified: Vec<AtomicBool>,
     connection: Engine,
+    /// The connections a context's readers read through, one each, so their queries run at once.
+    context_connections: Vec<Engine>,
     first: Option<u64>,
     last: Option<u64>,
     unknown: u64,
@@ -50,13 +53,13 @@ pub struct Session {
     pub(crate) saved_history_context_preparations: std::cell::Cell<u64>,
     operation: Operation,
     #[cfg(test)]
-    pub(crate) source_reads: std::cell::Cell<u64>,
+    pub(crate) source_reads: Count,
     #[cfg(test)]
     pub(crate) parts_decodes: std::cell::Cell<u64>,
     #[cfg(test)]
     pub(crate) tick_queries: std::cell::Cell<u64>,
     #[cfg(test)]
-    pub(crate) table_queries: std::cell::Cell<u64>,
+    pub(crate) table_queries: Count,
     #[cfg(test)]
     pub(crate) kept_header_queries: std::cell::Cell<u64>,
     #[cfg(test)]
@@ -171,9 +174,9 @@ impl Observation {
         })
     }
 
-    pub fn json(&self, session: &Session) -> Value {
-        let run = session.windows[self.window].identity.run;
-        let losses = session.windows[self.window].losses;
+    pub fn json(&self, windows: &[Manifest]) -> Value {
+        let run = windows[self.window].identity.run;
+        let losses = windows[self.window].losses;
         json!({"run": identity_text(run.run).to_string(),
             "boot": identity_text(run.boot).to_string(),
             "publication": self.publication, "run_tick": self.run_tick, "wall_ns": self.wall,
@@ -219,7 +222,7 @@ impl Session {
             .map(|manifest| {
                 let marker = layout::WindowKey::from(&manifest.identity).marker(root);
                 let kept = earlier_markers.get(&marker).copied();
-                std::cell::Cell::new(kept == Some(manifest))
+                AtomicBool::new(kept == Some(manifest))
             })
             .collect();
         let connection = data::connection();
@@ -229,6 +232,7 @@ impl Session {
             windows,
             verified,
             connection,
+            context_connections: (0..CONTEXT_READERS).map(|_| data::connection()).collect(),
             first: None,
             last: None,
             unknown: 0,
@@ -247,13 +251,13 @@ impl Session {
             saved_history_context_preparations: std::cell::Cell::new(0),
             operation,
             #[cfg(test)]
-            source_reads: std::cell::Cell::new(0),
+            source_reads: Count::default(),
             #[cfg(test)]
             parts_decodes: std::cell::Cell::new(0),
             #[cfg(test)]
             tick_queries: std::cell::Cell::new(0),
             #[cfg(test)]
-            table_queries: std::cell::Cell::new(0),
+            table_queries: Count::default(),
             #[cfg(test)]
             kept_header_queries: std::cell::Cell::new(0),
             #[cfg(test)]
@@ -317,7 +321,8 @@ impl Session {
         self.app_sample_cache.get_mut().take();
         self.operation.check()?;
         let range = ContextRange::charted_ending_at(selection.context_last_second)?;
-        let mut observations = self.observations(range.first_ns, range.end_ns)?;
+        let mut points = Vec::new();
+        let mut observations = self.context_read(range, &mut points)?;
         observations.sort_by_key(|value| (value.wall, value.window, value.publication));
         let alternatives: Vec<_> = observations
             .iter()
@@ -334,13 +339,11 @@ impl Session {
                     .clone(),
             )
         };
-        let mut points = Vec::new();
-        self.context_points(&observations, &mut points)?;
         let summary = chosen
             .as_ref()
             .and_then(|selected| {
                 points.iter().find(|point| {
-                    let identity = selected.json(self);
+                    let identity = selected.json(&self.windows);
                     if point["publication"].as_u64() != Some(selected.publication) {
                         return false;
                     }
@@ -357,10 +360,14 @@ impl Session {
         self.selected_context = selected_context;
         self.selected = chosen;
         self.context_last_second = Some(selection.context_last_second);
+        let alternative_identities: Vec<_> = alternatives
+            .iter()
+            .map(|value| value.json(&self.windows))
+            .collect();
         Ok(
             json!({"second": selection.second, "context_last_second": selection.context_last_second,
-            "selected": self.selected.as_ref().map(|value| value.json(self)),
-            "alternatives": alternatives.iter().map(|value| value.json(self)).collect::<Vec<_>>(),
+            "selected": self.selected.as_ref().map(|value| value.json(&self.windows)),
+            "alternatives": alternative_identities,
             "summary": summary, "trends": points, "context_seconds": 900}),
         )
     }
@@ -392,17 +399,21 @@ impl Session {
             .and_then(|value| value.checked_mul(NS))
             .ok_or(Error::Bound("selection time"))?;
 
-        let observations = self.observations(second * NS, end)?;
+        let observations = self.observations(ContextRange {
+            first_ns: second * NS,
+            end_ns: end,
+        })?;
         let Some(chosen) = observations
             .into_iter()
-            .find(|observation| named(&observation.json(self)))
+            .find(|observation| named(&observation.json(&self.windows)))
         else {
             return Ok(None);
         };
 
-        let selected = chosen.json(self);
-        let mut points = Vec::with_capacity(1);
-        self.context_points(std::slice::from_ref(&chosen), &mut points)?;
+        let selected = chosen.json(&self.windows);
+        let mut tables = metrics::Tables::new();
+        let mut points =
+            metrics::trends(&self.reader(), std::slice::from_ref(&chosen), &mut tables)?;
         assert_eq!(points.len(), 1);
         let mut summary = points.swap_remove(0);
         summary
@@ -420,32 +431,77 @@ impl Session {
         assert!(output.is_empty());
 
         self.operation.attach(&self.connection)?;
-        self.operation.run(|| {
-            let observations = self.observations(range.first_ns, range.end_ns)?;
-            self.context_points(&observations, output)
-        })
+        self.operation
+            .run(|| self.context_read(range, output).map(|_observations| ()))
     }
 
-    fn context_points(&self, observations: &[Observation], output: &mut Vec<Value>) -> Result<()> {
-        assert!(observations.len() <= OBSERVATIONS_MAX);
+    /// The observations of `range`, in no order, with their points in `output`, in time order.
+    /// Up to `CONTEXT_READERS` threads read them, each a contiguous run of the windows that may
+    /// hold them through a connection of its own, so the reads wait on each other no more than
+    /// the file system makes them.
+    fn context_read(
+        &self,
+        range: ContextRange,
+        output: &mut Vec<Value>,
+    ) -> Result<Vec<Observation>> {
+        assert!(range.first_ns < range.end_ns);
         assert!(output.is_empty());
+        assert_eq!(self.context_connections.len(), CONTEXT_READERS);
 
-        let mut windows = BTreeMap::<usize, Vec<Observation>>::new();
-        for observation in observations {
-            windows
-                .entry(observation.window)
-                .or_default()
-                .push(observation.clone());
-        }
+        let windows = self.context_windows(range);
+        let chunk = context_chunk(windows.len());
+        assert!(context_reader_count(windows.len()) <= self.context_connections.len());
+        let mut observations = Vec::new();
+        std::thread::scope(|scope| -> Result<()> {
+            let mut readers = Vec::with_capacity(CONTEXT_READERS);
+            for (part, connection) in windows.chunks(chunk).zip(&self.context_connections) {
+                let reader = self.reader_through(connection);
+                let thread = std::thread::Builder::new()
+                    .name("flightdeck-context".to_owned())
+                    // The desktop's live worker runs a context's reads with this stack when they
+                    // run on its own thread, as the earlier tail's still do.
+                    .stack_size(4 * 1024 * 1024)
+                    .spawn_scoped(scope, move || context_read_part(&reader, part, range))?;
+                readers.push(thread);
+            }
+            assert_eq!(readers.len(), context_reader_count(windows.len()));
 
-        let mut tables = metrics::Tables::new();
-        for batch in windows.values() {
-            self.operation.check()?;
-            output.append(&mut metrics::trends(self, batch, &mut tables)?);
-        }
+            for thread in readers {
+                let (mut part_observations, mut part_points) = thread
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
+                if observations.len() + part_observations.len() > OBSERVATIONS_MAX {
+                    return Err(Error::Bound("context observations"));
+                }
+                observations.append(&mut part_observations);
+                output.append(&mut part_points);
+            }
+            Ok(())
+        })?;
+        assert_eq!(observations.len(), output.len());
 
         context_points_order(output);
-        metrics::context_segments(output)
+        metrics::context_segments(output)?;
+        Ok(observations)
+    }
+
+    /// The windows whose readings may fall in `range`: those whose wall-clock bounds overlap it,
+    /// and those whose manifest holds no bounds.
+    fn context_windows(&self, range: ContextRange) -> Vec<usize> {
+        let mut windows = Vec::new();
+        for (window, manifest) in self.windows.iter().enumerate() {
+            if let Some(bounds) = manifest.wall_ns {
+                if bounds.max < range.first_ns {
+                    continue;
+                }
+                if bounds.min >= range.end_ns {
+                    continue;
+                }
+            }
+            windows.push(window);
+        }
+
+        windows
     }
 
     pub fn cpu_detail(&self) -> Result<Value> {
@@ -529,7 +585,7 @@ impl Session {
         )?;
 
         *output = Some(crate::cpu_detail::Sample {
-            identity: observation.json(self),
+            identity: observation.json(&self.windows),
             observation: observation.clone(),
             cpus,
         });
@@ -574,52 +630,16 @@ impl Session {
         )?;
         Ok(
             json!({"name": name, "columns": table.columns, "rows": table.rows,
-            "offset": offset, "total": total, "observation": selected.json(self)}),
+            "offset": offset, "total": total, "observation": selected.json(&self.windows)}),
         )
     }
 
     pub(crate) fn source(&self, window: usize, name: &str) -> Result<String> {
-        self.operation.check()?;
-        #[cfg(test)]
-        self.source_reads.set(self.source_reads.get() + 1);
-        let (table, _, _) = persistence::schema::TABLES
-            .iter()
-            .find(|entry| entry.0.name() == name)
-            .ok_or(Error::Bound("table name"))?;
-        self.validate_commitment(window)?;
-        let manifest = &self.windows[window];
-        let path = self
-            .root
-            .join(&manifest.data_directory)
-            .join(format!("{name}.parquet"));
-        persistence::query::table_source(
-            &self.connection,
-            *table,
-            persistence::query::TableSource::Parquet(&path),
-        )
+        self.reader().source(window, name)
     }
 
-    /// Checks that a window `discover` listed is still committed unchanged. Readers call it
-    /// around every read, so it verifies the window's files on the first and rereads the marker
-    /// after.
     fn validate_commitment(&self, window: usize) -> Result<()> {
-        self.operation.check()?;
-
-        assert_eq!(self.verified.len(), self.windows.len());
-        let manifest = &self.windows[window];
-        let marker = layout::WindowKey::from(&manifest.identity).marker(&self.root);
-        let flag = &self.verified[window];
-        let committed = if flag.get() {
-            reread_committed(&self.root, &marker)?
-        } else {
-            read_committed(&self.root, &marker)?
-        };
-        if committed != *manifest {
-            return Err(Error::Bound("changed commitment"));
-        }
-
-        flag.set(true);
-        Ok(())
+        self.reader().validate_commitment(window)
     }
 
     /// The windows this session's reads verified, which a reopen need not verify again.
@@ -629,68 +649,42 @@ impl Session {
             self.windows
                 .iter()
                 .zip(&self.verified)
-                .filter(|(_, flag)| flag.get())
+                .filter(|(_, flag)| flag.load(Ordering::Acquire))
                 .map(|(manifest, _)| manifest.clone())
                 .collect(),
         )
     }
 
     pub(crate) fn table(&self, window: usize, name: &str) -> Result<Table> {
-        #[cfg(test)]
-        self.table_queries.set(self.table_queries.get() + 1);
-        if name == metrics::core_frequency::CORE_LEVEL_STATES {
-            let sources = metrics::core_frequency::CoreLevelSources {
-                core_states: &self.source(window, "core_states")?,
-                ticks: &self.source(window, "ticks")?,
-            };
-            return metrics::core_frequency::core_level_states(
-                &self.connection,
-                &sources,
-                &self.operation,
-            );
-        }
-        let order = if name == "fans" {
-            "publication, fan"
-        } else {
-            "publication"
-        };
-        data::query(
-            &self.connection,
-            &format!(
-                "SELECT * FROM {} ORDER BY {order}",
-                self.source(window, name)?
-            ),
-            data::ROWS_MAX,
-            &self.operation,
-        )
+        self.reader().table(window, name)
     }
 
-    /// The windows of `observation`'s run whose publications include the one before it.
-    pub(crate) fn predecessor_windows(&self, observation: &Observation) -> Vec<usize> {
-        let Some(publication) = observation.publication.checked_sub(1) else {
-            return Vec::new();
-        };
-
-        self.predecessor_windows_holding(observation.window, publication)
-    }
-
-    /// The windows of the run of `window` whose publications include `publication`.
     pub(crate) fn predecessor_windows_holding(
         &self,
         window: usize,
         publication: u64,
     ) -> Vec<usize> {
-        let run = self.windows[window].identity.run;
-        let mut windows = Vec::new();
-        for (window, manifest) in self.windows.iter().enumerate() {
-            if manifest.identity.run == run {
-                if (manifest.publication_first..manifest.publication_end).contains(&publication) {
-                    windows.push(window);
-                }
-            }
-        }
+        self.reader()
+            .predecessor_windows_holding(window, publication)
+    }
 
-        windows
+    /// A reader of this session's windows through the session's connection.
+    pub(crate) fn reader(&self) -> Reader<'_> {
+        self.reader_through(&self.connection)
+    }
+
+    fn reader_through<'session>(&'session self, connection: &'session Engine) -> Reader<'session> {
+        Reader {
+            root: &self.root,
+            windows: &self.windows,
+            verified: &self.verified,
+            connection,
+            operation: &self.operation,
+            #[cfg(test)]
+            source_reads: &self.source_reads,
+            #[cfg(test)]
+            table_queries: &self.table_queries,
+        }
     }
 
     fn extent(&mut self) -> Result<()> {
@@ -765,32 +759,218 @@ impl Session {
         Ok(sealed == listed)
     }
 
-    fn observations(&self, first: u64, end: u64) -> Result<Vec<Observation>> {
+    fn observations(&self, range: ContextRange) -> Result<Vec<Observation>> {
+        let reader = self.reader();
         let mut observations = Vec::new();
-        for (window, manifest) in self.windows.iter().enumerate() {
-            if let Some(bounds) = manifest.wall_ns {
-                if bounds.max < first {
-                    continue;
-                }
-                if bounds.min >= end {
-                    continue;
-                }
-            }
-            let source = self.source(window, "ticks")?;
-            let ticks = data::query(
-                &self.connection,
-                &format!("SELECT * FROM {source} WHERE wall_ns>={first} AND wall_ns<{end}"),
-                OBSERVATIONS_MAX,
-                &self.operation,
-            )?;
-            if observations.len() + ticks.rows.len() > OBSERVATIONS_MAX {
-                return Err(Error::Bound("context observations"));
-            }
-            for row in &ticks.rows {
-                observations.push(Observation::from_row(&ticks, row, window)?);
-            }
+        for window in self.context_windows(range) {
+            reader.window_observations(window, range, &mut observations)?;
         }
         Ok(observations)
+    }
+}
+
+/// Threads that read a context's windows. On an M5 Pro the newest sixteen minutes of a
+/// recording took 280 ms to read on one thread, about 120 ms on six, and no less on more.
+pub(crate) const CONTEXT_READERS: usize = 6;
+
+/// The windows each reader of a context of `window_count` windows reads, the last reader
+/// reading those left.
+const fn context_chunk(window_count: usize) -> usize {
+    let chunk = window_count.div_ceil(CONTEXT_READERS);
+    if chunk == 0 { 1 } else { chunk }
+}
+
+/// The readers a context of `window_count` windows starts.
+pub(crate) const fn context_reader_count(window_count: usize) -> usize {
+    window_count.div_ceil(context_chunk(window_count))
+}
+
+/// The sealed windows of a session and a connection to read them through. Each thread that
+/// reads a context holds a reader of a connection of its own, so the threads share the windows,
+/// their verification and the operation, and wait on no one's queries.
+pub(crate) struct Reader<'session> {
+    root: &'session Path,
+    pub(crate) windows: &'session [Manifest],
+    verified: &'session [AtomicBool],
+    connection: &'session Engine,
+    operation: &'session Operation,
+    #[cfg(test)]
+    source_reads: &'session Count,
+    #[cfg(test)]
+    table_queries: &'session Count,
+}
+
+impl Reader<'_> {
+    pub(crate) fn source(&self, window: usize, name: &str) -> Result<String> {
+        self.operation.check()?;
+        #[cfg(test)]
+        self.source_reads.increment();
+        let (table, _, _) = persistence::schema::TABLES
+            .iter()
+            .find(|entry| entry.0.name() == name)
+            .ok_or(Error::Bound("table name"))?;
+        self.validate_commitment(window)?;
+        let manifest = &self.windows[window];
+        let path = self
+            .root
+            .join(&manifest.data_directory)
+            .join(format!("{name}.parquet"));
+        persistence::query::table_source(
+            self.connection,
+            *table,
+            persistence::query::TableSource::Parquet(&path),
+        )
+    }
+
+    /// Checks that a window `discover` listed is still committed unchanged. Readers call it
+    /// around every read, so it verifies the window's files on the first and rereads the marker
+    /// after. Two readers may both verify a window, which reads its files twice and changes
+    /// nothing.
+    fn validate_commitment(&self, window: usize) -> Result<()> {
+        self.operation.check()?;
+
+        assert_eq!(self.verified.len(), self.windows.len());
+        let manifest = &self.windows[window];
+        let marker = layout::WindowKey::from(&manifest.identity).marker(self.root);
+        let flag = &self.verified[window];
+        let committed = if flag.load(Ordering::Acquire) {
+            reread_committed(self.root, &marker)?
+        } else {
+            read_committed(self.root, &marker)?
+        };
+        if committed != *manifest {
+            return Err(Error::Bound("changed commitment"));
+        }
+
+        flag.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    pub(crate) fn table(&self, window: usize, name: &str) -> Result<Table> {
+        #[cfg(test)]
+        self.table_queries.increment();
+        if name == metrics::core_frequency::CORE_LEVEL_STATES {
+            let sources = metrics::core_frequency::CoreLevelSources {
+                core_states: &self.source(window, "core_states")?,
+                ticks: &self.source(window, "ticks")?,
+            };
+            return metrics::core_frequency::core_level_states(
+                self.connection,
+                &sources,
+                self.operation,
+            );
+        }
+        let order = if name == "fans" {
+            "publication, fan"
+        } else {
+            "publication"
+        };
+        data::query(
+            self.connection,
+            &format!(
+                "SELECT * FROM {} ORDER BY {order}",
+                self.source(window, name)?
+            ),
+            data::ROWS_MAX,
+            self.operation,
+        )
+    }
+
+    /// Appends to `observations` the readings of `window` that fall in `range`.
+    fn window_observations(
+        &self,
+        window: usize,
+        range: ContextRange,
+        observations: &mut Vec<Observation>,
+    ) -> Result<()> {
+        let source = self.source(window, "ticks")?;
+        let ContextRange { first_ns, end_ns } = range;
+        let ticks = data::query(
+            self.connection,
+            &format!("SELECT * FROM {source} WHERE wall_ns>={first_ns} AND wall_ns<{end_ns}"),
+            OBSERVATIONS_MAX,
+            self.operation,
+        )?;
+        if observations.len() + ticks.rows.len() > OBSERVATIONS_MAX {
+            return Err(Error::Bound("context observations"));
+        }
+
+        for row in &ticks.rows {
+            observations.push(Observation::from_row(&ticks, row, window)?);
+        }
+        Ok(())
+    }
+
+    /// The windows of `observation`'s run whose publications include the one before it.
+    pub(crate) fn predecessor_windows(&self, observation: &Observation) -> Vec<usize> {
+        let Some(publication) = observation.publication.checked_sub(1) else {
+            return Vec::new();
+        };
+
+        self.predecessor_windows_holding(observation.window, publication)
+    }
+
+    /// The windows of the run of `window` whose publications include `publication`.
+    pub(crate) fn predecessor_windows_holding(
+        &self,
+        window: usize,
+        publication: u64,
+    ) -> Vec<usize> {
+        let run = self.windows[window].identity.run;
+        let mut windows = Vec::new();
+        for (window, manifest) in self.windows.iter().enumerate() {
+            if manifest.identity.run == run {
+                if (manifest.publication_first..manifest.publication_end).contains(&publication) {
+                    windows.push(window);
+                }
+            }
+        }
+
+        windows
+    }
+}
+
+/// The observations of `range` that `windows` hold and their points, read through `reader`.
+/// The points of a window's first readings take their rates from the window before, which a
+/// reader reads where another reader holds it.
+fn context_read_part(
+    reader: &Reader<'_>,
+    windows: &[usize],
+    range: ContextRange,
+) -> Result<(Vec<Observation>, Vec<Value>)> {
+    let mut tables = metrics::Tables::new();
+    let mut observations = Vec::new();
+    let mut points = Vec::new();
+    let mut batch = Vec::new();
+    for &window in windows {
+        batch.clear();
+        reader.window_observations(window, range, &mut batch)?;
+        if !batch.is_empty() {
+            if observations.len() + batch.len() > OBSERVATIONS_MAX {
+                return Err(Error::Bound("context observations"));
+            }
+            points.append(&mut metrics::trends(reader, &batch, &mut tables)?);
+            observations.append(&mut batch);
+        }
+    }
+
+    assert_eq!(observations.len(), points.len());
+    Ok((observations, points))
+}
+
+/// A count tests read of the reads a session makes, which its readers make from several threads.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct Count(std::sync::atomic::AtomicU64);
+
+#[cfg(test)]
+impl Count {
+    pub(crate) fn get(&self) -> u64 {
+        self.0.load(Ordering::Acquire)
+    }
+
+    fn increment(&self) {
+        self.0.fetch_add(1, Ordering::AcqRel);
     }
 }
 

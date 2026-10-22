@@ -512,7 +512,9 @@ fn refuses_overlapping_commitment_candidates_instead_of_choosing_one() {
     let mut session = Session::open(&fixture.root).unwrap();
     let selected = selected(&session, 1002);
     session.windows.push(session.windows[0].clone());
-    session.verified.push(std::cell::Cell::new(false));
+    session
+        .verified
+        .push(std::sync::atomic::AtomicBool::new(false));
     let target = Target {
         kind: KeyKind::Bundle,
         bytes: b"/Apps/Current.app",

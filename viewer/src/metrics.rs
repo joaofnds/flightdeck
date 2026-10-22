@@ -4,7 +4,7 @@ use persistence::{Error, Result};
 use serde_json::{Value, json};
 
 use crate::data::Table;
-use crate::session::{OBSERVATIONS_MAX, Observation, Session, partition};
+use crate::session::{OBSERVATIONS_MAX, Observation, Reader, partition};
 
 type ObservationKey = ([u64; 2], [u64; 2], u64);
 pub(crate) const TABLE_NAMES: [&str; 7] = [
@@ -35,26 +35,31 @@ const TRAFFIC_RATES: [(&str, &str); 6] = [
 
 pub(crate) type Tables = BTreeMap<(usize, &'static str), BTreeMap<u64, Table>>;
 
-/// The cells of the tables one context may hold while it makes its points.
+/// The cells of the tables one context may hold while it makes its points, over all its readers.
 pub(crate) const CONTEXT_CELLS_MAX: usize = 2_000_000;
+
+/// The cells of the tables one reader may hold, so the readers of a context together stay under
+/// `CONTEXT_CELLS_MAX`. A reader holds the tables of two minutes at most, which came to 68,640
+/// cells over a recording of an M5 Pro.
+pub(crate) const READER_CELLS_MAX: usize = CONTEXT_CELLS_MAX / crate::session::CONTEXT_READERS;
 
 /// The points of `observations`, the readings of one window. `tables` keeps the tables of their
 /// window and of the windows that may hold their predecessors, and drops the rest, since the
 /// first reading of the next window takes its rates from the last reading of this one.
 pub(crate) fn trends(
-    session: &Session,
+    reader: &Reader<'_>,
     observations: &[Observation],
     tables: &mut Tables,
 ) -> Result<Vec<Value>> {
-    let all = trends_read(session, observations, tables)?;
+    let all = trends_read(reader, observations, tables)?;
     let mut points = Vec::with_capacity(observations.len());
     let mut segment = 0_u64;
     let mut prior: Option<&Observation> = None;
     for observation in observations {
-        let previous = all.get(&key_previous(session, observation));
+        let previous = all.get(&key_previous(reader, observation));
         if !prior.is_some_and(|value| {
-            if session.windows[value.window].identity.run
-                != session.windows[observation.window].identity.run
+            if reader.windows[value.window].identity.run
+                != reader.windows[observation.window].identity.run
             {
                 return false;
             }
@@ -63,7 +68,7 @@ pub(crate) fn trends(
             segment += 1;
         }
         points.push(trends_point(
-            session,
+            reader,
             tables,
             observation,
             previous,
@@ -76,14 +81,14 @@ pub(crate) fn trends(
 
 /// The point of `observation` with the identity of its run and boot.
 pub(crate) fn trends_point(
-    session: &Session,
+    reader: &Reader<'_>,
     tables: &Tables,
     observation: &Observation,
     previous: Option<&Observation>,
     segment: u64,
 ) -> Result<Value> {
     let mut value = point(tables, observation, previous, segment)?;
-    let identity = observation.json(session);
+    let identity = observation.json(reader.windows);
     value["run"] = identity["run"].clone();
     value["boot"] = identity["boot"].clone();
 
@@ -93,31 +98,31 @@ pub(crate) fn trends_point(
 /// Reads into `tables` the tables of `observations` and of their predecessors, after dropping
 /// those of every other window, and returns the observations with their predecessors.
 fn trends_read(
-    session: &Session,
+    reader: &Reader<'_>,
     observations: &[Observation],
     tables: &mut Tables,
 ) -> Result<BTreeMap<ObservationKey, Observation>> {
     let mut all: BTreeMap<_, _> = observations
         .iter()
-        .map(|value| (key(session, value, value.publication), value.clone()))
+        .map(|value| (key(reader, value, value.publication), value.clone()))
         .collect();
     let mut windows = BTreeSet::new();
     for observation in observations {
         assert_eq!(observation.window, observations[0].window);
         windows.insert(observation.window);
-        if !all.contains_key(&key_previous(session, observation)) {
-            windows.extend(session.predecessor_windows(observation));
+        if !all.contains_key(&key_previous(reader, observation)) {
+            windows.extend(reader.predecessor_windows(observation));
         }
     }
     tables.retain(|(window, _), _| windows.contains(window));
 
     let mut cell_count = trends_cell_count(tables);
     for observation in observations {
-        if !all.contains_key(&key_previous(session, observation)) {
+        if !all.contains_key(&key_previous(reader, observation)) {
             if let Some(previous) =
-                trends_predecessor(session, observation, tables, &mut cell_count)?
+                trends_predecessor(reader, observation, tables, &mut cell_count)?
             {
-                all.insert(key(session, &previous, previous.publication), previous);
+                all.insert(key(reader, &previous, previous.publication), previous);
             }
         }
     }
@@ -133,7 +138,7 @@ fn trends_read(
     }
     for window in read {
         for name in TABLE_NAMES {
-            trends_table(session, tables, window, name, &mut cell_count)?;
+            trends_table(reader, tables, window, name, &mut cell_count)?;
         }
     }
     assert_eq!(cell_count, trends_cell_count(tables));
@@ -144,7 +149,7 @@ fn trends_read(
 /// The reading before `observation` in its run, from the ticks of the first window that holds
 /// it with a wall clock.
 fn trends_predecessor(
-    session: &Session,
+    reader: &Reader<'_>,
     observation: &Observation,
     tables: &mut Tables,
     cell_count: &mut usize,
@@ -153,8 +158,8 @@ fn trends_predecessor(
         return Ok(None);
     };
 
-    for window in session.predecessor_windows(observation) {
-        let ticks = trends_table(session, tables, window, "ticks", cell_count)?;
+    for window in reader.predecessor_windows(observation) {
+        let ticks = trends_table(reader, tables, window, "ticks", cell_count)?;
         if let Some(table) = ticks.get(&publication) {
             for row in &table.rows {
                 if table.integer(row, "wall_ns")?.is_some() {
@@ -170,7 +175,7 @@ fn trends_predecessor(
 /// The rows of table `name` of `window` by publication, read from the window unless `tables`
 /// keeps them. `cell_count` counts the cells `tables` keeps, which stay under a bound.
 fn trends_table<'tables>(
-    session: &Session,
+    reader: &Reader<'_>,
     tables: &'tables mut Tables,
     window: usize,
     name: &'static str,
@@ -179,25 +184,25 @@ fn trends_table<'tables>(
     match tables.entry((window, name)) {
         std::collections::btree_map::Entry::Occupied(entry) => Ok(entry.into_mut()),
         std::collections::btree_map::Entry::Vacant(entry) => {
-            Ok(entry.insert(table_read(session, window, name, cell_count)?))
+            Ok(entry.insert(table_read(reader, window, name, cell_count)?))
         }
     }
 }
 
 /// The rows of table `name` of `window` by publication, read from the window. `cell_count`
-/// counts the cells a context holds, which stay under `CONTEXT_CELLS_MAX`.
+/// counts the cells one reader holds, which stay under `READER_CELLS_MAX`.
 pub(crate) fn table_read(
-    session: &Session,
+    reader: &Reader<'_>,
     window: usize,
     name: &'static str,
     cell_count: &mut usize,
 ) -> Result<BTreeMap<u64, Table>> {
-    let table = session.table(window, name)?;
+    let table = reader.table(window, name)?;
     if name == "fans" {
         crate::live_fan_history::source(&table)?;
     }
     *cell_count += table.rows.len() * table.columns.len();
-    if *cell_count > CONTEXT_CELLS_MAX {
+    if *cell_count > READER_CELLS_MAX {
         return Err(Error::Bound("context cells"));
     }
 
@@ -216,15 +221,15 @@ pub(crate) fn trends_cell_count(tables: &Tables) -> usize {
     cell_count
 }
 
-fn key(session: &Session, observation: &Observation, publication: u64) -> ObservationKey {
-    let run = session.windows[observation.window].identity.run;
+fn key(reader: &Reader<'_>, observation: &Observation, publication: u64) -> ObservationKey {
+    let run = reader.windows[observation.window].identity.run;
     (run.run.0, run.boot.0, publication)
 }
 
 /// The key of the reading before `observation` in its run.
-fn key_previous(session: &Session, observation: &Observation) -> ObservationKey {
+fn key_previous(reader: &Reader<'_>, observation: &Observation) -> ObservationKey {
     key(
-        session,
+        reader,
         observation,
         observation.publication.saturating_sub(1),
     )

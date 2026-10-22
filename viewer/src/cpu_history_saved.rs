@@ -24,7 +24,7 @@ impl Session {
                 .selected
                 .as_ref()
                 .ok_or(Error::Bound("no selected observation"))?
-                .json(self);
+                .json(&self.windows);
             let context_last_second = self
                 .context_last_second
                 .ok_or(Error::Bound("no selected context"))?;
@@ -61,7 +61,7 @@ impl Session {
         self.operation.attach(&self.connection)?;
         let operation = self.operation.begin(self.operation.epoch())?;
         operation.run(|| {
-            let observations = self.observations(range.first_ns, range.end_ns)?;
+            let observations = self.observations(range)?;
             let mut cache = Cache {
                 range,
                 entries: Vec::with_capacity(observations.len()),
@@ -236,7 +236,7 @@ impl Session {
         output: &mut BTreeMap<(usize, u64), CounterSample>,
     ) -> Result<()> {
         let mut identity = None;
-        Identity::read(&observation.json(self), observation, &mut identity)?;
+        Identity::read(&observation.json(&self.windows), observation, &mut identity)?;
         let mut counters = Vec::new();
         if let Some(table) = cpus.remove(&observation.publication) {
             cpu_history_sample::counters(&table, observation.publication, &mut counters)?;

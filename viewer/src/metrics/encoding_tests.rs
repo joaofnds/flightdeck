@@ -1,4 +1,5 @@
 use super::*;
+use crate::session::Session;
 use collector::machine::{CPUTicks, Memory};
 use collector::ring::{Identity, RunIdentity, Shape, Tick, TickBuffers};
 use persistence::{Begin, Encoder, Limits, Store, Window, WindowIdentity};
