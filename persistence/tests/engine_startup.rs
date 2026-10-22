@@ -7,6 +7,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const PROBE_DIRECTORY: &str = "FLIGHTDECK_ENGINE_STARTUP_TEST";
+/// The thread counts a child passes its initializer, as "maximum asynchronous", where the
+/// case names them.
+const DEFAULTS: &str = "FLIGHTDECK_ENGINE_STARTUP_DEFAULTS";
 
 #[test]
 fn missing_settings_preserve_the_process_and_arguments() {
@@ -62,6 +65,40 @@ fn missing_maximum_setting_preserves_the_explicit_async_count_and_arguments() {
             valid: true,
         },
     );
+}
+
+#[test]
+fn missing_settings_take_the_caller_s_defaults() {
+    // Goal: a caller that starts with defaults of its own, as the app does, gets its own counts
+    // for missing settings rather than the library's.
+    // Method: an isolated child passes defaults of 3 and 2 with neither setting present, and
+    // checks both settings after its one re-exec.
+    run_case_with_defaults(
+        "missing_settings_take_the_caller_s_defaults",
+        &Settings {
+            maximum: None,
+            asynchronous: None,
+            valid: true,
+        },
+        Some(persistence::engine::ThreadCounts {
+            maximum: 3,
+            asynchronous: 2,
+        }),
+    );
+}
+
+#[test]
+#[should_panic(expected = "1 <= count")]
+fn a_caller_s_zero_default_is_refused_before_reading_the_environment() {
+    // Goal: a caller's default outside the bound is the caller's bug, so it stops the program
+    // rather than re-executing into an error that blames the environment.
+    // Method: pass a maximum default of zero in process, where the assertion fires first.
+    let defaults = persistence::engine::ThreadCounts {
+        maximum: 0,
+        asynchronous: 1,
+    };
+
+    persistence::engine::initialize_process_with(defaults).unwrap();
 }
 
 #[test]
@@ -127,6 +164,16 @@ struct Settings {
 }
 
 fn run_case(name: &str, settings: &Settings) {
+    run_case_with_defaults(name, settings, None);
+}
+
+/// Runs the case `name` in a child whose initializer takes `defaults`, or the library's
+/// defaults where it is `None`.
+fn run_case_with_defaults(
+    name: &str,
+    settings: &Settings,
+    defaults: Option<persistence::engine::ThreadCounts>,
+) {
     if let Some(directory) = std::env::var_os(PROBE_DIRECTORY) {
         assert_child(&PathBuf::from(directory));
         return;
@@ -146,6 +193,9 @@ fn run_case(name: &str, settings: &Settings) {
         .flat_map(|argument| argument.as_bytes().iter().copied().chain([0]))
         .collect();
     std::fs::write(directory.0.join("arguments"), expected).unwrap();
+    let [(_, maximum), (_, asynchronous)] = defaults
+        .unwrap_or(persistence::engine::THREAD_DEFAULTS)
+        .environment();
     let mut command = Command::new(&executable);
     command
         .args(&arguments[1..])
@@ -156,12 +206,16 @@ fn run_case(name: &str, settings: &Settings) {
         )
         .env(
             "FLIGHTDECK_ENGINE_STARTUP_MAXIMUM",
-            settings.maximum.unwrap_or("1"),
+            settings.maximum.map_or(maximum, String::from),
         )
         .env(
             "FLIGHTDECK_ENGINE_STARTUP_ASYNC",
-            settings.asynchronous.unwrap_or("1"),
+            settings.asynchronous.map_or(asynchronous, String::from),
         );
+    if let Some(defaults) = defaults {
+        let counts = format!("{} {}", defaults.maximum, defaults.asynchronous);
+        command.env(DEFAULTS, counts);
+    }
 
     run_case_settings(&mut command, settings);
     let output = command.output().unwrap();
@@ -198,7 +252,13 @@ fn assert_child(directory: &Path) {
     assert!(entries.lines().count() < 2);
     writeln!(entries, "{}", std::process::id()).unwrap();
     std::fs::write(&path, &entries).unwrap();
-    let result = persistence::engine::initialize_process();
+    let result = match std::env::var(DEFAULTS) {
+        Ok(defaults) => {
+            persistence::engine::initialize_process_with(assert_child_defaults(&defaults))
+        }
+        Err(std::env::VarError::NotPresent) => persistence::engine::initialize_process(),
+        Err(error) => panic!("{error}"),
+    };
     let valid: bool = std::env::var("FLIGHTDECK_ENGINE_STARTUP_VALID")
         .unwrap()
         .parse()
@@ -227,6 +287,14 @@ fn assert_child(directory: &Path) {
         std::env::var("POLARS_ASYNC_THREAD_COUNT").unwrap(),
         std::env::var("FLIGHTDECK_ENGINE_STARTUP_ASYNC").unwrap()
     );
+}
+
+fn assert_child_defaults(text: &str) -> persistence::engine::ThreadCounts {
+    let (maximum, asynchronous) = text.split_once(' ').unwrap();
+    persistence::engine::ThreadCounts {
+        maximum: maximum.parse().unwrap(),
+        asynchronous: asynchronous.parse().unwrap(),
+    }
 }
 
 fn assert_child_arguments(directory: &Path) {

@@ -231,13 +231,7 @@ impl CollectorSession {
         };
         let standard = Output::new()?;
         let diagnostic = Output::new()?;
-        let child = Command::new(&self.0.configuration.binary)
-            .arg("--ring")
-            .arg(ring)
-            .arg("--recording")
-            .arg(&self.0.configuration.root)
-            .arg("--parent-pid")
-            .arg(std::process::id().to_string())
+        let child = spawn_command(&self.0.configuration, &ring)
             .stdin(Stdio::null())
             .stdout(Stdio::from(standard.writer()?))
             .stderr(Stdio::from(diagnostic.writer()?))
@@ -371,6 +365,23 @@ pub(super) fn binary(executable: &Path) -> io::Result<PathBuf> {
     }
 
     Ok(Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/release/collector"))
+}
+
+/// The command that starts the collector on `ring`. It sets the library's thread defaults
+/// whatever settings the app runs with, explicit ones included, since the app sizes its own for
+/// its chart reads, so that the persister the collector starts keeps one Polars thread and
+/// leaves the Mac's cores to the programs it records.
+fn spawn_command(configuration: &Configuration, ring: &str) -> Command {
+    let mut command = Command::new(&configuration.binary);
+    command
+        .arg("--ring")
+        .arg(ring)
+        .arg("--recording")
+        .arg(&configuration.root)
+        .arg("--parent-pid")
+        .arg(std::process::id().to_string())
+        .envs(persistence::engine::THREAD_DEFAULTS.environment());
+    command
 }
 
 /// The ring of a collector this app starts on a recording of its own, named for this app's

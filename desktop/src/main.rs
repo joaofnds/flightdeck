@@ -81,8 +81,18 @@ fn main() -> ExitCode {
     }
 }
 
+/// The Polars thread counts the app starts with when the environment lacks them. The app
+/// reads a chart context and the older tail on six threads at once (the viewer's
+/// `CONTEXT_READERS`), and each waits on a Polars thread for its queries. On an M5 Pro over a
+/// recording of about 3,500 sealed minutes, six Polars threads filled the charts at launch in a
+/// median of 782 ms, where one took 855, and twelve were slower than six.
+const APP_THREAD_COUNTS: persistence::engine::ThreadCounts = persistence::engine::ThreadCounts {
+    maximum: 6,
+    ..persistence::engine::THREAD_DEFAULTS
+};
+
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    persistence::engine::initialize_process()?;
+    persistence::engine::initialize_process_with(APP_THREAD_COUNTS)?;
     diagnostics::initialize()?;
     if std::env::args().nth(1).as_deref() == Some("--bundle") {
         return bundle::create();

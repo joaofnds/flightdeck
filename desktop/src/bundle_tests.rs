@@ -136,7 +136,7 @@ fn bundle_launch_starts_with_every_thread_default() {
     let length = plist[start..].find("</dict>").unwrap();
     let environment = &plist[start..start + length];
 
-    for (option, default) in persistence::engine::THREAD_DEFAULTS {
+    for (option, default) in crate::APP_THREAD_COUNTS.environment() {
         let entry = format!("<key>{option}</key><string>{default}</string>");
         assert!(environment.contains(&entry), "{entry} is missing");
     }

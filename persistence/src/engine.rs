@@ -25,7 +25,7 @@ pub use admission::EXPANDED_BYTES_MAX as PARQUET_EXPANDED_BYTES_MAX;
 pub use cells::{Cells, FromCell, Row};
 pub use scan::scan;
 pub use sources::PARQUET_SOURCES_MAX;
-pub use startup::{THREAD_DEFAULTS, initialize_process};
+pub use startup::{THREAD_DEFAULTS, ThreadCounts, initialize_process, initialize_process_with};
 
 pub struct Engine {
     context: Mutex<SQLContext>,

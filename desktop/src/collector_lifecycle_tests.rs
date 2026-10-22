@@ -324,6 +324,34 @@ fn an_isolated_session_removes_its_saved_ring_once_its_collector_exits() {
     assert!(!fixture.place().lock_path.exists());
 }
 
+#[test]
+fn the_collector_starts_with_the_library_thread_defaults() {
+    // Goal: the collector, and the persister it starts, keep the library's thread defaults
+    // whatever the app runs with, since the app sizes its own Polars threads for its charts.
+    // Method: build the collector's command and read the environment it sets on the child.
+    let configuration = Configuration {
+        root: PathBuf::from("/recording"),
+        binary: PathBuf::from("/collector"),
+        isolated: true,
+        mode: Mode::Explicit,
+    };
+
+    let command = spawn_command(&configuration, "ring");
+
+    let defaults = persistence::engine::THREAD_DEFAULTS.environment();
+    let expected: BTreeMap<_, _> = defaults
+        .iter()
+        .map(|(option, count)| {
+            (
+                std::ffi::OsStr::new(option),
+                Some(std::ffi::OsStr::new(count)),
+            )
+        })
+        .collect();
+    let environment: BTreeMap<_, _> = command.get_envs().collect();
+    assert_eq!(environment, expected);
+}
+
 struct Recording {
     root: PathBuf,
     ring: String,
