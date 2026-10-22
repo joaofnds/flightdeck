@@ -232,6 +232,18 @@ fn overview_one_unavailable_history_keeps_the_other_three_cards(cx: &mut TestApp
 }
 
 #[gpui::test]
+fn overview_gpu_card_names_the_page_that_draws_gpu_time_by_app(cx: &mut TestAppContext) {
+    // Goal: the Overview, which loads no GPU history, never claims the recording lacks one.
+    // Method: install the Overview's histories and read its GPU card.
+    let mut harness = InputHarness::setup_route(cx, "overview");
+
+    harness.driver.seed_overview_histories(1100.0);
+
+    assert!(harness.driver.reading_is_visible("Drawn on the GPU page"));
+    harness.teardown();
+}
+
+#[gpui::test]
 fn overview_history_data_and_legend_keep_each_resource_reading(cx: &mut TestAppContext) {
     // Installed Data controls and legend toggles must select the Disk adapter in the cohort group.
     let mut harness = InputHarness::setup_route(cx, "overview");

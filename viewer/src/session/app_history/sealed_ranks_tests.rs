@@ -111,6 +111,36 @@ fn a_window_keeps_no_ranks_from_a_table_of_another_version() {
 }
 
 #[test]
+fn a_window_keeps_no_ranks_from_a_table_of_the_version_that_ranked_no_gpu_time() {
+    // Goal: a build reads no ranks from a table of version 1, which ranked no GPU time, and
+    // leaves the window's observations to the replay, which ranks it.
+    // Method: rewrite a sealed window's ranks to version 1 without their GPU rows, and read the
+    // ranks the window keeps.
+    const { assert!(VERSION > 1) };
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(1000);
+    fixture.publish_with_system_rows(1001);
+    fixture.seal_derived(&[], &crate::SealedApps::default());
+    let session = Session::open(&fixture.root).unwrap();
+    rewrite(&session, APP_RANKS, |frame| {
+        let gpu = metric_code(Metric::Gpu);
+        let ranked = polars::prelude::ChunkCompareEq::not_equal(
+            frame.column("metric").unwrap().u8().unwrap(),
+            gpu,
+        );
+        *frame = frame.filter(&ranked).unwrap();
+        let version = vec![1_u8; frame.height()];
+        frame
+            .replace("version", Column::new("version".into(), version))
+            .unwrap();
+    });
+
+    let kept = kept_ranks(&session, 1001);
+
+    assert!(kept.is_empty());
+}
+
+#[test]
 fn a_window_whose_ranks_lack_a_row_its_seal_counted_is_refused() {
     // Goal: ranks that lost a row since the window sealed are an error, not a shorter ranking.
     // Method: rewrite a sealed window's ranks without their last row, and read them.

@@ -1,4 +1,4 @@
-//! Bounded CPU, process-power and disk attribution over the selected App context.
+//! Bounded CPU, process-power, disk and GPU attribution over the selected App context.
 use persistence::Result;
 use serde_json::Value;
 
@@ -19,8 +19,10 @@ pub enum AppAttributionMetric {
     Cpu,
     Power,
     Disk,
+    Gpu,
 }
 
+/// The Overview's histories, which show no GPU.
 pub struct AppAttributionHistories {
     pub cpu: Result<Value>,
     pub power: Result<Value>,
@@ -89,6 +91,7 @@ impl AppAttributionMetric {
             Self::Cpu => "cpu",
             Self::Power => "power",
             Self::Disk => "disk",
+            Self::Gpu => "gpu",
         }
     }
 
@@ -97,6 +100,7 @@ impl AppAttributionMetric {
             Self::Cpu => "cpu_ns",
             Self::Power => "energy_nj",
             Self::Disk => "disk_io_bytes",
+            Self::Gpu => "gpu_ns",
         }
     }
 
@@ -105,6 +109,7 @@ impl AppAttributionMetric {
             Self::Cpu => "cpu_percent_one_core",
             Self::Power => "energy_watts",
             Self::Disk => "disk_io_bps",
+            Self::Gpu => "gpu_percent",
         }
     }
 
@@ -120,6 +125,10 @@ impl AppAttributionMetric {
             }),
             Self::Disk => crate::apps::bytes_per_second(crate::apps::BytesRate {
                 bytes: amount,
+                elapsed_ns: elapsed_ns?,
+            }),
+            Self::Gpu => crate::apps::gpu_percent(crate::apps::GpuRate {
+                gpu_ns: amount,
                 elapsed_ns: elapsed_ns?,
             }),
         }

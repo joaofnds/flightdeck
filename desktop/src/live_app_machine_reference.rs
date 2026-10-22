@@ -39,6 +39,7 @@ impl MachineReference {
                     .zip(decode_rate(&storage["write_bps"]))
                     .map(|(read, write)| read + write)
             }
+            Metric::Gpu => decode_rate(&value["gpu_active_percent"]),
             Metric::Power => unreachable!("Process power has no machine reference"),
         };
         let Some(rate) = rate.filter(|rate| rate.is_finite()) else {
@@ -70,6 +71,7 @@ impl History {
         match self.metric {
             Metric::Cpu => Some("All CPU"),
             Metric::Disk => Some("All disk I/O"),
+            Metric::Gpu => Some("GPU busy"),
             Metric::Power => None,
         }
     }
@@ -85,6 +87,7 @@ impl History {
                 let scope = match self.metric {
                     Metric::Cpu => "all recorded logical CPUs",
                     Metric::Disk => "whole-device read + write",
+                    Metric::Gpu => "GPU active time",
                     Metric::Power => unreachable!("Process power has no machine reference"),
                 };
                 format!("{} · {scope}", self.metric.rate_text(rate))

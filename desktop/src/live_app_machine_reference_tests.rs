@@ -8,10 +8,10 @@ pub(crate) fn scalar_selection() -> Value {
         "selected":{"run":[1,2],"boot":[3,4],"publication":2},
         "trends":[
             {"run":[1,2],"boot":[3,4],"publication":1,"wall_ns":999_000_000_000_u64,
-                "cpu_percent":12.5,"cpu_percent_one_core":150.0,
+                "cpu_percent":12.5,"cpu_percent_one_core":150.0,"gpu_active_percent":30.0,
                 "storage":{"state":"complete","read_bps":2_000_000.0,"write_bps":1_000_000.0}},
             {"run":[1,2],"boot":[3,4],"publication":2,"wall_ns":1_000_000_000_000_u64,
-                "cpu_percent":25.0,"cpu_percent_one_core":450.0,
+                "cpu_percent":25.0,"cpu_percent_one_core":450.0,"gpu_active_percent":45.0,
                 "storage":{"state":"complete","read_bps":4_000_000.0,"write_bps":2_000_000.0}}]})
 }
 
@@ -41,6 +41,28 @@ fn cpu_reference_is_independent_unstacked_and_excluded_from_captured_totals() {
         "450% · all recorded logical CPUs"
     );
     assert_eq!(history.headline(Some(1)), "250% captured");
+}
+
+#[test]
+fn gpu_reference_is_the_gpus_own_busy_share_over_each_apps_gpu_time() {
+    // Goal: the GPU page draws each App's GPU time stacked under the GPU's own busy share, which
+    // work from several Apps at once can sit under. Method: one App at 20% and 35% of two
+    // intervals beside a GPU busy for 30% and 45% of them.
+    let history = AppAttributionHistory::prepare(
+        Metric::Gpu,
+        &tests::fixture(Metric::Gpu),
+        &scalar_selection(),
+    );
+
+    let panel = history.panel().unwrap();
+
+    assert_eq!(panel.id, "live-gpu-apps");
+    assert_eq!(panel.title, "GPU time by app");
+    assert_eq!(panel.lines[1].values, [Some(20.0), Some(35.0)]);
+    assert_eq!(panel.lines[2].name, "GPU busy");
+    assert_eq!(panel.lines[2].values, [Some(30.0), Some(45.0)]);
+    assert_eq!(panel.lines[2].dashed, Some(true));
+    assert_eq!(history.reading(2, Some(1)), "45% · GPU active time");
 }
 
 #[test]

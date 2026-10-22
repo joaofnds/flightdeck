@@ -46,6 +46,7 @@ pub(crate) struct App {
     cpu: CompactMeasure,
     power: CompactMeasure,
     disk: CompactMeasure,
+    gpu: CompactMeasure,
     members: u16,
     membership_complete: bool,
 }
@@ -62,12 +63,13 @@ struct MeasuredApp<'key> {
     cpu: Measure,
     power: Measure,
     disk: Measure,
+    gpu: Measure,
     members: u32,
     membership_complete: bool,
 }
 
 const _: () = {
-    assert!(size_of::<App>() <= 48);
+    assert!(size_of::<App>() <= 64);
     assert!(size_of::<CompactMeasure>() <= 12);
 };
 
@@ -384,6 +386,7 @@ impl Point {
             cpu: app.cpu_ns,
             power: app.energy_nj,
             disk: app.disk_io_bytes,
+            gpu: app.gpu_ns,
             members: app.members,
             membership_complete: app.membership_complete,
         });
@@ -412,6 +415,7 @@ impl Point {
                 cpu: measure(&app.cpu_ns),
                 power: measure(&app.energy_nj),
                 disk: measure(&app.disk_io_bytes),
+                gpu: measure(&app.gpu_ns),
                 members: app.members,
                 membership_complete: app.membership_complete,
             });
@@ -462,6 +466,7 @@ impl Point {
                 cpu: CompactMeasure::capture(&measured.cpu),
                 power: CompactMeasure::capture(&measured.power),
                 disk: CompactMeasure::capture(&measured.disk),
+                gpu: CompactMeasure::capture(&measured.gpu),
                 members: u16::try_from(measured.members)
                     .map_err(|_| Error::Bound("attribution App members"))?,
                 membership_complete: measured.membership_complete,
@@ -483,6 +488,7 @@ impl Point {
                 AppAttributionMetric::Cpu => app.cpu.measure(),
                 AppAttributionMetric::Power => app.power.measure(),
                 AppAttributionMetric::Disk => app.disk.measure(),
+                AppAttributionMetric::Gpu => app.gpu.measure(),
             },
             members: u32::from(app.members),
             membership_complete: app.membership_complete,
@@ -501,11 +507,12 @@ impl Summed for App {
         self.key.view()
     }
 
-    fn measures(&self) -> [Measure; 3] {
+    fn measures(&self) -> [Measure; 4] {
         [
             self.cpu.measure(),
             self.power.measure(),
             self.disk.measure(),
+            self.gpu.measure(),
         ]
     }
 

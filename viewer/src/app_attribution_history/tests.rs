@@ -112,7 +112,7 @@ fn disk_attribution_restores_verified_exit_work_and_reuses_cpu_warmed_saved_fact
         saved.history.as_ref().unwrap().source_reads.get() - reads,
         1
     );
-    assert!(after["coverage"]["cache_bytes"].as_u64().unwrap() <= 67_108_864);
+    assert!(after["coverage"]["cache_bytes"].as_u64().unwrap() <= 75_497_472);
 }
 
 #[test]
@@ -229,7 +229,7 @@ fn attribution_restores_both_metrics_and_reuses_saved_intervals() {
         saved.history.as_ref().unwrap().source_reads.get() - reads,
         1
     );
-    assert!(restored_power["coverage"]["cache_bytes"].as_u64().unwrap() <= 67_108_864);
+    assert!(restored_power["coverage"]["cache_bytes"].as_u64().unwrap() <= 75_497_472);
 }
 
 #[test]
@@ -257,7 +257,7 @@ fn attribution_cache_keeps_resident_gauges_identical_in_both_route_orders() {
     assert_eq!(after["points"], before["points"]);
     assert_eq!(after["cohort"], before["cohort"]);
     assert_eq!(cpu["points"][1]["apps"][0]["cpu_percent_one_core"], 120.0);
-    assert!(after["coverage"]["cache_bytes"].as_u64().unwrap() <= 67_108_864);
+    assert!(after["coverage"]["cache_bytes"].as_u64().unwrap() <= 75_497_472);
 }
 
 #[test]

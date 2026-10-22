@@ -53,8 +53,10 @@ impl Presentation {
         if let Some(histories) = &snapshot.overview_app_histories {
             use crate::live_app_attribution_history::Metric;
             for metric in [Metric::Cpu, Metric::Power, Metric::Disk] {
-                if let Some(panel) = histories.history(metric).panel() {
-                    panels.push(panel);
+                if let Some(history) = histories.history(metric) {
+                    if let Some(panel) = history.panel() {
+                        panels.push(panel);
+                    }
                 }
             }
         }

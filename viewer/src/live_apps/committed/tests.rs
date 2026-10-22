@@ -32,8 +32,13 @@ fn connection() -> Engine {
     let connection = crate::data::connection();
     for index in [7, 9] {
         let (table, columns, _) = persistence::schema::TABLES[index];
+        let gpu = matches!(table, persistence::schema::Table::Processes)
+            .then_some(persistence::schema::PROCESS_GPU_FIELD);
         let extension = persistence::schema::IDENTITY_FIELDS
+            .iter()
+            .chain(gpu.iter())
             .map(|(name, kind)| format!("{name} {kind}"))
+            .collect::<Vec<_>>()
             .join(",");
         connection
             .query(&format!(

@@ -7,8 +7,8 @@ use super::{App, Entry, Metric, Ranking, Rankings, TopApps};
 use crate::live_source::{AppKey, identity_signature};
 
 /// The top Apps of `selected` when one App, Current, is all that ran: its amount and rate in
-/// CPU, resident memory, power and disk, in that order.
-pub fn current_only(selected: &Value, readings: [(u64, Option<f64>); 4]) -> Rankings {
+/// CPU, resident memory, power, disk and GPU time, in that order.
+pub fn current_only(selected: &Value, readings: [(u64, Option<f64>); 5]) -> Rankings {
     one_bundle(selected, "Current", "41", readings)
 }
 
@@ -18,7 +18,7 @@ pub fn one_bundle(
     selected: &Value,
     name: &str,
     bytes_hex: &str,
-    readings: [(u64, Option<f64>); 4],
+    readings: [(u64, Option<f64>); 5],
 ) -> Rankings {
     let app = Arc::new(App {
         key: AppKey {
@@ -51,9 +51,15 @@ pub fn empty(selected: &Value) -> Rankings {
     )
 }
 
-const METRICS: [Metric; 4] = [Metric::Cpu, Metric::Resident, Metric::Power, Metric::Disk];
+const METRICS: [Metric; 5] = [
+    Metric::Cpu,
+    Metric::Resident,
+    Metric::Power,
+    Metric::Disk,
+    Metric::Gpu,
+];
 
-fn top_apps(selected: &Value, app_count: u32, metrics: [Ranking; 4]) -> Rankings {
+fn top_apps(selected: &Value, app_count: u32, metrics: [Ranking; 5]) -> Rankings {
     let (run, boot, publication) = identity_signature(selected).unwrap();
 
     Rankings::Ready(Box::new(TopApps {

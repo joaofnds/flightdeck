@@ -265,6 +265,7 @@ impl Point {
                 AppAttributionMetric::Cpu => app.cpu_ns.measure(),
                 AppAttributionMetric::Power => app.energy_nj.measure(),
                 AppAttributionMetric::Disk => app.disk_io_bytes.measure(),
+                AppAttributionMetric::Gpu => app.gpu_ns.measure(),
             },
             members: u32::from(app.members),
             membership_complete: app.membership_complete,

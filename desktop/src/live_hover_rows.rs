@@ -246,12 +246,7 @@ impl LiveDashboard {
             });
         }
 
-        rows.push(Row::Heading("GPU time by app".into()));
-        rows.push(Row::GpuApps(
-            self.named_panels(&[crate::live_projection::GPU_APPS_ID])
-                .into_iter()
-                .next(),
-        ));
+        self.reading_rows_attribution(crate::live_app_attribution_history::Metric::Gpu, rows);
         rows.push(Row::Heading("GPU temperature".into()));
         let temperature = self.named_panels(&[crate::live_projection::GPU_TEMPERATURE_ID]);
         rows.push(Row::Temperature(

@@ -145,7 +145,7 @@ fn retains_a_full_rolling_disk_history_from_real_ring_publications() {
     assert_eq!(points[899]["disk_written_bps"], 1024.0);
     assert_eq!(points[899]["disk_io_bps"], 5120.0);
     assert_eq!(response["coverage"]["retention_limited"], false);
-    assert_eq!(response["coverage"]["cache_bytes_max"], 67_108_864);
+    assert_eq!(response["coverage"]["cache_bytes_max"], 75_497_472);
 }
 
 struct Fixture {

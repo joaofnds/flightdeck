@@ -19,6 +19,13 @@ pub struct EnergyRate {
     pub elapsed_ns: u64,
 }
 
+/// GPU time delta and continuous-time denominator for the share of the interval the GPU spent.
+#[derive(Clone, Copy)]
+pub struct GpuRate {
+    pub gpu_ns: u64,
+    pub elapsed_ns: u64,
+}
+
 /// Exact interval bytes and its continuous-time denominator for disk throughput.
 #[derive(Clone, Copy)]
 pub struct BytesRate {
@@ -52,8 +59,8 @@ const _: () = {
     assert!(size_of::<BytesRate>() <= 16);
     assert!(size_of::<EventRate>() <= 16);
     assert!(size_of::<Subtotal>() <= 24);
-    assert!(size_of::<AppTotals>() <= 256);
-    assert!(size_of::<ProcessTotals<'_>>() <= 232);
+    assert!(size_of::<AppTotals>() <= 280);
+    assert!(size_of::<ProcessTotals<'_>>() <= 248);
     assert!(size_of::<ProcessCreation>() <= 16);
 };
 
@@ -98,6 +105,7 @@ pub struct AppTotals {
     pub live_members: u32,
     pub cpu_ns: Subtotal,
     pub energy_nj: Subtotal,
+    pub gpu_ns: Subtotal,
     pub disk_read_bytes: Subtotal,
     pub disk_written_bytes: Subtotal,
     /// Sum of members with both directional deltas measured, not two partial App subtotals.
@@ -150,6 +158,7 @@ pub struct ProcessTotals<'bytes> {
     pub program_unavailable: Option<IdentityUnavailable>,
     pub cpu_ns: Amount,
     pub energy_nj: Amount,
+    pub gpu_ns: Amount,
     pub disk_read_bytes: Amount,
     pub disk_written_bytes: Amount,
     pub disk_io_bytes: Amount,
@@ -177,6 +186,9 @@ pub struct ProcessObservation<'bytes> {
     pub creation: Option<ProcessCreation>,
     pub program: CapturedProgram<'bytes>,
     pub usage: Result<&'bytes Usage, Unavailable>,
+    /// The GPU time the process's GPU clients have used, none where it has no GPU client or
+    /// the GPU read failed, which the recording does not tell apart.
+    pub gpu_ns: Option<u64>,
     pub threads: Option<u64>,
     pub state: ProcessState,
 }
@@ -288,6 +300,7 @@ impl<'bytes> Aggregate<'bytes> {
             program_unavailable,
             cpu_ns: Amount::Unavailable(Unavailable::Baseline),
             energy_nj: Amount::Unavailable(Unavailable::Baseline),
+            gpu_ns: Amount::Unavailable(Unavailable::Baseline),
             disk_read_bytes: Amount::Unavailable(Unavailable::Baseline),
             disk_written_bytes: Amount::Unavailable(Unavailable::Baseline),
             disk_io_bytes: Amount::Unavailable(Unavailable::Baseline),
@@ -315,6 +328,9 @@ impl<'bytes> Aggregate<'bytes> {
             totals
                 .energy_nj
                 .add(attributed(output.energy_nj, output.app_attribution));
+            totals
+                .gpu_ns
+                .add(attributed(output.gpu_ns, output.app_attribution));
             compute_process_counters(totals, output);
             if selected.state == ProcessState::Live {
                 compute_process_gauges(totals, selected);
@@ -510,6 +526,10 @@ fn deltas(interval: &Interval, process: &ProcessInterval, output: &mut ProcessTo
                     previous: before,
                     selected: now,
                 },
+                &Endpoints {
+                    previous: previous.gpu_ns,
+                    selected: selected.gpu_ns,
+                },
                 output,
             ),
             Err(reason) => deltas_unavailable(output, reason),
@@ -518,6 +538,9 @@ fn deltas(interval: &Interval, process: &ProcessInterval, output: &mut ProcessTo
         if start_matches(interval, process) {
             output.cpu_ns = cpu_delta(now, None);
             output.energy_nj = Amount::Known(now.energy_nj);
+            output.gpu_ns = selected
+                .gpu_ns
+                .map_or(Amount::Unavailable(Unavailable::Unknown), Amount::Known);
             deltas_disk(now, None, output);
             deltas_activity(now, None, output);
             deltas_start(process, output);
@@ -548,6 +571,7 @@ fn deltas_start(process: &ProcessInterval, output: &mut ProcessTotals) {
 fn deltas_unavailable(output: &mut ProcessTotals, reason: Unavailable) {
     output.cpu_ns = Amount::Unavailable(reason);
     output.energy_nj = Amount::Unavailable(reason);
+    output.gpu_ns = Amount::Unavailable(reason);
     output.disk_read_bytes = Amount::Unavailable(reason);
     output.disk_written_bytes = Amount::Unavailable(reason);
     output.disk_io_bytes = Amount::Unavailable(reason);
@@ -555,7 +579,11 @@ fn deltas_unavailable(output: &mut ProcessTotals, reason: Unavailable) {
     output.pageins = Amount::Unavailable(reason);
 }
 
-fn deltas_usage(endpoints: &Endpoints<&Usage>, output: &mut ProcessTotals) {
+fn deltas_usage(
+    endpoints: &Endpoints<&Usage>,
+    gpu_ns: &Endpoints<Option<u64>>,
+    output: &mut ProcessTotals,
+) {
     let Endpoints {
         previous: before,
         selected: now,
@@ -569,8 +597,25 @@ fn deltas_usage(endpoints: &Endpoints<&Usage>, output: &mut ProcessTotals) {
         Amount::Unavailable(Unavailable::CounterReset),
         Amount::Known,
     );
+    output.gpu_ns = gpu_delta(gpu_ns);
     deltas_disk(now, Some(before), output);
     deltas_activity(now, Some(before), output);
+}
+
+/// The GPU time gained between the endpoints, unknown where either lacks one, since a
+/// missing GPU time may be a failed read rather than no GPU use.
+fn gpu_delta(gpu_ns: &Endpoints<Option<u64>>) -> Amount {
+    let Some(previous) = gpu_ns.previous else {
+        return Amount::Unavailable(Unavailable::Unknown);
+    };
+    let Some(selected) = gpu_ns.selected else {
+        return Amount::Unavailable(Unavailable::Unknown);
+    };
+
+    selected.checked_sub(previous).map_or(
+        Amount::Unavailable(Unavailable::CounterReset),
+        Amount::Known,
+    )
 }
 
 fn deltas_disk(now: &Usage, before: Option<&Usage>, output: &mut ProcessTotals<'_>) {
@@ -754,6 +799,16 @@ pub fn energy_watts(rate: EnergyRate) -> Option<f64> {
     Some(number(rate.energy_nj) / number(rate.elapsed_ns))
 }
 
+/// The GPU time as a percent of the interval, which passes 100 where an App's clients overlap.
+#[must_use]
+pub fn gpu_percent(rate: GpuRate) -> Option<f64> {
+    if rate.elapsed_ns == 0 {
+        return None;
+    }
+
+    Some(number(rate.gpu_ns) / number(rate.elapsed_ns) * 100.0)
+}
+
 #[must_use]
 pub fn bytes_per_second(rate: BytesRate) -> Option<f64> {
     if rate.elapsed_ns == 0 {
@@ -775,6 +830,8 @@ mod boundary_tests;
 mod disk_tests;
 #[cfg(test)]
 mod fixture_tests;
+#[cfg(test)]
+mod gpu_tests;
 #[cfg(test)]
 mod limits_tests;
 #[cfg(test)]

@@ -204,8 +204,8 @@ fn keeps_disk_layouts_inside_the_unchanged_sample_and_response_budgets() {
 
     assert_eq!(SAMPLE_BYTES_MAX, 8_388_608);
     assert_eq!(super::RESPONSE_BYTES_MAX, 8_388_608);
-    assert_eq!(size_of::<super::App>(), 264);
-    assert_eq!(size_of::<super::Process>(), 248);
+    assert_eq!(size_of::<super::App>(), 288);
+    assert_eq!(size_of::<super::Process>(), 264);
     assert!(sample.bytes() <= SAMPLE_BYTES_MAX);
     assert_eq!(page["page"]["total"], 24_000);
     assert_eq!(page["processes"].as_array().unwrap().len(), 512);

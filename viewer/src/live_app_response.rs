@@ -114,6 +114,7 @@ pub struct App {
     pub membership_complete: bool,
     pub cpu_ns: Measure,
     pub energy_nj: Measure,
+    pub gpu_ns: Measure,
     /// Exact attributed bytes during the selected observation interval.
     pub disk_read_bytes: Measure,
     pub disk_written_bytes: Measure,
@@ -153,6 +154,7 @@ pub struct Process {
     pub program_unavailable: Option<IdentityUnavailable>,
     pub cpu_ns: Amount,
     pub energy_nj: Amount,
+    pub gpu_ns: Amount,
     /// Exact process interval bytes, distinct from the raw cumulative counters.
     pub disk_read_bytes: Amount,
     pub disk_written_bytes: Amount,
@@ -268,8 +270,8 @@ const _: () = {
     assert!(SAMPLE_BYTES_MAX < apps::PROGRAM_BYTES_MAX);
     assert!(APPS_MAX == MEMBERS_MAX);
     assert!(size_of::<Measure>() <= 24);
-    assert!(size_of::<App>() <= 264);
-    assert!(size_of::<Process>() <= 248);
+    assert!(size_of::<App>() <= 288);
+    assert!(size_of::<Process>() <= 264);
 };
 
 impl Sample {

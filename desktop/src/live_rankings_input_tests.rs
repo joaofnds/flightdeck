@@ -349,11 +349,10 @@ fn overview_rankings_show_current_measurements_and_explicit_source_limits(cx: &m
             .driver
             .reading_is_visible("ranking-uncaptured:Network")
     );
-    // The fixture's selection has no GPU time the app sampled, and the GPU card says so.
     assert!(
         harness
             .driver
-            .reading_is_visible("GPU time by App is sampled only while the app runs")
+            .reading_is_visible("ranking:GPU time:Current:25.0%")
     );
     harness.teardown();
 }
@@ -939,6 +938,7 @@ fn ranked_payload(
             (1_073_741_824, None),
             (u64::from(cpu), Some(0.5)),
             (u64::from(cpu), cpu_rate),
+            (250_000_000, Some(25.0)),
         ],
     ))
 }
@@ -1153,7 +1153,7 @@ fn interval_resident_history() -> serde_json::Value {
         "coverage":{"retention_limited":false,"live_retention_limited":false,
             "observations_retained":2,"committed_observations":0,"context_app_count":9,
             "context_app_count_max":24000,"context_key_bytes":45,
-            "context_key_bytes_max":8_388_608,"cache_bytes":0,"cache_bytes_max":67_108_864}})
+            "context_key_bytes_max":8_388_608,"cache_bytes":0,"cache_bytes_max":75_497_472}})
 }
 
 fn resident_history_observation(publication: u64) -> serde_json::Value {

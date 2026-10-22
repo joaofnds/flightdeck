@@ -26,6 +26,7 @@ pub enum Metric {
     Cpu,
     Power,
     Disk,
+    Gpu,
 }
 
 pub struct History {
@@ -73,11 +74,22 @@ struct Other {
 }
 
 impl Metric {
+    /// The index of this measure among the rankings the viewer ranks Apps by.
+    pub const fn ranking_index(self) -> usize {
+        match self {
+            Self::Cpu => 0,
+            Self::Power => 2,
+            Self::Disk => 3,
+            Self::Gpu => 4,
+        }
+    }
+
     pub fn panel_id(self) -> &'static str {
         match self {
             Self::Cpu => "live-cpu-apps",
             Self::Power => "live-power-apps",
             Self::Disk => "live-disk-apps",
+            Self::Gpu => "live-gpu-apps",
         }
     }
 
@@ -86,12 +98,13 @@ impl Metric {
             Self::Cpu => "CPU by app",
             Self::Power => "Process power by app",
             Self::Disk => "Disk I/O by app",
+            Self::Gpu => "GPU time by app",
         }
     }
 
     fn unit(self) -> &'static str {
         match self {
-            Self::Cpu => "%",
+            Self::Cpu | Self::Gpu => "%",
             Self::Power => "W",
             Self::Disk => "MB/s",
         }
@@ -102,6 +115,7 @@ impl Metric {
             "live-cpu-apps" => Some(Self::Cpu),
             "live-power-apps" => Some(Self::Power),
             "live-disk-apps" => Some(Self::Disk),
+            "live-gpu-apps" => Some(Self::Gpu),
             _ => None,
         }
     }
@@ -111,13 +125,14 @@ impl Metric {
             "cpu" => Some(Self::Cpu),
             "energy" => Some(Self::Power),
             "storage" => Some(Self::Disk),
+            "gpu" => Some(Self::Gpu),
             _ => None,
         }
     }
 
     fn divisor(self) -> f64 {
         match self {
-            Self::Cpu | Self::Power => 1.0,
+            Self::Cpu | Self::Power | Self::Gpu => 1.0,
             Self::Disk => 1_000_000.0,
         }
     }
@@ -135,6 +150,7 @@ impl Metric {
             Self::Cpu => viewer::AppAttributionMetric::Cpu,
             Self::Power => viewer::AppAttributionMetric::Power,
             Self::Disk => viewer::AppAttributionMetric::Disk,
+            Self::Gpu => viewer::AppAttributionMetric::Gpu,
         }
     }
 }
@@ -383,6 +399,15 @@ impl History {
                 The dashed All disk I/O reference sums measured whole-device read and write \
                 rates; incomplete device coverage is unavailable. References stay outside \
                 App totals."
+            }
+            Metric::Gpu => {
+                "GPU time each App's processes took per interval, from the GPU driver's own \
+                count, as a share of the interval. Eight leaders use the complete context's mean \
+                rate; Other sums remaining captured Apps. A process the driver lists no GPU \
+                client for, and every process of an interval whose GPU read failed, has an \
+                unknown GPU time, so an App with no known GPU time is not drawn. The dashed GPU \
+                busy line is the GPU's own active time, which work from several Apps at once can \
+                sit under. It stays outside App totals."
             }
         }
     }

@@ -282,6 +282,7 @@ fn trace(publication: u64, amount: u64) -> TracePoint {
         membership_complete: false,
         cpu_ns: measure,
         energy_nj: measure,
+        gpu_ns: measure,
         disk_read_bytes: measure,
         disk_written_bytes: measure,
         disk_io_bytes: measure,

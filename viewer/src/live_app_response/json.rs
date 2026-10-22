@@ -166,6 +166,7 @@ fn app(value: &App, index: usize, elapsed_ns: Option<u64>) -> Value {
         "members": value.members, "live_members": value.live_members,
         "membership_complete": value.membership_complete,
         "cpu_ns": measure(&value.cpu_ns), "energy_nj": measure(&value.energy_nj),
+        "gpu_ns": measure(&value.gpu_ns),
         "disk_read_bytes": measure(&value.disk_read_bytes),
         "disk_written_bytes": measure(&value.disk_written_bytes),
         "disk_io_bytes": measure(&value.disk_io_bytes),
@@ -180,6 +181,9 @@ fn app(value: &App, index: usize, elapsed_ns: Option<u64>) -> Value {
         "energy_joules": value.energy_nj.measured().map(apps::energy_joules),
         "energy_watts": value.energy_nj.measured().and_then(|energy_nj| {
             apps::energy_watts(apps::EnergyRate { energy_nj, elapsed_ns: elapsed_ns? })
+        }),
+        "gpu_percent": value.gpu_ns.measured().and_then(|gpu_ns| {
+            apps::gpu_percent(apps::GpuRate { gpu_ns, elapsed_ns: elapsed_ns? })
         }),
     })
 }
@@ -196,6 +200,7 @@ fn process(value: &Process, elapsed_ns: Option<u64>) -> Value {
         })),
         "program_unavailable": value.program_unavailable.map(identity_reason),
         "cpu_ns": amount(value.cpu_ns), "energy_nj": amount(value.energy_nj),
+        "gpu_ns": amount(value.gpu_ns),
         "disk_read_bytes": amount(value.disk_read_bytes),
         "disk_written_bytes": amount(value.disk_written_bytes),
         "disk_io_bytes": amount(value.disk_io_bytes),
@@ -227,6 +232,9 @@ fn process(value: &Process, elapsed_ns: Option<u64>) -> Value {
         "energy_joules": known(value.energy_nj).map(apps::energy_joules),
         "energy_watts": known(value.energy_nj).and_then(|energy_nj| {
             apps::energy_watts(apps::EnergyRate { energy_nj, elapsed_ns: elapsed_ns? })
+        }),
+        "gpu_percent": known(value.gpu_ns).and_then(|gpu_ns| {
+            apps::gpu_percent(apps::GpuRate { gpu_ns, elapsed_ns: elapsed_ns? })
         }),
     })
 }

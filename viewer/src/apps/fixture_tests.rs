@@ -86,6 +86,7 @@ fn reopens_real_v4_publications_after_writer_exit_and_aggregates_original_captur
             creation: Some(record.creation),
             program: Ok(program),
             usage: Ok(&record.usage),
+            gpu_ns: None,
             threads: None,
             state: ProcessState::Live,
         })

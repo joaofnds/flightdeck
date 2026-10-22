@@ -19,8 +19,8 @@ use persistence::{Error, Result, TableManifest};
 /// The version of the table's columns. A reader takes no ranks from a table of another version
 /// and leaves its window to the replay, so a later build may change the columns and an older
 /// one still reads the recording.
-const VERSION: u8 = 1;
-/// The four rankings of each observation a window holds, full.
+const VERSION: u8 = 2;
+/// The five rankings of each observation a window holds, full.
 const ROWS_MAX: usize = TICKS_PER_WINDOW_MAX * METRICS.len() * RANKS_MAX;
 const COLUMNS: &str = "version, publication, run_tick, wall_ns, continuous_ns, awake_ns, \
     app_count, membership_complete, ungrouped_members, metric, unavailable, overflowed, partial, \
@@ -30,11 +30,12 @@ const _: () = {
     assert!(RANKS_MAX < 256);
     assert!(ROWS_MAX < 4096);
     // A row names its ranking by its place among the rankings `Ranks` holds.
-    assert!(METRICS.len() == 4);
+    assert!(METRICS.len() == 5);
     assert!(metric_code(METRICS[0]) == 0);
     assert!(metric_code(METRICS[1]) == 1);
     assert!(metric_code(METRICS[2]) == 2);
     assert!(metric_code(METRICS[3]) == 3);
+    assert!(metric_code(METRICS[4]) == 4);
 };
 
 /// Writes the ranks of a window's observations into its pending directory, in the table the
@@ -371,6 +372,7 @@ const fn metric_code(metric: Metric) -> u8 {
         Metric::Resident => 1,
         Metric::Power => 2,
         Metric::Disk => 3,
+        Metric::Gpu => 4,
     }
 }
 

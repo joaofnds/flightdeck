@@ -15,13 +15,13 @@ fn ranks_the_largest_apps_wherever_they_sit_in_the_sample() {
     assert_eq!(ranks.app_count, 600);
     assert_eq!(
         ranks.metrics.iter().map(amounts).collect::<Vec<_>>(),
-        vec![largest; 4]
+        vec![largest; 5]
     );
 }
 
 #[test]
 fn ranks_each_metric_by_its_own_measure() {
-    // Goal: CPU, resident memory, power and disk each rank the App that used most of it.
+    // Goal: CPU, resident memory, power, disk and GPU each rank the App that used most of it.
     // Method: rank Apps that each lead one measure, beside one that leads the measures no
     // ranking reads.
     let mut cpu = app(1);
@@ -36,13 +36,16 @@ fn ranks_each_metric_by_its_own_measure() {
     let mut disk = app(4);
     disk.display_name = "disk".into();
     disk.disk_io_bytes.known = 50;
+    let mut gpu = app(6);
+    gpu.display_name = "gpu".into();
+    gpu.gpu_ns.known = 50;
     let mut other = app(5);
     other.display_name = "other".into();
     other.footprint_bytes.known = 90;
     other.disk_read_bytes.known = 90;
     other.disk_written_bytes.known = 90;
 
-    let ranks = sample(vec![cpu, resident, power, disk, other])
+    let ranks = sample(vec![cpu, resident, power, disk, gpu, other])
         .ranks()
         .unwrap();
 
@@ -56,7 +59,8 @@ fn ranks_each_metric_by_its_own_measure() {
             (Metric::Cpu, "cpu"),
             (Metric::Resident, "resident"),
             (Metric::Power, "power"),
-            (Metric::Disk, "disk")
+            (Metric::Disk, "disk"),
+            (Metric::Gpu, "gpu")
         ]
     );
 }
@@ -64,11 +68,12 @@ fn ranks_each_metric_by_its_own_measure() {
 #[test]
 fn gives_each_rank_its_rate_over_the_elapsed_interval() {
     // Goal: a rank carries the rate the App page shows, and resident memory carries none.
-    // Method: rank one App with known CPU, energy and disk over one elapsed second.
+    // Method: rank one App with known CPU, energy, disk and GPU over one elapsed second.
     let mut app = app(1);
     app.cpu_ns.known = 500_000_000;
     app.energy_nj.known = 3_000_000_000;
     app.disk_io_bytes.known = 1200;
+    app.gpu_ns.known = 250_000_000;
 
     let ranks = sample(vec![app]).ranks().unwrap();
 
@@ -78,7 +83,7 @@ fn gives_each_rank_its_rate_over_the_elapsed_interval() {
             .iter()
             .map(|ranking| ranking.entries[0].rate)
             .collect::<Vec<_>>(),
-        vec![Some(50.0), None, Some(3.0), Some(1200.0)]
+        vec![Some(50.0), None, Some(3.0), Some(1200.0), Some(25.0)]
     );
 }
 
@@ -97,7 +102,7 @@ fn ranks_equal_totals_by_their_app_keys_rather_than_their_names() {
 
     assert_eq!(
         ranks.metrics.iter().map(names).collect::<Vec<_>>(),
-        vec![vec!["Z", "A"]; 4]
+        vec![vec!["Z", "A"]; 5]
     );
 }
 
@@ -117,7 +122,7 @@ fn ranks_a_bundle_before_an_executable_with_an_equal_total() {
 
     assert_eq!(
         ranks.metrics.iter().map(names).collect::<Vec<_>>(),
-        vec![vec!["bundle", "executable"]; 4]
+        vec![vec!["bundle", "executable"]; 5]
     );
 }
 
@@ -134,7 +139,7 @@ fn ranks_an_app_tied_with_the_tenth_by_its_key_after_ten_have_filled_the_ranks()
     let first_ten = (1..=10).map(|byte| vec![byte]).collect::<Vec<Vec<u8>>>();
     assert_eq!(
         ranks.metrics.iter().map(keys).collect::<Vec<_>>(),
-        vec![first_ten; 4]
+        vec![first_ten; 5]
     );
 }
 
@@ -207,7 +212,7 @@ fn ranks_no_rate_without_an_elapsed_interval_except_resident_memory() {
             .iter()
             .map(|ranking| ranking.unavailable)
             .collect::<Vec<_>>(),
-        vec![1, 0, 1, 1]
+        vec![1, 0, 1, 1, 1]
     );
     assert_eq!(amounts(&ranks.metrics[1]), vec![0]);
 }
@@ -236,7 +241,7 @@ fn counts_the_name_of_each_app_it_ranks_in_its_bytes() {
 
     let long = sample(vec![named]).ranks().unwrap();
 
-    assert_eq!(long.bytes() - short.bytes(), 4 * (1024 - 8));
+    assert_eq!(long.bytes() - short.bytes(), 5 * (1024 - 8));
 }
 
 fn amounts(ranking: &Ranking) -> Vec<u64> {
@@ -312,6 +317,7 @@ fn app(amount: u64) -> App {
         membership_complete: true,
         cpu_ns: measure,
         energy_nj: measure,
+        gpu_ns: measure,
         disk_read_bytes: measure,
         disk_written_bytes: measure,
         disk_io_bytes: measure,

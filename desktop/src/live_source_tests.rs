@@ -208,11 +208,11 @@ fn a_page_whose_saved_minutes_cannot_be_checked_leaves_its_app_histories_to_its_
 
 #[test]
 fn pages_of_one_metric_leave_their_app_history_to_their_next_read() {
-    // Goal: the first readings of the CPU, energy and storage pages never wait on their App
-    // history, since it replays every saved minute of its range, parts kept or not.
+    // Goal: the first readings of the CPU, energy, storage and GPU pages never wait on their
+    // App history, since it replays every saved minute of its range, parts kept or not.
     // Method: open each page over a sealed recording whose minute keeps its App parts.
     let recording = SealedRecording::with_kept_parts();
-    for route in ["cpu", "energy", "storage"] {
+    for route in ["cpu", "energy", "storage", "gpu"] {
         let mut reader = SnapshotReader::new();
         reader.command.request.route = route.into();
 
@@ -252,10 +252,10 @@ fn a_page_that_reads_its_app_histories_early_reads_an_older_tail_next() {
 #[test]
 fn a_route_without_app_histories_publishes_one_complete_snapshot() {
     // Goal: a page with no App history is read once, with nothing left pending.
-    // Method: read the GPU page twice through the reader over a real sealed recording.
+    // Method: read the Network page twice through the reader over a real sealed recording.
     let recording = SealedRecording::new();
     let mut reader = SnapshotReader::new();
-    reader.command.request.route = "gpu".into();
+    reader.command.request.route = "network".into();
 
     let first = reader.read(&recording).unwrap().unwrap();
     let second = reader.read(&recording).unwrap();
@@ -281,11 +281,11 @@ fn a_newly_opened_page_reads_its_app_histories_without_a_pause() {
 fn a_newly_opened_page_publishes_its_readings_before_an_older_tail_it_has_to_read() {
     // Goal: an opened page shows its readings without waiting for an older tail its session
     // would read from saved minutes, and the worker reads that tail straight after.
-    // Method: read the GPU page, which has no App histories, over a recording with a minute
+    // Method: read the Network page, which has no App histories, over a recording with a minute
     // sealed long before its newest second, one step at a time.
     let recording = SealedRecording::with_an_older_minute();
     let mut reader = SnapshotReader::new();
-    reader.command.request.route = "gpu".into();
+    reader.command.request.route = "network".into();
     reader.command.request.earlier = crate::live_source::Earlier::Load;
 
     let first = reader.read(&recording).unwrap().unwrap();
@@ -366,11 +366,11 @@ fn a_new_request_of_a_page_still_reads_its_app_histories_before_an_older_tail_it
 fn a_newly_opened_page_completes_with_its_app_histories_where_its_session_keeps_the_tail() {
     // Goal: a page whose older tail its session already keeps takes no step past its App
     // histories.
-    // Method: read the GPU page to the end, then open Memory at the same newest second and read
+    // Method: read the Network page to the end, then open Memory at the same newest second and read
     // two steps.
     let recording = SealedRecording::with_an_older_minute();
     let mut reader = SnapshotReader::new();
-    reader.command.request.route = "gpu".into();
+    reader.command.request.route = "network".into();
     reader.command.request.earlier = crate::live_source::Earlier::Load;
     reader.read_complete(&recording);
     reader.command.generation += 1;
@@ -395,10 +395,10 @@ fn a_newly_opened_page_completes_with_its_app_histories_where_its_session_keeps_
 #[test]
 fn a_newly_opened_page_brings_the_older_tail_its_session_keeps_with_its_readings() {
     // Goal: a page opened after another read the same older tail shows it at once.
-    // Method: read the GPU page to the end, then open Memory at the same newest second.
+    // Method: read the Network page to the end, then open Memory at the same newest second.
     let recording = SealedRecording::with_an_older_minute();
     let mut reader = SnapshotReader::new();
-    reader.command.request.route = "gpu".into();
+    reader.command.request.route = "network".into();
     reader.command.request.earlier = crate::live_source::Earlier::Load;
     reader.read_complete(&recording);
     reader.command.generation += 1;
@@ -652,7 +652,6 @@ impl SnapshotReader {
         Self {
             reader: super::Reader {
                 session: None,
-                system: crate::live_system::SystemSamples::unread(),
                 last_catalog: None,
                 last_generation: 0,
                 last_route: String::new(),

@@ -229,6 +229,7 @@ fn disk_rankings(snapshot: &Snapshot) -> Rankings {
             (1024, None),
             (1_000_000_000, Some(0.5)),
             (3_000_000, Some(1_500_000.0)),
+            (250_000_000, Some(25.0)),
         ],
     )
 }

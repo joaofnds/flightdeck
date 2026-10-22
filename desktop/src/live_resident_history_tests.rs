@@ -162,7 +162,7 @@ fn decoder_refuses_wrong_selection_duplicate_keys_and_coverage_bounds() {
     for (field, bound) in [
         ("context_app_count", 24_000_u64),
         ("context_key_bytes", 8_388_608),
-        ("cache_bytes", 67_108_864),
+        ("cache_bytes", 75_497_472),
     ] {
         let mut value = fixture();
         value["coverage"][field] = json!(bound + 1);

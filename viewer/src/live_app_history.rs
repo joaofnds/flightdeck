@@ -30,7 +30,7 @@ pub(crate) use compact::CompactMeasure;
 use compact::{HistoryKey, count};
 pub(crate) use trace::TracePoint;
 
-const BYTES_MAX: usize = 64 * 1024 * 1024;
+pub const BYTES_MAX: usize = 72 * 1024 * 1024;
 const _: () = {
     assert!(OBSERVATIONS_MAX > 0);
     assert!(size_of::<Point>() <= 208);
@@ -73,6 +73,7 @@ struct App {
     membership_complete: bool,
     cpu_ns: CompactMeasure,
     energy_nj: CompactMeasure,
+    gpu_ns: CompactMeasure,
     disk_read_bytes: CompactMeasure,
     disk_written_bytes: CompactMeasure,
     disk_io_bytes: CompactMeasure,
@@ -236,11 +237,12 @@ impl Summed for App {
         self.key.view()
     }
 
-    fn measures(&self) -> [Measure; 3] {
+    fn measures(&self) -> [Measure; 4] {
         [
             self.cpu_ns.measure(),
             self.energy_nj.measure(),
             self.disk_io_bytes.measure(),
+            self.gpu_ns.measure(),
         ]
     }
 
@@ -283,6 +285,7 @@ impl Point {
                 membership_complete: app.membership_complete,
                 cpu_ns: CompactMeasure::capture(&app.cpu_ns),
                 energy_nj: CompactMeasure::capture(&app.energy_nj),
+                gpu_ns: CompactMeasure::capture(&app.gpu_ns),
                 disk_read_bytes: CompactMeasure::capture(&app.disk_read_bytes),
                 disk_written_bytes: CompactMeasure::capture(&app.disk_written_bytes),
                 disk_io_bytes: CompactMeasure::capture(&app.disk_io_bytes),

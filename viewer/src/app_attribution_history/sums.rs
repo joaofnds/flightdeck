@@ -14,7 +14,7 @@ struct Entry<K> {
     key: K,
     key_bytes: usize,
     points: u32,
-    totals: [Total; 3],
+    totals: [Total; 4],
 }
 
 /// The measured amount and elapsed time one App adds to its context mean.
@@ -24,12 +24,12 @@ pub(crate) struct Total {
     pub elapsed_ns: u128,
 }
 
-/// One App of one second, with its CPU, power and disk measures in that order.
+/// One App of one second, with its CPU, power, disk and GPU measures in that order.
 pub(crate) trait Summed {
     type Key: SumKey;
 
     fn view(&self) -> AppKey<'_>;
-    fn measures(&self) -> [Measure; 3];
+    fn measures(&self) -> [Measure; 4];
     /// The key an entry keeps for this App.
     fn key(&self) -> Self::Key;
     /// The bytes that key takes beyond the entry itself.
@@ -186,6 +186,7 @@ impl<K: SumKey> Sums<K> {
             AppAttributionMetric::Cpu => 0,
             AppAttributionMetric::Power => 1,
             AppAttributionMetric::Disk => 2,
+            AppAttributionMetric::Gpu => 3,
         };
         self.entries
             .iter()
@@ -232,8 +233,8 @@ impl SumKey for OwnedKey {
     }
 }
 
-fn totals(elapsed: Option<u64>, measures: [Measure; 3]) -> [Total; 3] {
-    let mut totals = [Total::default(); 3];
+fn totals(elapsed: Option<u64>, measures: [Measure; 4]) -> [Total; 4] {
+    let mut totals = [Total::default(); 4];
     // A mean counts only seconds with a measured amount and a clock that moved.
     let Some(elapsed) = elapsed.filter(|elapsed| *elapsed > 0) else {
         return totals;

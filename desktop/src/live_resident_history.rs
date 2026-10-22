@@ -613,10 +613,13 @@ pub(crate) fn position(wall_ns: Option<u64>, second: u64) -> Result<f32, String>
 }
 
 pub(crate) fn validate_coverage(value: &Value) -> Result<(), String> {
+    let cache_bytes_max =
+        u64::try_from(viewer::APP_HISTORY_BYTES_MAX).map_err(|error| error.to_string())?;
+
     for (name, bound) in [
         ("context_app_count", 24_000),
         ("context_key_bytes", 8_388_608),
-        ("cache_bytes", 67_108_864),
+        ("cache_bytes", cache_bytes_max),
     ] {
         if integer(&value[name])? > bound {
             return Err(format!("Resident App {name} exceeds its bound"));

@@ -817,7 +817,7 @@ fn retains_the_charted_seconds_for_an_ordinary_live_app_population() {
     assert_eq!(points[959]["resident_bytes"]["known"], "96100");
     assert_eq!(points[0]["cpu_ns"]["known"], "1000000");
     assert_eq!(points[959]["cpu_ns"]["known"], "1000000");
-    assert!(history["coverage"]["cache_bytes"].as_u64().unwrap() < 64 * 1024 * 1024);
+    assert!(history["coverage"]["cache_bytes"].as_u64().unwrap() < 72 * 1024 * 1024);
     eprintln!("ordinary App history coverage: {}", history["coverage"]);
 }
 

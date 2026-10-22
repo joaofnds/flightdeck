@@ -37,7 +37,7 @@ const OVERVIEW_SLOTS: [OverviewSlot; 6] = [
     OverviewSlot::Ranked(2),
 ];
 
-/// The measures a ranking card shows, by index: the recording's four, then GPU time.
+/// The measures a ranking card shows, by index, in the order the viewer ranks them.
 const RANKED_METRICS: [Metric; 5] = [
     Metric::Cpu,
     Metric::Resident,
@@ -45,6 +45,27 @@ const RANKED_METRICS: [Metric; 5] = [
     Metric::Disk,
     Metric::Gpu,
 ];
+
+const _: () = {
+    use crate::live_app_attribution_history::Metric as Attribution;
+
+    assert!(matches!(
+        RANKED_METRICS[Attribution::Cpu.ranking_index()],
+        Metric::Cpu
+    ));
+    assert!(matches!(
+        RANKED_METRICS[Attribution::Power.ranking_index()],
+        Metric::Power
+    ));
+    assert!(matches!(
+        RANKED_METRICS[Attribution::Disk.ranking_index()],
+        Metric::Disk
+    ));
+    assert!(matches!(
+        RANKED_METRICS[Attribution::Gpu.ranking_index()],
+        Metric::Gpu
+    ));
+};
 
 /// The number of cards in the Overview's top-app grid.
 pub(crate) const OVERVIEW_SLOT_COUNT: usize = OVERVIEW_SLOTS.len();
@@ -97,9 +118,6 @@ impl LiveDashboard {
     ) -> AnyElement {
         let metric = RANKED_METRICS[index];
         let card = ranking_card(metric_name(metric));
-        if matches!(metric, Metric::Gpu) {
-            return self.gpu_ranking(card, heading, cx);
-        }
 
         let (rankings, target) = match self.ranking_reading() {
             Ok(reading) => reading,
@@ -135,41 +153,6 @@ impl LiveDashboard {
         .child(ranking_title(metric, heading))
         .child(Self::app_ranking_entries(ranking, &target, cx))
         .into_any_element()
-    }
-
-    /// The GPU ranking of the selected second, from the GPU time the app sampled itself.
-    fn gpu_ranking(
-        &self,
-        card: gpui::Div,
-        heading: RankingHeading,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let card = card.child(ranking_title(Metric::Gpu, heading));
-        let Some(snapshot) = self.reading_snapshot() else {
-            let absent =
-                self.absent_reading("GPU time by App unavailable while reading the selection");
-            return card
-                .child(ranking_body().child(notice(absent)))
-                .into_any_element();
-        };
-        let selection = &snapshot.selection;
-        let reading = crate::live_gpu_apps::ranking(selection).and_then(|ranking| {
-            let second = selection["second"]
-                .as_u64()
-                .ok_or("GPU App observation time unavailable")?;
-            Ok((ranking, Target::exact(second, &selection["selected"])?))
-        });
-        match reading {
-            Ok((ranking, target)) => card
-                .id(SharedString::from("ranking-card-GPU time"))
-                .role(gpui::Role::Group)
-                .aria_label(format!("GPU top apps at Unix second {}", target.second))
-                .child(Self::app_ranking_entries(&ranking, &target, cx))
-                .into_any_element(),
-            Err(error) => card
-                .child(ranking_body().child(notice(&error)))
-                .into_any_element(),
-        }
     }
 
     fn ranking_reading(&self) -> Result<(&TopApps, Target), String> {
@@ -579,7 +562,7 @@ fn metric_help(metric: Metric) -> &'static str {
         }
         Metric::Gpu => {
             "GPU time each App's processes took over the interval, from the GPU driver's own \
-            count, as a share of the interval. The app samples it each second while it runs."
+            count, as a share of the interval."
         }
     }
 }

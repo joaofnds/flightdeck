@@ -374,14 +374,14 @@ fn ordinary_app_shape_stays_compact_while_process_groups_keep_ten_measures() {
         .unwrap();
 
     let app_point = &app["points"][1];
-    assert_eq!(app_point.as_object().unwrap().len(), 19);
+    assert_eq!(app_point.as_object().unwrap().len(), 21);
     assert!(app_point.get("idle_wakeups").is_none());
     assert!(app_point.get("pageins").is_none());
     assert!(app_point.get("threads").is_none());
     assert!(app_point.get("idle_wakeups_per_second").is_none());
     assert!(app_point.get("pageins_per_second").is_none());
     let group_point = &group["points"][1];
-    assert_eq!(group_point.as_object().unwrap().len(), 24);
+    assert_eq!(group_point.as_object().unwrap().len(), 26);
     assert_eq!(
         [
             "cpu_ns",

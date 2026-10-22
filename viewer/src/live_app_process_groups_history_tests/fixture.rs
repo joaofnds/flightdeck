@@ -19,6 +19,8 @@ pub(crate) struct Named<'a> {
     pub version: i32,
     pub unique_id: u64,
     pub threads: i32,
+    /// The GPU time the tick reads for the process, which a ring with system records carries.
+    pub gpu_ns: Option<u64>,
 }
 
 pub(crate) fn member<'a>(pid: i32, name: &'a [u8], app: &'a [u8], usage: Usage) -> Named<'a> {
@@ -31,13 +33,31 @@ pub(crate) fn member<'a>(pid: i32, name: &'a [u8], app: &'a [u8], usage: Usage) 
         version: 1,
         unique_id: u64::try_from(pid).unwrap() * 100,
         threads: 1,
+        gpu_ns: None,
     }
 }
 
+type CreateWriter = fn(
+    &collector::ring::Place,
+    collector::ring::Shape,
+    collector::ring::DictionaryCapacity,
+    &collector::ring::RunIdentity,
+    u64,
+) -> std::io::Result<collector::ring::Writer>;
+
 pub(crate) fn dense() -> Fixture {
+    dense_with(collector::ring::Writer::create_with_identity)
+}
+
+/// A dense ring whose ticks also carry the system records, each process's GPU time among them.
+pub(crate) fn dense_with_system() -> Fixture {
+    dense_with(collector::ring::Writer::create_with_system)
+}
+
+fn dense_with(create: CreateWriter) -> Fixture {
     let mut fixture = Fixture::new();
     let identity = fixture.writer.identity().unwrap();
-    let writer = collector::ring::Writer::create_with_identity(
+    let writer = create(
         &collector::ring::Place {
             lock_path: fixture.root.join("dense.lock"),
             name_prefix: format!(
@@ -108,48 +128,104 @@ pub(crate) fn publish_with_interval(
         .filter(|(row, _)| row.exited)
         .map(|(_, identity)| *identity)
         .collect();
-    let events: Vec<_> = rows
+    let events = publish_with_interval_events(rows);
+    let gpu_ns: Vec<_> = rows
         .iter()
+        .filter(|row| !row.exited)
+        .map(|row| row.gpu_ns)
+        .collect();
+    let readings = Readings {
+        run_tick: publication,
+        cpus: &[collector::machine::CPUTicks {
+            user: 1,
+            system: 0,
+            nice: 0,
+            idle: 1,
+        }],
+        memory: &collector::machine::Memory::default(),
+        interfaces: &[],
+        ioreport: None,
+        smc: None,
+        processes: &processes,
+        processes_refused: u32::try_from(rows.iter().filter(|row| row.usage.is_none()).count())
+            .unwrap(),
+        processes_gone: 0,
+        coalitions: &[],
+        events: &events,
+        dropped: collector::ring::Dropped::default(),
+    };
+    let times = collector::ring::ObservationTimes {
+        wall_ns: (1000 + publication) * 1_000_000_000,
+        continuous_ns: publication * interval_ns,
+        awake_ns: publication * interval_ns,
+    };
+    let identities = IdentityPublication {
+        processes: &live,
+        events: &event_identities,
+    };
+    publish_with_interval_write(
+        fixture,
+        &Publication {
+            readings: &readings,
+            times: &times,
+            identities: &identities,
+            gpu_ns: &gpu_ns,
+        },
+    );
+}
+
+/// The exit of each row that exited.
+fn publish_with_interval_events(rows: &[Named<'_>]) -> Vec<collector::tracker::Event> {
+    rows.iter()
         .filter(|row| row.exited)
         .map(|row| collector::tracker::Event::Exit {
             pid: row.pid,
             last: row.usage.ok_or(collector::processes::Unreadable::Refused),
             noticed: collector::tracker::Noticed::OnExit,
         })
-        .collect();
+        .collect()
+}
+
+/// What one publication of the fixture writes to the ring.
+struct Publication<'a> {
+    readings: &'a Readings<'a>,
+    times: &'a collector::ring::ObservationTimes,
+    identities: &'a IdentityPublication<'a>,
+    /// Each live process's GPU time, which only a ring with a system tail holds.
+    gpu_ns: &'a [Option<u64>],
+}
+
+fn publish_with_interval_write(fixture: &mut Fixture, publication: &Publication<'_>) {
+    let Publication {
+        readings,
+        times,
+        identities,
+        gpu_ns,
+    } = *publication;
+    if !fixture.writer.system_supported() {
+        assert!(gpu_ns.iter().all(Option::is_none));
+        fixture
+            .writer
+            .publish_with_identity(readings, Some(times), identities)
+            .unwrap();
+        return;
+    }
+    let system = collector::ring::SystemPublication {
+        reading: &collector::system::SystemReading::default(),
+        machine: &collector::system::MachineFacts::default(),
+        clock: None,
+        process_gpu_ns: gpu_ns,
+    };
     fixture
         .writer
-        .publish_with_identity(
-            &Readings {
-                run_tick: publication,
-                cpus: &[collector::machine::CPUTicks {
-                    user: 1,
-                    system: 0,
-                    nice: 0,
-                    idle: 1,
-                }],
-                memory: &collector::machine::Memory::default(),
-                interfaces: &[],
-                ioreport: None,
-                smc: None,
-                processes: &processes,
-                processes_refused: u32::try_from(
-                    rows.iter().filter(|row| row.usage.is_none()).count(),
-                )
-                .unwrap(),
-                processes_gone: 0,
-                coalitions: &[],
-                events: &events,
-                dropped: collector::ring::Dropped::default(),
-            },
-            Some(&collector::ring::ObservationTimes {
-                wall_ns: (1000 + publication) * 1_000_000_000,
-                continuous_ns: publication * interval_ns,
-                awake_ns: publication * interval_ns,
-            }),
-            &IdentityPublication {
-                processes: &live,
-                events: &event_identities,
+        .publish_with_disks(
+            readings,
+            Some(times),
+            identities,
+            &collector::ring::SupplementalReadings {
+                battery: None,
+                disks: None,
+                system: Some(&system),
             },
         )
         .unwrap();
@@ -212,6 +288,16 @@ fn process(row: &Named<'_>) -> Option<Process> {
 }
 
 pub(crate) fn seal_selected(fixture: &Fixture, selected: &[u64]) {
+    seal_selected_derived(fixture, selected, &crate::live::identity_fixture::Underived);
+}
+
+/// Seals the publications `selected` with the tables `derive` derives from them, as the
+/// persister does.
+pub(crate) fn seal_selected_derived(
+    fixture: &Fixture,
+    selected: &[u64],
+    derive: &dyn persistence::worker::Derive,
+) {
     assert!(selected.len() <= 8);
     let mut reader = collector::ring::RingReader::open_generation(fixture.writer.name()).unwrap();
     let shape = reader.shape();
@@ -266,7 +352,7 @@ pub(crate) fn seal_selected(fixture: &Fixture, selected: &[u64]) {
             )
             .unwrap();
     }
-    seal_window(fixture, &window);
+    seal_window(fixture, &window, derive);
 }
 
 fn read_events(
@@ -294,12 +380,25 @@ fn read_events(
     }
 }
 
-fn seal_window(fixture: &Fixture, window: &persistence::Window) {
+fn seal_window(
+    fixture: &Fixture,
+    window: &persistence::Window,
+    derive: &dyn persistence::worker::Derive,
+) {
     let store = persistence::Store::open(&fixture.root).unwrap();
     let persistence::Begin::Pending(pending) = store.begin(&window.identity).unwrap() else {
         panic!("selected window is already committed");
     };
-    let tables = persistence::Encoder.encode(window, pending.path()).unwrap();
+    let mut tables = persistence::Encoder.encode(window, pending.path()).unwrap();
+    tables.extend(
+        derive
+            .derive(&persistence::worker::Derivation {
+                identity: window.identity,
+                pending: pending.path(),
+                predecessor: None,
+            })
+            .unwrap(),
+    );
     let publications = window.publication_range();
     let events = window.event_range();
     let times: Vec<_> = window

@@ -102,7 +102,6 @@ impl LiveDashboard {
             | Row::BatteryState(_)
             | Row::Temperature(_, _, _)
             | Row::AppAttribution(_, _)
-            | Row::GpuApps(_)
             | Row::NetworkApps(_)
             | Row::CPUTop(_) => (4.0, 4.0),
             Row::OverviewRankings(_) => (6.0, 6.0),
@@ -171,7 +170,6 @@ impl LiveDashboard {
             Row::MemoryAttribution(panel) => self.memory_attribution(panel.as_ref(), cx),
             Row::MemoryQuantities => self.memory_quantities().into_any_element(),
             Row::AppAttribution(metric, panel) => self.app_attribution(*metric, panel.as_ref(), cx),
-            Row::GpuApps(panel) => self.gpu_apps(panel.as_ref(), cx),
             Row::NetworkApps(panel) => self.network_apps(panel.as_ref(), cx),
             Row::AppSelector => self.app_selector(cx).into_any_element(),
             Row::ProcessGroupBar => self.process_group_bar(cx).into_any_element(),
@@ -238,7 +236,7 @@ impl LiveDashboard {
         }
 
         // The notes of the selected App's cards carry no reading.
-        let mut cards = crate::live_app_views::app_cards(None, &Value::Null);
+        let mut cards = crate::live_app_views::app_cards(None);
         for card in &mut cards {
             summary::loading(card);
         }
@@ -246,12 +244,12 @@ impl LiveDashboard {
     }
 
     fn summary_cards_read(&self) -> Vec<summary::Card> {
+        if self.request.route == "apps" {
+            return crate::live_app_views::app_cards(self.current_app());
+        }
         let selection = self
             .reading_snapshot()
             .map_or(&Value::Null, |snapshot| &snapshot.selection);
-        if self.request.route == "apps" {
-            return crate::live_app_views::app_cards(self.current_app(), selection);
-        }
         if self.request.route == "self" {
             return crate::self_monitoring::cards(&self.self_reports);
         }
@@ -470,9 +468,9 @@ mod tests {
     use crate::live_app_attribution_history::Metric;
 
     #[test]
-    fn a_heading_sits_as_far_below_an_app_chart_row_as_below_the_gpu_apps_row() {
+    fn a_heading_sits_as_far_below_an_app_chart_row_as_below_the_network_apps_row() {
         // Goal: the prototype puts a section heading the same distance below every row of App
-        // charts, so the Storage page's Disk I/O by app has the room GPU time by app has.
+        // charts, so the Storage page's Disk I/O by app has the room Network by app has.
         // Method: add the padding below each row to the room above a heading.
         let heading = Row::Heading("Storage temperature".into());
 
@@ -480,7 +478,8 @@ mod tests {
             |row: &Row| LiveDashboard::row_padding(row).1 + LiveDashboard::row_padding(&heading).0;
 
         assert!(
-            (below(&Row::AppAttribution(Metric::Disk, None)) - below(&Row::GpuApps(None))).abs()
+            (below(&Row::AppAttribution(Metric::Disk, None)) - below(&Row::NetworkApps(None)))
+                .abs()
                 < f32::EPSILON
         );
     }

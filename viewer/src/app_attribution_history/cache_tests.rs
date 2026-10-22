@@ -63,6 +63,7 @@ fn point(publication: u64, keys: Vec<Arc<Key>>) -> Point {
                 cpu: CompactMeasure::default(),
                 power: CompactMeasure::default(),
                 disk: CompactMeasure::default(),
+                gpu: CompactMeasure::default(),
                 members: 1,
                 membership_complete: true,
             })
@@ -152,6 +153,7 @@ fn totals_after_a_retain_match_a_cache_of_the_kept_points_alone() {
                 }),
                 power: CompactMeasure::default(),
                 disk: CompactMeasure::default(),
+                gpu: CompactMeasure::default(),
                 members: 1,
                 membership_complete: true,
             })

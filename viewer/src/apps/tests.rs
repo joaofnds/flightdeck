@@ -86,6 +86,7 @@ pub(super) fn observation<'a>(
         }),
         program: Ok(program),
         usage: Ok(usage),
+        gpu_ns: None,
         threads: None,
         state: ProcessState::Live,
     })

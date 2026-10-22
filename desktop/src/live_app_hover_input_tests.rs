@@ -98,7 +98,7 @@ fn the_selected_app_reads_in_six_summary_cards(cx: &mut TestAppContext) {
         "summary-card:Resident memory:7 GiB",
         "summary-card:Network:Unavailable",
         "summary-card:Disk I/O:Unavailable *",
-        "summary-card:GPU time:Not sampled",
+        "summary-card:GPU time:25%",
         "summary-card:Process power:9 W",
     ] {
         assert!(harness.driver.text_is_visible(card), "{card}");
@@ -678,6 +678,7 @@ impl AppEpoch {
             "membership_complete":true,"cpu_percent_one_core":cpu,
             "energy_watts":energy,"energy_joules":energy,
             "cpu_ns":measure("130000000"),"energy_nj":measure("4000000000"),
+            "gpu_ns":measure("250000000"),"gpu_percent":25.0,
             "resident_bytes":measure(memory),"footprint_bytes":measure(memory),
             "disk_read_bytes":{"known":"0","measured_members":0,
                 "unavailable_members":members,"overflowed":false},

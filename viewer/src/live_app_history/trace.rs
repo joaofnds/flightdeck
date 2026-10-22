@@ -19,6 +19,7 @@ pub(super) struct Totals {
     membership_complete: bool,
     cpu_ns: CompactMeasure,
     energy_nj: CompactMeasure,
+    gpu_ns: CompactMeasure,
     disk_read_bytes: CompactMeasure,
     disk_written_bytes: CompactMeasure,
     disk_io_bytes: CompactMeasure,
@@ -124,6 +125,7 @@ impl TracePoint {
                 membership_complete: app.membership_complete,
                 cpu_ns: app.cpu_ns,
                 energy_nj: app.energy_nj,
+                gpu_ns: app.gpu_ns,
                 disk_read_bytes: app.disk_read_bytes,
                 disk_written_bytes: app.disk_written_bytes,
                 disk_io_bytes: app.disk_io_bytes,
@@ -150,6 +152,7 @@ impl TracePoint {
             "members": null, "membership_complete": false,
             "cpu_ns": null, "energy_nj": null, "resident_bytes": null, "footprint_bytes": null,
             "cpu_percent_one_core": null, "energy_joules": null, "energy_watts": null,
+            "gpu_ns": null, "gpu_percent": null,
             "disk_read_bytes": null, "disk_written_bytes": null, "disk_io_bytes": null,
             "disk_read_bps": null, "disk_written_bps": null, "disk_io_bps": null});
 
@@ -170,6 +173,13 @@ impl TracePoint {
             point["energy_watts"] = json!(app.energy_nj.measured().and_then(|energy_nj| {
                 apps::energy_watts(apps::EnergyRate {
                     energy_nj,
+                    elapsed_ns: self.elapsed_ns?,
+                })
+            }));
+            point["gpu_ns"] = app.gpu_ns.json();
+            point["gpu_percent"] = json!(app.gpu_ns.measured().and_then(|gpu_ns| {
+                apps::gpu_percent(apps::GpuRate {
+                    gpu_ns,
                     elapsed_ns: self.elapsed_ns?,
                 })
             }));
@@ -270,6 +280,7 @@ impl Totals {
             membership_complete: app.membership_complete,
             cpu_ns: CompactMeasure::capture(&app.cpu_ns),
             energy_nj: CompactMeasure::capture(&app.energy_nj),
+            gpu_ns: CompactMeasure::capture(&app.gpu_ns),
             disk_read_bytes: CompactMeasure::capture(&app.disk_read_bytes),
             disk_written_bytes: CompactMeasure::capture(&app.disk_written_bytes),
             disk_io_bytes: CompactMeasure::capture(&app.disk_io_bytes),
@@ -285,6 +296,7 @@ impl Totals {
             membership_complete: app.membership_complete,
             cpu_ns: capture_subtotal(&app.cpu_ns),
             energy_nj: capture_subtotal(&app.energy_nj),
+            gpu_ns: capture_subtotal(&app.gpu_ns),
             disk_read_bytes: capture_subtotal(&app.disk_read_bytes),
             disk_written_bytes: capture_subtotal(&app.disk_written_bytes),
             disk_io_bytes: capture_subtotal(&app.disk_io_bytes),

@@ -636,3 +636,6 @@ pub(crate) fn equal(left: &AppProcessGroupsHistory, right: &AppProcessGroupsHist
 
 #[path = "captured_process_metrics_tests.rs"]
 mod captured_process_metrics_tests;
+
+#[path = "gpu_time_tests.rs"]
+mod gpu_time_tests;

@@ -139,7 +139,7 @@ fn utilization_panel(summary: &Value, absent: &'static str) -> gpui::Div {
                 ))
                 .child(utilization_status(
                     "Thermal state",
-                    crate::live_system::thermal_pressure_text(summary),
+                    crate::live_thermal_pressure::thermal_pressure_text(summary),
                 )),
         )
         .child(

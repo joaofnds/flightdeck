@@ -209,11 +209,7 @@ fn probe_app_attribution(snapshot: &Snapshot, route: &str) -> Result<(), String>
     let index = history
         .index(None)
         .ok_or("Missing selected App attribution")?;
-    let ranking = match metric {
-        Metric::Cpu => 0,
-        Metric::Power => 2,
-        Metric::Disk => 3,
-    };
+    let ranking = metric.ranking_index();
     if let Some(crate::live_rankings::Rankings::Ready(rankings)) = snapshot.rankings.as_deref() {
         if !rankings.metrics[ranking].entries.is_empty() {
             if !(0..9).any(|line| history.amount(line, Some(index)).is_some()) {

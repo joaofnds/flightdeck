@@ -49,15 +49,25 @@ impl Session {
         });
     }
 
-    /// Rewrites the parts each sealed window keeps to the version before this build's, which
-    /// kept no count of the live processes outside every App.
+    /// Rewrites the parts each sealed window keeps to version 2, the last that kept no GPU
+    /// time, so a build that reads it as its own fails on the columns it lacks.
     pub(crate) fn previous_version_kept_parts(&self) {
+        const { assert!(VERSION > 2) };
         rewrite(self, APP_PARTS, |frame| {
-            let version = vec![VERSION - 1; frame.height()];
+            let version = vec![2_u8; frame.height()];
             frame
                 .replace("version", Column::new("version".into(), version))
                 .unwrap();
-            frame.drop_in_place("live_ungrouped_members").unwrap();
+            let gpu: Vec<String> = frame
+                .get_column_names()
+                .into_iter()
+                .filter(|name| name.contains("gpu_ns"))
+                .map(ToString::to_string)
+                .collect();
+            assert!(!gpu.is_empty());
+            for name in gpu {
+                frame.drop_in_place(&name).unwrap();
+            }
         });
     }
 

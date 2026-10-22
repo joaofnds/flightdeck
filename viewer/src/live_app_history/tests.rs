@@ -203,6 +203,7 @@ pub(super) fn point(publication: u64, app_count: usize) -> Box<Point> {
             membership_complete: false,
             cpu_ns: measure(),
             energy_nj: measure(),
+            gpu_ns: measure(),
             disk_read_bytes: measure(),
             disk_written_bytes: measure(),
             disk_io_bytes: measure(),

@@ -930,30 +930,6 @@ fn gpu_memory_charts_in_use_and_dashed_allocation_in_gibibytes() {
 }
 
 #[test]
-fn gpu_apps_stack_each_leader_under_the_dashed_gpu_busy_line() {
-    // Goal: the GPU time by App chart draws Other and each sampled leader stacked, with the
-    // GPU's busy share dashed and unstacked, and a second the app did not sample stays a gap.
-    // Method: one leader sampled at the middle point of three, under 40% busy there.
-    let mut selection = selection();
-    selection["gpu_app_cohort"] = json!(["WindowServer"]);
-    selection["trends"][1]["gpu_app_percent"] = json!([1.5, 20.0]);
-    selection["trends"][1]["gpu_active_percent"] = json!(40.0);
-
-    let panels = panels("gpu", &selection, None).unwrap();
-
-    let apps = panels.iter().find(|panel| panel.id == GPU_APPS_ID).unwrap();
-    let names: Vec<_> = apps.lines.iter().map(|line| line.name.as_str()).collect();
-    assert_eq!(names, ["Other", "WindowServer", "GPU busy"]);
-    assert_eq!(apps.lines[1].values, [None, Some(20.0), None]);
-    assert_eq!(apps.lines[2].values[1], Some(40.0));
-    assert_eq!(apps.stack, Some(true));
-    assert_eq!(apps.lines[2].stack, Some(false));
-    assert_eq!(apps.lines[2].dashed, Some(true));
-    let unsampled = super::panels("gpu", &super::tests::selection(), None).unwrap();
-    assert!(unsampled.iter().all(|panel| panel.id != GPU_APPS_ID));
-}
-
-#[test]
 fn quantity_text_writes_numbers_as_the_prototype_does() {
     // Goal: every reading reads as the prototype's axisValue writes it, with no decimals at
     // zero or from 100, one from 1, two significant digits below 1, and thousands grouped.

@@ -510,6 +510,24 @@ fn power_attribution_and_ranking_share_a_wide_row_and_stack_narrow(cx: &mut Test
 }
 
 #[gpui::test]
+fn gpu_attribution_and_ranking_share_a_wide_row_and_stack_narrow(cx: &mut TestAppContext) {
+    // Goal: the GPU page lays GPU time by App out beside its ranking as the other App charts
+    // are. Method: seed the GPU history and read the row's geometry wide and then narrow.
+    let mut harness = InputHarness::setup_route(cx, "gpu");
+    harness.driver.seed_attribution(Metric::Gpu);
+    harness.driver.assert_attribution_layout(Metric::Gpu, false);
+
+    harness
+        .driver
+        .context
+        .simulate_resize(gpui::size(px(620.0), px(5000.0)));
+    harness.driver.context.run_until_parked();
+
+    harness.driver.assert_attribution_layout(Metric::Gpu, true);
+    harness.teardown();
+}
+
+#[gpui::test]
 fn attribution_legend_accepts_native_keydown_and_keyup_and_data_keeps_rates(
     cx: &mut TestAppContext,
 ) {
@@ -728,6 +746,12 @@ impl InputDriver {
                 "ranking:Disk I/O:Current:80 B/s",
                 "chart-card:live-disk-apps",
                 "attribution-ranking:live-disk-apps",
+            ),
+            Metric::Gpu => (
+                "live-gpu-apps-plot",
+                "ranking:GPU time:Current:25.0%",
+                "chart-card:live-gpu-apps",
+                "attribution-ranking:live-gpu-apps",
             ),
         };
         let plot = self.chart_bounds(plot);

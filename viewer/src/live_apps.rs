@@ -35,6 +35,8 @@ struct Member {
     creation: Option<ProcessCreation>,
     program: std::result::Result<ProgramSpan, IdentityUnavailable>,
     usage: std::result::Result<Usage, Unavailable>,
+    /// The GPU time of the process's GPU clients, none where the tick read none for it.
+    gpu_ns: Option<u64>,
     threads: Option<u64>,
 }
 

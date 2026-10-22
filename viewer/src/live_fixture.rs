@@ -518,7 +518,7 @@ fn seal_read_observation(
 }
 
 /// Derives no table, as the persister of a build before derived tables sealed every window.
-struct Underived;
+pub(crate) struct Underived;
 
 impl persistence::worker::Derive for Underived {
     fn derive(

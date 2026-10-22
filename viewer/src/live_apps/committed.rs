@@ -37,15 +37,15 @@ impl Sources<'_> {
     pub(crate) fn query(&self) -> String {
         format!(
             "(SELECT {PROCESS_COLUMNS}, publication, 0::UTINYINT app_origin, \
-            NULL::UBIGINT app_event, NULL::UTINYINT app_kind, NULL::UBIGINT app_tick, threads \
-            FROM {processes} UNION ALL SELECT pid, process_unique_id, pid_version, \
+            NULL::UBIGINT app_event, NULL::UTINYINT app_kind, NULL::UBIGINT app_tick, threads, \
+            gpu_ns FROM {processes} UNION ALL SELECT pid, process_unique_id, pid_version, \
             identity_availability, CASE WHEN kind=3 THEN NULL ELSE executable_name END, \
             CASE WHEN kind=3 THEN NULL ELSE app_path END, usage_availability, \
             awake_ns_at_start, user_ns, system_ns, energy_nj, instructions, super_instructions, \
             cycles, idle_wakeups, interrupt_wakeups, pageins, resident_bytes, footprint_bytes, \
             disk_read_bytes, disk_written_bytes, publication, 1::UTINYINT app_origin, \
-            event app_event, kind app_kind, run_tick app_tick, NULL::INTEGER threads \
-            FROM {events})",
+            event app_event, kind app_kind, run_tick app_tick, NULL::INTEGER threads, \
+            NULL::UBIGINT gpu_ns FROM {events})",
             processes = self.processes,
             events = self.events,
         )
@@ -451,8 +451,8 @@ fn committed_many_rows(
     );
     let limit = size.rows + 1;
     let frame = connection.query(&format!(
-        "SELECT {PROCESS_COLUMNS}, publication, app_origin, app_event, app_kind, app_tick, threads \
-        FROM {source} WHERE publication IN ({publications}) \
+        "SELECT {PROCESS_COLUMNS}, publication, app_origin, app_event, app_kind, app_tick, \
+        threads, gpu_ns FROM {source} WHERE publication IN ({publications}) \
         ORDER BY publication, app_origin, app_event, pid LIMIT {limit}",
         source = batch.source,
         publications = batch.publications,
@@ -551,6 +551,7 @@ fn committed_member(row: &Row<'_>, frame: &mut Frame) -> Result<()> {
         creation: committed_creation(row)?,
         program: committed_program(row, &mut frame.arena)?,
         usage: committed_usage(row)?,
+        gpu_ns: row.get::<Option<u64>>(27)?,
         threads: row.get::<Option<i32>>(26)?.and_then(super::threads),
     });
 

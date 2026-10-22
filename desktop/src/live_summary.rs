@@ -22,11 +22,11 @@ enum Reading {
     Health,
     /// The busy share of one performance level, by its index fastest first.
     Level(usize),
-    /// The one-minute load average the app sampled in the selected second.
+    /// The one-minute load average of the selected second.
     LoadAverage,
     MemoryInUse,
     Pressure,
-    /// macOS's thermal pressure level the app sampled in the selected second.
+    /// macOS's thermal pressure level at the selected second.
     Thermal,
     Uncaptured,
 }
@@ -302,7 +302,7 @@ fn card(summary: &Value, definition: &Specification) -> Card {
         }
         Reading::Thermal => {
             color = thermal_color(summary);
-            crate::live_system::thermal_pressure_text(summary).into()
+            crate::live_thermal_pressure::thermal_pressure_text(summary).into()
         }
         Reading::Uncaptured => "Unavailable".into(),
     };

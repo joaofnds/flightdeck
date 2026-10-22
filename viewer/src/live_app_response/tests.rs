@@ -26,6 +26,41 @@ fn preserves_known_subtotals_and_uncertain_membership() {
 pub(super) mod fixture;
 
 #[test]
+fn reads_gpu_time_as_a_share_of_the_interval_and_a_missing_one_as_unknown() {
+    // Goal: an App's GPU time is its members' sum over the interval, shown as a percent of the
+    // interval, and a member without GPU time reads unknown rather than zero. Method: the
+    // ordinary App, whose main process gained a quarter second of GPU time over one second
+    // and whose helper has none.
+    let sample = fixture::sample(fixture::Scenario::Ordinary);
+
+    let detail = sample
+        .app_detail(&Detail {
+            selected: &sample.selected,
+            app_index: 0,
+            page: Page {
+                offset: 0,
+                limit: 512,
+            },
+        })
+        .unwrap();
+
+    assert_eq!(
+        detail["app"]["gpu_ns"],
+        serde_json::json!({
+            "known":"250000000", "measured_members":1,
+            "unavailable_members":1, "overflowed":false
+        })
+    );
+    assert_eq!(detail["app"]["gpu_percent"], 25.0);
+    assert_eq!(detail["processes"][0]["gpu_percent"], 25.0);
+    assert_eq!(
+        detail["processes"][1]["gpu_ns"],
+        serde_json::json!({"known":null, "unavailable":"unknown"})
+    );
+    assert_eq!(detail["processes"][1]["gpu_percent"], Value::Null);
+}
+
+#[test]
 fn keeps_partial_disk_rates_and_joint_coverage_on_the_wire() {
     // Goal: a refused process cannot erase measured I/O or become a measured zero.
     // Method: serialize the known member's read/write/combined amounts beside one refusal.

@@ -195,9 +195,9 @@ fn oversized_point_envelope_is_refused_before_projection() {
 
 #[test]
 fn oversized_source_cache_metadata_is_refused() {
-    // A response cannot enlarge the 64 MiB source cache contract through metadata.
+    // A response cannot enlarge the 72 MiB source cache contract through metadata.
     let mut value = fixture(Metric::Cpu);
-    value["coverage"]["cache_bytes"] = json!(67_108_865);
+    value["coverage"]["cache_bytes"] = json!(75_497_473);
 
     let history = AppAttributionHistory::prepare(Metric::Cpu, &value, &selection());
 
@@ -222,6 +222,22 @@ pub(crate) fn fixture(metric: Metric) -> Value {
                 "energy_nj":measure(&(power * 1_000_000_000.0).to_string()),"energy_watts":power});
             point["other"] = json!({"app_count":1,"membership_complete":true,
                 "energy_nj":measure("250000000"),"energy_watts":0.25});
+        }
+    }
+    if metric == Metric::Gpu {
+        value["metric"] = json!("gpu");
+        for (index, point) in value["points"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .enumerate()
+        {
+            let gpu_ns = ["200000000", "350000000"][index];
+            let gpu_percent = [20.0, 35.0][index];
+            point["apps"][0] = json!({"members":1,"membership_complete":true,
+                "gpu_ns":measure(gpu_ns),"gpu_percent":gpu_percent});
+            point["other"] = json!({"app_count":1,"membership_complete":true,
+                "gpu_ns":measure("50000000"),"gpu_percent":5.0});
         }
     }
 

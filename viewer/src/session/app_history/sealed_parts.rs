@@ -26,7 +26,7 @@ use persistence::{Error, Result, TableManifest};
 /// The version of the table's columns. A reader takes no parts from a table of another version
 /// and leaves its window to the replay, so a later build may change the columns and an older
 /// one still reads the recording.
-pub(super) const VERSION: u8 = 2;
+pub(super) const VERSION: u8 = 3;
 /// The rows a window keeps. About 1,100 processes in a few hundred Apps a second make some
 /// 85,000 rows a window, a sixth of this.
 const ROWS_MAX: u32 = 1 << 19;
@@ -83,7 +83,7 @@ const FIXED_COLUMNS: [&str; 32] = [
     "state",
 ];
 /// An App row's measures, each in a column for every field, after the fixed columns.
-const MEASURES: [MeasureColumn; 7] = [
+const MEASURES: [MeasureColumn; 8] = [
     ("cpu_ns", |app| app.cpu_ns),
     ("energy_nj", |app| app.energy_nj),
     ("disk_read_bytes", |app| app.disk_read_bytes),
@@ -91,6 +91,7 @@ const MEASURES: [MeasureColumn; 7] = [
     ("disk_io_bytes", |app| app.disk_io_bytes),
     ("resident_bytes", |app| app.resident_bytes),
     ("footprint_bytes", |app| app.footprint_bytes),
+    ("gpu_ns", |app| app.gpu_ns),
 ];
 const MEASURE_FIELDS: [&str; 4] = [
     "known",
@@ -100,7 +101,7 @@ const MEASURE_FIELDS: [&str; 4] = [
 ];
 /// A process row's amounts, each in a column of its value and one of why it has none, after
 /// the measures.
-const AMOUNTS: [AmountColumn; 10] = [
+const AMOUNTS: [AmountColumn; 11] = [
     ("cpu_ns", |process| process.cpu_ns),
     ("energy_nj", |process| process.energy_nj),
     ("disk_read_bytes", |process| process.disk_read_bytes),
@@ -111,6 +112,7 @@ const AMOUNTS: [AmountColumn; 10] = [
     ("idle_wakeups", |process| process.idle_wakeups),
     ("pageins", |process| process.pageins),
     ("threads", |process| process.threads),
+    ("gpu_ns", |process| process.gpu_ns),
 ];
 /// A measure's name, and where an App row takes it from.
 type MeasureColumn = (&'static str, fn(&App) -> Measure);
@@ -1055,6 +1057,7 @@ struct KeptAttributionColumns<'frame> {
     cpu_ns: KeptMeasureColumns<'frame>,
     energy_nj: KeptMeasureColumns<'frame>,
     disk_io_bytes: KeptMeasureColumns<'frame>,
+    gpu_ns: KeptMeasureColumns<'frame>,
 }
 
 impl<'frame> KeptAttributionColumns<'frame> {
@@ -1070,6 +1073,7 @@ impl<'frame> KeptAttributionColumns<'frame> {
             cpu_ns: measure(const { attribution_column("app_cpu_ns_known") })?,
             energy_nj: measure(const { attribution_column("app_energy_nj_known") })?,
             disk_io_bytes: measure(const { attribution_column("app_disk_io_bytes_known") })?,
+            gpu_ns: measure(const { attribution_column("app_gpu_ns_known") })?,
         })
     }
 }
@@ -1094,6 +1098,7 @@ impl KeptColumns for KeptAttributionColumns<'_> {
             cpu_ns: self.cpu_ns.measure(row, members)?,
             energy_nj: self.energy_nj.measure(row, members)?,
             disk_io_bytes: self.disk_io_bytes.measure(row, members)?,
+            gpu_ns: self.gpu_ns.measure(row, members)?,
         })
     }
 }
@@ -1134,8 +1139,8 @@ impl KeptColumns for KeptResidentColumns<'_> {
     }
 }
 
-/// An App's CPU, energy and disk at an observation of a window that keeps its parts, which the
-/// histories of every App plot.
+/// An App's CPU, energy, disk and GPU at an observation of a window that keeps its parts, which
+/// the histories of every App plot.
 pub(crate) struct KeptAttribution {
     pub key: Key,
     pub members: u32,
@@ -1143,12 +1148,13 @@ pub(crate) struct KeptAttribution {
     pub cpu_ns: Measure,
     pub energy_nj: Measure,
     pub disk_io_bytes: Measure,
+    pub gpu_ns: Measure,
 }
 
-/// The columns a read of the Apps' CPU, energy and disk takes: those it decodes, then the row's
-/// kind its filter reads. The read takes no more, since each column costs the engine its plan
-/// and decode on every window.
-const ATTRIBUTION_COLUMNS: [&str; 19] = [
+/// The columns a read of the Apps' CPU, energy, disk and GPU takes: those it decodes, then the
+/// row's kind its filter reads. The read takes no more, since each column costs the engine its
+/// plan and decode on every window.
+const ATTRIBUTION_COLUMNS: [&str; 23] = [
     "publication",
     "app_index",
     "app_kind",
@@ -1167,6 +1173,10 @@ const ATTRIBUTION_COLUMNS: [&str; 19] = [
     "app_disk_io_bytes_measured_members",
     "app_disk_io_bytes_unavailable_members",
     "app_disk_io_bytes_overflowed",
+    "app_gpu_ns_known",
+    "app_gpu_ns_measured_members",
+    "app_gpu_ns_unavailable_members",
+    "app_gpu_ns_overflowed",
     "row_kind",
 ];
 const _: () = {
@@ -1183,11 +1193,16 @@ const _: () = {
     assert!(attribution_column("app_disk_io_bytes_measured_members") == disk + 1);
     assert!(attribution_column("app_disk_io_bytes_unavailable_members") == disk + 2);
     assert!(attribution_column("app_disk_io_bytes_overflowed") == disk + 3);
+    let gpu = attribution_column("app_gpu_ns_known");
+    assert!(attribution_column("app_gpu_ns_measured_members") == gpu + 1);
+    assert!(attribution_column("app_gpu_ns_unavailable_members") == gpu + 2);
+    assert!(attribution_column("app_gpu_ns_overflowed") == gpu + 3);
     // Each column the read takes is one the parts table holds, under the name it gives it.
     assert!(fixed("app_membership_complete") < FIXED_COLUMNS.len());
     assert!(place(&MEASURES, "cpu_ns") < MEASURES.len());
     assert!(place(&MEASURES, "energy_nj") < MEASURES.len());
     assert!(place(&MEASURES, "disk_io_bytes") < MEASURES.len());
+    assert!(place(&MEASURES, "gpu_ns") < MEASURES.len());
 };
 
 /// An App's resident memory at an observation of a window that keeps its parts.
@@ -1461,6 +1476,7 @@ fn kept_app(row: &Row<'_>) -> Result<(usize, App)> {
         disk_io_bytes: measure(const { place(&MEASURES, "disk_io_bytes") })?,
         resident_bytes: measure(const { place(&MEASURES, "resident_bytes") })?,
         footprint_bytes: measure(const { place(&MEASURES, "footprint_bytes") })?,
+        gpu_ns: measure(const { place(&MEASURES, "gpu_ns") })?,
     };
 
     Ok((
@@ -1536,6 +1552,7 @@ fn kept_process(row: &Row<'_>) -> Result<Process> {
         program_unavailable: program_unavailable.map(identity_of).transpose()?,
         cpu_ns: amount(const { place(&AMOUNTS, "cpu_ns") })?,
         energy_nj: amount(const { place(&AMOUNTS, "energy_nj") })?,
+        gpu_ns: amount(const { place(&AMOUNTS, "gpu_ns") })?,
         disk_read_bytes: amount(const { place(&AMOUNTS, "disk_read_bytes") })?,
         disk_written_bytes: amount(const { place(&AMOUNTS, "disk_written_bytes") })?,
         disk_io_bytes: amount(const { place(&AMOUNTS, "disk_io_bytes") })?,

@@ -8,8 +8,13 @@ use super::{App, Error, KeyKind, Measure, Observation, Result, Sample};
 use crate::apps;
 
 pub const RANKS_MAX: usize = 10;
-pub(crate) const METRICS: [Metric; 4] =
-    [Metric::Cpu, Metric::Resident, Metric::Power, Metric::Disk];
+pub(crate) const METRICS: [Metric; 5] = [
+    Metric::Cpu,
+    Metric::Resident,
+    Metric::Power,
+    Metric::Disk,
+    Metric::Gpu,
+];
 
 #[derive(Debug, PartialEq)]
 pub struct Ranks {
@@ -17,8 +22,8 @@ pub struct Ranks {
     pub app_count: u32,
     pub membership_complete: bool,
     pub ungrouped_members: u32,
-    /// CPU, resident memory, power and disk, in that order.
-    pub metrics: [Ranking; 4],
+    /// CPU, resident memory, power, disk and GPU, in that order.
+    pub metrics: [Ranking; 5],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,6 +32,7 @@ pub enum Metric {
     Resident,
     Power,
     Disk,
+    Gpu,
 }
 
 #[derive(Debug, PartialEq)]
@@ -80,7 +86,7 @@ impl Sample {
     }
 }
 
-fn ranks_app(app: &App, elapsed_ns: Option<u64>, metrics: &mut [Ranking; 4]) {
+fn ranks_app(app: &App, elapsed_ns: Option<u64>, metrics: &mut [Ranking; 5]) {
     let mut ranked = None;
     for ranking in metrics {
         let Some(reading) = ranking.read(app, elapsed_ns) else {
@@ -210,6 +216,7 @@ impl Metric {
             Self::Resident => &app.resident_bytes,
             Self::Power => &app.energy_nj,
             Self::Disk => &app.disk_io_bytes,
+            Self::Gpu => &app.gpu_ns,
         }
     }
 
@@ -226,6 +233,10 @@ impl Metric {
             }),
             Self::Disk => apps::bytes_per_second(apps::BytesRate {
                 bytes: amount,
+                elapsed_ns,
+            }),
+            Self::Gpu => apps::gpu_percent(apps::GpuRate {
+                gpu_ns: amount,
                 elapsed_ns,
             }),
         }

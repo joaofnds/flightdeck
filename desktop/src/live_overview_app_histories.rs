@@ -13,11 +13,14 @@ pub struct OverviewAppHistories {
 }
 
 impl OverviewAppHistories {
-    pub fn history(&self, metric: Metric) -> &AppAttributionHistory {
+    /// The Overview's history of `metric`. The Overview loads no GPU history, so its GPU slot
+    /// names the GPU page, which draws it.
+    pub fn history(&self, metric: Metric) -> Option<&AppAttributionHistory> {
         match metric {
-            Metric::Cpu => self.cpu.as_ref(),
-            Metric::Power => self.power.as_ref(),
-            Metric::Disk => self.disk.as_ref(),
+            Metric::Cpu => Some(self.cpu.as_ref()),
+            Metric::Power => Some(self.power.as_ref()),
+            Metric::Disk => Some(self.disk.as_ref()),
+            Metric::Gpu => None,
         }
     }
 }
@@ -25,7 +28,7 @@ impl OverviewAppHistories {
 impl Snapshot {
     pub(crate) fn attribution_history(&self, metric: Metric) -> Option<&AppAttributionHistory> {
         if let Some(histories) = &self.overview_app_histories {
-            return Some(histories.history(metric));
+            return histories.history(metric);
         }
 
         self.app_attribution_history.as_deref()
@@ -72,7 +75,11 @@ impl LiveDashboard {
         let reading = if id == NETWORK_APPS_ID {
             "Not recorded per app".to_owned()
         } else {
-            self.overview_app_histories_unavailable(id)
+            if id == Metric::Gpu.panel_id() {
+                "Drawn on the GPU page".to_owned()
+            } else {
+                self.overview_app_histories_unavailable(id)
+            }
         };
         crate::live_chart_view::absent_chart(&AbsentChart { id, title }, reading)
             .debug_selector(move || format!("overview-app-history-unavailable:{id}"))
@@ -107,7 +114,7 @@ pub(crate) fn overview_app_history_slot(slot: usize) -> (&'static str, &'static 
         1 => (crate::live_resident_history::PANEL_ID, "Memory by app"),
         2 => (NETWORK_APPS_ID, "Network by app"),
         3 => (Metric::Disk.panel_id(), "Disk by app"),
-        4 => (crate::live_projection::GPU_APPS_ID, "GPU by app"),
+        4 => (Metric::Gpu.panel_id(), "GPU by app"),
         5 => (Metric::Power.panel_id(), "Energy by app"),
         _ => unreachable!("Overview App history has six fixed resource slots"),
     }

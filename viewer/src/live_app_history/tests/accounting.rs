@@ -281,12 +281,12 @@ compact_measure_round_trip!(
 );
 
 #[test]
-fn bounds_global_app_history_layout_with_seven_exact_measures() {
+fn bounds_global_app_history_layout_with_eight_exact_measures() {
     // Goal: preserve fifteen minutes for ordinary App populations within the fixed cache budget.
     // Method: guard the actual compiler layouts that Point::bytes charges per App and observation.
     assert!(size_of::<CompactMeasure>() <= 12);
     assert!(align_of::<CompactMeasure>() <= align_of::<u32>());
-    assert!(size_of::<App>() <= 96);
+    assert!(size_of::<App>() <= 112);
     eprintln!(
         "compact App history layout: {}",
         json!({"measure_bytes": size_of::<CompactMeasure>(), "app_bytes": size_of::<App>(),
@@ -386,6 +386,7 @@ fn point(history: &History, publication: u64, keys: &[(KeyKind, &[u8])]) -> Box<
             membership_complete: false,
             cpu_ns: measure(),
             energy_nj: measure(),
+            gpu_ns: measure(),
             disk_read_bytes: measure(),
             disk_written_bytes: measure(),
             disk_io_bytes: measure(),

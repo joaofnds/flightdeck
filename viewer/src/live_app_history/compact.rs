@@ -27,7 +27,7 @@ const _: () = {
     assert!(align_of::<HistoryKey>() <= align_of::<usize>());
     assert!(align_of::<CompactMeasure>() <= align_of::<u32>());
     assert!(size_of::<CompactMeasure>() <= 12);
-    assert!(size_of::<App>() <= 96);
+    assert!(size_of::<App>() <= 112);
 };
 
 impl HistoryKey {

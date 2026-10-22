@@ -926,6 +926,7 @@ fn distinct_history() -> Box<History> {
                 membership_complete: true,
                 cpu_ns: amount(100 - index),
                 energy_nj: amount(100 - (index + 4) % 12),
+                gpu_ns: amount(100 - (index + 6) % 12),
                 disk_io_bytes: amount(100 - (index + 8) % 12),
                 disk_read_bytes: zero,
                 disk_written_bytes: zero,

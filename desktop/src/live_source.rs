@@ -162,7 +162,6 @@ enum Context {
 
 struct Reader {
     session: Option<LiveSession>,
-    system: crate::live_system::SystemSamples,
     last_catalog: Option<Value>,
     last_generation: u64,
     /// The route of the last published snapshot, so a newly opened page is told apart.
@@ -418,7 +417,6 @@ fn worker_run(root: &std::path::Path, shared: &Shared) {
     let mut command = None;
     let mut reader = Reader {
         session: None,
-        system: crate::live_system::SystemSamples::new(),
         last_catalog: None,
         last_generation: 0,
         last_route: String::new(),
@@ -525,7 +523,6 @@ fn worker_step(
     reader: &mut Reader,
     command: &mut Option<Command>,
 ) -> Duration {
-    worker_sample(&mut reader.system);
     if let Some(command) = command {
         if let Some(output) = reader_read(reader, root, command, shared) {
             worker_publish(shared, command.generation, output);
@@ -572,14 +569,6 @@ fn worker_pause_for(shared: &Shared, pause: Duration) {
             eprintln!("flightdeck GPUI reader mailbox: {error}");
             shared.stopped.store(true, Ordering::Release);
         }
-    }
-}
-
-/// Samples the readings the collector does not record, once in each wall-clock second.
-fn worker_sample(system: &mut crate::live_system::SystemSamples) {
-    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-        Ok(now) => system.sample(now.as_secs()),
-        Err(error) => eprintln!("flightdeck system clock precedes 1970: {error}"),
     }
 }
 
@@ -701,7 +690,6 @@ fn reader_snapshot(
     }
     let mut selection = reader_selection(session, &command.request, command.context)?;
     let tail_pending = reader_earlier(session, &command.request, kept_tail_only, &mut selection);
-    reader.system.annotate(&mut selection);
     let mut snapshot = reader_snapshot_new(command.generation, catalog, selection);
     if early {
         histories = reader_snapshot_histories(session, &snapshot);
@@ -719,7 +707,6 @@ fn reader_snapshot(
     if tail_pending {
         snapshot.histories_pending = true;
     }
-    reader_snapshot_annotate_app(&reader.system, &command.request, &mut snapshot);
     snapshot.read_ms = started.elapsed().as_secs_f64() * 1000.0;
     reader_snapshot_record(reader, command, &snapshot, histories);
 
@@ -842,22 +829,6 @@ fn reader_snapshot_record(
     });
 }
 
-/// Marks the selected App's history with the machine's own samples on the Apps page.
-fn reader_snapshot_annotate_app(
-    system: &crate::live_system::SystemSamples,
-    request: &Request,
-    snapshot: &mut Snapshot,
-) {
-    if request.route != "apps" {
-        return;
-    }
-    if let Some(app) = &request.app {
-        if let Some(history) = &mut snapshot.history {
-            system.annotate_app(history, app);
-        }
-    }
-}
-
 /// Whether the reader has published everything `generation` asks for.
 fn reader_published(reader: &Reader, generation: u64) -> bool {
     if reader.last_generation != generation {
@@ -873,24 +844,25 @@ fn reader_pending(reader: &Reader, generation: u64) -> bool {
         .is_some_and(|pending| pending.generation == generation)
 }
 
-/// Whether the route's pages show the selected second's top Apps.
+/// Whether the route's pages show the selected second's top Apps, which every page of one App
+/// measure does.
 pub(crate) fn route_ranks_apps(route: &str) -> bool {
-    matches!(route, "overview" | "storage" | "cpu" | "memory" | "energy")
+    matches!(route, "overview" | "memory")
+        || crate::live_app_attribution_history::Metric::from_route(route).is_some()
 }
 
 /// Whether the route's App histories read the parts its saved minutes keep and replay only the
-/// minutes that keep none. The App history of the CPU, energy and storage pages replays every
+/// minutes that keep none. The App history of each page of one App measure replays every
 /// saved minute of its range, so it never reads with a page's first readings.
 fn reader_route_reads_kept_histories(route: &str) -> bool {
     matches!(route, "overview" | "memory")
 }
 
-/// Whether the route's payload replays App histories from saved minutes.
+/// Whether the route's payload replays App histories from saved minutes, which every page of
+/// one App measure does.
 fn reader_route_has_histories(route: &str) -> bool {
-    matches!(
-        route,
-        "overview" | "cpu" | "apps" | "memory" | "energy" | "storage"
-    )
+    matches!(route, "overview" | "apps" | "memory")
+        || crate::live_app_attribution_history::Metric::from_route(route).is_some()
 }
 
 /// A snapshot of the catalog and selection, before the route's payload is read.

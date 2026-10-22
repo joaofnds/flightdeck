@@ -218,11 +218,6 @@ pub fn panels(
 
         result.push(Rc::new(panel));
     }
-    if route == "gpu" {
-        if let Some(panel) = gpu_apps_panel(selection, points, &coordinates)? {
-            result.push(Rc::new(panel));
-        }
-    }
     assert!(result.len() <= limit);
     Ok(result)
 }
@@ -740,99 +735,6 @@ fn panel(
     })
 }
 
-const GPU_APPS_HELP: &str = "GPU time each App's processes took per interval, from the GPU \
-    driver's own count, as a share of the interval. The eight Apps with the most GPU time over \
-    the window lead, and Other sums the rest. The dashed GPU busy line is the GPU's own active \
-    time, which work from several Apps at once can sit under. The app samples GPU time each \
-    second while it runs, so time before it started has no reading.";
-
-/// The stacked chart of GPU time by App: Other and each leader the app sampled, with the
-/// GPU's own busy share dashed over them. A selection without sampled GPU time has none.
-fn gpu_apps_panel(
-    selection: &Value,
-    points: &[Value],
-    coordinates: &Coordinates,
-) -> Result<Option<Panel>, String> {
-    let Some(cohort) = selection["gpu_app_cohort"].as_array() else {
-        return Ok(None);
-    };
-    if cohort.len() + 1 > APP_COLORS.len() {
-        return Err("GPU App cohort exceeds eight leaders".into());
-    }
-    let mut names = Vec::with_capacity(cohort.len() + 1);
-    names.push("Other");
-    for name in cohort {
-        names.push(name.as_str().ok_or("GPU App name unavailable")?);
-    }
-    let mut lines = Vec::with_capacity(names.len() + 1);
-    for (channel, name) in names.into_iter().enumerate() {
-        lines.push(gpu_apps_panel_line(name, channel, points)?);
-    }
-    let mut busy = Vec::with_capacity(points.len());
-    for point in points {
-        busy.push(number(&point["gpu_active_percent"])?);
-    }
-    lines.push(Line {
-        name: "GPU busy".into(),
-        color: "#ccccdc".into(),
-        values: busy,
-        stack: Some(false),
-        negative: Some(false),
-        dashed: Some(true),
-        axis: None,
-        follows: None,
-        unit: Some("%".into()),
-        fill: Some(0.0),
-    });
-    Ok(Some(Panel {
-        id: GPU_APPS_ID.to_owned(),
-        title: "GPU time by app".to_owned(),
-        unit: "%".to_owned(),
-        kind: "line".to_owned(),
-        lines,
-        minimum: Some(0.0),
-        maximum: None,
-        stack: Some(true),
-        fill: Some(1.0),
-        caption: None,
-        help: Some(GPU_APPS_HELP.to_owned()),
-        source: Some("Sampled by the app".into()),
-        quantities: None,
-        states: None,
-        table_headings: None,
-        table_rows: None,
-        positions: Some(coordinates.positions.clone()),
-        segments: Some(coordinates.segments.clone()),
-        selected_index: coordinates.selected_index,
-        window: Some(coordinates.window),
-        detail_first: Some(coordinates.detail_first),
-        reading_seconds: crate::charts::TICK_SECONDS,
-        sliding: false,
-        chart_width: std::cell::Cell::new(None),
-    }))
-}
-
-/// The stacked line of one App's share of GPU time, at `channel` of each point's shares.
-fn gpu_apps_panel_line(name: &str, channel: usize, points: &[Value]) -> Result<Line, String> {
-    let mut values = Vec::with_capacity(points.len());
-    for point in points {
-        values.push(number(&point["gpu_app_percent"][channel])?);
-    }
-
-    Ok(Line {
-        name: name.to_owned(),
-        color: APP_COLORS[channel].to_owned(),
-        values,
-        stack: None,
-        negative: Some(false),
-        dashed: Some(false),
-        axis: None,
-        follows: None,
-        unit: Some("%".into()),
-        fill: None,
-    })
-}
-
 fn panel_reading_value(reading: &Reading, point: &Value) -> Result<Option<f32>, String> {
     if reading.key == "power_remainder_watts" {
         let system = number(&point["power_watts"])?;
@@ -977,7 +879,7 @@ fn frequency(points: &[Value]) -> Specification {
     specification
 }
 
-/// The load averages the app sampled each second, with the logical CPU count dashed, since
+/// The load averages the collector read each second, with the logical CPU count dashed, since
 /// work above it waits for a core.
 fn load_average() -> Specification {
     let mut lines = Vec::with_capacity(4);
@@ -1093,10 +995,7 @@ pub const APP_COLORS: [&str; 9] = [
     "#1f60c4",
 ];
 
-/// GPU time by App, from the shares the app sampled each second.
-pub const GPU_APPS_ID: &str = "live-gpu-apps";
-
-/// The unified memory the GPU driver reported in use and allocated, sampled by the app.
+/// The unified memory the GPU driver reported in use and allocated.
 pub const GPU_MEMORY_ID: &str = "live-gpu-memory";
 
 fn gpu_memory() -> Specification {
@@ -1120,9 +1019,7 @@ fn gpu_memory() -> Specification {
     );
     specification.help = "The unified memory the GPU driver reports. In use is the memory \
         GPU work holds now, and allocated is what the driver has set aside for it. The GPU \
-        shares RAM with the CPU, so this memory also counts in the Mac's memory in use. The \
-        app samples the driver each second while it runs, so time before it started has no \
-        reading.";
+        shares RAM with the CPU, so this memory also counts in the Mac's memory in use.";
     specification
 }
 
@@ -1795,7 +1692,6 @@ const APP_DISK_HELP: &str = "Process-attributed read and write rates for each se
 
 /// The selected App's totals in the prototype's order and colors. The collector records no
 /// network bytes per process, so the prototype's Network chart has no source and is left out.
-/// GPU time comes from the app's own GPU sampler, which `SystemSamples::annotate_app` adds.
 fn app_specifications() -> Vec<Specification> {
     let mut disk = specification(
         "live-app-disk",
@@ -1810,8 +1706,8 @@ fn app_specifications() -> Vec<Specification> {
         "%",
         vec![reading("gpu_percent", "GPU time", "#b877d9", 1.0)],
     );
-    gpu.help = "The App's GPU time as a share of each second, read from the GPU driver while \
-        Flightdeck runs. Seconds before it started, or that it did not sample, remain gaps.";
+    gpu.help = "The App's GPU time as a share of each interval, from the GPU driver's own \
+        count. An interval without a GPU reading, or an App with no GPU client, remains a gap.";
     let mut network = specification(
         "live-app-network",
         "Network",

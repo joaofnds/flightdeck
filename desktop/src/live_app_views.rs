@@ -302,8 +302,8 @@ pub fn selected_detail<'a>(
 }
 
 /// The prototype's six readings of the selected App at the selected second. Network has no
-/// per-App source, and GPU time exists only for the seconds the app sampled while it ran.
-pub(crate) fn app_cards(app: Option<&Value>, selection: &Value) -> Vec<summary::Card> {
+/// per-App source.
+pub(crate) fn app_cards(app: Option<&Value>) -> Vec<summary::Card> {
     let reading = |read: fn(&Value) -> String| app.map_or_else(|| "Unavailable".into(), read);
     let card = |label: &str, reading, note: &str, color| summary::Card {
         label: label.into(),
@@ -333,7 +333,7 @@ pub(crate) fn app_cards(app: Option<&Value>, selection: &Value) -> Vec<summary::
         ),
         card(
             "GPU time",
-            app.map_or_else(|| "Unavailable".into(), |app| app_gpu_time(app, selection)),
+            reading(|app| value_rate(&app["gpu_percent"], "%")),
             "Selected app",
             PURPLE,
         ),
@@ -344,25 +344,6 @@ pub(crate) fn app_cards(app: Option<&Value>, selection: &Value) -> Vec<summary::
             ORANGE,
         ),
     ]
-}
-
-/// The selected App's share of GPU time at the selected second. An App the sampler saw no
-/// GPU time for used none, and a second the app did not sample has no reading.
-fn app_gpu_time(app: &Value, selection: &Value) -> String {
-    let Some(apps) = selection["summary"]["gpu_apps"].as_array() else {
-        return "Not sampled".into();
-    };
-    let key = &app["key"];
-    let share = apps.iter().find(|entry| {
-        if entry["kind"] != key["kind"] {
-            return false;
-        }
-        entry["bytes_hex"] == key["bytes_hex"]
-    });
-    match share {
-        Some(entry) => value_rate(&entry["percent"], "%"),
-        None => event_rate(Some(0.0), "%"),
-    }
 }
 
 pub fn app_table_columns(kind: &str, scroll: &gpui::ScrollHandle) -> impl IntoElement {

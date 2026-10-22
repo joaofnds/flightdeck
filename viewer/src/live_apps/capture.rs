@@ -38,21 +38,20 @@ pub(super) fn program_bytes(
 
 pub(super) fn members(source: &Publication<'_>, frame: &mut Frame) -> Result<()> {
     if source.reader.dictionary_capacity().is_none() {
-        for process in &source.tick.processes {
-            frame.members.push(Member {
-                pid: process.pid,
-                creation: None,
-                program: Err(IdentityUnavailable::Unsupported),
-                usage: Ok(process.usage),
-                threads: super::threads(process.task.threads),
-            });
-        }
+        members_unidentified(source, frame);
         return Ok(());
+    }
+
+    let gpu_ns = source.tick.process_gpu_ns();
+    if !gpu_ns.is_empty() {
+        if gpu_ns.len() != source.identities.len() {
+            return Err(Error::Bound("live App GPU time association"));
+        }
     }
 
     let mut measured = 0;
     let mut previous_pid = None;
-    for identity in source.identities {
+    for (index, identity) in source.identities.iter().enumerate() {
         if previous_pid.is_some_and(|previous| previous >= identity.pid) {
             return Err(Error::Bound("live App identity order"));
         }
@@ -83,6 +82,7 @@ pub(super) fn members(source: &Publication<'_>, frame: &mut Frame) -> Result<()>
             creation: identity.creation().copied(),
             program: Err(IdentityUnavailable::Unsupported),
             usage,
+            gpu_ns: gpu_ns.get(index).copied().flatten(),
             threads,
         });
         let member = frame.members.last_mut().unwrap_or_else(|| unreachable!());
@@ -98,6 +98,20 @@ pub(super) fn members(source: &Publication<'_>, frame: &mut Frame) -> Result<()>
     }
 
     Ok(())
+}
+
+/// The members of a ring that records no identities, each with its usage and no program.
+fn members_unidentified(source: &Publication<'_>, frame: &mut Frame) {
+    for process in &source.tick.processes {
+        frame.members.push(Member {
+            pid: process.pid,
+            creation: None,
+            program: Err(IdentityUnavailable::Unsupported),
+            usage: Ok(process.usage),
+            gpu_ns: None,
+            threads: super::threads(process.task.threads),
+        });
+    }
 }
 
 pub(super) fn member_program(

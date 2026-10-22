@@ -29,7 +29,7 @@ pub struct TopApps {
     pub app_count: u32,
     pub membership_complete: bool,
     pub ungrouped_members: u32,
-    pub metrics: [Ranking; 4],
+    pub metrics: [Ranking; 5],
 }
 
 #[derive(Debug, PartialEq)]
@@ -47,7 +47,6 @@ pub enum Metric {
     Resident,
     Power,
     Disk,
-    /// GPU time, which the app samples itself rather than reading from the recording.
     Gpu,
 }
 
@@ -93,6 +92,7 @@ pub fn from_ranks(ranks: &Ranks) -> TopApps {
                 viewer::live_app_response::Metric::Resident => Metric::Resident,
                 viewer::live_app_response::Metric::Power => Metric::Power,
                 viewer::live_app_response::Metric::Disk => Metric::Disk,
+                viewer::live_app_response::Metric::Gpu => Metric::Gpu,
             },
             entries: ranking.entries.iter().map(from_ranks_entry).collect(),
             unavailable: ranking.unavailable,

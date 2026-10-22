@@ -340,7 +340,7 @@ fn trims_optional_groups_before_app_facts_under_a_full_live_context() {
     assert_eq!(group["points"][899]["cpu_ns"]["known"], "1000");
     assert_eq!(cpu["points"], repeated["points"]);
     assert_eq!(power["points"].as_array().unwrap().len(), 900);
-    assert!(group["coverage"]["cache_bytes"].as_u64().unwrap() <= 67_108_864);
+    assert!(group["coverage"]["cache_bytes"].as_u64().unwrap() <= 75_497_472);
     println!(
         "{}",
         serde_json::json!({"fixture_only":true,

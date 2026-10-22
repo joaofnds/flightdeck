@@ -31,11 +31,11 @@ pub(super) struct Group {
 struct Member {
     attribution: Option<apps::Unavailable>,
     live: bool,
-    amounts: [apps::Amount; 10],
+    amounts: [apps::Amount; 11],
 }
 
 const _: () = {
-    assert!(size_of::<Group>() <= 144);
+    assert!(size_of::<Group>() <= 160);
 };
 
 impl Selection for Target<'_> {
@@ -301,6 +301,7 @@ pub(super) fn aggregate_totals(
                 amounts: [
                     process.cpu_ns,
                     process.energy_nj,
+                    process.gpu_ns,
                     process.disk_read_bytes,
                     process.disk_written_bytes,
                     process.disk_io_bytes,
@@ -339,6 +340,7 @@ fn add_process(totals: &mut apps::AppTotals, process: &Process) {
             amounts: [
                 process.cpu_ns,
                 process.energy_nj,
+                process.gpu_ns,
                 process.disk_read_bytes,
                 process.disk_written_bytes,
                 process.disk_io_bytes,
@@ -358,6 +360,7 @@ fn add(totals: &mut apps::AppTotals, member: &Member) {
     let [
         cpu,
         energy,
+        gpu,
         read,
         written,
         disk,
@@ -371,6 +374,7 @@ fn add(totals: &mut apps::AppTotals, member: &Member) {
 
     totals.cpu_ns.add(attributed(cpu));
     totals.energy_nj.add(attributed(energy));
+    totals.gpu_ns.add(attributed(gpu));
     totals.disk_read_bytes.add(attributed(read));
     totals.disk_written_bytes.add(attributed(written));
     totals.disk_io_bytes.add(attributed(disk));

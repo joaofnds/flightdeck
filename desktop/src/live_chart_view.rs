@@ -905,9 +905,6 @@ fn chart_legend_slots(id: &str, lines: usize) -> usize {
     if id == crate::live_resident_history::PANEL_ID {
         return lines.max(APP_LEGEND_SLOTS);
     }
-    if id == crate::live_projection::GPU_APPS_ID {
-        return lines.max(APP_LEGEND_SLOTS);
-    }
 
     lines
 }

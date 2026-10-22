@@ -193,6 +193,7 @@ fn retains_final_process_gauges_when_the_matching_exec_program_is_refused() {
                     program_unavailable: Some(collector::ring::IdentityUnavailable::Refused),
                     cpu_ns: apps::Amount::Unavailable(apps::Unavailable::Interval),
                     energy_nj: apps::Amount::Unavailable(apps::Unavailable::Interval),
+                    gpu_ns: apps::Amount::Unavailable(apps::Unavailable::Interval),
                     disk_read_bytes: apps::Amount::Unavailable(apps::Unavailable::Interval),
                     disk_written_bytes: apps::Amount::Unavailable(apps::Unavailable::Interval),
                     disk_io_bytes: apps::Amount::Unavailable(apps::Unavailable::Interval),

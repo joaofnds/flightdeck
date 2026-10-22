@@ -152,6 +152,7 @@ fn with_aggregate_observations<'frame>(
             creation: member.creation,
             program,
             usage: member.usage.as_ref().map_err(|reason| *reason),
+            gpu_ns: member.gpu_ns,
             threads: member.threads,
             state: ProcessState::Live,
         });
@@ -377,6 +378,7 @@ fn with_aggregate_exit_observation<'frame>(
         creation: exit.creation,
         program,
         usage: exit.usage.as_ref().map_err(|reason| *reason),
+        gpu_ns: None,
         threads: None,
         state: if exit.usage.is_ok() {
             ProcessState::ExitedVerified

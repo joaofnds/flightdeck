@@ -129,6 +129,10 @@ fn scenario_observations<'a>(
     selected: &mut [apps::ProcessObservation<'a>],
 ) {
     match scenario {
+        Scenario::Ordinary => {
+            previous[0].gpu_ns = Some(100_000_000);
+            selected[0].gpu_ns = Some(350_000_000);
+        }
         Scenario::Refused => selected[1].usage = Err(apps::Unavailable::Refused),
         Scenario::Exec => {
             selected[0].creation.as_mut().unwrap().pid_version = 2;
@@ -140,11 +144,7 @@ fn scenario_observations<'a>(
                 observation.creation = None;
             }
         }
-        Scenario::Ordinary
-        | Scenario::Birth
-        | Scenario::Gap
-        | Scenario::Bytes
-        | Scenario::Overflow => {}
+        Scenario::Birth | Scenario::Gap | Scenario::Bytes | Scenario::Overflow => {}
     }
 }
 
@@ -185,6 +185,7 @@ fn observations<'a>(
             }),
             program: Ok(program),
             usage: Ok(usage),
+            gpu_ns: None,
             threads: None,
             state: apps::ProcessState::Live,
         })
@@ -210,6 +211,7 @@ pub fn populated(count: usize, name: &[u8]) -> persistence::Result<Box<Sample>> 
             program_unavailable: None,
             cpu_ns: apps::Amount::Unavailable(apps::Unavailable::Baseline),
             energy_nj: apps::Amount::Unavailable(apps::Unavailable::Baseline),
+            gpu_ns: apps::Amount::Unavailable(apps::Unavailable::Baseline),
             disk_read_bytes: apps::Amount::Unavailable(apps::Unavailable::Baseline),
             disk_written_bytes: apps::Amount::Unavailable(apps::Unavailable::Baseline),
             disk_io_bytes: apps::Amount::Unavailable(apps::Unavailable::Baseline),

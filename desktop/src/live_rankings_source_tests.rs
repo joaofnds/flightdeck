@@ -45,6 +45,21 @@ fn real_saved_cpu_rankings_reach_later_pages_at_the_exact_sibling() {
 }
 
 #[test]
+fn real_saved_gpu_rankings_reach_later_pages_at_the_exact_sibling() {
+    // Read the actual GPU route from 600 sealed Apps after its source ring retires.
+    let recording = SealedRecording::with_ranked_apps();
+    let request = exact_ranked_request("gpu");
+
+    let snapshot = recording.read(request).unwrap();
+
+    let rankings = assert_exact_ranked_snapshot(&snapshot);
+    assert!(matches!(
+        rankings.metrics[4].metric,
+        crate::live_rankings::Metric::Gpu
+    ));
+}
+
+#[test]
 fn real_saved_memory_rankings_reach_later_pages_at_the_exact_sibling() {
     // Read the actual Memory route from 600 sealed Apps after its source ring retires.
     let recording = SealedRecording::with_ranked_apps();
@@ -692,6 +707,7 @@ fn assert_real_rate_attribution(
         crate::live_app_attribution_history::Metric::Cpu => "cpu",
         crate::live_app_attribution_history::Metric::Power => "energy",
         crate::live_app_attribution_history::Metric::Disk => "storage",
+        crate::live_app_attribution_history::Metric::Gpu => "gpu",
     };
     let recording = SealedRecording::with_ranked_apps();
     let request = exact_ranked_request(route);

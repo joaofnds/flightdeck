@@ -28,7 +28,6 @@ impl Row {
             Self::MemoryAttribution(_) => "memory-attribution".into(),
             Self::MemoryQuantities => "memory-quantities".into(),
             Self::AppAttribution(metric, _) => format!("app-attribution-{}", metric.panel_id()),
-            Self::GpuApps(_) => "app-attribution-live-gpu-apps".into(),
             Self::NetworkApps(_) => "app-attribution-live-network-apps".into(),
             Self::AppSelector => "app-selector".into(),
             Self::ProcessGroupBar => "process-group-bar".into(),

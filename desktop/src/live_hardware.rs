@@ -105,7 +105,7 @@ fn live_readings(summary: &Value, speeds: [Option<f32>; 2]) -> Result<Readings, 
             live_memory_in_use(summary),
             live_number(&summary["memory_total_bytes"], 1_073_741_824.0)?,
         ],
-        thermal: crate::live_system::thermal_pressure_text(summary).into(),
+        thermal: crate::live_thermal_pressure::thermal_pressure_text(summary).into(),
         ..Readings::default()
     })
 }
