@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -31,6 +31,10 @@ pub struct Session {
     wall_bounds: Vec<Option<TimeBounds>>,
     /// The older tail last assembled from these windows and the range it covers.
     earlier_tail: std::cell::RefCell<Option<(TailRange, Vec<Value>)>>,
+    /// The context a select read last from these windows, which a select of the same context
+    /// takes again without a read, since a session's sealed windows never change. It holds one
+    /// context, of at most `OBSERVATIONS_MAX` observations.
+    last_context: Option<LastContext>,
     /// Whether each window's files were verified, which its first read does.
     verified: Vec<AtomicBool>,
     connection: Engine,
@@ -72,6 +76,16 @@ pub struct Session {
     pub(crate) after_process_groups_frame: std::cell::RefCell<Option<Box<dyn FnOnce()>>>,
 }
 
+/// The context a select read: its range, its observations, in no order, its points, in time
+/// order, and the windows the read verified, which a select that takes it again rechecks.
+#[derive(Clone)]
+struct LastContext {
+    range: ContextRange,
+    observations: Vec<Observation>,
+    points: Vec<Value>,
+    windows: Vec<usize>,
+}
+
 /// A selected second and the last second of the context read with it, which runs past the
 /// selected second where the recording holds later seconds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,7 +119,7 @@ impl ContextSelection {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct ContextRange {
     pub first_ns: u64,
     pub end_ns: u64,
@@ -238,6 +252,7 @@ impl Session {
             unknown: 0,
             wall_bounds: Vec::new(),
             earlier_tail: std::cell::RefCell::new(None),
+            last_context: None,
             selected: None,
             selected_context: Vec::new(),
             context_last_second: None,
@@ -321,8 +336,11 @@ impl Session {
         self.app_sample_cache.get_mut().take();
         self.operation.check()?;
         let range = ContextRange::charted_ending_at(selection.context_last_second)?;
-        let mut points = Vec::new();
-        let mut observations = self.context_read(range, &mut points)?;
+        let LastContext {
+            mut observations,
+            points,
+            ..
+        } = self.select_inner_context(range)?;
         observations.sort_by_key(|value| (value.wall, value.window, value.publication));
         let alternatives: Vec<_> = observations
             .iter()
@@ -373,6 +391,57 @@ impl Session {
             "alternatives": alternative_identities,
             "summary": summary, "trends": points, "context_seconds": 900}),
         )
+    }
+
+    /// The context of `range`, read from the sealed windows unless the last select read it. A
+    /// context taken again rechecks every window its read verified, so a window evicted since
+    /// fails the select as a read of it would.
+    fn select_inner_context(&mut self, range: ContextRange) -> Result<LastContext> {
+        if let Some(last) = &self.last_context {
+            if last.range == range {
+                for &window in &last.windows {
+                    self.validate_commitment(window)?;
+                }
+                return Ok(last.clone());
+            }
+        }
+
+        let mut points = Vec::new();
+        let observations = self.context_read(range, &mut points)?;
+        let windows = self.select_inner_context_windows(range, &observations);
+        let last = LastContext {
+            range,
+            observations,
+            points,
+            windows,
+        };
+
+        self.last_context = Some(last.clone());
+        Ok(last)
+    }
+
+    /// The windows a read of `range` verified: those that may hold its readings, and those holding
+    /// the reading before the first of each window's `observations`, which its first rates come
+    /// from.
+    fn select_inner_context_windows(
+        &self,
+        range: ContextRange,
+        observations: &[Observation],
+    ) -> Vec<usize> {
+        let mut firsts: BTreeMap<usize, &Observation> = BTreeMap::new();
+        for observation in observations {
+            let first = firsts.entry(observation.window).or_insert(observation);
+            if observation.publication < first.publication {
+                *first = observation;
+            }
+        }
+        let reader = self.reader();
+        let mut windows: BTreeSet<usize> = self.context_windows(range).into_iter().collect();
+        for first in firsts.values() {
+            windows.extend(reader.predecessor_windows(first));
+        }
+
+        windows.into_iter().collect()
     }
 
     /// Selects the observation of `second` that `named` picks out of its JSON, with its summary,

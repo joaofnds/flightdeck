@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use persistence::{Error, Manifest};
 
-use super::Session;
+use super::{NS, Session};
 use crate::Cancellation;
 use crate::live::identity_fixture::Fixture;
 
@@ -242,4 +242,47 @@ fn refused<T>(read: &persistence::Result<T>) -> bool {
 fn add_a_stray_file(root: &Path, window: &Manifest) {
     let directory = root.join(&window.data_directory);
     std::fs::write(directory.join("stray.parquet"), b"stray").unwrap();
+}
+
+#[test]
+fn a_select_again_stops_reading_once_the_window_before_its_context_loses_its_marker() {
+    // Goal: selecting a second again still checks that the window holding the reading its
+    // context's first rates come from stays committed, though that window lies before the
+    // context.
+    // Method: seal a reading just before a second's context, one at the context's first second
+    // and the second itself, each in a minute of its own, select the second, remove the
+    // earlier window's marker, then select the second again.
+    const RUN_TICK_FIRST: u64 = 59;
+    const CONTEXT_FIRST: u64 = 1001;
+    const SELECTED: u64 = CONTEXT_FIRST + crate::CHARTED_SECONDS - 1;
+    const SELECTED_MINUTE: u64 = (RUN_TICK_FIRST + 1 + SELECTED - CONTEXT_FIRST) / 60;
+    let mut fixture = Fixture::new();
+    fixture.start_at_run_tick(RUN_TICK_FIRST);
+    fixture.publish_with_system_rows(CONTEXT_FIRST - 1);
+    fixture.publish_with_system_rows(CONTEXT_FIRST);
+    fixture.skip_run_ticks(SELECTED - CONTEXT_FIRST - 1);
+    fixture.publish_with_system_rows(SELECTED);
+    for minute in [0, 1, SELECTED_MINUTE] {
+        fixture.seal_minute(minute);
+    }
+    let mut session = Session::open(&fixture.root).unwrap();
+    session.select(SELECTED, 0).unwrap();
+    let before = session
+        .windows
+        .iter()
+        .find(|manifest| {
+            manifest
+                .wall_ns
+                .is_some_and(|bounds| bounds.max < CONTEXT_FIRST * NS)
+        })
+        .unwrap();
+    let marker = persistence::layout::WindowKey::from(&before.identity).marker(&fixture.root);
+    std::fs::remove_file(marker).unwrap();
+
+    let read = session.select(SELECTED, 0);
+
+    assert!(
+        matches!(&read, Err(Error::Io(error)) if error.kind() == ErrorKind::NotFound),
+        "{read:?}"
+    );
 }

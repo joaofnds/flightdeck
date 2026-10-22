@@ -128,6 +128,48 @@ fn context_keeps_the_tables_of_a_minute_and_of_the_minute_before_only() {
     );
 }
 
+#[test]
+fn select_reads_no_minute_again_for_the_context_it_read_last() {
+    // Goal: selecting a second again, as a launch's next step does, reads none of the sealed
+    // minutes its context read the first time, and gives the same response.
+    // Method: select a second of seven sealed minutes twice and count the saved reads of the
+    // second time.
+    let fixture = sealed_minutes();
+    let mut session = Session::open(&fixture.root).unwrap();
+    let first = session.select(SECOND_FIRST + 3, 0).unwrap();
+    let reads = session.source_reads.get();
+
+    let again = session.select(SECOND_FIRST + 3, 0).unwrap();
+
+    assert_eq!(session.source_reads.get(), reads);
+    assert_eq!(again, first);
+}
+
+#[test]
+fn select_reads_its_own_context_after_a_select_of_another_context() {
+    // Goal: a select whose context differs from the one the last select read gives what a
+    // session that selected nothing before gives.
+    // Method: seal two minutes too far apart to share a context, select a second of the first
+    // and then one of the second, and compare the second response with a new session's.
+    const EARLIER: u64 = 1000;
+    const LATER: u64 = 3000;
+    const { assert!(EARLIER + crate::CONTEXT_AFTER_SECONDS < LATER) };
+    const { assert!(EARLIER + crate::CHARTED_SECONDS <= LATER) };
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(EARLIER);
+    fixture.skip_run_ticks(LATER - EARLIER - 1);
+    fixture.publish_with_system_rows(LATER);
+    fixture.seal_minute(0);
+    fixture.seal_minute((LATER - EARLIER) / 60);
+    let mut session = Session::open(&fixture.root).unwrap();
+    session.select(EARLIER, 0).unwrap();
+
+    let later = session.select(LATER, 0).unwrap();
+
+    let mut fresh = Session::open(&fixture.root).unwrap();
+    assert_eq!(later, fresh.select(LATER, 0).unwrap());
+}
+
 /// The readings of `RUN_TICKS`, sealed by minute.
 fn sealed_minutes() -> Fixture {
     let mut fixture = Fixture::new();
