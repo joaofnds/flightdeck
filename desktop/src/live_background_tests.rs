@@ -1,10 +1,11 @@
 use std::path::PathBuf;
 
-use gpui::{App, AppContext, TestAppContext};
+use gpui::{App, AppContext, Pixels, Size, TestAppContext, px, size};
 
 use super::*;
 use crate::live_dashboard::LiveDashboard;
 use crate::live_source_mode::SourceMode;
+use crate::time_range::Range;
 
 #[gpui::test]
 fn closing_the_last_window_keeps_the_owned_collector_running(cx: &mut TestAppContext) {
@@ -121,6 +122,82 @@ fn showing_with_the_window_open_opens_no_second_window(cx: &mut TestAppContext) 
     harness.teardown();
 }
 
+#[gpui::test]
+fn showing_after_the_window_closed_opens_it_as_the_user_left_it(cx: &mut TestAppContext) {
+    // Goal: closing the window keeps its size, the range picked and the series hidden.
+    // Method: resize the window, pick a range and hide a series, close the window, show the
+    // app again, and read the window it opened.
+    let mut harness = BackgroundHarness::setup(cx);
+    harness.keep_preferences();
+    harness.show();
+    harness.adjust_window();
+    harness.close_windows();
+
+    harness.show();
+
+    assert_eq!(size(px(1000.0), px(700.0)), harness.window_size());
+    assert_eq!(
+        Range::Last(300),
+        harness.dashboard(|dashboard| dashboard.range)
+    );
+    assert_eq!(
+        vec!["cpu\tSafari".to_owned()],
+        harness.dashboard(|dashboard| dashboard.hidden.clone())
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_launch_opens_the_window_as_the_last_run_left_it(cx: &mut TestAppContext) {
+    // Goal: the size, range and hidden series outlast quitting and launching again.
+    // Method: resize the window, pick a range and hide a series, close the window, read the
+    // file again as a launch does, show the app, and read the window it opened.
+    let mut harness = BackgroundHarness::setup(cx);
+    harness.keep_preferences();
+    harness.show();
+    harness.adjust_window();
+    harness.close_windows();
+
+    harness.keep_preferences();
+    harness.show();
+
+    assert_eq!(size(px(1000.0), px(700.0)), harness.window_size());
+    assert_eq!(
+        Range::Last(300),
+        harness.dashboard(|dashboard| dashboard.range)
+    );
+    assert_eq!(
+        vec!["cpu\tSafari".to_owned()],
+        harness.dashboard(|dashboard| dashboard.hidden.clone())
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn closing_the_window_saves_what_the_user_set_in_it(cx: &mut TestAppContext) {
+    // Goal: the file keeps its field names, since a renamed field loses what an older build
+    // saved.
+    // Method: resize the window, pick a range and hide a series, close the window, and read
+    // the file.
+    let mut harness = BackgroundHarness::setup(cx);
+    harness.keep_preferences();
+    harness.show();
+    harness.adjust_window();
+
+    harness.close_windows();
+
+    let saved = harness.saved_preferences();
+    assert!(saved["window"]["display"].is_string());
+    assert!(saved["window"]["x"].is_number());
+    assert!(saved["window"]["y"].is_number());
+    assert_eq!(serde_json::json!(1000.0), saved["window"]["width"]);
+    assert_eq!(serde_json::json!(700.0), saved["window"]["height"]);
+    assert_eq!("windowed", saved["window"]["state"]);
+    assert_eq!(5, saved["range_minutes"]);
+    assert_eq!("cpu\tSafari", saved["hidden_series"][0]);
+    harness.teardown();
+}
+
 struct BackgroundHarness {
     cx: TestAppContext,
     root: PathBuf,
@@ -154,6 +231,54 @@ impl BackgroundHarness {
                 .unwrap();
         }
         self.cx.run_until_parked();
+    }
+
+    fn keep_preferences(&mut self) {
+        let path = self.preferences_path();
+        self.cx
+            .update(|cx| super::super::preferences::install(path, cx));
+    }
+
+    fn preferences_path(&self) -> PathBuf {
+        self.root.join("preferences.json")
+    }
+
+    fn saved_preferences(&self) -> serde_json::Value {
+        let text = std::fs::read(self.preferences_path()).unwrap();
+        serde_json::from_slice(&text).unwrap()
+    }
+
+    /// Resizes the open window to 1000 by 700 points, sets the range the menu's last five
+    /// minutes set, and hides Safari's CPU series as its legend does.
+    fn adjust_window(&mut self) {
+        let window = self.cx.read(|cx| cx.windows()[0]);
+        self.cx
+            .simulate_window_resize(window, size(px(1000.0), px(700.0)));
+        self.cx
+            .update_window(window, |view, _, cx| {
+                let dashboard = view.downcast::<LiveDashboard>().unwrap();
+                dashboard.update(cx, |dashboard, cx| {
+                    dashboard.set_range(Range::Last(300), cx);
+                    dashboard.hidden.push("cpu\tSafari".into());
+                });
+            })
+            .unwrap();
+        self.cx.run_until_parked();
+    }
+
+    fn window_size(&mut self) -> Size<Pixels> {
+        let window = self.cx.read(|cx| cx.windows()[0]);
+        self.cx
+            .update_window(window, |_, window, _| window.bounds().size)
+            .unwrap()
+    }
+
+    /// Reads `read` off the open window's page.
+    fn dashboard<R>(&self, read: impl FnOnce(&LiveDashboard) -> R) -> R {
+        self.cx.read(|cx| {
+            let window = cx.windows()[0].downcast::<LiveDashboard>().unwrap();
+            read(window.read(cx).unwrap())
+        })
     }
 
     /// Reads `read` off the open window's reader.

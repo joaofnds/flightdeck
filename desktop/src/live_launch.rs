@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use gpui::{App, Bounds, WindowBounds, WindowOptions, px, size};
+use gpui::{App, WindowOptions, px, size};
 
 use crate::live_dashboard::{LiveDashboard, ROUTES};
 use crate::live_source::Worker;
@@ -13,6 +13,8 @@ mod background;
 mod collection;
 #[path = "collector_lifecycle.rs"]
 mod lifecycle;
+#[path = "live_preferences.rs"]
+mod preferences;
 #[path = "collector_lifecycle_readiness.rs"]
 mod readiness;
 
@@ -81,6 +83,7 @@ pub fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
         _ => Worker::start(root.clone())?,
     };
     let reopening = reopening(root, &options, control.is_some());
+    let preferences_path = preferences_path(&options, control.is_some());
     let opening = Opening {
         worker,
         start: Start {
@@ -97,6 +100,9 @@ pub fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
     }
     application.run(move |cx: &mut App| {
         collection::install(collector, cx);
+        if let Some(preferences_path) = preferences_path {
+            preferences::install(preferences_path, cx);
+        }
         if let Some(reopening) = reopening {
             background::install(reopening, cx);
             background::install_menu_bar(cx);
@@ -134,11 +140,7 @@ struct Opening {
 /// screen. A recording opened read-only collects nothing, a timed run quits by itself, and a
 /// window under the control socket is never on the screen.
 fn reopening(root: PathBuf, options: &Options, controlled: bool) -> Option<background::Reopening> {
-    if controlled {
-        return None;
-    }
-
-    if options.seconds.is_some() {
+    if !personal(options, controlled) {
         return None;
     }
 
@@ -155,6 +157,33 @@ fn reopening(root: PathBuf, options: &Options, controlled: bool) -> Option<backg
     })
 }
 
+/// Whether the window is the user's own, on the screen until they close it. A window under
+/// the control socket is never on the screen, and a timed run quits by itself to report how
+/// it ran.
+fn personal(options: &Options, controlled: bool) -> bool {
+    if controlled {
+        return false;
+    }
+
+    options.seconds.is_none()
+}
+
+/// Where the user's preferences are kept, or none for a window that is not theirs. A launch
+/// that cannot find them goes on without them.
+fn preferences_path(options: &Options, controlled: bool) -> Option<PathBuf> {
+    if !personal(options, controlled) {
+        return None;
+    }
+
+    match preferences::path() {
+        Ok(path) => Some(path),
+        Err(error) => {
+            eprintln!("Flightdeck keeps no preferences this run: {error}");
+            None
+        }
+    }
+}
+
 fn open_window(opening: Opening, cx: &mut App) -> Result<(), String> {
     let Opening {
         worker,
@@ -163,9 +192,14 @@ fn open_window(opening: Opening, cx: &mut App) -> Result<(), String> {
     } = opening;
     let title = worker.mode().title();
     let hidden = control.is_some();
-    let bounds = Bounds::centered(None, size(px(1320.0), px(900.0)), cx);
+    let (bounds, display_id) = preferences::placement(size(px(1320.0), px(900.0)), cx);
     let window = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        window_bounds: Some(bounds),
+        display_id,
+        window_min_size: Some(size(
+            px(preferences::WINDOW_SIDE_MIN),
+            px(preferences::WINDOW_SIDE_MIN),
+        )),
         // A window under the control socket stays off the screen and never takes focus.
         show: !hidden,
         focus: !hidden,
@@ -188,6 +222,7 @@ fn open_window(opening: Opening, cx: &mut App) -> Result<(), String> {
             crate::live_dashboard::observe_visibility(&dashboard, window, cx);
         }
         install_control(control, &dashboard, window, cx);
+        preferences::follow(&dashboard, window, cx);
         dashboard
     })
     .map_err(|error| error.to_string())?;
@@ -265,8 +300,13 @@ pub fn recording(options: &Options) -> Result<PathBuf, Box<dyn std::error::Error
         return Ok(path.clone());
     }
 
+    Ok(application_support()?.join("flightdeck.recording"))
+}
+
+/// The directory Flightdeck keeps the user's files in.
+fn application_support() -> Result<PathBuf, String> {
     let home = std::env::var_os("HOME").ok_or("HOME is unavailable")?;
-    Ok(PathBuf::from(home).join("Library/Application Support/Flightdeck/flightdeck.recording"))
+    Ok(PathBuf::from(home).join("Library/Application Support/Flightdeck"))
 }
 
 fn collector_session(

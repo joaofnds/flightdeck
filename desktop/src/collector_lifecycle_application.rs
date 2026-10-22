@@ -103,6 +103,7 @@ fn tick(entity: &WeakEntity<LiveDashboard>, cx: &mut App) {
 
 fn dashboard_tick(dashboard: &mut LiveDashboard, cx: &mut Context<LiveDashboard>) {
     dashboard.tick(cx);
+    super::preferences::remember(dashboard, cx);
     // A request sent with no quick poll, such as the page's first at launch, is still taken
     // within a frame of its answer from the next tick on.
     if dashboard.awaiting_reply() {
