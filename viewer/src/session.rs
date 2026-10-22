@@ -7,7 +7,9 @@ use collector::recording::{identity_text, private};
 use collector::ring::Identity;
 use persistence::engine::{Engine, Row};
 use persistence::layout::{self, Kind};
-use persistence::{Error, Manifest, Result, list_committed, read_committed, reread_committed};
+use persistence::{
+    Error, Manifest, Result, TimeBounds, list_committed, read_committed, reread_committed,
+};
 use serde_json::{Value, json};
 
 use crate::Cancellation;
@@ -23,6 +25,11 @@ const NS: u64 = 1_000_000_000;
 pub struct Session {
     root: PathBuf,
     pub(crate) windows: Vec<Manifest>,
+    /// The wall-clock bounds of each window's readings, from its manifest, or from its ticks
+    /// where the manifest holds none.
+    wall_bounds: Vec<Option<TimeBounds>>,
+    /// The older tail last assembled from these windows and the range it covers.
+    earlier_tail: std::cell::RefCell<Option<(TailRange, Vec<Value>)>>,
     /// Whether each window's files were verified, which its first read does.
     verified: Vec<std::cell::Cell<bool>>,
     connection: Engine,
@@ -225,6 +232,8 @@ impl Session {
             first: None,
             last: None,
             unknown: 0,
+            wall_bounds: Vec::new(),
+            earlier_tail: std::cell::RefCell::new(None),
             selected: None,
             selected_context: Vec::new(),
             context_last_second: None,
@@ -435,21 +444,7 @@ impl Session {
             output.append(&mut metrics::trends(self, batch, &mut tables)?);
         }
 
-        output.sort_by(|left, right| {
-            (
-                left["wall_ns"].as_u64(),
-                left["run"].as_str(),
-                left["boot"].as_str(),
-                left["publication"].as_u64(),
-            )
-                .cmp(&(
-                    right["wall_ns"].as_u64(),
-                    right["run"].as_str(),
-                    right["boot"].as_str(),
-                    right["publication"].as_u64(),
-                ))
-        });
-
+        context_points_order(output);
         metrics::context_segments(output)
     }
 
@@ -672,7 +667,16 @@ impl Session {
             return Vec::new();
         };
 
-        let run = self.windows[observation.window].identity.run;
+        self.predecessor_windows_holding(observation.window, publication)
+    }
+
+    /// The windows of the run of `window` whose publications include `publication`.
+    pub(crate) fn predecessor_windows_holding(
+        &self,
+        window: usize,
+        publication: u64,
+    ) -> Vec<usize> {
+        let run = self.windows[window].identity.run;
         let mut windows = Vec::new();
         for (window, manifest) in self.windows.iter().enumerate() {
             if manifest.identity.run == run {
@@ -686,8 +690,12 @@ impl Session {
     }
 
     fn extent(&mut self) -> Result<()> {
+        let mut wall_bounds = Vec::with_capacity(self.windows.len());
         for window in 0..self.windows.len() {
-            let bounds = self.windows[window].wall_ns;
+            let bounds = match self.windows[window].wall_ns {
+                Some(bounds) => Some(bounds),
+                None => self.extent_ticks(window)?,
+            };
             if let Some(bounds) = bounds {
                 self.first = Some(
                     self.first
@@ -697,19 +705,38 @@ impl Session {
                     self.last
                         .map_or(bounds.max / NS, |v| v.max(bounds.max / NS)),
                 );
+            }
+            wall_bounds.push(bounds);
+        }
+
+        assert_eq!(wall_bounds.len(), self.windows.len());
+        self.wall_bounds = wall_bounds;
+        Ok(())
+    }
+
+    /// The wall-clock bounds of the ticks of a window whose manifest holds none, counting the
+    /// ticks without a wall time as unknown.
+    fn extent_ticks(&mut self, window: usize) -> Result<Option<TimeBounds>> {
+        let ticks = self.table(window, "ticks")?;
+        let mut bounds: Option<TimeBounds> = None;
+        for row in &ticks.rows {
+            if let Some(wall) = ticks.integer(row, "wall_ns")? {
+                bounds = Some(match bounds {
+                    Some(bounds) => TimeBounds {
+                        min: bounds.min.min(wall),
+                        max: bounds.max.max(wall),
+                    },
+                    None => TimeBounds {
+                        min: wall,
+                        max: wall,
+                    },
+                });
             } else {
-                let ticks = self.table(window, "ticks")?;
-                for row in &ticks.rows {
-                    if let Some(wall) = ticks.integer(row, "wall_ns")? {
-                        self.first = Some(self.first.map_or(wall / NS, |v| v.min(wall / NS)));
-                        self.last = Some(self.last.map_or(wall / NS, |v| v.max(wall / NS)));
-                    } else {
-                        self.unknown += 1;
-                    }
-                }
+                self.unknown += 1;
             }
         }
-        Ok(())
+
+        Ok(bounds)
     }
 
     fn observations(&self, first: u64, end: u64) -> Result<Vec<Observation>> {
@@ -739,6 +766,24 @@ impl Session {
         }
         Ok(observations)
     }
+}
+
+/// Orders context points by time, then by run, boot and publication.
+fn context_points_order(points: &mut [Value]) {
+    points.sort_by(|left, right| {
+        (
+            left["wall_ns"].as_u64(),
+            left["run"].as_str(),
+            left["boot"].as_str(),
+            left["publication"].as_u64(),
+        )
+            .cmp(&(
+                right["wall_ns"].as_u64(),
+                right["run"].as_str(),
+                right["boot"].as_str(),
+                right["publication"].as_u64(),
+            ))
+    });
 }
 
 pub(crate) fn partition(table: &Table) -> Result<BTreeMap<u64, Table>> {
@@ -831,4 +876,4 @@ mod selection;
 pub use earlier::{
     CHARTED_SECONDS, CONTEXT_AFTER_SECONDS, EARLIER_STRIDE_SECONDS, LEAD_IN_SECONDS, LOADED_SECONDS,
 };
-pub(crate) use earlier::{DETAIL_SECONDS, Tail};
+pub(crate) use earlier::{DETAIL_SECONDS, KeptTail, TailRange};

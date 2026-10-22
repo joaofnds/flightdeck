@@ -637,9 +637,10 @@ mod tests {
     }
 
     #[test]
-    fn reads_the_older_tail_once_for_each_stretch_the_context_moves_through() {
-        // Goal: following the newest second does not query saved history every second.
-        // Method: read the tail, remove the saved data, and read it for later seconds.
+    fn answers_later_strides_from_the_minutes_it_kept() {
+        // Goal: following the newest second does not read a sealed minute again at each stride.
+        // Method: read the tail, remove the saved data, and read it for later seconds inside the
+        // stride and at the next one.
         let limit = 200_000;
         let newest = limit + viewer::CHARTED_SECONDS - 1;
         let mut recording = Recording::new();
@@ -653,14 +654,15 @@ mod tests {
         std::fs::remove_dir_all(recording.root.join("data")).unwrap();
 
         assert_eq!(session.earlier_context(newest + 9).unwrap(), tail);
-        assert!(session.earlier_context(newest + 10).is_err());
+        assert_eq!(session.earlier_context(newest + 10).unwrap(), tail);
     }
 
     #[test]
-    fn gives_the_older_tail_it_keeps_only_while_the_context_stays_in_its_stretch() {
+    fn gives_the_older_tail_it_keeps_only_while_it_keeps_every_minute_the_tail_needs() {
         // Goal: a page can show its readings at once with the tail already read, and leave a
         // tail it would have to read for later. Method: ask for the kept tail before reading
-        // it, then for seconds inside and past the stretch it was read for.
+        // it, then for a later stride inside the minute it read, and for one that needs the
+        // next minute.
         let limit = 200_000;
         let newest = limit + viewer::CHARTED_SECONDS - 1;
         let mut recording = Recording::new();
@@ -668,16 +670,21 @@ mod tests {
             recording.publish(second);
         }
         recording.seal_window(0);
+        recording.elapsed = 60;
+        for second in limit + 100..limit + 104 {
+            recording.publish(second);
+        }
+        recording.seal_window(1);
         let mut session = LiveSession::open(&recording.root).unwrap();
         assert_eq!(session.earlier_context_kept(newest).unwrap(), None);
 
         let tail = session.earlier_context(newest).unwrap();
 
         assert_eq!(
-            session.earlier_context_kept(newest + 9).unwrap(),
+            session.earlier_context_kept(newest + 10).unwrap(),
             Some(tail)
         );
-        assert_eq!(session.earlier_context_kept(newest + 10).unwrap(), None);
+        assert_eq!(session.earlier_context_kept(newest + 90).unwrap(), None);
     }
 
     #[test]

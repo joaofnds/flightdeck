@@ -16,7 +16,8 @@ use crate::live_app_response::{Detail, KeyKind, Page, Sample};
 use crate::live_apps::{Frame, Publication, PublicationEvents};
 use crate::session::{
     CHARTED_SECONDS, ContextRange, ContextSelection, DETAIL_SECONDS, EARLIER_STRIDE_SECONDS,
-    LEAD_IN_SECONDS, LOADED_SECONDS, OBSERVATIONS_MAX, Observation, PAGE_ROWS, Tail, Verified,
+    KeptTail, LEAD_IN_SECONDS, LOADED_SECONDS, OBSERVATIONS_MAX, Observation, PAGE_ROWS, TailRange,
+    Verified,
 };
 use crate::{Cancellation, Session, metrics};
 
@@ -57,7 +58,7 @@ pub struct LiveSession {
     history: Option<Session>,
     history_error: Option<String>,
     restored: Option<ScalarContext>,
-    earlier: Option<EarlierCache>,
+    earlier: KeptTail,
     sources: Vec<Source>,
     observations: VecDeque<LiveObservation>,
     points: VecDeque<Value>,
@@ -90,13 +91,6 @@ struct ScalarContext {
     /// at or after it, so a later follow reads only the history past it.
     through_ns: u64,
     points: Vec<Value>,
-}
-
-/// The older tail, read once for every stretch of seconds the full-detail context moves through.
-struct EarlierCache {
-    limit_second: u64,
-    windows: usize,
-    tail: Tail,
 }
 
 type PointIndex<'a> = BTreeMap<(Option<&'a str>, Option<&'a str>, Option<u64>), usize>;
@@ -174,7 +168,7 @@ impl LiveSession {
             history: None,
             history_error: None,
             restored: None,
-            earlier: None,
+            earlier: KeptTail::default(),
             sources: Vec::with_capacity(SOURCES_MAX),
             observations: VecDeque::new(),
             points: VecDeque::new(),
@@ -495,70 +489,49 @@ impl LiveSession {
 
     /// The saved readings older than the full-detail context that ends at
     /// `context_last_second`, back to the lead-in before the loaded hour, one in every stretch of
-    /// seconds. Read again only when the context moves into another stretch or a minute is
-    /// sealed, so following the newest second costs one read in every `EARLIER_STRIDE_SECONDS`.
+    /// seconds. Each sealed minute the tail needs is read once, when the tail first needs it, so
+    /// following the newest second reads a minute about once a minute and a stride inside the
+    /// kept minutes reads nothing.
     pub fn earlier_context(&mut self, context_last_second: u64) -> Result<Value> {
-        let limit_second = earlier_limit_second(context_last_second);
-        if !self.earlier_current(limit_second) {
-            let tail = match &mut self.history {
-                Some(history) => {
-                    history.begin(self.operation.epoch())?;
-                    history.earlier_tail(
-                        limit_second
-                            .saturating_sub(LOADED_SECONDS + LEAD_IN_SECONDS - CHARTED_SECONDS),
-                        limit_second,
-                    )?
-                }
-                None => Tail { points: Vec::new() },
-            };
-            self.earlier = Some(EarlierCache {
-                limit_second,
-                windows: self.earlier_windows(),
-                tail,
-            });
+        if let Some(tail) = self.earlier_context_kept(context_last_second)? {
+            return Ok(tail);
         }
 
+        if let Some(history) = &mut self.history {
+            history.begin(self.operation.epoch())?;
+            self.earlier
+                .fill(history, TailRange::of_context(context_last_second))?;
+        }
         self.earlier_context_kept(context_last_second)?
             .ok_or(Error::Bound("older tail"))
     }
 
-    /// The older tail `earlier_context` gives for `context_last_second`, when the tail it read
-    /// last still answers it, and `None` when answering would read saved history.
+    /// The older tail `earlier_context` gives for `context_last_second`, when the minutes it
+    /// keeps answer it, and `None` when answering would read saved history.
     pub fn earlier_context_kept(&self, context_last_second: u64) -> Result<Option<Value>> {
-        if !self.earlier_current(earlier_limit_second(context_last_second)) {
-            return Ok(None);
-        }
-
         let first_second = context_last_second.saturating_sub(LOADED_SECONDS + LEAD_IN_SECONDS - 1);
-        let cache = self.earlier.as_ref().ok_or(Error::Bound("older tail"))?;
-        let points: Vec<&Value> = cache
-            .tail
-            .points
-            .iter()
-            .filter(|point| {
-                point["wall_ns"]
-                    .as_u64()
-                    .is_some_and(|wall| wall / NANOSECONDS_PER_SECOND >= first_second)
-            })
-            .collect();
-        context_bytes_of(&points)?;
+        let respond = |points: &[Value]| {
+            let points: Vec<&Value> = points
+                .iter()
+                .filter(|point| {
+                    point["wall_ns"]
+                        .as_u64()
+                        .is_some_and(|wall| wall / NANOSECONDS_PER_SECOND >= first_second)
+                })
+                .collect();
+            context_bytes_of(&points)?;
 
-        Ok(Some(json!({"earlier_trends": points,
-            "earlier_stride_seconds": EARLIER_STRIDE_SECONDS})))
-    }
+            Ok(json!({"earlier_trends": points,
+                "earlier_stride_seconds": EARLIER_STRIDE_SECONDS}))
+        };
 
-    /// Whether the older tail read last ends at `limit_second` and saw every sealed minute.
-    fn earlier_current(&self, limit_second: u64) -> bool {
-        let windows = self.earlier_windows();
-        self.earlier
-            .as_ref()
-            .is_some_and(|cache| cache.limit_second == limit_second && cache.windows == windows)
-    }
-
-    fn earlier_windows(&self) -> usize {
-        self.history
-            .as_ref()
-            .map_or(0, |history| history.windows.len())
+        match &self.history {
+            Some(history) => {
+                let range = TailRange::of_context(context_last_second);
+                self.earlier.answer(history, range, respond)
+            }
+            None => respond(&[]).map(Some),
+        }
     }
 
     /// Restores committed context once, then follows live points without repeating its queries.
@@ -2279,14 +2252,6 @@ fn refresh_history_before(windows: &[persistence::Manifest], through_ns: u64) ->
         .count()
 }
 
-/// The first second of the stretch that holds the first of the full-detail seconds the charts
-/// of the context that ends at `context_last_second` hold, where its older tail ends. The
-/// division floors.
-fn earlier_limit_second(context_last_second: u64) -> u64 {
-    let charted_first = context_last_second.saturating_sub(CHARTED_SECONDS - 1);
-    charted_first / EARLIER_STRIDE_SECONDS * EARLIER_STRIDE_SECONDS
-}
-
 fn context_contains(range: ContextRange, point: &Value) -> Result<bool> {
     let wall = point["wall_ns"]
         .as_u64()
@@ -2414,6 +2379,11 @@ mod tests {
     mod inspect_tests {
         use super::*;
         include!("live_inspect_tests.rs");
+    }
+
+    mod earlier_tests {
+        use super::*;
+        include!("live_earlier_tests.rs");
     }
 
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -3867,6 +3837,16 @@ mod tests {
     }
 
     fn seal_window(root: &Path, window: &Window) {
+        seal_window_with(
+            root,
+            window,
+            seal_window_bounds(window, |value| value.wall_ns),
+        );
+    }
+
+    /// Seals `window` with `wall_ns` as its manifest's wall-clock bounds, as the persister seals a
+    /// minute with none when one of its ticks has no wall time.
+    fn seal_window_with(root: &Path, window: &Window, wall_ns: Option<persistence::TimeBounds>) {
         let store = persistence::Store::open(root).unwrap();
         let persistence::Begin::Pending(pending) = store.begin(&window.identity).unwrap() else {
             panic!("fixture window already committed");
@@ -3883,7 +3863,7 @@ mod tests {
                     publication_end: publications.end,
                     events_first: events.start,
                     events_end: events.end,
-                    wall_ns: seal_window_bounds(window, |value| value.wall_ns),
+                    wall_ns,
                     continuous_ns: seal_window_bounds(window, |value| value.continuous_ns),
                     awake_ns: seal_window_bounds(window, |value| value.awake_ns),
                     losses: Losses::default(),

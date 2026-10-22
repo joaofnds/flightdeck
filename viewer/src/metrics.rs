@@ -35,6 +35,9 @@ const TRAFFIC_RATES: [(&str, &str); 6] = [
 
 pub(crate) type Tables = BTreeMap<(usize, &'static str), BTreeMap<u64, Table>>;
 
+/// The cells of the tables one context may hold while it makes its points.
+pub(crate) const CONTEXT_CELLS_MAX: usize = 2_000_000;
+
 /// The points of `observations`, the readings of one window. `tables` keeps the tables of their
 /// window and of the windows that may hold their predecessors, and drops the rest, since the
 /// first reading of the next window takes its rates from the last reading of this one.
@@ -59,14 +62,32 @@ pub(crate) fn trends(
         }) {
             segment += 1;
         }
-        let mut value = point(tables, observation, previous, segment)?;
-        let identity = observation.json(session);
-        value["run"] = identity["run"].clone();
-        value["boot"] = identity["boot"].clone();
-        points.push(value);
+        points.push(trends_point(
+            session,
+            tables,
+            observation,
+            previous,
+            segment,
+        )?);
         prior = Some(observation);
     }
     Ok(points)
+}
+
+/// The point of `observation` with the identity of its run and boot.
+pub(crate) fn trends_point(
+    session: &Session,
+    tables: &Tables,
+    observation: &Observation,
+    previous: Option<&Observation>,
+    segment: u64,
+) -> Result<Value> {
+    let mut value = point(tables, observation, previous, segment)?;
+    let identity = observation.json(session);
+    value["run"] = identity["run"].clone();
+    value["boot"] = identity["boot"].clone();
+
+    Ok(value)
 }
 
 /// Reads into `tables` the tables of `observations` and of their predecessors, after dropping
@@ -158,22 +179,33 @@ fn trends_table<'tables>(
     match tables.entry((window, name)) {
         std::collections::btree_map::Entry::Occupied(entry) => Ok(entry.into_mut()),
         std::collections::btree_map::Entry::Vacant(entry) => {
-            let table = session.table(window, name)?;
-            if name == "fans" {
-                crate::live_fan_history::source(&table)?;
-            }
-            *cell_count += table.rows.len() * table.columns.len();
-            if *cell_count > 2_000_000 {
-                return Err(Error::Bound("context cells"));
-            }
-
-            Ok(entry.insert(partition(&table)?))
+            Ok(entry.insert(table_read(session, window, name, cell_count)?))
         }
     }
 }
 
+/// The rows of table `name` of `window` by publication, read from the window. `cell_count`
+/// counts the cells a context holds, which stay under `CONTEXT_CELLS_MAX`.
+pub(crate) fn table_read(
+    session: &Session,
+    window: usize,
+    name: &'static str,
+    cell_count: &mut usize,
+) -> Result<BTreeMap<u64, Table>> {
+    let table = session.table(window, name)?;
+    if name == "fans" {
+        crate::live_fan_history::source(&table)?;
+    }
+    *cell_count += table.rows.len() * table.columns.len();
+    if *cell_count > CONTEXT_CELLS_MAX {
+        return Err(Error::Bound("context cells"));
+    }
+
+    partition(&table)
+}
+
 /// The count of the cells of the tables `tables` keeps.
-fn trends_cell_count(tables: &Tables) -> usize {
+pub(crate) fn trends_cell_count(tables: &Tables) -> usize {
     let mut cell_count = 0;
     for publications in tables.values() {
         for table in publications.values() {
