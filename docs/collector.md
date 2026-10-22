@@ -293,20 +293,36 @@ On an M5 Pro on 2026-10-22, CPU time divided by elapsed time from `ps`, over the
 of a collector the app started, gave 2.86% of a core for the collector and 1.65% for the
 persister, 4.5% together.
 
-Most of the persister's cost is deriving each window's App ranks and App parts as it seals, which
-replays the tables it just wrote and writes two more, about 140 ms of CPU a window on that Mac.
-Building and writing the App parts table takes about half of that and the replay the rest. The
-persister buffers each table's writes, because Polars hands the file each page header and page on
+Most of the persister's cost is sealing. `persister/src/bin/seal_bench.rs` seals synthetic
+windows of 1,050 processes through the persister's own code and prints the median CPU of a seal
+and of its derivation, so a change to sealing is measured without a live collector. Deriving each
+window's App ranks and App parts replays the window's processes and events as the persister
+staged them in memory, and writes two more tables. On an M5 Pro on 2026-10-22 a seal took a
+median 135 ms of CPU, 84 ms of it deriving, against 219 ms and 146 ms for a build that re-read
+the window's written tables to derive them.
+A profile of the seal puts about 29 ms in zstd compressing the pages, 15 ms in reading each
+process's sample and 10 ms in the derivation's queries and frames.
+
+The persister writes every column as plain Parquet pages, without a dictionary. Polars' own
+writer builds a dictionary for every column, which took about a fifth of a seal's CPU, so the
+encoder writes through `polars_parquet` directly. In interleaved runs a seal went from 182 to
+144 ms and the files shrank, a window's processes table from 1.58 to 1.27 MB and its App parts
+from 826 to 755 kB. Reading a whole table back takes about a quarter longer, 2.2 ms instead of
+1.7 for the App parts, and the viewer's page queries cost the same. Keeping dictionaries for the
+narrow integer columns cost 13 to 20 ms a seal and read no faster, so no column keeps one.
+
+The persister buffers each table's writes, because Polars hands the file each page header and page on
 its own and each of those system calls costs more as the machine's load rises: without the
 buffer, a seal of the 2026-10-19 build took about 190 ms on a quiet Mac and 4 to 12 s under a load
 average of 15 to 24.
 
-Run side by side on 2026-10-22, each build on its own scratch ring and empty recording, the
-persister spent 0.43% of a core against 0.30% for the 2026-10-19 build, which derived nothing,
-while the load average stayed near 4 (Overhead in
+Run side by side on 2026-10-22 for ten minutes, each build on its own scratch ring and empty
+recording, the persister spent 1.93 s of CPU against 1.95 s for the 2026-10-19 build, which
+derived nothing, about 0.32% of a core each over 11 seals (Overhead in
 [headless-collector-research.md](headless-collector-research.md) measured that build at 0.33%).
-Once the load average passed 10, the persister spent 0.53 to 0.55% and the 2026-10-19 build 1.0 to
-1.9%, so the 1.65% above was most likely taken over a busy stretch.
+It kept 205 to 214 MB resident against 89 MB. The 1.65% above came from a build that re-read
+the written tables, as did 0.53 to 0.55% measured once the load average passed 10, when the
+2026-10-19 build spent 1.0 to 1.9%.
 
 ## Limits
 
@@ -460,3 +476,5 @@ earlier run, with each one's ring and collector pid (The persister and the recor
 - `collector/src/recording/`: registering a run with the recording and starting the persister.
 - `collector/src/cost.rs`: the per-source cost meter behind the reports.
 - `persister/` and `persistence/src/worker.rs`: the loop that seals windows from the ring.
+- `persister/src/bin/seal_bench.rs`: the CPU of a seal, measured on synthetic windows.
+- `persistence/src/encoder.rs`: how each table is written to Parquet.

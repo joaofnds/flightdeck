@@ -975,9 +975,10 @@ per-process records are kept under `target/polars_migration/` on this Mac
    many coalitions the collector never learns because their processes are gone before a
    rescan.
 7. Taken without measuring and open for the user's ruling, under Moving the data: the
-   ring is written here, since iceoryx2 loses a dead publisher's history. Not done: the
-   latency and CPU of a tick through each, how much of iceoryx2 Flightdeck would use, and
-   a survey of its blackboard.
+   ring is written here, since iceoryx2 loses a dead publisher's history. The ring's 53 µs
+   a tick for writer and reader together, at one tick a second, is about 0.005% of a core,
+   so iceoryx2 could save at most that much CPU. Not done: the latency and CPU of a tick
+   through iceoryx2, how much of it Flightdeck would use, and a survey of its blackboard.
 8. Parquet against Vortex, which claims much faster random access and cannot yet read
    files written by a newer version of itself.
 9. For the root option: `eslogger`'s events a second and its CPU, file opens most of

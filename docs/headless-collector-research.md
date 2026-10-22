@@ -71,10 +71,9 @@ outside what Flightdeck records.
 An always-on daemon makes its running cost permanent. On a collector the app had started,
 over 332 seconds, the collector used 2.38% of a core with 50 MB resident and the persister
 0.33% with 64 MB. Since 2026-10-20 the persister also derives each window's App tables as it
-seals, and on 2026-10-22 it spent 0.43% of a core with 170 to 270 MB at a load average near 4,
-and about 0.55% under outside load, as Cost and budget in [collector.md](collector.md)
-explains. The recording research measured the collector at 37.5 and 21.7 mW over
-two five-minute runs. m-5 already accepts that cost.
+seals, and on 2026-10-22 it spent 0.32% of a core with 205 to 214 MB, the same CPU as the
+2026-10-19 build run beside it, as Cost and budget in [collector.md](collector.md) explains.
+The recording research measured the collector at 37.5 and 21.7 mW over two five-minute runs. m-5 already accepts that cost.
 
 ## How other monitors split collection from viewing
 
@@ -172,7 +171,7 @@ ledger per process name as well as per App.
 |---|---|---|
 | Exporter off | nothing runs | 0 |
 | Formatting 9,100 samples, 860 KB of Prometheus text, Rust 1.98 `-O`, mean of 200 | 0.56 ms | 0.006% at 10 s scrapes, 0.06% at 1 s |
-| The persister, the nearest separate reader of the ring | 0.33%, 64 to 97 MB resident, on 2026-10-19; 0.43%, 170 to 270 MB, on 2026-10-22 once it derived App tables | continuous |
+| The persister, the nearest separate reader of the ring | 0.33%, 64 to 97 MB resident, on 2026-10-19; 0.32%, 205 to 214 MB, on 2026-10-22 while it derives App tables | continuous |
 | Starting the 57 MB GPUI binary instead of the 0.8 MB collector, both exiting at once on an unknown flag | 10.8 MB against 5.9 MB peak resident, 3.5 MB against 1.9 MB peak footprint, about 170 against 30 million instructions | once, at start |
 
 The formatting benchmark covers only writing the text. It reads no ring, keeps no counters
