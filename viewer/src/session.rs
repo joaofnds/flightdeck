@@ -639,9 +639,13 @@ impl Session {
         #[cfg(test)]
         self.table_queries.set(self.table_queries.get() + 1);
         if name == metrics::core_frequency::CORE_LEVEL_STATES {
+            let sources = metrics::core_frequency::CoreLevelSources {
+                core_states: &self.source(window, "core_states")?,
+                ticks: &self.source(window, "ticks")?,
+            };
             return metrics::core_frequency::core_level_states(
                 &self.connection,
-                &self.source(window, "core_states")?,
+                &sources,
                 &self.operation,
             );
         }

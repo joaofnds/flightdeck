@@ -2217,17 +2217,16 @@ fn project_observation_tables(
             )?,
         );
     }
+    let staged = |table| {
+        persistence::query::table_source(connection, table, persistence::query::TableSource::Staged)
+    };
+    let sources = metrics::core_frequency::CoreLevelSources {
+        core_states: &staged(persistence::schema::Table::CoreStates)?,
+        ticks: &staged(persistence::schema::Table::Ticks)?,
+    };
     tables.insert(
         metrics::core_frequency::CORE_LEVEL_STATES,
-        metrics::core_frequency::core_level_states(
-            connection,
-            &persistence::query::table_source(
-                connection,
-                persistence::schema::Table::CoreStates,
-                persistence::query::TableSource::Staged,
-            )?,
-            operation,
-        )?,
+        metrics::core_frequency::core_level_states(connection, &sources, operation)?,
     );
 
     Ok(tables)

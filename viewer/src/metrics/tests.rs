@@ -3,6 +3,7 @@ use super::*;
 mod app_machine_tests;
 mod battery_tests;
 mod storage_tests;
+mod system_tests;
 
 macro_rules! unsigned_number_case {
     ($name:ident, $value:expr, $expected:expr) => {
@@ -634,7 +635,7 @@ fn reports_the_recorded_cpu_and_gpu_temperatures() {
     assert!(cpu_only["gpu_celsius"].is_null());
 }
 
-const POINT_FIELDS: [&str; 46] = [
+const POINT_FIELDS: [&str; 62] = [
     "battery",
     "boot",
     "continuous_ns",
@@ -646,8 +647,18 @@ const POINT_FIELDS: [&str; 46] = [
     "fan_rpm",
     "gpu_active_percent",
     "gpu_celsius",
+    "gpu_memory_allocated_bytes",
+    "gpu_memory_in_use_bytes",
     "gpu_watts",
     "interval_unavailable",
+    "load_average",
+    "logical_cpu_count",
+    "machine_architecture",
+    "machine_chip",
+    "machine_cpu_cores",
+    "machine_gpu_cores",
+    "machine_memory_bytes",
+    "machine_model",
     "memory_active_bytes",
     "memory_anonymous_bytes",
     "memory_compressed_bytes",
@@ -668,6 +679,10 @@ const POINT_FIELDS: [&str; 46] = [
     "network_tx_bps",
     "network_tx_errors_per_second",
     "network_tx_packets_per_second",
+    "open_files",
+    "open_files_limit",
+    "open_files_percent",
+    "performance_levels",
     "power_watts",
     "pressure",
     "publication",
@@ -680,6 +695,8 @@ const POINT_FIELDS: [&str; 46] = [
     "swap_out_bytes_per_second",
     "swap_total_bytes",
     "swap_used_bytes",
+    "thermal_pressure",
+    "uptime_seconds",
     "wall_ns",
 ];
 
@@ -698,6 +715,7 @@ fn widest_point() -> Value {
     point["fan_rpm"] = json!(vec![0.000_012_345_678_901_234_568; 10]);
     point["cpu_level_percent"] = json!(vec![0.000_012_345_678_901_234_568; 2]);
     point["cpu_level_ghz"] = point["cpu_level_percent"].clone();
+    widest_point_system(&mut point);
     point["battery"] = json!({"source_continuous_ns": u64::MAX,
         "age_seconds": 0.000_012_345_678_901_234_568,
         "charge_percent": 0.000_012_345_678_901_234_568,
@@ -715,6 +733,33 @@ fn widest_point() -> Value {
         "window_losses": null, "reader_losses": {"publications": u64::MAX,
             "events": u64::MAX, "unknown": false}});
     point
+}
+
+/// Fills the system readings and the machine's facts at their widest, which the fixture's
+/// ticks, holding no system group, leave null.
+fn widest_point_system(point: &mut Value) {
+    let fraction = 0.000_012_345_678_901_234_568;
+    let text = "x".repeat(collector::system::FACT_BYTES_MAX);
+    point["load_average"] = json!(vec![fraction; 3]);
+    point["open_files_percent"] = json!(fraction);
+    for name in [
+        "open_files",
+        "open_files_limit",
+        "thermal_pressure",
+        "gpu_memory_in_use_bytes",
+        "gpu_memory_allocated_bytes",
+        "uptime_seconds",
+        "machine_cpu_cores",
+        "machine_gpu_cores",
+        "machine_memory_bytes",
+    ] {
+        point[name] = json!(u64::MAX);
+    }
+    for name in ["machine_model", "machine_chip", "machine_architecture"] {
+        point[name] = json!(text);
+    }
+    let level = json!({"name": text, "logical_cpus": u64::MAX});
+    point["performance_levels"] = json!([level, level]);
 }
 
 fn selection_envelope(point: &Value, identity: &Value, count: usize) -> Value {
@@ -735,8 +780,8 @@ fn measures_scalar_selection_response_sizes_at_both_context_limits() {
         fields.keys().map(String::as_str).collect::<Vec<_>>(),
         POINT_FIELDS
     );
-    assert_eq!(fields.values().filter(|value| value.is_f64()).count(), 19);
-    assert_eq!(fields.values().filter(|value| value.is_u64()).count(), 18);
+    assert_eq!(fields.values().filter(|value| value.is_f64()).count(), 20);
+    assert_eq!(fields.values().filter(|value| value.is_u64()).count(), 28);
     assert_eq!(u64::MAX.to_string().len(), 20);
     let identity = &internal["observation"];
     let mut saved_identity = identity.clone();

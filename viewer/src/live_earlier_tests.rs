@@ -557,6 +557,8 @@ fn earlier_reads(session: &LiveSession) -> u64 {
 }
 
 /// The saved sources one minute's readings come from.
+/// The sources a minute's context reads, its tables and the ticks again, which place each core
+/// state in a performance level.
 fn earlier_tables() -> u64 {
-    u64::try_from(metrics::TABLE_NAMES.len()).unwrap()
+    u64::try_from(metrics::TABLE_NAMES.len() + 1).unwrap()
 }

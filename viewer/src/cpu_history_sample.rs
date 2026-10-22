@@ -191,21 +191,6 @@ fn sum_busy_slices(interval: &CounterSlices<'_>) -> Result<Option<f64>> {
     Ok(Some(sum))
 }
 
-/// This Mac's performance levels, read once, since they do not change while the Mac runs.
-/// The recordings this viewer reads come from this Mac's collector.
-pub(crate) fn this_mac_levels() -> Result<Option<collector::machine::PerformanceLevels>> {
-    static LEVELS: std::sync::OnceLock<
-        std::result::Result<Option<collector::machine::PerformanceLevels>, ()>,
-    > = std::sync::OnceLock::new();
-    let levels = LEVELS.get_or_init(|| {
-        collector::machine::performance_levels().map_err(|error| {
-            eprintln!("viewer: performance levels unreadable: {error}");
-        })
-    });
-
-    levels.map_err(|()| Error::Bound("performance levels unreadable"))
-}
-
 /// The mean busy share of each performance level's CPUs, level 0 first. The slower level's
 /// CPUs take the lowest indices, as macOS numbers them. Levels that do not cover the recorded
 /// CPUs read nothing, since no CPU can then be placed in a level.

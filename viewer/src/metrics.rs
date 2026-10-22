@@ -274,6 +274,14 @@ pub(crate) fn point(
         "interval_unavailable": "Requires consecutive compatible counter samples"});
     value["battery"] = battery::point(ticks, tick, current.continuous)?;
     value["storage"] = storage::point(tables, current, previous)?;
+    let system = system::SystemTick {
+        ticks,
+        tick,
+        wall_ns: current.wall,
+    };
+    system::point(&system, &mut value)?;
+    value["logical_cpu_count"] =
+        json!(optional(tables, current, "cpus").map(|cpus| cpus.rows.len()));
     for (name, column) in [
         ("memory_total_bytes", "total_bytes"),
         ("memory_free_bytes", "free_bytes"),
@@ -372,7 +380,8 @@ fn point_interval(
         previous: &previous_counters,
     };
     value["cpu_percent_one_core"] = json!(crate::cpu_history_sample::sum_busy(counters)?);
-    if let Some(levels) = crate::cpu_history_sample::this_mac_levels()? {
+    let ticks = get(tables, current, "ticks")?;
+    if let Some(levels) = system::levels(ticks, only(ticks)?)? {
         value["cpu_level_percent"] =
             json!(crate::cpu_history_sample::level_busy(counters, levels)?);
         let states = optional(tables, current, core_frequency::CORE_LEVEL_STATES);
@@ -647,3 +656,4 @@ mod encoding_tests;
 mod battery;
 pub(crate) mod core_frequency;
 mod storage;
+mod system;
