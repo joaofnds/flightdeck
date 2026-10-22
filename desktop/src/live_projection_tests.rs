@@ -591,6 +591,7 @@ fn energy_exposes_temperature_and_channel_indexed_fan_history() {
         .unwrap();
     let fans = energy.iter().find(|panel| panel.id == "live-fans").unwrap();
     assert_eq!(temperature.title, "SoC temperature");
+    assert_eq!(temperature.lines[0].name, "SoC sensor");
     assert_eq!(temperature.lines[0].values, [None, Some(42.5), None]);
     assert_eq!(fans.unit, "rpm");
     assert_eq!(fans.lines[0].name, "Fan 0");

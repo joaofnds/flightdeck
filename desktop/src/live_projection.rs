@@ -1102,21 +1102,24 @@ fn energy(points: &[Value]) -> Result<Vec<Specification>, String> {
         system_power("live-energy"),
         gpu_power(),
         power_breakdown(),
-        specification(
-            "live-soc-temperature",
-            "SoC temperature",
-            "°C",
-            vec![reading(
-                "soc_celsius",
-                "Source SoC group average",
-                "#f2495c",
-                1.0,
-            )],
-        ),
+        soc_temperature(),
         fan_specification(points)?,
         thermal_state(),
         area_maxima(),
     ])
+}
+
+/// The one system-on-chip sensor the collector reads each tick.
+fn soc_temperature() -> Specification {
+    let mut specification = specification(
+        "live-soc-temperature",
+        "SoC temperature",
+        "°C",
+        vec![reading("soc_celsius", "SoC sensor", "#f2495c", 1.0)],
+    );
+    specification.help = "The SoC sensor that read hottest when each collector run started, \
+        read each tick. A second without a reading leaves a gap.";
+    specification
 }
 
 pub const THERMAL_STATE_ID: &str = "live-thermal";
