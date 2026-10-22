@@ -137,6 +137,7 @@ pub(super) fn encode(samples: &[Box<Sample>], pending: &Path) -> Result<TableMan
 }
 
 /// One row of the table.
+#[derive(Clone, Copy)]
 enum PartRow<'sample> {
     Header {
         sample: &'sample Sample,
@@ -164,21 +165,22 @@ impl<'sample> PartRow<'sample> {
         }
     }
 
-    /// The row's place in the table's order, given the position of its App's key among the
-    /// window's App keys.
-    fn order(&self, app_position: Option<u32>) -> RowOrder {
-        let process = self.described_process().map(|process| {
-            (
-                process.pid,
-                process.creation.map(|creation| creation.pid_version),
-            )
-        });
-        RowOrder {
-            kind: self.kind(),
-            app: app_position,
-            process,
-            publication: self.sample().selected.stamp.publication,
-        }
+    /// The row's place in the table's order, one integer the rows sort by alone. From its most
+    /// significant bits: the row's kind, the position of its App's key among the window's App
+    /// keys, a process row's pid and the version of its pid, and `observation`, the place of
+    /// the row's observation among the window's in their order.
+    fn order(&self, app_position: Option<u32>, observation: u8) -> u128 {
+        let pid = self.described_process().map(|process| process.pid);
+        let pid_version = self
+            .described_process()
+            .and_then(|process| process.creation)
+            .map(|creation| creation.pid_version);
+
+        let mut order = u128::from(self.kind());
+        order = order << ORDER_FIELD_BITS | order_field(app_position);
+        order = order << ORDER_FIELD_BITS | order_field(pid.map(order_signed));
+        order = order << ORDER_FIELD_BITS | order_field(pid_version.map(order_signed));
+        order << u8::BITS | u128::from(observation)
     }
 
     fn kind(&self) -> u8 {
@@ -228,18 +230,24 @@ impl<'sample> PartRow<'sample> {
     }
 }
 
-/// The order of the rows in the table, by these fields in turn: every observation's facts
-/// first, then the Apps' own rows, then their processes' rows, each App's and each process's
-/// rows side by side, second after second.
-#[derive(PartialEq, Eq, PartialOrd, Ord)]
-struct RowOrder {
-    kind: u8,
-    /// The position of the row's App key among the window's App keys in their order.
-    app: Option<u32>,
-    /// The pid of a process row and the version of its pid.
-    process: Option<(i32, Option<i32>)>,
-    publication: u64,
+/// The bits of a field of a row's place in the table's order, one more than its value's to put
+/// an absent field first.
+const ORDER_FIELD_BITS: u32 = u32::BITS + 1;
+
+fn order_field(value: Option<u32>) -> u128 {
+    value.map_or(0, |value| 1 << u32::BITS | u128::from(value))
 }
+
+/// A signed field of a row's order as an unsigned one, in the same order.
+fn order_signed(value: i32) -> u32 {
+    value.abs_diff(i32::MIN)
+}
+
+const _: () = {
+    // The row's kind, its App, its pid and pid version, and its observation.
+    assert!(u8::BITS + 3 * ORDER_FIELD_BITS + u8::BITS <= u128::BITS);
+    assert!(TICKS_PER_WINDOW_MAX <= 1 << 8);
+};
 
 fn sealed_parts_frame(samples: &[Box<Sample>]) -> Result<DataFrame> {
     let rows = sealed_parts_rows(samples)?;
@@ -279,28 +287,39 @@ fn sealed_parts_rows(samples: &[Box<Sample>]) -> Result<Vec<PartRow<'_>>> {
     // A row changes little from the row of the same App or process a second before, so keeping
     // them side by side halves the table. The reader orders the rows it reads by observation.
     let positions = sealed_parts_positions(samples);
-    let mut ordered = Vec::with_capacity(count);
-    for sample in samples {
+    let mut rows = Vec::with_capacity(count);
+    let mut orders = Vec::with_capacity(count);
+    for (observation, sample) in (0_u8..).zip(samples) {
         // A sample takes its rates only from the adjacent observation of its run, so a row
         // keeps only the publication and clocks of the observation before.
         if let Some(previous) = &sample.previous {
             assert_eq!(previous.boot, sample.selected.stamp.boot);
             assert_eq!(previous.run, sample.selected.stamp.run);
         }
+        // The rows of one App or process keep their observations' order only from samples
+        // that come in it.
+        if let Some(before) = observation.checked_sub(1) {
+            let before = &samples[usize::from(before)];
+            assert!(before.selected.stamp.publication < sample.selected.stamp.publication);
+        }
 
-        sealed_parts_rows_push(sample, &positions, &mut ordered)?;
+        sealed_parts_rows_push(sample, observation, &positions, &mut rows, &mut orders)?;
     }
-    assert!(ordered.len() <= count);
-    ordered.sort_unstable_by(|(left, _left_row), (right, _right_row)| left.cmp(right));
+    assert!(rows.len() <= count);
+    assert_eq!(orders.len(), rows.len());
+    orders.sort_unstable_by_key(|(order, _row)| *order);
 
-    Ok(ordered.into_iter().map(|(_order, row)| row).collect())
+    Ok(orders.iter().map(|(_order, row)| rows[*row]).collect())
 }
 
-/// Every row of `sample`, each with its place in the table's order.
+/// Every row of `sample`, the window's observation `observation`, and the row's place in the
+/// table's order beside the place of the row in `rows`.
 fn sealed_parts_rows_push<'sample>(
     sample: &'sample Sample,
+    observation: u8,
     positions: &HashMap<(u8, &[u8]), u32>,
-    ordered: &mut Vec<(RowOrder, PartRow<'sample>)>,
+    rows: &mut Vec<PartRow<'sample>>,
+    orders: &mut Vec<(u128, usize)>,
 ) -> Result<()> {
     let app_positions: Vec<u32> = sample
         .apps()
@@ -309,10 +328,12 @@ fn sealed_parts_rows_push<'sample>(
         .collect();
 
     let header = PartRow::Header { sample };
-    ordered.push((header.order(None), header));
+    orders.push((header.order(None, observation), rows.len()));
+    rows.push(header);
     for ((index, app), position) in (0_u32..).zip(sample.apps()).zip(&app_positions) {
         let row = PartRow::App { sample, index, app };
-        ordered.push((row.order(Some(*position)), row));
+        orders.push((row.order(Some(*position), observation), rows.len()));
+        rows.push(row);
     }
     for (index, process) in (0_u32..).zip(sample.processes()) {
         if let Some(app_index) = process.app_index {
@@ -328,7 +349,11 @@ fn sealed_parts_rows_push<'sample>(
                 index,
                 process,
             };
-            ordered.push((row.order(Some(app_positions[place])), row));
+            orders.push((
+                row.order(Some(app_positions[place]), observation),
+                rows.len(),
+            ));
+            rows.push(row);
         }
     }
 
