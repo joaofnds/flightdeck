@@ -7,6 +7,8 @@ use crate::live_dashboard::{LiveDashboard, ROUTES};
 use crate::live_source::Worker;
 use crate::performance::Options;
 
+#[path = "live_app_nap.rs"]
+mod app_nap;
 #[path = "live_background.rs"]
 mod background;
 #[path = "collector_lifecycle_application.rs"]
@@ -95,6 +97,8 @@ pub fn run(options: &Options) -> Result<(), Box<dyn std::error::Error>> {
         application.on_reopen(background::show);
     }
     application.run(move |cx: &mut App| {
+        cx.set_global(app_nap::AppNapExemption::begin());
+
         collection::install(collector, cx);
         if let Some(preferences_path) = preferences_path {
             preferences::install(preferences_path, cx);

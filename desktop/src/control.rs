@@ -117,8 +117,6 @@ pub fn install(
     window: &mut Window,
     cx: &mut App,
 ) {
-    cx.set_global(Activity::begin());
-
     window
         .spawn(cx, async move |cx| {
             // The window starts from the real pointer's place on the screen, which would
@@ -156,52 +154,6 @@ pub fn install(
             }
         })
         .detach();
-}
-
-/// Keeps App Nap off while the app runs under the socket. macOS naps an app none of whose
-/// windows show, and the controlled window never shows, so a measurement through the socket
-/// would otherwise run on the slower cores at a lower priority from about 30 s after launch.
-struct Activity {
-    token: Retained<AnyObject>,
-}
-
-impl gpui::Global for Activity {}
-
-/// `NSActivityUserInitiatedAllowingIdleSystemSleep` in Foundation's NSProcessInfo.h.
-const ACTIVITY_USER_INITIATED_ALLOWING_IDLE_SYSTEM_SLEEP: u64 = 0x00EF_FFFF;
-const _: () = {
-    // NSActivityUserInitiated without NSActivityIdleSystemSleepDisabled, as the header says.
-    assert!(ACTIVITY_USER_INITIATED_ALLOWING_IDLE_SYSTEM_SLEEP == 0x00FF_FFFF & !(1 << 20));
-};
-
-impl Activity {
-    fn begin() -> Self {
-        let reason = NSString::from_str("Flightdeck runs under its control socket");
-        // SAFETY: processInfo is a class method of NSProcessInfo that returns the shared object.
-        let information: Retained<AnyObject> =
-            unsafe { msg_send![objc2::class!(NSProcessInfo), processInfo] };
-        // SAFETY: NSProcessInfo declares beginActivityWithOptions:reason: with a uint64_t and an
-        // NSString, and returns the activity's token.
-        let token: Retained<AnyObject> = unsafe {
-            msg_send![
-                &*information,
-                beginActivityWithOptions: ACTIVITY_USER_INITIATED_ALLOWING_IDLE_SYSTEM_SLEEP,
-                reason: &*reason
-            ]
-        };
-
-        Self { token }
-    }
-}
-
-impl Drop for Activity {
-    fn drop(&mut self) {
-        // SAFETY: as in begin.
-        let information: Retained<AnyObject> =
-            unsafe { msg_send![objc2::class!(NSProcessInfo), processInfo] };
-        // SAFETY: endActivity: takes the token beginActivityWithOptions:reason: returned.
-        let () = unsafe { msg_send![&*information, endActivity: &*self.token] };
-    }
 }
 
 /// The reply to one command, or none once the window is gone.
