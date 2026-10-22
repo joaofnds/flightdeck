@@ -300,8 +300,15 @@ window's App ranks and App parts replays the window's processes and events as th
 staged them in memory, and writes two more tables. On an M5 Pro on 2026-10-22 a seal took a
 median 135 ms of CPU, 84 ms of it deriving, against 219 ms and 146 ms for a build that re-read
 the window's written tables to derive them.
-A profile of the seal puts about 29 ms in zstd compressing the pages, 15 ms in reading each
-process's sample and 10 ms in the derivation's queries and frames.
+A profile of the seal puts about 15 ms in reading each process's sample and 10 ms in the
+derivation's queries and frames.
+
+The pages are compressed with zstd at level 3. Re-encoding 20 sealed windows of a real recording,
+whose tables take 0.94 MB a window, compression cost about 8 ms of a window's 37 ms of writing,
+and about 18 ms of a 192 ms seal in the bench, both measured under a load average near 100.
+Level 1 cost the same CPU and made the files 7% larger. lz4 saved most of that CPU and made the
+files 43% larger, and leaving the pages uncompressed made them 29 times larger, so the tables
+stay at level 3.
 
 The persister writes every column as plain Parquet pages, without a dictionary. Polars' own
 writer builds a dictionary for every column, which took about a fifth of a seal's CPU, so the
