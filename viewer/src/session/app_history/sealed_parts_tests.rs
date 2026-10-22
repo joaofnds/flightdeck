@@ -63,9 +63,10 @@ fn a_window_keeps_the_state_and_reasons_of_each_process_the_replay_gives() {
 
 #[test]
 fn a_window_keeps_the_rows_of_each_app_side_by_side_across_its_observations() {
-    // Goal: a window keeps each App's rows of all its observations together, the App's own and
-    // then each process's second after second, since a row there changes little from the row
-    // before it and the table compresses to about half of what it takes second by second.
+    // Goal: a window keeps the rows of each series of all its observations together, the
+    // observations' facts, each App's own and each process's, second after second, since a row
+    // there changes little from the row before it and the table compresses to about half of what
+    // it takes second by second.
     // Method: seal three observations of an App running two processes with their Apps' parts,
     // and read the runs of adjacent rows of the window's table that belong to one series, the
     // observations' facts, the App's own or one process's.

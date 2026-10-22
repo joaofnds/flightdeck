@@ -164,6 +164,23 @@ impl<'sample> PartRow<'sample> {
         }
     }
 
+    /// The row's place in the table's order, given the position of its App's key among the
+    /// window's App keys.
+    fn order(&self, app_position: Option<u32>) -> RowOrder {
+        let process = self.described_process().map(|process| {
+            (
+                process.pid,
+                process.creation.map(|creation| creation.pid_version),
+            )
+        });
+        RowOrder {
+            kind: self.kind(),
+            app: app_position,
+            process,
+            publication: self.sample().selected.stamp.publication,
+        }
+    }
+
     fn kind(&self) -> u8 {
         match self {
             Self::Header { .. } => ROW_HEADER,
@@ -217,7 +234,7 @@ impl<'sample> PartRow<'sample> {
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 struct RowOrder {
     kind: u8,
-    /// The place of the row's App key among the window's App keys in their order.
+    /// The position of the row's App key among the window's App keys in their order.
     app: Option<u32>,
     /// The pid of a process row and the version of its pid.
     process: Option<(i32, Option<i32>)>,
@@ -261,8 +278,7 @@ fn sealed_parts_rows(samples: &[Box<Sample>]) -> Result<Vec<PartRow<'_>>> {
 
     // A row changes little from the row of the same App or process a second before, so keeping
     // them side by side halves the table. The reader orders the rows it reads by observation.
-    // Each App key is compared only to rank it, so the rows sort by integers.
-    let ranks = sealed_parts_ranks(samples);
+    let positions = sealed_parts_positions(samples);
     let mut ordered = Vec::with_capacity(count);
     for sample in samples {
         // A sample takes its rates only from the adjacent observation of its run, so a row
@@ -272,7 +288,7 @@ fn sealed_parts_rows(samples: &[Box<Sample>]) -> Result<Vec<PartRow<'_>>> {
             assert_eq!(previous.run, sample.selected.stamp.run);
         }
 
-        sealed_parts_rows_push(sample, &ranks, &mut ordered)?;
+        sealed_parts_rows_push(sample, &positions, &mut ordered)?;
     }
     assert!(ordered.len() <= count);
     ordered.sort_unstable_by(|(left, _left_row), (right, _right_row)| left.cmp(right));
@@ -283,31 +299,20 @@ fn sealed_parts_rows(samples: &[Box<Sample>]) -> Result<Vec<PartRow<'_>>> {
 /// Every row of `sample`, each with its place in the table's order.
 fn sealed_parts_rows_push<'sample>(
     sample: &'sample Sample,
-    ranks: &HashMap<(u8, &[u8]), u32>,
+    positions: &HashMap<(u8, &[u8]), u32>,
     ordered: &mut Vec<(RowOrder, PartRow<'sample>)>,
 ) -> Result<()> {
-    let publication = sample.selected.stamp.publication;
-    let app_ranks: Vec<u32> = sample
+    let app_positions: Vec<u32> = sample
         .apps()
         .iter()
-        .map(|app| ranks[&sealed_parts_rank_key(app)])
+        .map(|app| positions[&sealed_parts_position_key(app)])
         .collect();
 
-    let header = RowOrder {
-        kind: ROW_HEADER,
-        app: None,
-        process: None,
-        publication,
-    };
-    ordered.push((header, PartRow::Header { sample }));
-    for ((index, app), rank) in (0_u32..).zip(sample.apps()).zip(&app_ranks) {
-        let order = RowOrder {
-            kind: ROW_APP,
-            app: Some(*rank),
-            process: None,
-            publication,
-        };
-        ordered.push((order, PartRow::App { sample, index, app }));
+    let header = PartRow::Header { sample };
+    ordered.push((header.order(None), header));
+    for ((index, app), position) in (0_u32..).zip(sample.apps()).zip(&app_positions) {
+        let row = PartRow::App { sample, index, app };
+        ordered.push((row.order(Some(*position)), row));
     }
     for (index, process) in (0_u32..).zip(sample.processes()) {
         if let Some(app_index) = process.app_index {
@@ -316,15 +321,6 @@ fn sealed_parts_rows_push<'sample>(
                 .apps()
                 .get(place)
                 .ok_or(Error::Bound("sealed parts process App"))?;
-            let order = RowOrder {
-                kind: ROW_PROCESS,
-                app: Some(app_ranks[place]),
-                process: Some((
-                    process.pid,
-                    process.creation.map(|creation| creation.pid_version),
-                )),
-                publication,
-            };
             let row = PartRow::Process {
                 sample,
                 app_index,
@@ -332,32 +328,32 @@ fn sealed_parts_rows_push<'sample>(
                 index,
                 process,
             };
-            ordered.push((order, row));
+            ordered.push((row.order(Some(app_positions[place])), row));
         }
     }
 
     Ok(())
 }
 
-/// The place of each App key of `samples` among them, in their order.
-fn sealed_parts_ranks(samples: &[Box<Sample>]) -> HashMap<(u8, &[u8]), u32> {
-    let mut ranks = HashMap::new();
+/// The position of each App key of `samples` among them, in their order.
+fn sealed_parts_positions(samples: &[Box<Sample>]) -> HashMap<(u8, &[u8]), u32> {
+    let mut positions = HashMap::new();
     for sample in samples {
         for app in sample.apps() {
-            ranks.insert(sealed_parts_rank_key(app), 0);
+            positions.insert(sealed_parts_position_key(app), 0);
         }
     }
-    let mut distinct: Vec<(u8, &[u8])> = ranks.keys().copied().collect();
+    let mut distinct: Vec<(u8, &[u8])> = positions.keys().copied().collect();
     distinct.sort_unstable();
-    for (rank, key) in (0_u32..).zip(distinct) {
-        ranks.insert(key, rank);
+    for (position, key) in (0_u32..).zip(distinct) {
+        positions.insert(key, position);
     }
 
-    ranks
+    positions
 }
 
 /// What orders App `app` among the window's Apps.
-fn sealed_parts_rank_key(app: &App) -> (u8, &[u8]) {
+fn sealed_parts_position_key(app: &App) -> (u8, &[u8]) {
     (kind_code(app.key.kind), app.key.bytes.as_slice())
 }
 
