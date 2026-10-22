@@ -464,6 +464,37 @@ fn a_resting_reader_without_a_session_opens_one() {
 }
 
 #[test]
+fn a_request_to_a_resting_reader_lets_its_step_finish() {
+    // Goal: a launch's first request does not throw away the session the resting reader is
+    // opening, since the request reads through that same session.
+    // Method: let the reader rest, then send it a request and compare the cancellation epoch.
+    let mut reader = SnapshotReader::new();
+    let mut kept = reader.hand_over();
+    reader.receive();
+    let epoch = reader.shared.cancellation.epoch();
+
+    kept.request(SealedRecording::request()).unwrap();
+
+    assert_eq!(reader.shared.cancellation.epoch(), epoch);
+}
+
+#[test]
+fn a_request_to_a_reading_reader_cancels_its_read() {
+    // Goal: a page the window no longer wants stops being read as soon as another is asked for.
+    // Method: let the resting reader take a request, then send another and compare the epoch.
+    let mut reader = SnapshotReader::new();
+    let mut kept = reader.hand_over();
+    reader.receive();
+    kept.request(SealedRecording::request()).unwrap();
+    reader.receive();
+    let epoch = reader.shared.cancellation.epoch();
+
+    kept.request(SealedRecording::request()).unwrap();
+
+    assert!(reader.shared.cancellation.epoch() > epoch);
+}
+
+#[test]
 fn a_window_that_takes_the_resting_reader_renews_its_step_limit() {
     // Goal: a reader kept across windows gives each window the full step limit, so a window
     // opened days after the app started never finds its reader at the limit.
@@ -631,6 +662,7 @@ impl SnapshotReader {
                     request: None,
                     output: None,
                     rest: false,
+                    resting: false,
                 }),
                 wake: Condvar::new(),
                 stopped: AtomicBool::new(false),

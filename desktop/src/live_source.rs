@@ -139,6 +139,9 @@ struct Mailbox {
     /// The window reading through the worker closed, so the worker drops its page and keeps its
     /// session following the recording until the next window asks for one.
     rest: bool,
+    /// The worker reads no page, so its step opens or follows the session a request reads
+    /// through, which cancelling would throw away.
+    resting: bool,
 }
 
 struct Command {
@@ -278,10 +281,12 @@ impl Worker {
             .generation
             .checked_add(1)
             .ok_or_else(|| "Live request generation exhausted".to_owned())?;
-        self.shared
-            .cancellation
-            .cancel()
-            .map_err(|error| error.to_string())?;
+        if !mailbox.resting {
+            self.shared
+                .cancellation
+                .cancel()
+                .map_err(|error| error.to_string())?;
+        }
         mailbox.generation = generation;
         mailbox.output = None;
         mailbox.request = Some(Command {
@@ -394,6 +399,7 @@ impl Shared {
                 request: None,
                 output: None,
                 rest: false,
+                resting: true,
             }),
             wake: Condvar::new(),
             stopped: AtomicBool::new(false),
@@ -490,8 +496,10 @@ fn worker_receive(shared: &Shared, reader: &mut Reader, command: &mut Option<Com
                 reader_rest(reader);
             }
             let Some(next) = mailbox.request.take() else {
+                mailbox.resting = command.is_none();
                 return Received::Continued;
             };
+            mailbox.resting = false;
             let resting = command.is_none();
             *command = Some(next);
             reader.retry_after = Instant::now();
