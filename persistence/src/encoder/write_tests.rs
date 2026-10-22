@@ -1,6 +1,8 @@
-use std::io::{self, Write};
+use std::io::{self, Cursor, Write};
 
 use polars::prelude::{Column, DataFrame};
+use polars_parquet::parquet::read::read_metadata;
+use polars_parquet::read::RowGroupMetadata;
 
 use super::{WRITE_BUFFER_BYTES, encode_write};
 
@@ -74,4 +76,36 @@ fn reports_a_write_the_file_refuses() {
     let written = encode_write(&mut frame, FullFile);
 
     assert!(written.is_err());
+}
+
+#[test]
+fn writes_every_column_without_a_dictionary() {
+    // Goal: a table's columns are written plain, since building a dictionary for each column
+    // cost a fifth of a window's seal CPU and saved no bytes once compressed. Method: write
+    // columns of one repeated value, which a dictionary writer encodes as a dictionary, and
+    // look for a dictionary page in the file's metadata.
+    let mut frame = DataFrame::new(
+        3,
+        vec![
+            Column::new("pid".into(), [7i32, 7, 7]),
+            Column::new("executable_name".into(), [b"a".as_slice(), b"a", b"a"]),
+        ],
+    )
+    .unwrap();
+    let mut file = Cursor::new(Vec::new());
+
+    encode_write(&mut frame, &mut file).unwrap();
+
+    let metadata = read_metadata(&mut file).unwrap();
+    let columns: Vec<_> = metadata
+        .row_groups
+        .iter()
+        .flat_map(RowGroupMetadata::parquet_columns)
+        .collect();
+    assert_eq!(columns.len(), 2);
+    assert!(
+        columns
+            .iter()
+            .all(|column| column.dictionary_page_offset().is_none())
+    );
 }

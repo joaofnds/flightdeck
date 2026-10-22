@@ -1,8 +1,11 @@
 use std::fs::OpenOptions;
 use std::path::Path;
 
-use polars::polars_utils::compression::ZstdLevel;
 use polars::prelude::*;
+use polars_parquet::write::{
+    CompressionOptions, Encoding, FileWriter, Version, WriteOptions, ZstdLevel, get_dtype_encoding,
+    row_group_iter,
+};
 
 use crate::schema::{TABLES, Table};
 use crate::{Error, Result, Window};
@@ -103,33 +106,54 @@ fn encode_write(frame: &mut DataFrame, file: impl std::io::Write) -> Result<()> 
     frame.rechunk_mut();
     // Parquet writes each header and page on its own, a system call apiece without a buffer.
     let capacity = usize::try_from(WRITE_BUFFER_BYTES).map_err(|_| Error::Bound("write buffer"))?;
-    let mut buffer = std::io::BufWriter::with_capacity(capacity, file);
-    let mut writer = ParquetWriter::new(&mut buffer)
-        .with_compression(ParquetCompression::Zstd(Some(ZstdLevel::try_new(3)?)))
-        .with_statistics(StatisticsOptions {
+    let buffer = std::io::BufWriter::with_capacity(capacity, file);
+    let schema = frame.schema().to_arrow(CompatLevel::newest());
+    // Polars' own writer gives every number and byte column a dictionary, which cost a fifth of
+    // a window's seal CPU and made the compressed files larger, as docs/collector.md measures.
+    // A plain page holds each value as it is.
+    let encodings: Vec<Vec<Encoding>> = schema
+        .iter_values()
+        .map(|field| {
+            get_dtype_encoding(&field.dtype)
+                .iter()
+                .map(|_leaf| Encoding::Plain)
+                .collect()
+        })
+        .collect();
+    let options = WriteOptions {
+        statistics: StatisticsOptions {
             min_value: true,
             max_value: true,
             distinct_count: false,
             null_count: true,
             binary_statistics_truncate_length: None,
-        })
-        .with_row_group_size(Some(16_384))
-        .with_data_page_size(Some(1024 * 1024))
-        .set_parallel(false)
-        .with_key_value_metadata(None)
-        .with_context_info(None)
-        .batched(frame.schema())?;
-    // Polars' eager finish balances groups above the requested size; explicit slices cap them.
+        },
+        version: Version::V1,
+        compression: CompressionOptions::Zstd(Some(ZstdLevel::try_new(3)?)),
+        data_page_size: Some(1024 * 1024),
+    };
+    let mut writer = FileWriter::try_new(buffer, schema, options)?;
+    let fields = writer.parquet_schema().fields().to_vec();
+    // Each slice of the rechunked frame is one batch, so each row group holds at most 16,384
+    // rows.
     for offset in (0..frame.height()).step_by(16_384) {
         let length = (frame.height() - offset).min(16_384);
         let offset = i64::try_from(offset).map_err(|_| Error::Bound("parquet row offset"))?;
-        writer.write_batch(&frame.slice(offset, length))?;
+        for batch in frame
+            .slice(offset, length)
+            .iter_chunks(CompatLevel::newest(), false)
+        {
+            let rows = collector::u64_from_usize(batch.len());
+            let group = row_group_iter(batch, encodings.clone().into(), fields.clone(), options);
+            writer.write(rows, group)?;
+        }
     }
-    let bytes = writer.finish()?;
+    let bytes = writer.end(None)?;
     assert!(bytes > 0);
 
     // Dropping the buffer would flush its last bytes and discard a failed write.
-    buffer
+    writer
+        .into_inner()
         .into_inner()
         .map_err(std::io::IntoInnerError::into_error)?;
     Ok(())
