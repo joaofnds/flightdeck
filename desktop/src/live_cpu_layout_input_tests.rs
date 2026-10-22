@@ -90,13 +90,19 @@ impl InputDriver {
 
 impl InputDriver {
     fn seed_cpu_layout_readings(&mut self) {
-        self.seed_cpu_readings(18);
+        self.seed_cpu_readings();
     }
 
-    /// Gives the CPU page readings of `cpus` logical CPUs, each 67% busy.
-    pub(super) fn seed_cpu_readings(&mut self, cpus: u32) {
+    /// Gives the CPU page readings of 18 logical CPUs, 12 performance and 6 super, each 67% busy.
+    pub(super) fn seed_cpu_readings(&mut self) {
+        let cpus = 18;
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = accepted_snapshot(dashboard.generation);
+            let levels = json!([{"name": "Super", "logical_cpus": 6},
+                {"name": "Performance", "logical_cpus": 12}]);
+            snapshot.selection["trends"][0]["performance_levels"] = levels.clone();
+            snapshot.selection["trends"][1]["performance_levels"] = levels.clone();
+            snapshot.selection["summary"]["performance_levels"] = levels;
             snapshot.selection["context_seconds"] = json!(900);
             snapshot.selection["trends"][0]["run_tick"] = json!(1);
             snapshot.selection["trends"][1]["run_tick"] = json!(2);

@@ -147,15 +147,12 @@ macro_rules! cpu_panels_keep_layout_case {
         #[gpui::test]
         fn $name(cx: &mut TestAppContext) {
             // Goal: the CPU page's panels of each logical CPU hold the size their readings give
-            // them before those readings arrive. Method: lay the page out before its first
-            // reading, then with readings of each logical CPU this Mac has.
-            let levels = crate::live_inventory::performance_levels()
-                .expect("the CPU page counts this Mac's logical CPUs by its performance levels");
-            let cpus = levels[0].logical_cpus + levels[1].logical_cpus;
+            // them before those readings arrive, from no fact about the Mac. Method: lay the page
+            // out before its first reading, then with readings of 18 logical CPUs in two levels.
             let mut harness = InputHarness::open_route(cx, "cpu");
 
             let loading = harness.driver.page_layout($width);
-            harness.driver.seed_cpu_readings(cpus);
+            harness.driver.seed_cpu_readings();
             let loaded = harness.driver.page_layout_like($width, &loading);
 
             assert_eq!(loading, loaded);

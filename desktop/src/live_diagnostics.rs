@@ -562,7 +562,7 @@ fn self_card(card: &Card) -> impl IntoElement {
                 .text_size(px(12.0))
                 .line_height(px(18.0))
                 .text_color(rgb(MUTED))
-                .child(card.label),
+                .child(card.label.clone()),
         )
         .child(
             div()

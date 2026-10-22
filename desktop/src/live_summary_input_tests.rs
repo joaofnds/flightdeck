@@ -198,6 +198,10 @@ impl InputDriver {
             snapshot.selection["trends"][1]["cpu_celsius"] = json!(71.5);
             snapshot.selection["trends"][1]["gpu_celsius"] = json!(63.25);
             snapshot.selection["trends"][1]["pressure"] = json!(1);
+            snapshot.selection["trends"][1]["performance_levels"] = json!([
+                {"name": "Super", "logical_cpus": 6},
+                {"name": "Performance", "logical_cpus": 12},
+            ]);
             snapshot.selection["summary"] = snapshot.selection["trends"][1].clone();
             dashboard.accept(snapshot);
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);

@@ -76,9 +76,10 @@ fn cards_show_the_last_minute_and_the_run_totals() {
         events_lost: 2,
     };
 
-    let shown: Vec<_> = cards(&reports)
-        .into_iter()
-        .map(|card| (card.label, card.reading, card.note))
+    let shown_cards = cards(&reports);
+    let shown: Vec<_> = shown_cards
+        .iter()
+        .map(|card| (card.label.as_str(), card.reading.clone(), card.note.clone()))
         .collect();
 
     assert_eq!(

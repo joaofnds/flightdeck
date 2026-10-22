@@ -362,7 +362,7 @@ struct Specification {
 
 struct Reading {
     key: &'static str,
-    name: &'static str,
+    name: Cow<'static, str>,
     color: &'static str,
     divisor: f32,
     negative: bool,
@@ -684,7 +684,7 @@ fn panel(
             values.push(panel_reading_value(reading, point)?.map(|value| value / reading.divisor));
         }
         lines.push(Line {
-            name: reading.name.to_owned(),
+            name: reading.name.clone().into_owned(),
             color: reading.color.to_owned(),
             values,
             stack: reading.stack,
@@ -899,7 +899,7 @@ fn specification(
 fn reading(key: &'static str, name: &'static str, color: &'static str, divisor: f32) -> Reading {
     Reading {
         key,
-        name,
+        name: Cow::Borrowed(name),
         color,
         divisor,
         negative: false,
@@ -917,14 +917,16 @@ fn reading(key: &'static str, name: &'static str, color: &'static str, divisor: 
 /// CPU activity across all cores and within each performance level, the slower level first
 /// as the prototype lists it. The level's name comes from `level_name`, since the Overview
 /// names a level alone and the CPU page names its cores.
-fn cpu(level_name: fn(&'static PerformanceLevel) -> &'static str) -> Specification {
+fn cpu(points: &[Value], level_name: fn(&PerformanceLevel) -> &str) -> Specification {
+    let levels = points
+        .last()
+        .and_then(crate::live_inventory::performance_levels);
     let mut lines = vec![reading("cpu_percent", "All cores", "#5794f2", 1.0)];
-    if let Some(levels) = crate::live_inventory::performance_levels() {
-        for (index, color) in [(1, "#73bf69"), (0, "#b877d9")] {
-            let mut line = reading("cpu_level_percent", level_name(&levels[index]), color, 1.0);
-            line.channel = Some(index);
-            lines.push(line);
-        }
+    for (index, color) in [(1, "#73bf69"), (0, "#b877d9")] {
+        let mut line = reading("cpu_level_percent", "", color, 1.0);
+        line.name = level_line_name(levels.as_ref(), index, level_name);
+        line.channel = Some(index);
+        lines.push(line);
     }
     let mut specification = specification("live-cpu", "CPU activity", "%", lines);
     specification.maximum = Some(100.0);
@@ -956,19 +958,16 @@ fn cpu_temperature() -> Specification {
 
 /// The mean clock of each performance level while its cores were active, from the time they
 /// spent in each clock state.
-fn frequency() -> Specification {
+fn frequency(points: &[Value]) -> Specification {
+    let levels = points
+        .last()
+        .and_then(crate::live_inventory::performance_levels);
     let mut lines = Vec::with_capacity(2);
-    if let Some(levels) = crate::live_inventory::performance_levels() {
-        for (index, color) in [(1, "#73bf69"), (0, "#b877d9")] {
-            let mut line = reading(
-                "cpu_level_ghz",
-                levels[index].cluster_cores.as_str(),
-                color,
-                1.0,
-            );
-            line.channel = Some(index);
-            lines.push(line);
-        }
+    for (index, color) in [(1, "#73bf69"), (0, "#b877d9")] {
+        let mut line = reading("cpu_level_ghz", "", color, 1.0);
+        line.name = level_line_name(levels.as_ref(), index, cpu_level_cluster_cores);
+        line.channel = Some(index);
+        lines.push(line);
     }
     let mut specification = specification(FREQUENCY_ID, "CPU active frequency", "GHz", lines);
     specification.help = "The mean clock of each core level while its cores were active, \
@@ -997,8 +996,8 @@ fn load_average() -> Specification {
     let mut specification = specification(LOAD_AVERAGE_ID, "Load average", "work items", lines);
     specification.fill = 0.0;
     specification.help = "Work running or waiting for a CPU, averaged by macOS over 1, 5 and \
-        15 minutes. Above the dashed core count, work waits for a core. Flightdeck samples it \
-        once a second while the app runs, so earlier seconds have no reading.";
+        15 minutes. Above the dashed core count, work waits for a core. The collector reads it \
+        each tick, so a second it did not collect has no reading.";
     specification
 }
 
@@ -1018,16 +1017,33 @@ fn open_files() -> Specification {
         vec![reading("open_files", "Open", "#00ffff", 1.0), share],
     );
     specification.help = "File entries open across the system and their share of the \
-        kernel's limit. Flightdeck samples them once a second while the app runs, so earlier \
-        seconds have no reading.";
+        kernel's limit. The collector reads them each tick, so a second it did not collect \
+        has no reading.";
     specification
 }
 
-fn cpu_level_cores(level: &'static PerformanceLevel) -> &'static str {
+/// The name of performance level `index` as `level_name` gives it, or its index where the
+/// readings name no levels, so a chart keeps a line for each level before its first reading.
+fn level_line_name(
+    levels: Option<&[PerformanceLevel; 2]>,
+    index: usize,
+    level_name: fn(&PerformanceLevel) -> &str,
+) -> Cow<'static, str> {
+    match levels {
+        Some(levels) => Cow::Owned(level_name(&levels[index]).to_owned()),
+        None => Cow::Owned(format!("Core level {index}")),
+    }
+}
+
+fn cpu_level_cores(level: &PerformanceLevel) -> &str {
     level.cores.as_str()
 }
 
-fn cpu_level_name(level: &'static PerformanceLevel) -> &'static str {
+fn cpu_level_cluster_cores(level: &PerformanceLevel) -> &str {
+    level.cluster_cores.as_str()
+}
+
+fn cpu_level_name(level: &PerformanceLevel) -> &str {
     level.name.as_str()
 }
 
@@ -1153,10 +1169,10 @@ fn gpu_temperature() -> Specification {
 
 fn specifications(route: &str, points: &[Value]) -> Result<Vec<Specification>, String> {
     Ok(match route {
-        "overview" => overview(),
+        "overview" => overview(points),
         "cpu" => vec![
-            cpu(cpu_level_cores),
-            frequency(),
+            cpu(points, cpu_level_cores),
+            frequency(points),
             load_average(),
             open_files(),
             cpu_temperature(),
@@ -1413,11 +1429,11 @@ fn pressure_state(value: Option<f32>) -> Option<f32> {
     }
 }
 
-fn overview() -> Vec<Specification> {
+fn overview(points: &[Value]) -> Vec<Specification> {
     let mut network = network_throughput();
     network.title = "Network throughput";
     let mut result = vec![
-        cpu(cpu_level_name),
+        cpu(points, cpu_level_name),
         gpu_activity(),
         memory(),
         system_power("live-power"),

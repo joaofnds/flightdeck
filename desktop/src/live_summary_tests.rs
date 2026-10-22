@@ -95,10 +95,10 @@ fn an_overview_card_without_a_die_temperature_stays_unavailable_and_keeps_its_lo
     assert_eq!(overview[1].note, "Utilization 40%");
 }
 
-fn readings(cards: &[super::Card]) -> Vec<(&'static str, String)> {
+fn readings(cards: &[super::Card]) -> Vec<(&str, String)> {
     cards
         .iter()
-        .map(|card| (card.label, card.reading.clone()))
+        .map(|card| (card.label.as_str(), card.reading.clone()))
         .collect()
 }
 

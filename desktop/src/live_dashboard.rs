@@ -311,7 +311,7 @@ impl LiveDashboard {
             drag: None,
         };
         if dashboard.request.route == "computer" {
-            dashboard.inventory = crate::live_inventory::rows();
+            dashboard.inventory = crate::live_inventory::rows(None);
         }
         dashboard.rebuild();
         dashboard.submit();
@@ -498,6 +498,13 @@ impl LiveDashboard {
         self.panels = presentation.panels;
         self.executables = presentation.executables;
         self.snapshot = Some(presentation.snapshot);
+        if self.request.route == "computer" {
+            let summary = self
+                .snapshot
+                .as_ref()
+                .map(|snapshot| &snapshot.selection["summary"]);
+            self.inventory = crate::live_inventory::rows(summary);
+        }
         self.zoom_panels();
         self.refresh_chart_inspector();
         self.received_at = SystemTime::now();
@@ -676,7 +683,7 @@ impl LiveDashboard {
         self.rows.clear();
         self.reset_section_rows();
         if route == "computer" {
-            self.inventory = crate::live_inventory::rows();
+            self.inventory = crate::live_inventory::rows(None);
         }
         self.rebuild();
         self.submit();
@@ -902,7 +909,7 @@ impl LiveDashboard {
     }
 
     pub(crate) fn status_at(&self, now: SystemTime) -> String {
-        // Computer reads this Mac's inventory each time it opens, whatever the recording.
+        // Computer shows the machine facts of the latest reading, with no time selection.
         if self.request.route == "computer" {
             return "System snapshot".into();
         }

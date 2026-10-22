@@ -680,7 +680,7 @@ fn reader_snapshot(
         }
     }
     if command.request.route == "computer" {
-        return Ok(reader_computer(reader, command));
+        return reader_computer(reader, root, command, shared, published);
     }
     if published {
         if reader_snapshot_is_pinned(&command.request) {
@@ -917,37 +917,28 @@ fn reader_snapshot_new(generation: u64, catalog: Value, selection: Value) -> Box
     })
 }
 
-fn reader_computer(reader: &mut Reader, command: &Command) -> Option<Box<Snapshot>> {
-    if reader.last_generation == command.generation {
-        return None;
+/// The Computer page's reading: the newest observation, whose summary carries the machine's
+/// facts as the collector read them. A step reads it again only once the recording changed, so
+/// a page opened before the collector's first tick shows the facts once that tick arrives.
+fn reader_computer(
+    reader: &mut Reader,
+    root: &std::path::Path,
+    command: &Command,
+    shared: &Shared,
+    published: bool,
+) -> Result<Option<Box<Snapshot>>, String> {
+    let session = reader_snapshot_session(&mut reader.session, root, command, shared)?;
+    let catalog = session.catalog();
+    if published {
+        if reader.last_catalog.as_ref() == Some(&catalog) {
+            return Ok(None);
+        }
     }
-    let catalog = reader
-        .session
-        .as_ref()
-        .map_or(Value::Null, LiveSession::catalog);
-    reader.last_generation = command.generation;
-    reader.last_route.clone_from(&command.request.route);
-    reader.pending = None;
-    Some(Box::new(Snapshot {
-        generation: command.generation,
-        catalog,
-        selection: Value::Null,
-        pages: BTreeMap::new(),
-        apps: None,
-        detail: None,
-        history: None,
-        cpu_detail: None,
-        cpu_history: None,
-        resident_history: None,
-        app_attribution_history: None,
-        overview_app_histories: None,
-        histories_pending: false,
-        process_history: None,
-        rankings: None,
-        app_ranks: None,
-        app_parts: None,
-        read_ms: 0.0,
-    }))
+
+    let selection = reader_latest(session)?;
+    let snapshot = reader_snapshot_new(command.generation, catalog, selection);
+    reader_snapshot_record(reader, command, &snapshot, Histories::Read);
+    Ok(Some(snapshot))
 }
 
 fn reader_selection(

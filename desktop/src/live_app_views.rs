@@ -305,8 +305,8 @@ pub fn selected_detail<'a>(
 /// per-App source, and GPU time exists only for the seconds the app sampled while it ran.
 pub(crate) fn app_cards(app: Option<&Value>, selection: &Value) -> Vec<summary::Card> {
     let reading = |read: fn(&Value) -> String| app.map_or_else(|| "Unavailable".into(), read);
-    let card = |label, reading, note: &str, color| summary::Card {
-        label,
+    let card = |label: &str, reading, note: &str, color| summary::Card {
+        label: label.into(),
         reading,
         note: note.into(),
         color,

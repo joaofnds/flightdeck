@@ -31,32 +31,40 @@ struct CoreGroup {
 }
 
 /// The performance levels of `cpu_count` logical CPUs in index order, which is the slower level
-/// first. Empty when the levels are unknown or do not cover the CPUs exactly.
+/// first. One group of all the CPUs when the levels are unknown or do not cover the CPUs
+/// exactly, so the headings keep their row whatever the reading recorded.
 fn core_groups(
     cpu_count: usize,
     levels: Option<&[crate::live_inventory::PerformanceLevel; 2]>,
 ) -> Vec<CoreGroup> {
+    let Ok(all_cpus) = u8::try_from(cpu_count.min(COLUMNS_MAX)) else {
+        unreachable!("COLUMNS_MAX fits a u8");
+    };
+    let all = vec![CoreGroup {
+        title: format!("Logical CPUs · {cpu_count}"),
+        cpus: all_cpus,
+    }];
     let Some([fastest, slower]) = levels else {
-        return Vec::new();
+        return all;
     };
     let (Ok(fastest_cpus), Ok(slower_cpus)) = (
         u8::try_from(fastest.logical_cpus),
         u8::try_from(slower.logical_cpus),
     ) else {
-        return Vec::new();
+        return all;
     };
     let covered = usize::from(fastest_cpus) + usize::from(slower_cpus);
     if covered != cpu_count {
-        return Vec::new();
+        return all;
     }
 
     vec![
         CoreGroup {
-            title: slower.cores.clone(),
+            title: format!("{} · {slower_cpus}", slower.cores),
             cpus: slower_cpus,
         },
         CoreGroup {
-            title: fastest.cores.clone(),
+            title: format!("{} · {fastest_cpus}", fastest.cores),
             cpus: fastest_cpus,
         },
     ]
@@ -85,7 +93,7 @@ fn core_group_headings(groups: &[CoreGroup]) -> impl IntoElement {
                 .border_color(rgb(crate::charts::LINE))
                 .px(px(4.0))
                 .truncate()
-                .child(format!("{} · {}", group.title, group.cpus)),
+                .child(group.title.clone()),
         );
     }
     row
@@ -234,74 +242,102 @@ impl LiveDashboard {
                     .into(),
                 "ⓘ",
             ));
+        let levels = self.performance_levels();
         if self.reading_target_source().map(gpui::SharedString::as_ref) == Some("cpu-history-plot")
         {
             if self.cpu_inspection == Some(crate::live_cpu_history::CPUInspection::Gap) {
-                return cpu_activity_absent(panel, ACTIVITY_UNAVAILABLE);
+                return cpu_activity_absent(panel, ACTIVITY_UNAVAILABLE, levels.as_ref());
             }
         }
         let Some(activity) = self
             .reading_snapshot()
             .and_then(|snapshot| snapshot.cpu_detail.as_ref())
         else {
-            return cpu_activity_absent(panel, self.absent_reading(ACTIVITY_UNAVAILABLE));
+            let notice = self.absent_reading(ACTIVITY_UNAVAILABLE);
+            return cpu_activity_absent(panel, notice, levels.as_ref());
         };
         if activity.cpus.is_empty() {
-            return cpu_activity_absent(panel, ACTIVITY_UNAVAILABLE);
+            return cpu_activity_absent(panel, ACTIVITY_UNAVAILABLE, levels.as_ref());
         }
-        cpu_activity_bars(panel, &activity.cpus)
+        let groups = core_groups(activity.cpus.len(), levels.as_ref());
+        cpu_activity_bars(panel, &activity.cpus, &groups)
+    }
+
+    /// The performance levels the shown reading recorded, or none before a reading.
+    pub(crate) fn performance_levels(
+        &self,
+    ) -> Option<[crate::live_inventory::PerformanceLevel; 2]> {
+        let snapshot = self.reading_snapshot()?;
+        crate::live_inventory::performance_levels(&snapshot.selection["summary"])
     }
 }
 
 /// The bars of `cpus` under `panel`'s heading, in rows of at most `COLUMNS_MAX`, with the
-/// performance levels named above them.
-fn cpu_activity_bars(mut panel: gpui::Div, cpus: &[LogicalCPU]) -> gpui::Div {
+/// performance levels of `groups` named above them.
+fn cpu_activity_bars(mut panel: gpui::Div, cpus: &[LogicalCPU], groups: &[CoreGroup]) -> gpui::Div {
     assert!(!cpus.is_empty());
+    assert!(!groups.is_empty());
     let columns = cpus.len().min(COLUMNS_MAX);
-    let groups = core_groups(cpus.len(), crate::live_inventory::performance_levels());
-    if !groups.is_empty() {
-        panel = panel.child(core_group_headings(&groups));
-    }
+    panel = panel.child(core_group_headings(groups));
     for row in cpu_rows(cpus) {
         panel = panel.child(cpu_activity_row(row, columns));
     }
     panel
 }
 
-/// The panel with no reading of its CPUs: the bars of this Mac's CPUs, empty, with `notice` over
-/// them, so the panel keeps the size its readings give it. A Mac whose CPUs could not be counted
-/// shows the notice alone.
-fn cpu_activity_absent(panel: gpui::Div, notice: &'static str) -> gpui::Div {
-    let Some(cpus) = cpu_activity_absent_cpus() else {
-        return panel.child(div().debug_selector(move || notice.into()).child(notice));
+/// The panel with no reading of its CPUs: empty bars with `notice` over them, so the panel
+/// keeps the size its readings give it. The bars are the CPUs of `levels`, or before a reading
+/// one full row of them, which is the size the readings of a Mac of up to `COLUMNS_MAX` logical
+/// CPUs give the panel. The window reads no CPU count of its own.
+fn cpu_activity_absent(
+    panel: gpui::Div,
+    notice: &'static str,
+    levels: Option<&[crate::live_inventory::PerformanceLevel; 2]>,
+) -> gpui::Div {
+    let cpus = cpu_activity_absent_cpus(levels);
+    let groups = match levels {
+        Some(_) => core_groups(cpus.len(), levels),
+        None => vec![CoreGroup {
+            title: "Loading".into(),
+            cpus: 1,
+        }],
     };
 
-    cpu_activity_bars(panel.relative(), &cpus).child(
+    cpu_activity_bars(panel.relative(), &cpus, &groups).child(
         crate::live_chart_view::plot_notice(notice.into())
             .absolute()
             .inset_0(),
     )
 }
 
-/// This Mac's logical CPUs with no reading, from its performance levels, or none where they
-/// could not be read.
-fn cpu_activity_absent_cpus() -> Option<Vec<LogicalCPU>> {
-    let [fastest, slower] = crate::live_inventory::performance_levels()?;
-    let count = fastest.logical_cpus.checked_add(slower.logical_cpus)?;
-    let cpus: Vec<LogicalCPU> = (0..count)
-        .take(CPUS_MAX + 1)
+/// Empty readings of the logical CPUs of `levels`, or of one full row where the levels are
+/// unknown or count no CPUs or more than `CPUS_MAX`.
+fn cpu_activity_absent_cpus(
+    levels: Option<&[crate::live_inventory::PerformanceLevel; 2]>,
+) -> Vec<LogicalCPU> {
+    let Ok(row) = u32::try_from(COLUMNS_MAX) else {
+        unreachable!("COLUMNS_MAX fits a u32");
+    };
+    let Ok(cpus_max) = u32::try_from(CPUS_MAX) else {
+        unreachable!("CPUS_MAX fits a u32");
+    };
+    let mut count = row;
+    if let Some([fastest, slower]) = levels {
+        if let Some(recorded) = fastest.logical_cpus.checked_add(slower.logical_cpus) {
+            if 0 < recorded {
+                if recorded <= cpus_max {
+                    count = recorded;
+                }
+            }
+        }
+    }
+
+    (0..count)
         .map(|cpu| LogicalCPU {
             cpu,
             busy_percent: None,
         })
-        .collect();
-    if cpus.is_empty() {
-        return None;
-    }
-    if cpus.len() > CPUS_MAX {
-        return None;
-    }
-    Some(cpus)
+        .collect()
 }
 
 /// The prototype's bars: a 244 pixel plot of twenty segments per core, with each core's index
@@ -472,11 +508,11 @@ mod tests {
             groups,
             [
                 CoreGroup {
-                    title: "Performance cores".into(),
+                    title: "Performance cores · 12".into(),
                     cpus: 12
                 },
                 CoreGroup {
-                    title: "Super cores".into(),
+                    title: "Super cores · 6".into(),
                     cpus: 6
                 },
             ]
@@ -484,13 +520,36 @@ mod tests {
     }
 
     #[test]
-    fn cores_stay_ungrouped_when_the_levels_do_not_cover_them() {
-        // Goal: a count that disagrees with macOS never labels a core with the wrong type.
-        // Method: group 17 CPUs against 18 cores of levels, then group with no levels.
+    fn cores_share_one_heading_when_the_levels_do_not_cover_them() {
+        // Goal: a count that disagrees with the levels never labels a core with the wrong type,
+        // and the heading row stays, so a reading without levels moves nothing.
+        // Method: group 17 CPUs against 18 cores of levels, then 18 CPUs with no levels.
         let levels = [level("Super", 6), level("Performance", 12)];
 
-        assert!(core_groups(17, Some(&levels)).is_empty());
-        assert!(core_groups(18, None).is_empty());
+        let groups = [core_groups(17, Some(&levels)), core_groups(18, None)];
+
+        assert_eq!(
+            groups,
+            [17, 18].map(|count| vec![CoreGroup {
+                title: format!("Logical CPUs · {count}"),
+                cpus: count,
+            }])
+        );
+    }
+
+    #[test]
+    fn an_absent_reading_draws_one_full_row_before_the_levels_are_known() {
+        // Goal: before a reading the panel takes the size of one full row, from no fact about
+        // the Mac, and with a reading it takes the size of the CPUs the reading recorded.
+        // Method: count the empty bars with no levels, with 18, and with levels counting none.
+        let levels = [level("Super", 6), level("Performance", 12)];
+        let large = [level("Super", 16), level("Performance", 16)];
+        let empty = [level("Super", 0), level("Performance", 0)];
+
+        let counts = [None, Some(&levels), Some(&large), Some(&empty)]
+            .map(|levels| cpu_activity_absent_cpus(levels).len());
+
+        assert_eq!(counts, [COLUMNS_MAX, 18, 32, COLUMNS_MAX]);
     }
 
     #[test]

@@ -310,7 +310,7 @@ impl LiveDashboard {
                     .debug_selector(|| format!("summary-label:{}", card.label))
                     .text_size(px(12.0))
                     .text_color(rgb(MUTED))
-                    .child(card.label),
+                    .child(card.label.clone()),
             )
             .child(
                 div()

@@ -3,7 +3,7 @@ use serde_json::Value;
 use crate::charts::{BLUE, GREEN, MUTED, ORANGE, PURPLE, RED, TEXT, YELLOW};
 
 pub struct Card {
-    pub label: &'static str,
+    pub label: String,
     pub reading: String,
     pub note: String,
     pub color: u32,
@@ -249,12 +249,13 @@ fn cards_definitions(route: &str) -> &'static [Specification] {
 }
 
 fn card(summary: &Value, definition: &Specification) -> Card {
-    let (mut label, source, note, color) = *definition;
+    let (label, source, note, color) = *definition;
+    let mut label = label.to_owned();
     let mut color = color;
     let mut note = note.to_owned();
     let reading = match source {
         Reading::AllCores => {
-            if let Some(levels) = crate::live_inventory::performance_levels() {
+            if let Some(levels) = crate::live_inventory::performance_levels(summary) {
                 let cores = levels[0].logical_cpus + levels[1].logical_cpus;
                 note = format!("All {cores} cores");
             }
@@ -278,10 +279,10 @@ fn card(summary: &Value, definition: &Specification) -> Card {
             };
             crate::live_projection::quantity(&summary["battery"], "health_percent", "%", 1.0)
         }
-        Reading::Level(index) => match crate::live_inventory::performance_levels() {
+        Reading::Level(index) => match crate::live_inventory::performance_levels(summary) {
             Some(levels) => {
                 let level = &levels[index];
-                label = level.cores.as_str();
+                label.clone_from(&level.cores);
                 note = format!("{} cores · cluster capacity", level.logical_cpus);
                 card_level(summary, index)
             }

@@ -24,7 +24,7 @@ const SIDE_BY_SIDE_WIDTH: f32 = 1000.0;
 /// One resource's share in use, in percent, or none where it was not measured.
 #[derive(Debug, PartialEq)]
 pub(crate) struct Utilization {
-    pub name: &'static str,
+    pub name: String,
     pub percent: Option<f64>,
 }
 
@@ -70,25 +70,29 @@ impl LiveDashboard {
 
 /// The share in use of each resource the prototype lists, slower core level first.
 pub(crate) fn utilizations(summary: &Value) -> Vec<Utilization> {
-    let levels = crate::live_inventory::performance_levels();
+    let levels = crate::live_inventory::performance_levels(summary);
     let level = |index: usize, fallback: &'static str| Utilization {
-        name: levels.map_or(fallback, |levels| levels[index].cores.as_str()),
-        percent: levels.and_then(|_| summary["cpu_level_percent"][index].as_f64()),
+        name: levels
+            .as_ref()
+            .map_or(fallback.into(), |levels| levels[index].cores.clone()),
+        percent: levels
+            .as_ref()
+            .and_then(|_| summary["cpu_level_percent"][index].as_f64()),
     };
     let memory = super::summary::memory_in_use_bytes(summary);
     vec![
         level(1, "Core level 1"),
         level(0, "Core level 0"),
         Utilization {
-            name: "GPU",
+            name: "GPU".into(),
             percent: summary["gpu_active_percent"].as_f64(),
         },
         Utilization {
-            name: "Memory",
+            name: "Memory".into(),
             percent: utilizations_share(memory, summary["memory_total_bytes"].as_u64()),
         },
         Utilization {
-            name: "Swap",
+            name: "Swap".into(),
             percent: utilizations_share(
                 summary["swap_used_bytes"].as_u64(),
                 summary["swap_total_bytes"].as_u64(),
@@ -162,7 +166,12 @@ fn utilization_row(utilization: &Utilization, absent: &str) -> gpui::Div {
         .gap(px(8.0))
         .min_h(px(32.0))
         .text_size(px(12.0))
-        .child(div().w(px(128.0)).flex_shrink_0().child(utilization.name))
+        .child(
+            div()
+                .w(px(128.0))
+                .flex_shrink_0()
+                .child(utilization.name.clone()),
+        )
         .child(utilization_track(utilization.percent))
         .child(
             div()

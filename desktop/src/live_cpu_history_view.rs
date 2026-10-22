@@ -92,6 +92,7 @@ impl LiveDashboard {
             .child(cpu_history_rows(
                 history,
                 self.cpu_history_inspection(history),
+                self.performance_levels().as_ref(),
             ))
             .child(self.cpu_history_cells(history, cx))
             .child(
@@ -553,7 +554,11 @@ fn cell_second(time: TimeWindow, bounds: Bounds<gpui::Pixels>, x: gpui::Pixels) 
 }
 
 /// The row labels, each as tall as its row of cells.
-fn cpu_history_rows(history: &CPUHistory, inspection: Option<CPUInspection>) -> impl IntoElement {
+fn cpu_history_rows(
+    history: &CPUHistory,
+    inspection: Option<CPUInspection>,
+    levels: Option<&[crate::live_inventory::PerformanceLevel; 2]>,
+) -> impl IntoElement {
     let row_height = row_height(history);
     let mut labels = div()
         .absolute()
@@ -591,7 +596,7 @@ fn cpu_history_rows(history: &CPUHistory, inspection: Option<CPUInspection>) -> 
                 .aria_value(value)
                 .h(px(row_height))
                 .line_height(px(row_height))
-                .child(crate::live_inventory::logical_cpu_name(cpu.cpu())),
+                .child(crate::live_inventory::logical_cpu_name(levels, cpu.cpu())),
         );
     }
 

@@ -880,9 +880,13 @@ fn cpu_frequency_charts_each_level_where_measured() {
     // Goal: the CPU active frequency chart draws each core level's clock from its own channel,
     // and an interval with no clock reading stays a gap.
     // Method: measure the middle point of three, the slower level at 2.2 GHz and the faster
-    // at 4.1 GHz, and project the CPU page of this Mac.
+    // at 4.1 GHz, with the levels the newest point recorded, and project the CPU page.
     let mut selection = selection();
     selection["trends"][1]["cpu_level_ghz"] = json!([4.1, 2.2]);
+    selection["trends"][2]["performance_levels"] = json!([
+        {"name": "Super", "logical_cpus": 6},
+        {"name": "Performance", "logical_cpus": 12},
+    ]);
 
     let panels = panels("cpu", &selection, None).unwrap();
 
@@ -890,6 +894,12 @@ fn cpu_frequency_charts_each_level_where_measured() {
         .iter()
         .find(|panel| panel.id == FREQUENCY_ID)
         .unwrap();
+    let names: Vec<_> = frequency
+        .lines
+        .iter()
+        .map(|line| line.name.as_str())
+        .collect();
+    assert_eq!(names, ["performance cores", "super cores"]);
     let values: Vec<_> = frequency.lines.iter().map(|line| &line.values).collect();
     assert_eq!(values, [&[None, Some(2.2), None], &[None, Some(4.1), None]]);
     assert_eq!(quantity_text(2.2, "GHz"), "2.2 GHz");

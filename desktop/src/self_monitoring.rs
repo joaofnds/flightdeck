@@ -242,7 +242,7 @@ const NOT_OWNED: &str = "Collector not started by this app";
 
 fn card(label: &'static str, reading: String, note: String) -> Card {
     Card {
-        label,
+        label: label.into(),
         reading,
         note,
         color: TEXT,
