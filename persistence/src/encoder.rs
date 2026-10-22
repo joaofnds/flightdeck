@@ -44,7 +44,7 @@ impl Encoder {
 
         let mut tables = Vec::with_capacity(TABLES.len());
         for (table, _columns, order) in TABLES {
-            let mut frame = frame(table, window)?.sort(
+            let mut frame = frame_in_file_order(table, window)?.sort(
                 order.split(", "),
                 SortMultipleOptions {
                     descending: vec![false],
@@ -181,6 +181,22 @@ pub fn frame(table: Table, window: &Window) -> Result<DataFrame> {
         Table::Processes => crate::identity_encoder::processes(window),
         Table::Coalitions => machine::coalitions(window),
         Table::Events => crate::identity_encoder::events(window),
+    }
+}
+
+/// The table's frame, with the processes and events already in the order their files keep, so
+/// the sort before writing finds them sorted.
+fn frame_in_file_order(table: Table, window: &Window) -> Result<DataFrame> {
+    match table {
+        Table::Processes => {
+            bounds::frame(table, window)?;
+            crate::identity_encoder::processes_in_file_order(window)
+        }
+        Table::Events => {
+            bounds::frame(table, window)?;
+            crate::identity_encoder::events_in_file_order(window)
+        }
+        _ => frame(table, window),
     }
 }
 

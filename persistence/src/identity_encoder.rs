@@ -21,12 +21,31 @@ struct EventRow<'window> {
 }
 
 pub(crate) fn processes(window: &Window) -> Result<DataFrame> {
-    let rows = processes_rows(window);
+    processes_frame(window, &processes_rows(window))
+}
+
+/// The processes frame in the order its file keeps, by pid, start and publication, which an
+/// integer sort of the rows reaches sooner than a sort of the frame's columns.
+pub(crate) fn processes_in_file_order(window: &Window) -> Result<DataFrame> {
+    let mut rows = processes_rows(window);
+    rows.sort_by_key(|row| {
+        let awake = row.process.map(|value| value.usage.awake_ns_at_start);
+        (
+            row.pid,
+            awake.is_none(),
+            awake,
+            row.tick.observation.publication,
+        )
+    });
+    processes_frame(window, &rows)
+}
+
+fn processes_frame(window: &Window, rows: &[ProcessRow<'_>]) -> Result<DataFrame> {
     let mut columns = columns!(rows;
         "publication" => |row| row.tick.observation.publication,
         "pid" => |row| row.pid,
     );
-    columns.extend(usage_columns(&rows, |row| {
+    columns.extend(usage_columns(rows, |row| {
         row.process.map(|value| &value.usage)
     }));
     columns.extend(columns!(rows;
@@ -37,7 +56,7 @@ pub(crate) fn processes(window: &Window) -> Result<DataFrame> {
         "unix_syscalls" => |row| row.process.map(|value| value.task.unix_syscalls),
     ));
     if let Some(programs) = window.programs.as_deref() {
-        columns.extend(identity_columns(&rows, programs, |row| row.identity));
+        columns.extend(identity_columns(rows, programs, |row| row.identity));
         if window.system_captured() {
             columns.extend(columns!(rows; "gpu_ns" => |row| row.gpu_ns));
         }
@@ -102,7 +121,24 @@ fn processes_rows(window: &Window) -> Vec<ProcessRow<'_>> {
 }
 
 pub(crate) fn events(window: &Window) -> Result<DataFrame> {
-    let rows = events_rows(window);
+    events_frame(window, &events_rows(window))
+}
+
+/// The events frame in the order its file keeps, by pid, start and event.
+pub(crate) fn events_in_file_order(window: &Window) -> Result<DataFrame> {
+    let mut rows = events_rows(window);
+    rows.sort_by_key(|row| {
+        let awake = row
+            .event
+            .usage
+            .as_ref()
+            .map(|value| value.awake_ns_at_start);
+        (row.event.pid, awake.is_none(), awake, row.event.number)
+    });
+    events_frame(window, &rows)
+}
+
+fn events_frame(window: &Window, rows: &[EventRow<'_>]) -> Result<DataFrame> {
     let mut columns = columns!(rows;
         "publication" => |row| row.tick.observation.publication,
         "event" => |row| row.event.number,
@@ -113,9 +149,9 @@ pub(crate) fn events(window: &Window) -> Result<DataFrame> {
         "availability" => |row| row.event.availability,
         "noticed" => |row| row.event.noticed,
     );
-    columns.extend(usage_columns(&rows, |row| row.event.usage.as_ref()));
+    columns.extend(usage_columns(rows, |row| row.event.usage.as_ref()));
     if let Some(programs) = window.programs.as_deref() {
-        columns.extend(identity_columns(&rows, programs, |row| row.identity));
+        columns.extend(identity_columns(rows, programs, |row| row.identity));
     }
 
     Ok(DataFrame::new(rows.len(), columns)?)
