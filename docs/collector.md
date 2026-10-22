@@ -327,9 +327,13 @@ Run side by side on 2026-10-22 for ten minutes, each build on its own scratch ri
 recording, the persister spent 1.93 s of CPU against 1.95 s for the 2026-10-19 build, which
 derived nothing, about 0.32% of a core each over 11 seals (Overhead in
 [headless-collector-research.md](headless-collector-research.md) measured that build at 0.33%).
-It kept 205 to 214 MB resident against 89 MB. The 1.65% above came from a build that re-read
-the written tables, as did 0.53 to 0.55% measured once the load average passed 10, when the
-2026-10-19 build spent 1.0 to 1.9%.
+It kept 205 to 214 MB resident against 89 MB, which overstates its memory, since resident size
+also counts the pages the allocator keeps after a seal and hands back when macOS asks. On a
+scratch collector on 2026-10-23, the persister's physical footprint, what macOS charges it for
+memory, stood at 27 to 29 MB at each minute report between seals and reached 146 MB while
+sealing, since a seal builds the whole window's tables at once. The 1.65% above came from a
+build that re-read the written tables, as did 0.53 to 0.55% measured once the load average
+passed 10, when the 2026-10-19 build spent 1.0 to 1.9%.
 
 ## Limits
 
