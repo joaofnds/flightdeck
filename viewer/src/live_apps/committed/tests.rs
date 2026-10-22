@@ -345,17 +345,17 @@ macro_rules! chunk_boundary {
 
 chunk_boundary!(
     packs_a_normal_group_one_byte_below_the_logical_target,
-    3_515_985,
+    3_483_969,
     2
 );
 chunk_boundary!(
     packs_a_normal_group_exactly_at_the_logical_target,
-    3_515_986,
+    3_483_970,
     2
 );
 chunk_boundary!(
     splits_a_normal_group_one_byte_above_the_logical_target,
-    3_515_987,
+    3_483_971,
     1
 );
 
@@ -363,9 +363,9 @@ chunk_boundary!(
 fn ties_the_logical_row_charge_to_the_selected_columns_and_extra_row_reserve() {
     // Goal: changing the numeric projection cannot silently loosen its logical accounting.
     // Method: count the shared SELECT fields plus publication and verify the sentinel formula.
-    assert_eq!(PROCESS_COLUMNS.split(',').count() + 6, BATCH_COLUMNS);
-    assert_eq!(ROW_LOGICAL_BYTES, 432);
-    assert_eq!(SENTINEL_LOGICAL_BYTES, 8_622);
+    assert_eq!(PROCESS_COLUMNS.split(',').count() + 7, BATCH_COLUMNS);
+    assert_eq!(ROW_LOGICAL_BYTES, 448);
+    assert_eq!(SENTINEL_LOGICAL_BYTES, 8_638);
     assert_eq!(BATCH_LOGICAL_BYTES_MAX, 8_388_608);
 }
 

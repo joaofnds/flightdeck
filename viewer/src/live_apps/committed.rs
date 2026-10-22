@@ -91,7 +91,7 @@ impl BatchRows {
 }
 
 pub(crate) const ENDPOINTS_MAX: usize = 61;
-const BATCH_COLUMNS: usize = 27;
+const BATCH_COLUMNS: usize = 28;
 const ROW_LOGICAL_BYTES: usize = BATCH_COLUMNS * size_of::<Option<u64>>();
 const SENTINEL_LOGICAL_BYTES: usize =
     ROW_LOGICAL_BYTES + 2 * collector::ring::PROGRAM_PATH_BYTES_MAX;
