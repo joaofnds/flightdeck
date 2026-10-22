@@ -19,6 +19,7 @@ pub struct Executable {
     pub disk_read_bytes: Subtotal,
     pub disk_written_bytes: Subtotal,
     pub disk_io_bytes: Subtotal,
+    pub gpu_ns: Subtotal,
     pub idle_wakeups: Subtotal,
     pub pageins: Subtotal,
     pub threads: Subtotal,
@@ -88,6 +89,7 @@ pub fn groups(detail: Option<&Value>) -> Result<Vec<Executable>, String> {
             disk_read_bytes: Subtotal::default(),
             disk_written_bytes: Subtotal::default(),
             disk_io_bytes: Subtotal::default(),
+            gpu_ns: Subtotal::default(),
             idle_wakeups: Subtotal::default(),
             pageins: Subtotal::default(),
             threads: Subtotal::default(),
@@ -167,6 +169,12 @@ impl Executable {
             })
         });
         let threads = self.threads.value().and_then(|value| value.to_f64());
+        let gpu = self.gpu_ns.value().and_then(|gpu_ns| {
+            viewer::apps::gpu_percent(viewer::apps::GpuRate {
+                gpu_ns,
+                elapsed_ns: self.elapsed_ns?,
+            })
+        });
         [
             partial(&self.cpu_ns, fixed(self.cpu_percent(), 1, "%")),
             partial(
@@ -179,7 +187,7 @@ impl Executable {
             ),
             NOT_CAPTURED.into(),
             self.disk_rate(),
-            NOT_CAPTURED.into(),
+            partial(&self.gpu_ns, fixed(gpu, 1, "%")),
             partial(&self.energy_nj, fixed(power, 2, " W")),
             partial(&self.idle_wakeups, fixed(wakeups, 1, "")),
             partial(&self.threads, fixed(threads, 0, "")),
@@ -205,7 +213,7 @@ impl Executable {
             "footprint_bytes":self.footprint_bytes.json(),
             "disk_read_bytes":self.disk_read_bytes.json(),
             "disk_written_bytes":self.disk_written_bytes.json(),
-            "disk_io_bytes":self.disk_io_bytes.json(),
+            "disk_io_bytes":self.disk_io_bytes.json(), "gpu_ns":self.gpu_ns.json(),
             "idle_wakeups":self.idle_wakeups.json(), "pageins":self.pageins.json(),
             "threads":self.threads.json()})
     }
@@ -430,6 +438,7 @@ fn groups_add(group: &mut Executable, process: &Value) -> Result<(), String> {
             .disk_written_bytes
             .add(amount(&process["disk_written_bytes"])?);
         group.disk_io_bytes.add(amount(&process["disk_io_bytes"])?);
+        group.gpu_ns.add(amount(&process["gpu_ns"])?);
         group.idle_wakeups.add(amount(&process["idle_wakeups"])?);
         group.pageins.add(amount(&process["pageins"])?);
     } else {
@@ -438,6 +447,7 @@ fn groups_add(group: &mut Executable, process: &Value) -> Result<(), String> {
         group.disk_read_bytes.add(None);
         group.disk_written_bytes.add(None);
         group.disk_io_bytes.add(None);
+        group.gpu_ns.add(None);
         group.idle_wakeups.add(None);
         group.pageins.add(None);
     }
@@ -588,7 +598,58 @@ mod tests {
             "disk_io_bytes":{"known":null,"unavailable":"interval"},
             "idle_wakeups":{"known":"6","unavailable":null},
             "pageins":{"known":"4","unavailable":null},
-            "threads":{"known":"8","unavailable":null}})
+            "threads":{"known":"8","unavailable":null},
+            "gpu_ns":{"known":null,"unavailable":"unknown"}})
+    }
+
+    /// The GPU time cell of the first group.
+    fn gpu_cell(groups: &[Executable]) -> String {
+        let column = COLUMNS
+            .iter()
+            .position(|column| *column == "GPU time")
+            .unwrap();
+
+        groups[0].metrics()[column].clone()
+    }
+
+    #[test]
+    fn shows_the_gpu_time_its_processes_used_and_marks_the_ones_without() {
+        // Goal: the recording's GPU time of each process reaches its group, and a process the
+        // driver lists no GPU client for leaves the group's GPU time partial. Method: group a
+        // process that used a quarter second of GPU time in one second beside one without.
+        let mut client = process("61");
+        client["gpu_ns"] = json!({"known":"250000000","unavailable":null});
+        let detail = json!({"processes":[client,process("61")],"elapsed_ns":"1000000000"});
+
+        let groups = groups(Some(&detail)).unwrap();
+
+        assert_eq!(gpu_cell(&groups), "25.0% *");
+    }
+
+    #[test]
+    fn shows_no_gpu_time_for_a_group_without_a_gpu_client() {
+        // Goal: a group none of whose processes has a GPU time reads as missing, never as 0%.
+        // Method: group two processes the driver lists no GPU client for.
+        let detail = json!({"processes":[process("61"),process("61")],"elapsed_ns":"1000000000"});
+
+        let groups = groups(Some(&detail)).unwrap();
+
+        assert_eq!(gpu_cell(&groups), "— *");
+    }
+
+    #[test]
+    fn excludes_gpu_time_crossing_an_exec_boundary() {
+        // Goal: an exec boundary cannot give the whole interval's GPU time to its final
+        // executable. Method: group one GPU client and one exec-crossing GPU client.
+        let mut ordinary = process("61");
+        ordinary["gpu_ns"] = json!({"known":"250000000","unavailable":null});
+        let mut crossing = ordinary.clone();
+        crossing["app_attribution"] = json!("exec");
+        let detail = json!({"processes":[ordinary,crossing],"elapsed_ns":"1000000000"});
+
+        let groups = groups(Some(&detail)).unwrap();
+
+        assert_eq!(gpu_cell(&groups), "25.0% *");
     }
 
     macro_rules! missing_captured_amount {
@@ -625,6 +686,8 @@ mod tests {
     null_captured_amount!(rejects_null_wakeups_amount, "idle_wakeups");
     null_captured_amount!(rejects_null_pageins_amount, "pageins");
     null_captured_amount!(rejects_null_threads_amount, "threads");
+    missing_captured_amount!(rejects_missing_gpu_amount, "gpu_ns");
+    null_captured_amount!(rejects_null_gpu_amount, "gpu_ns");
 
     #[test]
     fn keeps_exact_known_subtotals_beside_unavailable_members() {

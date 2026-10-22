@@ -755,6 +755,7 @@ fn process(name: &str, bytes: &str, pid: u32) -> Value {
         "disk_io_bytes":{"known":null,"unavailable":"interval"},
         "idle_wakeups":{"known":"6","unavailable":null},
         "pageins":{"known":"4","unavailable":null},"threads":{"known":"8","unavailable":null},
+        "gpu_ns":{"known":null,"unavailable":"unknown"},
         "idle_wakeups_per_second":6.0,"pageins_per_second":4.0,
         "disk_read_bps":null,"disk_written_bps":null,"disk_io_bps":null})
 }
