@@ -361,16 +361,7 @@ impl LiveSession {
                 .ok_or(Error::Bound("selected context point"))?
                 .clone();
         }
-        let mut context = Vec::new();
-        crate::cpu_history::context(
-            response["trends"]
-                .as_array()
-                .ok_or(Error::Bound("CPU selected context"))?,
-            ContextRange::ending_at(selection.context_last_second())?,
-            &mut context,
-        )?;
-        self.selected_context = context;
-        self.context_last_second = Some(selection.context_last_second());
+        self.select_cpu_context(selection, &response)?;
 
         Ok(response)
     }
@@ -1635,6 +1626,22 @@ impl LiveSession {
         metrics::context_segments(points)?;
 
         context_bytes(points)
+    }
+
+    /// Builds the CPU history context of the selected second from the trends of `response`.
+    fn select_cpu_context(&mut self, selection: ContextSelection, response: &Value) -> Result<()> {
+        let mut context = Vec::new();
+        crate::cpu_history::context(
+            response["trends"]
+                .as_array()
+                .ok_or(Error::Bound("CPU selected context"))?,
+            ContextRange::ending_at(selection.context_last_second())?,
+            &mut context,
+        )?;
+        self.selected_context = context;
+        self.context_last_second = Some(selection.context_last_second());
+
+        Ok(())
     }
 
     fn select_observation(
