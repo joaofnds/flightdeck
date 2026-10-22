@@ -483,11 +483,13 @@ fn a_request_to_a_resting_reader_lets_its_step_finish() {
 #[test]
 fn a_request_to_a_reading_reader_cancels_its_read() {
     // Goal: a page the window no longer wants stops being read as soon as another is asked for.
-    // Method: let the resting reader take a request, then send another and compare the epoch.
+    // Method: let the resting reader take a request and step again with no other waiting, as it
+    // does while it reads the page, then send another request and compare the epoch.
     let mut reader = SnapshotReader::new();
     let mut kept = reader.hand_over();
     reader.receive();
     kept.request(SealedRecording::request()).unwrap();
+    reader.receive();
     reader.receive();
     let epoch = reader.shared.cancellation.epoch();
 
