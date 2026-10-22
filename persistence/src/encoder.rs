@@ -99,8 +99,12 @@ fn encode_open(path: &Path) -> Result<std::fs::File> {
     }
 }
 
+/// The rows of a row group, which the last row group of a table may fall short of.
+const ROW_GROUP_ROWS: usize = 16_384;
+/// What a data page holds before the writer starts the next.
+const DATA_PAGE_BYTES: u64 = 1024 * 1024;
 /// What a table's bytes gather in before they reach its file, the size of a data page.
-pub const WRITE_BUFFER_BYTES: u64 = 1024 * 1024;
+pub const WRITE_BUFFER_BYTES: u64 = DATA_PAGE_BYTES;
 
 fn encode_write(frame: &mut DataFrame, file: impl std::io::Write) -> Result<()> {
     frame.rechunk_mut();
@@ -130,14 +134,15 @@ fn encode_write(frame: &mut DataFrame, file: impl std::io::Write) -> Result<()> 
         },
         version: Version::V1,
         compression: CompressionOptions::Zstd(Some(ZstdLevel::try_new(3)?)),
-        data_page_size: Some(1024 * 1024),
+        data_page_size: Some(
+            usize::try_from(DATA_PAGE_BYTES).map_err(|_| Error::Bound("data page size"))?,
+        ),
     };
     let mut writer = FileWriter::try_new(buffer, schema, options)?;
     let fields = writer.parquet_schema().fields().to_vec();
-    // Each slice of the rechunked frame is one batch, so each row group holds at most 16,384
-    // rows.
-    for offset in (0..frame.height()).step_by(16_384) {
-        let length = (frame.height() - offset).min(16_384);
+    // Each slice of the rechunked frame is one batch, which the writer makes one row group.
+    for offset in (0..frame.height()).step_by(ROW_GROUP_ROWS) {
+        let length = (frame.height() - offset).min(ROW_GROUP_ROWS);
         let offset = i64::try_from(offset).map_err(|_| Error::Bound("parquet row offset"))?;
         for batch in frame
             .slice(offset, length)

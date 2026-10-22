@@ -4,7 +4,7 @@ use polars::prelude::{Column, DataFrame};
 use polars_parquet::parquet::read::read_metadata;
 use polars_parquet::read::RowGroupMetadata;
 
-use super::{WRITE_BUFFER_BYTES, encode_write};
+use super::{ROW_GROUP_ROWS, WRITE_BUFFER_BYTES, encode_write};
 
 /// A file that counts the writes it is handed and the bytes in them.
 struct CountingFile {
@@ -65,6 +65,28 @@ fn hands_a_table_smaller_than_its_buffer_to_the_file_in_one_write() {
 
     assert!(file.bytes < WRITE_BUFFER_BYTES);
     assert_eq!(1, file.writes);
+}
+
+#[test]
+fn writes_a_row_group_for_each_slice_of_its_rows() {
+    // Goal: a table's rows split into row groups of a fixed count, the last one shorter, so a
+    // reader skips the groups a query rules out. Method: write a table of 40,000 rows and read
+    // the row counts of its row groups from the file's metadata.
+    let mut frame = three_row_groups();
+    let mut file = Cursor::new(Vec::new());
+
+    encode_write(&mut frame, &mut file).unwrap();
+
+    let metadata = read_metadata(&mut file).unwrap();
+    let groups: Vec<usize> = metadata
+        .row_groups
+        .iter()
+        .map(RowGroupMetadata::num_rows)
+        .collect();
+    assert_eq!(
+        groups,
+        [ROW_GROUP_ROWS, ROW_GROUP_ROWS, 40_000 - 2 * ROW_GROUP_ROWS]
+    );
 }
 
 #[test]
