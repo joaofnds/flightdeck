@@ -182,6 +182,11 @@ fn open_window(opening: Opening, cx: &mut App) -> Result<(), String> {
     cx.open_window(window, move |window, cx| {
         let dashboard = create_dashboard(worker, start, cx);
         background::keep_reader(&dashboard, cx);
+        // The window under the control socket stands in for a shown window and is never on the
+        // screen, so it reads its page whatever macOS reports.
+        if control.is_none() {
+            crate::live_dashboard::observe_visibility(&dashboard, window, cx);
+        }
         install_control(control, &dashboard, window, cx);
         dashboard
     })

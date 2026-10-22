@@ -32,6 +32,21 @@ pub const NAVIGATION: [&[&str]; 3] = [
     &["computer", "self"],
 ];
 
+/// Tells the dashboard whether macOS presents its window, which its next tick acts on.
+pub(crate) fn observe_visibility(
+    dashboard: &gpui::Entity<LiveDashboard>,
+    window: &mut Window,
+    cx: &mut gpui::App,
+) {
+    dashboard.update(cx, |_, cx| {
+        cx.observe_window_visibility(window, |dashboard, visibility, _, cx| {
+            dashboard.presence = dashboard.presence.reported(visibility.is_visible());
+            cx.notify();
+        })
+        .detach();
+    });
+}
+
 /// A picker on the Apps page whose choices show below it. One shows at a time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Picker {
@@ -61,6 +76,7 @@ pub struct LiveDashboard {
     pub generation: u64,
     /// The worker has not yet answered the last request, so the app polls it quickly.
     reply_pending: bool,
+    presence: Presence,
     pub error: Option<String>,
     pub rows: Vec<Row>,
     pub expanded: Option<(String, usize)>,
@@ -116,6 +132,39 @@ pub struct LiveDashboard {
     pub(crate) range: crate::time_range::Range,
     /// The selection a drag across a chart is making.
     pub(crate) drag: Option<Drag>,
+}
+
+/// Whether macOS presents the window, and whether its reader has caught up with that, since the
+/// reader rests while the window is hidden and reads no page nobody sees.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Presence {
+    /// Shown, and the reader reads the page.
+    Shown,
+    /// Hidden, and the reader still reads the page until the next tick rests it.
+    Hiding,
+    /// Hidden, and the reader rests.
+    Hidden,
+    /// Shown again, and the reader rests until the next tick asks it for the page.
+    Showing,
+}
+
+impl Presence {
+    /// The presence once macOS reports whether it presents the window.
+    fn reported(self, visible: bool) -> Self {
+        if visible {
+            match self {
+                Presence::Hiding => Presence::Shown,
+                Presence::Hidden => Presence::Showing,
+                Presence::Shown | Presence::Showing => self,
+            }
+        } else {
+            match self {
+                Presence::Shown => Presence::Hiding,
+                Presence::Showing => Presence::Hidden,
+                Presence::Hiding | Presence::Hidden => self,
+            }
+        }
+    }
 }
 
 /// A drag across one chart: the seconds under the pointer when it went down and where it is now.
@@ -204,6 +253,7 @@ impl LiveDashboard {
             panels: Vec::with_capacity(8),
             generation: 0,
             reply_pending: false,
+            presence: Presence::Shown,
             error: None,
             rows: Vec::with_capacity(4096),
             expanded: None,
@@ -275,6 +325,18 @@ impl LiveDashboard {
 
     pub fn tick(&mut self, cx: &mut Context<Self>) {
         self.native_tick(cx);
+        match self.presence {
+            Presence::Hiding => {
+                self.end_reading_preview(cx);
+                self.tick_hidden();
+                self.presence = Presence::Hidden;
+            }
+            Presence::Showing => {
+                self.tick_shown();
+                self.presence = Presence::Shown;
+            }
+            Presence::Shown | Presence::Hidden => {}
+        }
         match self.worker.take() {
             Ok(Some(update)) => {
                 if self.take_update(update) {
@@ -325,6 +387,27 @@ impl LiveDashboard {
                 );
                 cx.quit();
             }
+        }
+    }
+
+    /// Rests the reader of a window macOS hides, as a closed window's reader rests. A reader of
+    /// a recording opened read-only reads nothing once its page is read, so it is left alone.
+    fn tick_hidden(&mut self) {
+        match self.worker.hand_over() {
+            Ok(Some(resting)) => {
+                self.worker = resting;
+                self.reply_pending = false;
+            }
+            Ok(None) => {}
+            Err(error) => self.error = Some(error),
+        }
+    }
+
+    /// Asks the rested reader for the page again, which it reads as newly opened, readings
+    /// first.
+    fn tick_shown(&mut self) {
+        if self.worker.mode() == crate::live_source_mode::SourceMode::Live {
+            self.request_reading();
         }
     }
 
@@ -458,6 +541,13 @@ impl LiveDashboard {
     /// or the App histories the page's first readings left pending, which it reads at once.
     pub(crate) fn awaiting_reply(&self) -> bool {
         if self.reply_pending {
+            return true;
+        }
+
+        // A window hidden or shown again rests its reader or asks for its page at the next
+        // tick, which the quick poll brings within a frame rather than at the quarter-second
+        // tick.
+        if matches!(self.presence, Presence::Hiding | Presence::Showing) {
             return true;
         }
 
