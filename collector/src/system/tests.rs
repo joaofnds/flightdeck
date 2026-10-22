@@ -133,7 +133,7 @@ fn read_boot_wall_ns_refuses_seconds_past_what_nanoseconds_hold() {
 /// The tests whose subject is what this Mac gives, which only an Apple silicon Mac runs. CI's
 /// virtual Mac has no power manager, no Apple GPU driver and one core cluster, so its check
 /// skips this module.
-mod hardware {
+mod this_mac {
     use super::*;
 
     #[test]

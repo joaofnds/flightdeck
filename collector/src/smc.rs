@@ -1333,7 +1333,7 @@ mod tests {
 
     /// The tests whose subject is what this Mac's SMC gives, which only a Mac with an SMC runs.
     /// CI's virtual Mac has none, so its check skips this module.
-    mod hardware {
+    mod this_mac {
         use super::*;
 
         fn connection() -> Controller {

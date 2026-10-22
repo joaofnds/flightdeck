@@ -782,7 +782,7 @@ mod tests {
     /// The tests whose subject is what this Mac's chip is, which only an Apple silicon Mac runs.
     /// CI's virtual Mac has one core cluster and no Apple GPU driver, so its check skips this
     /// module.
-    mod hardware {
+    mod this_mac {
         use super::*;
 
         #[test]

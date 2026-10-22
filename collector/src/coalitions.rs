@@ -486,7 +486,7 @@ mod tests {
 
     /// The tests whose subject is the energy this Mac counts, which only an Apple silicon Mac
     /// runs. CI's virtual Mac counts none, so its check skips this module.
-    mod hardware {
+    mod this_mac {
         use super::*;
 
         #[test]

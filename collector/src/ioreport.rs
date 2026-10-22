@@ -1587,7 +1587,7 @@ mod tests {
 
     /// The tests whose subject is what this Mac's `IOReport` gives, which only a Mac with these
     /// channels runs. CI's virtual Mac has none of them, so its check skips this module.
-    mod hardware {
+    mod this_mac {
         use std::time::{Duration, Instant};
 
         use super::*;

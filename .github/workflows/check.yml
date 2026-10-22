@@ -39,8 +39,8 @@ jobs:
       - run: cargo clippy --locked --workspace --all-targets -- --deny warnings
       # The runner is a virtual machine with no SMC, no IOReport channels, no power manager, no
       # Apple GPU driver, one core cluster and energy counters that read 0. The tests whose subject
-      # is what those give sit in a module named hardware beside the tests of the code that reads
-      # them, and run only on a Mac, so the check skips every test whose path holds ::hardware::. A
+      # is what those give sit in a module named this_mac beside the tests of the code that reads
+      # them, and run only on a Mac, so the check skips every test whose path holds ::this_mac::. A
       # test that needs a second user, which the runner's sudo gives without a password and a
       # contributor's machine does not, is ignored elsewhere, and --include-ignored runs it here
       # under whatever name it takes. It fails, rather than skips, where sudo asks for a password.
@@ -49,7 +49,7 @@ jobs:
       # --no-capture writes it to stderr as the collector does in production.
       - run: >-
           cargo test --locked --workspace --no-fail-fast -- --include-ignored --no-capture
-          --skip ::hardware::
+          --skip ::this_mac::
       # A lock file left in Application Support names a ring that stays in memory after its
       # writer exits, about 800 MB of address space, so whatever ran above removes both.
       - name: Refuse ring lock files left in Application Support

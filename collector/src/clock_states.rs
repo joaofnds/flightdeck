@@ -182,7 +182,7 @@ mod tests {
 
     /// The tests whose subject is what this Mac's power manager gives, which only an Apple silicon
     /// Mac runs. CI's virtual Mac has no power manager, so its check skips this module.
-    mod hardware {
+    mod this_mac {
         use super::*;
 
         #[test]

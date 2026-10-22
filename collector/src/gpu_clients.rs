@@ -128,7 +128,7 @@ mod tests {
 
     /// The tests whose subject is what this Mac's GPU driver gives, which only an Apple silicon
     /// Mac runs. CI's virtual Mac has no Apple GPU driver, so its check skips this module.
-    mod hardware {
+    mod this_mac {
         use super::*;
 
         #[test]
