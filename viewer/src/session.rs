@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -48,6 +48,8 @@ pub struct Session {
     pub(crate) parts_decodes: std::cell::Cell<u64>,
     #[cfg(test)]
     pub(crate) tick_queries: std::cell::Cell<u64>,
+    #[cfg(test)]
+    pub(crate) table_queries: std::cell::Cell<u64>,
     #[cfg(test)]
     pub(crate) kept_header_queries: std::cell::Cell<u64>,
     #[cfg(test)]
@@ -147,7 +149,7 @@ pub(crate) struct Observation {
 }
 
 impl Observation {
-    fn from_row(table: &Table, row: &[Option<String>], window: usize) -> Result<Self> {
+    pub(crate) fn from_row(table: &Table, row: &[Option<String>], window: usize) -> Result<Self> {
         let required = |name| {
             table
                 .integer(row, name)?
@@ -202,13 +204,7 @@ impl Session {
         persistence::query::validate_root(root)?;
         private::verify_directory(root)?;
         let recording = collector::recording::read_identity(root)?;
-        let mut earlier_markers = BTreeMap::new();
-        for manifest in &earlier.0 {
-            if manifest.identity.run.recording == recording {
-                let marker = layout::WindowKey::from(&manifest.identity).marker(root);
-                earlier_markers.insert(marker, manifest);
-            }
-        }
+        let earlier_markers = reopen_markers(root, recording, earlier);
         let mut windows = Vec::new();
         discover(root, recording, &mut windows, &operation)?;
         let verified = windows
@@ -247,6 +243,8 @@ impl Session {
             parts_decodes: std::cell::Cell::new(0),
             #[cfg(test)]
             tick_queries: std::cell::Cell::new(0),
+            #[cfg(test)]
+            table_queries: std::cell::Cell::new(0),
             #[cfg(test)]
             kept_header_queries: std::cell::Cell::new(0),
             #[cfg(test)]
@@ -431,10 +429,10 @@ impl Session {
                 .push(observation.clone());
         }
 
+        let mut tables = metrics::Tables::new();
         for batch in windows.values() {
             self.operation.check()?;
-            self.context_batch_windows(batch)?;
-            output.append(&mut metrics::trends(self, batch)?);
+            output.append(&mut metrics::trends(self, batch, &mut tables)?);
         }
 
         output.sort_by(|left, right| {
@@ -453,27 +451,6 @@ impl Session {
         });
 
         metrics::context_segments(output)
-    }
-
-    fn context_batch_windows(&self, observations: &[Observation]) -> Result<()> {
-        let mut windows = BTreeSet::new();
-        let publications = observations
-            .iter()
-            .map(|value| value.publication)
-            .collect::<BTreeSet<_>>();
-        for observation in observations {
-            windows.insert(observation.window);
-            if !publications.contains(&observation.publication.saturating_sub(1)) {
-                if let Some(previous) = self.predecessor(observation)? {
-                    windows.insert(previous.window);
-                }
-            }
-            if windows.len() > 2 {
-                return Err(Error::Bound("context batch windows"));
-            }
-        }
-
-        Ok(())
     }
 
     pub fn cpu_detail(&self) -> Result<Value> {
@@ -664,6 +641,8 @@ impl Session {
     }
 
     pub(crate) fn table(&self, window: usize, name: &str) -> Result<Table> {
+        #[cfg(test)]
+        self.table_queries.set(self.table_queries.get() + 1);
         if name == metrics::core_frequency::CORE_LEVEL_STATES {
             return metrics::core_frequency::core_level_states(
                 &self.connection,
@@ -687,26 +666,23 @@ impl Session {
         )
     }
 
-    pub(crate) fn predecessor(&self, observation: &Observation) -> Result<Option<Observation>> {
+    /// The windows of `observation`'s run whose publications include the one before it.
+    pub(crate) fn predecessor_windows(&self, observation: &Observation) -> Vec<usize> {
         let Some(publication) = observation.publication.checked_sub(1) else {
-            return Ok(None);
+            return Vec::new();
         };
+
         let run = self.windows[observation.window].identity.run;
+        let mut windows = Vec::new();
         for (window, manifest) in self.windows.iter().enumerate() {
             if manifest.identity.run == run {
                 if (manifest.publication_first..manifest.publication_end).contains(&publication) {
-                    let table = self.table(window, "ticks")?;
-                    for row in &table.rows {
-                        if table.integer(row, "publication")? == Some(publication) {
-                            if table.integer(row, "wall_ns")?.is_some() {
-                                return Ok(Some(Observation::from_row(&table, row, window)?));
-                            }
-                        }
-                    }
+                    windows.push(window);
                 }
             }
         }
-        Ok(None)
+
+        windows
     }
 
     fn extent(&mut self) -> Result<()> {
@@ -783,6 +759,23 @@ pub(crate) fn partition(table: &Table) -> Result<BTreeMap<u64, Table>> {
     Ok(result)
 }
 
+/// The windows of `earlier` from the recording `recording`, by the path of their marker.
+fn reopen_markers<'earlier>(
+    root: &Path,
+    recording: Identity,
+    earlier: &'earlier Verified,
+) -> BTreeMap<PathBuf, &'earlier Manifest> {
+    let mut markers = BTreeMap::new();
+    for manifest in &earlier.0 {
+        if manifest.identity.run.recording == recording {
+            let marker = layout::WindowKey::from(&manifest.identity).marker(root);
+            markers.insert(marker, manifest);
+        }
+    }
+
+    markers
+}
+
 fn discover(
     root: &Path,
     recording: Identity,
@@ -829,6 +822,8 @@ pub(crate) use app_history::ProcessGroupsReplay;
 pub use app_history::SealedApps;
 pub(crate) use app_history::{KeptAttribution, KeptResident};
 mod committed_apps;
+#[cfg(test)]
+mod context_tests;
 mod earlier;
 #[cfg(test)]
 mod reopen_tests;

@@ -35,53 +35,20 @@ const TRAFFIC_RATES: [(&str, &str); 6] = [
 
 pub(crate) type Tables = BTreeMap<(usize, &'static str), BTreeMap<u64, Table>>;
 
-pub(crate) fn trends(session: &Session, observations: &[Observation]) -> Result<Vec<Value>> {
-    let mut all: BTreeMap<_, _> = observations
-        .iter()
-        .map(|value| (key(session, value, value.publication), value.clone()))
-        .collect();
-    for observation in observations {
-        if !all.contains_key(&key(
-            session,
-            observation,
-            observation.publication.saturating_sub(1),
-        )) {
-            if let Some(previous) = session.predecessor(observation)? {
-                all.insert(key(session, &previous, previous.publication), previous);
-            }
-        }
-    }
-    if all.len() > OBSERVATIONS_MAX * 2 {
-        return Err(Error::Bound("predecessor count"));
-    }
-    let mut tables = Tables::new();
-    let mut cells = 0;
-    for observation in all.values() {
-        for name in TABLE_NAMES {
-            if let std::collections::btree_map::Entry::Vacant(entry) =
-                tables.entry((observation.window, name))
-            {
-                let table = session.table(observation.window, name)?;
-                if name == "fans" {
-                    crate::live_fan_history::source(&table)?;
-                }
-                cells += table.rows.len() * table.columns.len();
-                if cells > 2_000_000 {
-                    return Err(Error::Bound("context cells"));
-                }
-                entry.insert(partition(&table)?);
-            }
-        }
-    }
+/// The points of `observations`, the readings of one window. `tables` keeps the tables of their
+/// window and of the windows that may hold their predecessors, and drops the rest, since the
+/// first reading of the next window takes its rates from the last reading of this one.
+pub(crate) fn trends(
+    session: &Session,
+    observations: &[Observation],
+    tables: &mut Tables,
+) -> Result<Vec<Value>> {
+    let all = trends_read(session, observations, tables)?;
     let mut points = Vec::with_capacity(observations.len());
     let mut segment = 0_u64;
     let mut prior: Option<&Observation> = None;
     for observation in observations {
-        let previous = all.get(&key(
-            session,
-            observation,
-            observation.publication.saturating_sub(1),
-        ));
+        let previous = all.get(&key_previous(session, observation));
         if !prior.is_some_and(|value| {
             if session.windows[value.window].identity.run
                 != session.windows[observation.window].identity.run
@@ -92,7 +59,7 @@ pub(crate) fn trends(session: &Session, observations: &[Observation]) -> Result<
         }) {
             segment += 1;
         }
-        let mut value = point(&tables, observation, previous, segment)?;
+        let mut value = point(tables, observation, previous, segment)?;
         let identity = observation.json(session);
         value["run"] = identity["run"].clone();
         value["boot"] = identity["boot"].clone();
@@ -102,9 +69,133 @@ pub(crate) fn trends(session: &Session, observations: &[Observation]) -> Result<
     Ok(points)
 }
 
+/// Reads into `tables` the tables of `observations` and of their predecessors, after dropping
+/// those of every other window, and returns the observations with their predecessors.
+fn trends_read(
+    session: &Session,
+    observations: &[Observation],
+    tables: &mut Tables,
+) -> Result<BTreeMap<ObservationKey, Observation>> {
+    let mut all: BTreeMap<_, _> = observations
+        .iter()
+        .map(|value| (key(session, value, value.publication), value.clone()))
+        .collect();
+    let mut windows = BTreeSet::new();
+    for observation in observations {
+        assert_eq!(observation.window, observations[0].window);
+        windows.insert(observation.window);
+        if !all.contains_key(&key_previous(session, observation)) {
+            windows.extend(session.predecessor_windows(observation));
+        }
+    }
+    tables.retain(|(window, _), _| windows.contains(window));
+
+    let mut cell_count = trends_cell_count(tables);
+    for observation in observations {
+        if !all.contains_key(&key_previous(session, observation)) {
+            if let Some(previous) =
+                trends_predecessor(session, observation, tables, &mut cell_count)?
+            {
+                all.insert(key(session, &previous, previous.publication), previous);
+            }
+        }
+    }
+    if all.len() > OBSERVATIONS_MAX * 2 {
+        return Err(Error::Bound("predecessor count"));
+    }
+    let read = all
+        .values()
+        .map(|value| value.window)
+        .collect::<BTreeSet<_>>();
+    if read.len() > 2 {
+        return Err(Error::Bound("context batch windows"));
+    }
+    for window in read {
+        for name in TABLE_NAMES {
+            trends_table(session, tables, window, name, &mut cell_count)?;
+        }
+    }
+    assert_eq!(cell_count, trends_cell_count(tables));
+
+    Ok(all)
+}
+
+/// The reading before `observation` in its run, from the ticks of the first window that holds
+/// it with a wall clock.
+fn trends_predecessor(
+    session: &Session,
+    observation: &Observation,
+    tables: &mut Tables,
+    cell_count: &mut usize,
+) -> Result<Option<Observation>> {
+    let Some(publication) = observation.publication.checked_sub(1) else {
+        return Ok(None);
+    };
+
+    for window in session.predecessor_windows(observation) {
+        let ticks = trends_table(session, tables, window, "ticks", cell_count)?;
+        if let Some(table) = ticks.get(&publication) {
+            for row in &table.rows {
+                if table.integer(row, "wall_ns")?.is_some() {
+                    return Ok(Some(Observation::from_row(table, row, window)?));
+                }
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+/// The rows of table `name` of `window` by publication, read from the window unless `tables`
+/// keeps them. `cell_count` counts the cells `tables` keeps, which stay under a bound.
+fn trends_table<'tables>(
+    session: &Session,
+    tables: &'tables mut Tables,
+    window: usize,
+    name: &'static str,
+    cell_count: &mut usize,
+) -> Result<&'tables BTreeMap<u64, Table>> {
+    match tables.entry((window, name)) {
+        std::collections::btree_map::Entry::Occupied(entry) => Ok(entry.into_mut()),
+        std::collections::btree_map::Entry::Vacant(entry) => {
+            let table = session.table(window, name)?;
+            if name == "fans" {
+                crate::live_fan_history::source(&table)?;
+            }
+            *cell_count += table.rows.len() * table.columns.len();
+            if *cell_count > 2_000_000 {
+                return Err(Error::Bound("context cells"));
+            }
+
+            Ok(entry.insert(partition(&table)?))
+        }
+    }
+}
+
+/// The count of the cells of the tables `tables` keeps.
+fn trends_cell_count(tables: &Tables) -> usize {
+    let mut cell_count = 0;
+    for publications in tables.values() {
+        for table in publications.values() {
+            cell_count += table.rows.len() * table.columns.len();
+        }
+    }
+
+    cell_count
+}
+
 fn key(session: &Session, observation: &Observation, publication: u64) -> ObservationKey {
     let run = session.windows[observation.window].identity.run;
     (run.run.0, run.boot.0, publication)
+}
+
+/// The key of the reading before `observation` in its run.
+fn key_previous(session: &Session, observation: &Observation) -> ObservationKey {
+    key(
+        session,
+        observation,
+        observation.publication.saturating_sub(1),
+    )
 }
 
 fn get<'a>(tables: &'a Tables, observation: &Observation, name: &'static str) -> Result<&'a Table> {
