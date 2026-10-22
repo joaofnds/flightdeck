@@ -44,7 +44,7 @@ impl Dashboard {
         performance: Performance,
         replay: Option<crate::replay::Replay>,
     ) -> Self {
-        let route = performance.options.page.clone();
+        let route = performance.options.page().to_owned();
         let animate = performance.options.animate;
         let mut dashboard = Self {
             capture: Rc::new(capture),

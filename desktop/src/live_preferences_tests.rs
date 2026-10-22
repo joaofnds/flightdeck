@@ -20,10 +20,11 @@ fn reads_the_defaults_when_nothing_was_saved() {
 #[test]
 fn reads_back_what_it_saved() {
     // Goal: what the user set in one run is there in the next.
-    // Method: save a window frame, a range and a hidden series, then read the file again.
+    // Method: save a window frame, a page, a range and a hidden series, then read the file
+    // again.
     let directory = Directory::new("round-trip");
     let mut preferences = Preferences::default();
-    preferences.remember_view(Range::Last(300), &["cpu\tSafari".into()]);
+    preferences.remember_view("memory", Range::Last(300), &["cpu\tSafari".into()]);
     preferences.window = Some(frame(900.0, 700.0));
 
     write(&directory.file(), &preferences).unwrap();
@@ -91,7 +92,7 @@ fn keeps_the_range_chosen_from_the_menu() {
     // Method: remember a range the menu picks and read it back.
     let mut preferences = Preferences::default();
 
-    preferences.remember_view(Range::minutes(5), &[]);
+    preferences.remember_view("overview", Range::minutes(5), &[]);
 
     assert_eq!(Range::minutes(5), preferences.range());
 }
@@ -101,9 +102,9 @@ fn keeps_the_default_history_chosen_from_the_menu() {
     // Goal: picking the default history again replaces a shorter range kept before.
     // Method: remember a range, then the default history, and read the range back.
     let mut preferences = Preferences::default();
-    preferences.remember_view(Range::minutes(5), &[]);
+    preferences.remember_view("overview", Range::minutes(5), &[]);
 
-    preferences.remember_view(Range::History, &[]);
+    preferences.remember_view("overview", Range::History, &[]);
 
     assert_eq!(Range::History, preferences.range());
 }
@@ -114,7 +115,7 @@ fn keeps_the_longest_range_the_menu_offers() {
     // Method: remember the range of all the seconds loaded and read it back.
     let mut preferences = Preferences::default();
 
-    preferences.remember_view(Range::Last(LOADED_SECONDS), &[]);
+    preferences.remember_view("overview", Range::Last(LOADED_SECONDS), &[]);
 
     assert_eq!(Range::Last(LOADED_SECONDS), preferences.range());
 }
@@ -125,9 +126,10 @@ fn keeps_the_menu_range_through_a_selection_on_a_chart() {
     // on the range the menu picked before it.
     // Method: remember a range from the menu, then a selection, and read the range back.
     let mut preferences = Preferences::default();
-    preferences.remember_view(Range::minutes(10), &[]);
+    preferences.remember_view("overview", Range::minutes(10), &[]);
 
     preferences.remember_view(
+        "overview",
         Range::Between {
             first: 10,
             last: 90,
@@ -167,7 +169,7 @@ fn keeps_a_bounded_number_of_hidden_series() {
     hidden.insert(0, "x".repeat(SERIES_KEY_BYTES_MAX + 1));
     let mut preferences = Preferences::default();
 
-    preferences.remember_view(Range::History, &hidden);
+    preferences.remember_view("overview", Range::History, &hidden);
 
     assert_eq!(HIDDEN_SERIES_MAX, preferences.hidden_series.len());
     assert_eq!("cpu\tApp 0", preferences.hidden_series[0]);
@@ -239,6 +241,69 @@ fn opens_a_window_whose_display_is_gone_at_its_size(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn opens_on_the_page_the_user_left_open(cx: &mut TestAppContext) {
+    // Goal: a launch that names no page opens the window on the page last shown.
+    // Method: keep a page, then ask for the page of a launch that named none.
+    let mut preferences = Preferences::default();
+    preferences.remember_view("memory", Range::History, &[]);
+
+    let opened = cx.update(|cx| {
+        cx.set_global(store(PathBuf::from("/nonexistent"), preferences));
+        page(None, cx)
+    });
+
+    assert_eq!("memory", opened);
+}
+
+#[gpui::test]
+fn opens_on_the_page_the_launch_named(cx: &mut TestAppContext) {
+    // Goal: a page named at launch opens over the page last shown.
+    // Method: keep a page, then ask for the page of a launch that named another.
+    let mut preferences = Preferences::default();
+    preferences.remember_view("memory", Range::History, &[]);
+
+    let opened = cx.update(|cx| {
+        cx.set_global(store(PathBuf::from("/nonexistent"), preferences));
+        page(Some("cpu".into()), cx)
+    });
+
+    assert_eq!("cpu", opened);
+}
+
+#[gpui::test]
+fn opens_on_the_default_page_when_none_was_kept(cx: &mut TestAppContext) {
+    // Goal: with no page kept, a launch that names none opens the default page.
+    // Method: ask for the page with preferences that hold no page, then with none kept at all,
+    // as for a timed run.
+    let kept_nothing = cx.update(|cx| {
+        cx.set_global(store(PathBuf::from("/nonexistent"), Preferences::default()));
+        page(None, cx)
+    });
+    let keeps_nothing = cx.update(|cx| {
+        cx.remove_global::<Store>();
+        page(None, cx)
+    });
+
+    assert_eq!(DEFAULT_PAGE, kept_nothing);
+    assert_eq!(DEFAULT_PAGE, keeps_nothing);
+}
+
+#[test]
+fn drops_a_page_this_build_does_not_have() {
+    // Goal: a page removed or renamed since the file was saved opens the window on its usual
+    // page, and costs nothing else the file holds.
+    // Method: write a page no route has, with a range, and read them.
+    let directory = Directory::new("unknown-page");
+    let text = serde_json::json!({ "page": "removed", "range_minutes": 5 }).to_string();
+    std::fs::write(directory.file(), text).unwrap();
+
+    let read = load(&directory.file()).unwrap();
+
+    assert_eq!(None, read.page);
+    assert_eq!(Some(5), read.range_minutes);
+}
+
+#[gpui::test]
 fn keeps_no_preferences_from_a_file_it_cannot_read(cx: &mut TestAppContext) {
     // Goal: a file Flightdeck cannot read is never written over with preferences of this run.
     // Method: make the file unreadable, install from it, and look for the preferences kept.
@@ -264,7 +329,7 @@ fn saves_again_after_a_write_failed() {
     let blocked = directory.path("blocked");
     std::fs::write(&blocked, "").unwrap();
     let mut preferences = Preferences::default();
-    preferences.remember_view(Range::minutes(5), &[]);
+    preferences.remember_view("overview", Range::minutes(5), &[]);
     let mut kept = store(blocked.join("preferences.json"), Preferences::default());
     kept.current = preferences.clone();
 

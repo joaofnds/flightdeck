@@ -31,9 +31,13 @@ pub fn start_deadline(
     Ok(())
 }
 
+/// The page a live window opens on when neither `--page` nor the user chose one.
+pub const DEFAULT_PAGE: &str = "overview";
+
 pub struct Options {
     pub source: Source,
-    pub page: String,
+    /// The page `--page` named, which opens over the page the user left open.
+    pub named_page: Option<String>,
     pub scrub: bool,
     pub animate: bool,
     pub hardware: bool,
@@ -69,15 +73,22 @@ enum RunMode {
 }
 
 impl Options {
+    /// The page `--page` named, else the default page.
+    pub fn page(&self) -> &str {
+        self.named_page.as_deref().unwrap_or(DEFAULT_PAGE)
+    }
+
     pub fn parse() -> Result<Self, Box<dyn std::error::Error>> {
         let arguments: Vec<_> = std::env::args().skip(1).take(21).collect();
         Self::parse_arguments(&arguments)
     }
 
-    fn parse_arguments(arguments: &[String]) -> Result<Self, Box<dyn std::error::Error>> {
+    pub(crate) fn parse_arguments(
+        arguments: &[String],
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut options = Self {
             source: Source::default(),
-            page: "overview".into(),
+            named_page: None,
             scrub: false,
             animate: false,
             hardware: false,
@@ -101,7 +112,7 @@ impl Options {
             if !options.hardware {
                 return Err("--animate requires --hardware".into());
             }
-            if options.page != "overview" {
+            if options.page() != "overview" {
                 return Err("animation is on the overview page".into());
             }
         }
@@ -187,8 +198,12 @@ impl Options {
         position += 1;
         match flag.as_str() {
             "--page" => {
-                self.page
-                    .clone_from(arguments.get(position).ok_or("--page needs a route")?);
+                self.named_page = Some(
+                    arguments
+                        .get(position)
+                        .ok_or("--page needs a route")?
+                        .clone(),
+                );
                 position += 1;
             }
             "--scrub" => self.scrub = true,
@@ -357,7 +372,7 @@ impl Performance {
         println!(
             "{}",
             serde_json::json!({
-                "page": self.options.page, "scrub": self.options.scrub,
+                "page": self.options.page(), "scrub": self.options.scrub,
                 "animate": self.options.animate,
                 "elapsed_seconds": self.started.elapsed().as_secs_f64(),
                 "render_count": self.frames, "measured_intervals": self.intervals.len(),

@@ -59,9 +59,9 @@ pub fn probe(options: &Options) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-pub fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
-    if !ROUTES.iter().any(|(route, _)| *route == options.page) {
-        return Err(format!("Unknown live route {}", options.page).into());
+pub fn run(options: &Options) -> Result<(), Box<dyn std::error::Error>> {
+    if !ROUTES.iter().any(|(route, _)| *route == options.page()) {
+        return Err(format!("Unknown live route {}", options.page()).into());
     }
 
     if options.scrub {
@@ -72,9 +72,9 @@ pub fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
         return Err("--smoke requires --reference".into());
     }
 
-    let control = control(&options)?;
-    let root = recording(&options)?;
-    let collector = collector_session(&root, &options)?;
+    let control = control(options)?;
+    let root = recording(options)?;
+    let collector = collector_session(&root, options)?;
     let worker = match (
         options.source.recording.is_some(),
         options.source.start_collector,
@@ -82,15 +82,11 @@ pub fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
         (true, false) => Worker::start_recorded(root.clone())?,
         _ => Worker::start(root.clone())?,
     };
-    let reopening = reopening(root, &options, control.is_some());
-    let preferences_path = preferences_path(&options, control.is_some());
+    let reopening = reopening(root, options, control.is_some());
+    let preferences_path = preferences_path(options, control.is_some());
     let opening = Opening {
         worker,
-        start: Start {
-            page: options.page,
-            seconds: options.seconds,
-            hardware: options.hardware,
-        },
+        start: start(options),
         control,
     };
     let application = crate::diagnostics::application();
@@ -124,9 +120,22 @@ pub fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
 
 /// What the window opens on.
 struct Start {
-    page: String,
+    /// The page `--page` named, which opens over the page the user left open.
+    named_page: Option<String>,
     seconds: Option<u32>,
     hardware: bool,
+}
+
+#[cfg(test)]
+#[path = "live_launch_tests.rs"]
+mod tests;
+
+fn start(options: &Options) -> Start {
+    Start {
+        named_page: options.named_page.clone(),
+        seconds: options.seconds,
+        hardware: options.hardware,
+    }
 }
 
 /// What a live window is made of when it opens.
@@ -152,7 +161,6 @@ fn reopening(root: PathBuf, options: &Options, controlled: bool) -> Option<backg
 
     Some(background::Reopening {
         root,
-        page: options.page.clone(),
         hardware: options.hardware,
     })
 }
@@ -280,7 +288,8 @@ fn install_control(
 }
 
 fn create_dashboard(worker: Worker, start: Start, cx: &mut App) -> gpui::Entity<LiveDashboard> {
-    let entity = crate::native_workflows::create_dashboard(worker, start.page, start.seconds, cx);
+    let page = preferences::page(start.named_page, cx);
+    let entity = crate::native_workflows::create_dashboard(worker, page, start.seconds, cx);
     entity.update(cx, |dashboard, _| {
         dashboard.animate = true;
         dashboard.reveal_hardware = start.hardware;

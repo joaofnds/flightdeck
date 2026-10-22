@@ -124,9 +124,10 @@ fn showing_with_the_window_open_opens_no_second_window(cx: &mut TestAppContext) 
 
 #[gpui::test]
 fn showing_after_the_window_closed_opens_it_as_the_user_left_it(cx: &mut TestAppContext) {
-    // Goal: closing the window keeps its size, the range picked and the series hidden.
-    // Method: resize the window, pick a range and hide a series, close the window, show the
-    // app again, and read the window it opened.
+    // Goal: closing the window keeps its size, its page, the range picked and the series
+    // hidden.
+    // Method: resize the window, open a page, pick a range and hide a series, close the
+    // window, show the app again, and read the window it opened.
     let mut harness = BackgroundHarness::setup(cx);
     harness.keep_preferences();
     harness.show();
@@ -136,6 +137,10 @@ fn showing_after_the_window_closed_opens_it_as_the_user_left_it(cx: &mut TestApp
     harness.show();
 
     assert_eq!(size(px(1000.0), px(700.0)), harness.window_size());
+    assert_eq!(
+        "memory",
+        harness.dashboard(|dashboard| dashboard.request.route.clone())
+    );
     assert_eq!(
         Range::Last(300),
         harness.dashboard(|dashboard| dashboard.range)
@@ -149,9 +154,10 @@ fn showing_after_the_window_closed_opens_it_as_the_user_left_it(cx: &mut TestApp
 
 #[gpui::test]
 fn a_launch_opens_the_window_as_the_last_run_left_it(cx: &mut TestAppContext) {
-    // Goal: the size, range and hidden series outlast quitting and launching again.
-    // Method: resize the window, pick a range and hide a series, close the window, read the
-    // file again as a launch does, show the app, and read the window it opened.
+    // Goal: the size, page, range and hidden series outlast quitting and launching again.
+    // Method: resize the window, open a page, pick a range and hide a series, close the
+    // window, read the file again as a launch does, show the app, and read the window it
+    // opened.
     let mut harness = BackgroundHarness::setup(cx);
     harness.keep_preferences();
     harness.show();
@@ -162,6 +168,10 @@ fn a_launch_opens_the_window_as_the_last_run_left_it(cx: &mut TestAppContext) {
     harness.show();
 
     assert_eq!(size(px(1000.0), px(700.0)), harness.window_size());
+    assert_eq!(
+        "memory",
+        harness.dashboard(|dashboard| dashboard.request.route.clone())
+    );
     assert_eq!(
         Range::Last(300),
         harness.dashboard(|dashboard| dashboard.range)
@@ -177,8 +187,8 @@ fn a_launch_opens_the_window_as_the_last_run_left_it(cx: &mut TestAppContext) {
 fn closing_the_window_saves_what_the_user_set_in_it(cx: &mut TestAppContext) {
     // Goal: the file keeps its field names, since a renamed field loses what an older build
     // saved.
-    // Method: resize the window, pick a range and hide a series, close the window, and read
-    // the file.
+    // Method: resize the window, open a page, pick a range and hide a series, close the
+    // window, and read the file.
     let mut harness = BackgroundHarness::setup(cx);
     harness.keep_preferences();
     harness.show();
@@ -193,6 +203,7 @@ fn closing_the_window_saves_what_the_user_set_in_it(cx: &mut TestAppContext) {
     assert_eq!(serde_json::json!(1000.0), saved["window"]["width"]);
     assert_eq!(serde_json::json!(700.0), saved["window"]["height"]);
     assert_eq!("windowed", saved["window"]["state"]);
+    assert_eq!("memory", saved["page"]);
     assert_eq!(5, saved["range_minutes"]);
     assert_eq!("cpu\tSafari", saved["hidden_series"][0]);
     harness.teardown();
@@ -209,7 +220,6 @@ impl BackgroundHarness {
         let (session, root, _pid) = super::super::lifecycle::test_child::session();
         let reopening = Reopening {
             root: root.clone(),
-            page: "overview".into(),
             hardware: false,
         };
         cx.update(|cx| {
@@ -248,8 +258,9 @@ impl BackgroundHarness {
         serde_json::from_slice(&text).unwrap()
     }
 
-    /// Resizes the open window to 1000 by 700 points, sets the range the menu's last five
-    /// minutes set, and hides Safari's CPU series as its legend does.
+    /// Resizes the open window to 1000 by 700 points, opens the memory page as the sidebar
+    /// does, sets the range the menu's last five minutes set, and hides Safari's CPU series as
+    /// its legend does.
     fn adjust_window(&mut self) {
         let window = self.cx.read(|cx| cx.windows()[0]);
         self.cx
@@ -258,6 +269,7 @@ impl BackgroundHarness {
             .update_window(window, |view, _, cx| {
                 let dashboard = view.downcast::<LiveDashboard>().unwrap();
                 dashboard.update(cx, |dashboard, cx| {
+                    dashboard.navigate("memory", cx);
                     dashboard.set_range(Range::Last(300), cx);
                     dashboard.hidden.push("cpu\tSafari".into());
                 });

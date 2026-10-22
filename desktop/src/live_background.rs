@@ -17,7 +17,6 @@ mod tests;
 /// What a live window needs to open again after the user closed it.
 pub(super) struct Reopening {
     pub root: PathBuf,
-    pub page: String,
     pub hardware: bool,
 }
 
@@ -116,7 +115,7 @@ fn reopen(cx: &mut App) -> Result<(), String> {
     let kept = background.kept.take().filter(Worker::running);
     let reopening = &background.reopening;
     let start = super::Start {
-        page: reopening.page.clone(),
+        named_page: None,
         seconds: None,
         hardware: reopening.hardware,
     };

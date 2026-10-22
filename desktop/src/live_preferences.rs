@@ -1,6 +1,7 @@
 //! What the user set in the live window and expects to find again: where the window stands
-//! and how large it is, the stretch of time the charts show, and the chart series hidden from
-//! their legends. One file holds them, so they outlast closing the window and quitting the app.
+//! and how large it is, the page it shows, the stretch of time the charts show, and the chart
+//! series hidden from their legends. One file holds them, so they outlast closing the window
+//! and quitting the app.
 
 use std::ffi::OsString;
 use std::io::{Read, Write};
@@ -11,7 +12,8 @@ use gpui::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::live_dashboard::LiveDashboard;
+use crate::live_dashboard::{LiveDashboard, ROUTES};
+use crate::performance::DEFAULT_PAGE;
 use crate::time_range::Range;
 
 #[cfg(test)]
@@ -64,6 +66,23 @@ fn install_quit_callback(cx: &mut App) -> std::future::Ready<()> {
         cx.global_mut::<Store>().save();
     }
     std::future::ready(())
+}
+
+/// The page a live window opens on: the one the launch named, else the one the user left
+/// open, else the default page.
+pub(super) fn page(named_page: Option<String>, cx: &App) -> String {
+    if let Some(page) = named_page {
+        return page;
+    }
+
+    let Some(page) = cx
+        .try_global::<Store>()
+        .and_then(|store| store.current.page.as_ref())
+    else {
+        return DEFAULT_PAGE.to_owned();
+    };
+
+    page.clone()
 }
 
 /// Where a live window opens: where the last one stood, at its size there, or centered at
@@ -154,7 +173,7 @@ pub(super) fn remember(dashboard: &LiveDashboard, cx: &mut App) {
     let store = cx.global_mut::<Store>();
     store
         .current
-        .remember_view(dashboard.range, &dashboard.hidden);
+        .remember_view(&dashboard.request.route, dashboard.range, &dashboard.hidden);
     store.save();
 }
 
@@ -196,14 +215,19 @@ impl Store {
 #[serde(default)]
 struct Preferences {
     window: Option<Frame>,
+    /// The page the window showed last, one of the sidebar's routes.
+    page: Option<String>,
     /// The minutes of the range the menu picked last, or none for the default history.
     range_minutes: Option<u64>,
     hidden_series: Vec<String>,
 }
 
 impl Preferences {
-    /// Keeps `range` when the menu picked it, and `hidden`, as far as they are kept.
-    fn remember_view(&mut self, range: Range, hidden: &[String]) {
+    /// Keeps `page`, `range` when the menu picked it, and `hidden`, as far as they are kept.
+    fn remember_view(&mut self, page: &str, range: Range, hidden: &[String]) {
+        if self.page.as_deref() != Some(page) {
+            self.page = Some(page.to_owned());
+        }
         match range {
             Range::History => self.range_minutes = None,
             // The menu picks whole minutes, so the division is exact.
@@ -345,9 +369,19 @@ fn load(path: &Path) -> Result<Preferences, String> {
     }
 }
 
-/// The parsed preferences held to what is kept: a frame no window could have is dropped,
-/// and the hidden series are bounded.
+/// The parsed preferences held to what is kept: a frame no window could have and a page this
+/// build does not have are dropped, and the hidden series are bounded.
 fn load_parsed(path: &Path, mut preferences: Preferences) -> Preferences {
+    if let Some(page) = &preferences.page {
+        if !ROUTES.iter().any(|(route, _)| route == page) {
+            eprintln!(
+                "Flightdeck preferences at {} name no page this build has, {page}, so the \
+                 window opens on its usual page",
+                path.display()
+            );
+            preferences.page = None;
+        }
+    }
     if let Some(frame) = &preferences.window {
         if !frame.fits() {
             eprintln!(
@@ -367,6 +401,9 @@ fn load_parsed(path: &Path, mut preferences: Preferences) -> Preferences {
 /// the process id, so two Flightdeck processes saving at once never write into one file.
 fn write(path: &Path, preferences: &Preferences) -> Result<(), String> {
     assert!(preferences.hidden_series.len() <= HIDDEN_SERIES_MAX);
+    if let Some(page) = &preferences.page {
+        assert!(ROUTES.iter().any(|(route, _)| route == page));
+    }
     let describe = |error: std::io::Error| format!("{}: {error}", path.display());
     let text = serde_json::to_vec_pretty(preferences).map_err(|error| error.to_string())?;
     if let Some(directory) = path.parent() {

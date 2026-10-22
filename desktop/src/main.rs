@@ -94,7 +94,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     if !options.source.reference {
         if !options.check() {
-            return live_launch::run(options);
+            return live_launch::run(&options);
         }
     }
     run_reference(options)
@@ -111,9 +111,9 @@ fn run_reference(options: performance::Options) -> Result<(), Box<dyn std::error
     if !catalog
         .navigation
         .iter()
-        .any(|entry| entry[0] == options.page)
+        .any(|entry| entry[0] == options.page())
     {
-        return Err(format!("unknown page: {}", options.page).into());
+        return Err(format!("unknown page: {}", options.page()).into());
     }
     if options.check() {
         println!(
