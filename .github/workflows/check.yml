@@ -38,14 +38,15 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --workspace --all-targets -- --deny warnings
       # The runner is a virtual machine with no SMC, no IOReport channels, no power manager, no
-      # Apple GPU driver and energy counters that read 0, so the tests that read them run only on a
-      # Mac. --exact keeps each skip from matching a longer name, so a new test runs here until it
-      # is listed. A test that needs a second user, which the runner's sudo gives without a password
-      # and a contributor's machine does not, is ignored elsewhere, and --include-ignored runs it
-      # here under whatever name it takes. It fails, rather than skips, where sudo asks for a
-      # password. The runner's disks fail every scan, and the collector reports each failure on
-      # stderr. Captured output grows a buffer the allocation tests count against the collector, so
-      # --no-capture writes it to stderr as the collector does in production.
+      # Apple GPU driver, one core cluster and energy counters that read 0, so the tests that read
+      # them run only on a Mac. --exact keeps each skip from matching a longer name, so a new test
+      # runs here until it is listed. A test that needs a second user, which the runner's sudo gives
+      # without a password and a contributor's machine does not, is ignored elsewhere, and
+      # --include-ignored runs it here under whatever name it takes. It fails, rather than skips,
+      # where sudo asks for a password. The runner's disks fail every scan, and the collector
+      # reports each failure on stderr. Captured output grows a buffer the allocation tests count
+      # against the collector, so --no-capture writes it to stderr as the collector does in
+      # production.
       - run: >-
           cargo test --locked --workspace --no-fail-fast -- --exact --include-ignored --no-capture
           --skip clock_states::tests::reads_the_tables_of_this_mac
@@ -67,6 +68,8 @@ jobs:
           --skip ioreport::tests::refuses_the_energy_unit_of_a_channel_that_gives_no_energy
           --skip ioreport::tests::refuses_to_learn_a_channel_with_a_negative_state_count
           --skip ioreport::tests::subscribes_only_to_the_channels_a_read_takes
+          --skip machine::tests::reads_the_gpu_core_count_the_registry_reports
+          --skip machine::tests::reads_the_logical_cpus_of_each_performance_level_fastest_first
           --skip processes::tests::reads_this_process_spending_energy_while_it_runs
           --skip smc::tests::finds_no_info_for_a_key_the_smc_does_not_hold
           --skip smc::tests::reads_a_speed_for_every_fan
@@ -107,7 +110,12 @@ jobs:
       - run: >-
           cargo clippy --locked --manifest-path desktop/Cargo.toml
           --all-targets --features automation -- --deny warnings
-      - run: cargo test --locked --manifest-path desktop/Cargo.toml
+      # Two tests project the CPU page of the Mac they run on, and the runner has one core cluster
+      # where they need two, so they run only on a Mac. --exact keeps each skip to its own test.
+      - run: >-
+          cargo test --locked --manifest-path desktop/Cargo.toml -- --exact
+          --skip live_dashboard::input_tests::summary::a_wide_cpu_summary_fills_four_equal_tracks
+          --skip live_projection::tests::cpu_frequency_charts_each_level_where_measured
       - run: >-
           cargo run --locked --manifest-path desktop/Cargo.toml
           --bin flightdeck -- --check
