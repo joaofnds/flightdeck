@@ -29,7 +29,7 @@ pub use store::{
 };
 
 pub use encoder::{
-    Encoder, TableManifest, WRITE_BUFFER_BYTES, encode_derived, frame, table_columns,
+    Encoder, TableManifest, WRITE_BUFFER_BYTES, encode_derived, frame, frame_bytes, table_columns,
 };
 pub use schema::SCHEMA_VERSION;
 pub use window::{Limits, NumberedEvent, Observation, STAGED_BYTES_MAX, Window, WindowIdentity};

@@ -29,13 +29,14 @@ pub trait Derive {
     fn derive(&self, derivation: &Derivation<'_>) -> Result<Vec<TableManifest>>;
 }
 
-pub struct Derivation<'path> {
-    pub identity: WindowIdentity,
+pub struct Derivation<'seal> {
+    /// The window as the persister staged it, which the tables it wrote hold.
+    pub window: &'seal Window,
     /// The directory of the tables the persister wrote for the window.
-    pub pending: &'path Path,
+    pub pending: &'seal Path,
     /// The data directory of the run's sealed window holding the observation just before the
     /// window's first, when there is one.
-    pub predecessor: Option<&'path Path>,
+    pub predecessor: Option<&'seal Path>,
 }
 
 /// What writes a window's tables: the persister's own and those derived from them.
@@ -602,7 +603,7 @@ fn seal(store: &Store, writers: &Writers<'_>, window: &Window, state: &RunState)
     tables.extend(seal_derived(
         writers.derive,
         &Derivation {
-            identity: window.identity,
+            window,
             pending: pending.path(),
             predecessor: predecessor.as_deref(),
         },
@@ -656,7 +657,7 @@ fn seal_derived(derive: &dyn Derive, derivation: &Derivation<'_>) -> Result<Vec<
         Err(error) => {
             eprintln!(
                 "persister derived no tables window={}: {error}",
-                derivation.identity.window
+                derivation.window.identity.window
             );
             for name in crate::schema::DERIVED_TABLES {
                 match std::fs::remove_file(derivation.pending.join(format!("{name}.parquet"))) {

@@ -359,7 +359,7 @@ impl Fixture {
         tables.extend(
             derive
                 .derive(&persistence::worker::Derivation {
-                    identity: window.identity,
+                    window: &window,
                     pending: pending.path(),
                     predecessor: predecessor.as_deref(),
                 })

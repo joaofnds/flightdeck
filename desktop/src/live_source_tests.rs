@@ -1025,7 +1025,7 @@ impl SealedRecording {
         tables.extend(
             derive
                 .derive(&persistence::worker::Derivation {
-                    identity,
+                    window,
                     pending: pending.path(),
                     predecessor: None,
                 })

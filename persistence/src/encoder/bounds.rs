@@ -9,6 +9,14 @@ const VALIDITY_BYTES_PER_ROW_MAX: usize = 8;
 const SORT_INDEX_BYTES_MAX: usize = 8;
 
 pub(super) fn frame(table: Table, window: &Window) -> Result<()> {
+    let bytes = frame_bytes(table, window)?;
+    assert!(bytes <= FRAME_BYTES_MAX);
+
+    Ok(())
+}
+
+/// What the frame of `table` may take of memory, refused above what a frame may take.
+pub(super) fn frame_bytes(table: Table, window: &Window) -> Result<usize> {
     // A system column holds at most a 16-byte string view, beside the text it points to.
     let width = match table {
         Table::Ticks => 224 + crate::schema::SYSTEM_FIELDS.len() * 16,
@@ -39,7 +47,7 @@ pub(super) fn frame(table: Table, window: &Window) -> Result<()> {
         }
     }
 
-    Ok(())
+    Ok(bytes)
 }
 
 pub(super) fn rows(table: Table, window: &Window) -> usize {

@@ -135,6 +135,13 @@ fn encode_write(frame: &mut DataFrame, file: impl std::io::Write) -> Result<()> 
     Ok(())
 }
 
+/// What `frame` may take of memory for `table`, or why it refuses to build that frame.
+pub fn frame_bytes(table: Table, window: &Window) -> Result<u64> {
+    Ok(collector::u64_from_usize(bounds::frame_bytes(
+        table, window,
+    )?))
+}
+
 /// Materializes a single admitted window table without a SQL or row-string conversion.
 pub fn frame(table: Table, window: &Window) -> Result<DataFrame> {
     bounds::frame(table, window)?;

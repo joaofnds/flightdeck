@@ -12,15 +12,19 @@ use persistence::engine::Engine;
 use persistence::query::{TableSource, table_source};
 use persistence::schema::{APP_PARTS, Table};
 use persistence::worker::{Derivation, Derive};
-use persistence::{Error, Result, TableManifest};
+use persistence::{Error, Result, TableManifest, Window};
 
 /// What the samples a derivation holds for its window's App parts may take.
 const SAMPLES_BYTES_MAX: u64 = 256 * 1024 * 1024;
+/// What the frames of the window's processes and events may take together, which the
+/// derivation queries in memory once it has read every file it needs.
+const STAGED_FRAMES_BYTES_MAX: u64 = persistence::engine::PARQUET_EXPANDED_BYTES_MAX;
 
-/// The window staged for its seal, the engine's read of one of its tables, the samples held for
-/// its parts, the table built from them and the buffer it is written through fit the
-/// persister's working bound together.
+/// The window staged for its seal, the engine's read of one of its tables or the window's
+/// frames it queries after its reads, the samples held for its parts, the table built from them
+/// and the buffer it is written through fit the persister's working bound together.
 const _: () = {
+    assert!(STAGED_FRAMES_BYTES_MAX <= persistence::engine::PARQUET_EXPANDED_BYTES_MAX);
     assert!(
         persistence::STAGED_BYTES_MAX
             + persistence::engine::PARQUET_EXPANDED_BYTES_MAX
@@ -31,8 +35,8 @@ const _: () = {
     );
 };
 
-/// Samples each observation of a window as it seals, from the tables the persister wrote for
-/// it, by the rule the replay of its minute samples it, and keeps the Apps' ranks and every
+/// Samples each observation of a window as it seals, from the window the persister staged and
+/// wrote, by the rule the replay of its minute samples it, and keeps the Apps' ranks and every
 /// App's part.
 #[derive(Default)]
 pub struct SealedApps {
@@ -50,10 +54,11 @@ struct Sampled {
 
 impl Derive for SealedApps {
     fn derive(&self, derivation: &Derivation<'_>) -> Result<Vec<TableManifest>> {
+        let identity = derivation.window.identity;
         let replayer = Replayer {
             connection: Engine::new(),
             operation: Arc::new(Cancellation::default()).operation(0)?,
-            run: derivation.identity.run,
+            run: identity.run,
         };
         let readings = replayer.readings(derivation.pending)?;
         let first = readings.first().ok_or(Error::Bound("sealed Apps ticks"))?;
@@ -68,10 +73,14 @@ impl Derive for SealedApps {
             }
         }
 
+        // Every file the derivation reads is read by now, so the window's frames take the place
+        // of a file's read in the working bound.
+        let sources = replayer.staged(derivation.window)?;
+
         let mut ranks = Vec::with_capacity(readings.len());
         let mut samples: Result<Vec<Box<Sample>>> = Ok(Vec::with_capacity(readings.len()));
         let mut samples_bytes = 0;
-        replayer.frames(derivation.pending, &readings, |reading, frame| {
+        replayer.frames(&sources, &readings, |reading, frame| {
             let previous = super::sample_predecessor(
                 projection.reading.as_ref(),
                 projection.previous.as_deref(),
@@ -96,7 +105,7 @@ impl Derive for SealedApps {
         if let Some(frame) = projection.previous {
             if let Some(reading) = projection.reading {
                 self.last.replace(Some(Sampled {
-                    run: derivation.identity.run,
+                    run: identity.run,
                     reading,
                     frame,
                 }));
@@ -124,7 +133,7 @@ fn derive_parts(
         Err(error) => {
             eprintln!(
                 "persister derived no App parts window={}: {error}",
-                derivation.identity.window
+                derivation.window.identity.window
             );
             let path = derivation.pending.join(format!("{APP_PARTS}.parquet"));
             match std::fs::remove_file(path) {
@@ -142,6 +151,12 @@ struct Replayer {
     connection: Engine,
     operation: Operation,
     run: RunIdentity,
+}
+
+/// What the engine names a window's processes and its events as.
+struct Sources {
+    processes: String,
+    events: String,
 }
 
 /// The reading sampled last, whose frame gives the next reading's sample its rates.
@@ -175,7 +190,11 @@ impl Replayer {
 
         let mut before = self.readings(directory)?;
         before.retain(|reading| reading.observation.stamp.publication == publication);
-        self.frames(directory, &before, |reading, frame| {
+        let sources = Sources {
+            processes: self.source(directory, Table::Processes)?,
+            events: self.source(directory, Table::Events)?,
+        };
+        self.frames(&sources, &before, |reading, frame| {
             projection.previous = Some(frame);
             projection.reading = Some(*reading);
             Ok(())
@@ -191,17 +210,37 @@ impl Replayer {
         super::app_history_readings(&self.connection, &self.operation, &ticks, 0, &self.run)
     }
 
+    /// The window's processes and events as the persister staged them, which hold what the
+    /// files it wrote of them hold without a read of those files.
+    fn staged(&self, window: &Window) -> Result<Sources> {
+        let tables = [Table::Processes, Table::Events];
+        let mut bytes = 0;
+        for table in tables {
+            bytes += persistence::frame_bytes(table, window)?;
+        }
+        if bytes > STAGED_FRAMES_BYTES_MAX {
+            return Err(Error::Bound("sealed Apps staged frames"));
+        }
+
+        for table in tables {
+            self.connection
+                .register(table.name(), persistence::frame(table, window)?)?;
+        }
+        Ok(Sources {
+            processes: table_source(&self.connection, Table::Processes, TableSource::Staged)?,
+            events: table_source(&self.connection, Table::Events, TableSource::Staged)?,
+        })
+    }
+
     fn frames(
         &self,
-        directory: &Path,
+        sources: &Sources,
         readings: &[Reading],
         mut consume: impl FnMut(&Reading, Box<Frame>) -> Result<()>,
     ) -> Result<()> {
-        let processes = self.source(directory, Table::Processes)?;
-        let events = self.source(directory, Table::Events)?;
         let source = crate::live_apps::committed::Sources {
-            processes: &processes,
-            events: &events,
+            processes: &sources.processes,
+            events: &sources.events,
         }
         .query();
         let endpoints: Vec<_> = readings.iter().map(Reading::endpoint).collect();
