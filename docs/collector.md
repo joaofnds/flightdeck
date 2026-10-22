@@ -291,9 +291,19 @@ short processes (Decisions).
 
 On an M5 Pro on 2026-10-22, CPU time divided by elapsed time from `ps`, over the first 16 minutes
 of a collector the app started, gave 2.86% of a core for the collector and 1.65% for the
-persister, 4.5% together. On 2026-10-19 the headless research measured the persister at 0.33%
-(Overhead in [headless-collector-research.md](headless-collector-research.md)), and what changed
-between the two is not known.
+persister, 4.5% together.
+
+Most of the persister's cost is deriving each window's App ranks and App parts as it seals, which
+re-reads the tables it just wrote and writes two more. On the same Mac the same day, in minutes
+with no other load, the persister spent 0.50 s of CPU a minute, 0.83% of a core, against 0.33%
+for the build of 2026-10-19 that derived nothing (Overhead in
+[headless-collector-research.md](headless-collector-research.md)). Run side by side under the
+same outside load, the current persister cost 2.93%, the same build with the derivation removed
+1.24%, and the 2026-10-19 build 1.22%. Outside load raises every build's CPU time about fourfold,
+not only its wall time, so a reading taken over a busy stretch, as the 1.65% may have been, sits
+above the quiet figure, and the reason for that rise is not known. The quiet figure does not
+depend on the recording's size: the app's persister on a 3 GB recording spent the same 0.5 s a
+minute.
 
 ## Limits
 
