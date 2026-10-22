@@ -453,6 +453,7 @@ mod tests {
             committed_range(&ring.recording)
         );
         assert!(stdout(&output).contains("persister_status=0"));
+        assert!(!stdout(&output).contains("persister failed during drain"));
     }
 
     #[test]
@@ -470,6 +471,10 @@ mod tests {
 
         assert!(output.status.success(), "{output:?}");
         assert!(stdout(&output).contains("persister_status=0"), "{output:?}");
+        assert!(
+            !stdout(&output).contains("persister failed during drain"),
+            "{output:?}"
+        );
         let reader = collector::ring::RingReader::open(&ring.place.lock_path).unwrap();
         assert!(reader.completed());
         assert_eq!(
