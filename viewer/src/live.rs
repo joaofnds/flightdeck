@@ -2280,15 +2280,7 @@ fn context_bytes(points: &[Value]) -> Result<()> {
         return Err(Error::Bound("context observations"));
     }
 
-    if serde_json::to_vec(points)
-        .map_err(std::io::Error::other)?
-        .len()
-        > CONTEXT_BYTES_MAX
-    {
-        return Err(Error::Bound("context bytes"));
-    }
-
-    Ok(())
+    context_bytes_of(&points.iter().collect::<Vec<_>>())
 }
 
 fn follow_merge_point(merge: PointMerge<'_>) -> Result<()> {
