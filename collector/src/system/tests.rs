@@ -58,39 +58,46 @@ fn fact_text_keeps_utf8_text_up_to_its_bound() {
     assert_eq!(FactText::new(&[0xff, 0xfe]), None);
 }
 
-#[test]
-fn reads_the_readings_of_this_mac() {
-    // Goal: an Apple silicon Mac gives every system reading and every machine fact.
-    // Method: open the sources on this Mac, read one tick, and compare with the kernel.
-    let mut system = System::open();
+/// The tests whose subject is what this Mac gives, which only an Apple silicon Mac runs. CI's
+/// virtual Mac has no power manager, no Apple GPU driver and one core cluster, so its check
+/// skips this module.
+mod hardware {
+    use super::*;
 
-    system.read();
-    system.read_gpu();
+    #[test]
+    fn reads_the_readings_of_this_mac() {
+        // Goal: an Apple silicon Mac gives every system reading and every machine fact.
+        // Method: open the sources on this Mac, read one tick, and compare with the kernel.
+        let mut system = System::open();
 
-    let reading = system.reading;
-    assert!(
-        reading
-            .load_average
-            .unwrap()
-            .iter()
-            .all(|average| *average >= 0.0)
-    );
-    assert!(reading.open_files.unwrap() <= reading.open_files_limit.unwrap());
-    assert!(reading.thermal_pressure.unwrap() <= 4);
-    assert!(reading.gpu_memory.unwrap().in_use_bytes.is_some());
-    assert!(reading.boot_wall_ns.unwrap() > 1_700_000_000_000_000_000);
-    assert!(!system.gpu_times.is_empty());
-    let machine = system.machine;
-    assert!(machine.model.unwrap().as_str().starts_with("Mac"));
-    assert!(machine.chip.unwrap().as_str().starts_with("Apple"));
-    assert_eq!(machine.architecture.unwrap().as_str(), "arm64");
-    assert!(machine.cpu_cores.unwrap() > 0);
-    assert!(machine.gpu_cores.unwrap() > 0);
-    assert_eq!(
-        machine.memory_bytes.unwrap(),
-        u64::from_ne_bytes(crate::kernel::sysctl_bytes(c"hw.memsize"))
-    );
-    let [fastest, slower] = machine.levels.unwrap();
-    assert!(!fastest.name.as_str().is_empty());
-    assert!(slower.logical_cpus > 0);
+        system.read();
+        system.read_gpu();
+
+        let reading = system.reading;
+        assert!(
+            reading
+                .load_average
+                .unwrap()
+                .iter()
+                .all(|average| *average >= 0.0)
+        );
+        assert!(reading.open_files.unwrap() <= reading.open_files_limit.unwrap());
+        assert!(reading.thermal_pressure.unwrap() <= 4);
+        assert!(reading.gpu_memory.unwrap().in_use_bytes.is_some());
+        assert!(reading.boot_wall_ns.unwrap() > 1_700_000_000_000_000_000);
+        assert!(!system.gpu_times.is_empty());
+        let machine = system.machine;
+        assert!(machine.model.unwrap().as_str().starts_with("Mac"));
+        assert!(machine.chip.unwrap().as_str().starts_with("Apple"));
+        assert_eq!(machine.architecture.unwrap().as_str(), "arm64");
+        assert!(machine.cpu_cores.unwrap() > 0);
+        assert!(machine.gpu_cores.unwrap() > 0);
+        assert_eq!(
+            machine.memory_bytes.unwrap(),
+            u64::from_ne_bytes(crate::kernel::sysctl_bytes(c"hw.memsize"))
+        );
+        let [fastest, slower] = machine.levels.unwrap();
+        assert!(!fastest.name.as_str().is_empty());
+        assert!(slower.logical_cpus > 0);
+    }
 }

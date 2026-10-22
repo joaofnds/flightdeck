@@ -527,43 +527,6 @@ mod tests {
     }
 
     #[test]
-    fn reads_the_logical_cpus_of_each_performance_level_fastest_first() {
-        // Goal: the two performance levels give their logical CPUs fastest level first, and
-        // together cover every logical CPU the machine runs.
-        // Method: compare the levels with hw.perflevel0 and hw.perflevel1 read as raw bytes.
-        let fast = u32::from_ne_bytes(kernel::sysctl_bytes(c"hw.perflevel0.logicalcpu"));
-        let slow = u32::from_ne_bytes(kernel::sysctl_bytes(c"hw.perflevel1.logicalcpu"));
-
-        let levels = performance_levels().unwrap().unwrap();
-
-        assert_eq!(levels.logical_cpus, [fast, slow]);
-        assert_eq!(
-            u32::from_ne_bytes(kernel::sysctl_bytes(c"hw.logicalcpu_max")),
-            fast + slow
-        );
-    }
-
-    #[test]
-    fn reads_the_gpu_core_count_the_registry_reports() {
-        // Goal: the GPU core count is the one the GPU driver publishes in the I/O Registry.
-        // Method: compare it with the gpu-core-count that ioreg prints for AGXAccelerator.
-        let output = std::process::Command::new("/usr/sbin/ioreg")
-            .args(["-r", "-c", "AGXAccelerator", "-d", "1"])
-            .output()
-            .unwrap();
-        let text = String::from_utf8(output.stdout).unwrap();
-        let line = text
-            .lines()
-            .find(|line| line.contains("\"gpu-core-count\" = "))
-            .unwrap();
-        let printed: u64 = line.rsplit(" = ").next().unwrap().trim().parse().unwrap();
-
-        let cores = gpu_cores().unwrap();
-
-        assert_eq!(cores, Some(printed));
-    }
-
-    #[test]
     fn reads_the_cpu_limit_from_hw_logicalcpu_max() {
         // Goal: the CPU limit is hw.logicalcpu_max, the most logical CPUs the machine runs.
         // Method: compare the limit with hw.logicalcpu_max read as raw bytes.
@@ -786,5 +749,49 @@ mod tests {
         let read = Pressure::from_level(3);
 
         assert_eq!(io::ErrorKind::InvalidData, read.unwrap_err().kind());
+    }
+
+    /// The tests whose subject is what this Mac's chip is, which only an Apple silicon Mac runs.
+    /// CI's virtual Mac has one core cluster and no Apple GPU driver, so its check skips this
+    /// module.
+    mod hardware {
+        use super::*;
+
+        #[test]
+        fn reads_the_logical_cpus_of_each_performance_level_fastest_first() {
+            // Goal: the two performance levels give their logical CPUs fastest level first, and
+            // together cover every logical CPU the machine runs.
+            // Method: compare the levels with hw.perflevel0 and hw.perflevel1 read as raw bytes.
+            let fast = u32::from_ne_bytes(kernel::sysctl_bytes(c"hw.perflevel0.logicalcpu"));
+            let slow = u32::from_ne_bytes(kernel::sysctl_bytes(c"hw.perflevel1.logicalcpu"));
+
+            let levels = performance_levels().unwrap().unwrap();
+
+            assert_eq!(levels.logical_cpus, [fast, slow]);
+            assert_eq!(
+                u32::from_ne_bytes(kernel::sysctl_bytes(c"hw.logicalcpu_max")),
+                fast + slow
+            );
+        }
+
+        #[test]
+        fn reads_the_gpu_core_count_the_registry_reports() {
+            // Goal: the GPU core count is the one the GPU driver publishes in the I/O Registry.
+            // Method: compare it with the gpu-core-count that ioreg prints for AGXAccelerator.
+            let output = std::process::Command::new("/usr/sbin/ioreg")
+                .args(["-r", "-c", "AGXAccelerator", "-d", "1"])
+                .output()
+                .unwrap();
+            let text = String::from_utf8(output.stdout).unwrap();
+            let line = text
+                .lines()
+                .find(|line| line.contains("\"gpu-core-count\" = "))
+                .unwrap();
+            let printed: u64 = line.rsplit(" = ").next().unwrap().trim().parse().unwrap();
+
+            let cores = gpu_cores().unwrap();
+
+            assert_eq!(cores, Some(printed));
+        }
     }
 }

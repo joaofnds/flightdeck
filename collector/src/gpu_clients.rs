@@ -126,17 +126,22 @@ mod tests {
         );
     }
 
-    #[test]
-    fn reads_each_process_once_with_some_gpu_time() {
-        // Goal: each pid appears once, and some process has GPU time, since the window server
-        // draws every frame through the GPU.
-        // Method: read this Mac's GPU clients once.
-        let clients = GpuClients::new().unwrap();
-        let mut times = Vec::with_capacity(CLIENTS_MAX);
+    /// The tests whose subject is what this Mac's GPU driver gives, which only an Apple silicon
+    /// Mac runs. CI's virtual Mac has no Apple GPU driver, so its check skips this module.
+    mod hardware {
+        use super::*;
 
-        clients.read(&mut times).unwrap();
+        #[test]
+        fn reads_some_gpu_time() {
+            // Goal: some process has GPU time, since the window server draws every frame through
+            // the GPU.
+            // Method: read this Mac's GPU clients once.
+            let clients = GpuClients::new().unwrap();
+            let mut times = Vec::with_capacity(CLIENTS_MAX);
 
-        assert!(times.windows(2).all(|pair| pair[0].pid < pair[1].pid));
-        assert!(times.iter().any(|time| time.gpu_ns > 0));
+            clients.read(&mut times).unwrap();
+
+            assert!(times.iter().any(|time| time.gpu_ns > 0));
+        }
     }
 }

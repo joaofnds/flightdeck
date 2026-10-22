@@ -696,24 +696,6 @@ mod tests {
     }
 
     #[test]
-    fn reads_this_process_spending_energy_while_it_runs() {
-        // Goal: a process's energy grows while it runs.
-        // Method: read this process's usage before and after spinning 50 ms.
-        let pid = std::process::id().cast_signed();
-        let before = read_usage(Timebase::read().unwrap(), pid).unwrap().unwrap();
-
-        spin_on_this_thread_for(Duration::from_millis(50));
-
-        let after = read_usage(Timebase::read().unwrap(), pid).unwrap().unwrap();
-        assert!(
-            after.energy_nj > before.energy_nj,
-            "{} nJ then {} nJ",
-            before.energy_nj,
-            after.energy_nj
-        );
-    }
-
-    #[test]
     fn reads_when_a_process_started_in_awake_time() {
         // Goal: a process's start reads in awake time, the clock the collector keeps.
         // Method: spawn a child, read its start, and take it within a second of the awake time
@@ -894,5 +876,29 @@ mod tests {
         child.wait().unwrap();
 
         assert!(!alive);
+    }
+
+    /// The tests whose subject is the energy this Mac counts, which only an Apple silicon Mac
+    /// runs. CI's virtual Mac counts none, so its check skips this module.
+    mod hardware {
+        use super::*;
+
+        #[test]
+        fn reads_this_process_spending_energy_while_it_runs() {
+            // Goal: a process's energy grows while it runs.
+            // Method: read this process's usage before and after spinning 50 ms.
+            let pid = std::process::id().cast_signed();
+            let before = read_usage(Timebase::read().unwrap(), pid).unwrap().unwrap();
+
+            spin_on_this_thread_for(Duration::from_millis(50));
+
+            let after = read_usage(Timebase::read().unwrap(), pid).unwrap().unwrap();
+            assert!(
+                after.energy_nj > before.energy_nj,
+                "{} nJ then {} nJ",
+                before.energy_nj,
+                after.energy_nj
+            );
+        }
     }
 }

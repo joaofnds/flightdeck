@@ -38,39 +38,18 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --workspace --all-targets -- --deny warnings
       # The runner is a virtual machine with no SMC, no IOReport channels, no power manager, no
-      # Apple GPU driver, one core cluster and energy counters that read 0, so the tests that read
-      # them run only on a Mac. --exact keeps each skip from matching a longer name, so a new test
-      # runs here until it is listed. A test that needs a second user, which the runner's sudo gives
-      # without a password and a contributor's machine does not, is ignored elsewhere, and
-      # --include-ignored runs it here under whatever name it takes. It fails, rather than skips,
-      # where sudo asks for a password. The runner's disks fail every scan, and the collector
-      # reports each failure on stderr. Captured output grows a buffer the allocation tests count
-      # against the collector, so --no-capture writes it to stderr as the collector does in
-      # production.
+      # Apple GPU driver, one core cluster and energy counters that read 0. The tests whose subject
+      # is what those give sit in a module named hardware beside the tests of the code that reads
+      # them, and run only on a Mac, so the check skips every test whose path holds ::hardware::. A
+      # test that needs a second user, which the runner's sudo gives without a password and a
+      # contributor's machine does not, is ignored elsewhere, and --include-ignored runs it here
+      # under whatever name it takes. It fails, rather than skips, where sudo asks for a password.
+      # The runner's disks fail every scan, and the collector reports each failure on stderr.
+      # Captured output grows a buffer the allocation tests count against the collector, so
+      # --no-capture writes it to stderr as the collector does in production.
       - run: >-
-          cargo test --locked --workspace --no-fail-fast -- --exact --include-ignored --no-capture
-          --skip clock_states::tests::reads_the_tables_of_this_mac
-          --skip coalitions::tests::counts_the_energy_this_process_spends_in_its_coalition
-          --skip gpu_clients::tests::reads_each_process_once_with_some_gpu_time
-          --skip gpu_memory::tests::reads_the_gpu_memory_of_this_mac
-          --skip ioreport::tests::hardware::counts_a_busy_cpu_in_its_cores_active_time
-          --skip ioreport::tests::hardware::counts_the_energy_the_gpu_spends
-          --skip ioreport::tests::hardware::counts_time_the_gpu_spends_in_active_states
-          --skip ioreport::tests::hardware::finds_a_state_left_out_of_active_time_in_every_core_and_the_gpu
-          --skip ioreport::tests::hardware::reads_the_gpus_energy_as_its_counter_holds_it
-          --skip ioreport::tests::hardware::reads_the_performance_states_of_every_logical_cpu
-          --skip ioreport::tests::hardware::subscribes_only_to_the_channels_a_read_takes
-          --skip machine::tests::reads_the_gpu_core_count_the_registry_reports
-          --skip machine::tests::reads_the_logical_cpus_of_each_performance_level_fastest_first
-          --skip processes::tests::reads_this_process_spending_energy_while_it_runs
-          --skip smc::tests::hardware::finds_no_info_for_a_key_the_smc_does_not_hold
-          --skip smc::tests::hardware::reads_each_fan_speed_in_rpm
-          --skip smc::tests::hardware::reads_the_power_the_mac_draws
-          --skip smc::tests::hardware::reads_the_temperature_of_a_soc_sensor
-          --skip smc::tests::hardware::reads_the_temperature_of_the_cpu_and_of_the_gpu
-          --skip smc::tests::hardware::refuses_a_float_key_the_smc_holds_as_another_type
-          --skip smc::tests::hardware::refuses_a_key_read_as_a_type_it_does_not_hold
-          --skip system::tests::reads_the_readings_of_this_mac
+          cargo test --locked --workspace --no-fail-fast -- --include-ignored --no-capture
+          --skip ::hardware::
       # A lock file left in Application Support names a ring that stays in memory after its
       # writer exits, about 800 MB of address space, so whatever ran above removes both.
       - name: Refuse ring lock files left in Application Support

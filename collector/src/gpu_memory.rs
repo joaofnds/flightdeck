@@ -52,18 +52,24 @@ impl GpuMemory {
 mod tests {
     use super::*;
 
-    #[test]
-    fn reads_the_gpu_memory_of_this_mac() {
-        // Goal: the GPU driver of an Apple silicon Mac reports both quantities, and the memory
-        // in use fits within what the driver allocated.
-        // Method: read this Mac's driver statistics once.
-        let memory = GpuMemory::open().unwrap();
+    /// The tests whose subject is what this Mac's GPU driver gives, which only an Apple silicon
+    /// Mac runs. CI's virtual Mac has no Apple GPU driver, so its check skips this module.
+    mod hardware {
+        use super::*;
 
-        let reading = memory.read().unwrap();
+        #[test]
+        fn reads_the_gpu_memory_of_this_mac() {
+            // Goal: the GPU driver of an Apple silicon Mac reports both quantities, and the memory
+            // in use fits within what the driver allocated.
+            // Method: read this Mac's driver statistics once.
+            let memory = GpuMemory::open().unwrap();
 
-        let in_use = reading.in_use_bytes.unwrap();
-        let allocated = reading.allocated_bytes.unwrap();
-        assert!(in_use > 0);
-        assert!(in_use <= allocated);
+            let reading = memory.read().unwrap();
+
+            let in_use = reading.in_use_bytes.unwrap();
+            let allocated = reading.allocated_bytes.unwrap();
+            assert!(in_use > 0);
+            assert!(in_use <= allocated);
+        }
     }
 }

@@ -180,12 +180,18 @@ mod tests {
         assert_eq!(found, [Some(&[1_u32, 2][..]), None, None]);
     }
 
-    #[test]
-    fn reads_the_tables_of_this_mac() {
-        // Goal: the registry of an Apple silicon Mac yields at least one clock table.
-        // Method: read this Mac's power manager.
-        let tables = read().unwrap();
+    /// The tests whose subject is what this Mac's power manager gives, which only an Apple silicon
+    /// Mac runs. CI's virtual Mac has no power manager, so its check skips this module.
+    mod hardware {
+        use super::*;
 
-        assert!(!tables.tables.is_empty());
+        #[test]
+        fn reads_the_tables_of_this_mac() {
+            // Goal: the registry of an Apple silicon Mac yields at least one clock table.
+            // Method: read this Mac's power manager.
+            let tables = read().unwrap();
+
+            assert!(!tables.tables.is_empty());
+        }
     }
 }

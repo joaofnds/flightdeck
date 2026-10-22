@@ -302,31 +302,6 @@ mod tests {
     }
 
     #[test]
-    fn counts_the_energy_this_process_spends_in_its_coalition() {
-        // Goal: a coalition's energy grows by at least what one of its processes spends.
-        // Method: read this process's coalition and usage before and after spinning 50 ms.
-        let timebase = Timebase::read().unwrap();
-        let pid = std::process::id().cast_signed();
-        let mut coalitions = Coalitions::new(timebase, COALITION_LIMIT);
-        coalitions.add(own_coalition()).unwrap();
-        coalitions.read().unwrap();
-        let before = coalitions.readings[0];
-        let own_before = processes::read_usage(timebase, pid).unwrap().unwrap();
-
-        spin_on_this_thread_for(Duration::from_millis(50));
-
-        let own_after = processes::read_usage(timebase, pid).unwrap().unwrap();
-        coalitions.read().unwrap();
-        let after = coalitions.readings[0];
-        let own_nj = own_after.energy_nj - own_before.energy_nj;
-        assert!(
-            after.energy_nj - before.energy_nj >= own_nj,
-            "coalition grew {} nJ, this process {own_nj} nJ",
-            after.energy_nj - before.energy_nj
-        );
-    }
-
-    #[test]
     fn reads_each_coalition_once_however_many_processes_it_holds() {
         // Goal: a coalition added twice, as two of its processes would add it, is read once.
         // Method: add this process's coalition twice, and read every coalition.
@@ -507,5 +482,36 @@ mod tests {
             io::ErrorKind::PermissionDenied,
             coalition.unwrap_err().kind()
         );
+    }
+
+    /// The tests whose subject is the energy this Mac counts, which only an Apple silicon Mac
+    /// runs. CI's virtual Mac counts none, so its check skips this module.
+    mod hardware {
+        use super::*;
+
+        #[test]
+        fn counts_the_energy_this_process_spends_in_its_coalition() {
+            // Goal: a coalition's energy grows by at least what one of its processes spends.
+            // Method: read this process's coalition and usage before and after spinning 50 ms.
+            let timebase = Timebase::read().unwrap();
+            let pid = std::process::id().cast_signed();
+            let mut coalitions = Coalitions::new(timebase, COALITION_LIMIT);
+            coalitions.add(own_coalition()).unwrap();
+            coalitions.read().unwrap();
+            let before = coalitions.readings[0];
+            let own_before = processes::read_usage(timebase, pid).unwrap().unwrap();
+
+            spin_on_this_thread_for(Duration::from_millis(50));
+
+            let own_after = processes::read_usage(timebase, pid).unwrap().unwrap();
+            coalitions.read().unwrap();
+            let after = coalitions.readings[0];
+            let own_nj = own_after.energy_nj - own_before.energy_nj;
+            assert!(
+                after.energy_nj - before.energy_nj >= own_nj,
+                "coalition grew {} nJ, this process {own_nj} nJ",
+                after.energy_nj - before.energy_nj
+            );
+        }
     }
 }
