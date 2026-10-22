@@ -1,0 +1,10 @@
+# Both workspaces of this checkout, the one here and desktop/, keep their intermediate
+# artifacts in the target directory beside this file, whatever target directory a build
+# names. A dependency is then compiled once for this checkout rather than once per
+# workspace and per target directory. Final binaries still go to the target directory.
+#
+# Another checkout must not share it: Cargo finds a path crate's build fresh by the
+# modification times of its sources, so a copy at another commit whose files are older
+# would take this checkout's build of them without compiling its own.
+[build]
+build-dir = "target"
