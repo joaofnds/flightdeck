@@ -451,38 +451,61 @@ impl Session {
         let windows = self.context_windows(range);
         let chunk = context_chunk(windows.len());
         assert!(context_reader_count(windows.len()) <= self.context_connections.len());
+        let parts: Vec<&[usize]> = windows.chunks(chunk).collect();
+        assert_eq!(parts.len(), context_reader_count(windows.len()));
         let mut observations = Vec::new();
-        std::thread::scope(|scope| -> Result<()> {
-            let mut readers = Vec::with_capacity(CONTEXT_READERS);
-            for (part, connection) in windows.chunks(chunk).zip(&self.context_connections) {
-                let reader = self.reader_through(connection);
-                let thread = std::thread::Builder::new()
-                    .name("flightdeck-context".to_owned())
-                    // The desktop's live worker runs a context's reads with this stack when they
-                    // run on its own thread, as the earlier tail's still do.
-                    .stack_size(4 * 1024 * 1024)
-                    .spawn_scoped(scope, move || context_read_part(&reader, part, range))?;
-                readers.push(thread);
+        let read = |reader: &Reader<'_>, part| context_read_part(reader, part, range);
+        for part in self.context_readers("flightdeck-context", parts, read)? {
+            let (mut part_observations, mut part_points) = part?;
+            if observations.len() + part_observations.len() > OBSERVATIONS_MAX {
+                return Err(Error::Bound("context observations"));
             }
-            assert_eq!(readers.len(), context_reader_count(windows.len()));
-
-            for thread in readers {
-                let (mut part_observations, mut part_points) = thread
-                    .join()
-                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
-                if observations.len() + part_observations.len() > OBSERVATIONS_MAX {
-                    return Err(Error::Bound("context observations"));
-                }
-                observations.append(&mut part_observations);
-                output.append(&mut part_points);
-            }
-            Ok(())
-        })?;
+            observations.append(&mut part_observations);
+            output.append(&mut part_points);
+        }
         assert_eq!(observations.len(), output.len());
 
         context_points_order(output);
         metrics::context_segments(output)?;
         Ok(observations)
+    }
+
+    /// Reads each of `parts` with `read` on a thread named `name` and a context connection of its
+    /// own, so the reads wait on each other no more than the file system makes them, and gives
+    /// each part's result in the order of `parts`.
+    pub(crate) fn context_readers<P: Send, T: Send>(
+        &self,
+        name: &str,
+        parts: Vec<P>,
+        read: impl Fn(&Reader<'_>, P) -> Result<T> + Sync,
+    ) -> Result<Vec<Result<T>>> {
+        assert!(parts.len() <= self.context_connections.len());
+
+        let count = parts.len();
+        let read = &read;
+        let results = std::thread::scope(|scope| -> Result<Vec<Result<T>>> {
+            let mut readers = Vec::with_capacity(CONTEXT_READERS);
+            for (part, connection) in parts.into_iter().zip(&self.context_connections) {
+                let reader = self.reader_through(connection);
+                let thread = std::thread::Builder::new()
+                    .name(name.to_owned())
+                    .stack_size(CONTEXT_READER_STACK_BYTES)
+                    .spawn_scoped(scope, move || read(&reader, part))?;
+                readers.push(thread);
+            }
+
+            let mut results = Vec::with_capacity(readers.len());
+            for thread in readers {
+                let result = thread
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+                results.push(result);
+            }
+            Ok(results)
+        })?;
+
+        assert_eq!(results.len(), count);
+        Ok(results)
     }
 
     /// The windows whose readings may fall in `range`: those whose wall-clock bounds overlap it,
@@ -772,6 +795,10 @@ impl Session {
 /// Threads that read a context's windows. On an M5 Pro the newest sixteen minutes of a
 /// recording took 280 ms to read on one thread, about 120 ms on six, and no less on more.
 pub(crate) const CONTEXT_READERS: usize = 6;
+
+/// The stack of each thread that reads part of a context, the stack the desktop's live worker
+/// gives the same reads when they run on its own thread.
+const CONTEXT_READER_STACK_BYTES: usize = 4 * 1024 * 1024;
 
 /// The windows each reader of a context of `window_count` windows reads, the last reader
 /// reading those left.

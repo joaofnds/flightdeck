@@ -202,11 +202,18 @@ pub(crate) fn table_read(
         crate::live_fan_history::source(&table)?;
     }
     *cell_count += table.rows.len() * table.columns.len();
-    if *cell_count > READER_CELLS_MAX {
+    cells_check(*cell_count)?;
+
+    partition(&table)
+}
+
+/// Refuses a reader that would hold `cell_count` cells, more than `READER_CELLS_MAX`.
+pub(crate) fn cells_check(cell_count: usize) -> Result<()> {
+    if cell_count > READER_CELLS_MAX {
         return Err(Error::Bound("context cells"));
     }
 
-    partition(&table)
+    Ok(())
 }
 
 /// The count of the cells of the tables `tables` keeps.

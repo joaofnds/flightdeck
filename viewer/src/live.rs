@@ -489,9 +489,9 @@ impl LiveSession {
 
     /// The saved readings older than the full-detail context that ends at
     /// `context_last_second`, back to the lead-in before the loaded hour, one in every stretch of
-    /// seconds. Each sealed minute the tail needs is read once, when the tail first needs it, so
-    /// following the newest second reads a minute about once a minute and a stride inside the
-    /// kept minutes reads nothing.
+    /// seconds. Each sealed minute the tail needs is read once, at the latest when the tail first
+    /// needs it, so following the newest second reads a minute about once a minute and a stride
+    /// inside the kept minutes reads nothing.
     pub fn earlier_context(&mut self, context_last_second: u64) -> Result<Value> {
         if let Some(tail) = self.earlier_context_kept(context_last_second)? {
             return Ok(tail);

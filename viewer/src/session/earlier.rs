@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use persistence::{Error, Manifest, Result, TimeBounds};
 use serde_json::Value;
 
-use super::{NS, OBSERVATIONS_MAX, Observation, Session};
+use super::{CONTEXT_READERS, NS, OBSERVATIONS_MAX, Observation, Reader, Session};
 use crate::data::Table;
 use crate::metrics;
 
@@ -167,8 +167,11 @@ impl Reading {
 /// read loads are, since `metrics::point` gives no traffic rate without the previous interfaces.
 struct Last {
     reading: Option<Reading>,
-    tables: Vec<(&'static str, BTreeMap<u64, Table>)>,
+    tables: MinuteTables,
 }
+
+/// The rows of every table of a minute, or of one publication of it, by table name.
+type MinuteTables = Vec<(&'static str, BTreeMap<u64, Table>)>;
 
 /// The listed minute that holds the publication before a minute's first.
 #[derive(Clone, Copy)]
@@ -208,13 +211,16 @@ enum Previous {
 
 impl KeptTail {
     /// Reads each minute `range` needs that the tail does not keep, keeps it, drops the minutes
-    /// it no longer needs, and assembles the tail. Each minute is kept as soon as it is read, so
-    /// a canceled read loses only the minute it was reading.
+    /// it no longer needs, and assembles the tail. The minutes the next steps read are read up
+    /// to `CONTEXT_READERS` at a time, each on a connection of its own, and kept one at a time
+    /// in the session's order, so a canceled read loses only the minutes of the batch it was
+    /// reading, and a failed read keeps the minutes before the one that failed.
     pub(crate) fn fill(&mut self, history: &Session, range: TailRange) -> Result<()> {
         // A minute is read at most twice in one fill: once to hold the reading before a needed
         // minute's first, without the point of its own first reading, and once whole when the
         // tail needs it too.
         let steps_max = 2 * history.windows.len() + 1;
+        let mut batch: Vec<(usize, Result<MinuteTables>)> = Vec::new();
         for _ in 0..steps_max {
             let Some(step) = self.next(history, range) else {
                 self.fill_drop(history, range);
@@ -226,7 +232,16 @@ impl KeptTail {
                 return Err(Error::Bound("context observations"));
             }
 
-            let minute = history.earlier_minute(step)?;
+            if !batch.iter().any(|(window, _)| *window == step.window) {
+                // Holds one batch at a time, so the fill holds no more tables than a context.
+                batch.clear();
+                batch = history.earlier_batch(&self.fill_batch(history, range))?;
+            }
+            let Some(read) = batch.iter().position(|(window, _)| *window == step.window) else {
+                unreachable!("the older tail's batch misses the minute it reads next");
+            };
+            let tables = batch.swap_remove(read).1?;
+            let minute = history.earlier_minute(step, tables)?;
             self.minutes
                 .retain(|kept| kept.manifest.identity != minute.manifest.identity);
             self.minutes.push(minute);
@@ -256,6 +271,31 @@ impl KeptTail {
         }
 
         count
+    }
+
+    /// The minutes the fill reads together: the minutes the steps `next` gives would read, in
+    /// their order, up to `CONTEXT_READERS`, as the tail stands before the first of them.
+    fn fill_batch(&self, history: &Session, range: TailRange) -> Vec<usize> {
+        let mut windows = Vec::with_capacity(CONTEXT_READERS);
+        for window in 0..history.windows.len() {
+            if windows.len() == CONTEXT_READERS {
+                break;
+            }
+            if !range.needs(history.wall_bounds[window].as_ref()) {
+                continue;
+            }
+
+            let holder = self.holder(history, window);
+            if self.current(history, window, holder) {
+                continue;
+            }
+            if let Holder::Unread(before) = holder {
+                fill_batch_push(&mut windows, before);
+            }
+            fill_batch_push(&mut windows, window);
+        }
+
+        windows
     }
 
     /// Drops the kept minutes `range` needs neither for a reading nor as the minute before one
@@ -448,19 +488,33 @@ impl Session {
             .copied()
     }
 
-    /// Reads the minute `step` names whole and makes the point of the first reading of each
-    /// stretch inside it.
-    fn earlier_minute(&self, step: Step) -> Result<KeptMinute> {
+    /// Reads every table of each minute of `windows` whole, as `metrics::trends` reads a minute
+    /// it takes points from, each minute on a context connection of its own, and gives each
+    /// minute's tables or the error that stopped its read.
+    fn earlier_batch(&self, windows: &[usize]) -> Result<Vec<(usize, Result<MinuteTables>)>> {
+        assert!(!windows.is_empty());
+
+        self.operation.run(|| {
+            let tables =
+                self.context_readers("flightdeck-earlier", windows.to_vec(), earlier_batch_minute)?;
+            Ok(windows.iter().copied().zip(tables).collect())
+        })
+    }
+
+    /// Makes the point of the first reading of each stretch inside the minute `step` names,
+    /// whose tables the batch read as `tables`.
+    fn earlier_minute(&self, step: Step, tables: MinuteTables) -> Result<KeptMinute> {
         assert!(step.window < self.windows.len());
         if let Some(before) = step.holder.window() {
             assert_ne!(before, step.window);
         }
 
         self.operation.attach(&self.connection)?;
-        self.operation.run(|| self.earlier_minute_inner(step))
+        self.operation
+            .run(|| self.earlier_minute_inner(step, tables))
     }
 
-    fn earlier_minute_inner(&self, step: Step) -> Result<KeptMinute> {
+    fn earlier_minute_inner(&self, step: Step, minute_tables: MinuteTables) -> Result<KeptMinute> {
         let Step { window, holder } = step;
         let manifest = &self.windows[window];
         let mut tables = metrics::Tables::new();
@@ -473,7 +527,12 @@ impl Session {
                 tables.insert((before, *name), rows.clone());
             }
         }
-        self.earlier_minute_tables(window, &mut tables)?;
+        for (name, rows) in minute_tables {
+            tables.insert((window, name), rows);
+        }
+        // The cells of the rows the minute before lends count toward the bound, as a context
+        // counts its predecessor's tables.
+        metrics::cells_check(metrics::trends_cell_count(&tables))?;
         let readings = earlier_minute_readings(&tables, window)?;
 
         let mut first_missing = false;
@@ -505,19 +564,28 @@ impl Session {
             last,
         })
     }
+}
 
-    /// Reads every table of the minute at `window` whole, once, as `metrics::trends` reads a
-    /// minute it takes points from. The cells of the rows the minute before it lends in `tables`
-    /// count toward the bound, as a context counts its predecessor's tables.
-    fn earlier_minute_tables(&self, window: usize, tables: &mut metrics::Tables) -> Result<()> {
-        let mut cell_count = metrics::trends_cell_count(tables);
-        for name in metrics::TABLE_NAMES {
-            let rows = metrics::table_read(&self.reader(), window, name, &mut cell_count)?;
-            tables.insert((window, name), rows);
+/// Adds `window` to the minutes a batch reads, once, while it holds fewer than
+/// `CONTEXT_READERS`.
+fn fill_batch_push(windows: &mut Vec<usize>, window: usize) {
+    if windows.len() < CONTEXT_READERS {
+        if !windows.contains(&window) {
+            windows.push(window);
         }
-
-        Ok(())
     }
+}
+
+/// Reads every table of the minute at `window` whole, once, through `reader`.
+fn earlier_batch_minute(reader: &Reader<'_>, window: usize) -> Result<MinuteTables> {
+    let mut cell_count = 0;
+    let mut tables = Vec::with_capacity(metrics::TABLE_NAMES.len());
+    for name in metrics::TABLE_NAMES {
+        let rows = metrics::table_read(reader, window, name, &mut cell_count)?;
+        tables.push((name, rows));
+    }
+
+    Ok(tables)
 }
 
 /// The readings of the minute at `window` that have a wall time, by publication.

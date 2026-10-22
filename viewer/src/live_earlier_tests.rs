@@ -132,6 +132,33 @@ fn reads_a_recovered_minute_and_the_minute_after_it() {
 }
 
 #[test]
+fn reads_each_recovered_minute_once_with_a_newly_needed_one() {
+    // Goal: a fill that reads a minute sealed late, the minute after it, and a minute it now
+    // needs reads each once, though it reads them together. Method: read the tail without
+    // minutes 5 and 12, seal both, refresh the list, and count the saved sources the next read
+    // takes, and compare its tail with a reopened session's.
+    let mut fixture = RingFixture::new_following();
+    let windows = earlier_publish(&mut fixture);
+    for window in &windows {
+        if ![5, 12].contains(&window.identity.window) {
+            seal_window(&fixture.root, window);
+        }
+    }
+    let mut session = LiveSession::open(&fixture.root).unwrap();
+    let last = earlier_context_last(EARLIER_LIMIT);
+    session.earlier_context(last).unwrap();
+    seal_window(&fixture.root, &windows[5]);
+    seal_window(&fixture.root, &windows[12]);
+    session.refresh_history().unwrap();
+    let refreshed = earlier_reads(&session);
+
+    let tail = session.earlier_context(last).unwrap();
+
+    assert_eq!(earlier_reads(&session) - refreshed, 3 * earlier_tables());
+    assert_eq!(tail, earlier_reopened(&fixture.root, last));
+}
+
+#[test]
 fn drops_the_minutes_a_tail_leaves() {
     // Goal: the tail keeps only the minutes its range needs, so going back and returning reads
     // the newest minutes again. Method: read the tail, read it 500 seconds earlier, which leaves
@@ -331,7 +358,8 @@ fn stops_reading_minutes_once_the_kept_readings_pass_the_bound() {
     // Goal: a range holding more readings than a context may hold fails without reading every
     // minute in it. Method: seal five runs of fifteen minutes whose readings all fall at the
     // same 900 seconds, as runs recorded at once would, read the tail twice, and count the
-    // saved sources read. The 69th minute brings the kept readings past OBSERVATIONS_MAX.
+    // saved sources read. The 69th minute brings the kept readings past OBSERVATIONS_MAX, and
+    // the fill stops once it has kept it, having read the rest of its batch of six, the 72nd.
     let mut fixture = RingFixture::new_following();
     let wall = |tick: u64| EARLIER_BASE + 300 + tick;
     let recording = RingReader::open_generation(fixture.writer.name())
@@ -358,8 +386,7 @@ fn stops_reading_minutes_once_the_kept_readings_pass_the_bound() {
 
     assert!(matches!(first, Err(Error::Bound("context observations"))));
     assert!(matches!(second, Err(Error::Bound("context observations"))));
-    let minutes = u64::try_from(OBSERVATIONS_MAX / 60 + 1).unwrap();
-    assert_eq!(earlier_reads(&session) - opened, minutes * earlier_tables());
+    assert_eq!(earlier_reads(&session) - opened, 72 * earlier_tables());
 }
 
 #[test]
@@ -384,9 +411,10 @@ fn answers_a_kept_tail_after_its_read_is_canceled() {
 
 #[test]
 fn keeps_the_minutes_a_canceled_fill_finished() {
-    // Goal: a canceled read of the tail loses only the minute it was reading. Method: cancel
-    // once the first minute is kept, read the tail again in the next epoch, and count the saved
-    // sources both reads took.
+    // Goal: a canceled read of the tail loses only the minutes of the batch it was reading.
+    // Method: cancel once the first minute is kept, read the tail again in the next epoch, and
+    // count the saved sources both reads took. The first batch read six minutes, 0 to 5, so
+    // the second read reads minutes 1 to 5 again.
     let mut fixture = RingFixture::new_following();
     for window in earlier_publish(&mut fixture) {
         seal_window(&fixture.root, &window);
@@ -404,7 +432,7 @@ fn keeps_the_minutes_a_canceled_fill_finished() {
 
     assert!(matches!(canceled, Err(Error::Io(error))
         if error.kind() == std::io::ErrorKind::Interrupted));
-    assert_eq!(earlier_reads(&session) - opened, 13 * earlier_tables());
+    assert_eq!(earlier_reads(&session) - opened, (13 + 5) * earlier_tables());
 }
 
 /// Follows ten limits a minute apart from `EARLIER_BASE + 2860`, sealing `windows` in turn
@@ -556,7 +584,6 @@ fn earlier_reads(session: &LiveSession) -> u64 {
     session.history.as_ref().unwrap().source_reads.get()
 }
 
-/// The saved sources one minute's readings come from.
 /// The sources a minute's context reads, its tables and the ticks again, which place each core
 /// state in a performance level.
 fn earlier_tables() -> u64 {
