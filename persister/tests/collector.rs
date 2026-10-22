@@ -1,4 +1,6 @@
-//! Tests of the collector binary, run as a process of its own.
+//! Tests of the collector binary, run as a process of its own beside the persister it starts.
+//! They live in the persister's package, since cargo builds a package's own binaries for its
+//! tests and the collector starts the persister from its own directory.
 
 // Clippy lets a test unwrap only inside a module marked as a test's.
 #[cfg(test)]
@@ -6,8 +8,9 @@ mod tests {
     use std::ffi::{CString, c_char, c_int};
     use std::os::unix::fs::{DirBuilderExt, symlink};
     use std::os::unix::process::CommandExt;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Output, Stdio};
+    use std::sync::OnceLock;
     use std::time::Duration;
 
     use collector::ring::{Found, Place, Reader};
@@ -22,7 +25,7 @@ mod tests {
     struct TestRing {
         name: String,
         place: Place,
-        recording: std::path::PathBuf,
+        recording: PathBuf,
     }
 
     impl TestRing {
@@ -62,6 +65,41 @@ mod tests {
         }
     }
 
+    /// The collector binary, built by cargo into the directory of the persister this package's
+    /// tests run, once for all of them, so the collector starts this persister.
+    fn collector() -> &'static Path {
+        static BUILT: OnceLock<PathBuf> = OnceLock::new();
+        BUILT.get_or_init(|| {
+            let persister = Path::new(env!("CARGO_BIN_EXE_persister"));
+            let profile_directory = persister.parent().unwrap();
+            let target_directory = profile_directory.parent().unwrap();
+            // Cargo names the dev profile's directory debug and every other after its profile.
+            let profile = match profile_directory.file_name().unwrap().to_str().unwrap() {
+                "debug" => "dev",
+                other => other,
+            };
+
+            let built = Command::new(env!("CARGO"))
+                .args(["build", "--locked"])
+                .args(["--package", "collector", "--bin", "collector"])
+                .args(["--profile", profile])
+                .arg("--target-dir")
+                .arg(target_directory)
+                .current_dir(env!("CARGO_MANIFEST_DIR"))
+                .output()
+                .unwrap();
+
+            assert!(
+                built.status.success(),
+                "{}",
+                String::from_utf8_lossy(&built.stderr)
+            );
+            let collector = profile_directory.join("collector");
+            assert!(collector.is_file(), "{collector:?}");
+            collector
+        })
+    }
+
     fn stdout(output: &Output) -> &str {
         assert!(
             output.status.success(),
@@ -75,7 +113,7 @@ mod tests {
 
     impl RunningCollector {
         fn start(ring: &TestRing) -> Self {
-            let child = Command::new(env!("CARGO_BIN_EXE_collector"))
+            let child = Command::new(collector())
                 .arg("--ring")
                 .arg(&ring.name)
                 .arg("--recording")
@@ -149,7 +187,7 @@ mod tests {
         panic!("collector did not publish its first scheduled tick");
     }
 
-    fn only_entry(path: &Path) -> std::path::PathBuf {
+    fn only_entry(path: &Path) -> PathBuf {
         let mut entries = std::fs::read_dir(path).unwrap();
         let path = entries.next().unwrap().unwrap().path();
         assert!(entries.next().is_none());
@@ -226,7 +264,7 @@ mod tests {
         // Method: run the collector for two seconds under a ring name of this test's own, then
         // read every publication of the ring it left, in this process.
         let ring = TestRing::new("ticks");
-        let collected = Command::new(env!("CARGO_BIN_EXE_collector"))
+        let collected = Command::new(collector())
             .args(["--seconds", "2", "--ring", &ring.name])
             .arg("--recording")
             .arg(&ring.recording)
@@ -276,11 +314,11 @@ mod tests {
             .mode(0o700)
             .create(&launch)
             .unwrap();
-        let collector = launch.join("collector");
-        symlink(env!("CARGO_BIN_EXE_collector"), &collector).unwrap();
+        let launch_collector = launch.join("collector");
+        symlink(collector(), &launch_collector).unwrap();
         symlink("/usr/bin/false", launch.join("persister")).unwrap();
 
-        let output = Command::new(collector)
+        let output = Command::new(launch_collector)
             .args(["--seconds", "1", "--ring", &ring.name])
             .arg("--recording")
             .arg(&ring.recording)
