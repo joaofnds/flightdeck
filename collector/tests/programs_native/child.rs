@@ -61,7 +61,6 @@ pub fn run(test: &str) -> ! {
     if mode == "setexec" {
         setexec::replace(&setexec::Replacement {
             image: &target,
-            root: &root,
             test,
             phase: next,
         });

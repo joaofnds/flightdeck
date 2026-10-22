@@ -2,9 +2,10 @@ use std::ffi::{CString, c_char, c_void};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
+use super::PHASE;
+
 pub struct Replacement<'paths> {
     pub image: &'paths Path,
-    pub root: &'paths Path,
     pub test: &'paths str,
     pub phase: u32,
 }
@@ -16,20 +17,20 @@ pub fn replace(input: &Replacement<'_>) -> ! {
         CString::new(input.test).unwrap(),
         CString::new("--nocapture").unwrap(),
     ];
-    let environment = [
-        CString::new("FLIGHTDECK_ASSOC_ROLE=child").unwrap(),
-        CString::new(format!("FLIGHTDECK_ASSOC_ROOT={}", input.root.display())).unwrap(),
-        CString::new(format!("FLIGHTDECK_ASSOC_PHASE={}", input.phase)).unwrap(),
-        CString::new("FLIGHTDECK_ASSOC_MODE=setexec").unwrap(),
-    ];
     let mut argument_pointers = [std::ptr::null_mut(); 5];
-    let mut environment_pointers = [std::ptr::null_mut(); 5];
     for (index, argument) in arguments.iter().enumerate() {
         argument_pointers[index] = argument.as_ptr().cast_mut();
     }
-    for (index, entry) in environment.iter().enumerate() {
-        environment_pointers[index] = entry.as_ptr().cast_mut();
-    }
+
+    // The replacement keeps the test's environment, as the exec of the other modes does, so a
+    // coverage run's LLVM_PROFILE_FILE reaches it and its profile lands with the others.
+    let environment = replace_environment(input.phase);
+    let mut environment_pointers: Vec<*mut c_char> = environment
+        .iter()
+        .map(|entry| entry.as_ptr().cast_mut())
+        .collect();
+    environment_pointers.push(std::ptr::null_mut());
+
     let mut pointer = std::ptr::null_mut();
     assert_eq!(0, unsafe { posix_spawnattr_init(&raw mut pointer) });
     let mut attributes = Attributes { pointer };
@@ -49,6 +50,20 @@ pub fn replace(input: &Replacement<'_>) -> ! {
         )
     };
     panic!("POSIX_SPAWN_SETEXEC returned status={status} pid={pid}");
+}
+
+fn replace_environment(phase: u32) -> Vec<CString> {
+    let mut environment = Vec::new();
+    for (name, value) in std::env::vars_os() {
+        if name != PHASE {
+            let mut entry = name.as_bytes().to_vec();
+            entry.push(b'=');
+            entry.extend_from_slice(value.as_bytes());
+            environment.push(CString::new(entry).unwrap());
+        }
+    }
+    environment.push(CString::new(format!("{PHASE}={phase}")).unwrap());
+    environment
 }
 
 struct Attributes {
