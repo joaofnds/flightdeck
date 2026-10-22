@@ -171,8 +171,8 @@ fn capture(recording: &Path, output: &Path) -> Result<(), Box<dyn std::error::Er
         .as_array()
         .ok_or("Missing trends")?
         .len();
-    if count != 900 {
-        return Err("Capture requires exactly 900 real scalar points".into());
+    if u64::try_from(count)? != viewer::CHARTED_SECONDS {
+        return Err("Capture requires a real scalar point every charted second".into());
     }
 
     write(output, &selection)?;
