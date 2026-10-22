@@ -357,7 +357,10 @@ impl LiveDashboard {
             }
         }
         self.tick_presence(cx);
-        self.preview_tick(cx);
+        // A hover's read would wake the resting reader of a hidden window.
+        if self.presence != Presence::Hidden {
+            self.preview_tick(cx);
+        }
         let status = self.status();
         if self.last_status != status {
             self.last_status = status;
@@ -570,6 +573,12 @@ impl LiveDashboard {
         // tick.
         if matches!(self.presence, Presence::Hiding | Presence::Showing) {
             return true;
+        }
+
+        // A hidden window's reader rests, so the App histories or the hover its page waits on
+        // come only once the window shows again.
+        if self.presence == Presence::Hidden {
+            return false;
         }
 
         if let Some(snapshot) = &self.snapshot {

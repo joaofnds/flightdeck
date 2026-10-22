@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 
 use super::SnapshotReader;
 use crate::live_dashboard::LiveDashboard;
+use crate::live_hover::{Origin, Target};
 use crate::live_source::{Received, Snapshot, Update};
 
 #[gpui::test]
@@ -125,6 +126,83 @@ fn a_window_hidden_again_before_it_asked_for_its_page_leaves_its_reader_resting(
     assert_eq!(window.reader.receive(), (Received::Continued, false));
 }
 
+#[gpui::test]
+fn a_window_reported_hidden_polls_quickly_until_its_reader_rests(cx: &mut TestAppContext) {
+    // Goal: a window macOS hides rests its reader within a frame rather than at the
+    // quarter-second tick.
+    // Method: answer the window's first request, hide the window with no step of its
+    // dashboard after it, and ask whether the window still waits on its reader.
+    let mut window = VisibilityHarness::open(cx);
+    window.answer();
+    window.tick();
+
+    window.report(WindowVisibility::Hidden);
+
+    assert!(window.awaiting_reply());
+}
+
+#[gpui::test]
+fn a_hidden_window_waits_on_no_reply_from_its_resting_reader(cx: &mut TestAppContext) {
+    // Goal: a hidden window stops the quick poll once its reader rests, since the reader
+    // answers nothing until the window shows again.
+    // Method: hide the window while its first request is unanswered, and ask whether the window
+    // still waits on its reader.
+    let mut window = VisibilityHarness::open(cx);
+
+    window.change(WindowVisibility::Hidden);
+
+    assert!(!window.awaiting_reply());
+}
+
+#[gpui::test]
+fn a_window_hidden_before_its_histories_arrive_waits_on_no_reply(cx: &mut TestAppContext) {
+    // Goal: a window hidden while its first readings leave their App histories to a second
+    // read stops the quick poll, since its resting reader reads none until the window shows.
+    // Method: open a window that macOS reports hidden, answer its first request with readings
+    // whose App histories are still to come, step its dashboard, and ask whether the window
+    // still waits on its reader.
+    let mut window = VisibilityHarness::open_unobserved(cx);
+    window.report(WindowVisibility::Hidden);
+    window.observe();
+
+    window.answer_leaving_histories();
+    window.tick();
+
+    assert!(!window.awaiting_reply());
+}
+
+#[gpui::test]
+fn a_window_hidden_during_a_hover_ends_it(cx: &mut TestAppContext) {
+    // Goal: hiding a window ends the hover it showed, whose read its resting reader drops.
+    // Method: answer the window's first request, hover a second the page does not hold, hide
+    // the window, and ask whether it still shows the hover.
+    let mut window = VisibilityHarness::open(cx);
+    window.answer();
+    window.tick();
+    window.hover();
+
+    window.change(WindowVisibility::Hidden);
+
+    assert!(!window.hovering());
+}
+
+#[gpui::test]
+fn a_hidden_window_leaves_its_reader_no_hover_to_read(cx: &mut TestAppContext) {
+    // Goal: a hover that starts while the window is hidden, as one ending on the hide shows the
+    // selected second again, sends its resting reader no read until the window shows.
+    // Method: answer the window's first request, hide the window, hover a second the page does
+    // not hold, step the dashboard, and step the reader's mailbox.
+    let mut window = VisibilityHarness::open(cx);
+    window.answer();
+    window.tick();
+    window.change(WindowVisibility::Hidden);
+    window.hover();
+
+    window.tick();
+
+    assert_eq!(window.reader.receive(), (Received::Continued, false));
+}
+
 struct VisibilityHarness {
     cx: TestAppContext,
     window: WindowHandle<LiveDashboard>,
@@ -184,6 +262,16 @@ impl VisibilityHarness {
 
     /// Answers the window's last request with a page, as the reader publishes one.
     fn answer(&mut self) {
+        self.publish(false);
+    }
+
+    /// Answers the window's last request with readings whose App histories a second read
+    /// brings, as the reader publishes a newly opened page.
+    fn answer_leaving_histories(&mut self) {
+        self.publish(true);
+    }
+
+    fn publish(&mut self, histories_pending: bool) {
         let page = Box::new(Snapshot {
             generation: self.generation(),
             catalog: Value::Null,
@@ -201,7 +289,7 @@ impl VisibilityHarness {
             rankings: None,
             app_ranks: None,
             app_parts: None,
-            histories_pending: false,
+            histories_pending,
             read_ms: 0.0,
         });
         crate::live_source::worker_publish(
@@ -209,6 +297,32 @@ impl VisibilityHarness {
             page.generation,
             Update::Ready(page),
         );
+    }
+
+    /// Hovers a second the window's page does not hold, so the hover waits on a read of it.
+    fn hover(&mut self) {
+        let identity = json!({"run":"00000000000000010000000000000002",
+            "boot":"00000000000000030000000000000004","publication":1});
+        let target = Target::exact(1000, &identity).unwrap();
+        self.window
+            .update(&mut self.cx, |dashboard, _, cx| {
+                dashboard.set_reading_target("visibility".into(), target, Origin::Keyboard, cx);
+            })
+            .unwrap();
+    }
+
+    /// Whether the window shows a hover.
+    fn hovering(&self) -> bool {
+        self.window
+            .read_with(&self.cx, |dashboard, _| dashboard.preview.is_some())
+            .unwrap()
+    }
+
+    /// Whether the window waits on its reader, which keeps its quick poll running.
+    fn awaiting_reply(&self) -> bool {
+        self.window
+            .read_with(&self.cx, |dashboard, _| dashboard.awaiting_reply())
+            .unwrap()
     }
 
     /// The generation of the last request the window sent its reader.
