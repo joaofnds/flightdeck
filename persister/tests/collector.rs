@@ -6,6 +6,7 @@
 #[cfg(test)]
 mod tests {
     use std::ffi::{CString, c_char, c_int};
+    use std::fs;
     use std::os::unix::fs::{DirBuilderExt, symlink};
     use std::os::unix::process::CommandExt;
     use std::path::{Path, PathBuf};
@@ -24,18 +25,23 @@ mod tests {
     const PUBLICATION_LIMIT: Duration = Duration::from_secs(120);
     /// What a test waits past the collector's stop limit, for the alarm that ends it there.
     const STOP_ALARM_MARGIN_SECONDS: u32 = 30;
+    /// How long a test waits for a binary another cargo build is replacing to be back.
+    const REPLACE_LIMIT: Duration = Duration::from_secs(10);
 
     unsafe extern "C" {
         fn shm_unlink(name: *const c_char) -> c_int;
         fn kill(pid: c_int, signal: c_int) -> c_int;
     }
 
-    /// A ring name only one test uses, whose lock file and ring are removed when the test
-    /// ends, since a shared-memory object outlives the process that made it.
+    /// A ring name only one test uses, and copies of the collector and the persister only it
+    /// runs, so another process's cargo build cannot replace them under it. Its lock file,
+    /// ring and directories are removed when the test ends, since a shared-memory object
+    /// outlives the process that made it.
     struct TestRing {
         name: String,
         place: Place,
         recording: PathBuf,
+        executables: PathBuf,
     }
 
     impl TestRing {
@@ -45,19 +51,39 @@ mod tests {
             let recording =
                 std::env::temp_dir().join(format!("fdc-recording-{}{test}", std::process::id()));
             assert!(!recording.exists());
+            let executables =
+                std::env::temp_dir().join(format!("fdc-executables-{}{test}", std::process::id()));
+
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&executables)
+                .unwrap();
+            copy_executable(built_collector_executable(), &executables.join("collector"));
+            copy_executable(
+                Path::new(env!("CARGO_BIN_EXE_persister")),
+                &executables.join("persister"),
+            );
+
             Self {
                 name,
                 place,
                 recording,
+                executables,
             }
+        }
+
+        /// The collector this test runs, which starts the persister copied beside it.
+        fn collector_executable(&self) -> PathBuf {
+            self.executables.join("collector")
         }
     }
 
     impl Drop for TestRing {
         fn drop(&mut self) {
+            fs::remove_dir_all(&self.executables).unwrap();
             // The lock file names the ring, as the writer recorded it, so a change to how rings
             // are named cannot leave one behind unseen.
-            let name = match std::fs::read(&self.place.lock_path) {
+            let name = match fs::read(&self.place.lock_path) {
                 Ok(name) => name,
                 Err(error) => {
                     assert_eq!(std::io::ErrorKind::NotFound, error.kind());
@@ -68,22 +94,23 @@ mod tests {
                 let ring = CString::new(name).unwrap();
                 assert_eq!(0, unsafe { shm_unlink(ring.as_ptr()) }, "unlink {ring:?}");
             }
-            std::fs::remove_file(&self.place.lock_path).unwrap();
+            fs::remove_file(&self.place.lock_path).unwrap();
             if self.recording.exists() {
-                std::fs::remove_dir_all(&self.recording).unwrap();
+                fs::remove_dir_all(&self.recording).unwrap();
             }
         }
     }
 
     /// The collector binary, built by cargo into the directory of the persister this package's
-    /// tests run, once for all of them, so the collector starts this persister.
-    fn collector() -> &'static Path {
+    /// tests run, once for all of them in this process.
+    fn built_collector_executable() -> &'static Path {
         static BUILT: OnceLock<PathBuf> = OnceLock::new();
         BUILT.get_or_init(|| {
             let persister = Path::new(env!("CARGO_BIN_EXE_persister"));
             let profile_directory = persister.parent().unwrap();
             let target_directory = profile_directory.parent().unwrap();
-            // Cargo names the dev profile's directory debug and every other after its profile.
+            // Cargo writes the dev and test profiles into debug, the release and bench profiles
+            // into release, and any other profile into a directory of its name.
             let profile = match profile_directory.file_name().unwrap().to_str().unwrap() {
                 "debug" => "dev",
                 other => other,
@@ -104,10 +131,26 @@ mod tests {
                 "{}",
                 String::from_utf8_lossy(&built.stderr)
             );
-            let collector = profile_directory.join("collector");
-            assert!(collector.is_file(), "{collector:?}");
-            collector
+            profile_directory.join("collector")
         })
+    }
+
+    /// Copies the executable at `source` to `target`. A cargo build in any process replaces
+    /// each binary it builds, even one already up to date, by removing it and linking it again,
+    /// so the copy waits out the moment `source` is missing.
+    fn copy_executable(source: &Path, target: &Path) {
+        let copied = wait_until(REPLACE_LIMIT, || match fs::copy(source, target) {
+            Ok(bytes) => {
+                assert!(bytes > 0, "{source:?}");
+                true
+            }
+            Err(error) => {
+                assert_eq!(std::io::ErrorKind::NotFound, error.kind(), "{source:?}");
+                false
+            }
+        });
+
+        assert!(copied, "{source:?} stayed missing for {REPLACE_LIMIT:?}");
     }
 
     fn stdout(output: &Output) -> &str {
@@ -123,7 +166,7 @@ mod tests {
 
     impl RunningCollector {
         fn start(ring: &TestRing) -> Self {
-            let child = Command::new(collector())
+            let child = Command::new(ring.collector_executable())
                 .arg("--ring")
                 .arg(&ring.name)
                 .arg("--recording")
@@ -226,7 +269,7 @@ mod tests {
     }
 
     fn only_entry(path: &Path) -> PathBuf {
-        let mut entries = std::fs::read_dir(path).unwrap();
+        let mut entries = fs::read_dir(path).unwrap();
         let path = entries.next().unwrap().unwrap().path();
         assert!(entries.next().is_none());
         path
@@ -236,7 +279,7 @@ mod tests {
         let run = only_entry(&root.join("commits"));
         let day = only_entry(&run);
         let marker = only_entry(&day);
-        let bytes = std::fs::read(marker).unwrap();
+        let bytes = fs::read(marker).unwrap();
         assert_eq!(&bytes[..8], b"FDSEAL01");
         let first = u64::from_le_bytes(bytes[80..88].try_into().unwrap());
         let end = u64::from_le_bytes(bytes[88..96].try_into().unwrap());
@@ -302,7 +345,7 @@ mod tests {
         // Method: run the collector for two seconds under a ring name of this test's own, then
         // read every publication of the ring it left, in this process.
         let ring = TestRing::new("ticks");
-        let collected = Command::new(collector())
+        let collected = Command::new(ring.collector_executable())
             .args(["--seconds", "2", "--ring", &ring.name])
             .arg("--recording")
             .arg(&ring.recording)
@@ -347,16 +390,16 @@ mod tests {
         // Method: place a failing sibling beside a collector symlink and inspect the seal.
         let ring = TestRing::new("symlink");
         let launch = ring.recording.join("launch");
-        std::fs::DirBuilder::new()
+        fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
             .create(&launch)
             .unwrap();
-        let launch_collector = launch.join("collector");
-        symlink(collector(), &launch_collector).unwrap();
+        let collector = launch.join("collector");
+        symlink(ring.collector_executable(), &collector).unwrap();
         symlink("/usr/bin/false", launch.join("persister")).unwrap();
 
-        let output = Command::new(launch_collector)
+        let output = Command::new(collector)
             .args(["--seconds", "1", "--ring", &ring.name])
             .arg("--recording")
             .arg(&ring.recording)
