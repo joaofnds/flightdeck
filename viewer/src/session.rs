@@ -355,8 +355,11 @@ impl Session {
             })
             .cloned();
         let mut selected_context = Vec::new();
-        let context = ContextRange::ending_at(selection.context_last_second)?;
-        crate::cpu_history::context(context.held_points(&points), &mut selected_context)?;
+        crate::cpu_history::context(
+            &points,
+            ContextRange::ending_at(selection.context_last_second)?,
+            &mut selected_context,
+        )?;
         self.selected_context = selected_context;
         self.selected = chosen;
         self.context_last_second = Some(selection.context_last_second);

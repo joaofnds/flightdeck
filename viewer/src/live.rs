@@ -361,12 +361,14 @@ impl LiveSession {
                 .ok_or(Error::Bound("selected context point"))?
                 .clone();
         }
-        let trends = response["trends"]
-            .as_array()
-            .ok_or(Error::Bound("CPU selected context"))?;
-        let held = ContextRange::ending_at(selection.context_last_second())?.held_points(trends);
         let mut context = Vec::new();
-        crate::cpu_history::context(held, &mut context)?;
+        crate::cpu_history::context(
+            response["trends"]
+                .as_array()
+                .ok_or(Error::Bound("CPU selected context"))?,
+            ContextRange::ending_at(selection.context_last_second())?,
+            &mut context,
+        )?;
         self.selected_context = context;
         self.context_last_second = Some(selection.context_last_second());
 
@@ -584,8 +586,7 @@ impl LiveSession {
             .collect::<Vec<_>>();
         alternatives.sort_by(|left, right| identity_order(left).cmp(&identity_order(right)));
         let mut context = Vec::new();
-        let held = ContextRange::ending_at(second)?.held_points(&trends);
-        crate::cpu_history::context(held, &mut context)?;
+        crate::cpu_history::context(&trends, ContextRange::ending_at(second)?, &mut context)?;
         self.operation.check()?;
 
         let response = json!({"second": second, "context_last_second": second,

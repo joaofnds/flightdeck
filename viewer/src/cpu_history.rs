@@ -216,14 +216,21 @@ impl Cache {
     }
 }
 
-pub(crate) fn context(points: &[Value], output: &mut Vec<Identity>) -> Result<()> {
+/// The identities of the charted `points` that lie in `range`, which leaves out the lead-in the
+/// charts draw before it.
+pub(crate) fn context(
+    points: &[Value],
+    range: ContextRange,
+    output: &mut Vec<Identity>,
+) -> Result<()> {
     assert!(output.is_empty());
-    if points.len() > OBSERVATIONS_MAX {
+    let held = range.held_points(points);
+    if held.len() > OBSERVATIONS_MAX {
         return Err(Error::Bound("CPU context observations"));
     }
 
-    output.reserve_exact(points.len());
-    for point in points {
+    output.reserve_exact(held.len());
+    for point in held {
         let required = |name| {
             point[name]
                 .as_u64()
