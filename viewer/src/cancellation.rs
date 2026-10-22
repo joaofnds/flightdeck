@@ -6,11 +6,17 @@ use std::time::Duration;
 use persistence::engine::{Engine, InterruptHandle};
 use persistence::{Error, Result};
 
+/// The engines whose queries one cancellation interrupts, most recently attached last. A live
+/// session reads on its own engine and its session's, and a context on several more at once,
+/// so twice as many leaves room for the engines a reopen brings. Interrupting an engine with no
+/// query running does nothing, so an engine kept after its session closed costs nothing.
+const INTERRUPTS_MAX: usize = 16;
+
 /// Independent from the serial session owner, so a superseding request can interrupt it.
 #[derive(Default)]
 pub struct Cancellation {
     epoch: AtomicU64,
-    interrupt: Mutex<Option<Arc<InterruptHandle>>>,
+    interrupts: Mutex<Vec<Arc<InterruptHandle>>>,
     wake: Condvar,
 }
 
@@ -27,7 +33,7 @@ struct Completion<'a> {
 impl Drop for Completion<'_> {
     fn drop(&mut self) {
         // Pair completion with the waiter's mutex so notification cannot precede its wait.
-        let handle = self.operation.cancellation.interrupt.lock();
+        let handle = self.operation.cancellation.interrupts.lock();
         self.finished.store(true, Ordering::Release);
         self.operation.cancellation.wake.notify_all();
         if let Err(error) = &handle {
@@ -48,12 +54,12 @@ impl Cancellation {
                 epoch.checked_add(1)
             })
             .map_err(|_| Error::Bound("cancellation epoch"))?;
-        let handle = self
-            .interrupt
+        let interrupts = self
+            .interrupts
             .lock()
             .map_err(|error| io::Error::other(error.to_string()))?;
-        if let Some(handle) = &*handle {
-            handle.interrupt()?;
+        for interrupt in interrupts.iter() {
+            interrupt.interrupt()?;
         }
         self.wake.notify_all();
         Ok(())
@@ -93,9 +99,9 @@ impl Operation {
     }
 
     fn watch(&self, finished: &AtomicBool) -> Result<()> {
-        let mut handle = self
+        let mut interrupts = self
             .cancellation
-            .interrupt
+            .interrupts
             .lock()
             .map_err(|error| poisoned(&error))?;
         // Keep cancellation effective while a native query is being installed. Polars can
@@ -105,21 +111,21 @@ impl Operation {
                 return Ok(());
             }
             if self.cancellation.epoch() == self.epoch {
-                handle = self
+                interrupts = self
                     .cancellation
                     .wake
-                    .wait(handle)
+                    .wait(interrupts)
                     .map_err(|error| poisoned(&error))?;
             } else {
-                if let Some(interrupt) = &*handle {
+                for interrupt in interrupts.iter() {
                     interrupt.interrupt()?;
                 }
                 let (next, _) = self
                     .cancellation
                     .wake
-                    .wait_timeout(handle, Duration::from_millis(1))
+                    .wait_timeout(interrupts, Duration::from_millis(1))
                     .map_err(|error| poisoned(&error))?;
-                handle = next;
+                interrupts = next;
             }
         }
         Err(Error::Bound("query cancellation retries"))
@@ -140,13 +146,22 @@ impl Operation {
         self.epoch
     }
 
+    /// Adds `connection` to the engines a cancel interrupts, dropping the least recently
+    /// attached once `INTERRUPTS_MAX` are.
     pub fn attach(&self, connection: &Engine) -> Result<()> {
-        let mut handle = self
+        let mut interrupts = self
             .cancellation
-            .interrupt
+            .interrupts
             .lock()
             .map_err(|error| io::Error::other(error.to_string()))?;
-        *handle = Some(connection.interrupt_handle());
+        let attached = connection.interrupt_handle();
+        interrupts.retain(|interrupt| !Arc::ptr_eq(interrupt, &attached));
+        if interrupts.len() == INTERRUPTS_MAX {
+            interrupts.remove(0);
+        }
+        interrupts.push(attached);
+        assert!(interrupts.len() <= INTERRUPTS_MAX);
+        drop(interrupts);
         self.check()
     }
 }
@@ -240,6 +255,21 @@ mod tests {
     fn interrupts_a_superseded_native_query_that_has_started() {
         // Goal: cancelling during native execution interrupts the query and returns no answer.
         // Method: gate native execution, cancel once inside it, then release the gate.
+        assert_eq!(cancel_inside_native_query(0), (true, true));
+    }
+
+    #[test]
+    fn interrupts_a_started_query_on_an_engine_attached_before_another() {
+        // Goal: a cancellation interrupts the query of every engine its operation attached, since
+        // a context reads on several engines at once and each attaches its own.
+        // Method: attach a second engine after the querying one, then cancel inside native
+        // execution on the first.
+        assert_eq!(cancel_inside_native_query(1), (true, true));
+    }
+
+    /// Whether the operation was superseded, and whether its query was interrupted natively,
+    /// when a cancel lands inside a query on an engine attached before `engines_after` others.
+    fn cancel_inside_native_query(engines_after: usize) -> (bool, bool) {
         let cancellation = Arc::new(Cancellation::default());
         let control = Arc::clone(&cancellation);
         let (started, ready) = mpsc::sync_channel(1);
@@ -247,8 +277,14 @@ mod tests {
         let (finished, result) = mpsc::sync_channel(1);
         let worker = std::thread::spawn(move || {
             let connection = crate::data::connection();
+            let others: Vec<_> = (0..engines_after)
+                .map(|_| crate::data::connection())
+                .collect();
             let operation = control.operation(0).unwrap();
             operation.attach(&connection).unwrap();
+            for other in &others {
+                operation.attach(other).unwrap();
+            }
             let mut native = false;
             let permitted = std::sync::Mutex::new(permitted);
             let plan = interruptible_plan(move || {
@@ -269,11 +305,10 @@ mod tests {
         cancellation.cancel().unwrap();
         proceed.send(()).unwrap();
 
-        assert_eq!(
-            result.recv_timeout(Duration::from_secs(5)).unwrap(),
-            (true, true)
-        );
+        let outcome = result.recv_timeout(Duration::from_secs(5)).unwrap();
         worker.join().unwrap();
+
+        outcome
     }
 
     fn superseded(outcome: &persistence::Result<()>) -> bool {
