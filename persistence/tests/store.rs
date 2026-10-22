@@ -941,7 +941,10 @@ mod tests {
 
         let result = persistence::reread_committed(&recording.0, &marker);
 
-        assert!(result.is_err());
+        assert_eq!(
+            std::io::ErrorKind::InvalidData,
+            result.err().unwrap().kind()
+        );
     }
 
     #[test]
