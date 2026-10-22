@@ -128,11 +128,14 @@ New and changed code here follows Tiger Style, as [docs/tiger-style.md](docs/tig
 reads it into Rust. The collector's older code does not follow it yet.
 
 GitHub Actions runs the check that page describes on every push to `main` and every pull
-request, with the steps and the toolchain `.github/workflows/check.yml` names. The
-repository installs no git hook, so nothing runs on your machine unless you run it. A clone
-that set `core.hooksPath` for the hook this repository once carried can drop it with
-`git config --unset core.hooksPath`. To get the check's verdict before you push, run its
-steps under that toolchain. `just fmt`, `just clippy` and `just test` run one part of it.
+request, under the toolchain `.github/workflows/check.yml` names, by running the recipes of
+`justfile` that `just check` runs. The repository installs no git hook, so nothing runs on
+your machine unless you run it. A clone that set `core.hooksPath` for the hook this
+repository once carried can drop it with `git config --unset core.hooksPath`. To get the
+check's verdict before you push, run `just check` under that toolchain. It runs the tests
+CI skips for lack of hardware, and leaves out the ones that need a second user, which CI's
+runner gives. `just fmt`, `just clippy` and `just test` run the root workspace's part of
+it, and the recipes named `desktop-` the desktop workspace's.
 
 ```sh
 just check
