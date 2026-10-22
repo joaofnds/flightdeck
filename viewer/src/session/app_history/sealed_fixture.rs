@@ -108,6 +108,32 @@ impl Session {
         });
     }
 
+    /// Rewrites the parts each sealed window keeps so each row's App key ends in zero bytes up
+    /// to `length` bytes, which keeps the keys apart and in their order.
+    pub(crate) fn pad_kept_app_keys(&self, length: usize) {
+        rewrite(self, APP_PARTS, |frame| {
+            let padded: Vec<Option<Vec<u8>>> = frame
+                .column("app_key")
+                .unwrap()
+                .binary()
+                .unwrap()
+                .iter()
+                .map(|key| {
+                    key.map(|key| {
+                        assert!(key.len() <= length);
+                        let mut padded = key.to_vec();
+                        padded.resize(length, 0);
+                        padded
+                    })
+                })
+                .collect();
+            let padded: Vec<Option<&[u8]>> = padded.iter().map(Option::as_deref).collect();
+            frame
+                .replace("app_key", Column::new("app_key".into(), padded))
+                .unwrap();
+        });
+    }
+
     /// Rewrites the parts each sealed window keeps so each App row names the place after its
     /// own among its observation's Apps.
     pub(crate) fn misorder_kept_apps(&self) {

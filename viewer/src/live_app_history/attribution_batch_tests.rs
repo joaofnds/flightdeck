@@ -557,6 +557,44 @@ fn batch_refuses_parts_holding_an_app_column_in_another_type() {
 }
 
 #[test]
+fn batch_reads_parts_holding_app_keys_as_long_as_a_program_path() {
+    // Goal: App keys as long as the longest program path the collector captures are read.
+    // Method: seal the minutes with their parts, pad every App key to that length, and take
+    // the batch.
+    let fixture = kept_fixture([true; 4]);
+    Session::open(&fixture.root)
+        .unwrap()
+        .pad_kept_app_keys(collector::ring::PROGRAM_PATH_BYTES_MAX);
+    let session = Session::open(&fixture.root).unwrap();
+
+    let batch = kept_batch(&session, &History::new(), 6, BYTES_MAX).unwrap();
+
+    assert!(batch.cpu.is_ok());
+    assert!(batch.power.is_ok());
+    assert!(batch.disk.is_ok());
+}
+
+#[test]
+fn batch_refuses_parts_holding_an_app_key_longer_than_a_program_path() {
+    // Goal: an App key longer than any program path the collector captures fails the batch
+    // rather than giving a point under that key.
+    // Method: seal the minutes with their parts, pad every App key one byte past that length,
+    // and take the batch.
+    let fixture = kept_fixture([true; 4]);
+    Session::open(&fixture.root)
+        .unwrap()
+        .pad_kept_app_keys(collector::ring::PROGRAM_PATH_BYTES_MAX + 1);
+    let session = Session::open(&fixture.root).unwrap();
+
+    let result = kept_batch(&session, &History::new(), 6, BYTES_MAX);
+
+    assert!(matches!(
+        result,
+        Err(Error::Bound("live App captured bytes"))
+    ));
+}
+
+#[test]
 fn batch_refuses_parts_whose_apps_are_out_of_order() {
     // Goal: an App row of the parts in another place than its observation's next App fails
     // the batch rather than giving a point whose Apps are shuffled.

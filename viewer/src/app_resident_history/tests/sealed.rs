@@ -114,6 +114,38 @@ fn resident_history_refuses_replaced_parts_a_cached_point_was_taken_from() {
 }
 
 #[test]
+fn resident_history_reads_parts_holding_app_keys_as_long_as_a_program_path() {
+    // Goal: App keys as long as the longest program path the collector captures are read.
+    // Method: seal four minutes with their parts, pad every App key to that length, and take
+    // the history.
+    let fixture = sealed_minutes([true; 4]);
+    pad_kept_app_keys(&fixture, collector::ring::PROGRAM_PATH_BYTES_MAX);
+    let session = resident_at(&fixture, 1005);
+
+    let result = session.app_resident_history();
+
+    assert!(result.is_ok(), "{result:?}");
+}
+
+#[test]
+fn resident_history_refuses_parts_holding_an_app_key_longer_than_a_program_path() {
+    // Goal: an App key longer than any program path the collector captures fails the history
+    // rather than giving a point under that key.
+    // Method: seal four minutes with their parts, pad every App key one byte past that length,
+    // and take the history.
+    let fixture = sealed_minutes([true; 4]);
+    pad_kept_app_keys(&fixture, collector::ring::PROGRAM_PATH_BYTES_MAX + 1);
+    let session = resident_at(&fixture, 1005);
+
+    let result = session.app_resident_history();
+
+    assert!(
+        matches!(result, Err(Error::Bound("live App captured bytes"))),
+        "{result:?}"
+    );
+}
+
+#[test]
 fn resident_history_refuses_parts_whose_window_marker_disappeared() {
     // Goal: a history from the parts a window keeps revalidates that window's commitment, as a
     // history from its replayed sources does.
@@ -371,6 +403,15 @@ fn without_cache_bytes(mut history: Value) -> Value {
         .unwrap();
 
     history
+}
+
+/// Pads each App key of the parts every sealed window of `fixture` keeps to `length` bytes.
+fn pad_kept_app_keys(fixture: &Fixture, length: usize) {
+    resident_at(fixture, 1005)
+        .history
+        .as_ref()
+        .unwrap()
+        .pad_kept_app_keys(length);
 }
 
 /// The resident history at `second` from a session opened in place of `session` once each

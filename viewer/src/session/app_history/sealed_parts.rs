@@ -13,7 +13,7 @@ use polars::prelude::{
 
 use super::sealed::{Kept, columns, kind_code, kind_of, observed_in};
 use super::{ContextRange, Session, TICKS_PER_WINDOW_MAX, WINDOWS_MAX};
-use crate::apps::{Amount, ProcessCreation, ProcessState, Stamp, Unavailable};
+use crate::apps::{Amount, AppKey, ProcessCreation, ProcessState, Stamp, Unavailable};
 use crate::cancellation::Operation;
 use crate::live_app_response::{
     App, AppPart, Bytes, Header, Key, KeyKind, MEMBERS_MAX, Measure, Observation, Present, Process,
@@ -858,7 +858,7 @@ impl Session {
         &self,
         source: &str,
         headers: &[&Header],
-        consume: impl FnMut(&Header, &[KeptAttribution]) -> Result<()>,
+        consume: impl FnMut(&Header, &[KeptAttribution<'_>]) -> Result<()>,
     ) -> Result<()> {
         let Some(publications) = kept_parts_publications(headers) else {
             return Ok(());
@@ -875,7 +875,7 @@ impl Session {
         &self,
         source: &str,
         headers: &[&Header],
-        consume: impl FnMut(&Header, &[KeptResident]) -> Result<()>,
+        consume: impl FnMut(&Header, &[KeptResident<'_>]) -> Result<()>,
     ) -> Result<()> {
         let Some(publications) = kept_parts_publications(headers) else {
             return Ok(());
@@ -1053,12 +1053,13 @@ impl<'frame> KeptAppColumns<'frame> {
         Ok(collector::usize_from_u32(self.app_index.get(row)?))
     }
 
-    /// The key of row `row`'s App.
-    fn key(&self, row: usize) -> Result<Key> {
-        Key::new(
-            kind_of(self.app_kind.get(row)?)?,
-            self.app_key.get(row)?.to_vec(),
-        )
+    /// The key of row `row`'s App, in the frame's bytes, which the reads of every row of a
+    /// window share rather than copying each.
+    fn key(&self, row: usize) -> Result<AppKey<'frame>> {
+        let kind = kind_of(self.app_kind.get(row)?)?;
+        let bytes = self.app_key.get(row)?;
+
+        kind.checked_key(bytes)
     }
 
     /// The members of row `row`'s App.
@@ -1127,14 +1128,14 @@ impl<'frame> KeptAttributionColumns<'frame> {
     }
 }
 
-impl KeptColumns for KeptAttributionColumns<'_> {
-    type App = KeptAttribution;
+impl<'frame> KeptColumns for KeptAttributionColumns<'frame> {
+    type App = KeptAttribution<'frame>;
 
     fn app_columns(&self) -> &KeptAppColumns<'_> {
         &self.app_columns
     }
 
-    fn app(&self, row: usize) -> Result<KeptAttribution> {
+    fn app(&self, row: usize) -> Result<KeptAttribution<'frame>> {
         // The key is read before the members, as `kept_app` reads them, so a row wrong in both
         // reports the same cell whichever read takes it.
         let key = self.app_columns.key(row)?;
@@ -1170,14 +1171,14 @@ impl<'frame> KeptResidentColumns<'frame> {
     }
 }
 
-impl KeptColumns for KeptResidentColumns<'_> {
-    type App = KeptResident;
+impl<'frame> KeptColumns for KeptResidentColumns<'frame> {
+    type App = KeptResident<'frame>;
 
     fn app_columns(&self) -> &KeptAppColumns<'_> {
         &self.app_columns
     }
 
-    fn app(&self, row: usize) -> Result<KeptResident> {
+    fn app(&self, row: usize) -> Result<KeptResident<'frame>> {
         let key = self.app_columns.key(row)?;
         let members = self.app_columns.members(row)?;
 
@@ -1190,8 +1191,8 @@ impl KeptColumns for KeptResidentColumns<'_> {
 
 /// An App's CPU, energy, disk and GPU at an observation of a window that keeps its parts, which
 /// the histories of every App plot.
-pub(crate) struct KeptAttribution {
-    pub key: Key,
+pub(crate) struct KeptAttribution<'frame> {
+    pub key: AppKey<'frame>,
     pub members: u32,
     pub membership_complete: bool,
     pub cpu_ns: Measure,
@@ -1255,8 +1256,8 @@ const _: () = {
 };
 
 /// An App's resident memory at an observation of a window that keeps its parts.
-pub(crate) struct KeptResident {
-    pub key: Key,
+pub(crate) struct KeptResident<'frame> {
+    pub key: AppKey<'frame>,
     pub resident: Measure,
 }
 

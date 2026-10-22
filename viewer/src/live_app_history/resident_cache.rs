@@ -237,7 +237,7 @@ impl ResidentPoint {
 
     fn capture_sealed(
         header: &crate::live_app_response::Header,
-        apps: &[crate::session::KeptResident],
+        apps: &[crate::session::KeptResident<'_>],
         window: &WindowIdentity,
         available: usize,
         operation: &crate::cancellation::Operation,

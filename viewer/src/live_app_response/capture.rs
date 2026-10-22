@@ -118,7 +118,7 @@ fn key_bytes(key: AppKey<'_>) -> &[u8] {
     }
 }
 
-fn validate_bytes(bytes: &[u8]) -> Result<()> {
+pub(super) fn validate_bytes(bytes: &[u8]) -> Result<()> {
     if bytes.len() > collector::ring::PROGRAM_PATH_BYTES_MAX {
         return Err(Error::Bound("live App captured bytes"));
     }

@@ -11,7 +11,7 @@ pub(crate) enum SavedResidents<'saved> {
     Replayed(&'saved Frame),
     Sealed {
         header: &'saved Header,
-        apps: &'saved [KeptResident],
+        apps: &'saved [KeptResident<'saved>],
     },
 }
 
@@ -67,10 +67,12 @@ pub(crate) fn capture_header(header: &Header) -> Capture {
 
 /// The Apps with resident memory of an observation the parts of its sealed window keep, which
 /// are the Apps a replay of its minute gives.
-pub(crate) fn kept_readings(apps: &[KeptResident]) -> impl Iterator<Item = AppReading<'_>> {
+pub(crate) fn kept_readings<'saved>(
+    apps: &'saved [KeptResident<'saved>],
+) -> impl Iterator<Item = AppReading<'saved>> {
     apps.iter()
         .map(|app| AppReading {
-            key: app.key.view(),
+            key: app.key,
             resident: app.resident,
         })
         .filter(|app| super::has_resident(&app.resident))

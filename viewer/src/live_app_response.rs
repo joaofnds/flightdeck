@@ -136,6 +136,23 @@ pub enum KeyKind {
     Executable,
 }
 
+impl KeyKind {
+    /// The key of this kind whose captured bytes are `bytes`, refused as `Key::new` refuses
+    /// them, without copying the bytes.
+    pub(crate) fn checked_key(self, bytes: &[u8]) -> Result<AppKey<'_>> {
+        capture::validate_bytes(bytes)?;
+
+        Ok(self.key(bytes))
+    }
+
+    fn key(self, bytes: &[u8]) -> AppKey<'_> {
+        match self {
+            KeyKind::Bundle => AppKey::Bundle(bytes),
+            KeyKind::Executable => AppKey::Executable(bytes),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct Measure {
     pub known: u64,
@@ -214,10 +231,7 @@ impl Key {
 
     /// The key as an aggregate of the App's processes holds it.
     pub(crate) fn view(&self) -> AppKey<'_> {
-        match self.kind {
-            KeyKind::Bundle => AppKey::Bundle(&self.bytes),
-            KeyKind::Executable => AppKey::Executable(&self.bytes),
-        }
+        self.kind.key(&self.bytes)
     }
 
     /// The name the App of this key shows.
