@@ -294,16 +294,19 @@ of a collector the app started, gave 2.86% of a core for the collector and 1.65%
 persister, 4.5% together.
 
 Most of the persister's cost is deriving each window's App ranks and App parts as it seals, which
-re-reads the tables it just wrote and writes two more. On the same Mac the same day, in minutes
-with no other load, the persister spent 0.50 s of CPU a minute, 0.83% of a core, against 0.33%
-for the build of 2026-10-19 that derived nothing (Overhead in
-[headless-collector-research.md](headless-collector-research.md)). Run side by side under the
-same outside load, the current persister cost 2.93%, the same build with the derivation removed
-1.24%, and the 2026-10-19 build 1.22%. Outside load raises every build's CPU time about fourfold,
-not only its wall time, so a reading taken over a busy stretch, as the 1.65% may have been, sits
-above the quiet figure, and the reason for that rise is not known. The quiet figure does not
-depend on the recording's size: the app's persister on a 3 GB recording spent the same 0.5 s a
-minute.
+replays the tables it just wrote and writes two more, about 140 ms of CPU a window on that Mac.
+Building and writing the App parts table takes about half of that and the replay the rest. The
+persister buffers each table's writes, because Polars hands the file each page header and page on
+its own and each of those system calls costs more as the machine's load rises: without the
+buffer, a seal of the 2026-10-19 build took about 190 ms on a quiet Mac and 4 to 12 s under a load
+average of 15 to 24.
+
+Run side by side on 2026-10-22, each build on its own scratch ring and empty recording, the
+persister spent 0.43% of a core against 0.30% for the 2026-10-19 build, which derived nothing,
+while the load average stayed near 4 (Overhead in
+[headless-collector-research.md](headless-collector-research.md) measured that build at 0.33%).
+Once the load average passed 10, the persister spent 0.53 to 0.55% and the 2026-10-19 build 1.0 to
+1.9%, so the 1.65% above was most likely taken over a busy stretch.
 
 ## Limits
 
