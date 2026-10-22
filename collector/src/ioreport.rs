@@ -299,7 +299,7 @@ const _: () = assert!(align_of::<CFArrayCallBacks>() == 8);
 
 const UTF8: u32 = 0x0800_0100;
 /// `kCFPropertyListBinaryFormat_v1_0`.
-const BINARY_PROPERTY_LIST: isize = 200;
+const BINARY_FORMAT_V1_0: isize = 200;
 
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
@@ -524,37 +524,35 @@ impl Reader {
     }
 }
 
-/// The channels of the groups a read takes on this Mac, and one sample of those a read keeps,
-/// each a binary property list, which a test reads as a Mac gave them.
-pub struct Fixture {
-    pub groups: Vec<u8>,
-    pub sample: Vec<u8>,
+/// Where `fixture` writes the channels of the groups a read takes on this Mac, and one sample
+/// of those a read keeps, each a binary property list, which a test reads as a Mac gave them.
+pub struct Fixture<W: io::Write> {
+    pub groups: W,
+    pub sample: W,
 }
 
-/// Takes the channels of the groups a read takes, and a sample of those it keeps, as open and
+/// Writes the channels of the groups a read takes, and a sample of those it keeps, as open and
 /// a read take them.
-pub fn fixture() -> io::Result<Fixture> {
+pub fn fixture(into: &mut Fixture<impl io::Write>) -> io::Result<()> {
     let channels_key = ChannelsKey::new()?;
 
     let wanted = open_groups()?;
-    let groups = fixture_bytes(&wanted)?;
+    fixture_write(&wanted, &mut into.groups)?;
     open_keep_read_channels(&wanted, &channels_key)?;
 
     let subscription = Subscription::new(&wanted)?;
-    let sample = fixture_bytes(&subscription.sample()?)?;
-
-    Ok(Fixture { groups, sample })
+    fixture_write(&subscription.sample()?, &mut into.sample)
 }
 
-/// The bytes of `object` as a binary property list.
-fn fixture_bytes(object: &Owned) -> io::Result<Vec<u8>> {
+/// Writes `object` into `into` as a binary property list.
+fn fixture_write(object: &Owned, into: &mut impl io::Write) -> io::Result<()> {
     assert!(!object.0.is_null());
 
     let data = unsafe {
         CFPropertyListCreateData(
             ptr::null(),
             object.0,
-            BINARY_PROPERTY_LIST,
+            BINARY_FORMAT_V1_0,
             0,
             ptr::null_mut(),
         )
@@ -564,9 +562,14 @@ fn fixture_bytes(object: &Owned) -> io::Result<Vec<u8>> {
     let size = usize::try_from(unsafe { CFDataGetLength(data.0) })
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     let bytes = unsafe { CFDataGetBytePtr(data.0) };
-    assert!(!bytes.is_null());
+    if bytes.is_null() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "CoreFoundation wrote a property list with no bytes",
+        ));
+    }
 
-    Ok(unsafe { std::slice::from_raw_parts(bytes, size) }.to_vec())
+    into.write_all(unsafe { std::slice::from_raw_parts(bytes, size) })
 }
 
 /// The channels of every group a read takes from, more than a read keeps.

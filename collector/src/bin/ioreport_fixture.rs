@@ -22,13 +22,16 @@ fn main() -> ExitCode {
         }
     };
 
-    let fixture = match collector::ioreport::fixture() {
-        Ok(fixture) => fixture,
-        Err(error) => {
-            eprintln!("ioreport_fixture: {error}");
-            return ExitCode::FAILURE;
-        }
+    // The fixtures are written only once both are read whole, so a failed read leaves the
+    // recorded ones as they were.
+    let mut fixture = collector::ioreport::Fixture {
+        groups: Vec::new(),
+        sample: Vec::new(),
     };
+    if let Err(error) = collector::ioreport::fixture(&mut fixture) {
+        eprintln!("ioreport_fixture: {error}");
+        return ExitCode::FAILURE;
+    }
 
     for (path, bytes) in [
         (&paths.groups, &fixture.groups),

@@ -18,13 +18,13 @@ fn main() -> ExitCode {
         }
     };
 
-    let fixture = match collector::smc::fixture() {
-        Ok(fixture) => fixture,
-        Err(error) => {
-            eprintln!("smc_fixture: {error}");
-            return ExitCode::FAILURE;
-        }
-    };
+    // The fixture is written only once it is read whole, so a failed read leaves the recorded
+    // one as it was.
+    let mut fixture = Vec::new();
+    if let Err(error) = collector::smc::fixture(&mut fixture) {
+        eprintln!("smc_fixture: {error}");
+        return ExitCode::FAILURE;
+    }
 
     if let Err(error) = std::fs::write(&path, fixture) {
         eprintln!("smc_fixture: writing {path}: {error}");

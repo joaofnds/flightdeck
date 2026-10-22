@@ -276,35 +276,56 @@ impl Controller {
     }
 }
 
-/// The keys this Mac's SMC lists, and the info and the bytes of each key open or a read asks
-/// about, as the SMC tests read them: the count of keys, a little-endian u32, then each key,
-/// then for each key asked about the key, its info as the SMC lays it out, and its bytes.
-pub fn fixture() -> io::Result<Vec<u8>> {
+/// Writes the keys this Mac's SMC lists, and the info and the bytes of each key open or a read
+/// asks about, as the SMC tests read them: the count of keys, a little-endian u32, then each
+/// key, then for each key asked about an answer of `fixture_answer`.
+pub fn fixture(into: &mut impl io::Write) -> io::Result<()> {
     let controller = Controller::Connection(Connection::open()?);
     let key_count = controller.key_count()?;
     let fan_count = controller.fan_count()?;
 
-    let mut fixture = Vec::new();
-    fixture.extend_from_slice(&key_count.to_le_bytes());
-    let mut asked = vec![KEY_COUNT, FAN_COUNT, SYSTEM_POWER];
-    asked.extend((0..fan_count).map(Key::fan_speed));
+    into.write_all(&key_count.to_le_bytes())?;
     for index in 0..key_count {
-        let key = controller.key_at(index)?;
-        fixture.extend_from_slice(&key.0.to_be_bytes());
-        if key.is_soc_temperature() {
-            asked.push(key);
-        }
+        into.write_all(&controller.key_at(index)?.0.to_be_bytes())?;
     }
 
-    for key in asked {
-        let info = controller.info(key)?;
-        fixture.extend_from_slice(&key.0.to_be_bytes());
-        fixture.extend_from_slice(&info.size.to_le_bytes());
-        fixture.extend_from_slice(&info.kind.to_le_bytes());
-        fixture.extend_from_slice(&[info.attributes, 0, 0, 0]);
-        fixture.extend_from_slice(&controller.bytes(key, info)?);
+    for key in [KEY_COUNT, FAN_COUNT, SYSTEM_POWER] {
+        fixture_answer(&controller, key, into)?;
     }
-    Ok(fixture)
+    for fan_index in 0..fan_count {
+        fixture_answer(&controller, Key::fan_speed(fan_index), into)?;
+    }
+    for index in 0..key_count {
+        let key = controller.key_at(index)?;
+        if key.is_soc_temperature() {
+            fixture_answer(&controller, key, into)?;
+        }
+    }
+    Ok(())
+}
+
+/// Writes `key`, a big-endian u32, then its info, its size and its kind each a little-endian
+/// u32 and its attributes a byte followed by three zero bytes, then its bytes.
+fn fixture_answer(controller: &Controller, key: Key, into: &mut impl io::Write) -> io::Result<()> {
+    let key_info = controller.info(key)?;
+    if key_info.size == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("the SMC holds {key:?} with a size of 0"),
+        ));
+    }
+    if key_info.size > VALUE_SIZE_MAX {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("the SMC holds {key:?} with a size of {}", key_info.size),
+        ));
+    }
+
+    into.write_all(&key.0.to_be_bytes())?;
+    into.write_all(&key_info.size.to_le_bytes())?;
+    into.write_all(&key_info.kind.to_le_bytes())?;
+    into.write_all(&[key_info.attributes, 0, 0, 0])?;
+    into.write_all(&controller.bytes(key, key_info)?)
 }
 
 /// A key, and the info the SMC holds it with.
@@ -1131,6 +1152,9 @@ mod tests {
 
     /// The bytes of a key and its info, then its value, in the fixture.
     const ANSWER_SIZE: usize = 48;
+
+    const _: () =
+        assert!(ANSWER_SIZE == size_of::<u32>() + size_of::<KeyInfo>() + MESSAGE_BYTES_SIZE);
 
     impl FakeSmc {
         fn m5_pro() -> Self {
