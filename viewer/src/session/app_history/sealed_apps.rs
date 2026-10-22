@@ -145,8 +145,8 @@ fn derive_parts(
     }
 }
 
-/// What replays a sealing window: a query engine of its own over the window's tables and those
-/// of the sealed window before it.
+/// What replays a sealing window: a query engine of its own over the window's staged processes
+/// and events and the tables of the sealed window before it.
 struct Replayer {
     connection: Engine,
     operation: Operation,

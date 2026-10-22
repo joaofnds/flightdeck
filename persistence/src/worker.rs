@@ -23,7 +23,7 @@ pub enum Outcome {
     Owned,
 }
 
-/// Derives tables from those the persister wrote for a window, which seal with them.
+/// Derives tables from a window the persister staged and wrote, which seal with its tables.
 pub trait Derive {
     /// Writes into the pending directory only tables `schema::DERIVED_TABLES` names.
     fn derive(&self, derivation: &Derivation<'_>) -> Result<Vec<TableManifest>>;
