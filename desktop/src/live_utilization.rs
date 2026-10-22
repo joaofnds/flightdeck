@@ -39,7 +39,10 @@ impl LiveDashboard {
         let selection = self
             .reading_snapshot()
             .map_or(&Value::Null, |snapshot| &snapshot.selection);
-        let panel_utilization = utilization_panel(super::matching_summary(selection));
+        let panel_utilization = utilization_panel(
+            super::matching_summary(selection),
+            self.absent_reading("Unavailable"),
+        );
         let chart = panel.map(|panel| self.live_chart(panel, cx).into_any_element());
 
         if self.viewport_size.width < px(SIDE_BY_SIDE_WIDTH) {
@@ -104,7 +107,8 @@ fn utilizations_share(part: Option<u64>, whole: Option<u64>) -> Option<f64> {
     Some(part?.to_f64()? / whole.to_f64()? * 100.0)
 }
 
-fn utilization_panel(summary: &Value) -> gpui::Div {
+/// The panel of `summary`'s utilizations, each missing one reading `absent`.
+fn utilization_panel(summary: &Value, absent: &'static str) -> gpui::Div {
     overview_context_card("utilization")
         .child(crate::live_chart_view::timeline::timeline_heading_text(
             "Utilization by resource",
@@ -114,7 +118,7 @@ fn utilization_panel(summary: &Value) -> gpui::Div {
         .children(
             utilizations(summary)
                 .into_iter()
-                .map(|utilization| utilization_row(&utilization)),
+                .map(|utilization| utilization_row(&utilization, absent)),
         )
         .child(
             div()
@@ -146,10 +150,10 @@ fn utilization_panel(summary: &Value) -> gpui::Div {
         )
 }
 
-fn utilization_row(utilization: &Utilization) -> gpui::Div {
+fn utilization_row(utilization: &Utilization, absent: &str) -> gpui::Div {
     let reading = utilization
         .percent
-        .map_or_else(|| "Unavailable".into(), |percent| format!("{percent:.0}%"));
+        .map_or_else(|| absent.into(), |percent| format!("{percent:.0}%"));
     let selector = format!("utilization:{}:{reading}", utilization.name);
     div()
         .debug_selector(move || selector.clone())

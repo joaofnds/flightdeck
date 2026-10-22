@@ -5,6 +5,9 @@ use crate::data::Panel;
 use crate::live_dashboard::{LiveDashboard, Row};
 use crate::live_sections::Section;
 
+/// What the Apps page calls the selected App before a reading names it.
+const UNNAMED_APP: &str = "selected App";
+
 impl LiveDashboard {
     pub(crate) fn reading_chart_columns(&self) -> usize {
         if self.viewport_size.width < gpui::px(640.0) {
@@ -26,10 +29,6 @@ impl LiveDashboard {
                 .iter()
                 .map(|(key, height)| Row::Placeholder(key.clone(), *height))
                 .collect();
-        }
-
-        if self.is_opening() {
-            return Vec::new();
         }
 
         self.reading_rows_page()
@@ -372,7 +371,7 @@ impl LiveDashboard {
                 .cloned()
         };
         rows.push(Row::EnergyCooling {
-            fans: find("live-fans"),
+            fans: find(crate::live_projection::FANS_ID),
             thermal: find(crate::live_projection::THERMAL_STATE_ID),
             maxima: find(crate::live_projection::AREA_MAXIMA_ID),
         });
@@ -440,10 +439,8 @@ impl LiveDashboard {
         if self.sections.expanded(Section::OverviewContext) {
             self.reading_rows_overview_context(rows);
         }
-        if self.snapshot.is_some() {
-            rows.push(Row::Heading("MacBook".into()));
-            rows.push(Row::Hardware);
-        }
+        rows.push(Row::Heading("MacBook".into()));
+        rows.push(Row::Hardware);
     }
 
     fn reading_rows_overview_context(&self, rows: &mut Vec<Row>) {
@@ -464,6 +461,12 @@ impl LiveDashboard {
         rows.push(Row::Summary);
         rows.push(Row::AppSelector);
         let Some(snapshot) = self.reading_snapshot() else {
+            // Only the reading names the App's executables, so the page holds the rows above
+            // them and the rest arrive below, moving nothing it drew.
+            if self.is_opening() {
+                rows.push(Row::Heading(format!("Inside {UNNAMED_APP}")));
+                rows.push(Row::AppColumns("executables"));
+            }
             return rows;
         };
 
@@ -478,7 +481,7 @@ impl LiveDashboard {
             self.request.app.as_ref(),
         );
         let name = detail.map_or_else(
-            || "selected App".into(),
+            || UNNAMED_APP.into(),
             |detail| crate::live_app_views::app_name(&detail["app"]),
         );
         rows.push(Row::Heading(format!("Inside {name}")));

@@ -192,6 +192,40 @@ const HEALTH: Specification = ("Health", Reading::Health, "", GREEN);
 
 pub fn cards(route: &str, selection: &Value) -> Vec<Card> {
     let summary = matching_summary(selection);
+    cards_definitions(route)
+        .iter()
+        .map(|definition| card(summary, definition))
+        .collect()
+}
+
+/// The cards of `route` while its first reading is still being read. Each says so in place of
+/// its reading, and a note that would carry a reading keeps only its own words.
+pub fn loading_cards(route: &str) -> Vec<Card> {
+    cards_definitions(route)
+        .iter()
+        .map(|definition| {
+            let (_, source, note, _) = *definition;
+            let mut card = card(&Value::Null, definition);
+            let reads = matches!(
+                source,
+                Reading::DieTemperature(..) | Reading::Health | Reading::MemoryInUse
+            );
+            if reads {
+                note.clone_into(&mut card.note);
+            }
+            loading(&mut card);
+            card
+        })
+        .collect()
+}
+
+/// Makes `card` say its reading is still being read.
+pub fn loading(card: &mut Card) {
+    crate::live_dashboard::LOADING.clone_into(&mut card.reading);
+    card.color = MUTED;
+}
+
+fn cards_definitions(route: &str) -> &'static [Specification] {
     let definitions = match route {
         "overview" => &[
             OVERVIEW_CPU,
@@ -211,11 +245,7 @@ pub fn cards(route: &str, selection: &Value) -> Vec<Card> {
         _ => &[],
     };
     assert!(definitions.len() <= 6);
-
     definitions
-        .iter()
-        .map(|definition| card(summary, definition))
-        .collect()
 }
 
 fn card(summary: &Value, definition: &Specification) -> Card {

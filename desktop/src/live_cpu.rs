@@ -93,17 +93,19 @@ fn core_group_headings(groups: &[CoreGroup]) -> impl IntoElement {
 
 const CPUS_MAX: usize = 1024;
 const COLUMNS_MAX: usize = 18;
+const ACTIVITY_UNAVAILABLE: &str = "Logical CPU readings unavailable.";
 const SEGMENTS: u8 = 20;
 const _: () = {
     assert!(CPUS_MAX >= COLUMNS_MAX);
     assert!(SEGMENTS == 20);
 };
 
-impl CPUActivity {
-    fn rows(&self) -> std::slice::Chunks<'_, LogicalCPU> {
-        self.cpus.chunks(COLUMNS_MAX)
-    }
+/// The rows the bars of `cpus` take, each of at most `COLUMNS_MAX`.
+fn cpu_rows(cpus: &[LogicalCPU]) -> std::slice::Chunks<'_, LogicalCPU> {
+    cpus.chunks(COLUMNS_MAX)
+}
 
+impl CPUActivity {
     pub fn decode(value: Value, selected: &Value) -> Result<Self, String> {
         let cpus = value["cpus"]
             .as_array()
@@ -214,7 +216,7 @@ impl CPUActivity {
 
 impl LiveDashboard {
     pub fn cpu_activity(&self) -> impl IntoElement {
-        let mut panel = div()
+        let panel = div()
             .debug_selector(|| "cpu-selected-panel".into())
             .flex_1()
             .min_w_0()
@@ -232,39 +234,74 @@ impl LiveDashboard {
                     .into(),
                 "ⓘ",
             ));
-        let unavailable = || {
-            div()
-                .debug_selector(|| "Logical CPU readings unavailable.".into())
-                .child("Logical CPU readings unavailable.")
-        };
         if self.reading_target_source().map(gpui::SharedString::as_ref) == Some("cpu-history-plot")
         {
             if self.cpu_inspection == Some(crate::live_cpu_history::CPUInspection::Gap) {
-                return panel.child(unavailable());
+                return cpu_activity_absent(panel, ACTIVITY_UNAVAILABLE);
             }
         }
         let Some(activity) = self
             .reading_snapshot()
             .and_then(|snapshot| snapshot.cpu_detail.as_ref())
         else {
-            return panel.child(unavailable());
+            return cpu_activity_absent(panel, self.absent_reading(ACTIVITY_UNAVAILABLE));
         };
         if activity.cpus.is_empty() {
-            return panel.child(unavailable());
+            return cpu_activity_absent(panel, ACTIVITY_UNAVAILABLE);
         }
-        let columns = activity.cpus.len().min(COLUMNS_MAX);
-        let groups = core_groups(
-            activity.cpus.len(),
-            crate::live_inventory::performance_levels(),
-        );
-        if !groups.is_empty() {
-            panel = panel.child(core_group_headings(&groups));
-        }
-        for cpus in activity.rows() {
-            panel = panel.child(cpu_activity_row(cpus, columns));
-        }
-        panel
+        cpu_activity_bars(panel, &activity.cpus)
     }
+}
+
+/// The bars of `cpus` under `panel`'s heading, in rows of at most `COLUMNS_MAX`, with the
+/// performance levels named above them.
+fn cpu_activity_bars(mut panel: gpui::Div, cpus: &[LogicalCPU]) -> gpui::Div {
+    assert!(!cpus.is_empty());
+    let columns = cpus.len().min(COLUMNS_MAX);
+    let groups = core_groups(cpus.len(), crate::live_inventory::performance_levels());
+    if !groups.is_empty() {
+        panel = panel.child(core_group_headings(&groups));
+    }
+    for row in cpu_rows(cpus) {
+        panel = panel.child(cpu_activity_row(row, columns));
+    }
+    panel
+}
+
+/// The panel with no reading of its CPUs: the bars of this Mac's CPUs, empty, with `notice` over
+/// them, so the panel keeps the size its readings give it. A Mac whose CPUs could not be counted
+/// shows the notice alone.
+fn cpu_activity_absent(panel: gpui::Div, notice: &'static str) -> gpui::Div {
+    let Some(cpus) = cpu_activity_absent_cpus() else {
+        return panel.child(div().debug_selector(move || notice.into()).child(notice));
+    };
+
+    cpu_activity_bars(panel.relative(), &cpus).child(
+        crate::live_chart_view::plot_notice(notice.into())
+            .absolute()
+            .inset_0(),
+    )
+}
+
+/// This Mac's logical CPUs with no reading, from its performance levels, or none where they
+/// could not be read.
+fn cpu_activity_absent_cpus() -> Option<Vec<LogicalCPU>> {
+    let [fastest, slower] = crate::live_inventory::performance_levels()?;
+    let count = fastest.logical_cpus.checked_add(slower.logical_cpus)?;
+    let cpus: Vec<LogicalCPU> = (0..count)
+        .take(CPUS_MAX + 1)
+        .map(|cpu| LogicalCPU {
+            cpu,
+            busy_percent: None,
+        })
+        .collect();
+    if cpus.is_empty() {
+        return None;
+    }
+    if cpus.len() > CPUS_MAX {
+        return None;
+    }
+    Some(cpus)
 }
 
 /// The prototype's bars: a 244 pixel plot of twenty segments per core, with each core's index
@@ -597,7 +634,9 @@ mod tests {
         let selected = payload["observation"].clone();
 
         let result = CPUActivity::decode(payload, &selected).unwrap();
-        let rows = result.rows().map(<[LogicalCPU]>::len).collect::<Vec<_>>();
+        let rows = cpu_rows(&result.cpus)
+            .map(<[LogicalCPU]>::len)
+            .collect::<Vec<_>>();
 
         assert_eq!(rows, vec![18, 1]);
     }

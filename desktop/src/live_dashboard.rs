@@ -60,6 +60,9 @@ pub enum Picker {
     ProcessGroup,
 }
 
+/// What a reading reads on a page whose first reading the worker is still reading.
+pub(crate) const LOADING: &str = "Loading";
+
 /// The open picker after its control is pressed: the picker's choices, or none if they
 /// showed already.
 pub fn toggle(open: Option<Picker>, pressed: Picker) -> Option<Picker> {
@@ -529,8 +532,23 @@ impl LiveDashboard {
         };
         self.clear_readings();
         self.placeholders = placeholders;
-        self.rebuild();
         self.submit_request();
+        self.install_loading_panels();
+        self.rebuild();
+    }
+
+    /// Gives a page with no readings to show the charts its readings will fill, empty, so each
+    /// row takes its final size before the first reading arrives and that reading moves nothing.
+    fn install_loading_panels(&mut self) {
+        assert!(self.snapshot.is_none());
+        if !self.placeholders.is_empty() {
+            return;
+        }
+
+        match crate::live_projection::empty_panels(&self.request.route) {
+            Ok(panels) => self.panels = panels,
+            Err(error) => self.error = Some(error),
+        }
     }
 
     /// Asks for the request in place of whatever the page asked before, so no reply to an
@@ -850,9 +868,31 @@ impl LiveDashboard {
         self.status_at(SystemTime::now())
     }
 
+    /// What a reading the page lacks reads: that it is still being read on a newly opened
+    /// page, and otherwise `unavailable`.
+    pub(crate) fn absent_reading<'a>(&self, unavailable: &'a str) -> &'a str {
+        if self.is_opening() {
+            return LOADING;
+        }
+        unavailable
+    }
+
+    /// The text a reading shows: `reading`, or that it is still being read on a newly opened
+    /// page, which has no readings yet.
+    pub(crate) fn shown_reading(&self, reading: String) -> String {
+        if self.is_opening() {
+            return LOADING.into();
+        }
+        reading
+    }
+
     /// What a history card reads where the snapshot holds no such history: that it is still
-    /// being read on a newly opened page, and otherwise `unavailable`.
+    /// being read on a newly opened page, that the page's App histories are still being read,
+    /// and otherwise `unavailable`.
     pub(crate) fn history_absent(&self, unavailable: &str) -> String {
+        if self.is_opening() {
+            return LOADING.into();
+        }
         if let Some(snapshot) = &self.snapshot {
             if snapshot.histories_pending {
                 return "Reading App history".into();
@@ -1173,21 +1213,26 @@ mod selection_tests {
     }
 
     #[test]
-    fn a_page_opened_for_the_first_time_draws_nothing_until_its_reading_arrives() {
-        // Goal: the first frame of a page the worker is still reading shows no "Unavailable",
-        // which would flash for the few milliseconds the read takes. Method: open a page with
-        // no kept reading, then fail its read.
+    fn a_page_opened_for_the_first_time_says_it_is_loading_until_its_reading_arrives() {
+        // Goal: the first frame of a page the worker is still reading lays out its rows and
+        // charts and shows no "Unavailable", which would flash for the few milliseconds the read
+        // takes. Method: open a page with no kept reading, then fail its read.
         let mut dashboard = dashboard();
 
         dashboard.switch_route("cpu");
-        assert!(dashboard.reading_rows().is_empty());
+        assert!(!dashboard.reading_rows().is_empty());
+        assert!(!dashboard.panels.is_empty());
+        assert_eq!(dashboard.history_absent("App history unavailable"), LOADING);
         let failed = dashboard.generation;
         dashboard.receive(Update::Failed {
             generation: failed,
             message: "Recording read failed".into(),
         });
 
-        assert!(!dashboard.reading_rows().is_empty());
+        assert_eq!(
+            dashboard.history_absent("App history unavailable"),
+            "App history unavailable"
+        );
     }
 
     #[test]

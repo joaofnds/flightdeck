@@ -26,6 +26,7 @@ const LABEL_COLUMN: f32 = 104.0;
 /// A row label ends this far left of the cells.
 const LABEL_GAP: f32 = 9.0;
 const HOVER_SOURCE: &str = "cpu-history-plot";
+const HISTORY_UNAVAILABLE: &str = "Logical CPU history unavailable.";
 
 impl LiveDashboard {
     pub fn cpu_history_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -52,20 +53,23 @@ impl LiveDashboard {
             .as_ref()
             .and_then(|snapshot| snapshot.cpu_history.as_ref())
         else {
-            return panel.child(self.history_absent("Logical CPU history unavailable."));
+            let notice = self.history_absent(HISTORY_UNAVAILABLE);
+            return panel
+                .child(crate::live_chart_view::plot_notice(notice).h(px(PLOT_HEIGHT)))
+                .child(cpu_history_panel_caption());
         };
         if history.cpus().is_empty() {
-            return panel.child("Logical CPU history unavailable.");
+            return panel
+                .child(
+                    crate::live_chart_view::plot_notice(HISTORY_UNAVAILABLE.into())
+                        .h(px(PLOT_HEIGHT)),
+                )
+                .child(cpu_history_panel_caption());
         }
 
-        panel.child(self.cpu_history_plot(history, cx)).child(
-            div()
-                .mt(px(7.0))
-                .text_size(px(11.0))
-                .line_height(px(17.0))
-                .text_color(rgb(MUTED))
-                .child("Green → yellow → red: 0–100% utilization."),
-        )
+        panel
+            .child(self.cpu_history_plot(history, cx))
+            .child(cpu_history_panel_caption())
     }
 
     fn cpu_history_plot(
@@ -529,6 +533,16 @@ impl LiveDashboard {
         window.prevent_default();
         cx.notify();
     }
+}
+
+/// The line under the plot naming its colors.
+fn cpu_history_panel_caption() -> gpui::Div {
+    div()
+        .mt(px(7.0))
+        .text_size(px(11.0))
+        .line_height(px(17.0))
+        .text_color(rgb(MUTED))
+        .child("Green → yellow → red: 0–100% utilization.")
 }
 
 /// The second drawn under `x` across the cells, held to the cells' edges.

@@ -1,9 +1,9 @@
 use std::rc::Rc;
 
-use gpui::{AnyElement, Context, IntoElement, div, prelude::*, px, rgb};
+use gpui::{AnyElement, Context, IntoElement, div, prelude::*, px};
 
-use crate::charts::{GRID, MUTED, PANEL};
 use crate::data::Panel;
+use crate::live_chart_view::AbsentChart;
 use crate::live_dashboard::LiveDashboard;
 
 impl LiveDashboard {
@@ -23,24 +23,15 @@ impl LiveDashboard {
                     || self.history_absent("Resident App history unavailable at this observation"),
                     |history| history.coverage(None),
                 );
-            div()
-                .debug_selector(|| "memory-attribution-unavailable".into())
-                .flex_1()
-                .min_w_0()
-                .p(px(18.0))
-                .rounded(px(7.0))
-                .border_1()
-                .border_color(rgb(GRID))
-                .bg(rgb(PANEL))
-                .child(crate::live_resident_history::TITLE)
-                .child(
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(rgb(MUTED))
-                        .debug_selector(|| reading.clone())
-                        .child(reading),
-                )
-                .into_any_element()
+            crate::live_chart_view::absent_chart(
+                &AbsentChart {
+                    id: crate::live_resident_history::PANEL_ID,
+                    title: crate::live_resident_history::TITLE,
+                },
+                reading,
+            )
+            .debug_selector(|| "memory-attribution-unavailable".into())
+            .into_any_element()
         };
 
         div()

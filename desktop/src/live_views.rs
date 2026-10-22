@@ -43,8 +43,10 @@ impl LiveDashboard {
         let measured_key = key.clone();
         let height = self.reading_row_height(&self.rows[index]);
         let scroll_reserved = matches!(&self.rows[index], Row::CPUTop(_) | Row::CPUActivity);
+        let selector = gpui::SharedString::from(key);
         div()
-            .id(gpui::SharedString::from(key))
+            .id(selector.clone())
+            .debug_selector(move || format!("row:{selector}"))
             .relative()
             .when_some(height, |row, height| {
                 row.h(height).when(
@@ -228,6 +230,22 @@ impl LiveDashboard {
 
     /// The summary cards of the page, as the screen shows them.
     pub(crate) fn summary_cards(&self) -> Vec<summary::Card> {
+        if !self.is_opening() {
+            return self.summary_cards_read();
+        }
+        if self.request.route != "apps" {
+            return summary::loading_cards(&self.request.route);
+        }
+
+        // The notes of the selected App's cards carry no reading.
+        let mut cards = crate::live_app_views::app_cards(None, &Value::Null);
+        for card in &mut cards {
+            summary::loading(card);
+        }
+        cards
+    }
+
+    fn summary_cards_read(&self) -> Vec<summary::Card> {
         let selection = self
             .reading_snapshot()
             .map_or(&Value::Null, |snapshot| &snapshot.selection);
@@ -308,6 +326,7 @@ impl LiveDashboard {
                     .debug_selector(|| format!("summary-note:{}", card.label))
                     .text_size(px(11.0))
                     .line_height(px(16.0))
+                    .min_h(px(16.0))
                     .text_color(rgb(MUTED))
                     .child(card.note.clone()),
             )
@@ -328,7 +347,7 @@ impl LiveDashboard {
         let readings = crate::live_memory::quantities(selection)
             .into_iter()
             .zip(keys)
-            .map(|(row, key)| (key, row.name, row.reading))
+            .map(|(row, key)| (key, row.name, self.shown_reading(row.reading)))
             .collect();
 
         crate::live_presentation::quantity_panel(

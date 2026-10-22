@@ -90,6 +90,11 @@ impl InputDriver {
 
 impl InputDriver {
     fn seed_cpu_layout_readings(&mut self) {
+        self.seed_cpu_readings(18);
+    }
+
+    /// Gives the CPU page readings of `cpus` logical CPUs, each 67% busy.
+    pub(super) fn seed_cpu_readings(&mut self, cpus: u32) {
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = accepted_snapshot(dashboard.generation);
             snapshot.selection["context_seconds"] = json!(900);
@@ -104,7 +109,7 @@ impl InputDriver {
                 crate::live_cpu::CPUActivity::decode(
                     json!({"observation":selected,"previous_observation":previous,
                     "interval_available":true,"unavailable_reason":null,
-                    "cpus":(0..18).map(|cpu| json!({"cpu":cpu,"busy_percent":67}))
+                    "cpus":(0..cpus).map(|cpu| json!({"cpu":cpu,"busy_percent":67}))
                         .collect::<Vec<_>>()}),
                     &selected,
                 )
@@ -114,13 +119,13 @@ impl InputDriver {
                 crate::live_cpu_history::CPUHistory::decode(
                     json!({"observation":selected,"context_seconds":900,
                     "first_ns":101_000_000_000_u64,"end_ns":1_001_000_000_000_u64,
-                    "offset":0,"total":18,"retention_limited":false,
+                    "offset":0,"total":cpus,"retention_limited":false,
                     "observations":[
                         {"observation":previous,"previous_observation":null,
-                            "interval_available":false,"cpu_count":18},
+                            "interval_available":false,"cpu_count":cpus},
                         {"observation":selected,"previous_observation":previous,
-                            "interval_available":true,"cpu_count":18}],
-                    "cpus":(0..18).map(|cpu| json!({"cpu":cpu,"busy_percent":[null,67]}))
+                            "interval_available":true,"cpu_count":cpus}],
+                    "cpus":(0..cpus).map(|cpu| json!({"cpu":cpu,"busy_percent":[null,67]}))
                         .collect::<Vec<_>>()}),
                     &snapshot.selection,
                 )

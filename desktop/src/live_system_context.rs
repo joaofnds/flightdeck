@@ -22,9 +22,11 @@ impl LiveDashboard {
             .reading_snapshot()
             .map_or(&Value::Null, |snapshot| &snapshot.selection);
         let summary = super::matching_summary(selection);
-        let uptime = summary["uptime_seconds"]
-            .as_u64()
-            .map_or_else(|| "Unavailable".into(), uptime_text);
+        let uptime = self.shown_reading(
+            summary["uptime_seconds"]
+                .as_u64()
+                .map_or_else(|| "Unavailable".into(), uptime_text),
+        );
 
         div()
             .flex()

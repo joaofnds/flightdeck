@@ -42,7 +42,7 @@ impl LiveDashboard {
             .gap(px(8.0))
             .child(div().flex().min_w_0().children(pressure))
             .child(div().flex().min_w_0().children(thermal))
-            .child(overview_cooling(summary))
+            .child(self.overview_cooling(summary))
     }
 
     /// The prototype's battery state row: the compact charging timeline and a details card
@@ -56,6 +56,7 @@ impl LiveDashboard {
             .reading_snapshot()
             .map_or(&Value::Null, |snapshot| &snapshot.selection);
         let battery = &crate::live_views::matching_summary(selection)["battery"];
+        let reading = |reading| self.shown_reading(reading);
         let details = overview_context_card("battery-details")
             .child(timeline_heading_text(
                 "Battery details",
@@ -68,21 +69,21 @@ impl LiveDashboard {
                         key: "health",
                         label: "Health",
                     },
-                    hardware_reading(battery, "health_percent", "%", 1),
+                    reading(hardware_reading(battery, "health_percent", "%", 1)),
                 ),
                 overview_context_reading(
                     &ContextReading {
                         key: "cycles",
                         label: "Cycles",
                     },
-                    hardware_reading(battery, "cycle_count", "", 0),
+                    reading(hardware_reading(battery, "cycle_count", "", 0)),
                 ),
                 overview_context_reading(
                     &ContextReading {
                         key: "adapter",
                         label: "Adapter rating",
                     },
-                    quantity(battery, "adapter_watts", "W", 1.0),
+                    reading(quantity(battery, "adapter_watts", "W", 1.0)),
                 ),
             ]));
 
@@ -140,8 +141,16 @@ impl LiveDashboard {
             ("board", "Board", "Unavailable".into()),
             ("wireless", "Wireless", "Unavailable".into()),
             ("ambient", "Ambient", "Unavailable".into()),
-            ("fan0", "Fan channel 0", overview_context_fan(summary, 0)),
-            ("fan1", "Fan channel 1", overview_context_fan(summary, 1)),
+            (
+                "fan0",
+                "Fan channel 0",
+                self.shown_reading(overview_context_fan(summary, 0)),
+            ),
+            (
+                "fan1",
+                "Fan channel 1",
+                self.shown_reading(overview_context_fan(summary, 1)),
+            ),
         ];
 
         div()
@@ -218,43 +227,51 @@ struct ContextReading {
     label: &'static str,
 }
 
-fn overview_cooling(summary: &Value) -> gpui::Div {
-    overview_context_card("cooling-battery")
-        .child(timeline_heading_text(
-            "Cooling and battery",
-            COOLING_HELP.into(),
-            "About",
-        ))
-        .child(quantity_list([
-            overview_context_reading(
-                &ContextReading {
-                    key: "soc",
-                    label: "SoC temperature",
-                },
-                hardware_reading(summary, "soc_celsius", " °C", 1),
-            ),
-            overview_context_reading(
-                &ContextReading {
-                    key: "fan0",
-                    label: "Fan channel 0",
-                },
-                overview_context_fan(summary, 0),
-            ),
-            overview_context_reading(
-                &ContextReading {
-                    key: "fan1",
-                    label: "Fan channel 1",
-                },
-                overview_context_fan(summary, 1),
-            ),
-            overview_context_reading(
-                &ContextReading {
-                    key: "charge",
-                    label: "Battery charge",
-                },
-                hardware_reading(&summary["battery"], "charge_percent", "%", 1),
-            ),
-        ]))
+impl LiveDashboard {
+    fn overview_cooling(&self, summary: &Value) -> gpui::Div {
+        let reading = |reading| self.shown_reading(reading);
+        overview_context_card("cooling-battery")
+            .child(timeline_heading_text(
+                "Cooling and battery",
+                COOLING_HELP.into(),
+                "About",
+            ))
+            .child(quantity_list([
+                overview_context_reading(
+                    &ContextReading {
+                        key: "soc",
+                        label: "SoC temperature",
+                    },
+                    reading(hardware_reading(summary, "soc_celsius", " °C", 1)),
+                ),
+                overview_context_reading(
+                    &ContextReading {
+                        key: "fan0",
+                        label: "Fan channel 0",
+                    },
+                    reading(overview_context_fan(summary, 0)),
+                ),
+                overview_context_reading(
+                    &ContextReading {
+                        key: "fan1",
+                        label: "Fan channel 1",
+                    },
+                    reading(overview_context_fan(summary, 1)),
+                ),
+                overview_context_reading(
+                    &ContextReading {
+                        key: "charge",
+                        label: "Battery charge",
+                    },
+                    reading(hardware_reading(
+                        &summary["battery"],
+                        "charge_percent",
+                        "%",
+                        1,
+                    )),
+                ),
+            ]))
+    }
 }
 
 /// The prototype's list of labelled readings, ten pixels apart.

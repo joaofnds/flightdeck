@@ -56,7 +56,7 @@ impl LiveDashboard {
             panel.kind != "timeline",
             "a timeline draws through live_timeline"
         );
-        let height = 192.0;
+        let height = PLOT_HEIGHT;
         let chart = self
             .chart_events(
                 div()
@@ -184,6 +184,9 @@ impl LiveDashboard {
     }
 
     fn chart_reading(&self, panel: &Panel, index: Option<usize>) -> String {
+        if self.is_opening() {
+            return crate::live_dashboard::LOADING.into();
+        }
         if let Some(history) = self.chart_process_groups(panel) {
             return format!("{} captured named groups", history.named_group_count);
         }
@@ -234,6 +237,9 @@ impl LiveDashboard {
     }
 
     fn chart_line_reading(&self, panel: &Panel, line: usize, index: Option<usize>) -> String {
+        if self.is_opening() {
+            return crate::live_dashboard::LOADING.into();
+        }
         if let Some(history) = self.chart_process_groups(panel) {
             return crate::live_process_history::groups::reading(history, &panel.id, line, index);
         }
@@ -760,13 +766,7 @@ impl LiveDashboard {
         index: Option<usize>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let mut legends = div()
-            .flex()
-            .flex_wrap()
-            .gap_x(px(12.0))
-            .mt(px(2.0))
-            .text_size(px(12.0))
-            .line_height(px(20.0));
+        let mut legends = chart_legend_frame();
         for (line_index, line) in panel.lines.iter().take(16).enumerate() {
             let key = self.chart_legend_key(panel, line_index);
             let reading = self.chart_line_reading(panel, line_index, index);
@@ -789,7 +789,8 @@ impl LiveDashboard {
                     .focusable()
                     .tab_stop(true)
                     .focus(crate::charts::focus_ring)
-                    .py(px(2.0))
+                    .w(px(LEGEND_SLOT_WIDTH))
+                    .py(px(LEGEND_ENTRY_PADDING))
                     .opacity(if self.hidden.contains(&key) {
                         0.35
                     } else {
@@ -801,7 +802,8 @@ impl LiveDashboard {
                     ),
             );
         }
-        legends
+        let empty = chart_legend_slots(&panel.id, panel.lines.len()) - panel.lines.len();
+        legends.children(chart_legend_empty(&panel.id, empty))
     }
 
     fn toggle_chart_legend(&mut self, key: &str, cx: &mut Context<Self>) {
@@ -831,9 +833,16 @@ impl LiveDashboard {
             .items_center()
             .gap(px(8.0))
             .child(swatch.flex_shrink_0())
-            .child(line.name.clone())
+            .child(div().flex_1().min_w_0().truncate().child(line.name.clone()))
             .when_some(reading, |label, reading| {
-                label.child(div().text_color(rgb(MUTED)).child(reading.to_owned()))
+                label.child(
+                    div()
+                        .min_w_0()
+                        .max_w(gpui::relative(LEGEND_READING_SHARE))
+                        .truncate()
+                        .text_color(rgb(MUTED))
+                        .child(reading.to_owned()),
+                )
             })
             .into_any_element()
     }
@@ -860,6 +869,116 @@ pub(crate) fn chart_head_button(id: String, label: &'static str) -> gpui::Statef
         .focus(crate::charts::focus_ring)
         .hover(|style| style.bg(rgb(0x2c_2f_35)))
         .child(label)
+}
+
+/// How wide each place of a chart's legend is, which holds a line's swatch, its name and its
+/// reading, so the legend wraps where its places do whatever names and readings fill them. A
+/// reading takes at most `LEGEND_READING_SHARE` of the place and the name the rest, and either
+/// is cut short where it is longer.
+const LEGEND_SLOT_WIDTH: f32 = 160.0;
+const LEGEND_READING_SHARE: f32 = 0.6;
+/// The height of a legend's line of text, and the room above and below it in its place.
+const LEGEND_LINE_HEIGHT: f32 = 20.0;
+const LEGEND_ENTRY_PADDING: f32 = 2.0;
+
+/// The most lines a chart of Apps draws: one in each App color, which the leading Apps and
+/// Other take, and the whole machine's line.
+const APP_LEGEND_SLOTS: usize = crate::live_projection::APP_COLORS.len() + 1;
+
+/// The places the fan chart keeps, one row of them, since its readings name its fans and a Mac
+/// with fans has one or two.
+const FAN_LEGEND_SLOTS: usize = 2;
+
+/// How tall a chart's plot is.
+const PLOT_HEIGHT: f32 = 192.0;
+
+/// The places the legend of the chart `id` keeps when it draws `lines`. A chart of Apps keeps
+/// one for each line it can draw, since its readings name its Apps, the fan chart a row, and any
+/// other chart one for each of its lines.
+fn chart_legend_slots(id: &str, lines: usize) -> usize {
+    if id == crate::live_projection::FANS_ID {
+        return lines.max(FAN_LEGEND_SLOTS);
+    }
+    if crate::live_app_attribution_history::Metric::from_panel(id).is_some() {
+        return lines.max(APP_LEGEND_SLOTS);
+    }
+    if id == crate::live_resident_history::PANEL_ID {
+        return lines.max(APP_LEGEND_SLOTS);
+    }
+    if id == crate::live_projection::GPU_APPS_ID {
+        return lines.max(APP_LEGEND_SLOTS);
+    }
+
+    lines
+}
+
+/// A chart's legend, which wraps its places onto as many rows as they need.
+fn chart_legend_frame() -> gpui::Div {
+    div()
+        .flex()
+        .flex_wrap()
+        .gap_x(px(12.0))
+        .mt(px(2.0))
+        .text_size(px(12.0))
+        .line_height(px(LEGEND_LINE_HEIGHT))
+}
+
+/// The `empty` places after the lines of the chart `id`'s legend, each as large as a line's, so
+/// the legend is as tall as the lines its readings can draw.
+fn chart_legend_empty(id: &str, empty: usize) -> impl Iterator<Item = gpui::Div> + '_ {
+    assert!(empty <= APP_LEGEND_SLOTS);
+    (0..empty).map(move |slot| {
+        div()
+            .debug_selector(move || format!("chart-legend-empty:{id}:{slot}"))
+            .w(px(LEGEND_SLOT_WIDTH))
+            .h(px(LEGEND_LINE_HEIGHT + LEGEND_ENTRY_PADDING * 2.0))
+    })
+}
+
+/// The chart a card stands for while it has no readings to draw.
+pub(crate) struct AbsentChart {
+    pub(crate) id: &'static str,
+    pub(crate) title: &'static str,
+}
+
+/// The card of `chart` while it has no readings to draw, as tall as the chart, with `notice`
+/// saying why in place of the plot.
+pub(crate) fn absent_chart(chart: &AbsentChart, notice: String) -> gpui::Div {
+    let AbsentChart { id, title } = *chart;
+    div()
+        .flex_1()
+        .min_w_0()
+        .rounded(px(12.0))
+        .border_1()
+        .border_color(rgb(charts::LINE))
+        .bg(rgb(PANEL))
+        .px(px(12.0))
+        .py(px(8.0))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .min_h(px(44.0))
+                .text_size(px(14.0))
+                .line_height(px(21.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .child(title),
+        )
+        .child(plot_notice(notice).h(px(PLOT_HEIGHT)))
+        .child(div().h(px(crate::chart_axes::TIME_ROW_HEIGHT)))
+        .child(chart_legend_frame().children(chart_legend_empty(id, chart_legend_slots(id, 0))))
+}
+
+/// `notice` centred in a plot's place, which says why the plot has nothing to draw.
+pub(crate) fn plot_notice(notice: String) -> gpui::Div {
+    let selector = notice.clone();
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(px(11.0))
+        .text_color(rgb(MUTED))
+        .child(div().debug_selector(move || selector).child(notice))
 }
 
 /// The most lines a chart's legend shows each line's reading for. Past it the legend names

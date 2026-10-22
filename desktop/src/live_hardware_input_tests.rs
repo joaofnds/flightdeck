@@ -129,8 +129,9 @@ impl InputDriver {
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();
         });
+        // The window holds the whole Overview, so the schematic under its last section is drawn.
         self.context
-            .simulate_resize(gpui::size(px(1536.0), px(3600.0)));
+            .simulate_resize(gpui::size(px(1536.0), px(5000.0)));
         self.context.run_until_parked();
     }
 

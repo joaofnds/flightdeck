@@ -590,7 +590,7 @@ impl InputDriver {
         self.context.run_until_parked();
     }
 
-    fn seed_attribution(&mut self, metric: Metric) {
+    pub(crate) fn seed_attribution(&mut self, metric: Metric) {
         self.view.update(&mut self.context, |dashboard, cx| {
             let snapshot = attributed_snapshot(dashboard.generation, metric);
             assert!(dashboard.take_update(Update::Ready(snapshot)));

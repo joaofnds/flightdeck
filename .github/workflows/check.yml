@@ -111,10 +111,12 @@ jobs:
       - run: >-
           cargo clippy --locked --manifest-path desktop/Cargo.toml
           --all-targets --features automation -- --deny warnings
-      # Two tests project the CPU page of the Mac they run on, and the runner has one core cluster
+      # Four tests project the CPU page of the Mac they run on, and the runner has one core cluster
       # where they need two, so they run only on a Mac. --exact keeps each skip to its own test.
       - run: >-
           cargo test --locked --manifest-path desktop/Cargo.toml -- --exact
+          --skip live_dashboard::input_tests::loading::the_cpu_panels_keep_their_size_side_by_side
+          --skip live_dashboard::input_tests::loading::the_cpu_panels_keep_their_size_stacked
           --skip live_dashboard::input_tests::summary::a_wide_cpu_summary_fills_four_equal_tracks
           --skip live_projection::tests::cpu_frequency_charts_each_level_where_measured
       - run: >-

@@ -367,11 +367,11 @@ fn overview_pressure_history_retains_the_selected_same_second_alternative() {
 fn empty_or_unavailable_observations_never_fabricate_cpu_activity() {
     // Goal: no-data and unavailable-counter states remain distinguishable from zero.
     // Method: project empty and null-only payloads, then reject an oversized context.
-    assert!(
-        panels("cpu", &json!({"trends": []}), None)
-            .unwrap()
-            .is_empty()
-    );
+    let empty = panels("cpu", &json!({"trends": []}), None).unwrap();
+    assert!(!empty.is_empty());
+    for line in empty.iter().flat_map(|panel| &panel.lines) {
+        assert!(line.values.iter().all(Option::is_none));
+    }
     let mut selection = selection();
     selection["trends"][1]["cpu_percent"] = Value::Null;
     let cpu = panels("cpu", &selection, None).unwrap();

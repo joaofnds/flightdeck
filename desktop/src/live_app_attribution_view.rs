@@ -1,10 +1,10 @@
 use std::rc::Rc;
 
-use gpui::{AnyElement, Context, IntoElement, div, prelude::*, px, rgb};
+use gpui::{AnyElement, Context, IntoElement, div, prelude::*, px};
 
 use super::Metric;
-use crate::charts::{GRID, MUTED, PANEL};
 use crate::data::Panel;
+use crate::live_chart_view::AbsentChart;
 use crate::live_dashboard::LiveDashboard;
 
 impl LiveDashboard {
@@ -22,23 +22,15 @@ impl LiveDashboard {
     pub(crate) fn gpu_apps(&self, panel: Option<&Rc<Panel>>, cx: &mut Context<Self>) -> AnyElement {
         let chart = match panel {
             Some(panel) => self.live_chart(panel, cx).into_any_element(),
-            None => div()
-                .debug_selector(|| "attribution-unavailable:live-gpu-apps".into())
-                .flex_1()
-                .min_w_0()
-                .p(px(18.0))
-                .rounded(px(7.0))
-                .border_1()
-                .border_color(rgb(GRID))
-                .bg(rgb(PANEL))
-                .child("GPU time by app")
-                .child(
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(rgb(MUTED))
-                        .child("GPU time by App is sampled only while the app runs"),
-                )
-                .into_any_element(),
+            None => crate::live_chart_view::absent_chart(
+                &AbsentChart {
+                    id: crate::live_projection::GPU_APPS_ID,
+                    title: "GPU time by app",
+                },
+                self.history_absent("GPU time by App is sampled only while the app runs"),
+            )
+            .debug_selector(|| "attribution-unavailable:live-gpu-apps".into())
+            .into_any_element(),
         };
 
         div()
@@ -109,23 +101,12 @@ impl LiveDashboard {
                     || self.history_absent("App rate history unavailable at this observation"),
                     |history| history.coverage(None),
                 );
-            div()
+            let chart = AbsentChart {
+                id: metric.panel_id(),
+                title: metric.title(),
+            };
+            crate::live_chart_view::absent_chart(&chart, reading)
                 .debug_selector(|| format!("attribution-unavailable:{}", metric.panel_id()))
-                .flex_1()
-                .min_w_0()
-                .p(px(18.0))
-                .rounded(px(7.0))
-                .border_1()
-                .border_color(rgb(GRID))
-                .bg(rgb(PANEL))
-                .child(metric.title())
-                .child(
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(rgb(MUTED))
-                        .debug_selector(|| reading.clone())
-                        .child(reading),
-                )
                 .into_any_element()
         };
         let ranking = match metric {

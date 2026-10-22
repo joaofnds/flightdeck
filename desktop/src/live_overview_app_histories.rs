@@ -1,8 +1,8 @@
-use gpui::{AnyElement, Context, IntoElement, div, prelude::*, px, rgb};
+use gpui::{AnyElement, Context, IntoElement, div, prelude::*, px};
 use std::sync::Arc;
 
-use crate::charts::{MUTED, PANEL};
 use crate::live_app_attribution_history::{AppAttributionHistory, Metric};
+use crate::live_chart_view::AbsentChart;
 use crate::live_dashboard::LiveDashboard;
 use crate::live_source::Snapshot;
 
@@ -48,6 +48,7 @@ impl LiveDashboard {
             let (id, title) = overview_app_history_slot(*slot);
             cards = cards.child(
                 div()
+                    .debug_selector(move || format!("overview-app-history:{id}"))
                     .flex_1()
                     .min_w_0()
                     .flex()
@@ -73,34 +74,8 @@ impl LiveDashboard {
         } else {
             self.overview_app_histories_unavailable(id)
         };
-        div()
+        crate::live_chart_view::absent_chart(&AbsentChart { id, title }, reading)
             .debug_selector(move || format!("overview-app-history-unavailable:{id}"))
-            .flex_1()
-            .min_w_0()
-            .min_h(px(356.0))
-            .px(px(12.0))
-            .pt(px(8.0))
-            .rounded(px(12.0))
-            .border_1()
-            .border_color(rgb(crate::charts::LINE))
-            .bg(rgb(PANEL))
-            .child(
-                div()
-                    .h(px(44.0))
-                    .flex()
-                    .items_center()
-                    .text_size(px(14.0))
-                    .line_height(px(21.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child(title),
-            )
-            .child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(rgb(MUTED))
-                    .debug_selector(|| reading.clone())
-                    .child(reading),
-            )
             .into_any_element()
     }
 

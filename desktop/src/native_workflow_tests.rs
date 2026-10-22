@@ -634,11 +634,13 @@ fn canceling_an_open_keeps_the_current_source_mode() {
 }
 
 #[test]
-fn overview_defers_artwork_until_a_reading_is_available() {
-    // Cold row planning must not load the artwork only to push it below arriving charts.
+fn overview_lays_out_its_artwork_before_a_reading_is_available() {
+    // Goal: the Overview places the artwork under the room its charts hold before their first
+    // reading, so the reading pushes nothing down. Method: plan the Overview's rows before and
+    // after its reading, then plan a page without the artwork.
     let mut dashboard = dashboard("overview");
     assert!(
-        !dashboard
+        dashboard
             .rows
             .iter()
             .any(|row| matches!(row, Row::Hardware))

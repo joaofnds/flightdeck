@@ -32,6 +32,8 @@ mod disk_attribution;
 mod hardware;
 #[path = "live_layout_input_tests.rs"]
 mod layout;
+#[path = "live_loading_input_tests.rs"]
+mod loading;
 #[path = "live_range_input_tests.rs"]
 mod range;
 #[path = "live_rankings_input_tests.rs"]
@@ -488,8 +490,9 @@ fn scrolling_the_plot_back_under_the_pointer_restores_synchronized_hover(cx: &mu
     // Reverse layout movement so reentry cannot depend on another pointer event.
     let mut harness = InputHarness::setup(cx);
     harness.driver.seed_repeated_second();
-    // The shorter chart cards fit a 1500-pixel window, so a 1000-pixel one keeps it scrollable.
-    harness.driver.make_scrollable(1000.0);
+    // The energy page is taller than a 1400-pixel window, which still shows its temperature
+    // chart under the room its App chart holds for ten Apps.
+    harness.driver.make_scrollable(1400.0);
     let plot = harness.driver.plot_bounds("live-energy-plot");
     let previous = harness.driver.previous_second_position();
     let pointer = gpui::point(previous.x, plot.bottom() - gpui::px(1.0));
@@ -935,6 +938,13 @@ impl InputHarness {
     }
 
     fn setup_route(cx: &mut TestAppContext, route: &str) -> Self {
+        let mut harness = Self::open_route(cx, route);
+        harness.driver.seed_accepted_selection();
+        harness
+    }
+
+    /// Opens the window on `route` with the page's first reading still to come.
+    fn open_route(cx: &mut TestAppContext, route: &str) -> Self {
         let root =
             std::env::temp_dir().join(format!("flightdeck-input-contract-{}", std::process::id()));
         let worker = Worker::start(root).unwrap();
@@ -946,11 +956,9 @@ impl InputHarness {
         });
         let view = window.root(cx).unwrap();
         let context = VisualTestContext::from_window(window.into(), cx);
-        let mut harness = Self {
+        Self {
             driver: InputDriver { view, context },
-        };
-        harness.driver.seed_accepted_selection();
-        harness
+        }
     }
 
     fn teardown(self) {
@@ -1492,7 +1500,13 @@ impl InputDriver {
                 return false;
             }
 
-            dashboard.panels.is_empty()
+            // A page still reading keeps its charts in place, each without a reading.
+            dashboard.panels.iter().all(|panel| {
+                panel
+                    .lines
+                    .iter()
+                    .all(|line| line.values.iter().all(Option::is_none))
+            })
         })
     }
 

@@ -106,7 +106,7 @@ impl LiveDashboard {
             Err(error) => {
                 return card
                     .child(ranking_title(metric, heading))
-                    .child(notice(&error))
+                    .child(ranking_body().child(notice(&error)))
                     .into_any_element();
             }
         };
@@ -146,10 +146,10 @@ impl LiveDashboard {
     ) -> AnyElement {
         let card = card.child(ranking_title(Metric::Gpu, heading));
         let Some(snapshot) = self.reading_snapshot() else {
+            let absent =
+                self.absent_reading("GPU time by App unavailable while reading the selection");
             return card
-                .child(notice(
-                    "GPU time by App unavailable while reading the selection",
-                ))
+                .child(ranking_body().child(notice(absent)))
                 .into_any_element();
         };
         let selection = &snapshot.selection;
@@ -166,14 +166,16 @@ impl LiveDashboard {
                 .aria_label(format!("GPU top apps at Unix second {}", target.second))
                 .child(Self::app_ranking_entries(&ranking, &target, cx))
                 .into_any_element(),
-            Err(error) => card.child(notice(&error)).into_any_element(),
+            Err(error) => card
+                .child(ranking_body().child(notice(&error)))
+                .into_any_element(),
         }
     }
 
     fn ranking_reading(&self) -> Result<(&TopApps, Target), String> {
         let snapshot = self
             .reading_snapshot()
-            .ok_or("App totals unavailable while reading the selection")?;
+            .ok_or(self.absent_reading("App totals unavailable while reading the selection"))?;
 
         if let Some(preview) = &self.preview {
             if let Some(error) = &preview.failure {
@@ -209,7 +211,7 @@ impl LiveDashboard {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if ranking.entries.is_empty() {
-            return div()
+            return ranking_body()
                 .py(px(20.0))
                 .text_size(px(11.0))
                 .line_height(px(17.0))
@@ -218,12 +220,11 @@ impl LiveDashboard {
                 .into_any_element();
         }
 
-        div()
+        ranking_body()
             .id(SharedString::from(format!(
                 "ranking-{}",
                 ranking.metric.title()
             )))
-            .max_h(px(280.0))
             .overflow_y_scroll()
             .children(
                 ranking
@@ -308,6 +309,14 @@ impl LiveDashboard {
         self.picker = None;
         self.navigate("apps", cx);
     }
+}
+
+/// How tall a ranking's list is, whatever it holds, so its card keeps its size from the page's
+/// first frame through every reading. A longer list scrolls inside it.
+const RANKING_BODY_HEIGHT: f32 = 280.0;
+/// The room a ranking's Apps, or the notice standing for them, take in its card.
+fn ranking_body() -> gpui::Div {
+    div().h(px(RANKING_BODY_HEIGHT))
 }
 
 fn ranking_card(name: &'static str) -> gpui::Div {

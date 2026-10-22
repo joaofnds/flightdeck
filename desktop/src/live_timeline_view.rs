@@ -127,10 +127,11 @@ impl LiveDashboard {
 
     fn timeline_caption(&self, panel: &Panel, index: Option<usize>) -> gpui::Div {
         let state = self.chart_reading(panel, index);
+        let absent = self.absent_reading("Unavailable");
         let time = self
             .reading_snapshot()
             .and_then(|snapshot| snapshot.selection["second"].as_u64())
-            .map_or_else(|| "Unavailable".into(), |second| clock(second, true));
+            .map_or_else(|| absent.into(), |second| clock(second, true));
         let states = panel
             .states
             .as_ref()

@@ -1094,7 +1094,7 @@ fn memory_shows_interval_resident_leaders_separately_from_current_top_apps(
 }
 
 impl InputDriver {
-    fn seed_interval_resident_leaders(&mut self) {
+    pub(super) fn seed_interval_resident_leaders(&mut self) {
         self.seed_resident_leaders(interval_resident_history());
     }
 

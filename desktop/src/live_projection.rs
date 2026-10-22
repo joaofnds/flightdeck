@@ -189,7 +189,9 @@ pub fn panels(
         return Ok(Vec::new());
     };
     if recent.is_empty() {
-        return Ok(Vec::new());
+        // A reading with no trend points still draws its page's charts, with nothing in them,
+        // so the charts the page drew before its first reading stay in place.
+        return empty_panels(route);
     }
     let earlier = if route == "apps" {
         None
@@ -222,6 +224,43 @@ pub fn panels(
         }
     }
     assert!(result.len() <= limit);
+    Ok(result)
+}
+
+/// The charts `route` shows, each with its lines and no readings, which the page lays out
+/// before its first reading arrives so that reading moves nothing. The Apps page charts the
+/// selected App, which only its readings name, so it has none.
+pub fn empty_panels(route: &str) -> Result<Vec<Rc<Panel>>, String> {
+    if route == "apps" {
+        return Ok(Vec::new());
+    }
+
+    let coordinates = Coordinates {
+        window: crate::chart_axes::TimeWindow { first: 0, span: 1 },
+        detail_first: 0,
+        positions: Vec::new(),
+        segments: Vec::new(),
+        selected_index: None,
+    };
+    // One second, which holds no reading, so a state chart draws as its timeline.
+    let domain = Domain {
+        first: 0,
+        end: 1,
+        span: 1,
+        recent_first: 0,
+        stride: 1,
+    };
+    let specifications = specifications(route, &[])?;
+    let mut result = Vec::with_capacity(specifications.len());
+    for specification in &specifications {
+        let mut panel = panels_panel(specification, &domain, &[], &coordinates)?;
+        // No reading names the seconds a chart spans yet.
+        panel.window = None;
+        panel.detail_first = None;
+
+        result.push(Rc::new(panel));
+    }
+    assert!(result.len() <= panels_limit(route, false));
     Ok(result)
 }
 
@@ -1166,6 +1205,7 @@ fn energy(points: &[Value]) -> Result<Vec<Specification>, String> {
 }
 
 pub const THERMAL_STATE_ID: &str = "live-thermal";
+pub const FANS_ID: &str = "live-fans";
 pub const AREA_MAXIMA_ID: &str = "live-area-maxima";
 
 fn thermal_state() -> Specification {
@@ -1264,7 +1304,7 @@ fn fan_specification(points: &[Value]) -> Result<Specification, String> {
         lines.push(line);
     }
 
-    let mut specification = specification("live-fans", "Fan speed", "rpm", lines);
+    let mut specification = specification(FANS_ID, "Fan speed", "rpm", lines);
     specification.help = "SMC channels retain their numeric indices, without physical-side \
         attribution. Zero means measured stopped; unavailable channels remain gaps. \
         Channel count can change between observations.";

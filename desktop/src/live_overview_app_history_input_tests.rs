@@ -386,7 +386,7 @@ fn assert_overview_histories_current(driver: &mut InputDriver) {
 }
 
 impl InputDriver {
-    fn seed_overview_histories(&mut self, width: f32) {
+    pub(crate) fn seed_overview_histories(&mut self, width: f32) {
         self.view.update(&mut self.context, |dashboard, cx| {
             let snapshot = overview_history_snapshot(dashboard.generation);
             dashboard.accept(snapshot);
