@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
 
+# A newer push to the same branch or pull request makes the older run's verdict moot.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -26,6 +31,10 @@ jobs:
       - run: >-
           rustup toolchain install "$RUSTUP_TOOLCHAIN"
           --profile minimal --component rustfmt,clippy --no-self-update
+      # Only main saves, so a branch starts from main's build and never evicts it.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --workspace --all-targets -- --deny warnings
       # The runner is a virtual machine with no SMC, no IOReport channels, no power manager, no
@@ -82,6 +91,14 @@ jobs:
       - run: >-
           rustup toolchain install "$RUSTUP_TOOLCHAIN"
           --profile minimal --component rustfmt,clippy --no-self-update
+      # Both workspaces compile into the root target, as .cargo/config.toml sets build-dir, and
+      # the action deletes from a listed workspace's target every crate that workspace does not
+      # name. The desktop workspace names every crate the root one takes from crates.io, so list
+      # it alone.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: desktop -> ../target
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --manifest-path desktop/Cargo.toml --check
       - run: >-
           cargo clippy --locked --manifest-path desktop/Cargo.toml
