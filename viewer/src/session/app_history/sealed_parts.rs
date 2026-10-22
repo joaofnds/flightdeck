@@ -1,6 +1,7 @@
 //! Every App's part of each observation of a sealed window: its row, its processes, and the
 //! facts of the observation's sample every page shows. The persister derives them as the window
 //! seals, so the viewer shows a saved second's App without replaying its minute.
+use std::collections::HashMap;
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -208,35 +209,18 @@ impl<'sample> PartRow<'sample> {
     fn described_process(&self) -> Option<&'sample Process> {
         self.process().map(|(_index, process)| process)
     }
-
-    fn order(&self) -> RowOrder<'sample> {
-        let process = self.described_process();
-        RowOrder {
-            app: self
-                .app()
-                .map(|(_index, app)| (kind_code(app.key.kind), app.key.bytes.as_slice())),
-            kind: self.kind(),
-            executable: process
-                .and_then(|process| process.executable_name.as_ref())
-                .map(|name| name.bytes.as_slice()),
-            pid: process.map(|process| process.pid),
-            pid_version: process
-                .and_then(|process| process.creation)
-                .map(|creation| creation.pid_version),
-            publication: self.sample().selected.stamp.publication,
-        }
-    }
 }
 
 /// The order of the rows in the table, by these fields in turn: every observation's facts
-/// first, then each App's own rows, then those of each of its processes, second after second.
+/// first, then the Apps' own rows, then their processes' rows, each App's and each process's
+/// rows side by side, second after second.
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
-struct RowOrder<'sample> {
-    app: Option<(u8, &'sample [u8])>,
+struct RowOrder {
     kind: u8,
-    executable: Option<&'sample [u8]>,
-    pid: Option<i32>,
-    pid_version: Option<i32>,
+    /// The place of the row's App key among the window's App keys in their order.
+    app: Option<u32>,
+    /// The pid of a process row and the version of its pid.
+    process: Option<(i32, Option<i32>)>,
     publication: u64,
 }
 
@@ -275,7 +259,11 @@ fn sealed_parts_rows(samples: &[Box<Sample>]) -> Result<Vec<PartRow<'_>>> {
         return Err(Error::Bound("sealed parts rows"));
     }
 
-    let mut rows = Vec::with_capacity(count);
+    // A row changes little from the row of the same App or process a second before, so keeping
+    // them side by side halves the table. The reader orders the rows it reads by observation.
+    // Each App key is compared only to rank it, so the rows sort by integers.
+    let ranks = sealed_parts_ranks(samples);
+    let mut ordered = Vec::with_capacity(count);
     for sample in samples {
         // A sample takes its rates only from the adjacent observation of its run, so a row
         // keeps only the publication and clocks of the observation before.
@@ -284,32 +272,93 @@ fn sealed_parts_rows(samples: &[Box<Sample>]) -> Result<Vec<PartRow<'_>>> {
             assert_eq!(previous.run, sample.selected.stamp.run);
         }
 
-        rows.push(PartRow::Header { sample });
-        for (index, app) in (0_u32..).zip(sample.apps()) {
-            rows.push(PartRow::App { sample, index, app });
-        }
-        for (index, process) in (0_u32..).zip(sample.processes()) {
-            if let Some(app_index) = process.app_index {
-                let app = sample
-                    .apps()
-                    .get(collector::usize_from_u32(app_index))
-                    .ok_or(Error::Bound("sealed parts process App"))?;
-                rows.push(PartRow::Process {
-                    sample,
-                    app_index,
-                    app,
-                    index,
-                    process,
-                });
-            }
+        sealed_parts_rows_push(sample, &ranks, &mut ordered)?;
+    }
+    assert!(ordered.len() <= count);
+    ordered.sort_unstable_by(|(left, _left_row), (right, _right_row)| left.cmp(right));
+
+    Ok(ordered.into_iter().map(|(_order, row)| row).collect())
+}
+
+/// Every row of `sample`, each with its place in the table's order.
+fn sealed_parts_rows_push<'sample>(
+    sample: &'sample Sample,
+    ranks: &HashMap<(u8, &[u8]), u32>,
+    ordered: &mut Vec<(RowOrder, PartRow<'sample>)>,
+) -> Result<()> {
+    let publication = sample.selected.stamp.publication;
+    let app_ranks: Vec<u32> = sample
+        .apps()
+        .iter()
+        .map(|app| ranks[&sealed_parts_rank_key(app)])
+        .collect();
+
+    let header = RowOrder {
+        kind: ROW_HEADER,
+        app: None,
+        process: None,
+        publication,
+    };
+    ordered.push((header, PartRow::Header { sample }));
+    for ((index, app), rank) in (0_u32..).zip(sample.apps()).zip(&app_ranks) {
+        let order = RowOrder {
+            kind: ROW_APP,
+            app: Some(*rank),
+            process: None,
+            publication,
+        };
+        ordered.push((order, PartRow::App { sample, index, app }));
+    }
+    for (index, process) in (0_u32..).zip(sample.processes()) {
+        if let Some(app_index) = process.app_index {
+            let place = collector::usize_from_u32(app_index);
+            let app = sample
+                .apps()
+                .get(place)
+                .ok_or(Error::Bound("sealed parts process App"))?;
+            let order = RowOrder {
+                kind: ROW_PROCESS,
+                app: Some(app_ranks[place]),
+                process: Some((
+                    process.pid,
+                    process.creation.map(|creation| creation.pid_version),
+                )),
+                publication,
+            };
+            let row = PartRow::Process {
+                sample,
+                app_index,
+                app,
+                index,
+                process,
+            };
+            ordered.push((order, row));
         }
     }
-    assert!(rows.len() <= count);
-    // A row changes little from the row of the same App or process a second before, so keeping
-    // them side by side halves the table. The reader orders the rows it reads by observation.
-    rows.sort_by_key(PartRow::order);
 
-    Ok(rows)
+    Ok(())
+}
+
+/// The place of each App key of `samples` among them, in their order.
+fn sealed_parts_ranks(samples: &[Box<Sample>]) -> HashMap<(u8, &[u8]), u32> {
+    let mut ranks = HashMap::new();
+    for sample in samples {
+        for app in sample.apps() {
+            ranks.insert(sealed_parts_rank_key(app), 0);
+        }
+    }
+    let mut distinct: Vec<(u8, &[u8])> = ranks.keys().copied().collect();
+    distinct.sort_unstable();
+    for (rank, key) in (0_u32..).zip(distinct) {
+        ranks.insert(key, rank);
+    }
+
+    ranks
+}
+
+/// What orders App `app` among the window's Apps.
+fn sealed_parts_rank_key(app: &App) -> (u8, &[u8]) {
+    (kind_code(app.key.kind), app.key.bytes.as_slice())
 }
 
 /// What the engine may decode of the rows, by the rule `DECODED_BYTES_MAX` gives.
