@@ -1,0 +1,41 @@
+name: audit
+
+# Advisories arrive without a commit, so the weekly run catches one against an unchanged
+# lockfile, and a run on each lockfile change catches one a new dependency brings in.
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - Cargo.lock
+      - desktop/Cargo.lock
+  pull_request:
+    paths:
+      - Cargo.lock
+      - desktop/Cargo.lock
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-audit:
+    # It reads only the lockfiles, so it needs no Mac.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: cargo-audit@0.22.2
+      - run: cargo audit --file Cargo.lock
+      # Runs after a failure above too, so one run reports both lockfiles.
+      - if: ${{ !cancelled() }}
+        run: cargo audit --file desktop/Cargo.lock
