@@ -1,20 +1,25 @@
 //! Every App's part of each observation of a sealed window: its row, its processes, and the
 //! facts of the observation's sample every page shows. The persister derives them as the window
 //! seals, so the viewer shows a saved second's App without replaying its minute.
+use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use polars::prelude::{Column, DataFrame, LazyFrame, SortMultipleOptions, col, lit};
+use polars::prelude::{
+    BinaryType, BooleanType, Column, DataFrame, LazyFrame, SortMultipleOptions, UInt8Type,
+    UInt32Type, UInt64Type, col, lit,
+};
 
 use super::sealed::{Kept, columns, kind_code, kind_of, observed_in};
 use super::{ContextRange, Session, TICKS_PER_WINDOW_MAX, WINDOWS_MAX};
 use crate::apps::{Amount, ProcessCreation, ProcessState, Stamp, Unavailable};
+use crate::cancellation::Operation;
 use crate::live_app_response::{
     App, AppPart, Bytes, Header, Key, KeyKind, MEMBERS_MAX, Measure, Observation, Present, Process,
     Sample,
 };
 use collector::ring::{IdentityUnavailable, RunIdentity};
-use persistence::engine::Row;
+use persistence::engine::{Cells, Row};
 use persistence::schema::{APP_PARTS, identity_availability};
 use persistence::{Error, Result, TableManifest};
 
@@ -804,13 +809,13 @@ impl Session {
         headers: &[&Header],
         consume: impl FnMut(&Header, &[KeptAttribution]) -> Result<()>,
     ) -> Result<()> {
-        let rows = KeptAppRows {
-            query: format!("SELECT {} FROM {source}", ATTRIBUTION_COLUMNS.join(", ")),
-            publication_place: const { attribution_column("publication") },
-            decode: kept_attribution,
+        let Some(publications) = kept_parts_publications(headers) else {
+            return Ok(());
         };
 
-        self.visit_kept_parts_rows(&rows, headers, consume)
+        let frame = self.kept_parts_app_rows(source, &ATTRIBUTION_COLUMNS, publications)?;
+        let columns = KeptAttributionColumns::new(&frame)?;
+        self.visit_kept_parts_rows(&columns, headers, consume)
     }
 
     /// Gives `consume` each of `headers`, in publication order, with the resident memory of
@@ -821,37 +826,33 @@ impl Session {
         headers: &[&Header],
         consume: impl FnMut(&Header, &[KeptResident]) -> Result<()>,
     ) -> Result<()> {
-        let rows = KeptAppRows {
-            query: format!("SELECT {} FROM {source}", RESIDENT_COLUMNS.join(", ")),
-            publication_place: const { resident_column("publication") },
-            decode: kept_resident,
-        };
-
-        self.visit_kept_parts_rows(&rows, headers, consume)
-    }
-
-    /// Gives `consume` each of `headers`, in publication order, with what `rows` decodes of
-    /// each of its Apps.
-    fn visit_kept_parts_rows<T>(
-        &self,
-        rows: &KeptAppRows<T>,
-        headers: &[&Header],
-        mut consume: impl FnMut(&Header, &[T]) -> Result<()>,
-    ) -> Result<()> {
-        let (Some(first), Some(last)) = (headers.first(), headers.last()) else {
+        let Some(publications) = kept_parts_publications(headers) else {
             return Ok(());
         };
 
+        let frame = self.kept_parts_app_rows(source, &RESIDENT_COLUMNS, publications)?;
+        let columns = KeptResidentColumns::new(&frame)?;
+        self.visit_kept_parts_rows(&columns, headers, consume)
+    }
+
+    /// The `columns` of the App rows of the observations of `publications`, in publication and
+    /// App order, from the parts the engine holds as `source`.
+    fn kept_parts_app_rows(
+        &self,
+        source: &str,
+        columns: &[&str],
+        publications: RangeInclusive<u64>,
+    ) -> Result<DataFrame> {
         // The engine filters a range of publications far faster than a list of them, so the
-        // read takes the range and skips the rows of observations in it that `headers` leave
-        // out.
-        assert!(first.selected.stamp.publication <= last.selected.stamp.publication);
+        // read takes the range and skips the rows of observations in it that a read leaves out.
+        assert!(publications.start() <= publications.end());
+        let query = format!("SELECT {} FROM {source}", columns.join(", "));
         let frame = self.connection.collect(kept_parts_sorted(
-            self.connection.plan(&rows.query)?.filter(
+            self.connection.plan(&query)?.filter(
                 col("row_kind")
                     .eq(lit(ROW_APP))
-                    .and(col("publication").gt_eq(lit(first.selected.stamp.publication)))
-                    .and(col("publication").lt_eq(lit(last.selected.stamp.publication))),
+                    .and(col("publication").gt_eq(lit(*publications.start())))
+                    .and(col("publication").lt_eq(lit(*publications.end()))),
             ),
             &["publication", "app_index"],
         ))?;
@@ -859,84 +860,278 @@ impl Session {
             return Err(Error::Bound("sealed parts rows"));
         }
 
+        Ok(frame)
+    }
+
+    /// Gives `consume` each of `headers`, in publication order, with what `columns` give of
+    /// each of its Apps.
+    fn visit_kept_parts_rows<C: KeptColumns>(
+        &self,
+        columns: &C,
+        headers: &[&Header],
+        mut consume: impl FnMut(&Header, &[C::App]) -> Result<()>,
+    ) -> Result<()> {
         let mut apps = Vec::with_capacity(crate::live_app_response::APPS_MAX);
         let mut row = 0;
         for header in headers {
             self.operation.check()?;
-            row = self.visit_kept_parts_rows_read(rows, &frame, row, header, &mut apps)?;
+            row = visit_kept_parts_rows_read(&self.operation, columns, row, header, &mut apps)?;
             consume(header, &apps)?;
         }
-        if row != frame.height() {
+        if row != columns.app_columns().row_count {
             return Err(Error::Bound("sealed parts publication"));
         }
 
         Ok(())
     }
+}
 
-    /// Gives `output` what `rows` decodes of the Apps of the observation of `header`, whose
-    /// rows of `frame` start at or after `first`, and returns the row after them.
-    fn visit_kept_parts_rows_read<T>(
-        &self,
-        rows: &KeptAppRows<T>,
-        frame: &DataFrame,
-        first: usize,
-        header: &Header,
-        output: &mut Vec<T>,
-    ) -> Result<usize> {
-        let start = self.visit_kept_parts_rows_read_start(rows, frame, first, header)?;
-        output.clear();
-        for index in start..frame.height() {
-            self.operation.check()?;
-            let row = Row::new(frame, index)?;
-            if row.get::<u64>(rows.publication_place)? != header.selected.stamp.publication {
-                break;
-            }
-            let (app_index, app) = (rows.decode)(&row)?;
-            if app_index != output.len() {
-                return Err(Error::Bound("sealed parts App"));
-            }
-            if output.len() == header.app_count {
-                return Err(Error::Bound("sealed parts Apps"));
-            }
-            output.push(app);
+/// The first and the last publication of `headers`, which a read of their App rows takes, or
+/// none for no headers.
+fn kept_parts_publications(headers: &[&Header]) -> Option<RangeInclusive<u64>> {
+    let (Some(first), Some(last)) = (headers.first(), headers.last()) else {
+        return None;
+    };
+
+    Some(first.selected.stamp.publication..=last.selected.stamp.publication)
+}
+
+/// Gives `output` what `columns` give of the Apps of the observation of `header`, whose rows
+/// start at or after row `first`, and returns the row after them.
+fn visit_kept_parts_rows_read<C: KeptColumns>(
+    operation: &Operation,
+    columns: &C,
+    first: usize,
+    header: &Header,
+    output: &mut Vec<C::App>,
+) -> Result<usize> {
+    let app_columns = columns.app_columns();
+    let start = visit_kept_parts_rows_read_start(operation, app_columns, first, header)?;
+    output.clear();
+    for row in start..app_columns.row_count {
+        operation.check()?;
+        if app_columns.publication.get(row)? != header.selected.stamp.publication {
+            break;
         }
-        if output.len() != header.app_count {
+        // A row is read whole before its place is checked, so a row wrong in both ways
+        // reports its cell.
+        let app = columns.app(row)?;
+        if app_columns.app_index(row)? != output.len() {
+            return Err(Error::Bound("sealed parts App"));
+        }
+        if output.len() == header.app_count {
             return Err(Error::Bound("sealed parts Apps"));
         }
-
-        Ok(start + output.len())
+        output.push(app);
+    }
+    if output.len() != header.app_count {
+        return Err(Error::Bound("sealed parts Apps"));
     }
 
-    /// The first row of `frame` from `first` on whose observation is not before `header`'s,
-    /// which skips the rows of the observations the read leaves out.
-    fn visit_kept_parts_rows_read_start<T>(
-        &self,
-        rows: &KeptAppRows<T>,
-        frame: &DataFrame,
-        first: usize,
-        header: &Header,
-    ) -> Result<usize> {
-        for index in first..frame.height() {
-            self.operation.check()?;
-            let publication: u64 = Row::new(frame, index)?.get(rows.publication_place)?;
-            if publication >= header.selected.stamp.publication {
-                return Ok(index);
-            }
-        }
+    Ok(start + output.len())
+}
 
-        Ok(frame.height())
+/// The first row of `app_columns` from row `first` on whose observation is not before
+/// `header`'s, which skips the rows of the observations the read leaves out.
+fn visit_kept_parts_rows_read_start(
+    operation: &Operation,
+    app_columns: &KeptAppColumns<'_>,
+    first: usize,
+    header: &Header,
+) -> Result<usize> {
+    for row in first..app_columns.row_count {
+        operation.check()?;
+        if app_columns.publication.get(row)? >= header.selected.stamp.publication {
+            return Ok(row);
+        }
+    }
+
+    Ok(app_columns.row_count)
+}
+
+/// The columns of a frame of App rows a read takes, and what the read gives of each App.
+trait KeptColumns {
+    /// What the read gives of an App.
+    type App;
+
+    /// The columns every read of App rows takes.
+    fn app_columns(&self) -> &KeptAppColumns<'_>;
+
+    /// What the read gives of the App of row `row`.
+    fn app(&self, row: usize) -> Result<Self::App>;
+}
+
+/// The columns every read of App rows takes, the first of each read's columns. Each is read in
+/// the type the parts table holds it in, since a read of many rows converting each cell through
+/// `Row` spends most of its time converting.
+struct KeptAppColumns<'frame> {
+    row_count: usize,
+    publication: Cells<'frame, UInt64Type>,
+    app_index: Cells<'frame, UInt32Type>,
+    app_kind: Cells<'frame, UInt8Type>,
+    app_key: Cells<'frame, BinaryType>,
+    members: Cells<'frame, UInt32Type>,
+}
+
+/// The columns `KeptAppColumns` reads, in their places among the columns of every read.
+const APP_COLUMNS: [&str; 5] = ["publication", "app_index", "app_kind", "app_key", "members"];
+const _: () = {
+    let mut index = 0;
+    while index < APP_COLUMNS.len() {
+        assert!(same(ATTRIBUTION_COLUMNS[index], APP_COLUMNS[index]));
+        assert!(same(RESIDENT_COLUMNS[index], APP_COLUMNS[index]));
+        index += 1;
+    }
+};
+
+impl<'frame> KeptAppColumns<'frame> {
+    /// The columns of `frame`, whose columns open with `APP_COLUMNS`.
+    fn new(frame: &'frame DataFrame) -> Result<Self> {
+        Ok(Self {
+            row_count: frame.height(),
+            publication: Cells::new(frame, const { column(&APP_COLUMNS, "publication") })?,
+            app_index: Cells::new(frame, const { column(&APP_COLUMNS, "app_index") })?,
+            app_kind: Cells::new(frame, const { column(&APP_COLUMNS, "app_kind") })?,
+            app_key: Cells::new(frame, const { column(&APP_COLUMNS, "app_key") })?,
+            members: Cells::new(frame, const { column(&APP_COLUMNS, "members") })?,
+        })
+    }
+
+    /// The place of row `row`'s App among its sample's Apps.
+    fn app_index(&self, row: usize) -> Result<usize> {
+        Ok(collector::usize_from_u32(self.app_index.get(row)?))
+    }
+
+    /// The key of row `row`'s App.
+    fn key(&self, row: usize) -> Result<Key> {
+        Key::new(
+            kind_of(self.app_kind.get(row)?)?,
+            self.app_key.get(row)?.to_vec(),
+        )
+    }
+
+    /// The members of row `row`'s App.
+    fn members(&self, row: usize) -> Result<u32> {
+        kept_members(self.members.get(row)?)
     }
 }
 
-/// The App rows a read of a window's parts takes, and how it reads each.
-struct KeptAppRows<T> {
-    /// The query of the rows, which selects the columns `row_kind` and `publication` the read
-    /// filters on.
-    query: String,
-    /// The place of `publication` among the columns the query selects.
-    publication_place: usize,
-    /// What a row gives, and the place of its App among its sample's Apps.
-    decode: fn(&Row<'_>) -> Result<(usize, T)>,
+/// The columns of one measure of App rows.
+struct KeptMeasureColumns<'frame> {
+    known: Cells<'frame, UInt64Type>,
+    measured_members: Cells<'frame, UInt32Type>,
+    unavailable_members: Cells<'frame, UInt32Type>,
+    overflowed: Cells<'frame, BooleanType>,
+}
+
+impl<'frame> KeptMeasureColumns<'frame> {
+    /// The columns of the measure whose fields `frame` holds from column `first`.
+    fn new(frame: &'frame DataFrame, first: usize) -> Result<Self> {
+        Ok(Self {
+            known: Cells::new(frame, first)?,
+            measured_members: Cells::new(frame, first + 1)?,
+            unavailable_members: Cells::new(frame, first + 2)?,
+            overflowed: Cells::new(frame, first + 3)?,
+        })
+    }
+
+    /// The measure of row `row`'s App, of `members` members.
+    fn measure(&self, row: usize, members: u32) -> Result<Measure> {
+        let measure = Measure {
+            known: self.known.get(row)?,
+            measured_members: self.measured_members.get(row)?,
+            unavailable_members: self.unavailable_members.get(row)?,
+            overflowed: self.overflowed.get(row)?,
+        };
+
+        kept_measure(measure, members)
+    }
+}
+
+/// The columns of `ATTRIBUTION_COLUMNS`.
+struct KeptAttributionColumns<'frame> {
+    app_columns: KeptAppColumns<'frame>,
+    membership_complete: Cells<'frame, BooleanType>,
+    cpu_ns: KeptMeasureColumns<'frame>,
+    energy_nj: KeptMeasureColumns<'frame>,
+    disk_io_bytes: KeptMeasureColumns<'frame>,
+}
+
+impl<'frame> KeptAttributionColumns<'frame> {
+    fn new(frame: &'frame DataFrame) -> Result<Self> {
+        let measure = |first: usize| KeptMeasureColumns::new(frame, first);
+
+        Ok(Self {
+            app_columns: KeptAppColumns::new(frame)?,
+            membership_complete: Cells::new(
+                frame,
+                const { attribution_column("app_membership_complete") },
+            )?,
+            cpu_ns: measure(const { attribution_column("app_cpu_ns_known") })?,
+            energy_nj: measure(const { attribution_column("app_energy_nj_known") })?,
+            disk_io_bytes: measure(const { attribution_column("app_disk_io_bytes_known") })?,
+        })
+    }
+}
+
+impl KeptColumns for KeptAttributionColumns<'_> {
+    type App = KeptAttribution;
+
+    fn app_columns(&self) -> &KeptAppColumns<'_> {
+        &self.app_columns
+    }
+
+    fn app(&self, row: usize) -> Result<KeptAttribution> {
+        // The key is read before the members, as `kept_app` reads them, so a row wrong in both
+        // reports the same cell whichever read takes it.
+        let key = self.app_columns.key(row)?;
+        let members = self.app_columns.members(row)?;
+
+        Ok(KeptAttribution {
+            key,
+            members,
+            membership_complete: self.membership_complete.get(row)?,
+            cpu_ns: self.cpu_ns.measure(row, members)?,
+            energy_nj: self.energy_nj.measure(row, members)?,
+            disk_io_bytes: self.disk_io_bytes.measure(row, members)?,
+        })
+    }
+}
+
+/// The columns of `RESIDENT_COLUMNS`.
+struct KeptResidentColumns<'frame> {
+    app_columns: KeptAppColumns<'frame>,
+    resident: KeptMeasureColumns<'frame>,
+}
+
+impl<'frame> KeptResidentColumns<'frame> {
+    fn new(frame: &'frame DataFrame) -> Result<Self> {
+        Ok(Self {
+            app_columns: KeptAppColumns::new(frame)?,
+            resident: KeptMeasureColumns::new(
+                frame,
+                const { resident_column("app_resident_bytes_known") },
+            )?,
+        })
+    }
+}
+
+impl KeptColumns for KeptResidentColumns<'_> {
+    type App = KeptResident;
+
+    fn app_columns(&self) -> &KeptAppColumns<'_> {
+        &self.app_columns
+    }
+
+    fn app(&self, row: usize) -> Result<KeptResident> {
+        let key = self.app_columns.key(row)?;
+        let members = self.app_columns.members(row)?;
+
+        Ok(KeptResident {
+            key,
+            resident: self.resident.measure(row, members)?,
+        })
+    }
 }
 
 /// An App's CPU, energy and disk at an observation of a window that keeps its parts, which the
@@ -1248,9 +1443,9 @@ fn kept_app(row: &Row<'_>) -> Result<(usize, App)> {
         kind_of(row.get(const { fixed("app_kind") })?)?,
         row.get(const { fixed("app_key") })?,
     )?;
-    let members = kept_members(row, const { fixed("members") })?;
+    let members = kept_members(row.get(const { fixed("members") })?)?;
     let measure = |place: usize| -> Result<Measure> {
-        kept_measure(row, MEASURE_FIRST + place * MEASURE_FIELDS.len(), members)
+        kept_app_measure(row, MEASURE_FIRST + place * MEASURE_FIELDS.len(), members)
     };
 
     let app = App {
@@ -1274,64 +1469,8 @@ fn kept_app(row: &Row<'_>) -> Result<(usize, App)> {
     ))
 }
 
-/// A row of `ATTRIBUTION_COLUMNS`'s App's CPU, energy and disk, and its place among its
-/// sample's Apps.
-fn kept_attribution(row: &Row<'_>) -> Result<(usize, KeptAttribution)> {
-    let key = Key::new(
-        kind_of(row.get(const { attribution_column("app_kind") })?)?,
-        row.get(const { attribution_column("app_key") })?,
-    )?;
-    let members = kept_members(row, const { attribution_column("members") })?;
-
-    let app = KeptAttribution {
-        key,
-        members,
-        membership_complete: row.get(const { attribution_column("app_membership_complete") })?,
-        cpu_ns: kept_measure(
-            row,
-            const { attribution_column("app_cpu_ns_known") },
-            members,
-        )?,
-        energy_nj: kept_measure(
-            row,
-            const { attribution_column("app_energy_nj_known") },
-            members,
-        )?,
-        disk_io_bytes: kept_measure(
-            row,
-            const { attribution_column("app_disk_io_bytes_known") },
-            members,
-        )?,
-    };
-
-    Ok((
-        collector::usize_from_u32(row.get(const { attribution_column("app_index") })?),
-        app,
-    ))
-}
-
-/// A row of `RESIDENT_COLUMNS`'s App's resident memory and its place among its sample's Apps.
-fn kept_resident(row: &Row<'_>) -> Result<(usize, KeptResident)> {
-    let key = Key::new(
-        kind_of(row.get(const { resident_column("app_kind") })?)?,
-        row.get(const { resident_column("app_key") })?,
-    )?;
-    let members = kept_members(row, const { resident_column("members") })?;
-    let resident = kept_measure(
-        row,
-        const { resident_column("app_resident_bytes_known") },
-        members,
-    )?;
-
-    Ok((
-        collector::usize_from_u32(row.get(const { resident_column("app_index") })?),
-        KeptResident { key, resident },
-    ))
-}
-
-/// The members of a row's App, from its column at `place`.
-fn kept_members(row: &Row<'_>, place: usize) -> Result<u32> {
-    let members: u32 = row.get(place)?;
+/// An App's `members`, which a history bounds.
+fn kept_members(members: u32) -> Result<u32> {
     if collector::usize_from_u32(members) > MEMBERS_MAX {
         return Err(Error::Bound("sealed parts members"));
     }
@@ -1340,13 +1479,19 @@ fn kept_members(row: &Row<'_>, place: usize) -> Result<u32> {
 }
 
 /// The measure of an App of `members` members whose fields a row holds from column `first`.
-fn kept_measure(row: &Row<'_>, first: usize, members: u32) -> Result<Measure> {
+fn kept_app_measure(row: &Row<'_>, first: usize, members: u32) -> Result<Measure> {
     let measure = Measure {
         known: row.get(first)?,
         measured_members: row.get(first + 1)?,
         unavailable_members: row.get(first + 2)?,
         overflowed: row.get(first + 3)?,
     };
+
+    kept_measure(measure, members)
+}
+
+/// `measure`, of an App of `members` members.
+fn kept_measure(measure: Measure, members: u32) -> Result<Measure> {
     // Each member adds to one count at most, and a history holds counts up to the members.
     let counted = measure
         .measured_members

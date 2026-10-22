@@ -2,8 +2,9 @@ use polars::prelude::{Column, DataFrame, DataType, NamedFrom, Series};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
-use super::{Engine, Row};
+use super::{Cells, Engine, Row};
 use crate::Error;
+use polars::prelude::{BinaryType, UInt32Type, UInt64Type};
 
 #[test]
 fn preserves_full_width_counters_and_binary_identity() {
@@ -59,6 +60,75 @@ fn rejects_a_counter_that_does_not_fit_its_destination() {
     let result = Row::new(&frame, 0).unwrap().get::<u8>(0);
 
     assert!(matches!(result, Err(Error::Bound("query integer range"))));
+}
+
+#[test]
+fn reads_the_cells_of_a_column_in_the_type_it_holds_them() {
+    // Goal: a typed read of a column gives each of its cells whole, full-width counters and
+    // bytes that are not text included.
+    // Method: read a full-width counter column and a binary identity column.
+    let bytes: &[u8] = b"\xff\\x41";
+    let frame = DataFrame::new(
+        1,
+        vec![
+            Column::new("counter".into(), [u64::MAX]),
+            Series::new("identity".into(), [bytes]).into(),
+        ],
+    )
+    .unwrap();
+
+    let counters = Cells::<UInt64Type>::new(&frame, 0).unwrap();
+    let identities = Cells::<BinaryType>::new(&frame, 1).unwrap();
+
+    assert_eq!(counters.get(0).unwrap(), u64::MAX);
+    assert_eq!(identities.get(0).unwrap(), bytes);
+}
+
+#[test]
+fn refuses_a_null_typed_cell() {
+    // Goal: a typed read gives only cells that hold a value.
+    // Method: ask for the null cell of a counter column.
+    let frame = DataFrame::new(1, vec![Column::new("counter".into(), [None::<u64>])]).unwrap();
+    let counters = Cells::<UInt64Type>::new(&frame, 0).unwrap();
+
+    let result = counters.get(0);
+
+    assert!(matches!(result, Err(Error::Bound("query null cell"))));
+}
+
+#[test]
+fn refuses_a_typed_read_of_a_column_held_in_another_type() {
+    // Goal: a typed read converts no cell, so a column of another width is refused whole, even
+    // one whose every value the type asked for holds, where a row read converts each cell.
+    // Method: ask for 32-bit cells of a full-width counter column whose one value is small.
+    let frame = DataFrame::new(1, vec![Column::new("counter".into(), [7u64])]).unwrap();
+
+    let result = Cells::<UInt32Type>::new(&frame, 0);
+
+    assert!(matches!(result, Err(Error::Bound("query column type"))));
+}
+
+#[test]
+fn refuses_a_typed_read_past_the_last_column() {
+    // Goal: a typed read of a column the frame lacks is an error, not a panic.
+    // Method: ask for the second column of a frame of one.
+    let frame = DataFrame::new(1, vec![Column::new("counter".into(), [7u64])]).unwrap();
+
+    let result = Cells::<UInt64Type>::new(&frame, 1);
+
+    assert!(matches!(result, Err(Error::Bound("query column index"))));
+}
+
+#[test]
+fn refuses_a_typed_cell_past_the_last_row() {
+    // Goal: a cell past a column's end is an error, not the panic its engine gives.
+    // Method: ask for the second cell of a column of one.
+    let frame = DataFrame::new(1, vec![Column::new("counter".into(), [7u64])]).unwrap();
+    let counters = Cells::<UInt64Type>::new(&frame, 0).unwrap();
+
+    let result = counters.get(1);
+
+    assert!(matches!(result, Err(Error::Bound("query row index"))));
 }
 
 #[test]

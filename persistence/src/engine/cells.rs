@@ -1,4 +1,4 @@
-use polars::prelude::{AnyValue, DataFrame};
+use polars::prelude::{AnyValue, ChunkedArray, DataFrame, PolarsPhysicalType};
 
 use crate::{Error, Result};
 
@@ -31,6 +31,43 @@ impl<'a> Row<'a> {
 
     pub fn get<T: FromCell>(&self, index: usize) -> Result<T> {
         T::from_cell(self.value(index)?)
+    }
+}
+
+/// One column of a frame, read in the type the frame holds it in. The type is checked once for
+/// the column, where `Row` converts each cell it reads, so a read of many rows reads them far
+/// faster through these.
+pub struct Cells<'a, T: PolarsPhysicalType> {
+    cells: &'a ChunkedArray<T>,
+}
+
+impl<'a, T: PolarsPhysicalType> Cells<'a, T> {
+    /// The cells of column `index` of `frame`, which must hold them as `T`. A column of
+    /// another type is refused whole, even one whose values `T` could hold, since a table
+    /// holding it was not written by the writer its reader was built for.
+    pub fn new(frame: &'a DataFrame, index: usize) -> Result<Self> {
+        let column = frame
+            .columns()
+            .get(index)
+            .ok_or(Error::Bound("query column index"))?;
+        // The engine refuses only a column of another type here, which `Row` reports as a
+        // bound too.
+        let cells = column
+            .as_materialized_series()
+            .unpack::<T>()
+            .map_err(|_| Error::Bound("query column type"))?;
+
+        Ok(Self { cells })
+    }
+
+    /// The cell of row `index`, which must hold a value.
+    pub fn get(&self, index: usize) -> Result<T::Physical<'a>> {
+        // The engine panics on a row past the end.
+        if index >= self.cells.len() {
+            return Err(Error::Bound("query row index"));
+        }
+
+        self.cells.get(index).ok_or(Error::Bound("query null cell"))
     }
 }
 

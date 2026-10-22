@@ -1,5 +1,5 @@
 //! The range and the rewrite the tests of a sealed window's derived tables share.
-use polars::prelude::{Column, DataFrame};
+use polars::prelude::{Column, DataFrame, DataType};
 
 use super::super::sealed_parts::VERSION;
 use super::{ContextRange, Session};
@@ -76,6 +76,60 @@ impl Session {
             frame
                 .replace("app_count", Column::new("app_count".into(), raised))
                 .unwrap();
+        });
+    }
+
+    /// Rewrites the parts each sealed window keeps so every cell of column `name` is null, in
+    /// the type the column holds.
+    pub(crate) fn null_kept_column(&self, name: &str) {
+        rewrite(self, APP_PARTS, |frame| {
+            let column = frame.column(name).unwrap();
+            let nulls = Column::full_null(name.into(), frame.height(), column.dtype());
+            frame.replace(name, nulls).unwrap();
+        });
+    }
+
+    /// Rewrites the parts each sealed window keeps so column `name` holds its values as 64-bit
+    /// integers, a type no build writes it in.
+    pub(crate) fn widen_kept_column(&self, name: &str) {
+        rewrite(self, APP_PARTS, |frame| {
+            let widened = frame.column(name).unwrap().cast(&DataType::UInt64).unwrap();
+            frame.replace(name, widened).unwrap();
+        });
+    }
+
+    /// Rewrites the parts each sealed window keeps so each App row names the place after its
+    /// own among its observation's Apps.
+    pub(crate) fn misorder_kept_apps(&self) {
+        rewrite(self, APP_PARTS, |frame| {
+            let shifted: Vec<Option<u32>> = frame
+                .column("app_index")
+                .unwrap()
+                .u32()
+                .unwrap()
+                .iter()
+                .map(|index| index.map(|index| index + 1))
+                .collect();
+            frame
+                .replace("app_index", Column::new("app_index".into(), shifted))
+                .unwrap();
+        });
+    }
+
+    /// Rewrites the parts each sealed window keeps so each App row says the opposite of what
+    /// it said of whether the App's membership is complete.
+    pub(crate) fn invert_kept_memberships(&self) {
+        rewrite(self, APP_PARTS, |frame| {
+            let inverted: Vec<Option<bool>> = frame
+                .column("app_membership_complete")
+                .unwrap()
+                .bool()
+                .unwrap()
+                .iter()
+                .map(|complete| complete.map(|complete| !complete))
+                .collect();
+            let column = Column::new("app_membership_complete".into(), inverted);
+            frame.replace("app_membership_complete", column).unwrap();
         });
     }
 }

@@ -236,6 +236,26 @@ fn resident_replay_gives_again_every_observation_left_out_before_a_reset() {
 }
 
 #[test]
+fn resident_history_refuses_parts_holding_a_null_resident_cell() {
+    // Goal: an App row of the parts without its resident memory fails the history.
+    // Method: seal four minutes with their parts, empty the resident memory of every App row,
+    // and take the history.
+    let fixture = sealed_minutes([true; 4]);
+    let session = resident_at(&fixture, 1005);
+    let saved = session.history.as_ref().unwrap();
+    saved.null_kept_column("app_resident_bytes_known");
+    drop(session);
+    let session = resident_at(&fixture, 1005);
+
+    let result = session.app_resident_history();
+
+    assert!(
+        matches!(result, Err(Error::Bound("query null cell"))),
+        "{result:?}"
+    );
+}
+
+#[test]
 fn resident_history_replays_the_windows_whose_parts_an_earlier_build_sealed() {
     // Goal: parts sealed by the build before this one, which kept no count of the live
     // processes outside every App, give way to a replay of their minutes.

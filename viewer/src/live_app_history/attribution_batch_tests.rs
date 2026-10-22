@@ -503,6 +503,93 @@ fn batch_refuses_parts_whose_facts_count_more_apps_than_the_window_keeps() {
 }
 
 #[test]
+fn batch_shows_the_membership_completeness_the_parts_keep_for_each_app() {
+    // Goal: each App of a batch from the parts says what its row in the parts says of whether
+    // its membership is complete, and takes it from no other column.
+    // Method: take the batch, invert what every App row of the parts says, and take it again.
+    let fixture = kept_fixture([true; 4]);
+    let kept = memberships(&saved_batch(&Session::open(&fixture.root).unwrap()));
+    Session::open(&fixture.root)
+        .unwrap()
+        .invert_kept_memberships();
+    let inverted_session = Session::open(&fixture.root).unwrap();
+
+    let inverted = memberships(&saved_batch(&inverted_session));
+
+    assert!(!kept.is_empty());
+    assert_eq!(
+        inverted,
+        kept.iter().map(|complete| !complete).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn batch_refuses_parts_holding_a_null_app_cell() {
+    // Goal: an App row of the parts without its members fails the batch.
+    // Method: seal the minutes with their parts, empty the members of every App row, and take
+    // the batch.
+    let fixture = kept_fixture([true; 4]);
+    Session::open(&fixture.root)
+        .unwrap()
+        .null_kept_column("members");
+    let session = Session::open(&fixture.root).unwrap();
+
+    let result = kept_batch(&session, &History::new(), 6, BYTES_MAX);
+
+    assert!(matches!(result, Err(Error::Bound("query null cell"))));
+}
+
+#[test]
+fn batch_refuses_parts_holding_an_app_column_in_another_type() {
+    // Goal: parts that hold an App column in a type no build writes it in fail the batch,
+    // even when each of its values fits the type the reader takes.
+    // Method: seal the minutes with their parts, widen the members column to 64 bits, and take
+    // the batch.
+    let fixture = kept_fixture([true; 4]);
+    Session::open(&fixture.root)
+        .unwrap()
+        .widen_kept_column("members");
+    let session = Session::open(&fixture.root).unwrap();
+
+    let result = kept_batch(&session, &History::new(), 6, BYTES_MAX);
+
+    assert!(matches!(result, Err(Error::Bound("query column type"))));
+}
+
+#[test]
+fn batch_refuses_parts_whose_apps_are_out_of_order() {
+    // Goal: an App row of the parts in another place than its observation's next App fails
+    // the batch rather than giving a point whose Apps are shuffled.
+    // Method: seal the minutes with their parts, move each App row one place on, and take the
+    // batch.
+    let fixture = kept_fixture([true; 4]);
+    Session::open(&fixture.root).unwrap().misorder_kept_apps();
+    let session = Session::open(&fixture.root).unwrap();
+
+    let result = kept_batch(&session, &History::new(), 6, BYTES_MAX);
+
+    assert!(matches!(result, Err(Error::Bound("sealed parts App"))));
+}
+
+#[test]
+fn batch_reports_the_cell_of_an_app_row_out_of_order() {
+    // Goal: an App row both out of order and without a cell reports its cell, as the read of
+    // one App's parts does, so one malformed row gives one error whichever read meets it.
+    // Method: seal the minutes with their parts, move each App row one place on and empty its
+    // members, and take the batch.
+    let fixture = kept_fixture([true; 4]);
+    let rewriting = Session::open(&fixture.root).unwrap();
+    rewriting.misorder_kept_apps();
+    rewriting.null_kept_column("members");
+    drop(rewriting);
+    let session = Session::open(&fixture.root).unwrap();
+
+    let result = kept_batch(&session, &History::new(), 6, BYTES_MAX);
+
+    assert!(matches!(result, Err(Error::Bound("query null cell"))));
+}
+
+#[test]
 fn batch_rejects_more_than_the_observation_bound_in_each_metric() {
     // A full ledger is accepted; the next observation fails instead of growing a result.
     let cancellation = Arc::new(Cancellation::default());
@@ -935,6 +1022,17 @@ fn replayed_batch_at(
         [replayed.cpu, replayed.power, replayed.disk].map(Result::unwrap),
         reads,
     )
+}
+
+/// What each App of each point of `batch`'s CPU history says of whether its membership is
+/// complete, in order.
+fn memberships(batch: &AppAttributionHistories) -> Vec<bool> {
+    let points = batch.cpu.as_ref().unwrap()["points"].as_array().unwrap();
+    points
+        .iter()
+        .flat_map(|point| point["apps"].as_array().unwrap())
+        .filter_map(|app| app["membership_complete"].as_bool())
+        .collect()
 }
 
 fn retire(fixture: &Fixture) {
