@@ -111,12 +111,51 @@ mod tests {
         fn raise(signal: c_int) -> c_int;
     }
 
+    /// Held by each test that installs the handlers, since a signal's action belongs to the
+    /// whole process and these tests would otherwise change it under each other.
+    static HANDLERS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The function the process now runs on `signal`, or `None` for the default action.
+    fn handler_of(signal: c_int) -> Option<extern "C" fn(c_int)> {
+        let mut current = std::mem::MaybeUninit::<Sigaction>::uninit();
+        assert_eq!(0, unsafe {
+            sigaction(signal, std::ptr::null(), current.as_mut_ptr())
+        });
+        unsafe { current.assume_init().handler.sa_handler }
+    }
+
+    #[test]
+    fn restores_each_signals_default_action_when_dropped() {
+        // Goal: a collector that finishes hands SIGINT and SIGTERM back as it found them, so a
+        // later signal ends the process instead of asking a loop that has stopped.
+        // Method: read each signal's action before installing, while installed and after drop.
+        let _handlers = HANDLERS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(handler_of(SIGINT).is_none());
+        assert!(handler_of(SIGTERM).is_none());
+
+        let stop = Stop::install().unwrap();
+        let installed = [handler_of(SIGINT), handler_of(SIGTERM)];
+        drop(stop);
+
+        let requested: extern "C" fn(c_int) = request_stop;
+        for handler in installed {
+            assert!(std::ptr::fn_addr_eq(handler.unwrap(), requested));
+        }
+        assert!(handler_of(SIGINT).is_none());
+        assert!(handler_of(SIGTERM).is_none());
+    }
+
     #[test]
     fn a_stop_request_sets_the_deadline_once() {
         // Goal: the first stop request starts the deadline that ends a collector stuck in its
         // finish, and a later request does not push the deadline back.
         // Method: raise SIGTERM in this process twice under the installed handler, and read the
         // pending alarm after each, which also cancels it.
+        let _handlers = HANDLERS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let stop = Stop::install().unwrap();
 
         assert_eq!(0, unsafe { raise(SIGTERM) });
