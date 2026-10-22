@@ -112,7 +112,7 @@ impl Persister {
     }
 
     pub fn finish(&mut self, timeout: Duration) -> io::Result<Finished> {
-        if timeout > Duration::from_mins(2) {
+        if timeout > super::PERSISTER_FINISH_LIMIT {
             return Err(io::Error::from(io::ErrorKind::InvalidInput));
         }
         let start = Instant::now();
@@ -180,6 +180,23 @@ mod tests {
         assert!(!finished.successful());
         assert_eq!(1 << 8, finished.status);
         assert_eq!(finished.cpu_ns, persister.poll().unwrap().unwrap().cpu_ns);
+    }
+
+    #[test]
+    fn refuses_to_wait_longer_than_the_persister_finish_limit() {
+        // Goal: no caller can hold a stopping collector past the limit its stop deadline allows.
+        // Method: ask a running child to finish within a millisecond more than the limit.
+        let mut command = Command::new("/bin/sleep");
+        command.arg("30");
+        let mut persister =
+            Persister::spawn_command(&mut command, Timebase::read().unwrap()).unwrap();
+
+        let refused = persister
+            .finish(super::super::PERSISTER_FINISH_LIMIT + Duration::from_millis(1))
+            .unwrap_err();
+
+        assert_eq!(io::ErrorKind::InvalidInput, refused.kind());
+        assert!(!persister.finish(Duration::ZERO).unwrap().successful());
     }
 
     #[test]
