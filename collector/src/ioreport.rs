@@ -6,9 +6,15 @@ use crate::clock::Timebase;
 use crate::push_without_growing;
 
 pub struct IOReport {
+    subscription: Subscription,
+    reader: Reader,
+}
+
+/// What open learned of the channels a read takes, and what the last read found in them,
+/// apart from the subscription that samples them, so a test reads a sample an M5 Pro gave.
+struct Reader {
     timebase: Timebase,
     channels_key: ChannelsKey,
-    subscription: Subscription,
     gpu_energy_nj: u64,
     /// The nanojoules in one unit of the GPU's energy, learned at open.
     gpu_nj_per_unit: u64,
@@ -355,19 +361,56 @@ impl IOReport {
     pub fn open(timebase: Timebase, cpu_limit: usize) -> io::Result<Self> {
         assert!(cpu_limit > 0);
 
-        let channels_key = ChannelsKey::new()?;
+        let mut reader = Reader::new(timebase, cpu_limit)?;
 
         let wanted = channels_in_group(&ENERGY_MODEL)?;
         open_merge_group(&wanted, &GPU_PERFORMANCE_STATES)?;
         open_merge_group(&wanted, &CPU_CORE_PERFORMANCE_STATES)?;
-        open_keep_read_channels(&wanted, &channels_key)?;
+        open_keep_read_channels(&wanted, &reader.channels_key)?;
 
         let subscription = Subscription::new(&wanted)?;
 
-        let mut ioreport = Self {
-            timebase,
-            channels_key,
+        reader.learn(&subscription.sample()?)?;
+
+        assert!(reader.counts.core_states > 0);
+        Ok(Self {
             subscription,
+            reader,
+        })
+    }
+
+    pub fn read(&mut self) -> io::Result<()> {
+        let samples = self.subscription.sample()?;
+        self.reader.read(&samples)
+    }
+
+    /// The energy the GPU had spent at the last read, in nanojoules.
+    #[must_use]
+    pub fn gpu_energy_nj(&self) -> u64 {
+        self.reader.gpu_energy_nj()
+    }
+
+    /// The GPU's performance states.
+    #[must_use]
+    pub fn gpu(&self) -> &States {
+        self.reader.gpu()
+    }
+
+    /// The performance states of each core open found.
+    #[must_use]
+    pub fn cores(&self) -> &[States] {
+        self.reader.cores()
+    }
+}
+
+impl Reader {
+    /// A reader with room for a core on each of `cpu_limit` CPUs, which has learned nothing.
+    fn new(timebase: Timebase, cpu_limit: usize) -> io::Result<Self> {
+        assert!(cpu_limit > 0);
+
+        Ok(Self {
+            timebase,
+            channels_key: ChannelsKey::new()?,
             gpu_energy_nj: 0,
             gpu_nj_per_unit: 0,
             gpu: States::new(ACTIVE_STATES_MAX),
@@ -375,21 +418,16 @@ impl IOReport {
                 .map(|_| States::new(ACTIVE_STATES_MAX))
                 .collect(),
             counts: ChannelCounts::default(),
-        };
-        ioreport.learn()?;
-
-        assert!(ioreport.counts.core_states > 0);
-        Ok(ioreport)
+        })
     }
 
     /// Learns from one sample the GPU's energy unit and which states of the GPU and of every
     /// core are active, so a read finds each active state by its index and asks `IOReport` for
     /// no state's name.
-    fn learn(&mut self) -> io::Result<()> {
+    fn learn(&mut self, samples: &Owned) -> io::Result<()> {
         assert_eq!(ChannelCounts::default(), self.counts);
 
-        let samples = self.subscription.sample()?;
-        let channels = self.channels_key.channels_of(&samples)?;
+        let channels = self.channels_key.channels_of(samples)?;
 
         let mut counts = ChannelCounts::default();
         for channel in each(channels)? {
@@ -417,15 +455,14 @@ impl IOReport {
         Ok(())
     }
 
-    pub fn read(&mut self) -> io::Result<()> {
+    fn read(&mut self, samples: &Owned) -> io::Result<()> {
         assert!(self.gpu_nj_per_unit > 0);
         assert_eq!(1, self.counts.gpu_energy);
         assert_eq!(1, self.counts.gpu_states);
         assert!(self.counts.core_states > 0);
         assert!(self.counts.core_states <= self.cores.len());
 
-        let samples = self.subscription.sample()?;
-        let channels = self.channels_key.channels_of(&samples)?;
+        let channels = self.channels_key.channels_of(samples)?;
 
         let mut counts = ChannelCounts::default();
         for channel in each(channels)? {
@@ -455,9 +492,7 @@ impl IOReport {
         Ok(())
     }
 
-    /// The energy the GPU had spent at the last read, in nanojoules.
-    #[must_use]
-    pub fn gpu_energy_nj(&self) -> u64 {
+    fn gpu_energy_nj(&self) -> u64 {
         assert!(self.gpu_nj_per_unit > 0);
         // A read counts whole units of the energy, and none before it.
         assert!(self.gpu_energy_nj.is_multiple_of(self.gpu_nj_per_unit));
@@ -465,18 +500,14 @@ impl IOReport {
         self.gpu_energy_nj
     }
 
-    /// The GPU's performance states.
-    #[must_use]
-    pub fn gpu(&self) -> &States {
+    fn gpu(&self) -> &States {
         assert_eq!(1, self.counts.gpu_states);
         assert!(self.gpu.active_ns.len() <= self.gpu.active_indices.len());
 
         &self.gpu
     }
 
-    /// The performance states of each core open found.
-    #[must_use]
-    pub fn cores(&self) -> &[States] {
+    fn cores(&self) -> &[States] {
         assert!(self.counts.core_states > 0);
         assert!(self.counts.core_states <= self.cores.len());
 
@@ -822,7 +853,7 @@ mod tests {
     /// The first channel of `kind` among the channels `samples` holds, a sample of
     /// `ioreport`'s.
     fn first_channel(ioreport: &IOReport, samples: &Owned, kind: Kind) -> CFTypeRef {
-        each(ioreport.channels_key.channels_of(samples).unwrap())
+        each(ioreport.reader.channels_key.channels_of(samples).unwrap())
             .unwrap()
             .find(|&channel| Kind::of(channel) == Some(kind))
             .unwrap()
@@ -1228,6 +1259,7 @@ mod tests {
 
         let subscribed = each(
             ioreport
+                .reader
                 .channels_key
                 .channels_of(&ioreport.subscription.channels)
                 .unwrap(),
@@ -1235,7 +1267,7 @@ mod tests {
         .unwrap()
         .count();
 
-        let counts = ioreport.counts;
+        let counts = ioreport.reader.counts;
         assert_eq!(
             counts.gpu_energy + counts.gpu_states + counts.core_states,
             subscribed
@@ -1304,7 +1336,7 @@ mod tests {
         let mut states = States::new(ACTIVE_STATES_MAX);
         learn_active_states(gpu, &mut states).unwrap();
 
-        let read = read_active_states(ioreport.timebase, core, &mut states);
+        let read = read_active_states(ioreport.reader.timebase, core, &mut states);
 
         assert_eq!(io::ErrorKind::InvalidData, read.unwrap_err().kind());
     }
@@ -1317,7 +1349,7 @@ mod tests {
         // that core too, and read.
         let cpu_limit = machine::cpu_limit().unwrap();
         let mut ioreport = IOReport::open(Timebase::read().unwrap(), cpu_limit + 1).unwrap();
-        ioreport.counts.core_states += 1;
+        ioreport.reader.counts.core_states += 1;
 
         let read = ioreport.read();
 
@@ -1428,7 +1460,7 @@ mod tests {
         // channel of core or GPU states.
         let ioreport = open();
         let samples = ioreport.subscription.sample().unwrap();
-        let channels = ioreport.channels_key.channels_of(&samples).unwrap();
+        let channels = ioreport.reader.channels_key.channels_of(&samples).unwrap();
 
         let states: Vec<CFTypeRef> = each(channels)
             .unwrap()
@@ -1478,7 +1510,7 @@ mod tests {
         ioreport.read().unwrap();
         let after = ioreport.gpu_energy_nj();
 
-        let between = units * ioreport.gpu_nj_per_unit;
+        let between = units * ioreport.reader.gpu_nj_per_unit;
         assert!(before <= between, "{before} nJ, then {between} nJ");
         assert!(between <= after, "{between} nJ, then {after} nJ");
     }
