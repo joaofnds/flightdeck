@@ -11,10 +11,19 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Output, Stdio};
     use std::sync::OnceLock;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use collector::recording::STOP_LIMIT_SECONDS;
     use collector::ring::{Found, Place, Reader};
+
+    /// How often a test looks again at a collector it waits for.
+    const POLL_INTERVAL: Duration = Duration::from_millis(10);
+    /// How long a test waits for a collector's second publication. The collector promises no
+    /// limit on its start, which full-syncs the recording's metadata and so waits on every other
+    /// process writing to the disk, and its longest measured wait for this was 10 seconds.
+    const PUBLICATION_LIMIT: Duration = Duration::from_secs(120);
+    /// What a test waits past the collector's stop limit, for the alarm that ends it there.
+    const STOP_ALARM_MARGIN_SECONDS: u32 = 30;
 
     unsafe extern "C" {
         fn shm_unlink(name: *const c_char) -> c_int;
@@ -151,19 +160,22 @@ mod tests {
             assert_eq!(0, unsafe { kill(i32::try_from(pid).unwrap(), SIGTERM) });
         }
 
-        /// Waits for the collector to exit, for as long as it may take once asked to stop and a
-        /// margin for the alarm that ends it there. Its drain waits on the disk, and so on every
-        /// other process writing to it, so a shorter wait fails a collector that keeps its limit.
+        /// Waits for the collector to exit, for its stop limit and the alarm's margin. Its drain
+        /// waits on the disk, and so on every other process writing to it, so a shorter wait
+        /// fails a collector that keeps its limit.
         fn finish(&mut self) -> Output {
-            const FINISH_POLLS: u32 = (STOP_LIMIT_SECONDS + 30) * 100; // 10 ms apart
+            let limit =
+                Duration::from_secs(u64::from(STOP_LIMIT_SECONDS + STOP_ALARM_MARGIN_SECONDS));
 
-            for _attempt in 0..FINISH_POLLS {
-                if self.0.as_mut().unwrap().try_wait().unwrap().is_some() {
-                    return self.0.take().unwrap().wait_with_output().unwrap();
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            panic!("collector did not finish its interrupted recording within its stop limit");
+            let exited = wait_until(limit, || {
+                self.0.as_mut().unwrap().try_wait().unwrap().is_some()
+            });
+
+            assert!(
+                exited,
+                "collector outlived its stop limit, {limit:?} with its margin"
+            );
+            self.0.take().unwrap().wait_with_output().unwrap()
         }
     }
 
@@ -179,18 +191,38 @@ mod tests {
     }
 
     fn wait_for_publications(ring: &TestRing) {
-        for _attempt in 0..2_000 {
-            match collector::ring::RingReader::open(&ring.place.lock_path) {
-                Ok(reader) => {
-                    if reader.publication_newest().unwrap() >= 2 {
-                        return;
-                    }
+        let published = wait_until(
+            PUBLICATION_LIMIT,
+            || match collector::ring::RingReader::open(&ring.place.lock_path) {
+                Ok(reader) => reader.publication_newest().unwrap() >= 2,
+                Err(error) => {
+                    assert_eq!(std::io::ErrorKind::NotFound, error.kind());
+                    false
                 }
-                Err(error) => assert_eq!(std::io::ErrorKind::NotFound, error.kind()),
+            },
+        );
+
+        assert!(
+            published,
+            "collector did not publish its first scheduled tick in {PUBLICATION_LIMIT:?}"
+        );
+    }
+
+    /// Polls `ready` every `POLL_INTERVAL` until it holds or `limit` has passed, and tells
+    /// whether it held.
+    fn wait_until(limit: Duration, mut ready: impl FnMut() -> bool) -> bool {
+        let start = Instant::now();
+        let attempts = limit.as_millis().div_ceil(POLL_INTERVAL.as_millis()) + 1;
+        for _attempt in 0..attempts {
+            if ready() {
+                return true;
             }
-            std::thread::sleep(Duration::from_millis(10));
+            if start.elapsed() >= limit {
+                return false;
+            }
+            std::thread::sleep(POLL_INTERVAL);
         }
-        panic!("collector did not publish its first scheduled tick");
+        false
     }
 
     fn only_entry(path: &Path) -> PathBuf {
