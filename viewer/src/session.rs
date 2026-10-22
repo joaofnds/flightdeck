@@ -739,6 +739,26 @@ impl Session {
         Ok(bounds)
     }
 
+    /// Whether a listed window's manifest puts `second` within its wall-clock bounds. A window
+    /// whose manifest leaves its bounds unknown counts as not holding it.
+    pub(crate) fn holds_second(&self, second: u64) -> bool {
+        let Some(end) = second.checked_add(1).and_then(|end| end.checked_mul(NS)) else {
+            return false;
+        };
+        let start = end - NS;
+
+        for manifest in &self.windows {
+            if let Some(bounds) = manifest.wall_ns {
+                if start <= bounds.max {
+                    if bounds.min < end {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     fn observations(&self, first: u64, end: u64) -> Result<Vec<Observation>> {
         let mut observations = Vec::new();
         for (window, manifest) in self.windows.iter().enumerate() {

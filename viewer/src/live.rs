@@ -1087,10 +1087,18 @@ impl LiveSession {
         newest
     }
 
+    /// Whether `select` lists the saved minutes again before reading `second`, since a minute
+    /// sealed since the last listing may hold a second the ring has dropped.
     fn select_refresh_due(&self, second: u64) -> bool {
-        self.observations.front().is_none_or(|observation| {
+        let dropped = self.observations.front().is_none_or(|observation| {
             second < observation.observation.wall / NANOSECONDS_PER_SECOND
-        })
+        });
+        if dropped {
+            if let Some(history) = &self.history {
+                return !history.holds_second(second);
+            }
+        }
+        dropped
     }
 
     fn refresh_history(&mut self) -> Result<()> {
