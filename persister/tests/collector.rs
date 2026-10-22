@@ -10,7 +10,7 @@ mod tests {
     use std::os::unix::fs::{DirBuilderExt, symlink};
     use std::os::unix::process::CommandExt;
     use std::path::{Path, PathBuf};
-    use std::process::{Child, Command, Output, Stdio};
+    use std::process::{Child, Command, Output};
     use std::sync::OnceLock;
     use std::time::{Duration, Instant};
 
@@ -33,15 +33,16 @@ mod tests {
         fn kill(pid: c_int, signal: c_int) -> c_int;
     }
 
-    /// A ring name only one test uses, and copies of the collector and the persister only it
-    /// runs, so another process's cargo build cannot replace them under it. Its lock file,
-    /// ring and directories are removed when the test ends, since a shared-memory object
-    /// outlives the process that made it.
+    /// A ring name only one test uses, and a directory of its own holding the copies of the
+    /// collector and the persister it runs, so another process's cargo build cannot replace
+    /// them under it, and the collector's output. Its lock file, ring and directories are
+    /// removed when the test ends, since a shared-memory object outlives the process that
+    /// made it.
     struct TestRing {
         name: String,
         place: Place,
         recording: PathBuf,
-        executables: PathBuf,
+        directory: PathBuf,
     }
 
     impl TestRing {
@@ -51,36 +52,36 @@ mod tests {
             let recording =
                 std::env::temp_dir().join(format!("fdc-recording-{}{test}", std::process::id()));
             assert!(!recording.exists());
-            let executables =
-                std::env::temp_dir().join(format!("fdc-executables-{}{test}", std::process::id()));
+            let directory =
+                std::env::temp_dir().join(format!("fdc-test-{}{test}", std::process::id()));
 
             fs::DirBuilder::new()
                 .mode(0o700)
-                .create(&executables)
+                .create(&directory)
                 .unwrap();
-            copy_executable(built_collector_executable(), &executables.join("collector"));
+            copy_executable(built_collector_executable(), &directory.join("collector"));
             copy_executable(
                 Path::new(env!("CARGO_BIN_EXE_persister")),
-                &executables.join("persister"),
+                &directory.join("persister"),
             );
 
             Self {
                 name,
                 place,
                 recording,
-                executables,
+                directory,
             }
         }
 
         /// The collector this test runs, which starts the persister copied beside it.
         fn collector_executable(&self) -> PathBuf {
-            self.executables.join("collector")
+            self.directory.join("collector")
         }
     }
 
     impl Drop for TestRing {
         fn drop(&mut self) {
-            fs::remove_dir_all(&self.executables).unwrap();
+            fs::remove_dir_all(&self.directory).unwrap();
             // The lock file names the ring, as the writer recorded it, so a change to how rings
             // are named cannot leave one behind unseen.
             let name = match fs::read(&self.place.lock_path) {
@@ -162,26 +163,41 @@ mod tests {
         std::str::from_utf8(&output.stdout).unwrap()
     }
 
-    struct RunningCollector(Option<Child>);
+    /// A collector running until the test stops it. Its output goes to files rather than
+    /// pipes, since the persister it starts shares them and may outlive it, which would hold a
+    /// pipe open past any limit the test sets.
+    struct RunningCollector {
+        child: Option<Child>,
+        stdout: PathBuf,
+        stderr: PathBuf,
+    }
 
     impl RunningCollector {
         fn start(ring: &TestRing) -> Self {
+            let stdout = ring.directory.join("stdout");
+            let stderr = ring.directory.join("stderr");
+
             let child = Command::new(ring.collector_executable())
                 .arg("--ring")
                 .arg(&ring.name)
                 .arg("--recording")
                 .arg(&ring.recording)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
+                .stdout(fs::File::create_new(&stdout).unwrap())
+                .stderr(fs::File::create_new(&stderr).unwrap())
                 .process_group(0)
                 .spawn()
                 .unwrap();
-            Self(Some(child))
+
+            Self {
+                child: Some(child),
+                stdout,
+                stderr,
+            }
         }
 
         fn interrupt_group(&self) {
             const SIGINT: c_int = 2;
-            let pid = i32::try_from(self.0.as_ref().unwrap().id()).unwrap();
+            let pid = i32::try_from(self.child.as_ref().unwrap().id()).unwrap();
             assert_eq!(0, unsafe { kill(-pid, SIGINT) });
         }
 
@@ -189,7 +205,7 @@ mod tests {
         /// process at logout or shutdown.
         fn terminate_with_children(&self) {
             const SIGTERM: c_int = 15;
-            let pid = self.0.as_ref().unwrap().id();
+            let pid = self.child.as_ref().unwrap().id();
             let children = Command::new("/usr/bin/pgrep")
                 .args(["-P", &pid.to_string()])
                 .output()
@@ -211,20 +227,24 @@ mod tests {
                 Duration::from_secs(u64::from(STOP_LIMIT_SECONDS + STOP_ALARM_MARGIN_SECONDS));
 
             let exited = wait_until(limit, || {
-                self.0.as_mut().unwrap().try_wait().unwrap().is_some()
+                self.child.as_mut().unwrap().try_wait().unwrap().is_some()
             });
 
             assert!(
                 exited,
                 "collector outlived its stop limit, {limit:?} with its margin"
             );
-            self.0.take().unwrap().wait_with_output().unwrap()
+            Output {
+                status: self.child.take().unwrap().wait().unwrap(),
+                stdout: fs::read(&self.stdout).unwrap(),
+                stderr: fs::read(&self.stderr).unwrap(),
+            }
         }
     }
 
     impl Drop for RunningCollector {
         fn drop(&mut self) {
-            if let Some(mut child) = self.0.take() {
+            if let Some(mut child) = self.child.take() {
                 if child.try_wait().unwrap().is_none() {
                     child.kill().unwrap();
                     child.wait().unwrap();
