@@ -197,7 +197,15 @@ pub enum Row {
     SelfPart(crate::live_diagnostics::SelfPart),
     OverviewStatus,
     /// A component's temperature chart beside the card of its reading at the selected time.
-    Temperature(&'static str, &'static str, Option<Rc<Panel>>),
+    Temperature {
+        /// The component, which names the row.
+        area: &'static str,
+        /// The summary key of the sensor the collector records for the component, if any.
+        recorded: Option<&'static str>,
+        /// The card's label for the reading.
+        label: &'static str,
+        panel: Option<Rc<Panel>>,
+    },
     /// The Battery page's charging timeline beside its details card.
     BatteryState(Option<Rc<Panel>>),
     OverviewRankings(Vec<usize>),

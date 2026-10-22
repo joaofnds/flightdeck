@@ -378,6 +378,104 @@ fn regrouping_a_hovered_first_plot_recomputes_its_reading_at_the_stationary_poin
     harness.teardown();
 }
 
+macro_rules! temperature_sensor_case {
+    ($name:ident, $route:literal, $key:literal, $plot:literal) => {
+        #[gpui::test]
+        fn $name(cx: &mut TestAppContext) {
+            // Goal: a page's temperature card shows the sensor the collector records at the
+            // selected second, and Unavailable at a second without a reading.
+            // Method: record the sensor at the last two seconds with different readings, then
+            // hover the earlier second and a gap on the page's temperature chart.
+            let mut harness = InputHarness::setup_route(cx, $route);
+            harness
+                .driver
+                .seed_temperature_sensors(&[$key], [40.5, 61.5], SummaryOwner::Selected);
+            assert!(
+                harness
+                    .driver
+                    .reading_is_visible("overview-context:temperature:61.5 °C")
+            );
+
+            harness.driver.hover_previous_second_on($plot);
+            assert!(
+                harness
+                    .driver
+                    .reading_is_visible("overview-context:temperature:40.5 °C")
+            );
+
+            let gap = harness.driver.second_position($plot, 896.5 / 900.0);
+            harness.driver.hover_position(gap);
+            assert!(
+                harness
+                    .driver
+                    .reading_is_visible("overview-context:temperature:Unavailable")
+            );
+            harness.teardown();
+        }
+    };
+}
+
+temperature_sensor_case!(
+    cpu_temperature_card_follows_the_recorded_core_sensor,
+    "cpu",
+    "cpu_celsius",
+    "live-cpu-temperature-plot"
+);
+temperature_sensor_case!(
+    gpu_temperature_card_follows_the_recorded_gpu_sensor,
+    "gpu",
+    "gpu_celsius",
+    "live-gpu-temperature-plot"
+);
+
+/// Which observation the seeded summary belongs to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SummaryOwner {
+    Selected,
+    /// Another publication at the same second, whose readings the card must not show.
+    Sibling,
+}
+
+#[gpui::test]
+fn cpu_temperature_card_refuses_a_sibling_observations_sensor(cx: &mut TestAppContext) {
+    // Goal: the CPU page's temperature card never shows another observation's sensor as the
+    // selected second's.
+    // Method: record the sensor in a summary of another publication at the selected second.
+    let mut harness = InputHarness::setup_route(cx, "cpu");
+
+    harness
+        .driver
+        .seed_temperature_sensors(&["cpu_celsius"], [40.5, 61.5], SummaryOwner::Sibling);
+
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("overview-context:temperature:Unavailable")
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn memory_temperature_card_reads_no_recorded_sensor(cx: &mut TestAppContext) {
+    // Goal: the Memory page's temperature card stays Unavailable, since the collector records
+    // no memory sensor, even when the selected second has the CPU and GPU sensors.
+    // Method: record both sensors at the selected second and look for the Memory card.
+    let mut harness = InputHarness::setup_route(cx, "memory");
+
+    harness.driver.seed_temperature_sensors(
+        &["cpu_celsius", "gpu_celsius"],
+        [40.5, 61.5],
+        SummaryOwner::Selected,
+    );
+
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("overview-context:temperature:Unavailable")
+    );
+    harness.teardown();
+}
+
 macro_rules! energy_context_width_case {
     ($name:ident, $width:literal, $narrow:literal) => {
         #[gpui::test]
@@ -444,6 +542,34 @@ impl InputDriver {
             points[1]["battery"] = json!({"charge_percent":50});
             snapshot.selection["summary"] = snapshot.selection["trends"][1].clone();
             snapshot.rankings = Some(overview_context_rankings(&snapshot));
+            dashboard.accept(snapshot);
+            assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
+            cx.notify();
+        });
+        self.resize_overview_context(1320.0);
+    }
+
+    fn seed_temperature_sensors(
+        &mut self,
+        keys: &[&'static str],
+        readings: [f64; 2],
+        summary: SummaryOwner,
+    ) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            dashboard.request.second = None;
+            dashboard.request.identity = None;
+            let mut snapshot = accepted_snapshot(dashboard.generation);
+            for key in keys {
+                snapshot.selection["trends"][0][*key] = json!(readings[0]);
+                snapshot.selection["trends"][1][*key] = json!(readings[1]);
+            }
+            snapshot.selection["summary"] = snapshot.selection["trends"][1].clone();
+            if summary == SummaryOwner::Sibling {
+                let publication = snapshot.selection["selected"]["publication"]
+                    .as_u64()
+                    .unwrap();
+                snapshot.selection["summary"]["publication"] = json!(publication + 1);
+            }
             dashboard.accept(snapshot);
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();

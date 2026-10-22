@@ -35,15 +35,15 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      # Installs only just, at the version mise.toml pins, so CI runs the justfile's recipes
-      # with the just a contributor runs them with.
-      - uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
+      # Installs only just, at the version and the checksum mise.toml and mise.lock pin, so CI
+      # runs the justfile's recipes with the just a contributor runs them with. The desktop job
+      # repeats this step through its anchor.
+      - &install-just
+        uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
         with:
           version: 2026.10.3
           install_args: just
           cache_save: ${{ github.ref == 'refs/heads/main' }}
-      - run: just fmt
-      - run: just clippy
       # The runner is a virtual machine with no SMC, no IOReport channels, no power manager, no
       # Apple GPU driver, one core cluster and energy counters that read 0. The tests whose subject
       # is what those give sit in a module named this_mac beside the tests of the code that reads
@@ -54,11 +54,13 @@ jobs:
       # The runner's disks fail every scan, and the collector reports each failure on stderr.
       # Captured output grows a buffer the allocation tests count against the collector, so
       # --no-capture writes it to stderr as the collector does in production.
-      - run: >-
-          just test --include-ignored --no-capture --skip ::this_mac::
+      - run: just test_arguments='--include-ignored --no-capture --skip ::this_mac::' check-root
       # A lock file left in Application Support names a ring that stays in memory after its
-      # writer exits, about 800 MB of address space, so whatever ran above removes both.
-      - name: Refuse ring lock files left in Application Support
+      # writer exits, about 800 MB of address space, so whatever ran above removes both. It stays
+      # out of the justfile, since on a contributor's Mac a running Flightdeck holds its lock
+      # there. The desktop job repeats this step through its anchor.
+      - &refuse-ring-locks
+        name: Refuse ring lock files left in Application Support
         run: '! find "$HOME/Library/Application Support/Flightdeck" -name "*.lock" | grep .'
   desktop:
     # Build the GPUI desktop client with its separate UI dependency lockfile.
@@ -83,19 +85,6 @@ jobs:
         with:
           workspaces: desktop -> ../target
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      # Installs only just, at the version mise.toml pins, so CI runs the justfile's recipes
-      # with the just a contributor runs them with.
-      - uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
-        with:
-          version: 2026.10.3
-          install_args: just
-          cache_save: ${{ github.ref == 'refs/heads/main' }}
-      - run: just desktop-fmt
-      - run: just desktop-clippy
-      - run: just desktop-test
-      # A lock file left in Application Support names a ring that stays in memory after its
-      # writer exits, about 800 MB of address space, so whatever ran above removes both.
-      - name: Refuse ring lock files left in Application Support
-        run: '! find "$HOME/Library/Application Support/Flightdeck" -name "*.lock" | grep .'
-      - run: just bundle
-      - run: just seal-bench
+      - *install-just
+      - run: just check-desktop
+      - *refuse-ring-locks

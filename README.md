@@ -128,14 +128,22 @@ New and changed code here follows Tiger Style, as [docs/tiger-style.md](docs/tig
 reads it into Rust. The collector's older code does not follow it yet.
 
 GitHub Actions runs the check that page describes on every push to `main` and every pull
-request, under the toolchain `.github/workflows/check.yml` names, by running the recipes of
-`justfile` that `just check` runs. The repository installs no git hook, so nothing runs on
-your machine unless you run it. A clone that set `core.hooksPath` for the hook this
-repository once carried can drop it with `git config --unset core.hooksPath`. To get the
-check's verdict before you push, run `just check` under that toolchain. It runs the tests
-CI skips for lack of hardware, and leaves out the ones that need a second user, which CI's
-runner gives. `just fmt`, `just clippy` and `just test` run the root workspace's part of
-it, and the recipes named `desktop-` the desktop workspace's.
+request, under the toolchain `.github/workflows/check.yml` names. Its check job runs
+`just check-root` and its desktop job `just check-desktop`, the two recipes `just check`
+runs, so a step added to either runs in CI and on your machine alike. `check-root` formats,
+lints and tests the root workspace through `fmt`, `clippy` and `test`. `check-desktop` does
+the same for the desktop workspace through the recipes named `desktop-`, then runs
+`bundle-check`, which packages the app and compares the bundle's executables with the ones
+the build made, and `seal-bench`, which prints what sealing a minute costs.
+
+CI adds only what its runner needs. It skips the tests in modules named `this_mac`, since
+its virtual Mac lacks the hardware they read, and runs the ignored tests that need a second
+user, which its sudo gives without a password. After each job it refuses a ring lock file
+left in Application Support, which on your Mac a running Flightdeck holds. The repository
+installs no git hook, so nothing runs on your machine unless you run it. A clone that set
+`core.hooksPath` for the hook this repository once carried can drop it with
+`git config --unset core.hooksPath`. To get the check's verdict before you push, run it
+under that toolchain:
 
 ```sh
 just check

@@ -830,6 +830,42 @@ fn cpu_charts_scheduling_and_open_files_only_where_sampled() {
 }
 
 #[test]
+fn cpu_temperature_charts_the_recorded_core_sensor_only_where_read() {
+    // Goal: the CPU page's temperature chart draws the CPU core sensor the collector records,
+    // and a point without a reading stays a gap rather than a zero.
+    // Method: record the middle point of three at 61.5 degrees and project the CPU page.
+    let mut selection = selection();
+    selection["trends"][1]["cpu_celsius"] = json!(61.5);
+
+    let panels = panels("cpu", &selection, None).unwrap();
+
+    let temperature = panels
+        .iter()
+        .find(|panel| panel.id == CPU_TEMPERATURE_ID)
+        .unwrap();
+    assert_eq!(temperature.title, "CPU core sensor");
+    assert_eq!(temperature.lines[0].values, [None, Some(61.5), None]);
+}
+
+#[test]
+fn gpu_temperature_charts_the_recorded_gpu_sensor_only_where_read() {
+    // Goal: the GPU page's temperature chart draws the GPU sensor the collector records, and
+    // a point without a reading stays a gap rather than a zero.
+    // Method: record the middle point of three at 48.5 degrees and project the GPU page.
+    let mut selection = selection();
+    selection["trends"][1]["gpu_celsius"] = json!(48.5);
+
+    let panels = panels("gpu", &selection, None).unwrap();
+
+    let temperature = panels
+        .iter()
+        .find(|panel| panel.id == GPU_TEMPERATURE_ID)
+        .unwrap();
+    assert_eq!(temperature.title, "GPU sensor");
+    assert_eq!(temperature.lines[0].values, [None, Some(48.5), None]);
+}
+
+#[test]
 fn open_files_share_axis_marks_the_same_heights_as_the_count_axis() {
     // Goal: a height on the open files chart reads as one value on both axes, so the share of
     // the limit at a gridline is the share the files there make up.

@@ -21,7 +21,7 @@ impl Row {
             Self::SelfPart(part) => part.key().into(),
             Self::OverviewStatus => "overview-status".into(),
             Self::BatteryState(_) => "battery-state".into(),
-            Self::Temperature(name, _, _) => format!("temperature-{name}"),
+            Self::Temperature { area, .. } => format!("temperature-{area}"),
             Self::OverviewRankings(slots) => format!("overview-rankings-{}", slots[0]),
             Self::OverviewAppHistories(slots) => format!("overview-app-histories-{}", slots[0]),
             Self::OverviewAnalysis(_) => "overview-analysis".into(),
@@ -121,7 +121,9 @@ impl Row {
             | Self::OverviewAnalysis(Some(panel))
             | Self::AppAttribution(_, Some(panel))
             | Self::SystemContext(Some(panel))
-            | Self::Temperature(_, _, Some(panel))
+            | Self::Temperature {
+                panel: Some(panel), ..
+            }
             | Self::BatteryState(Some(panel)) => panel.id == source,
             Self::CPUTop(panel) => {
                 if source == "cpu-history-plot" {

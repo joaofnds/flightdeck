@@ -42,13 +42,16 @@ const GPU: Specification = (
 );
 const OVERVIEW_CPU: Specification = (
     "CPU",
-    Reading::DieTemperature("cpu_celsius", "cpu_percent"),
+    Reading::DieTemperature(crate::live_projection::CPU_TEMPERATURE_KEY, "cpu_percent"),
     "",
     BLUE,
 );
 const OVERVIEW_GPU: Specification = (
     "GPU",
-    Reading::DieTemperature("gpu_celsius", "gpu_active_percent"),
+    Reading::DieTemperature(
+        crate::live_projection::GPU_TEMPERATURE_KEY,
+        "gpu_active_percent",
+    ),
     "",
     PURPLE,
 );

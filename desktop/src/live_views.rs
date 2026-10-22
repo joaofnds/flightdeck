@@ -100,7 +100,7 @@ impl LiveDashboard {
             | Row::EnergyCooling { .. }
             | Row::OverviewStatus
             | Row::BatteryState(_)
-            | Row::Temperature(_, _, _)
+            | Row::Temperature { .. }
             | Row::AppAttribution(_, _)
             | Row::NetworkApps(_)
             | Row::CPUTop(_) => (4.0, 4.0),
@@ -161,7 +161,12 @@ impl LiveDashboard {
             Row::SystemContext(panel) => self.system_context(panel.as_ref(), cx).into_any_element(),
             Row::OverviewStatus => self.overview_status(cx).into_any_element(),
             Row::BatteryState(panel) => self.battery_state(panel.as_ref(), cx),
-            Row::Temperature(_, sensor, panel) => self.temperature(sensor, panel.as_ref(), cx),
+            Row::Temperature {
+                recorded,
+                label,
+                panel,
+                ..
+            } => self.temperature(*recorded, label, panel.as_ref(), cx),
             Row::OverviewRankings(slots) => {
                 self.overview_rankings(slots, self.reading_chart_columns(), cx)
             }

@@ -88,11 +88,12 @@ impl LiveDashboard {
         self.reading_rows_system_files(rows);
         rows.push(Row::Heading("CPU temperature".into()));
         let panel = self.named_panels(&[crate::live_projection::CPU_TEMPERATURE_ID]);
-        rows.push(Row::Temperature(
-            "cpu",
-            "Hottest CPU-area sensor",
-            panel.into_iter().next(),
-        ));
+        rows.push(Row::Temperature {
+            area: "cpu",
+            recorded: Some(crate::live_projection::CPU_TEMPERATURE_KEY),
+            label: "CPU core sensor",
+            panel: panel.into_iter().next(),
+        });
     }
 
     /// Memory by app, the memory quantities, then the memory temperature, as the prototype
@@ -108,11 +109,12 @@ impl LiveDashboard {
         self.reading_rows_memory_quantities(rows);
         rows.push(Row::Heading("Memory temperature".into()));
         let panel = self.named_panels(&[crate::live_projection::MEMORY_TEMPERATURE_ID]);
-        rows.push(Row::Temperature(
-            "memory",
-            "Hottest Memory-area sensor",
-            panel.into_iter().next(),
-        ));
+        rows.push(Row::Temperature {
+            area: "memory",
+            recorded: None,
+            label: "Hottest Memory-area sensor",
+            panel: panel.into_iter().next(),
+        });
     }
 
     /// Disk I/O by app, then the storage temperature, as the prototype orders them.
@@ -121,11 +123,12 @@ impl LiveDashboard {
         self.reading_rows_attribution(metric, rows);
         rows.push(Row::Heading("Storage temperature".into()));
         let panel = self.named_panels(&[crate::live_projection::STORAGE_TEMPERATURE_ID]);
-        rows.push(Row::Temperature(
-            "storage",
-            "Hottest Storage-area sensor",
-            panel.into_iter().next(),
-        ));
+        rows.push(Row::Temperature {
+            area: "storage",
+            recorded: None,
+            label: "Hottest Storage-area sensor",
+            panel: panel.into_iter().next(),
+        });
     }
 
     /// The heading and chart of one resource's attribution to apps.
@@ -249,11 +252,12 @@ impl LiveDashboard {
         self.reading_rows_attribution(crate::live_app_attribution_history::Metric::Gpu, rows);
         rows.push(Row::Heading("GPU temperature".into()));
         let temperature = self.named_panels(&[crate::live_projection::GPU_TEMPERATURE_ID]);
-        rows.push(Row::Temperature(
-            "gpu",
-            "Hottest GPU-area sensor",
-            temperature.into_iter().next(),
-        ));
+        rows.push(Row::Temperature {
+            area: "gpu",
+            recorded: Some(crate::live_projection::GPU_TEMPERATURE_KEY),
+            label: "GPU sensor",
+            panel: temperature.into_iter().next(),
+        });
     }
 
     fn reading_rows_charts_memory(&self, rows: &mut Vec<Row>) {

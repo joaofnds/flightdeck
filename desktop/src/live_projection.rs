@@ -842,19 +842,20 @@ pub const OPEN_FILES_ID: &str = "live-open-files";
 
 pub const FREQUENCY_ID: &str = "live-cpu-frequency";
 pub const CPU_TEMPERATURE_ID: &str = "live-cpu-temperature";
+/// The summary key of the CPU core sensor the collector records.
+pub const CPU_TEMPERATURE_KEY: &str = "cpu_celsius";
 
-/// The hottest sensor in the CPU area. The collector does not record it, so the chart has the
-/// prototype's panel and no readings.
+/// The one CPU core sensor the collector reads each tick.
 fn cpu_temperature() -> Specification {
     let mut specification = specification(
         CPU_TEMPERATURE_ID,
-        "CPU area maximum",
+        "CPU core sensor",
         "°C",
-        vec![reading("cpu_area_celsius", "CPU", "#5794f2", 1.0)],
+        vec![reading(CPU_TEMPERATURE_KEY, "CPU", "#5794f2", 1.0)],
     );
     specification.maximum = Some(125.0);
-    specification.help = "The hottest measured sensor in the CPU area. This collector does \
-        not record it yet, so no readings are shown.";
+    specification.help = "The CPU core sensor that read hottest when each collector run \
+        started, read each tick. A second without a reading leaves a gap.";
     specification
 }
 
@@ -1034,6 +1035,8 @@ fn gpu_activity() -> Specification {
 
 pub const GPU_FREQUENCY_ID: &str = "live-gpu-frequency";
 pub const GPU_TEMPERATURE_ID: &str = "live-gpu-temperature";
+/// The summary key of the GPU sensor the collector records.
+pub const GPU_TEMPERATURE_KEY: &str = "gpu_celsius";
 
 /// The clock the GPU ran at while active. The collector does not record it, so the chart has
 /// the prototype's panel and no readings.
@@ -1049,18 +1052,17 @@ fn gpu_frequency() -> Specification {
     specification
 }
 
-/// The hottest sensor in the GPU area. The collector does not record it, so the chart has the
-/// prototype's panel and no readings.
+/// The one GPU sensor the collector reads each tick.
 fn gpu_temperature() -> Specification {
     let mut specification = specification(
         GPU_TEMPERATURE_ID,
-        "GPU area maximum",
+        "GPU sensor",
         "°C",
-        vec![reading("gpu_area_celsius", "GPU", "#b877d9", 1.0)],
+        vec![reading(GPU_TEMPERATURE_KEY, "GPU", "#b877d9", 1.0)],
     );
     specification.maximum = Some(125.0);
-    specification.help = "The hottest measured sensor in the GPU area. This collector does \
-        not record it yet, so no readings are shown.";
+    specification.help = "The GPU sensor that read hottest when each collector run started, \
+        read each tick. A second without a reading leaves a gap.";
     specification
 }
 

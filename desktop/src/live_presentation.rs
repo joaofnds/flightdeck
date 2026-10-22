@@ -107,6 +107,9 @@ impl LiveDashboard {
 const TEMPERATURE_HELP: &str = "The hottest measured sensor in this part of the machine. \
     This collector does not record it yet, so no reading is shown.";
 
+const SENSOR_HELP: &str = "The sensor's temperature at the selected second, as the collector \
+    read it from the SMC. A second without a reading shows Unavailable.";
+
 impl LiveDashboard {
     /// The Energy page's cooling charts: fan speed beside the thermal state, then the area
     /// maxima beside the readings at the selected time. The prototype leaves no gap between
@@ -180,19 +183,32 @@ impl LiveDashboard {
             .into_any_element()
     }
 
-    /// The prototype's temperature row: the component's chart beside a card with its hottest
-    /// sensor at the selected time.
+    /// The prototype's temperature row: the component's chart beside a card with its sensor
+    /// at the selected time, read from the summary key `recorded` where the collector records
+    /// one.
     pub fn temperature(
         &self,
-        sensor: &'static str,
+        recorded: Option<&'static str>,
+        label: &'static str,
         panel: Option<&std::rc::Rc<crate::data::Panel>>,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        let (help, reading) = match recorded {
+            Some(key) => {
+                let selection = self
+                    .reading_snapshot()
+                    .map_or(&Value::Null, |snapshot| &snapshot.selection);
+                let summary = crate::live_views::matching_summary(selection);
+                let reading = hardware_reading(summary, key, " °C", 1);
+                (SENSOR_HELP, self.shown_reading(reading))
+            }
+            None => (TEMPERATURE_HELP, "Unavailable".into()),
+        };
         let details = quantity_panel(
             "temperature-now",
             "At the selected time",
-            TEMPERATURE_HELP,
-            vec![("hottest", sensor, "Unavailable".into())],
+            help,
+            vec![("temperature", label, reading)],
         );
 
         div()
@@ -214,7 +230,7 @@ impl LiveDashboard {
 }
 
 const AREA_HELP: &str = "The hottest measured sensor of each area and each fan channel's speed \
-    at the selected second. The collector records only the SoC temperature and the fans so far.";
+    at the selected second. Of these the collector records only the fans so far.";
 
 const BATTERY_HELP: &str = "Health compares the full-charge capacity with the design \
     capacity. The adapter rating is the charger's limit, not a measurement of the power drawn.";
