@@ -944,9 +944,9 @@ mod tests {
     }
 
     /// A reader with room for the cores of `cpu_limit` CPUs that learned from the M5 Pro's
-    /// sample.
+    /// sample, and reads its ticks as nanoseconds.
     fn learned_from_m5_pro(cpu_limit: usize) -> Reader {
-        let mut reader = Reader::new(Timebase::read().unwrap(), cpu_limit).unwrap();
+        let mut reader = Reader::new(Timebase::NANOSECOND_TICKS, cpu_limit).unwrap();
         reader.learn(&m5_pro_sample()).unwrap();
         reader
     }
@@ -1332,14 +1332,80 @@ mod tests {
 
     #[test]
     fn reads_every_core_of_a_sample() {
-        // Goal: a read takes the performance states of every core a sample holds, so no
-        // core's active time is missing.
-        // Method: learn and read the M5 Pro's sample, which holds 18 cores.
-        let mut reader = learned_from_m5_pro(18);
+        // Goal: a read gives the cores a sample holds and no others, so no core's active time
+        // is missing and no empty room reads as a core.
+        // Method: learn and read the M5 Pro's sample, which holds 18 cores, with room for 19.
+        let mut reader = learned_from_m5_pro(19);
 
         reader.read(&m5_pro_sample()).unwrap();
 
         assert_eq!(18, reader.cores().len());
+    }
+
+    #[test]
+    fn reads_the_time_a_core_spent_in_each_active_state() {
+        // Goal: a read gives a core's time in each of its active states, in their order, so
+        // no state's time is lost, doubled or moved to another state.
+        // Method: read the M5 Pro's sample at a nanosecond a tick, against the residencies of
+        // V0P14 to V14P0 of its first core, MCPU00, taken from the sample's raw elements, which
+        // hold each state's residency at byte 48 of 64.
+        let mut reader = learned_from_m5_pro(19);
+
+        reader.read(&m5_pro_sample()).unwrap();
+
+        assert_eq!(
+            [
+                1_475_210_549_364,
+                132_779_418_912,
+                173_362_134_999,
+                356_950_280_747,
+                341_196_600_269,
+                18_468_589_318,
+                15_367_637_543,
+                8_273_765_744,
+                7_462_822_156,
+                9_460_302_383,
+                25_167_498_965,
+                40_604_695_282,
+                8_344_624_230,
+                5_485_358_085,
+                1_199_295_139_660,
+            ],
+            reader.cores()[0].active_ns()
+        );
+    }
+
+    #[test]
+    fn reads_the_time_the_gpu_spent_in_each_active_state() {
+        // Goal: a read gives the GPU's time in each of its active states, in their order, so
+        // no state's time is lost, doubled or moved to another state.
+        // Method: read the M5 Pro's sample at a nanosecond a tick, against the residencies of
+        // P1 to P15 of its GPUPH channel, taken from the sample's raw elements, which hold each
+        // state's residency at byte 48 of 64.
+        let mut reader = learned_from_m5_pro(19);
+
+        reader.read(&m5_pro_sample()).unwrap();
+
+        assert_eq!(
+            [
+                1_212_802_493_168,
+                8_264_299_210,
+                7_881_146_874,
+                19_990_909_782,
+                15_855_742_388,
+                9_638_549_531,
+                5_642_325_312,
+                3_024_479_153,
+                2_080_422_434,
+                1_992_407_495,
+                1_414_072_157,
+                1_000_112_797,
+                14_388_103_914,
+                0,
+                0,
+            ],
+            reader.gpu().active_ns()
+        );
     }
 
     #[test]

@@ -1283,6 +1283,30 @@ mod tests {
         assert_eq!(60.253_124_f32.to_bits(), smc.soc_celsius().to_bits());
     }
 
+    #[test]
+    fn refuses_a_key_read_as_a_type_it_does_not_hold() {
+        // Goal: a key read as another type than the one the SMC holds it as is an error, since
+        // the SMC answers such a read with the key's bytes.
+        // Method: read the fan count, which the M5 Pro's SMC holds as a ui8, as a float.
+        let controller = Controller::Fake(FakeSmc::m5_pro());
+
+        let read = controller.read(FAN_COUNT, FLOAT);
+
+        assert_eq!(io::ErrorKind::InvalidData, read.unwrap_err().kind());
+    }
+
+    #[test]
+    fn refuses_a_float_key_the_smc_holds_as_another_type() {
+        // Goal: a key open would read each tick as a float, but the SMC holds as another type,
+        // is an error at open, never a float made of the key's bytes.
+        // Method: take the fan count, which the M5 Pro's SMC holds as a ui8, as a float key.
+        let controller = Controller::Fake(FakeSmc::m5_pro());
+
+        let taken = controller.float_key(FAN_COUNT);
+
+        assert_eq!(io::ErrorKind::InvalidData, taken.unwrap_err().kind());
+    }
+
     /// The tests whose subject is what this Mac's SMC gives, which only a Mac with an SMC runs.
     /// CI's virtual Mac has none, so its check skips this module.
     mod hardware {

@@ -17,6 +17,14 @@ pub struct Timebase {
 }
 
 impl Timebase {
+    /// A timebase whose tick lasts a nanosecond, so a test reads recorded ticks as exact
+    /// nanoseconds whatever timebase the Mac running it has.
+    #[cfg(test)]
+    pub const NANOSECOND_TICKS: Self = Self {
+        numerator: 1,
+        denominator: 1,
+    };
+
     pub fn read() -> io::Result<Self> {
         let mut info = MachTimebaseInfo { numer: 0, denom: 0 };
         let returned = unsafe { mach_timebase_info(&raw mut info) };
