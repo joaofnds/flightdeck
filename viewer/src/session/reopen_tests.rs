@@ -145,6 +145,57 @@ fn opening_refuses_a_window_sealed_for_another_recording() {
     );
 }
 
+#[test]
+fn opening_lists_every_sealed_minute_in_order() {
+    // Goal: an open lists each sealed window once and in publication order, however the
+    // markers are split between the threads that read them.
+    // Method: seal more minutes than there are reader threads, open, and list their minutes.
+    let count = u64::try_from(MINUTES).unwrap();
+    let fixture = sealed_minutes(count);
+
+    let session = Session::open(&fixture.root).unwrap();
+
+    let minutes: Vec<u64> = session
+        .windows
+        .iter()
+        .map(|window| window.identity.window)
+        .collect();
+    assert_eq!(minutes, (0..count).collect::<Vec<u64>>());
+}
+
+#[test]
+fn opening_refuses_a_broken_marker_after_many_sound_ones() {
+    // Goal: a marker that fails its read refuses the open wherever it sits in the listing.
+    // Method: seal more minutes than there are reader threads, break the last marker, open.
+    let fixture = sealed_minutes(u64::try_from(MINUTES).unwrap());
+    let last = Session::open(&fixture.root).unwrap().windows.pop().unwrap();
+    let marker = persistence::layout::WindowKey::from(&last.identity).marker(&fixture.root);
+    std::fs::write(marker, b"broken").unwrap();
+
+    let opened = Session::open(&fixture.root);
+
+    assert!(
+        refused(&opened),
+        "{:?}",
+        opened.map(|session| session.windows)
+    );
+}
+
+/// More minutes than `discover` has reader threads, so a thread reads several markers. The
+/// fixture's reader takes at most eight.
+const MINUTES: usize = 8;
+const _: () = assert!(MINUTES > super::DISCOVER_THREADS);
+
+fn sealed_minutes(count: u64) -> Fixture {
+    let mut fixture = Fixture::new();
+    for minute in 0..count {
+        fixture.publish(1001 + minute * 60);
+        fixture.seal_minute(minute);
+        fixture.skip_run_ticks(59);
+    }
+    fixture
+}
+
 fn reopen(root: &Path, earlier: &Session) -> Session {
     let cancellation = Arc::new(Cancellation::default());
     Session::reopen(root, cancellation, 0, &earlier.verified_windows()).unwrap()
