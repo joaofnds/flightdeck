@@ -154,5 +154,5 @@ pins. `just mutants --file PATH` reports the changes to that file that no test o
 package notices, with the cargo-mutants `mise.toml` pins. The collector's process tests sit
 in the persister package, beside the persister they start, so for a file of the collector
 add `--cargo-test-arg=--package=persister`, which runs both packages' tests on the
-unchanged code and on each change and about doubles each change's test time. A change that keeps the collector running past the
-tests' time limit shows as TIMEOUT rather than caught.
+unchanged code and on each change and about doubles each change's test time. A change that
+keeps the collector running past the tests' time limit shows as TIMEOUT rather than caught.
