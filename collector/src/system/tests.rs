@@ -17,6 +17,19 @@ fn gpu_ns_by_pid_gives_each_pid_its_own_time_and_none_without_clients() {
 }
 
 #[test]
+fn gpu_ns_by_pid_reads_none_for_a_time_past_what_the_ring_carries() {
+    // Goal: a GPU time the ring cannot carry reads as unknown rather than ending the run.
+    // Method: merge the largest time the ring carries and one past it, as a saturated sum.
+    let ring_max = crate::ring::GPU_NS_MAX;
+    let times = [time(3, ring_max), time(5, u64::MAX)];
+    let mut gpu_ns = Vec::with_capacity(2);
+
+    gpu_ns_by_pid([3, 5].into_iter(), &times, &mut gpu_ns);
+
+    assert_eq!(gpu_ns, [Some(ring_max), None]);
+}
+
+#[test]
 fn gpu_ns_by_pid_reads_none_for_every_pid_without_times() {
     // Goal: a tick whose GPU read failed gives every process none, never a stale time.
     // Method: merge pids against no times into a list that held an earlier tick's.

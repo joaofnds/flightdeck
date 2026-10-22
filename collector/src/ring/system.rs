@@ -80,6 +80,8 @@ const LEVEL_NAMES: usize = 3;
 
 /// A process's GPU time word holds this bit beside its nanoseconds, so 0 reads as none.
 const GPU_PRESENT: u64 = 1 << 63;
+/// The most GPU time a record carries for a process, in nanoseconds, 292 years of it.
+pub const GPU_NS_MAX: u64 = GPU_PRESENT - 1;
 
 #[derive(Debug, Clone)]
 pub(super) struct SystemLayout {

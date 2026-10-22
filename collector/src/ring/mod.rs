@@ -46,7 +46,7 @@ use object::{
     create_previous, create_unlink, create_unlink_older, open_lock_file, open_ring, place_for_user,
     ring_name,
 };
-pub use system::{SystemPublication, SystemSnapshot};
+pub use system::{GPU_NS_MAX, SystemPublication, SystemSnapshot};
 pub use tick::{Dropped, IOReportReadings, Readings, SmcReadings, Tick};
 pub use view::{RingReader, TickBuffers};
 

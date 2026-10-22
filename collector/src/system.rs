@@ -184,7 +184,7 @@ impl System {
 }
 
 /// Fills `gpu_ns` with the GPU time of each pid of `pids`, rising, from `times`, rising by
-/// pid, with none for a pid that has no GPU clients.
+/// pid, with none for a pid that has no GPU clients or more time than the ring carries.
 pub fn gpu_ns_by_pid(
     pids: impl Iterator<Item = i32>,
     times: &[GpuClientTime],
@@ -208,8 +208,22 @@ pub fn gpu_ns_by_pid(
         }
         let found = times.get(time).filter(|found| found.pid == pid);
         assert!(gpu_ns.len() < capacity);
-        gpu_ns.push(found.map(|found| found.gpu_ns));
+        gpu_ns.push(found.and_then(gpu_ns_by_pid_carried));
     }
+}
+
+/// The time of `found`, or none where it passes what the ring carries, which only a client
+/// count no driver keeps, or a sum of them, reaches.
+fn gpu_ns_by_pid_carried(found: &GpuClientTime) -> Option<u64> {
+    if found.gpu_ns > crate::ring::GPU_NS_MAX {
+        eprintln!(
+            "collector: GPU time of pid {} read {} ns, past what the ring carries",
+            found.pid, found.gpu_ns
+        );
+        return None;
+    }
+
+    Some(found.gpu_ns)
 }
 
 fn open_source<T>(name: &str, opened: io::Result<T>) -> Option<T> {
