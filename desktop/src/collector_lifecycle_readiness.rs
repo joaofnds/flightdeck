@@ -14,7 +14,7 @@ pub(super) fn wait(collector: &mut CollectorSession) -> Result<(), String> {
     let mut latest = None;
     let mut observations = 0_u32;
     for _step in 0..POLL_STEPS_MAX {
-        collector.tick(true);
+        collector.tick();
         if let Some(failure) = collector.failure() {
             return Err(failure.to_owned());
         }

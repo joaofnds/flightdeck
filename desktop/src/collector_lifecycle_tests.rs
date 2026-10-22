@@ -20,36 +20,17 @@ fn paused_selection_does_not_freeze_owned_collector_health() {
         .0
         .policy
         .launched(std::process::id(), Duration::ZERO);
-    session.tick(true);
+    session.tick();
     fixture.publish();
 
-    session.tick(true);
+    session.tick();
 
     assert!(session.ready());
     assert_eq!(paused.catalog["latest_observation"]["publication"], 1);
     session.0.started = Instant::now()
         .checked_sub(STARTUP_LIMIT + Duration::from_secs(1))
         .unwrap();
-    session.tick(false);
-    assert!(session.ready());
-}
-
-#[test]
-fn computer_navigation_does_not_hide_owned_startup_progress() {
-    // Goal: startup observes its configured producer after navigation to Computer.
-    // Method: advance a real ring after its first observation, then omit presented data.
-    let mut fixture = Recording::new();
-    fixture.publish();
-    let mut session = fixture.session(Mode::Explicit);
-    session
-        .0
-        .policy
-        .launched(std::process::id(), Duration::ZERO);
-    session.tick(true);
-    fixture.publish();
-
-    session.tick(false);
-
+    session.tick();
     assert!(session.ready());
 }
 
@@ -62,10 +43,10 @@ fn opening_another_recording_does_not_change_auto_discovery_root() {
     configured.publish();
     presented.publish();
     let mut session = configured.session(Mode::Auto);
-    session.tick(true);
+    session.tick();
     configured.publish();
 
-    session.tick(true);
+    session.tick();
 
     assert_eq!(session.0.policy.state, State::Attached);
     assert_eq!(session.owned_pid(), None);
@@ -80,14 +61,14 @@ fn registry_rollover_requires_advancement_from_the_new_run() {
     let mut fixture = Recording::new();
     fixture.publish();
     let mut session = fixture.session(Mode::Auto);
-    session.tick(true);
+    session.tick();
     fixture.rollover();
     fixture.publish();
-    session.tick(false);
+    session.tick();
     assert_eq!(session.0.policy.state, State::Discovering);
 
     fixture.publish();
-    session.tick(false);
+    session.tick();
 
     assert_eq!(session.0.policy.state, State::Attached);
     assert_eq!(session.owned_pid(), None);
@@ -104,7 +85,7 @@ fn a_foreign_registered_identity_fails_without_spawning() {
     registry.write(&fixture.root).unwrap();
     let mut session = fixture.session(Mode::Auto);
 
-    session.tick(true);
+    session.tick();
 
     assert!(session.failure().is_some());
     assert_eq!(session.0.policy.state, State::Failed);
@@ -119,12 +100,12 @@ fn a_missing_ring_with_a_live_pid_stays_unknown_until_its_fixed_deadline() {
     fixture.publish();
     collector::ring::unlink_generation(fixture.writer.as_ref().unwrap().name()).unwrap();
     let mut session = fixture.session(Mode::Auto);
-    session.tick(true);
+    session.tick();
     session.0.started = Instant::now()
         .checked_sub(STARTUP_LIMIT + Duration::from_secs(1))
         .unwrap();
 
-    session.tick(false);
+    session.tick();
 
     assert!(session.failure().is_some());
     assert_eq!(session.0.policy.state, State::Failed);
@@ -138,12 +119,12 @@ fn a_completed_shared_collector_offers_recovery_without_taking_ownership() {
     let mut recording = Recording::new();
     let mut session = recording.session(Mode::Auto);
     recording.publish();
-    session.tick(true);
+    session.tick();
     recording.publish();
-    session.tick(true);
+    session.tick();
     recording.writer.as_mut().unwrap().finish();
 
-    session.tick(true);
+    session.tick();
 
     assert!(session.status().unwrap().1);
     assert_eq!(session.owned_pid(), None);
@@ -152,20 +133,20 @@ fn a_completed_shared_collector_offers_recovery_without_taking_ownership() {
 }
 
 #[test]
-fn a_stalled_shared_collector_offers_recovery_even_while_on_computer() {
-    // Goal: shared health is independent of the displayed route and selected observation.
+fn a_stalled_shared_collector_offers_recovery() {
+    // Goal: shared health is independent of the selected observation.
     // Method: keep a real registered producer alive without publishing through the deadline.
     let mut recording = Recording::new();
     let mut session = recording.session(Mode::Auto);
     recording.publish();
-    session.tick(true);
+    session.tick();
     recording.publish();
-    session.tick(true);
+    session.tick();
     session.0.started = Instant::now()
         .checked_sub(policy::DISCOVERY_LIMIT + Duration::from_secs(1))
         .unwrap();
 
-    session.tick(false);
+    session.tick();
 
     assert!(session.status().unwrap().1);
     assert_eq!(session.owned_pid(), None);

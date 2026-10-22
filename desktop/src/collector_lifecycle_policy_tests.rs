@@ -5,7 +5,6 @@ const OTHER_BUILD: u64 = 7;
 
 fn existing(publication: u64) -> Source {
     Source {
-        recording_route: true,
         recording: RecordingStatus::Ready,
         producer_alive: true,
         build: Build::Expected,
@@ -52,7 +51,6 @@ fn missing_default_recording_requests_one_owned_spawn() {
     // Method: report the absent default recording on an actual readings route.
     let mut policy = Policy::new(Mode::Auto);
     let source = Source {
-        recording_route: true,
         recording: RecordingStatus::Missing,
         ..Source::default()
     };
@@ -65,25 +63,27 @@ fn missing_default_recording_requests_one_owned_spawn() {
 }
 
 #[test]
-fn initial_computer_page_defers_auto_discovery_and_collection() {
-    // Goal: current machine inventory remains independent of recording availability.
-    // Method: leave Auto on Computer for longer than every startup bound.
+fn auto_collection_starts_on_whichever_page_the_window_opens() {
+    // Goal: every page reads the Mac through the collector, so none waits to start one.
+    // Method: report a recording no collector holds while the window shows Computer.
     let mut policy = Policy::new(Mode::Auto);
+    let source = Source {
+        recording: RecordingStatus::Ready,
+        ..Source::default()
+    };
 
-    let action = policy.step(Duration::from_mins(15), &Source::default());
+    let action = policy.step(Duration::ZERO, &source);
 
-    assert_eq!(action, Action::None);
-    assert_eq!(policy.state, State::Discovering);
-    assert_eq!(policy.since, None);
+    assert_eq!(action, Action::Spawn);
+    assert_eq!(policy.state, State::Starting);
 }
 
 #[test]
-fn explicit_collection_starts_even_on_the_computer_page() {
-    // Goal: an explicit start command retains its authority on every launch route.
-    // Method: report a recording no collector holds while no readings route is open.
+fn explicit_collection_starts_for_a_recording_no_collector_holds() {
+    // Goal: an explicit start command spawns its own collector where none collects.
+    // Method: report a recording no collector holds at the first discovery step.
     let mut policy = Policy::new(Mode::Explicit);
     let source = Source {
-        recording_route: false,
         recording: RecordingStatus::Ready,
         ..Source::default()
     };
@@ -94,12 +94,14 @@ fn explicit_collection_starts_even_on_the_computer_page() {
 }
 
 #[test]
-fn explicit_collection_looks_for_a_collector_on_every_route() {
-    // Goal: an explicit start learns of a running collector before it could spawn another.
-    // Method: ask for health on Computer before the first discovery step.
-    let policy = Policy::new(Mode::Explicit);
+fn collection_looks_for_a_collector_before_its_first_step() {
+    // Goal: a start learns of a running collector before it could spawn another.
+    // Method: ask each starting mode for health before the first discovery step.
+    let explicit = Policy::new(Mode::Explicit);
+    let auto = Policy::new(Mode::Auto);
 
-    assert!(policy.needs_health(false));
+    assert!(explicit.needs_health());
+    assert!(auto.needs_health());
 }
 
 #[test]
@@ -136,22 +138,6 @@ fn explicit_collection_offers_recovery_when_its_shared_collector_stops() {
 }
 
 #[test]
-fn attached_collection_survives_navigation_to_computer() {
-    // Goal: navigation cannot turn a shared producer into an app-owned shutdown target.
-    // Method: attach using two publications, then stop observing recording data.
-    let mut policy = Policy::new(Mode::Auto);
-    policy.step(Duration::ZERO, &existing(1));
-    policy.step(Duration::from_secs(1), &existing(2));
-
-    let mut source = existing(3);
-    source.recording_route = false;
-    let action = policy.step(Duration::from_secs(2), &source);
-
-    assert_eq!(action, Action::None);
-    assert_eq!(policy.state, State::Attached);
-}
-
-#[test]
 fn retrying_a_stalled_shared_collector_never_competes_with_its_living_producer() {
     // Goal: explicit recovery still discovers a living producer before considering a spawn.
     // Method: stall after attachment, retry, and keep that PID alive through rediscovery.
@@ -179,7 +165,6 @@ fn retrying_a_dead_shared_collector_can_resume_owned_recording() {
     policy.step(Duration::ZERO, &existing(1));
     policy.step(Duration::from_secs(1), &existing(2));
     let stopped = Source {
-        recording_route: true,
         recording: RecordingStatus::Ready,
         ..Source::default()
     };
@@ -207,7 +192,7 @@ fn explicit_attachment_stays_read_only_after_its_producer_stops() {
     assert_eq!(action, Action::None);
     assert_eq!(policy.state, State::Attached);
     assert!(!policy.can_retry());
-    assert!(!policy.needs_health(true));
+    assert!(!policy.needs_health());
 }
 
 #[test]
@@ -384,7 +369,6 @@ fn a_collector_built_from_other_code_fails_discovery_without_spawning() {
     // Method: report a holder announcing another build on the first discovery step.
     let mut policy = Policy::new(Mode::Auto);
     let source = Source {
-        recording_route: true,
         recording: RecordingStatus::Ready,
         build: Build::Other(OTHER_BUILD),
         ..Source::default()
@@ -404,7 +388,6 @@ fn a_collector_announcing_another_format_fails_discovery_without_spawning() {
     // Method: report a holder announcing another format on the first discovery step.
     let mut policy = Policy::new(Mode::Auto);
     let source = Source {
-        recording_route: true,
         build: Build::Unrecognized,
         ..Source::default()
     };
@@ -443,7 +426,6 @@ fn an_unannounced_holder_fails_discovery_at_its_deadline() {
     // Method: hold the recording without an announcement through the discovery deadline.
     let mut policy = Policy::new(Mode::Auto);
     let source = Source {
-        recording_route: true,
         build: Build::Unannounced,
         ..Source::default()
     };
@@ -463,12 +445,10 @@ fn a_finishing_holder_is_awaited_past_the_discovery_deadline() {
     // Method: report a finishing holder through the discovery deadline, then a ready recording.
     let mut policy = Policy::new(Mode::Auto);
     let finishing = Source {
-        recording_route: true,
         recording: RecordingStatus::Finishing,
         ..Source::default()
     };
     let ready = Source {
-        recording_route: true,
         recording: RecordingStatus::Ready,
         ..Source::default()
     };
@@ -488,7 +468,6 @@ fn a_finishing_holder_fails_discovery_at_the_collectors_stop_deadline() {
     // Method: report a finishing holder just before and then at that deadline.
     let mut policy = Policy::new(Mode::Auto);
     let finishing = Source {
-        recording_route: true,
         recording: RecordingStatus::Finishing,
         ..Source::default()
     };

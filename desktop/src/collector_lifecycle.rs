@@ -72,11 +72,11 @@ impl CollectorSession {
         }))
     }
 
-    pub fn tick(&mut self, recording_route: bool) {
+    pub fn tick(&mut self) {
         if let Err(error) = self.poll_child() {
             self.failed(&format!("Collector observation failed: {error}"));
         }
-        let source = match self.source_if_needed(recording_route) {
+        let source = match self.source_if_needed() {
             Ok(source) => source,
             Err(error) => {
                 self.failed(&format!("Collector discovery failed: {error}"));
@@ -87,7 +87,7 @@ impl CollectorSession {
         if let Err(error) = self.act(action) {
             self.failed(&format!("Collector operation failed: {error}"));
         }
-        if !self.0.policy.needs_health(recording_route) {
+        if !self.0.policy.needs_health() {
             self.0.health.clear();
         }
     }
@@ -171,7 +171,7 @@ impl CollectorSession {
     pub fn stop_and_wait(&mut self) -> Result<(), String> {
         self.begin_stop();
         for _attempt in 0..STOP_ATTEMPTS_MAX {
-            self.tick(false);
+            self.tick();
             if self.finished() {
                 return match &self.0.policy.failure {
                     Some(failure) => Err(failure.clone()),
@@ -185,8 +185,8 @@ impl CollectorSession {
         Err("Collector shutdown exceeded its 127-second bound".into())
     }
 
-    fn source_if_needed(&mut self, recording_route: bool) -> Result<Source, String> {
-        if !self.0.policy.needs_health(recording_route) {
+    fn source_if_needed(&mut self) -> Result<Source, String> {
+        if !self.0.policy.needs_health() {
             self.0.health.clear();
             return Ok(Source::default());
         }
@@ -195,7 +195,6 @@ impl CollectorSession {
             Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 return Ok(Source {
-                    recording_route,
                     recording: RecordingStatus::Missing,
                     ..Source::default()
                 });
@@ -203,13 +202,10 @@ impl CollectorSession {
             Err(error) => return Err(error.to_string()),
         }
 
-        let mut source = self
-            .0
+        self.0
             .health
             .read(&self.0.configuration.root, self.0.policy.owned_pid)
-            .map_err(|error| error.to_string())?;
-        source.recording_route = recording_route;
-        Ok(source)
+            .map_err(|error| error.to_string())
     }
 
     fn act(&mut self, action: Action) -> io::Result<()> {

@@ -24,7 +24,7 @@ pub fn probe(options: &Options) -> Result<(), Box<dyn std::error::Error>> {
     let root = recording(options)?;
     let mut collector = if options.source.start_collector {
         let mut collector = collector_session(&root, options)?;
-        collector.tick(false);
+        collector.tick();
         if let Some(failure) = collector.failure() {
             return Err(failure.to_owned().into());
         }

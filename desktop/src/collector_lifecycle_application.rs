@@ -97,7 +97,7 @@ fn quick_tick(entity: &WeakEntity<LiveDashboard>, cx: &mut App) {
 
 fn tick(entity: &WeakEntity<LiveDashboard>, cx: &mut App) {
     if entity.update(cx, dashboard_tick).is_err() {
-        cx.global_mut::<Collection>().session.tick(false);
+        cx.global_mut::<Collection>().session.tick();
     }
 }
 
@@ -111,9 +111,7 @@ fn dashboard_tick(dashboard: &mut LiveDashboard, cx: &mut Context<LiveDashboard>
     }
     let collection = cx.global_mut::<Collection>();
     let previous = collection.session.status();
-    collection
-        .session
-        .tick(dashboard.request.route != "computer");
+    collection.session.tick();
     let mut changed = previous != collection.session.status();
     let reports = collection.session.reports();
     if reports.revision != dashboard.self_reports.revision {

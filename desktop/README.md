@@ -21,9 +21,8 @@ otherwise fails with both builds named. A ring states its own layout, which ever
 checks, so an app opening a recording another build wrote reads it only where the
 layouts agree. A collector counts as running only while it holds the recording's lifetime
 lock, which macOS releases when it exits, so a pid given to another process never
-passes for it. Initial Computer-only entry defers automatic collection until a
-recording route is opened. A recording supplied with `--recording PATH` opens as
-Recorded and reads on navigation or Refresh, without idle polling. Add
+passes for it. A launch on any page, Computer included, starts collection the same way.
+A recording supplied with `--recording PATH` opens as Recorded and reads on navigation or Refresh, without idle polling. Add
 `--start-collector` to collect into that root and follow Live readings. When a
 collector of the same build already collects there, the app attaches to it rather than
 starting a second one, on whichever page it opens. The following commands run from `desktop/`:

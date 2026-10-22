@@ -54,7 +54,6 @@ pub(super) struct Observation {
 
 #[derive(Default)]
 pub(super) struct Source {
-    pub recording_route: bool,
     pub recording: RecordingStatus,
     pub producer_alive: bool,
     pub build: Build,
@@ -160,16 +159,6 @@ impl Policy {
     }
 
     fn discover(&mut self, now: Duration, source: &Source) -> Action {
-        // An explicit start collects whatever page is open, where Auto waits for a readings
-        // route.
-        if self.since.is_none() {
-            if self.mode == Mode::Auto {
-                if !source.recording_route {
-                    return Action::None;
-                }
-            }
-        }
-
         if self.since.is_none() {
             self.since = Some(now);
         }
@@ -392,7 +381,7 @@ impl Policy {
         self.owned_pid.is_none()
     }
 
-    pub fn needs_health(&self, recording_route: bool) -> bool {
+    pub fn needs_health(&self) -> bool {
         if self.state == State::Starting {
             return true;
         }
@@ -405,15 +394,7 @@ impl Policy {
             return false;
         }
 
-        if self.mode == Mode::Explicit {
-            return true;
-        }
-
-        if self.mode != Mode::Auto {
-            return false;
-        }
-
-        recording_route || self.since.is_some()
+        self.mode != Mode::Attach
     }
 
     pub fn observed_publication(&self) -> Option<u64> {
