@@ -1,6 +1,4 @@
-use super::{
-    BTreeMap, BTreeSet, ContextRange, Frame, Key, Observation, Reading, Restore, Session, Source,
-};
+use super::{BTreeSet, ContextRange, Frame, Key, Observation, Reading, Restore, Session, Source};
 use crate::app_process_groups_history::AppProcessGroupsHistory;
 use crate::app_process_groups_history::cache::{Cache, Point};
 use crate::live_app_history::{PIN_BYTES_MAX, ResidentFile, ResidentPin, Target};
@@ -35,12 +33,7 @@ impl Session {
         }
 
         let range = self.app_history_range(selected)?;
-        let mut restore = Restore {
-            readings: BTreeMap::new(),
-            sources: BTreeMap::new(),
-            source_bytes: 0,
-            plotted: 0,
-        };
+        let mut restore = Restore::default();
 
         let mut kept = BTreeSet::new();
         self.visit_sealed_parts_by_window(range, target.kind, target.bytes, |window, _part| {

@@ -37,6 +37,7 @@ pub(super) struct Cache {
     pins: Vec<usize>,
 }
 
+#[derive(Default)]
 struct Restore {
     readings: BTreeMap<Key, Reading>,
     sources: BTreeMap<(usize, Source), SourceQuery>,
@@ -259,12 +260,7 @@ impl Session {
         selected: &Observation,
         target: &dyn Selection,
     ) -> Result<Cache> {
-        let mut restore = Restore {
-            readings: BTreeMap::new(),
-            sources: BTreeMap::new(),
-            source_bytes: 0,
-            plotted: 0,
-        };
+        let mut restore = Restore::default();
         let mut points = Vec::new();
         let kept = self.app_history_kept(range, target, &mut restore, &mut points)?;
         self.app_history_gather(range, &kept, &mut restore)?;
@@ -336,12 +332,7 @@ impl Session {
         self.operation.attach(&self.connection)?;
         self.operation.check()?;
         let range = self.app_history_range(selected)?;
-        let mut restore = Restore {
-            readings: BTreeMap::new(),
-            sources: BTreeMap::new(),
-            source_bytes: 0,
-            plotted: 0,
-        };
+        let mut restore = Restore::default();
         let listed: BTreeSet<usize> = self
             .windows
             .iter()
@@ -961,12 +952,7 @@ mod source_cache_tests {
         fixture.publish_with_system_rows(1002);
         fixture.seal();
         let session = Session::open(&fixture.root).unwrap();
-        let mut restore = Restore {
-            readings: BTreeMap::new(),
-            sources: BTreeMap::new(),
-            source_bytes: 0,
-            plotted: 0,
-        };
+        let mut restore = Restore::default();
         let original = session
             .app_history_source(&mut restore, 0, Source::Apps)
             .unwrap()

@@ -1,5 +1,5 @@
 use super::sealed_attribution::{KeptObservation, KeptWindow};
-use super::{BTreeMap, BTreeSet, Frame, Key, Observation, Reading, Restore, Session, Source};
+use super::{BTreeSet, Frame, Key, Observation, Reading, Restore, Session, Source};
 use crate::app_attribution_history::cache::{Cache, Observed};
 use crate::live_app_history::{ResidentFile, ResidentPin};
 use crate::live_app_response::Selected;
@@ -24,12 +24,7 @@ impl Session {
             return Err(Error::Bound("attribution saved recording"));
         }
         let range = self.app_history_range(selected)?;
-        let mut restore = Restore {
-            readings: BTreeMap::new(),
-            sources: BTreeMap::new(),
-            source_bytes: 0,
-            plotted: 0,
-        };
+        let mut restore = Restore::default();
         self.app_history_gather(&range, &BTreeSet::new(), &mut restore)?;
         let count = restore.plotted;
         for reading in restore.readings.values_mut() {
@@ -245,12 +240,7 @@ impl Session {
         let range = self.app_history_range(selected)?;
         let mut replay = Box::new(AttributionReplay {
             kept_windows: Vec::new(),
-            restore: Restore {
-                readings: BTreeMap::new(),
-                sources: BTreeMap::new(),
-                source_bytes: 0,
-                plotted: 0,
-            },
+            restore: Restore::default(),
             context: Vec::with_capacity(super::super::OBSERVATIONS_MAX),
             readings: Vec::with_capacity(super::READINGS_MAX),
             prepared: None,

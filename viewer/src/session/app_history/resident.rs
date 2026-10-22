@@ -1,5 +1,5 @@
 use super::sealed_attribution::KeptWindow;
-use super::{BTreeMap, Frame, Observation, Reading, Restore, Session, Source};
+use super::{Frame, Observation, Reading, Restore, Session, Source};
 use crate::live::resident_history::SavedResidents;
 use crate::live_app_history::{
     PIN_BYTES_MAX, ResidentCache, ResidentFile, ResidentPin, ResidentPoint,
@@ -28,12 +28,7 @@ impl Session {
         }
 
         let range = self.app_history_range(selected)?;
-        let mut restore = Restore {
-            readings: BTreeMap::new(),
-            sources: BTreeMap::new(),
-            source_bytes: 0,
-            plotted: 0,
-        };
+        let mut restore = Restore::default();
         let mut kept_windows = Vec::new();
         let kept_indexes = self.every_app_kept(&range, &mut restore, &mut kept_windows)?;
         self.app_history_gather(&range, &kept_indexes, &mut restore)?;
