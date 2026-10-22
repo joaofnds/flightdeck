@@ -272,7 +272,12 @@ fn read_count(sysctl: &Sysctl) -> io::Result<u64> {
 
 /// The wall time macOS booted at, in nanoseconds since 1970.
 fn read_boot_wall_ns(boot_time: &Sysctl) -> io::Result<u64> {
-    let value: Timeval = boot_time.read()?;
+    read_boot_wall_ns_of(boot_time.read()?)
+}
+
+/// The nanoseconds since 1970 of the boot time `value`, or an error where it is before 1970,
+/// holds a second or more of microseconds, or passes what a u64 counts.
+fn read_boot_wall_ns_of(value: Timeval) -> io::Result<u64> {
     let seconds =
         u64::try_from(value.tv_sec).map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
     let microseconds =

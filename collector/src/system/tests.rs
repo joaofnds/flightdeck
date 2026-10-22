@@ -58,6 +58,78 @@ fn fact_text_keeps_utf8_text_up_to_its_bound() {
     assert_eq!(FactText::new(&[0xff, 0xfe]), None);
 }
 
+#[test]
+fn read_boot_wall_ns_gives_the_boot_time_in_nanoseconds() {
+    // Goal: the boot time's seconds and microseconds add up to nanoseconds since 1970.
+    // Method: read 1,760,000,000 s and 250,000 us.
+    let boot_time = Timeval {
+        tv_sec: 1_760_000_000,
+        tv_usec: 250_000,
+    };
+
+    assert_eq!(
+        1_760_000_000_250_000_000,
+        read_boot_wall_ns_of(boot_time).unwrap()
+    );
+}
+
+#[test]
+fn read_boot_wall_ns_refuses_a_second_or_more_of_microseconds() {
+    // Goal: microseconds that make up a whole second are an error, never a boot time
+    // shifted by it.
+    // Method: read 1,000,000 us.
+    let boot_time = Timeval {
+        tv_sec: 1_760_000_000,
+        tv_usec: 1_000_000,
+    };
+
+    let read = read_boot_wall_ns_of(boot_time);
+
+    assert_eq!(io::ErrorKind::InvalidData, read.unwrap_err().kind());
+}
+
+#[test]
+fn read_boot_wall_ns_refuses_a_boot_before_1970() {
+    // Goal: a boot time before 1970 is an error, never a time near the u64's top.
+    // Method: read -1 s.
+    let boot_time = Timeval {
+        tv_sec: -1,
+        tv_usec: 0,
+    };
+
+    let read = read_boot_wall_ns_of(boot_time);
+
+    assert_eq!(io::ErrorKind::InvalidData, read.unwrap_err().kind());
+}
+
+#[test]
+fn read_boot_wall_ns_refuses_negative_microseconds() {
+    // Goal: microseconds below zero are an error, never a time near the u64's top.
+    // Method: read -1 us.
+    let boot_time = Timeval {
+        tv_sec: 1_760_000_000,
+        tv_usec: -1,
+    };
+
+    let read = read_boot_wall_ns_of(boot_time);
+
+    assert_eq!(io::ErrorKind::InvalidData, read.unwrap_err().kind());
+}
+
+#[test]
+fn read_boot_wall_ns_refuses_seconds_past_what_nanoseconds_hold() {
+    // Goal: a boot time whose nanoseconds pass a u64 is an error, never a wrapped time.
+    // Method: read the most seconds an i64 holds.
+    let boot_time = Timeval {
+        tv_sec: i64::MAX,
+        tv_usec: 0,
+    };
+
+    let read = read_boot_wall_ns_of(boot_time);
+
+    assert_eq!(io::ErrorKind::InvalidData, read.unwrap_err().kind());
+}
+
 /// The tests whose subject is what this Mac gives, which only an Apple silicon Mac runs. CI's
 /// virtual Mac has no power manager, no Apple GPU driver and one core cluster, so its check
 /// skips this module.

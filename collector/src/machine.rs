@@ -355,8 +355,7 @@ pub fn performance_levels() -> io::Result<Option<PerformanceLevels>> {
         Err(error) if error.raw_os_error() == Some(kernel::ENOENT) => return Ok(None),
         Err(error) => return Err(error),
     };
-    let levels: c_int = levels.read()?;
-    if levels != 2 {
+    if !performance_levels_named(levels.read()?) {
         return Ok(None);
     }
 
@@ -366,6 +365,12 @@ pub fn performance_levels() -> io::Result<Option<PerformanceLevels>> {
     Ok(Some(PerformanceLevels {
         logical_cpus: [fast, slow],
     }))
+}
+
+/// Whether a chip with `levels` performance levels has the two `PerformanceLevels` names, the
+/// fastest and a slower one.
+fn performance_levels_named(levels: c_int) -> bool {
+    levels == 2
 }
 
 /// The GPU cores the GPU driver reports, or none where the machine has no Apple GPU driver
@@ -749,6 +754,29 @@ mod tests {
         let read = Pressure::from_level(3);
 
         assert_eq!(io::ErrorKind::InvalidData, read.unwrap_err().kind());
+    }
+
+    #[test]
+    fn names_the_performance_levels_of_a_chip_with_two() {
+        // Goal: a chip with two performance levels gives them, fastest and slower.
+        // Method: ask about 2 levels, as an M5 Pro reports.
+        assert!(performance_levels_named(2));
+    }
+
+    #[test]
+    fn names_no_performance_levels_for_a_chip_with_one() {
+        // Goal: a chip with one level, as CI's virtual Mac reports, gives none, never a read
+        // of a second level it does not have.
+        // Method: ask about 1 level.
+        assert!(!performance_levels_named(1));
+    }
+
+    #[test]
+    fn names_no_performance_levels_for_a_chip_with_more_than_two() {
+        // Goal: a chip with more levels than the fastest and slower a reading names gives
+        // none, never two levels of more.
+        // Method: ask about 3 levels.
+        assert!(!performance_levels_named(3));
     }
 
     /// The tests whose subject is what this Mac's chip is, which only an Apple silicon Mac runs.
