@@ -69,6 +69,9 @@ automation = ["gpui/test-support", "gpui_macos/test-support"]
 # Keep the native query engine's debug unwind tables within Mach-O limits.
 [profile.dev.package."*"]
 opt-level = 1
+# Nobody steps through a dependency, and its debug info made the native engine's core
+# library ten times its release size.
+debug = false
 
 [profile.release]
 overflow-checks = true

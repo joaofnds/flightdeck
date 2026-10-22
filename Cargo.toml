@@ -40,6 +40,9 @@ unused_result_ok = "warn"
 # Optimized dependencies keep the native engine's debug unwind tables within Mach-O limits.
 [profile.dev.package."*"]
 opt-level = 1
+# Nobody steps through a dependency, and its debug info made the native engine's core
+# library ten times its release size.
+debug = false
 
 # Tiger Style keeps assertions on in production, so overflow traps and a panic aborts.
 [profile.release]
