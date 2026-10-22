@@ -1,5 +1,5 @@
-use crate::engine::{Engine, Row};
-use polars::prelude::AnyValue;
+use crate::engine::{Cells, Engine};
+use polars::prelude::{BinaryType, BooleanType, DataFrame, Int32Type, UInt8Type, UInt64Type};
 
 use crate::schema::{
     IDENTITY_FIELDS, IDENTITY_ROWS_MAX, IDENTITY_VERSION, Table, availability,
@@ -66,7 +66,7 @@ fn normalize_validate(connection: &Engine, table: Table, source: &str) -> Result
     let frame = connection.query(&format!(
         "SELECT identity_version, identity_availability, process_unique_id, pid_version, \
         executable_name, app_path, usage_availability, {payload}, \
-        {availability} AS source_usage_availability, \
+        CAST({availability} AS UTINYINT) AS source_usage_availability, \
         (publication IS NOT NULL AND pid IS NOT NULL) AS observation_present \
         FROM {source} LIMIT {maximum}"
     ))?;
@@ -76,28 +76,28 @@ fn normalize_validate(connection: &Engine, table: Table, source: &str) -> Result
         return Err(Error::Bound("process identity rows"));
     }
 
-    for index in 0..frame.height() {
-        let row = Row::new(&frame, index)?;
-
-        if !row.get::<bool>(10)? {
+    let columns = ValidationColumns::new(&frame)?;
+    for row in 0..frame.height() {
+        if columns.observation_present.optional(row)? != Some(true) {
             return Err(Error::Bound("process identity observation"));
         }
 
-        normalize_validate_usage(&row, table)?;
+        normalize_validate_usage(&columns, row, table)?;
 
-        if row.get::<Option<u8>>(0)? != Some(IDENTITY_VERSION) {
+        if columns.identity_version.optional(row)? != Some(IDENTITY_VERSION) {
             return Err(Error::Bound("process identity version"));
         }
 
-        let availability = row
-            .get::<Option<u8>>(1)?
+        let availability = columns
+            .identity_availability
+            .optional(row)?
             .ok_or(Error::Bound("process identity availability"))?;
         if availability > identity_availability::EXHAUSTED {
             return Err(Error::Bound("process identity availability"));
         }
 
-        let unique = row.get::<Option<u64>>(2)?;
-        let version = row.get::<Option<i32>>(3)?;
+        let unique = columns.process_unique_id.optional(row)?;
+        let version = columns.pid_version.optional(row)?;
         if unique.is_some() != version.is_some() {
             return Err(Error::Bound("process creation identity"));
         }
@@ -107,13 +107,48 @@ fn normalize_validate(connection: &Engine, table: Table, source: &str) -> Result
                 return Err(Error::Bound("process creation identity"));
             }
 
-            normalize_validate_program(&row)?;
+            normalize_validate_program(&columns, row)?;
         } else {
-            normalize_validate_program_unavailable(&row)?;
+            normalize_validate_program_unavailable(&columns, row)?;
         }
     }
 
     Ok(())
+}
+
+/// The columns of the validation query, each read whole in the type the identity fields'
+/// storage types and the query's own expressions give it.
+struct ValidationColumns<'frame> {
+    identity_version: Cells<'frame, UInt8Type>,
+    identity_availability: Cells<'frame, UInt8Type>,
+    process_unique_id: Cells<'frame, UInt64Type>,
+    pid_version: Cells<'frame, Int32Type>,
+    executable_name: Cells<'frame, BinaryType>,
+    app_path: Cells<'frame, BinaryType>,
+    usage_availability: Cells<'frame, UInt8Type>,
+    usage_present: Cells<'frame, BooleanType>,
+    usage_absent: Cells<'frame, BooleanType>,
+    source_usage_availability: Cells<'frame, UInt8Type>,
+    observation_present: Cells<'frame, BooleanType>,
+}
+
+impl<'frame> ValidationColumns<'frame> {
+    /// The columns of `frame`, in the order the validation query selects them.
+    fn new(frame: &'frame DataFrame) -> Result<Self> {
+        Ok(Self {
+            identity_version: Cells::new(frame, 0)?,
+            identity_availability: Cells::new(frame, 1)?,
+            process_unique_id: Cells::new(frame, 2)?,
+            pid_version: Cells::new(frame, 3)?,
+            executable_name: Cells::new(frame, 4)?,
+            app_path: Cells::new(frame, 5)?,
+            usage_availability: Cells::new(frame, 6)?,
+            usage_present: Cells::new(frame, 7)?,
+            usage_absent: Cells::new(frame, 8)?,
+            source_usage_availability: Cells::new(frame, 9)?,
+            observation_present: Cells::new(frame, 10)?,
+        })
+    }
 }
 
 fn normalize_validate_payload(table: Table) -> String {
@@ -139,9 +174,14 @@ fn normalize_validate_payload(table: Table) -> String {
     format!("({known}) AS usage_present, ({absent}) AS usage_absent")
 }
 
-fn normalize_validate_usage(row: &Row<'_>, table: Table) -> Result<()> {
-    let availability = row
-        .get::<Option<u8>>(6)?
+fn normalize_validate_usage(
+    columns: &ValidationColumns<'_>,
+    row: usize,
+    table: Table,
+) -> Result<()> {
+    let availability = columns
+        .usage_availability
+        .optional(row)?
         .ok_or(Error::Bound("process usage availability"))?;
     let maximum = match table {
         Table::Events => availability::NOT_APPLICABLE,
@@ -152,38 +192,29 @@ fn normalize_validate_usage(row: &Row<'_>, table: Table) -> Result<()> {
         return Err(Error::Bound("process usage availability"));
     }
 
-    if row.get::<Option<u8>>(9)? != Some(availability) {
+    if columns.source_usage_availability.optional(row)? != Some(availability) {
         return Err(Error::Bound("event usage availability"));
     }
 
     let payload = if availability == availability::MEASURED {
-        7
+        &columns.usage_present
     } else {
-        8
+        &columns.usage_absent
     };
 
-    if !row.get::<bool>(payload)? {
+    if payload.optional(row)? != Some(true) {
         return Err(Error::Bound("process usage payload"));
     }
 
     Ok(())
 }
 
-fn normalize_validate_program(row: &Row<'_>) -> Result<()> {
-    let executable_value = row.value(4)?;
-    let executable = match &executable_value {
-        AnyValue::Binary(value) => *value,
-        AnyValue::BinaryOwned(value) => value.as_slice(),
-        _ => return Err(Error::Bound("process executable bytes")),
-    };
-
-    let app_value = row.value(5)?;
-    let app_path = match &app_value {
-        AnyValue::Null => None,
-        AnyValue::Binary(path) => Some(*path),
-        AnyValue::BinaryOwned(path) => Some(path.as_slice()),
-        _ => return Err(Error::Bound("process app bytes")),
-    };
+fn normalize_validate_program(columns: &ValidationColumns<'_>, row: usize) -> Result<()> {
+    let executable = columns
+        .executable_name
+        .optional(row)?
+        .ok_or(Error::Bound("process executable bytes"))?;
+    let app_path = columns.app_path.optional(row)?;
 
     collector::ring::ProgramBytes {
         executable_name: executable,
@@ -202,12 +233,15 @@ fn normalize_validate_program(row: &Row<'_>) -> Result<()> {
     })
 }
 
-fn normalize_validate_program_unavailable(row: &Row<'_>) -> Result<()> {
-    if row.value(4)? != AnyValue::Null {
+fn normalize_validate_program_unavailable(
+    columns: &ValidationColumns<'_>,
+    row: usize,
+) -> Result<()> {
+    if columns.executable_name.optional(row)?.is_some() {
         return Err(Error::Bound("unavailable process executable"));
     }
 
-    if row.value(5)? != AnyValue::Null {
+    if columns.app_path.optional(row)?.is_some() {
         return Err(Error::Bound("unavailable process app"));
     }
 
