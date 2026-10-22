@@ -1,6 +1,7 @@
 use polars::prelude::*;
 
 use crate::encoder::columns;
+use crate::window::StagedTick;
 use crate::{Error, Result, Window};
 
 pub(super) fn memory(window: &Window) -> Result<DataFrame> {
@@ -107,24 +108,47 @@ pub(super) fn cores(window: &Window) -> Result<DataFrame> {
     ));
     for tick in &window.ticks {
         if tick.ioreport_read {
-            for (core, states) in tick.cores.iter().enumerate() {
-                let core = u32::try_from(core).map_err(|_| Error::Bound("core index"))?;
+            for (index, states) in tick.cores.iter().enumerate() {
+                let core = u32::try_from(index).map_err(|_| Error::Bound("core index"))?;
                 for (state, active_ns) in states.iter().enumerate() {
+                    let frequency_khz = cores_frequency_khz(tick, index, state);
                     let state =
                         u32::try_from(state).map_err(|_| Error::Bound("core state index"))?;
-                    rows.push((tick.observation.publication, core, state, *active_ns));
+                    rows.push((
+                        tick.observation.publication,
+                        core,
+                        state,
+                        *active_ns,
+                        frequency_khz,
+                    ));
                 }
             }
         }
     }
-    let columns = columns!(rows;
+    let mut columns = columns!(rows;
         "publication" => |row| row.0,
         "core" => |row| row.1,
         "state" => |row| row.2,
         "active_ns" => |row| row.3,
     );
+    if window.system_captured() {
+        columns.extend(columns!(rows; "frequency_khz" => |row| row.4));
+    }
 
     Ok(DataFrame::new(rows.len(), columns)?)
+}
+
+/// The clock of a core's state, or none where its tick published no system readings or no
+/// clock for that state.
+fn cores_frequency_khz(tick: &StagedTick, core: usize, state: usize) -> Option<u32> {
+    tick.system.as_ref()?;
+
+    let frequency_khz = tick.core_state_khz[core][state];
+    if frequency_khz == 0 {
+        None
+    } else {
+        Some(frequency_khz)
+    }
 }
 
 pub(super) fn fans(window: &Window) -> Result<DataFrame> {
@@ -172,3 +196,7 @@ pub(super) fn coalitions(window: &Window) -> Result<DataFrame> {
 
     Ok(DataFrame::new(rows.len(), columns)?)
 }
+
+#[cfg(test)]
+#[path = "machine_tests.rs"]
+mod tests;

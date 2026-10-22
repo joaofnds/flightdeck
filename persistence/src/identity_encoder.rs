@@ -11,6 +11,7 @@ struct ProcessRow<'window> {
     pid: i32,
     process: Option<&'window collector::processes::Process>,
     identity: Option<&'window OwnedIdentity>,
+    gpu_ns: Option<u64>,
 }
 
 struct EventRow<'window> {
@@ -37,6 +38,9 @@ pub(crate) fn processes(window: &Window) -> Result<DataFrame> {
     ));
     if let Some(programs) = window.programs.as_deref() {
         columns.extend(identity_columns(&rows, programs, |row| row.identity));
+        if window.system_captured() {
+            columns.extend(columns!(rows; "gpu_ns" => |row| row.gpu_ns));
+        }
     }
 
     Ok(DataFrame::new(rows.len(), columns)?)
@@ -56,8 +60,11 @@ fn processes_rows(window: &Window) -> Vec<ProcessRow<'_>> {
     for tick in &window.ticks {
         if let Some(identities) = &tick.identities {
             assert!(window.programs.is_some());
+            if !tick.process_gpu_ns.is_empty() {
+                assert_eq!(tick.process_gpu_ns.len(), identities.processes.len());
+            }
             let mut measured = 0;
-            for identity in &identities.processes {
+            for (index, identity) in identities.processes.iter().enumerate() {
                 let process = if identity.usage == schema::availability::MEASURED {
                     let process = &tick.processes[measured];
                     assert_eq!(process.pid, identity.pid);
@@ -71,17 +78,20 @@ fn processes_rows(window: &Window) -> Vec<ProcessRow<'_>> {
                     pid: identity.pid,
                     process,
                     identity: Some(identity),
+                    gpu_ns: tick.process_gpu_ns.get(index).copied().flatten(),
                 });
             }
             assert_eq!(measured, tick.processes.len());
         } else {
             assert!(window.programs.is_none());
+            assert!(tick.process_gpu_ns.is_empty());
             for process in &tick.processes {
                 rows.push(ProcessRow {
                     tick,
                     pid: process.pid,
                     process: Some(process),
                     identity: None,
+                    gpu_ns: None,
                 });
             }
         }

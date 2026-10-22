@@ -9,17 +9,16 @@ const VALIDITY_BYTES_PER_ROW_MAX: usize = 8;
 const SORT_INDEX_BYTES_MAX: usize = 8;
 
 pub(super) fn frame(table: Table, window: &Window) -> Result<()> {
+    // A system column holds at most a 16-byte string view, beside the text it points to.
     let width = match table {
-        Table::Ticks => 224,
+        Table::Ticks => 224 + crate::schema::SYSTEM_FIELDS.len() * 16,
         Table::Memory => 153,
-        Table::Cpus => 28,
+        Table::Cpus | Table::CoreStates => 28,
         Table::Interfaces => 82,
         Table::GpuStates => 20,
-        Table::CoreStates => 24,
         Table::Fans => 16,
-        Table::Processes => 192,
+        Table::Processes | Table::Events => 200,
         Table::Coalitions => 88,
-        Table::Events => 200,
     };
     let overhead = ROW_REFERENCES_BYTES_MAX + VALIDITY_BYTES_PER_ROW_MAX + SORT_INDEX_BYTES_MAX;
     let fixed = rows(table, window)
@@ -82,14 +81,38 @@ pub(super) fn rows(table: Table, window: &Window) -> usize {
         .sum()
 }
 
+/// The bytes of the machine's fact texts a tick holds.
+fn frame_variable_system(tick: &StagedTick) -> usize {
+    let Some(system) = tick.system.as_ref() else {
+        return 0;
+    };
+
+    let machine = &system.machine;
+    let mut texts = [
+        machine.model,
+        machine.chip,
+        machine.architecture,
+        None,
+        None,
+    ];
+    if let Some(levels) = machine.levels {
+        texts[3] = Some(levels[0].name);
+        texts[4] = Some(levels[1].name);
+    }
+    texts.iter().flatten().map(|text| text.as_str().len()).sum()
+}
+
 fn frame_variable(table: Table, tick: &StagedTick, programs: Option<&Programs>) -> Result<usize> {
     match table {
-        Table::Ticks => Ok(tick
-            .disks
-            .as_ref()
-            .map(crate::disks::encode)
-            .transpose()?
-            .map_or(0, |text| text.len())),
+        Table::Ticks => {
+            let disks = tick
+                .disks
+                .as_ref()
+                .map(crate::disks::encode)
+                .transpose()?
+                .map_or(0, |text| text.len());
+            Ok(disks + frame_variable_system(tick))
+        }
         Table::Interfaces => Ok(tick
             .interfaces
             .iter()

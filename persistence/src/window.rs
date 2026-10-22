@@ -61,6 +61,7 @@ pub struct Window {
 pub(crate) struct StagedTick {
     pub battery: Option<collector::battery::BatteryReading>,
     pub disks: Option<collector::disks::DiskSnapshot>,
+    pub system: Option<collector::ring::SystemSnapshot>,
     pub observation: Observation,
     pub run_tick: u64,
     pub memory: Memory,
@@ -70,6 +71,8 @@ pub(crate) struct StagedTick {
     pub gpu_energy_nj: u64,
     pub gpu_active_ns: Vec<u64>,
     pub cores: Vec<Vec<u64>>,
+    /// The clock of each of `cores`' states in kHz, 0 where unknown.
+    pub core_state_khz: Vec<Vec<u32>>,
     pub smc_read: bool,
     pub power_watts: f32,
     pub soc_celsius: f32,
@@ -77,6 +80,9 @@ pub(crate) struct StagedTick {
     pub gpu_celsius: Option<f32>,
     pub fan_rpm: Vec<f32>,
     pub processes: Vec<collector::processes::Process>,
+    /// The GPU time of each process the identities name, in their order, or empty where the
+    /// tick published none.
+    pub process_gpu_ns: Vec<Option<u64>>,
     pub coalitions: Vec<Coalition>,
     pub processes_refused: u32,
     pub processes_gone: u32,
@@ -163,6 +169,10 @@ impl Window {
         self.ticks.iter().any(|tick| tick.disks.is_some())
     }
 
+    pub(crate) fn system_captured(&self) -> bool {
+        self.ticks.iter().any(|tick| tick.system.is_some())
+    }
+
     pub(crate) fn temperatures_captured(&self) -> bool {
         self.ticks
             .iter()
@@ -210,6 +220,10 @@ impl Window {
     ) -> Result<()> {
         if self.programs.is_some() {
             return Err(Error::Bound("mixed window identity mode"));
+        }
+
+        if !tick.process_gpu_ns().is_empty() {
+            return Err(Error::Bound("process GPU time without identities"));
         }
 
         self.push_tick_validate(observation, tick, events)?;
@@ -306,6 +320,12 @@ impl Window {
 
         if source.events.len() != events.len() {
             return Err(Error::Bound("identity event rows"));
+        }
+
+        if !tick.process_gpu_ns().is_empty() {
+            if tick.process_gpu_ns().len() != source.processes.len() {
+                return Err(Error::Bound("process GPU time rows"));
+            }
         }
 
         self.push_tick_validate_identity_rows(source)?;
@@ -431,12 +451,15 @@ fn validate_events(tick: &Tick, events: &[NumberedEvent<'_>]) -> Result<()> {
 impl StagedTick {
     fn copy(observation: &Observation, tick: &Tick, events: &[NumberedEvent<'_>]) -> Self {
         let mut cores = Vec::with_capacity(tick.core_count());
+        let mut core_state_khz = Vec::with_capacity(tick.core_count());
         for index in 0..tick.core_count() {
             cores.push(tick.core_active_ns(index).to_vec());
+            core_state_khz.push(tick.core_state_khz(index).to_vec());
         }
         Self {
             battery: tick.battery,
             disks: tick.disks,
+            system: tick.system,
             observation: *observation,
             run_tick: tick.run_tick,
             memory: tick.memory,
@@ -446,6 +469,7 @@ impl StagedTick {
             gpu_energy_nj: tick.gpu_energy_nj,
             gpu_active_ns: tick.gpu_active_ns.clone(),
             cores,
+            core_state_khz,
             smc_read: tick.smc_read,
             power_watts: tick.power_watts,
             soc_celsius: tick.soc_celsius,
@@ -453,6 +477,7 @@ impl StagedTick {
             gpu_celsius: tick.gpu_celsius,
             fan_rpm: tick.fan_rpm.clone(),
             processes: tick.processes.clone(),
+            process_gpu_ns: tick.process_gpu_ns().to_vec(),
             coalitions: tick.coalitions.clone(),
             processes_refused: tick.processes_refused,
             processes_gone: tick.processes_gone,
@@ -471,10 +496,12 @@ fn staging_bytes(tick: &Tick, event_count: usize) -> u64 {
         + tick.gpu_active_ns.len() * 8
         + tick.fan_rpm.len() * 4
         + tick.processes.len() * size_of::<collector::processes::Process>()
+        + size_of_val(tick.process_gpu_ns())
         + tick.coalitions.len() * size_of::<Coalition>()
         + event_count * size_of::<EventRecord>();
     for index in 0..tick.core_count() {
         bytes += size_of::<Vec<u64>>() + tick.core_active_ns(index).len() * 8;
+        bytes += size_of::<Vec<u32>>() + tick.core_state_khz(index).len() * 4;
     }
     collector::u64_from_usize(bytes)
 }

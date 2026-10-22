@@ -1,6 +1,8 @@
 use polars::prelude::*;
 
 use crate::encoder::columns;
+use crate::schema::SYSTEM_FIELDS;
+use crate::window::StagedTick;
 use crate::{Error, Result, Window};
 
 pub(super) fn frame(window: &Window) -> Result<DataFrame> {
@@ -52,6 +54,10 @@ pub(super) fn frame(window: &Window) -> Result<DataFrame> {
         ));
     }
 
+    if window.system_captured() {
+        columns.extend(frame_system(window));
+    }
+
     Ok(DataFrame::new(rows.len(), columns)?)
 }
 
@@ -83,4 +89,66 @@ fn frame_battery(window: &Window) -> Vec<Column> {
         "battery_current_ma" => |tick| tick.battery.and_then(|value| value.current_ma),
         "battery_adapter_watts" => |tick| tick.battery.and_then(|value| value.adapter_watts),
     )
+}
+
+/// The system columns in the order of `SYSTEM_FIELDS`, NULL in a tick that published none.
+fn frame_system(window: &Window) -> Vec<Column> {
+    let rows = &window.ticks;
+    let columns = columns!(rows;
+        "load_average_1" => |tick| load_average(tick, 0),
+        "load_average_5" => |tick| load_average(tick, 1),
+        "load_average_15" => |tick| load_average(tick, 2),
+        "open_files" => |tick| reading(tick).and_then(|value| value.open_files),
+        "open_files_limit" => |tick| reading(tick).and_then(|value| value.open_files_limit),
+        "thermal_pressure" => |tick| reading(tick).and_then(|value| value.thermal_pressure),
+        "gpu_memory_in_use_bytes" => |tick| {
+            reading(tick).and_then(|value| value.gpu_memory?.in_use_bytes)
+        },
+        "gpu_memory_allocated_bytes" => |tick| {
+            reading(tick).and_then(|value| value.gpu_memory?.allocated_bytes)
+        },
+        "boot_wall_ns" => |tick| reading(tick).and_then(|value| value.boot_wall_ns),
+        "machine_model" => |tick| text(machine(tick).and_then(|value| value.model.as_ref())),
+        "machine_chip" => |tick| text(machine(tick).and_then(|value| value.chip.as_ref())),
+        "machine_architecture" => |tick| {
+            text(machine(tick).and_then(|value| value.architecture.as_ref()))
+        },
+        "machine_cpu_cores" => |tick| machine(tick).and_then(|value| value.cpu_cores),
+        "machine_gpu_cores" => |tick| machine(tick).and_then(|value| value.gpu_cores),
+        "machine_memory_bytes" => |tick| machine(tick).and_then(|value| value.memory_bytes),
+        "machine_performance_level0_name" => |tick| text(level(tick, 0).map(|value| &value.name)),
+        "machine_performance_level0_logical_cpus" => |tick| {
+            level(tick, 0).map(|value| value.logical_cpus)
+        },
+        "machine_performance_level1_name" => |tick| text(level(tick, 1).map(|value| &value.name)),
+        "machine_performance_level1_logical_cpus" => |tick| {
+            level(tick, 1).map(|value| value.logical_cpus)
+        },
+    );
+
+    assert_eq!(columns.len(), SYSTEM_FIELDS.len());
+    for (column, (name, _kind)) in columns.iter().zip(SYSTEM_FIELDS) {
+        assert_eq!(column.name().as_str(), name);
+    }
+    columns
+}
+
+fn reading(tick: &StagedTick) -> Option<&collector::system::SystemReading> {
+    tick.system.as_ref().map(|system| &system.reading)
+}
+
+fn machine(tick: &StagedTick) -> Option<&collector::system::MachineFacts> {
+    tick.system.as_ref().map(|system| &system.machine)
+}
+
+fn load_average(tick: &StagedTick, index: usize) -> Option<f64> {
+    reading(tick)?.load_average.map(|averages| averages[index])
+}
+
+fn level(tick: &StagedTick, index: usize) -> Option<&collector::system::PerformanceLevel> {
+    machine(tick)?.levels.as_ref().map(|levels| &levels[index])
+}
+
+fn text(fact: Option<&collector::system::FactText>) -> Option<&str> {
+    fact.map(collector::system::FactText::as_str)
 }

@@ -171,44 +171,46 @@ pub fn table_columns(table: Table, window: &Window) -> String {
     };
 
     let mut columns = (*columns).to_owned();
-    if window.battery_captured() {
-        if matches!(table, Table::Ticks) {
-            for (name, kind) in crate::schema::BATTERY_FIELDS {
-                columns.push_str(", ");
-                columns.push_str(name);
-                columns.push(' ');
-                columns.push_str(kind);
-            }
+    if matches!(table, Table::Ticks) {
+        if window.battery_captured() {
+            table_columns_push(&mut columns, &crate::schema::BATTERY_FIELDS);
         }
-    }
-
-    if window.disks_captured() {
-        if matches!(table, Table::Ticks) {
+        if window.disks_captured() {
             columns.push_str(", physical_disks VARCHAR");
         }
-    }
-
-    if window.temperatures_captured() {
-        if matches!(table, Table::Ticks) {
-            for (name, kind) in crate::schema::TEMPERATURE_FIELDS {
-                columns.push_str(", ");
-                columns.push_str(name);
-                columns.push(' ');
-                columns.push_str(kind);
-            }
+        if window.temperatures_captured() {
+            table_columns_push(&mut columns, &crate::schema::TEMPERATURE_FIELDS);
+        }
+        if window.system_captured() {
+            table_columns_push(&mut columns, &crate::schema::SYSTEM_FIELDS);
         }
     }
 
     if window.programs.is_some() {
         if matches!(table, Table::Processes | Table::Events) {
-            for (name, kind) in crate::schema::IDENTITY_FIELDS {
-                columns.push_str(", ");
-                columns.push_str(name);
-                columns.push(' ');
-                columns.push_str(kind);
-            }
+            table_columns_push(&mut columns, &crate::schema::IDENTITY_FIELDS);
+        }
+    }
+
+    if window.system_captured() {
+        let field = match table {
+            Table::CoreStates => Some(crate::schema::CORE_STATE_FREQUENCY_FIELD),
+            Table::Processes if window.programs.is_some() => Some(crate::schema::PROCESS_GPU_FIELD),
+            _ => None,
+        };
+        if let Some(field) = field {
+            table_columns_push(&mut columns, &[field]);
         }
     }
 
     columns
+}
+
+fn table_columns_push(columns: &mut String, fields: &[(&str, &str)]) {
+    for (name, kind) in fields {
+        columns.push_str(", ");
+        columns.push_str(name);
+        columns.push(' ');
+        columns.push_str(kind);
+    }
 }
