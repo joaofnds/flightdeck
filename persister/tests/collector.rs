@@ -13,6 +13,7 @@ mod tests {
     use std::sync::OnceLock;
     use std::time::Duration;
 
+    use collector::recording::STOP_LIMIT_SECONDS;
     use collector::ring::{Found, Place, Reader};
 
     unsafe extern "C" {
@@ -150,14 +151,19 @@ mod tests {
             assert_eq!(0, unsafe { kill(i32::try_from(pid).unwrap(), SIGTERM) });
         }
 
+        /// Waits for the collector to exit, for as long as it may take once asked to stop and a
+        /// margin for the alarm that ends it there. Its drain waits on the disk, and so on every
+        /// other process writing to it, so a shorter wait fails a collector that keeps its limit.
         fn finish(&mut self) -> Output {
-            for _attempt in 0..2_000 {
+            const FINISH_POLLS: u32 = (STOP_LIMIT_SECONDS + 30) * 100; // 10 ms apart
+
+            for _attempt in 0..FINISH_POLLS {
                 if self.0.as_mut().unwrap().try_wait().unwrap().is_some() {
                     return self.0.take().unwrap().wait_with_output().unwrap();
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
-            panic!("collector did not finish its interrupted recording");
+            panic!("collector did not finish its interrupted recording within its stop limit");
         }
     }
 
