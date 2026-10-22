@@ -365,12 +365,10 @@ impl Store {
         Self::validate_link(root, manifest, marker)
     }
 
+    /// The marker's own open already checked the inode both names share, so the metadata name
+    /// is checked without following it and without opening the inode a second time.
     fn validate_link(root: &Path, manifest: &Manifest, marker: &File) -> io::Result<()> {
-        let metadata = private::open_private_file(
-            &root.join(&manifest.data_directory).join("metadata"),
-            false,
-        )?;
-        let source = metadata.metadata()?;
+        let source = fs::symlink_metadata(root.join(&manifest.data_directory).join("metadata"))?;
         let target = marker.metadata()?;
         if source.dev() != target.dev() {
             return Err(invalid("marker device mismatch"));

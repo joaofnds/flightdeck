@@ -926,6 +926,25 @@ mod tests {
     }
 
     #[test]
+    fn rereading_a_window_whose_metadata_is_a_symbolic_link_refuses_it() {
+        // Goal: a link to the marker cannot stand in for the window's own metadata hard link.
+        // Method: replace the window's metadata with a symbolic link to its marker and reread.
+        let recording = Recording::new();
+        let store = Store::open(&recording.0).unwrap();
+        let original = manifest(identity(&store));
+        let pending = stage(&store, &original);
+        let committed = store.commit(pending, original).unwrap();
+        let marker = store.marker_path(&committed.identity);
+        let metadata = recording.0.join(&committed.data_directory).join("metadata");
+        fs::remove_file(&metadata).unwrap();
+        std::os::unix::fs::symlink(&marker, &metadata).unwrap();
+
+        let result = persistence::reread_committed(&recording.0, &marker);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn rereading_a_marker_refuses_its_data_directory_before_following_it() {
         // Goal: a reread follows a marker's data directory only where the window's identity
         // puts it, since a reader also rereads markers no full read has accepted.
