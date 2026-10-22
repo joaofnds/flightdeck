@@ -122,6 +122,7 @@ pub struct LiveDashboard {
     pub native: crate::native_workflows::NativeControls,
     pub(crate) inspection_focus: Option<gpui::FocusHandle>,
     pub(crate) list: ListState,
+    pub(crate) wheel_hold: Rc<crate::live_wheel::WheelHold>,
     last_status: String,
     rendered_source: Option<crate::live_source_mode::SourceMode>,
     /// The reports of the collector this app started, as of the last tick that changed them.
@@ -289,6 +290,7 @@ impl LiveDashboard {
             native: crate::native_workflows::NativeControls::default(),
             inspection_focus: None,
             list: ListState::new(0, ListAlignment::Top, px(100.0)),
+            wheel_hold: Rc::default(),
             last_status: String::new(),
             rendered_source: None,
             self_reports: Rc::default(),
@@ -919,6 +921,7 @@ impl LiveDashboard {
             .flex_col()
             .flex_1()
             .min_h_0()
+            .child(self.wheel_hold(cx))
             .child(body)
     }
 }

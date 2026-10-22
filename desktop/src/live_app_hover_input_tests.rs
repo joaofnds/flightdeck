@@ -256,6 +256,31 @@ fn scrolled_app_details_keep_the_graph_under_a_stationary_pointer(cx: &mut TestA
     harness.teardown();
 }
 
+#[gpui::test]
+fn a_wheel_before_the_next_frame_scrolls_from_where_a_hover_left_the_graph(
+    cx: &mut TestAppContext,
+) {
+    // Goal: the wheel moves the page by its own distance even when a hover's end moved the page's
+    // rows since the window last drew, so the graph never jumps as the pointer crosses it.
+    // Method: end a hover and turn the wheel in one turn, before the window draws, then compare
+    // the graph's position with where the hover held it.
+    let mut harness = AppHoverHarness::setup(cx);
+    harness.driver.scroll_to_history();
+    harness.driver.hover_previous_second();
+    harness.driver.deliver_historical_details();
+    let hovered = harness.driver.chart_bounds();
+
+    harness
+        .driver
+        .leave_and_wheel_before_drawing(gpui::px(24.0));
+
+    assert_eq!(
+        harness.driver.chart_bounds().top(),
+        hovered.top() - gpui::px(24.0)
+    );
+    harness.teardown();
+}
+
 struct AppHoverHarness {
     driver: AppHoverDriver,
 }
@@ -537,6 +562,29 @@ impl AppHoverDriver {
         let plot = crate::charts::plot_bounds(self.chart_bounds());
         assert!(plot.top() >= gpui::px(0.0));
         assert!(plot.bottom() <= gpui::px(900.0));
+    }
+
+    /// Moves the pointer off the graph's plot onto its card and turns the wheel there by
+    /// `distance` in the same turn, so the window draws neither before the wheel.
+    fn leave_and_wheel_before_drawing(&mut self, distance: gpui::Pixels) {
+        let card = self.chart_bounds();
+        let position = gpui::point(card.left() + gpui::px(2.0), card.center().y);
+        self.context.update(|window, cx| {
+            let moved = gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                position,
+                pressed_button: None,
+                modifiers: Modifiers::none(),
+            });
+            window.dispatch_event(moved, cx);
+            let wheel = gpui::PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
+                position,
+                delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.0), -distance)),
+                modifiers: Modifiers::none(),
+                touch_phase: gpui::TouchPhase::Moved,
+            });
+            window.dispatch_event(wheel, cx);
+        });
+        self.context.run_until_parked();
     }
 
     fn leave_and_scroll_to_end(&mut self) {

@@ -132,6 +132,7 @@ impl LiveDashboard {
     }
 
     pub(crate) fn splice_section_rows(&self, previous: usize) {
+        self.wheel_hold.rows_rebuilt();
         self.list.splice_focusable(
             0..previous,
             self.rows.iter().map(|row| {
@@ -146,6 +147,7 @@ impl LiveDashboard {
     pub(crate) fn replace_rows(&mut self, rows: Vec<Row>) -> ListOffset {
         let splice =
             crate::live_row_splice::row_splice(&self.rows, &rows, self.list.logical_scroll_top());
+        self.wheel_hold.rows_rebuilt();
         self.rows = rows;
         self.list.splice_focusable(
             splice.source,

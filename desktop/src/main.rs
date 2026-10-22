@@ -44,6 +44,7 @@ mod live_system;
 mod live_tables;
 mod live_timer;
 mod live_views;
+mod live_wheel;
 mod menu_bar;
 mod native_input;
 mod native_text;
