@@ -36,15 +36,6 @@ const DEFAULT_RESCAN_INTERVAL: Duration = Duration::ZERO;
 const DEFAULT_RING: &str = "flightdeck";
 /// The ticks the ring holds, two minutes of them, so a reader that stops for less loses none.
 const RING_SLOTS: u64 = 120;
-/// How long the persister may take to seal what the collector left, once the collector finishes.
-const PERSISTER_FINISH_LIMIT: Duration = Duration::from_mins(2);
-// A collector asked to stop ends its tick and waits out the persister well before its deadline.
-const _: () = assert!(
-    PERSISTER_FINISH_LIMIT.as_secs() + 30
-        <= Duration::from_secs(1)
-            .saturating_mul(recording::STOP_LIMIT_SECONDS)
-            .as_secs()
-);
 
 unsafe extern "C" {
     fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: c_int) -> c_int;
@@ -525,7 +516,7 @@ impl Persistence {
         let begin = timebase.nanoseconds(clock::now())?;
         let sampled = self.sample(out)?.map(|cost| cost.cpu_ns);
         let finished = match &mut self.child {
-            Some(child) => Some(child.finish(PERSISTER_FINISH_LIMIT)?),
+            Some(child) => Some(child.finish(recording::PERSISTER_FINISH_LIMIT)?),
             None => None,
         };
         let after = Snapshot::take(meter, timebase)?;

@@ -31,6 +31,13 @@ pub struct RecordingHarness {
 static NEXT: AtomicU64 = AtomicU64::new(0);
 static SPAWNS: Mutex<()> = Mutex::new(());
 
+/// How often a test looks again at the persister it waits for.
+const POLL_INTERVAL: Duration = Duration::from_millis(10);
+/// How long a test waits for the persister to seal a window. The persister promises no limit on
+/// a seal, which waits on every other process using the CPU and the disk, and its longest
+/// measured wait for one was 21 seconds.
+const SEAL_LIMIT: Duration = Duration::from_secs(120);
+
 #[derive(Clone, Copy)]
 pub enum SourceFault {
     Unsupported,
@@ -582,15 +589,15 @@ impl RecordingHarness {
     }
 
     fn wait_for_marker(&self, run: &str, window: u64) {
-        let deadline = Instant::now() + Duration::from_secs(20);
-        while !self.marker(run, window).try_exists().unwrap() {
-            assert!(
-                Instant::now() < deadline,
-                "seal missing: {}",
-                self.marker(run, window).display()
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        let marker = self.marker(run, window);
+
+        let sealed = wait_until(SEAL_LIMIT, || marker.try_exists().unwrap());
+
+        assert!(
+            sealed,
+            "seal missing after {SEAL_LIMIT:?}: {}",
+            marker.display()
+        );
     }
 }
 
@@ -784,16 +791,39 @@ fn spawns() -> MutexGuard<'static, ()> {
     }
 }
 
+/// Waits for the persister to exit, for as long as the collector gives it to finish.
 fn wait_status(child: &mut Child) -> std::process::ExitStatus {
-    for _attempt in 0..2_000 {
-        if let Some(status) = child.try_wait().unwrap() {
-            return status;
-        }
-        std::thread::sleep(Duration::from_millis(10));
+    let limit = collector::recording::PERSISTER_FINISH_LIMIT;
+    let mut status = None;
+
+    let exited = wait_until(limit, || {
+        status = child.try_wait().unwrap();
+        status.is_some()
+    });
+
+    if !exited {
+        child.kill().unwrap();
+        child.wait().unwrap();
+        panic!("persister did not finish within its finish limit, {limit:?}");
     }
-    child.kill().unwrap();
-    child.wait().unwrap();
-    panic!("persister did not finish within its test drain bound");
+    status.unwrap()
+}
+
+/// Polls `ready` every `POLL_INTERVAL` until it holds or `limit` has passed, and tells
+/// whether it held.
+fn wait_until(limit: Duration, mut ready: impl FnMut() -> bool) -> bool {
+    let start = Instant::now();
+    let attempts = limit.as_millis().div_ceil(POLL_INTERVAL.as_millis()) + 1;
+    for _attempt in 0..attempts {
+        if ready() {
+            return true;
+        }
+        if start.elapsed() >= limit {
+            return false;
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+    false
 }
 
 fn record_legacy_tail(place: &Place) -> String {

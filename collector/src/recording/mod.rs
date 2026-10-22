@@ -16,11 +16,21 @@ pub const BUILD: u64 = include!(concat!(env!("OUT_DIR"), "/build"));
 /// collector still finishing lets go of its recording within this many seconds.
 pub const STOP_LIMIT_SECONDS: u32 = 150;
 
+/// How long the persister may take to seal what the collector left, once the collector finishes.
+pub const PERSISTER_FINISH_LIMIT: Duration = Duration::from_mins(2);
+// A collector asked to stop ends its tick and waits out the persister well before its deadline.
+const _: () = assert!(
+    PERSISTER_FINISH_LIMIT.as_secs() + 30
+        <= Duration::from_secs(1)
+            .saturating_mul(STOP_LIMIT_SECONDS)
+            .as_secs()
+);
+
 use std::ffi::{c_char, c_int, c_void};
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::clock::{self, Timebase};
 use crate::ring::{Identity, LockedPlace, ObservationTimes, Place, RunIdentity, Shape, Writer};
@@ -536,7 +546,7 @@ mod tests {
         // Goal: a wall clock outside the stored range remains explicitly unavailable.
         // Method: inject a pre-epoch clock and count allocations on the refused snapshot.
         let timebase = Timebase::read().unwrap();
-        let wall = UNIX_EPOCH - std::time::Duration::from_secs(1);
+        let wall = UNIX_EPOCH - Duration::from_secs(1);
 
         let calls = allocator_calls_in(|| {
             assert_eq!(
