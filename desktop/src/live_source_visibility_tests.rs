@@ -17,6 +17,21 @@ fn a_hidden_window_leaves_its_reader_no_page_to_read(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_window_opened_hidden_leaves_its_reader_no_page_to_read(cx: &mut TestAppContext) {
+    // Goal: a window macOS hides from the start, behind other windows or on a sleeping display,
+    // reads no page, though macOS reports no change of its visibility.
+    // Method: open a window that macOS hides before the dashboard observes it, step its
+    // dashboard, and step the reader's mailbox.
+    let mut window = VisibilityHarness::open_unobserved(cx);
+    window.report(WindowVisibility::Hidden);
+
+    window.observe();
+    window.tick();
+
+    assert_eq!(window.reader.receive(), (Received::Continued, false));
+}
+
+#[gpui::test]
 fn a_window_shown_again_asks_its_reader_for_its_page(cx: &mut TestAppContext) {
     // Goal: a window shown again reads its page in the reader's next step, so it shows the
     // latest readings rather than those of the second it was hidden at.
@@ -82,21 +97,38 @@ impl VisibilityHarness {
     /// Opens a live window over a reader the test steps, and lets the reader take the window's
     /// first request, as a reader that reads the page does.
     fn open(cx: &TestAppContext) -> Self {
+        let mut harness = Self::open_unobserved(cx);
+        harness.observe();
+
+        harness
+    }
+
+    /// Opens a live window whose dashboard does not yet observe its visibility, and lets the
+    /// reader take the window's first request.
+    fn open_unobserved(cx: &TestAppContext) -> Self {
         let cx = cx.clone();
         let mut reader = SnapshotReader::new();
         let worker = reader.hand_over();
         let window = cx
             .update(|cx| {
-                cx.open_window(WindowOptions::default(), |window, cx| {
-                    let dashboard = cx.new(|_| LiveDashboard::new(worker, "overview".into(), None));
-                    crate::live_dashboard::observe_visibility(&dashboard, window, cx);
-                    dashboard
+                cx.open_window(WindowOptions::default(), |_, cx| {
+                    cx.new(|_| LiveDashboard::new(worker, "overview".into(), None))
                 })
             })
             .unwrap();
         assert_eq!(reader.receive(), (Received::Taken, true));
 
         Self { cx, window, reader }
+    }
+
+    /// Lets the window's dashboard observe whether macOS presents the window.
+    fn observe(&mut self) {
+        let dashboard = self.window.entity(&self.cx).unwrap();
+        self.cx
+            .update_window(self.window.into(), |_, window, cx| {
+                crate::live_dashboard::observe_visibility(&dashboard, window, cx);
+            })
+            .unwrap();
     }
 
     /// Changes whether macOS presents the window, then steps its dashboard as its timer does.

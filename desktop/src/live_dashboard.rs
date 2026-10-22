@@ -38,7 +38,11 @@ pub(crate) fn observe_visibility(
     window: &mut Window,
     cx: &mut gpui::App,
 ) {
-    dashboard.update(cx, |_, cx| {
+    dashboard.update(cx, |dashboard, cx| {
+        // macOS reports only changes, so a window it hides from the start would read its page
+        // until it first showed and hid again.
+        dashboard.presence = dashboard.presence.reported(window.is_visible());
+
         cx.observe_window_visibility(window, |dashboard, visibility, _, cx| {
             dashboard.presence = dashboard.presence.reported(visibility.is_visible());
             cx.notify();
