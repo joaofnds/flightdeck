@@ -1,6 +1,0 @@
-# Both workspaces, the one here and desktop/, read this file, since Cargo looks for it in
-# every directory above the one it runs in. Compiling the native query engine and the UI
-# toolkit on all eighteen cores of an M5 Pro keeps its fans running and its case hot, so a
-# build takes as many jobs as the Mac has super cores.
-[build]
-jobs = 6
