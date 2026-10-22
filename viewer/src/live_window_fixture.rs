@@ -29,6 +29,28 @@ pub fn saved_with_apps() -> Fixture {
     fixture
 }
 
+/// Sealed second 1060, then 1930 and 1931, then 1990, each run minute sealed with what the
+/// persister keeps of its Apps. 1931's context runs on to 1990, so its charts read 1060 in the
+/// lead-in before the 900 seconds the context holds.
+pub fn saved_with_apps_after_a_lead_in() -> Fixture {
+    const { assert!(1060 + crate::session::DETAIL_SECONDS <= 1990) };
+    const { assert!(1990 < 1060 + crate::CHARTED_SECONDS) };
+    const { assert!(1990 <= 1931 + crate::CONTEXT_AFTER_SECONDS) };
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(1060);
+    fixture.seal_minute_derived(0, &crate::SealedApps::default());
+    fixture.skip_run_ticks(869);
+    fixture.publish_with_system_rows(1930);
+    fixture.publish_with_system_rows(1931);
+    fixture.seal_minute_derived(14, &crate::SealedApps::default());
+    fixture.skip_run_ticks(58);
+    fixture.publish_with_system_rows(1990);
+    fixture.seal_minute_derived(15, &crate::SealedApps::default());
+    forget_live_runs(&fixture.root);
+
+    fixture
+}
+
 /// The key a window holds the observation a session response names as selected under.
 pub fn observation_key(selected: &Value) -> ObservationKey {
     ObservationKey {

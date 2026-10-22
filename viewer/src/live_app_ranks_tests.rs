@@ -4,6 +4,7 @@ use super::*;
 use crate::live::identity_fixture::Fixture;
 use crate::live::window::fixture::{
     damage, observation_key, saved_in_two_minutes, saved_only, saved_with_apps,
+    saved_with_apps_after_a_lead_in,
 };
 
 #[test]
@@ -43,6 +44,33 @@ fn rank_window_takes_the_ranks_a_window_keeps_without_a_replay() {
     let fixture = saved_with_apps();
     let mut session = LiveSession::open(&fixture.root).unwrap();
     let selected = session.select(1001, 0).unwrap()["selected"].clone();
+    let expected = selected_ranks(&session);
+    let before = session.history.as_ref().unwrap().source_reads.get();
+
+    session.rank_window().unwrap();
+
+    assert_eq!(session.history.as_ref().unwrap().source_reads.get(), before);
+    assert_eq!(
+        summary(
+            session
+                .app_ranks()
+                .get(&observation_key(&selected))
+                .unwrap()
+        ),
+        expected
+    );
+}
+
+#[test]
+fn rank_window_takes_the_ranks_a_window_keeps_after_a_lead_in_without_a_replay() {
+    // Goal: the minute a selected second's charts read before its context for their first
+    // rates costs the window's ranks no replay.
+    // Method: select a second whose charts reach a saved second before its context, every
+    // minute keeping its ranks, read its own ranks, rank its window, then count the saved
+    // source reads and find its ranks.
+    let fixture = saved_with_apps_after_a_lead_in();
+    let mut session = LiveSession::open(&fixture.root).unwrap();
+    let selected = session.select(1931, 0).unwrap()["selected"].clone();
     let expected = selected_ranks(&session);
     let before = session.history.as_ref().unwrap().source_reads.get();
 

@@ -361,13 +361,12 @@ impl LiveSession {
                 .ok_or(Error::Bound("selected context point"))?
                 .clone();
         }
+        let trends = response["trends"]
+            .as_array()
+            .ok_or(Error::Bound("CPU selected context"))?;
+        let held = ContextRange::ending_at(selection.context_last_second())?.held_points(trends);
         let mut context = Vec::new();
-        crate::cpu_history::context(
-            response["trends"]
-                .as_array()
-                .ok_or(Error::Bound("CPU selected context"))?,
-            &mut context,
-        )?;
+        crate::cpu_history::context(held, &mut context)?;
         self.selected_context = context;
         self.context_last_second = Some(selection.context_last_second());
 

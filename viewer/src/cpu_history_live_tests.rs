@@ -419,3 +419,19 @@ fn measures_cpu_history_restoration_projection_and_serialization_separately() {
         "payload_bytes":serde_json::to_vec(output.as_ref().unwrap()).unwrap().len()})
     );
 }
+
+#[test]
+fn reads_cpu_history_of_a_selected_second_whose_charts_reach_a_saved_lead_in() {
+    // Goal: a selected second whose charts read a saved second before its context still shows
+    // its CPU history, which covers only the context's 900 seconds.
+    // Method: select a second whose charts reach a saved second before its context, then read
+    // the range and the readings its CPU history covers.
+    let fixture = window::fixture::saved_with_apps_after_a_lead_in();
+    let mut session = LiveSession::open(&fixture.root).unwrap();
+    session.select(1931, 0).unwrap();
+
+    let history = session.cpu_history(0).unwrap();
+
+    assert_eq!(history["first_ns"], 1091 * NANOSECONDS_PER_SECOND);
+    assert_eq!(history["observations"].as_array().unwrap().len(), 3);
+}
