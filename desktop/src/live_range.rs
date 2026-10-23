@@ -4,7 +4,7 @@ use gpui::{
 
 use crate::chart_axes::TimeWindow;
 use crate::charts::{self, BLUE};
-use crate::live_dashboard::{Drag, LiveDashboard};
+use crate::live_dashboard::{Drag, LiveDashboard, PinnedHover};
 use crate::live_hover::Origin;
 use crate::time_range::Range;
 
@@ -110,7 +110,7 @@ impl LiveDashboard {
         cx.notify();
         if click(drag.pressed_at, released_at) {
             match self.drag_end_hovered(chart) {
-                Some(target) => self.pin_target(target, cx),
+                Some(hovered) => self.pin_hovered(hovered, cx),
                 None => self.pin_second(drag.from, cx),
             }
         } else {
@@ -122,7 +122,13 @@ impl LiveDashboard {
 
     /// The reading the pointer's hover of `chart` shows, which is the exact observation under
     /// it, as on the CPU history where one second holds several.
-    fn drag_end_hovered(&self, chart: &str) -> Option<crate::live_hover::Target> {
+    fn drag_end_hovered(&self, chart: &str) -> Option<PinnedHover> {
+        if let Some(hovered) = self.pinned_hover() {
+            if hovered.source.as_ref() == chart {
+                return Some(hovered.clone());
+            }
+            return None;
+        }
         let preview = self.preview.as_ref()?;
         if preview.origin != Origin::Pointer {
             return None;
@@ -131,7 +137,10 @@ impl LiveDashboard {
             return None;
         }
 
-        Some(preview.target.clone())
+        Some(PinnedHover {
+            source: preview.source.clone(),
+            target: preview.target.clone(),
+        })
     }
 
     /// The second at the pointer's horizontal place across the plot, held to the plot's edges.

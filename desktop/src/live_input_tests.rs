@@ -571,9 +571,10 @@ fn a_pinned_second_draws_its_cursor_on_every_chart(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn the_reply_to_a_pin_keeps_the_pinned_second_against_a_hover(cx: &mut TestAppContext) {
-    // Goal: once the reader answers for the pinned second, the page still shows it and marks
-    // it, whatever the pointer hovers. Method: pin 999, hand the page the reader's answer for
-    // 999, hover 1000, and read the second the page shows and where each chart's cursor is.
+    // Goal: once the reader answers for the pinned second, the page still shows it and every
+    // chart but the hovered one marks it. Method: pin 999, hand the page the reader's answer
+    // for 999, hover 1000 on the GPU power chart, and read the second the page shows and where
+    // each chart's cursor is.
     let mut harness = InputHarness::setup(cx);
     harness.driver.seed_repeated_second();
     harness.driver.pin_previous_second();
@@ -585,7 +586,131 @@ fn the_reply_to_a_pin_keeps_the_pinned_second_against_a_hover(cx: &mut TestAppCo
     harness.driver.render_pending();
 
     assert_eq!(harness.driver.shown_second(), Some(999));
+    harness.driver.assert_energy_cursor_tracks_plot();
+    harness
+        .driver
+        .assert_cursor_tracks_selected_second("live-gpu-power-plot");
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_click_leaves_the_clicked_charts_tooltip_shown(cx: &mut TestAppContext) {
+    // Goal: pinning a second keeps the tooltip the pointer showed before the click. Method:
+    // hover and click 999 on the energy chart, then look for that chart's tooltip.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.seed_repeated_second();
+
+    harness.driver.pin_previous_second();
+    harness.driver.render_pending();
+
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("chart-tooltip:live-energy")
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn hovering_a_chart_while_a_second_is_pinned_shows_its_reading_in_the_tooltip(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a pin leaves the hovered chart its tooltip, which reads the hovered second while
+    // the page keeps the pinned one. Method: pin 999, at 90 W, hover 1000, at 8 W, on the same
+    // chart, then read its tooltip, the GPU power chart's and the second the page shows.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.seed_repeated_second();
+    harness.driver.pin_previous_second();
+
+    harness.driver.hover_selected_second_on("live-energy-plot");
+    harness.driver.render_pending();
+
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("chart-tooltip-row:live-energy:0:Whole machine:8 W")
+    );
+    assert!(
+        !harness
+            .driver
+            .reading_is_visible("chart-tooltip:live-gpu-power")
+    );
+    assert_eq!(harness.driver.pinned_second(), Some(999));
+    assert!(harness.driver.reading_is_visible("60 °C"));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn leaving_a_chart_while_a_second_is_pinned_returns_its_cursor_to_the_pin(cx: &mut TestAppContext) {
+    // Goal: once the pointer leaves a chart it hovered during a pin, the chart drops its
+    // tooltip and marks the pinned second again. Method: pin 999, hover 1000 on the GPU power
+    // chart, move onto the sidebar, then read that chart's cursor and look for its tooltip.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.seed_repeated_second();
+    harness.driver.pin_previous_second();
+    harness
+        .driver
+        .hover_selected_second_on("live-gpu-power-plot");
+
+    harness
+        .driver
+        .leave_plot("live-gpu-power-plot", PlotExit::Sidebar);
+    harness.driver.render_pending();
+
     harness.driver.assert_cursors_track_previous_second();
+    assert!(
+        !harness
+            .driver
+            .reading_is_visible("chart-tooltip:live-gpu-power")
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn leaving_the_window_while_a_second_is_pinned_returns_the_chart_to_the_pin(
+    cx: &mut TestAppContext,
+) {
+    // Goal: the pointer leaving the window ends a chart's hover during a pin, as leaving the
+    // chart does, since the window keeps the pointer's last place. Method: pin 999, hover 1000
+    // on the GPU power chart, leave the window, then read that chart's cursor and look for its
+    // tooltip.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.seed_repeated_second();
+    harness.driver.pin_previous_second();
+    harness
+        .driver
+        .hover_selected_second_on("live-gpu-power-plot");
+
+    harness.driver.leave_window("live-gpu-power-plot");
+
+    harness.driver.assert_cursors_track_previous_second();
+    assert!(
+        !harness
+            .driver
+            .reading_is_visible("chart-tooltip:live-gpu-power")
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn clicking_another_second_while_one_is_pinned_pins_the_hovered_reading(cx: &mut TestAppContext) {
+    // Goal: a click during a pin moves the pin to the reading the chart's hover shows, and the
+    // chart goes on showing it. Method: pin 999, hover 1000 on the same chart, click there,
+    // then read the pinned second and look for that chart's tooltip.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.seed_repeated_second();
+    harness.driver.pin_previous_second();
+    harness.driver.hover_selected_second_on("live-energy-plot");
+
+    harness.driver.click_selected_second_on("live-energy-plot");
+    harness.driver.render_pending();
+
+    assert_eq!(harness.driver.pinned_second(), Some(1000));
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("chart-tooltip:live-energy")
+    );
     harness.teardown();
 }
 
@@ -1342,6 +1467,22 @@ impl InputDriver {
         self.hover_position(position);
     }
 
+    fn click_selected_second_on(&mut self, selector: &'static str) {
+        let position = self.second_position(selector, 899.5 / 900.0);
+        self.context.simulate_click(position, Modifiers::none());
+    }
+
+    fn leave_window(&mut self, selector: &'static str) {
+        let plot = self.plot_bounds(selector);
+        self.context.simulate_event(gpui::MouseExitEvent {
+            position: plot.center(),
+            pressed_button: None,
+            modifiers: Modifiers::none(),
+        });
+        self.context.update(|window, _| window.refresh());
+        self.context.run_until_parked();
+    }
+
     fn hover_previous_second_on(&mut self, selector: &'static str) {
         let position = self.second_position(selector, 898.5 / 900.0);
         self.hover_position(position);
@@ -1452,6 +1593,10 @@ impl InputDriver {
 
     fn assert_cursor_tracks_previous_second(&mut self, selector: &'static str) {
         self.assert_cursor_tracks_fraction(selector, 898.0 / 900.0);
+    }
+
+    fn assert_cursor_tracks_selected_second(&mut self, selector: &'static str) {
+        self.assert_cursor_tracks_fraction(selector, 899.0 / 900.0);
     }
 
     fn assert_cursor_tracks_fraction(&mut self, selector: &'static str, fraction: f32) {

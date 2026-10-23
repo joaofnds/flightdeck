@@ -145,18 +145,24 @@ impl LiveDashboard {
 
     /// Where the cursor stands across `panel`: at the hovered second, or else at the pinned one.
     fn chart_cursor_fraction(&self, panel: &Panel) -> Option<f32> {
-        let second = match &self.chart_hover {
-            Some(hover) => hover.second,
-            None => self.pinned_second()?,
+        let hovered = self.chart_pinned_hover(panel);
+        let second = if let Some(hovered) = hovered {
+            hovered.second
+        } else {
+            match &self.chart_hover {
+                Some(hover) => hover.second,
+                None => self.pinned_second()?,
+            }
         };
+        let target = self.chart_target(panel);
         if self.store_view_draws(panel) {
-            if let Some(index) = self.store_view_index(panel) {
+            if let Some(index) = self.store_view_index(panel, target) {
                 return panel.positions.as_ref()?.get(index).copied();
             }
             return self.view_window()?.fraction_of(second);
         }
         let snapshot = self.snapshot.as_deref()?;
-        if let Some(target) = self.reading_target() {
+        if let Some(target) = target {
             if let Some(index) = target_index(panel, snapshot, target) {
                 if let Some(position) = panel.positions.as_ref()?.get(index) {
                     return Some(*position);
@@ -178,9 +184,28 @@ impl LiveDashboard {
         self.snapshot.as_ref()?.process_history.as_ref()?.all()
     }
 
+    /// The reading the pointer hovers on `panel` while a second is pinned, which no other chart
+    /// shows.
+    fn chart_pinned_hover(&self, panel: &Panel) -> Option<&crate::live_hover::Target> {
+        let hovered = self.pinned_hover()?;
+        if hovered.source.as_ref() != panel.id {
+            return None;
+        }
+
+        Some(&hovered.target)
+    }
+
+    /// The reading `panel` shows: the one its hover shows while a second is pinned, and
+    /// otherwise the page's.
+    fn chart_target(&self, panel: &Panel) -> Option<&crate::live_hover::Target> {
+        self.chart_pinned_hover(panel)
+            .or_else(|| self.reading_target())
+    }
+
     fn chart_inspection_index(&self, panel: &Panel) -> Option<usize> {
+        let target = self.chart_target(panel);
         if self.store_view_draws(panel) {
-            return self.store_view_index(panel);
+            return self.store_view_index(panel, target);
         }
         // Before the worker's first reading only the store's View draws a chart, at its newest
         // second.
@@ -188,7 +213,7 @@ impl LiveDashboard {
             return panel.selected_index;
         };
 
-        match self.reading_target() {
+        match target {
             Some(target) => target_index(panel, snapshot, target),
             None => inspection_index(panel, snapshot, None),
         }

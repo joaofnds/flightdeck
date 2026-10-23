@@ -227,11 +227,14 @@ impl LiveDashboard {
         index: Option<usize>,
         fraction: Option<f32>,
     ) -> Option<gpui::Div> {
-        if self.reading_target_source().map(SharedString::as_ref) != Some(panel.id.as_str()) {
-            return None;
-        }
-
-        let second = self.reading_target()?.second;
+        let second = if let Some(hovered) = self.chart_pinned_hover(panel) {
+            hovered.second
+        } else {
+            if self.reading_target_source().map(SharedString::as_ref) != Some(panel.id.as_str()) {
+                return None;
+            }
+            self.reading_target()?.second
+        };
         let fraction = fraction?;
         let indices: Vec<_> = (0..panel.lines.len().min(16))
             .filter(|line| self.chart_series_visible(panel, *line))

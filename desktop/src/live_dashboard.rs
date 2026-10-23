@@ -216,13 +216,25 @@ pub(crate) struct Drag {
 }
 
 /// What a hover does to the selected second.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Pinning {
     /// A hover shows the hovered second, and leaving the chart shows the selected one again.
     Unpinned,
     /// A click on a chart, or Return on a second a key stepped to, pinned the selected second,
-    /// which a hover leaves shown.
-    Pinned,
+    /// which a hover leaves shown everywhere but on the hovered chart.
+    Pinned {
+        /// The reading the pointer hovers, which only the chart under it shows. None while the
+        /// pointer is over no chart.
+        hovered: Option<PinnedHover>,
+    },
+}
+
+/// A chart's hover of a reading while a second is pinned.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct PinnedHover {
+    /// The chart under the pointer.
+    pub(crate) source: gpui::SharedString,
+    pub(crate) target: crate::live_hover::Target,
 }
 
 pub struct ChartHover {
@@ -876,13 +888,23 @@ impl LiveDashboard {
     /// Selects `second` and holds every page to it, so a hover leaves its readings shown until
     /// the latest reading or the range's reset lets it go.
     pub(crate) fn pin_second(&mut self, second: u64, cx: &mut Context<Self>) {
-        self.pinning = Pinning::Pinned;
+        self.pinning = Pinning::Pinned { hovered: None };
         self.inspect(second, cx);
     }
 
     /// Selects the reading of `target` and holds every page to it, as `pin_second` does.
     pub(crate) fn pin_target(&mut self, target: crate::live_hover::Target, cx: &mut Context<Self>) {
-        self.pinning = Pinning::Pinned;
+        self.pinning = Pinning::Pinned { hovered: None };
+        self.inspect_target(target, cx);
+    }
+
+    /// Pins the reading a chart's hover shows, which that chart goes on showing while the
+    /// pointer stays over it.
+    pub(crate) fn pin_hovered(&mut self, hovered: PinnedHover, cx: &mut Context<Self>) {
+        let target = hovered.target.clone();
+        self.pinning = Pinning::Pinned {
+            hovered: Some(hovered),
+        };
         self.inspect_target(target, cx);
     }
 
@@ -894,6 +916,14 @@ impl LiveDashboard {
 
         assert!(self.request.second.is_some());
         self.request.second
+    }
+
+    /// The reading a chart's hover shows while a second is pinned.
+    pub(crate) fn pinned_hover(&self) -> Option<&PinnedHover> {
+        match &self.pinning {
+            Pinning::Unpinned => None,
+            Pinning::Pinned { hovered } => hovered.as_ref(),
+        }
     }
 
     /// Asks for the request's second and keeps the page's readings shown until the reply, which
