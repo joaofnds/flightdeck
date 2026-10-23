@@ -51,7 +51,7 @@ pub fn reading_at(wall_second: u64, segment: u64) -> MachineSecond {
         cpu_celsius: Some(61.5),
         gpu_celsius: Some(52.25),
         fan_mean_rpm: Some(1_200.5),
-        fan_rpm: [None; 2],
+        fan_rpm: [Some(1_000.5), Some(1_400.5)],
         battery: None,
         thermal_pressure: Some(u8::try_from(wall_second % 5).unwrap()),
         performance_levels: Some(store_levels()),
@@ -85,6 +85,8 @@ pub fn selection(earlier: &[MachineSecond], trends: &[MachineSecond]) -> Value {
 /// The trend point the viewer writes for `second`.
 pub fn trend_point(second: &MachineSecond) -> Value {
     let memory = second.memory.as_ref();
+    // The viewer writes anonymous memory with the purgeable part the trend path subtracts.
+    let purgeable = second.publication * 131_072;
     let pressure = memory.map(|memory| match memory.pressure {
         Pressure::Normal => 0,
         Pressure::Warning => 1,
@@ -96,8 +98,8 @@ pub fn trend_point(second: &MachineSecond) -> Value {
         "cpu_percent": second.cpu_percent,
         "cpu_level_percent": second.cpu_level_percent,
         "gpu_active_percent": second.gpu_active_percent,
-        "memory_anonymous_bytes": memory.and_then(|memory| memory.app_bytes),
-        "memory_purgeable_bytes": memory.map(|_| 0),
+        "memory_anonymous_bytes": memory.and_then(|memory| Some(memory.app_bytes? + purgeable)),
+        "memory_purgeable_bytes": memory.map(|_| purgeable),
         "memory_wired_bytes": memory.map(|memory| memory.wired_bytes),
         "memory_compressed_bytes": memory.map(|memory| memory.compressed_bytes),
         "memory_total_bytes": memory.map(|memory| memory.total_bytes),
@@ -109,7 +111,7 @@ pub fn trend_point(second: &MachineSecond) -> Value {
         "soc_celsius": second.soc_celsius,
         "cpu_celsius": second.cpu_celsius,
         "gpu_celsius": second.gpu_celsius,
-        "fan_rpm": second.fan_mean_rpm.map(|rpm| [rpm]),
+        "fan_rpm": second.fan_rpm,
         "thermal_pressure": second.thermal_pressure,
         "performance_levels": levels_json("Super", "Performance")})
 }
