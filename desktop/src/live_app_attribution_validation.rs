@@ -50,6 +50,7 @@ impl History {
             window: crate::chart_axes::TimeWindow::charted(last),
             selected_index: 0,
             retention_limited: boolean(&value["coverage"]["retention_limited"])?,
+            view_cohort: None,
         };
         history.decode_points(values, &selected, last)?;
         history.attach_reference(selection);

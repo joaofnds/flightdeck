@@ -1,8 +1,10 @@
 use std::collections::BTreeSet;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use num_traits::ToPrimitive;
 use serde_json::Value;
+use viewer::live_app_response::RankedApp;
 
 use crate::data::{Line, Panel};
 use crate::live_hover::Target;
@@ -33,6 +35,9 @@ pub struct History {
     window: crate::chart_axes::TimeWindow,
     selected_index: usize,
     retention_limited: bool,
+    /// The Apps of the store's View that the chart draws on lines of their own, where it is drawn
+    /// from a View.
+    view_cohort: Option<Vec<Arc<RankedApp>>>,
 }
 
 struct Point {
@@ -235,6 +240,7 @@ impl History {
             window: crate::chart_axes::TimeWindow::charted(last),
             selected_index: 0,
             retention_limited: boolean(&value["coverage"]["retention_limited"])?,
+            view_cohort: None,
         };
         let mut selected_index = None;
         let mut identities = BTreeSet::new();
@@ -606,6 +612,19 @@ pub(crate) fn cohort_labels(
     }
 
     Ok(())
+}
+
+/// Whether `drawn` and `cohort`, the Apps two charts of the store's Views draw on lines of their
+/// own, are the same Apps in the same order.
+pub(crate) fn same_apps(drawn: &[Arc<RankedApp>], cohort: &[Arc<RankedApp>]) -> bool {
+    if drawn.len() != cohort.len() {
+        return false;
+    }
+
+    drawn
+        .iter()
+        .zip(cohort)
+        .all(|(drawn, app)| drawn.kind == app.kind && drawn.bytes == app.bytes)
 }
 
 fn decode_cohort_label_collisions(names: &[String]) -> [bool; COHORT_MAX] {

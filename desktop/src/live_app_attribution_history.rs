@@ -1,7 +1,9 @@
 use std::rc::Rc;
+use std::sync::Arc;
 
 use num_traits::ToPrimitive;
 use serde_json::Value;
+use viewer::live_app_response::RankedApp;
 
 use crate::data::{Line, Panel};
 use crate::live_hover::Target;
@@ -39,6 +41,9 @@ pub struct History {
     window: crate::chart_axes::TimeWindow,
     selected_index: usize,
     retention_limited: bool,
+    /// The Apps of the store's View that the chart draws on lines of their own, where it is drawn
+    /// from a View.
+    view_cohort: Option<Vec<Arc<RankedApp>>>,
 }
 
 struct Point {
@@ -167,7 +172,21 @@ impl AppAttributionHistory {
 
     /// The chart of `metric` drawn from the store's `view`.
     pub fn from_view(metric: Metric, view: &viewer::store::View) -> Self {
-        match History::from_view(metric, view) {
+        match History::from_view(metric, view, None) {
+            Ok(history) => Self::Ready(history),
+            Err(error) => Self::Unavailable(error),
+        }
+    }
+
+    /// The chart of `metric` drawn from the store's `view` after `older`, the chart of an older
+    /// View, which gives it the points of the seconds both Views hold.
+    pub fn from_view_after(metric: Metric, view: &viewer::store::View, older: Self) -> Self {
+        let older = match older {
+            Self::Ready(history) => Some(history),
+            Self::Unavailable(_) => None,
+        };
+
+        match History::from_view(metric, view, older) {
             Ok(history) => Self::Ready(history),
             Err(error) => Self::Unavailable(error),
         }

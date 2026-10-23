@@ -44,6 +44,25 @@ pub fn charted(seconds: &[MachineSecond; 4]) -> View {
     view
 }
 
+/// The View of `seconds`, at each of which the executables A, B and C used 0.5, 0.25 and 0.125 s
+/// of CPU, whose CPU chart and chart of resident memory draw the Apps `cohort` names on lines of
+/// their own over all of them. Of the seconds of `seconds()`, only 102 follows the one before it.
+pub fn sliding(seconds: &[MachineSecond], cohort: &[&str]) -> View {
+    let mut view = view(1, &[], seconds);
+    let used = [("A", 500_000_000), ("B", 250_000_000), ("C", 125_000_000)];
+    for (apps, second) in view.apps.iter_mut().zip(seconds) {
+        *apps = Arc::new(AppsSecond {
+            consecutive: second.wall_ns / NANOSECONDS_PER_SECOND == 102,
+            ..apps_at(second, &used)
+        });
+    }
+    view.cohorts.seconds = seconds.len();
+    view.cohorts.cpu = cohort.iter().map(|name| ranked(name)).collect();
+    view.cohorts.resident = view.cohorts.cpu.clone();
+
+    view
+}
+
 /// The executable `name`, as a chart's cohort names it.
 pub fn ranked(name: &str) -> Arc<RankedApp> {
     Arc::new(RankedApp {

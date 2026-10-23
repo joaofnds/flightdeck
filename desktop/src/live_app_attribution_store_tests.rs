@@ -43,6 +43,51 @@ fn describes_each_second_as_the_workers_history_of_those_seconds_describes_it() 
     assert_eq!(hovered(&drawn), hovered(&worker));
 }
 
+mod after_the_chart_of_an_older_view {
+    use super::{AppAttributionHistory, Metric, hovered, seconds};
+    use crate::live_store_app_fixtures::sliding;
+
+    #[test]
+    fn draws_the_chart_its_own_seconds_draw() {
+        // Goal: a chart drawn from a View after the chart of an older View of the same Apps is
+        // the chart the newer View draws alone, its line broken where the newer View's seconds
+        // break it. Method: an older View of three seconds whose second does not follow its
+        // first, a newer View of its last two and a later second, and the chart drawn after the
+        // older one's beside the chart the newer View draws alone.
+        let seconds = seconds();
+        let older =
+            AppAttributionHistory::from_view(Metric::Cpu, &sliding(&seconds[..3], &["A", "B"]));
+        let newer = sliding(&seconds[1..], &["A", "B"]);
+
+        let drawn = AppAttributionHistory::from_view_after(Metric::Cpu, &newer, older);
+
+        let alone = AppAttributionHistory::from_view(Metric::Cpu, &newer);
+        assert_eq!(drawn.panel(), alone.panel());
+        assert_eq!(hovered(&drawn), hovered(&alone));
+    }
+
+    mod when_the_older_chart_drew_other_apps {
+        use super::{AppAttributionHistory, Metric, hovered, seconds, sliding};
+
+        #[test]
+        fn draws_the_chart_its_own_seconds_draw() {
+            // Goal: a chart drawn after the chart of an older View that drew other Apps on lines
+            // of their own is the chart the newer View draws alone. Method: the Views of the
+            // test above, the older drawing B and A where the newer draws A and B.
+            let seconds = seconds();
+            let older =
+                AppAttributionHistory::from_view(Metric::Cpu, &sliding(&seconds[..3], &["B", "A"]));
+            let newer = sliding(&seconds[1..], &["A", "B"]);
+
+            let drawn = AppAttributionHistory::from_view_after(Metric::Cpu, &newer, older);
+
+            let alone = AppAttributionHistory::from_view(Metric::Cpu, &newer);
+            assert_eq!(drawn.panel(), alone.panel());
+            assert_eq!(hovered(&drawn), hovered(&alone));
+        }
+    }
+}
+
 mod when_the_seconds_hold_more_apps_than_the_store_adds_up {
     use super::{AppAttributionHistory, Metric, charted, seconds};
 

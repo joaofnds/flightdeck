@@ -52,6 +52,13 @@ pub(super) fn take_store_view(cx: &App) -> Option<Arc<View>> {
     store.0.take()
 }
 
+/// The App charts the page drew from its last View, which the charts of a newer View take the
+/// points of the seconds both Views hold from.
+struct OlderAppCharts {
+    histories: Option<OverviewAppHistories>,
+    resident: Option<ResidentHistory>,
+}
+
 /// The charts the page drew from a View, as the range zoomed them, so a reading that arrives
 /// before the next View splices the same charts in again and their plots draw nothing.
 #[derive(Default)]
@@ -99,13 +106,20 @@ impl LiveDashboard {
     /// where the page draws them from it, drawing them once for each View. Answers whether it
     /// put them in place.
     pub(super) fn draw_store_view(&mut self) -> bool {
-        let Some(view) = self.drawn_store_view() else {
+        let Some(version) = self.drawn_store_view().map(|view| view.version) else {
             return false;
         };
 
-        let version = view.version;
         if self.store_panels.version != Some(version) {
-            match self.draw_store_view_panels(view) {
+            // The App charts of the last View give the new ones the points both Views hold.
+            let older = OlderAppCharts {
+                histories: self.store_panels.histories.take(),
+                resident: self.store_panels.resident.take(),
+            };
+            let Some(view) = self.drawn_store_view() else {
+                unreachable!("taking the App charts leaves the drawn View as it was");
+            };
+            match self.draw_store_view_panels(view, older) {
                 Ok(panels) => self.store_panels = panels,
                 Err(error) => {
                     self.draw_store_view_failed(error);
@@ -139,12 +153,20 @@ impl LiveDashboard {
         self.store_view = None;
     }
 
-    /// The charts of `view`, as the range zooms them, and the top Apps of its newest second.
-    fn draw_store_view_panels(&self, view: &View) -> Result<StorePanels, String> {
+    /// The charts of `view`, as the range zooms them, and the top Apps of its newest second. The
+    /// App charts take the points of the seconds they share with `older`.
+    fn draw_store_view_panels(
+        &self,
+        view: &View,
+        older: OlderAppCharts,
+    ) -> Result<StorePanels, String> {
         let levels = draw_store_view_panels_levels(view);
         let mut panels = crate::live_projection::overview_panels(view, levels.as_ref())?;
-        let histories = draw_store_view_panels_histories(view);
-        let resident = ResidentHistory::from_view(view);
+        let histories = draw_store_view_panels_histories(view, older.histories);
+        let resident = match older.resident {
+            Some(older) => ResidentHistory::from_view_after(view, older),
+            None => ResidentHistory::from_view(view),
+        };
         let rates = APP_METRICS
             .iter()
             .filter_map(|metric| histories.history(*metric)?.panel());
@@ -405,13 +427,28 @@ impl LiveDashboard {
 }
 
 /// The charts by App of `view`.
-fn draw_store_view_panels_histories(view: &View) -> OverviewAppHistories {
-    let history = |metric| Arc::new(AppAttributionHistory::from_view(metric, view));
+fn draw_store_view_panels_histories(
+    view: &View,
+    older: Option<OverviewAppHistories>,
+) -> OverviewAppHistories {
+    let Some(older) = older else {
+        let history = |metric| Arc::new(AppAttributionHistory::from_view(metric, view));
+        return OverviewAppHistories {
+            cpu: history(Metric::Cpu),
+            power: history(Metric::Power),
+            disk: history(Metric::Disk),
+        };
+    };
 
+    // The page holds the only reference to the charts it drew.
+    let history = |metric, older: Arc<AppAttributionHistory>| match Arc::into_inner(older) {
+        Some(older) => Arc::new(AppAttributionHistory::from_view_after(metric, view, older)),
+        None => Arc::new(AppAttributionHistory::from_view(metric, view)),
+    };
     OverviewAppHistories {
-        cpu: history(Metric::Cpu),
-        power: history(Metric::Power),
-        disk: history(Metric::Disk),
+        cpu: history(Metric::Cpu, older.cpu),
+        power: history(Metric::Power, older.power),
+        disk: history(Metric::Disk, older.disk),
     }
 }
 
