@@ -16,6 +16,7 @@ use crate::live_app_attribution_history::{AppAttributionHistory, Metric};
 use crate::live_hover::{Origin, Preview, Target};
 use crate::live_overview_app_histories::OverviewAppHistories;
 use crate::live_projection::overview_panels;
+use crate::live_resident_history::ResidentHistory;
 use crate::live_source::{Snapshot, Update, Worker};
 use crate::live_store_fixtures::{
     levels, levels_named, reading_at, selection, store_levels_named, trend_point, view,
@@ -186,16 +187,37 @@ fn a_view_newer_than_the_readings_ranks_the_apps_of_its_newest_second() {
 
 #[test]
 fn a_view_newer_than_the_readings_draws_the_overviews_charts_by_app() {
-    // Goal: Overview, following the newest second, draws its CPU, energy and disk charts by App
-    // from the store's View, under the titles Overview gives them. Method: readings that end at
-    // 10,000 and draw no chart by App, then a View that ends five seconds later and holds an App
-    // in each second.
+    // Goal: Overview, following the newest second, draws its CPU, memory, energy and disk
+    // charts by App from the store's View, under the titles Overview gives them. Method:
+    // readings that end at 10,000 and draw no chart by App, then a View that ends five seconds
+    // later and holds an App in each second.
     let mut dashboard = dashboard(&[reading_at(9_999, 0), reading_at(10_000, 0)]);
     let view = Arc::new(charted_view());
 
     dashboard.take_view(Arc::clone(&view));
 
     assert_eq!(by_app(&dashboard.panels), expected_by_app(&view));
+}
+
+#[test]
+fn a_view_newer_than_the_readings_reads_each_chart_by_app_at_its_newest_second() {
+    // Goal: a chart by App drawn from the View reads its newest second as the worker's chart of
+    // the same seconds reads it. Method: readings that end at 10,000, then a View that ends five
+    // seconds later and holds an App in each second, beside a page showing the worker's reading
+    // and charts by App of those seconds.
+    let mut dashboard = dashboard(&[reading_at(9_999, 0), reading_at(10_000, 0)]);
+
+    dashboard.take_view(Arc::new(charted_view()));
+
+    let worker = drawn_by_app(&newer_seconds());
+    for id in [
+        crate::live_resident_history::PANEL_ID,
+        Metric::Cpu.panel_id(),
+        Metric::Power.panel_id(),
+        Metric::Disk.panel_id(),
+    ] {
+        assert_eq!(chart_reading(&dashboard, id), chart_reading(&worker, id));
+    }
 }
 
 mod when_the_view_cannot_choose_the_apps_its_charts_draw {
@@ -213,10 +235,15 @@ mod when_the_view_cannot_choose_the_apps_its_charts_draw {
         dashboard.take_view(Arc::new(view));
 
         let cpu = dashboard.attribution_history(Metric::Cpu).unwrap();
+        let resident = dashboard.resident_history().unwrap();
         assert_eq!(by_app(&dashboard.panels), Vec::new());
         assert_eq!(
             cpu.coverage(None),
             "App rate history unavailable: App rate history holds more Apps than it adds up"
+        );
+        assert_eq!(
+            resident.coverage(None),
+            "Resident App history unavailable: Resident App history holds more Apps than it adds up"
         );
     }
 }
@@ -629,7 +656,8 @@ fn charted_view() -> View {
     view.cohorts.seconds = seconds.len();
     view.cohorts.cpu = vec![Arc::clone(&brave)];
     view.cohorts.power = vec![Arc::clone(&brave)];
-    view.cohorts.disk = vec![brave];
+    view.cohorts.disk = vec![Arc::clone(&brave)];
+    view.cohorts.resident = vec![brave];
     view
 }
 
@@ -644,18 +672,24 @@ fn drawn_by_app(trends: &[MachineSecond]) -> LiveDashboard {
         power: history(Metric::Power),
         disk: history(Metric::Disk),
     }));
+    snapshot.resident_history = Some(Arc::new(ResidentHistory::from_view(&charted)));
 
     let mut dashboard = opening();
     dashboard.accept(snapshot);
     assert!(dashboard.error.is_none());
-    assert_eq!(by_app(&dashboard.panels).len(), 3);
+    assert_eq!(by_app(&dashboard.panels).len(), 4);
     dashboard
 }
 
-/// The id, title and lines of each of `panels` that Overview's CPU, energy and disk charts by
-/// App draw, in order.
+/// The id, title and lines of each of `panels` that Overview's CPU, memory, energy and disk
+/// charts by App draw, in order.
 fn by_app(panels: &[Rc<Panel>]) -> Vec<(String, String, Vec<Line>)> {
-    let ids = [Metric::Cpu, Metric::Power, Metric::Disk].map(Metric::panel_id);
+    let ids = [
+        crate::live_resident_history::PANEL_ID,
+        Metric::Cpu.panel_id(),
+        Metric::Power.panel_id(),
+        Metric::Disk.panel_id(),
+    ];
 
     panels
         .iter()
@@ -671,16 +705,21 @@ fn expected_by_app(view: &View) -> Vec<(String, String, Vec<Line>)> {
         (Metric::Power, "Energy by app"),
         (Metric::Disk, "Disk by app"),
     ];
+    let resident = ResidentHistory::from_view(view).panel().unwrap();
 
-    titled
-        .into_iter()
-        .map(|(metric, title)| {
-            let panel = AppAttributionHistory::from_view(metric, view)
-                .panel()
-                .unwrap();
-            (panel.id.clone(), title.into(), panel.lines.clone())
-        })
-        .collect()
+    let mut expected = vec![(
+        resident.id.clone(),
+        "Memory by app".to_owned(),
+        resident.lines.clone(),
+    )];
+    expected.extend(titled.into_iter().map(|(metric, title)| {
+        let panel = AppAttributionHistory::from_view(metric, view)
+            .panel()
+            .unwrap();
+        (panel.id.clone(), title.into(), panel.lines.clone())
+    }));
+
+    expected
 }
 
 /// The Apps of `second` when one bundle, named `name`, is all that ran, and spent `cpu_ns` of
@@ -736,6 +775,7 @@ pub fn apps_of(second: &MachineSecond, name: &str, cpu_ns: u64) -> AppsSecond {
         elapsed_ns: Some(1_000_000_000),
         membership_complete: true,
         ungrouped_members: 0,
+        live_ungrouped_members: 0,
         usage_refused: 0,
         usage_gone: 0,
         totals: Totals::of(&apps),

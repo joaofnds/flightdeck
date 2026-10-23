@@ -11,7 +11,7 @@ use super::{AppsSecond, MachineSecond};
 use crate::app_attribution_history::AppAttributionMetric;
 use crate::app_attribution_history::means::{Comparison, Mean, compare};
 use crate::apps::AppKey;
-use crate::live_app_response::{Rankable, RankedApp};
+use crate::live_app_response::{Metric, Rankable, RankedApp};
 use crate::session::CHARTED_SECONDS;
 
 /// The Apps the context holds at most, as the worker's App histories hold them, past which it
@@ -44,6 +44,9 @@ pub struct Cohorts {
     /// The Apps that read and wrote the most bytes over those seconds, at most eight, the most
     /// first.
     pub disk: Vec<Arc<RankedApp>>,
+    /// The Apps that held the most resident memory over the seconds that measured it, on
+    /// average, at most eight, the most first.
+    pub resident: Vec<Arc<RankedApp>>,
     /// Whether those seconds hold more Apps than the store adds up, so it chose none.
     pub refused: bool,
 }
@@ -56,6 +59,7 @@ impl Cohorts {
             cpu: Vec::with_capacity(COHORT_MAX),
             power: Vec::with_capacity(COHORT_MAX),
             disk: Vec::with_capacity(COHORT_MAX),
+            resident: Vec::with_capacity(COHORT_MAX),
             refused: false,
         }
     }
@@ -66,6 +70,7 @@ impl Cohorts {
         self.cpu.clear();
         self.power.clear();
         self.disk.clear();
+        self.resident.clear();
         self.refused = false;
     }
 
@@ -115,6 +120,24 @@ struct Entry {
     seconds: u32,
     /// What the App used of each of `METRICS` over the seconds that measured it, in their order.
     means: [Mean; 3],
+    /// The App's resident memory added up over the seconds that measured it.
+    resident: Gauge,
+}
+
+/// A reading of what an App holds, added up over some seconds, whose mean is per second rather
+/// than per nanosecond, as the worker's history of resident memory takes it.
+#[derive(Clone, Copy)]
+struct Gauge {
+    bytes: u128,
+    /// The seconds that measured the reading.
+    seconds: u32,
+}
+
+impl Gauge {
+    const ZERO: Self = Self {
+        bytes: 0,
+        seconds: 0,
+    };
 }
 
 impl Context {
@@ -211,6 +234,7 @@ impl Context {
         assert!(cohorts.cpu.is_empty());
         assert!(cohorts.power.is_empty());
         assert!(cohorts.disk.is_empty());
+        assert!(cohorts.resident.is_empty());
 
         cohorts.seconds = self.held;
         if self.refused.is_some() {
@@ -218,16 +242,26 @@ impl Context {
             return;
         }
         for (place, metric) in METRICS.into_iter().enumerate() {
-            choose_leaders(&self.entries, place, &mut self.chosen);
-            let cohort = cohorts.of_mut(metric);
-            let capacity = cohort.capacity();
-            cohort.extend(
-                self.chosen
-                    .iter()
-                    .map(|index| Arc::clone(&self.entries[*index].name)),
+            choose_leaders(
+                &self.entries,
+                &mut self.chosen,
+                |entry| entry.means[place].elapsed_ns > 0,
+                |before, after| {
+                    compare(Comparison {
+                        before: &before.means[place],
+                        after: &after.means[place],
+                    })
+                },
             );
-            assert_eq!(cohort.capacity(), capacity);
+            choose_cohort(&self.entries, &self.chosen, cohorts.of_mut(metric));
         }
+        choose_leaders(
+            &self.entries,
+            &mut self.chosen,
+            |entry| entry.resident.seconds > 0,
+            |before, after| choose_resident_compare(&before.resident, &after.resident),
+        );
+        choose_cohort(&self.entries, &self.chosen, &mut cohorts.resident);
     }
 
     /// Adds `second`'s Apps to what the context holds, or holds none and waits to add its
@@ -270,6 +304,10 @@ impl Context {
                     entry.means[place].elapsed_ns -= elapsed_ns;
                 }
             }
+            if let Some(bytes) = row.measure(Metric::Resident).measured() {
+                entry.resident.bytes -= u128::from(bytes);
+                entry.resident.seconds -= 1;
+            }
         }
 
         self.entries.retain(|entry| {
@@ -278,6 +316,8 @@ impl Context {
                     assert_eq!(mean.amount, 0);
                     assert_eq!(mean.elapsed_ns, 0);
                 }
+                assert_eq!(entry.resident.bytes, 0);
+                assert_eq!(entry.resident.seconds, 0);
             }
             entry.seconds > 0
         });
@@ -302,6 +342,7 @@ fn enter_merge(entries: &mut Vec<Entry>, second: &AppsSecond, merged: &mut Vec<E
                 name: Arc::clone(&row.name),
                 seconds: 0,
                 means: [Mean::ZERO; 3],
+                resident: Gauge::ZERO,
             },
         };
 
@@ -311,6 +352,10 @@ fn enter_merge(entries: &mut Vec<Entry>, second: &AppsSecond, merged: &mut Vec<E
                 entry.means[place].amount += amount;
                 entry.means[place].elapsed_ns += elapsed_ns;
             }
+        }
+        if let Some(bytes) = row.measure(Metric::Resident).measured() {
+            entry.resident.bytes += u128::from(bytes);
+            entry.resident.seconds += 1;
         }
         if merged.len() == APPS_MAX {
             return false;
@@ -327,25 +372,26 @@ fn enter_merge(entries: &mut Vec<Entry>, second: &AppsSecond, merged: &mut Vec<E
     true
 }
 
-/// Writes into `chosen` the entries a chart of the resource at `place` among `METRICS` draws,
-/// the most first: those with the highest mean, ties going to the App first in key order, and
+/// Writes into `chosen` the entries a chart draws, the most first: those with the highest mean,
+/// as `compare` orders the means of two entries, ties going to the App first in key order, and
 /// none whose seconds never measured the resource.
-fn choose_leaders(entries: &[Entry], place: usize, chosen: &mut Vec<usize>) {
+fn choose_leaders(
+    entries: &[Entry],
+    chosen: &mut Vec<usize>,
+    measured: impl Fn(&Entry) -> bool,
+    compare: impl Fn(&Entry, &Entry) -> Ordering,
+) {
     chosen.clear();
     for (index, entry) in entries.iter().enumerate() {
-        let mean = &entry.means[place];
-        if mean.elapsed_ns == 0 {
+        if !measured(entry) {
             continue;
         }
 
         let position = chosen.partition_point(|other| {
             let other = &entries[*other];
-            compare(Comparison {
-                before: &other.means[place],
-                after: mean,
-            })
-            .reverse()
-            .then_with(|| key_of(&other.name).cmp(&key_of(&entry.name)))
+            compare(other, entry)
+                .reverse()
+                .then_with(|| key_of(&other.name).cmp(&key_of(&entry.name)))
                 != Ordering::Greater
         });
         if position < COHORT_MAX {
@@ -356,6 +402,22 @@ fn choose_leaders(entries: &[Entry], place: usize, chosen: &mut Vec<usize>) {
         }
     }
     assert!(chosen.len() <= COHORT_MAX);
+}
+
+/// How the mean of `before` compares with that of `after`, exactly, since neither cross product
+/// passes a `u128`: a mean adds up at most `CHARTED_SECONDS` readings of a `u64`.
+fn choose_resident_compare(before: &Gauge, after: &Gauge) -> Ordering {
+    let before_scaled = before.bytes * u128::from(after.seconds);
+    let after_scaled = after.bytes * u128::from(before.seconds);
+
+    before_scaled.cmp(&after_scaled)
+}
+
+/// Writes into `cohort` the Apps of `entries` that `chosen` names, in its order.
+fn choose_cohort(entries: &[Entry], chosen: &[usize], cohort: &mut Vec<Arc<RankedApp>>) {
+    let capacity = cohort.capacity();
+    cohort.extend(chosen.iter().map(|index| Arc::clone(&entries[*index].name)));
+    assert_eq!(cohort.capacity(), capacity);
 }
 
 /// The interval `second`'s Apps were measured over, where it measured them over one, as the

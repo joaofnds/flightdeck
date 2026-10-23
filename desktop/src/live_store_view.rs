@@ -1,7 +1,7 @@
 //! The page drawn from the store's newest View, which the window takes each tick. Overview draws
-//! its machine charts, its CPU, energy and disk charts by App, its readouts and its hardware
-//! figure from it while it follows the newest second, and a chosen second, a hover's reading and
-//! every other page draw from the worker's readings as before.
+//! its machine charts, its CPU, memory, energy and disk charts by App, its readouts and its
+//! hardware figure from it while it follows the newest second, and a chosen second, a hover's
+//! reading and every other page draw from the worker's readings as before.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -19,6 +19,7 @@ use crate::live_inventory::PerformanceLevel;
 use crate::live_overview_app_histories::OverviewAppHistories;
 use crate::live_projection::held_projection;
 use crate::live_rankings::{Rankings, from_selected};
+use crate::live_resident_history::ResidentHistory;
 use crate::live_source_mode::SourceMode;
 use crate::live_thermal_pressure::thermal_pressure_level_text;
 use crate::live_views::summary;
@@ -28,7 +29,7 @@ use crate::live_views::summary;
 mod tests;
 
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
-/// The charts by App Overview draws from the store's View.
+/// The charts by App of a rate Overview draws from the store's View.
 const APP_METRICS: [Metric; 3] = [Metric::Cpu, Metric::Power, Metric::Disk];
 
 /// The store the app starts before its window opens and keeps for its life, so a window shown
@@ -56,11 +57,14 @@ pub(super) struct StorePanels {
     /// The version of the View they were drawn from, or none before the first.
     version: Option<u64>,
     panels: Vec<Rc<Panel>>,
-    /// The charts of `APP_METRICS` the View draws, leaving out each it holds too little for.
+    /// The charts by App the View draws, of resident memory and of `APP_METRICS`, leaving out
+    /// each it holds too little for.
     apps: Vec<Rc<Panel>>,
-    /// The histories `apps` draw, which say why a chart is left out, or none before the first
-    /// View.
+    /// The histories of `APP_METRICS` that `apps` draw, which say why a chart is left out, or
+    /// none before the first View.
     histories: Option<OverviewAppHistories>,
+    /// The history of resident memory `apps` draw, or none before the first View.
+    resident: Option<ResidentHistory>,
     /// The top Apps of the View's newest second, or none before the first View.
     rankings: Option<Rankings>,
     /// Why the last View the page took could not be drawn, reported once.
@@ -121,10 +125,11 @@ impl LiveDashboard {
         let levels = draw_store_view_panels_levels(view);
         let mut panels = crate::live_projection::overview_panels(view, levels.as_ref())?;
         let histories = draw_store_view_panels_histories(view);
-        let mut apps: Vec<Rc<Panel>> = APP_METRICS
+        let resident = ResidentHistory::from_view(view);
+        let rates = APP_METRICS
             .iter()
-            .filter_map(|metric| histories.history(*metric)?.panel())
-            .collect();
+            .filter_map(|metric| histories.history(*metric)?.panel());
+        let mut apps: Vec<Rc<Panel>> = resident.panel().into_iter().chain(rates).collect();
         crate::live_acceptance::prepare_overview_titles(&mut apps)?;
 
         if let Some(window) = self.view_window() {
@@ -138,6 +143,7 @@ impl LiveDashboard {
             panels,
             apps,
             histories: Some(histories),
+            resident: Some(resident),
             rankings: Some(draw_store_view_rankings(view)),
             failure: None,
         })
@@ -208,6 +214,18 @@ impl LiveDashboard {
         }
 
         self.snapshot.as_ref()?.attribution_history(metric)
+    }
+
+    /// The history of resident memory by App the page reads: the one the page drew from the
+    /// store's View, where it draws one, and otherwise the one the worker read.
+    pub(crate) fn resident_history(&self) -> Option<&ResidentHistory> {
+        if self.drawn_store_view().is_some() {
+            if let Some(resident) = &self.store_panels.resident {
+                return Some(resident);
+            }
+        }
+
+        self.snapshot.as_ref()?.resident_history.as_deref()
     }
 
     /// The second the page's readings show: the newest of the View the page draws, where it
@@ -345,10 +363,13 @@ fn draw_store_view_splice(panels: &mut [Rc<Panel>], drawn: &[Rc<Panel>]) {
     }
 }
 
-/// Puts `apps`, the charts by App the View draws, in place of the page's charts of
-/// `APP_METRICS`, so a chart the View leaves out is left out and its card says why.
+/// Puts `apps`, the charts by App the View draws, in place of the page's charts of resident
+/// memory and of `APP_METRICS`, so a chart the View leaves out is left out and its card says why.
 fn draw_store_view_splice_apps(panels: &mut Vec<Rc<Panel>>, apps: &[Rc<Panel>]) {
     let drawn_by_app = |panel: &Rc<Panel>| {
+        if panel.id == crate::live_resident_history::PANEL_ID {
+            return true;
+        }
         let metric = Metric::from_panel(&panel.id);
         metric.is_some_and(|metric| APP_METRICS.contains(&metric))
     };

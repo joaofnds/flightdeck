@@ -18,7 +18,9 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 pub use apps::{APPS_PER_SECOND_MAX, AppRow, AppsSecond, Missing};
-pub use attribution::{Attribution, AttributionReading, COHORT_MAX, OtherReading, Totals};
+pub use attribution::{
+    Attribution, AttributionReading, COHORT_MAX, OtherReading, Resident, ResidentOther, Totals,
+};
 pub use buffers::{Buffers, Mailbox, Span};
 pub use context::Cohorts;
 pub use second::{BatterySecond, MachineSecond, MemorySecond, Reading, Traffic, readings};

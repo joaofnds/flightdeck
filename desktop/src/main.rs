@@ -63,6 +63,8 @@ mod allocation_tests;
 #[cfg(test)]
 mod contrast_tests;
 #[cfg(test)]
+mod live_store_app_fixtures;
+#[cfg(test)]
 mod live_store_fixtures;
 #[cfg(test)]
 #[path = "live_process_history_tests.rs"]

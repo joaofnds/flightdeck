@@ -92,11 +92,9 @@ impl LiveDashboard {
                 return history.coverage(history.index(self.reading_target()));
             }
         }
-        if let Some(snapshot) = self.snapshot.as_deref() {
-            if id == crate::live_resident_history::PANEL_ID {
-                if let Some(history) = &snapshot.resident_history {
-                    return history.coverage(history.index(self.reading_target()));
-                }
+        if id == crate::live_resident_history::PANEL_ID {
+            if let Some(history) = self.resident_history() {
+                return history.coverage(history.index(self.reading_target()));
             }
         }
 

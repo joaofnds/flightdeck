@@ -195,9 +195,7 @@ impl LiveDashboard {
         }
         if panel.id == crate::live_resident_history::PANEL_ID {
             return self
-                .snapshot
-                .as_ref()
-                .and_then(|snapshot| snapshot.resident_history.as_ref())
+                .resident_history()
                 .map_or_else(|| "Unavailable".into(), |history| history.headline(index));
         }
         if is_process_disk(panel) {
@@ -262,14 +260,10 @@ impl LiveDashboard {
             return history.reading(line, index);
         }
         if panel.id == crate::live_resident_history::PANEL_ID {
-            return self
-                .snapshot
-                .as_ref()
-                .and_then(|snapshot| snapshot.resident_history.as_ref())
-                .map_or_else(
-                    || "Unavailable".into(),
-                    |history| history.reading(line, index),
-                );
+            return self.resident_history().map_or_else(
+                || "Unavailable".into(),
+                |history| history.reading(line, index),
+            );
         }
         let value = chart_line_value(panel, line, index);
         let unit = panel

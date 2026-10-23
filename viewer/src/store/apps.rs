@@ -40,6 +40,9 @@ pub struct AppsSecond {
     pub elapsed_ns: Option<u64>,
     pub membership_complete: bool,
     pub ungrouped_members: u32,
+    /// The ungrouped members live at the tick, which the worker's history of resident memory
+    /// counts, since an exited process holds no memory.
+    pub live_ungrouped_members: u32,
     pub usage_refused: u32,
     pub usage_gone: u32,
     /// Every App of the tick, once each, in key order.
@@ -182,6 +185,7 @@ impl AppsSecond {
         self.elapsed_ns = sample.elapsed_ns;
         self.membership_complete = sample.membership_complete;
         self.ungrouped_members = sample.ungrouped_members;
+        self.live_ungrouped_members = sample.live_ungrouped_members;
         self.usage_refused = sample.usage_refused;
         self.usage_gone = sample.usage_gone;
         self.totals = Totals::of(&self.apps);
@@ -194,6 +198,7 @@ impl AppsSecond {
         self.elapsed_ns = None;
         self.membership_complete = false;
         self.ungrouped_members = 0;
+        self.live_ungrouped_members = 0;
         self.usage_refused = 0;
         self.usage_gone = 0;
         self.apps.clear();
@@ -229,6 +234,7 @@ impl AppsSecond {
         self.elapsed_ns = sample.elapsed_ns;
         self.membership_complete = sample.membership_complete;
         self.ungrouped_members = sample.ungrouped_members;
+        self.live_ungrouped_members = sample.live_ungrouped_members;
         self.usage_refused = sample.usage_refused;
         self.usage_gone = sample.usage_gone;
         self.totals = Totals::of(&self.apps);
@@ -305,6 +311,7 @@ impl Default for AppsSecond {
             elapsed_ns: None,
             membership_complete: false,
             ungrouped_members: 0,
+            live_ungrouped_members: 0,
             usage_refused: 0,
             usage_gone: 0,
             apps: Vec::new(),

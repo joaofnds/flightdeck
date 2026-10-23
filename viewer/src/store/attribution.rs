@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use super::{AppRow, AppsSecond};
 use crate::app_attribution_history::AppAttributionMetric;
+use crate::live::resident_history::has_resident;
 use crate::live_app_response::{Measure, Metric, Rankable, RankedApp};
 
 /// The resources Overview draws an App chart of, in the order the store adds them up.
@@ -26,6 +27,11 @@ pub struct Totals {
     sums: [Sum; 3],
     /// The Apps whose members the App rule did not all find.
     incomplete: u32,
+    /// The resident memory of the Apps that hold a reading of it, added up.
+    resident: Sum,
+    /// The Apps that hold a reading of resident memory, which the worker's history of resident
+    /// memory counts, leaving out an App all of whose members it never asked.
+    resident_apps: u32,
 }
 
 /// One resource added up over some of a second's Apps.
@@ -67,6 +73,25 @@ pub struct OtherReading {
     pub reading: AttributionReading,
 }
 
+/// What one second shows on Overview's chart of resident memory by App.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Resident {
+    /// The resident memory of each App the chart draws on a line of its own, in the cohort's
+    /// order, `None` where the second holds no reading of the App and past the cohort's end.
+    pub apps: [Option<Measure>; COHORT_MAX],
+    /// The other Apps added up, `None` where the second holds no Apps.
+    pub other: Option<ResidentOther>,
+}
+
+/// The Apps the chart of resident memory does not draw on lines of their own, added up.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ResidentOther {
+    pub app_count: u32,
+    /// What they hold, `None` for an Other of no Apps at a second whose readings missed some
+    /// process, since such an Other may have missed an App.
+    pub resident: Option<Measure>,
+}
+
 impl Totals {
     /// Every App of `apps` added up.
     #[must_use]
@@ -85,6 +110,11 @@ impl Totals {
         }
         if !row.membership_complete {
             self.incomplete += 1;
+        }
+        let resident = row.measure(Metric::Resident);
+        if has_resident(&resident) {
+            self.resident.add(&resident);
+            self.resident_apps += 1;
         }
     }
 }
@@ -151,14 +181,9 @@ impl AppsSecond {
         let mut taken = Totals::default();
         let mut found = 0;
         for (reading, name) in attribution.apps.iter_mut().zip(cohort) {
-            let key = name.kind.key(&name.bytes);
-            let Ok(index) = self
-                .apps
-                .binary_search_by(|row| row.name.kind.key(&row.name.bytes).cmp(&key))
-            else {
+            let Some(row) = self.row(name) else {
                 continue;
             };
-            let row = &self.apps[index];
             let measure = row.measure(ranked_metric(metric));
 
             *reading = Some(AttributionReading {
@@ -208,13 +233,7 @@ impl AppsSecond {
     /// The Other of a chart whose own lines draw every App of the second, which used nothing
     /// where the second's readings found every process, and is unknown where they missed one.
     fn attribution_other_empty(&self, metric: AppAttributionMetric) -> AttributionReading {
-        let complete = [
-            self.membership_complete,
-            self.ungrouped_members == 0,
-            self.usage_refused == 0,
-            self.usage_gone == 0,
-        ];
-        if complete.contains(&false) {
+        if !self.found_every_process(self.ungrouped_members) {
             return AttributionReading {
                 rate: None,
                 measure: None,
@@ -232,6 +251,86 @@ impl AppsSecond {
             }),
             membership_complete: true,
         }
+    }
+
+    /// What the second shows on the chart of resident memory by App whose own lines draw
+    /// `cohort`.
+    #[must_use]
+    pub fn resident(&self, cohort: &[Arc<RankedApp>]) -> Resident {
+        assert!(cohort.len() <= COHORT_MAX);
+
+        let mut resident = Resident {
+            apps: [None; COHORT_MAX],
+            other: None,
+        };
+        if self.missing.is_some() {
+            return resident;
+        }
+
+        let mut taken = Totals::default();
+        for (reading, name) in resident.apps.iter_mut().zip(cohort) {
+            let Some(row) = self.row(name) else {
+                continue;
+            };
+            let measure = row.measure(Metric::Resident);
+            if !has_resident(&measure) {
+                continue;
+            }
+
+            *reading = Some(measure);
+            taken.add(row);
+        }
+        resident.other = Some(self.resident_other(&taken));
+
+        resident
+    }
+
+    /// The Other of the chart of resident memory, where its own lines draw the Apps `taken` adds
+    /// up.
+    fn resident_other(&self, taken: &Totals) -> ResidentOther {
+        assert!(taken.resident_apps <= self.totals.resident_apps);
+        let app_count = self.totals.resident_apps - taken.resident_apps;
+
+        if app_count == 0 {
+            let found_every_process = self.found_every_process(self.live_ungrouped_members);
+            return ResidentOther {
+                app_count,
+                resident: found_every_process.then_some(Measure {
+                    known: 0,
+                    measured_members: 0,
+                    unavailable_members: 0,
+                    overflowed: false,
+                }),
+            };
+        }
+        ResidentOther {
+            app_count,
+            resident: Some(self.totals.resident.without(&taken.resident)),
+        }
+    }
+
+    /// The row of the App `name` names, where the second holds it.
+    fn row(&self, name: &RankedApp) -> Option<&AppRow> {
+        let key = name.kind.key(&name.bytes);
+        let index = self
+            .apps
+            .binary_search_by(|row| row.name.kind.key(&row.name.bytes).cmp(&key))
+            .ok()?;
+
+        Some(&self.apps[index])
+    }
+
+    /// Whether the second's readings found every process, where `ungrouped_members` of them
+    /// joined no App.
+    fn found_every_process(&self, ungrouped_members: u32) -> bool {
+        let complete = [
+            self.membership_complete,
+            ungrouped_members == 0,
+            self.usage_refused == 0,
+            self.usage_gone == 0,
+        ];
+
+        !complete.contains(&false)
     }
 }
 

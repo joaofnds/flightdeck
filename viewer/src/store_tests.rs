@@ -639,7 +639,10 @@ mod when_the_seconds_hold_more_apps_than_a_chart_draws {
     use collector::processes::Usage;
     use serde_json::Value;
 
-    use super::super::{Attribution, AttributionReading, COHORT_MAX, Cohorts, OtherReading, View};
+    use super::super::{
+        Attribution, AttributionReading, COHORT_MAX, Cohorts, OtherReading, Resident,
+        ResidentOther, View,
+    };
     use super::{Fixture, Store, view_where};
     use crate::live::app_process_groups_history_tests::named;
     use crate::live_app_response::{Measure, RankedApp};
@@ -653,6 +656,9 @@ mod when_the_seconds_hold_more_apps_than_a_chart_draws {
     /// The thousands of bytes each of `APPS` reads in each second, E and F the same.
     const DISK_THOUSANDS: [u64; 10] = [5, 3, 9, 1, 7, 7, 2, 8, 4, 6];
 
+    /// The kibibytes each of `APPS` holds resident at each second, C and G the same.
+    const RESIDENT_KIBIBYTES: [u64; 10] = [4, 9, 6, 2, 8, 1, 6, 3, 7, 5];
+
     /// The CPU time A uses in its second second on top of its own step, which makes it the App
     /// that used the most CPU over the seconds only while the chart draws that second.
     const BURST_NS: u64 = 40_000;
@@ -663,6 +669,7 @@ mod when_the_seconds_hold_more_apps_than_a_chart_draws {
         cpu: Vec<String>,
         power: Vec<String>,
         disk: Vec<String>,
+        resident: Vec<String>,
     }
 
     /// What each App chart shows at each second it draws, oldest first.
@@ -671,15 +678,17 @@ mod when_the_seconds_hold_more_apps_than_a_chart_draws {
         cpu: Vec<Attribution>,
         power: Vec<Attribution>,
         disk: Vec<Attribution>,
+        resident: Vec<Resident>,
     }
 
     #[test]
     fn the_store_chooses_the_apps_the_worker_chooses_for_each_chart() {
         // Goal: Overview's App charts drawn from the store draw on lines of their own the Apps
         // the worker chooses, the eight that used the most of each resource over the seconds
-        // the charts draw, ties going to the App first in key order. Method: ten Apps over five
-        // seconds, the first using the most CPU only in its second second and two of them
-        // reading the same bytes, followed second by second by the worker and by a store, and
+        // the charts draw, or held the most resident memory on average over them, ties going
+        // to the App first in key order. Method: ten Apps over five seconds, the first using
+        // the most CPU only in its second second, two of them reading the same bytes and two
+        // holding the same memory, followed second by second by the worker and by a store, and
         // the Apps each chooses for each chart compared.
         let (_fixture, session, view) = followed(rows, 5);
 
@@ -691,6 +700,7 @@ mod when_the_seconds_hold_more_apps_than_a_chart_draws {
                 cpu: names_of(["A", "J", "I", "H", "G", "F", "E", "D"]),
                 power: names_of(["A", "B", "C", "D", "E", "F", "G", "H"]),
                 disk: names_of(["C", "H", "E", "F", "J", "A", "I", "B"]),
+                resident: names_of(["B", "E", "I", "C", "G", "J", "A", "H"]),
             }
         );
         assert_eq!(chosen_by_store(&view.cohorts), worker);
@@ -699,9 +709,10 @@ mod when_the_seconds_hold_more_apps_than_a_chart_draws {
     #[test]
     fn each_second_shows_the_readings_the_worker_shows_on_each_chart() {
         // Goal: each second of Overview's App charts drawn from the store shows what the
-        // worker's App histories show there, each chosen App's rate and measure and the other
-        // Apps added up. Method: the ten Apps over five seconds, followed by the worker and by
-        // a store, and each second of each chart compared.
+        // worker's App histories show there, each chosen App's rate and measure, or its
+        // resident memory, and the other Apps added up. Method: the ten Apps over five
+        // seconds, followed by the worker and by a store, and each second of each chart
+        // compared.
         let (_fixture, session, view) = followed(rows, 5);
 
         let shown = shown_by_store(&view);
@@ -713,9 +724,9 @@ mod when_the_seconds_hold_more_apps_than_a_chart_draws {
     fn a_chart_ranks_its_apps_over_only_the_seconds_it_draws() {
         // Goal: an App that used the most only in seconds older than the charts draw no longer
         // leads them, as it no longer leads the worker's. Method: A uses five seconds of CPU in
-        // the second second and none after, B a little every second, and the newest seconds
-        // come sixteen minutes later, so the seconds of A's burst lie before those the charts
-        // draw.
+        // the second second and none after, and holds the most memory until then, B a little
+        // CPU every second and the same memory throughout, and the newest seconds come sixteen
+        // minutes later, so the seconds A led lie before those the charts draw.
         let mut fixture = named::dense_with_system();
         named::publish(&mut fixture, 1, &burst_rows(1));
         let mut session = LiveSession::open(&fixture.root).unwrap();
@@ -730,10 +741,13 @@ mod when_the_seconds_hold_more_apps_than_a_chart_draws {
             });
         }
         session.select(1_963, 0).unwrap();
-        let worker = chosen_by_worker_of(&session, AppAttributionMetric::Cpu);
+        let cpu = chosen_by_worker_of(&session, AppAttributionMetric::Cpu);
+        let resident = chosen_by_worker_of_resident(&session);
 
-        assert_eq!(worker, ["/B.app", "/A.app"]);
-        assert_eq!(chosen_by_store_of(&view.cohorts.cpu), worker);
+        assert_eq!(cpu, ["/B.app", "/A.app"]);
+        assert_eq!(chosen_by_store_of(&view.cohorts.cpu), cpu);
+        assert_eq!(resident, ["/B.app", "/A.app"]);
+        assert_eq!(chosen_by_store_of(&view.cohorts.resident), resident);
     }
 
     mod when_a_chart_draws_every_app {
@@ -747,6 +761,25 @@ mod when_the_seconds_hold_more_apps_than_a_chart_draws {
             // over three seconds, which every chart draws, followed by the worker and by a
             // store, and each second compared.
             let (_fixture, session, view) = followed(burst_rows, 3);
+
+            let shown = shown_by_store(&view);
+
+            assert_eq!(shown, shown_by_worker(&session));
+        }
+    }
+
+    mod when_an_app_holds_no_memory_at_a_second {
+        use super::{exit_rows, followed, shown_by_store, shown_by_worker};
+
+        #[test]
+        fn the_charts_leave_it_out_as_the_worker_does() {
+            // Goal: an App whose processes all exited before a tick holds no resident memory
+            // there, so the chart of resident memory neither draws it there nor counts it among
+            // the other Apps, as the worker's does. Method: A and B over three seconds, C at the
+            // first two, its one process exited at the second, and D at the third only, its one
+            // process exited, followed by the worker and by a store, and each second of each
+            // chart compared.
+            let (_fixture, session, view) = followed(exit_rows, 3);
 
             let shown = shown_by_store(&view);
 
@@ -813,17 +846,49 @@ mod when_the_seconds_hold_more_apps_than_a_chart_draws {
     }
 
     /// A and B at `publication`, A having used five seconds of CPU at the second second and
-    /// none since, and B a microsecond each second.
+    /// none since, and B a microsecond each second. A holds eight kibibytes resident up to the
+    /// second second and one since, and B two throughout.
     fn burst_rows(publication: u64) -> Vec<named::Named<'static>> {
         let burst_ns = match publication {
             2.. => 5_000_000_000,
             _ => 0,
         };
+        let resident_kibibytes = match publication {
+            ..=2 => 8,
+            _ => 1,
+        };
+        let a = Usage {
+            resident_bytes: resident_kibibytes * 1_024,
+            ..usage_of(burst_ns)
+        };
+        let b = Usage {
+            resident_bytes: 2 * 1_024,
+            ..usage_of(1_000 * publication)
+        };
 
         vec![
-            named::member(10, b"worker", b"/A.app", usage_of(burst_ns)),
-            named::member(11, b"worker", b"/B.app", usage_of(1_000 * publication)),
+            named::member(10, b"worker", b"/A.app", a),
+            named::member(11, b"worker", b"/B.app", b),
         ]
+    }
+
+    /// A and B at `publication` as `burst_rows` has them, C at the first second and at the
+    /// second, whose one process exited before the second's tick, and D at the third only, its
+    /// one process exited too. A tick of the fixture's ring holds one exit.
+    fn exit_rows(publication: u64) -> Vec<named::Named<'static>> {
+        let mut rows = burst_rows(publication);
+        if publication <= 2 {
+            let mut row = named::member(12, b"worker", b"/C.app", usage_of(2_000 * publication));
+            row.exited = publication == 2;
+            rows.push(row);
+        }
+        if publication == 3 {
+            let mut row = named::member(13, b"worker", b"/D.app", usage_of(3_000));
+            row.exited = true;
+            rows.push(row);
+        }
+
+        rows
     }
 
     /// Each of `APPS` at `publication`.
@@ -848,6 +913,7 @@ mod when_the_seconds_hold_more_apps_than_a_chart_draws {
         Usage {
             energy_nj: (10 - place) * 1_000 * publication,
             disk_read_bytes: DISK_THOUSANDS[index] * 1_000 * publication,
+            resident_bytes: RESIDENT_KIBIBYTES[index] * 1_024,
             ..usage_of((place + 1) * 1_000 * publication + burst_ns)
         }
     }
@@ -885,11 +951,19 @@ mod when_the_seconds_hold_more_apps_than_a_chart_draws {
             cpu: chosen_by_worker_of(session, AppAttributionMetric::Cpu),
             power: chosen_by_worker_of(session, AppAttributionMetric::Power),
             disk: chosen_by_worker_of(session, AppAttributionMetric::Disk),
+            resident: chosen_by_worker_of_resident(session),
         }
     }
 
     fn chosen_by_worker_of(session: &LiveSession, metric: AppAttributionMetric) -> Vec<String> {
-        let response = session.app_attribution_history(metric).unwrap();
+        chosen_by_worker_cohort(&session.app_attribution_history(metric).unwrap())
+    }
+
+    fn chosen_by_worker_of_resident(session: &LiveSession) -> Vec<String> {
+        chosen_by_worker_cohort(&session.app_resident_history().unwrap())
+    }
+
+    fn chosen_by_worker_cohort(response: &Value) -> Vec<String> {
         response["cohort"]
             .as_array()
             .unwrap()
@@ -903,6 +977,7 @@ mod when_the_seconds_hold_more_apps_than_a_chart_draws {
             cpu: chosen_by_store_of(&cohorts.cpu),
             power: chosen_by_store_of(&cohorts.power),
             disk: chosen_by_store_of(&cohorts.disk),
+            resident: chosen_by_store_of(&cohorts.resident),
         }
     }
 
@@ -918,6 +993,7 @@ mod when_the_seconds_hold_more_apps_than_a_chart_draws {
             cpu: shown_by_store_of(view, AppAttributionMetric::Cpu),
             power: shown_by_store_of(view, AppAttributionMetric::Power),
             disk: shown_by_store_of(view, AppAttributionMetric::Disk),
+            resident: shown_by_store_of_resident(view),
         }
     }
 
@@ -931,11 +1007,21 @@ mod when_the_seconds_hold_more_apps_than_a_chart_draws {
             .collect()
     }
 
+    fn shown_by_store_of_resident(view: &View) -> Vec<Resident> {
+        let drawn = &view.apps[view.apps.len() - view.cohorts.seconds..];
+
+        drawn
+            .iter()
+            .map(|second| second.resident(&view.cohorts.resident))
+            .collect()
+    }
+
     fn shown_by_worker(session: &LiveSession) -> Shown {
         Shown {
             cpu: shown_by_worker_of(session, AppAttributionMetric::Cpu),
             power: shown_by_worker_of(session, AppAttributionMetric::Power),
             disk: shown_by_worker_of(session, AppAttributionMetric::Disk),
+            resident: shown_by_worker_of_resident(session),
         }
     }
 
@@ -947,6 +1033,36 @@ mod when_the_seconds_hold_more_apps_than_a_chart_draws {
             .iter()
             .map(|point| attribution_of(point, metric))
             .collect()
+    }
+
+    fn shown_by_worker_of_resident(session: &LiveSession) -> Vec<Resident> {
+        let response = session.app_resident_history().unwrap();
+        response["points"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(resident_of)
+            .collect()
+    }
+
+    /// What the worker's `point` shows on the chart of resident memory by App.
+    fn resident_of(point: &Value) -> Resident {
+        let mut resident = Resident {
+            apps: [None; COHORT_MAX],
+            other: None,
+        };
+        let apps = point["apps"].as_array().unwrap();
+        for (measure, app) in resident.apps.iter_mut().zip(apps) {
+            *measure = (!app.is_null()).then(|| measure_of(app));
+        }
+        let other = &point["other"];
+        resident.other = (!other.is_null()).then(|| ResidentOther {
+            app_count: u32::try_from(other["app_count"].as_u64().unwrap()).unwrap(),
+            resident: (!other["resident_bytes"].is_null())
+                .then(|| measure_of(&other["resident_bytes"])),
+        });
+
+        resident
     }
 
     /// What the worker's `point` shows on the chart of `metric`.

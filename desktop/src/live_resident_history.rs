@@ -704,3 +704,6 @@ mod tests;
 
 #[path = "live_resident_history_view.rs"]
 mod view;
+
+#[path = "live_resident_store.rs"]
+mod store;
