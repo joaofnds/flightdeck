@@ -26,6 +26,14 @@ pub enum AppKey<'bytes> {
     Executable(&'bytes [u8]),
 }
 
+impl<'bytes> AppKey<'bytes> {
+    fn bytes(self) -> &'bytes [u8] {
+        match self {
+            AppKey::Bundle(bytes) | AppKey::Executable(bytes) => bytes,
+        }
+    }
+}
+
 /// What the index holds at most, taken at startup.
 #[derive(Clone, Copy)]
 pub struct Capacity {
@@ -90,6 +98,34 @@ impl Programs {
             Err(position) => self.add_app(key, position),
         };
         self.entries[crate::usize_from_u32(entry)] = Some(app);
+    }
+
+    /// The entry of `program`'s App, for a source that names each program by its bytes rather
+    /// than by its entry in the run's dictionary, which gets one entry for each App, numbered as
+    /// the App. Adds the App where the index has not met it, and gives `None` where the index has
+    /// no room for it. An index takes its entries from one kind of source.
+    pub fn intern(&mut self, program: Program<'_>) -> Option<u32> {
+        let key = program.key();
+        let app = match self.search(key) {
+            Ok(position) => self.ordered[position],
+            Err(position) => {
+                if self.keys.len() == self.keys.capacity() {
+                    return None;
+                }
+                if key.bytes().len() > self.arena.capacity() - self.arena.len() {
+                    return None;
+                }
+                self.add_app(key, position)
+            }
+        };
+
+        let entry = &mut self.entries[app.index()];
+        if let Some(known) = *entry {
+            assert_eq!(known, app);
+        } else {
+            *entry = Some(app);
+        }
+        Some(app.0)
     }
 
     /// Whether the index has met `entry`.

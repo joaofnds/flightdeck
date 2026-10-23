@@ -84,3 +84,79 @@ fn knows_only_the_entries_it_met() {
         [false, false, true, false]
     );
 }
+
+#[test]
+fn numbers_each_app_of_a_source_without_a_dictionary_once() {
+    // Goal: a source that names each process's program by its bytes gets one entry per App,
+    // so two programs of one bundle share an entry and the Apps keep their key order.
+    // Method: intern git, then two programs of Safari's bundle, and read each entry's App.
+    let mut programs = Programs::new(Capacity {
+        entries: 4,
+        key_bytes: 1024,
+    });
+    let safari = Some(&b"/Applications/Safari.app"[..]);
+    let interned = [
+        programs.intern(Program {
+            executable_name: b"git",
+            app_path: None,
+        }),
+        programs.intern(Program {
+            executable_name: b"Safari",
+            app_path: safari,
+        }),
+        programs.intern(Program {
+            executable_name: b"com.apple.WebKit.WebContent",
+            app_path: safari,
+        }),
+    ];
+
+    let ranks = interned.map(|entry| entry.map(|entry| programs.rank(programs.app(entry))));
+
+    assert_eq!(interned, [Some(0), Some(1), Some(1)]);
+    assert_eq!(ranks, [Some(1), Some(0), Some(0)]);
+}
+
+mod when_the_index_is_full {
+    use super::{Capacity, Program, Programs};
+
+    #[test]
+    fn interns_no_app_past_its_entries() {
+        // Goal: an index sized for one App refuses a second rather than growing.
+        // Method: intern git into an index of one entry, then Safari, then git again.
+        let mut programs = Programs::new(Capacity {
+            entries: 1,
+            key_bytes: 1024,
+        });
+        let git = Program {
+            executable_name: b"git",
+            app_path: None,
+        };
+        let safari = Program {
+            executable_name: b"Safari",
+            app_path: None,
+        };
+
+        let interned = [git, safari, git].map(|program| programs.intern(program));
+
+        assert_eq!(interned, [Some(0), None, Some(0)]);
+    }
+
+    #[test]
+    fn interns_no_app_past_its_key_bytes() {
+        // Goal: an index whose key bytes are spent refuses a new App's key.
+        // Method: intern git into an index of 4 key bytes, then Safari, whose key is 6 bytes.
+        let mut programs = Programs::new(Capacity {
+            entries: 4,
+            key_bytes: 4,
+        });
+
+        let interned = [b"git".as_slice(), b"Safari"].map(|name| {
+            programs.intern(Program {
+                executable_name: name,
+                app_path: None,
+            })
+        });
+
+        assert_eq!(interned, [Some(0), None]);
+    }
+}
