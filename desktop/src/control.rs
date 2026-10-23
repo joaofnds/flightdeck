@@ -529,7 +529,7 @@ fn state(dashboard: &LiveDashboard, window: &Window) -> Value {
     json!({
         "route": dashboard.request.route,
         "requested_second": dashboard.request.second,
-        "selected_second": selection["second"],
+        "selected_second": dashboard.shown_second(),
         "selected": selection["selected"],
         "status": dashboard.status(),
         "error": dashboard.error,
