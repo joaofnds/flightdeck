@@ -145,12 +145,34 @@ fn derive_apps_samples(
     })
 }
 
+/// A minute's processes and events as rows of the columns the assembly reads, with each
+/// observation's endpoint and the order that places each row with its observation.
+pub(crate) struct ProcessBatch {
+    pub(crate) endpoints: Vec<Endpoint>,
+    pub(crate) rows: DataFrame,
+    pub(crate) order: Vec<usize>,
+}
+
 /// Hands `consume` the endpoint and the frame of each of `minute`'s observations, in publication
 /// order.
 pub(crate) fn read_processes(
     minute: &SealedMinute,
     consume: impl FnMut(&Endpoint, Box<Frame>) -> persistence::Result<()>,
 ) -> Result<(), Refused> {
+    let batch = read_processes_batch(minute)?;
+    let operation = Arc::new(Cancellation::default()).operation(0)?;
+    Frame::placed_many(
+        &batch.endpoints,
+        &batch.rows,
+        &batch.order,
+        &operation,
+        consume,
+    )?;
+    Ok(())
+}
+
+/// The rows of `minute`'s processes and events, each placed with its observation.
+pub(crate) fn read_processes_batch(minute: &SealedMinute) -> Result<ProcessBatch, Refused> {
     let endpoints = read_processes_endpoints(minute)?;
 
     let processes = minute.table(Table::Processes)?;
@@ -206,9 +228,11 @@ pub(crate) fn read_processes(
         .collect();
     let publication = Cells::<UInt64Type>::named(&rows, "publication")?;
     let order = placement(&publications, &publication, rows.height(), TICKLESS)?;
-    let operation = Arc::new(Cancellation::default()).operation(0)?;
-    Frame::placed_many(&endpoints, &rows, &order, &operation, consume)?;
-    Ok(())
+    Ok(ProcessBatch {
+        endpoints,
+        rows,
+        order,
+    })
 }
 
 /// The endpoint of each of `minute`'s ticks, in the order the table holds them.

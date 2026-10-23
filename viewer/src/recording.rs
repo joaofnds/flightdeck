@@ -5,6 +5,7 @@
 
 pub(crate) mod apps;
 mod machine;
+mod minute_ticks;
 mod processes;
 
 use std::ops::Range;
@@ -19,6 +20,7 @@ pub use machine::{
     CoreStateRow, CpuRow, FanRow, GpuStateRow, InterfaceRow, MachineMinute, MemoryRow, TickRow,
     read_machine,
 };
+pub use minute_ticks::{MinuteTick, MinuteTicks};
 pub use processes::{Before, derive_apps};
 
 /// A sealed minute whose marker and files `open` verified.

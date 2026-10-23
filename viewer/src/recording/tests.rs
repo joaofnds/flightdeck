@@ -17,6 +17,8 @@ use collector::ring::{
 };
 use collector::system::{FactText, MachineFacts, PerformanceLevel, SystemReading};
 use collector::tracker::{Event, Noticed};
+use model::apps::{Apps, Creation, Measurement, ProgramUnavailable};
+use model::programs::{AppKey, Capacity, Programs};
 use persistence::engine::{Engine, Row};
 use persistence::query::{TableSource, table_source};
 use persistence::schema::{APP_PARTS, Table};
@@ -29,7 +31,8 @@ use polars::prelude::{
 use super::apps::{ROW_APP, ROW_HEADER, ROW_PROCESS, VERSION};
 use super::processes::read_processes;
 use super::{
-    AppMinute, AppParts, MachineMinute, Refused, SealedMinute, derive_apps, read_apps, read_machine,
+    AppMinute, AppParts, MachineMinute, MinuteTicks, Refused, SealedMinute, derive_apps, read_apps,
+    read_machine,
 };
 use crate::cancellation::Cancellation;
 use crate::live::identity_fixture::Fixture;
@@ -490,6 +493,282 @@ refuses_damaged_processes! {
         |frame| with_column(frame, (col("run_tick") + lit(1)).alias("run_tick"));
     refuses_events_of_one_number, "events", "committed App event order",
         |frame| with_column(frame, col("event").min().alias("event"));
+}
+
+#[test]
+fn a_sealed_minute_gives_the_rule_each_tick_of_its_processes() {
+    // Goal: the rule reads each tick of a sealed minute with its processes, their creation,
+    // program, usage and threads, as the collector read them.
+    // Method: seal three ticks of a refused process and a measured one, and read the minute's
+    // ticks into a fresh index.
+    let fixture = sealed_events_minute();
+    let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+
+    let ticks = minute_ticks(&mut MinuteTicks::default(), &minute).unwrap();
+
+    assert_eq!(
+        ticks.iter().map(|tick| tick.tick).collect::<Vec<_>>(),
+        [0, 1, 2]
+    );
+    let first = &ticks[0];
+    assert_eq!(first.pid, [1, 7]);
+    assert_eq!(
+        first.creation,
+        [Some(creation(1, -1)), Some(creation(7, -7))]
+    );
+    assert_eq!(
+        first.program,
+        [
+            Ok(b"/Apps/Outer\xfe.app".to_vec()),
+            Ok(b"/Apps/Current.app".to_vec())
+        ]
+    );
+    assert_eq!(
+        first.measurement,
+        [Measurement::Refused, Measurement::Measured]
+    );
+    assert_eq!(first.user_ns, [0, 9_007_199_254_740_993]);
+    assert_eq!(first.threads, [None, Some(1)]);
+}
+
+#[test]
+fn a_sealed_minute_gives_the_rule_each_tick_of_its_events() {
+    // Goal: the rule reads each tick's starts, execs and exits, each with its process's
+    // creation and its program or last usage, in the orders it reads them.
+    // Method: seal a start and an exec, then two exits in reverse pid order, then a gone exit
+    // and an exec, and read the minute's ticks.
+    let fixture = sealed_events_minute();
+    let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let departed = Ok(b"/Old.app".to_vec());
+
+    let ticks = minute_ticks(&mut MinuteTicks::default(), &minute).unwrap();
+
+    assert_eq!(
+        ticks[0].starts,
+        [(9, Some(creation(900, -90)), departed.clone())]
+    );
+    assert_eq!(
+        ticks[0].execs,
+        [(9, Some(creation(900, -90)), departed.clone())]
+    );
+    assert_eq!(
+        ticks[1].exits,
+        [(8, Measurement::Refused, 0), (9, Measurement::Measured, 2)]
+    );
+    assert_eq!(ticks[2].exits, [(6, Measurement::Gone, 0)]);
+    assert_eq!(ticks[2].execs, [(7, Some(creation(700, -70)), departed)]);
+}
+
+#[test]
+fn a_minute_sealed_before_process_identity_gives_the_rule_no_programs() {
+    // Goal: the processes of a minute sealed before processes carried their identity reach
+    // the rule with no creation and an unsupported program.
+    // Method: seal three ticks of a measured process from a ring without identity, a start
+    // among their events, and read the minute's ticks.
+    let fixture = sealed_events_minute_of(Fixture::new_mode(false, 2, None));
+    let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+
+    let ticks = minute_ticks(&mut MinuteTicks::default(), &minute).unwrap();
+
+    assert_eq!(ticks[0].pid, [7]);
+    assert_eq!(ticks[0].creation, [None]);
+    assert_eq!(ticks[0].program, [Err(ProgramUnavailable::Unsupported)]);
+    assert_eq!(ticks[0].measurement, [Measurement::Measured]);
+    assert_eq!(
+        ticks[0].starts,
+        [(9, None, Err(ProgramUnavailable::Unsupported))]
+    );
+}
+
+#[test]
+fn a_minute_gives_its_first_tick_the_last_tick_of_the_minute_before_it() {
+    // Goal: the first tick of a minute takes its rates from the last tick of the minute before
+    // it in its run, and every other tick from the one before it.
+    // Method: seal two adjacent minutes of a run, a second apart, read the first and then the
+    // second through the same buffers, and derive each tick's Apps.
+    let fixture = sealed_adjacent_apps_minutes();
+    let first = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let second = SealedMinute::open(&fixture.root, &marker(&fixture, 1)).unwrap();
+    let mut ticks = MinuteTicks::default();
+    minute_ticks(&mut ticks, &first).unwrap();
+
+    let read = minute_ticks(&mut ticks, &second).unwrap();
+
+    assert_eq!(
+        read.iter().map(|tick| tick.tick).collect::<Vec<_>>(),
+        [60, 61]
+    );
+    assert_eq!(read[0].elapsed_ns, Some(1_000_000_000));
+    assert_eq!(read[1].elapsed_ns, Some(1_000_000_000));
+}
+
+#[test]
+fn a_minute_read_without_the_one_before_it_gives_its_first_tick_no_rates() {
+    // Goal: the first tick of a minute read alone takes no rates, since the tick they would
+    // come from is not at hand.
+    // Method: seal two adjacent minutes of a run, and read the second alone.
+    let fixture = sealed_adjacent_apps_minutes();
+    let second = SealedMinute::open(&fixture.root, &marker(&fixture, 1)).unwrap();
+
+    let read = minute_ticks(&mut MinuteTicks::default(), &second).unwrap();
+
+    assert_eq!(read[0].elapsed_ns, None);
+}
+
+#[test]
+fn a_refused_minute_leaves_no_tick_to_take_rates_from() {
+    // Goal: a minute whose read is refused part way leaves the next minute no tick of it to
+    // take rates from.
+    // Method: refuse the first of two adjacent minutes at its last tick, then read the second.
+    let fixture = sealed_adjacent_apps_minutes();
+    let first = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let second = SealedMinute::open(&fixture.root, &marker(&fixture, 1)).unwrap();
+    let mut ticks = MinuteTicks::default();
+    let mut programs = minute_programs();
+    let refused = ticks.read(&first, &mut programs, |tick| {
+        if tick.selected.stamp.tick == 59 {
+            return Err(persistence::Error::Bound("test refusal"));
+        }
+        Ok(())
+    });
+    assert!(matches!(
+        refused,
+        Err(Refused::Decode(persistence::Error::Bound("test refusal")))
+    ));
+
+    let read = minute_ticks(&mut ticks, &second).unwrap();
+
+    assert_eq!(read[0].elapsed_ns, None);
+}
+
+macro_rules! refuses_damaged_ticks {
+    ($($name:ident, $table:literal, $reason:literal, $damage:expr;)*) => {$(
+        #[test]
+        fn $name() {
+            // Goal: a minute whose processes or events hold what format 1 never writes is
+            // refused with the reason, and never reaches the rule.
+            // Method: seal a minute of events, replace the table with a copy the case damages,
+            // and read the minute's ticks.
+            let fixture = sealed_events_minute();
+            damage_table(&fixture, $table, $damage);
+            let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+
+            let refused = minute_ticks(&mut MinuteTicks::default(), &minute);
+
+            let refusal = matches!(
+                refused,
+                Err(Refused::Decode(persistence::Error::Bound($reason)))
+            );
+            assert!(refusal, "{refused:?}");
+        }
+    )*};
+}
+
+refuses_damaged_ticks! {
+    refuses_a_tick_of_a_process_of_no_tick, "processes", "process of no tick",
+        |frame| with_column(frame, (col("publication") + lit(100)).alias("publication"));
+    refuses_a_tick_of_a_process_twice, "processes", "sealed tick pid order",
+        |frame| with_column(frame, lit(7).cast(DataType::Int32).alias("pid"));
+    refuses_a_tick_of_an_event_of_another_tick, "events", "sealed tick event tick",
+        |frame| with_column(frame, (col("run_tick") + lit(1)).alias("run_tick"));
+    refuses_a_tick_of_events_of_one_number, "events", "sealed tick event order",
+        |frame| with_column(frame, col("event").min().alias("event"));
+    refuses_a_tick_of_an_event_of_no_kind, "events", "sealed tick event kind",
+        |frame| with_column(frame, lit(9).cast(DataType::UInt8).alias("kind"));
+}
+
+/// What the rule reads of a tick of a sealed minute, kept past the read, each program as its
+/// App's key.
+#[derive(Debug)]
+struct ReadTick {
+    tick: u64,
+    pid: Vec<i32>,
+    creation: Vec<Option<Creation>>,
+    program: Vec<ReadProgram>,
+    measurement: Vec<Measurement>,
+    user_ns: Vec<u64>,
+    threads: Vec<Option<u64>>,
+    /// Each exit's pid, measurement and user time.
+    exits: Vec<(i32, Measurement, u64)>,
+    /// Each start's pid, creation and program.
+    starts: Vec<(i32, Option<Creation>, ReadProgram)>,
+    execs: Vec<(i32, Option<Creation>, ReadProgram)>,
+    /// The time the rule takes the tick's rates over.
+    elapsed_ns: Option<u64>,
+}
+
+/// A program as its App's key, or why the collector did not read it.
+type ReadProgram = Result<Vec<u8>, ProgramUnavailable>;
+
+/// Each tick `ticks` reads of `minute` into a fresh index.
+fn minute_ticks(ticks: &mut MinuteTicks, minute: &SealedMinute) -> Result<Vec<ReadTick>, Refused> {
+    let mut programs = minute_programs();
+    let mut read = Vec::new();
+    ticks.read(minute, &mut programs, |tick| {
+        let mut apps = Apps::new(16, tick.programs);
+        apps.derive(tick.programs, &tick.previous, &tick.selected);
+        let selected = &tick.selected;
+        let key = |program: &Result<u32, ProgramUnavailable>| {
+            program.map(|entry| {
+                let app = tick.programs.app(entry);
+                match tick.programs.key(app) {
+                    AppKey::Bundle(bytes) | AppKey::Executable(bytes) => bytes.to_vec(),
+                }
+            })
+        };
+        let events = |pid: &[i32], creation: &[Option<Creation>], program| {
+            let program: &[Result<u32, ProgramUnavailable>] = program;
+            (0..pid.len())
+                .map(|event| (pid[event], creation[event], key(&program[event])))
+                .collect()
+        };
+        read.push(ReadTick {
+            tick: selected.stamp.tick,
+            pid: selected.processes.pid.to_vec(),
+            creation: selected.processes.creation.to_vec(),
+            program: selected.processes.program.iter().map(key).collect(),
+            measurement: selected.processes.usage.measurement.to_vec(),
+            user_ns: selected.processes.usage.user_ns.to_vec(),
+            threads: selected.processes.threads.to_vec(),
+            exits: (0..selected.exits.pid.len())
+                .map(|exit| {
+                    let usage = &selected.exits.usage;
+                    (
+                        selected.exits.pid[exit],
+                        usage.measurement[exit],
+                        usage.user_ns[exit],
+                    )
+                })
+                .collect(),
+            starts: events(
+                selected.starts.pid,
+                selected.starts.creation,
+                selected.starts.program,
+            ),
+            execs: events(
+                selected.execs.pid,
+                selected.execs.creation,
+                selected.execs.program,
+            ),
+            elapsed_ns: apps.elapsed_ns(),
+        });
+        Ok(())
+    })?;
+    Ok(read)
+}
+
+fn minute_programs() -> Programs {
+    Programs::new(Capacity {
+        entries: 16,
+        key_bytes: 4096,
+    })
+}
+
+fn creation(unique_id: u64, pid_version: i32) -> Creation {
+    Creation {
+        unique_id,
+        pid_version,
+    }
 }
 
 /// A fixture whose ring held three observations whose events start, exec and exit processes,
