@@ -32,7 +32,8 @@ fn attributes_the_cpu_a_process_spent_between_two_ticks_to_its_app() {
     // Method: index one bundled program as the ring adapter hands out its first entry, then
     // derive the Apps of two ticks of one process of it, whose CPU time grows by 5 ms.
     let mut programs = Programs::new(CAPACITY);
-    let entry = programs.add(SAFARI);
+    let entry = 0;
+    programs.add(entry, SAFARI);
     let previous = Columns::of(
         1,
         &[Process {
@@ -68,8 +69,9 @@ fn groups_the_processes_of_one_bundle_into_one_app() {
     // Method: index the bundle's main program and a helper inside it, then derive the Apps of
     // two ticks of one process of each, whose CPU times grow by 5 ms and 2 ms.
     let mut programs = Programs::new(CAPACITY);
-    let main = programs.add(SAFARI);
-    let helper = programs.add(SAFARI_HELPER);
+    let (main, helper) = (0, 1);
+    programs.add(main, SAFARI);
+    programs.add(helper, SAFARI_HELPER);
     let previous = Columns::of(
         1,
         &[
@@ -428,10 +430,14 @@ fn gives_the_apps_in_key_order() {
     let mut programs = Programs::new(CAPACITY);
     let rows: Vec<Process> = [(5, GIT), (6, SAFARI), (7, BRAVE)]
         .into_iter()
-        .map(|(pid, program)| Process {
-            pid,
-            program: Ok(programs.add(program)),
-            ..Process::default()
+        .zip(0..)
+        .map(|((pid, program), entry)| {
+            programs.add(entry, program);
+            Process {
+                pid,
+                program: Ok(entry),
+                ..Process::default()
+            }
         })
         .collect();
     let previous = Columns::of(1, &rows);
@@ -461,8 +467,9 @@ fn keeps_the_cpu_of_a_process_that_ran_another_program_out_of_its_apps() {
     // the rule cannot split it between the two programs.
     // Method: derive two ticks of one process whose program changes from git to Safari.
     let mut programs = Programs::new(CAPACITY);
-    let git = programs.add(GIT);
-    let safari = programs.add(SAFARI);
+    let (git, safari) = (0, 1);
+    programs.add(git, GIT);
+    programs.add(safari, SAFARI);
     let previous = Columns::of(
         1,
         &[Process {
@@ -1751,8 +1758,8 @@ struct Derived {
 /// git as entry 1.
 fn derive(previous: &Columns, selected: &Columns) -> Derived {
     let mut programs = Programs::new(CAPACITY);
-    assert_eq!(programs.add(SAFARI), 0);
-    assert_eq!(programs.add(GIT), 1);
+    programs.add(0, SAFARI);
+    programs.add(1, GIT);
     let mut apps = Apps::new(PROCESSES_MAX, &programs);
 
     apps.derive(&programs, &previous.tick(), &selected.tick());

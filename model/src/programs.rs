@@ -1,5 +1,5 @@
 //! The App index: the App of each entry of a run's program dictionary, which the ring adapter
-//! hands out numbered from 0 in the order the collector added them.
+//! hands out numbered from 0, in the order a tick first names each.
 
 /// A program as the run's dictionary holds it: the executable's name, and the path of the
 /// outermost `.app` bundle it runs from, if it runs from one.
@@ -48,8 +48,8 @@ impl App {
 
 /// The App of each dictionary entry of one run, and each App's key.
 pub struct Programs {
-    /// The App of each entry.
-    entries: Vec<App>,
+    /// The App of each entry, none until the index meets the entry.
+    entries: Vec<Option<App>>,
     /// Each App's key, as a range of `arena`.
     keys: Vec<KeyRange>,
     arena: Vec<u8>,
@@ -72,7 +72,7 @@ impl Programs {
     pub fn new(capacity: Capacity) -> Self {
         let entries_max = crate::usize_from_u32(capacity.entries);
         Self {
-            entries: Vec::with_capacity(entries_max),
+            entries: vec![None; entries_max],
             keys: Vec::with_capacity(entries_max),
             arena: Vec::with_capacity(capacity.key_bytes),
             ordered: Vec::with_capacity(entries_max),
@@ -80,25 +80,31 @@ impl Programs {
         }
     }
 
-    /// Indexes the dictionary's next entry and returns its number.
-    pub fn add(&mut self, program: Program<'_>) -> u32 {
-        assert!(self.entries.len() < self.entries.capacity());
+    /// Indexes `entry`, which the index has not met, as the entry of `program`.
+    pub fn add(&mut self, entry: u32, program: Program<'_>) {
+        assert!(!self.knows(entry));
 
         let key = program.key();
         let app = match self.search(key) {
             Ok(position) => self.ordered[position],
             Err(position) => self.add_app(key, position),
         };
-
-        let entry = crate::u32_from_length(self.entries.len());
-        self.entries.push(app);
-        entry
+        self.entries[crate::usize_from_u32(entry)] = Some(app);
     }
 
-    /// The App of `entry`.
+    /// Whether the index has met `entry`.
+    #[must_use]
+    pub fn knows(&self, entry: u32) -> bool {
+        self.entries[crate::usize_from_u32(entry)].is_some()
+    }
+
+    /// The App of `entry`, which the index has met.
     #[must_use]
     pub fn app(&self, entry: u32) -> App {
-        self.entries[crate::usize_from_u32(entry)]
+        let Some(app) = self.entries[crate::usize_from_u32(entry)] else {
+            unreachable!("the App rule reads only the entries the index has met");
+        };
+        app
     }
 
     /// The key of `app`.
