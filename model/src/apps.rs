@@ -25,9 +25,9 @@ pub struct Processes<'columns> {
     pub pid: &'columns [i32],
     /// The process's creation, if it was read, which tells two processes of one pid apart.
     pub creation: &'columns [Option<Creation>],
-    /// The process's program, as its entry in the run's dictionary, if it was read. Two entries
-    /// of one index hold two programs, as the ring's dictionary holds each program once.
-    pub program: &'columns [Option<u32>],
+    /// The process's program, as its entry in the run's dictionary, or why it was not read. Two
+    /// entries of one index hold two programs, as the ring's dictionary holds each program once.
+    pub program: &'columns [Result<u32, ProgramUnavailable>],
     /// Whether the process's usage, the columns below, was read.
     pub usage: &'columns [Measurement],
     pub awake_ns_at_start: &'columns [u64],
@@ -53,6 +53,23 @@ pub struct Creation {
     pub unique_id: u64,
     /// Grows when the process runs another program.
     pub pid_version: i32,
+}
+
+/// Why a process's program was not read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProgramUnavailable {
+    /// macOS refused the read.
+    Refused,
+    /// The process exited before the read.
+    Gone,
+    /// macOS gave no answer the collector could use, or the call failed.
+    Unsupported,
+    /// The process ran another program between the readings that would name it.
+    Changed,
+    /// The kernel's answer was not of the size the collector reads.
+    Invalid,
+    /// The run's program dictionary was full.
+    Exhausted,
 }
 
 /// Whether a process's usage was read at a tick, or why not.
@@ -106,6 +123,9 @@ impl Processes<'_> {
 /// the tick.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProcessTotals {
+    pub pid: i32,
+    pub creation: Option<Creation>,
+    pub program: Result<u32, ProgramUnavailable>,
     pub deltas: Deltas,
     /// Why no App takes what the process spent, where one does not.
     pub app_attribution: Option<Unavailable>,
@@ -296,7 +316,7 @@ impl Apps {
         for row in 0..count {
             let process = derive_process(compatible, &previous.processes, &selected.processes, row);
             self.processes.push(process);
-            if let Some(entry) = selected.processes.program[row] {
+            if let Ok(entry) = selected.processes.program[row] {
                 let totals = self.totals_of(programs.app(entry));
                 totals.add_deltas(&process);
                 totals.add_gauges(&selected.processes, row);
@@ -378,6 +398,9 @@ fn derive_process(
 ) -> ProcessTotals {
     let unmeasured = unmeasured(selected.usage[row]);
     let mut process = ProcessTotals {
+        pid: selected.pid[row],
+        creation: selected.creation[row],
+        program: selected.program[row],
         deltas: Deltas::unavailable(Unavailable::Baseline),
         app_attribution: None,
         resident_bytes_last: last(unmeasured, selected.resident_bytes[row]),
@@ -399,7 +422,7 @@ fn derive_process(
         }
         process.deltas = derive_deltas(previous, before, selected, row);
     }
-    if selected.program[row].is_none() {
+    if selected.program[row].is_err() {
         process.app_attribution = Some(Unavailable::Program);
     }
     process
@@ -416,10 +439,10 @@ fn derive_same_program(
     if previous.creation[before] != selected.creation[row] {
         return false;
     }
-    let Some(program) = selected.program[row] else {
+    let Ok(program) = selected.program[row] else {
         return false;
     };
-    previous.program[before] == Some(program)
+    previous.program[before] == Ok(program)
 }
 
 /// How much the process's counters grew between its observations at `before` and `row`.

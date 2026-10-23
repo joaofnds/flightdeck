@@ -1,6 +1,6 @@
 use super::{
-    Amount, Apps, Creation, Deltas, Measurement, ProcessTotals, Processes, Stamp, Subtotal, Tick,
-    Totals, Unavailable,
+    Amount, Apps, Creation, Deltas, Measurement, ProcessTotals, Processes, ProgramUnavailable,
+    Stamp, Subtotal, Tick, Totals, Unavailable,
 };
 use crate::programs::{Capacity, Program, Programs};
 
@@ -32,7 +32,7 @@ fn attributes_the_cpu_a_process_spent_between_two_ticks_to_its_app() {
     let previous = Columns::of(
         1,
         &[Process {
-            program: Some(entry),
+            program: Ok(entry),
             user_ns: 7_000_000,
             system_ns: 3_000_000,
             ..Process::default()
@@ -41,7 +41,7 @@ fn attributes_the_cpu_a_process_spent_between_two_ticks_to_its_app() {
     let selected = Columns::of(
         2,
         &[Process {
-            program: Some(entry),
+            program: Ok(entry),
             user_ns: 10_000_000,
             system_ns: 5_000_000,
             ..Process::default()
@@ -70,12 +70,12 @@ fn groups_the_processes_of_one_bundle_into_one_app() {
         1,
         &[
             Process {
-                program: Some(main),
+                program: Ok(main),
                 ..Process::default()
             },
             Process {
                 pid: 8,
-                program: Some(helper),
+                program: Ok(helper),
                 ..Process::default()
             },
         ],
@@ -84,13 +84,13 @@ fn groups_the_processes_of_one_bundle_into_one_app() {
         2,
         &[
             Process {
-                program: Some(main),
+                program: Ok(main),
                 user_ns: 5_000_000,
                 ..Process::default()
             },
             Process {
                 pid: 8,
-                program: Some(helper),
+                program: Ok(helper),
                 user_ns: 2_000_000,
                 ..Process::default()
             },
@@ -426,14 +426,14 @@ fn keeps_the_cpu_of_a_process_that_ran_another_program_out_of_its_apps() {
     let previous = Columns::of(
         1,
         &[Process {
-            program: Some(git),
+            program: Ok(git),
             ..Process::default()
         }],
     );
     let selected = Columns::of(
         2,
         &[Process {
-            program: Some(safari),
+            program: Ok(safari),
             user_ns: 3_000_000,
             ..Process::default()
         }],
@@ -483,7 +483,7 @@ fn keeps_the_cpu_of_a_process_whose_previous_program_is_unknown_out_of_its_apps(
     let previous = Columns::of(
         1,
         &[Process {
-            program: None,
+            program: Err(ProgramUnavailable::Refused),
             ..Process::default()
         }],
     );
@@ -511,7 +511,7 @@ fn leaves_a_process_without_its_program_out_of_every_app() {
     let selected = Columns::of(
         2,
         &[Process {
-            program: None,
+            program: Err(ProgramUnavailable::Refused),
             user_ns: 3_000_000,
             ..Process::default()
         }],
@@ -526,6 +526,35 @@ fn leaves_a_process_without_its_program_out_of_every_app() {
     );
     assert_eq!(derived.totals, []);
     assert_eq!(derived.ungrouped_members, 1);
+}
+
+#[test]
+fn names_each_process_and_why_its_program_is_unknown() {
+    // Goal: each process of a tick carries its pid, its creation and its program, or why the
+    // program could not be read.
+    // Method: derive two ticks of two processes, the second of which macOS refused the program
+    // of.
+    let rows = [
+        Process::default(),
+        Process {
+            pid: 8,
+            program: Err(ProgramUnavailable::Refused),
+            ..Process::default()
+        },
+    ];
+    let previous = Columns::of(1, &rows);
+    let selected = Columns::of(2, &rows);
+
+    let derived = derive(&previous, &selected);
+
+    assert_eq!(derived.processes[0].pid, 7);
+    assert_eq!(derived.processes[0].creation, Process::default().creation);
+    assert_eq!(derived.processes[0].program, Ok(0));
+    assert_eq!(derived.processes[1].pid, 8);
+    assert_eq!(
+        derived.processes[1].program,
+        Err(ProgramUnavailable::Refused)
+    );
 }
 
 #[test]
@@ -968,7 +997,7 @@ fn unavailable(reason: Unavailable) -> Deltas {
 struct Process {
     pid: i32,
     creation: Option<Creation>,
-    program: Option<u32>,
+    program: Result<u32, ProgramUnavailable>,
     usage: Measurement,
     awake_ns_at_start: u64,
     user_ns: u64,
@@ -992,7 +1021,7 @@ impl Default for Process {
                 unique_id: 700,
                 pid_version: 1,
             }),
-            program: Some(0),
+            program: Ok(0),
             usage: Measurement::Measured,
             awake_ns_at_start: 0,
             user_ns: 0,
@@ -1015,7 +1044,7 @@ struct Columns {
     stamp: Stamp,
     pid: Vec<i32>,
     creation: Vec<Option<Creation>>,
-    program: Vec<Option<u32>>,
+    program: Vec<Result<u32, ProgramUnavailable>>,
     usage: Vec<Measurement>,
     awake_ns_at_start: Vec<u64>,
     user_ns: Vec<u64>,
