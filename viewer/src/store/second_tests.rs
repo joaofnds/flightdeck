@@ -361,6 +361,23 @@ mod when_the_readings_do_not_match {
     use super::{BatteryReading, Machine, READ_INTERVAL_NS, ScanState};
 
     #[test]
+    fn a_power_or_heat_reading_that_is_no_number_is_unknown() {
+        // Goal: a chart draws a gap where the sensor read no number, as the worker's readings
+        // draw one, and never fails to draw. Method: a tick whose power and every temperature
+        // read NaN or an infinity.
+        let machine = Machine::at(1)
+            .smc(f32::NAN, f32::INFINITY)
+            .die_temperatures(f32::NEG_INFINITY, f32::NAN);
+
+        let second = machine.first_second();
+
+        assert_eq!(second.power_watts, None);
+        assert_eq!(second.soc_celsius, None);
+        assert_eq!(second.cpu_celsius, None);
+        assert_eq!(second.gpu_celsius, None);
+    }
+
+    #[test]
     fn a_cpu_counter_that_went_back_leaves_the_cpu_percent_unknown() {
         // Goal: a counter that went back draws no CPU share rather than a wrong one. Method: a CPU
         // whose busy ticks fall from 10 to 5.

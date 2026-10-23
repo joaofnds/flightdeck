@@ -115,10 +115,10 @@ impl MachineSecond {
             network: None,
             disk_read_bps: None,
             disk_written_bps: None,
-            power_watts: reading.tick.power_watts,
-            soc_celsius: reading.tick.soc_celsius,
-            cpu_celsius: reading.tick.cpu_celsius,
-            gpu_celsius: reading.tick.gpu_celsius,
+            power_watts: measured(reading.tick.power_watts),
+            soc_celsius: measured(reading.tick.soc_celsius),
+            cpu_celsius: measured(reading.tick.cpu_celsius),
+            gpu_celsius: measured(reading.tick.gpu_celsius),
             fan_mean_rpm: fan_mean_rpm(reading.fans),
             fan_rpm: fan_rpm(reading.fans),
             battery: BatterySecond::of(reading.tick),
@@ -431,6 +431,11 @@ fn fan_rpm(fans: &[FanRow]) -> [Option<f32>; 2] {
     }
 
     speeds
+}
+
+/// The sensor's `reading`, `None` where it read no number, as a chart draws a gap there.
+fn measured(reading: Option<f32>) -> Option<f32> {
+    reading.filter(|reading| reading.is_finite())
 }
 
 /// The speed `fan` read, `None` where its reading is no speed.
