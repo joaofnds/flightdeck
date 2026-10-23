@@ -9,6 +9,8 @@ use crate::live_resident_history::{COLORS, Observation};
 
 #[path = "live_app_machine_reference.rs"]
 mod machine_reference;
+#[path = "live_app_attribution_store.rs"]
+mod store;
 #[path = "live_app_attribution_validation.rs"]
 mod validation;
 #[path = "live_app_attribution_view.rs"]
@@ -158,6 +160,14 @@ impl Metric {
 impl AppAttributionHistory {
     pub fn prepare(metric: Metric, value: &Value, selection: &Value) -> Self {
         match History::decode(metric, value, selection) {
+            Ok(history) => Self::Ready(history),
+            Err(error) => Self::Unavailable(error),
+        }
+    }
+
+    /// The chart of `metric` drawn from the store's `view`.
+    pub fn from_view(metric: Metric, view: &viewer::store::View) -> Self {
+        match History::from_view(metric, view) {
             Ok(history) => Self::Ready(history),
             Err(error) => Self::Unavailable(error),
         }

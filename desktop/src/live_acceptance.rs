@@ -136,7 +136,7 @@ fn prepare_app_names(
 }
 
 /// Names the App history charts as the Overview does, which differs from the pages that own them.
-fn prepare_overview_titles(panels: &mut [Rc<Panel>]) -> Result<(), String> {
+pub(crate) fn prepare_overview_titles(panels: &mut [Rc<Panel>]) -> Result<(), String> {
     for panel in panels {
         let Some(title) = crate::live_overview_app_histories::overview_app_history_title(&panel.id)
         else {

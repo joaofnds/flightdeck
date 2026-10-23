@@ -87,12 +87,12 @@ impl LiveDashboard {
     }
 
     fn overview_app_histories_unavailable(&self, id: &str) -> String {
-        if let Some(snapshot) = self.snapshot.as_deref() {
-            if let Some(metric) = Metric::from_panel(id) {
-                if let Some(history) = snapshot.attribution_history(metric) {
-                    return history.coverage(history.index(self.reading_target()));
-                }
+        if let Some(metric) = Metric::from_panel(id) {
+            if let Some(history) = self.attribution_history(metric) {
+                return history.coverage(history.index(self.reading_target()));
             }
+        }
+        if let Some(snapshot) = self.snapshot.as_deref() {
             if id == crate::live_resident_history::PANEL_ID {
                 if let Some(history) = &snapshot.resident_history {
                     return history.coverage(history.index(self.reading_target()));

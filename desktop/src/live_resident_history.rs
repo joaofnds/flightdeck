@@ -440,6 +440,22 @@ impl Observation {
         })
     }
 
+    /// The observation the store names a second by.
+    pub(crate) fn of(observation: &viewer::live_app_response::Observation) -> Self {
+        let stamp = &observation.stamp;
+
+        Self {
+            recording: observation.recording,
+            boot: stamp.boot,
+            run: stamp.run,
+            publication: stamp.publication,
+            run_tick: observation.run_tick,
+            wall_ns: observation.wall_ns,
+            continuous_ns: stamp.continuous_ns,
+            awake_ns: stamp.awake_ns,
+        }
+    }
+
     pub(crate) fn matches(&self, target: &Target) -> bool {
         let Some(identity) = &target.identity else {
             return false;
@@ -538,23 +554,42 @@ fn decode_cohort(value: &Value) -> Result<Vec<String>, String> {
 }
 
 pub(crate) fn decode_cohort_labels(entries: &[Value], names: &mut [String]) -> Result<(), String> {
-    assert!(names.len() <= COHORT_MAX);
     assert_eq!(entries.len(), names.len());
+
+    cohort_labels(
+        names,
+        |index| {
+            let display = entries[index]["key"]["display"].as_str();
+            Ok(display
+                .ok_or("Missing captured resident App display")?
+                .into())
+        },
+        |index| {
+            let kind = entries[index]["key"]["kind"].as_str();
+            Ok(kind.ok_or("Missing captured resident App kind")?.into())
+        },
+    )
+}
+
+/// Gives each of a cohort's `names` a label of its own: the App's whole display where two
+/// names are the same or one is Other, `display_of` it, then its kind beside it, `kind_of` it,
+/// where they are still the same, then a number.
+pub(crate) fn cohort_labels(
+    names: &mut [String],
+    display_of: impl Fn(usize) -> Result<String, String>,
+    kind_of: impl Fn(usize) -> Result<String, String>,
+) -> Result<(), String> {
+    assert!(names.len() <= COHORT_MAX);
     let collisions = decode_cohort_label_collisions(names);
     for (index, name) in names.iter_mut().enumerate() {
         if collisions[index] {
-            *name = entries[index]["key"]["display"]
-                .as_str()
-                .ok_or("Missing captured resident App display")?
-                .into();
+            *name = display_of(index)?;
         }
     }
     let collisions = decode_cohort_label_collisions(names);
     for (index, name) in names.iter_mut().enumerate() {
         if collisions[index] {
-            let kind = entries[index]["key"]["kind"]
-                .as_str()
-                .ok_or("Missing captured resident App kind")?;
+            let kind = kind_of(index)?;
             *name = format!("{name} ({kind})");
         }
     }

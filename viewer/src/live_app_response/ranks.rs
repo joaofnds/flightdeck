@@ -178,6 +178,15 @@ impl RankedApp {
             display_name,
         })
     }
+
+    /// The App's whole key as text, as the worker's App histories display it.
+    #[must_use]
+    pub fn display(&self) -> String {
+        let mut display = String::with_capacity(self.bytes.len() * 4);
+        crate::byte_display::append(&mut display, &self.bytes);
+
+        display
+    }
 }
 
 impl Ranking {

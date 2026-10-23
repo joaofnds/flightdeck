@@ -12,9 +12,7 @@ impl LiveDashboard {
         &self,
         panel: &Panel,
     ) -> Option<&super::AppAttributionHistory> {
-        let metric = Metric::from_panel(&panel.id)?;
-
-        self.snapshot.as_ref()?.attribution_history(metric)
+        self.attribution_history(Metric::from_panel(&panel.id)?)
     }
 
     /// Network traffic by App beside its ranking. The collector records no traffic per App, so
@@ -59,14 +57,10 @@ impl LiveDashboard {
         let chart = if let Some(panel) = panel {
             self.live_chart(panel, cx).into_any_element()
         } else {
-            let reading = self
-                .snapshot
-                .as_ref()
-                .and_then(|snapshot| snapshot.attribution_history(metric))
-                .map_or_else(
-                    || self.history_absent("App rate history unavailable at this observation"),
-                    |history| history.coverage(None),
-                );
+            let reading = self.attribution_history(metric).map_or_else(
+                || self.history_absent("App rate history unavailable at this observation"),
+                |history| history.coverage(None),
+            );
             let chart = AbsentChart {
                 id: metric.panel_id(),
                 title: metric.title(),

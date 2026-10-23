@@ -3,6 +3,8 @@ use std::collections::BTreeMap;
 use num_traits::ToPrimitive;
 use serde_json::Value;
 
+use viewer::store::MachineSecond;
+
 use super::{History, Metric};
 use crate::data::Line;
 use crate::live_projection::{identity, integer};
@@ -42,6 +44,28 @@ impl MachineReference {
             Metric::Gpu => decode_rate(&value["gpu_active_percent"]),
             Metric::Power => unreachable!("Process power has no machine reference"),
         };
+
+        Self::of_rate(metric, rate)
+    }
+
+    /// The reference of `metric` at `second`, a second the store holds.
+    pub(super) fn of(metric: Metric, second: &MachineSecond) -> Self {
+        let rate = match metric {
+            Metric::Cpu => second.cpu_percent_one_core,
+            Metric::Disk => second
+                .disk_read_bps
+                .zip(second.disk_written_bps)
+                .map(|(read, written)| read + written),
+            Metric::Gpu => second.gpu_active_percent,
+            // Process power draws no reference, so its points keep the reason they have none.
+            Metric::Power => return Self::Unavailable("machine observation unavailable"),
+        };
+
+        Self::of_rate(metric, rate.filter(|rate| *rate >= 0.0))
+    }
+
+    /// The reference of `metric` at the rate `rate`, where the chart can draw it.
+    fn of_rate(metric: Metric, rate: Option<f64>) -> Self {
         let Some(rate) = rate.filter(|rate| rate.is_finite()) else {
             return Self::Unavailable("machine interval unavailable");
         };

@@ -10,9 +10,11 @@ use viewer::live_app_response::{App, Key, KeyKind, Measure, Observation, RankedA
 use viewer::store::{AppRow, AppsSecond, BatterySecond, MachineSecond, MemorySecond, Totals, View};
 
 use super::super::LiveDashboard;
-use crate::data::Panel;
+use crate::data::{Line, Panel};
 use crate::hardware::Readings;
+use crate::live_app_attribution_history::{AppAttributionHistory, Metric};
 use crate::live_hover::{Origin, Preview, Target};
+use crate::live_overview_app_histories::OverviewAppHistories;
 use crate::live_projection::overview_panels;
 use crate::live_source::{Snapshot, Update, Worker};
 use crate::live_store_fixtures::{
@@ -182,8 +184,58 @@ fn a_view_newer_than_the_readings_ranks_the_apps_of_its_newest_second() {
     assert_eq!(cpu.amount, 750_000_000);
 }
 
+#[test]
+fn a_view_newer_than_the_readings_draws_the_overviews_charts_by_app() {
+    // Goal: Overview, following the newest second, draws its CPU, energy and disk charts by App
+    // from the store's View, under the titles Overview gives them. Method: readings that end at
+    // 10,000 and draw no chart by App, then a View that ends five seconds later and holds an App
+    // in each second.
+    let mut dashboard = dashboard(&[reading_at(9_999, 0), reading_at(10_000, 0)]);
+    let view = Arc::new(charted_view());
+
+    dashboard.take_view(Arc::clone(&view));
+
+    assert_eq!(by_app(&dashboard.panels), expected_by_app(&view));
+}
+
+mod when_the_view_cannot_choose_the_apps_its_charts_draw {
+    use super::*;
+
+    #[test]
+    fn the_page_draws_no_chart_by_app_and_says_why() {
+        // Goal: where the store could not choose the Apps its charts draw, Overview draws none
+        // of its charts by App, not even the worker's older ones, and their cards say why.
+        // Method: readings with charts by App, then a newer View whose cohorts the store refused.
+        let mut dashboard = drawn_by_app(&[reading_at(9_999, 0), reading_at(10_000, 0)]);
+        let mut view = charted_view();
+        view.cohorts.refused = true;
+
+        dashboard.take_view(Arc::new(view));
+
+        let cpu = dashboard.attribution_history(Metric::Cpu).unwrap();
+        assert_eq!(by_app(&dashboard.panels), Vec::new());
+        assert_eq!(
+            cpu.coverage(None),
+            "App rate history unavailable: App rate history holds more Apps than it adds up"
+        );
+    }
+}
+
 mod when_the_worker_has_not_read_the_page_yet {
     use super::*;
+
+    #[test]
+    fn the_view_draws_the_overviews_charts_by_app() {
+        // Goal: at launch Overview draws its charts by App from the store's View before the
+        // worker's first reading. Method: a newly opened Overview, then a View that holds an App
+        // in each second.
+        let mut dashboard = opening();
+        let view = Arc::new(charted_view());
+
+        dashboard.take_view(Arc::clone(&view));
+
+        assert_eq!(by_app(&dashboard.panels), expected_by_app(&view));
+    }
 
     #[test]
     fn the_view_draws_the_overviews_machine_charts() {
@@ -558,6 +610,77 @@ fn ranked_view() -> Arc<View> {
     let mut view = view(1, &[], &seconds);
     view.apps[2] = Arc::new(apps_of(&seconds[2], "Brave Browser", 750_000_000));
     Arc::new(view)
+}
+
+/// The View of `newer_seconds`, in each of which one App, Brave Browser, spent 0.75 s of CPU,
+/// and whose charts by App draw it on a line of its own.
+fn charted_view() -> View {
+    let seconds = newer_seconds();
+    let mut view = view(1, &[], &seconds);
+    view.apps = seconds
+        .iter()
+        .map(|second| Arc::new(apps_of(second, "Brave Browser", 750_000_000)))
+        .collect();
+    let brave = Arc::new(RankedApp {
+        kind: KeyKind::Bundle,
+        bytes: b"Brave Browser".to_vec(),
+        display_name: "Brave Browser".into(),
+    });
+    view.cohorts.seconds = seconds.len();
+    view.cohorts.cpu = vec![Arc::clone(&brave)];
+    view.cohorts.power = vec![Arc::clone(&brave)];
+    view.cohorts.disk = vec![brave];
+    view
+}
+
+/// An Overview showing the worker's readings of `trends` with the charts by App the worker
+/// drew of them.
+fn drawn_by_app(trends: &[MachineSecond]) -> LiveDashboard {
+    let charted = charted_view();
+    let history = |metric| Arc::new(AppAttributionHistory::from_view(metric, &charted));
+    let mut snapshot = readings(trends);
+    snapshot.overview_app_histories = Some(Arc::new(OverviewAppHistories {
+        cpu: history(Metric::Cpu),
+        power: history(Metric::Power),
+        disk: history(Metric::Disk),
+    }));
+
+    let mut dashboard = opening();
+    dashboard.accept(snapshot);
+    assert!(dashboard.error.is_none());
+    assert_eq!(by_app(&dashboard.panels).len(), 3);
+    dashboard
+}
+
+/// The id, title and lines of each of `panels` that Overview's CPU, energy and disk charts by
+/// App draw, in order.
+fn by_app(panels: &[Rc<Panel>]) -> Vec<(String, String, Vec<Line>)> {
+    let ids = [Metric::Cpu, Metric::Power, Metric::Disk].map(Metric::panel_id);
+
+    panels
+        .iter()
+        .filter(|panel| ids.contains(&panel.id.as_str()))
+        .map(|panel| (panel.id.clone(), panel.title.clone(), panel.lines.clone()))
+        .collect()
+}
+
+/// What `by_app` finds of Overview's charts by App drawn from `view`.
+fn expected_by_app(view: &View) -> Vec<(String, String, Vec<Line>)> {
+    let titled = [
+        (Metric::Cpu, "CPU by app"),
+        (Metric::Power, "Energy by app"),
+        (Metric::Disk, "Disk by app"),
+    ];
+
+    titled
+        .into_iter()
+        .map(|(metric, title)| {
+            let panel = AppAttributionHistory::from_view(metric, view)
+                .panel()
+                .unwrap();
+            (panel.id.clone(), title.into(), panel.lines.clone())
+        })
+        .collect()
 }
 
 /// The Apps of `second` when one bundle, named `name`, is all that ran, and spent `cpu_ns` of

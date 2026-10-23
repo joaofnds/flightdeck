@@ -1,7 +1,7 @@
 //! The page drawn from the store's newest View, which the window takes each tick. Overview draws
-//! its machine charts, readouts and hardware figure from it while it follows the newest second,
-//! and a chosen second, a hover's reading and every other page draw from the worker's readings
-//! as before.
+//! its machine charts, its CPU, energy and disk charts by App, its readouts and its hardware
+//! figure from it while it follows the newest second, and a chosen second, a hover's reading and
+//! every other page draw from the worker's readings as before.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -14,7 +14,9 @@ use viewer::store::{MachineSecond, Store, View};
 use super::LiveDashboard;
 use crate::data::Panel;
 use crate::hardware::Readings;
+use crate::live_app_attribution_history::{AppAttributionHistory, Metric};
 use crate::live_inventory::PerformanceLevel;
+use crate::live_overview_app_histories::OverviewAppHistories;
 use crate::live_projection::held_projection;
 use crate::live_rankings::{Rankings, from_selected};
 use crate::live_source_mode::SourceMode;
@@ -26,6 +28,8 @@ use crate::live_views::summary;
 mod tests;
 
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
+/// The charts by App Overview draws from the store's View.
+const APP_METRICS: [Metric; 3] = [Metric::Cpu, Metric::Power, Metric::Disk];
 
 /// The store the app starts before its window opens and keeps for its life, so a window shown
 /// or opened again draws what the store holds at once.
@@ -45,13 +49,18 @@ pub(super) fn take_store_view(cx: &App) -> Option<Arc<View>> {
     store.0.take()
 }
 
-/// The machine charts the page drew from a View, as the range zoomed them, so a reading that
-/// arrives before the next View splices the same charts in again and their plots draw nothing.
+/// The charts the page drew from a View, as the range zoomed them, so a reading that arrives
+/// before the next View splices the same charts in again and their plots draw nothing.
 #[derive(Default)]
 pub(super) struct StorePanels {
     /// The version of the View they were drawn from, or none before the first.
     version: Option<u64>,
     panels: Vec<Rc<Panel>>,
+    /// The charts of `APP_METRICS` the View draws, leaving out each it holds too little for.
+    apps: Vec<Rc<Panel>>,
+    /// The histories `apps` draw, which say why a chart is left out, or none before the first
+    /// View.
+    histories: Option<OverviewAppHistories>,
     /// The top Apps of the View's newest second, or none before the first View.
     rankings: Option<Rankings>,
     /// Why the last View the page took could not be drawn, reported once.
@@ -85,14 +94,7 @@ impl LiveDashboard {
         let version = view.version;
         if self.store_panels.version != Some(version) {
             match self.draw_store_view_panels(view) {
-                Ok(panels) => {
-                    self.store_panels = StorePanels {
-                        version: Some(version),
-                        panels,
-                        rankings: Some(draw_store_view_rankings(view)),
-                        failure: None,
-                    };
-                }
+                Ok(panels) => self.store_panels = panels,
                 Err(error) => {
                     self.draw_store_view_failed(error);
                     return false;
@@ -100,6 +102,7 @@ impl LiveDashboard {
             }
         }
         draw_store_view_splice(&mut self.panels, &self.store_panels.panels);
+        draw_store_view_splice_apps(&mut self.panels, &self.store_panels.apps);
         true
     }
 
@@ -113,18 +116,31 @@ impl LiveDashboard {
         self.store_view = None;
     }
 
-    /// The machine charts of `view`, as the range zooms them.
-    fn draw_store_view_panels(&self, view: &View) -> Result<Vec<Rc<Panel>>, String> {
+    /// The charts of `view`, as the range zooms them, and the top Apps of its newest second.
+    fn draw_store_view_panels(&self, view: &View) -> Result<StorePanels, String> {
         let levels = draw_store_view_panels_levels(view);
         let mut panels = crate::live_projection::overview_panels(view, levels.as_ref())?;
+        let histories = draw_store_view_panels_histories(view);
+        let mut apps: Vec<Rc<Panel>> = APP_METRICS
+            .iter()
+            .filter_map(|metric| histories.history(*metric)?.panel())
+            .collect();
+        crate::live_acceptance::prepare_overview_titles(&mut apps)?;
 
         if let Some(window) = self.view_window() {
             let sliding = self.panels_slide();
-            for panel in &mut panels {
+            for panel in panels.iter_mut().chain(&mut apps) {
                 super::zoom_panel(panel, window, sliding);
             }
         }
-        Ok(panels)
+        Ok(StorePanels {
+            version: Some(view.version),
+            panels,
+            apps,
+            histories: Some(histories),
+            rankings: Some(draw_store_view_rankings(view)),
+            failure: None,
+        })
     }
 
     /// The View the page draws Overview's machine charts, readouts and hardware figure from: the
@@ -177,8 +193,21 @@ impl LiveDashboard {
             return false;
         }
 
-        let drawn = &self.store_panels.panels;
-        drawn.iter().any(|drawn| drawn.id == panel.id)
+        let drawn = &self.store_panels;
+        let mut panels = drawn.panels.iter().chain(&drawn.apps);
+        panels.any(|drawn| drawn.id == panel.id)
+    }
+
+    /// The history of `metric` the page reads: the one the page drew from the store's View,
+    /// where it draws one, and otherwise the one the worker read.
+    pub(crate) fn attribution_history(&self, metric: Metric) -> Option<&AppAttributionHistory> {
+        if self.drawn_store_view().is_some() {
+            if let Some(histories) = &self.store_panels.histories {
+                return histories.history(metric);
+            }
+        }
+
+        self.snapshot.as_ref()?.attribution_history(metric)
     }
 
     /// The second the page's readings show: the newest of the View the page draws, where it
@@ -223,6 +252,17 @@ impl LiveDashboard {
         let view = self.drawn_store_view()?;
 
         Some(store_view_hardware_of(view.seconds.last()?))
+    }
+}
+
+/// The charts by App of `view`.
+fn draw_store_view_panels_histories(view: &View) -> OverviewAppHistories {
+    let history = |metric| Arc::new(AppAttributionHistory::from_view(metric, view));
+
+    OverviewAppHistories {
+        cpu: history(Metric::Cpu),
+        power: history(Metric::Power),
+        disk: history(Metric::Disk),
     }
 }
 
@@ -303,6 +343,18 @@ fn draw_store_view_splice(panels: &mut [Rc<Panel>], drawn: &[Rc<Panel>]) {
         };
         *place = Rc::clone(panel);
     }
+}
+
+/// Puts `apps`, the charts by App the View draws, in place of the page's charts of
+/// `APP_METRICS`, so a chart the View leaves out is left out and its card says why.
+fn draw_store_view_splice_apps(panels: &mut Vec<Rc<Panel>>, apps: &[Rc<Panel>]) {
+    let drawn_by_app = |panel: &Rc<Panel>| {
+        let metric = Metric::from_panel(&panel.id);
+        metric.is_some_and(|metric| APP_METRICS.contains(&metric))
+    };
+
+    panels.retain(|panel| !drawn_by_app(panel));
+    panels.extend(apps.iter().map(Rc::clone));
 }
 
 /// Reports why the store reads less than it should, once each time the reason changes.

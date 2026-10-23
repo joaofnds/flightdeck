@@ -265,9 +265,9 @@ impl LiveDashboard {
 
         let mut cards = summary::cards(&self.request.route, selection);
         if let Some(card) = cards.iter_mut().find(|card| card.label == "Process power") {
-            if let Some(history) = self.snapshot.as_ref().and_then(|snapshot| {
-                snapshot.attribution_history(crate::live_app_attribution_history::Metric::Power)
-            }) {
+            if let Some(history) =
+                self.attribution_history(crate::live_app_attribution_history::Metric::Power)
+            {
                 card.reading = history.total_rate(history.index(self.reading_target()));
                 card.note = "Attributed processes; separate scope".into();
                 if card.reading != "Unavailable" {
