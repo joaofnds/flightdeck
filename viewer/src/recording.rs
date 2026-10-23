@@ -9,8 +9,9 @@ mod machine;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
+use persistence::engine::Cells;
 use persistence::schema::Table;
-use polars::prelude::{DataFrame, Expr, LazyFrame, SchemaRef, SortMultipleOptions, col};
+use polars::prelude::{DataFrame, Expr, LazyFrame, SchemaRef, UInt64Type, col};
 
 pub use apps::{AppMinute, AppParts, AppRow, Previous, SampleRow, read_apps};
 pub use machine::{
@@ -121,20 +122,53 @@ impl SealedTable {
         Ok(true)
     }
 
-    /// The `columns`, rows in the order of the columns `order` names.
-    fn collect(self, columns: &[&str], order: &[&str]) -> Result<DataFrame, Refused> {
+    /// The `columns`, rows in the order the file holds them.
+    fn collect(self, columns: &[&str]) -> Result<DataFrame, Refused> {
         let columns: Vec<Expr> = columns.iter().map(|name| col(*name)).collect();
-        let sort = SortMultipleOptions {
-            descending: vec![false; order.len()],
-            nulls_last: vec![false; order.len()],
-            multithreaded: false,
-            maintain_order: true,
-            limit: None,
-        };
-        let plan = self.plan.select(columns).sort(order.iter().copied(), sort);
-        plan.collect()
+        self.plan
+            .select(columns)
+            .collect()
             .map_err(|error| Refused::Decode(persistence::Error::from(error)))
     }
+}
+
+/// The place in its table of each row in publication order, the rows of one publication in the
+/// order the table holds them, where `publication` holds the publication of each of the table's
+/// `rows` rows and `publications`, strictly increasing, those its rows may name. Refuses a row
+/// of any other publication for `refusal`. A sealed minute's tables keep each entity's rows
+/// together, which compress far better, and a store reads them a publication at a time, so one
+/// pass over the rows replaces a sort that cost more than decoding the table.
+fn placement(
+    publications: &[u64],
+    publication: &Cells<'_, UInt64Type>,
+    rows: usize,
+    refusal: &'static str,
+) -> persistence::Result<Vec<usize>> {
+    for pair in publications.windows(2) {
+        assert!(pair[0] < pair[1]);
+    }
+
+    // The first place of each publication's rows, once the rows of those before it are counted.
+    let mut starts = vec![0_usize; publications.len() + 1];
+    let mut places = Vec::with_capacity(rows);
+    for row in 0..rows {
+        let place = publications
+            .binary_search(&publication.get(row)?)
+            .map_err(|_| persistence::Error::Bound(refusal))?;
+        starts[place + 1] += 1;
+        places.push(place);
+    }
+    for place in 1..starts.len() {
+        starts[place] += starts[place - 1];
+    }
+    assert_eq!(starts[publications.len()], rows);
+
+    let mut order = vec![0_usize; rows];
+    for (row, place) in places.into_iter().enumerate() {
+        order[starts[place]] = row;
+        starts[place] += 1;
+    }
+    Ok(order)
 }
 
 #[cfg(test)]

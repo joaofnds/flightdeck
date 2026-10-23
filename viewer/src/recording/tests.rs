@@ -148,6 +148,19 @@ refuses_a_damaged_table! {
         |frame| with_column(frame, lit(9).cast(DataType::UInt8).alias("pressure"));
     refuses_an_interface_name_longer_than_the_kernel_allows, Table::Interfaces, "interface name",
         |frame| with_column(frame, lit("utun_longer_than_ifnamsiz").alias("name"));
+    refuses_two_ticks_of_one_publication, Table::Ticks, "tick order",
+        |frame| with_column(frame, col("publication").min().alias("publication"));
+    refuses_a_reading_of_a_tick_the_minute_does_not_hold, Table::Cpus, "reading of no tick",
+        |frame| with_column(frame, (col("publication") + lit(100)).alias("publication"));
+    refuses_two_readings_of_one_cpu_at_a_tick, Table::Cpus, "reading order",
+        |frame| with_column(frame, lit(0).cast(DataType::UInt32).alias("cpu"));
+    refuses_cpus_out_of_their_order, Table::Cpus, "reading order",
+        |frame| with_column(frame, (lit(1) - col("cpu")).cast(DataType::UInt32).alias("cpu"));
+    refuses_core_states_out_of_their_order, Table::CoreStates, "reading order",
+        |frame| {
+            let state = (lit(1) - col("state")).cast(DataType::UInt32);
+            with_column(frame, state.alias("state"))
+        };
 }
 
 #[test]

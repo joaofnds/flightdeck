@@ -16,7 +16,7 @@ use polars::prelude::{
     UInt16Type, UInt32Type, UInt64Type,
 };
 
-use super::{Refused, SealedMinute};
+use super::{Refused, SealedMinute, placement};
 
 /// The ticks table's columns every minute holds, of those the store reads.
 const TICK_COLUMNS: [&str; 10] = [
@@ -40,6 +40,12 @@ const SYSTEM_COLUMNS: [&str; 5] = [
     "machine_performance_level1_name",
     "machine_performance_level1_logical_cpus",
 ];
+
+/// Why a reading is refused that names a publication none of the minute's ticks has.
+const TICKLESS: &str = "reading of no tick";
+/// Why a tick's readings are refused that name an entity twice or out of the order the
+/// collector read them in.
+const UNORDERED: &str = "reading order";
 
 /// The memory table's counters, in the order `Memory` declares them.
 const MEMORY_COUNTERS: [&str; 18] = [
@@ -275,12 +281,31 @@ fn push_tick_frequency_khz(tick: &Tick, khz: u32) -> Option<u32> {
 pub fn read_machine(minute: &SealedMinute, into: &mut MachineMinute) -> Result<(), Refused> {
     into.clear();
     read_ticks(minute, &mut into.ticks)?;
-    read_cpus(minute, &mut into.cpus)?;
-    read_memory(minute, &mut into.memory)?;
-    read_interfaces(minute, &mut into.interfaces)?;
-    read_gpu_states(minute, &mut into.gpu_states)?;
-    read_core_states(minute, &mut into.core_states)?;
-    read_fans(minute, &mut into.fans)
+
+    // Every other table's rows are readings of the minute's ticks.
+    let ticks: Vec<u64> = into.ticks.iter().map(|tick| tick.publication).collect();
+    read_cpus(minute, &ticks, &mut into.cpus)?;
+    read_memory(minute, &ticks, &mut into.memory)?;
+    read_interfaces(minute, &ticks, &mut into.interfaces)?;
+    read_gpu_states(minute, &ticks, &mut into.gpu_states)?;
+    read_core_states(minute, &ticks, &mut into.core_states)?;
+    read_fans(minute, &ticks, &mut into.fans)
+}
+
+/// Refuses `rows` for `refusal` unless the `key` of each row is greater than the key of the row
+/// before it.
+fn ordered<T, K: Ord>(
+    rows: &[T],
+    refusal: &'static str,
+    key: impl Fn(&T) -> K,
+) -> Result<(), Refused> {
+    for pair in rows.windows(2) {
+        if key(&pair[0]) >= key(&pair[1]) {
+            return Err(persistence::Error::Bound(refusal).into());
+        }
+    }
+
+    Ok(())
 }
 
 fn read_ticks(minute: &SealedMinute, into: &mut Vec<TickRow>) -> Result<(), Refused> {
@@ -309,9 +334,10 @@ fn read_ticks(minute: &SealedMinute, into: &mut Vec<TickRow>) -> Result<(), Refu
     if disks_held {
         columns.extend(disks);
     }
-    let frame = table.collect(&columns, &["publication"])?;
+    let frame = table.collect(&columns)?;
 
     read_ticks_rows(&frame, into)?;
+    ordered(into, "tick order", |tick| tick.publication)?;
     if temperatures_held {
         read_ticks_temperatures(&frame, into)?;
     }
@@ -511,7 +537,7 @@ fn optional_cell<'a, T: PolarsPhysicalType>(
     Ok(cells.optional(row)?)
 }
 
-fn read_cpus(minute: &SealedMinute, into: &mut Vec<CpuRow>) -> Result<(), Refused> {
+fn read_cpus(minute: &SealedMinute, ticks: &[u64], into: &mut Vec<CpuRow>) -> Result<(), Refused> {
     let columns = [
         "publication",
         "cpu",
@@ -520,17 +546,16 @@ fn read_cpus(minute: &SealedMinute, into: &mut Vec<CpuRow>) -> Result<(), Refuse
         "nice_ticks",
         "idle_ticks",
     ];
-    let frame = minute
-        .table(Table::Cpus)?
-        .collect(&columns, &["publication", "cpu"])?;
+    let frame = minute.table(Table::Cpus)?.collect(&columns)?;
     let publication = Cells::<UInt64Type>::named(&frame, "publication")?;
     let cpu = Cells::<UInt32Type>::named(&frame, "cpu")?;
     let user = Cells::<UInt32Type>::named(&frame, "user_ticks")?;
     let system = Cells::<UInt32Type>::named(&frame, "system_ticks")?;
     let nice = Cells::<UInt32Type>::named(&frame, "nice_ticks")?;
     let idle = Cells::<UInt32Type>::named(&frame, "idle_ticks")?;
-    into.reserve(frame.height());
-    for row in 0..frame.height() {
+    let order = placement(ticks, &publication, frame.height(), TICKLESS)?;
+    into.reserve(order.len());
+    for row in order {
         into.push(CpuRow {
             publication: publication.get(row)?,
             cpu: cpu.get(row)?,
@@ -542,25 +567,28 @@ fn read_cpus(minute: &SealedMinute, into: &mut Vec<CpuRow>) -> Result<(), Refuse
             },
         });
     }
-    Ok(())
+    ordered(into, UNORDERED, |row| (row.publication, row.cpu))
 }
 
-fn read_memory(minute: &SealedMinute, into: &mut Vec<MemoryRow>) -> Result<(), Refused> {
+fn read_memory(
+    minute: &SealedMinute,
+    ticks: &[u64],
+    into: &mut Vec<MemoryRow>,
+) -> Result<(), Refused> {
     let mut columns = Vec::with_capacity(MEMORY_COUNTERS.len() + 2);
     columns.push("publication");
     columns.extend(MEMORY_COUNTERS);
     columns.push("pressure");
-    let frame = minute
-        .table(Table::Memory)?
-        .collect(&columns, &["publication"])?;
+    let frame = minute.table(Table::Memory)?.collect(&columns)?;
     let publication = Cells::<UInt64Type>::named(&frame, "publication")?;
     let counters = MEMORY_COUNTERS
         .iter()
         .map(|name| Cells::<UInt64Type>::named(&frame, name))
         .collect::<persistence::Result<Vec<_>>>()?;
     let pressures = Cells::<UInt8Type>::named(&frame, "pressure")?;
-    into.reserve(frame.height());
-    for row in 0..frame.height() {
+    let order = placement(ticks, &publication, frame.height(), TICKLESS)?;
+    into.reserve(order.len());
+    for row in order {
         let mut values = [0_u64; MEMORY_COUNTERS.len()];
         for (value, cells) in values.iter_mut().zip(&counters) {
             *value = cells.get(row)?;
@@ -571,7 +599,7 @@ fn read_memory(minute: &SealedMinute, into: &mut Vec<MemoryRow>) -> Result<(), R
             memory,
         });
     }
-    Ok(())
+    ordered(into, UNORDERED, |row| row.publication)
 }
 
 /// The memory reading of the counters `values`, in `MEMORY_COUNTERS` order, and `pressure`.
@@ -628,13 +656,15 @@ fn memory_pressure(code: u8) -> Result<Pressure, Refused> {
     }
 }
 
-fn read_interfaces(minute: &SealedMinute, into: &mut Vec<InterfaceRow>) -> Result<(), Refused> {
+fn read_interfaces(
+    minute: &SealedMinute,
+    ticks: &[u64],
+    into: &mut Vec<InterfaceRow>,
+) -> Result<(), Refused> {
     let mut columns = Vec::with_capacity(INTERFACE_COUNTERS.len() + 3);
     columns.extend(["publication", "interface", "name"]);
     columns.extend(INTERFACE_COUNTERS);
-    let frame = minute
-        .table(Table::Interfaces)?
-        .collect(&columns, &["publication", "interface"])?;
+    let frame = minute.table(Table::Interfaces)?.collect(&columns)?;
     let publication = Cells::<UInt64Type>::named(&frame, "publication")?;
     let index = Cells::<UInt16Type>::named(&frame, "interface")?;
     let names = Cells::<StringType>::named(&frame, "name")?;
@@ -642,8 +672,9 @@ fn read_interfaces(minute: &SealedMinute, into: &mut Vec<InterfaceRow>) -> Resul
         .iter()
         .map(|name| Cells::<UInt64Type>::named(&frame, name))
         .collect::<persistence::Result<Vec<_>>>()?;
-    into.reserve(frame.height());
-    for row in 0..frame.height() {
+    let order = placement(ticks, &publication, frame.height(), TICKLESS)?;
+    into.reserve(order.len());
+    for row in order {
         let mut values = [0_u64; INTERFACE_COUNTERS.len()];
         for (value, cells) in values.iter_mut().zip(&counters) {
             *value = cells.get(row)?;
@@ -673,7 +704,9 @@ fn read_interfaces(minute: &SealedMinute, into: &mut Vec<InterfaceRow>) -> Resul
             interface,
         });
     }
-    Ok(())
+    ordered(into, UNORDERED, |row| {
+        (row.publication, row.interface.index)
+    })
 }
 
 fn interface_name(name: &str) -> Result<Name, Refused> {
@@ -686,25 +719,33 @@ fn interface_name(name: &str) -> Result<Name, Refused> {
     Name::from_bytes(bytes, name.len()).ok_or_else(refused)
 }
 
-fn read_gpu_states(minute: &SealedMinute, into: &mut Vec<GpuStateRow>) -> Result<(), Refused> {
+fn read_gpu_states(
+    minute: &SealedMinute,
+    ticks: &[u64],
+    into: &mut Vec<GpuStateRow>,
+) -> Result<(), Refused> {
     let columns = ["publication", "state", "active_ns"];
-    let order = ["publication", "state"];
-    let frame = minute.table(Table::GpuStates)?.collect(&columns, &order)?;
+    let frame = minute.table(Table::GpuStates)?.collect(&columns)?;
     let publication = Cells::<UInt64Type>::named(&frame, "publication")?;
     let state = Cells::<UInt32Type>::named(&frame, "state")?;
     let active_ns = Cells::<UInt64Type>::named(&frame, "active_ns")?;
-    into.reserve(frame.height());
-    for row in 0..frame.height() {
+    let order = placement(ticks, &publication, frame.height(), TICKLESS)?;
+    into.reserve(order.len());
+    for row in order {
         into.push(GpuStateRow {
             publication: publication.get(row)?,
             state: state.get(row)?,
             active_ns: active_ns.get(row)?,
         });
     }
-    Ok(())
+    ordered(into, UNORDERED, |row| (row.publication, row.state))
 }
 
-fn read_core_states(minute: &SealedMinute, into: &mut Vec<CoreStateRow>) -> Result<(), Refused> {
+fn read_core_states(
+    minute: &SealedMinute,
+    ticks: &[u64],
+    into: &mut Vec<CoreStateRow>,
+) -> Result<(), Refused> {
     let (clock, _) = CORE_STATE_FREQUENCY_FIELD;
     let table = minute.table(Table::CoreStates)?;
     let clocked = table.holds(&[clock])?;
@@ -713,7 +754,7 @@ fn read_core_states(minute: &SealedMinute, into: &mut Vec<CoreStateRow>) -> Resu
     if clocked {
         columns.push(clock);
     }
-    let frame = table.collect(&columns, &["publication", "core", "state"])?;
+    let frame = table.collect(&columns)?;
 
     let publication = Cells::<UInt64Type>::named(&frame, "publication")?;
     let core = Cells::<UInt32Type>::named(&frame, "core")?;
@@ -722,8 +763,9 @@ fn read_core_states(minute: &SealedMinute, into: &mut Vec<CoreStateRow>) -> Resu
     let frequency_khz = clocked
         .then(|| Cells::<UInt32Type>::named(&frame, clock))
         .transpose()?;
-    into.reserve(frame.height());
-    for row in 0..frame.height() {
+    let order = placement(ticks, &publication, frame.height(), TICKLESS)?;
+    into.reserve(order.len());
+    for row in order {
         into.push(CoreStateRow {
             publication: publication.get(row)?,
             core: core.get(row)?,
@@ -732,24 +774,25 @@ fn read_core_states(minute: &SealedMinute, into: &mut Vec<CoreStateRow>) -> Resu
             frequency_khz: optional_cell(frequency_khz.as_ref(), row)?,
         });
     }
-    Ok(())
+    ordered(into, UNORDERED, |row| {
+        (row.publication, row.core, row.state)
+    })
 }
 
-fn read_fans(minute: &SealedMinute, into: &mut Vec<FanRow>) -> Result<(), Refused> {
+fn read_fans(minute: &SealedMinute, ticks: &[u64], into: &mut Vec<FanRow>) -> Result<(), Refused> {
     let columns = ["publication", "fan", "rpm"];
-    let frame = minute
-        .table(Table::Fans)?
-        .collect(&columns, &["publication", "fan"])?;
+    let frame = minute.table(Table::Fans)?.collect(&columns)?;
     let publication = Cells::<UInt64Type>::named(&frame, "publication")?;
     let fan = Cells::<UInt32Type>::named(&frame, "fan")?;
     let rpm = Cells::<Float32Type>::named(&frame, "rpm")?;
-    into.reserve(frame.height());
-    for row in 0..frame.height() {
+    let order = placement(ticks, &publication, frame.height(), TICKLESS)?;
+    into.reserve(order.len());
+    for row in order {
         into.push(FanRow {
             publication: publication.get(row)?,
             fan: fan.get(row)?,
             rpm: rpm.get(row)?,
         });
     }
-    Ok(())
+    ordered(into, UNORDERED, |row| (row.publication, row.fan))
 }

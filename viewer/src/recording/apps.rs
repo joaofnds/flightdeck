@@ -5,11 +5,11 @@
 use std::ops::Range;
 
 use polars::prelude::{
-    BinaryType, BooleanType, DataFrame, DataType, Expr, LazyFrame, SortMultipleOptions, UInt8Type,
-    UInt32Type, UInt64Type, col, len, lit,
+    BinaryType, BooleanType, DataFrame, DataType, Expr, LazyFrame, UInt8Type, UInt32Type,
+    UInt64Type, col, len, lit,
 };
 
-use super::{Refused, SealedMinute};
+use super::{Refused, SealedMinute, placement};
 use crate::apps::AppKey;
 use crate::live_app_response::{App, KeyKind, MEMBERS_MAX, Measure, Sample};
 use persistence::engine::Cells;
@@ -259,20 +259,14 @@ pub(crate) fn read_app_rows(
     for measure in MEASURES {
         columns.extend(measure_column_names(measure).map(col));
     }
-    let order = ["publication", "row_kind", "app_index"];
-    let sort = SortMultipleOptions {
-        descending: vec![false; order.len()],
-        nulls_last: vec![false; order.len()],
-        multithreaded: false,
-        maintain_order: true,
-        limit: None,
-    };
-    let frame = plan
+    let mut frame = plan
         .filter(col("row_kind").neq(lit(ROW_PROCESS)))
         .select(columns)
-        .sort(order, sort)
         .limit(ROWS_TAKEN)
         .collect()?;
+    // A cell of a column in one chunk is read without finding its chunk first, which halves the
+    // reading of the rows.
+    frame.rechunk_mut();
 
     read_app_rows_frame(&frame, &publications, into)?;
     Ok(AppParts::Read)
@@ -307,9 +301,10 @@ fn read_app_rows_version(plan: LazyFrame, rows: u64) -> Result<u8> {
     Ok(first)
 }
 
-/// Appends each row of `frame`, the rows of every observation's facts and of its Apps in
-/// publication order, each observation's facts before its Apps and its Apps in their order, of
-/// the observations of `publications`.
+/// Appends each row of `frame`, the rows of every observation's facts and of its Apps, in
+/// publication order with each observation's facts before its Apps and its Apps in their
+/// order, of the observations of `publications`. The table keeps each App's rows together,
+/// every observation's facts first.
 fn read_app_rows_frame(
     frame: &DataFrame,
     publications: &Range<u64>,
@@ -317,17 +312,23 @@ fn read_app_rows_frame(
 ) -> Result<()> {
     let samples = SampleColumns::new(frame)?;
     let apps = AppColumns::new(frame)?;
+    let observations = read_app_rows_observations(&samples, frame.height())?;
+    let order = placement(
+        &observations,
+        &samples.publication,
+        frame.height(),
+        "sealed parts header",
+    )?;
     // The first of the Apps of the observation whose facts were read last.
     let mut first_app = 0;
-    for row in 0..frame.height() {
+    for row in order {
         let kind = samples.row_kind.get(row)?;
         if kind == ROW_HEADER {
             let sample = samples.sample(row)?;
-            read_app_rows_follows(publications, into.samples.last(), sample.publication)?;
-            read_app_rows_close(into, first_app)?;
-            if into.samples.len() == SAMPLES_MAX {
-                return Err(Error::Bound("sealed parts observations"));
+            if !publications.contains(&sample.publication) {
+                return Err(Error::Bound("sealed parts publication"));
             }
+            read_app_rows_close(into, first_app)?;
             into.samples.push(sample);
             first_app = into.apps.len();
         } else {
@@ -367,23 +368,27 @@ fn read_app_rows_close(into: &AppMinute, first_app: usize) -> Result<()> {
     Ok(())
 }
 
-/// Refuses an observation of `publication` that `publications` does not hold, or that does not
-/// follow the observation `last` read before it.
-fn read_app_rows_follows(
-    publications: &Range<u64>,
-    last: Option<&SampleRow>,
-    publication: u64,
-) -> Result<()> {
-    if !publications.contains(&publication) {
-        return Err(Error::Bound("sealed parts publication"));
-    }
-    if let Some(last) = last {
-        if last.publication >= publication {
-            return Err(Error::Bound("sealed parts publication"));
+/// The publication of each observation whose facts the `rows` rows of `samples` hold, in the
+/// order the table holds them, refusing more observations than a minute holds or two that do
+/// not follow in publication order.
+fn read_app_rows_observations(samples: &SampleColumns, rows: usize) -> Result<Vec<u64>> {
+    let mut observations: Vec<u64> = Vec::with_capacity(SAMPLES_MAX);
+    for row in 0..rows {
+        if samples.row_kind.get(row)? == ROW_HEADER {
+            let publication = samples.publication.get(row)?;
+            if observations.len() == SAMPLES_MAX {
+                return Err(Error::Bound("sealed parts observations"));
+            }
+            if let Some(last) = observations.last() {
+                if *last >= publication {
+                    return Err(Error::Bound("sealed parts publication"));
+                }
+            }
+            observations.push(publication);
         }
     }
 
-    Ok(())
+    Ok(observations)
 }
 
 /// The columns of a row of an observation's facts.
