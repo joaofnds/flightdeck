@@ -110,6 +110,21 @@ pub(crate) fn publish_with_interval(
     rows: &[Named<'_>],
     interval_ns: u64,
 ) {
+    let times = collector::ring::ObservationTimes {
+        wall_ns: (1000 + publication) * 1_000_000_000,
+        continuous_ns: publication * interval_ns,
+        awake_ns: publication * interval_ns,
+    };
+    publish_at(fixture, publication, rows, &times);
+}
+
+/// Publishes `rows` as the tick `run_tick` of the run, taken at `times`.
+pub(crate) fn publish_at(
+    fixture: &mut Fixture,
+    run_tick: u64,
+    rows: &[Named<'_>],
+    times: &collector::ring::ObservationTimes,
+) {
     let identities: Vec<_> = rows.iter().map(|row| identity(fixture, row)).collect();
     let processes: Vec<_> = rows
         .iter()
@@ -128,14 +143,14 @@ pub(crate) fn publish_with_interval(
         .filter(|(row, _)| row.exited)
         .map(|(_, identity)| *identity)
         .collect();
-    let events = publish_with_interval_events(rows);
+    let events = publish_at_events(rows);
     let gpu_ns: Vec<_> = rows
         .iter()
         .filter(|row| !row.exited)
         .map(|row| row.gpu_ns)
         .collect();
     let readings = Readings {
-        run_tick: publication,
+        run_tick,
         cpus: &[collector::machine::CPUTicks {
             user: 1,
             system: 0,
@@ -154,20 +169,15 @@ pub(crate) fn publish_with_interval(
         events: &events,
         dropped: collector::ring::Dropped::default(),
     };
-    let times = collector::ring::ObservationTimes {
-        wall_ns: (1000 + publication) * 1_000_000_000,
-        continuous_ns: publication * interval_ns,
-        awake_ns: publication * interval_ns,
-    };
     let identities = IdentityPublication {
         processes: &live,
         events: &event_identities,
     };
-    publish_with_interval_write(
+    publish_at_write(
         fixture,
         &Publication {
             readings: &readings,
-            times: &times,
+            times,
             identities: &identities,
             gpu_ns: &gpu_ns,
         },
@@ -175,7 +185,7 @@ pub(crate) fn publish_with_interval(
 }
 
 /// The exit of each row that exited.
-fn publish_with_interval_events(rows: &[Named<'_>]) -> Vec<collector::tracker::Event> {
+fn publish_at_events(rows: &[Named<'_>]) -> Vec<collector::tracker::Event> {
     rows.iter()
         .filter(|row| row.exited)
         .map(|row| collector::tracker::Event::Exit {
@@ -195,7 +205,7 @@ struct Publication<'a> {
     gpu_ns: &'a [Option<u64>],
 }
 
-fn publish_with_interval_write(fixture: &mut Fixture, publication: &Publication<'_>) {
+fn publish_at_write(fixture: &mut Fixture, publication: &Publication<'_>) {
     let Publication {
         readings,
         times,

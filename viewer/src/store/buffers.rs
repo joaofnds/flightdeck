@@ -157,6 +157,23 @@ impl<T> Span<T> {
         self.held.back().map(AsRef::as_ref)
     }
 
+    /// The reading at `index` of those the span holds, the oldest at 0.
+    #[must_use]
+    pub fn get(&self, index: usize) -> Option<&T> {
+        self.held.get(index).map(AsRef::as_ref)
+    }
+
+    /// How many readings the span holds.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.held.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.held.is_empty()
+    }
+
     /// The newest reading's buffer, which a View may hold too.
     #[must_use]
     pub fn newest_held(&self) -> Option<&Arc<T>> {

@@ -26,15 +26,25 @@ pub(super) struct Key {
     bytes: Box<[u8]>,
 }
 
-struct Mean {
-    amount: u128,
-    elapsed_ns: u128,
+/// What an App used of a resource over the seconds that measured it, and those seconds' length,
+/// whose ratio is its mean rate.
+#[derive(Clone, Copy)]
+pub(crate) struct Mean {
+    pub(crate) amount: u128,
+    pub(crate) elapsed_ns: u128,
+}
+
+impl Mean {
+    pub(crate) const ZERO: Self = Self {
+        amount: 0,
+        elapsed_ns: 0,
+    };
 }
 
 #[derive(Clone, Copy)]
-struct Comparison<'mean> {
-    before: &'mean Mean,
-    after: &'mean Mean,
+pub(crate) struct Comparison<'mean> {
+    pub(crate) before: &'mean Mean,
+    pub(crate) after: &'mean Mean,
 }
 
 const APPS_MAX: usize = 24_000;
@@ -209,7 +219,8 @@ impl Key {
     }
 }
 
-fn compare(comparison: Comparison<'_>) -> Ordering {
+/// How the mean rate of `comparison.before` compares with that of `comparison.after`, exactly.
+pub(crate) fn compare(comparison: Comparison<'_>) -> Ordering {
     // Continued fractions compare exact weighted means without overflowing a cross product.
     let (mut first, mut left) = (comparison.before.amount, comparison.before.elapsed_ns);
     let (mut second, mut right) = (comparison.after.amount, comparison.after.elapsed_ns);

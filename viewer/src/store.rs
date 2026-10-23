@@ -4,6 +4,7 @@
 
 mod apps;
 mod buffers;
+mod context;
 mod recording;
 mod ring;
 mod second;
@@ -17,10 +18,12 @@ use std::time::Duration;
 
 pub use apps::{APPS_PER_SECOND_MAX, AppRow, AppsSecond, Missing};
 pub use buffers::{Buffers, Mailbox, Span};
+pub use context::Cohorts;
 pub use second::{BatterySecond, MachineSecond, MemorySecond, Reading, Traffic, readings};
 
 use apps::TickApps;
 use collector::ring::RunIdentity;
+use context::Context;
 use ring::Ring;
 
 use crate::session::EARLIER_STRIDE_SECONDS;
@@ -73,6 +76,9 @@ pub struct View {
     pub apps: Vec<Arc<AppsSecond>>,
     /// The older seconds of the loaded hour, before `seconds`, oldest first.
     pub earlier: Vec<Arc<MachineSecond>>,
+    /// The Apps each of Overview's App charts draws on a line of its own, chosen over the newest
+    /// seconds of `seconds` those charts draw.
+    pub cohorts: Cohorts,
     /// Why the store could not read the recording at its last step.
     pub failure: Option<Failure>,
     /// Why the store holds less of the loaded hour than the recording sealed when it started.
@@ -177,6 +183,8 @@ struct Held {
     /// Each App's totals at each second of `span`, in the same order.
     apps: Span<AppsSecond>,
     earlier: Span<MachineSecond>,
+    /// What each App used over the newest seconds of `apps` that Overview's App charts draw.
+    context: Context,
     /// The run and publication of the newest second taken in.
     newest: Option<Newest>,
     views: Buffers<View>,
@@ -203,6 +211,7 @@ impl Held {
             seconds: Vec::with_capacity(SECONDS_MAX),
             apps: Vec::with_capacity(SECONDS_MAX),
             earlier: Vec::with_capacity(EARLIER_MAX),
+            cohorts: Cohorts::with_room(),
             failure: None,
             left_out: None,
         });
@@ -211,6 +220,7 @@ impl Held {
             span: Span::new(SECONDS_MAX, seconds),
             apps: Span::new(SECONDS_MAX, apps),
             earlier: Span::new(EARLIER_MAX, earlier),
+            context: Context::new(),
             newest: None,
             views,
             version: 0,
@@ -249,6 +259,7 @@ impl Held {
         }
 
         let segment = segment(self.newest.as_ref(), run, second);
+        self.context.leave(&self.apps);
         if let Some(kept) = kept {
             let pushed = self.earlier.push(|buffer| *buffer = kept);
             assert!(pushed);
@@ -266,6 +277,7 @@ impl Held {
         if let Some(observation) = self.apps.newest().and_then(|apps| apps.observation) {
             assert_eq!(observation.stamp.publication, second.publication);
         }
+        self.context.follow(&self.span, &self.apps);
 
         self.newest = Some(Newest {
             run: *run,
@@ -283,11 +295,13 @@ impl Held {
             view.seconds.clear();
             view.apps.clear();
             view.earlier.clear();
+            view.cohorts.clear();
         });
         let version = self.version + 1;
         let span = &self.span;
         let apps = &self.apps;
         let earlier = &self.earlier;
+        let context = &mut self.context;
         let failure = self.failure;
         let left_out = self.left_out;
         let written = self.views.write(|view| {
@@ -304,10 +318,12 @@ impl Held {
             view.seconds.extend(span.held().map(Arc::clone));
             view.apps.extend(apps.held().map(Arc::clone));
             view.earlier.extend(earlier.held().map(Arc::clone));
+            context.choose(&mut view.cohorts);
             view.failure = failure;
             view.left_out = left_out;
 
             assert_eq!(view.apps.len(), view.seconds.len());
+            assert!(view.cohorts.seconds <= view.seconds.len());
             let held = (
                 view.seconds.capacity(),
                 view.apps.capacity(),

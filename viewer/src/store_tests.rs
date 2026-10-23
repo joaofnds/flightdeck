@@ -566,6 +566,234 @@ mod when_the_recording_holds_sealed_minutes {
     }
 }
 
+mod when_the_seconds_hold_more_apps_than_a_chart_draws {
+    use std::sync::Arc;
+
+    use collector::processes::Usage;
+
+    use super::super::Cohorts;
+    use super::{Store, view_where};
+    use crate::live::app_process_groups_history_tests::named;
+    use crate::live_app_response::RankedApp;
+    use crate::{AppAttributionMetric, LiveSession};
+
+    const APPS: [&[u8]; 10] = [
+        b"/A.app", b"/B.app", b"/C.app", b"/D.app", b"/E.app", b"/F.app", b"/G.app", b"/H.app",
+        b"/I.app", b"/J.app",
+    ];
+
+    /// The thousands of bytes each of `APPS` reads in each second, E and F the same.
+    const DISK_THOUSANDS: [u64; 10] = [5, 3, 9, 1, 7, 7, 2, 8, 4, 6];
+
+    /// The CPU time A uses in its second second on top of its own step, which makes it the App
+    /// that used the most CPU over the seconds only while the chart draws that second.
+    const BURST_NS: u64 = 40_000;
+
+    /// The Apps each App chart draws on a line of its own, by name, the most first.
+    #[derive(Debug, PartialEq)]
+    struct Chosen {
+        cpu: Vec<String>,
+        power: Vec<String>,
+        disk: Vec<String>,
+    }
+
+    #[test]
+    fn the_store_chooses_the_apps_the_worker_chooses_for_each_chart() {
+        // Goal: Overview's App charts drawn from the store draw on lines of their own the Apps
+        // the worker chooses, the eight that used the most of each resource over the seconds
+        // the charts draw, ties going to the App first in key order. Method: ten Apps over five
+        // seconds, the first using the most CPU only in its second second and two of them
+        // reading the same bytes, followed second by second by the worker and by a store, and
+        // the Apps each chooses for each chart compared.
+        let mut fixture = named::dense_with_system();
+        named::publish(&mut fixture, 1, &rows(1));
+        let mut session = LiveSession::open(&fixture.root).unwrap();
+        let store = Store::start(&fixture.root).unwrap();
+        let mut view = view_where(&store, |view| view.seconds.len() == 1);
+
+        for publication in 2..=5 {
+            named::publish(&mut fixture, publication, &rows(publication));
+            session.poll().unwrap();
+            let count = usize::try_from(publication).unwrap();
+            view = view_where(&store, |view| view.seconds.len() == count);
+        }
+        session.select(1_005, 0).unwrap();
+        let worker = chosen_by_worker(&session);
+
+        assert_eq!(
+            worker,
+            Chosen {
+                cpu: names_of(["A", "J", "I", "H", "G", "F", "E", "D"]),
+                power: names_of(["A", "B", "C", "D", "E", "F", "G", "H"]),
+                disk: names_of(["C", "H", "E", "F", "J", "A", "I", "B"]),
+            }
+        );
+        assert_eq!(chosen_by_store(&view.cohorts), worker);
+    }
+
+    #[test]
+    fn a_chart_ranks_its_apps_over_only_the_seconds_it_draws() {
+        // Goal: an App that used the most only in seconds older than the charts draw no longer
+        // leads them, as it no longer leads the worker's. Method: A uses five seconds of CPU in
+        // the second second and none after, B a little every second, and the newest seconds
+        // come sixteen minutes later, so the seconds of A's burst lie before those the charts
+        // draw.
+        let mut fixture = named::dense_with_system();
+        named::publish(&mut fixture, 1, &burst_rows(1));
+        let mut session = LiveSession::open(&fixture.root).unwrap();
+        let store = Store::start(&fixture.root).unwrap();
+        let mut view = view_where(&store, |view| view.seconds.len() == 1);
+
+        for publication in [2, 962, 963] {
+            named::publish(&mut fixture, publication, &burst_rows(publication));
+            session.poll().unwrap();
+            view = view_where(&store, |view| {
+                super::held_through(view, 1_000 + publication)
+            });
+        }
+        session.select(1_963, 0).unwrap();
+        let worker = chosen_by_worker_of(&session, AppAttributionMetric::Cpu);
+
+        assert_eq!(worker, ["/B.app", "/A.app"]);
+        assert_eq!(chosen_by_store_of(&view.cohorts.cpu), worker);
+    }
+
+    mod when_the_clock_is_set_back {
+        use super::super::{Store, held_through, view_where};
+        use super::{burst_rows, chosen_by_store_of, named};
+
+        #[test]
+        fn the_charts_rank_their_apps_over_the_seconds_since() {
+            // Goal: seconds the clock was set back past sit before the newest seconds in the
+            // span but after them in time, so the charts rank their Apps over the seconds after
+            // the clock went back. Method: A uses five seconds of CPU in the second second and
+            // B a little every second, then a third second whose clock reads two minutes
+            // earlier.
+            let mut fixture = named::dense_with_system();
+            let store = Store::start(&fixture.root).unwrap();
+            for publication in 1..=2 {
+                named::publish(&mut fixture, publication, &burst_rows(publication));
+                view_where(&store, |view| held_through(view, 1_000 + publication));
+            }
+
+            named::publish_at(
+                &mut fixture,
+                3,
+                &burst_rows(3),
+                &collector::ring::ObservationTimes {
+                    wall_ns: 880_000_000_000,
+                    continuous_ns: 3_000_000_000,
+                    awake_ns: 3_000_000_000,
+                },
+            );
+
+            let view = view_where(&store, |view| held_through(view, 880));
+            assert_eq!(chosen_by_store_of(&view.cohorts.cpu), ["/B.app", "/A.app"]);
+        }
+    }
+
+    /// A and B at `publication`, A having used five seconds of CPU at the second second and
+    /// none since, and B a microsecond each second.
+    fn burst_rows(publication: u64) -> Vec<named::Named<'static>> {
+        let burst_ns = match publication {
+            2.. => 5_000_000_000,
+            _ => 0,
+        };
+
+        vec![
+            named::member(10, b"worker", b"/A.app", usage_of(burst_ns)),
+            named::member(11, b"worker", b"/B.app", usage_of(1_000 * publication)),
+        ]
+    }
+
+    /// Each of `APPS` at `publication`.
+    fn rows(publication: u64) -> Vec<named::Named<'static>> {
+        APPS.iter()
+            .enumerate()
+            .map(|(index, app)| {
+                let pid = 10 + i32::try_from(index).unwrap();
+                named::member(pid, b"worker", app, usage(index, publication))
+            })
+            .collect()
+    }
+
+    /// What App `index` of `APPS` has used by `publication`, a step of each resource a second.
+    fn usage(index: usize, publication: u64) -> Usage {
+        let place = u64::try_from(index).unwrap();
+        let burst_ns = match (index, publication) {
+            (0, 2..) => BURST_NS,
+            _ => 0,
+        };
+
+        Usage {
+            energy_nj: (10 - place) * 1_000 * publication,
+            disk_read_bytes: DISK_THOUSANDS[index] * 1_000 * publication,
+            ..usage_of((place + 1) * 1_000 * publication + burst_ns)
+        }
+    }
+
+    /// What a process has used by a second where it has used `user_ns` of CPU and nothing else
+    /// a chart draws.
+    fn usage_of(user_ns: u64) -> Usage {
+        Usage {
+            awake_ns_at_start: 0,
+            user_ns,
+            system_ns: 0,
+            energy_nj: 0,
+            instructions: 0,
+            super_instructions: 0,
+            cycles: 0,
+            idle_wakeups: 0,
+            interrupt_wakeups: 0,
+            pageins: 0,
+            resident_bytes: 1024,
+            footprint_bytes: 2048,
+            disk_read_bytes: 0,
+            disk_written_bytes: 0,
+        }
+    }
+
+    fn names_of(letters: [&str; 8]) -> Vec<String> {
+        letters
+            .iter()
+            .map(|letter| format!("/{letter}.app"))
+            .collect()
+    }
+
+    fn chosen_by_worker(session: &LiveSession) -> Chosen {
+        Chosen {
+            cpu: chosen_by_worker_of(session, AppAttributionMetric::Cpu),
+            power: chosen_by_worker_of(session, AppAttributionMetric::Power),
+            disk: chosen_by_worker_of(session, AppAttributionMetric::Disk),
+        }
+    }
+
+    fn chosen_by_worker_of(session: &LiveSession, metric: AppAttributionMetric) -> Vec<String> {
+        let response = session.app_attribution_history(metric).unwrap();
+        response["cohort"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|app| app["key"]["display"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    fn chosen_by_store(cohorts: &Cohorts) -> Chosen {
+        Chosen {
+            cpu: chosen_by_store_of(&cohorts.cpu),
+            power: chosen_by_store_of(&cohorts.power),
+            disk: chosen_by_store_of(&cohorts.disk),
+        }
+    }
+
+    fn chosen_by_store_of(cohort: &[Arc<RankedApp>]) -> Vec<String> {
+        cohort
+            .iter()
+            .map(|app| String::from_utf8(app.bytes.clone()).unwrap())
+            .collect()
+    }
+}
+
 /// Whether the newest second `view` holds is at whole wall second `wall_second`.
 fn held_through(view: &View, wall_second: u64) -> bool {
     view.seconds

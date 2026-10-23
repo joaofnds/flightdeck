@@ -7,7 +7,7 @@ use crate::LiveSession;
 #[path = "app_attribution_history/cache.rs"]
 pub(crate) mod cache;
 #[path = "app_attribution_history/means.rs"]
-mod means;
+pub(crate) mod means;
 #[path = "app_attribution_history/reduce.rs"]
 mod reduce;
 #[path = "app_attribution_history/sums.rs"]

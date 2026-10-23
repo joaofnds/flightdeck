@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use collector::machine::Pressure;
 use serde_json::{Value, json};
-use viewer::store::{AppsSecond, MachineSecond, MemorySecond, Traffic, View};
+use viewer::store::{AppsSecond, Cohorts, MachineSecond, MemorySecond, Traffic, View};
 
 use crate::live_inventory::{PerformanceLevel, performance_levels};
 
@@ -70,6 +70,7 @@ pub fn view(version: u64, earlier: &[MachineSecond], seconds: &[MachineSecond]) 
             .map(|_| Arc::new(AppsSecond::default()))
             .collect(),
         earlier: earlier.iter().copied().map(Arc::new).collect(),
+        cohorts: Cohorts::default(),
         failure: None,
         left_out: None,
     }

@@ -16,6 +16,10 @@ use crate::live_app_response::{
 };
 use crate::recording::{self, AppMinute, SampleRow};
 
+#[cfg(test)]
+#[path = "apps_tests.rs"]
+mod tests;
+
 /// The Apps one second holds at most. The App rule finds about 470 Apps a tick on the user's
 /// M5 Pro, so a second past this bound holds none and says so.
 pub const APPS_PER_SECOND_MAX: usize = 2_048;
@@ -32,7 +36,7 @@ pub struct AppsSecond {
     pub ungrouped_members: u32,
     pub usage_refused: u32,
     pub usage_gone: u32,
-    /// Every App of the tick, in key order.
+    /// Every App of the tick, once each, in key order.
     pub apps: Vec<AppRow>,
 }
 
@@ -140,6 +144,15 @@ impl AppsSecond {
         let mut previous_index = 0;
         for row in kept.rows {
             let bytes = kept.minute.key(row);
+            if let Some(last) = self.apps.last() {
+                // A minute is read from disk, so it may hold an App twice or out of order.
+                if last.name.kind.key(&last.name.bytes) >= row.kind.key(bytes) {
+                    self.clear(Missing::Refused(String::from(
+                        "the sealed minute holds its Apps out of key order",
+                    )));
+                    return;
+                }
+            }
             let name = match previous_name(row.kind, bytes, previous, &mut previous_index) {
                 Some(name) => name,
                 None => match RankedApp::new(row.kind, bytes.to_vec()) {
@@ -190,6 +203,10 @@ impl AppsSecond {
         self.apps.clear();
         let mut previous_index = 0;
         for app in apps {
+            if let Some(last) = self.apps.last() {
+                // The App rule finds each App by its key among a sample's Apps.
+                assert!(last.name.kind.key(&last.name.bytes) < app.key.kind.key(&app.key.bytes));
+            }
             let name = previous_name(app.key.kind, &app.key.bytes, previous, &mut previous_index)
                 .unwrap_or_else(|| app.ranked());
             self.apps.push(AppRow::new(app, name));
