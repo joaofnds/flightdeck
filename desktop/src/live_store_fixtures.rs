@@ -48,8 +48,11 @@ pub fn reading_at(wall_second: u64, segment: u64) -> MachineSecond {
         disk_written_bps: half(150).map(|value| value * 1_000_000.0),
         power_watts: Some(f32::from(u16::try_from(wall_second % 60).unwrap()) / 2.0),
         soc_celsius: Some(40.25),
+        cpu_celsius: Some(61.5),
+        gpu_celsius: Some(52.25),
         fan_mean_rpm: Some(1_200.5),
         thermal_pressure: Some(u8::try_from(wall_second % 5).unwrap()),
+        performance_levels: Some(store_levels()),
     }
 }
 
@@ -110,6 +113,16 @@ fn trend_point(second: &MachineSecond) -> Value {
 /// The performance levels every trend point names.
 pub fn levels() -> Option<[PerformanceLevel; 2]> {
     performance_levels(&json!({"performance_levels": levels_json()}))
+}
+
+/// The performance levels the store holds for every second, as `levels` names them.
+fn store_levels() -> [collector::system::PerformanceLevel; 2] {
+    let level = |name: &str, logical_cpus| collector::system::PerformanceLevel {
+        name: collector::system::FactText::new(name.as_bytes()).unwrap(),
+        logical_cpus,
+    };
+
+    [level("Super", 6), level("Performance", 12)]
 }
 
 fn levels_json() -> Value {

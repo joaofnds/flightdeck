@@ -121,6 +121,29 @@ fn power_heat_and_thermal_pressure_are_the_ticks_own_readings() {
 }
 
 #[test]
+fn die_temperatures_are_the_ticks_own_readings() {
+    // Goal: Overview's CPU and GPU readouts show each die's heat at the second. Method: a tick
+    // that read both dies.
+    let machine = Machine::at(1).die_temperatures(61.5, 52.25);
+
+    let second = machine.first_second();
+
+    assert_eq!(second.cpu_celsius, Some(61.5));
+    assert_eq!(second.gpu_celsius, Some(52.25));
+}
+
+#[test]
+fn performance_levels_are_the_ticks_own() {
+    // Goal: the CPU chart names each level as the second's tick named it. Method: a tick
+    // naming six super and twelve performance cores.
+    let machine = Machine::at(1).levels(6, 12);
+
+    let second = machine.first_second();
+
+    assert_eq!(second.performance_levels, machine.tick.performance_levels);
+}
+
+#[test]
 fn fan_speed_is_the_mean_of_the_fans_the_tick_measured() {
     let machine = Machine::at(1).fans(&[1_000.0, 2_000.0, 3_000.0]);
 
@@ -512,6 +535,13 @@ impl Machine {
         self.tick.smc_read = true;
         self.tick.power_watts = Some(power_watts);
         self.tick.soc_celsius = Some(soc_celsius);
+        self
+    }
+
+    fn die_temperatures(mut self, cpu_celsius: f32, gpu_celsius: f32) -> Self {
+        self.tick.smc_read = true;
+        self.tick.cpu_celsius = Some(cpu_celsius);
+        self.tick.gpu_celsius = Some(gpu_celsius);
         self
     }
 

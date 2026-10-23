@@ -6,6 +6,7 @@ use collector::disks::{DiskReading, DiskSnapshot, ScanState};
 use collector::interfaces::Interface;
 use collector::machine::{CPUTicks, Pressure};
 use collector::smc::FANS_MAX;
+use collector::system::PerformanceLevel;
 
 use crate::metrics::number;
 use crate::recording::{
@@ -41,8 +42,12 @@ pub struct MachineSecond {
     pub disk_written_bps: Option<f64>,
     pub power_watts: Option<f32>,
     pub soc_celsius: Option<f32>,
+    pub cpu_celsius: Option<f32>,
+    pub gpu_celsius: Option<f32>,
     pub fan_mean_rpm: Option<f32>,
     pub thermal_pressure: Option<u8>,
+    /// The chip's two performance levels, level 0 the fastest, as the tick named them.
+    pub performance_levels: Option<[PerformanceLevel; 2]>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,8 +103,11 @@ impl MachineSecond {
             disk_written_bps: None,
             power_watts: reading.tick.power_watts,
             soc_celsius: reading.tick.soc_celsius,
+            cpu_celsius: reading.tick.cpu_celsius,
+            gpu_celsius: reading.tick.gpu_celsius,
             fan_mean_rpm: fan_mean_rpm(reading.fans),
             thermal_pressure: reading.tick.thermal_pressure,
+            performance_levels: reading.tick.performance_levels,
         };
         if let Some(previous) = previous {
             if let Some(elapsed_ns) = interval_ns(previous.tick, reading.tick) {
