@@ -27,6 +27,7 @@ mod live_inventory;
 mod live_launch;
 mod live_memory;
 mod live_overview_app_histories;
+mod live_plot;
 mod live_presentation;
 mod live_probe;
 mod live_process_history;

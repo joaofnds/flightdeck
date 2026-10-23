@@ -43,14 +43,8 @@ impl LiveDashboard {
         let scale = charts::axis_scale(panel, inspection, &hidden, "left");
         let trailing = trailing_axes(panel, inspection, &hidden);
         let time = self.chart_time_window();
-        let measured = Rc::new(Cell::new(Bounds::default()));
-        let plot = charts::plot_without_cursor(
-            Rc::clone(panel),
-            inspection,
-            hidden,
-            Rc::clone(&measured),
-            time,
-        );
+        let shown = crate::live_plot::Shown::new(Rc::clone(panel), inspection, hidden, time);
+        let (plot, measured) = self.plots.plot(shown, cx);
         let cursor = self.chart_cursor_fraction(panel);
         assert!(
             panel.kind != "timeline",
@@ -806,7 +800,7 @@ impl LiveDashboard {
         legends.children(chart_legend_empty(&panel.id, empty))
     }
 
-    fn toggle_chart_legend(&mut self, key: &str, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_chart_legend(&mut self, key: &str, cx: &mut Context<Self>) {
         if let Some(index) = self.hidden.iter().position(|value| value == key) {
             self.hidden.remove(index);
         } else {

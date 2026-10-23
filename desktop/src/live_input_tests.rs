@@ -34,6 +34,8 @@ mod hardware;
 mod layout;
 #[path = "live_loading_input_tests.rs"]
 mod loading;
+#[path = "live_plot_input_tests.rs"]
+mod plot;
 #[path = "live_range_input_tests.rs"]
 mod range;
 #[path = "live_rankings_input_tests.rs"]

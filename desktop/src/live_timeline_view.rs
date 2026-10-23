@@ -1,10 +1,9 @@
 //! The state timeline the prototype draws for memory pressure and charging: a labelled band,
 //! the window's first and last minute, and a caption naming the state.
 
-use std::cell::Cell;
 use std::rc::Rc;
 
-use gpui::{AnyElement, Bounds, Context, Pixels, div, prelude::*, px, rgb};
+use gpui::{AnyElement, Context, Pixels, div, prelude::*, px, rgb};
 
 use super::ChartHelp;
 use crate::charts::{self, MUTED, PANEL, TEXT};
@@ -33,14 +32,13 @@ impl LiveDashboard {
 
         let index = self.chart_inspection_index(panel);
         let inspection = super::chart_inspection(panel, index);
-        let measured = Rc::new(Cell::new(Bounds::default()));
-        let plot = charts::plot_without_cursor(
+        let shown = crate::live_plot::Shown::new(
             Rc::clone(panel),
             inspection,
             self.chart_hidden(panel),
-            Rc::clone(&measured),
             None,
         );
+        let (plot, measured) = self.plots.plot(shown, cx);
         let cursor = self.chart_cursor_fraction(panel).or_else(|| {
             let position = panel.positions.as_ref()?;
             position.get(index?).copied()

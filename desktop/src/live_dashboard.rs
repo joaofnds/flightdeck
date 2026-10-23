@@ -98,6 +98,7 @@ pub struct LiveDashboard {
     pub seconds: Option<u32>,
     pub updates: u32,
     pub renders: u64,
+    pub(crate) plots: crate::live_plot::Plots,
     pub animate: bool,
     pub reveal_hardware: bool,
     pub chart_hover: Option<ChartHover>,
@@ -285,6 +286,7 @@ impl LiveDashboard {
             seconds,
             updates: 0,
             renders: 0,
+            plots: crate::live_plot::Plots::new(),
             animate: false,
             reveal_hardware: false,
             chart_hover: None,
@@ -383,6 +385,7 @@ impl LiveDashboard {
                     serde_json::json!({"mode":"live", "route":self.request.route,
                     "elapsed_seconds":self.started.elapsed().as_secs_f64(),
                     "updates":self.updates,"renders":self.renders,
+                    "plot_renders":self.plots.renders(),"plots_held":self.plots.held(),
                     "read_ms":self.snapshot.as_ref().map(|snapshot| snapshot.read_ms),
                     "tail_cache_bytes":self.snapshot.as_ref()
                         .map(|snapshot| &snapshot.catalog["tail_cache_bytes"]),
@@ -1056,6 +1059,7 @@ impl Render for LiveDashboard {
         let inspection_focus = self.install_inspection_focus(window, cx);
         let root_focus = self.install_root_focus(window, cx);
         self.hardware_state.begin_frame();
+        self.plots.begin_frame();
         self.renders += 1;
         if self.renders == 1 {
             window.on_next_frame(|window, _| {

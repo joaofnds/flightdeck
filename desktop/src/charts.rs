@@ -62,7 +62,7 @@ pub const PLOT_INSETS: gpui::Edges<Pixels> = gpui::Edges {
     bottom: px(0.0),
     left: px(0.0),
 };
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Inspection {
     pub lower: usize,
     pub selected: usize,
@@ -149,6 +149,20 @@ fn plot_cursor(
     )
     .w_full()
     .h_full()
+}
+
+/// The inspection a plot of `panel` draws. Bars draw the selected reading, and every other
+/// kind draws the readings in view whatever is selected, so a hover leaves its plot as it was.
+#[must_use]
+pub fn plot_inspection(panel: &Panel, inspection: Inspection) -> Inspection {
+    if matches!(panel.kind.as_str(), "core-bars" | "pressure") {
+        return inspection;
+    }
+
+    Inspection {
+        selected: inspection.upper,
+        ..inspection
+    }
 }
 
 #[must_use]
@@ -1448,6 +1462,52 @@ mod live_tests {
 
         assert_eq!(shadows.len(), 1);
         assert!(shadows[0].inset);
+    }
+
+    #[test]
+    fn a_line_plot_draws_the_readings_in_view_whatever_is_selected() {
+        // Goal: a hover over a line chart leaves what its plot draws as it was. Method: take the
+        // plot's inspection of a line panel while an earlier reading is selected.
+        let panel = kind_panel("line");
+        let hovered = Inspection {
+            lower: 3,
+            selected: 5,
+            upper: 9,
+        };
+
+        let drawn = plot_inspection(&panel, hovered);
+
+        assert_eq!(
+            drawn,
+            Inspection {
+                selected: 9,
+                ..hovered
+            }
+        );
+    }
+
+    #[test]
+    fn a_bar_plot_draws_the_selected_reading() {
+        // Goal: the bars of a hovered second are the bars the plot draws. Method: take the
+        // plot's inspection of a core bar panel while an earlier reading is selected.
+        let panel = kind_panel("core-bars");
+        let hovered = Inspection {
+            lower: 3,
+            selected: 5,
+            upper: 9,
+        };
+
+        let drawn = plot_inspection(&panel, hovered);
+
+        assert_eq!(drawn, hovered);
+    }
+
+    fn kind_panel(kind: &str) -> Panel {
+        serde_json::from_value(
+            serde_json::json!({"id":"chart", "title":"Chart", "unit":"%",
+            "kind":kind, "lines":[]}),
+        )
+        .unwrap()
     }
 
     #[test]
