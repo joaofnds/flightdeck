@@ -267,6 +267,10 @@ impl Machine {
                 soc_celsius: None,
                 cpu_celsius: None,
                 gpu_celsius: None,
+                thermal_pressure: None,
+                performance_levels: None,
+                battery: None,
+                disks: None,
             },
             cpus: Vec::new(),
             memory: MemoryRow {

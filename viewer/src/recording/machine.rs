@@ -1,13 +1,19 @@
 //! The machine's readings of a sealed minute, raw as the collector took them.
 
+use collector::battery::BatteryReading;
+use collector::disks::DiskSnapshot;
 use collector::interfaces::{IFNAMSIZ, Interface, Name};
 use collector::machine::{CPUTicks, Memory, Pressure};
 use collector::ring::Tick;
+use collector::system::{FactText, PerformanceLevel};
 use persistence::engine::Cells;
-use persistence::schema::{CORE_STATE_FREQUENCY_FIELD, TEMPERATURE_FIELDS, Table, pressure};
+use persistence::schema::{
+    BATTERY_FIELDS, BATTERY_VERSION, CORE_STATE_FREQUENCY_FIELD, SYSTEM_FIELDS, TEMPERATURE_FIELDS,
+    TICK_COLUMNS_MAX, Table, pressure,
+};
 use polars::prelude::{
-    BooleanType, Float32Type, PolarsPhysicalType, StringType, UInt8Type, UInt16Type, UInt32Type,
-    UInt64Type,
+    BooleanType, DataFrame, Float32Type, Int64Type, PolarsPhysicalType, StringType, UInt8Type,
+    UInt16Type, UInt32Type, UInt64Type,
 };
 
 use super::{Refused, SealedMinute};
@@ -24,6 +30,15 @@ const TICK_COLUMNS: [&str; 10] = [
     "gpu_energy_nj",
     "power_watts",
     "soc_celsius",
+];
+
+/// The system group's columns the store reads, of those `SYSTEM_FIELDS` names.
+const SYSTEM_COLUMNS: [&str; 5] = [
+    "thermal_pressure",
+    "machine_performance_level0_name",
+    "machine_performance_level0_logical_cpus",
+    "machine_performance_level1_name",
+    "machine_performance_level1_logical_cpus",
 ];
 
 /// The memory table's counters, in the order `Memory` declares them.
@@ -98,6 +113,14 @@ pub struct TickRow {
     /// Each `None` where the tick did not read the SMC or the SMC lists no such sensor.
     pub cpu_celsius: Option<f32>,
     pub gpu_celsius: Option<f32>,
+    /// `None` where the tick published no system readings or macOS gave no thermal pressure.
+    pub thermal_pressure: Option<u8>,
+    /// `None` where the tick published no system readings or macOS named no levels.
+    pub performance_levels: Option<[PerformanceLevel; 2]>,
+    /// `None` where the tick published no battery reading.
+    pub battery: Option<BatteryReading>,
+    /// `None` where the tick published no disks.
+    pub disks: Option<DiskSnapshot>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -170,6 +193,16 @@ impl MachineMinute {
             soc_celsius: tick.smc_read.then_some(tick.soc_celsius),
             cpu_celsius: tick.cpu_celsius,
             gpu_celsius: tick.gpu_celsius,
+            thermal_pressure: tick
+                .system
+                .as_ref()
+                .and_then(|system| system.reading.thermal_pressure),
+            performance_levels: tick
+                .system
+                .as_ref()
+                .and_then(|system| system.machine.levels),
+            battery: tick.battery,
+            disks: tick.disks,
         });
         for (cpu, ticks) in (0_u32..).zip(&tick.cpus) {
             self.cpus.push(CpuRow {
@@ -251,30 +284,62 @@ pub fn read_machine(minute: &SealedMinute, into: &mut MachineMinute) -> Result<(
 }
 
 fn read_ticks(minute: &SealedMinute, into: &mut Vec<TickRow>) -> Result<(), Refused> {
+    assert!(into.is_empty());
     let temperatures = TEMPERATURE_FIELDS.map(|(name, _)| name);
+    let system = SYSTEM_FIELDS.map(|(name, _)| name);
+    let battery = BATTERY_FIELDS.map(|(name, _)| name);
+    let disks = [persistence::disks::FIELD];
     let table = minute.table(Table::Ticks)?;
-    let measured = table.holds(&temperatures)?;
-    let mut columns = Vec::with_capacity(TICK_COLUMNS.len() + temperatures.len());
+    let temperatures_held = table.holds(&temperatures)?;
+    let system_held = table.holds(&system)?;
+    let battery_held = table.holds(&battery)?;
+    let disks_held = table.holds(&disks)?;
+
+    let mut columns = Vec::with_capacity(TICK_COLUMNS_MAX);
     columns.extend(TICK_COLUMNS);
-    if measured {
+    if temperatures_held {
         columns.extend(temperatures);
+    }
+    if system_held {
+        columns.extend(SYSTEM_COLUMNS);
+    }
+    if battery_held {
+        columns.extend(battery);
+    }
+    if disks_held {
+        columns.extend(disks);
     }
     let frame = table.collect(&columns, &["publication"])?;
 
-    let publication = Cells::<UInt64Type>::named(&frame, "publication")?;
-    let run_tick = Cells::<UInt64Type>::named(&frame, "run_tick")?;
-    let wall_ns = Cells::<UInt64Type>::named(&frame, "wall_ns")?;
-    let continuous_ns = Cells::<UInt64Type>::named(&frame, "continuous_ns")?;
-    let awake_ns = Cells::<UInt64Type>::named(&frame, "awake_ns")?;
-    let ioreport_read = Cells::<BooleanType>::named(&frame, "ioreport_read")?;
-    let smc_read = Cells::<BooleanType>::named(&frame, "smc_read")?;
-    let gpu_energy_nj = Cells::<UInt64Type>::named(&frame, "gpu_energy_nj")?;
-    let power_watts = Cells::<Float32Type>::named(&frame, "power_watts")?;
-    let soc_celsius = Cells::<Float32Type>::named(&frame, "soc_celsius")?;
-    let [cpu_celsius, gpu_celsius] =
-        temperatures.map(|name| measured.then(|| Cells::<Float32Type>::named(&frame, name)));
-    let cpu_celsius = cpu_celsius.transpose()?;
-    let gpu_celsius = gpu_celsius.transpose()?;
+    read_ticks_rows(&frame, into)?;
+    if temperatures_held {
+        read_ticks_temperatures(&frame, into)?;
+    }
+    if system_held {
+        read_ticks_system(&frame, into)?;
+    }
+    if battery_held {
+        read_ticks_battery(&frame, into)?;
+    }
+    if disks_held {
+        read_ticks_disks(&frame, into)?;
+    }
+    Ok(())
+}
+
+/// Appends a row for each of `frame`'s ticks from the columns every minute holds, with the
+/// readings of the groups a minute may lack left out.
+fn read_ticks_rows(frame: &DataFrame, into: &mut Vec<TickRow>) -> Result<(), Refused> {
+    let publication = Cells::<UInt64Type>::named(frame, "publication")?;
+    let run_tick = Cells::<UInt64Type>::named(frame, "run_tick")?;
+    let wall_ns = Cells::<UInt64Type>::named(frame, "wall_ns")?;
+    let continuous_ns = Cells::<UInt64Type>::named(frame, "continuous_ns")?;
+    let awake_ns = Cells::<UInt64Type>::named(frame, "awake_ns")?;
+    let ioreport_read = Cells::<BooleanType>::named(frame, "ioreport_read")?;
+    let smc_read = Cells::<BooleanType>::named(frame, "smc_read")?;
+    let gpu_energy_nj = Cells::<UInt64Type>::named(frame, "gpu_energy_nj")?;
+    let power_watts = Cells::<Float32Type>::named(frame, "power_watts")?;
+    let soc_celsius = Cells::<Float32Type>::named(frame, "soc_celsius")?;
     into.reserve(frame.height());
     for row in 0..frame.height() {
         into.push(TickRow {
@@ -288,9 +353,147 @@ fn read_ticks(minute: &SealedMinute, into: &mut Vec<TickRow>) -> Result<(), Refu
             gpu_energy_nj: gpu_energy_nj.optional(row)?,
             power_watts: power_watts.optional(row)?,
             soc_celsius: soc_celsius.optional(row)?,
-            cpu_celsius: optional_cell(cpu_celsius.as_ref(), row)?,
-            gpu_celsius: optional_cell(gpu_celsius.as_ref(), row)?,
+            cpu_celsius: None,
+            gpu_celsius: None,
+            thermal_pressure: None,
+            performance_levels: None,
+            battery: None,
+            disks: None,
         });
+    }
+    Ok(())
+}
+
+/// Fills each of `into`'s temperatures from `frame`, which holds the temperature group.
+fn read_ticks_temperatures(frame: &DataFrame, into: &mut [TickRow]) -> Result<(), Refused> {
+    assert_eq!(into.len(), frame.height());
+    let cpu_celsius = Cells::<Float32Type>::named(frame, "cpu_celsius")?;
+    let gpu_celsius = Cells::<Float32Type>::named(frame, "gpu_celsius")?;
+    for (row, tick) in into.iter_mut().enumerate() {
+        tick.cpu_celsius = cpu_celsius.optional(row)?;
+        tick.gpu_celsius = gpu_celsius.optional(row)?;
+    }
+    Ok(())
+}
+
+/// Fills each of `into`'s thermal pressure and performance levels from `frame`, which holds
+/// the system group.
+fn read_ticks_system(frame: &DataFrame, into: &mut [TickRow]) -> Result<(), Refused> {
+    assert_eq!(into.len(), frame.height());
+    let [pressure, level0_name, level0_cpus, level1_name, level1_cpus] = SYSTEM_COLUMNS;
+    let thermal_pressure = Cells::<UInt8Type>::named(frame, pressure)?;
+    let level0_name = Cells::<StringType>::named(frame, level0_name)?;
+    let level0_cpus = Cells::<UInt32Type>::named(frame, level0_cpus)?;
+    let level1_name = Cells::<StringType>::named(frame, level1_name)?;
+    let level1_cpus = Cells::<UInt32Type>::named(frame, level1_cpus)?;
+    for (row, tick) in into.iter_mut().enumerate() {
+        tick.thermal_pressure = thermal_pressure.optional(row)?;
+        tick.performance_levels = performance_levels([
+            (level0_name.optional(row)?, level0_cpus.optional(row)?),
+            (level1_name.optional(row)?, level1_cpus.optional(row)?),
+        ])?;
+    }
+    Ok(())
+}
+
+/// The performance levels of a tick's level `columns`, each a name and a count of logical
+/// CPUs, which hold both levels whole or nothing.
+fn performance_levels(
+    columns: [(Option<&str>, Option<u32>); 2],
+) -> Result<Option<[PerformanceLevel; 2]>, Refused> {
+    let mut levels = [PerformanceLevel::default(); 2];
+    let mut held = 0_usize;
+    for (level, (name, logical_cpus)) in levels.iter_mut().zip(columns) {
+        if let Some(name) = name {
+            level.name = FactText::new(name.as_bytes())
+                .ok_or(persistence::Error::Bound("performance level name"))?;
+            held += 1;
+        }
+        if let Some(logical_cpus) = logical_cpus {
+            level.logical_cpus = logical_cpus;
+            held += 1;
+        }
+    }
+    if held == 0 {
+        return Ok(None);
+    }
+
+    if held < 2 * levels.len() {
+        return Err(persistence::Error::Bound("incomplete performance levels").into());
+    }
+
+    Ok(Some(levels))
+}
+
+/// Fills each of `into`'s battery reading from `frame`, which holds the battery group,
+/// refusing a row of another version, or one with readings and no source time.
+fn read_ticks_battery(frame: &DataFrame, into: &mut [TickRow]) -> Result<(), Refused> {
+    assert_eq!(into.len(), frame.height());
+    let version = Cells::<UInt8Type>::named(frame, "battery_version")?;
+    let source_ns = Cells::<UInt64Type>::named(frame, "battery_source_continuous_ns")?;
+    let charge_current = Cells::<UInt64Type>::named(frame, "battery_charge_current")?;
+    let charge_maximum = Cells::<UInt64Type>::named(frame, "battery_charge_maximum")?;
+    let full_capacity = Cells::<UInt64Type>::named(frame, "battery_full_charge_capacity")?;
+    let design_capacity = Cells::<UInt64Type>::named(frame, "battery_design_capacity")?;
+    let cycle_count = Cells::<UInt64Type>::named(frame, "battery_cycle_count")?;
+    let charging = Cells::<BooleanType>::named(frame, "battery_charging")?;
+    let external_power = Cells::<BooleanType>::named(frame, "battery_external_power")?;
+    let voltage_mv = Cells::<UInt64Type>::named(frame, "battery_voltage_mv")?;
+    let current_ma = Cells::<Int64Type>::named(frame, "battery_current_ma")?;
+    let adapter_watts = Cells::<UInt64Type>::named(frame, "battery_adapter_watts")?;
+    for (row, tick) in into.iter_mut().enumerate() {
+        if version.get(row)? != BATTERY_VERSION {
+            return Err(persistence::Error::Bound("battery version").into());
+        }
+
+        let reading = BatteryReading {
+            source_continuous_ns: 0,
+            charge_current: charge_current.optional(row)?,
+            charge_maximum: charge_maximum.optional(row)?,
+            full_charge_capacity: full_capacity.optional(row)?,
+            design_capacity: design_capacity.optional(row)?,
+            cycle_count: cycle_count.optional(row)?,
+            charging: charging.optional(row)?,
+            external_power: external_power.optional(row)?,
+            voltage_mv: voltage_mv.optional(row)?,
+            current_ma: current_ma.optional(row)?,
+            adapter_watts: adapter_watts.optional(row)?,
+        };
+        tick.battery = battery(source_ns.optional(row)?, reading)?;
+    }
+    Ok(())
+}
+
+/// The battery reading of a row whose source time is `source_continuous_ns` and whose other
+/// columns hold `reading`, which a row without a source time leaves empty.
+fn battery(
+    source_continuous_ns: Option<u64>,
+    reading: BatteryReading,
+) -> Result<Option<BatteryReading>, Refused> {
+    let Some(source_continuous_ns) = source_continuous_ns else {
+        if reading != BatteryReading::default() {
+            return Err(persistence::Error::Bound("battery payload without source time").into());
+        }
+
+        return Ok(None);
+    };
+
+    Ok(Some(BatteryReading {
+        source_continuous_ns,
+        ..reading
+    }))
+}
+
+/// Fills each of `into`'s disks from `frame`, which holds the disks column, in the
+/// collector's own encoding.
+fn read_ticks_disks(frame: &DataFrame, into: &mut [TickRow]) -> Result<(), Refused> {
+    assert_eq!(into.len(), frame.height());
+    let disks = Cells::<StringType>::named(frame, persistence::disks::FIELD)?;
+    for (row, tick) in into.iter_mut().enumerate() {
+        if let Some(text) = disks.optional(row)? {
+            let snapshot = tick.disks.insert(DiskSnapshot::default());
+            persistence::disks::decode(text, snapshot)?;
+        }
     }
     Ok(())
 }
