@@ -17,7 +17,45 @@ permissions:
   contents: read
 
 jobs:
+  # A release ships only a commit that check passed on main. When main and the tag arrive in one
+  # push, check may not have started yet, so the job waits for its run to appear and then to end.
+  # A run cancelled by a newer push to main refuses the release too, which a rerun can retry.
+  wait-for-check:
+    runs-on: ubuntu-latest
+    # Check takes 10 to 25 minutes once main's cache is warm, and a cold run that takes longer
+    # refuses the release, which a rerun after check ends can retry.
+    timeout-minutes: 35
+    permissions:
+      actions: read
+    steps:
+      - name: Wait for check to pass on the tagged commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Polls every 30 seconds for 30 minutes, inside the job's limit. A missing run reads
+          # as "null null", and a run that has not ended has an empty conclusion.
+          for attempt in $(seq 1 60); do
+            state="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow check.yml \
+              --commit "$GITHUB_SHA" --event push --branch main --limit 1 \
+              --json status,conclusion --jq '.[0] | "\(.status) \(.conclusion)"')"
+            if [ "$state" = "completed success" ]; then
+              exit 0
+            fi
+            if [ "${state%% *}" = "completed" ]; then
+              echo "::error::Check on main ended as ${state#* } for $GITHUB_SHA."
+              exit 1
+            fi
+            sleep 30
+          done
+          if [ "$state" = "null null" ]; then
+            echo "::error::Check never ran on main for $GITHUB_SHA."
+            exit 1
+          fi
+          echo "::error::Check on main did not end for $GITHUB_SHA within 30 minutes."
+          exit 1
+
   build:
+    needs: [wait-for-check]
     # The collector reads macOS kernel interfaces and frameworks, so it builds only on macOS, and
     # only for Apple chips, the only Macs it is checked on.
     runs-on: macos-26
