@@ -18,7 +18,7 @@ use crate::hardware_motion::{
     FanFrame, HardwareState, HardwareVisibility, Vector, contains, particle, perimeter,
 };
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug, PartialEq)]
 pub struct Readings {
     pub temperatures: [Option<f32>; 3],
     pub speeds: [Option<f32>; 2],

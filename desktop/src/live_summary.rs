@@ -396,10 +396,13 @@ pub(crate) fn memory_in_use_bytes(summary: &Value) -> Option<u64> {
         .and_then(|(anonymous, purgeable)| anonymous.checked_sub(purgeable));
     let wired = summary["memory_wired_bytes"].as_u64();
     let compressed = summary["memory_compressed_bytes"].as_u64();
-    app.zip(wired)
-        .and_then(|(app, wired)| app.checked_add(wired))
-        .zip(compressed)
-        .and_then(|(used, compressed)| used.checked_add(compressed))
+
+    memory_in_use_bytes_of(app?, wired?, compressed?)
+}
+
+/// App, wired and compressed memory added together, so the arguments may come in any order.
+pub(crate) fn memory_in_use_bytes_of(app: u64, wired: u64, compressed: u64) -> Option<u64> {
+    app.checked_add(wired)?.checked_add(compressed)
 }
 
 /// The summary only where it is the selected observation's own: the same run, boot and

@@ -5,8 +5,13 @@ use serde_json::Value;
 /// The thermal pressure the collector read at a reading, by macOS's name, or "Unavailable".
 #[must_use]
 pub fn thermal_pressure_text(point: &Value) -> &'static str {
-    point["thermal_pressure"]
-        .as_u64()
+    thermal_pressure_level_text(point["thermal_pressure"].as_u64())
+}
+
+/// macOS's name for the thermal pressure `level`, or "Unavailable" where the collector read none.
+#[must_use]
+pub fn thermal_pressure_level_text(level: Option<u64>) -> &'static str {
+    level
         .and_then(thermal_pressure_name)
         .unwrap_or("Unavailable")
 }

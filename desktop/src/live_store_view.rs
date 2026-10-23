@@ -1,18 +1,23 @@
 //! The page drawn from the store's newest View, which the window takes each tick. Overview draws
-//! its machine charts and readouts from it while it follows the newest second, and a chosen
-//! second, a hover's reading and every other page draw from the worker's readings as before.
+//! its machine charts, readouts and hardware figure from it while it follows the newest second,
+//! and a chosen second, a hover's reading and every other page draw from the worker's readings
+//! as before.
 
 use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{App, Global};
+use num_traits::ToPrimitive;
 use serde_json::{Value, json};
 use viewer::store::{MachineSecond, Store, View};
 
 use super::LiveDashboard;
 use crate::data::Panel;
+use crate::hardware::Readings;
 use crate::live_inventory::PerformanceLevel;
 use crate::live_projection::held_projection;
+use crate::live_thermal_pressure::thermal_pressure_level_text;
+use crate::live_views::summary;
 
 #[cfg(test)]
 #[path = "live_store_view_tests.rs"]
@@ -104,9 +109,9 @@ impl LiveDashboard {
         Ok(panels)
     }
 
-    /// The View the page draws Overview's machine charts and readouts from: the store's newest,
-    /// while the page shows Overview's readings following the newest second, no hover's reading
-    /// is shown, and the View is no older than the readings.
+    /// The View the page draws Overview's machine charts, readouts and hardware figure from: the
+    /// store's newest, while the page shows Overview's readings following the newest second, no
+    /// hover's reading is shown, and the View is no older than the readings.
     fn drawn_store_view(&self) -> Option<&View> {
         if self.request.route != "overview" {
             return None;
@@ -146,6 +151,14 @@ impl LiveDashboard {
 
         Some(store_view_summary_of(view.seconds.last()?))
     }
+
+    /// The hardware figure's readings of the newest second of the View the page draws, where it
+    /// draws one.
+    pub(crate) fn store_view_hardware(&self) -> Option<Readings> {
+        let view = self.drawn_store_view()?;
+
+        Some(store_view_hardware_of(view.seconds.last()?))
+    }
 }
 
 /// The readings of `second` that Overview's readouts read, keyed as the worker's summary keys
@@ -164,6 +177,34 @@ fn store_view_summary_of(second: &MachineSecond) -> Value {
         "storage": {"read_bps": second.disk_read_bps},
         "network_rx_bps": second.network.map(|traffic| traffic.received_bps),
     })
+}
+
+/// The hardware figure's readings of `second`, as the figure reads the worker's summary of it.
+fn store_view_hardware_of(second: &MachineSecond) -> Readings {
+    let memory = second.memory.as_ref();
+    let in_use = memory.and_then(|memory| {
+        let app = memory.app_bytes?;
+        summary::memory_in_use_bytes_of(app, memory.wired_bytes, memory.compressed_bytes)
+    });
+    let total = memory.map(|memory| memory.total_bytes);
+    let battery = second.battery.as_ref();
+    let narrow = |value: Option<f64>| value.and_then(|value| value.to_f32());
+    let gibibytes = |bytes: Option<u64>| Some(bytes?.to_f32()? / 1_073_741_824.0);
+
+    Readings {
+        temperatures: [second.cpu_celsius, second.gpu_celsius, None],
+        speeds: second.fan_rpm,
+        utilization: [
+            narrow(second.cpu_percent),
+            narrow(second.gpu_active_percent),
+        ],
+        memory: [gibibytes(in_use), gibibytes(total)],
+        battery: [
+            narrow(battery.and_then(|battery| battery.charge_percent)),
+            narrow(battery.and_then(|battery| battery.power_watts)),
+        ],
+        thermal: thermal_pressure_level_text(second.thermal_pressure.map(u64::from)).into(),
+    }
 }
 
 /// The CPU's performance levels as the newest second of `view` names them.

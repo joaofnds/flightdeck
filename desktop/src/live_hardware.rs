@@ -11,11 +11,7 @@ use crate::live_source::Snapshot;
 
 impl LiveDashboard {
     pub fn live_hardware(&self) -> impl IntoElement {
-        let (speeds, failure) = match self.reading_fan_speeds() {
-            Ok(speeds) => (speeds, None),
-            Err(error) => ([None, None], Some(error)),
-        };
-        let (readings, summary_failure) = self.live_hardware_projection(speeds);
+        let (readings, failures) = self.live_hardware_readings();
         let thermal = readings.thermal.clone();
         div()
             .p(px(16.0))
@@ -29,12 +25,29 @@ impl LiveDashboard {
                 Rc::clone(&self.hardware_state),
                 self.animate,
             )))
-            .children(failure.into_iter().chain(summary_failure).map(|error| {
+            .children(failures.into_iter().flatten().map(|error| {
                 div()
                     .debug_selector(|| "schematic-error".into())
                     .text_color(rgb(ORANGE))
                     .child(error)
             }))
+    }
+
+    /// The figure's readings and what kept any of them from it: the newest second of the store's
+    /// View where the page draws from it, and the worker's reading of the second it shows
+    /// otherwise.
+    pub(crate) fn live_hardware_readings(&self) -> (Readings, [Option<String>; 2]) {
+        if let Some(readings) = self.store_view_hardware() {
+            return (readings, [None, None]);
+        }
+
+        let (speeds, failure) = match self.reading_fan_speeds() {
+            Ok(speeds) => (speeds, None),
+            Err(error) => ([None, None], Some(error)),
+        };
+        let (readings, summary_failure) = self.live_hardware_projection(speeds);
+
+        (readings, [failure, summary_failure])
     }
 
     pub(crate) fn live_hardware_projection(

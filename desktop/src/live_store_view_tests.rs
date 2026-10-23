@@ -2,11 +2,13 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use collector::machine::Pressure;
 use serde_json::json;
-use viewer::store::{MachineSecond, View};
+use viewer::store::{BatterySecond, MachineSecond, MemorySecond, View};
 
 use super::super::LiveDashboard;
 use crate::data::Panel;
+use crate::hardware::Readings;
 use crate::live_hover::{Origin, Preview, Target};
 use crate::live_projection::overview_panels;
 use crate::live_source::{Snapshot, Worker};
@@ -55,6 +57,27 @@ fn a_view_newer_than_the_readings_fills_the_overviews_readouts() {
 
     let expected = summary::cards("overview", &summary_selection(&reading_at(10_005, 0)));
     assert_eq!(texts(&dashboard.summary_cards()), texts(&expected));
+}
+
+#[test]
+fn a_view_newer_than_the_readings_fills_the_hardware_figure() {
+    // Goal: the hardware figure shows the newest second the store holds, as the charts and
+    // readouts do. Method: readings that end at 10,000, then a View whose newest second, at
+    // 10,005, holds the figure's readings.
+    let mut dashboard = dashboard(&[reading_at(9_999, 0), reading_at(10_000, 0)]);
+    let view = view(1, &[], &[reading_at(10_000, 0), figure_second(10_005)]);
+
+    dashboard.take_view(Arc::new(view));
+
+    let expected = Readings {
+        temperatures: [Some(61.5), Some(52.25), None],
+        speeds: [Some(1_200.0), Some(1_500.0)],
+        utilization: [Some(25.0), Some(12.5)],
+        memory: [Some(12.0), Some(32.0)],
+        battery: [Some(75.0), Some(-6.5)],
+        thermal: "Moderate".into(),
+    };
+    assert_eq!(dashboard.live_hardware_readings(), (expected, [None, None]));
 }
 
 #[test]
@@ -181,6 +204,23 @@ mod when_a_hover_shows_an_earlier_second {
         let expected = summary::cards("overview", &summary_selection(&reading_at(9_999, 0)));
         assert_eq!(texts(&dashboard.summary_cards()), texts(&expected));
     }
+
+    #[test]
+    fn the_hardware_figure_shows_the_hovered_second() {
+        // Goal: the figure reads the second under the pointer, as the readouts do, rather than
+        // the View's newest. Method: a hover's reading of 9,999, whose CPU was 99.5% busy, then
+        // a View that ends at 10,005, whose CPU was 2.5% busy.
+        let mut dashboard = dashboard(&[reading_at(9_999, 0), reading_at(10_000, 0)]);
+        let mut hover = preview(&dashboard);
+        hover.reading.selection = summary_selection(&reading_at(9_999, 0));
+        dashboard.preview = Some(hover);
+
+        dashboard.take_view(newer_view());
+
+        let (readings, failures) = dashboard.live_hardware_readings();
+        assert_eq!(failures, [None, None]);
+        assert_eq!(readings.utilization[0], Some(99.5));
+    }
 }
 
 mod when_macos_hides_the_window {
@@ -255,6 +295,34 @@ fn readings(trends: &[MachineSecond]) -> Box<Snapshot> {
         app_parts: None,
         read_ms: 0.0,
     })
+}
+
+/// The second at `wall_second` whose hardware figure shows CPU and GPU dies at 61.5 and 52.25 °C,
+/// fans at 1,200 and 1,500 rpm, the CPU 25% and the GPU 12.5% busy, 12 of 32 GiB in use, the
+/// battery 75% charged and giving 6.5 W, and moderate thermal pressure.
+fn figure_second(wall_second: u64) -> MachineSecond {
+    const GIBIBYTE: u64 = 1_073_741_824;
+
+    MachineSecond {
+        cpu_celsius: Some(61.5),
+        gpu_celsius: Some(52.25),
+        fan_rpm: [Some(1_200.0), Some(1_500.0)],
+        cpu_percent: Some(25.0),
+        gpu_active_percent: Some(12.5),
+        memory: Some(MemorySecond {
+            total_bytes: 32 * GIBIBYTE,
+            app_bytes: Some(8 * GIBIBYTE),
+            wired_bytes: 2 * GIBIBYTE,
+            compressed_bytes: 2 * GIBIBYTE,
+            pressure: Pressure::Normal,
+        }),
+        battery: Some(BatterySecond {
+            charge_percent: Some(75.0),
+            power_watts: Some(-6.5),
+        }),
+        thermal_pressure: Some(1),
+        ..reading_at(wall_second, 0)
+    }
 }
 
 /// A hover's reading of 9,999, complete.
