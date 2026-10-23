@@ -199,6 +199,67 @@ mod when_a_second_reaches_the_store_twice {
 }
 
 /// A run of a recording, as the tests that take seconds in directly name it.
+mod when_the_readings_break {
+    use super::super::{Held, SECONDS_MAX};
+    use super::{RUN, published, second_at};
+    use collector::ring::{Identity, RunIdentity};
+
+    #[test]
+    fn a_second_that_does_not_follow_the_one_before_starts_a_segment() {
+        // Goal: a chart breaks its line where the readings break. Method: take in two pairs of
+        // seconds, each second of a pair following the one before it, and read their segments.
+        let mut held = Held::new();
+
+        for (wall_second, follows) in [(100, false), (101, true), (102, false), (103, true)] {
+            assert!(held.take(&RUN, &following(wall_second, follows)));
+        }
+
+        assert_eq!(segments_of(&published(&mut held).seconds), [0, 0, 1, 1]);
+    }
+
+    #[test]
+    fn a_second_of_another_run_starts_a_segment() {
+        // Goal: a line never joins the readings of two runs. Method: take in a second of the
+        // next run that follows a second of its own run, after a second of this run.
+        let mut held = Held::new();
+        let next = RunIdentity {
+            run: Identity([4, 4]),
+            ..RUN
+        };
+
+        assert!(held.take(&RUN, &following(100, false)));
+        assert!(held.take(&next, &following(5, true)));
+
+        assert_eq!(segments_of(&published(&mut held).seconds), [0, 1]);
+    }
+
+    #[test]
+    fn an_older_second_keeps_the_segment_its_readings_had() {
+        // Goal: the older seconds, one in ten, break their line where the readings between them
+        // broke. Method: break the readings at a second the older seconds leave out, let the
+        // live span go of three stretches, and read the older seconds' segments.
+        let mut held = Held::new();
+        let last = 1_030 + u64::try_from(SECONDS_MAX).unwrap();
+
+        for wall_second in 1_000..last {
+            assert!(held.take(&RUN, &following(wall_second, wall_second != 1_015)));
+        }
+
+        assert_eq!(segments_of(&published(&mut held).earlier), [0, 0, 1]);
+    }
+
+    fn following(wall_second: u64, follows: bool) -> super::super::MachineSecond {
+        super::super::MachineSecond {
+            follows,
+            ..second_at(wall_second)
+        }
+    }
+
+    fn segments_of(seconds: &[std::sync::Arc<super::super::MachineSecond>]) -> Vec<u64> {
+        seconds.iter().map(|second| second.segment).collect()
+    }
+}
+
 const RUN: collector::ring::RunIdentity = collector::ring::RunIdentity {
     recording: collector::ring::Identity([1, 1]),
     run: collector::ring::Identity([2, 2]),

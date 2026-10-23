@@ -180,6 +180,7 @@ struct Held {
 struct Newest {
     run: RunIdentity,
     publication: u64,
+    segment: u64,
 }
 
 impl Held {
@@ -230,16 +231,21 @@ impl Held {
             }
         }
 
+        let segment = segment(self.newest.as_ref(), run, second);
         if let Some(kept) = kept {
             let pushed = self.earlier.push(|buffer| *buffer = kept);
             assert!(pushed);
         }
-        let pushed = self.span.push(|buffer| *buffer = *second);
+        let pushed = self.span.push(|buffer| {
+            *buffer = *second;
+            buffer.segment = segment;
+        });
         assert!(pushed);
 
         self.newest = Some(Newest {
             run: *run,
             publication: second.publication,
+            segment,
         });
         self.unpublished = true;
         true
@@ -278,6 +284,20 @@ impl Held {
         self.version = version;
         self.unpublished = false;
     }
+}
+
+/// The segment of `second` of run `run`, taken in after `newest`.
+fn segment(newest: Option<&Newest>, run: &RunIdentity, second: &MachineSecond) -> u64 {
+    let Some(newest) = newest else {
+        return 0;
+    };
+
+    if newest.run == *run {
+        if second.follows {
+            return newest.segment;
+        }
+    }
+    newest.segment + 1
 }
 
 /// Whether `second` starts a stretch of `EARLIER_STRIDE_SECONDS` after the stretch of `newest`.

@@ -27,6 +27,10 @@ pub struct MachineSecond {
     /// Whether the rates are over the interval since the run's previous reading, which holds
     /// only where the two readings are consecutive (doc-30).
     pub follows: bool,
+    /// The breaks in the store's readings before this second, so two seconds share it where
+    /// every reading between them follows the one before it in one run. The store sets it as
+    /// it takes the second in.
+    pub segment: u64,
     pub cpu_percent: Option<f64>,
     /// Each performance level's busy share, level 0, the fastest, first.
     pub cpu_level_percent: [Option<f64>; 2],
@@ -84,6 +88,7 @@ impl MachineSecond {
             wall_ns,
             continuous_ns: reading.tick.continuous_ns,
             follows: false,
+            segment: 0,
             cpu_percent: None,
             cpu_level_percent: [None; 2],
             gpu_active_percent: None,
