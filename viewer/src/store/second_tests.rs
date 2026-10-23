@@ -24,6 +24,19 @@ fn cpu_percent_is_the_busy_share_of_every_cpus_ticks_since_the_previous_second()
 }
 
 #[test]
+fn all_cpu_adds_up_each_cpus_busy_share_since_the_previous_second() {
+    // Goal: CPU by app draws the whole Mac's CPU in its Apps' unit, where one busy CPU is 100%,
+    // as the worker's All CPU reference adds it up. Method: two CPUs, one busy for 30 of 100
+    // ticks and one for 50 of 100, read a second apart.
+    let before = Machine::at(1).cpus(&[(0, 0), (0, 0)]);
+    let after = Machine::at(2).cpus(&[(30, 70), (50, 50)]);
+
+    let second = after.second_after(&before);
+
+    assert_eq!(second.cpu_percent_one_core, Some(80.0));
+}
+
+#[test]
 fn network_rates_are_bytes_per_second_of_the_continuous_clock() {
     // Goal: traffic is a rate over the time the Mac was running, summed over its interfaces.
     // Method: two interfaces move 1,500 bytes in and 600 out over half a second.
@@ -388,6 +401,19 @@ mod when_the_readings_do_not_match {
 
         assert!(second.follows);
         assert_eq!(second.cpu_percent, None);
+    }
+
+    #[test]
+    fn a_cpu_counter_that_went_back_leaves_all_cpu_unknown() {
+        // Goal: All CPU reads no sum rather than one that leaves a CPU out. Method: two CPUs, the
+        // second's busy ticks falling from 10 to 5.
+        let before = Machine::at(1).cpus(&[(10, 10), (10, 10)]);
+        let after = Machine::at(2).cpus(&[(20, 20), (5, 20)]);
+
+        let second = after.second_after(&before);
+
+        assert!(second.follows);
+        assert_eq!(second.cpu_percent_one_core, None);
     }
 
     #[test]

@@ -31,6 +31,7 @@ pub fn reading_at(wall_second: u64, segment: u64) -> MachineSecond {
         follows: true,
         segment,
         cpu_percent: half(200),
+        cpu_percent_one_core: half(140).map(|value| value * 18.0),
         cpu_level_percent: [half(190), half(180)],
         gpu_active_percent: half(170),
         memory: Some(MemorySecond {
@@ -101,6 +102,7 @@ pub fn trend_point(second: &MachineSecond) -> Value {
     json!({"run": RUN, "boot": BOOT, "segment": second.segment, "wall_ns": second.wall_ns,
         "publication": second.publication,
         "cpu_percent": second.cpu_percent,
+        "cpu_percent_one_core": second.cpu_percent_one_core,
         "cpu_level_percent": second.cpu_level_percent,
         "gpu_active_percent": second.gpu_active_percent,
         "memory_anonymous_bytes": memory.and_then(|memory| Some(memory.app_bytes? + purgeable)),

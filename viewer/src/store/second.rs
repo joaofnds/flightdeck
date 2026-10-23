@@ -33,6 +33,9 @@ pub struct MachineSecond {
     /// it takes the second in.
     pub segment: u64,
     pub cpu_percent: Option<f64>,
+    /// Each CPU's busy share added up, so one busy CPU is 100%, as All CPU draws it beside the
+    /// CPU each App used.
+    pub cpu_percent_one_core: Option<f64>,
     /// Each performance level's busy share, level 0, the fastest, first.
     pub cpu_level_percent: [Option<f64>; 2],
     pub gpu_active_percent: Option<f64>,
@@ -109,6 +112,7 @@ impl MachineSecond {
             follows: false,
             segment: 0,
             cpu_percent: None,
+            cpu_percent_one_core: None,
             cpu_level_percent: [None; 2],
             gpu_active_percent: None,
             memory: reading.memory.map(MemorySecond::of),
@@ -129,6 +133,7 @@ impl MachineSecond {
             if let Some(elapsed_ns) = interval_ns(previous.tick, reading.tick) {
                 second.follows = true;
                 second.cpu_percent = cpu_percent(reading.cpus, previous.cpus);
+                second.cpu_percent_one_core = cpu_percent_one_core(reading.cpus, previous.cpus);
                 second.cpu_level_percent = cpu_level_percent(reading, previous);
                 second.gpu_active_percent =
                     gpu_active_percent(reading.gpu_states, previous.gpu_states, elapsed_ns);
@@ -269,6 +274,20 @@ fn cpu_level_percent(current: &Reading<'_>, previous: &Reading<'_>) -> [Option<f
     ]
 }
 
+/// Each CPU's busy share since `previous` added up, in percent, so one busy CPU is 100%, as the
+/// worker's All CPU adds it up. `None` where the CPUs differ, a counter went back or a CPU
+/// counted no ticks.
+fn cpu_percent_one_core(current: &[CpuRow], previous: &[CpuRow]) -> Option<f64> {
+    if current.len() != previous.len() {
+        return None;
+    }
+    if current.is_empty() {
+        return None;
+    }
+
+    Some(busy_shares(current, previous)?.percent_sum)
+}
+
 /// The mean of each CPU's busy share since `previous`, in percent. `None` where a CPU differs,
 /// a counter went back or a CPU counted no ticks.
 fn mean_busy_percent(current: &[CpuRow], previous: &[CpuRow]) -> Option<f64> {
@@ -277,8 +296,25 @@ fn mean_busy_percent(current: &[CpuRow], previous: &[CpuRow]) -> Option<f64> {
         return None;
     }
 
-    let mut sum = 0.0;
-    let mut count = 0_u32;
+    let shares = busy_shares(current, previous)?;
+    Some(shares.percent_sum / f64::from(shares.count))
+}
+
+/// Each CPU's busy share since a previous reading, added up in percent, and the CPUs added.
+struct BusyShares {
+    percent_sum: f64,
+    count: u32,
+}
+
+/// The busy shares of `current`'s CPUs since `previous`, CPU by CPU in order. `None` where a CPU
+/// differs, a counter went back or a CPU counted no ticks.
+fn busy_shares(current: &[CpuRow], previous: &[CpuRow]) -> Option<BusyShares> {
+    assert_eq!(current.len(), previous.len());
+
+    let mut shares = BusyShares {
+        percent_sum: 0.0,
+        count: 0,
+    };
     for (now, before) in current.iter().zip(previous) {
         if now.cpu != before.cpu {
             return None;
@@ -289,11 +325,11 @@ fn mean_busy_percent(current: &[CpuRow], previous: &[CpuRow]) -> Option<f64> {
             return None;
         }
 
-        sum += number(delta.busy) / number(total) * 100.0;
-        count += 1;
+        shares.percent_sum += number(delta.busy) / number(total) * 100.0;
+        shares.count += 1;
     }
 
-    Some(sum / f64::from(count))
+    Some(shares)
 }
 
 /// The share of `elapsed_ns` the GPU spent in its states since `previous`, in percent. `None`
