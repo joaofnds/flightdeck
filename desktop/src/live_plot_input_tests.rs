@@ -135,7 +135,7 @@ impl InputDriver {
 
     fn go_to(&mut self, route: &str) {
         self.view.update(&mut self.context, |dashboard, cx| {
-            dashboard.navigate(route, cx)
+            dashboard.navigate(route, cx);
         });
         self.context.run_until_parked();
     }
