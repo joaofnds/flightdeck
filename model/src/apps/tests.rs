@@ -1,6 +1,6 @@
 use super::{
-    Amount, Apps, Creation, Deltas, Measurement, ProcessTotals, Processes, ProgramUnavailable,
-    Stamp, Subtotal, Tick, Totals, Unavailable, Usages,
+    Amount, Apps, Creation, Deltas, Exits, Measurement, ProcessState, ProcessTotals, Processes,
+    ProgramUnavailable, Stamp, Subtotal, Tick, Totals, Unavailable, Usages,
 };
 use crate::programs::{Capacity, Program, Programs};
 
@@ -526,6 +526,7 @@ fn leaves_a_process_without_its_program_out_of_every_app() {
     );
     assert_eq!(derived.totals, []);
     assert_eq!(derived.ungrouped_members, 1);
+    assert_eq!(derived.live_ungrouped_members, 1);
 }
 
 #[test]
@@ -939,10 +940,305 @@ fn gives_a_live_process_whose_usage_was_not_read_no_memory() {
 }
 
 /// What a derivation of two ticks of processes of Safari gave.
+#[test]
+fn counts_a_process_that_exited_as_a_member_of_its_app() {
+    // Goal: a process that exited during the tick gives its App what it spent until it exited,
+    // and holds no memory in the App any more.
+    // Method: derive two ticks of one process, which the selected tick reads only at its exit,
+    // after 6 ms of CPU and with 300 bytes resident, where the previous tick read 2 ms.
+    let previous = Columns::of(
+        1,
+        &[Process {
+            user_ns: 2_000_000,
+            resident_bytes: 100,
+            ..Process::default()
+        }],
+    );
+    let selected = Columns::of(2, &[]).with_exits(&[Exit {
+        user_ns: 6_000_000,
+        resident_bytes: 300,
+        ..Exit::default()
+    }]);
+
+    let derived = derive(&previous, &selected);
+
+    assert_eq!(derived.processes.len(), 1);
+    assert_eq!(derived.processes[0].state, ProcessState::ExitedVerified);
+    assert_eq!(derived.processes[0].deltas.cpu_ns, Amount::Known(4_000_000));
+    assert_eq!(derived.processes[0].resident_bytes_last, Some(300));
+    assert_eq!(derived.processes[0].threads, None);
+    assert_eq!(derived.totals[0].members, 1);
+    assert_eq!(derived.totals[0].live_members, 0);
+    assert_eq!(derived.totals[0].cpu_ns, measured(4_000_000, 1));
+    assert_eq!(derived.totals[0].resident_bytes, Subtotal::default());
+}
+
+#[test]
+fn takes_the_exit_of_a_process_in_place_of_its_live_row() {
+    // Goal: a process the tick read both live and at its exit counts once, by its exit.
+    // Method: derive a selected tick holding one process live at 3 ms of CPU and its exit at
+    // 5 ms.
+    let previous = Columns::of(1, &[Process::default()]);
+    let selected = Columns::of(
+        2,
+        &[Process {
+            user_ns: 3_000_000,
+            ..Process::default()
+        }],
+    )
+    .with_exits(&[Exit {
+        user_ns: 5_000_000,
+        ..Exit::default()
+    }]);
+
+    let derived = derive(&previous, &selected);
+
+    assert_eq!(derived.processes.len(), 1);
+    assert_eq!(derived.processes[0].state, ProcessState::ExitedVerified);
+    assert_eq!(derived.processes[0].deltas.cpu_ns, Amount::Known(5_000_000));
+    assert_eq!(derived.totals[0].live_members, 0);
+}
+
+/// Declares a test that an exit which read less than the live row of its process, or another
+/// start, is not taken as the process's final usage.
+macro_rules! reconcile_tests {
+    ($($name:ident, $field:ident;)*) => {
+        $(
+            #[test]
+            fn $name() {
+                // Goal: an exit that disagrees with the live row of its process leaves the
+                // process's counters unknown and keeps the live row's memory.
+                // Method: derive a selected tick holding one process live and its exit, whose
+                // one field is one less than the live row's.
+                let previous = Columns::of(1, &[Process::default()]);
+                let live = Process {
+                    awake_ns_at_start: 9,
+                    user_ns: 9,
+                    system_ns: 9,
+                    energy_nj: 9,
+                    resident_bytes: 400,
+                    ..Process::default()
+                };
+                let mut exit = Exit {
+                    awake_ns_at_start: 9,
+                    user_ns: 9,
+                    system_ns: 9,
+                    energy_nj: 9,
+                    resident_bytes: 500,
+                    ..Exit::default()
+                };
+                exit.$field = 8;
+                let selected = Columns::of(2, &[live]).with_exits(&[exit]);
+
+                let derived = derive(&previous, &selected);
+
+                assert_eq!(derived.processes[0].state, ProcessState::ExitedUnverified);
+                assert_eq!(
+                    derived.processes[0].deltas,
+                    unavailable(Unavailable::ExitUnverified)
+                );
+                assert_eq!(derived.processes[0].resident_bytes_last, Some(400));
+            }
+        )*
+    };
+}
+
+reconcile_tests! {
+    distrusts_an_exit_of_another_start, awake_ns_at_start;
+    distrusts_an_exit_whose_user_time_went_back, user_ns;
+    distrusts_an_exit_whose_system_time_went_back, system_ns;
+    distrusts_an_exit_whose_energy_went_back, energy_nj;
+}
+
+#[test]
+fn trusts_an_exit_whose_disk_counters_went_back() {
+    // Goal: the rule checks an exit against its live row by awake time, CPU time and energy
+    // alone, so a disk counter that went back leaves the exit trusted.
+    // Method: derive a selected tick holding one process live and its exit, which read fewer
+    // disk bytes than the live row.
+    let previous = Columns::of(1, &[Process::default()]);
+    let selected = Columns::of(
+        2,
+        &[Process {
+            disk_read_bytes: 9,
+            ..Process::default()
+        }],
+    )
+    .with_exits(&[Exit {
+        disk_read_bytes: 8,
+        ..Exit::default()
+    }]);
+
+    let derived = derive(&previous, &selected);
+
+    assert_eq!(derived.processes[0].state, ProcessState::ExitedVerified);
+    assert_eq!(
+        derived.processes[0].deltas.disk_read_bytes,
+        Amount::Known(8)
+    );
+}
+
+#[test]
+fn leaves_the_counters_of_an_exit_without_its_final_usage_unknown() {
+    // Goal: an exit whose final usage was not read gives no counter, and the process keeps the
+    // memory the previous tick read.
+    // Method: derive two ticks of one process whose exit's usage macOS refused.
+    let previous = Columns::of(
+        1,
+        &[Process {
+            resident_bytes: 100,
+            footprint_bytes: 50,
+            ..Process::default()
+        }],
+    );
+    let selected = Columns::of(2, &[]).with_exits(&[Exit {
+        usage: Measurement::Refused,
+        ..Exit::default()
+    }]);
+
+    let derived = derive(&previous, &selected);
+
+    assert_eq!(derived.processes[0].state, ProcessState::ExitedUnverified);
+    assert_eq!(
+        derived.processes[0].deltas,
+        unavailable(Unavailable::ExitUnverified)
+    );
+    assert_eq!(derived.processes[0].resident_bytes_last, Some(100));
+    assert_eq!(derived.processes[0].footprint_bytes_last, Some(50));
+}
+
+#[test]
+fn leaves_an_exit_whose_pid_version_changed_out_of_every_app() {
+    // Goal: a process that ran another program before it exited belongs to no App, since its
+    // program at its exit is unknown.
+    // Method: derive two ticks of one process whose exit carries a greater pid version than
+    // the previous tick read.
+    let previous = Columns::of(1, &[Process::default()]);
+    let selected = Columns::of(2, &[]).with_exits(&[Exit {
+        creation: Some(Creation {
+            pid_version: 2,
+            ..CREATION
+        }),
+        ..Exit::default()
+    }]);
+
+    let derived = derive(&previous, &selected);
+
+    assert_eq!(
+        derived.processes[0].program,
+        Err(ProgramUnavailable::Changed)
+    );
+    assert_eq!(derived.totals, []);
+    assert_eq!(derived.ungrouped_members, 1);
+    assert_eq!(derived.live_ungrouped_members, 0);
+}
+
+#[test]
+fn leaves_out_two_exits_of_one_process() {
+    // Goal: two exits of one process leave which was its last unknown, so neither is taken.
+    // Method: derive a selected tick holding one process live at 3 ms of CPU and two exits of
+    // it.
+    let previous = Columns::of(1, &[Process::default()]);
+    let selected = Columns::of(
+        2,
+        &[Process {
+            user_ns: 3_000_000,
+            ..Process::default()
+        }],
+    )
+    .with_exits(&[
+        Exit {
+            user_ns: 4_000_000,
+            ..Exit::default()
+        },
+        Exit {
+            user_ns: 5_000_000,
+            ..Exit::default()
+        },
+    ]);
+
+    let derived = derive(&previous, &selected);
+
+    assert_eq!(derived.processes.len(), 1);
+    assert_eq!(derived.processes[0].state, ProcessState::Live);
+    assert_eq!(derived.processes[0].deltas.cpu_ns, Amount::Known(3_000_000));
+}
+
+#[test]
+fn leaves_out_an_exit_the_previous_tick_does_not_hold() {
+    // Goal: an exit of a process that no reading before it names gives no App its usage, since
+    // its program is unknown.
+    // Method: derive two ticks, the previous without the process and the selected with only
+    // its exit.
+    let previous = Columns::of(1, &[]);
+    let selected = Columns::of(2, &[]).with_exits(&[Exit::default()]);
+
+    let derived = derive(&previous, &selected);
+
+    assert_eq!(derived.processes, []);
+    assert_eq!(derived.totals, []);
+}
+
+#[test]
+fn leaves_out_an_exit_when_the_ticks_do_not_span_one_interval() {
+    // Goal: the previous tick names no exited process unless the two ticks span one interval.
+    // Method: derive two ticks a publication apart, the selected with only the exit of the
+    // previous tick's process.
+    let previous = Columns::of(1, &[Process::default()]);
+    let selected = Columns::of(3, &[]).with_exits(&[Exit::default()]);
+
+    let derived = derive(&previous, &selected);
+
+    assert_eq!(derived.processes, []);
+}
+
+#[test]
+fn orders_the_exits_among_the_live_processes() {
+    // Goal: the rule gives the tick's processes in order of pid, exits among the live ones.
+    // Method: derive a selected tick of the live pids 5 and 9 and the exit of pid 7, all three
+    // of which the previous tick read live.
+    let rows = [5, 7, 9].map(|pid| Process {
+        pid,
+        creation: Some(Creation {
+            unique_id: u64::try_from(pid).unwrap() * 100,
+            pid_version: 1,
+        }),
+        ..Process::default()
+    });
+    let previous = Columns::of(1, &rows);
+    let selected = Columns::of(2, &[rows[0], rows[2]]).with_exits(&[Exit {
+        creation: rows[1].creation,
+        ..Exit::default()
+    }]);
+
+    let derived = derive(&previous, &selected);
+
+    let pids: Vec<i32> = derived
+        .processes
+        .iter()
+        .map(|process| process.pid)
+        .collect();
+    let states: Vec<ProcessState> = derived
+        .processes
+        .iter()
+        .map(|process| process.state)
+        .collect();
+    assert_eq!(pids, [5, 7, 9]);
+    assert_eq!(
+        states,
+        [
+            ProcessState::Live,
+            ProcessState::ExitedVerified,
+            ProcessState::Live
+        ]
+    );
+}
+
 struct Derived {
     processes: Vec<ProcessTotals>,
     totals: Vec<Totals>,
     ungrouped_members: u32,
+    live_ungrouped_members: u32,
 }
 
 /// Derives the Apps of `selected` after `previous`, whose processes run Safari as entry 0.
@@ -957,6 +1253,7 @@ fn derive(previous: &Columns, selected: &Columns) -> Derived {
         processes: apps.processes().to_vec(),
         totals: apps.totals().to_vec(),
         ungrouped_members: apps.ungrouped_members(),
+        live_ungrouped_members: apps.live_ungrouped_members(),
     }
 }
 
@@ -1017,10 +1314,7 @@ impl Default for Process {
     fn default() -> Self {
         Self {
             pid: 7,
-            creation: Some(Creation {
-                unique_id: 700,
-                pid_version: 1,
-            }),
+            creation: Some(CREATION),
             program: Ok(0),
             usage: Measurement::Measured,
             awake_ns_at_start: 0,
@@ -1039,25 +1333,170 @@ impl Default for Process {
     }
 }
 
-/// A tick's stamp and the columns of its processes, which the rule borrows.
-struct Columns {
-    stamp: Stamp,
-    pid: Vec<i32>,
-    creation: Vec<Option<Creation>>,
-    program: Vec<Result<u32, ProgramUnavailable>>,
-    usage: Vec<Measurement>,
+/// One exit of a tick, as a test writes it: the process's final usage.
+#[derive(Clone, Copy)]
+struct Exit {
+    pid: i32,
+    creation: Option<Creation>,
+    usage: Measurement,
+    awake_ns_at_start: u64,
+    user_ns: u64,
+    system_ns: u64,
+    energy_nj: u64,
+    disk_read_bytes: u64,
+    disk_written_bytes: u64,
+    idle_wakeups: u64,
+    pageins: u64,
+    resident_bytes: u64,
+    footprint_bytes: u64,
+}
+
+impl Default for Exit {
+    fn default() -> Self {
+        Self {
+            pid: 7,
+            creation: Some(CREATION),
+            usage: Measurement::Measured,
+            awake_ns_at_start: 0,
+            user_ns: 0,
+            system_ns: 0,
+            energy_nj: 0,
+            disk_read_bytes: 0,
+            disk_written_bytes: 0,
+            idle_wakeups: 0,
+            pageins: 0,
+            resident_bytes: 0,
+            footprint_bytes: 0,
+        }
+    }
+}
+
+const CREATION: Creation = Creation {
+    unique_id: 700,
+    pid_version: 1,
+};
+
+/// The usage columns of a tick's processes or of its exits.
+#[derive(Default)]
+struct UsageColumns {
+    measurement: Vec<Measurement>,
     awake_ns_at_start: Vec<u64>,
     user_ns: Vec<u64>,
     system_ns: Vec<u64>,
     energy_nj: Vec<u64>,
-    gpu_ns: Vec<Option<u64>>,
     disk_read_bytes: Vec<u64>,
     disk_written_bytes: Vec<u64>,
     idle_wakeups: Vec<u64>,
     pageins: Vec<u64>,
     resident_bytes: Vec<u64>,
     footprint_bytes: Vec<u64>,
+}
+
+/// One row of usage columns.
+struct UsageRow {
+    measurement: Measurement,
+    awake_ns_at_start: u64,
+    user_ns: u64,
+    system_ns: u64,
+    energy_nj: u64,
+    disk_read_bytes: u64,
+    disk_written_bytes: u64,
+    idle_wakeups: u64,
+    pageins: u64,
+    resident_bytes: u64,
+    footprint_bytes: u64,
+}
+
+impl UsageColumns {
+    fn of(rows: impl Iterator<Item = UsageRow>) -> Self {
+        let mut columns = Self::default();
+        for row in rows {
+            columns.measurement.push(row.measurement);
+            columns.awake_ns_at_start.push(row.awake_ns_at_start);
+            columns.user_ns.push(row.user_ns);
+            columns.system_ns.push(row.system_ns);
+            columns.energy_nj.push(row.energy_nj);
+            columns.disk_read_bytes.push(row.disk_read_bytes);
+            columns.disk_written_bytes.push(row.disk_written_bytes);
+            columns.idle_wakeups.push(row.idle_wakeups);
+            columns.pageins.push(row.pageins);
+            columns.resident_bytes.push(row.resident_bytes);
+            columns.footprint_bytes.push(row.footprint_bytes);
+        }
+        columns
+    }
+
+    fn usages(&self) -> Usages<'_> {
+        Usages {
+            measurement: &self.measurement,
+            awake_ns_at_start: &self.awake_ns_at_start,
+            user_ns: &self.user_ns,
+            system_ns: &self.system_ns,
+            energy_nj: &self.energy_nj,
+            disk_read_bytes: &self.disk_read_bytes,
+            disk_written_bytes: &self.disk_written_bytes,
+            idle_wakeups: &self.idle_wakeups,
+            pageins: &self.pageins,
+            resident_bytes: &self.resident_bytes,
+            footprint_bytes: &self.footprint_bytes,
+        }
+    }
+}
+
+impl Process {
+    fn usage(&self) -> UsageRow {
+        UsageRow {
+            measurement: self.usage,
+            awake_ns_at_start: self.awake_ns_at_start,
+            user_ns: self.user_ns,
+            system_ns: self.system_ns,
+            energy_nj: self.energy_nj,
+            disk_read_bytes: self.disk_read_bytes,
+            disk_written_bytes: self.disk_written_bytes,
+            idle_wakeups: self.idle_wakeups,
+            pageins: self.pageins,
+            resident_bytes: self.resident_bytes,
+            footprint_bytes: self.footprint_bytes,
+        }
+    }
+}
+
+impl Exit {
+    fn usage(&self) -> UsageRow {
+        UsageRow {
+            measurement: self.usage,
+            awake_ns_at_start: self.awake_ns_at_start,
+            user_ns: self.user_ns,
+            system_ns: self.system_ns,
+            energy_nj: self.energy_nj,
+            disk_read_bytes: self.disk_read_bytes,
+            disk_written_bytes: self.disk_written_bytes,
+            idle_wakeups: self.idle_wakeups,
+            pageins: self.pageins,
+            resident_bytes: self.resident_bytes,
+            footprint_bytes: self.footprint_bytes,
+        }
+    }
+}
+
+/// A tick's stamp and the columns of its processes and exits, which the rule borrows.
+struct Columns {
+    stamp: Stamp,
+    pid: Vec<i32>,
+    creation: Vec<Option<Creation>>,
+    program: Vec<Result<u32, ProgramUnavailable>>,
+    usage: UsageColumns,
+    gpu_ns: Vec<Option<u64>>,
     threads: Vec<Option<u64>>,
+    exits: ExitColumns,
+}
+
+/// The columns of a tick's exits.
+#[derive(Default)]
+struct ExitColumns {
+    pid: Vec<i32>,
+    creation: Vec<Option<Creation>>,
+    usage: UsageColumns,
 }
 
 impl Columns {
@@ -1074,20 +1513,21 @@ impl Columns {
             pid: rows.iter().map(|row| row.pid).collect(),
             creation: rows.iter().map(|row| row.creation).collect(),
             program: rows.iter().map(|row| row.program).collect(),
-            usage: rows.iter().map(|row| row.usage).collect(),
-            awake_ns_at_start: rows.iter().map(|row| row.awake_ns_at_start).collect(),
-            user_ns: rows.iter().map(|row| row.user_ns).collect(),
-            system_ns: rows.iter().map(|row| row.system_ns).collect(),
-            energy_nj: rows.iter().map(|row| row.energy_nj).collect(),
+            usage: UsageColumns::of(rows.iter().map(Process::usage)),
             gpu_ns: rows.iter().map(|row| row.gpu_ns).collect(),
-            disk_read_bytes: rows.iter().map(|row| row.disk_read_bytes).collect(),
-            disk_written_bytes: rows.iter().map(|row| row.disk_written_bytes).collect(),
-            idle_wakeups: rows.iter().map(|row| row.idle_wakeups).collect(),
-            pageins: rows.iter().map(|row| row.pageins).collect(),
-            resident_bytes: rows.iter().map(|row| row.resident_bytes).collect(),
-            footprint_bytes: rows.iter().map(|row| row.footprint_bytes).collect(),
             threads: rows.iter().map(|row| row.threads).collect(),
+            exits: ExitColumns::default(),
         }
+    }
+
+    /// The tick with `exits`, which a test writes in the order the rule reads them.
+    fn with_exits(mut self, exits: &[Exit]) -> Self {
+        self.exits = ExitColumns {
+            pid: exits.iter().map(|exit| exit.pid).collect(),
+            creation: exits.iter().map(|exit| exit.creation).collect(),
+            usage: UsageColumns::of(exits.iter().map(Exit::usage)),
+        };
+        self
     }
 
     fn tick(&self) -> Tick<'_> {
@@ -1097,21 +1537,14 @@ impl Columns {
                 pid: &self.pid,
                 creation: &self.creation,
                 program: &self.program,
-                usage: Usages {
-                    measurement: &self.usage,
-                    awake_ns_at_start: &self.awake_ns_at_start,
-                    user_ns: &self.user_ns,
-                    system_ns: &self.system_ns,
-                    energy_nj: &self.energy_nj,
-                    disk_read_bytes: &self.disk_read_bytes,
-                    disk_written_bytes: &self.disk_written_bytes,
-                    idle_wakeups: &self.idle_wakeups,
-                    pageins: &self.pageins,
-                    resident_bytes: &self.resident_bytes,
-                    footprint_bytes: &self.footprint_bytes,
-                },
+                usage: self.usage.usages(),
                 gpu_ns: &self.gpu_ns,
                 threads: &self.threads,
+            },
+            exits: Exits {
+                pid: &self.exits.pid,
+                creation: &self.exits.creation,
+                usage: self.exits.usage.usages(),
             },
         }
     }
