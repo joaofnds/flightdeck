@@ -5,7 +5,7 @@ use gpui::{AppContext, TestAppContext, WindowHandle, WindowOptions, WindowVisibi
 use serde_json::{Value, json};
 use viewer::store::MachineSecond;
 
-use super::SnapshotReader;
+use super::{SealedRecording, SnapshotReader};
 use crate::live_dashboard::LiveDashboard;
 use crate::live_hover::{Origin, Target};
 use crate::live_source::{Received, Snapshot, Update};
@@ -236,6 +236,70 @@ fn a_rested_overview_leaves_its_resting_reader_alone(cx: &mut TestAppContext) {
     window.tick();
 
     assert_eq!(window.reader.shared.cancellation.epoch(), epoch);
+}
+
+#[gpui::test]
+fn a_rested_overview_leaves_its_reader_idle(cx: &mut TestAppContext) {
+    // Goal: an Overview drawn from the store's View rests its reader without following the
+    // recording, since the View brings each second the page shows.
+    // Method: rest the reader of an Overview drawn from a View, let the reader take the rest,
+    // and step it as the worker steps a resting reader, over a recording it has not opened.
+    let mut window = VisibilityHarness::open_resting(cx);
+    let recording = SealedRecording::new();
+    assert_eq!(window.reader.receive(), (Received::Continued, false));
+
+    window.reader.step_resting(&recording.root);
+
+    assert!(window.reader.reader.session.is_none());
+}
+
+#[gpui::test]
+fn a_hidden_overview_drawn_from_the_store_leaves_its_reader_idle(cx: &mut TestAppContext) {
+    // Goal: a hidden Overview drawn from the store's View rests its reader without following
+    // the recording, since the View brings the seconds the page shows when it shows again.
+    // Method: hide an Overview drawn from a View, let the reader take the rest, and step it as
+    // the worker steps a resting reader, over a recording it has not opened.
+    let mut window = VisibilityHarness::open_resting(cx);
+    let recording = SealedRecording::new();
+    window.change(WindowVisibility::Hidden);
+    assert_eq!(window.reader.receive(), (Received::Continued, false));
+
+    window.reader.step_resting(&recording.root);
+
+    assert!(window.reader.reader.session.is_none());
+}
+
+#[gpui::test]
+fn a_hidden_page_drawn_from_its_readings_keeps_its_reader_following(cx: &mut TestAppContext) {
+    // Goal: a hidden page the worker's readings draw rests its reader following the recording,
+    // so the page shown again reads only the ticks since the reader's last step.
+    // Method: hide a window whose page has no View to draw, let the reader take the rest, and
+    // step it as the worker steps a resting reader, over a recording it has not opened.
+    let mut window = VisibilityHarness::open(cx);
+    let recording = SealedRecording::new();
+    window.change(WindowVisibility::Hidden);
+    assert_eq!(window.reader.receive(), (Received::Continued, false));
+
+    window.reader.step_resting(&recording.root);
+
+    assert!(window.reader.reader.session.is_some());
+}
+
+#[gpui::test]
+fn an_overview_shown_again_over_a_view_leaves_its_reader_resting(cx: &mut TestAppContext) {
+    // Goal: an Overview shown again draws the store's newest View and asks its reader for no
+    // page, since the View holds each second the page shows.
+    // Method: hide an Overview drawn from a View, give it a newer View as it shows again, step
+    // its dashboard, and step the reader's mailbox.
+    let mut window = VisibilityHarness::open_resting(cx);
+    window.change(WindowVisibility::Hidden);
+    assert_eq!(window.reader.receive(), (Received::Continued, false));
+    window.report(WindowVisibility::Visible);
+    window.take_view(&[reading_at(10_001, 0), reading_at(10_002, 0)]);
+
+    window.tick();
+
+    assert_eq!(window.reader.receive(), (Received::Continued, false));
 }
 
 #[gpui::test]

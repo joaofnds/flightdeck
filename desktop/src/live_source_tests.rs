@@ -453,6 +453,29 @@ fn a_handed_over_reader_follows_the_ring_while_no_page_reads() {
 }
 
 #[test]
+fn a_reader_handed_over_idle_leaves_its_session_where_it_is() {
+    // Goal: a reader whose window draws its page from the store's View reads nothing while it
+    // rests, since following the recording would cost the window more than the View it draws.
+    // Method: read a live ring, hand the reader over idle, publish a tick, and step the reader
+    // as the worker does.
+    let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
+    recording.publish();
+    let mut reader = SnapshotReader::new();
+    reader.command.mode = crate::live_source_mode::SourceMode::Live;
+    reader.read_at(&recording.root).unwrap().unwrap();
+    let read = reader.session().catalog()["last_second"].as_u64();
+    let _kept = reader.hand_over_idle();
+    recording.publish();
+
+    let received = reader.receive();
+    let pause = reader.step_resting(&recording.root);
+
+    assert_eq!(received, (super::Received::Continued, false));
+    assert_eq!(pause, super::POLL_INTERVAL);
+    assert_eq!(reader.session().catalog()["last_second"].as_u64(), read);
+}
+
+#[test]
 fn a_resting_reader_without_a_session_opens_one() {
     // Goal: a window closed before its reader opened the recording still opens again at once.
     // Method: step a reader that never read a page as the worker steps a resting one.
@@ -666,6 +689,7 @@ impl SnapshotReader {
                     output: None,
                     rest: false,
                     resting: false,
+                    rest_kind: super::Rest::Following,
                 }),
                 wake: Condvar::new(),
                 stopped: AtomicBool::new(false),
@@ -704,6 +728,17 @@ impl SnapshotReader {
             mode: crate::live_source_mode::SourceMode::Live,
         };
         closing.hand_over().unwrap().unwrap()
+    }
+
+    /// Hands the reader over idle, as a window that draws its page from the store's View does,
+    /// through a handle without a thread.
+    fn hand_over_idle(&self) -> Worker {
+        let mut closing = Worker {
+            shared: Arc::clone(&self.shared),
+            thread: None,
+            mode: crate::live_source_mode::SourceMode::Live,
+        };
+        closing.hand_over_idle().unwrap().unwrap()
     }
 
     /// Takes the mailbox as the worker does at the top of a step, and tells whether the reader

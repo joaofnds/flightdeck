@@ -142,6 +142,19 @@ struct Mailbox {
     /// The worker reads no page, so its step opens the session a request reads through, or polls
     /// it, and cancelling would discard the open or cut the poll short for the request to redo.
     resting: bool,
+    /// How the reader rests while it reads no page.
+    rest_kind: Rest,
+}
+
+/// How a reader that reads no page spends its rest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Rest {
+    /// Its session follows the recording, so the next page reads only what arrived since the
+    /// reader's last step.
+    Following,
+    /// Its session stays where it is, since its window draws its page from the store's View, and
+    /// the next page reads what arrived since the rest began.
+    Idle,
 }
 
 struct Command {
@@ -333,6 +346,17 @@ impl Worker {
     /// drops the page it read and keeps its session following the recording until a request
     /// arrives, and this handle refuses requests from then on.
     pub fn hand_over(&mut self) -> Result<Option<Worker>, String> {
+        self.hand_over_resting(Rest::Following)
+    }
+
+    /// Hands the reader to a new handle as `hand_over` does, for a window that draws its page
+    /// from the store's View, so the reader leaves its session where it is until a request
+    /// arrives.
+    pub fn hand_over_idle(&mut self) -> Result<Option<Worker>, String> {
+        self.hand_over_resting(Rest::Idle)
+    }
+
+    fn hand_over_resting(&mut self, rest: Rest) -> Result<Option<Worker>, String> {
         // A recording the user opened in the window is read-only, and the window opened again
         // follows the live recording.
         if self.mode != SourceMode::Live {
@@ -357,6 +381,7 @@ impl Worker {
             mailbox.request = None;
             mailbox.output = None;
             mailbox.rest = true;
+            mailbox.rest_kind = rest;
             self.shared.wake.notify_one();
         }
 
@@ -399,6 +424,7 @@ impl Shared {
                 output: None,
                 rest: false,
                 resting: true,
+                rest_kind: Rest::Following,
             }),
             wake: Condvar::new(),
             stopped: AtomicBool::new(false),
@@ -529,8 +555,22 @@ fn worker_step(
         }
         worker_pause(reader, command)
     } else {
-        reader_follow(reader, root, shared);
+        if worker_step_follows(shared) {
+            reader_follow(reader, root, shared);
+        }
         POLL_INTERVAL
+    }
+}
+
+/// Whether the resting reader keeps its session following the recording.
+fn worker_step_follows(shared: &Shared) -> bool {
+    match shared.mailbox.lock() {
+        Ok(mailbox) => mailbox.rest_kind == Rest::Following,
+        Err(error) => {
+            eprintln!("flightdeck GPUI reader mailbox: {error}");
+            shared.stopped.store(true, Ordering::Release);
+            false
+        }
     }
 }
 

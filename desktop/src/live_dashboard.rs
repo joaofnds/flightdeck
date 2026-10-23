@@ -449,8 +449,8 @@ impl LiveDashboard {
                 self.presence = Presence::Hidden;
             }
             Presence::Showing => {
-                self.tick_shown();
                 self.presence = Presence::Shown;
+                self.tick_shown(cx);
             }
             Presence::Opening | Presence::Shown | Presence::Hidden | Presence::Rested => {}
         }
@@ -458,9 +458,18 @@ impl LiveDashboard {
 
     /// Rests the reader of a window macOS hides, as a closed window's reader rests. A reader of
     /// a recording opened read-only reads nothing once its page is read, so it is left alone.
+    /// The reader of a page drawn from the store's View rests idle, since the View brings the
+    /// seconds the page shows when the window shows again.
     fn tick_hidden(&mut self) {
+        let drawn_from_view = self.followed_store_view().is_some();
         self.store_view = None;
-        match self.worker.hand_over() {
+
+        let handed_over = if drawn_from_view {
+            self.worker.hand_over_idle()
+        } else {
+            self.worker.hand_over()
+        };
+        match handed_over {
             Ok(Some(resting)) => {
                 self.worker = resting;
                 self.reply_pending = false;
@@ -496,7 +505,7 @@ impl LiveDashboard {
             return;
         }
 
-        match self.worker.hand_over() {
+        match self.worker.hand_over_idle() {
             Ok(Some(resting)) => {
                 self.worker = resting;
                 self.presence = Presence::Rested;
@@ -511,9 +520,20 @@ impl LiveDashboard {
         self.presence == Presence::Rested
     }
 
-    /// Asks the rested reader for the page again, which it reads as newly opened, readings
-    /// first.
-    fn tick_shown(&mut self) {
+    /// Draws the page shown again from the store's newest View, released while the window hid,
+    /// and rests the reader while the View brings each second the page shows. Otherwise asks the
+    /// rested reader for the page again, which it reads as newly opened, readings first.
+    fn tick_shown(&mut self, cx: &mut Context<Self>) {
+        if let Some(view) = store_view::take_store_view(cx) {
+            if self.take_view(view) {
+                cx.notify();
+            }
+        }
+        self.tick_rest();
+        if self.presence == Presence::Rested {
+            return;
+        }
+
         if self.worker.mode() == crate::live_source_mode::SourceMode::Live {
             self.request_reading();
         }
