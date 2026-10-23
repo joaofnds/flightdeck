@@ -1,6 +1,6 @@
 //! Real registered sources shared by focused live identity adapter tests.
 use collector::machine::Memory;
-use collector::processes::{Process, Task, Usage};
+use collector::processes::{Process, Task, Unreadable, Usage};
 use collector::recording::{RegisteredRun, Registration, Registry, private};
 use collector::ring::{
     DictionaryCapacity, Dropped, Found, FoundEvent, IdentityObservation, IdentityPublication,
@@ -172,7 +172,13 @@ impl Fixture {
     }
 
     pub fn publish(&mut self, second: u64) {
-        self.publish_sources(second, &[], &[]);
+        self.publish_with_events(second, &[Event::Exec { pid: 7 }]);
+    }
+
+    /// Publishes the tick of `second` with the processes `publish` publishes and `events`, each
+    /// of a measured process whose program departed.
+    pub fn publish_with_events(&mut self, second: u64, events: &[Event]) {
+        self.publish_sources(second, &[], &[], events);
     }
 
     pub fn start_at_run_tick(&mut self, run_tick: u64) {
@@ -220,7 +226,7 @@ impl Fixture {
             receive_drops: 0,
         }];
 
-        self.publish_sources(second, &cpus, &interfaces);
+        self.publish_sources(second, &cpus, &interfaces, &[Event::Exec { pid: 7 }]);
         assert!(self.usage_override.is_none());
     }
 
@@ -229,12 +235,12 @@ impl Fixture {
         second: u64,
         cpus: &[collector::machine::CPUTicks],
         interfaces: &[collector::interfaces::Interface],
+        events: &[Event],
     ) {
         let mut process = measured_process(self.elapsed);
         if let Some(usage) = self.usage_override.take() {
             process.usage = usage;
         }
-        let events = [Event::Exec { pid: 7 }];
         let memory = Memory::default();
         let mut readings = Readings {
             run_tick: self.elapsed,
@@ -247,7 +253,7 @@ impl Fixture {
             processes_refused: 0,
             processes_gone: 0,
             coalitions: &[],
-            events: &events,
+            events,
             dropped: Dropped::default(),
         };
         let times = ObservationTimes {
@@ -283,17 +289,11 @@ impl Fixture {
                 })
                 .collect()
         };
-        let events = [IdentityObservation {
-            pid: 7,
-            usage: UsageAvailability::NotApplicable,
-            identity: ProcessIdentity::Measured {
-                creation: ProcessCreation {
-                    unique_id: 700,
-                    pid_version: -70,
-                },
-                program: departed,
-            },
-        }];
+        let events: Vec<_> = readings
+            .events
+            .iter()
+            .map(|event| departed_observation(event, &departed))
+            .collect();
         readings.processes_refused = u32::try_from(self.process_capacity - 1).unwrap();
         self.writer
             .publish_with_identity(
@@ -536,6 +536,30 @@ impl Drop for Fixture {
         if self.owns_root {
             std::fs::remove_dir_all(&self.root).unwrap();
         }
+    }
+}
+
+/// The identity of `event`'s process, whose program `departed` names, with the usage the
+/// ring holds for an event of its kind.
+fn departed_observation(event: &Event, departed: &ProgramReference) -> IdentityObservation {
+    let (pid, usage) = match event {
+        Event::Start { pid, .. } | Event::Exec { pid } => (*pid, UsageAvailability::NotApplicable),
+        Event::Exit { pid, last, .. } => match last {
+            Ok(_) => (*pid, UsageAvailability::Measured),
+            Err(Unreadable::Refused) => (*pid, UsageAvailability::Refused),
+            Err(Unreadable::Gone) => (*pid, UsageAvailability::Gone),
+        },
+    };
+    IdentityObservation {
+        pid,
+        usage,
+        identity: ProcessIdentity::Measured {
+            creation: ProcessCreation {
+                unique_id: u64::try_from(pid).unwrap() * 100,
+                pid_version: -10 * pid,
+            },
+            program: *departed,
+        },
     }
 }
 

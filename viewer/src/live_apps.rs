@@ -16,6 +16,7 @@ pub const TRANSIENT_VIEW_BYTES_MAX: usize = apps::PROCESS_INTERVALS_MAX
         + 2 * size_of::<apps::ProcessObservation<'static>>()
         + size_of::<apps::ProcessInterval<'static>>());
 
+#[cfg_attr(test, derive(Debug, PartialEq))]
 pub struct Frame {
     identity: RunIdentity,
     stamp: Stamp,
@@ -30,6 +31,7 @@ pub struct Frame {
     pub usage_gone: u32,
 }
 
+#[cfg_attr(test, derive(Debug, PartialEq))]
 struct Member {
     pid: i32,
     creation: Option<ProcessCreation>,
@@ -40,6 +42,7 @@ struct Member {
     threads: Option<u64>,
 }
 
+#[cfg_attr(test, derive(Debug, PartialEq))]
 struct Exit {
     number: u64,
     pid: i32,
@@ -48,6 +51,7 @@ struct Exit {
     ambiguous: bool,
 }
 
+#[cfg_attr(test, derive(Debug, PartialEq))]
 struct Start {
     number: u64,
     pid: i32,
@@ -57,6 +61,7 @@ struct Start {
     exec_number: Option<u64>,
 }
 
+#[cfg_attr(test, derive(Debug, PartialEq))]
 struct Exec {
     number: u64,
     pid: i32,
@@ -70,6 +75,7 @@ pub struct PublicationEvents<'source> {
 }
 
 #[derive(Clone, Copy)]
+#[cfg_attr(test, derive(Debug, PartialEq))]
 struct ProgramSpan {
     start: usize,
     name_end: usize,

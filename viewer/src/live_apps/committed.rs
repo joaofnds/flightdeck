@@ -178,6 +178,97 @@ impl Frame {
         committed_many_sizes(&batch, connection, operation, &mut sizes)?;
         committed_many_chunks(&batch, &sizes, connection, operation, &mut consume)
     }
+
+    /// The frame of each of `endpoints`, from the rows of `rows`, which has the columns
+    /// `committed_many`'s query selects, read in `order`. `order` holds the rows of each
+    /// endpoint's publication together, in endpoint order, each publication's members by pid
+    /// and its events by number, as that query sorts them.
+    pub(crate) fn placed_many(
+        endpoints: &[Endpoint],
+        rows: &DataFrame,
+        order: &[usize],
+        operation: &Operation,
+        mut consume: impl FnMut(Box<Self>) -> Result<()>,
+    ) -> Result<()> {
+        assert_eq!(rows.width(), BATCH_COLUMNS);
+        assert!(order.len() <= rows.height());
+
+        committed_endpoints(endpoints)?;
+        let mut cursor = BatchCursor {
+            columns: BatchColumns::new(rows)?,
+            rows: order.iter().copied(),
+        };
+        let mut sizes = Vec::with_capacity(endpoints.len());
+        let mut placed = 0;
+        for endpoint in endpoints {
+            operation.check()?;
+            let size = placed_many_size(&cursor.columns, &order[placed..], endpoint)?;
+            size.validate()?;
+            placed += size.count;
+            sizes.push(size);
+        }
+        if placed < order.len() {
+            return Err(Error::Bound("committed App batch unwanted publication"));
+        }
+
+        for (endpoint, size) in endpoints.iter().zip(&sizes) {
+            operation.check()?;
+            let mut frame = committed_frame(endpoint, size);
+            committed_many_members(&mut cursor, &mut frame, endpoint, size, operation)?;
+            committed_finish(&frame, size)?;
+            operation.check()?;
+            consume(frame)?;
+        }
+        assert!(cursor.rows.next().is_none());
+
+        operation.check()
+    }
+}
+
+/// The size of `endpoint`'s frame, from the rows of `order` before the first of another
+/// publication, counted as `committed_many_sizes_plan` counts a publication's rows. An exit
+/// keeps no program, so its names take no bytes.
+fn placed_many_size(
+    columns: &BatchColumns<'_>,
+    order: &[usize],
+    endpoint: &Endpoint,
+) -> Result<FrameSize> {
+    let mut size = FrameSize {
+        count: 0,
+        members: 0,
+        starts: 0,
+        execs: 0,
+        exits: 0,
+        bytes: 0,
+    };
+    for &row in order {
+        if columns.publication.optional(row)? != Some(endpoint.stamp.publication) {
+            break;
+        }
+
+        size.count += 1;
+        let kind = columns.app_kind.optional(row)?;
+        match columns.app_origin.optional(row)? {
+            Some(0) => size.members += 1,
+            Some(1) => match kind {
+                Some(1) => size.starts += 1,
+                Some(2) => size.execs += 1,
+                Some(3) => size.exits += 1,
+                _ => {}
+            },
+            _ => {}
+        }
+        if kind != Some(3) {
+            let name = columns
+                .executable_name
+                .optional(row)?
+                .map_or(0, <[u8]>::len);
+            let app_path = columns.app_path.optional(row)?.map_or(0, <[u8]>::len);
+            size.bytes += name + app_path;
+        }
+    }
+
+    Ok(size)
 }
 
 fn committed_many_chunks(
@@ -280,35 +371,47 @@ fn committed_many_query_size(
 }
 
 fn committed_many_publications(endpoints: &[Endpoint]) -> Result<String> {
+    committed_endpoints(endpoints)?;
+    if endpoints.is_empty() {
+        return Err(Error::Bound("committed App batch empty"));
+    }
+
+    let publications: Vec<_> = endpoints
+        .iter()
+        .map(|endpoint| endpoint.stamp.publication.to_string())
+        .collect();
+    Ok(publications.join(","))
+}
+
+/// Refuses `endpoints` unless they are a batch's, at most `ENDPOINTS_MAX` of one run in
+/// increasing publication order, each with an event range.
+fn committed_endpoints(endpoints: &[Endpoint]) -> Result<()> {
     if endpoints.len() > ENDPOINTS_MAX {
         return Err(Error::Bound("committed App batch endpoints"));
     }
 
-    let first = endpoints
-        .first()
-        .ok_or(Error::Bound("committed App batch empty"))?;
-    let mut previous = None;
-    let mut publications = Vec::with_capacity(endpoints.len());
+    let mut previous: Option<&Endpoint> = None;
     for endpoint in endpoints {
-        if endpoint.identity != first.identity {
-            return Err(Error::Bound("committed App batch identity"));
+        if let Some(previous) = previous {
+            if endpoint.identity != previous.identity {
+                return Err(Error::Bound("committed App batch identity"));
+            }
+
+            if previous.stamp.publication >= endpoint.stamp.publication {
+                return Err(Error::Bound("committed App batch publication order"));
+            }
         }
 
         assert_eq!(endpoint.stamp.boot, endpoint.identity.boot.0);
         assert_eq!(endpoint.stamp.run, endpoint.identity.run.0);
-        if previous.is_some_and(|previous| previous >= endpoint.stamp.publication) {
-            return Err(Error::Bound("committed App batch publication order"));
-        }
-
         if endpoint.events_first > endpoint.events_end {
             return Err(Error::Bound("committed App event range"));
         }
 
-        previous = Some(endpoint.stamp.publication);
-        publications.push(endpoint.stamp.publication.to_string());
+        previous = Some(endpoint);
     }
 
-    Ok(publications.join(","))
+    Ok(())
 }
 
 fn committed_many_sizes(
@@ -465,10 +568,12 @@ fn committed_many_rows(
         source = batch.source,
         publications = batch.publications,
     ))?;
+    // The batch bounds its bytes by this count of columns a row.
+    assert_eq!(frame.width(), BATCH_COLUMNS);
+
     let mut rows = BatchCursor {
         columns: BatchColumns::new(&frame)?,
-        row_count: frame.height(),
-        index: 0,
+        rows: 0..frame.height(),
     };
     for endpoint in batch.endpoints {
         operation.check()?;
@@ -479,7 +584,7 @@ fn committed_many_rows(
         operation.check()?;
         consume(frame)?;
     }
-    if rows.next().is_some() {
+    if rows.rows.next().is_some() {
         return Err(Error::Bound("committed App batch changed row count"));
     }
 
@@ -487,25 +592,11 @@ fn committed_many_rows(
     operation.check()
 }
 
-/// The rows of a batch, read in the order the batch query sorts them.
-struct BatchCursor<'frame> {
+/// The rows of a batch and the order they are read in, which holds the rows of each endpoint's
+/// publication together, in endpoint order.
+struct BatchCursor<'frame, Rows> {
     columns: BatchColumns<'frame>,
-    row_count: usize,
-    index: usize,
-}
-
-impl BatchCursor<'_> {
-    /// The index of the next row, or `None` past the last.
-    fn next(&mut self) -> Option<usize> {
-        if self.index == self.row_count {
-            return None;
-        }
-
-        let index = self.index;
-        self.index += 1;
-
-        Some(index)
-    }
+    rows: Rows,
 }
 
 /// The columns of a batch's rows, each read whole in the type its normalized source holds it
@@ -531,9 +622,6 @@ struct BatchColumns<'frame> {
 impl<'frame> BatchColumns<'frame> {
     /// The columns of `frame`, by the names the batch query gives them.
     fn new(frame: &'frame DataFrame) -> Result<Self> {
-        // The batch bounds its bytes by this count of columns a row.
-        assert_eq!(frame.width(), BATCH_COLUMNS);
-
         Ok(Self {
             pid: Cells::named(frame, "pid")?,
             process_unique_id: Cells::named(frame, "process_unique_id")?,
@@ -615,7 +703,7 @@ impl<'frame> UsageColumns<'frame> {
 }
 
 fn committed_many_members(
-    rows: &mut BatchCursor<'_>,
+    rows: &mut BatchCursor<'_, impl Iterator<Item = usize>>,
     frame: &mut Frame,
     endpoint: &Endpoint,
     size: &FrameSize,
@@ -625,6 +713,7 @@ fn committed_many_members(
     for _index in 0..size.count {
         operation.check()?;
         let row = rows
+            .rows
             .next()
             .ok_or(Error::Bound("committed App batch changed row count"))?;
         if required_cell(&rows.columns.publication, row)? != frame.stamp.publication {

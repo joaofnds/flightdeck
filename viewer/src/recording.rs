@@ -5,6 +5,7 @@
 
 pub(crate) mod apps;
 mod machine;
+mod processes;
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -18,6 +19,7 @@ pub use machine::{
     CoreStateRow, CpuRow, FanRow, GpuStateRow, InterfaceRow, MachineMinute, MemoryRow, TickRow,
     read_machine,
 };
+pub use processes::read_processes;
 
 /// A sealed minute whose marker and files `open` verified.
 pub struct SealedMinute {

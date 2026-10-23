@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use collector::battery::BatteryReading;
@@ -6,13 +7,18 @@ use collector::disks::{DiskReading, DiskSnapshot, ScanState};
 use collector::interfaces::{IFNAMSIZ, Interface, Name};
 use collector::ioreport::States;
 use collector::machine::{CPUTicks, Memory, Pressure};
+use collector::processes::{Process, Task, Unreadable, Usage};
 use collector::recording::{RegisteredRun, Registry};
 use collector::ring::{
-    DictionaryCapacity, Dropped, Found, IOReportReadings, IdentityPublication, ObservationTimes,
-    Place, Readings, RingReader, RunIdentity, Shape, SmcReadings, SupplementalReadings,
-    SystemPublication, Tick, Writer,
+    DictionaryCapacity, Dropped, Found, IOReportReadings, IdentityObservation, IdentityPublication,
+    ObservationTimes, Place, ProcessCreation, ProcessIdentity, ProgramBytes, ProgramReference,
+    Readings, RingReader, RunIdentity, Shape, SmcReadings, SupplementalReadings, SystemPublication,
+    Tick, UsageAvailability, Writer,
 };
 use collector::system::{FactText, MachineFacts, PerformanceLevel, SystemReading};
+use collector::tracker::{Event, Noticed};
+use persistence::engine::{Engine, Row};
+use persistence::query::{TableSource, table_source};
 use persistence::schema::{APP_PARTS, Table};
 use polars::polars_utils::compression::ZstdLevel;
 use polars::prelude::{
@@ -21,8 +27,14 @@ use polars::prelude::{
 };
 
 use super::apps::{ROW_APP, ROW_HEADER, ROW_PROCESS, VERSION};
-use super::{AppMinute, AppParts, MachineMinute, Refused, SealedMinute, read_apps, read_machine};
+use super::{
+    AppMinute, AppParts, MachineMinute, Refused, SealedMinute, read_apps, read_machine,
+    read_processes,
+};
+use crate::cancellation::Cancellation;
 use crate::live::identity_fixture::Fixture;
+use crate::live_apps::Frame;
+use crate::live_apps::committed::Endpoint;
 
 /// Tells apart the rings the tests of this file make.
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -287,6 +299,337 @@ refuses_damaged_app_parts! {
         };
     refuses_an_observation_the_minute_does_not_hold, "sealed parts publication",
         |frame| with_column(frame, (col("publication") + lit(100)).alias("publication"));
+}
+
+#[test]
+fn a_sealed_minute_gives_the_frames_the_replay_of_its_files_gives() {
+    // Goal: the store builds each observation's frame from a minute's processes and events
+    // without SQL, exactly as the SQL replay of the minute builds it.
+    // Method: seal three observations whose events start, exec and exit processes, exits of
+    // measured, refused and gone usage among them, and compare the decoded frames with the
+    // replay's over the same files.
+    let fixture = sealed_events_minute();
+    let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let frames = decoded_frames(&minute).unwrap();
+
+    assert_eq!((frames.len(), minute.rows("events")), (3, Some(6)));
+    assert_eq!(frames, replayed_frames(&fixture));
+}
+
+#[test]
+fn a_minute_sealed_before_process_identity_gives_the_frames_its_replay_gives() {
+    // Goal: a minute sealed before processes carried their identity gives frames of processes
+    // whose identity is unsupported, as its replay gives them.
+    // Method: seal three observations of a ring without identity, and compare the decoded
+    // frames with the replay's over the same files.
+    let fixture = sealed_system_minute();
+    let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let frames = decoded_frames(&minute).unwrap();
+
+    assert_eq!(frames.len(), 3);
+    assert_eq!(frames, replayed_frames(&fixture));
+}
+
+#[test]
+fn a_minute_of_gpu_time_gives_the_frames_its_replay_gives() {
+    // Goal: a minute whose processes carry their GPU time gives frames that hold it, as its
+    // replay gives them.
+    // Method: seal three observations of one process with GPU time and one without, and
+    // compare the decoded frames with the replay's over the same files.
+    let fixture = sealed_gpu_minute();
+    let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let frames = decoded_frames(&minute).unwrap();
+
+    assert_eq!(frames.len(), 3);
+    assert_eq!(frames, replayed_frames(&fixture));
+}
+
+#[test]
+fn a_minute_sealed_without_gpu_time_gives_the_frames_its_replay_gives() {
+    // Goal: a minute sealed before processes carried their GPU time gives frames of processes
+    // of no GPU time, as its replay gives them.
+    // Method: seal a minute of GPU time, drop the GPU time from its processes, and compare the
+    // decoded frames with the replay's over the same files.
+    let fixture = sealed_gpu_minute();
+    damage_table(&fixture, "processes", |frame| frame.drop("gpu_ns").unwrap());
+    let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let frames = decoded_frames(&minute).unwrap();
+
+    assert_eq!(frames.len(), 3);
+    assert_eq!(frames, replayed_frames(&fixture));
+}
+
+macro_rules! refuses_damaged_processes {
+    ($($name:ident, $table:literal, $reason:literal, $damage:expr;)*) => {$(
+        #[test]
+        fn $name() {
+            // Goal: a minute whose processes or events hold what format 1 never writes is
+            // refused with the reason, and never read as frames.
+            // Method: seal a minute of events, replace the table with a copy the case damages,
+            // and read the minute's frames.
+            let fixture = sealed_events_minute();
+            damage_table(&fixture, $table, $damage);
+            let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+
+            let refused = decoded_frames(&minute);
+
+            let refusal = matches!(
+                refused,
+                Err(Refused::Decode(persistence::Error::Bound($reason)))
+            );
+            assert!(refusal, "{refused:?}");
+        }
+    )*};
+}
+
+refuses_damaged_processes! {
+    refuses_a_process_of_no_tick, "processes", "process of no tick",
+        |frame| with_column(frame, (col("publication") + lit(100)).alias("publication"));
+    refuses_an_event_of_no_tick, "events", "process of no tick",
+        |frame| with_column(frame, (col("publication") + lit(100)).alias("publication"));
+    refuses_a_process_twice_in_one_observation, "processes", "duplicate committed App PID",
+        |frame| with_column(frame, lit(7).cast(DataType::Int32).alias("pid"));
+    refuses_an_identity_of_another_version, "processes", "process identity version",
+        |frame| with_column(frame, lit(2).cast(DataType::UInt8).alias("identity_version"));
+    refuses_an_event_of_another_observations_tick, "events", "committed App event tick",
+        |frame| with_column(frame, (col("run_tick") + lit(1)).alias("run_tick"));
+    refuses_events_of_one_number, "events", "committed App event order",
+        |frame| with_column(frame, col("event").min().alias("event"));
+}
+
+/// A fixture whose ring held three observations whose events start, exec and exit processes,
+/// sealed as minute 0.
+fn sealed_events_minute() -> Fixture {
+    let mut fixture = Fixture::new();
+    let last = Usage {
+        awake_ns_at_start: 1,
+        user_ns: 2,
+        system_ns: 3,
+        energy_nj: 4,
+        instructions: 5,
+        super_instructions: 6,
+        cycles: 7,
+        idle_wakeups: 8,
+        interrupt_wakeups: 9,
+        pageins: 10,
+        resident_bytes: 11,
+        footprint_bytes: 12,
+        disk_read_bytes: 13,
+        disk_written_bytes: 14,
+    };
+    let started = [
+        Event::Start {
+            pid: 9,
+            coalition: Some(3),
+        },
+        Event::Exec { pid: 9 },
+    ];
+    let exited = [
+        Event::Exit {
+            pid: 9,
+            last: Ok(last),
+            noticed: Noticed::OnExit,
+        },
+        Event::Exit {
+            pid: 8,
+            last: Err(Unreadable::Refused),
+            noticed: Noticed::AlreadyExited,
+        },
+    ];
+    let gone = [
+        Event::Exit {
+            pid: 6,
+            last: Err(Unreadable::Gone),
+            noticed: Noticed::OnExit,
+        },
+        Event::Exec { pid: 7 },
+    ];
+    fixture.publish_with_events(1000, &started);
+    fixture.publish_with_events(1001, &exited);
+    fixture.publish_with_events(1002, &gone);
+    fixture.seal_minute(0);
+    fixture
+}
+
+/// A fixture whose system ring held three observations of a process with GPU time and one
+/// without, sealed as minute 0.
+fn sealed_gpu_minute() -> Fixture {
+    let mut fixture = Fixture::new();
+    system_ring(&mut fixture);
+    for step in 1..=3 {
+        publish_gpu_time(&mut fixture, step);
+    }
+    fixture.seal_minute(0);
+    fixture
+}
+
+/// Publishes the `step`th tick of `fixture`'s system ring, of process 1 without GPU time and
+/// process 7 with it.
+fn publish_gpu_time(fixture: &mut Fixture, step: u64) {
+    let mut program = None;
+    fixture
+        .writer
+        .intern_program(
+            &ProgramBytes {
+                executable_name: b"render",
+                app_path: Some(b"/Apps/Render.app"),
+            },
+            &mut program,
+        )
+        .unwrap();
+    let (processes, identities) = gpu_processes(step, program.unwrap());
+    let (cpus, memory, interfaces) = machine(step);
+    let readings = Readings {
+        run_tick: step - 1,
+        cpus: &cpus,
+        memory: &memory,
+        interfaces: &interfaces,
+        ioreport: None,
+        smc: None,
+        processes: &processes,
+        processes_refused: 0,
+        processes_gone: 0,
+        coalitions: &[],
+        events: &[],
+        dropped: Dropped::default(),
+    };
+    let times = ObservationTimes {
+        wall_ns: (1_000 + step) * 1_000_000_000,
+        continuous_ns: step * 1_000_000_000,
+        awake_ns: step * 900_000_000,
+    };
+    let system = SystemPublication {
+        reading: &SystemReading::default(),
+        machine: &MachineFacts::default(),
+        clock: None,
+        process_gpu_ns: &[None, Some(step * 500)],
+    };
+    let supplemental = SupplementalReadings {
+        battery: None,
+        disks: None,
+        system: Some(&system),
+    };
+    fixture
+        .writer
+        .publish_with_disks(
+            &readings,
+            Some(&times),
+            &IdentityPublication {
+                processes: &identities,
+                events: &[],
+            },
+            &supplemental,
+        )
+        .unwrap();
+}
+
+/// The processes 1 and 7 of the `step`th tick of a GPU minute, both running `program`.
+fn gpu_processes(step: u64, program: ProgramReference) -> ([Process; 2], [IdentityObservation; 2]) {
+    let processes = [1, 7].map(|pid| Process {
+        pid,
+        usage: Usage {
+            awake_ns_at_start: 0,
+            user_ns: step * 1_000,
+            system_ns: step,
+            energy_nj: 4,
+            instructions: 5,
+            super_instructions: 6,
+            cycles: 7,
+            idle_wakeups: 8,
+            interrupt_wakeups: 9,
+            pageins: 10,
+            resident_bytes: 11,
+            footprint_bytes: 12,
+            disk_read_bytes: 13,
+            disk_written_bytes: 14,
+        },
+        task: Task {
+            threads: pid,
+            faults: 2,
+            context_switches: 3,
+            mach_syscalls: 4,
+            unix_syscalls: 5,
+        },
+    });
+    let identities = [1, 7].map(|pid| IdentityObservation {
+        pid,
+        usage: UsageAvailability::Measured,
+        identity: ProcessIdentity::Measured {
+            creation: ProcessCreation {
+                unique_id: u64::try_from(pid).unwrap(),
+                pid_version: -pid,
+            },
+            program,
+        },
+    });
+    (processes, identities)
+}
+
+/// The frames the decoder reads of `minute`, in publication order.
+fn decoded_frames(minute: &SealedMinute) -> Result<Vec<Frame>, Refused> {
+    let mut frames = Vec::new();
+    read_processes(minute, |frame| {
+        frames.push(*frame);
+        Ok(())
+    })?;
+    Ok(frames)
+}
+
+/// The frames the SQL replay of `fixture`'s sealed minute 0 builds from the minute's files.
+fn replayed_frames(fixture: &Fixture) -> Vec<Frame> {
+    let manifest = persistence::read_committed(&fixture.root, &marker(fixture, 0)).unwrap();
+    let directory = fixture.root.join(&manifest.data_directory);
+    let connection = Engine::new();
+    let source = |table: Table| {
+        let path = directory.join(format!("{}.parquet", table.name()));
+        table_source(&connection, table, TableSource::Parquet(&path)).unwrap()
+    };
+    let ticks = connection
+        .query(&format!(
+            "SELECT publication, run_tick, wall_ns, continuous_ns, awake_ns, processes_refused, \
+            processes_gone, events_first, events_end FROM {} ORDER BY publication",
+            source(Table::Ticks)
+        ))
+        .unwrap();
+    let run = manifest.identity.run;
+    let endpoints: Vec<_> = (0..ticks.height())
+        .map(|index| {
+            let row = Row::new(&ticks, index).unwrap();
+            Endpoint {
+                identity: run,
+                stamp: crate::apps::Stamp {
+                    boot: run.boot.0,
+                    run: run.run.0,
+                    publication: row.get(0).unwrap(),
+                    continuous_ns: row.get(3).unwrap(),
+                    awake_ns: row.get(4).unwrap(),
+                },
+                run_tick: row.get(1).unwrap(),
+                wall_ns: row.get(2).unwrap(),
+                usage_refused: row.get(5).unwrap(),
+                usage_gone: row.get(6).unwrap(),
+                events_first: row.get(7).unwrap(),
+                events_end: row.get(8).unwrap(),
+            }
+        })
+        .collect();
+    let processes = source(Table::Processes);
+    let events = source(Table::Events);
+    let replay = crate::live_apps::committed::Sources {
+        processes: &processes,
+        events: &events,
+    }
+    .query();
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let mut frames = Vec::new();
+
+    Frame::committed_many(&endpoints, &connection, &replay, &operation, |frame| {
+        frames.push(*frame);
+        Ok(())
+    })
+    .unwrap();
+
+    frames
 }
 
 /// A fixture whose ring held three observations of several Apps, sealed as minute 0 with
