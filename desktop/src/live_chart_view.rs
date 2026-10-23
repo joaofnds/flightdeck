@@ -143,13 +143,17 @@ impl LiveDashboard {
         self.view_window()
     }
 
+    /// Where the cursor stands across `panel`: at the hovered second, or else at the pinned one.
     fn chart_cursor_fraction(&self, panel: &Panel) -> Option<f32> {
-        let hover = self.chart_hover.as_ref()?;
+        let second = match &self.chart_hover {
+            Some(hover) => hover.second,
+            None => self.pinned_second()?,
+        };
         if self.store_view_draws(panel) {
             if let Some(index) = self.store_view_index(panel) {
                 return panel.positions.as_ref()?.get(index).copied();
             }
-            return self.view_window()?.fraction_of(hover.second);
+            return self.view_window()?.fraction_of(second);
         }
         let snapshot = self.snapshot.as_deref()?;
         if let Some(target) = self.reading_target() {
@@ -160,7 +164,7 @@ impl LiveDashboard {
             }
         }
 
-        cursor_fraction(panel, snapshot, self.view_window(), Some(hover.second))
+        cursor_fraction(panel, snapshot, self.view_window(), Some(second))
     }
 
     fn chart_process_groups(
@@ -674,13 +678,13 @@ impl LiveDashboard {
         Some(crate::live_hover::Target::regular(snapshot, second))
     }
 
-    /// Selects the second an arrow step shows, which then reads it with its context.
+    /// Pins the second an arrow step shows, which then reads it with its context.
     fn chart_step_select(&mut self, cx: &mut Context<Self>) {
         let Some(second) = self.chart_stepped_second() else {
             return;
         };
 
-        self.inspect(second, cx);
+        self.pin_second(second, cx);
     }
 
     /// The charts' focus, watched so a step ends when the charts lose it, as a keyboard
@@ -718,7 +722,9 @@ impl LiveDashboard {
 
     fn chart_heading(panel: &Rc<Panel>, cx: &mut Context<Self>) -> impl IntoElement {
         let help = panel.help.clone().unwrap_or_else(|| {
-            "Unavailable readings remain gaps. Drag across a chart to zoom to that stretch.".into()
+            "Unavailable readings remain gaps. Drag across a chart to zoom to that stretch, \
+            or click it to pin its second on every page."
+                .into()
         });
         let inspector_panel = Rc::clone(panel);
         let keyboard_panel = Rc::clone(panel);
@@ -1124,7 +1130,7 @@ fn target_index(
 }
 
 /// The cursor over a chart. A state timeline draws it dashed and always, as the prototype does,
-/// and a line chart draws it solid while the pointer is over it.
+/// and a line chart draws it solid while the pointer is over it or a second is pinned.
 fn chart_cursor(fraction: Option<f32>, dashed: bool) -> impl IntoElement {
     canvas(
         |_, _, _| (),

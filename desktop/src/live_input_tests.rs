@@ -516,26 +516,173 @@ fn scrolling_the_plot_back_under_the_pointer_restores_synchronized_hover(cx: &mu
 }
 
 #[gpui::test]
-fn clicking_a_chart_leaves_the_view_where_it_was(cx: &mut TestAppContext) {
-    // Goal: a plain click on a plot neither pauses the view nor requests another second, since
-    // only a drag acts on a chart. Method: click the previous second of a chart that repeats a
-    // second, then read the request and whether any reading was hidden.
+fn clicking_a_chart_selects_the_reading_under_the_pointer(cx: &mut TestAppContext) {
+    // Goal: a click selects the reading the pointer shows, so every page reads that second.
+    // Method: in a context whose second 999 holds publications 2 and 3, hover and click 999,
+    // then read the second and publication the page asks for and whether any reading was
+    // hidden. A hover of 999 shows publication 3, the later of the two.
     let mut harness = InputHarness::setup(cx);
     harness.driver.seed_repeated_second();
-    let before = (
-        harness.driver.requested_second(),
-        harness.driver.requested_publication(),
-    );
+
+    harness.driver.pin_previous_second();
+
+    assert_eq!(harness.driver.requested_second(), Some(999));
+    assert_eq!(harness.driver.requested_publication(), Some(3));
+    assert!(!harness.driver.readings_are_hidden());
+    harness.teardown();
+}
+
+#[gpui::test]
+fn moving_the_pointer_after_a_click_keeps_the_pinned_readings_shown(cx: &mut TestAppContext) {
+    // Goal: a hover leaves the second a click pinned on the page, so the pointer can move to
+    // any part of it. Method: pin 999, whose reading is 90 W and 60 °C, hover 1000, whose
+    // reading is 40 °C, on another chart, and read which readings the page shows.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.seed_repeated_second();
+    harness.driver.pin_previous_second();
+
+    harness
+        .driver
+        .hover_selected_second_on("live-gpu-power-plot");
+
+    assert!(harness.driver.reading_is_visible("90 W"));
+    assert!(harness.driver.reading_is_visible("60 °C"));
+    assert!(!harness.driver.reading_is_visible("40 °C"));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_pinned_second_draws_its_cursor_on_every_chart(cx: &mut TestAppContext) {
+    // Goal: every chart marks the second a click pinned, with no pointer over any of them.
+    // Method: pin 999, move the pointer onto the sidebar, and find the cursor each chart
+    // paints.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.seed_repeated_second();
+    harness.driver.pin_previous_second();
+
+    harness
+        .driver
+        .leave_plot("live-energy-plot", PlotExit::Sidebar);
+    harness.driver.render_pending();
+
+    harness.driver.assert_cursors_track_previous_second();
+    harness.teardown();
+}
+
+#[gpui::test]
+fn the_reply_to_a_pin_keeps_the_pinned_second_against_a_hover(cx: &mut TestAppContext) {
+    // Goal: once the reader answers for the pinned second, the page still shows it and marks
+    // it, whatever the pointer hovers. Method: pin 999, hand the page the reader's answer for
+    // 999, hover 1000, and read the second the page shows and where each chart's cursor is.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.seed_repeated_second();
+    harness.driver.pin_previous_second();
+    harness.driver.reply_with_second(999);
+
+    harness
+        .driver
+        .hover_selected_second_on("live-gpu-power-plot");
+    harness.driver.render_pending();
+
+    assert_eq!(harness.driver.shown_second(), Some(999));
+    harness.driver.assert_cursors_track_previous_second();
+    harness.teardown();
+}
+
+#[gpui::test]
+fn going_to_the_latest_reading_ends_the_pin(cx: &mut TestAppContext) {
+    // Goal: the latest reading lets go of a pinned second, and a hover then shows the hovered
+    // second across the page again. Method: pin 999, go to the latest reading, hover 999,
+    // and read which readings the page shows.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.seed_repeated_second();
+    harness.driver.pin_previous_second();
+    harness.driver.pause();
+    harness
+        .driver
+        .leave_plot("live-energy-plot", PlotExit::Sidebar);
 
     harness.driver.hover_previous_second();
-    harness.driver.click_previous_second();
 
-    let after = (
-        harness.driver.requested_second(),
-        harness.driver.requested_publication(),
-    );
-    assert_eq!(after, before);
-    assert!(!harness.driver.readings_are_hidden());
+    assert_eq!(harness.driver.pinned_second(), None);
+    assert!(harness.driver.reading_is_visible("60 °C"));
+    assert!(!harness.driver.reading_is_visible("40 °C"));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn resetting_the_range_ends_the_pin(cx: &mut TestAppContext) {
+    // Goal: the range's reset lets go of a pinned second along with the second it holds, and a
+    // hover then shows the hovered second again. Method: pin 999, reset the range, hover 999,
+    // and read which readings the page shows.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.seed_repeated_second();
+    harness.driver.pin_previous_second();
+    harness.driver.follow_latest();
+    harness
+        .driver
+        .leave_plot("live-energy-plot", PlotExit::Sidebar);
+
+    harness.driver.hover_previous_second();
+
+    assert_eq!(harness.driver.pinned_second(), None);
+    assert!(harness.driver.reading_is_visible("60 °C"));
+    assert!(!harness.driver.reading_is_visible("40 °C"));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_pinned_second_holds_on_every_page(cx: &mut TestAppContext) {
+    // Goal: a pinned second stays selected and pinned as the reader moves between pages.
+    // Method: pin 999, open Memory and then Energy again, hover 1000, and read the second the
+    // page asks for and which readings it shows.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.seed_repeated_second();
+    harness.driver.pin_previous_second();
+
+    harness.driver.navigate("memory");
+    harness.driver.navigate("energy");
+    harness
+        .driver
+        .hover_selected_second_on("live-gpu-power-plot");
+
+    assert_eq!(harness.driver.requested_second(), Some(999));
+    assert_eq!(harness.driver.pinned_second(), Some(999));
+    assert!(!harness.driver.reading_is_visible("40 °C"));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_drag_that_zooms_pins_nothing(cx: &mut TestAppContext) {
+    // Goal: only a click pins, so a drag that zooms leaves the hover free.
+    // Method: drag across half the plot and read whether a second is pinned.
+    let mut harness = InputHarness::setup(cx);
+
+    harness.driver.drag_across("live-energy-plot", 0.25, 0.75);
+
+    assert_eq!(harness.driver.pinned_second(), None);
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_drag_too_short_to_zoom_pins_nothing(cx: &mut TestAppContext) {
+    // Goal: a drag across a chart zoomed to five seconds is no click, though it spans too few
+    // seconds to zoom further. Method: show the five seconds 996 to 1000, drag from 997 to 999,
+    // and read the view, the second the page asks for and whether a second is pinned.
+    let mut harness = InputHarness::setup(cx);
+    harness
+        .driver
+        .show_range(crate::time_range::Range::Between {
+            first: 996,
+            last: 1000,
+        });
+    let view = harness.driver.view_window();
+
+    harness.driver.drag_across("live-energy-plot", 0.3, 0.7);
+
+    assert_eq!(harness.driver.view_window(), view);
+    assert_eq!(harness.driver.requested_second(), Some(1000));
+    assert_eq!(harness.driver.pinned_second(), None);
     harness.teardown();
 }
 
@@ -706,6 +853,20 @@ fn enter_selects_the_second_an_arrow_step_showed(cx: &mut TestAppContext) {
     assert_eq!(harness.driver.requested_second(), Some(999));
     assert_eq!(harness.driver.requested_publication(), Some(1));
     assert!(harness.driver.inspection_has_focus());
+    harness.teardown();
+}
+
+#[gpui::test]
+fn enter_pins_the_second_an_arrow_step_showed(cx: &mut TestAppContext) {
+    // Goal: Return pins a second as a click does, so the keyboard reaches a pin too.
+    // Method: step left to 999, press Enter, then read the pinned second.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.focus_chart();
+    harness.driver.press("left");
+
+    harness.driver.press("enter");
+
+    assert_eq!(harness.driver.pinned_second(), Some(999));
     harness.teardown();
 }
 
@@ -1333,9 +1494,23 @@ impl InputDriver {
         );
     }
 
-    fn click_previous_second(&mut self) {
+    /// Hovers 999 on the energy chart and clicks it, as a person pins a second.
+    fn pin_previous_second(&mut self) {
+        self.hover_previous_second();
         let position = self.previous_second_position();
         self.context.simulate_click(position, Modifiers::none());
+    }
+
+    fn pinned_second(&self) -> Option<u64> {
+        self.view
+            .read_with(&self.context, |dashboard, _| dashboard.pinned_second())
+    }
+
+    fn navigate(&mut self, route: &str) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            dashboard.navigate(route, cx);
+        });
+        self.context.run_until_parked();
     }
 
     fn reading_is_visible(&mut self, reading: &'static str) -> bool {

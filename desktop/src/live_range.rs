@@ -5,7 +5,12 @@ use gpui::{
 use crate::chart_axes::TimeWindow;
 use crate::charts::{self, BLUE};
 use crate::live_dashboard::{Drag, LiveDashboard};
+use crate::live_hover::Origin;
 use crate::time_range::Range;
+
+/// How far the pointer may move, across or down, between a press and its release for the two
+/// to be a click rather than a drag.
+const CLICK_TRAVEL_MAX: Pixels = px(3.0);
 
 impl LiveDashboard {
     /// Starts selecting a stretch on `chart`, from the second under the pointer.
@@ -17,14 +22,15 @@ impl LiveDashboard {
     ) {
         let second = self.second_under(bounds, event.position.x);
 
-        self.drag_begin_at(chart, second, cx);
+        self.drag_begin_at(chart, (second, event.position), cx);
     }
 
-    /// Starts selecting a stretch on `chart`, from `second`.
+    /// Starts selecting a stretch on `chart`, from `second`, which the pointer pressed at
+    /// `pressed_at`.
     pub(crate) fn drag_begin_at(
         &mut self,
         chart: &str,
-        second: Option<u64>,
+        (second, pressed_at): (Option<u64>, gpui::Point<Pixels>),
         cx: &mut Context<Self>,
     ) {
         let Some(second) = second else {
@@ -34,6 +40,7 @@ impl LiveDashboard {
             chart: chart.to_owned(),
             from: second,
             to: second,
+            pressed_at,
         });
         cx.notify();
     }
@@ -80,11 +87,18 @@ impl LiveDashboard {
     ) {
         let second = self.second_under(bounds, event.position.x);
 
-        self.drag_end_at(chart, second, cx);
+        self.drag_end_at(chart, (second, event.position), cx);
     }
 
-    /// Ends the selection on `chart` at `second`, and shows the stretch it covers.
-    pub(crate) fn drag_end_at(&mut self, chart: &str, second: Option<u64>, cx: &mut Context<Self>) {
+    /// Ends the selection on `chart` at `second`, which the pointer let go at `released_at`, and
+    /// shows the stretch it covers. A release that barely moved from the press is a click, which
+    /// pins the reading under the pointer.
+    pub(crate) fn drag_end_at(
+        &mut self,
+        chart: &str,
+        (second, released_at): (Option<u64>, gpui::Point<Pixels>),
+        cx: &mut Context<Self>,
+    ) {
         // Every chart is told of a release outside it, so only the chart being dragged ends it.
         if self.drag.as_ref().is_none_or(|drag| drag.chart != chart) {
             return;
@@ -94,9 +108,30 @@ impl LiveDashboard {
             return;
         };
         cx.notify();
-        if let Some(range) = Range::selection(drag.from, drag.to) {
-            self.select_range(range, cx);
+        if click(drag.pressed_at, released_at) {
+            match self.drag_end_hovered(chart) {
+                Some(target) => self.pin_target(target, cx),
+                None => self.pin_second(drag.from, cx),
+            }
+        } else {
+            if let Some(range) = Range::selection(drag.from, drag.to) {
+                self.select_range(range, cx);
+            }
         }
+    }
+
+    /// The reading the pointer's hover of `chart` shows, which is the exact observation under
+    /// it, as on the CPU history where one second holds several.
+    fn drag_end_hovered(&self, chart: &str) -> Option<crate::live_hover::Target> {
+        let preview = self.preview.as_ref()?;
+        if preview.origin != Origin::Pointer {
+            return None;
+        }
+        if preview.source.as_ref() != chart {
+            return None;
+        }
+
+        Some(preview.target.clone())
     }
 
     /// The second at the pointer's horizontal place across the plot, held to the plot's edges.
@@ -132,6 +167,16 @@ impl LiveDashboard {
     }
 }
 
+/// Whether a press at `pressed_at` and its release at `released_at` are a click.
+fn click(pressed_at: gpui::Point<Pixels>, released_at: gpui::Point<Pixels>) -> bool {
+    let travel = released_at - pressed_at;
+    if travel.x.abs() > CLICK_TRAVEL_MAX {
+        return false;
+    }
+
+    travel.y.abs() <= CLICK_TRAVEL_MAX
+}
+
 /// The band's left and right edges as fractions of the plot, covering every second it spans.
 fn band_edges(window: TimeWindow, drag: &Drag) -> Option<(f32, f32)> {
     let first = drag.from.min(drag.to);
@@ -163,11 +208,13 @@ mod tests {
             chart: "p".into(),
             from: 1010,
             to: 1029,
+            pressed_at: gpui::Point::default(),
         };
         let backward = Drag {
             chart: "p".into(),
             from: 1029,
             to: 1010,
+            pressed_at: gpui::Point::default(),
         };
 
         assert_eq!(band_edges(window, &forward), Some((0.1, 0.3)));

@@ -125,7 +125,11 @@ reading selection is paused. The schematic is below Overview.
 Hovering a plot temporarily shows that exact observation across the page, including
 Memory quantities, CPU and App details, Storage/Battery summaries, the schematic
 and Copy. Leaving the plot
-restores the live or paused selection. Missing readings stay unavailable. The
+restores the live or paused selection. A click on a plot, or Return on a second
+the arrow keys reached, pins that reading instead: every page with a time selection
+then shows it and marks it on each chart, and a hover leaves it shown until Go to
+latest reading, the range's reset or another recording lets it go. Missing
+readings stay unavailable. The
 reader keeps each second's top Apps for the selected window, and the selected App's
 processes on Apps, so a hover shows them in the frame that handles the move. A
 second not kept yet, the Apps an open App picker lists, and an App too large for

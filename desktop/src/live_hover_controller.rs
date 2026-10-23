@@ -30,6 +30,9 @@ impl LiveDashboard {
         hovered_at: Instant,
         cx: &mut Context<Self>,
     ) {
+        if self.pinned_second().is_some() {
+            return;
+        }
         if !self.set_reading_target(source, target, Origin::Pointer, cx) {
             return;
         }

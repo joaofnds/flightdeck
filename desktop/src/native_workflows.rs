@@ -439,6 +439,8 @@ impl LiveDashboard {
             self.hidden.clear();
             self.chart_hover = None;
             self.preview = None;
+            // The new recording's page follows its newest second, so nothing stays pinned.
+            self.pinning = crate::live_dashboard::Pinning::Unpinned;
             self.picker = None;
             self.cpu_inspection = None;
             self.native.alternative_page = 0;

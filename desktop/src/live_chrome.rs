@@ -328,7 +328,9 @@ impl LiveDashboard {
                     .text_color(rgb(MUTED))
                     .child(
                         "Drag across a chart to zoom to that stretch. Ranges end at the latest \
-                         captured sample. Hover a chart or use its arrow keys to inspect.",
+                         captured sample. Hover a chart or use its arrow keys to inspect, and \
+                         click it or press Return to pin that second on every page until the \
+                         latest reading or the reset.",
                     ),
             );
 

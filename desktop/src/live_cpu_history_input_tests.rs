@@ -48,16 +48,27 @@ fn keyboard_history_selection_keeps_the_pages_readings_shown(cx: &mut TestAppCon
 }
 
 #[gpui::test]
-fn clicking_a_history_interval_changes_nothing(cx: &mut TestAppContext) {
-    // Goal: a plain click on the CPU history never requests another second, since only a drag
-    // acts on a chart. Method: click a measured interval and a blank one, then read the request.
+fn clicking_a_history_interval_pins_the_observation_under_the_pointer(cx: &mut TestAppContext) {
+    // Goal: a click on the CPU history pins the exact observation the pointer inspects, as
+    // Return does, and not merely its second.
+    // Method: hover the interval drawn at 1000.9, which ends at an observation of second 1001
+    // other than publication 3, the later observation of that second. Read the observation it
+    // inspects, click it, then read the request and the pinned second.
     let mut harness = CPUHistoryHarness::setup(cx);
-    let previous = harness.driver.requested_selection();
+    let interval = 1000 * NS + NS * 9 / 10;
+    harness.driver.hover_at(interval);
+    let inspected = harness.driver.inspected_publication();
+    assert_ne!(inspected, Some(3));
 
-    harness.driver.click_at(1000 * NS + NS * 9 / 10);
-    harness.driver.click_at(1001 * NS + NS * 3 / 4);
+    harness.driver.click_at(interval);
 
-    assert_eq!(harness.driver.requested_selection(), previous);
+    let (second, identity) = harness.driver.requested_selection();
+    assert_eq!(second, Some(1001));
+    assert_eq!(
+        identity.and_then(|identity| identity["publication"].as_u64()),
+        inspected
+    );
+    assert_eq!(harness.driver.pinned_second(), Some(1001));
     assert!(!harness.driver.readings_are_hidden());
     harness.teardown();
 }
@@ -228,7 +239,25 @@ impl CPUHistoryDriver {
         self.context.simulate_keystrokes(keys);
     }
 
+    fn hover_at(&mut self, wall_ns: u64) {
+        let position = self.position_at(wall_ns);
+        self.context
+            .simulate_mouse_move(position, None, Modifiers::none());
+        self.context.run_until_parked();
+    }
+
     fn click_at(&mut self, wall_ns: u64) {
+        let position = self.position_at(wall_ns);
+        self.context.simulate_click(position, Modifiers::none());
+    }
+
+    fn pinned_second(&self) -> Option<u64> {
+        self.view
+            .read_with(&self.context, |dashboard, _| dashboard.pinned_second())
+    }
+
+    /// Where the cells draw `wall_ns`, at their middle row.
+    fn position_at(&mut self, wall_ns: u64) -> gpui::Point<gpui::Pixels> {
         let bounds = self.context.debug_bounds("cpu-history-cells").unwrap();
         let fraction = self.view.read_with(&self.context, |dashboard, _| {
             dashboard
@@ -241,11 +270,10 @@ impl CPUHistoryDriver {
                 .fraction(wall_ns)
         });
         let fraction = num_traits::ToPrimitive::to_f32(&fraction).unwrap();
-        let position = gpui::point(
+        gpui::point(
             bounds.origin.x + bounds.size.width * fraction,
             bounds.center().y,
-        );
-        self.context.simulate_click(position, Modifiers::none());
+        )
     }
 
     fn drag_cells(&mut self, from: f32, to: f32) {

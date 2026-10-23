@@ -206,7 +206,7 @@ impl LiveDashboard {
                 cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
                     window.prevent_default();
                     let second = cell_second(time, down_bounds.get(), event.position.x);
-                    this.drag_begin_at(HOVER_SOURCE, second, cx);
+                    this.drag_begin_at(HOVER_SOURCE, (second, event.position), cx);
                 }),
             )
             .on_mouse_move(
@@ -219,14 +219,14 @@ impl LiveDashboard {
                 gpui::MouseButton::Left,
                 cx.listener(move |this, event: &gpui::MouseUpEvent, _, cx| {
                     let second = cell_second(time, up_bounds.get(), event.position.x);
-                    this.drag_end_at(HOVER_SOURCE, second, cx);
+                    this.drag_end_at(HOVER_SOURCE, (second, event.position), cx);
                 }),
             )
             .on_mouse_up_out(
                 gpui::MouseButton::Left,
                 cx.listener(move |this, event: &gpui::MouseUpEvent, _, cx| {
                     let second = cell_second(time, measured.get(), event.position.x);
-                    this.drag_end_at(HOVER_SOURCE, second, cx);
+                    this.drag_end_at(HOVER_SOURCE, (second, event.position), cx);
                 }),
             )
     }
@@ -361,6 +361,10 @@ impl LiveDashboard {
         hovered_at: Instant,
         cx: &mut Context<Self>,
     ) -> bool {
+        // A pinned second keeps the CPU it inspects, wherever the pointer goes.
+        if self.pinned_second().is_some() {
+            return false;
+        }
         let Some(snapshot) = self.snapshot.as_deref() else {
             return false;
         };
@@ -523,13 +527,13 @@ impl LiveDashboard {
         let Some((second, identity)) = history.target(inspection) else {
             return;
         };
-        self.request.second = Some(second);
-        self.request.identity = Some(identity);
-        self.request.offset = 0;
-        self.request.apps_offset = 0;
-        self.request.members_offset = 0;
-        self.request.cpu_offset = 0;
-        self.select(cx);
+        self.pin_target(
+            Target {
+                second,
+                identity: Some(identity),
+            },
+            cx,
+        );
         self.focus_inspection(window, cx);
         window.prevent_default();
         cx.notify();

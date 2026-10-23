@@ -161,6 +161,8 @@ pub struct LiveDashboard {
     pub(crate) range: crate::time_range::Range,
     /// The selection a drag across a chart is making.
     pub(crate) drag: Option<Drag>,
+    /// Whether the selected second is pinned, which a hover then leaves shown.
+    pub(crate) pinning: Pinning,
 }
 
 /// Whether macOS presents the window, and whether its reader has caught up with that, since the
@@ -203,12 +205,24 @@ impl Presence {
     }
 }
 
-/// A drag across one chart: the seconds under the pointer when it went down and where it is now.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A drag across one chart: the seconds under the pointer when it went down and where it is now,
+/// and where in the window it went down.
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Drag {
     pub(crate) chart: String,
     pub(crate) from: u64,
     pub(crate) to: u64,
+    pub(crate) pressed_at: gpui::Point<gpui::Pixels>,
+}
+
+/// What a hover does to the selected second.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Pinning {
+    /// A hover shows the hovered second, and leaving the chart shows the selected one again.
+    Unpinned,
+    /// A click on a chart, or Return on a second a key stepped to, pinned the selected second,
+    /// which a hover leaves shown.
+    Pinned,
 }
 
 pub struct ChartHover {
@@ -341,6 +355,7 @@ impl LiveDashboard {
             self_inspected: None,
             range: crate::time_range::Range::default(),
             drag: None,
+            pinning: Pinning::Unpinned,
         };
         if dashboard.request.route == "computer" {
             dashboard.inventory = crate::live_inventory::rows(None);
@@ -802,6 +817,9 @@ impl LiveDashboard {
 
     pub fn pause(&mut self, cx: &mut Context<Self>) {
         let (second, identity) = self.pause_target();
+        // Pause holds the newest second without pinning it, and the latest reading lets go of
+        // a pin.
+        self.pinning = Pinning::Unpinned;
         self.request.second = second;
         self.request.identity = identity;
         self.request.offset = 0;
@@ -838,15 +856,44 @@ impl LiveDashboard {
         let second = self.context_snapshot().map_or(second, |snapshot| {
             crate::live_projection::inspection_second(&snapshot.selection, second)
         });
-        self.request.second = Some(second);
-        self.request.identity = self.context_snapshot().and_then(|snapshot| {
+        let identity = self.context_snapshot().and_then(|snapshot| {
             crate::live_projection::inspection_identity(&snapshot.selection, second)
         });
+        self.inspect_target(crate::live_hover::Target { second, identity }, cx);
+    }
+
+    /// Selects the reading of `target`, from the first row of each of the page's tables.
+    fn inspect_target(&mut self, target: crate::live_hover::Target, cx: &mut Context<Self>) {
+        self.request.second = Some(target.second);
+        self.request.identity = target.identity;
         self.request.offset = 0;
         self.request.apps_offset = 0;
         self.request.members_offset = 0;
         self.request.cpu_offset = 0;
         self.select(cx);
+    }
+
+    /// Selects `second` and holds every page to it, so a hover leaves its readings shown until
+    /// the latest reading or the range's reset lets it go.
+    pub(crate) fn pin_second(&mut self, second: u64, cx: &mut Context<Self>) {
+        self.pinning = Pinning::Pinned;
+        self.inspect(second, cx);
+    }
+
+    /// Selects the reading of `target` and holds every page to it, as `pin_second` does.
+    pub(crate) fn pin_target(&mut self, target: crate::live_hover::Target, cx: &mut Context<Self>) {
+        self.pinning = Pinning::Pinned;
+        self.inspect_target(target, cx);
+    }
+
+    /// The pinned second, while one is pinned.
+    pub(crate) fn pinned_second(&self) -> Option<u64> {
+        if self.pinning == Pinning::Unpinned {
+            return None;
+        }
+
+        assert!(self.request.second.is_some());
+        self.request.second
     }
 
     /// Asks for the request's second and keeps the page's readings shown until the reply, which
@@ -958,6 +1005,7 @@ impl LiveDashboard {
         if held {
             self.request.identity = None;
         }
+        self.pinning = Pinning::Unpinned;
         self.set_range(crate::time_range::Range::History, cx);
         if held {
             self.request_reading();
