@@ -1,6 +1,9 @@
 use collector::interfaces::{IFNAMSIZ, Interface, Name};
+use collector::ioreport::States;
 use collector::machine::{CPUTicks, Memory, Pressure};
-use collector::ring::{Dropped, Found, ObservationTimes, Readings, RingReader, Tick};
+use collector::ring::{
+    Dropped, Found, IOReportReadings, ObservationTimes, Readings, RingReader, SmcReadings, Tick,
+};
 
 use super::{MachineMinute, SealedMinute, read_machine};
 use crate::live::identity_fixture::Fixture;
@@ -9,8 +12,9 @@ use crate::live::identity_fixture::Fixture;
 fn a_sealed_minute_holds_the_machine_readings_the_ring_held() {
     // Goal: the recording and the ring hand the store the same machine readings, so one rate
     // rule serves both.
-    // Method: publish three ticks with distinct CPU ticks, memory and interface counters, take
-    // the ring's ticks as the store would, seal them as one minute, and decode it.
+    // Method: publish three ticks with distinct readings, the second without IOReport and the
+    // third without the SMC, take the ring's ticks as the store would, seal them as one
+    // minute, and decode it.
     let mut fixture = Fixture::new_mode(false, 2, None);
     for step in 1..=3 {
         publish_machine(&mut fixture, step);
@@ -25,20 +29,36 @@ fn a_sealed_minute_holds_the_machine_readings_the_ring_held() {
 
     read_machine(&minute, &mut decoded).unwrap();
 
-    assert_eq!(expected.ticks.len(), 3);
+    let states = (expected.gpu_states.len(), expected.core_states.len());
+    assert_eq!(
+        (expected.ticks.len(), states, expected.fans.len()),
+        (3, (2, 2), 2)
+    );
     assert_eq!(decoded, expected);
 }
 
-/// Publishes the `step`th tick of run minute 0, holding `machine(step)`.
+/// Publishes the `step`th tick of run minute 0, holding `machine(step)`, with no `IOReport`
+/// readings at step 2 and no SMC readings at step 3.
 fn publish_machine(fixture: &mut Fixture, step: u64) {
     let (cpus, memory, interfaces) = machine(step);
+    let sources = sources(step);
     let readings = Readings {
         run_tick: step - 1,
         cpus: &cpus,
         memory: &memory,
         interfaces: &interfaces,
-        ioreport: None,
-        smc: None,
+        ioreport: (step != 2).then_some(IOReportReadings {
+            gpu_energy_nj: sources.gpu_energy_nj,
+            gpu_active_ns: &sources.gpu_active_ns,
+            cores: &sources.cores,
+        }),
+        smc: (step != 3).then_some(SmcReadings {
+            power_watts: sources.power_watts,
+            soc_celsius: sources.soc_celsius,
+            cpu_celsius: Some(sources.cpu_celsius),
+            gpu_celsius: None,
+            fan_rpm: &sources.fan_rpm,
+        }),
         processes: &[],
         processes_refused: 0,
         processes_gone: 0,
@@ -124,4 +144,28 @@ fn machine(step: u64) -> ([CPUTicks; 1], Memory, [Interface; 1]) {
         receive_drops: 100 * step + 6,
     }];
     (cpus, memory, interfaces)
+}
+
+/// The `IOReport` and SMC readings of the `step`th tick, each distinct from every other tick's.
+struct Sources {
+    gpu_energy_nj: u64,
+    gpu_active_ns: [u64; 1],
+    cores: [States; 1],
+    power_watts: f32,
+    soc_celsius: f32,
+    cpu_celsius: f32,
+    fan_rpm: [f32; 1],
+}
+
+fn sources(step: u64) -> Sources {
+    let small = f32::from(u8::try_from(step).unwrap());
+    Sources {
+        gpu_energy_nj: 10_000 * step,
+        gpu_active_ns: [10_000 * step + 1],
+        cores: [States::with_active_ns(&[10_000 * step + 2])],
+        power_watts: 10.0 + small,
+        soc_celsius: 40.0 + small,
+        cpu_celsius: 50.0 + small,
+        fan_rpm: [1_000.0 + small],
+    }
 }

@@ -43,9 +43,10 @@ pub struct States {
 pub const ACTIVE_STATES_MAX: usize = 64;
 
 impl States {
-    /// States that hold `active_ns` as a read would, for a test of what carries them.
-    #[cfg(test)]
-    pub(crate) fn with_active_ns(active_ns: &[u64]) -> Self {
+    /// States that hold `active_ns` as a read would, for a test of what carries them, in this
+    /// crate or in one that reads what the collector publishes.
+    #[must_use]
+    pub fn with_active_ns(active_ns: &[u64]) -> Self {
         let mut states = Self::new(ACTIVE_STATES_MAX);
         states.active_ns.extend_from_slice(active_ns);
         states.active_indices.extend((0..).take(active_ns.len()));

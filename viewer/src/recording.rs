@@ -7,9 +7,13 @@ mod machine;
 
 use std::path::{Path, PathBuf};
 
-use polars::prelude::{DataFrame, Expr, SortMultipleOptions, col};
+use persistence::schema::Table;
+use polars::prelude::{DataFrame, Expr, LazyFrame, SchemaRef, SortMultipleOptions, col};
 
-pub use machine::{CpuRow, InterfaceRow, MachineMinute, MemoryRow, TickRow, read_machine};
+pub use machine::{
+    CoreStateRow, CpuRow, FanRow, GpuStateRow, InterfaceRow, MachineMinute, MemoryRow, TickRow,
+    read_machine,
+};
 
 /// A sealed minute whose marker and files `open` verified.
 pub struct SealedMinute {
@@ -45,10 +49,10 @@ impl SealedMinute {
         })
     }
 
-    /// The `columns` of table `table`, rows in the order of the columns `order` names, once the
-    /// marker still links the minute `open` verified. A sealed minute's files never change, so
-    /// the marker standing shows them unchanged without verifying them again.
-    fn collect(&self, table: &str, columns: &[&str], order: &[&str]) -> Result<DataFrame, Refused> {
+    /// Table `table`, once the marker still links the minute `open` verified. A sealed minute's
+    /// files never change, so the marker standing shows them unchanged without verifying them
+    /// again.
+    fn table(&self, table: Table) -> Result<SealedTable, Refused> {
         let committed =
             persistence::reread_committed(&self.root, &self.marker).map_err(Refused::Commitment)?;
         if committed != self.manifest {
@@ -61,7 +65,40 @@ impl SealedMinute {
         let path = self
             .root
             .join(&self.manifest.data_directory)
-            .join(format!("{table}.parquet"));
+            .join(format!("{}.parquet", table.name()));
+        let mut plan = persistence::engine::scan(&path)?;
+        let schema = plan.collect_schema().map_err(persistence::Error::from)?;
+        Ok(SealedTable { plan, schema })
+    }
+}
+
+/// One table of a sealed minute, through admission, and the columns its file holds.
+struct SealedTable {
+    plan: LazyFrame,
+    schema: SchemaRef,
+}
+
+impl SealedTable {
+    /// Whether the table holds the optional columns `group`, which a minute holds whole or
+    /// not at all.
+    fn holds(&self, group: &[&str]) -> Result<bool, Refused> {
+        let held = group
+            .iter()
+            .filter(|name| self.schema.contains(name))
+            .count();
+        if held == 0 {
+            return Ok(false);
+        }
+
+        if held < group.len() {
+            return Err(persistence::Error::Bound("incomplete column group").into());
+        }
+
+        Ok(true)
+    }
+
+    /// The `columns`, rows in the order of the columns `order` names.
+    fn collect(self, columns: &[&str], order: &[&str]) -> Result<DataFrame, Refused> {
         let columns: Vec<Expr> = columns.iter().map(|name| col(*name)).collect();
         let sort = SortMultipleOptions {
             descending: vec![false; order.len()],
@@ -70,10 +107,7 @@ impl SealedMinute {
             maintain_order: true,
             limit: None,
         };
-        let plan = persistence::engine::scan(&path)
-            .map_err(Refused::Decode)?
-            .select(columns)
-            .sort(order.iter().copied(), sort);
+        let plan = self.plan.select(columns).sort(order.iter().copied(), sort);
         plan.collect()
             .map_err(|error| Refused::Decode(persistence::Error::from(error)))
     }
