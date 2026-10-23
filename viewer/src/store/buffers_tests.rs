@@ -85,6 +85,21 @@ fn a_view_released_frees_its_buffers() {
     assert_eq!(held(&span), [3, 4]);
 }
 
+#[test]
+fn a_released_buffer_keeps_nothing_it_held() {
+    // Goal: a View waiting to be written again pins no reading the span let go of. Method:
+    // write a buffer that holds a reading, let go of it, release the buffers, and count who
+    // holds the reading.
+    let reading = Arc::new(7_u64);
+    let mut buffers = Buffers::new(1, Vec::new);
+    let written = buffers.write(|held: &mut Vec<Arc<u64>>| held.push(Arc::clone(&reading)));
+    drop(written);
+
+    buffers.release(Vec::clear);
+
+    assert_eq!(Arc::strong_count(&reading), 1);
+}
+
 mod when_every_buffer_is_held {
     use super::{held, push, span, view};
 

@@ -14,7 +14,7 @@ mod tests;
 
 /// One second of the machine's readings. A value the collector did not read, or a rate whose
 /// interval the readings do not show, is `None` and never zero.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct MachineSecond {
     pub publication: u64,
     pub run_tick: u64,

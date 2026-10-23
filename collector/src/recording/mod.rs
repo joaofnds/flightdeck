@@ -7,7 +7,7 @@ pub mod private;
 mod registry;
 
 pub use holder::{Holder, holder};
-pub use registry::{RegisteredRun, Registry};
+pub use registry::{RegisteredRun, Registry, RegistryBuffer};
 
 /// The fingerprint of the code this collector is built from.
 pub const BUILD: u64 = include!(concat!(env!("OUT_DIR"), "/build"));

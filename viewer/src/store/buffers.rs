@@ -49,6 +49,16 @@ impl<T> Buffers<T> {
         None
     }
 
+    /// Clears with `clear` each buffer that nothing else holds, so a buffer waiting to be
+    /// written again keeps nothing it held alive.
+    pub fn release(&mut self, mut clear: impl FnMut(&mut T)) {
+        for buffer in &mut self.all {
+            if let Some(buffer) = Arc::get_mut(buffer) {
+                clear(buffer);
+            }
+        }
+    }
+
     /// How many buffers nothing but these buffers holds.
     #[must_use]
     pub fn free(&self) -> usize {
