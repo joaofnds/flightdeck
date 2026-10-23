@@ -258,13 +258,8 @@ fn native_cancellation_wait_for_installation(interrupt: &super::InterruptHandle)
     // Native work may start before collect installs its handle. Observe, never mutate it.
     let started = Instant::now();
     while started.elapsed() < Duration::from_secs(1) {
-        match interrupt.query.lock() {
-            Ok(query) => {
-                if query.is_some() {
-                    return;
-                }
-            }
-            Err(_) => return,
+        if interrupt.running().unwrap() {
+            return;
         }
         std::thread::yield_now();
     }

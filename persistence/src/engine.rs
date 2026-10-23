@@ -161,6 +161,17 @@ impl Default for Engine {
 }
 
 impl InterruptHandle {
+    /// Whether the engine runs a query that `interrupt` stops. Polars may start a query's
+    /// work before the engine holds the query, and an interrupt in that gap stops nothing.
+    pub fn running(&self) -> Result<bool> {
+        let query = self
+            .query
+            .lock()
+            .map_err(|_| Error::Bound("query interruption poisoned"))?;
+
+        Ok(query.is_some())
+    }
+
     pub fn interrupt(&self) -> Result<()> {
         let query = self
             .query

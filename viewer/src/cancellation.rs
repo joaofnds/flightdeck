@@ -175,7 +175,7 @@ mod tests {
     use super::Cancellation;
     use polars::prelude::{DataFrame, LazyFrame};
     use std::sync::{Arc, mpsc};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn one_cancellation_survives_native_query_startup() {
@@ -287,8 +287,9 @@ mod tests {
             }
             let mut native = false;
             let permitted = std::sync::Mutex::new(permitted);
+            let interrupt = connection.interrupt_handle();
             let plan = interruptible_plan(move || {
-                started.send(()).unwrap();
+                started.send(Arc::clone(&interrupt)).unwrap();
                 let permitted = permitted.lock().unwrap();
                 permitted.recv_timeout(Duration::from_secs(5)).unwrap();
             });
@@ -300,7 +301,8 @@ mod tests {
 
             finished.send((superseded(&outcome), native)).unwrap();
         });
-        ready.recv_timeout(Duration::from_secs(5)).unwrap();
+        let interrupt = ready.recv_timeout(Duration::from_secs(5)).unwrap();
+        cancel_inside_native_query_wait_for_installation(&interrupt);
 
         cancellation.cancel().unwrap();
         proceed.send(()).unwrap();
@@ -309,6 +311,20 @@ mod tests {
         worker.join().unwrap();
 
         outcome
+    }
+
+    fn cancel_inside_native_query_wait_for_installation(
+        interrupt: &persistence::engine::InterruptHandle,
+    ) {
+        // Polars starts the gated work before the engine holds the query, and a cancel in that
+        // gap reaches the query only if it is still running once the engine holds it.
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(1) {
+            if interrupt.running().unwrap() {
+                return;
+            }
+            std::thread::yield_now();
+        }
     }
 
     fn superseded(outcome: &persistence::Result<()>) -> bool {
