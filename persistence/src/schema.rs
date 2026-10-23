@@ -2,6 +2,8 @@
 //! Event kinds: start=1, exec=2, exit=3. Exit observation: on-exit=0, already-exited=1.
 //! Availability: measured=0, refused=1, gone=2, not-applicable=3.
 //! Memory pressure: normal=0, warning=1, critical=2. These stored codes are versioned.
+use model::catalog::Kind;
+
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// Optional tick columns retain raw battery units without changing schema-1 tables or seals.
@@ -258,3 +260,76 @@ pub const TABLES: [(Table, &str, &str); 10] = [
         "pid, awake_ns_at_start, event",
     ),
 ];
+
+/// The name the recording's SQL gives the storage of `kind`.
+#[must_use]
+pub const fn storage_name(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Bool => "BOOLEAN",
+        Kind::U8 => "UTINYINT",
+        Kind::U16 => "USMALLINT",
+        Kind::U32 => "UINTEGER",
+        Kind::U64 => "UBIGINT",
+        Kind::I32 => "INTEGER",
+        Kind::I64 => "BIGINT",
+        Kind::F32 => "FLOAT",
+        Kind::F64 => "DOUBLE",
+        Kind::Text => "VARCHAR",
+        Kind::Bytes => "BLOB",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use model::catalog::{self, Column};
+
+    use super::*;
+
+    #[test]
+    fn the_catalog_declares_each_table_as_the_schema_does() {
+        // Goal: the catalog names every table, key, column and kind the schema declares.
+        // Method: compare each catalog table with the schema's definition of the same table.
+        for (declared, (table, definition, order)) in catalog::TABLES.iter().zip(TABLES) {
+            let expected: Vec<(&str, &str)> = definition
+                .split(',')
+                .map(|column| column.trim().split_once(' ').unwrap())
+                .collect();
+
+            assert_eq!(declared.name, table.name());
+            assert_eq!(declared.key.join(", "), order);
+            assert_eq!(fields(declared.columns), expected);
+        }
+    }
+
+    #[test]
+    fn the_catalog_declares_each_group_as_the_schema_does() {
+        // Goal: the catalog's groups hold the columns and kinds of the schema's extensions.
+        // Method: compare each group with the schema's fields of the same extension.
+        let groups: [(&[Column], Fields); 7] = [
+            (&catalog::BATTERY, &BATTERY_FIELDS),
+            (&[catalog::PHYSICAL_DISKS], &[("physical_disks", "VARCHAR")]),
+            (&catalog::TEMPERATURES, &TEMPERATURE_FIELDS),
+            (&catalog::SYSTEM, &SYSTEM_FIELDS),
+            (&catalog::IDENTITY, &IDENTITY_FIELDS),
+            (
+                &[catalog::CORE_STATE_FREQUENCY],
+                &[CORE_STATE_FREQUENCY_FIELD],
+            ),
+            (&[catalog::PROCESS_GPU], &[PROCESS_GPU_FIELD]),
+        ];
+
+        for (group, expected) in groups {
+            assert_eq!(fields(group), expected);
+        }
+    }
+
+    /// A schema's columns, each named with the name of its storage.
+    type Fields = &'static [(&'static str, &'static str)];
+
+    fn fields(columns: &[Column]) -> Vec<(&'static str, &'static str)> {
+        columns
+            .iter()
+            .map(|column| (column.name, storage_name(column.kind)))
+            .collect()
+    }
+}

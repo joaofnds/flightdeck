@@ -1,6 +1,7 @@
 //! The recording's model: the App rule over typed columns of one tick and the tick before it,
 //! which the store, the persister and a jump share, so each derives a second's Apps the same way.
 pub mod apps;
+pub mod catalog;
 pub mod columns;
 pub mod programs;
 pub mod ranks;
