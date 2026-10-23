@@ -115,7 +115,8 @@ fn a_missing_ring_with_a_live_pid_stays_unknown_until_its_fixed_deadline() {
 #[test]
 fn a_completed_shared_collector_offers_recovery_without_taking_ownership() {
     // Goal: a shared producer stopping after attachment exposes an explicit recovery action.
-    // Method: complete its real registered ring after two advancing observations.
+    // Method: complete its real registered ring after two advancing observations, and tick
+    // once more a health interval later, since an attached app reads health once a second.
     let mut recording = Recording::new();
     let mut session = recording.session(Mode::Auto);
     recording.publish();
@@ -123,6 +124,11 @@ fn a_completed_shared_collector_offers_recovery_without_taking_ownership() {
     recording.publish();
     session.tick();
     recording.writer.as_mut().unwrap().finish();
+    session.0.started = session
+        .0
+        .started
+        .checked_sub(policy::ATTACHED_HEALTH_INTERVAL)
+        .unwrap();
 
     session.tick();
 

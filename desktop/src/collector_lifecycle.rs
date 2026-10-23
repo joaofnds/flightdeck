@@ -78,6 +78,11 @@ impl CollectorSession {
         if let Err(error) = self.poll_child() {
             self.failed(&format!("Collector observation failed: {error}"));
         }
+        let now = self.0.started.elapsed();
+        if !self.0.policy.health_due(now) {
+            return;
+        }
+
         let source = match self.source_if_needed() {
             Ok(source) => source,
             Err(error) => {
@@ -85,7 +90,7 @@ impl CollectorSession {
                 Source::default()
             }
         };
-        let action = self.0.policy.step(self.0.started.elapsed(), &source);
+        let action = self.0.policy.step(now, &source);
         if let Err(error) = self.act(action) {
             self.failed(&format!("Collector operation failed: {error}"));
         }

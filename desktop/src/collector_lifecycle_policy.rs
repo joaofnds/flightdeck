@@ -4,6 +4,10 @@ pub(super) const DISCOVERY_LIMIT: Duration = Duration::from_secs(20);
 pub(super) const STARTUP_LIMIT: Duration = Duration::from_secs(20);
 pub(super) const SHUTDOWN_LIMIT: Duration = Duration::from_secs(125);
 pub(super) const KILL_LIMIT: Duration = Duration::from_secs(2);
+/// A little under the shared collector's second, so the tick a second after the last read takes
+/// the next one whatever the timer's jitter, and the tick before it does not.
+pub(super) const ATTACHED_HEALTH_INTERVAL: Duration = Duration::from_millis(900);
+const _: () = assert!(ATTACHED_HEALTH_INTERVAL.as_millis() < DISCOVERY_LIMIT.as_millis());
 /// How long a collector still finishing may keep the recording, which its own deadline bounds.
 pub(super) const FINISHING_LIMIT: Duration =
     Duration::from_secs(1).saturating_mul(collector::recording::STOP_LIMIT_SECONDS);
@@ -112,6 +116,9 @@ pub(super) struct Policy {
     stopping: bool,
     /// When discovery first found a collector still finishing.
     finishing_since: Option<Duration>,
+    /// When the policy last took a step, which an attached collection's next health read
+    /// waits from.
+    stepped: Option<Duration>,
 }
 
 impl Policy {
@@ -129,10 +136,12 @@ impl Policy {
             previous: None,
             stopping: false,
             finishing_since: None,
+            stepped: None,
         }
     }
 
     pub fn step(&mut self, now: Duration, source: &Source) -> Action {
+        self.stepped = Some(now);
         match self.state {
             State::Discovering => self.discover(now, source),
             State::Starting => self.starting(now, source),
@@ -395,6 +404,18 @@ impl Policy {
         }
 
         self.mode != Mode::Attach
+    }
+
+    /// Whether the tick at `now` reads the collector's health. An attached collection reads it
+    /// once a second, since the shared collector publishes once a second and the app ticks four
+    /// times.
+    pub fn health_due(&self, now: Duration) -> bool {
+        if self.state != State::Attached {
+            return true;
+        }
+
+        self.stepped
+            .is_none_or(|stepped| now.saturating_sub(stepped) >= ATTACHED_HEALTH_INTERVAL)
     }
 
     pub fn observed_publication(&self) -> Option<u64> {

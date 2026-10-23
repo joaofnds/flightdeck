@@ -32,6 +32,32 @@ fn advancing_existing_collector_is_attached_without_spawning() {
 }
 
 #[test]
+fn an_attached_collection_reads_health_a_second_after_its_last_step() {
+    // Goal: following a shared collector reads its health once for each of its publications,
+    // where the app ticks four times a second.
+    // Method: attach at one second, then ask whether a read is due a tick and a second later.
+    let mut policy = Policy::new(Mode::Auto);
+    policy.step(Duration::ZERO, &existing(1));
+    policy.step(Duration::from_secs(1), &existing(2));
+
+    let after_a_tick = policy.health_due(Duration::from_millis(1250));
+    let after_a_second = policy.health_due(Duration::from_secs(2));
+
+    assert!(!after_a_tick);
+    assert!(after_a_second);
+}
+
+#[test]
+fn a_discovering_collection_reads_health_at_every_tick() {
+    // Goal: looking for a collector notices one within a tick of its first publication.
+    // Method: step once without attaching, then ask whether a read is due a tick later.
+    let mut policy = Policy::new(Mode::Auto);
+    policy.step(Duration::ZERO, &existing(1));
+
+    assert!(policy.health_due(Duration::from_millis(250)));
+}
+
+#[test]
 fn a_live_stalled_pid_fails_without_a_competing_spawn() {
     // Goal: a deadline cannot launch a second collector while its discovered owner lives.
     // Method: hold its publication fixed through the exact discovery deadline.
