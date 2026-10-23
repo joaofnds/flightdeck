@@ -194,7 +194,7 @@ impl LiveDashboard {
     /// The store's newest View, while the page shows the live Mac's Overview following the
     /// newest second and the View is no older than the worker's readings, or the page is opening
     /// before the worker's first reading, whatever hover is shown.
-    fn followed_store_view(&self) -> Option<&View> {
+    pub(super) fn followed_store_view(&self) -> Option<&View> {
         if self.request.route != "overview" {
             return None;
         }
@@ -311,7 +311,7 @@ impl LiveDashboard {
     /// The newest second of the View the page draws, where it draws one, which the range ends
     /// at since the worker's readings may not hold it yet. Under a hover, the newest second of
     /// the View the charts were drawn from.
-    pub(super) fn store_view_last_second(&self) -> Option<u64> {
+    pub(crate) fn store_view_last_second(&self) -> Option<u64> {
         let view = self.drawn_store_view()?;
         if self.store_view_hover_shown() {
             return self.store_panels.seconds.last().copied();

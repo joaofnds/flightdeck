@@ -8,8 +8,13 @@ const PLOT: &str = "live-energy-plot";
 
 impl InputDriver {
     fn drag_plot(&mut self, from: f32, to: f32) {
-        let start = self.second_position(PLOT, from);
-        let end = self.second_position(PLOT, to);
+        self.drag_across(PLOT, from, to);
+    }
+
+    /// Drags across the plot `selector` from the fraction `from` of its width to `to`.
+    pub(super) fn drag_across(&mut self, selector: &'static str, from: f32, to: f32) {
+        let start = self.second_position(selector, from);
+        let end = self.second_position(selector, to);
         self.context
             .simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
         self.context

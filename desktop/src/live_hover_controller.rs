@@ -170,6 +170,7 @@ impl LiveDashboard {
 
     pub(crate) fn preview_tick(&mut self, cx: &mut Context<Self>) {
         let selection_reading = self.selection_reading();
+        let reader_rested = self.reader_rested();
         let Some(preview) = &mut self.preview else {
             return;
         };
@@ -205,6 +206,15 @@ impl LiveDashboard {
         // A hover's read would cancel the page's read of its selection, whose reply shows the
         // hovered second again from what it brings.
         if selection_reading {
+            return;
+        }
+
+        // A rested reader would read the hovered second as a newly opened page, so the hover
+        // asks for the page first and waits for it.
+        if reader_rested {
+            if !self.reply_pending {
+                self.request_reading();
+            }
             return;
         }
 
@@ -326,6 +336,10 @@ impl LiveDashboard {
             if committed.histories_pending {
                 return true;
             }
+        }
+        // The hover asked the rested reader for the page before its own read.
+        if self.reader_rested() {
+            return true;
         }
 
         self.selection_reading()

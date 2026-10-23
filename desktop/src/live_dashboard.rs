@@ -102,7 +102,7 @@ pub struct LiveDashboard {
     pub panels: Vec<Rc<Panel>>,
     pub generation: u64,
     /// The worker has not yet answered the last request, so the app polls it quickly.
-    reply_pending: bool,
+    pub(crate) reply_pending: bool,
     presence: Presence,
     pub error: Option<String>,
     pub rows: Vec<Row>,
@@ -164,7 +164,8 @@ pub struct LiveDashboard {
 }
 
 /// Whether macOS presents the window, and whether its reader has caught up with that, since the
-/// reader rests while the window is hidden and reads no page nobody sees.
+/// reader rests while the window is hidden and reads no page nobody sees, and while the page
+/// draws Overview from the store's View, which brings each second it shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Presence {
     /// Not yet shown, and the reader reads the page until it answers. macOS reports a new window
@@ -178,6 +179,9 @@ enum Presence {
     Hidden,
     /// Shown again, and the reader rests until the next tick asks it for the page.
     Showing,
+    /// Shown, and the reader rests while the page draws Overview from the store's View, until
+    /// a reply to the page's next request arrives.
+    Rested,
 }
 
 impl Presence {
@@ -187,11 +191,11 @@ impl Presence {
             match self {
                 Presence::Opening | Presence::Hiding => Presence::Shown,
                 Presence::Hidden => Presence::Showing,
-                Presence::Shown | Presence::Showing => self,
+                Presence::Shown | Presence::Showing | Presence::Rested => self,
             }
         } else {
             match self {
-                Presence::Shown => Presence::Hiding,
+                Presence::Shown | Presence::Rested => Presence::Hiding,
                 Presence::Showing => Presence::Hidden,
                 Presence::Opening | Presence::Hiding | Presence::Hidden => self,
             }
@@ -396,6 +400,7 @@ impl LiveDashboard {
                     cx.notify();
                 }
             }
+            self.tick_rest();
         }
         let status = self.status();
         if self.last_status != status {
@@ -447,7 +452,7 @@ impl LiveDashboard {
                 self.tick_shown();
                 self.presence = Presence::Shown;
             }
-            Presence::Opening | Presence::Shown | Presence::Hidden => {}
+            Presence::Opening | Presence::Shown | Presence::Hidden | Presence::Rested => {}
         }
     }
 
@@ -463,6 +468,47 @@ impl LiveDashboard {
             Ok(None) => {}
             Err(error) => self.error = Some(error),
         }
+    }
+
+    /// Rests the reader while the page draws Overview from the store's View, which brings each
+    /// second the page shows.
+    fn tick_rest(&mut self) {
+        // Each rest cancels what the resting reader does, and a hidden window's reader rests.
+        if self.presence != Presence::Shown {
+            return;
+        }
+        // Resting would drop the read the page waits on, its first readings among them.
+        if self.reply_pending {
+            return;
+        }
+        // A hover may wait on a read of a second the View does not hold.
+        if self.preview.is_some() {
+            return;
+        }
+        // The App histories the page's first readings left pending come in the reader's next
+        // read, which a resting reader drops.
+        if let Some(snapshot) = &self.snapshot {
+            if snapshot.histories_pending {
+                return;
+            }
+        }
+        if self.followed_store_view().is_none() {
+            return;
+        }
+
+        match self.worker.hand_over() {
+            Ok(Some(resting)) => {
+                self.worker = resting;
+                self.presence = Presence::Rested;
+            }
+            Ok(None) => {}
+            Err(error) => self.error = Some(error),
+        }
+    }
+
+    /// Whether the page rested its reader while it draws Overview from the store's View.
+    pub(crate) fn reader_rested(&self) -> bool {
+        self.presence == Presence::Rested
     }
 
     /// Asks the rested reader for the page again, which it reads as newly opened, readings
@@ -504,6 +550,9 @@ impl LiveDashboard {
                 self.clear_presentation();
                 self.error = Some(message);
             }
+        }
+        if self.presence == Presence::Rested {
+            self.presence = Presence::Shown;
         }
 
         true
@@ -895,21 +944,19 @@ impl LiveDashboard {
         }
     }
 
-    /// Asks for the second now shown, so the view stops following without blanking.
+    /// Asks for the second now shown, as Pause does, so the view stops following without
+    /// blanking.
     fn hold_second(&mut self) {
         if self.request.second.is_some() {
             return;
         }
-        let Some(snapshot) = self.snapshot.as_deref() else {
+        let (second, identity) = self.pause_target();
+        if second.is_none() {
             return;
-        };
-        let identity = snapshot.selection["selected"].clone();
-        self.request.second = snapshot.selection["second"].as_u64();
-        self.request.identity = if identity.is_null() {
-            None
-        } else {
-            Some(identity)
-        };
+        }
+
+        self.request.second = second;
+        self.request.identity = identity;
         self.request_reading();
     }
 

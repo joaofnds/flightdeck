@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use gpui::TestAppContext;
+use gpui::{Modifiers, MouseButton, TestAppContext};
 use viewer::store::{AppsSecond, MachineSecond, View};
 
 use super::super::LiveDashboard;
@@ -197,6 +197,60 @@ fn a_hover_that_ends_shows_the_newer_view(cx: &mut TestAppContext) {
     harness.teardown();
 }
 
+#[gpui::test]
+fn an_arrow_step_steps_from_the_newest_second_the_view_holds(cx: &mut TestAppContext) {
+    // Goal: an arrow step on Overview drawn from the store's View steps from the newest second
+    // the page shows, which the worker has not read, since a rested reader reads no more
+    // seconds. Method: the worker's readings end at 10,000 and the View's at 10,005, then a left
+    // step on the focused CPU chart.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_held_view(&stepped_seconds());
+    harness.driver.focus_cpu_chart();
+
+    harness.driver.press("left");
+
+    assert_eq!(harness.driver.cpu_shown_second(), Some(10_004));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn an_arrow_step_to_a_second_only_the_view_holds_reads_the_chart_by_app_there(
+    cx: &mut TestAppContext,
+) {
+    // Goal: an arrow step to a second only the store's View holds names the tick the View holds
+    // of it, so the chart of resident memory by App reads that second, as it reads a hover's.
+    // Method: a left step from the View's newest second, 10,005, to 10,004, and Overview
+    // following a View that ends at 10,004 reads the chart as the step should.
+    let seconds = stepped_seconds();
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_held_view(&seconds);
+    harness.driver.focus_cpu_chart();
+
+    harness.driver.press("left");
+
+    let expected = reading_following(RESIDENT, &seconds[..3]);
+    assert_eq!(
+        harness.driver.chart_accessibility_reading(RESIDENT),
+        expected
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_drag_on_overview_drawn_from_the_view_holds_its_newest_second(cx: &mut TestAppContext) {
+    // Goal: a drag across a chart of Overview drawn from the store's View holds the page at the
+    // newest second it shows, which the worker has not read, so the stretch stays where it was
+    // drawn. Method: the worker's readings end at 10,000 and the View's at 10,005, a drag across
+    // the middle half of the CPU chart, then the second the page asks the reader for.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_held_view(&held_seconds());
+
+    harness.driver.drag_across("live-cpu-plot", 0.25, 0.75);
+
+    assert_eq!(harness.driver.requested_second(), Some(10_005));
+    harness.teardown();
+}
+
 /// The last minute of the clock, ending at `last`.
 fn minute_ending_at(last: u64) -> TimeWindow {
     TimeWindow {
@@ -215,6 +269,17 @@ fn held_seconds() -> [MachineSecond; 4] {
         reading_at(9_999, 0),
         reading_at(10_000, 0),
         reading_at(10_003, 0),
+        reading_at(10_005, 0),
+    ]
+}
+
+/// The seconds 9,999, 10,000, 10,004 and 10,005, which the View holds and of which the worker
+/// has read the first two, so a step from the newest lands on a second only the View holds.
+fn stepped_seconds() -> [MachineSecond; 4] {
+    [
+        reading_at(9_999, 0),
+        reading_at(10_000, 0),
+        reading_at(10_004, 0),
         reading_at(10_005, 0),
     ]
 }
@@ -304,6 +369,20 @@ impl InputDriver {
             }
         });
         self.context.run_until_parked();
+    }
+
+    /// Focuses the CPU chart for arrow steps, with a right press, which selects no second.
+    fn focus_cpu_chart(&mut self) {
+        let bounds = self.context.debug_bounds("live-cpu-plot").unwrap();
+        self.context
+            .simulate_mouse_down(bounds.center(), MouseButton::Right, Modifiers::none());
+        self.context
+            .simulate_mouse_up(bounds.center(), MouseButton::Right, Modifiers::none());
+    }
+
+    /// The second the CPU chart shows, as macOS's accessibility reads it.
+    fn cpu_shown_second(&self) -> Option<u64> {
+        self.chart_accessibility_reading("live-cpu").0
     }
 
     /// Moves the pointer off the CPU chart, which ends its hover.

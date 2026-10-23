@@ -469,13 +469,19 @@ impl LiveDashboard {
                 return;
             };
 
-            let target = match self.store_view_target(second) {
-                Some(target) => target,
-                None => crate::live_hover::Target::regular(snapshot, second),
-            };
+            let target = self.hover_target(snapshot, second);
             self.hover_reading_target(source.clone(), target, hovered_at, cx);
         } else {
             self.clear_reading_target(source, cx);
+        }
+    }
+
+    /// The target of a hover of `second`: the tick the store's View holds of it where the page
+    /// draws from the View, and otherwise the worker's.
+    fn hover_target(&self, snapshot: &Snapshot, second: u64) -> crate::live_hover::Target {
+        match self.store_view_target(second) {
+            Some(target) => target,
+            None => crate::live_hover::Target::regular(snapshot, second),
         }
     }
 
@@ -626,9 +632,17 @@ impl LiveDashboard {
             return;
         };
 
+        // The page drawn from the store's View shows its newest second, which the worker's
+        // readings may not hold, and a rested reader reads no more of them.
+        let newest = self.store_view_last_second();
         let selection = KeyboardSelection {
             stepped: self.chart_stepped_second(),
-            accepted: self.request.second.or(context.selection["second"].as_u64()),
+            accepted: self
+                .request
+                .second
+                .or(newest)
+                .or(context.selection["second"].as_u64()),
+            newest,
         };
         let Some(next) = keyboard_second(&selection, delta, context) else {
             return;
@@ -637,7 +651,12 @@ impl LiveDashboard {
             return;
         }
 
-        match self.held_target(next) {
+        // The page drawn from the store's View shows a step as it shows the pointer's hover.
+        let target = match newest {
+            Some(_) => Some(self.hover_target(context, next)),
+            None => self.held_target(next),
+        };
+        match target {
             Some(target) => {
                 self.set_reading_target(CHART_STEP_SOURCE.into(), target, Origin::Keyboard, cx);
             }
@@ -996,6 +1015,8 @@ pub(crate) struct ChartHelp(pub(crate) String);
 struct KeyboardSelection {
     stepped: Option<u64>,
     accepted: Option<u64>,
+    /// The newest second of the store's View the page draws, past the worker's last reading.
+    newest: Option<u64>,
 }
 
 /// The second a step of `delta` shows from the one shown, held to the recording's edges.
@@ -1006,7 +1027,7 @@ fn keyboard_second(keys: &KeyboardSelection, delta: i64, snapshot: &Snapshot) ->
     if let Some(first) = catalog["first_second"].as_u64() {
         next = next.max(first);
     }
-    if let Some(last) = catalog["last_second"].as_u64() {
+    if let Some(last) = keys.newest.or(catalog["last_second"].as_u64()) {
         next = next.min(last);
     }
     Some(next)
@@ -1428,6 +1449,7 @@ mod tests {
         let mut selection = KeyboardSelection {
             stepped: None,
             accepted: Some(1000),
+            newest: None,
         };
         selection.stepped = keyboard_second(&selection, 1, &snapshot);
         assert_eq!(keyboard_second(&selection, 1, &snapshot), Some(1002));
