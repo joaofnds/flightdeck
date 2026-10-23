@@ -169,17 +169,23 @@ impl LiveDashboard {
     }
 
     fn chart_inspection_index(&self, panel: &Panel) -> Option<usize> {
-        self.snapshot
-            .as_deref()
-            .and_then(|snapshot| match self.reading_target() {
-                Some(target) => target_index(panel, snapshot, target),
-                None => inspection_index(panel, snapshot, None),
-            })
+        // Before the worker's first reading only the store's View draws a chart, at its newest
+        // second.
+        let Some(snapshot) = self.snapshot.as_deref() else {
+            return panel.selected_index;
+        };
+
+        match self.reading_target() {
+            Some(target) => target_index(panel, snapshot, target),
+            None => inspection_index(panel, snapshot, None),
+        }
     }
 
     fn chart_reading(&self, panel: &Panel, index: Option<usize>) -> String {
         if self.is_opening() {
-            return crate::live_dashboard::LOADING.into();
+            if !self.store_view_draws(panel) {
+                return crate::live_dashboard::LOADING.into();
+            }
         }
         if let Some(history) = self.chart_process_groups(panel) {
             return format!("{} captured named groups", history.named_group_count);
@@ -220,6 +226,9 @@ impl LiveDashboard {
         }
 
         if panel.id == "live-memory-pressure" {
+            if let Some(summary) = self.store_view_summary() {
+                return crate::live_views::pressure(&summary["pressure"]).to_owned();
+            }
             let selection = self
                 .reading_snapshot()
                 .map_or(&Value::Null, |snapshot| &snapshot.selection);
@@ -232,7 +241,9 @@ impl LiveDashboard {
 
     fn chart_line_reading(&self, panel: &Panel, line: usize, index: Option<usize>) -> String {
         if self.is_opening() {
-            return crate::live_dashboard::LOADING.into();
+            if !self.store_view_draws(panel) {
+                return crate::live_dashboard::LOADING.into();
+            }
         }
         if let Some(history) = self.chart_process_groups(panel) {
             return crate::live_process_history::groups::reading(history, &panel.id, line, index);
@@ -529,9 +540,7 @@ impl LiveDashboard {
     }
 
     pub(crate) fn chart_accessibility_reading(&self, panel: &Panel) -> (Option<u64>, String) {
-        let second = self
-            .reading_snapshot()
-            .and_then(|snapshot| snapshot.selection["second"].as_u64());
+        let second = self.shown_second();
         let mut reading = format!(
             "{}; {}",
             second.map_or_else(

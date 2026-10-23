@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::{Duration, UNIX_EPOCH};
 
 use collector::machine::Pressure;
 use serde_json::json;
@@ -69,15 +70,46 @@ fn a_view_newer_than_the_readings_fills_the_hardware_figure() {
 
     dashboard.take_view(Arc::new(view));
 
-    let expected = Readings {
-        temperatures: [Some(61.5), Some(52.25), None],
-        speeds: [Some(1_200.0), Some(1_500.0)],
-        utilization: [Some(25.0), Some(12.5)],
-        memory: [Some(12.0), Some(32.0)],
-        battery: [Some(75.0), Some(-6.5)],
-        thermal: "Moderate".into(),
-    };
-    assert_eq!(dashboard.live_hardware_readings(), (expected, [None, None]));
+    assert_eq!(
+        dashboard.live_hardware_readings(),
+        (figure_readings(), [None, None])
+    );
+}
+
+#[test]
+fn a_view_newer_than_the_readings_reads_each_chart_at_its_newest_second() {
+    // Goal: a chart drawn from the View names the View's newest second and reads its value
+    // there, as the worker's reading of the same seconds would. Method: readings that end at
+    // 10,000, then a View that ends at 10,005, whose CPU and memory pressure charts read as a
+    // page showing the worker's reading of 10,005 reads them.
+    let mut dashboard = dashboard(&[reading_at(9_999, 0), reading_at(10_000, 0)]);
+
+    dashboard.take_view(newer_view());
+
+    let worker = read_by_the_worker(&newer_seconds());
+    assert_eq!(
+        chart_reading(&dashboard, "live-cpu"),
+        chart_reading(&worker, "live-cpu")
+    );
+    assert_eq!(
+        chart_reading(&dashboard, "live-memory-pressure"),
+        chart_reading(&worker, "live-memory-pressure")
+    );
+}
+
+#[test]
+fn the_status_judges_the_views_newest_second() {
+    // Goal: the page reads live while the View it draws keeps up with the clock, though the
+    // worker's newest reading is older. Method: readings that end at 10,000, a View that ends
+    // at 10,005, and the clock at 10,006.
+    let mut dashboard = dashboard(&[reading_at(9_999, 0), reading_at(10_000, 0)]);
+
+    dashboard.take_view(newer_view());
+
+    assert_eq!(
+        dashboard.status_at(UNIX_EPOCH + Duration::from_secs(10_006)),
+        "Live"
+    );
 }
 
 #[test]
@@ -116,6 +148,91 @@ fn a_reading_that_arrives_after_the_view_redraws_no_machine_chart() {
     assert_eq!(after.len(), before.len());
     for (after, before) in after.iter().zip(&before) {
         assert!(Rc::ptr_eq(after, before));
+    }
+}
+
+mod when_the_worker_has_not_read_the_page_yet {
+    use super::*;
+
+    #[test]
+    fn the_view_draws_the_overviews_machine_charts() {
+        // Goal: a window opened at launch draws Overview's machine charts from the store's View,
+        // which comes seconds before the worker's first reading. Method: a newly opened
+        // Overview the worker has not answered, then a View.
+        let mut dashboard = opening();
+        let view = newer_view();
+
+        let changed = dashboard.take_view(Arc::clone(&view));
+
+        assert!(changed);
+        for panel in overview_panels(&view, levels().as_ref()).unwrap() {
+            assert_eq!(drawn(&dashboard, &panel.id).lines, panel.lines);
+        }
+    }
+
+    #[test]
+    fn the_view_fills_the_overviews_readouts() {
+        // Goal: the readouts of a window opened at launch show the View's newest second rather
+        // than wait for the worker. Method: a newly opened Overview, then a View that ends at
+        // 10,005, whose readouts read as the worker's reading of 10,005 reads them.
+        let mut dashboard = opening();
+
+        dashboard.take_view(newer_view());
+
+        let expected = summary::cards("overview", &summary_selection(&reading_at(10_005, 0)));
+        assert_eq!(texts(&dashboard.summary_cards()), texts(&expected));
+    }
+
+    #[test]
+    fn the_view_fills_the_hardware_figure() {
+        // Goal: the hardware figure of a window opened at launch shows the View's newest
+        // second. Method: a newly opened Overview, then a View whose newest second holds the
+        // figure's readings.
+        let mut dashboard = opening();
+        let view = view(1, &[], &[reading_at(10_000, 0), figure_second(10_005)]);
+
+        dashboard.take_view(Arc::new(view));
+
+        assert_eq!(
+            dashboard.live_hardware_readings(),
+            (figure_readings(), [None, None])
+        );
+    }
+
+    #[test]
+    fn each_chart_reads_the_views_newest_second() {
+        // Goal: a chart drawn from the View at launch reads the View's newest second rather
+        // than wait for the worker. Method: a newly opened Overview, then a View that ends at
+        // 10,005, whose CPU and memory pressure charts read as a page showing the worker's
+        // reading of 10,005 reads them.
+        let mut dashboard = opening();
+
+        dashboard.take_view(newer_view());
+
+        let worker = read_by_the_worker(&newer_seconds());
+        assert_eq!(
+            chart_reading(&dashboard, "live-cpu"),
+            chart_reading(&worker, "live-cpu")
+        );
+        assert_eq!(
+            chart_reading(&dashboard, "live-memory-pressure"),
+            chart_reading(&worker, "live-memory-pressure")
+        );
+    }
+
+    #[test]
+    fn the_status_reads_live() {
+        // Goal: a window opened at launch reads live once the View draws it, rather than
+        // reporting no readings until the worker answers. Method: a newly opened Overview, a
+        // View that ends at 10,005, and the clock at 10,006.
+        let mut dashboard = opening();
+
+        dashboard.take_view(newer_view());
+
+        assert_eq!(
+            dashboard.status_at(UNIX_EPOCH + Duration::from_secs(10_006)),
+            "Live"
+        );
     }
 }
 
@@ -247,24 +364,58 @@ fn dashboard(trends: &[MachineSecond]) -> LiveDashboard {
 
 /// The page `route` showing the worker's readings of `trends`, following the newest second.
 fn dashboard_on(route: &str, trends: &[MachineSecond]) -> LiveDashboard {
-    let root = std::env::temp_dir().join(format!(
-        "flightdeck-missing-store-view-{}",
-        std::process::id()
-    ));
-    let mut dashboard = LiveDashboard::new(Worker::start(root).unwrap(), route.into(), None);
+    let mut dashboard = opening_on(route);
     dashboard.accept(readings(trends));
     assert!(dashboard.error.is_none());
     dashboard
 }
 
-/// The View of 9,999 to 10,005, five seconds newer than the worker's readings.
+/// An Overview newly opened, which the worker has not answered yet, as at launch.
+fn opening() -> LiveDashboard {
+    opening_on("overview")
+}
+
+/// The page `route` newly opened, which the worker has not answered yet.
+fn opening_on(route: &str) -> LiveDashboard {
+    let root = std::env::temp_dir().join(format!(
+        "flightdeck-missing-store-view-{}",
+        std::process::id()
+    ));
+    let dashboard = LiveDashboard::new(Worker::start(root).unwrap(), route.into(), None);
+    assert!(dashboard.is_opening());
+    dashboard
+}
+
+/// An Overview showing the worker's readings of `seconds`, with the summary of the newest, as
+/// the worker reads them.
+fn read_by_the_worker(seconds: &[MachineSecond]) -> LiveDashboard {
+    let mut snapshot = readings(seconds);
+    snapshot.selection["summary"] = trend_point(seconds.last().unwrap());
+
+    let mut dashboard = opening();
+    dashboard.accept(snapshot);
+    assert!(dashboard.error.is_none());
+    dashboard
+}
+
+/// What the chart `id` reads on the page, as macOS's accessibility reads it: its second and
+/// its reading there.
+fn chart_reading(dashboard: &LiveDashboard, id: &str) -> (Option<u64>, String) {
+    dashboard.chart_accessibility_reading(drawn(dashboard, id))
+}
+
+/// The View of `newer_seconds`.
 fn newer_view() -> Arc<View> {
-    let seconds = [
+    Arc::new(view(1, &[], &newer_seconds()))
+}
+
+/// The seconds 9,999, 10,000 and 10,005, five seconds newer than the worker's readings.
+fn newer_seconds() -> [MachineSecond; 3] {
+    [
         reading_at(9_999, 0),
         reading_at(10_000, 0),
         reading_at(10_005, 0),
-    ];
-    Arc::new(view(1, &[], &seconds))
+    ]
 }
 
 /// The worker's readings of `trends`, following the newest of them.
@@ -322,6 +473,18 @@ fn figure_second(wall_second: u64) -> MachineSecond {
         }),
         thermal_pressure: Some(1),
         ..reading_at(wall_second, 0)
+    }
+}
+
+/// The hardware figure's readings of `figure_second`.
+fn figure_readings() -> Readings {
+    Readings {
+        temperatures: [Some(61.5), Some(52.25), None],
+        speeds: [Some(1_200.0), Some(1_500.0)],
+        utilization: [Some(25.0), Some(12.5)],
+        memory: [Some(12.0), Some(32.0)],
+        battery: [Some(75.0), Some(-6.5)],
+        thermal: "Moderate".into(),
     }
 }
 

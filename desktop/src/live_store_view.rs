@@ -111,7 +111,8 @@ impl LiveDashboard {
 
     /// The View the page draws Overview's machine charts, readouts and hardware figure from: the
     /// store's newest, while the page shows Overview's readings following the newest second, no
-    /// hover's reading is shown, and the View is no older than the readings.
+    /// hover's reading is shown, and the View is no older than the worker's readings, where the
+    /// worker has read any.
     fn drawn_store_view(&self) -> Option<&View> {
         if self.request.route != "overview" {
             return None;
@@ -124,16 +125,40 @@ impl LiveDashboard {
             return None;
         }
 
-        let selection = &self.snapshot.as_ref()?.selection;
-        let readings_last = crate::live_projection::context_last_second(selection)?;
         let view = self.store_view.as_deref()?;
         let view_last = view.seconds.last()?.wall_ns / NANOSECONDS_PER_SECOND;
+        // At launch the worker's first reading comes seconds after the store's first View.
+        let Some(snapshot) = &self.snapshot else {
+            return Some(view);
+        };
+        let readings_last = crate::live_projection::context_last_second(&snapshot.selection)?;
         // A store that falls behind the worker draws nothing, so the charts never hold less
         // than the worker read.
         if view_last < readings_last {
             return None;
         }
         Some(view)
+    }
+
+    /// Whether `panel` is a chart the page drew from the store's View.
+    pub(crate) fn store_view_draws(&self, panel: &Panel) -> bool {
+        if self.drawn_store_view().is_none() {
+            return false;
+        }
+
+        let drawn = &self.store_panels.panels;
+        drawn.iter().any(|drawn| drawn.id == panel.id)
+    }
+
+    /// The second the page's readings show: the newest of the View the page draws, where it
+    /// draws one, and otherwise the second the worker's reading, or a hover's, selected.
+    pub(crate) fn shown_second(&self) -> Option<u64> {
+        if let Some(second) = self.store_view_last_second() {
+            return Some(second);
+        }
+
+        let snapshot = self.reading_snapshot()?;
+        snapshot.selection["second"].as_u64()
     }
 
     /// The newest second of the View the page draws, where it draws one, which the range ends

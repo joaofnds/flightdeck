@@ -959,6 +959,10 @@ impl LiveDashboard {
             return "System snapshot".into();
         }
         let Some(snapshot) = &self.snapshot else {
+            // At launch the store's View draws the page before the worker's first reading.
+            if let Some(newest) = self.store_view_last_second() {
+                return self.status_at_newest(newest, now);
+            }
             if self.error.is_some() {
                 return "Reading unavailable".into();
             }
@@ -983,9 +987,19 @@ impl LiveDashboard {
         if self.request.second.is_some() {
             return "Paused".into();
         }
-        let Some(newest) = snapshot.catalog["last_second"].as_u64() else {
+        // The store's View the page draws may hold seconds the worker has not read yet.
+        let newest = self
+            .store_view_last_second()
+            .or_else(|| snapshot.catalog["last_second"].as_u64());
+        let Some(newest) = newest else {
             return "No live readings".into();
         };
+
+        self.status_at_newest(newest, now)
+    }
+
+    /// Whether `newest`, the newest second the page shows, keeps up with the clock at `now`.
+    fn status_at_newest(&self, newest: u64, now: SystemTime) -> String {
         let judged = if self.preview.is_some() {
             self.received_at
         } else {

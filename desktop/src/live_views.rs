@@ -233,6 +233,10 @@ impl LiveDashboard {
 
     /// The summary cards of the page, as the screen shows them.
     pub(crate) fn summary_cards(&self) -> Vec<summary::Card> {
+        // At launch the store's View draws Overview before the worker's first reading.
+        if let Some(summary) = self.store_view_summary() {
+            return summary::cards_of_summary(&self.request.route, &summary);
+        }
         if !self.is_opening() {
             return self.summary_cards_read();
         }
@@ -251,9 +255,6 @@ impl LiveDashboard {
     fn summary_cards_read(&self) -> Vec<summary::Card> {
         if self.request.route == "apps" {
             return crate::live_app_views::app_cards(self.current_app());
-        }
-        if let Some(summary) = self.store_view_summary() {
-            return summary::cards_of_summary(&self.request.route, &summary);
         }
         let selection = self
             .reading_snapshot()
