@@ -1523,6 +1523,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "collector",
+ "model",
  "polars",
  "polars-arrow-format",
  "polars-parquet",

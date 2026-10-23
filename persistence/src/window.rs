@@ -30,6 +30,9 @@ pub struct NumberedEvent<'a> {
     pub event: &'a Event,
 }
 
+/// The live processes a tick holds at most, the most a ring's shape may hold.
+pub(crate) const PROCESSES_MAX: usize = 65_536;
+
 // A carried late deadline can join sixty scheduled observations in one elapsed minute.
 const WINDOW_TICKS_MAX: usize = 61;
 const _: () = assert!(WINDOW_TICKS_MAX == 60 + 1);
@@ -121,7 +124,16 @@ impl Limits {
             shape.coalition_capacity,
             shape.event_capacity,
         ];
-        let maxima = [256, 16_384, 256, 256, 256, 65_536, 131_072, 1_966_080];
+        let maxima = [
+            256,
+            16_384,
+            256,
+            256,
+            256,
+            collector::u64_from_usize(PROCESSES_MAX),
+            131_072,
+            1_966_080,
+        ];
         let mut counts = [0_usize; 8];
         for (index, value) in values.into_iter().enumerate() {
             if value > maxima[index] {

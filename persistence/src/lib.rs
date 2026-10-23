@@ -17,6 +17,7 @@ mod store;
 mod system;
 mod temperatures;
 mod window;
+pub mod window_ticks;
 pub mod worker;
 
 pub use owned_identity::IdentitySource;
