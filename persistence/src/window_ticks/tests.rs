@@ -81,6 +81,7 @@ fn pairs_the_first_tick_of_a_window_with_the_last_tick_read_before_it() {
     let read = read_with(&mut ticks, &mut programs, &second).unwrap();
 
     assert_eq!(read[0].previous_tick, 1);
+    assert_eq!(read[0].previous_publication, Some(2));
     assert_eq!(read[0].previous_user_ns, [31]);
 }
 
@@ -104,6 +105,7 @@ fn pairs_no_tick_with_the_first_after_a_refused_window() {
         error,
         crate::Error::Bound("window tick pid order")
     ));
+    assert_eq!(read[0].previous_publication, None);
     assert_eq!(read[0].previous_user_ns, [0_u64; 0]);
 }
 
@@ -184,6 +186,7 @@ fn reads_why_the_collector_read_no_program() {
     assert_eq!(read[0].program, [Err(ProgramUnavailable::Exhausted)]);
     assert_eq!(read[0].measurement, [Measurement::Gone]);
     assert_eq!(read[0].creation, [None]);
+    assert_eq!((read[0].usage_refused, read[0].usage_gone), (0, 1));
 }
 
 /// What a test reads of one tick and the tick before it.
@@ -197,7 +200,10 @@ struct Read {
     threads: Vec<Option<u64>>,
     exits: Vec<i32>,
     starts: Vec<Result<u32, ProgramUnavailable>>,
+    usage_refused: u32,
+    usage_gone: u32,
     previous_tick: u64,
+    previous_publication: Option<u64>,
     previous_user_ns: Vec<u64>,
 }
 
@@ -213,7 +219,12 @@ impl Read {
             threads: selected.processes.threads.to_vec(),
             exits: selected.exits.pid.to_vec(),
             starts: selected.starts.program.to_vec(),
+            usage_refused: tick.usage_refused,
+            usage_gone: tick.usage_gone,
             previous_tick: tick.previous.stamp.tick,
+            previous_publication: tick
+                .previous_observation
+                .map(|observation| observation.publication),
             previous_user_ns: tick.previous.processes.usage.user_ns.to_vec(),
         }
     }

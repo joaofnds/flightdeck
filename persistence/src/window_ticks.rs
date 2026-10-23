@@ -15,6 +15,11 @@ use crate::{Error, Observation, Result, Window};
 /// that numbers their programs.
 pub struct WindowTick<'ticks> {
     pub observation: Observation,
+    /// The observation of `previous`, none where no tick was read before this one.
+    pub previous_observation: Option<Observation>,
+    /// The live processes whose usage the collector was refused, and those that were gone.
+    pub usage_refused: u32,
+    pub usage_gone: u32,
     pub programs: &'ticks Programs,
     pub previous: Tick<'ticks>,
     pub selected: Tick<'ticks>,
@@ -25,6 +30,8 @@ pub struct WindowTick<'ticks> {
 pub struct WindowTicks {
     /// The tick before the one read last, then the one read last.
     pair: [TickColumns; 2],
+    /// The observation of each tick of `pair`, none where the columns hold no tick.
+    observations: [Option<Observation>; 2],
     /// The live processes of the tick being read, before they are put in pid order.
     processes: Vec<ProcessRow>,
     /// The entry in the run's index of each program of the window being read, none until a
@@ -41,6 +48,7 @@ impl Default for WindowTicks {
                 TickColumns::new(processes, events),
                 TickColumns::new(processes, events),
             ],
+            observations: [None; 2],
             processes: Vec::with_capacity(PROCESSES_MAX),
             entries: vec![None; owned_identity::PROGRAMS_MAX],
         }
@@ -70,6 +78,7 @@ impl WindowTicks {
         for columns in &mut self.pair {
             columns.clear();
         }
+        self.observations = [None; 2];
     }
 
     fn read_window(
@@ -99,9 +108,13 @@ impl WindowTicks {
             read_tick_events(tick, &mut index, columns)?;
             columns.finish();
             self.pair.swap(0, 1);
+            self.observations = [self.observations[1], Some(tick.observation)];
 
             consume(&WindowTick {
                 observation: tick.observation,
+                previous_observation: self.observations[0],
+                usage_refused: tick.processes_refused,
+                usage_gone: tick.processes_gone,
                 programs: index.programs,
                 previous: self.pair[0].tick(),
                 selected: self.pair[1].tick(),
