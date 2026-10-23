@@ -79,6 +79,11 @@ external.
 **Energy**: what the chip spent running a process, in joules. Energy per second is power,
 in watts.
 
+**Rate**: how fast a counter, such as a process's CPU time or the bytes it read from disk,
+grew between two ticks, its change divided by the time between them. An App's rates come
+only from two ticks in a row of one collector run, so the first tick after a missed tick
+or a restart has none.
+
 **Resource coalition**: the group macOS puts a process in together with related
 processes. macOS keeps CPU time, energy, disk bytes and GPU time per coalition, and a
 process's CPU time stays in those totals after it exits. A coalition and an App are

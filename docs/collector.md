@@ -167,6 +167,20 @@ written only once every table of it is synced to disk, so a reader never sees ha
 The persister checks its own memory every 100 ms against a limit, 2 GiB by default, and exits
 once it has passed it. That is a threshold it may overshoot, not a quota macOS enforces.
 
+The live window's store reads sealed minutes back one table at a time with Polars' Parquet
+reader, into typed rows and with no SQL, while the rest of the app reads the recording through
+Polars SQL. Each table must stay within the recording's admission bounds, and each process and
+event row must hold an identity and a usage as the persister writes them, so a damaged or
+oversized minute is refused with its reason, never read as zeros. The store takes a minute's
+Apps from its App parts where the minute keeps parts of the version this build writes. For a
+minute sealed before App parts existed, or with parts of an older version, the decoder derives
+the Apps from the minute's processes and events by the rule the seal uses, and over a real
+recording of 4,296 minutes on 2026-10-23 both gave the same Apps on all 675 minutes that keep
+current parts. The store does not call that derivation yet. An App's rates at a tick come from
+the tick just before it in the same run, as the glossary's rate says, so a minute's first tick
+takes them from the last tick of the minute before, and a run's minutes derive in order. A
+minute derived without the one before it has no App rates at its first tick.
+
 The recording continues across restarts. Each collector run makes a new ring and registers it
 with the recording, and the registry keeps the active ring and one earlier one. The persister
 seals what an earlier ring still holds before it moves on to the new one, so a collector that
@@ -464,7 +478,16 @@ each with the minimum, maximum and null count of every column, so a query can sk
 cannot match.
 
 **Polars.** A Rust library for tables in memory. The persister uses it to sort each window's
-readings, derive the per-App tables and write the Parquet files.
+readings, derive the per-App tables and write the Parquet files. The live window's store reads
+sealed minutes back with its Parquet reader, and the rest of the app queries them with Polars
+SQL (The persister and the recording).
+
+**App ranks and App parts.** The two tables the persister derives from a window's processes and
+events as it seals the window. App ranks hold the Apps that used the most of each resource in
+each of the window's ticks, and App parts hold every App's row and processes in each tick. A
+window sealed before they existed lacks them, and App parts carry a version, so a reader that
+needs the Apps of a window whose parts it does not read derives them from the window's processes
+and events (The persister and the recording).
 
 **Commit marker.** A hard link, under the recording's `commits/` directory, to the metadata file
 of a window, made once every file of the window is synced to disk. A window belongs to the
@@ -489,3 +512,7 @@ earlier run, with each one's ring and collector pid (The persister and the recor
 - `persister/` and `persistence/src/worker.rs`: the loop that seals windows from the ring.
 - `persister/src/bin/seal_bench.rs`: the CPU of a seal, measured on synthetic windows.
 - `persistence/src/encoder.rs`: how each table is written to Parquet.
+- `persistence/src/identity.rs`: the identity and usage a process or event row must hold to be
+  read back.
+- `viewer/src/recording/`: reading a sealed minute's tables back without SQL, and deriving the
+  Apps of a minute whose App parts this build does not read.
