@@ -8,7 +8,7 @@ use gpui::{
 };
 
 use crate::chart_axes::TimeWindow;
-use crate::charts::{self, Inspection};
+use crate::charts::{self, HeldCurves, Inspection};
 use crate::data::Panel;
 
 /// The most charts whose plots a page holds, well above the charts of every page together.
@@ -62,9 +62,12 @@ impl Shown {
 }
 
 /// One chart's plot, which GPUI draws again only when its view is new or its bounds change.
+/// The plot that replaces it keeps its curves, so a chart drawn again for a slide of its window
+/// moves the curves it drew rather than tessellating them again.
 pub(crate) struct Plot {
     shown: Shown,
     measured: Rc<Cell<Bounds<Pixels>>>,
+    curves: Rc<HeldCurves>,
     renders: Rc<Cell<u64>>,
 }
 
@@ -79,6 +82,7 @@ impl Render for Plot {
             Rc::clone(&self.shown.hidden),
             Rc::clone(&self.measured),
             self.shown.time,
+            Some(Rc::clone(&self.curves)),
         )
     }
 }
@@ -88,6 +92,7 @@ impl Render for Plot {
 pub(crate) struct Plots {
     views: RefCell<BTreeMap<String, Held>>,
     renders: Rc<Cell<u64>>,
+    curve_builds: Rc<Cell<u64>>,
 }
 
 struct Held {
@@ -100,12 +105,18 @@ impl Plots {
         Self {
             views: RefCell::new(BTreeMap::new()),
             renders: Rc::new(Cell::new(0)),
+            curve_builds: Rc::new(Cell::new(0)),
         }
     }
 
     /// How many times a plot has rendered, which the page's reports give.
     pub(crate) fn renders(&self) -> u64 {
         self.renders.get()
+    }
+
+    /// How many curves the plots have tessellated, which the page's reports give.
+    pub(crate) fn curve_builds(&self) -> u64 {
+        self.curve_builds.get()
     }
 
     /// How many plots the page holds.
@@ -131,26 +142,28 @@ impl Plots {
         cx: &mut App,
     ) -> (AnyElement, Rc<Cell<Bounds<Pixels>>>) {
         let mut views = self.views.borrow_mut();
-        let measured = if let Some(held) = views.get_mut(&shown.panel.id) {
+        let (measured, curves) = if let Some(held) = views.get_mut(&shown.panel.id) {
             held.drawn = true;
             let plot = held.view.read(cx);
             if plot.shown.same(&shown) {
                 return (plot_held(held.view.clone()), Rc::clone(&plot.measured));
             }
 
-            Rc::clone(&plot.measured)
+            (Rc::clone(&plot.measured), Rc::clone(&plot.curves))
         } else {
             if views.len() >= PLOTS_MAX {
                 views.clear();
             }
 
-            Rc::new(Cell::new(Bounds::default()))
+            let curves = HeldCurves::new(Rc::clone(&self.curve_builds));
+            (Rc::new(Cell::new(Bounds::default())), Rc::new(curves))
         };
 
         let id = shown.panel.id.clone();
         let plot = Plot {
             shown,
             measured: Rc::clone(&measured),
+            curves,
             renders: Rc::clone(&self.renders),
         };
         let view = cx.new(|_| plot);

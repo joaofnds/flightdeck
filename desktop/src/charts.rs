@@ -1,9 +1,9 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gpui::{
-    Background, Bounds, IntoElement, PathBuilder, Pixels, Window, canvas, fill, linear_color_stop,
-    linear_gradient, point, prelude::*, px, rgb, size,
+    Background, Bounds, IntoElement, Path, PathBuilder, Pixels, Point, Window, canvas, fill,
+    linear_color_stop, linear_gradient, point, prelude::*, px, rgb, size,
 };
 
 pub use crate::chart_axes::{AxisSide, TimeWindow, axis_column, axis_labels, time_labels};
@@ -87,17 +87,26 @@ pub fn plot(
     hidden: Rc<Vec<String>>,
     measured: Rc<Cell<Bounds<Pixels>>>,
 ) -> impl IntoElement {
-    plot_cursor(panel, inspection, hidden, measured, (true, None))
+    plot_cursor(panel, inspection, hidden, measured, (true, None), None)
 }
 
+/// A plot with no cursor, which paints its curves through `held_curves` where it holds them.
 pub fn plot_without_cursor(
     panel: Rc<Panel>,
     inspection: Inspection,
     hidden: Rc<Vec<String>>,
     measured: Rc<Cell<Bounds<Pixels>>>,
     time: Option<TimeWindow>,
+    held_curves: Option<Rc<HeldCurves>>,
 ) -> impl IntoElement {
-    plot_cursor(panel, inspection, hidden, measured, (false, time))
+    plot_cursor(
+        panel,
+        inspection,
+        hidden,
+        measured,
+        (false, time),
+        held_curves,
+    )
 }
 
 fn plot_cursor(
@@ -106,6 +115,7 @@ fn plot_cursor(
     hidden: Rc<Vec<String>>,
     measured: Rc<Cell<Bounds<Pixels>>>,
     (show_cursor, time): (bool, Option<TimeWindow>),
+    held_curves: Option<Rc<HeldCurves>>,
 ) -> impl IntoElement {
     canvas(
         move |bounds, _, _| measured.set(bounds),
@@ -129,7 +139,10 @@ fn plot_cursor(
                 "timeline" => paint_timeline(&panel, chart, inspection, &hidden, (window, cx)),
                 "heatmap" => paint_heatmap(&panel, chart, inspection, &hidden, window),
                 "core-bars" | "pressure" => paint_bars(&panel, chart, inspection, &hidden, window),
-                _ => paint_lines(&panel, chart, inspection, &hidden, window),
+                _ => {
+                    let held_curves = held_curves.as_deref();
+                    paint_lines(&panel, chart, inspection, &hidden, held_curves, window);
+                }
             });
             if !show_cursor {
                 return;
@@ -233,17 +246,21 @@ fn paint_lines(
     bounds: Bounds<Pixels>,
     inspection: Inspection,
     hidden: &[String],
+    held_curves: Option<&HeldCurves>,
     window: &mut Window,
 ) {
-    prepare_lines(
-        panel,
-        bounds,
-        inspection,
-        hidden,
-        |line, values, geometry| {
-            paint_line_runs(line, panel, values, geometry, window);
-        },
-    );
+    HeldCurves::hold(held_curves, |mut frame| {
+        prepare_lines(
+            panel,
+            bounds,
+            inspection,
+            hidden,
+            |line, values, geometry| {
+                let frame = frame.as_deref_mut();
+                paint_line_runs(line, panel, values, geometry, frame, window);
+            },
+        );
+    });
 }
 
 pub(crate) fn prepare_lines(
@@ -404,6 +421,7 @@ fn paint_line_runs(
     panel: &Panel,
     values: &[Option<(f32, f32)>],
     geometry: &Geometry<'_>,
+    mut frame: Option<&mut CurveFrame<'_>>,
     window: &mut Window,
 ) {
     // With a clock, the curves of a run break at each bucket with no readings of its own, which
@@ -418,22 +436,29 @@ fn paint_line_runs(
         present,
         |run| {
             for curve in run_curves(values, run, geometry) {
-                paint_curve(line, panel, &curve, geometry, window);
+                paint_curve(line, panel, curve, geometry, frame.as_deref_mut(), window);
             }
         },
     );
 }
 
-/// The unbroken curves through one run of readings, each as its points in time order. A chart
-/// with a clock draws a point at the end of each bucket that holds readings of its own, and
-/// breaks the curve at each bucket that holds none. The bucket the join of thinned and
-/// full-detail readings cuts holds readings the chart leaves out, so the curve runs past it. A
-/// chart with no clock draws each reading.
+/// One unbroken curve, as its points in time order and, on a chart with a clock, the window
+/// mean each point stands for.
+#[derive(Debug)]
+struct Curve {
+    means: Vec<WindowMean>,
+    points: Vec<RunPoint>,
+}
+
+/// The unbroken curves through one run of readings. A chart with a clock draws a point at the
+/// end of each bucket that holds readings of its own, and breaks the curve at each bucket that
+/// holds none. The bucket the join of thinned and full-detail readings cuts holds readings the
+/// chart leaves out, so the curve runs past it. A chart with no clock draws each reading.
 fn run_curves(
     values: &[Option<(f32, f32)>],
     run: std::ops::Range<usize>,
     geometry: &Geometry<'_>,
-) -> Vec<Vec<RunPoint>> {
+) -> Vec<Curve> {
     let Some(clock) = geometry.clock() else {
         let points = run
             .map(|index| {
@@ -446,19 +471,23 @@ fn run_curves(
                 }
             })
             .collect();
-        return vec![points];
+        return vec![Curve {
+            means: Vec::new(),
+            points,
+        }];
     };
 
     window_means(values, run, clock)
         .chunk_by(|left, right| clock.buckets.joins(left.end, right.end))
-        .map(|curve| {
-            curve
+        .map(|means| Curve {
+            points: means
                 .iter()
                 .map(|mean| RunPoint {
                     top: geometry.clock_point(clock.buckets, mean.end, mean.top),
                     bottom: geometry.clock_point(clock.buckets, mean.end, mean.bottom),
                 })
-                .collect()
+                .collect(),
+            means: means.to_vec(),
         })
         .collect()
 }
@@ -494,21 +523,23 @@ fn for_each_run(
     }
 }
 
-/// Draws one unbroken curve through `points`, in time order, with the area beneath it.
+/// Draws one unbroken curve, in time order, with the area beneath it, moving the paths `frame`
+/// holds from the last paint where it holds the curve.
 fn paint_curve(
     line: &crate::data::Line,
     panel: &Panel,
-    points: &[RunPoint],
+    curve: Curve,
     geometry: &Geometry<'_>,
+    frame: Option<&mut CurveFrame<'_>>,
     window: &mut Window,
 ) {
     let tint = color(&line.color);
-    if points.is_empty() {
+    if curve.points.is_empty() {
         return;
     }
 
-    if points.len() == 1 {
-        let position = points[0].top;
+    if curve.points.len() == 1 {
+        let position = curve.points[0].top;
         window.paint_quad(fill(
             Bounds::new(position - point(px(1.5), px(1.5)), size(px(3.0), px(3.0))),
             rgb(tint),
@@ -516,59 +547,124 @@ fn paint_curve(
         return;
     }
 
-    let dashed = line.dashed == Some(true);
-    let stacked = stacked(panel, line);
-    let width = if stacked { px(1.0) } else { px(2.0) };
+    let paths = held_curve_paths(line, panel, curve, geometry, frame);
+    if let Some((area, fill)) = paths.area {
+        window.paint_path(area, fill);
+    }
+    if let Some(stroke) = paths.stroke {
+        window.paint_path(stroke, rgb(tint));
+    }
+}
+
+/// The paths of `curve`, which has at least two points: those `frame` holds for the curve
+/// painted in its order last, moved to where `curve` stands, where that curve had the shape
+/// `curve` has, and a new tessellation otherwise.
+fn held_curve_paths(
+    line: &crate::data::Line,
+    panel: &Panel,
+    curve: Curve,
+    geometry: &Geometry<'_>,
+    frame: Option<&mut CurveFrame<'_>>,
+) -> CurvePaths {
+    assert!(curve.points.len() > 1);
+    let look = CurveLook::of(line, panel);
+    let Curve { means, points } = curve;
+    let Some(frame) = frame else {
+        return curve_paths(look, &points, geometry.bounds);
+    };
+    // The points of a chart with no clock stand for readings, which no mean records.
+    let Some(clock) = geometry.clock() else {
+        return curve_paths(look, &points, geometry.bounds);
+    };
+    assert_eq!(means.len(), points.len());
+
+    let window = clock.buckets.window;
+    let shape = CurveShape {
+        means,
+        look,
+        scale: [geometry.minimum, geometry.maximum],
+        size: geometry.bounds.size,
+        span: window.span,
+    };
+    let place = CurvePlace {
+        first: window.first,
+        origin: geometry.bounds.origin,
+    };
+    frame.paths(shape, place, || curve_paths(look, &points, geometry.bounds))
+}
+
+/// How a line's curve is drawn, whatever its points.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CurveLook {
+    tint: u32,
+    dashed: bool,
+    stacked: bool,
+    /// The opacity of the area beneath the curve at the plot's top.
+    opacity: f32,
+    negative: bool,
+}
+
+impl CurveLook {
+    fn of(line: &crate::data::Line, panel: &Panel) -> Self {
+        let stacked = stacked(panel, line);
+        let default_opacity = if stacked { 0.45 } else { 0.12 };
+        Self {
+            tint: color(&line.color),
+            dashed: line.dashed == Some(true),
+            stacked,
+            opacity: line.fill.or(panel.fill).unwrap_or(default_opacity),
+            negative: line.negative == Some(true),
+        }
+    }
+}
+
+/// The tessellated stroke of the curve through `points` on `plot` and, for a curve that is
+/// neither dashed nor clear, the area beneath it with its fill.
+fn curve_paths(look: CurveLook, points: &[RunPoint], plot: Bounds<Pixels>) -> CurvePaths {
+    let width = if look.stacked { px(1.0) } else { px(2.0) };
     let mut stroke = PathBuilder::stroke(width);
-    if dashed {
+    if look.dashed {
         stroke = stroke.dash_array(&[px(6.0), px(4.0)]);
     }
     let top: Vec<_> = points.iter().map(|sample| sample.top).collect();
     smooth(&mut stroke, &top, true);
 
-    let default_opacity = if stacked { 0.45 } else { 0.12 };
-    let opacity = line.fill.or(panel.fill).unwrap_or(default_opacity);
-    if !dashed {
-        if opacity > 0.0 {
+    let mut area = None;
+    if !look.dashed {
+        if look.opacity > 0.0 {
             let bottom: Vec<_> = points.iter().rev().map(|sample| sample.bottom).collect();
-            let mut area = PathBuilder::fill();
-            smooth(&mut area, &top, true);
-            smooth(&mut area, &bottom, false);
-            area.close();
+            let mut builder = PathBuilder::fill();
+            smooth(&mut builder, &top, true);
+            smooth(&mut builder, &bottom, false);
+            builder.close();
             let span = points
                 .iter()
                 .fold(None, |span: Option<(Pixels, Pixels)>, sample| {
                     let (low, high) = span.unwrap_or((sample.top.y, sample.bottom.y));
                     Some((low.min(sample.top.y), high.max(sample.bottom.y)))
                 });
-            let fill = curve_fill(tint, opacity, line, geometry.bounds, span);
-            paint_path(area, fill, window);
+            let fill = curve_fill(look, plot, span);
+            area = built_path(builder).map(|path| (path, fill));
         }
     }
-    paint_path(stroke, rgb(tint), window);
+
+    CurvePaths {
+        stroke: built_path(stroke),
+        area,
+    }
 }
 
 /// The prototype fades every area from its full opacity at the plot's top to nothing at the
 /// plot's bottom, however tall the area is. A gradient spans the area's own bounds, so each end
 /// takes the opacity the plot-wide fade has at that height.
-fn curve_fill(
-    tint: u32,
-    opacity: f32,
-    line: &crate::data::Line,
-    plot: Bounds<Pixels>,
-    span: Option<(Pixels, Pixels)>,
-) -> Background {
+fn curve_fill(look: CurveLook, plot: Bounds<Pixels>, span: Option<(Pixels, Pixels)>) -> Background {
     let Some((high, low)) = span else {
-        return alpha(tint, 0.0).into();
+        return alpha(look.tint, 0.0).into();
     };
     let fade = |y: Pixels| {
         let depth = ((y - plot.origin.y) / plot.size.height).clamp(0.0, 1.0);
-        let level = if line.negative == Some(true) {
-            depth
-        } else {
-            1.0 - depth
-        };
-        alpha(tint, opacity * level)
+        let level = if look.negative { depth } else { 1.0 - depth };
+        alpha(look.tint, look.opacity * level)
     };
 
     linear_gradient(
@@ -576,6 +672,161 @@ fn curve_fill(
         linear_color_stop(fade(high.min(low)), 0.0),
         linear_color_stop(fade(high.max(low)), 1.0),
     )
+}
+
+/// The tessellation of `builder`, or `None`, reported, where lyon refuses the path.
+fn built_path(builder: PathBuilder) -> Option<Path<Pixels>> {
+    match builder.build() {
+        Ok(path) => Some(path),
+        Err(error) => {
+            eprintln!("chart path: {error}");
+            None
+        }
+    }
+}
+
+/// The tessellated paths of one curve: its stroke, and the area beneath it with its fill.
+#[derive(Clone)]
+struct CurvePaths {
+    stroke: Option<Path<Pixels>>,
+    area: Option<(Path<Pixels>, Background)>,
+}
+
+impl CurvePaths {
+    /// These paths, each moved by `offset`.
+    fn moved(&self, offset: Point<Pixels>) -> Self {
+        let moved = |path: &Path<Pixels>| {
+            let mut path = path.clone();
+            path.bounds.origin += offset;
+            for vertex in &mut path.vertices {
+                vertex.xy_position += offset;
+            }
+            path
+        };
+
+        Self {
+            stroke: self.stroke.as_ref().map(moved),
+            area: self.area.as_ref().map(|(path, fill)| (moved(path), *fill)),
+        }
+    }
+}
+
+/// The most curves a plot holds, far more than the lines and breaks of any chart draw. A plot
+/// tessellates each curve past them at every paint.
+const HELD_CURVES_MAX: usize = 256;
+
+/// The paths of the curves a plot painted last, each with the place it was tessellated for. The
+/// window of a following chart slides a second at a time while its buckets stay pinned to the
+/// clock, so most paints find each curve with the shape it had, standing a second's width
+/// further left, and move the paths held for it rather than tessellate them again.
+pub struct HeldCurves {
+    curves: RefCell<Vec<HeldCurve>>,
+    /// How many curves the plots sharing it have tessellated, which the page's reports give.
+    builds: Rc<Cell<u64>>,
+}
+
+struct HeldCurve {
+    shape: CurveShape,
+    place: CurvePlace,
+    paths: CurvePaths,
+}
+
+impl HeldCurves {
+    pub fn new(builds: Rc<Cell<u64>>) -> Self {
+        Self {
+            curves: RefCell::new(Vec::new()),
+            builds,
+        }
+    }
+
+    /// Runs `paint` with the curves `held` holds from the last paint, and holds the curves it
+    /// paints for the next. Where nothing holds a plot's curves, `paint` tessellates each.
+    fn hold(held: Option<&Self>, paint: impl FnOnce(Option<&mut CurveFrame<'_>>)) {
+        let Some(held) = held else {
+            paint(None);
+            return;
+        };
+
+        let last = held.curves.take();
+        let mut frame = CurveFrame {
+            next: Vec::with_capacity(last.len()),
+            last: last.into_iter(),
+            builds: &held.builds,
+        };
+        paint(Some(&mut frame));
+        assert!(frame.next.len() <= HELD_CURVES_MAX);
+        *held.curves.borrow_mut() = frame.next;
+    }
+}
+
+/// One paint of a plot's curves, which meets them in the order the last paint did.
+struct CurveFrame<'a> {
+    last: std::vec::IntoIter<HeldCurve>,
+    next: Vec<HeldCurve>,
+    builds: &'a Cell<u64>,
+}
+
+impl CurveFrame<'_> {
+    /// The paths of the next curve, of `shape` at `place`: the last paint's curve in the same
+    /// order moved to `place` where it had `shape`, and the tessellation `build` makes otherwise.
+    fn paths(
+        &mut self,
+        shape: CurveShape,
+        place: CurvePlace,
+        build: impl FnOnce() -> CurvePaths,
+    ) -> CurvePaths {
+        if let Some(last) = self.last.next() {
+            if last.shape == shape {
+                let paths = last.paths.moved(last.place.offset(place, &last.shape));
+                self.next.push(last);
+                return paths;
+            }
+        }
+
+        let paths = build();
+        self.builds.set(self.builds.get() + 1);
+        if self.next.len() < HELD_CURVES_MAX {
+            self.next.push(HeldCurve {
+                shape,
+                place,
+                paths: paths.clone(),
+            });
+        }
+        paths
+    }
+}
+
+/// What a curve's paths depend on besides where its window starts and where its plot stands:
+/// the window means its points stand for, how it is drawn, its scale, the plot's size and the
+/// seconds its window spans. Two curves of one shape differ only by a move.
+#[derive(PartialEq)]
+struct CurveShape {
+    means: Vec<WindowMean>,
+    look: CurveLook,
+    scale: [f32; 2],
+    size: gpui::Size<Pixels>,
+    span: u64,
+}
+
+/// Where a curve stands: the first second of its window and the top left corner of its plot.
+#[derive(Clone, Copy)]
+struct CurvePlace {
+    first: u64,
+    origin: Point<Pixels>,
+}
+
+impl CurvePlace {
+    /// How far a curve of `shape` tessellated at `self` moves to stand at `to`: as far as its plot
+    /// moved, and back across the plot by the share of its window the window slid on by.
+    fn offset(self, to: Self, shape: &CurveShape) -> Point<Pixels> {
+        let moved = to.origin - self.origin;
+        let slide = if to.first >= self.first {
+            -(shape.size.width * window_fraction(to.first - self.first, shape.span))
+        } else {
+            shape.size.width * window_fraction(self.first - to.first, shape.span)
+        };
+        point(moved.x + slide, moved.y)
+    }
 }
 
 /// The seconds between two ticks, a full-detail reading apart, which Grafana calls the scrape
@@ -703,18 +954,10 @@ impl Buckets {
 
     /// Where `second` sits across the window, from 0 at its first second to 1 past its newest.
     fn fraction(&self, second: u64) -> f32 {
-        let span = match u32::try_from(self.window.span) {
-            Ok(span) => f64::from(span),
-            Err(error) => panic!("a chart spans at most a few hours of seconds: {error}"),
+        let Some(offset) = second.checked_sub(self.window.first) else {
+            panic!("a point's second lies after its window's first");
         };
-        let offset = match second.checked_sub(self.window.first).map(u32::try_from) {
-            Some(Ok(offset)) => f64::from(offset),
-            _ => panic!("a point's second lies within a few hours after its window's first"),
-        };
-        match num_traits::ToPrimitive::to_f32(&(offset / span)) {
-            Some(fraction) => fraction,
-            None => panic!("a fraction of a window fits f32"),
-        }
+        window_fraction(offset, self.window.span)
     }
 
     /// The second a reading at `position` across the window was taken in, or `None` for a reading
@@ -782,6 +1025,22 @@ impl Buckets {
             return false;
         }
         self.join_cuts(left)
+    }
+}
+
+/// The share of a window of `span` seconds that `seconds` cover.
+fn window_fraction(seconds: u64, span: u64) -> f32 {
+    let span = match u32::try_from(span) {
+        Ok(span) => f64::from(span),
+        Err(error) => panic!("a chart spans at most a few hours of seconds: {error}"),
+    };
+    let seconds = match u32::try_from(seconds) {
+        Ok(seconds) => f64::from(seconds),
+        Err(error) => panic!("a point lies within a few hours of its window's first: {error}"),
+    };
+    match num_traits::ToPrimitive::to_f32(&(seconds / span)) {
+        Some(fraction) => fraction,
+        None => panic!("a fraction of a window fits f32"),
     }
 }
 
@@ -1420,13 +1679,6 @@ fn threshold(value: f32) -> u32 {
     }
 }
 
-fn paint_path(builder: PathBuilder, color: impl Into<Background>, window: &mut Window) {
-    match builder.build() {
-        Ok(path) => window.paint_path(path, color),
-        Err(error) => eprintln!("chart path: {error}"),
-    }
-}
-
 pub fn clip_plot(bounds: Bounds<Pixels>, window: &mut Window, paint: impl FnOnce(&mut Window)) {
     window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| paint(window));
 }
@@ -1731,7 +1983,7 @@ mod live_tests {
     ) -> Vec<RunPoint> {
         let mut curves = run_curves(values, run, geometry);
         assert_eq!(curves.len(), 1, "{curves:?}");
-        curves.remove(0)
+        curves.remove(0).points
     }
 
     /// The 900-second window from `first` of varying readings, following the newest second, in a
@@ -1839,9 +2091,9 @@ mod live_tests {
         let curves = run_curves(&values, 0..900, &geometry);
 
         assert_eq!(curves.len(), 2, "{curves:?}");
-        assert_places(&curves[0][9..], &[[100.0, 80.0, 100.0]]);
+        assert_places(&curves[0].points[9..], &[[100.0, 80.0, 100.0]]);
         assert_places(
-            &curves[1][..2],
+            &curves[1].points[..2],
             &[[102.0, 66.67, 100.0], [103.0, 53.33, 100.0]],
         );
     }
@@ -1900,7 +2152,7 @@ mod live_tests {
         });
 
         assert_eq!(curves.len(), 1);
-        curves.remove(0)
+        curves.remove(0).points
     }
 
     #[test]
@@ -1915,6 +2167,171 @@ mod live_tests {
         assert_eq!(points.len(), 90);
         assert!(f32::from(points[0].top.x).abs() < 0.01);
         assert!((f32::from(points[89].top.x) - 890.0).abs() < 0.01);
+    }
+
+    /// A plot 900 pixels wide and 100 tall whose top left corner stands at `x` and `y`.
+    fn plot_at(x: f32, y: f32) -> Bounds<Pixels> {
+        Bounds::new(point(px(x), px(y)), size(px(900.0), px(100.0)))
+    }
+
+    /// The paths of the one curve a following 15-minute chart from `first` paints on `plot`
+    /// through `held`, whose panel holds the minute before its oldest edge.
+    fn led_paths(first: u64, plot: Bounds<Pixels>, held: &HeldCurves) -> CurvePaths {
+        let (mut panel, inspection) = led_panel(first, 60, varying_reading);
+        panel.maximum = Some(100.0);
+
+        let mut paths = Vec::new();
+        HeldCurves::hold(Some(held), |mut frame| {
+            prepare_lines(&panel, plot, inspection, &[], |line, values, geometry| {
+                for curve in run_curves(values, 0..values.len(), geometry) {
+                    let frame = frame.as_deref_mut();
+                    paths.push(held_curve_paths(line, &panel, curve, geometry, frame));
+                }
+            });
+        });
+
+        assert_eq!(paths.len(), 1);
+        paths.remove(0)
+    }
+
+    /// The paths a plot that holds no curves yet builds for `led_paths`.
+    fn built_led_paths(first: u64, plot: Bounds<Pixels>) -> CurvePaths {
+        led_paths(first, plot, &HeldCurves::new(Rc::new(Cell::new(0))))
+    }
+
+    fn assert_near(value: gpui::Point<Pixels>, expected: gpui::Point<Pixels>) {
+        assert!(
+            (value.x - expected.x).abs() < px(0.01),
+            "{value:?} {expected:?}"
+        );
+        assert!(
+            (value.y - expected.y).abs() < px(0.01),
+            "{value:?} {expected:?}"
+        );
+    }
+
+    fn assert_same_bounds(path: &gpui::Path<Pixels>, expected: &gpui::Path<Pixels>) {
+        assert_near(path.bounds.origin, expected.bounds.origin);
+        assert_near(
+            point(path.bounds.size.width, path.bounds.size.height),
+            point(expected.bounds.size.width, expected.bounds.size.height),
+        );
+    }
+
+    /// The square pixels the triangles of `path` cover.
+    fn covered_area(path: &gpui::Path<Pixels>) -> f64 {
+        assert!(path.vertices.len().is_multiple_of(3));
+        path.vertices
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|triangle| {
+                let [a, b, c] = triangle.each_ref().map(|corner| corner.xy_position);
+                let cross = f32::from(b.x - a.x) * f32::from(c.y - a.y)
+                    - f32::from(c.x - a.x) * f32::from(b.y - a.y);
+                f64::from(cross.abs()) / 2.0
+            })
+            .sum()
+    }
+
+    /// Asserts that `paths` draw the shapes `expected` draws, whatever their fills. The
+    /// tessellator can split an area into other triangles once its points move by a rounding
+    /// error, so areas compare by where they stand and what they cover, and strokes, which it
+    /// builds point by point, by each vertex.
+    fn assert_same_shapes(paths: &CurvePaths, expected: &CurvePaths) {
+        let (Some(stroke), Some(expected_stroke)) = (&paths.stroke, &expected.stroke) else {
+            panic!("both curves have a stroke");
+        };
+        assert_same_bounds(stroke, expected_stroke);
+        assert_eq!(stroke.vertices.len(), expected_stroke.vertices.len());
+        for (vertex, expected) in stroke.vertices.iter().zip(&expected_stroke.vertices) {
+            assert_near(vertex.xy_position, expected.xy_position);
+        }
+
+        let (Some((area, _)), Some((expected_area, _))) = (&paths.area, &expected.area) else {
+            panic!("both curves have an area");
+        };
+        assert_same_bounds(area, expected_area);
+        let (covered, expected_covered) = (covered_area(area), covered_area(expected_area));
+        assert!(
+            (covered - expected_covered).abs() < 0.5,
+            "{covered} {expected_covered}"
+        );
+    }
+
+    fn area_fill(paths: &CurvePaths) -> Background {
+        let Some((_, fill)) = paths.area else {
+            panic!("the curve has an area");
+        };
+        fill
+    }
+
+    #[test]
+    fn a_curve_whose_window_slid_past_still_buckets_is_moved_rather_than_built_again() {
+        // Goal: a plot painted again after its window slid a second, with no bucket closed or
+        // gone, draws its curve as a new build would without tessellating the curve again.
+        // Method: paint a following chart from 1001 and then from 1002 through one held set of
+        // curves, both with buckets from 1010 to 1900, and compare the second paint with a new
+        // build from 1002.
+        let builds = Rc::new(Cell::new(0));
+        let held = HeldCurves::new(Rc::clone(&builds));
+        led_paths(1001, plot_at(0.0, 0.0), &held);
+
+        let moved = led_paths(1002, plot_at(0.0, 0.0), &held);
+
+        let built = built_led_paths(1002, plot_at(0.0, 0.0));
+        assert_eq!(builds.get(), 1);
+        assert_same_shapes(&moved, &built);
+        assert_eq!(area_fill(&moved), area_fill(&built));
+    }
+
+    #[test]
+    fn a_curve_on_a_plot_laid_out_elsewhere_is_moved_with_its_plot() {
+        // Goal: a plot the page lays out at another place, as a scroll does, draws its curve
+        // there as a new build would, without tessellating the curve again. The fill fades by
+        // the height within the plot, so a move leaves it as it was. Method: paint a following
+        // chart from 1001 on a plot at the page's corner and then on one 20 pixels right and 30
+        // down through one held set of curves, and compare the second paint with a new build.
+        let builds = Rc::new(Cell::new(0));
+        let held = HeldCurves::new(Rc::clone(&builds));
+        led_paths(1001, plot_at(0.0, 0.0), &held);
+
+        let moved = led_paths(1001, plot_at(20.0, 30.0), &held);
+
+        assert_eq!(builds.get(), 1);
+        assert_same_shapes(&moved, &built_led_paths(1001, plot_at(20.0, 30.0)));
+    }
+
+    #[test]
+    fn a_curve_whose_newest_bucket_closed_is_built_again() {
+        // Goal: a curve that gained a point is tessellated again, so no paint draws the curve it
+        // had. Method: paint a following chart from 1000, whose newest whole bucket ends at
+        // 1890, and then from 1001, whose newest ends at 1900, through one held set of curves,
+        // and compare the second paint with a new build from 1001.
+        let builds = Rc::new(Cell::new(0));
+        let held = HeldCurves::new(Rc::clone(&builds));
+        led_paths(1000, plot_at(0.0, 0.0), &held);
+
+        let painted = led_paths(1001, plot_at(0.0, 0.0), &held);
+
+        assert_eq!(builds.get(), 2);
+        assert_same_shapes(&painted, &built_led_paths(1001, plot_at(0.0, 0.0)));
+    }
+
+    #[test]
+    fn a_curve_on_a_taller_plot_is_built_again() {
+        // Goal: a plot that changed its size draws its curve to the new size. Method: paint a
+        // following chart from 1001 on a plot 100 pixels tall and then on one 150 tall through
+        // one held set of curves, and count the curves built.
+        let builds = Rc::new(Cell::new(0));
+        let held = HeldCurves::new(Rc::clone(&builds));
+        led_paths(1001, plot_at(0.0, 0.0), &held);
+        let mut taller = plot_at(0.0, 0.0);
+        taller.size.height = px(150.0);
+
+        led_paths(1001, taller, &held);
+
+        assert_eq!(builds.get(), 2);
     }
 
     #[test]
@@ -2106,11 +2523,12 @@ mod live_tests {
 
     /// The seconds of the first and last points of each curve of a 30-minute window from 1000 on
     /// the 900-pixel plot, two seconds a pixel.
-    fn half_hour_ends(curves: &[Vec<RunPoint>]) -> Vec<(f32, f32)> {
+    fn half_hour_ends(curves: &[Curve]) -> Vec<(f32, f32)> {
         let seconds = |point: &RunPoint| 1000.0 + f32::from(point.top.x) * 2.0;
         curves
             .iter()
-            .map(|curve| (seconds(&curve[0]), seconds(&curve[curve.len() - 1])))
+            .map(|curve| curve.points.as_slice())
+            .map(|points| (seconds(&points[0]), seconds(&points[points.len() - 1])))
             .collect()
     }
 

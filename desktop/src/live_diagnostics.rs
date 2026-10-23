@@ -338,6 +338,7 @@ impl LiveDashboard {
                 Rc::new(Vec::new()),
                 Rc::new(Cell::new(Bounds::default())),
                 None,
+                None,
             )
         });
         let budget = chart.budget;

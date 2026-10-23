@@ -431,6 +431,7 @@ impl LiveDashboard {
                     "elapsed_seconds":self.started.elapsed().as_secs_f64(),
                     "updates":self.updates,"renders":self.renders,
                     "plot_renders":self.plots.renders(),"plots_held":self.plots.held(),
+                    "curve_builds":self.plots.curve_builds(),
                     "read_ms":self.snapshot.as_ref().map(|snapshot| snapshot.read_ms),
                     "tail_cache_bytes":self.snapshot.as_ref()
                         .map(|snapshot| &snapshot.catalog["tail_cache_bytes"]),
