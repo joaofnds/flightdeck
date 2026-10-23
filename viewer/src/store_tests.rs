@@ -68,6 +68,43 @@ fn a_second_carries_the_rates_since_the_tick_before_it() {
 }
 
 #[test]
+fn a_second_ranks_its_apps_as_the_worker_ranks_them() {
+    // Goal: the page draws a second's top Apps from the View, ranked by the App rule the
+    // worker runs. Method: publish three ticks, then rank the newest through the worker's
+    // session and through a store's View.
+    let mut fixture = Fixture::new();
+    for second in 100..103 {
+        fixture.publish_with_system_rows(second);
+    }
+    let mut session = crate::LiveSession::open(&fixture.root).unwrap();
+    session.select(102, 0).unwrap();
+    let expected = session.selected_ranks().unwrap();
+
+    let store = Store::start(&fixture.root).unwrap();
+
+    let view = view_where(&store, |view| view.seconds.len() == 3);
+    assert_eq!(view.apps[2].ranks(), Ok(expected));
+}
+
+#[test]
+fn seconds_in_a_row_hold_one_name_for_each_app() {
+    // Goal: an App's name is held once for every second that names it, which keeps each
+    // second's Apps small. Method: publish two ticks and compare the names their seconds hold.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    fixture.publish_with_system_rows(101);
+
+    let store = Store::start(&fixture.root).unwrap();
+
+    let view = view_where(&store, |view| view.seconds.len() == 2);
+    let (first, second) = (&view.apps[0].apps, &view.apps[1].apps);
+    assert_eq!(first.len(), 2);
+    assert_eq!(second.len(), 2);
+    assert!(Arc::ptr_eq(&first[0].name, &second[0].name));
+    assert!(Arc::ptr_eq(&first[1].name, &second[1].name));
+}
+
+#[test]
 fn each_view_has_a_higher_version_than_the_one_before() {
     // Goal: the main thread tells a new View from one it drew by its version, since the store
     // writes each View's buffer again. Method: take the View of one tick, publish another, and
@@ -114,14 +151,14 @@ mod when_the_collector_starts_again {
         first.publish_with_system_rows(100);
         let mut ring = Ring::new(first.root.clone());
         ring.follow().unwrap();
-        ring.read(|_, _| true).unwrap();
+        ring.read(|_, _, _| true).unwrap();
         let mut second = Fixture::new_mode(false, 2, Some(&first));
         second.publish_with_system_rows(101);
 
         let steps = (1..=FOLLOW_STEPS + 1).find(|_| {
             ring.follow().unwrap();
             let mut taken = false;
-            ring.read(|_, _| {
+            ring.read(|_, _, _| {
                 taken = true;
                 true
             })
@@ -151,6 +188,7 @@ mod when_the_folder_holds_no_recording {
 }
 
 mod when_the_live_span_lets_go_of_a_second {
+    use super::super::apps::TickApps;
     use super::super::{EARLIER_MAX, Held, SECONDS_MAX};
     use super::{RUN, published, second_at, wall_seconds_of};
 
@@ -164,7 +202,7 @@ mod when_the_live_span_lets_go_of_a_second {
         let last = first + u64::try_from(SECONDS_MAX).unwrap() + 25;
 
         for wall_second in first..last {
-            assert!(held.take(&RUN, &second_at(wall_second)));
+            assert!(held.take(&RUN, &second_at(wall_second), &TickApps::Unread));
         }
 
         let view = published(&mut held);
@@ -180,7 +218,7 @@ mod when_the_live_span_lets_go_of_a_second {
         let last = 1_000 + u64::try_from(SECONDS_MAX).unwrap() + let_go;
 
         for wall_second in 1_000..last {
-            assert!(held.take(&RUN, &second_at(wall_second)));
+            assert!(held.take(&RUN, &second_at(wall_second), &TickApps::Unread));
         }
 
         let view = published(&mut held);
@@ -191,6 +229,7 @@ mod when_the_live_span_lets_go_of_a_second {
 
 mod when_a_second_reaches_the_store_twice {
     use super::super::Held;
+    use super::super::apps::TickApps;
     use super::{RUN, published, second_at, wall_seconds_of};
     use collector::ring::{Identity, RunIdentity};
 
@@ -199,10 +238,10 @@ mod when_a_second_reaches_the_store_twice {
         // Goal: a tick the recording sealed and the ring still holds shows once. Method: take in
         // one run's second, then that second and the one before it again.
         let mut held = Held::new();
-        assert!(held.take(&RUN, &second_at(101)));
+        assert!(held.take(&RUN, &second_at(101), &TickApps::Unread));
 
-        assert!(held.take(&RUN, &second_at(100)));
-        assert!(held.take(&RUN, &second_at(101)));
+        assert!(held.take(&RUN, &second_at(100), &TickApps::Unread));
+        assert!(held.take(&RUN, &second_at(101), &TickApps::Unread));
 
         let view = published(&mut held);
         assert_eq!(wall_seconds_of(&view.seconds), [101]);
@@ -218,9 +257,9 @@ mod when_a_second_reaches_the_store_twice {
             run: Identity([4, 4]),
             ..RUN
         };
-        assert!(held.take(&RUN, &second_at(101)));
+        assert!(held.take(&RUN, &second_at(101), &TickApps::Unread));
 
-        assert!(held.take(&next, &second_at(5)));
+        assert!(held.take(&next, &second_at(5), &TickApps::Unread));
 
         let view = published(&mut held);
         assert_eq!(wall_seconds_of(&view.seconds), [101, 5]);
@@ -229,6 +268,7 @@ mod when_a_second_reaches_the_store_twice {
 
 /// A run of a recording, as the tests that take seconds in directly name it.
 mod when_the_readings_break {
+    use super::super::apps::TickApps;
     use super::super::{Held, SECONDS_MAX};
     use super::{RUN, published, second_at};
     use collector::ring::{Identity, RunIdentity};
@@ -240,7 +280,7 @@ mod when_the_readings_break {
         let mut held = Held::new();
 
         for (wall_second, follows) in [(100, false), (101, true), (102, false), (103, true)] {
-            assert!(held.take(&RUN, &following(wall_second, follows)));
+            assert!(held.take(&RUN, &following(wall_second, follows), &TickApps::Unread));
         }
 
         assert_eq!(segments_of(&published(&mut held).seconds), [0, 0, 1, 1]);
@@ -256,8 +296,8 @@ mod when_the_readings_break {
             ..RUN
         };
 
-        assert!(held.take(&RUN, &following(100, false)));
-        assert!(held.take(&next, &following(5, true)));
+        assert!(held.take(&RUN, &following(100, false), &TickApps::Unread));
+        assert!(held.take(&next, &following(5, true), &TickApps::Unread));
 
         assert_eq!(segments_of(&published(&mut held).seconds), [0, 1]);
     }
@@ -271,7 +311,11 @@ mod when_the_readings_break {
         let last = 1_030 + u64::try_from(SECONDS_MAX).unwrap();
 
         for wall_second in 1_000..last {
-            assert!(held.take(&RUN, &following(wall_second, wall_second != 1_015)));
+            assert!(held.take(
+                &RUN,
+                &following(wall_second, wall_second != 1_015),
+                &TickApps::Unread
+            ));
         }
 
         assert_eq!(segments_of(&published(&mut held).earlier), [0, 0, 1]);

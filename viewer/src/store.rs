@@ -2,6 +2,7 @@
 //! into buffers allocated when the store starts, and the main thread reads them through a View
 //! that never changes while it holds it.
 
+mod apps;
 mod buffers;
 mod recording;
 mod ring;
@@ -14,9 +15,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+pub use apps::{APPS_PER_SECOND_MAX, AppRow, AppsSecond, Missing};
 pub use buffers::{Buffers, Mailbox, Span};
 pub use second::{BatterySecond, MachineSecond, MemorySecond, Reading, Traffic, readings};
 
+use apps::TickApps;
 use collector::ring::RunIdentity;
 use ring::Ring;
 
@@ -66,6 +69,8 @@ pub struct View {
     /// The seconds of the live span, every second the store holds of the newest 18 minutes,
     /// oldest first.
     pub seconds: Vec<Arc<MachineSecond>>,
+    /// Each App's totals at each second of `seconds`, in the same order.
+    pub apps: Vec<Arc<AppsSecond>>,
     /// The older seconds of the loaded hour, before `seconds`, oldest first.
     pub earlier: Vec<Arc<MachineSecond>>,
     /// Why the store could not read the recording at its last step.
@@ -128,7 +133,7 @@ impl Store {
             .name(String::from("flightdeck-store"))
             .spawn(move || {
                 held.left_out = recording::load(&root, |run, second| {
-                    let taken = held.take(run, second);
+                    let taken = held.take(run, second, &TickApps::Unread);
                     // No View is out before the store's first step, so every buffer is free.
                     assert!(taken);
                 });
@@ -169,6 +174,8 @@ impl Drop for Store {
 /// What the store thread holds between steps.
 struct Held {
     span: Span<MachineSecond>,
+    /// Each App's totals at each second of `span`, in the same order.
+    apps: Span<AppsSecond>,
     earlier: Span<MachineSecond>,
     /// The run and publication of the newest second taken in.
     newest: Option<Newest>,
@@ -189,10 +196,12 @@ struct Newest {
 impl Held {
     fn new() -> Self {
         let seconds = Buffers::new(SECONDS_MAX + SECONDS_HELD_MAX, MachineSecond::default);
+        let apps = Buffers::new(SECONDS_MAX + SECONDS_HELD_MAX, AppsSecond::with_room);
         let earlier = Buffers::new(EARLIER_MAX + EARLIER_HELD_MAX, MachineSecond::default);
         let views = Buffers::new(VIEWS_MAX, || View {
             version: 0,
             seconds: Vec::with_capacity(SECONDS_MAX),
+            apps: Vec::with_capacity(SECONDS_MAX),
             earlier: Vec::with_capacity(EARLIER_MAX),
             failure: None,
             left_out: None,
@@ -200,6 +209,7 @@ impl Held {
 
         Self {
             span: Span::new(SECONDS_MAX, seconds),
+            apps: Span::new(SECONDS_MAX, apps),
             earlier: Span::new(EARLIER_MAX, earlier),
             newest: None,
             views,
@@ -210,11 +220,12 @@ impl Held {
         }
     }
 
-    /// Takes `second` of run `run` in after the newest, and keeps the second the live span lets
-    /// go of where it is the first of its stretch. A second of the run no newer than the newest
-    /// taken in is held already. Returns false and changes nothing where a span has no buffer
-    /// to write, so the caller takes the second again at its next step.
-    fn take(&mut self, run: &RunIdentity, second: &MachineSecond) -> bool {
+    /// Takes `second` of run `run` in after the newest, with what the store found of its Apps,
+    /// `apps`, and keeps the second the live span lets go of where it is the first of its
+    /// stretch. A second of the run no newer than the newest taken in is held already. Returns
+    /// false and changes nothing where a span has no buffer to write, so the caller takes the
+    /// second again at its next step.
+    fn take(&mut self, run: &RunIdentity, second: &MachineSecond, apps: &TickApps<'_>) -> bool {
         if let Some(newest) = &self.newest {
             if newest.run == *run {
                 if second.publication <= newest.publication {
@@ -226,6 +237,9 @@ impl Held {
         let leaving = self.span.leaving().copied();
         let kept = leaving.filter(|leaving| starts_stretch(self.earlier.newest(), leaving));
         if !self.span.has_room() {
+            return false;
+        }
+        if !self.apps.has_room() {
             return false;
         }
         if kept.is_some() {
@@ -244,6 +258,11 @@ impl Held {
             buffer.segment = segment;
         });
         assert!(pushed);
+        let previous = self.apps.newest_held().map(Arc::clone);
+        let pushed = self
+            .apps
+            .push(|buffer| buffer.take(apps, previous.as_deref()));
+        assert!(pushed);
 
         self.newest = Some(Newest {
             run: *run,
@@ -259,25 +278,39 @@ impl Held {
     fn publish(&mut self, mailbox: &Mailbox<View>) {
         self.views.release(|view| {
             view.seconds.clear();
+            view.apps.clear();
             view.earlier.clear();
         });
         let version = self.version + 1;
         let span = &self.span;
+        let apps = &self.apps;
         let earlier = &self.earlier;
         let failure = self.failure;
         let left_out = self.left_out;
         let written = self.views.write(|view| {
             assert!(view.seconds.is_empty());
+            assert!(view.apps.is_empty());
             assert!(view.earlier.is_empty());
-            let capacity = (view.seconds.capacity(), view.earlier.capacity());
+            let capacity = (
+                view.seconds.capacity(),
+                view.apps.capacity(),
+                view.earlier.capacity(),
+            );
 
             view.version = version;
             view.seconds.extend(span.held().map(Arc::clone));
+            view.apps.extend(apps.held().map(Arc::clone));
             view.earlier.extend(earlier.held().map(Arc::clone));
             view.failure = failure;
             view.left_out = left_out;
 
-            assert_eq!((view.seconds.capacity(), view.earlier.capacity()), capacity);
+            assert_eq!(view.apps.len(), view.seconds.len());
+            let held = (
+                view.seconds.capacity(),
+                view.apps.capacity(),
+                view.earlier.capacity(),
+            );
+            assert_eq!(held, capacity);
         });
         let Some(view) = written else {
             return;
@@ -343,7 +376,7 @@ fn run(held: &mut Held, ring: &mut Ring, shared: &Shared) {
 fn step(held: &mut Held, ring: &mut Ring, waited: Result<(), Failure>, mailbox: &Mailbox<View>) {
     let mut failure = waited.err();
 
-    let read = ring.read(|run, second| held.take(run, second));
+    let read = ring.read(|run, second, apps| held.take(run, second, &apps));
     if let Err(read) = read {
         failure = Some(read);
     }

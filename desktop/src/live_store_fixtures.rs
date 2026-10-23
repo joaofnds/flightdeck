@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use collector::machine::Pressure;
 use serde_json::{Value, json};
-use viewer::store::{MachineSecond, MemorySecond, Traffic, View};
+use viewer::store::{AppsSecond, MachineSecond, MemorySecond, Traffic, View};
 
 use crate::live_inventory::{PerformanceLevel, performance_levels};
 
@@ -58,11 +58,16 @@ pub fn reading_at(wall_second: u64, segment: u64) -> MachineSecond {
     }
 }
 
-/// The View of a store that holds `earlier` before the live span `seconds`.
+/// The View of a store that holds `earlier` before the live span `seconds`, whose Apps it has
+/// not read.
 pub fn view(version: u64, earlier: &[MachineSecond], seconds: &[MachineSecond]) -> View {
     View {
         version,
         seconds: seconds.iter().copied().map(Arc::new).collect(),
+        apps: seconds
+            .iter()
+            .map(|_| Arc::new(AppsSecond::default()))
+            .collect(),
         earlier: earlier.iter().copied().map(Arc::new).collect(),
         failure: None,
         left_out: None,

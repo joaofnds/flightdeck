@@ -1,5 +1,5 @@
 //! The store's ring adapter. It follows the newest run the recording registers and derives a
-//! second from each tick the run's ring publishes.
+//! second and its Apps from each tick the run's ring publishes.
 
 use std::io::ErrorKind;
 use std::mem;
@@ -8,9 +8,16 @@ use std::thread;
 use std::time::Duration;
 
 use collector::recording::{Registry, RegistryBuffer, read_identity};
-use collector::ring::{Found, RingReader, RunIdentity, Shape, Tick};
+use collector::ring::{
+    Found, FoundEvent, IdentityObservation, RingReader, RunIdentity, Shape, Tick,
+};
+use collector::tracker::{EVENTS_PER_TICK_MAX, Event};
+use persistence::{Error, NumberedEvent};
 
+use super::apps::TickApps;
 use super::{Failure, MachineSecond, readings};
+use crate::live_app_response::Sample;
+use crate::live_apps::{Frame, Publication, PublicationEvents};
 use crate::recording::MachineMinute;
 
 /// The ticks one read takes in, well above the ticks a ring publishes between two steps.
@@ -28,8 +35,9 @@ pub(super) struct Ring {
     runs: PathBuf,
     registry: RegistryBuffer,
     source: Option<Source>,
-    /// A second read from the ring that the store could not take yet.
-    pending: Option<MachineSecond>,
+    /// A second read from the ring that the store could not take yet, and whether the App rule
+    /// derived its Apps, which the source's sample holds, or why it refused them.
+    pending: Option<(MachineSecond, Result<(), String>)>,
     /// The steps since the store last looked at the runs registry, and what it found there.
     unlooked_steps: u32,
     followed: Result<(), Failure>,
@@ -40,10 +48,20 @@ struct Source {
     reader: RingReader,
     identity: RunIdentity,
     tick: Tick,
+    /// The identities of the processes of the tick just read, where the ring holds them.
+    identities: Vec<IdentityObservation>,
+    /// The events of the tick just read, with their identities where the ring holds them.
+    events: Vec<(u64, u64, Event)>,
+    event_identities: Vec<IdentityObservation>,
     /// The tick read last and the one before it, each as a machine minute of one tick, so a
     /// second from the ring is derived as one from a sealed minute is.
     current: MachineMinute,
     previous: MachineMinute,
+    /// The App rule's frame of the tick read last and of the one before it the rule took.
+    frame: Option<Box<Frame>>,
+    previous_frame: Option<Box<Frame>>,
+    /// The App rule's sample of the tick read last.
+    sample: Option<Box<Sample>>,
 }
 
 impl Ring {
@@ -59,12 +77,12 @@ impl Ring {
         }
     }
 
-    /// Hands `push` the run and the second of each tick the ring published since the last
-    /// read, oldest first, until the ring has no more or `push` refuses one, which the next read
-    /// hands it again.
+    /// Hands `push` the run, the second and the Apps of each tick the ring published since the
+    /// last read, oldest first, until the ring has no more or `push` refuses one, which the next
+    /// read hands it again.
     pub(super) fn read(
         &mut self,
-        mut push: impl FnMut(&RunIdentity, &MachineSecond) -> bool,
+        mut push: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>) -> bool,
     ) -> Result<(), Failure> {
         let Some(source) = &mut self.source else {
             return Ok(());
@@ -72,9 +90,11 @@ impl Ring {
 
         for _ in 0..TICKS_PER_READ_MAX {
             if self.pending.is_none() {
-                match source.reader.read_into(&mut source.tick) {
+                match source.read_tick() {
                     Ok(Found::Publication { publication, .. }) => {
-                        self.pending = source.second(publication);
+                        if let Some(second) = source.second(publication) {
+                            self.pending = Some((second, source.apps(publication)));
+                        }
                     }
                     Ok(Found::Missed { .. }) => continue,
                     Ok(Found::Nothing) => return Ok(()),
@@ -82,10 +102,17 @@ impl Ring {
                 }
             }
 
-            let Some(second) = &self.pending else {
+            let Some((second, apps)) = &self.pending else {
                 continue;
             };
-            if !push(&source.identity, second) {
+            let apps = match apps {
+                Ok(()) => match source.sample.as_deref() {
+                    Some(sample) => TickApps::Derived(sample),
+                    None => unreachable!("the App rule leaves a sample where it took the tick"),
+                },
+                Err(error) => TickApps::Refused(error),
+            };
+            if !push(&source.identity, second, apps) {
                 return Ok(());
             }
             self.pending = None;
@@ -181,13 +208,131 @@ impl Source {
         let shape = reader.shape();
         let tick = persistence::tick_buffer(&shape).map_err(|_| Failure::TickShape)?;
 
+        let processes = count(shape.process_capacity)?;
+
         Ok(Self {
             reader,
             identity,
             tick,
+            identities: Vec::with_capacity(processes),
+            events: Vec::with_capacity(EVENTS_PER_TICK_MAX),
+            event_identities: Vec::with_capacity(EVENTS_PER_TICK_MAX),
             current: minute_of(&shape)?,
             previous: minute_of(&shape)?,
+            frame: None,
+            previous_frame: None,
+            sample: None,
         })
+    }
+
+    /// Reads the ring's next tick, with its processes' identities where the ring holds them.
+    fn read_tick(&mut self) -> std::io::Result<Found> {
+        if self.reader.dictionary_capacity().is_some() {
+            self.reader
+                .read_identity_into(&mut self.tick, &mut self.identities)
+        } else {
+            self.identities.clear();
+            self.reader.read_into(&mut self.tick)
+        }
+    }
+
+    /// Runs the App rule on the tick just read, the ring's publication `publication`, with its
+    /// rates since the tick before it the rule took, and leaves its sample in `sample`, or says
+    /// why the rule refused the tick.
+    fn apps(&mut self, publication: u64) -> Result<(), String> {
+        if let Err(error) = self.apps_capture(publication) {
+            self.sample = None;
+            return Err(error.to_string());
+        }
+
+        mem::swap(&mut self.frame, &mut self.previous_frame);
+        Ok(())
+    }
+
+    /// The App rule's frame of the tick just read, with the programs its departed processes ran,
+    /// and the sample of that frame after the frame before it.
+    fn apps_capture(&mut self, publication: u64) -> persistence::Result<()> {
+        Frame::capture(
+            &Publication {
+                reader: &self.reader,
+                tick: &self.tick,
+                identities: &self.identities,
+                publication,
+            },
+            &mut self.frame,
+        )?;
+        self.apps_capture_events()?;
+
+        let numbered: Vec<NumberedEvent<'_>> = self
+            .events
+            .iter()
+            .map(|(number, tick, event)| NumberedEvent {
+                number: *number,
+                tick: *tick,
+                event,
+            })
+            .collect();
+        let Some(frame) = self.frame.as_deref_mut() else {
+            unreachable!("a frame the App rule took holds the tick");
+        };
+        frame.capture_exits(
+            &Publication {
+                reader: &self.reader,
+                tick: &self.tick,
+                identities: &self.identities,
+                publication,
+            },
+            &PublicationEvents {
+                events: &numbered,
+                identities: &self.event_identities,
+            },
+        )?;
+
+        Sample::capture(frame, self.previous_frame.as_deref(), &mut self.sample)
+    }
+
+    /// Reads the events of the tick just read into `events`, with their identities where the
+    /// ring holds them. An event the ring no longer holds is left out.
+    fn apps_capture_events(&mut self) -> persistence::Result<()> {
+        self.events.clear();
+        self.event_identities.clear();
+        if self.tick.events.is_empty() {
+            return Ok(());
+        }
+
+        self.reader.seek_event(self.tick.events.start)?;
+        let identities = self.reader.dictionary_capacity().is_some();
+        for _ in 0..=EVENTS_PER_TICK_MAX {
+            if self.reader.next_event() >= self.tick.events.end {
+                return Ok(());
+            }
+
+            let mut identity = IdentityObservation::EMPTY;
+            let found = if identities {
+                self.reader.read_event_identity(&mut identity)?
+            } else {
+                self.reader.read_event()?
+            };
+            match found {
+                FoundEvent::Nothing => return Ok(()),
+                FoundEvent::Missed { .. } => {}
+                FoundEvent::Event {
+                    number,
+                    tick,
+                    event,
+                } => {
+                    if self.events.len() == EVENTS_PER_TICK_MAX {
+                        return Err(Error::Bound("store tick events"));
+                    }
+                    self.events.push((number, tick, event));
+                    if identities {
+                        self.event_identities.push(identity);
+                    }
+                }
+            }
+        }
+
+        Err(Error::Bound("store tick events"))
     }
 
     /// The second of the tick just read, the ring's publication `publication`, with its rates

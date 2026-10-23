@@ -156,6 +156,12 @@ impl<T> Span<T> {
     pub fn newest(&self) -> Option<&T> {
         self.held.back().map(AsRef::as_ref)
     }
+
+    /// The newest reading's buffer, which a View may hold too.
+    #[must_use]
+    pub fn newest_held(&self) -> Option<&Arc<T>> {
+        self.held.back()
+    }
 }
 
 /// Where the store thread leaves its newest View for the main thread.

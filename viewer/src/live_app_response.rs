@@ -11,7 +11,7 @@ use crate::live_apps::Frame;
 pub(crate) use json::{Header, bounded};
 pub use part::AppPart;
 pub(crate) use part::Present;
-pub(crate) use ranks::METRICS;
+pub(crate) use ranks::{METRICS, Rankable, Ranked, rank_apps};
 pub use ranks::{Metric, RANKS_MAX, Rank, RankedApp, Ranking, Ranks};
 
 pub const SAMPLE_BYTES_MAX: usize = 8 * 1024 * 1024;
@@ -145,7 +145,7 @@ impl KeyKind {
         Ok(self.key(bytes))
     }
 
-    fn key(self, bytes: &[u8]) -> AppKey<'_> {
+    pub(crate) fn key(self, bytes: &[u8]) -> AppKey<'_> {
         match self {
             KeyKind::Bundle => AppKey::Bundle(bytes),
             KeyKind::Executable => AppKey::Executable(bytes),

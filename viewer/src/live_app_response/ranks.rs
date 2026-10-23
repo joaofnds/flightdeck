@@ -69,24 +69,75 @@ const _: () = {
     assert!(super::APPS_MAX <= 4_294_967_295);
 };
 
+/// One App as the ranking rule reads it, so a sample's Apps and the Apps the store holds rank
+/// by one rule.
+pub(crate) trait Rankable {
+    /// What the App's members used of `metric`.
+    fn measure(&self, metric: Metric) -> Measure;
+
+    /// The App as a ranking names it.
+    fn ranked(&self) -> Arc<RankedApp>;
+}
+
+/// What the ranks of one observation carry beside its Apps.
+pub(crate) struct Ranked {
+    pub(crate) selected: Observation,
+    pub(crate) elapsed_ns: Option<u64>,
+    pub(crate) membership_complete: bool,
+    pub(crate) ungrouped_members: u32,
+}
+
 impl Sample {
     pub fn ranks(&self) -> Result<Ranks> {
-        let mut ranks = Ranks {
-            selected: self.selected,
-            app_count: u32::try_from(self.apps.len()).map_err(|_| Error::Bound("ranked Apps"))?,
-            membership_complete: self.membership_complete,
-            ungrouped_members: self.ungrouped_members,
-            metrics: METRICS.map(Ranking::new),
-        };
-        for app in &self.apps {
-            ranks_app(app, self.elapsed_ns, &mut ranks.metrics);
-        }
-
-        Ok(ranks)
+        rank_apps(
+            &Ranked {
+                selected: self.selected,
+                elapsed_ns: self.elapsed_ns,
+                membership_complete: self.membership_complete,
+                ungrouped_members: self.ungrouped_members,
+            },
+            &self.apps,
+        )
     }
 }
 
-fn ranks_app(app: &App, elapsed_ns: Option<u64>, metrics: &mut [Ranking; 5]) {
+/// The Apps of `apps` that used the most of each resource in the observation `ranked` names.
+pub(crate) fn rank_apps(ranked: &Ranked, apps: &[impl Rankable]) -> Result<Ranks> {
+    let mut ranks = Ranks {
+        selected: ranked.selected,
+        app_count: u32::try_from(apps.len()).map_err(|_| Error::Bound("ranked Apps"))?,
+        membership_complete: ranked.membership_complete,
+        ungrouped_members: ranked.ungrouped_members,
+        metrics: METRICS.map(Ranking::new),
+    };
+    for app in apps {
+        ranks_app(app, ranked.elapsed_ns, &mut ranks.metrics);
+    }
+
+    Ok(ranks)
+}
+
+impl Rankable for App {
+    fn measure(&self, metric: Metric) -> Measure {
+        match metric {
+            Metric::Cpu => self.cpu_ns,
+            Metric::Resident => self.resident_bytes,
+            Metric::Power => self.energy_nj,
+            Metric::Disk => self.disk_io_bytes,
+            Metric::Gpu => self.gpu_ns,
+        }
+    }
+
+    fn ranked(&self) -> Arc<RankedApp> {
+        Arc::new(RankedApp {
+            kind: self.key.kind,
+            bytes: self.key.bytes.clone(),
+            display_name: self.display_name.clone(),
+        })
+    }
+}
+
+fn ranks_app(app: &impl Rankable, elapsed_ns: Option<u64>, metrics: &mut [Ranking; 5]) {
     let mut ranked = None;
     for ranking in metrics {
         let Some(reading) = ranking.read(app, elapsed_ns) else {
@@ -99,13 +150,7 @@ fn ranks_app(app: &App, elapsed_ns: Option<u64>, metrics: &mut [Ranking; 5]) {
             }
         }
 
-        let ranked = ranked.get_or_insert_with(|| {
-            Arc::new(RankedApp {
-                kind: app.key.kind,
-                bytes: app.key.bytes.clone(),
-                display_name: app.display_name.clone(),
-            })
-        });
+        let ranked = ranked.get_or_insert_with(|| app.ranked());
         ranking.insert(Rank {
             app: Arc::clone(ranked),
             amount: reading.amount,
@@ -116,8 +161,8 @@ fn ranks_app(app: &App, elapsed_ns: Option<u64>, metrics: &mut [Ranking; 5]) {
     }
 }
 
-struct Reading<'app> {
-    measure: &'app Measure,
+struct Reading {
+    measure: Measure,
     amount: u64,
     rate: Option<f64>,
 }
@@ -146,8 +191,8 @@ impl Ranking {
         }
     }
 
-    fn read<'app>(&mut self, app: &'app App, elapsed_ns: Option<u64>) -> Option<Reading<'app>> {
-        let measure = self.metric.measure(app);
+    fn read(&mut self, app: &impl Rankable, elapsed_ns: Option<u64>) -> Option<Reading> {
+        let measure = app.measure(self.metric);
         if measure.overflowed {
             self.overflowed += 1;
             return None;
@@ -210,16 +255,6 @@ fn kind_order(kind: KeyKind) -> u8 {
 }
 
 impl Metric {
-    fn measure(self, app: &App) -> &Measure {
-        match self {
-            Self::Cpu => &app.cpu_ns,
-            Self::Resident => &app.resident_bytes,
-            Self::Power => &app.energy_nj,
-            Self::Disk => &app.disk_io_bytes,
-            Self::Gpu => &app.gpu_ns,
-        }
-    }
-
     fn rate(self, amount: u64, elapsed_ns: u64) -> Option<f64> {
         match self {
             Self::Cpu => apps::cpu_percent_one_core(apps::CpuRate {
