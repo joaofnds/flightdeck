@@ -13,6 +13,7 @@ pub mod live_app_response;
 pub mod live_apps;
 mod live_fan_history;
 mod metrics;
+pub mod recording;
 mod session;
 
 pub use cancellation::Cancellation;

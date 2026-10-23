@@ -404,7 +404,7 @@ const NET_RT_IFLIST2: c_int = 6;
 const EVERY_INTERFACE: c_int = 0;
 const RTM_IFINFO2: c_int = 18;
 const IFF_LOOPBACK: c_int = 0x8;
-pub(crate) const IFNAMSIZ: usize = 16;
+pub const IFNAMSIZ: usize = 16;
 const ENOMEM: c_int = 12;
 
 #[cfg(test)]
