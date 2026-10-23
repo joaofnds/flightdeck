@@ -48,6 +48,8 @@ mod scroll;
 mod sections;
 #[path = "live_source_mode_input_tests.rs"]
 pub(crate) mod source_mode;
+#[path = "live_store_view_hover_input_tests.rs"]
+mod store_view_hover;
 #[path = "live_summary_input_tests.rs"]
 mod summary;
 

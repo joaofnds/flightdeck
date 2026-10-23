@@ -26,9 +26,7 @@ pub fn overview_panels(
         return super::empty_panels("overview");
     };
 
-    // The page always asks for the older tail, so the charts span the loaded hour.
-    let older_stride = Some(viewer::EARLIER_STRIDE_SECONDS);
-    let domain = Domain::ending_at(newest.wall_ns / NANOSECONDS_PER_SECOND, older_stride)?;
+    let domain = overview_panels_domain(newest)?;
     let points = overview_panels_points(view, &domain);
     let coordinates = overview_panels_coordinates(&points, &domain)?;
     let specifications = super::overview(levels);
@@ -40,6 +38,29 @@ pub fn overview_panels(
     }
     assert!(result.len() <= OVERVIEW_PANELS_MAX);
     Ok(result)
+}
+
+/// The wall second of each point the Overview's machine charts of `view` draw, in the order of
+/// their positions.
+pub fn overview_seconds(view: &View) -> Result<Vec<u64>, String> {
+    let Some(newest) = view.seconds.last() else {
+        return Ok(Vec::new());
+    };
+
+    let domain = overview_panels_domain(newest)?;
+    let points = overview_panels_points(view, &domain);
+    Ok(points
+        .iter()
+        .map(|second| second.wall_ns / NANOSECONDS_PER_SECOND)
+        .collect())
+}
+
+/// The span the Overview's machine charts draw, ending at `newest`. The page always asks for the
+/// older tail, so the charts span the loaded hour.
+fn overview_panels_domain(newest: &MachineSecond) -> Result<Domain, String> {
+    let older_stride = Some(viewer::EARLIER_STRIDE_SECONDS);
+
+    Domain::ending_at(newest.wall_ns / NANOSECONDS_PER_SECOND, older_stride)
 }
 
 /// The seconds of `view` the charts of `domain` draw, oldest first: of the seconds older than

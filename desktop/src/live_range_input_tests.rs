@@ -31,14 +31,14 @@ impl InputDriver {
         });
     }
 
-    fn show_range(&mut self, range: Range) {
+    pub(super) fn show_range(&mut self, range: Range) {
         self.view.update(&mut self.context, |dashboard, cx| {
             dashboard.set_range(range, cx);
         });
         self.context.run_until_parked();
     }
 
-    fn view_window(&self) -> Option<TimeWindow> {
+    pub(super) fn view_window(&self) -> Option<TimeWindow> {
         self.view
             .read_with(&self.context, |dashboard, _| dashboard.view_window())
     }

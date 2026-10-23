@@ -151,11 +151,13 @@ impl LiveDashboard {
         cx.notify();
     }
 
-    /// Takes the cursor of `preview`, which the page no longer shows, off the charts, and
-    /// records its hover as ended before the page held its readings where its timing still runs.
+    /// Takes the cursor of `preview`, which the page no longer shows, off the charts, records
+    /// its hover as ended before the page held its readings where its timing still runs, and
+    /// draws the charts from the store's newest View, which the hover held them back from.
     pub(crate) fn hover_ended(&mut self, preview: &Preview) {
         hover_unfinished(&mut self.hover_timings, preview);
         self.chart_hover = None;
+        self.store_view_resume();
     }
 
     /// Whether a hover still waits on a read of its second, whether that read is out or waits
@@ -385,6 +387,14 @@ impl LiveDashboard {
             .as_ref()
             .is_some_and(|preview| preview.page_reply_kept);
         let mut preview = Preview::resident(snapshot, &self.request, target);
+        preview.held = self.store_view_held(&preview.target);
+        // The View holds the hovered second's readings and top Apps, which is all the page shows
+        // of it, so the hover reads nothing.
+        if let Some(held) = &preview.held {
+            if held.rankings.is_some() {
+                preview.complete = true;
+            }
+        }
         preview.page_reply_kept = page_reply_kept;
         if self.picker == Some(Picker::App) {
             preview.list_apps(snapshot);

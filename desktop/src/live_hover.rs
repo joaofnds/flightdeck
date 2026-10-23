@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use serde_json::{Value, json};
+use viewer::store::MachineSecond;
 
 use crate::live_dashboard::LiveDashboard;
 use crate::live_source::{Snapshot, identity_publication, identity_signature};
@@ -51,6 +52,18 @@ pub struct Preview {
     /// When the app began handling what put the pointer over the target, while the hover's
     /// timing runs.
     pub hovered_at: Option<std::time::Instant>,
+    /// The hovered second as the store's View held it, where the page draws from the View, or
+    /// none where the worker's readings show the hover.
+    pub held: Option<HeldSecond>,
+}
+
+/// A hovered second as the store's View held it when the pointer reached it.
+pub struct HeldSecond {
+    /// The second's readings, or none where the View holds no reading of it.
+    pub second: Option<Arc<MachineSecond>>,
+    /// The second's top Apps, or none where the View holds no Apps of it, as for a second of the
+    /// older tail.
+    pub rankings: Option<crate::live_rankings::Rankings>,
 }
 
 impl Target {
@@ -146,6 +159,7 @@ impl Preview {
             retarget_geometry: false,
             page_reply_kept: false,
             hovered_at: None,
+            held: None,
         }
     }
 

@@ -9,16 +9,17 @@ use std::sync::Arc;
 use gpui::{App, Global};
 use num_traits::ToPrimitive;
 use serde_json::{Value, json};
-use viewer::store::{MachineSecond, Store, View};
+use viewer::store::{AppsSecond, MachineSecond, Store, View};
 
 use super::LiveDashboard;
 use crate::data::Panel;
 use crate::hardware::Readings;
 use crate::live_app_attribution_history::{AppAttributionHistory, Metric};
+use crate::live_hover::{HeldSecond, Target};
 use crate::live_inventory::PerformanceLevel;
 use crate::live_overview_app_histories::OverviewAppHistories;
 use crate::live_projection::held_projection;
-use crate::live_rankings::{Rankings, from_selected};
+use crate::live_rankings::{Rankings, from_selected, stamp_identity};
 use crate::live_resident_history::ResidentHistory;
 use crate::live_source_mode::SourceMode;
 use crate::live_thermal_pressure::thermal_pressure_level_text;
@@ -57,6 +58,8 @@ pub(super) struct StorePanels {
     /// The version of the View they were drawn from, or none before the first.
     version: Option<u64>,
     panels: Vec<Rc<Panel>>,
+    /// The wall second of each point of `panels`, in the order of their positions.
+    seconds: Vec<u64>,
     /// The charts by App the View draws, of resident memory and of `APP_METRICS`, leaving out
     /// each it holds too little for.
     apps: Vec<Rc<Panel>>,
@@ -77,6 +80,10 @@ impl LiveDashboard {
     pub(crate) fn take_view(&mut self, view: Arc<View>) -> bool {
         take_view_report(self.store_view.as_deref(), &view);
         self.store_view = Some(view);
+        // The hover holds the charts where they were until it ends.
+        if self.store_view_hover_shown() {
+            return false;
+        }
         if !self.draw_store_view() {
             return false;
         }
@@ -110,6 +117,17 @@ impl LiveDashboard {
         true
     }
 
+    /// Draws Overview's machine charts from the store's newest View, which a hover that ended
+    /// held them back from, where the page draws them from it.
+    pub(crate) fn store_view_resume(&mut self) {
+        if !self.draw_store_view() {
+            return;
+        }
+
+        self.zoom_panels();
+        self.refresh_chart_inspector();
+    }
+
     /// Lets go of the View the page could not draw, so the page shows the worker's readings
     /// whole and its error stays the worker's, and reports `error` once each time it changes.
     fn draw_store_view_failed(&mut self, error: String) {
@@ -138,9 +156,17 @@ impl LiveDashboard {
                 super::zoom_panel(panel, window, sliding);
             }
         }
+        let seconds = crate::live_projection::overview_seconds(view)?;
+        // A hover reads the range's end from the charts' last point.
+        let last = view
+            .seconds
+            .last()
+            .map(|second| second.wall_ns / NANOSECONDS_PER_SECOND);
+        assert_eq!(seconds.last().copied(), last);
         Ok(StorePanels {
             version: Some(view.version),
             panels,
+            seconds,
             apps,
             histories: Some(histories),
             resident: Some(resident),
@@ -150,10 +176,24 @@ impl LiveDashboard {
     }
 
     /// The View the page draws Overview's machine charts, readouts and hardware figure from: the
-    /// store's newest, while the page shows the live Mac's Overview following the newest second,
-    /// no hover's reading is shown, and the View is no older than the worker's readings, or the
-    /// page is opening before the worker's first reading.
+    /// one `followed_store_view` names, while no hover the worker's readings show is shown.
     fn drawn_store_view(&self) -> Option<&View> {
+        // A hover the worker's readings show holds the page still, as it holds those readings.
+        if self
+            .preview
+            .as_ref()
+            .is_some_and(|preview| preview.held.is_none())
+        {
+            return None;
+        }
+
+        self.followed_store_view()
+    }
+
+    /// The store's newest View, while the page shows the live Mac's Overview following the
+    /// newest second and the View is no older than the worker's readings, or the page is opening
+    /// before the worker's first reading, whatever hover is shown.
+    fn followed_store_view(&self) -> Option<&View> {
         if self.request.route != "overview" {
             return None;
         }
@@ -163,10 +203,6 @@ impl LiveDashboard {
             return None;
         }
         if self.request.second.is_some() {
-            return None;
-        }
-        // A hover holds the page still, as it holds the worker's readings.
-        if self.preview.is_some() {
             return None;
         }
 
@@ -193,6 +229,17 @@ impl LiveDashboard {
         Some(view)
     }
 
+    /// Whether a hover is shown on the page drawn from the store's View, which holds the charts
+    /// drawn from it where they were, so the hovered second stays under the pointer as the
+    /// worker's readings hold the page still under a hover.
+    fn store_view_hover_shown(&self) -> bool {
+        let Some(preview) = &self.preview else {
+            return false;
+        };
+
+        preview.held.is_some()
+    }
+
     /// Whether `panel` is a chart the page drew from the store's View.
     pub(crate) fn store_view_draws(&self, panel: &Panel) -> bool {
         if self.drawn_store_view().is_none() {
@@ -202,6 +249,23 @@ impl LiveDashboard {
         let drawn = &self.store_panels;
         let mut panels = drawn.panels.iter().chain(&drawn.apps);
         panels.any(|drawn| drawn.id == panel.id)
+    }
+
+    /// The index of the point the page's chart `panel`, drawn from the View, shows: the hovered
+    /// second's, or the newest second's while no hover is shown.
+    pub(crate) fn store_view_index(&self, panel: &Panel) -> Option<usize> {
+        let Some(target) = self.reading_target() else {
+            return panel.selected_index;
+        };
+
+        if let Some(metric) = Metric::from_panel(&panel.id) {
+            return self.attribution_history(metric)?.index(Some(target));
+        }
+        if panel.id == crate::live_resident_history::PANEL_ID {
+            return self.resident_history()?.index(Some(target));
+        }
+        let seconds = &self.store_panels.seconds;
+        seconds.iter().rposition(|second| *second == target.second)
     }
 
     /// The history of `metric` the page reads: the one the page drew from the store's View,
@@ -228,10 +292,14 @@ impl LiveDashboard {
         self.snapshot.as_ref()?.resident_history.as_deref()
     }
 
-    /// The second the page's readings show: the newest of the View the page draws, where it
-    /// draws one, and otherwise the second the worker's reading, or a hover's, selected.
+    /// The second the page's readings show: the hovered one, or the newest, of the View the page
+    /// draws, where it draws one, and otherwise the second the worker's reading, or a hover's,
+    /// selected.
     pub(crate) fn shown_second(&self) -> Option<u64> {
         if let Some(second) = self.store_view_last_second() {
+            if let Some(preview) = &self.preview {
+                return Some(preview.target.second);
+            }
             return Some(second);
         }
 
@@ -240,36 +308,93 @@ impl LiveDashboard {
     }
 
     /// The newest second of the View the page draws, where it draws one, which the range ends
-    /// at since the worker's readings may not hold it yet.
+    /// at since the worker's readings may not hold it yet. Under a hover, the newest second of
+    /// the View the charts were drawn from.
     pub(super) fn store_view_last_second(&self) -> Option<u64> {
         let view = self.drawn_store_view()?;
+        if self.store_view_hover_shown() {
+            return self.store_panels.seconds.last().copied();
+        }
 
         Some(view.seconds.last()?.wall_ns / NANOSECONDS_PER_SECOND)
     }
 
-    /// The top Apps of the newest second of the View the page draws, where it draws one, and
-    /// that second.
+    /// The top Apps of the second the View the page draws shows, and that second: the one it
+    /// held for the shown hover, or its newest while no hover is shown. None where the View holds
+    /// no Apps of the hovered second, and where the page draws from the worker's readings.
     pub(crate) fn store_view_rankings(&self) -> Option<(&Rankings, u64)> {
         let second = self.store_view_last_second()?;
-        let rankings = self.store_panels.rankings.as_ref()?;
+        if let Some(preview) = &self.preview {
+            let held = preview.held.as_ref()?;
+            return Some((held.rankings.as_ref()?, preview.target.second));
+        }
 
-        Some((rankings, second))
+        Some((self.store_panels.rankings.as_ref()?, second))
     }
 
-    /// The readings Overview's readouts read of the newest second of the View the page draws,
-    /// where it draws one, keyed as the worker's summary of a second keys them.
+    /// The readings Overview's readouts read of the second the View the page draws shows,
+    /// keyed as the worker's summary of a second keys them.
     pub(crate) fn store_view_summary(&self) -> Option<Value> {
-        let view = self.drawn_store_view()?;
-
-        Some(store_view_summary_of(view.seconds.last()?))
+        Some(store_view_summary_of(self.store_view_shown()?))
     }
 
-    /// The hardware figure's readings of the newest second of the View the page draws, where it
-    /// draws one.
+    /// The hardware figure's readings of the second the View the page draws shows.
     pub(crate) fn store_view_hardware(&self) -> Option<Readings> {
-        let view = self.drawn_store_view()?;
+        Some(store_view_hardware_of(self.store_view_shown()?))
+    }
 
-        Some(store_view_hardware_of(view.seconds.last()?))
+    /// The second the View the page draws shows: the one it held for the shown hover, or its
+    /// newest while no hover is shown. None in a gap, and where the page draws from the
+    /// worker's readings.
+    fn store_view_shown(&self) -> Option<&MachineSecond> {
+        let view = self.drawn_store_view()?;
+        let hovered = self
+            .preview
+            .as_ref()
+            .and_then(|preview| preview.held.as_ref());
+
+        match hovered {
+            Some(held) => held.second.as_deref(),
+            None => view.seconds.last().map(AsRef::as_ref),
+        }
+    }
+
+    /// The hover of `second` on the page drawn from the store's View, naming the tick the View
+    /// holds of it, so the charts by App find that tick as they find any they draw. None where
+    /// the View holds no Apps of `second`, as in a gap or the older tail, and where the page
+    /// draws from the worker's readings.
+    pub(crate) fn store_view_target(&self, second: u64) -> Option<Target> {
+        let view = self.followed_store_view()?;
+        let at_second = |held: &Arc<MachineSecond>| held.wall_ns / NANOSECONDS_PER_SECOND == second;
+
+        assert_eq!(view.apps.len(), view.seconds.len());
+        let index = view.seconds.iter().rposition(at_second)?;
+        let observation = view.apps[index].observation.as_ref()?;
+        Some(Target {
+            second,
+            identity: Some(stamp_identity(&observation.stamp)),
+        })
+    }
+
+    /// The second `target` names as the View the page draws holds it, whatever hover is shown,
+    /// or none where the page draws from the worker's readings.
+    pub(crate) fn store_view_held(&self, target: &Target) -> Option<HeldSecond> {
+        let view = self.followed_store_view()?;
+        let at_target =
+            |second: &&Arc<MachineSecond>| second.wall_ns / NANOSECONDS_PER_SECOND == target.second;
+
+        assert_eq!(view.apps.len(), view.seconds.len());
+        if let Some(index) = view.seconds.iter().rposition(|second| at_target(&second)) {
+            return Some(HeldSecond {
+                second: Some(Arc::clone(&view.seconds[index])),
+                rankings: Some(store_view_ranks(&view.apps[index])),
+            });
+        }
+        // The store holds no Apps of the older tail's seconds.
+        Some(HeldSecond {
+            second: view.earlier.iter().rfind(at_target).map(Arc::clone),
+            rankings: None,
+        })
     }
 }
 
@@ -292,6 +417,11 @@ fn draw_store_view_rankings(view: &View) -> Rankings {
         unreachable!("a View the page draws holds a second");
     };
 
+    store_view_ranks(apps)
+}
+
+/// The top Apps of `apps`, ranked by the rule the worker ranks a second's Apps by.
+fn store_view_ranks(apps: &AppsSecond) -> Rankings {
     from_selected(apps.ranks().map_err(|missing| missing.to_string()))
 }
 

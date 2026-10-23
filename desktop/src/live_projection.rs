@@ -11,7 +11,7 @@ use crate::live_inventory::PerformanceLevel;
 #[path = "live_held_projection.rs"]
 pub(crate) mod held_projection;
 
-pub use held_projection::overview_panels;
+pub use held_projection::{overview_panels, overview_seconds};
 #[path = "live_resource_projection.rs"]
 mod resource_projection;
 

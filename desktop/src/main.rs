@@ -67,6 +67,8 @@ mod live_store_app_fixtures;
 #[cfg(test)]
 mod live_store_fixtures;
 #[cfg(test)]
+mod live_store_page_fixtures;
+#[cfg(test)]
 #[path = "live_process_history_tests.rs"]
 pub(crate) mod process_history_tests;
 #[cfg(test)]

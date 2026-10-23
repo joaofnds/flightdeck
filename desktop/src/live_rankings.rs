@@ -4,6 +4,7 @@ use serde_json::{Value, json};
 
 use collector::recording::{identity_text, parse_identity};
 use collector::ring::Identity;
+use viewer::apps::Stamp;
 use viewer::live_app_response::{KeyKind, Rank, Ranks};
 
 use crate::live_source::{AppKey, app_key_bytes_hex, identity_signature};
@@ -76,13 +77,8 @@ pub fn from_selected(ranks: Result<Ranks, String>) -> Rankings {
 
 /// The top Apps of an observation the viewer ranked, in the shape the pages draw.
 pub fn from_ranks(ranks: &Ranks) -> TopApps {
-    let stamp = &ranks.selected.stamp;
     TopApps {
-        selected: json!({
-            "run": identity_text(Identity(stamp.run)).to_string(),
-            "boot": identity_text(Identity(stamp.boot)).to_string(),
-            "publication": stamp.publication,
-        }),
+        selected: stamp_identity(&ranks.selected.stamp),
         app_count: ranks.app_count,
         membership_complete: ranks.membership_complete,
         ungrouped_members: ranks.ungrouped_members,
@@ -100,6 +96,15 @@ pub fn from_ranks(ranks: &Ranks) -> TopApps {
             partial: ranking.partial,
         }),
     }
+}
+
+/// The identity the pages name the tick of `stamp` by, as the worker names it.
+pub fn stamp_identity(stamp: &Stamp) -> Value {
+    json!({
+        "run": identity_text(Identity(stamp.run)).to_string(),
+        "boot": identity_text(Identity(stamp.boot)).to_string(),
+        "publication": stamp.publication,
+    })
 }
 
 fn from_ranks_entry(rank: &Rank) -> Entry {

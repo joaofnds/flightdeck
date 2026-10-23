@@ -583,14 +583,14 @@ fn attribution_arrow_inspection_and_app_navigation_keep_the_exact_target(cx: &mu
 }
 
 impl InputDriver {
-    pub(super) fn tick_hover(&mut self) {
+    pub(crate) fn tick_hover(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
             dashboard.preview_tick(cx);
         });
         self.context.run_until_parked();
     }
 
-    pub(super) fn hover_reads(&self) -> u64 {
+    pub(crate) fn hover_reads(&self) -> u64 {
         self.view
             .read_with(&self.context, |dashboard, _| dashboard.preview_submissions)
     }

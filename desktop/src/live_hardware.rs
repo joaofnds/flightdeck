@@ -33,8 +33,8 @@ impl LiveDashboard {
             }))
     }
 
-    /// The figure's readings and what kept any of them from it: the newest second of the store's
-    /// View where the page draws from it, and the worker's reading of the second it shows
+    /// The figure's readings and what kept any of them from it: the second the store's View
+    /// shows where the page draws from it, and the worker's reading of the second it shows
     /// otherwise.
     pub(crate) fn live_hardware_readings(&self) -> (Readings, [Option<String>; 2]) {
         if let Some(readings) = self.store_view_hardware() {

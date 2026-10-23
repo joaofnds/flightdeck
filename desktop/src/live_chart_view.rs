@@ -145,6 +145,12 @@ impl LiveDashboard {
 
     fn chart_cursor_fraction(&self, panel: &Panel) -> Option<f32> {
         let hover = self.chart_hover.as_ref()?;
+        if self.store_view_draws(panel) {
+            if let Some(index) = self.store_view_index(panel) {
+                return panel.positions.as_ref()?.get(index).copied();
+            }
+            return self.view_window()?.fraction_of(hover.second);
+        }
         let snapshot = self.snapshot.as_deref()?;
         if let Some(target) = self.reading_target() {
             if let Some(index) = target_index(panel, snapshot, target) {
@@ -169,6 +175,9 @@ impl LiveDashboard {
     }
 
     fn chart_inspection_index(&self, panel: &Panel) -> Option<usize> {
+        if self.store_view_draws(panel) {
+            return self.store_view_index(panel);
+        }
         // Before the worker's first reading only the store's View draws a chart, at its newest
         // second.
         let Some(snapshot) = self.snapshot.as_deref() else {
@@ -460,7 +469,10 @@ impl LiveDashboard {
                 return;
             };
 
-            let target = crate::live_hover::Target::regular(snapshot, second);
+            let target = match self.store_view_target(second) {
+                Some(target) => target,
+                None => crate::live_hover::Target::regular(snapshot, second),
+            };
             self.hover_reading_target(source.clone(), target, hovered_at, cx);
         } else {
             self.clear_reading_target(source, cx);
