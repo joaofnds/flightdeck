@@ -84,7 +84,6 @@ impl Derive for SealedApps {
             let previous = super::sample_predecessor(
                 projection.reading.as_ref(),
                 projection.previous.as_deref(),
-                reading,
                 &frame,
             );
             let mut sample = None;

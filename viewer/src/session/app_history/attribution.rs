@@ -128,7 +128,6 @@ impl Session {
             let previous = super::sample_predecessor(
                 projection.reading.as_ref(),
                 projection.previous.as_deref(),
-                reading,
                 &current,
             );
             let previous_window = if previous.is_some() {

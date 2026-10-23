@@ -107,7 +107,10 @@ impl Session {
         if let Some(window) = predecessor_window {
             if let Some(publication) = publication.checked_sub(1) {
                 if let Some(endpoint) = self.with_app_sample_endpoint(window, publication)? {
-                    if with_app_sample_predecessor(&endpoint, current.as_deref()) {
+                    if current
+                        .as_deref()
+                        .is_some_and(|current| current.takes_rates_from(&endpoint))
+                    {
                         self.with_app_sample_frame(window, &endpoint, &mut source, &mut previous)?;
                     }
                 }
@@ -303,36 +306,6 @@ fn with_app_sample_selection(selected: &Value, endpoint: &Endpoint) -> Result<()
     }
 
     Ok(())
-}
-
-pub(super) fn with_app_sample_predecessor(previous: &Endpoint, selected: Option<&Frame>) -> bool {
-    let Some(selected) = selected else {
-        return false;
-    };
-
-    if previous.run_tick.checked_add(1) != Some(selected.run_tick()) {
-        return false;
-    }
-
-    if previous.wall_ns.is_none() {
-        return false;
-    }
-
-    let (Some(before), Some(after)) =
-        (previous.stamp.continuous_ns, selected.stamp().continuous_ns)
-    else {
-        return false;
-    };
-
-    if before >= after {
-        return false;
-    }
-
-    let (Some(before), Some(after)) = (previous.stamp.awake_ns, selected.stamp().awake_ns) else {
-        return false;
-    };
-
-    before <= after
 }
 
 #[cfg(test)]

@@ -754,23 +754,6 @@ impl Reading {
             events_end: self.events_end,
         }
     }
-
-    fn adjacent(&self, selected: &Self) -> bool {
-        if self.observation.recording != selected.observation.recording {
-            return false;
-        }
-
-        if self.observation.stamp.boot != selected.observation.stamp.boot {
-            return false;
-        }
-
-        if self.observation.stamp.run != selected.observation.stamp.run {
-            return false;
-        }
-
-        self.observation.stamp.publication.checked_add(1)
-            == Some(selected.observation.stamp.publication)
-    }
 }
 
 /// Whether the replay of the App histories of `range` reads `window`, the window of
@@ -832,7 +815,6 @@ fn app_history_capture(
         let previous = sample_predecessor(
             projection.reading.as_ref(),
             projection.previous.as_deref(),
-            reading,
             &current,
         );
         projection
@@ -845,20 +827,16 @@ fn app_history_capture(
     Ok(())
 }
 
-/// The frame a sample of `reading` takes its rates from: the frame of the reading just before
-/// it, when that is the observation before it in its run and the collector took both on
-/// consecutive ticks.
+/// The frame the sample of `current` takes its rates from: the frame of the reading just before
+/// it, where the App rule takes them from that reading.
 fn sample_predecessor<'frame>(
     previous: Option<&Reading>,
     previous_frame: Option<&'frame Frame>,
-    reading: &Reading,
     current: &Frame,
 ) -> Option<&'frame Frame> {
     let previous = previous?;
-    if previous.adjacent(reading) {
-        if super::committed_apps::with_app_sample_predecessor(&previous.endpoint(), Some(current)) {
-            return previous_frame;
-        }
+    if current.takes_rates_from(&previous.endpoint()) {
+        return previous_frame;
     }
 
     None
