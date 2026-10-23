@@ -19,8 +19,6 @@ mod process_groups;
 pub(crate) use process_groups::Replay as ProcessGroupsReplay;
 mod resident;
 mod sealed;
-mod sealed_apps;
-pub use sealed_apps::SealedApps;
 mod sealed_attribution;
 pub(super) use sealed_attribution::KeptHeaders;
 mod sealed_parts;

@@ -7,9 +7,10 @@ use super::super::sealed::fixture::{range, rewrite};
 use super::*;
 use crate::live::app_process_groups_history_tests::{named, usage};
 use crate::live::identity_fixture::Fixture;
-use crate::live_app_response::{PAGE_ROWS_MAX, Page};
+use crate::live_app_response::{PAGE_ROWS_MAX, Page, Sample};
 use crate::recording::apps::read_app_rows;
 use crate::recording::{AppMinute, AppParts};
+use persistence::app_tables::{program_code, state_code, unavailable_code};
 
 #[test]
 fn a_window_keeps_the_parts_the_replay_of_its_minute_gives_every_app() {
@@ -21,7 +22,7 @@ fn a_window_keeps_the_parts_the_replay_of_its_minute_gives_every_app() {
     fixture.publish_with_system_rows(1000);
     fixture.publish_with_system_rows(1001);
     fixture.publish_with_system_rows(1002);
-    fixture.seal_derived(&[], &crate::SealedApps::default());
+    fixture.seal_derived(&[], &persistence::sealed_apps::SealedApps::default());
     let session = Session::open(&fixture.root).unwrap();
     let replayed = replayed_samples(&session, 1002);
     let keys = app_keys(&replayed[2]);
@@ -39,19 +40,24 @@ fn a_window_keeps_the_parts_the_replay_of_its_minute_gives_every_app() {
 #[test]
 fn a_window_keeps_every_app_of_each_observation_as_its_sample_gave_it() {
     // Goal: a window's App rows read back with no SQL as the facts and the Apps of each sample
-    // its seal encoded, so the store holds a sealed minute's Apps as it holds a live second's.
-    // Method: encode the samples a replay of a sealed minute of three observations gives, read
-    // the table's App rows back, and compare them with the rows the samples give.
+    // the replay of its minute gives, so the store holds a sealed minute's Apps as it holds a
+    // live second's.
+    // Method: seal a window of two observations with its Apps' parts, read the table's App rows
+    // back, and compare them with the rows the samples of a replay of its minute give.
     let mut fixture = Fixture::new();
     let session = sealed_seconds_with_parts(&mut fixture);
-    let samples: Vec<Box<Sample>> = replayed_samples(&session, 1001)
-        .into_iter()
-        .map(Box::new)
-        .collect();
-    let pending = fixture.root.join("encoded");
-    std::fs::create_dir(&pending).unwrap();
-    let table = encode(&samples, &pending).unwrap();
-    let plan = persistence::engine::scan(&pending.join(format!("{APP_PARTS}.parquet"))).unwrap();
+    let samples = replayed_samples(&session, 1001);
+    let window = session.windows.last().unwrap();
+    let table = window
+        .tables
+        .iter()
+        .find(|table| table.name == APP_PARTS)
+        .unwrap();
+    let path = session
+        .root
+        .join(&window.data_directory)
+        .join(format!("{APP_PARTS}.parquet"));
+    let plan = persistence::engine::scan(&path).unwrap();
     let first = samples[0].selected.stamp.publication;
     let mut expected = AppMinute::default();
     for sample in &samples {
@@ -76,7 +82,7 @@ fn a_window_keeps_the_state_and_reasons_of_each_process_the_replay_gives() {
     // gives.
     let mut fixture = Fixture::new();
     publish_changing_processes(&mut fixture);
-    fixture.seal_derived(&[], &crate::SealedApps::default());
+    fixture.seal_derived(&[], &persistence::sealed_apps::SealedApps::default());
     let session = Session::open(&fixture.root).unwrap();
     let replayed = replayed_samples(&session, 1003);
     let keys = app_keys(&replayed[2]);
@@ -111,7 +117,7 @@ fn a_window_keeps_the_rows_of_each_app_side_by_side_across_its_observations() {
         ];
         named::publish(&mut fixture, tick, &rows);
     }
-    fixture.seal_derived(&[], &crate::SealedApps::default());
+    fixture.seal_derived(&[], &persistence::sealed_apps::SealedApps::default());
     let session = Session::open(&fixture.root).unwrap();
 
     let runs = kept_runs(&session);
@@ -144,26 +150,29 @@ fn a_window_keeps_the_facts_of_each_second_for_an_app_that_ran_at_none() {
 }
 
 #[test]
-fn a_window_keeps_the_rates_its_first_observation_takes_from_the_minute_before() {
-    // Goal: the first observation of a window shows the rates it takes from the last
-    // observation of the sealed minute before it, as the replay shows them.
-    // Method: seal run ticks 59 and 60 in two minutes with their Apps' parts, and compare the
-    // parts of tick 60, which need the tick before, with those a replay of both minutes gives.
+fn a_window_derived_after_a_restart_keeps_no_rates_for_its_first_observation() {
+    // Goal: a derivation that did not derive the minute before a window gives the window's
+    // first observation no rates, where a replay of both minutes takes them from that minute,
+    // since the persister reads no sealed minute back.
+    // Method: seal run ticks 59 and 60 in two minutes, each through a derivation of its own as
+    // a restarted persister seals them, and compare the parts of both ticks with a replay's.
     let mut fixture = Fixture::new();
     fixture.start_at_run_tick(59);
     fixture.publish_with_system_rows(1059);
     fixture.publish_with_system_rows(1060);
-    fixture.seal_minute_derived(0, &crate::SealedApps::default());
-    fixture.seal_minute_derived(1, &crate::SealedApps::default());
+    fixture.seal_minute_derived(0, &persistence::sealed_apps::SealedApps::default());
+    fixture.seal_minute_derived(1, &persistence::sealed_apps::SealedApps::default());
     let session = Session::open(&fixture.root).unwrap();
-    let replayed = replayed_samples(&session, 1060);
-    let keys = app_keys(&replayed[1]);
+    let samples = replayed_samples(&session, 1060);
+    let keys = app_keys(&samples[1]);
+    let replayed = replayed_parts(&samples, &keys[..1]).remove(0);
 
     let kept = kept_parts(&session, 1060, &keys[0]);
 
     assert_eq!(kept.len(), 2);
-    assert_ne!(kept[1].paging["previous"], Value::Null);
-    assert_eq!(vec![kept], replayed_parts(&replayed, &keys[..1]));
+    assert_eq!(kept[0], replayed[0]);
+    assert_eq!(kept[1].paging["previous"], Value::Null);
+    assert_ne!(replayed[1].paging["previous"], Value::Null);
 }
 
 #[test]
@@ -178,7 +187,7 @@ fn a_window_takes_the_minute_before_from_the_derivation_that_sealed_it() {
     fixture.start_at_run_tick(59);
     fixture.publish_with_system_rows(1059);
     fixture.publish_with_system_rows(1060);
-    let derivation = crate::SealedApps::default();
+    let derivation = persistence::sealed_apps::SealedApps::default();
     fixture.seal_minute_derived(0, &derivation);
     let hidden = hide_saved_tables(&fixture.root);
     fixture.seal_minute_derived(1, &derivation);
@@ -222,7 +231,7 @@ fn a_window_keeps_no_parts_from_a_table_of_another_version() {
     let session = sealed_seconds_with_parts(&mut fixture);
     let key = app_keys(&replayed_samples(&session, 1001)[1]).remove(0);
     rewrite(&session, APP_PARTS, |frame| {
-        let version = vec![VERSION + 1; frame.height()];
+        let version = vec![PARTS_VERSION + 1; frame.height()];
         frame
             .replace("version", Column::new("version".into(), version))
             .unwrap();
@@ -291,11 +300,40 @@ fn a_window_whose_app_counts_more_members_in_a_measure_than_it_has_is_refused() 
 
 #[test]
 fn every_code_a_part_is_written_with_reads_back_as_what_it_was_written_from() {
-    // Goal: no reason, cause or state a part keeps reads back as another.
-    // Method: read every byte as each kind of code, and write back each that reads.
-    assert_eq!(codes_read_back(unavailable_of, unavailable_code), 11);
-    assert_eq!(codes_read_back(identity_of, identity_code), 6);
-    assert_eq!(codes_read_back(state_of, state_code), 3);
+    // Goal: no reason, cause or state the persister writes a part with reads back as another.
+    // Method: read back the code the persistence crate writes for each, and read every byte as
+    // each kind of code.
+    use model::apps::{ProcessState, ProgramUnavailable, Unavailable};
+    let reasons = [
+        Unavailable::Refused,
+        Unavailable::Gone,
+        Unavailable::Unknown,
+        Unavailable::Interval,
+        Unavailable::Creation,
+        Unavailable::Baseline,
+        Unavailable::CounterReset,
+        Unavailable::Overflow,
+        Unavailable::Exec,
+        Unavailable::Program,
+        Unavailable::ExitUnverified,
+    ];
+    let programs = [
+        ProgramUnavailable::Refused,
+        ProgramUnavailable::Gone,
+        ProgramUnavailable::Unsupported,
+        ProgramUnavailable::Changed,
+        ProgramUnavailable::Invalid,
+        ProgramUnavailable::Exhausted,
+    ];
+    let states = [
+        ProcessState::Live,
+        ProcessState::ExitedVerified,
+        ProcessState::ExitedUnverified,
+    ];
+
+    codes_read_back(&reasons, unavailable_code, unavailable_of);
+    codes_read_back(&programs, program_code, identity_of);
+    codes_read_back(&states, state_code, state_of);
 }
 
 #[test]
@@ -371,8 +409,8 @@ fn a_read_decodes_again_the_parts_past_its_bound() {
     fixture.skip_run_ticks(58);
     fixture.publish_with_system_rows(1060);
     fixture.publish_with_system_rows(1061);
-    fixture.seal_minute_derived(0, &crate::SealedApps::default());
-    fixture.seal_minute_derived(1, &crate::SealedApps::default());
+    fixture.seal_minute_derived(0, &persistence::sealed_apps::SealedApps::default());
+    fixture.seal_minute_derived(1, &persistence::sealed_apps::SealedApps::default());
     let session = Session::open(&fixture.root).unwrap();
     let key = app_keys(&replayed_samples(&session, 1001)[1]).remove(0);
     let first_minute = kept_parts_bytes(&session, 1001, &key);
@@ -413,7 +451,7 @@ impl Shown {
 fn sealed_seconds_with_parts(fixture: &mut Fixture) -> Session {
     fixture.publish_with_system_rows(1000);
     fixture.publish_with_system_rows(1001);
-    fixture.seal_derived(&[], &crate::SealedApps::default());
+    fixture.seal_derived(&[], &persistence::sealed_apps::SealedApps::default());
 
     Session::open(&fixture.root).unwrap()
 }
@@ -484,34 +522,6 @@ fn replayed_samples(session: &Session, second: u64) -> Vec<Sample> {
         .unwrap();
 
     replayed
-}
-
-#[test]
-fn a_window_replays_the_minute_before_when_its_derivation_sealed_an_earlier_one() {
-    // Goal: a derivation whose last sampled observation is not the one before the window's
-    // first takes that one from the minute before, as the replay of the minutes gives it.
-    // Method: seal run ticks 59, 60 and 119, and 120 in three minutes, the second with another
-    // derivation, and compare the parts of tick 120 with those a replay gives.
-    let mut fixture = Fixture::new();
-    fixture.start_at_run_tick(59);
-    fixture.publish_with_system_rows(1059);
-    fixture.publish_with_system_rows(1060);
-    fixture.skip_run_ticks(58);
-    fixture.publish_with_system_rows(1119);
-    fixture.publish_with_system_rows(1120);
-    let derivation = crate::SealedApps::default();
-    fixture.seal_minute_derived(0, &derivation);
-    fixture.seal_minute_derived(1, &crate::SealedApps::default());
-    fixture.seal_minute_derived(2, &derivation);
-    let session = Session::open(&fixture.root).unwrap();
-    let replayed = replayed_samples(&session, 1120);
-    let keys = app_keys(&replayed[3]);
-
-    let kept = kept_parts(&session, 1120, &keys[0]);
-
-    assert_eq!(kept.len(), 4);
-    assert_ne!(kept[3].paging["previous"], Value::Null);
-    assert_eq!(vec![kept], replayed_parts(&replayed, &keys[..1]));
 }
 
 /// Overwrites the tables the persister wrote for the sealed minutes, keeping their App tables,
@@ -680,14 +690,22 @@ fn overcount_members(frame: &mut DataFrame) {
 
 /// Reads every byte as a code by `of`, asserts each that reads writes back by `code` as that
 /// byte, and gives how many read.
-fn codes_read_back<T: Copy>(of: fn(u8) -> Result<T>, code: fn(T) -> u8) -> usize {
-    let mut read = 0;
-    for byte in u8::MIN..=u8::MAX {
-        if let Ok(value) = of(byte) {
-            assert_eq!(code(value), byte);
-            read += 1;
-        }
+/// Asserts each of `written` reads back from its code as the value of the same name, and that
+/// no other byte reads as a value.
+fn codes_read_back<Written, Read>(
+    written: &[Written],
+    code: fn(Written) -> u8,
+    of: fn(u8) -> Result<Read>,
+) where
+    Written: Copy + std::fmt::Debug,
+    Read: std::fmt::Debug,
+{
+    for value in written {
+        assert_eq!(
+            format!("{:?}", of(code(*value)).unwrap()),
+            format!("{value:?}")
+        );
     }
-
-    read
+    let read = (u8::MIN..=u8::MAX).filter(|byte| of(*byte).is_ok()).count();
+    assert_eq!(read, written.len());
 }

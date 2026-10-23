@@ -15,7 +15,7 @@ use polars::prelude::{
     DataFrame, DataType, Expr, Null, SortMultipleOptions, UInt32Type, UInt64Type, col, lit,
 };
 
-use super::apps::{AppMinute, ROWS_MAX};
+use super::apps::AppMinute;
 use super::{Refused, SealedMinute, SealedTable, placement};
 use crate::apps::Stamp;
 use crate::cancellation::Cancellation;
@@ -133,7 +133,9 @@ fn derive_apps_samples(
             .ok_or(persistence::Error::Bound("derived App sample"))?;
         into.push_sample(captured);
         // A minute's Apps fit the rows its App parts would keep of them.
-        if into.samples.len() + into.apps.len() > collector::usize_from_u32(ROWS_MAX) {
+        if into.samples.len() + into.apps.len()
+            > collector::usize_from_u32(persistence::app_tables::PARTS_ROWS_MAX)
+        {
             return Err(persistence::Error::Bound("derived App rows"));
         }
 

@@ -2,6 +2,8 @@ use super::super::sealed::fixture::{range, rewrite};
 use super::*;
 use crate::live::identity_fixture::Fixture;
 use crate::live_app_response::{Metric, Sample};
+use persistence::TableManifest;
+use persistence::app_tables::{RANKS_VERSION, kind_code, metric_code};
 use persistence::schema::APP_PARTS;
 use persistence::worker::{Derivation, Derive};
 use polars::prelude::Column;
@@ -15,7 +17,7 @@ fn a_window_keeps_the_ranks_the_replay_of_its_minute_gives() {
     fixture.publish_with_system_rows(1000);
     fixture.publish_with_system_rows(1001);
     fixture.publish_with_system_rows(1002);
-    fixture.seal_derived(&[], &crate::SealedApps::default());
+    fixture.seal_derived(&[], &persistence::sealed_apps::SealedApps::default());
     let session = Session::open(&fixture.root).unwrap();
 
     let kept = kept_ranks(&session, 1002);
@@ -28,14 +30,15 @@ fn a_window_keeps_the_ranks_the_replay_of_its_minute_gives() {
 fn a_window_keeps_the_rates_its_first_observation_takes_from_the_minute_before() {
     // Goal: the first observation of a window ranks by the rates it takes from the last
     // observation of the sealed minute before it, as the replay ranks it.
-    // Method: seal run ticks 59 and 60 in two minutes with their ranks, and compare the CPU
-    // ranks of tick 60, which need a rate, with those a replay of both minutes gives.
+    // Method: seal run ticks 59 and 60 in two minutes through one derivation, and compare the
+    // CPU ranks of tick 60, which need a rate, with those a replay of both minutes gives.
     let mut fixture = Fixture::new();
     fixture.start_at_run_tick(59);
     fixture.publish_with_system_rows(1059);
     fixture.publish_with_system_rows(1060);
-    fixture.seal_minute_derived(0, &crate::SealedApps::default());
-    fixture.seal_minute_derived(1, &crate::SealedApps::default());
+    let derivation = persistence::sealed_apps::SealedApps::default();
+    fixture.seal_minute_derived(0, &derivation);
+    fixture.seal_minute_derived(1, &derivation);
     let session = Session::open(&fixture.root).unwrap();
 
     let kept = kept_ranks(&session, 1060);
@@ -96,10 +99,10 @@ fn a_window_keeps_no_ranks_from_a_table_of_another_version() {
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(1000);
     fixture.publish_with_system_rows(1001);
-    fixture.seal_derived(&[], &crate::SealedApps::default());
+    fixture.seal_derived(&[], &persistence::sealed_apps::SealedApps::default());
     let session = Session::open(&fixture.root).unwrap();
     rewrite(&session, APP_RANKS, |frame| {
-        let version = vec![VERSION + 1; frame.height()];
+        let version = vec![RANKS_VERSION + 1; frame.height()];
         frame
             .replace("version", Column::new("version".into(), version))
             .unwrap();
@@ -116,14 +119,14 @@ fn a_window_keeps_no_ranks_from_a_table_of_the_version_that_ranked_no_gpu_time()
     // leaves the window's observations to the replay, which ranks it.
     // Method: rewrite a sealed window's ranks to version 1 without their GPU rows, and read the
     // ranks the window keeps.
-    const { assert!(VERSION > 1) };
+    const { assert!(RANKS_VERSION > 1) };
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(1000);
     fixture.publish_with_system_rows(1001);
-    fixture.seal_derived(&[], &crate::SealedApps::default());
+    fixture.seal_derived(&[], &persistence::sealed_apps::SealedApps::default());
     let session = Session::open(&fixture.root).unwrap();
     rewrite(&session, APP_RANKS, |frame| {
-        let gpu = metric_code(Metric::Gpu);
+        let gpu = metric_code(model::ranks::Metric::Gpu);
         let ranked = polars::prelude::ChunkCompareEq::not_equal(
             frame.column("metric").unwrap().u8().unwrap(),
             gpu,
@@ -147,7 +150,7 @@ fn a_window_whose_ranks_lack_a_row_its_seal_counted_is_refused() {
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(1000);
     fixture.publish_with_system_rows(1001);
-    fixture.seal_derived(&[], &crate::SealedApps::default());
+    fixture.seal_derived(&[], &persistence::sealed_apps::SealedApps::default());
     let session = Session::open(&fixture.root).unwrap();
     rewrite(&session, APP_RANKS, |frame| {
         *frame = frame.head(Some(frame.height() - 1));
@@ -167,7 +170,7 @@ fn a_window_whose_ranks_skip_a_position_is_refused() {
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(1000);
     fixture.publish_with_system_rows(1001);
-    fixture.seal_derived(&[], &crate::SealedApps::default());
+    fixture.seal_derived(&[], &persistence::sealed_apps::SealedApps::default());
     let session = Session::open(&fixture.root).unwrap();
     rewrite(&session, APP_RANKS, |frame| {
         let positions: Vec<Option<u8>> = (0..frame.height())
@@ -195,7 +198,7 @@ impl Derive for Occupied {
         let path = derivation.pending.join(format!("{APP_PARTS}.parquet"));
         std::fs::write(path, b"occupied").unwrap();
 
-        crate::SealedApps::default().derive(derivation)
+        persistence::sealed_apps::SealedApps::default().derive(derivation)
     }
 }
 
@@ -231,4 +234,22 @@ fn replayed_ranks(session: &Session, selected: &Ranks) -> Vec<Ranks> {
         .unwrap();
 
     replayed
+}
+
+#[test]
+fn every_code_a_rank_is_written_with_reads_back_as_what_it_was_written_from() {
+    // Goal: no kind or ranking the persister writes reads back as another.
+    // Method: read back the code the persistence crate writes for each kind and each ranking.
+    let bundle = kind_of(kind_code(model::programs::AppKey::Bundle(b"")));
+    let executable = kind_of(kind_code(model::programs::AppKey::Executable(b"")));
+    assert_eq!(bundle.unwrap(), crate::live_app_response::KeyKind::Bundle);
+    assert_eq!(
+        executable.unwrap(),
+        crate::live_app_response::KeyKind::Executable
+    );
+    for (written, read) in model::ranks::METRICS.into_iter().zip(METRICS) {
+        let code = usize::from(metric_code(written));
+        assert_eq!(format!("{:?}", METRICS[code]), format!("{written:?}"));
+        assert_eq!(METRICS[code], read);
+    }
 }

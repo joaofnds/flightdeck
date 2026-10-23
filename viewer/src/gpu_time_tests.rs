@@ -37,7 +37,11 @@ fn an_apps_gpu_time_reads_the_same_from_the_parts_its_saved_window_keeps() {
     // of the App histories caches. Method: the same processes, sealed with their App parts
     // derived, read through the Overview's histories and then the GPU history.
     let (fixture, live) = gpu_live();
-    named::seal_selected_derived(&fixture, &[1, 2], &crate::SealedApps::default());
+    named::seal_selected_derived(
+        &fixture,
+        &[1, 2],
+        &persistence::sealed_apps::SealedApps::default(),
+    );
     let session = gpu_saved_session(&fixture);
     session.app_attribution_histories().unwrap();
 

@@ -66,7 +66,7 @@ fn keeps_a_group_apart_from_the_other_executables_of_its_app_across_sealing() {
     session.poll().unwrap();
     let live = worker(&mut session);
     drop(session);
-    fixture.seal_derived(&[], &crate::SealedApps::default());
+    fixture.seal_derived(&[], &persistence::sealed_apps::SealedApps::default());
     collector::recording::Registry {
         runs: Vec::new(),
         evictions: 0,

@@ -379,7 +379,7 @@ fn kept_cold() -> Box<Cold> {
     let mut fixture = Fixture::new();
     publish_workers(&mut fixture, 1, 2);
     publish_workers(&mut fixture, 2, 2);
-    fixture.seal_derived(&[], &crate::SealedApps::default());
+    fixture.seal_derived(&[], &persistence::sealed_apps::SealedApps::default());
     let cancellation = Arc::new(Cancellation::default());
     let saved = Session::open_with(&fixture.root, Arc::clone(&cancellation), 0).unwrap();
     Box::new(Cold {

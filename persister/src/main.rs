@@ -20,7 +20,7 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     let options = collector::arguments("persister").and_then(|words| options(&words));
-    let derive = viewer::SealedApps::default();
+    let derive = persistence::sealed_apps::SealedApps::default();
     match options {
         Ok((root, memory)) => match persistence::worker::run(&root, memory, &derive) {
             Ok(persistence::worker::Outcome::Complete) => ExitCode::SUCCESS,

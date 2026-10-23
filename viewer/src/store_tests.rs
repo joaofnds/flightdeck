@@ -574,7 +574,7 @@ mod when_the_recording_holds_sealed_minutes {
             fixture.publish_with_system_rows(second);
             view_where(&from_ring, |view| held_through(view, second));
         }
-        let derive = crate::SealedApps::default();
+        let derive = persistence::sealed_apps::SealedApps::default();
         fixture.seal_minute_derived(0, &derive);
         fixture.seal_minute_derived(1, &derive);
         fixture.skip_run_ticks(58);
@@ -601,7 +601,7 @@ mod when_the_recording_holds_sealed_minutes {
         // more than 18 minutes later, both with their Apps, publish until the ring holds neither,
         // and start a store.
         let mut fixture = Fixture::new();
-        let derive = crate::SealedApps::default();
+        let derive = persistence::sealed_apps::SealedApps::default();
         fixture.publish_with_system_rows(100);
         fixture.seal_minute_derived(0, &derive);
         fixture.skip_run_ticks(59);

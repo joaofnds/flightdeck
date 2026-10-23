@@ -431,7 +431,7 @@ impl SealedRecording {
     /// The recording of `with_ranked_apps`, sealed as the persister seals a window now, with the
     /// App ranks of each of its observations.
     fn with_kept_ranks() -> Self {
-        Self::with_ranked_apps_sealed(|_| {}, &viewer::SealedApps::default())
+        Self::with_ranked_apps_sealed(|_| {}, &persistence::sealed_apps::SealedApps::default())
     }
 
     fn with_ranked_apps_sealed(

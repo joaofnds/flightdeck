@@ -1537,7 +1537,6 @@ dependencies = [
  "collector",
  "persistence",
  "polars",
- "viewer",
 ]
 
 [[package]]

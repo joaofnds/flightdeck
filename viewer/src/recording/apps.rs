@@ -12,24 +12,15 @@ use polars::prelude::{
 use super::{Refused, SealedMinute, placement};
 use crate::apps::AppKey;
 use crate::live_app_response::{App, KeyKind, MEMBERS_MAX, Measure, Sample};
+use persistence::app_tables::{
+    MEASURES, PARTS_ROWS_MAX, PARTS_VERSION, ROW_APP, ROW_HEADER, ROW_PROCESS, measure_column_names,
+};
 use persistence::engine::Cells;
 use persistence::schema::APP_PARTS;
 use persistence::{Error, Result};
 
-/// The version of the App parts table's columns. A reader takes no Apps from a table of another
-/// version and leaves its minute to the App rule, so a later build may change the columns and
-/// an older one still reads the recording.
-pub(crate) const VERSION: u8 = 3;
-/// The rows a minute keeps. About 1,100 processes in a few hundred Apps a second make some
-/// 85,000 rows a minute, a sixth of this.
-pub(crate) const ROWS_MAX: u32 = 1 << 19;
 /// The rows a read takes of a minute, one past what it keeps so a longer table is refused.
-pub(crate) const ROWS_TAKEN: u32 = ROWS_MAX + 1;
-/// A row holds the facts of an observation's sample, one of its Apps, or one of an App's
-/// processes.
-pub(crate) const ROW_HEADER: u8 = 0;
-pub(crate) const ROW_APP: u8 = 1;
-pub(crate) const ROW_PROCESS: u8 = 2;
+pub(crate) const ROWS_TAKEN: u32 = PARTS_ROWS_MAX + 1;
 /// The observations a minute holds, at most one a second and the one a stop seals early.
 const SAMPLES_MAX: usize = crate::live_apps::committed::ENDPOINTS_MAX;
 
@@ -61,23 +52,6 @@ const APP_COLUMNS: [&str; 6] = [
     "members",
     "live_members",
     "app_membership_complete",
-];
-/// An App row's measures, each in a column for every field of `MEASURE_FIELDS`.
-pub(crate) const MEASURES: [&str; 8] = [
-    "cpu_ns",
-    "energy_nj",
-    "disk_read_bytes",
-    "disk_written_bytes",
-    "disk_io_bytes",
-    "resident_bytes",
-    "footprint_bytes",
-    "gpu_ns",
-];
-pub(crate) const MEASURE_FIELDS: [&str; 4] = [
-    "known",
-    "measured_members",
-    "unavailable_members",
-    "overflowed",
 ];
 
 /// One minute's Apps at each observation its App parts keep, in publication order. The caller
@@ -250,7 +224,7 @@ pub(crate) fn read_app_rows(
     assert!(into.apps.is_empty());
     assert!(into.keys.is_empty());
     let version = read_app_rows_version(plan.clone(), rows)?;
-    if version != VERSION {
+    if version != PARTS_VERSION {
         return Ok(AppParts::Version(version));
     }
 
@@ -289,7 +263,7 @@ fn read_app_rows_version(plan: LazyFrame, rows: u64) -> Result<u8> {
     if counted == 0 {
         return Err(Error::Bound("sealed parts rows"));
     }
-    if counted > u64::from(ROWS_MAX) {
+    if counted > u64::from(PARTS_ROWS_MAX) {
         return Err(Error::Bound("sealed parts rows"));
     }
 
@@ -566,11 +540,6 @@ impl<'frame> MeasureColumns<'frame> {
 
         kept_measure(measure, members)
     }
-}
-
-/// The columns of measure `measure`, a column for each of its fields in their order.
-pub(crate) fn measure_column_names(measure: &str) -> [String; 4] {
-    MEASURE_FIELDS.map(|field| format!("app_{measure}_{field}"))
 }
 
 /// A table keeps an App's kind by these codes, so a build that changed one would misread the

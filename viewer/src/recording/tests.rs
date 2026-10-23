@@ -1,3 +1,4 @@
+use persistence::app_tables::{PARTS_VERSION, ROW_APP, ROW_HEADER, ROW_PROCESS};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -28,7 +29,6 @@ use polars::prelude::{
     StatisticsOptions, col, lit, when,
 };
 
-use super::apps::{ROW_APP, ROW_HEADER, ROW_PROCESS, VERSION};
 use super::processes::read_processes;
 use super::{
     AppMinute, AppParts, MachineMinute, MinuteTicks, Refused, SealedMinute, derive_apps, read_apps,
@@ -224,7 +224,9 @@ fn a_minute_whose_app_parts_are_of_another_version_gives_no_apps() {
     damage_table(&fixture, APP_PARTS, |frame| {
         with_column(
             frame,
-            lit(VERSION + 1).cast(DataType::UInt8).alias("version"),
+            lit(PARTS_VERSION + 1)
+                .cast(DataType::UInt8)
+                .alias("version"),
         )
     });
     let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
@@ -234,7 +236,7 @@ fn a_minute_whose_app_parts_are_of_another_version_gives_no_apps() {
 
     assert_eq!(
         (parts, apps),
-        (AppParts::Version(VERSION + 1), AppMinute::default())
+        (AppParts::Version(PARTS_VERSION + 1), AppMinute::default())
     );
 }
 
@@ -265,7 +267,7 @@ refuses_damaged_app_parts! {
     refuses_app_parts_that_lost_a_row_the_seal_counted, "sealed parts rows",
         |frame| frame.head(Some(frame.height() - 1));
     refuses_app_parts_of_two_versions, "sealed parts version",
-        |frame| with_column(frame, of_rows(ROW_HEADER, lit(VERSION + 1), "version"));
+        |frame| with_column(frame, of_rows(ROW_HEADER, lit(PARTS_VERSION + 1), "version"));
     refuses_an_observation_that_counts_an_app_more_than_it_keeps, "sealed parts Apps",
         |frame| with_column(frame, (col("app_count") + lit(1)).alias("app_count"));
     refuses_apps_out_of_their_order, "sealed parts App",
@@ -1017,7 +1019,7 @@ fn sealed_apps_minute() -> Fixture {
     for second in 1000..=1002 {
         fixture.publish_with_system_rows(second);
     }
-    fixture.seal_minute_derived(0, &crate::SealedApps::default());
+    fixture.seal_minute_derived(0, &persistence::sealed_apps::SealedApps::default());
     fixture
 }
 
@@ -1025,7 +1027,7 @@ fn sealed_apps_minute() -> Fixture {
 /// minute 1, each minute sealed with its App parts.
 fn sealed_adjacent_apps_minutes() -> Fixture {
     let mut fixture = Fixture::new();
-    let derive = crate::SealedApps::default();
+    let derive = persistence::sealed_apps::SealedApps::default();
     fixture.start_at_run_tick(58);
     for second in 1058..=1059 {
         fixture.publish_with_system_rows(second);

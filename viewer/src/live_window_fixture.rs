@@ -23,7 +23,7 @@ pub fn saved_with_apps() -> Fixture {
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(1000);
     fixture.publish_with_system_rows(1001);
-    fixture.seal_derived(&[], &crate::SealedApps::default());
+    fixture.seal_derived(&[], &persistence::sealed_apps::SealedApps::default());
     forget_live_runs(&fixture.root);
 
     fixture
@@ -38,14 +38,14 @@ pub fn saved_with_apps_after_a_lead_in() -> Fixture {
     const { assert!(1990 <= 1931 + crate::CONTEXT_AFTER_SECONDS) };
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(1060);
-    fixture.seal_minute_derived(0, &crate::SealedApps::default());
+    fixture.seal_minute_derived(0, &persistence::sealed_apps::SealedApps::default());
     fixture.skip_run_ticks(869);
     fixture.publish_with_system_rows(1930);
     fixture.publish_with_system_rows(1931);
-    fixture.seal_minute_derived(14, &crate::SealedApps::default());
+    fixture.seal_minute_derived(14, &persistence::sealed_apps::SealedApps::default());
     fixture.skip_run_ticks(58);
     fixture.publish_with_system_rows(1990);
-    fixture.seal_minute_derived(15, &crate::SealedApps::default());
+    fixture.seal_minute_derived(15, &persistence::sealed_apps::SealedApps::default());
     forget_live_runs(&fixture.root);
 
     fixture

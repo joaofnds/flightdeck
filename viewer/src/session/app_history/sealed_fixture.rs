@@ -1,8 +1,8 @@
 //! The range and the rewrite the tests of a sealed window's derived tables share.
 use polars::prelude::{Column, DataFrame, DataType};
 
-use super::super::sealed_parts::VERSION;
 use super::{ContextRange, Session};
+use persistence::app_tables::PARTS_VERSION;
 use persistence::schema::APP_PARTS;
 
 /// The window of the context of second `second`.
@@ -42,7 +42,7 @@ impl Session {
     /// session opened afterwards replays their minutes.
     pub(crate) fn unread_kept_parts(&self) {
         rewrite(self, APP_PARTS, |frame| {
-            let version = vec![VERSION + 1; frame.height()];
+            let version = vec![PARTS_VERSION + 1; frame.height()];
             frame
                 .replace("version", Column::new("version".into(), version))
                 .unwrap();
@@ -52,7 +52,7 @@ impl Session {
     /// Rewrites the parts each sealed window keeps to version 2, the last that kept no GPU
     /// time, so a build that reads it as its own fails on the columns it lacks.
     pub(crate) fn previous_version_kept_parts(&self) {
-        const { assert!(VERSION > 2) };
+        const { assert!(PARTS_VERSION > 2) };
         rewrite(self, APP_PARTS, |frame| {
             let version = vec![2_u8; frame.height()];
             frame

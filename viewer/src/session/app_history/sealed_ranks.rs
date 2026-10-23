@@ -1,124 +1,24 @@
 //! The App ranks of each observation of a sealed window. The persister derives them as the
 //! window seals, so the viewer shows a saved second's top Apps without replaying its minute.
 use std::ops::Range;
-use std::path::Path;
 use std::sync::Arc;
 
-use polars::prelude::DataFrame;
-
-use super::sealed::{Kept, columns, kind_code, kind_of, observed_in};
+use super::sealed::{Kept, kind_of, observed_in};
 use super::{ContextRange, Session, TICKS_PER_WINDOW_MAX};
-use crate::live_app_response::{
-    METRICS, Metric, Observation, RANKS_MAX, Rank, RankedApp, Ranking, Ranks,
-};
+use crate::live_app_response::{METRICS, Observation, RANKS_MAX, Rank, RankedApp, Ranking, Ranks};
 use collector::ring::RunIdentity;
+use persistence::app_tables::{RANKS_COLUMNS, RANKS_VERSION};
 use persistence::engine::Row;
 use persistence::schema::APP_RANKS;
-use persistence::{Error, Result, TableManifest};
+use persistence::{Error, Result};
 
-/// The version of the table's columns. A reader takes no ranks from a table of another version
-/// and leaves its window to the replay, so a later build may change the columns and an older
-/// one still reads the recording.
-const VERSION: u8 = 2;
 /// The five rankings of each observation a window holds, full.
 const ROWS_MAX: usize = TICKS_PER_WINDOW_MAX * METRICS.len() * RANKS_MAX;
-const COLUMNS: &str = "version, publication, run_tick, wall_ns, continuous_ns, awake_ns, \
-    app_count, membership_complete, ungrouped_members, metric, unavailable, overflowed, partial, \
-    position, app_kind, app_key, amount, rate, measured_members, unavailable_members";
 
 const _: () = {
     assert!(RANKS_MAX < 256);
     assert!(ROWS_MAX < 4096);
-    // A row names its ranking by its place among the rankings `Ranks` holds.
-    assert!(METRICS.len() == 5);
-    assert!(metric_code(METRICS[0]) == 0);
-    assert!(metric_code(METRICS[1]) == 1);
-    assert!(metric_code(METRICS[2]) == 2);
-    assert!(metric_code(METRICS[3]) == 3);
-    assert!(metric_code(METRICS[4]) == 4);
 };
-
-/// Writes the ranks of a window's observations into its pending directory, in the table the
-/// window seals with.
-pub(super) fn encode(ranks: &[Ranks], pending: &Path) -> Result<TableManifest> {
-    let mut frame = sealed_ranks_frame(ranks)?;
-
-    persistence::encode_derived(APP_RANKS, &mut frame, pending)
-}
-
-/// One row of the table: one ranking of an observation, and the App at `position` in it when it
-/// ranks any.
-struct RankRow<'ranks> {
-    ranks: &'ranks Ranks,
-    ranking: &'ranks Ranking,
-    position: Option<u8>,
-}
-
-impl<'ranks> RankRow<'ranks> {
-    fn rank(&self) -> Option<&'ranks Rank> {
-        self.position
-            .map(|position| &self.ranking.entries[usize::from(position)])
-    }
-}
-
-fn sealed_ranks_frame(ranks: &[Ranks]) -> Result<DataFrame> {
-    let rows = sealed_ranks_rows(ranks)?;
-    let columns = columns!(rows;
-        "version" => |_| VERSION,
-        "publication" => |row| row.ranks.selected.stamp.publication,
-        "run_tick" => |row| row.ranks.selected.run_tick,
-        "wall_ns" => |row| row.ranks.selected.wall_ns,
-        "continuous_ns" => |row| row.ranks.selected.stamp.continuous_ns,
-        "awake_ns" => |row| row.ranks.selected.stamp.awake_ns,
-        "app_count" => |row| row.ranks.app_count,
-        "membership_complete" => |row| row.ranks.membership_complete,
-        "ungrouped_members" => |row| row.ranks.ungrouped_members,
-        "metric" => |row| metric_code(row.ranking.metric),
-        "unavailable" => |row| row.ranking.unavailable,
-        "overflowed" => |row| row.ranking.overflowed,
-        "partial" => |row| row.ranking.partial,
-        "position" => |row| row.position,
-        "app_kind" => |row| row.rank().map(|rank| kind_code(rank.app.kind)),
-        "app_key" => |row| row.rank().map(|rank| rank.app.bytes.as_slice()),
-        "amount" => |row| row.rank().map(|rank| rank.amount),
-        "rate" => |row| row.rank().and_then(|rank| rank.rate),
-        "measured_members" => |row| row.rank().map(|rank| rank.measured_members),
-        "unavailable_members" => |row| row.rank().map(|rank| rank.unavailable_members),
-    );
-
-    Ok(DataFrame::new(rows.len(), columns)?)
-}
-
-/// A row for each App each ranking ranks, and one for each ranking that ranks none.
-fn sealed_ranks_rows(ranks: &[Ranks]) -> Result<Vec<RankRow<'_>>> {
-    if ranks.len() > TICKS_PER_WINDOW_MAX {
-        return Err(Error::Bound("sealed ranks observations"));
-    }
-
-    let mut rows = Vec::with_capacity(ROWS_MAX);
-    for observation in ranks {
-        for ranking in &observation.metrics {
-            assert!(ranking.entries.len() <= RANKS_MAX);
-            if ranking.entries.is_empty() {
-                rows.push(RankRow {
-                    ranks: observation,
-                    ranking,
-                    position: None,
-                });
-            }
-            for (position, _rank) in (0_u8..).zip(&ranking.entries) {
-                rows.push(RankRow {
-                    ranks: observation,
-                    ranking,
-                    position: Some(position),
-                });
-            }
-        }
-    }
-    assert!(rows.len() <= ROWS_MAX);
-
-    Ok(rows)
-}
 
 impl Session {
     /// Gives `consume` the ranks the windows of `range` keep of their observations in it, from
@@ -157,13 +57,14 @@ impl Session {
         if version.height() == 0 {
             return Err(Error::Bound("sealed ranks rows"));
         }
-        if Row::new(&version, 0)?.get::<u8>(0)? != VERSION {
+        if Row::new(&version, 0)?.get::<u8>(0)? != RANKS_VERSION {
             return Ok(());
         }
 
         let limit = ROWS_MAX + 1;
+        let columns = RANKS_COLUMNS.join(", ");
         let frame = self.connection.query(&format!(
-            "SELECT {COLUMNS} FROM {source} ORDER BY publication, metric, position LIMIT {limit}"
+            "SELECT {columns} FROM {source} ORDER BY publication, metric, position LIMIT {limit}"
         ))?;
         if collector::u64_from_usize(frame.height()) != kept.rows {
             return Err(Error::Bound("sealed ranks rows"));
@@ -267,7 +168,7 @@ struct Decoder<'output> {
 
 impl Decoder<'_> {
     fn push(&mut self, row: KeptRow) -> Result<()> {
-        if row.version != VERSION {
+        if row.version != RANKS_VERSION {
             return Err(Error::Bound("sealed ranks version"));
         }
 
@@ -363,16 +264,6 @@ impl Decoder<'_> {
         }
 
         Ok(())
-    }
-}
-
-const fn metric_code(metric: Metric) -> u8 {
-    match metric {
-        Metric::Cpu => 0,
-        Metric::Resident => 1,
-        Metric::Power => 2,
-        Metric::Disk => 3,
-        Metric::Gpu => 4,
     }
 }
 

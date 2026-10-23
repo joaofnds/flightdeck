@@ -59,19 +59,6 @@ impl Session {
     }
 }
 
-/// The columns of a derived table, each named and taking its value at every row from `value`.
-macro_rules! columns {
-    ($rows:ident; $($name:literal => $value:expr),+ $(,)?) => {
-        vec![$(
-            polars::prelude::Column::new(
-                $name.into(),
-                $rows.iter().map($value).collect::<Vec<_>>(),
-            )
-        ),+]
-    };
-}
-pub(super) use columns;
-
 /// Whether the observation's wall clock lies in `range`.
 pub(super) fn observed_in(range: ContextRange, observation: &Observation) -> bool {
     observation

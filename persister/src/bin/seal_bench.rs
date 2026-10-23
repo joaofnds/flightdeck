@@ -181,7 +181,7 @@ fn record_shape(options: &Options) -> Shape {
 /// Seals the recording at `root` in this process and returns the CPU time and the clock at the
 /// start and the end of each window's derivation.
 fn run_seal(root: &Path, deriving: Deriving) -> Result<Vec<Mark>, Box<dyn std::error::Error>> {
-    let apps = viewer::SealedApps::default();
+    let apps = persistence::sealed_apps::SealedApps::default();
     let inner: &dyn Derive = match deriving {
         Deriving::Apps => &apps,
         Deriving::Nothing => &Underived,

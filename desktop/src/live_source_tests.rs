@@ -944,7 +944,7 @@ impl SealedRecording {
     /// The recording of `new`, sealed as the persister seals a window now, with the App parts
     /// and ranks of each of its observations.
     fn with_kept_parts() -> Self {
-        Self::sealed(&viewer::SealedApps::default())
+        Self::sealed(&persistence::sealed_apps::SealedApps::default())
     }
 
     /// Readings at seconds 1000 and 1002 in one window sealed with the tables `derive` derives.
@@ -977,7 +977,7 @@ impl SealedRecording {
     /// The recording of `with_an_older_minute`, sealed with the App parts and ranks of each of
     /// its observations.
     fn with_an_older_kept_minute() -> Self {
-        Self::older_minute(&viewer::SealedApps::default())
+        Self::older_minute(&persistence::sealed_apps::SealedApps::default())
     }
 
     /// Readings at second 1000 and two at second 2200 in one window sealed with the tables

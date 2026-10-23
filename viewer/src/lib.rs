@@ -31,5 +31,5 @@ pub use live::window::{ObservationKey, Window};
 pub use live_app_history::BYTES_MAX as APP_HISTORY_BYTES_MAX;
 pub use session::{
     CHARTED_SECONDS, CONTEXT_AFTER_SECONDS, EARLIER_STRIDE_SECONDS, LEAD_IN_SECONDS,
-    LOADED_SECONDS, SealedApps, Session,
+    LOADED_SECONDS, Session,
 };

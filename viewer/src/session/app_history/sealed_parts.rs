@@ -1,568 +1,52 @@
 //! Every App's part of each observation of a sealed window: its row, its processes, and the
 //! facts of the observation's sample every page shows. The persister derives them as the window
 //! seals, so the viewer shows a saved second's App without replaying its minute.
-use std::collections::HashMap;
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use polars::prelude::{
-    BinaryType, BooleanType, Column, DataFrame, LazyFrame, SortMultipleOptions, UInt8Type,
-    UInt32Type, UInt64Type, col, lit,
+    BinaryType, BooleanType, DataFrame, LazyFrame, SortMultipleOptions, UInt8Type, UInt32Type,
+    UInt64Type, col, lit,
 };
 
-use super::sealed::{Kept, columns, kind_code, kind_of, observed_in};
+use super::sealed::{Kept, kind_code, kind_of, observed_in};
 use super::{ContextRange, Session, TICKS_PER_WINDOW_MAX, WINDOWS_MAX};
 use crate::apps::{Amount, AppKey, ProcessCreation, ProcessState, Stamp, Unavailable};
 use crate::cancellation::Operation;
 use crate::live_app_response::{
-    App, AppPart, Bytes, Header, Key, KeyKind, Measure, Observation, Present, Process, Sample,
+    App, AppPart, Bytes, Header, Key, KeyKind, Measure, Observation, Present, Process,
 };
-pub(super) use crate::recording::apps::VERSION;
-use crate::recording::apps::{
-    MEASURE_FIELDS, ROW_APP, ROW_HEADER, ROW_PROCESS, ROWS_MAX, ROWS_TAKEN, kept_measure,
-    kept_members, measure_column_names,
-};
+use crate::recording::apps::{ROWS_TAKEN, kept_measure, kept_members};
 use collector::ring::{IdentityUnavailable, RunIdentity};
+use persistence::app_tables::{
+    AMOUNTS, MEASURE_FIELDS, MEASURES, PARTS_COLUMNS, PARTS_FIXED_COLUMNS, PARTS_ROWS_MAX,
+    PARTS_VERSION, ROW_APP, ROW_HEADER, ROW_PROCESS, amount_column_names, measure_column_names,
+};
 use persistence::engine::{Cells, Row};
 use persistence::schema::{APP_PARTS, identity_availability};
-use persistence::{Error, Result, TableManifest};
+use persistence::{Error, Result};
 
-/// What the engine may decode of a window's table, below what it admits of a file. A row
-/// decodes to at most 8 bytes a column, 16 more for each of its two columns of bytes and what
-/// parquet adds to each, and the bytes of its App's key and its executable's name, so long
-/// keys may refuse a window before its rows reach their bound.
-pub(super) const DECODED_BYTES_MAX: u64 = 384 * 1024 * 1024;
-const ROW_DECODED_BYTES: usize = COLUMNS * 8 + 2 * 24;
-
-/// The columns before the measures and amounts, in their order: those of every row, those only
-/// a row of an observation's facts fills, those of an App and of a process row, those only an
-/// App row fills, and those only a process row fills.
-const FIXED_COLUMNS: [&str; 32] = [
-    "version",
-    "publication",
-    "row_kind",
-    "run_tick",
-    "wall_ns",
-    "continuous_ns",
-    "awake_ns",
-    "previous_publication",
-    "previous_continuous_ns",
-    "previous_awake_ns",
-    "elapsed_ns",
-    "membership_complete",
-    "ungrouped_members",
-    "live_ungrouped_members",
-    "usage_refused",
-    "usage_gone",
-    "app_count",
-    "process_count",
-    "app_index",
-    "app_kind",
-    "app_key",
-    "members",
-    "live_members",
-    "app_membership_complete",
-    "process_index",
-    "pid",
-    "unique_id",
-    "pid_version",
-    "executable_name",
-    "program_unavailable",
-    "app_attribution",
-    "state",
-];
-/// An App row's measures, each in a column for every field, after the fixed columns.
-const MEASURES: [MeasureColumn; 8] = [
-    ("cpu_ns", |app| app.cpu_ns),
-    ("energy_nj", |app| app.energy_nj),
-    ("disk_read_bytes", |app| app.disk_read_bytes),
-    ("disk_written_bytes", |app| app.disk_written_bytes),
-    ("disk_io_bytes", |app| app.disk_io_bytes),
-    ("resident_bytes", |app| app.resident_bytes),
-    ("footprint_bytes", |app| app.footprint_bytes),
-    ("gpu_ns", |app| app.gpu_ns),
-];
-/// A process row's amounts, each in a column of its value and one of why it has none, after
-/// the measures.
-const AMOUNTS: [AmountColumn; 11] = [
-    ("cpu_ns", |process| process.cpu_ns),
-    ("energy_nj", |process| process.energy_nj),
-    ("disk_read_bytes", |process| process.disk_read_bytes),
-    ("disk_written_bytes", |process| process.disk_written_bytes),
-    ("disk_io_bytes", |process| process.disk_io_bytes),
-    ("resident_bytes", |process| process.resident_bytes),
-    ("footprint_bytes", |process| process.footprint_bytes),
-    ("idle_wakeups", |process| process.idle_wakeups),
-    ("pageins", |process| process.pageins),
-    ("threads", |process| process.threads),
-    ("gpu_ns", |process| process.gpu_ns),
-];
-/// A measure's name, and where an App row takes it from.
-type MeasureColumn = (&'static str, fn(&App) -> Measure);
-/// An amount's name, and where a process row takes it from.
-type AmountColumn = (&'static str, fn(&Process) -> Amount);
-const MEASURE_FIRST: usize = FIXED_COLUMNS.len();
+const MEASURE_FIRST: usize = PARTS_FIXED_COLUMNS.len();
 const AMOUNT_FIRST: usize = MEASURE_FIRST + MEASURES.len() * MEASURE_FIELDS.len();
-const COLUMNS: usize = AMOUNT_FIRST + AMOUNTS.len() * 2;
-
-const _: () = {
-    // The reader of every App's rows names the measures as the table does, in its order.
-    assert!(MEASURES.len() == crate::recording::apps::MEASURES.len());
-    let mut index = 0;
-    while index < MEASURES.len() {
-        assert!(same(
-            MEASURES[index].0,
-            crate::recording::apps::MEASURES[index]
-        ));
-        index += 1;
-    }
-    assert!(COLUMNS <= persistence::engine::PARQUET_COLUMNS_MAX);
-    assert!(DECODED_BYTES_MAX < persistence::engine::PARQUET_EXPANDED_BYTES_MAX);
-};
-
-/// Writes every App's part of a window's observations into its pending directory, in the table
-/// the window seals with.
-pub(super) fn encode(samples: &[Box<Sample>], pending: &Path) -> Result<TableManifest> {
-    let mut frame = sealed_parts_frame(samples)?;
-
-    persistence::encode_derived(APP_PARTS, &mut frame, pending)
-}
-
-/// One row of the table.
-#[derive(Clone, Copy)]
-enum PartRow<'sample> {
-    Header {
-        sample: &'sample Sample,
-    },
-    App {
-        sample: &'sample Sample,
-        index: u32,
-        app: &'sample App,
-    },
-    Process {
-        sample: &'sample Sample,
-        app_index: u32,
-        app: &'sample App,
-        index: u32,
-        process: &'sample Process,
-    },
-}
-
-impl<'sample> PartRow<'sample> {
-    fn sample(&self) -> &'sample Sample {
-        match self {
-            Self::Header { sample } | Self::App { sample, .. } | Self::Process { sample, .. } => {
-                sample
-            }
-        }
-    }
-
-    /// The row's place in the table's order, one integer the rows sort by alone. From its most
-    /// significant bits: the row's kind, the position of its App's key among the window's App
-    /// keys, a process row's pid and the version of its pid, and `observation`, the place of
-    /// the row's observation among the window's in their order.
-    fn order(&self, app_position: Option<u32>, observation: u8) -> u128 {
-        let pid = self.described_process().map(|process| process.pid);
-        let pid_version = self
-            .described_process()
-            .and_then(|process| process.creation)
-            .map(|creation| creation.pid_version);
-
-        let mut order = u128::from(self.kind());
-        order = order << ORDER_FIELD_BITS | order_field(app_position);
-        order = order << ORDER_FIELD_BITS | order_field(pid.map(order_signed));
-        order = order << ORDER_FIELD_BITS | order_field(pid_version.map(order_signed));
-        order << u8::BITS | u128::from(observation)
-    }
-
-    fn kind(&self) -> u8 {
-        match self {
-            Self::Header { .. } => ROW_HEADER,
-            Self::App { .. } => ROW_APP,
-            Self::Process { .. } => ROW_PROCESS,
-        }
-    }
-
-    /// The observation of a row of its facts.
-    fn described_sample(&self) -> Option<&'sample Sample> {
-        match self {
-            Self::Header { sample } => Some(sample),
-            Self::App { .. } | Self::Process { .. } => None,
-        }
-    }
-
-    /// The App of an App row or a process row, and its place among its sample's Apps.
-    fn app(&self) -> Option<(u32, &'sample App)> {
-        match self {
-            Self::Header { .. } => None,
-            Self::App { index, app, .. } => Some((*index, app)),
-            Self::Process { app_index, app, .. } => Some((*app_index, app)),
-        }
-    }
-
-    /// The App of an App row, which a process row of the App does not describe.
-    fn described_app(&self) -> Option<&'sample App> {
-        match self {
-            Self::App { app, .. } => Some(app),
-            Self::Header { .. } | Self::Process { .. } => None,
-        }
-    }
-
-    /// The process of a process row, and its place among its sample's processes.
-    fn process(&self) -> Option<(u32, &'sample Process)> {
-        match self {
-            Self::Process { index, process, .. } => Some((*index, process)),
-            Self::Header { .. } | Self::App { .. } => None,
-        }
-    }
-
-    /// The process of a process row.
-    fn described_process(&self) -> Option<&'sample Process> {
-        self.process().map(|(_index, process)| process)
-    }
-}
-
-/// The bits of a field of a row's place in the table's order, one more than its value's to put
-/// an absent field first.
-const ORDER_FIELD_BITS: u32 = u32::BITS + 1;
-
-fn order_field(value: Option<u32>) -> u128 {
-    value.map_or(0, |value| 1 << u32::BITS | u128::from(value))
-}
-
-/// A signed field of a row's order as an unsigned one, in the same order.
-fn order_signed(value: i32) -> u32 {
-    value.abs_diff(i32::MIN)
-}
-
-const _: () = {
-    // The row's kind, its App, its pid and pid version, and its observation.
-    assert!(u8::BITS + 3 * ORDER_FIELD_BITS + u8::BITS <= u128::BITS);
-    assert!(TICKS_PER_WINDOW_MAX <= 1 << 8);
-};
-
-fn sealed_parts_frame(samples: &[Box<Sample>]) -> Result<DataFrame> {
-    let rows = sealed_parts_rows(samples)?;
-    if sealed_parts_decoded_bytes(&rows) > DECODED_BYTES_MAX {
-        return Err(Error::Bound("sealed parts bytes"));
-    }
-
-    let mut columns = sealed_parts_header_columns(&rows);
-    columns.extend(sealed_parts_member_columns(&rows));
-    columns.extend(sealed_parts_measure_columns(&rows));
-    columns.extend(sealed_parts_amount_columns(&rows));
-    let names = column_names();
-    assert!(
-        columns
-            .iter()
-            .map(|column| column.name().as_str())
-            .eq(names.iter().map(String::as_str))
-    );
-
-    Ok(DataFrame::new(rows.len(), columns)?)
-}
-
-/// A row for each observation's facts, one for each of its Apps, and one for each process of
-/// an App. A process outside every App belongs to no App's part.
-fn sealed_parts_rows(samples: &[Box<Sample>]) -> Result<Vec<PartRow<'_>>> {
-    if samples.len() > TICKS_PER_WINDOW_MAX {
-        return Err(Error::Bound("sealed parts observations"));
-    }
-    let mut count = 0;
-    for sample in samples {
-        count += 1 + sample.apps().len() + sample.processes().len();
-    }
-    if count > collector::usize_from_u32(ROWS_MAX) {
-        return Err(Error::Bound("sealed parts rows"));
-    }
-
-    // A row changes little from the row of the same App or process a second before, so keeping
-    // them side by side halves the table. The reader orders the rows it reads by observation.
-    let positions = sealed_parts_positions(samples);
-    let mut rows = Vec::with_capacity(count);
-    let mut orders = Vec::with_capacity(count);
-    for (observation, sample) in (0_u8..).zip(samples) {
-        // A sample takes its rates only from the adjacent observation of its run, so a row
-        // keeps only the publication and clocks of the observation before.
-        if let Some(previous) = &sample.previous {
-            assert_eq!(previous.boot, sample.selected.stamp.boot);
-            assert_eq!(previous.run, sample.selected.stamp.run);
-        }
-        // The rows of one App or process keep their observations' order only from samples
-        // that come in it.
-        if let Some(before) = observation.checked_sub(1) {
-            let before = &samples[usize::from(before)];
-            assert!(before.selected.stamp.publication < sample.selected.stamp.publication);
-        }
-
-        sealed_parts_rows_push(sample, observation, &positions, &mut rows, &mut orders)?;
-    }
-    assert!(rows.len() <= count);
-    assert_eq!(orders.len(), rows.len());
-    orders.sort_unstable_by_key(|(order, _row)| *order);
-
-    Ok(orders.iter().map(|(_order, row)| rows[*row]).collect())
-}
-
-/// Every row of `sample`, the window's observation `observation`, and the row's place in the
-/// table's order beside the place of the row in `rows`.
-fn sealed_parts_rows_push<'sample>(
-    sample: &'sample Sample,
-    observation: u8,
-    positions: &HashMap<(u8, &[u8]), u32>,
-    rows: &mut Vec<PartRow<'sample>>,
-    orders: &mut Vec<(u128, usize)>,
-) -> Result<()> {
-    let app_positions: Vec<u32> = sample
-        .apps()
-        .iter()
-        .map(|app| positions[&sealed_parts_position_key(app)])
-        .collect();
-
-    let header = PartRow::Header { sample };
-    orders.push((header.order(None, observation), rows.len()));
-    rows.push(header);
-    for ((index, app), position) in (0_u32..).zip(sample.apps()).zip(&app_positions) {
-        let row = PartRow::App { sample, index, app };
-        orders.push((row.order(Some(*position), observation), rows.len()));
-        rows.push(row);
-    }
-    for (index, process) in (0_u32..).zip(sample.processes()) {
-        if let Some(app_index) = process.app_index {
-            let place = collector::usize_from_u32(app_index);
-            let app = sample
-                .apps()
-                .get(place)
-                .ok_or(Error::Bound("sealed parts process App"))?;
-            let row = PartRow::Process {
-                sample,
-                app_index,
-                app,
-                index,
-                process,
-            };
-            orders.push((
-                row.order(Some(app_positions[place]), observation),
-                rows.len(),
-            ));
-            rows.push(row);
-        }
-    }
-
-    Ok(())
-}
-
-/// The position of each App key of `samples` among them, in their order.
-fn sealed_parts_positions(samples: &[Box<Sample>]) -> HashMap<(u8, &[u8]), u32> {
-    let mut positions = HashMap::new();
-    for sample in samples {
-        for app in sample.apps() {
-            positions.insert(sealed_parts_position_key(app), 0);
-        }
-    }
-    let mut distinct: Vec<(u8, &[u8])> = positions.keys().copied().collect();
-    distinct.sort_unstable();
-    for (position, key) in (0_u32..).zip(distinct) {
-        positions.insert(key, position);
-    }
-
-    positions
-}
-
-/// What orders App `app` among the window's Apps.
-fn sealed_parts_position_key(app: &App) -> (u8, &[u8]) {
-    (kind_code(app.key.kind), app.key.bytes.as_slice())
-}
-
-/// What the engine may decode of the rows, by the rule `DECODED_BYTES_MAX` gives.
-fn sealed_parts_decoded_bytes(rows: &[PartRow<'_>]) -> u64 {
-    rows.iter()
-        .map(|row| {
-            let key = row.app().map_or(0, |(_index, app)| app.key.bytes.len());
-            let name = row
-                .described_process()
-                .and_then(|process| process.executable_name.as_ref())
-                .map_or(0, |name| name.bytes.len());
-            collector::u64_from_usize(ROW_DECODED_BYTES + key + name)
-        })
-        .sum()
-}
-
-fn sealed_parts_header_columns(rows: &[PartRow<'_>]) -> Vec<Column> {
-    let previous = |row: &PartRow<'_>| row.described_sample().and_then(|sample| sample.previous);
-
-    columns!(rows;
-        "version" => |_| VERSION,
-        "publication" => |row| row.sample().selected.stamp.publication,
-        "row_kind" => PartRow::kind,
-        "run_tick" => |row| row.described_sample().map(|sample| sample.selected.run_tick),
-        "wall_ns" => |row| row.described_sample().and_then(|sample| sample.selected.wall_ns),
-        "continuous_ns" => |row| {
-            row.described_sample().and_then(|sample| sample.selected.stamp.continuous_ns)
-        },
-        "awake_ns" => |row| {
-            row.described_sample().and_then(|sample| sample.selected.stamp.awake_ns)
-        },
-        "previous_publication" => |row| previous(row).map(|stamp| stamp.publication),
-        "previous_continuous_ns" => |row| previous(row).and_then(|stamp| stamp.continuous_ns),
-        "previous_awake_ns" => |row| previous(row).and_then(|stamp| stamp.awake_ns),
-        "elapsed_ns" => |row| row.described_sample().and_then(|sample| sample.elapsed_ns),
-        "membership_complete" => |row| {
-            row.described_sample().map(|sample| sample.membership_complete)
-        },
-        "ungrouped_members" => |row| row.described_sample().map(|sample| sample.ungrouped_members),
-        "live_ungrouped_members" => |row| {
-            row.described_sample().map(|sample| sample.live_ungrouped_members)
-        },
-        "usage_refused" => |row| row.described_sample().map(|sample| sample.usage_refused),
-        "usage_gone" => |row| row.described_sample().map(|sample| sample.usage_gone),
-        "app_count" => |row| {
-            row.described_sample().map(|sample| collector::u64_from_usize(sample.apps().len()))
-        },
-        "process_count" => |row| {
-            row.described_sample().map(|sample| collector::u64_from_usize(sample.processes().len()))
-        },
-    )
-}
-
-fn sealed_parts_member_columns(rows: &[PartRow<'_>]) -> Vec<Column> {
-    columns!(rows;
-        "app_index" => |row| row.app().map(|(index, _app)| index),
-        "app_kind" => |row| row.app().map(|(_index, app)| kind_code(app.key.kind)),
-        "app_key" => |row| row.app().map(|(_index, app)| app.key.bytes.as_slice()),
-        "members" => |row| row.described_app().map(|app| app.members),
-        "live_members" => |row| row.described_app().map(|app| app.live_members),
-        "app_membership_complete" => |row| row.described_app().map(|app| app.membership_complete),
-        "process_index" => |row| row.process().map(|(index, _process)| index),
-        "pid" => |row| row.described_process().map(|process| process.pid),
-        "unique_id" => |row| {
-            row.described_process()
-                .and_then(|process| process.creation)
-                .map(|creation| creation.unique_id)
-        },
-        "pid_version" => |row| {
-            row.described_process()
-                .and_then(|process| process.creation)
-                .map(|creation| creation.pid_version)
-        },
-        "executable_name" => |row| {
-            row.described_process()
-                .and_then(|process| process.executable_name.as_ref())
-                .map(|name| name.bytes.as_slice())
-        },
-        "program_unavailable" => |row| {
-            row.described_process()
-                .and_then(|process| process.program_unavailable)
-                .map(identity_code)
-        },
-        "app_attribution" => |row| {
-            row.described_process()
-                .and_then(|process| process.app_attribution)
-                .map(unavailable_code)
-        },
-        "state" => |row| row.described_process().map(|process| state_code(process.state)),
-    )
-}
-
-fn sealed_parts_measure_columns(rows: &[PartRow<'_>]) -> Vec<Column> {
-    let mut columns = Vec::with_capacity(MEASURES.len() * MEASURE_FIELDS.len());
-    for (measure, value) in MEASURES {
-        let values: Vec<Option<Measure>> = rows
-            .iter()
-            .map(|row| row.described_app().map(value))
-            .collect();
-        let [known, measured, unavailable, overflowed] = measure_column_names(measure);
-        columns.push(Column::new(
-            known.into(),
-            values
-                .iter()
-                .map(|measure| measure.map(|measure| measure.known))
-                .collect::<Vec<_>>(),
-        ));
-        columns.push(Column::new(
-            measured.into(),
-            values
-                .iter()
-                .map(|measure| measure.map(|measure| measure.measured_members))
-                .collect::<Vec<_>>(),
-        ));
-        columns.push(Column::new(
-            unavailable.into(),
-            values
-                .iter()
-                .map(|measure| measure.map(|measure| measure.unavailable_members))
-                .collect::<Vec<_>>(),
-        ));
-        columns.push(Column::new(
-            overflowed.into(),
-            values
-                .iter()
-                .map(|measure| measure.map(|measure| measure.overflowed))
-                .collect::<Vec<_>>(),
-        ));
-    }
-
-    columns
-}
-
-fn sealed_parts_amount_columns(rows: &[PartRow<'_>]) -> Vec<Column> {
-    let mut columns = Vec::with_capacity(AMOUNTS.len() * 2);
-    for (amount, value) in AMOUNTS {
-        let values: Vec<Option<Amount>> = rows
-            .iter()
-            .map(|row| row.described_process().map(value))
-            .collect();
-        let [known, unavailable] = amount_column_names(amount);
-        columns.push(Column::new(
-            known.into(),
-            values
-                .iter()
-                .map(|amount| match amount {
-                    Some(Amount::Known(value)) => Some(*value),
-                    Some(Amount::Unavailable(_)) | None => None,
-                })
-                .collect::<Vec<_>>(),
-        ));
-        columns.push(Column::new(
-            unavailable.into(),
-            values
-                .iter()
-                .map(|amount| match amount {
-                    Some(Amount::Unavailable(reason)) => Some(unavailable_code(*reason)),
-                    Some(Amount::Known(_)) | None => None,
-                })
-                .collect::<Vec<_>>(),
-        ));
-    }
-
-    columns
-}
 
 /// Every column of the table in its order.
 fn column_names() -> Vec<String> {
-    let mut names = Vec::with_capacity(COLUMNS);
-    names.extend(FIXED_COLUMNS.map(String::from));
-    for (measure, _value) in MEASURES {
+    let mut names = Vec::with_capacity(PARTS_COLUMNS);
+    names.extend(PARTS_FIXED_COLUMNS.map(String::from));
+    for measure in MEASURES {
         names.extend(measure_column_names(measure));
     }
-    for (amount, _value) in AMOUNTS {
+    for amount in AMOUNTS {
         names.extend(amount_column_names(amount));
     }
 
     names
 }
 
-fn amount_column_names(amount: &str) -> [String; 2] {
-    [
-        format!("process_{amount}"),
-        format!("process_{amount}_unavailable"),
-    ]
-}
-
 /// The place of the fixed column `name`, which fails the build where no fixed column has it.
 const fn fixed(name: &str) -> usize {
-    column(&FIXED_COLUMNS, name)
+    column(&PARTS_FIXED_COLUMNS, name)
 }
 
 /// The place of the column `name` of a read of the Apps' CPU, energy and disk, which fails the
@@ -588,19 +72,6 @@ const fn column(columns: &[&str], name: &str) -> usize {
     }
 
     panic!("no column has this name");
-}
-
-/// The place of the entry `name` among `entries`, which fails the build where none has it.
-const fn place<T>(entries: &[(&str, T)], name: &str) -> usize {
-    let mut index = 0;
-    while index < entries.len() {
-        if same(entries[index].0, name) {
-            return index;
-        }
-        index += 1;
-    }
-
-    panic!("no entry has this name");
 }
 
 const fn same(left: &str, right: &str) -> bool {
@@ -779,7 +250,7 @@ impl Session {
             ))?,
             key,
         ))?;
-        if frame.height() > collector::usize_from_u32(ROWS_MAX) {
+        if frame.height() > collector::usize_from_u32(PARTS_ROWS_MAX) {
             return Err(Error::Bound("sealed parts rows"));
         }
         let mut decoder = Decoder {
@@ -813,7 +284,7 @@ impl Session {
         if rows == 0 {
             return Err(Error::Bound("sealed parts rows"));
         }
-        if rows > u64::from(ROWS_MAX) {
+        if rows > u64::from(PARTS_ROWS_MAX) {
             return Err(Error::Bound("sealed parts rows"));
         }
         let version: u8 = summary.get(0)?;
@@ -821,7 +292,7 @@ impl Session {
             return Err(Error::Bound("sealed parts version"));
         }
 
-        Ok(version == VERSION)
+        Ok(version == PARTS_VERSION)
     }
 
     /// The facts of each observation the parts of `kept`, which the engine holds as `source`,
@@ -917,7 +388,7 @@ impl Session {
             ),
             &["publication", "app_index"],
         ))?;
-        if frame.height() > collector::usize_from_u32(ROWS_MAX) {
+        if frame.height() > collector::usize_from_u32(PARTS_ROWS_MAX) {
             return Err(Error::Bound("sealed parts rows"));
         }
 
@@ -1258,11 +729,11 @@ const _: () = {
     assert!(attribution_column("app_gpu_ns_unavailable_members") == gpu + 2);
     assert!(attribution_column("app_gpu_ns_overflowed") == gpu + 3);
     // Each column the read takes is one the parts table holds, under the name it gives it.
-    assert!(fixed("app_membership_complete") < FIXED_COLUMNS.len());
-    assert!(place(&MEASURES, "cpu_ns") < MEASURES.len());
-    assert!(place(&MEASURES, "energy_nj") < MEASURES.len());
-    assert!(place(&MEASURES, "disk_io_bytes") < MEASURES.len());
-    assert!(place(&MEASURES, "gpu_ns") < MEASURES.len());
+    assert!(fixed("app_membership_complete") < PARTS_FIXED_COLUMNS.len());
+    assert!(column(&MEASURES, "cpu_ns") < MEASURES.len());
+    assert!(column(&MEASURES, "energy_nj") < MEASURES.len());
+    assert!(column(&MEASURES, "disk_io_bytes") < MEASURES.len());
+    assert!(column(&MEASURES, "gpu_ns") < MEASURES.len());
 };
 
 /// An App's resident memory at an observation of a window that keeps its parts.
@@ -1291,13 +762,13 @@ const _: () = {
     assert!(resident_column("app_resident_bytes_unavailable_members") == known + 2);
     assert!(resident_column("app_resident_bytes_overflowed") == known + 3);
     // Each column the read takes is one the parts table holds, under the name it gives it.
-    assert!(fixed("publication") < FIXED_COLUMNS.len());
-    assert!(fixed("app_index") < FIXED_COLUMNS.len());
-    assert!(fixed("app_kind") < FIXED_COLUMNS.len());
-    assert!(fixed("app_key") < FIXED_COLUMNS.len());
-    assert!(fixed("members") < FIXED_COLUMNS.len());
-    assert!(fixed("row_kind") < FIXED_COLUMNS.len());
-    assert!(place(&MEASURES, "resident_bytes") < MEASURES.len());
+    assert!(fixed("publication") < PARTS_FIXED_COLUMNS.len());
+    assert!(fixed("app_index") < PARTS_FIXED_COLUMNS.len());
+    assert!(fixed("app_kind") < PARTS_FIXED_COLUMNS.len());
+    assert!(fixed("app_key") < PARTS_FIXED_COLUMNS.len());
+    assert!(fixed("members") < PARTS_FIXED_COLUMNS.len());
+    assert!(fixed("row_kind") < PARTS_FIXED_COLUMNS.len());
+    assert!(column(&MEASURES, "resident_bytes") < MEASURES.len());
     assert!(same(MEASURE_FIELDS[0], "known"));
     assert!(same(MEASURE_FIELDS[1], "measured_members"));
     assert!(same(MEASURE_FIELDS[2], "unavailable_members"));
@@ -1313,7 +784,7 @@ fn kept_parts_query(source: &str) -> String {
     )
 }
 
-/// The rows of `plan` sorted by `columns`, of which a table keeps at most `ROWS_MAX`.
+/// The rows of `plan` sorted by `columns`, of which a table keeps at most `PARTS_ROWS_MAX`.
 fn kept_parts_sorted(plan: LazyFrame, columns: &[&str]) -> LazyFrame {
     plan.sort(
         columns.to_vec(),
@@ -1529,14 +1000,14 @@ fn kept_app(row: &Row<'_>) -> Result<(usize, App)> {
         members,
         live_members: row.get(const { fixed("live_members") })?,
         membership_complete: row.get(const { fixed("app_membership_complete") })?,
-        cpu_ns: measure(const { place(&MEASURES, "cpu_ns") })?,
-        energy_nj: measure(const { place(&MEASURES, "energy_nj") })?,
-        disk_read_bytes: measure(const { place(&MEASURES, "disk_read_bytes") })?,
-        disk_written_bytes: measure(const { place(&MEASURES, "disk_written_bytes") })?,
-        disk_io_bytes: measure(const { place(&MEASURES, "disk_io_bytes") })?,
-        resident_bytes: measure(const { place(&MEASURES, "resident_bytes") })?,
-        footprint_bytes: measure(const { place(&MEASURES, "footprint_bytes") })?,
-        gpu_ns: measure(const { place(&MEASURES, "gpu_ns") })?,
+        cpu_ns: measure(const { column(&MEASURES, "cpu_ns") })?,
+        energy_nj: measure(const { column(&MEASURES, "energy_nj") })?,
+        disk_read_bytes: measure(const { column(&MEASURES, "disk_read_bytes") })?,
+        disk_written_bytes: measure(const { column(&MEASURES, "disk_written_bytes") })?,
+        disk_io_bytes: measure(const { column(&MEASURES, "disk_io_bytes") })?,
+        resident_bytes: measure(const { column(&MEASURES, "resident_bytes") })?,
+        footprint_bytes: measure(const { column(&MEASURES, "footprint_bytes") })?,
+        gpu_ns: measure(const { column(&MEASURES, "gpu_ns") })?,
     };
 
     Ok((
@@ -1587,59 +1058,24 @@ fn kept_process(row: &Row<'_>) -> Result<Process> {
         app_index: Some(row.get(const { fixed("app_index") })?),
         executable_name: executable_name.map(Bytes::new).transpose()?,
         program_unavailable: program_unavailable.map(identity_of).transpose()?,
-        cpu_ns: amount(const { place(&AMOUNTS, "cpu_ns") })?,
-        energy_nj: amount(const { place(&AMOUNTS, "energy_nj") })?,
-        gpu_ns: amount(const { place(&AMOUNTS, "gpu_ns") })?,
-        disk_read_bytes: amount(const { place(&AMOUNTS, "disk_read_bytes") })?,
-        disk_written_bytes: amount(const { place(&AMOUNTS, "disk_written_bytes") })?,
-        disk_io_bytes: amount(const { place(&AMOUNTS, "disk_io_bytes") })?,
+        cpu_ns: amount(const { column(&AMOUNTS, "cpu_ns") })?,
+        energy_nj: amount(const { column(&AMOUNTS, "energy_nj") })?,
+        gpu_ns: amount(const { column(&AMOUNTS, "gpu_ns") })?,
+        disk_read_bytes: amount(const { column(&AMOUNTS, "disk_read_bytes") })?,
+        disk_written_bytes: amount(const { column(&AMOUNTS, "disk_written_bytes") })?,
+        disk_io_bytes: amount(const { column(&AMOUNTS, "disk_io_bytes") })?,
         app_attribution: app_attribution.map(unavailable_of).transpose()?,
-        resident_bytes: amount(const { place(&AMOUNTS, "resident_bytes") })?,
-        footprint_bytes: amount(const { place(&AMOUNTS, "footprint_bytes") })?,
-        idle_wakeups: amount(const { place(&AMOUNTS, "idle_wakeups") })?,
-        pageins: amount(const { place(&AMOUNTS, "pageins") })?,
-        threads: amount(const { place(&AMOUNTS, "threads") })?,
+        resident_bytes: amount(const { column(&AMOUNTS, "resident_bytes") })?,
+        footprint_bytes: amount(const { column(&AMOUNTS, "footprint_bytes") })?,
+        idle_wakeups: amount(const { column(&AMOUNTS, "idle_wakeups") })?,
+        pageins: amount(const { column(&AMOUNTS, "pageins") })?,
+        threads: amount(const { column(&AMOUNTS, "threads") })?,
         state: state_of(row.get(const { fixed("state") })?)?,
     })
 }
 
 fn count_of(value: u64) -> Result<usize> {
     usize::try_from(value).map_err(|_| Error::Bound("sealed parts count"))
-}
-
-/// A table keeps each reason and state by these codes, so a build that changed one would
-/// misread the tables earlier builds wrote at the same version.
-const _: () = {
-    assert!(unavailable_code(Unavailable::Refused) == 0);
-    assert!(unavailable_code(Unavailable::Gone) == 1);
-    assert!(unavailable_code(Unavailable::Unknown) == 2);
-    assert!(unavailable_code(Unavailable::Interval) == 3);
-    assert!(unavailable_code(Unavailable::Creation) == 4);
-    assert!(unavailable_code(Unavailable::Baseline) == 5);
-    assert!(unavailable_code(Unavailable::CounterReset) == 6);
-    assert!(unavailable_code(Unavailable::Overflow) == 7);
-    assert!(unavailable_code(Unavailable::Exec) == 8);
-    assert!(unavailable_code(Unavailable::Program) == 9);
-    assert!(unavailable_code(Unavailable::ExitUnverified) == 10);
-    assert!(state_code(ProcessState::Live) == 0);
-    assert!(state_code(ProcessState::ExitedVerified) == 1);
-    assert!(state_code(ProcessState::ExitedUnverified) == 2);
-};
-
-const fn unavailable_code(reason: Unavailable) -> u8 {
-    match reason {
-        Unavailable::Refused => 0,
-        Unavailable::Gone => 1,
-        Unavailable::Unknown => 2,
-        Unavailable::Interval => 3,
-        Unavailable::Creation => 4,
-        Unavailable::Baseline => 5,
-        Unavailable::CounterReset => 6,
-        Unavailable::Overflow => 7,
-        Unavailable::Exec => 8,
-        Unavailable::Program => 9,
-        Unavailable::ExitUnverified => 10,
-    }
 }
 
 fn unavailable_of(code: u8) -> Result<Unavailable> {
@@ -1659,17 +1095,6 @@ fn unavailable_of(code: u8) -> Result<Unavailable> {
     }
 }
 
-fn identity_code(reason: IdentityUnavailable) -> u8 {
-    match reason {
-        IdentityUnavailable::Refused => identity_availability::REFUSED,
-        IdentityUnavailable::Gone => identity_availability::GONE,
-        IdentityUnavailable::Unsupported => identity_availability::UNSUPPORTED,
-        IdentityUnavailable::Changed => identity_availability::CHANGED,
-        IdentityUnavailable::Invalid => identity_availability::INVALID,
-        IdentityUnavailable::Exhausted => identity_availability::EXHAUSTED,
-    }
-}
-
 fn identity_of(code: u8) -> Result<IdentityUnavailable> {
     match code {
         identity_availability::REFUSED => Ok(IdentityUnavailable::Refused),
@@ -1679,14 +1104,6 @@ fn identity_of(code: u8) -> Result<IdentityUnavailable> {
         identity_availability::INVALID => Ok(IdentityUnavailable::Invalid),
         identity_availability::EXHAUSTED => Ok(IdentityUnavailable::Exhausted),
         _ => Err(Error::Bound("sealed parts program")),
-    }
-}
-
-const fn state_code(state: ProcessState) -> u8 {
-    match state {
-        ProcessState::Live => 0,
-        ProcessState::ExitedVerified => 1,
-        ProcessState::ExitedUnverified => 2,
     }
 }
 

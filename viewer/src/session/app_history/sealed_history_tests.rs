@@ -19,7 +19,7 @@ fn restores_the_history_a_replay_gives_from_the_parts_a_window_keeps() {
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(1001);
     fixture.publish_with_system_rows(1002);
-    fixture.seal_derived(&[], &SealedApps::default());
+    fixture.seal_derived(&[], &persistence::sealed_apps::SealedApps::default());
     let session = Session::open(&fixture.root).unwrap();
     let selected = selected(&session, 1002);
 
@@ -40,7 +40,7 @@ fn restores_a_window_that_keeps_parts_without_reading_its_saved_sources() {
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(1001);
     fixture.publish_with_system_rows(1002);
-    fixture.seal_derived(&[], &SealedApps::default());
+    fixture.seal_derived(&[], &persistence::sealed_apps::SealedApps::default());
     let session = Session::open(&fixture.root).unwrap();
     let selected = selected(&session, 1002);
 
@@ -60,7 +60,7 @@ fn restores_the_history_of_an_app_that_ran_at_no_second_of_a_window_that_keeps_p
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(1001);
     fixture.publish_with_system_rows(1002);
-    fixture.seal_derived(&[], &SealedApps::default());
+    fixture.seal_derived(&[], &persistence::sealed_apps::SealedApps::default());
     let session = Session::open(&fixture.root).unwrap();
     let selected = selected(&session, 1002);
     let absent = Target {
@@ -85,7 +85,7 @@ fn restores_the_process_group_history_a_replay_gives_from_the_parts_a_window_kee
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(1001);
     fixture.publish_with_system_rows(1002);
-    fixture.seal_derived(&[], &SealedApps::default());
+    fixture.seal_derived(&[], &persistence::sealed_apps::SealedApps::default());
     let session = Session::open(&fixture.root).unwrap();
     let selected = selected(&session, 1002);
     let group = GroupTarget {
@@ -117,7 +117,7 @@ fn restores_a_process_group_of_a_window_that_keeps_parts_without_reading_its_sav
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(1001);
     fixture.publish_with_system_rows(1002);
-    fixture.seal_derived(&[], &SealedApps::default());
+    fixture.seal_derived(&[], &persistence::sealed_apps::SealedApps::default());
     let session = Session::open(&fixture.root).unwrap();
     let selected = selected(&session, 1002);
     let group = GroupTarget {
@@ -147,7 +147,7 @@ fn restores_a_replayed_minute_after_a_minute_that_keeps_parts() {
     fixture.start_at_run_tick(run_tick - 1);
     fixture.publish_with_system_rows(1001);
     fixture.publish_with_system_rows(1002);
-    fixture.seal_minute_derived(0, &SealedApps::default());
+    fixture.seal_minute_derived(0, &persistence::sealed_apps::SealedApps::default());
     fixture.seal_minute(1);
     let session = Session::open(&fixture.root).unwrap();
     let mut selected = selected(&session, 1002);
@@ -175,7 +175,7 @@ fn rejects_a_warm_history_from_kept_parts_once_their_window_marker_disappears() 
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(1001);
     fixture.publish_with_system_rows(1002);
-    fixture.seal_derived(&[], &SealedApps::default());
+    fixture.seal_derived(&[], &persistence::sealed_apps::SealedApps::default());
     let session = Session::open(&fixture.root).unwrap();
     let selected = selected(&session, 1002);
     session
