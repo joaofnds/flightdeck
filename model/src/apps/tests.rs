@@ -1,10 +1,18 @@
 use super::{Apps, Processes, Subtotal, Totals};
 use crate::programs::{Capacity, Program, Programs};
 
-const CAPACITY: Capacity = Capacity { entries: 8 };
+const CAPACITY: Capacity = Capacity {
+    entries: 8,
+    key_bytes: 1024,
+};
 const PROCESSES_MAX: u32 = 8;
 const SAFARI: Program = Program {
     executable_name: b"Safari",
+    app_path: Some(b"/Applications/Safari.app"),
+};
+
+const SAFARI_HELPER: Program = Program {
+    executable_name: b"Safari Web Content",
     app_path: Some(b"/Applications/Safari.app"),
 };
 
@@ -40,6 +48,57 @@ fn attributes_the_cpu_a_process_spent_between_two_ticks_to_its_app() {
             cpu_ns: Subtotal {
                 known: 5_000_000,
                 measured_members: 1,
+                unavailable_members: 0,
+                overflowed: false,
+            },
+        }]
+    );
+}
+
+#[test]
+fn groups_the_processes_of_one_bundle_into_one_app() {
+    // Goal: the processes of two programs inside one bundle are members of one App.
+    // Method: index the bundle's main program and a helper inside it, then derive the Apps of
+    // two ticks of one process of each, whose CPU times grow by 5 ms and 2 ms.
+    let mut programs = Programs::new(CAPACITY);
+    let main = programs.add(SAFARI);
+    let helper = programs.add(SAFARI_HELPER);
+    let previous = Columns::of(&[
+        Process {
+            program: main,
+            ..Process::default()
+        },
+        Process {
+            pid: 8,
+            program: helper,
+            ..Process::default()
+        },
+    ]);
+    let selected = Columns::of(&[
+        Process {
+            program: main,
+            user_ns: 5_000_000,
+            ..Process::default()
+        },
+        Process {
+            pid: 8,
+            program: helper,
+            user_ns: 2_000_000,
+            ..Process::default()
+        },
+    ]);
+    let mut apps = Apps::new(PROCESSES_MAX, &programs);
+
+    apps.derive(&programs, &previous.processes(), &selected.processes());
+
+    assert_eq!(
+        apps.totals(),
+        [Totals {
+            app: programs.app(main),
+            members: 2,
+            cpu_ns: Subtotal {
+                known: 7_000_000,
+                measured_members: 2,
                 unavailable_members: 0,
                 overflowed: false,
             },

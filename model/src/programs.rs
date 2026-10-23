@@ -9,11 +9,30 @@ pub struct Program<'bytes> {
     pub app_path: Option<&'bytes [u8]>,
 }
 
+impl<'bytes> Program<'bytes> {
+    /// The App the program belongs to: its bundle, or its executable's name outside one.
+    fn key(self) -> AppKey<'bytes> {
+        match self.app_path {
+            Some(path) => AppKey::Bundle(path),
+            None => AppKey::Executable(self.executable_name),
+        }
+    }
+}
+
+/// What tells one App from another, in the order the Apps of a tick come out in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AppKey<'bytes> {
+    Bundle(&'bytes [u8]),
+    Executable(&'bytes [u8]),
+}
+
 /// What the index holds at most, taken at startup.
 #[derive(Clone, Copy)]
 pub struct Capacity {
     /// Entries of a run's dictionary, at most 65,536 (collector/src/ring/identity.rs).
     pub entries: u32,
+    /// The bytes of every App's key together.
+    pub key_bytes: usize,
 }
 
 /// An App the index holds, numbered from 0 in the order the index first met it.
@@ -27,41 +46,102 @@ impl App {
     }
 }
 
-/// The App of each dictionary entry of one run.
+/// The App of each dictionary entry of one run, and each App's key.
 pub struct Programs {
-    apps: Vec<App>,
+    /// The App of each entry.
+    entries: Vec<App>,
+    /// Each App's key, as a range of `arena`.
+    keys: Vec<KeyRange>,
+    arena: Vec<u8>,
+    /// The Apps in key order.
+    ordered: Vec<App>,
+}
+
+/// Where an App's key lies in the index's arena.
+#[derive(Clone, Copy)]
+struct KeyRange {
+    bundle: bool,
+    start: usize,
+    end: usize,
 }
 
 impl Programs {
     #[must_use]
     pub fn new(capacity: Capacity) -> Self {
+        let entries_max = crate::usize_from_u32(capacity.entries);
         Self {
-            apps: Vec::with_capacity(crate::usize_from_u32(capacity.entries)),
+            entries: Vec::with_capacity(entries_max),
+            keys: Vec::with_capacity(entries_max),
+            arena: Vec::with_capacity(capacity.key_bytes),
+            ordered: Vec::with_capacity(entries_max),
         }
     }
 
     /// Indexes the dictionary's next entry and returns its number.
-    pub fn add(&mut self, _program: Program<'_>) -> u32 {
-        assert!(self.apps.len() < self.apps.capacity());
+    pub fn add(&mut self, program: Program<'_>) -> u32 {
+        assert!(self.entries.len() < self.entries.capacity());
 
-        let entry = self.count();
-        self.apps.push(App(entry));
+        let key = program.key();
+        let app = match self.search(key) {
+            Ok(position) => self.ordered[position],
+            Err(position) => self.add_app(key, position),
+        };
+
+        let entry = crate::u32_from_length(self.entries.len());
+        self.entries.push(app);
         entry
     }
 
     /// The App of `entry`.
     #[must_use]
     pub fn app(&self, entry: u32) -> App {
-        self.apps[crate::usize_from_u32(entry)]
+        self.entries[crate::usize_from_u32(entry)]
+    }
+
+    /// The key of `app`.
+    #[must_use]
+    pub fn key(&self, app: App) -> AppKey<'_> {
+        let range = self.keys[app.index()];
+        let bytes = &self.arena[range.start..range.end];
+        if range.bundle {
+            AppKey::Bundle(bytes)
+        } else {
+            AppKey::Executable(bytes)
+        }
     }
 
     /// The Apps the index can hold at most, which bounds an App's number.
     #[must_use]
     pub fn apps_max(&self) -> usize {
-        self.apps.capacity()
+        self.keys.capacity()
     }
 
-    fn count(&self) -> u32 {
-        crate::u32_from_length(self.apps.len())
+    /// The place of `key`'s App in key order, or where it would be.
+    fn search(&self, key: AppKey<'_>) -> Result<usize, usize> {
+        self.ordered
+            .binary_search_by(|app| self.key(*app).cmp(&key))
+    }
+
+    /// Adds the App of `key`, whose place in key order is `position`.
+    fn add_app(&mut self, key: AppKey<'_>, position: usize) -> App {
+        assert!(self.keys.len() < self.keys.capacity());
+        assert!(self.ordered.len() < self.ordered.capacity());
+
+        let (bundle, bytes) = match key {
+            AppKey::Bundle(bytes) => (true, bytes),
+            AppKey::Executable(bytes) => (false, bytes),
+        };
+        assert!(bytes.len() <= self.arena.capacity() - self.arena.len());
+        let start = self.arena.len();
+        self.arena.extend_from_slice(bytes);
+
+        let app = App(crate::u32_from_length(self.keys.len()));
+        self.keys.push(KeyRange {
+            bundle,
+            start,
+            end: self.arena.len(),
+        });
+        self.ordered.insert(position, app);
+        app
     }
 }
