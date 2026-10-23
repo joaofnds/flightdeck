@@ -193,9 +193,15 @@ fn capture_exec(
     });
     let exec = frame.execs.last_mut().unwrap_or_else(|| unreachable!());
 
+    let mut executable_name = [0; collector::ring::PROGRAM_PATH_BYTES_MAX];
+    let mut app_path = [0; collector::ring::PROGRAM_PATH_BYTES_MAX];
     super::capture::member_program(
         source,
         &identity.identity,
+        &mut collector::ring::ProgramBuffers {
+            executable_name: &mut executable_name,
+            app_path: &mut app_path,
+        },
         &mut frame.arena,
         &mut exec.program,
     )
@@ -226,9 +232,15 @@ fn capture_start(
     });
     let start = frame.starts.last_mut().unwrap_or_else(|| unreachable!());
 
+    let mut executable_name = [0; collector::ring::PROGRAM_PATH_BYTES_MAX];
+    let mut app_path = [0; collector::ring::PROGRAM_PATH_BYTES_MAX];
     super::capture::member_program(
         source,
         &identity.identity,
+        &mut collector::ring::ProgramBuffers {
+            executable_name: &mut executable_name,
+            app_path: &mut app_path,
+        },
         &mut frame.arena,
         &mut start.program,
     )

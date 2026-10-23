@@ -51,6 +51,8 @@ pub(super) fn members(source: &Publication<'_>, frame: &mut Frame) -> Result<()>
 
     let mut measured = 0;
     let mut previous_pid = None;
+    let mut executable_name = [0; PROGRAM_PATH_BYTES_MAX];
+    let mut app_path = [0; PROGRAM_PATH_BYTES_MAX];
     for (index, identity) in source.identities.iter().enumerate() {
         if previous_pid.is_some_and(|previous| previous >= identity.pid) {
             return Err(Error::Bound("live App identity order"));
@@ -89,6 +91,10 @@ pub(super) fn members(source: &Publication<'_>, frame: &mut Frame) -> Result<()>
         member_program(
             source,
             &identity.identity,
+            &mut ProgramBuffers {
+                executable_name: &mut executable_name,
+                app_path: &mut app_path,
+            },
             &mut frame.arena,
             &mut member.program,
         )?;
@@ -114,23 +120,18 @@ fn members_unidentified(source: &Publication<'_>, frame: &mut Frame) {
     }
 }
 
+/// Copies the program into `arena` through `buffers`. A caller passes one pair of buffers for
+/// all the programs of a tick, since zeroing a pair takes longer than copying a program into it.
 pub(super) fn member_program(
     source: &Publication<'_>,
     identity: &ProcessIdentity,
+    buffers: &mut ProgramBuffers,
     arena: &mut Vec<u8>,
     output: &mut std::result::Result<ProgramSpan, IdentityUnavailable>,
 ) -> Result<()> {
     match identity {
         ProcessIdentity::Measured { program, .. } => {
-            let mut executable_name = [0; PROGRAM_PATH_BYTES_MAX];
-            let mut app_path = [0; PROGRAM_PATH_BYTES_MAX];
-            let (name, app) = source.reader.copy_program(
-                program,
-                &mut ProgramBuffers {
-                    executable_name: &mut executable_name,
-                    app_path: &mut app_path,
-                },
-            )?;
+            let (name, app) = source.reader.copy_program(program, buffers)?;
             if arena.len() + name + app > arena.capacity() {
                 return Err(Error::Bound("live App changed byte size"));
             }
@@ -138,11 +139,11 @@ pub(super) fn member_program(
             *output = Ok(ProgramSpan::capture(
                 arena,
                 &ProgramBytes {
-                    executable_name: &executable_name[..name],
+                    executable_name: &buffers.executable_name[..name],
                     app_path: if app == 0 {
                         None
                     } else {
-                        Some(&app_path[..app])
+                        Some(&buffers.app_path[..app])
                     },
                 },
             ));

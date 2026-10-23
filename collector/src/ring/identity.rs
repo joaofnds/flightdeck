@@ -614,6 +614,7 @@ pub(super) fn load_observation(
     source: &IdentityRecord,
     layout: &Layout,
     owner: u64,
+    buffers: &mut ProgramBuffers,
     output: &mut IdentityObservation,
 ) -> io::Result<()> {
     assert_eq!(source.record.len(), layout::PROCESS_IDENTITY_WORDS);
@@ -649,7 +650,7 @@ pub(super) fn load_observation(
             &ReferencePosition { number, owner },
             &mut program,
         );
-        validate_program(source.words, layout, &program, owner)?;
+        validate_program(source.words, layout, &program, owner, buffers)?;
 
         output.identity = ProcessIdentity::Measured { creation, program };
     } else {
@@ -710,25 +711,17 @@ fn load_observation_creation(
     Ok(())
 }
 
+/// Copies the program's bytes into `buffers` and validates them. A caller passes one pair of
+/// buffers for all the programs it validates, since zeroing a pair takes longer than copying a
+/// program into it.
 fn validate_program(
     words: &[AtomicU64],
     layout: &Layout,
     program: &ProgramReference,
     owner: u64,
+    buffers: &mut ProgramBuffers,
 ) -> io::Result<()> {
-    let mut executable_name = [0; PROGRAM_PATH_BYTES_MAX];
-    let mut app_path = [0; PROGRAM_PATH_BYTES_MAX];
-
-    copy_program(
-        words,
-        layout,
-        program,
-        owner,
-        &mut ProgramBuffers {
-            executable_name: &mut executable_name,
-            app_path: &mut app_path,
-        },
-    )?;
+    copy_program(words, layout, program, owner, buffers)?;
 
     Ok(())
 }
@@ -738,9 +731,10 @@ pub(super) fn validate_observation(
     layout: &Layout,
     value: &IdentityObservation,
     owner: u64,
+    buffers: &mut ProgramBuffers,
 ) -> io::Result<()> {
     if let Some(program) = value.program() {
-        validate_program(words, layout, program, owner)?;
+        validate_program(words, layout, program, owner, buffers)?;
     }
 
     Ok(())
@@ -824,6 +818,8 @@ pub(super) fn load_event_identity(
         target.store(source.load(Ordering::Relaxed), Ordering::Relaxed);
     }
 
+    let mut executable_name = [0; PROGRAM_PATH_BYTES_MAX];
+    let mut app_path = [0; PROGRAM_PATH_BYTES_MAX];
     load_observation(
         &IdentityRecord {
             words: source.words,
@@ -831,6 +827,10 @@ pub(super) fn load_event_identity(
         },
         layout,
         owner,
+        &mut ProgramBuffers {
+            executable_name: &mut executable_name,
+            app_path: &mut app_path,
+        },
         output,
     )?;
 
@@ -878,6 +878,8 @@ pub(super) fn load_processes(
         return invalid();
     }
 
+    let mut executable_name = [0; PROGRAM_PATH_BYTES_MAX];
+    let mut app_path = [0; PROGRAM_PATH_BYTES_MAX];
     for index in 0..count {
         let mut value = IdentityObservation::EMPTY;
         load_observation(
@@ -887,6 +889,10 @@ pub(super) fn load_processes(
             },
             layout,
             owner,
+            &mut ProgramBuffers {
+                executable_name: &mut executable_name,
+                app_path: &mut app_path,
+            },
             &mut value,
         )?;
         crate::push_without_growing(identities, value);
@@ -955,8 +961,19 @@ pub(super) fn validate_publication(
 
     validate_process_rows(readings.processes, identities.processes)?;
 
+    let mut executable_name = [0; PROGRAM_PATH_BYTES_MAX];
+    let mut app_path = [0; PROGRAM_PATH_BYTES_MAX];
     for value in identities.processes {
-        validate_observation(words, layout, value, owner)?;
+        validate_observation(
+            words,
+            layout,
+            value,
+            owner,
+            &mut ProgramBuffers {
+                executable_name: &mut executable_name,
+                app_path: &mut app_path,
+            },
+        )?;
     }
 
     for (value, event) in identities.events.iter().zip(readings.events) {
@@ -968,7 +985,16 @@ pub(super) fn validate_publication(
             return invalid();
         }
 
-        validate_observation(words, layout, value, owner)?;
+        validate_observation(
+            words,
+            layout,
+            value,
+            owner,
+            &mut ProgramBuffers {
+                executable_name: &mut executable_name,
+                app_path: &mut app_path,
+            },
+        )?;
     }
 
     Ok(())
@@ -1041,6 +1067,8 @@ mod tests {
         store_observation(&record, &value);
 
         let mut loaded = IdentityObservation::EMPTY;
+        let mut executable_name = [0; PROGRAM_PATH_BYTES_MAX];
+        let mut app_path = [0; PROGRAM_PATH_BYTES_MAX];
         load_observation(
             &IdentityRecord {
                 words: &words,
@@ -1048,6 +1076,10 @@ mod tests {
             },
             &layout,
             1,
+            &mut ProgramBuffers {
+                executable_name: &mut executable_name,
+                app_path: &mut app_path,
+            },
             &mut loaded,
         )
         .unwrap();
@@ -1243,6 +1275,8 @@ mod tests {
             }
         }
         let mut observation = IdentityObservation::EMPTY;
+        let mut executable_name = [0; PROGRAM_PATH_BYTES_MAX];
+        let mut app_path = [0; PROGRAM_PATH_BYTES_MAX];
 
         let result = load_observation(
             &IdentityRecord {
@@ -1251,6 +1285,10 @@ mod tests {
             },
             &layout,
             1,
+            &mut ProgramBuffers {
+                executable_name: &mut executable_name,
+                app_path: &mut app_path,
+            },
             &mut observation,
         );
 
@@ -1324,6 +1362,8 @@ mod tests {
         store_observation(&record, &value);
 
         let mut loaded = IdentityObservation::EMPTY;
+        let mut executable_name = [0; PROGRAM_PATH_BYTES_MAX];
+        let mut app_path = [0; PROGRAM_PATH_BYTES_MAX];
         load_observation(
             &IdentityRecord {
                 words: &words,
@@ -1331,6 +1371,10 @@ mod tests {
             },
             &layout,
             1,
+            &mut ProgramBuffers {
+                executable_name: &mut executable_name,
+                app_path: &mut app_path,
+            },
             &mut loaded,
         )
         .unwrap();
