@@ -5,7 +5,7 @@ const STAMP: Stamp = Stamp {
     recording: [1, 2],
     boot: [3, 4],
     run: [5, 6],
-    publication: 7,
+    tick: 7,
     continuous_ns: Some(8),
 };
 
@@ -156,14 +156,11 @@ fn starting_a_tick_empties_the_one_before() {
     assert_eq!(columns.push_exit(&exit), Ok(()));
     columns.finish();
 
-    columns.start(Stamp {
-        publication: 8,
-        ..STAMP
-    });
+    columns.start(Stamp { tick: 8, ..STAMP });
     columns.finish();
     let tick = columns.tick();
 
-    assert_eq!(tick.stamp.publication, 8);
+    assert_eq!(tick.stamp.tick, 8);
     assert!(tick.processes.pid.is_empty());
     assert!(tick.exits.pid.is_empty());
 }

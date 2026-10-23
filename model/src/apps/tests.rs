@@ -174,7 +174,7 @@ interval_tests! {
     leaves_cpu_unknown_across_two_recordings, recording, [9, 9];
     leaves_cpu_unknown_across_two_boots, boot, [9, 9];
     leaves_cpu_unknown_across_two_runs, run, [9, 9];
-    leaves_cpu_unknown_across_a_missed_tick, publication, 3;
+    leaves_cpu_unknown_across_a_missed_tick, tick, 3;
     leaves_cpu_unknown_without_a_continuous_clock, continuous_ns, None;
     leaves_cpu_unknown_when_the_continuous_clock_stands_still, continuous_ns, Some(1_000_000_000);
 }
@@ -1344,7 +1344,7 @@ fn leaves_out_an_exit_the_previous_tick_does_not_hold() {
 #[test]
 fn leaves_out_an_exit_when_the_ticks_do_not_span_one_interval() {
     // Goal: the previous tick names no exited process unless the two ticks span one interval.
-    // Method: derive two ticks a publication apart, the selected with only the exit of the
+    // Method: derive tick 3 after tick 1, the selected with only the exit of the
     // previous tick's process.
     let previous = Columns::of(1, &[Process::default()]);
     let selected = Columns::of(3, &[]).with_exits(&[Exit::default()]);
@@ -1817,7 +1817,7 @@ unnamed_exit_tests! {
     names_no_exit_by_an_event_of_another_boot, |previous, _| previous.stamp.boot = [9, 9];
     names_no_exit_by_an_event_of_another_run, |previous, _| previous.stamp.run = [9, 9];
     names_no_exit_by_an_event_across_a_missed_tick,
-        |_, selected| selected.stamp.publication = 3;
+        |_, selected| selected.stamp.tick = 3;
     names_no_exit_by_an_event_without_a_continuous_clock,
         |previous, _| previous.stamp.continuous_ns = None;
     names_no_exit_by_an_event_after_the_continuous_clock_went_back,
@@ -2200,15 +2200,15 @@ struct ExitColumns {
 }
 
 impl Columns {
-    /// The tick of `publication` of one run, a second after the one before it.
-    fn of(publication: u64, rows: &[Process]) -> Self {
+    /// The tick of number `tick` of one run, a second after the one before it.
+    fn of(tick: u64, rows: &[Process]) -> Self {
         Self {
             stamp: Stamp {
                 recording: [1, 1],
                 boot: [2, 2],
                 run: [3, 3],
-                publication,
-                continuous_ns: Some(publication * 1_000_000_000),
+                tick,
+                continuous_ns: Some(tick * 1_000_000_000),
             },
             pid: rows.iter().map(|row| row.pid).collect(),
             creation: rows.iter().map(|row| row.creation).collect(),

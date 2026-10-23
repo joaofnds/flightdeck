@@ -251,12 +251,12 @@ impl TickColumns {
     }
 }
 
-/// The stamp of columns that hold no tick: of no run, and published by no tick.
+/// The stamp of columns that hold no tick: of no run, and at its first tick.
 const EMPTY: Stamp = Stamp {
     recording: [0; 2],
     boot: [0; 2],
     run: [0; 2],
-    publication: 0,
+    tick: 0,
     continuous_ns: None,
 };
 

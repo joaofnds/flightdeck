@@ -70,7 +70,7 @@ impl RingTick {
             recording: identity.recording.0,
             boot: identity.boot.0,
             run: identity.run.0,
-            publication: source.publication,
+            tick: source.tick.run_tick,
             continuous_ns: source.tick.times.map(|times| times.continuous_ns),
         });
         if source.reader.dictionary_capacity().is_none() {

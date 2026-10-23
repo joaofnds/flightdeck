@@ -66,7 +66,7 @@ fn hands_out_each_process_with_its_usage_and_its_dictionary_entry() {
     ring.capture(&mut tick, &mut programs).unwrap();
 
     let read = tick.tick();
-    assert_eq!(read.stamp.publication, 1);
+    assert_eq!(read.stamp.tick, 1);
     assert_eq!(read.stamp.run, [3, 4]);
     assert_eq!(read.stamp.continuous_ns, Some(2_000_000_000));
     assert_eq!(read.processes.pid, [7, 8, 9]);
@@ -170,6 +170,29 @@ fn gives_the_rule_two_ticks_it_derives_apps_from() {
 }
 
 #[test]
+fn gives_the_rule_no_rates_across_a_missed_tick() {
+    // Goal: two publications in a row whose ticks are not in a row span a missed tick, which
+    // has no readings, so the rule takes no rates across them.
+    // Method: publish Safari at tick 1 and then at tick 3, which the collector publishes next
+    // when tick 2 runs late, and derive the second publication's Apps after the first.
+    let mut ring = Ring::new(true);
+    let safari = ring.intern(&SAFARI);
+    let identities = [measured(7, UsageAvailability::Measured, safari)];
+    let mut programs = programs();
+    let mut previous = RingTick::new(4);
+    let mut selected = RingTick::new(4);
+    ring.publish(1, &[process(7, 1_000_000)], &identities, &[], &[]);
+    ring.capture(&mut previous, &mut programs).unwrap();
+    ring.publish(3, &[process(7, 6_000_000)], &identities, &[], &[]);
+    ring.capture(&mut selected, &mut programs).unwrap();
+    let mut apps = Apps::new(4, &programs);
+
+    apps.derive(&programs, &previous.tick(), &selected.tick());
+
+    assert_eq!(apps.elapsed_ns(), None);
+}
+
+#[test]
 fn hands_out_the_processes_of_a_ring_without_identities_with_no_program() {
     // Goal: a ring that records no identities still gives the rule each process's usage, and
     // says its program was not read.
@@ -261,7 +284,7 @@ fn refuses_events_without_their_identities_and_leaves_the_columns_empty() {
 
     assert!(refused.is_err());
     assert!(tick.tick().processes.pid.is_empty());
-    assert_eq!(tick.tick().stamp.publication, 0);
+    assert_eq!(tick.tick().stamp.tick, 0);
 }
 
 /// A ring of one collector run that a test publishes into and reads back.

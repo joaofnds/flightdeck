@@ -17,8 +17,9 @@ pub struct Stamp {
     pub recording: [u64; 2],
     pub boot: [u64; 2],
     pub run: [u64; 2],
-    /// The tick's number in its run, one more than the tick before it.
-    pub publication: u64,
+    /// The tick's number in its run, which counts the ticks the run missed too, so a tick
+    /// one more than the tick before follows it with no missed tick between.
+    pub tick: u64,
     /// The Mac's continuous clock at the tick, which counts sleep, if it was read.
     pub continuous_ns: Option<u64>,
 }
@@ -730,7 +731,7 @@ fn derive_elapsed(previous: &Stamp, selected: &Stamp) -> Option<u64> {
     if previous.run != selected.run {
         return None;
     }
-    if previous.publication.checked_add(1) != Some(selected.publication) {
+    if previous.tick.checked_add(1) != Some(selected.tick) {
         return None;
     }
     let elapsed = selected
