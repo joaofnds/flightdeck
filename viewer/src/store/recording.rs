@@ -4,6 +4,7 @@
 
 use std::io;
 use std::mem;
+use std::ops::Range;
 use std::panic;
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -38,6 +39,14 @@ struct Found {
     run: RunIdentity,
     marker: PathBuf,
     wall_ns_max: u64,
+}
+
+impl Found {
+    /// Whether the store reads the minute's Apps, where it reads those of minutes whose ticks
+    /// reach `apps_from_ns`.
+    fn reads_apps(&self, apps_from_ns: u64) -> bool {
+        self.wall_ns_max >= apps_from_ns
+    }
 }
 
 /// Hands `take` the run, the second and the Apps of each tick the loaded hour's sealed minutes
@@ -77,6 +86,11 @@ pub(super) fn load(
 /// The threads that decode the loaded hour's sealed minutes at once.
 const LOADERS_MAX: usize = 6;
 
+/// What decoding a sealed minute with its Apps costs, counted in minutes decoded without them.
+/// The newest 18 minutes of a recording of about 460 Apps a second took 3.6 ms each for their
+/// readings and 7.1 ms more for their Apps on 2026-10-23.
+const APPS_COST: usize = 3;
+
 /// The ticks a sealed minute holds where none was missed.
 const TICKS_PER_MINUTE: usize = 60;
 
@@ -98,13 +112,24 @@ struct Loaded {
 /// batch on a loader of its own, with the Apps of each minute whose ticks reach `apps_from_ns`.
 /// Returns the batches in the order of `found`.
 fn load_batches(root: &Path, found: &[Found], apps_from_ns: u64) -> Vec<Batch> {
-    let minutes_per_batch = found.len().div_ceil(LOADERS_MAX).max(1);
+    let costs: Vec<usize> = found
+        .iter()
+        .map(|minute| {
+            if minute.reads_apps(apps_from_ns) {
+                APPS_COST
+            } else {
+                1
+            }
+        })
+        .collect();
     thread::scope(|scope| {
         let mut loaders = Vec::with_capacity(LOADERS_MAX);
-        for (index, minutes) in found.chunks(minutes_per_batch).enumerate() {
-            let before = (index * minutes_per_batch)
+        for batch in load_batches_split(&costs) {
+            let before = batch
+                .start
                 .checked_sub(1)
                 .and_then(|before| found.get(before));
+            let minutes = &found[batch];
             let loader = thread::Builder::new()
                 .name(String::from("flightdeck-loader"))
                 .spawn_scoped(scope, move || {
@@ -131,6 +156,30 @@ fn load_batches(root: &Path, found: &[Found], apps_from_ns: u64) -> Vec<Batch> {
     })
 }
 
+/// Splits minutes that cost `costs` to decode, oldest first, into at most `LOADERS_MAX` batches
+/// of neighbouring minutes, each closed once it reaches an even share of the cost, so no batch
+/// costs a minute's cost or more past its share.
+pub(super) fn load_batches_split(costs: &[usize]) -> Vec<Range<usize>> {
+    let share = costs.iter().sum::<usize>().div_ceil(LOADERS_MAX);
+    let mut batches = Vec::with_capacity(LOADERS_MAX);
+    let mut start = 0;
+    let mut cost = 0;
+    for (index, minute_cost) in costs.iter().enumerate() {
+        cost += minute_cost;
+        if cost >= share {
+            batches.push(start..index + 1);
+            start = index + 1;
+            cost = 0;
+        }
+    }
+    if start < costs.len() {
+        batches.push(start..costs.len());
+    }
+
+    assert!(batches.len() <= LOADERS_MAX);
+    batches
+}
+
 /// Decodes `minutes`, oldest first, with the Apps of each minute whose ticks reach
 /// `apps_from_ns`. The first minute's first second takes its rates from the last tick of the
 /// minute `before` it, which the loader before this one decodes too.
@@ -151,7 +200,7 @@ fn load_batch(root: &Path, before: Option<&Found>, minutes: &[Found], apps_from_
     }
 
     for minute in minutes {
-        let read_apps = (minute.wall_ns_max >= apps_from_ns).then_some(&mut apps);
+        let read_apps = minute.reads_apps(apps_from_ns).then_some(&mut apps);
         let Ok(missing) = decode(root, &minute.marker, &mut current, read_apps) else {
             batch.left_out = Some(Failure::Refused);
             previous_run = None;

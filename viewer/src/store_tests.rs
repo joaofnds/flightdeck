@@ -528,6 +528,24 @@ mod when_the_recording_holds_sealed_minutes {
         assert_eq!(view.left_out, Some(Failure::Refused));
     }
 
+    #[test]
+    fn each_loader_decodes_about_an_even_share_of_the_hour() {
+        // Goal: the minutes whose Apps the store reads, the newest, do not fall on one loader,
+        // since the hour is held once the slowest loader is done. Method: split the loaded
+        // hour's 44 older minutes, costing one each, and the live span's 18, costing three,
+        // and compare each batch's cost with an even share of 17.
+        let mut costs = vec![1; 44];
+        costs.extend([3; 18]);
+
+        let batches = crate::store::recording::load_batches_split(&costs);
+
+        let minutes: Vec<usize> = batches.iter().flat_map(Clone::clone).collect();
+        assert_eq!(minutes, (0..62).collect::<Vec<_>>());
+        for batch in batches {
+            assert!(costs[batch].iter().sum::<usize>() < 17 + 3);
+        }
+    }
+
     fn seconds_of(view: &View) -> Vec<MachineSecond> {
         view.seconds.iter().map(|second| **second).collect()
     }
