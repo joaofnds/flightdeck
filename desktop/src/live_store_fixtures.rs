@@ -28,6 +28,7 @@ pub fn reading_at(wall_second: u64, segment: u64) -> MachineSecond {
         run_tick: wall_second,
         wall_ns: wall_second * NANOSECONDS_PER_SECOND + 250_000_000,
         continuous_ns: Some(wall_second * NANOSECONDS_PER_SECOND),
+        awake_ns: Some(wall_second * NANOSECONDS_PER_SECOND),
         follows: true,
         segment,
         cpu_percent: half(200),

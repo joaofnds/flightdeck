@@ -325,6 +325,73 @@ mod when_the_readings_break {
     }
 }
 
+mod when_the_app_rule_refuses_a_tick {
+    use super::super::apps::TickApps;
+    use super::super::{Held, MachineSecond};
+    use super::{RUN, published, second_at};
+    use crate::apps::Stamp;
+    use crate::live_app_response::Observation;
+
+    #[test]
+    fn its_second_holds_the_tick_it_holds_no_apps_of() {
+        // Goal: a chart places a second whose Apps the App rule refused, and breaks its line
+        // around it, as the worker's App histories do. Method: take in a refused tick and read
+        // the tick its second names.
+        let mut held = Held::new();
+        let second = MachineSecond {
+            continuous_ns: Some(7_000_000_000),
+            awake_ns: Some(6_000_000_000),
+            ..second_at(100)
+        };
+
+        assert!(held.take(&RUN, &second, TickApps::Refused("too many members")));
+
+        let tick = Observation {
+            recording: [1, 1],
+            stamp: Stamp {
+                boot: [3, 3],
+                run: [2, 2],
+                publication: 100,
+                continuous_ns: Some(7_000_000_000),
+                awake_ns: Some(6_000_000_000),
+            },
+            run_tick: 100,
+            wall_ns: Some(100_000_000_000),
+        };
+        assert_eq!(published(&mut held).apps[0].observation, Some(tick));
+    }
+}
+
+mod when_a_tick_is_missed {
+    use super::super::{Held, MachineSecond};
+    use super::{RUN, UNREAD, published, second_at};
+
+    #[test]
+    fn the_app_charts_break_their_line_after_it() {
+        // Goal: an App chart breaks its line where the worker's App histories break it, before
+        // a second whose tick is not the one after the tick before it. Method: take in seconds
+        // 100, 101 and 103, each with the clocks the rule compares, and read which follow.
+        let mut held = Held::new();
+
+        for wall_second in [100, 101, 103] {
+            assert!(held.take(&RUN, &clocked(wall_second), UNREAD));
+        }
+
+        let view = published(&mut held);
+        let consecutive: Vec<bool> = view.apps.iter().map(|second| second.consecutive).collect();
+        assert_eq!(consecutive, [false, true, false]);
+    }
+
+    /// The second at `wall_second`, its continuous and awake clocks that many seconds in.
+    fn clocked(wall_second: u64) -> MachineSecond {
+        MachineSecond {
+            continuous_ns: Some(wall_second * 1_000_000_000),
+            awake_ns: Some(wall_second * 1_000_000_000),
+            ..second_at(wall_second)
+        }
+    }
+}
+
 /// What a second the tests take in directly holds of its Apps.
 const UNREAD: super::apps::TickApps<'static> =
     super::apps::TickApps::Missing(&super::Missing::Unread);

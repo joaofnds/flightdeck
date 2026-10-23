@@ -30,8 +30,13 @@ pub const APPS_PER_SECOND_MAX: usize = 2_048;
 pub struct AppsSecond {
     /// Why the second holds no Apps, or `None` where it holds every App of its tick.
     pub missing: Option<Missing>,
-    /// The tick the Apps were derived from, `None` where the second holds no Apps.
+    /// The tick the second shows, which the store names for every second it takes in, holding
+    /// the tick's Apps or not, so a chart places each second as the worker's App histories do.
+    /// `None` only in a buffer the store has not filled.
     pub observation: Option<Observation>,
+    /// Whether `observation` is the tick after the tick of the second the store took in before
+    /// this one, by the rule at which the worker's App histories break a chart's line.
+    pub consecutive: bool,
     pub elapsed_ns: Option<u64>,
     pub membership_complete: bool,
     pub ungrouped_members: u32,
@@ -296,6 +301,7 @@ impl Default for AppsSecond {
         Self {
             missing: Some(Missing::Unread),
             observation: None,
+            consecutive: false,
             elapsed_ns: None,
             membership_complete: false,
             ungrouped_members: 0,

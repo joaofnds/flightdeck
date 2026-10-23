@@ -28,6 +28,9 @@ use collector::ring::RunIdentity;
 use context::Context;
 use ring::Ring;
 
+use crate::apps::Stamp;
+use crate::live::resident_history::{Interval, consecutive};
+use crate::live_app_response::Observation;
 use crate::session::EARLIER_STRIDE_SECONDS;
 
 #[cfg(test)]
@@ -272,9 +275,14 @@ impl Held {
         });
         assert!(pushed);
         let previous = self.apps.newest_held().map(Arc::clone);
-        let pushed = self
-            .apps
-            .push(|buffer| buffer.take(apps, previous.as_deref()));
+        let tick = take_observation(run, second);
+        let pushed = self.apps.push(|buffer| {
+            buffer.take(apps, previous.as_deref());
+            if buffer.observation.is_none() {
+                buffer.observation = Some(tick);
+            }
+            buffer.consecutive = take_consecutive(previous.as_deref(), buffer);
+        });
         assert!(pushed);
         if let Some(observation) = self.apps.newest().and_then(|apps| apps.observation) {
             assert_eq!(observation.stamp.publication, second.publication);
@@ -341,6 +349,35 @@ impl Held {
         self.version = version;
         self.unpublished = false;
     }
+}
+
+/// The tick of `second` of run `run`, as the App rule names a tick it samples.
+fn take_observation(run: &RunIdentity, second: &MachineSecond) -> Observation {
+    Observation {
+        recording: run.recording.0,
+        stamp: Stamp {
+            boot: run.boot.0,
+            run: run.run.0,
+            publication: second.publication,
+            continuous_ns: second.continuous_ns,
+            awake_ns: second.awake_ns,
+        },
+        run_tick: second.run_tick,
+        wall_ns: Some(second.wall_ns),
+    }
+}
+
+/// Whether the tick of `second` is the one after the tick of `previous`, the second the store
+/// took in before it, by the rule the worker's App histories break a chart's line at.
+fn take_consecutive(previous: Option<&AppsSecond>, second: &AppsSecond) -> bool {
+    let Some(before) = previous.and_then(|previous| previous.observation.as_ref()) else {
+        return false;
+    };
+    let Some(after) = second.observation.as_ref() else {
+        unreachable!("the store names the tick of every second it takes in");
+    };
+
+    consecutive(&Interval { before, after })
 }
 
 /// The segment of `second` of run `run`, taken in after `newest`.

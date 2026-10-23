@@ -25,6 +25,7 @@ pub struct MachineSecond {
     pub run_tick: u64,
     pub wall_ns: u64,
     pub continuous_ns: Option<u64>,
+    pub awake_ns: Option<u64>,
     /// Whether the rates are over the interval since the run's previous reading, which holds
     /// only where the two readings are consecutive (doc-30).
     pub follows: bool,
@@ -109,6 +110,7 @@ impl MachineSecond {
             run_tick: reading.tick.run_tick,
             wall_ns,
             continuous_ns: reading.tick.continuous_ns,
+            awake_ns: reading.tick.awake_ns,
             follows: false,
             segment: 0,
             cpu_percent: None,
