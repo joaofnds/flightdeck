@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use gpui::{App, WindowOptions, px, size};
+use viewer::store::Store;
 
 use crate::live_dashboard::{LiveDashboard, ROUTES};
 use crate::live_source::Worker;
@@ -77,12 +78,13 @@ pub fn run(options: &Options) -> Result<(), Box<dyn std::error::Error>> {
     let control = control(options)?;
     let root = recording(options)?;
     let collector = collector_session(&root, options)?;
-    let worker = match (
+    // A recording opened read-only has no ring to follow, so the store does not hold it yet.
+    let (worker, store) = match (
         options.source.recording.is_some(),
         options.source.start_collector,
     ) {
-        (true, false) => Worker::start_recorded(root.clone())?,
-        _ => Worker::start(root.clone())?,
+        (true, false) => (Worker::start_recorded(root.clone())?, None),
+        _ => (Worker::start(root.clone())?, Some(Store::start(&root)?)),
     };
     let reopening = reopening(root, options, control.is_some());
     let preferences_path = preferences_path(options, control.is_some());
@@ -98,6 +100,9 @@ pub fn run(options: &Options) -> Result<(), Box<dyn std::error::Error>> {
     }
     application.run(move |cx: &mut App| {
         cx.set_global(app_nap::AppNapExemption::begin());
+        if let Some(store) = store {
+            crate::live_dashboard::install_store(store, cx);
+        }
 
         collection::install(collector, cx);
         if let Some(preferences_path) = preferences_path {

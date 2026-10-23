@@ -6,7 +6,7 @@ fn tick_seconds() -> u64 {
     crate::charts::TICK_SECONDS
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Panel {
     pub selected_index: Option<usize>,
@@ -54,7 +54,7 @@ pub struct Panel {
     pub chart_width: std::cell::Cell<Option<f32>>,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Line {
     pub name: String,

@@ -8,6 +8,10 @@ use serde_json::Value;
 use crate::data::{Line, Panel};
 use crate::live_inventory::PerformanceLevel;
 
+#[path = "live_held_projection.rs"]
+mod held_projection;
+
+pub use held_projection::overview_panels;
 #[path = "live_resource_projection.rs"]
 mod resource_projection;
 
@@ -377,17 +381,26 @@ impl Domain {
     /// when the selection carries an older tail.
     fn read(selection: &Value, longer: bool) -> Result<Self, String> {
         let last = integer(&selection["context_last_second"])?;
+        let older_stride = if longer {
+            Some(integer(&selection["earlier_stride_seconds"])?)
+        } else {
+            None
+        };
+
+        Self::ending_at(last, older_stride)
+    }
+
+    /// The seconds the charts of a context that ends at `last` hold: the full-detail ones, or
+    /// the loaded hour and its lead-in where older readings stand `older_stride` seconds apart.
+    fn ending_at(last: u64, older_stride: Option<u64>) -> Result<Self, String> {
+        let longer = older_stride.is_some();
         let recent_first = first_held_second(last, false);
         let first = first_held_second(last, longer);
         let end = last.checked_add(1).ok_or("Live chart time overflow")?;
         let span = u16::try_from(end - first).map_err(|error| error.to_string())?;
         assert!(span > 0);
         assert!(u64::from(span) <= HELD_SECONDS);
-        let stride = if longer {
-            integer(&selection["earlier_stride_seconds"])?
-        } else {
-            1
-        };
+        let stride = older_stride.unwrap_or(1);
         assert!(stride > 0);
         Ok(Self {
             first,

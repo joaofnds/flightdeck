@@ -73,11 +73,29 @@ pub fn toggle(open: Option<Picker>, pressed: Picker) -> Option<Picker> {
     }
 }
 
+/// Spreads `view` across `panel` where it is drawn against the clock, and tells it whether its
+/// readings still move on with the newest second.
+fn zoom_panel(panel: &mut Rc<Panel>, view: crate::chart_axes::TimeWindow, sliding: bool) {
+    let Some(window) = panel.window else {
+        return;
+    };
+
+    if window != view {
+        crate::time_range::zoom(Rc::make_mut(panel), view);
+    }
+    if panel.sliding != sliding {
+        Rc::make_mut(panel).sliding = sliding;
+    }
+}
+
 pub struct LiveDashboard {
     pub worker: Worker,
     pub request: Request,
     pub snapshot: Option<Box<Snapshot>>,
     pending_snapshot: Option<Box<Snapshot>>,
+    /// The store's newest View the window took, which a hidden window lets go of.
+    store_view: Option<std::sync::Arc<viewer::store::View>>,
+    store_panels: store_view::StorePanels,
     /// The last live reading of each page the reader has left, shown again at once when the
     /// page is opened while the worker reads a fresh one. At most one for each route.
     visited: std::collections::BTreeMap<String, Box<crate::live_acceptance::Presentation>>,
@@ -274,6 +292,8 @@ impl LiveDashboard {
             generation: 0,
             reply_pending: false,
             presence: Presence::Shown,
+            store_view: None,
+            store_panels: store_view::StorePanels::default(),
             error: None,
             rows: Vec::with_capacity(4096),
             expanded: None,
@@ -371,6 +391,11 @@ impl LiveDashboard {
         // A hover's read would wake the resting reader of a hidden window.
         if self.presence != Presence::Hidden {
             self.preview_tick(cx);
+            if let Some(view) = store_view::take_store_view(cx) {
+                if self.take_view(view) {
+                    cx.notify();
+                }
+            }
         }
         let status = self.status();
         if self.last_status != status {
@@ -429,6 +454,7 @@ impl LiveDashboard {
     /// Rests the reader of a window macOS hides, as a closed window's reader rests. A reader of
     /// a recording opened read-only reads nothing once its page is read, so it is left alone.
     fn tick_hidden(&mut self) {
+        self.store_view = None;
         match self.worker.hand_over() {
             Ok(Some(resting)) => {
                 self.worker = resting;
@@ -514,11 +540,12 @@ impl LiveDashboard {
                 .map(|snapshot| &snapshot.selection["summary"]);
             self.inventory = crate::live_inventory::rows(summary);
         }
+        self.error = None;
+        self.draw_store_view();
         self.zoom_panels();
         self.refresh_chart_inspector();
         self.received_at = SystemTime::now();
         self.pending_snapshot = None;
-        self.error = None;
         self.updates += 1;
         self.placeholders.clear();
 
@@ -792,6 +819,13 @@ impl LiveDashboard {
 
     /// What the range is laid against: the selected second, and the last second the charts hold.
     pub(crate) fn range_anchor(&self) -> Option<crate::time_range::Anchor> {
+        if let Some(last) = self.store_view_last_second() {
+            return Some(crate::time_range::Anchor {
+                selected: last,
+                context_last: last,
+            });
+        }
+
         let selection = &self.snapshot.as_deref()?.selection;
 
         Some(crate::time_range::Anchor {
@@ -806,18 +840,20 @@ impl LiveDashboard {
         let Some(view) = self.view_window() else {
             return;
         };
-        let sliding = self.request.second.is_none() && self.range.slides();
+        let sliding = self.panels_slide();
         for panel in &mut self.panels {
-            let Some(window) = panel.window else {
-                continue;
-            };
-            if window != view {
-                crate::time_range::zoom(Rc::make_mut(panel), view);
-            }
-            if panel.sliding != sliding {
-                Rc::make_mut(panel).sliding = sliding;
-            }
+            zoom_panel(panel, view, sliding);
         }
+    }
+
+    /// Whether the charts' readings still move on with the newest second, as they do while the
+    /// page follows it over a range that slides.
+    fn panels_slide(&self) -> bool {
+        if self.request.second.is_some() {
+            return false;
+        }
+
+        self.range.slides()
     }
 
     /// Shows `range`, which a menu choice or a drag picked, without asking for another reading.
@@ -1009,6 +1045,11 @@ impl LiveDashboard {
             .child(body)
     }
 }
+
+#[path = "live_store_view.rs"]
+mod store_view;
+
+pub use store_view::install_store;
 
 #[cfg(test)]
 #[path = "live_input_tests.rs"]

@@ -10,6 +10,9 @@ pub mod data;
 pub mod live_inventory;
 #[path = "../live_projection.rs"]
 pub mod live_projection;
+#[cfg(test)]
+#[path = "../live_store_fixtures.rs"]
+mod live_store_fixtures;
 #[path = "projection_bench/paint.rs"]
 mod paint;
 #[path = "projection_bench/mod.rs"]
