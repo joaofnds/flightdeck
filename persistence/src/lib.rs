@@ -1,4 +1,5 @@
 //! Bounded, separate-process persistence of the collector's published measurements.
+pub mod app_tables;
 mod battery;
 pub mod disks;
 mod encoder;
@@ -13,6 +14,7 @@ pub mod query;
 mod reader;
 pub mod resources;
 pub mod schema;
+pub mod sealed_apps;
 mod store;
 mod system;
 mod temperatures;

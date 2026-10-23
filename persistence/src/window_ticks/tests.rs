@@ -262,7 +262,7 @@ fn run() -> RunIdentity {
     }
 }
 
-fn legacy_window(number: u64) -> Window {
+pub(crate) fn legacy_window(number: u64) -> Window {
     Window::new(
         WindowIdentity {
             run: run(),
@@ -274,7 +274,12 @@ fn legacy_window(number: u64) -> Window {
 
 /// Stages tick `run_tick` of `processes` and `events` in `window`, as a source of no identities
 /// publishes it.
-fn stage_legacy(window: &mut Window, run_tick: u64, processes: &[Process], events: &[Event]) {
+pub(crate) fn stage_legacy(
+    window: &mut Window,
+    run_tick: u64,
+    processes: &[Process],
+    events: &[Event],
+) {
     let mut tick = crate::tick_buffer(&SHAPE).unwrap();
     tick.run_tick = run_tick;
     tick.processes = processes.to_vec();
@@ -294,7 +299,7 @@ fn stage_legacy(window: &mut Window, run_tick: u64, processes: &[Process], event
         .unwrap();
 }
 
-fn observation(run_tick: u64) -> Observation {
+pub(crate) fn observation(run_tick: u64) -> Observation {
     Observation {
         publication: run_tick + 1,
         wall_ns: Some(1_000_000_000_000 + run_tick * 1_000_000_000),
@@ -303,7 +308,7 @@ fn observation(run_tick: u64) -> Observation {
     }
 }
 
-fn process(pid: i32, user_ns: u64) -> Process {
+pub(crate) fn process(pid: i32, user_ns: u64) -> Process {
     Process {
         pid,
         usage: usage(user_ns),
@@ -355,7 +360,11 @@ fn creation(pid: i32) -> Creation {
     }
 }
 
-fn identity(pid: i32, usage: UsageAvailability, program: ProgramReference) -> IdentityObservation {
+pub(crate) fn identity(
+    pid: i32,
+    usage: UsageAvailability,
+    program: ProgramReference,
+) -> IdentityObservation {
     IdentityObservation {
         pid,
         usage,
@@ -370,7 +379,7 @@ fn identity(pid: i32, usage: UsageAvailability, program: ProgramReference) -> Id
 }
 
 /// A ring of the collector's that publishes identities, and its reader.
-struct Ring {
+pub(crate) struct Ring {
     directory: PathBuf,
     writer: Writer,
     reader: Option<RingReader>,
@@ -379,7 +388,7 @@ struct Ring {
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 impl Ring {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let number = NEXT.fetch_add(1, Ordering::Relaxed);
         let directory =
             std::env::temp_dir().join(format!("window-ticks-{}-{number}", std::process::id()));
@@ -401,7 +410,7 @@ impl Ring {
         }
     }
 
-    fn intern(&mut self, name: &[u8], app: Option<&[u8]>) -> ProgramReference {
+    pub(crate) fn intern(&mut self, name: &[u8], app: Option<&[u8]>) -> ProgramReference {
         let mut program = None;
         let bytes = ProgramBytes {
             executable_name: name,
@@ -411,7 +420,7 @@ impl Ring {
         program.unwrap()
     }
 
-    fn publish(
+    pub(crate) fn publish(
         &mut self,
         run_tick: u64,
         processes: &[Process],
@@ -447,7 +456,7 @@ impl Ring {
     }
 
     /// A window of the tick published last, read as the persister stages it.
-    fn stage(&mut self, number: u64) -> Window {
+    pub(crate) fn stage(&mut self, number: u64) -> Window {
         let reader = self.reader.as_mut().unwrap();
         let mut window = Window::new(
             WindowIdentity {

@@ -26,6 +26,16 @@ pub enum AppKey<'bytes> {
     Executable(&'bytes [u8]),
 }
 
+impl<'bytes> AppKey<'bytes> {
+    /// The bundle's path or the executable's name.
+    #[must_use]
+    pub fn bytes(self) -> &'bytes [u8] {
+        match self {
+            Self::Bundle(bytes) | Self::Executable(bytes) => bytes,
+        }
+    }
+}
+
 /// What the index holds at most, taken at startup.
 #[derive(Clone, Copy)]
 pub struct Capacity {

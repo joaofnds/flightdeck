@@ -34,7 +34,7 @@ pub struct NumberedEvent<'a> {
 pub(crate) const PROCESSES_MAX: usize = 65_536;
 
 // A carried late deadline can join sixty scheduled observations in one elapsed minute.
-const WINDOW_TICKS_MAX: usize = 61;
+pub(crate) const WINDOW_TICKS_MAX: usize = 61;
 const _: () = assert!(WINDOW_TICKS_MAX == 60 + 1);
 
 /// What a window may stage, its ticks, their events and identities, before it seals.

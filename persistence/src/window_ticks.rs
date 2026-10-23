@@ -368,4 +368,4 @@ fn event_refused(_: Full) -> Error {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
